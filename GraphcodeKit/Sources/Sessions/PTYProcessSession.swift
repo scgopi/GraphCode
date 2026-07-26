@@ -58,6 +58,14 @@ public final class PTYProcessSession: @unchecked Sendable {
     process.standardOutput = slaveHandle
     process.standardError = slaveHandle
     var environment = ProcessInfo.processInfo.environment
+    // If graphcode.app/graphcoded was itself launched from inside a live Claude Code
+    // session, these identity vars are already set in *our* environment and would
+    // otherwise leak into every `claude` process we spawn — making it think it's a
+    // spawned child/subagent session (transcript saving off, etc.) when it's really a
+    // fresh top-level session the user is starting in this terminal.
+    for key in environment.keys where key.hasPrefix("CLAUDE") || key == "AI_AGENT" {
+      environment.removeValue(forKey: key)
+    }
     environment["TERM"] = "xterm-256color"
     for (key, value) in extraEnvironment {
       environment[key] = value
