@@ -22,13 +22,18 @@ enum OrchestratorClientError: Error, Equatable {
 }
 
 extension OrchestratorClient: DependencyKey {
-  static let liveValue: OrchestratorClient = {
-    let connection = DaemonConnection()
+  static let liveValue: OrchestratorClient = live(socketPath: DaemonSocketPath.url)
+
+  /// One `DaemonConnection` per client — `connect` and `send` deliberately share it, see
+  /// `DaemonConnection.connection`. Parameterized on the socket path so tests can point
+  /// a client at a socket they own instead of the real daemon's.
+  static func live(socketPath: URL) -> OrchestratorClient {
+    let connection = DaemonConnection(socketPath: socketPath)
     return OrchestratorClient(
       connect: { connection.events() },
       send: { command in try await connection.send(command) }
     )
-  }()
+  }
 }
 
 extension DependencyValues {
@@ -41,39 +46,100 @@ extension DependencyValues {
 /// Owns the one socket connection to `graphcoded`, connecting lazily and retrying with
 /// backoff — the app can launch before the daemon has finished starting up.
 private actor DaemonConnection {
-  private var fileDescriptor: Int32?
+  private let socketPath: URL
+
+  /// The one connect attempt, in flight or finished — **not** a bare file descriptor.
+  ///
+  /// `graphcoded` answers on the connection a command arrived on (`ProjectRegistry.handle`
+  /// replies to that connection's descriptor, and `GraphStore.addConnection` sends its
+  /// `graphChanged` snapshot the same way), so the socket `send` writes to has to be the
+  /// socket `events()` is reading. Caching a descriptor instead let that invariant break:
+  /// `AppFeature.task` starts `connect()` and `send(.listRecentProjects)` in the same
+  /// `.merge`, both reached the `if let fileDescriptor` check before the first connect had
+  /// resumed, and each opened its own socket — after which every reply the daemon wrote
+  /// landed on the descriptor nobody read, and the UI never saw an event. Storing the
+  /// `Task` means the second caller awaits the first caller's attempt: one socket, one
+  /// reader, replies land where they're expected.
+  private var connection: Task<Int32, any Error>?
+
+  /// Bumped whenever `connection` is dropped, so a late failure handler can tell whether
+  /// the attempt it was holding is still the current one.
+  private var generation = 0
+
+  init(socketPath: URL) {
+    self.socketPath = socketPath
+  }
 
   nonisolated func events() -> AsyncStream<DaemonEvent> {
     AsyncStream { continuation in
-      Task {
+      let task = Task {
+        var connectedDescriptor: Int32?
         do {
-          let fd = try await ensureConnected()
+          let fileDescriptor = try await ensureConnected()
+          connectedDescriptor = fileDescriptor
           while true {
-            let data = try await readFrameAsync(from: fd)
+            let data = try await readFrameAsync(from: fileDescriptor)
             let event = try JSONDecoder().decode(DaemonEvent.self, from: data)
             continuation.yield(event)
           }
         } catch {
+          if let connectedDescriptor { await invalidate(connectedDescriptor) }
           continuation.finish()
         }
       }
+      continuation.onTermination = { _ in task.cancel() }
     }
   }
 
   func send(_ command: DaemonCommand) async throws {
-    let fd = try await ensureConnected()
+    let fileDescriptor = try await ensureConnected()
     let data = try JSONEncoder().encode(command)
-    try await writeFrameAsync(data, to: fd)
+    do {
+      try await writeFrameAsync(data, to: fileDescriptor)
+    } catch {
+      await invalidate(fileDescriptor)
+      throw error
+    }
   }
 
   private func ensureConnected() async throws -> Int32 {
-    if let fileDescriptor { return fileDescriptor }
-    var lastError: Error = OrchestratorClientError.connectFailed(errno: 0)
+    if let connection { return try await connection.value }
+    let attemptGeneration = generation
+    let attempt = Task { try await connectWithBackoff() }
+    connection = attempt
+    do {
+      return try await attempt.value
+    } catch {
+      // Don't cache a failed attempt — the next caller should get a fresh one. Guard on
+      // the generation so a concurrent `invalidate` that already replaced it wins.
+      if generation == attemptGeneration {
+        connection = nil
+        generation += 1
+      }
+      throw error
+    }
+  }
+
+  /// Drops the shared connection after an I/O failure, so the next `send` or `events()`
+  /// dials again instead of writing into a socket the daemon has gone from.
+  ///
+  /// Deliberately does not `close` the descriptor: `events()` can be parked in a blocking
+  /// `read` on it from another thread, and closing under that read frees the number for
+  /// any other socket the process opens next. Costs one stranded descriptor per daemon
+  /// restart, which the process reclaims on exit.
+  private func invalidate(_ fileDescriptor: Int32) async {
+    guard let connection, let currentDescriptor = try? await connection.value,
+      currentDescriptor == fileDescriptor
+    else { return }
+    self.connection = nil
+    generation += 1
+  }
+
+  private func connectWithBackoff() async throws -> Int32 {
+    var lastError: any Error = OrchestratorClientError.connectFailed(errno: 0)
     for attempt in 0..<10 {
       do {
-        let fd = try await connectAsync()
-        fileDescriptor = fd
-        return fd
+        return try await connectAsync()
       } catch {
         lastError = error
         try? await Task.sleep(for: .milliseconds(200 * (attempt + 1)))
@@ -84,7 +150,8 @@ private actor DaemonConnection {
 
   @Sendable
   private func connectAsync() async throws -> Int32 {
-    try await withCheckedThrowingContinuation { continuation in
+    let path = socketPath.path
+    return try await withCheckedThrowingContinuation { continuation in
       DispatchQueue.global().async {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
@@ -95,7 +162,6 @@ private actor DaemonConnection {
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
         address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
-        let path = DaemonSocketPath.url.path
         withUnsafeMutablePointer(to: &address.sun_path) { pathField in
           pathField.withMemoryRebound(
             to: CChar.self, capacity: MemoryLayout.size(ofValue: pathField.pointee)
