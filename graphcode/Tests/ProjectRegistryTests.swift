@@ -2,6 +2,10 @@ import Foundation
 import GraphcodeKit
 import Testing
 
+#if canImport(Darwin)
+  import Darwin
+#endif
+
 /// Phase 4 (docs/07-roadmap.md#phase-4--projects): `ProjectRegistry` is the multi-graph
 /// routing layer in front of `GraphStore` — these exercise its routing logic directly,
 /// without a real socket (matching how `GraphStoreTests` tests `GraphStore` itself).
@@ -87,6 +91,58 @@ struct ProjectRegistryTests {
       connectionID: UUID())
   }
 
+  /// The bug this guards: `.openProject` used to detach a connection from whatever
+  /// project it had previously joined before joining the new one, so opening a second
+  /// folder silently stopped the first folder's `graphChanged` broadcasts from ever
+  /// reaching the socket. The persisted-file side channel the other tests use can't
+  /// observe that — a broadcast that never left the daemon still gets persisted, since
+  /// persistence and broadcast are two independent things `GraphStore.broadcast` does.
+  /// A real socket pair is the only way to see whether the *bytes* arrive.
+  @Test
+  func openingASecondProjectKeepsTheFirstProjectsBroadcastsFlowing() async throws {
+    var fds: [Int32] = [0, 0]
+    let pairResult = socketpair(AF_UNIX, SOCK_STREAM, 0, &fds)
+    #expect(pairResult == 0)
+    let (daemonEnd, testEnd) = (fds[0], fds[1])
+    defer {
+      close(daemonEnd)
+      close(testEnd)
+    }
+
+    let (registry, _) = makeRegistryAndPersistence()
+    let connectionID = UUID()
+
+    async let driver: Void = {
+      await registry.addConnection(id: connectionID, fileDescriptor: daemonEnd)
+      await registry.handle(.openProject(path: "/tmp/project-a"), connectionID: connectionID)
+      await registry.handle(.openProject(path: "/tmp/project-b"), connectionID: connectionID)
+      await registry.handle(
+        .graphCommand(
+          projectPath: "/tmp/project-a",
+          command: .createTurnBasedNode(title: "Research", checkDescription: "Sound?")),
+        connectionID: connectionID)
+    }()
+
+    // Three frames land on `testEnd`: the snapshot from joining project-a, the snapshot
+    // from joining project-b, then the graphChanged from mutating project-a. Reads are
+    // bridged off-thread (matching `readFrameAsync` in `graphcoded/Sources/main.swift`)
+    // so a blocking `read(2)` never occupies a thread the concurrency runtime also needs
+    // to run `driver` on.
+    _ = try await readFrameOffThread(testEnd)
+    _ = try await readFrameOffThread(testEnd)
+    let data = try await readFrameOffThread(testEnd)
+    let event = try JSONDecoder().decode(DaemonEvent.self, from: data)
+
+    guard case .graphChanged(let graph) = event else {
+      Issue.record("expected a graphChanged event, got \(event)")
+      return
+    }
+    #expect(graph.project.path == "/tmp/project-a")
+    #expect(graph.nodes.count == 1)
+
+    await driver
+  }
+
   @Test
   func openingAProjectRecordsItAsRecentlyOpened() async {
     let (registry, persistence) = makeRegistryAndPersistence()
@@ -96,5 +152,18 @@ struct ProjectRegistryTests {
     await registry.handle(.openProject(path: "/tmp/project-c"), connectionID: connectionID)
 
     #expect(persistence.loadRecentProjects().contains { $0.path == "/tmp/project-c" })
+  }
+}
+
+@Sendable
+private func readFrameOffThread(_ fileDescriptor: Int32) async throws -> Data {
+  try await withCheckedThrowingContinuation { continuation in
+    DispatchQueue.global().async {
+      do {
+        continuation.resume(returning: try FramedMessageIO.readFrame(from: fileDescriptor))
+      } catch {
+        continuation.resume(throwing: error)
+      }
+    }
   }
 }

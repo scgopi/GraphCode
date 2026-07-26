@@ -6,16 +6,21 @@ import Foundation
 /// here: `GraphStore` itself still only ever handles one graph and has no idea this
 /// layer exists.
 ///
-/// One connection (one socket, one `graphcode.app` instance) can have at most one
-/// project "open" at a time, but can switch which project that is over the connection's
-/// lifetime without reconnecting — `connectionProjectPaths` tracks that so `.openProject`
-/// can detach a connection from its previous project's `GraphStore` before joining the
-/// new one.
+/// One connection (one socket, one `graphcode.app` instance) can have any number of
+/// projects open at once — the sidebar shows every folder the app has opened, not just
+/// the most recent one (see docs/07-roadmap.md's Projects phase follow-up). `.openProject`
+/// *adds* to the connection's joined-project set rather than replacing it;
+/// `connectionProjectPaths` tracks that set so a full disconnect can detach from every
+/// joined `GraphStore`, not just one.
+///
+/// There's deliberately no `.closeProject`/"leave a project" command yet — nothing in
+/// the app can remove a project from the sidebar yet either, so there'd be nothing to
+/// call it.
 public actor ProjectRegistry {
   private let persistence: ProjectPersistence
   private var stores: [String: GraphStore] = [:]
   private var connectionFileDescriptors: [UUID: Int32] = [:]
-  private var connectionProjectPaths: [UUID: String] = [:]
+  private var connectionProjectPaths: [UUID: Set<String>] = [:]
 
   public init(persistenceDirectory: URL) {
     persistence = ProjectPersistence(baseDirectory: persistenceDirectory)
@@ -28,7 +33,8 @@ public actor ProjectRegistry {
   }
 
   public func removeConnection(_ id: UUID) async {
-    if let path = connectionProjectPaths[id], let store = stores[path] {
+    for path in connectionProjectPaths[id] ?? [] {
+      guard let store = stores[path] else { continue }
       await store.removeConnection(id)
     }
     connectionFileDescriptors.removeValue(forKey: id)
@@ -46,13 +52,8 @@ public actor ProjectRegistry {
 
     case .openProject(let path):
       let canonicalPath = Self.canonicalize(path)
-      if let previousPath = connectionProjectPaths[connectionID], previousPath != canonicalPath,
-        let previousStore = stores[previousPath]
-      {
-        await previousStore.removeConnection(connectionID)
-      }
       let store = store(forProjectPath: canonicalPath)
-      connectionProjectPaths[connectionID] = canonicalPath
+      connectionProjectPaths[connectionID, default: []].insert(canonicalPath)
       await store.addConnection(id: connectionID, fileDescriptor: fileDescriptor)
       let project = await store.graph.project
       persistence.recordOpened(

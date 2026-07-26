@@ -1,10 +1,15 @@
 import ComposableArchitecture
 import GraphcodeKit
 import SwiftUI
-import UniformTypeIdentifiers
 
-/// Phase 4's welcome screen (docs/07-roadmap.md#phase-4--projects) — create a graph for
-/// a folder or repository, or reopen one already known.
+/// The detail-pane content `AppView` shows once no project is open yet — create a graph
+/// for a folder or repository, or reopen one already known. Used to be the whole window
+/// (Phase 4, docs/07-roadmap.md#phase-4--projects); the multi-project sidebar follow-up
+/// made it detail-pane content instead, since the sidebar (always visible, listing
+/// every open project) needs its own "add a folder" affordance regardless of whether
+/// this view is currently showing — `AppSidebarView` owns the actual `.fileImporter`
+/// presentation for the state this view's button sets, so folder-picking works from
+/// either place without two competing importers.
 struct WelcomeView: View {
   @Bindable var store: StoreOf<WelcomeFeature>
 
@@ -38,15 +43,6 @@ struct WelcomeView: View {
       }
     }
     .frame(minWidth: 560, minHeight: 420)
-    .fileImporter(
-      isPresented: Binding(
-        get: { store.isOpenPanelPresented },
-        set: { store.send(.setOpenPanelPresented($0)) }
-      ),
-      allowedContentTypes: [.folder]
-    ) { result in
-      store.send(.folderPickerResult(result))
-    }
   }
 
   private var recentProjectsList: some View {

@@ -1,19 +1,22 @@
 import ComposableArchitecture
+import GraphcodeKit
 import SwiftUI
 
-/// Switches between `WelcomeView` (no project open) and `ProjectView` (one open
-/// project) — see `AppFeature`. Phase 4's replacement for `GraphcodeApp.swift` handing
-/// its store straight to `GraphCanvasView`.
+/// Always renders one `NavigationSplitView` — `AppSidebarView` lists every open
+/// project, and the detail pane swaps between the welcome content, a node's terminal,
+/// or the selected project's canvas (see `AppFeature`). Multi-project sidebar follow-up
+/// to Phase 4 (docs/07-roadmap.md#phase-4--projects): before this, the whole window
+/// switched between a full-window `WelcomeView` and a full-window `ProjectView` — there
+/// was no sidebar at all until a project was open, and only one could be open at a time.
 struct AppView: View {
   @Bindable var store: StoreOf<AppFeature>
 
   var body: some View {
-    Group {
-      if let projectStore = store.scope(state: \.project, action: \.project) {
-        ProjectView(store: projectStore)
-      } else {
-        WelcomeView(store: store.scope(state: \.welcome, action: \.welcome))
-      }
+    NavigationSplitView {
+      AppSidebarView(store: store)
+    } detail: {
+      detail
+        .background(Theme.windowBackground)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(Theme.windowBackground)
@@ -24,6 +27,24 @@ struct AppView: View {
     // in light mode the system's near-black label colors would land on it unreadable.
     .preferredColorScheme(.dark)
     .task { await store.send(.task).finish() }
+  }
+
+  @ViewBuilder
+  private var detail: some View {
+    if store.projects.isEmpty {
+      WelcomeView(store: store.scope(state: \.welcome, action: \.welcome))
+    } else if let detailStore = store.scope(state: \.detail, action: \.detail) {
+      LoopNodeDetailView(store: detailStore)
+    } else if let path = store.selectedProjectPath, let projectStore = selectedProjectStore(path) {
+      ProjectCanvasView(store: projectStore)
+    } else {
+      ContentUnavailableView(
+        "Select a folder", systemImage: "point.3.connected.trianglepath.dotted")
+    }
+  }
+
+  private func selectedProjectStore(_ path: String) -> StoreOf<ProjectFeature>? {
+    store.scope(state: \.projects[id: path], action: \.projects[id: path])
   }
 }
 

@@ -2,25 +2,31 @@ import ComposableArchitecture
 import Foundation
 import GraphcodeKit
 
-/// One open project's graph canvas + sidebar selection. Renamed from Phase 2/3's
-/// `GraphCanvasFeature` in Phase 4 (docs/07-roadmap.md#phase-4--projects), when
-/// graphcode grew a welcome screen and per-folder projects: `AppFeature` now owns the
-/// one daemon subscription for the app's whole lifetime and forwards this project's
-/// `DaemonEvent`s in via `.daemonEvent` — this feature no longer subscribes itself.
+/// One open project's graph canvas — one of possibly several the sidebar shows at once
+/// (multi-project sidebar follow-up to Phase 4, docs/07-roadmap.md#phase-4--projects).
+///
+/// Selection (which node's terminal is showing, if any) used to live here, back when
+/// only one project could be open at a time — now that the sidebar can show several
+/// projects sharing one detail pane, "what's selected" is inherently cross-project, so
+/// it moved up to `AppFeature.State.detail`/`.selectedProjectPath`. `.nodeTapped`
+/// is still declared here (both the sidebar's node rows and the canvas's node cards are
+/// rendered off a project-scoped store), but this feature's own reducer does nothing
+/// with it — it's purely a signal `AppFeature`'s parent `Reduce` intercepts.
 ///
 /// Still mirrors whatever `graphcoded` broadcasts for this project rather than owning
-/// graph state directly — node/edge-creation and check-resolution actions send a
-/// `GraphCommand` (wrapped in `.graphCommand(projectPath:, command:)`) and wait for the
-/// resulting `.graphChanged` broadcast; automatic `.handoff` firing happens in the
-/// daemon (see `graphcoded/Sources/GraphStore.swift`). `nodePositions` stays local —
-/// canvas layout is a UI concern the daemon has no reason to know about.
+/// graph state directly — node/edge-creation actions send a `GraphCommand` (wrapped in
+/// `.graphCommand(projectPath:, command:)`) and wait for the resulting `.graphChanged`
+/// broadcast; automatic `.handoff` firing happens in the daemon (see
+/// `graphcoded/Sources/GraphStore.swift`). `nodePositions` stays local — canvas layout
+/// is a UI concern the daemon has no reason to know about. `AppFeature` owns the one
+/// daemon subscription for the app's whole lifetime and forwards this project's
+/// `DaemonEvent`s in via `.daemonEvent`.
 @Reducer
 struct ProjectFeature {
   @ObservableState
-  struct State: Equatable {
+  struct State: Equatable, Identifiable {
     var graph: LoopGraph
     var nodePositions: [UUID: CGPoint] = [:]
-    var detail: LoopNodeDetailFeature.State?
     var showingNewNodeForm = false
     var draftLoopType: LoopType = .turnBased
     var draftTitle = ""
@@ -28,6 +34,8 @@ struct ProjectFeature {
     var draftIntervalSeconds = "3600"
     var draftPrompt = ""
     var connectionError: String?
+
+    var id: String { graph.project.path }
 
     init(graph: LoopGraph) {
       self.graph = graph
@@ -41,10 +49,7 @@ struct ProjectFeature {
     case createNodeConfirmed
     case cancelNewNodeForm
     case nodeTapped(UUID)
-    case detailDismissed
-    case closeProjectTapped
     case edgeDrawn(from: UUID, to: UUID)
-    case detail(LoopNodeDetailFeature.Action)
   }
 
   @Dependency(\.orchestratorClient) var orchestratorClient
@@ -64,11 +69,6 @@ struct ProjectFeature {
             state.nodePositions[node.id] = Self.nextPosition(index: state.nodePositions.count)
           }
           state.graph = newGraph
-          // Keep an open detail sheet's badge honest if the daemon resolved this node
-          // from underneath it (e.g. a second window/CLI approved it first).
-          if let detailID = state.detail?.node.id, let updated = newGraph.nodes[id: detailID] {
-            state.detail?.node.state = updated.state
-          }
         case .errorOccurred(let message):
           state.connectionError = message
         case .recentProjectsListed:
@@ -123,27 +123,9 @@ struct ProjectFeature {
           return .none
         }
 
-      case .nodeTapped(let id):
-        // Time-based nodes run headlessly in graphcoded; there's no local interactive
-        // session for a human to open here (see docs/04-cli-backends.md).
-        guard let node = state.graph.nodes[id: id],
-          node.state != .blocked,
-          node.loopType == .turnBased
-        else { return .none }
-        state.detail = LoopNodeDetailFeature.State(node: node)
-        return .none
-
-      case .detailDismissed:
-        // No explicit teardown needed: `GhosttyTerminalNSView`'s `deinit` frees the
-        // surface when the sheet's view hierarchy is torn down, which detaches from
-        // the underlying `zmx` session (not kill it) the same way closing any other
-        // terminal client to a persistent session does.
-        state.detail = nil
-        return .none
-
-      case .closeProjectTapped:
-        // Handled by `AppFeature`'s parent `Reduce`, which clears `state.project` —
-        // nothing to do here.
+      case .nodeTapped:
+        // Handled by `AppFeature`'s parent `Reduce`, which owns cross-project
+        // selection — nothing to do here.
         return .none
 
       case .edgeDrawn(let from, let to):
@@ -153,29 +135,7 @@ struct ProjectFeature {
           try? await orchestratorClient.send(
             .graphCommand(projectPath: projectPath, command: .createEdge(from: from, to: to)))
         }
-
-      case .detail(.checkApproved):
-        guard let id = state.detail?.node.id else { return .none }
-        let projectPath = state.graph.project.path
-        return .run { _ in
-          try? await orchestratorClient.send(
-            .graphCommand(projectPath: projectPath, command: .nodeCheckApproved(id)))
-        }
-
-      case .detail(.checkRejected):
-        guard let id = state.detail?.node.id else { return .none }
-        let projectPath = state.graph.project.path
-        return .run { _ in
-          try? await orchestratorClient.send(
-            .graphCommand(projectPath: projectPath, command: .nodeCheckRejected(id)))
-        }
-
-      case .detail:
-        return .none
       }
-    }
-    .ifLet(\.detail, action: \.detail) {
-      LoopNodeDetailFeature()
     }
   }
 

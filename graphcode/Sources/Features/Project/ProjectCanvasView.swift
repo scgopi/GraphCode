@@ -2,13 +2,19 @@ import ComposableArchitecture
 import GraphcodeKit
 import SwiftUI
 
-/// Renamed from Phase 2/3's `GraphCanvasView` in Phase 4
-/// (docs/07-roadmap.md#phase-4--projects): the graph canvas is no longer the whole
-/// window — it's the detail pane of a `NavigationSplitView`, alongside a
-/// `ProjectSidebarView` listing this project's loops. Selecting a loop swaps the detail
-/// pane to its terminal (`LoopNodeDetailView`, embedded inline — no more modal sheet);
-/// selecting nothing shows the canvas.
-struct ProjectView: View {
+/// One project's pan/zoom graph canvas — the detail-pane content `AppView` shows when
+/// a project is selected and no node's terminal is open. Renamed from Phase 4's
+/// `ProjectView` in the multi-project sidebar follow-up (docs/07-roadmap.md#phase-4
+/// --projects): the `NavigationSplitView` shell, the "‹ Projects" button, and the
+/// detail-vs-canvas branching all moved up to `AppView`/`AppFeature`, since a shared
+/// sidebar and detail pane across several open projects isn't this view's concern
+/// anymore — this is now just the canvas itself, still scoped to one project's store.
+///
+/// The "New Node" toolbar button and its sheet stay together here rather than moving to
+/// the sidebar: this view only renders while its project's canvas is the visible detail
+/// content, so the button is naturally unavailable while a node's terminal is showing
+/// instead — no separate enablement logic needed.
+struct ProjectCanvasView: View {
   @Bindable var store: StoreOf<ProjectFeature>
 
   @State private var canvasOffset: CGSize = .zero
@@ -18,34 +24,25 @@ struct ProjectView: View {
   @State private var dragLocation: CGPoint?
 
   var body: some View {
-    NavigationSplitView {
-      ProjectSidebarView(store: store)
-    } detail: {
-      VStack(spacing: 0) {
-        if let connectionError = store.connectionError {
-          Text("Not connected to graphcoded: \(connectionError)")
-            .font(.caption)
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity)
-            .padding(6)
-            .background(Color.red)
-        }
-        if let detailStore = store.scope(state: \.detail, action: \.detail) {
-          LoopNodeDetailView(store: detailStore)
-        } else {
-          canvas
-        }
+    VStack(spacing: 0) {
+      if let connectionError = store.connectionError {
+        Text("Not connected to graphcoded: \(connectionError)")
+          .font(.caption)
+          .foregroundStyle(.white)
+          .frame(maxWidth: .infinity)
+          .padding(6)
+          .background(Color.red)
       }
-      .background(Theme.windowBackground)
+      canvas
     }
+    .background(Theme.windowBackground)
     .toolbar {
-      ToolbarItem(placement: .navigation) {
+      ToolbarItem(placement: .primaryAction) {
         Button {
-          store.send(.closeProjectTapped)
+          store.send(.addNodeButtonTapped)
         } label: {
-          Label("Projects", systemImage: "chevron.backward")
+          Label("New Node", systemImage: "plus.circle")
         }
-        .help("Close \(store.graph.project.name) and return to the welcome screen")
       }
     }
     .sheet(isPresented: $store.showingNewNodeForm) {
@@ -238,7 +235,7 @@ private struct EdgeLineView: View {
 }
 
 #Preview {
-  ProjectView(
+  ProjectCanvasView(
     store: Store(
       initialState: ProjectFeature.State(
         graph: LoopGraph(project: ProjectRef(path: "/tmp/preview", name: "preview"))
