@@ -36,6 +36,7 @@ struct ProjectView: View {
           canvas
         }
       }
+      .background(Theme.windowBackground)
     }
     .toolbar {
       ToolbarItem(placement: .navigation) {
@@ -66,7 +67,7 @@ struct ProjectView: View {
           width: canvasOffset.width + dragOffset.width,
           height: canvasOffset.height + dragOffset.height))
     }
-    .background(Color(nsColor: .underPageBackgroundColor))
+    .background(Theme.canvasBackground)
     .contentShape(Rectangle())
     .gesture(
       DragGesture()

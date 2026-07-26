@@ -36,6 +36,10 @@ struct ProjectSidebarView: View {
       }
     }
     .listStyle(.sidebar)
+    // The sidebar's own translucent material would ignore `Theme` and let the desktop
+    // through, so hide it and fill with the flat gray instead.
+    .scrollContentBackground(.hidden)
+    .background(Theme.sidebarBackground)
     .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
     .toolbar {
       ToolbarItem(placement: .primaryAction) {
