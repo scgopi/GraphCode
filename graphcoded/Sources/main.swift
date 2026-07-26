@@ -8,11 +8,12 @@ import GraphcodeKit
 // graphcoded — the graphcode orchestrator daemon.
 //
 // From Phase 3 on this is no longer an empty skeleton (see docs/07-roadmap.md): it
-// owns the real `LoopGraph` in `GraphStore`, speaks `DaemonProtocol` over the Unix
-// socket, fires `.handoff` edges automatically, and arms time-based triggers that keep
-// firing whether or not `graphcode.app` is running — see
-// docs/03-architecture.md#why-a-daemon-at-all for why this has to be a separate,
-// long-lived process rather than in-app state.
+// speaks `DaemonProtocol` over the Unix socket, fires `.handoff` edges automatically,
+// and arms time-based triggers that keep firing whether or not `graphcode.app` is
+// running — see docs/03-architecture.md#why-a-daemon-at-all for why this has to be a
+// separate, long-lived process rather than in-app state. From Phase 4 on it hosts one
+// `LoopGraph` per opened project (`ProjectRegistry`, wrapping one `GraphStore` per
+// project) rather than a single hardcoded graph, each persisted under this directory.
 
 let fileManager = FileManager.default
 
@@ -72,7 +73,7 @@ signal(SIGINT) { _ in
   exit(0)
 }
 
-let store = GraphStore()
+let registry = ProjectRegistry(persistenceDirectory: supportDirectory)
 
 /// Bridges a blocking socket read onto a background queue so the `Task` awaiting it
 /// never blocks Swift concurrency's cooperative thread pool — the whole connection
@@ -91,18 +92,19 @@ let store = GraphStore()
 
 func handleConnection(_ fileDescriptor: Int32) {
   Task {
-    let connectionID = await store.addConnection(fileDescriptor: fileDescriptor)
+    let connectionID = UUID()
+    await registry.addConnection(id: connectionID, fileDescriptor: fileDescriptor)
     FileHandle.standardOutput.write(Data("graphcoded: client connected\n".utf8))
     while true {
       do {
         let data = try await readFrameAsync(from: fileDescriptor)
         let command = try JSONDecoder().decode(DaemonCommand.self, from: data)
-        await store.handle(command)
+        await registry.handle(command, connectionID: connectionID)
       } catch {
         break
       }
     }
-    await store.removeConnection(connectionID)
+    await registry.removeConnection(connectionID)
     close(fileDescriptor)
     FileHandle.standardOutput.write(Data("graphcoded: client disconnected\n".utf8))
   }

@@ -9,25 +9,26 @@ import IdentifiedCollections
 /// `IdentifiedCollections` is a small, TCA-independent package, so Domain types using
 /// it stays free of any real TCA/SwiftUI coupling.
 ///
-/// Still no `scope` field (`.global` vs `.project` — see
+/// `project` (Phase 4, docs/07-roadmap.md#phase-4--projects) gives every graph a real
+/// folder-backed identity — but there is still no `LoopGraphScope` enum (`.global` vs
+/// `.project`, see
 /// docs/02-graph-of-loops.md#the-orchestrator-graph--global-vs-project-scope): the
-/// global Orchestrator Graph itself is deferred past Phase 3 (see
-/// docs/07-roadmap.md) even though the daemon that would host it now exists. Every
-/// `LoopGraph` here is implicitly project-scoped.
+/// global Orchestrator Graph itself is still deferred, so every `LoopGraph` here is
+/// unconditionally project-scoped rather than holding an enum with only one case.
 public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   public let id: UUID
-  public var title: String
+  public var project: ProjectRef
   public var nodes: IdentifiedArrayOf<LoopNode>
   public var edges: IdentifiedArrayOf<LoopEdge>
 
   public init(
     id: UUID = UUID(),
-    title: String,
+    project: ProjectRef,
     nodes: IdentifiedArrayOf<LoopNode> = [],
     edges: IdentifiedArrayOf<LoopEdge> = []
   ) {
     self.id = id
-    self.title = title
+    self.project = project
     self.nodes = nodes
     self.edges = edges
   }

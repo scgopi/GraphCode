@@ -17,7 +17,7 @@ struct LoopNodeDetailView: View {
         checkBar
       }
     }
-    .frame(minWidth: 640, minHeight: 420)
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
 
   private var header: some View {

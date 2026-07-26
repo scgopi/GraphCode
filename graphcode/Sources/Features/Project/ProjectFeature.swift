@@ -2,18 +2,20 @@ import ComposableArchitecture
 import Foundation
 import GraphcodeKit
 
-/// The app's root feature: a mirror of `graphcoded`'s one `LoopGraph`, plus purely
-/// local UI state (canvas layout, the new-node form). See
-/// docs/07-roadmap.md#phase-3--orchestrator-automation.
+/// One open project's graph canvas + sidebar selection. Renamed from Phase 2/3's
+/// `GraphCanvasFeature` in Phase 4 (docs/07-roadmap.md#phase-4--projects), when
+/// graphcode grew a welcome screen and per-folder projects: `AppFeature` now owns the
+/// one daemon subscription for the app's whole lifetime and forwards this project's
+/// `DaemonEvent`s in via `.daemonEvent` — this feature no longer subscribes itself.
 ///
-/// From Phase 3 on this does **not** own graph state — `graphcoded` does.
-/// Node/edge-creation and check-resolution actions send a `DaemonCommand` and wait for
-/// the resulting `.graphChanged` broadcast rather than mutating `state.graph` directly;
-/// automatic `.handoff` firing happens in the daemon, not here (see
-/// `graphcoded/Sources/GraphStore.swift`). `nodePositions` stays local — canvas layout
-/// is a UI concern the daemon has no reason to know about.
+/// Still mirrors whatever `graphcoded` broadcasts for this project rather than owning
+/// graph state directly — node/edge-creation and check-resolution actions send a
+/// `GraphCommand` (wrapped in `.graphCommand(projectPath:, command:)`) and wait for the
+/// resulting `.graphChanged` broadcast; automatic `.handoff` firing happens in the
+/// daemon (see `graphcoded/Sources/GraphStore.swift`). `nodePositions` stays local —
+/// canvas layout is a UI concern the daemon has no reason to know about.
 @Reducer
-struct GraphCanvasFeature {
+struct ProjectFeature {
   @ObservableState
   struct State: Equatable {
     var graph: LoopGraph
@@ -27,25 +29,23 @@ struct GraphCanvasFeature {
     var draftPrompt = ""
     var connectionError: String?
 
-    init(graph: LoopGraph = LoopGraph(title: "My first graph")) {
+    init(graph: LoopGraph) {
       self.graph = graph
     }
   }
 
   enum Action: BindableAction {
     case binding(BindingAction<State>)
-    case task
     case daemonEvent(DaemonEvent)
     case addNodeButtonTapped
     case createNodeConfirmed
     case cancelNewNodeForm
     case nodeTapped(UUID)
     case detailDismissed
+    case closeProjectTapped
     case edgeDrawn(from: UUID, to: UUID)
     case detail(LoopNodeDetailFeature.Action)
   }
-
-  private enum CancelID { case daemonSubscription }
 
   @Dependency(\.orchestratorClient) var orchestratorClient
 
@@ -55,14 +55,6 @@ struct GraphCanvasFeature {
       switch action {
       case .binding:
         return .none
-
-      case .task:
-        return .run { send in
-          for await event in orchestratorClient.connect() {
-            await send(.daemonEvent(event))
-          }
-        }
-        .cancellable(id: CancelID.daemonSubscription)
 
       case .daemonEvent(let event):
         switch event {
@@ -79,6 +71,8 @@ struct GraphCanvasFeature {
           }
         case .errorOccurred(let message):
           state.connectionError = message
+        case .recentProjectsListed:
+          break  // Not this feature's concern — AppFeature routes this to `welcome`.
         }
         return .none
 
@@ -97,6 +91,7 @@ struct GraphCanvasFeature {
 
       case .createNodeConfirmed:
         guard !state.draftTitle.isEmpty else { return .none }
+        let projectPath = state.graph.project.path
         let title = state.draftTitle
         switch state.draftLoopType {
         case .turnBased:
@@ -105,7 +100,9 @@ struct GraphCanvasFeature {
           state.showingNewNodeForm = false
           return .run { _ in
             try? await orchestratorClient.send(
-              .createTurnBasedNode(title: title, checkDescription: checkDescription))
+              .graphCommand(
+                projectPath: projectPath,
+                command: .createTurnBasedNode(title: title, checkDescription: checkDescription)))
           }
         case .timeBased:
           guard let interval = Double(state.draftIntervalSeconds), interval > 0,
@@ -115,7 +112,10 @@ struct GraphCanvasFeature {
           state.showingNewNodeForm = false
           return .run { _ in
             try? await orchestratorClient.send(
-              .createTimeBasedNode(title: title, intervalSeconds: interval, prompt: prompt))
+              .graphCommand(
+                projectPath: projectPath,
+                command: .createTimeBasedNode(
+                  title: title, intervalSeconds: interval, prompt: prompt)))
           }
         case .goalBased, .proactive:
           // Not creatable yet — see docs/07-roadmap.md's deferred goal-based/proactive
@@ -141,19 +141,34 @@ struct GraphCanvasFeature {
         state.detail = nil
         return .none
 
+      case .closeProjectTapped:
+        // Handled by `AppFeature`'s parent `Reduce`, which clears `state.project` —
+        // nothing to do here.
+        return .none
+
       case .edgeDrawn(let from, let to):
         guard from != to else { return .none }
+        let projectPath = state.graph.project.path
         return .run { _ in
-          try? await orchestratorClient.send(.createEdge(from: from, to: to))
+          try? await orchestratorClient.send(
+            .graphCommand(projectPath: projectPath, command: .createEdge(from: from, to: to)))
         }
 
       case .detail(.checkApproved):
         guard let id = state.detail?.node.id else { return .none }
-        return .run { _ in try? await orchestratorClient.send(.nodeCheckApproved(id)) }
+        let projectPath = state.graph.project.path
+        return .run { _ in
+          try? await orchestratorClient.send(
+            .graphCommand(projectPath: projectPath, command: .nodeCheckApproved(id)))
+        }
 
       case .detail(.checkRejected):
         guard let id = state.detail?.node.id else { return .none }
-        return .run { _ in try? await orchestratorClient.send(.nodeCheckRejected(id)) }
+        let projectPath = state.graph.project.path
+        return .run { _ in
+          try? await orchestratorClient.send(
+            .graphCommand(projectPath: projectPath, command: .nodeCheckRejected(id)))
+        }
 
       case .detail:
         return .none

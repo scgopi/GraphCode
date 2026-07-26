@@ -2,8 +2,14 @@ import ComposableArchitecture
 import GraphcodeKit
 import SwiftUI
 
-struct GraphCanvasView: View {
-  @Bindable var store: StoreOf<GraphCanvasFeature>
+/// Renamed from Phase 2/3's `GraphCanvasView` in Phase 4
+/// (docs/07-roadmap.md#phase-4--projects): the graph canvas is no longer the whole
+/// window — it's the detail pane of a `NavigationSplitView`, alongside a
+/// `ProjectSidebarView` listing this project's loops. Selecting a loop swaps the detail
+/// pane to its terminal (`LoopNodeDetailView`, embedded inline — no more modal sheet);
+/// selecting nothing shows the canvas.
+struct ProjectView: View {
+  @Bindable var store: StoreOf<ProjectFeature>
 
   @State private var canvasOffset: CGSize = .zero
   @State private var dragOffset: CGSize = .zero
@@ -12,48 +18,38 @@ struct GraphCanvasView: View {
   @State private var dragLocation: CGPoint?
 
   var body: some View {
-    VStack(spacing: 0) {
-      toolbar
-      if let connectionError = store.connectionError {
-        Text("Not connected to graphcoded: \(connectionError)")
-          .font(.caption)
-          .foregroundStyle(.white)
-          .frame(maxWidth: .infinity)
-          .padding(6)
-          .background(Color.red)
+    NavigationSplitView {
+      ProjectSidebarView(store: store)
+    } detail: {
+      VStack(spacing: 0) {
+        if let connectionError = store.connectionError {
+          Text("Not connected to graphcoded: \(connectionError)")
+            .font(.caption)
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .padding(6)
+            .background(Color.red)
+        }
+        if let detailStore = store.scope(state: \.detail, action: \.detail) {
+          LoopNodeDetailView(store: detailStore)
+        } else {
+          canvas
+        }
       }
-      Divider()
-      canvas
     }
-    .frame(minWidth: 720, minHeight: 480)
-    .task { await store.send(.task).finish() }
-    .sheet(
-      isPresented: Binding(
-        get: { store.detail != nil },
-        set: { isPresented in if !isPresented { store.send(.detailDismissed) } }
-      )
-    ) {
-      if let detailStore = store.scope(state: \.detail, action: \.detail) {
-        LoopNodeDetailView(store: detailStore)
+    .toolbar {
+      ToolbarItem(placement: .navigation) {
+        Button {
+          store.send(.closeProjectTapped)
+        } label: {
+          Label("Projects", systemImage: "chevron.backward")
+        }
+        .help("Close \(store.graph.project.name) and return to the welcome screen")
       }
     }
     .sheet(isPresented: $store.showingNewNodeForm) {
       newNodeForm
     }
-  }
-
-  private var toolbar: some View {
-    HStack {
-      Text(store.graph.title).font(.headline)
-      Spacer()
-      Button {
-        store.send(.addNodeButtonTapped)
-      } label: {
-        Label("New Node", systemImage: "plus.circle")
-      }
-    }
-    .padding(10)
-    .background(.bar)
   }
 
   private var canvas: some View {
@@ -241,5 +237,11 @@ private struct EdgeLineView: View {
 }
 
 #Preview {
-  GraphCanvasView(store: Store(initialState: GraphCanvasFeature.State()) { GraphCanvasFeature() })
+  ProjectView(
+    store: Store(
+      initialState: ProjectFeature.State(
+        graph: LoopGraph(project: ProjectRef(path: "/tmp/preview", name: "preview"))
+      )
+    ) { ProjectFeature() }
+  )
 }

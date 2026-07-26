@@ -1,3 +1,4 @@
+import Foundation
 import GraphcodeKit
 import Testing
 
@@ -97,8 +98,10 @@ struct GraphStoreTests {
 
     // No real socket needed to prove this: addConnection's first `send` call is a
     // no-op for an unknown/invalid fd (silently dropped, not thrown), so this just
-    // confirms it doesn't crash and returns a usable connection id.
-    let connectionID = await store.addConnection(fileDescriptor: -1)
+    // confirms it doesn't crash for a caller-supplied connection id (Phase 4 moved id
+    // generation to `ProjectRegistry`, see docs/07-roadmap.md#phase-4--projects).
+    let connectionID = UUID()
+    await store.addConnection(id: connectionID, fileDescriptor: -1)
     await store.removeConnection(connectionID)
   }
 }

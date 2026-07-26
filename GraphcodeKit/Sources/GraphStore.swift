@@ -12,26 +12,34 @@ import Foundation
 /// cleanly unit-testable from `graphcodeTests` without spinning up a real daemon
 /// process or socket.
 ///
-/// No `.global` Orchestrator Graph yet (still deferred, see `LoopGraph`'s doc comment)
-/// and no persistence to disk — the graph lives in memory for as long as `graphcoded`
-/// runs. Losing it on daemon restart is an accepted gap for this phase, not something
-/// Phase 3 claims to solve.
+/// No `.global` Orchestrator Graph yet (still deferred, see `LoopGraph`'s doc comment).
+/// This actor itself still has no persistence of its own — from Phase 4 on that's
+/// `ProjectRegistry`'s job, via the `onGraphChanged` hook below, since `GraphStore`
+/// owns exactly one graph and has no notion of "which project" it belongs to.
+///
+/// Connection identity (the `id: UUID` `addConnection`/`removeConnection` take) is now
+/// caller-supplied rather than generated here — `ProjectRegistry` owns one `UUID` per
+/// live socket end-to-end across every project it might join over that socket's
+/// lifetime, so it needs to be the one minting it.
 public actor GraphStore {
   public private(set) var graph: LoopGraph
   private var connections: [UUID: Int32] = [:]
   private var timers: [UUID: Task<Void, Never>] = [:]
+  private let onGraphChanged: (@Sendable (LoopGraph) -> Void)?
 
-  public init(graph: LoopGraph = LoopGraph(title: "My first graph")) {
+  public init(
+    graph: LoopGraph = LoopGraph(project: ProjectRef(path: "", name: "Untitled")),
+    onGraphChanged: (@Sendable (LoopGraph) -> Void)? = nil
+  ) {
     self.graph = graph
+    self.onGraphChanged = onGraphChanged
   }
 
   // MARK: - Connections
 
-  public func addConnection(fileDescriptor: Int32) -> UUID {
-    let id = UUID()
+  public func addConnection(id: UUID, fileDescriptor: Int32) {
     connections[id] = fileDescriptor
     send(.graphChanged(graph), to: id)
-    return id
   }
 
   public func removeConnection(_ id: UUID) {
@@ -40,7 +48,7 @@ public actor GraphStore {
 
   // MARK: - Commands
 
-  public func handle(_ command: DaemonCommand) {
+  public func handle(_ command: GraphCommand) {
     switch command {
     case .createTurnBasedNode(let title, let checkDescription):
       let node = LoopNode(title: title, loopType: .turnBased, checkDescription: checkDescription)
@@ -149,6 +157,7 @@ public actor GraphStore {
   // MARK: - Broadcast
 
   private func broadcast() {
+    onGraphChanged?(graph)
     for id in connections.keys {
       send(.graphChanged(graph), to: id)
     }
