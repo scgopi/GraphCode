@@ -12,6 +12,19 @@ import Foundation
 public enum DaemonCommand: Codable, Sendable, Equatable {
   case listRecentProjects
   case openProject(path: String)
+  /// Reopen whichever projects were showing in the sidebar when the app last quit. Sent
+  /// once at launch; the daemon replies with one `.graphChanged` per project, which is
+  /// exactly what `.openProject` produces, so the app needs no separate restore path.
+  case restoreOpenProjects
+  /// Drop a project from the sidebar, keeping it in recents so Add Folder can bring it
+  /// straight back.
+  case closeProject(path: String)
+  /// Close it *and* forget it from recents. The saved graph survives — re-opening the
+  /// same folder restores its loops.
+  case forgetProject(path: String)
+  /// Discard a project's saved loops entirely. Irreversible, and separate from
+  /// `forgetProject` precisely because it is.
+  case deleteProjectGraph(path: String)
   case graphCommand(projectPath: String, command: GraphCommand)
 }
 
@@ -23,7 +36,10 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
 /// than to narrow.
 public enum GraphCommand: Codable, Sendable, Equatable {
   case createTurnBasedNode(title: String, checkDescription: String)
-  case createTimeBasedNode(title: String, intervalSeconds: Double, prompt: String)
+  /// No interval travels with this — a time-based node's cadence lives inside its own
+  /// session, written into `prompt` as a `/loop`/`/schedule` directive. See
+  /// `LoopNode.triggerPrompt`.
+  case createTimeBasedNode(title: String, prompt: String)
   case createEdge(from: UUID, to: UUID)
   case nodeCheckApproved(UUID)
   case nodeCheckRejected(UUID)

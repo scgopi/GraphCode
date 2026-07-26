@@ -18,6 +18,10 @@ struct AppSidebarView: View {
   @Bindable var store: StoreOf<AppFeature>
 
   @State private var collapsedProjectPaths: Set<String> = []
+  /// The project whose loops "Delete Loops…" is about to discard, driving the
+  /// confirmation dialog. Local view state: nothing outside this pane needs to know a
+  /// dialog is up, and nothing should persist if the app quits mid-prompt.
+  @State private var projectPendingLoopDeletion: ProjectFeature.State?
 
   private enum SidebarSelection: Hashable {
     case project(String)
@@ -29,6 +33,7 @@ struct AppSidebarView: View {
       ForEach(store.projects) { project in
         projectHeaderRow(for: project)
           .tag(SidebarSelection.project(project.id))
+          .contextMenu { projectMenu(for: project) }
 
         if !collapsedProjectPaths.contains(project.id) {
           ForEach(project.graph.nodes) { node in
@@ -58,6 +63,38 @@ struct AppSidebarView: View {
     ) { result in
       store.send(.welcome(.folderPickerResult(result)))
     }
+    .confirmationDialog(
+      "Delete this project's loops?",
+      isPresented: Binding(
+        get: { projectPendingLoopDeletion != nil },
+        set: { if !$0 { projectPendingLoopDeletion = nil } }
+      ),
+      presenting: projectPendingLoopDeletion
+    ) { project in
+      Button("Delete Loops", role: .destructive) {
+        store.send(.projectDeleteLoopsConfirmed(project.id))
+        projectPendingLoopDeletion = nil
+      }
+      Button("Cancel", role: .cancel) { projectPendingLoopDeletion = nil }
+    } message: { project in
+      Text(
+        """
+        \(project.graph.project.name)'s nodes and edges will be permanently deleted. \
+        The folder itself is not touched.
+        """)
+    }
+  }
+
+  /// Three verbs, deliberately distinct: closing is reversible from the Add Folder menu,
+  /// removing forgets the project but keeps its loops for whenever you re-add it, and
+  /// deleting throws the loops away. Only the last is destructive, so only it confirms
+  /// and carries the destructive role.
+  @ViewBuilder
+  private func projectMenu(for project: ProjectFeature.State) -> some View {
+    Button("Close") { store.send(.projectCloseTapped(project.id)) }
+    Button("Remove from Graphcode") { store.send(.projectRemoveTapped(project.id)) }
+    Divider()
+    Button("Delete Loops…", role: .destructive) { projectPendingLoopDeletion = project }
   }
 
   private var addFolderMenu: some View {

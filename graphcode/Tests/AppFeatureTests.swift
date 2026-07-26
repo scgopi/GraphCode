@@ -42,6 +42,68 @@ struct AppFeatureTests {
 
   @Test
   @MainActor
+  func closingAProjectTakesItsOpenWorkspaceAndSelectionWithIt() async {
+    // Selection and `openLoop` are cross-project, so removing a project from the sidebar
+    // has to clear both — otherwise its terminal workspace stays on screen with nothing
+    // in the sidebar pointing at it.
+    let node = LoopNode(title: "Research", checkDescription: "Sound?")
+    var state = AppFeature.State()
+    state.projects.append(
+      ProjectFeature.State(graph: LoopGraph(project: Self.projectA, nodes: [node])))
+    state.projects.append(ProjectFeature.State(graph: LoopGraph(project: Self.projectB)))
+    state.selectedProjectPath = Self.projectA.path
+
+    let sentCommands = SentCommandsBox()
+    let store = TestStore(initialState: state) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalLayoutStore = makeTerminalLayoutStore()
+      $0.orchestratorClient.send = { command in await sentCommands.append(command) }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.projects(.element(id: Self.projectA.path, action: .nodeTapped(node.id))))
+    #expect(store.state.openLoop != nil)
+
+    await store.send(.projectCloseTapped(Self.projectA.path))
+    #expect(store.state.projects.count == 1)
+    #expect(store.state.openLoop == nil)
+    // Falls back to a project that still exists rather than dangling on the closed one.
+    #expect(store.state.selectedProjectPath == Self.projectB.path)
+    // Closing must not forget the project — that's `.forgetProject`.
+    #expect(await sentCommands.all == [.closeProject(path: Self.projectA.path)])
+  }
+
+  @Test
+  @MainActor
+  func removingAProjectAlsoDropsItFromTheAddFolderMenu() async {
+    var state = AppFeature.State()
+    state.projects.append(ProjectFeature.State(graph: LoopGraph(project: Self.projectA)))
+    state.welcome.recentProjects = [Self.projectA, Self.projectB]
+
+    let sentCommands = SentCommandsBox()
+    let store = TestStore(initialState: state) {
+      AppFeature()
+    } withDependencies: {
+      $0.orchestratorClient.send = { command in await sentCommands.append(command) }
+    }
+    store.exhaustivity = .off
+
+    // Close keeps it in recents — that's what makes it one click away again.
+    await store.send(.projectCloseTapped(Self.projectA.path))
+    #expect(store.state.welcome.recentProjects.count == 2)
+
+    await store.send(.projectRemoveTapped(Self.projectA.path))
+    #expect(store.state.welcome.recentProjects.map(\.path) == [Self.projectB.path])
+
+    let commands = await sentCommands.all
+    #expect(commands.count == 2)
+    #expect(commands.first == .closeProject(path: Self.projectA.path))
+    #expect(commands.last == .forgetProject(path: Self.projectA.path))
+  }
+
+  @Test
+  @MainActor
   func aGraphChangedForAnAlreadyOpenProjectUpdatesItInPlace() async {
     let store = TestStore(initialState: AppFeature.State()) {
       AppFeature()
@@ -84,10 +146,10 @@ struct AppFeatureTests {
 
   @Test
   @MainActor
-  func timeBasedNodeCannotBeOpened() async {
+  func timeBasedNodeOpensItsWorkspace() async {
     let timeBasedNode = LoopNode(
-      title: "Poll inbox", loopType: .timeBased, triggerIntervalSeconds: 3600,
-      triggerPrompt: "Check for new reports")
+      title: "Poll inbox", loopType: .timeBased,
+      triggerPrompt: "/loop 1h Check for new reports")
     var state = AppFeature.State()
     state.projects.append(
       ProjectFeature.State(graph: LoopGraph(project: Self.projectA, nodes: [timeBasedNode])))
@@ -100,11 +162,12 @@ struct AppFeatureTests {
     }
     store.exhaustivity = .off
 
-    // Time-based nodes run headlessly in graphcoded — there's no local interactive
-    // session for a human to attach to (see docs/04-cli-backends.md).
+    // A time-based loop's recurrence runs inside an ordinary interactive session, so it
+    // opens exactly like a turn-based one — that's what makes it steerable mid-run.
     await store.send(
       .projects(.element(id: Self.projectA.path, action: .nodeTapped(timeBasedNode.id))))
-    #expect(store.state.openLoop == nil)
+    #expect(store.state.openLoop?.node.id == timeBasedNode.id)
+    #expect(store.state.openLoop?.node.triggerPrompt == "/loop 1h Check for new reports")
   }
 
   @Test

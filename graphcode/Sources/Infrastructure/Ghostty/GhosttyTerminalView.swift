@@ -17,14 +17,28 @@ import SwiftUI
 struct GhosttyTerminalView: NSViewRepresentable {
   let sessionName: String
   let launchesClaudeCode: Bool
+  /// The prompt this surface's Claude Code session should start with — a time-based
+  /// node's `/loop …` directive (see `LoopNode.triggerPrompt`). `nil` for a turn-based
+  /// loop's session, which starts bare, and for every plain-shell surface.
+  ///
+  /// Only reached when this view is the one *creating* the session. Once `graphcoded`
+  /// has started a time-based node's session, `zmx attach` ignores its command argument
+  /// entirely and just joins the live one — so this is the fallback path for a node
+  /// opened before the daemon got to it, or with `zmx` not installed.
+  var initialPrompt: String?
   let workingDirectory: String?
   let onProcessExited: (Bool) -> Void
+
+  /// Carries `initialPrompt` into the shell as a variable instead of interpolating it
+  /// into the command string, so a prompt containing quotes, `$`, or backticks can't
+  /// break out of (or inject into) the command Ghostty runs.
+  private static let promptVariable = "GRAPHCODE_TRIGGER_PROMPT"
 
   func makeNSView(context: Context) -> GhosttyTerminalNSView {
     let view = GhosttyTerminalNSView(
       command: command,
       workingDirectory: workingDirectory,
-      environment: [:])
+      environment: initialPrompt.map { [Self.promptVariable: $0] } ?? [:])
     view.onProcessExited = onProcessExited
     return view
   }
@@ -32,7 +46,10 @@ struct GhosttyTerminalView: NSViewRepresentable {
   func updateNSView(_ nsView: GhosttyTerminalNSView, context: Context) {}
 
   private var command: [String] {
-    let claudeCommand = ["/bin/zsh", "-l", "-c", "exec claude"]
+    let claudeCommand =
+      initialPrompt == nil
+      ? ["/bin/zsh", "-l", "-c", "exec claude"]
+      : ["/bin/zsh", "-l", "-c", "exec claude \"$\(Self.promptVariable)\""]
     guard ZmxLocator.isInstalled else {
       return launchesClaudeCode ? claudeCommand : ["/bin/zsh", "-l"]
     }

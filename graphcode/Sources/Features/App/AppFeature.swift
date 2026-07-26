@@ -29,6 +29,13 @@ struct AppFeature {
     case task
     case daemonEvent(DaemonEvent)
     case projectHeaderTapped(String)
+    /// Drop a project from the sidebar; it stays in recents, one click away under Add
+    /// Folder.
+    case projectCloseTapped(String)
+    /// Close it and forget it from recents. Its saved loops survive.
+    case projectRemoveTapped(String)
+    /// Discard a project's saved loops for good — the view confirms before sending this.
+    case projectDeleteLoopsConfirmed(String)
     case welcome(WelcomeFeature.Action)
     case projects(IdentifiedActionOf<ProjectFeature>)
     case openLoop(LoopWorkspaceFeature.Action)
@@ -53,7 +60,12 @@ struct AppFeature {
             }
           }
           .cancellable(id: CancelID.daemonSubscription),
-          .run { _ in try? await orchestratorClient.send(.listRecentProjects) }
+          .run { _ in try? await orchestratorClient.send(.listRecentProjects) },
+          // Without this the sidebar comes up empty on every launch even though the
+          // daemon has been persisting every project all along — the app just never
+          // asked for them back. Each restored project arrives as an ordinary
+          // `.graphChanged`, handled below.
+          .run { _ in try? await orchestratorClient.send(.restoreOpenProjects) }
         )
 
       case .daemonEvent(let event):
@@ -89,12 +101,28 @@ struct AppFeature {
         state.openLoop = nil
         return .none
 
+      case .projectCloseTapped(let path):
+        removeFromSidebar(&state, path: path)
+        return .run { _ in try? await orchestratorClient.send(.closeProject(path: path)) }
+
+      case .projectRemoveTapped(let path):
+        removeFromSidebar(&state, path: path)
+        state.welcome.recentProjects.removeAll { $0.path == path }
+        return .run { _ in try? await orchestratorClient.send(.forgetProject(path: path)) }
+
+      case .projectDeleteLoopsConfirmed(let path):
+        removeFromSidebar(&state, path: path)
+        state.welcome.recentProjects.removeAll { $0.path == path }
+        return .run { _ in try? await orchestratorClient.send(.deleteProjectGraph(path: path)) }
+
       case .projects(.element(id: let path, action: .nodeTapped(let nodeID))):
-        // Time-based nodes run headlessly in graphcoded; there's no local interactive
-        // session for a human to open here (see docs/04-cli-backends.md).
+        // Every loop type opens the same way. A time-based node used to be excluded
+        // because it only existed as a headless `claude -p` the daemon fired on a timer;
+        // now its recurrence runs inside an ordinary interactive session (see
+        // `LoopNode.triggerPrompt`), so there's a real terminal to attach to — which is
+        // the point, since watching and steering a running loop is most of its value.
         guard let node = state.projects[id: path]?.graph.nodes[id: nodeID],
-          node.state != .blocked,
-          node.loopType == .turnBased
+          node.state != .blocked
         else { return .none }
         let layout = terminalLayoutStore.load(forNode: nodeID) ?? .defaultLayout(forNode: nodeID)
         state.openLoop = LoopWorkspaceFeature.State(node: node, layout: layout, projectPath: path)
@@ -124,6 +152,21 @@ struct AppFeature {
     }
     .forEach(\.projects, action: \.projects) {
       ProjectFeature()
+    }
+  }
+
+  /// Shared by all three context-menu verbs — they differ only in what they ask the
+  /// daemon to forget, never in what leaves the sidebar. Selection and any open workspace
+  /// have to be cleared too: both are cross-project (see this type's doc comment), so a
+  /// workspace belonging to the removed project would otherwise stay on screen with
+  /// nothing in the sidebar pointing at it.
+  private func removeFromSidebar(_ state: inout State, path: String) {
+    state.projects.remove(id: path)
+    if state.openLoop?.projectPath == path {
+      state.openLoop = nil
+    }
+    if state.selectedProjectPath == path {
+      state.selectedProjectPath = state.projects.first?.id
     }
   }
 }

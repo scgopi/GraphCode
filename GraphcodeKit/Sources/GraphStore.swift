@@ -1,10 +1,17 @@
 import Foundation
 
 /// Owns the daemon's one `LoopGraph`, applies commands, automatically fires `.handoff`
-/// edges when a node resolves, arms/runs time-based triggers, and broadcasts the
-/// updated graph to every connected client. This is the whole of what makes
+/// edges when a node resolves, keeps time-based nodes' sessions alive, and broadcasts
+/// the updated graph to every connected client. This is the whole of what makes
 /// `graphcoded` load-bearing from Phase 3 on — see
 /// docs/07-roadmap.md#phase-3--orchestrator-automation.
+///
+/// Note what this deliberately does *not* do: schedule anything. An earlier version ran
+/// a `Task.sleep` timer per time-based node and fired a headless `claude -p` on each
+/// tick, discarding the output — which left a human nothing to attach to, watch, or
+/// steer. Recurrence now lives inside the session itself (`/loop` in the node's own
+/// prompt, see `LoopNode.triggerPrompt`), so this store's only remaining job for a
+/// time-based node is making sure its session exists.
 ///
 /// Lives in `GraphcodeKit`, not `graphcoded/Sources`, even though only the daemon
 /// instantiates it in production: it has no socket/process-lifecycle coupling of its
@@ -24,15 +31,22 @@ import Foundation
 public actor GraphStore {
   public private(set) var graph: LoopGraph
   private var connections: [UUID: Int32] = [:]
-  private var timers: [UUID: Task<Void, Never>] = [:]
   private let onGraphChanged: (@Sendable (LoopGraph) -> Void)?
+  private let onEnsureSession: (@Sendable (LoopNode) -> Void)?
 
+  /// `onEnsureSession` is how a time-based node's session gets started without this
+  /// actor knowing anything about `zmx` or spawning processes — same injected-closure
+  /// idiom as `onGraphChanged`, and for the same reason: `GraphStore` stays unit-testable
+  /// with no daemon, no socket, and no child process. `graphcoded` wires it to
+  /// `ZmxSessionLauncher`; tests leave it `nil` or capture the calls.
   public init(
     graph: LoopGraph = LoopGraph(project: ProjectRef(path: "", name: "Untitled")),
-    onGraphChanged: (@Sendable (LoopGraph) -> Void)? = nil
+    onGraphChanged: (@Sendable (LoopGraph) -> Void)? = nil,
+    onEnsureSession: (@Sendable (LoopNode) -> Void)? = nil
   ) {
     self.graph = graph
     self.onGraphChanged = onGraphChanged
+    self.onEnsureSession = onEnsureSession
   }
 
   // MARK: - Connections
@@ -54,12 +68,13 @@ public actor GraphStore {
       let node = LoopNode(title: title, loopType: .turnBased, checkDescription: checkDescription)
       graph.nodes.append(node)
 
-    case .createTimeBasedNode(let title, let intervalSeconds, let prompt):
-      let node = LoopNode(
-        title: title, loopType: .timeBased, triggerIntervalSeconds: intervalSeconds,
-        triggerPrompt: prompt)
+    case .createTimeBasedNode(let title, let prompt):
+      let node = LoopNode(title: title, loopType: .timeBased, triggerPrompt: prompt)
       graph.nodes.append(node)
-      armTimer(for: node.id, intervalSeconds: intervalSeconds)
+      // Start it now rather than waiting for someone to open it — the loop is supposed
+      // to run whether or not the app is up, which is the whole reason `graphcoded`
+      // exists (docs/03-architecture.md#background-daemons).
+      onEnsureSession?(node)
 
     case .createEdge(let from, let to):
       guard from != to, graph.nodes[id: from] != nil, graph.nodes[id: to] != nil,
@@ -111,47 +126,21 @@ public actor GraphStore {
     graph.nodes[id: nodeID]?.state = stillBlocked ? .blocked : .idle
   }
 
-  // MARK: - Scheduler (time-based nodes)
+  // MARK: - Time-based session liveness
 
-  /// Arms a repeating trigger for a time-based node. This `Task` is owned by
-  /// `graphcoded`, not the app — it keeps firing on schedule whether or not any client
-  /// is connected, which is the entire point of Phase 3 (see
-  /// docs/03-architecture.md#why-a-daemon-at-all). First fire is after one interval,
-  /// matching ordinary cron/interval semantics (not immediately on creation).
-  private func armTimer(for nodeID: UUID, intervalSeconds: Double) {
-    timers[nodeID] = Task { [weak self] in
-      while !Task.isCancelled {
-        try? await Task.sleep(for: .seconds(intervalSeconds))
-        guard !Task.isCancelled else { return }
-        await self?.fireTimeBasedNode(nodeID)
-      }
+  /// Makes sure every time-based node in this graph has its session running. Called
+  /// when a persisted graph is first loaded (`ProjectRegistry.store(forProjectPath:)`),
+  /// which is what gets loops going again after a reboot or a daemon restart — the
+  /// session itself is long-lived, but nothing outside it would otherwise recreate it
+  /// once it's gone.
+  ///
+  /// Safe to call repeatedly, but only because `ZmxSessionLauncher` checks for an
+  /// existing session first — `zmx run` itself is *not* idempotent, and re-running it
+  /// against a live session types the prompt in a second time.
+  public func ensureTimeBasedSessions() {
+    for node in graph.nodes where node.loopType == .timeBased {
+      onEnsureSession?(node)
     }
-  }
-
-  private func fireTimeBasedNode(_ nodeID: UUID) async {
-    guard let node = graph.nodes[id: nodeID] else { return }
-    graph.nodes[id: nodeID]?.state = .running
-    broadcast()
-
-    let succeeded: Bool
-    do {
-      // Non-interactive (`claude -p`), not a bare interactive session: nobody's
-      // present to hold up a conversation with a headless trigger, so it needs an
-      // actual task to run to completion. The prompt is passed via environment
-      // variable, not interpolated into the shell command string, so a prompt
-      // containing quotes/special characters can't break out of the command.
-      let session = try PTYProcessSession(
-        arguments: ["-l", "-c", "exec claude -p \"$GRAPHCODE_TRIGGER_PROMPT\""],
-        workingDirectory: node.worktreeBinding?.worktreePath,
-        extraEnvironment: ["GRAPHCODE_TRIGGER_PROMPT": node.triggerPrompt ?? "Say hello."]
-      )
-      succeeded = await session.waitUntilFinished()
-    } catch {
-      succeeded = false
-    }
-
-    resolveNode(nodeID, succeeded: succeeded)
-    broadcast()
   }
 
   // MARK: - Broadcast

@@ -153,6 +153,78 @@ struct ProjectRegistryTests {
 
     #expect(persistence.loadRecentProjects().contains { $0.path == "/tmp/project-c" })
   }
+
+  /// The bug this guards: the app relaunched with an empty sidebar because nothing ever
+  /// reopened what was showing when it quit — the daemon had persisted it all along.
+  @Test
+  func restoringReopensExactlyWhatWasOpenAtQuit() async {
+    let (registry, persistence) = makeRegistryAndPersistence()
+    let firstRun = UUID()
+    await registry.addConnection(id: firstRun, fileDescriptor: -1)
+    await registry.handle(.openProject(path: "/tmp/project-a"), connectionID: firstRun)
+    await registry.handle(.openProject(path: "/tmp/project-b"), connectionID: firstRun)
+    await registry.handle(.closeProject(path: "/tmp/project-b"), connectionID: firstRun)
+
+    // A closed project stays in recents — that's what makes Close reversible from the
+    // Add Folder menu — but must not come back in the sidebar.
+    #expect(Self.names(persistence.loadOpenProjects()) == ["project-a"])
+    #expect(persistence.loadRecentProjects().count == 2)
+
+    // Second launch: a fresh connection restores from disk alone.
+    let secondRun = UUID()
+    await registry.addConnection(id: secondRun, fileDescriptor: -1)
+    await registry.handle(.restoreOpenProjects, connectionID: secondRun)
+
+    #expect(Self.names(persistence.loadOpenProjects()) == ["project-a"])
+  }
+
+  @Test
+  func removingAProjectForgetsItButKeepsItsLoops() async {
+    let (registry, persistence) = makeRegistryAndPersistence()
+    let connectionID = UUID()
+    await registry.addConnection(id: connectionID, fileDescriptor: -1)
+    await registry.handle(.openProject(path: "/tmp/project-d"), connectionID: connectionID)
+    await registry.handle(
+      .graphCommand(
+        projectPath: "/tmp/project-d",
+        command: .createTurnBasedNode(title: "Research", checkDescription: "Sound?")),
+      connectionID: connectionID)
+
+    await registry.handle(.forgetProject(path: "/tmp/project-d"), connectionID: connectionID)
+
+    #expect(persistence.loadOpenProjects().isEmpty)
+    #expect(persistence.loadRecentProjects().isEmpty)
+    // Re-adding the folder has to bring the loops back — that's the whole distinction
+    // between "Remove from Graphcode" and "Delete Loops…".
+    #expect(persistence.loadGraph(path: "/tmp/project-d")?.nodes.count == 1)
+  }
+
+  @Test
+  func deletingAProjectsLoopsDiscardsThemForGood() async {
+    let (registry, persistence) = makeRegistryAndPersistence()
+    let connectionID = UUID()
+    await registry.addConnection(id: connectionID, fileDescriptor: -1)
+    await registry.handle(.openProject(path: "/tmp/project-e"), connectionID: connectionID)
+    await registry.handle(
+      .graphCommand(
+        projectPath: "/tmp/project-e",
+        command: .createTurnBasedNode(title: "Research", checkDescription: "Sound?")),
+      connectionID: connectionID)
+
+    await registry.handle(.deleteProjectGraph(path: "/tmp/project-e"), connectionID: connectionID)
+    #expect(persistence.loadGraph(path: "/tmp/project-e") == nil)
+
+    // Reopening must start empty. The in-memory store has to have been dropped too, or
+    // it would persist the graph we just deleted straight back to disk.
+    await registry.handle(.openProject(path: "/tmp/project-e"), connectionID: connectionID)
+    #expect(persistence.loadGraph(path: "/tmp/project-e")?.nodes.isEmpty != false)
+  }
+
+  /// Paths round-trip through `resolvingSymlinksInPath()`, so compare the leaf rather
+  /// than assuming `/tmp` survives as written.
+  private static func names(_ paths: [String]) -> [String] {
+    paths.map { URL(fileURLWithPath: $0).lastPathComponent }
+  }
 }
 
 @Sendable

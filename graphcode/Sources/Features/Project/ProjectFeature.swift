@@ -31,7 +31,6 @@ struct ProjectFeature {
     var draftLoopType: LoopType = .turnBased
     var draftTitle = ""
     var draftCheck = ""
-    var draftIntervalSeconds = "3600"
     var draftPrompt = ""
     var connectionError: String?
 
@@ -80,7 +79,6 @@ struct ProjectFeature {
         state.draftLoopType = .turnBased
         state.draftTitle = ""
         state.draftCheck = ""
-        state.draftIntervalSeconds = "3600"
         state.draftPrompt = ""
         state.showingNewNodeForm = true
         return .none
@@ -105,17 +103,16 @@ struct ProjectFeature {
                 command: .createTurnBasedNode(title: title, checkDescription: checkDescription)))
           }
         case .timeBased:
-          guard let interval = Double(state.draftIntervalSeconds), interval > 0,
-            !state.draftPrompt.isEmpty
-          else { return .none }
+          // Only the prompt is required — it carries its own cadence, and graphcode
+          // deliberately doesn't inspect it (a prompt with no `/loop` simply runs once).
+          guard !state.draftPrompt.isEmpty else { return .none }
           let prompt = state.draftPrompt
           state.showingNewNodeForm = false
           return .run { _ in
             try? await orchestratorClient.send(
               .graphCommand(
                 projectPath: projectPath,
-                command: .createTimeBasedNode(
-                  title: title, intervalSeconds: interval, prompt: prompt)))
+                command: .createTimeBasedNode(title: title, prompt: prompt)))
           }
         case .goalBased, .proactive:
           // Not creatable yet — see docs/07-roadmap.md's deferred goal-based/proactive

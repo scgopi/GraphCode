@@ -1,3 +1,4 @@
+import ComposableArchitecture
 import Foundation
 import GraphcodeKit
 import Testing
@@ -18,6 +19,40 @@ struct GraphStoreTests {
     #expect(graph.nodes.count == 1)
     #expect(graph.nodes[0].state == .idle)
     #expect(graph.nodes[0].loopType == .turnBased)
+  }
+
+  @Test
+  func creatingATimeBasedNodeStartsItsSessionImmediately() async {
+    // The daemon's only job for a time-based node is making sure its session exists —
+    // it deliberately schedules nothing, since the `/loop` in the prompt is what
+    // re-triggers the work from inside the session.
+    let started = LockIsolated<[LoopNode]>([])
+    let store = GraphStore(onEnsureSession: { node in started.withValue { $0.append(node) } })
+
+    await store.handle(
+      .createTimeBasedNode(title: "Poll inbox", prompt: "/loop 1h Check for new reports"))
+
+    let graph = await store.graph
+    #expect(graph.nodes.count == 1)
+    #expect(graph.nodes[0].loopType == .timeBased)
+    #expect(graph.nodes[0].triggerPrompt == "/loop 1h Check for new reports")
+    #expect(started.value.map(\.id) == [graph.nodes[0].id])
+  }
+
+  @Test
+  func ensureTimeBasedSessionsRestartsOnlyTimeBasedNodes() async {
+    // What gets a persisted loop running again after a reboot — turn-based nodes must
+    // not be swept up, since a human opening them is what starts those.
+    let started = LockIsolated<[LoopNode]>([])
+    let store = GraphStore(onEnsureSession: { node in started.withValue { $0.append(node) } })
+    await store.handle(.createTurnBasedNode(title: "Research", checkDescription: "Sound?"))
+    await store.handle(.createTimeBasedNode(title: "Poll inbox", prompt: "/loop 1h Check"))
+    started.withValue { $0.removeAll() }
+
+    await store.ensureTimeBasedSessions()
+
+    #expect(started.value.count == 1)
+    #expect(started.value.first?.loopType == .timeBased)
   }
 
   @Test

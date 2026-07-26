@@ -29,6 +29,38 @@ struct ProjectPersistenceTests {
   }
 
   @Test
+  func openProjectsAreTrackedSeparatelyFromRecents() {
+    // The two lists answer different questions — "what was the sidebar showing" versus
+    // "what has ever been opened" — which is what lets Close and Remove differ.
+    let persistence = makePersistence()
+    persistence.recordOpened(ProjectRef(path: "/tmp/a", name: "a"))
+    persistence.recordOpened(ProjectRef(path: "/tmp/b", name: "b"))
+    persistence.saveOpenProjects(["/tmp/a", "/tmp/b"])
+
+    persistence.saveOpenProjects(["/tmp/a"])
+
+    #expect(persistence.loadOpenProjects() == ["/tmp/a"])
+    #expect(persistence.loadRecentProjects().count == 2)
+  }
+
+  @Test
+  func forgettingAProjectLeavesItsGraphOnDisk() {
+    let persistence = makePersistence()
+    persistence.recordOpened(ProjectRef(path: "/tmp/a", name: "a"))
+    persistence.saveGraph(
+      LoopGraph(
+        project: ProjectRef(path: "/tmp/a", name: "a"),
+        nodes: [LoopNode(title: "Research", checkDescription: "Sound?")]))
+
+    persistence.forgetProject(path: "/tmp/a")
+    #expect(persistence.loadRecentProjects().isEmpty)
+    #expect(persistence.loadGraph(path: "/tmp/a")?.nodes.count == 1)
+
+    persistence.deleteGraph(path: "/tmp/a")
+    #expect(persistence.loadGraph(path: "/tmp/a") == nil)
+  }
+
+  @Test
   func recordingAnOpenedProjectDeduplicatesByPath() {
     let persistence = makePersistence()
     let project = ProjectRef(path: "/tmp/my-project", name: "my-project", lastOpenedAt: Date())

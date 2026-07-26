@@ -49,7 +49,7 @@ struct LoopWorkspaceView: View {
       HStack(spacing: 4) {
         ForEach(Array(store.layout.tabs.enumerated()), id: \.element.id) { index, tab in
           TabPillView(
-            title: tab.primary.launchesClaudeCode ? "Claude Code" : "Shell",
+            title: agentTabTitle(for: tab),
             isSelected: tab.id == store.layout.selectedTabID,
             shortcutHint: index < 9 ? "⌘\(index + 1)" : nil,
             canClose: store.layout.tabs.count > 1,
@@ -101,6 +101,14 @@ struct LoopWorkspaceView: View {
         store.send(.splitButtonTapped(direction: .vertical))
       }
     }
+  }
+
+  /// A time-based loop's agent tab is labelled "Loop" rather than "Claude Code" — the
+  /// session there is running its own `/loop`, and the distinction is the one thing a
+  /// glance at the tab strip should tell you apart from a turn-based loop's session.
+  private func agentTabTitle(for tab: TabLayout) -> String {
+    guard tab.primary.launchesClaudeCode else { return "Shell" }
+    return store.node.loopType == .timeBased ? "Loop" : "Claude Code"
   }
 
   private func hiddenShortcut(
@@ -155,6 +163,9 @@ struct LoopWorkspaceView: View {
     GhosttyTerminalView(
       sessionName: ref.zmxSessionName,
       launchesClaudeCode: ref.launchesClaudeCode,
+      // Only the agent surface of a time-based node starts from a prompt; a turn-based
+      // loop's session opens bare, and extra tabs/splits are plain shells either way.
+      initialPrompt: ref.launchesClaudeCode ? store.node.triggerPrompt : nil,
       // A node without its own worktree yet still belongs to a project — its shells
       // should open there, not wherever the app process happened to launch from.
       workingDirectory: store.node.worktreeBinding?.worktreePath ?? store.projectPath

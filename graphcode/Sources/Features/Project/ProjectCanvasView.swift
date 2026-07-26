@@ -183,8 +183,10 @@ struct ProjectCanvasView: View {
         case .turnBased:
           TextField("Check", text: $store.draftCheck)
         case .timeBased:
-          TextField("Interval (seconds)", text: $store.draftIntervalSeconds)
-          TextField("Prompt", text: $store.draftPrompt)
+          // No interval field: the cadence goes in the prompt itself, as a `/loop` or
+          // `/schedule` directive the session runs on its own (see
+          // `LoopNode.triggerPrompt`). The placeholder is the whole documentation.
+          TextField("/loop 1h Check for new reports", text: $store.draftPrompt)
         case .goalBased, .proactive:
           EmptyView()
         }
