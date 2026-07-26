@@ -2,83 +2,37 @@ import ComposableArchitecture
 import Foundation
 import GraphcodeKit
 
-/// One `LoopNode`'s terminal + turn-based check. Originally the whole of Phase 1's
-/// single-node slice; from Phase 2 on it's the detail sheet `GraphCanvasFeature` opens
-/// for a node. Still no automation — the check is a human decision via the
-/// Approve/Reject bar (see docs/07-roadmap.md).
+/// One `LoopNode`'s terminal + turn-based check. The terminal itself is a real
+/// `GhosttyKit` surface (see `GhosttyTerminalView`) — Ghostty owns the PTY and child
+/// process directly (usually a `zmx attach` wrapper), so this reducer only tracks
+/// whether that process has exited, not any scrollback or session handle. The check is
+/// still a human decision via the Approve/Reject bar (see docs/07-roadmap.md).
 @Reducer
 struct LoopNodeDetailFeature {
   @ObservableState
   struct State: Equatable, Identifiable {
     var node: LoopNode
-    var scrollback = ""
-    var sessionID: UUID?
-    var launchError: String?
 
     var id: UUID { node.id }
   }
 
   enum Action {
-    case onAppear
-    case sessionStarted(UUID)
-    case sessionEvent(CLISessionEvent)
-    case launchFailed(String)
-    case inputSubmitted(String)
+    case processExited(succeeded: Bool)
     case checkApproved
     case checkRejected
   }
 
-  private enum CancelID { case session }
-
-  @Dependency(\.cliSessionClient) var cliSessionClient
-
   var body: some ReducerOf<Self> {
     Reduce { state, action in
       switch action {
-      case .onAppear:
-        guard state.sessionID == nil else { return .none }
-        return .run { [node = state.node] send in
-          do {
-            let handle = try await cliSessionClient.launch(node)
-            await send(.sessionStarted(handle.id))
-            for await event in handle.events {
-              await send(.sessionEvent(event))
-            }
-          } catch {
-            await send(.launchFailed(String(describing: error)))
-          }
-        }
-        .cancellable(id: CancelID.session)
-
-      case .sessionStarted(let id):
-        state.sessionID = id
+      case .processExited(let succeeded):
+        state.node.state = succeeded ? .succeeded : .failed
         return .none
-
-      case .sessionEvent(let event):
-        switch event {
-        case .output(let text):
-          state.scrollback += text
-        case .stateChanged(let newState):
-          state.node.state = newState
-        }
-        return .none
-
-      case .launchFailed(let message):
-        state.launchError = message
-        state.node.state = .failed
-        return .none
-
-      case .inputSubmitted(let text):
-        guard let sessionID = state.sessionID else { return .none }
-        return .run { _ in
-          try? await cliSessionClient.sendInput(sessionID, text)
-        }
 
       // The check is a human decision, not a computed one. Approve/reject just labels
-      // the node — it doesn't fire any outgoing edges itself. Handing off to whatever
-      // the node connects to is a separate, explicit action on the edge
-      // (`GraphCanvasFeature.Action.edgeFireTapped`) until there's an orchestrator to
-      // automate that in Phase 3.
+      // the node locally — `GraphCanvasFeature` is what actually tells `graphcoded`
+      // about the resolution (see its `.detail(.checkApproved)`/`.detail(.checkRejected)`
+      // handling), which is what triggers automatic outgoing-edge firing.
       case .checkApproved:
         state.node.state = .succeeded
         return .none

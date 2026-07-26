@@ -9,8 +9,8 @@ struct LoopNodeDetailView: View {
     VStack(spacing: 0) {
       header
       Divider()
-      PlaceholderTerminalView(scrollback: store.scrollback) { text in
-        store.send(.inputSubmitted(text))
+      GhosttyTerminalView(node: store.node) { succeeded in
+        store.send(.processExited(succeeded: succeeded))
       }
       if store.node.checkDescription != nil {
         Divider()
@@ -18,17 +18,11 @@ struct LoopNodeDetailView: View {
       }
     }
     .frame(minWidth: 640, minHeight: 420)
-    .onAppear { store.send(.onAppear) }
   }
 
   private var header: some View {
     HStack {
-      VStack(alignment: .leading) {
-        Text(store.node.title).font(.headline)
-        if let error = store.launchError {
-          Text(error).font(.caption).foregroundStyle(.red)
-        }
-      }
+      Text(store.node.title).font(.headline)
       Spacer()
       PresenceBadge(state: store.node.state)
     }

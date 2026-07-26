@@ -1,6 +1,6 @@
 .PHONY: doctor generate build-app build-daemon run-app run-daemon \
         daemon-install daemon-uninstall daemon-status test check format clean \
-        third-party build-zmx build-ghostty vendor-sdk
+        third-party build-zmx install-zmx build-ghostty vendor-sdk
 
 SCHEME_APP := graphcode
 SCHEME_DAEMON := graphcoded
@@ -73,6 +73,14 @@ build-zmx:
 		--global-cache-dir "$(BUILD_DIR)/zmx/.zig-global-cache"
 	@echo "zmx built: $(BUILD_DIR)/zmx/bin/zmx"
 
+# Installs to the fixed path GraphcodeKit's ZmxLocator looks for at runtime (see
+# GraphcodeKit/Sources/Sessions/ZmxLocator.swift) — simpler than requiring zmx on
+# PATH, and matches how graphcoded itself lives under Application Support.
+install-zmx: build-zmx
+	@mkdir -p "$(SUPPORT_DIR)/bin"
+	@cp "$(BUILD_DIR)/zmx/bin/zmx" "$(SUPPORT_DIR)/bin/zmx"
+	@echo "zmx installed: $(SUPPORT_DIR)/bin/zmx"
+
 build-ghostty:
 	@test -d ThirdParty/ghostty || { echo "ThirdParty/ghostty missing — run: git submodule update --init --recursive"; exit 1; }
 	@if xcrun metal --version 2>&1 | grep -q "missing Metal Toolchain"; then \
@@ -104,7 +112,7 @@ vendor-sdk:
 # ---------------------------------------------------------------------------
 # generate / build / run
 # ---------------------------------------------------------------------------
-generate:
+generate: build-ghostty
 	$(MISE) tuist generate --no-open
 
 build-app: generate
@@ -115,7 +123,7 @@ build-daemon: generate
 	set -o pipefail && $(MISE) xcodebuild -workspace $(WORKSPACE) -scheme $(SCHEME_DAEMON) \
 		-destination '$(DESTINATION)' build | $(MISE) xcbeautify
 
-run-app: build-app
+run-app: build-app install-zmx
 	@APP_PATH=$$($(MISE) xcodebuild -workspace $(WORKSPACE) -scheme $(SCHEME_APP) \
 		-destination '$(DESTINATION)' -showBuildSettings 2>/dev/null \
 		| awk -F'= ' '/ BUILT_PRODUCTS_DIR /{print $$2; exit}')/graphcode.app; \

@@ -47,7 +47,6 @@ struct GraphCanvasFeature {
 
   private enum CancelID { case daemonSubscription }
 
-  @Dependency(\.cliSessionClient) var cliSessionClient
   @Dependency(\.orchestratorClient) var orchestratorClient
 
   var body: some ReducerOf<Self> {
@@ -135,11 +134,12 @@ struct GraphCanvasFeature {
         return .none
 
       case .detailDismissed:
-        guard let detail = state.detail else { return .none }
-        let sessionID = detail.sessionID
+        // No explicit teardown needed: `GhosttyTerminalNSView`'s `deinit` frees the
+        // surface when the sheet's view hierarchy is torn down, which detaches from
+        // the underlying `zmx` session (not kill it) the same way closing any other
+        // terminal client to a persistent session does.
         state.detail = nil
-        guard let sessionID else { return .none }
-        return .run { _ in await cliSessionClient.terminate(sessionID) }
+        return .none
 
       case .edgeDrawn(let from, let to):
         guard from != to else { return .none }

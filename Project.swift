@@ -51,6 +51,13 @@ let project = Project(
                 .external(name: "ComposableArchitecture"),
                 .external(name: "Dependencies"),
                 .external(name: "IdentifiedCollections"),
+                // Built by `make build-ghostty` (see Makefile) — not committed, not
+                // vendored in-tree. `generate`/`build-app` depend on that target so
+                // this path exists before Tuist needs to inspect it.
+                .xcframework(path: ".build/ghostty/GhosttyKit.xcframework"),
+                // libghostty's keyboard-layout handling (`input.KeymapDarwin`) calls
+                // the Carbon TIS* APIs directly.
+                .sdk(name: "Carbon", type: .framework),
             ]
         ),
         .target(
