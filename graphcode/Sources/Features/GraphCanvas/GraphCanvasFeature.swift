@@ -1,16 +1,17 @@
 import ComposableArchitecture
 import Foundation
+import GraphcodeKit
 
-/// The Phase 2 root: a single project-scoped `LoopGraph`, edited by hand. See
-/// docs/07-roadmap.md#phase-2--the-graph.
+/// The app's root feature: a mirror of `graphcoded`'s one `LoopGraph`, plus purely
+/// local UI state (canvas layout, the new-node form). See
+/// docs/07-roadmap.md#phase-3--orchestrator-automation.
 ///
-/// Manual only, on purpose — no automatic edge evaluation:
-///   - Creating a node is always standalone (`.idle`, no inbound edges).
-///   - Drawing an edge (`.edgeDrawn`) targets an *existing* node; if that node is still
-///     `.idle`, it flips to `.blocked` — it now has an unfired inbound edge.
-///   - `.edgeFireTapped` is the human "mark it fired" action. A node only comes back to
-///     `.idle` once none of its inbound `.handoff` edges are unfired.
-/// Automating any of this is Phase 3's job, once `graphcoded` exists to own it.
+/// From Phase 3 on this does **not** own graph state — `graphcoded` does.
+/// Node/edge-creation and check-resolution actions send a `DaemonCommand` and wait for
+/// the resulting `.graphChanged` broadcast rather than mutating `state.graph` directly;
+/// automatic `.handoff` firing happens in the daemon, not here (see
+/// `graphcoded/Sources/GraphStore.swift`). `nodePositions` stays local — canvas layout
+/// is a UI concern the daemon has no reason to know about.
 @Reducer
 struct GraphCanvasFeature {
   @ObservableState
@@ -19,8 +20,12 @@ struct GraphCanvasFeature {
     var nodePositions: [UUID: CGPoint] = [:]
     var detail: LoopNodeDetailFeature.State?
     var showingNewNodeForm = false
+    var draftLoopType: LoopType = .turnBased
     var draftTitle = ""
     var draftCheck = ""
+    var draftIntervalSeconds = "3600"
+    var draftPrompt = ""
+    var connectionError: String?
 
     init(graph: LoopGraph = LoopGraph(title: "My first graph")) {
       self.graph = graph
@@ -29,17 +34,21 @@ struct GraphCanvasFeature {
 
   enum Action: BindableAction {
     case binding(BindingAction<State>)
+    case task
+    case daemonEvent(DaemonEvent)
     case addNodeButtonTapped
     case createNodeConfirmed
     case cancelNewNodeForm
     case nodeTapped(UUID)
     case detailDismissed
     case edgeDrawn(from: UUID, to: UUID)
-    case edgeFireTapped(UUID)
     case detail(LoopNodeDetailFeature.Action)
   }
 
+  private enum CancelID { case daemonSubscription }
+
   @Dependency(\.cliSessionClient) var cliSessionClient
+  @Dependency(\.orchestratorClient) var orchestratorClient
 
   var body: some ReducerOf<Self> {
     BindingReducer()
@@ -48,9 +57,38 @@ struct GraphCanvasFeature {
       case .binding:
         return .none
 
+      case .task:
+        return .run { send in
+          for await event in orchestratorClient.connect() {
+            await send(.daemonEvent(event))
+          }
+        }
+        .cancellable(id: CancelID.daemonSubscription)
+
+      case .daemonEvent(let event):
+        switch event {
+        case .graphChanged(let newGraph):
+          state.connectionError = nil
+          for node in newGraph.nodes where state.nodePositions[node.id] == nil {
+            state.nodePositions[node.id] = Self.nextPosition(index: state.nodePositions.count)
+          }
+          state.graph = newGraph
+          // Keep an open detail sheet's badge honest if the daemon resolved this node
+          // from underneath it (e.g. a second window/CLI approved it first).
+          if let detailID = state.detail?.node.id, let updated = newGraph.nodes[id: detailID] {
+            state.detail?.node.state = updated.state
+          }
+        case .errorOccurred(let message):
+          state.connectionError = message
+        }
+        return .none
+
       case .addNodeButtonTapped:
+        state.draftLoopType = .turnBased
         state.draftTitle = ""
         state.draftCheck = ""
+        state.draftIntervalSeconds = "3600"
+        state.draftPrompt = ""
         state.showingNewNodeForm = true
         return .none
 
@@ -59,51 +97,63 @@ struct GraphCanvasFeature {
         return .none
 
       case .createNodeConfirmed:
-        guard !state.draftTitle.isEmpty, !state.draftCheck.isEmpty else { return .none }
-        let node = LoopNode(title: state.draftTitle, checkDescription: state.draftCheck)
-        state.graph.nodes.append(node)
-        state.nodePositions[node.id] = Self.nextPosition(index: state.graph.nodes.count - 1)
-        state.showingNewNodeForm = false
-        return .none
+        guard !state.draftTitle.isEmpty else { return .none }
+        let title = state.draftTitle
+        switch state.draftLoopType {
+        case .turnBased:
+          guard !state.draftCheck.isEmpty else { return .none }
+          let checkDescription = state.draftCheck
+          state.showingNewNodeForm = false
+          return .run { _ in
+            try? await orchestratorClient.send(
+              .createTurnBasedNode(title: title, checkDescription: checkDescription))
+          }
+        case .timeBased:
+          guard let interval = Double(state.draftIntervalSeconds), interval > 0,
+            !state.draftPrompt.isEmpty
+          else { return .none }
+          let prompt = state.draftPrompt
+          state.showingNewNodeForm = false
+          return .run { _ in
+            try? await orchestratorClient.send(
+              .createTimeBasedNode(title: title, intervalSeconds: interval, prompt: prompt))
+          }
+        case .goalBased, .proactive:
+          // Not creatable yet — see docs/07-roadmap.md's deferred goal-based/proactive
+          // node config UI. The picker only offers turn-based/time-based.
+          return .none
+        }
 
       case .nodeTapped(let id):
-        guard let node = state.graph.nodes[id: id], node.state != .blocked else { return .none }
+        // Time-based nodes run headlessly in graphcoded; there's no local interactive
+        // session for a human to open here (see docs/04-cli-backends.md).
+        guard let node = state.graph.nodes[id: id],
+          node.state != .blocked,
+          node.loopType == .turnBased
+        else { return .none }
         state.detail = LoopNodeDetailFeature.State(node: node)
         return .none
 
       case .detailDismissed:
         guard let detail = state.detail else { return .none }
-        state.graph.nodes[id: detail.node.id] = detail.node
         let sessionID = detail.sessionID
         state.detail = nil
         guard let sessionID else { return .none }
         return .run { _ in await cliSessionClient.terminate(sessionID) }
 
       case .edgeDrawn(let from, let to):
-        guard from != to,
-          state.graph.nodes[id: from] != nil,
-          state.graph.nodes[id: to] != nil,
-          !state.graph.edges.contains(where: { $0.from == from && $0.to == to })
-        else { return .none }
-
-        state.graph.edges.append(LoopEdge(from: from, to: to))
-        if state.graph.nodes[id: to]?.state == .idle {
-          state.graph.nodes[id: to]?.state = .blocked
+        guard from != to else { return .none }
+        return .run { _ in
+          try? await orchestratorClient.send(.createEdge(from: from, to: to))
         }
-        return .none
 
-      case .edgeFireTapped(let edgeID):
-        guard let edge = state.graph.edges[id: edgeID], !edge.fired else { return .none }
-        state.graph.edges[id: edgeID]?.fired = true
+      case .detail(.checkApproved):
+        guard let id = state.detail?.node.id else { return .none }
+        return .run { _ in try? await orchestratorClient.send(.nodeCheckApproved(id)) }
 
-        let targetID = edge.to
-        let stillBlocked = state.graph.edges.contains {
-          $0.to == targetID && $0.kind == .handoff && !$0.fired
-        }
-        if !stillBlocked, state.graph.nodes[id: targetID]?.state == .blocked {
-          state.graph.nodes[id: targetID]?.state = .idle
-        }
-        return .none
+      case .detail(.checkRejected):
+        guard let id = state.detail?.node.id else { return .none }
+        return .run { _ in try? await orchestratorClient.send(.nodeCheckRejected(id)) }
 
       case .detail:
         return .none
@@ -114,8 +164,8 @@ struct GraphCanvasFeature {
     }
   }
 
-  /// Simple grid layout for freshly created nodes — real layout (force-directed,
-  /// draggable repositioning) is future work; Phase 2 just needs nodes to not overlap.
+  /// Simple grid layout for freshly synced nodes — real layout (force-directed,
+  /// draggable repositioning) is future work; this just needs nodes to not overlap.
   private static func nextPosition(index: Int) -> CGPoint {
     let columns = 3
     let column = index % columns

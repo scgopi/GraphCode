@@ -1,4 +1,5 @@
 import Foundation
+import GraphcodeKit
 
 #if canImport(Darwin)
   import Darwin
@@ -6,22 +7,19 @@ import Foundation
 
 // graphcoded — the graphcode orchestrator daemon.
 //
-// Phase 0 (see docs/07-roadmap.md): an empty skeleton. It boots, opens a Unix domain
-// socket, and accepts connections without yet speaking any protocol over them.
-// `graphcode.app` and the `graphcode` CLI become clients of this socket starting
-// Phase 3, once real LoopGraph/scheduler state moves in here — see
-// docs/03-architecture.md#background-daemons for why this has to be a separate,
+// From Phase 3 on this is no longer an empty skeleton (see docs/07-roadmap.md): it
+// owns the real `LoopGraph` in `GraphStore`, speaks `DaemonProtocol` over the Unix
+// socket, fires `.handoff` edges automatically, and arms time-based triggers that keep
+// firing whether or not `graphcode.app` is running — see
+// docs/03-architecture.md#why-a-daemon-at-all for why this has to be a separate,
 // long-lived process rather than in-app state.
 
 let fileManager = FileManager.default
 
-let supportDirectory =
-  fileManager
-  .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-  .appendingPathComponent("graphcode", isDirectory: true)
+let supportDirectory = DaemonSocketPath.url.deletingLastPathComponent()
 try? fileManager.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
 
-let socketURL = supportDirectory.appendingPathComponent("graphcoded.sock")
+let socketURL = DaemonSocketPath.url
 // Clear a stale socket file left behind by a previous run that didn't shut down cleanly.
 try? fileManager.removeItem(at: socketURL)
 
@@ -65,8 +63,6 @@ guard listen(socketDescriptor, 8) == 0 else {
 
 FileHandle.standardOutput.write(Data("graphcoded: listening on \(path)\n".utf8))
 
-// A trap handler so `make stop` / SIGTERM cleans up the socket file instead of
-// leaving a stale one for the next launch to skip past.
 signal(SIGTERM) { _ in
   unlink(path)
   exit(0)
@@ -76,12 +72,48 @@ signal(SIGINT) { _ in
   exit(0)
 }
 
-while true {
-  let clientDescriptor = accept(socketDescriptor, nil, nil)
-  guard clientDescriptor >= 0 else { continue }
-  FileHandle.standardOutput.write(
-    Data("graphcoded: client connected (fd \(clientDescriptor))\n".utf8))
-  // Phase 0 has no wire protocol yet — accept and close. Phase 3 replaces this
-  // loop with the real request dispatcher (see docs/03-architecture.md#cli-graphcode).
-  close(clientDescriptor)
+let store = GraphStore()
+
+/// Bridges a blocking socket read onto a background queue so the `Task` awaiting it
+/// never blocks Swift concurrency's cooperative thread pool — the whole connection
+/// handler below is otherwise just async/await hops (this, plus actor calls).
+@Sendable func readFrameAsync(from fileDescriptor: Int32) async throws -> Data {
+  try await withCheckedThrowingContinuation { continuation in
+    DispatchQueue.global().async {
+      do {
+        continuation.resume(returning: try FramedMessageIO.readFrame(from: fileDescriptor))
+      } catch {
+        continuation.resume(throwing: error)
+      }
+    }
+  }
 }
+
+func handleConnection(_ fileDescriptor: Int32) {
+  Task {
+    let connectionID = await store.addConnection(fileDescriptor: fileDescriptor)
+    FileHandle.standardOutput.write(Data("graphcoded: client connected\n".utf8))
+    while true {
+      do {
+        let data = try await readFrameAsync(from: fileDescriptor)
+        let command = try JSONDecoder().decode(DaemonCommand.self, from: data)
+        await store.handle(command)
+      } catch {
+        break
+      }
+    }
+    await store.removeConnection(connectionID)
+    close(fileDescriptor)
+    FileHandle.standardOutput.write(Data("graphcoded: client disconnected\n".utf8))
+  }
+}
+
+DispatchQueue.global().async {
+  while true {
+    let clientDescriptor = accept(socketDescriptor, nil, nil)
+    guard clientDescriptor >= 0 else { continue }
+    handleConnection(clientDescriptor)
+  }
+}
+
+dispatchMain()

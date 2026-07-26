@@ -1,4 +1,5 @@
 import ComposableArchitecture
+import GraphcodeKit
 import SwiftUI
 
 struct LoopNodeDetailView: View {
@@ -11,8 +12,10 @@ struct LoopNodeDetailView: View {
       PlaceholderTerminalView(scrollback: store.scrollback) { text in
         store.send(.inputSubmitted(text))
       }
-      Divider()
-      checkBar
+      if store.node.checkDescription != nil {
+        Divider()
+        checkBar
+      }
     }
     .frame(minWidth: 640, minHeight: 420)
     .onAppear { store.send(.onAppear) }
@@ -36,7 +39,7 @@ struct LoopNodeDetailView: View {
     HStack {
       VStack(alignment: .leading, spacing: 2) {
         Text("The check").font(.caption).foregroundStyle(.secondary)
-        Text(store.node.checkDescription).font(.subheadline)
+        Text(store.node.checkDescription ?? "").font(.subheadline)
       }
       Spacer()
       Button("Reject") { store.send(.checkRejected) }

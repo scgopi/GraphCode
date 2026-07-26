@@ -1,5 +1,6 @@
 import Dependencies
 import Foundation
+import GraphcodeKit
 
 /// Graphcode's own minimal git client — create/list/remove a worktree, nothing more.
 /// A `LoopNode`'s `worktreeBinding` is the only thing that needs this; it is not a

@@ -1,5 +1,6 @@
 import ComposableArchitecture
 import Foundation
+import GraphcodeKit
 
 /// One `LoopNode`'s terminal + turn-based check. Originally the whole of Phase 1's
 /// single-node slice; from Phase 2 on it's the detail sheet `GraphCanvasFeature` opens

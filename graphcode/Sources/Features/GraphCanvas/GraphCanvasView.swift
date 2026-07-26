@@ -1,4 +1,5 @@
 import ComposableArchitecture
+import GraphcodeKit
 import SwiftUI
 
 struct GraphCanvasView: View {
@@ -13,10 +14,19 @@ struct GraphCanvasView: View {
   var body: some View {
     VStack(spacing: 0) {
       toolbar
+      if let connectionError = store.connectionError {
+        Text("Not connected to graphcoded: \(connectionError)")
+          .font(.caption)
+          .foregroundStyle(.white)
+          .frame(maxWidth: .infinity)
+          .padding(6)
+          .background(Color.red)
+      }
       Divider()
       canvas
     }
     .frame(minWidth: 720, minHeight: 480)
+    .task { await store.send(.task).finish() }
     .sheet(
       isPresented: Binding(
         get: { store.detail != nil },
@@ -87,9 +97,7 @@ struct GraphCanvasView: View {
   private var edgesLayer: some View {
     ForEach(store.graph.edges) { edge in
       if let from = store.nodePositions[edge.from], let to = store.nodePositions[edge.to] {
-        EdgeLineView(from: from, to: to, fired: edge.fired) {
-          store.send(.edgeFireTapped(edge.id))
-        }
+        EdgeLineView(from: from, to: to, fired: edge.fired)
       }
     }
   }
@@ -181,8 +189,23 @@ struct GraphCanvasView: View {
     VStack(spacing: 12) {
       Text("New Loop Node").font(.headline)
       Form {
+        Picker("Type", selection: $store.draftLoopType) {
+          Text("Turn-based").tag(LoopType.turnBased)
+          Text("Time-based").tag(LoopType.timeBased)
+        }
+        .pickerStyle(.segmented)
+
         TextField("Title", text: $store.draftTitle)
-        TextField("Check", text: $store.draftCheck)
+
+        switch store.draftLoopType {
+        case .turnBased:
+          TextField("Check", text: $store.draftCheck)
+        case .timeBased:
+          TextField("Interval (seconds)", text: $store.draftIntervalSeconds)
+          TextField("Prompt", text: $store.draftPrompt)
+        case .goalBased, .proactive:
+          EmptyView()
+        }
       }
       HStack {
         Button("Cancel") { store.send(.cancelNewNodeForm) }
@@ -196,34 +219,24 @@ struct GraphCanvasView: View {
   }
 }
 
+/// A dashed line means the edge exists but its condition hasn't resolved yet (the
+/// source node hasn't succeeded/failed); solid accent means `graphcoded` has already
+/// fired it. There's no manual "Fire" affordance anymore — from Phase 3 on, firing is
+/// automatic (see `graphcoded/Sources/GraphStore.swift`), so this view is read-only.
 private struct EdgeLineView: View {
   let from: CGPoint
   let to: CGPoint
   let fired: Bool
-  let onFireTapped: () -> Void
 
   var body: some View {
-    ZStack {
-      Path { path in
-        path.move(to: from)
-        path.addLine(to: to)
-      }
-      .stroke(
-        fired ? Color.accentColor : Color.secondary,
-        style: StrokeStyle(lineWidth: fired ? 2 : 1.5, dash: fired ? [] : [5, 4])
-      )
-
-      if !fired {
-        Button("Fire", action: onFireTapped)
-          .buttonStyle(.bordered)
-          .controlSize(.mini)
-          .position(midpoint)
-      }
+    Path { path in
+      path.move(to: from)
+      path.addLine(to: to)
     }
-  }
-
-  private var midpoint: CGPoint {
-    CGPoint(x: (from.x + to.x) / 2, y: (from.y + to.y) / 2)
+    .stroke(
+      fired ? Color.accentColor : Color.secondary,
+      style: StrokeStyle(lineWidth: fired ? 2 : 1.5, dash: fired ? [] : [5, 4])
+    )
   }
 }
 

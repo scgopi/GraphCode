@@ -1,0 +1,85 @@
+#!/bin/sh
+# xcrun shim for graphcode's zig-built third-party deps (zmx, ghostty).
+#
+# ── Why this exists ────────────────────────────────────────────────────────────
+# usr/lib/libSystem.B.tbd is a multi-document YAML file: one `!tapi-tbd` document
+# for libSystem itself, then one per reexported sub-library. In macOS SDK 26.x the
+# *primary* libSystem document dropped the plain `arm64-macos` target, leaving only
+# `arm64e-macos`:
+#
+#   SDK 26.5: targets: [ x86_64-macos, x86_64-maccatalyst, arm64e-macos, arm64e-maccatalyst ]
+#   SDK 15.4: targets: [ x86_64-macos, x86_64-maccatalyst, arm64-macos, arm64-maccatalyst,
+#                        arm64e-macos, arm64e-maccatalyst ]
+#
+# (`grep arm64-macos` on the 26.5 file still hits ~22 times — those are the *other*
+# libraries' documents further down, not libSystem's own.)
+#
+# Zig targets `arm64`, finds no matching target in libSystem's document, and so
+# concludes libSystem exports nothing — every libc symbol (_malloc, _getcwd,
+# _fork, …) comes back undefined. Apple's own ld falls back arm64 -> arm64e; zig
+# 0.15.2's self-hosted MachO linker does not. The failure is not specific to our
+# code: `zig libc` and even `zig build --help` fail the same way, because zig
+# cannot link its own internally-compiled helper programs.
+#
+# Zig resolves the SDK by shelling out to exactly:
+#
+#   xcrun --sdk macosx --show-sdk-path
+#
+# (lib/std/zig/system/darwin.zig, getSdk) and it has NO SDKROOT support at all —
+# grep the std source, there are zero hits. `--sysroot` fixes a single
+# `zig build-exe`, but cannot fix `zig build`, because the build runner is
+# compiled and linked before any build-graph flag applies.
+#
+# So the only lever that works everywhere is that one xcrun query. This shim
+# answers it with a macOS 15 SDK (which still carries the arm64 slice) and
+# delegates every other invocation to the real xcrun untouched.
+#
+# This replaces the previously assumed fix of installing a second, older Xcode:
+# no ~15GB download and no Apple ID needed — macOS 15 SDKs already ship with the
+# Command Line Tools.
+#
+# ── Usage ──────────────────────────────────────────────────────────────────────
+#   PATH="<repo>/Tools/zig-sdk-shim:$PATH" zig build ...
+# Optionally set GRAPHCODE_ZIG_SDK to pin a specific SDK. `make build-zmx` and
+# `make build-ghostty` do both for you.
+
+resolve_sdk() {
+  # 1. Explicit override wins.
+  if [ -n "$GRAPHCODE_ZIG_SDK" ]; then
+    printf '%s\n' "$GRAPHCODE_ZIG_SDK"
+    return 0
+  fi
+  # 2. A vendored SDK copied into the repo (survives a Command Line Tools update
+  #    that drops the macOS 15 SDK). See `make vendor-sdk`.
+  repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+  for candidate in "$repo_root"/.build/sdk/MacOSX15*.sdk; do
+    [ -d "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
+  done
+  # 3. Newest macOS 15 SDK from the Command Line Tools.
+  newest=$(ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX15*.sdk 2>/dev/null \
+    | sort -V | tail -1)
+  [ -n "$newest" ] && { printf '%s\n' "$newest"; return 0; }
+  return 1
+}
+
+want_sdk_path=0
+sdk=macosx
+prev=
+for arg in "$@"; do
+  [ "$arg" = "--show-sdk-path" ] && want_sdk_path=1
+  [ "$prev" = "--sdk" ] && sdk="$arg"
+  prev="$arg"
+done
+
+# Only intercept the macOS SDK-path query; everything else is the real xcrun.
+if [ "$want_sdk_path" = "1" ] && [ "$sdk" = "macosx" ]; then
+  if sdk_path=$(resolve_sdk); then
+    printf '%s\n' "$sdk_path"
+    exit 0
+  fi
+  echo "zig-sdk-shim: no macOS 15 SDK found. Install the Command Line Tools" >&2
+  echo "  (xcode-select --install) or set GRAPHCODE_ZIG_SDK to a macOS 15 SDK." >&2
+  exit 1
+fi
+
+exec /usr/bin/xcrun "$@"
