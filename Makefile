@@ -71,6 +71,12 @@ build-zmx:
 	cd ThirdParty/zmx && PATH="$(ZIG_SDK_SHIM):$$PATH" $(MISE) zig build \
 		--prefix "$(BUILD_DIR)/zmx" \
 		--global-cache-dir "$(BUILD_DIR)/zmx/.zig-global-cache"
+	@# zig's own linker-generated ad-hoc signature (produced while linking against the
+	@# macOS 15 SDK via the shim, see ZIG_SDK_SHIM above) is rejected outright by this
+	@# host's code-signing monitor at launch — SIGKILL, "Taskgated Invalid Signature",
+	@# even run standalone with no relation to graphcode/Ghostty. Re-signing with the
+	@# real macOS codesign tool (still ad-hoc, just host-native) fixes it.
+	codesign --force --sign - "$(BUILD_DIR)/zmx/bin/zmx"
 	@echo "zmx built: $(BUILD_DIR)/zmx/bin/zmx"
 
 # Installs to the fixed path GraphcodeKit's ZmxLocator looks for at runtime (see
