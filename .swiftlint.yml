@@ -1,0 +1,34 @@
+included:
+  - graphcode
+  - graphcoded
+
+excluded:
+  - .build
+  - Tuist
+  - "**/.build"
+  - "**/DerivedData"
+
+opt_in_rules:
+  - empty_count
+  - closure_spacing
+  - contains_over_first_not_nil
+  - fatal_error_message
+  - first_where
+  - force_unwrapping
+  - redundant_nil_coalescing
+  - sorted_imports
+
+disabled_rules:
+  - todo
+
+line_length:
+  warning: 120
+  error: 160
+
+identifier_name:
+  min_length:
+    warning: 2
+  excluded:
+    - id
+
+reporter: "xcode"

@@ -1,0 +1,8 @@
+[tools]
+tuist = "4.197.3"
+swiftlint = "0.65.0"
+xcbeautify = "3.2.1"
+
+[env]
+# Apple's swift-format ships with the Xcode toolchain (swift format / swift-format);
+# it is not pinned via mise.

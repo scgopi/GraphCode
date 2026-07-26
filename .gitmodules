@@ -1,0 +1,8 @@
+[submodule "ThirdParty/ghostty"]
+	path = ThirdParty/ghostty
+	url = https://github.com/ghostty-org/ghostty.git
+	shallow = true
+[submodule "ThirdParty/zmx"]
+	path = ThirdParty/zmx
+	url = https://github.com/neurosnap/zmx.git
+	shallow = true

@@ -1,0 +1,28 @@
+# Tuist
+.build/
+*.xcodeproj
+*.xcworkspace
+Derived/
+.tuist-bin/
+.tuist-cache/
+Tuist/.build/
+
+# Xcode
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# SwiftPM
+.swiftpm/
+
+# mise
+.mise.local.toml
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Design docs — kept locally for now, not pushed to the remote yet.
+/docs/

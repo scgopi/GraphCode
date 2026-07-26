@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for the graphcoded launchd agent. `make daemon-install` fills in
+  __GRAPHCODED_BIN__ with the built binary's actual path and installs the result to
+  ~/Library/LaunchAgents/dev.graphcode.graphcoded.plist. Not meant to be loaded directly.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.graphcode.graphcoded</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__GRAPHCODED_BIN__</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__GRAPHCODED_SUPPORT_DIR__/graphcoded.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__GRAPHCODED_SUPPORT_DIR__/graphcoded.err.log</string>
+</dict>
+</plist>
