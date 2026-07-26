@@ -109,7 +109,7 @@ struct AppSidebarView: View {
         Text(node.loopType.rawValue).font(.caption2).foregroundStyle(.secondary)
       }
     } icon: {
-      Circle().fill(color(for: node.state)).frame(width: 8, height: 8)
+      Circle().fill(node.state.presenceColor).frame(width: 8, height: 8)
     }
     .padding(.leading, 16)
   }
@@ -117,7 +117,7 @@ struct AppSidebarView: View {
   private var selectionBinding: Binding<SidebarSelection?> {
     Binding(
       get: {
-        if let node = store.detail?.node.id { return .node(node) }
+        if let id = store.activeTabID { return .node(id) }
         if let path = store.selectedProjectPath { return .project(path) }
         return nil
       },
@@ -145,15 +145,4 @@ struct AppSidebarView: View {
     }
   }
 
-  private func color(for state: LoopState) -> Color {
-    switch state {
-    case .idle: .gray
-    case .running: .blue
-    case .awaitingInput: .orange
-    case .blocked: .orange
-    case .succeeded: .green
-    case .failed: .red
-    case .stalled: .purple
-    }
-  }
 }

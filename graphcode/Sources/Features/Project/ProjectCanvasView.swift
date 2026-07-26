@@ -112,7 +112,7 @@ struct ProjectCanvasView: View {
       HStack {
         Text(node.title).font(.headline).lineLimit(1)
         Spacer()
-        Circle().fill(color(for: node.state)).frame(width: 8, height: 8)
+        Circle().fill(node.state.presenceColor).frame(width: 8, height: 8)
       }
       Text(node.loopType.rawValue).font(.caption2).foregroundStyle(.secondary)
       if node.state == .blocked {
@@ -165,18 +165,6 @@ struct ProjectCanvasView: View {
       if rect.contains(point) { return node.id }
     }
     return nil
-  }
-
-  private func color(for state: LoopState) -> Color {
-    switch state {
-    case .idle: .gray
-    case .running: .blue
-    case .awaitingInput: .orange
-    case .blocked: .orange
-    case .succeeded: .green
-    case .failed: .red
-    case .stalled: .purple
-    }
   }
 
   private var newNodeForm: some View {
