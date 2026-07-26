@@ -70,22 +70,31 @@ private actor DaemonConnection {
     self.socketPath = socketPath
   }
 
+  /// Reconnects forever rather than finishing the stream on the first failure — the app
+  /// can launch before `graphcoded` has finished starting up, and `ensureConnected`'s own
+  /// backoff (10 attempts, ~11s total) can still lose that race. Finishing here would
+  /// leave `send` able to silently open a fresh connection later (writing commands the
+  /// daemon happily answers) with nothing left subscribed to read the replies — the app
+  /// would look connected but never update again.
   nonisolated func events() -> AsyncStream<DaemonEvent> {
     AsyncStream { continuation in
       let task = Task {
-        var connectedDescriptor: Int32?
-        do {
-          let fileDescriptor = try await ensureConnected()
-          connectedDescriptor = fileDescriptor
-          while true {
-            let data = try await readFrameAsync(from: fileDescriptor)
-            let event = try JSONDecoder().decode(DaemonEvent.self, from: data)
-            continuation.yield(event)
+        while !Task.isCancelled {
+          var connectedDescriptor: Int32?
+          do {
+            let fileDescriptor = try await ensureConnected()
+            connectedDescriptor = fileDescriptor
+            while true {
+              let data = try await readFrameAsync(from: fileDescriptor)
+              let event = try JSONDecoder().decode(DaemonEvent.self, from: data)
+              continuation.yield(event)
+            }
+          } catch {
+            if let connectedDescriptor { await invalidate(connectedDescriptor) }
+            try? await Task.sleep(for: .seconds(1))
           }
-        } catch {
-          if let connectedDescriptor { await invalidate(connectedDescriptor) }
-          continuation.finish()
         }
+        continuation.finish()
       }
       continuation.onTermination = { _ in task.cancel() }
     }

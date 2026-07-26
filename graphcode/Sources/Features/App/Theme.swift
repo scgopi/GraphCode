@@ -16,4 +16,13 @@ enum Theme {
 
   /// Graph canvas fill, the darkest step — white nodes read as lit against it.
   static let canvasBackground = Color(red: 0.075, green: 0.082, blue: 0.094)
+
+  /// A loop workspace's tab bar fill — reads as its own chrome strip above the
+  /// terminal, the same role `sidebarBackground` plays next to the canvas.
+  static let tabBarBackground = Color(red: 0.145, green: 0.153, blue: 0.169)
+
+  /// The selected tab's pill — lighter than `tabBarBackground` so it stands off the
+  /// strip the way a real terminal app's active tab does, without reaching for the
+  /// system accent color (this isn't a selection, it's "what's showing").
+  static let tabSelectedBackground = Color(red: 0.235, green: 0.245, blue: 0.267)
 }

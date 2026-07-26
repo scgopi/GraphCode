@@ -112,10 +112,13 @@ final class GhosttyTerminalNSView: NSView {
   // MARK: - Keyboard
 
   override func keyDown(with event: NSEvent) {
-    guard sendKeyEvent(event, action: GHOSTTY_ACTION_PRESS) else {
-      super.keyDown(with: event)
-      return
-    }
+    // `sendKeyEvent` already writes the key (including its text, for plain
+    // characters) straight to the surface when it returns true — running
+    // `interpretKeyEvents` afterward as well would redispatch that same text
+    // through `insertText(_:replacementRange:)`, doubling every keystroke.
+    // Only fall through to AppKit's IME path (dead keys, marked text, etc.)
+    // when ghostty didn't already handle the event itself.
+    guard !sendKeyEvent(event, action: GHOSTTY_ACTION_PRESS) else { return }
     interpretKeyEvents([event])
   }
 

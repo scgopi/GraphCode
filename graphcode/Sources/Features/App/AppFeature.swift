@@ -9,12 +9,12 @@ import GraphcodeKit
 /// lifetime, and every open project's `ProjectFeature.State`.
 ///
 /// Selection is cross-project by nature — the sidebar and detail pane are shared across
-/// every open project, so neither "which loops have an open terminal tab" nor "which
+/// every open project, so neither "which loop's terminal workspace is open" nor "which
 /// project's canvas is the fallback" can live inside any one `ProjectFeature.State`.
-/// They live here instead: `openTabs` (every loop whose terminal has been opened, kept
-/// alive — see `AppView` — until its tab is explicitly closed, the way supacode's
-/// terminal tab bar keeps several terminals alive at once) and `activeTabID` (which
-/// tab, if any, is the visible one — `selectedProjectPath`'s canvas shows when nil).
+/// They live here instead: `openLoop` (at most one loop's whole terminal
+/// workspace — tabs and splits, see `LoopWorkspaceFeature` — is open at a time, the way
+/// a supacode worktree owns its own terminal area) and `selectedProjectPath` (which
+/// project's canvas is the fallback when no loop is open).
 @Reducer
 struct AppFeature {
   @ObservableState
@@ -22,31 +22,22 @@ struct AppFeature {
     var welcome = WelcomeFeature.State()
     var projects: IdentifiedArrayOf<ProjectFeature.State> = []
     var selectedProjectPath: String?
-    var openTabs: IdentifiedArrayOf<LoopNodeDetailFeature.State> = []
-    var activeTabID: UUID?
-
-    /// Which open project a loop belongs to — `LoopNode`/`LoopNodeDetailFeature.State`
-    /// don't carry their own project path, so this is how `AppFeature` resolves one
-    /// when a tab (rather than a project-scoped sidebar row) is the thing that fired.
-    func ownerProjectPath(ofNode nodeID: UUID) -> String? {
-      projects.first(where: { $0.graph.nodes[id: nodeID] != nil })?.id
-    }
+    var openLoop: LoopWorkspaceFeature.State?
   }
 
   enum Action {
     case task
     case daemonEvent(DaemonEvent)
     case projectHeaderTapped(String)
-    case tabSelected(UUID)
-    case tabClosed(UUID)
     case welcome(WelcomeFeature.Action)
     case projects(IdentifiedActionOf<ProjectFeature>)
-    case openTabs(IdentifiedActionOf<LoopNodeDetailFeature>)
+    case openLoop(LoopWorkspaceFeature.Action)
   }
 
   private enum CancelID { case daemonSubscription }
 
   @Dependency(\.orchestratorClient) var orchestratorClient
+  @Dependency(\.terminalLayoutStore) var terminalLayoutStore
 
   var body: some ReducerOf<Self> {
     Scope(state: \.welcome, action: \.welcome) {
@@ -78,13 +69,13 @@ struct AppFeature {
             // `.openProject` that just added it, i.e. this *is* "project opened."
             state.projects.append(ProjectFeature.State(graph: graph))
             state.selectedProjectPath = path
-            state.activeTabID = nil
+            state.openLoop = nil
             return .none
           }
-          // Keep any already-open tab for one of this project's loops in sync (title,
-          // presence dot, check bar) — a tab doesn't own a daemon subscription itself.
-          for node in graph.nodes where state.openTabs[id: node.id] != nil {
-            state.openTabs[id: node.id]?.node = node
+          // Keep an open workspace's node in sync (title, presence dot, check bar) —
+          // the workspace doesn't own a daemon subscription itself.
+          if let openNodeID = state.openLoop?.node.id, let updated = graph.nodes[id: openNodeID] {
+            state.openLoop?.node = updated
           }
           return .send(.projects(.element(id: path, action: .daemonEvent(event))))
 
@@ -95,28 +86,7 @@ struct AppFeature {
 
       case .projectHeaderTapped(let path):
         state.selectedProjectPath = path
-        state.activeTabID = nil
-        return .none
-
-      case .tabSelected(let id):
-        state.activeTabID = id
-        if let path = state.ownerProjectPath(ofNode: id) {
-          state.selectedProjectPath = path
-        }
-        return .none
-
-      case .tabClosed(let id):
-        let closedIndex = state.openTabs.index(id: id)
-        state.openTabs.remove(id: id)
-        if state.activeTabID == id {
-          // Browser-tab convention: fall back to the tab that took this one's place,
-          // else the one before it, else nothing (canvas/welcome shows instead).
-          if let closedIndex, state.openTabs.indices.contains(closedIndex) {
-            state.activeTabID = state.openTabs[closedIndex].id
-          } else {
-            state.activeTabID = state.openTabs.last?.id
-          }
-        }
+        state.openLoop = nil
         return .none
 
       case .projects(.element(id: let path, action: .nodeTapped(let nodeID))):
@@ -126,36 +96,34 @@ struct AppFeature {
           node.state != .blocked,
           node.loopType == .turnBased
         else { return .none }
-        if state.openTabs[id: nodeID] == nil {
-          state.openTabs.append(LoopNodeDetailFeature.State(node: node))
-        }
-        state.activeTabID = nodeID
+        let layout = terminalLayoutStore.load(forNode: nodeID) ?? .defaultLayout(forNode: nodeID)
+        state.openLoop = LoopWorkspaceFeature.State(node: node, layout: layout, projectPath: path)
         state.selectedProjectPath = path
         return .none
 
-      case .openTabs(.element(id: let nodeID, action: .checkApproved)):
-        guard let projectPath = state.ownerProjectPath(ofNode: nodeID) else { return .none }
+      // A loop's own primary Claude Code session exiting *is* its resolution — no
+      // separate human approve/reject step. `LoopWorkspaceFeature` already updated
+      // its local node state for this same action; telling `graphcoded` is this
+      // level's job, since it's the one holding the connection, and it's what
+      // actually triggers automatic outgoing-edge firing.
+      case .openLoop(.primarySurfaceExited(let succeeded)):
+        guard let id = state.openLoop?.node.id, let projectPath = state.selectedProjectPath
+        else { return .none }
+        let command: GraphCommand = succeeded ? .nodeCheckApproved(id) : .nodeCheckRejected(id)
         return .run { _ in
           try? await orchestratorClient.send(
-            .graphCommand(projectPath: projectPath, command: .nodeCheckApproved(nodeID)))
+            .graphCommand(projectPath: projectPath, command: command))
         }
 
-      case .openTabs(.element(id: let nodeID, action: .checkRejected)):
-        guard let projectPath = state.ownerProjectPath(ofNode: nodeID) else { return .none }
-        return .run { _ in
-          try? await orchestratorClient.send(
-            .graphCommand(projectPath: projectPath, command: .nodeCheckRejected(nodeID)))
-        }
-
-      case .openTabs, .welcome, .projects:
+      case .openLoop, .welcome, .projects:
         return .none
       }
     }
+    .ifLet(\.openLoop, action: \.openLoop) {
+      LoopWorkspaceFeature()
+    }
     .forEach(\.projects, action: \.projects) {
       ProjectFeature()
-    }
-    .forEach(\.openTabs, action: \.openTabs) {
-      LoopNodeDetailFeature()
     }
   }
 }

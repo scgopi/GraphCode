@@ -117,7 +117,7 @@ struct AppSidebarView: View {
   private var selectionBinding: Binding<SidebarSelection?> {
     Binding(
       get: {
-        if let id = store.activeTabID { return .node(id) }
+        if let id = store.openLoop?.node.id { return .node(id) }
         if let path = store.selectedProjectPath { return .project(path) }
         return nil
       },
