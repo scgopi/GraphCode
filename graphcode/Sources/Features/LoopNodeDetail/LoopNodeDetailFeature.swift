@@ -1,18 +1,20 @@
 import ComposableArchitecture
 import Foundation
 
-/// One `LoopNode`'s terminal + turn-based check, per Phase 1 scope (see
-/// docs/07-roadmap.md#phase-1--single-loop-manual-check): a single node, no
-/// `LoopEdge`/`LoopGraph`, check performed by a human via the Approve/Reject bar —
-/// nothing here is automated yet.
+/// One `LoopNode`'s terminal + turn-based check. Originally the whole of Phase 1's
+/// single-node slice; from Phase 2 on it's the detail sheet `GraphCanvasFeature` opens
+/// for a node. Still no automation — the check is a human decision via the
+/// Approve/Reject bar (see docs/07-roadmap.md).
 @Reducer
 struct LoopNodeDetailFeature {
   @ObservableState
-  struct State: Equatable {
+  struct State: Equatable, Identifiable {
     var node: LoopNode
     var scrollback = ""
     var sessionID: UUID?
     var launchError: String?
+
+    var id: UUID { node.id }
   }
 
   enum Action {
@@ -71,9 +73,11 @@ struct LoopNodeDetailFeature {
           try? await cliSessionClient.sendInput(sessionID, text)
         }
 
-      // Phase 1's whole point: the check is a human decision, not a computed one.
-      // Approve/reject just labels the node — nothing downstream reacts to it yet,
-      // since there's no graph/orchestrator to hand off to until Phase 2/3.
+      // The check is a human decision, not a computed one. Approve/reject just labels
+      // the node — it doesn't fire any outgoing edges itself. Handing off to whatever
+      // the node connects to is a separate, explicit action on the edge
+      // (`GraphCanvasFeature.Action.edgeFireTapped`) until there's an orchestrator to
+      // automate that in Phase 3.
       case .checkApproved:
         state.node.state = .succeeded
         return .none

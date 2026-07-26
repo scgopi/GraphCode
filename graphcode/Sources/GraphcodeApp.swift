@@ -3,13 +3,13 @@ import SwiftUI
 
 @main
 struct GraphcodeApp: App {
-  static let store = Store(initialState: AppFeature.State()) {
-    AppFeature()
+  static let store = Store(initialState: GraphCanvasFeature.State()) {
+    GraphCanvasFeature()
   }
 
   var body: some Scene {
     WindowGroup {
-      AppView(store: Self.store)
+      GraphCanvasView(store: Self.store)
     }
   }
 }

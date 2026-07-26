@@ -29,6 +29,7 @@ let project = Project(
             dependencies: [
                 .external(name: "ComposableArchitecture"),
                 .external(name: "Dependencies"),
+                .external(name: "IdentifiedCollections"),
             ]
         ),
         .target(
