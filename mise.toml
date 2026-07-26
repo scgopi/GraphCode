@@ -2,6 +2,7 @@
 tuist = "4.197.3"
 swiftlint = "0.65.0"
 xcbeautify = "3.2.1"
+zig = "0.15.2"
 
 [env]
 # Apple's swift-format ships with the Xcode toolchain (swift format / swift-format);

@@ -6,9 +6,9 @@ import ProjectDescription
 // Two products today:
 //   - `graphcode`   — the SwiftUI app (the UI process).
 //   - `graphcoded`  — the background orchestrator daemon (a command-line tool).
-// Phase 0 (see docs/07-roadmap.md) keeps both to an empty, buildable skeleton: no
-// Domain/Clients/Features layers yet, no third-party Swift packages yet. Those land
-// starting Phase 1.
+// Phase 1 (see docs/07-roadmap.md) adds the Domain/Clients/Features layers to
+// `graphcode` and its first third-party dependency (TCA, via Tuist/Package.swift).
+// `graphcoded` stays a plain, dependency-free skeleton until Phase 3.
 
 let bundleIdPrefix = "dev.graphcode"
 
@@ -26,7 +26,10 @@ let project = Project(
             buildableFolders: [
                 "graphcode/Sources"
             ],
-            dependencies: []
+            dependencies: [
+                .external(name: "ComposableArchitecture"),
+                .external(name: "Dependencies"),
+            ]
         ),
         .target(
             name: "graphcodeTests",
