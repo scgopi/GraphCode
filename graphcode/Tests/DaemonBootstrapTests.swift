@@ -1,0 +1,91 @@
+import Foundation
+import Testing
+
+@testable import GraphcodeKit
+
+/// What makes drag-to-Applications a complete install: a packaged app carries `graphcoded`
+/// and `zmx` inside itself and puts them in place on first launch.
+///
+/// These exercise the decisions rather than the copying — installing for real would move
+/// the developer's own daemon, which is exactly the accident this must never cause on a
+/// build run from Xcode.
+@Suite
+struct DaemonBootstrapTests {
+  private func makeBundleDirectory(helpers: [String]) -> URL {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
+    let binary = root.appendingPathComponent("bin", isDirectory: true)
+    try? FileManager.default.createDirectory(at: binary, withIntermediateDirectories: true)
+    for name in helpers {
+      let url = binary.appendingPathComponent(name)
+      FileManager.default.createFile(
+        atPath: url.path, contents: Data(name.utf8),
+        attributes: [.posixPermissions: 0o755])
+    }
+    return root
+  }
+
+  @Test
+  func aBuildWithNoBundledHelpersIsLeftAlone() {
+    // The case that matters most: running from Xcode must not touch a developer's own
+    // `make daemon-install` setup, which usually points at DerivedData.
+    #expect(DaemonBootstrap.bundledHelperDirectory(in: Bundle(for: BundleMarker.self)) == nil)
+  }
+
+  @Test
+  func aPartiallyPopulatedBundleIsNotTreatedAsPackaged() {
+    // Half an install is worse than none — it would load a launch agent pointing at a
+    // daemon that was never copied.
+    let root = makeBundleDirectory(helpers: ["graphcoded"])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = root.appendingPathComponent("bin")
+
+    // One helper present, two required — the stamp sees it, but it must not count as a
+    // packaged build.
+    #expect(DaemonBootstrap.stamp(forHelpersIn: binary).contains("graphcoded"))
+    #expect(!DaemonBootstrap.stamp(forHelpersIn: binary).contains("zmx"))
+    if let bundle = Bundle(url: root) {
+      #expect(DaemonBootstrap.bundledHelperDirectory(in: bundle) == nil)
+    }
+  }
+
+  @Test
+  func theStampChangesWhenAHelperChanges() {
+    // This is what makes an app update carry a daemon update: same helpers, same stamp,
+    // no work; different bytes, new stamp, reinstall.
+    let root = makeBundleDirectory(helpers: ["graphcoded", "zmx"])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = root.appendingPathComponent("bin")
+
+    let before = DaemonBootstrap.stamp(forHelpersIn: binary)
+    #expect(before.contains("graphcoded"))
+    #expect(before.contains("zmx"))
+    #expect(DaemonBootstrap.stamp(forHelpersIn: binary) == before)
+
+    try? Data("a considerably longer replacement".utf8)
+      .write(to: binary.appendingPathComponent("zmx"))
+    #expect(DaemonBootstrap.stamp(forHelpersIn: binary) != before)
+  }
+
+  @Test
+  func theLaunchAgentPointsAtTheInstalledDaemonNotTheBundle() {
+    // Pointing launchd inside the app bundle would break the moment the app is replaced
+    // or moved, and would keep a mounted disk image busy.
+    let plist = DaemonBootstrap.launchAgentPlist(
+      daemonPath: "/Users/x/.graphcode/bin/graphcoded", supportDirectory: "/Users/x/.graphcode")
+
+    #expect(plist["Label"] as? String == "dev.graphcode.graphcoded")
+    #expect(plist["ProgramArguments"] as? [String] == ["/Users/x/.graphcode/bin/graphcoded"])
+    #expect(plist["RunAtLoad"] as? Bool == true)
+    #expect(plist["KeepAlive"] as? Bool == true)
+    #expect(plist["StandardErrorPath"] as? String == "/Users/x/.graphcode/graphcoded.err.log")
+
+    // It has to serialize — a malformed agent fails silently at load time.
+    #expect(
+      (try? PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0))
+        != nil)
+  }
+}
+
+/// Anchors `Bundle(for:)` on the test bundle, which has no embedded helpers.
+private final class BundleMarker {}

@@ -1,6 +1,7 @@
 .PHONY: doctor generate build-app build-daemon run-app run-daemon \
         daemon-install daemon-uninstall daemon-status test check format clean \
-        third-party build-zmx install-zmx build-ghostty vendor-sdk
+        third-party build-zmx install-zmx build-ghostty vendor-sdk \
+        build-cli install-cli release-dmg
 
 SCHEME_APP := graphcode
 SCHEME_DAEMON := graphcoded
@@ -211,6 +212,50 @@ format:
 	swift format format --recursive --in-place --configuration .swift-format \
 		GraphcodeKit graphcode graphcode-cli graphcoded
 	$(MISE) swiftlint lint --fix
+
+# ---------------------------------------------------------------------------
+# release-dmg — a self-contained graphcode.app in a drag-to-Applications disk
+# image.
+#
+# The app carries `graphcoded` and `zmx` in Contents/Resources/bin, and
+# `DaemonBootstrap` installs them and loads the daemon on first launch. That is
+# what makes plain drag-to-Applications a complete install; without the embedded
+# helpers the app would open and silently do nothing, having no daemon to talk to.
+#
+# Release, and arm64 only: GhosttyKit is built `-Dxcframework-target=native` and
+# has no x86_64 slice, so a universal build fails at link time.
+# ---------------------------------------------------------------------------
+RELEASE_DIR := $(BUILD_DIR)/release
+DMG_STAGE := $(RELEASE_DIR)/dmg
+
+release-dmg: generate build-zmx
+	@set -e; \
+	for scheme in $(SCHEME_APP) $(SCHEME_DAEMON) $(SCHEME_CLI); do \
+		echo "building $$scheme (Release, arm64)"; \
+		$(MISE) xcodebuild -workspace $(WORKSPACE) -scheme $$scheme \
+			-configuration Release -destination '$(DESTINATION)' \
+			ARCHS=arm64 ONLY_ACTIVE_ARCH=NO build >/dev/null; \
+	done; \
+	PRODUCTS=$$($(MISE) xcodebuild -workspace $(WORKSPACE) -scheme $(SCHEME_APP) \
+		-configuration Release -destination '$(DESTINATION)' -showBuildSettings 2>/dev/null \
+		| awk -F'= ' '/ BUILT_PRODUCTS_DIR /{print $$2; exit}'); \
+	test -x "$$PRODUCTS/graphcode.app/Contents/MacOS/graphcode" \
+		|| { echo "the app bundle has no executable — the Release build failed"; exit 1; }; \
+	rm -rf "$(DMG_STAGE)"; mkdir -p "$(DMG_STAGE)"; \
+	ditto "$$PRODUCTS/graphcode.app" "$(DMG_STAGE)/graphcode.app"; \
+	mkdir -p "$(DMG_STAGE)/graphcode.app/Contents/Resources/bin"; \
+	cp "$$PRODUCTS/graphcoded" "$(DMG_STAGE)/graphcode.app/Contents/Resources/bin/graphcoded"; \
+	cp "$$PRODUCTS/graphcode" "$(DMG_STAGE)/graphcode.app/Contents/Resources/bin/graphcode"; \
+	cp "$(BUILD_DIR)/zmx/bin/zmx" "$(DMG_STAGE)/graphcode.app/Contents/Resources/bin/zmx"; \
+	echo "signing the bundle (embedding helpers invalidates the outer signature)"; \
+	codesign --force --deep --sign - "$(DMG_STAGE)/graphcode.app"; \
+	codesign --verify --deep "$(DMG_STAGE)/graphcode.app" \
+		|| { echo "the packaged app failed signature verification"; exit 1; }; \
+	ln -s /Applications "$(DMG_STAGE)/Applications"; \
+	rm -f "$(RELEASE_DIR)/graphcode-macos-arm64.dmg"; \
+	hdiutil create -volname "graphcode" -srcfolder "$(DMG_STAGE)" -ov -format UDZO \
+		"$(RELEASE_DIR)/graphcode-macos-arm64.dmg" >/dev/null; \
+	echo "built: $(RELEASE_DIR)/graphcode-macos-arm64.dmg"
 
 clean:
 	rm -rf $(WORKSPACE) graphcode.xcodeproj

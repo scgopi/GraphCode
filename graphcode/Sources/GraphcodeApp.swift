@@ -15,6 +15,13 @@ struct GraphcodeApp: App {
   /// happen before any reducer runs.
   init() {
     SupportDirectory.prepare()
+    // A packaged app carries `graphcoded` and `zmx` inside it, so dragging it to
+    // /Applications is the whole installation — this is what puts them in place and starts
+    // the daemon. No-op for a build run from Xcode, which has no bundled helpers, so a
+    // developer's own `make daemon-install` setup is left alone. Synchronous because it
+    // only does real work on first launch or after an update, and the app is more useful
+    // with its daemon already up than a fraction of a second earlier.
+    DaemonBootstrap.installIfNeeded()
   }
 
   var body: some Scene {

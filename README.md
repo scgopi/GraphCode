@@ -48,26 +48,30 @@ Requires **Apple Silicon** (arm64) macOS. Claude Code must be on your `PATH`.
 
 ### From a release
 
-```sh
-curl -L -o graphcode.tar.gz \
-  https://github.com/scgopi/graphcode/releases/latest/download/graphcode-macos-arm64.tar.gz
-tar xzf graphcode.tar.gz
-cd graphcode-macos-arm64 && ./install.sh
-```
+Download the `.dmg` from [Releases](https://github.com/scgopi/graphcode/releases), open it,
+and drag **graphcode** to Applications. That's the whole install.
 
-`install.sh` copies `graphcode.app` to `/Applications`, puts `graphcoded`, `graphcode`, and
-`zmx` in `~/.graphcode/bin`, and loads the launchd agent.
+The app carries `graphcoded`, `graphcode` (the CLI), and `zmx` inside it, and puts them in
+`~/.graphcode/bin` on first launch, along with the launchd agent that keeps the daemon
+running. Add that directory to your `PATH` for the CLI.
 
-**Use `curl`, not your browser.** The build is ad-hoc signed rather than Developer
-ID–signed, so a browser download picks up a quarantine flag and Gatekeeper refuses it with
-a misleading *"app is damaged"*. `curl` sets no quarantine. If you did download it in a
-browser:
+**Gatekeeper.** These builds are ad-hoc signed, not notarized, so a browser download picks
+up a quarantine flag and macOS refuses to open the app — with a misleading *"graphcode.app
+is damaged."* Either fetch the disk image with `curl`, which sets no quarantine:
 
 ```sh
-xattr -dr com.apple.quarantine graphcode.app
+curl -L -o graphcode.dmg \
+  https://github.com/scgopi/graphcode/releases/latest/download/graphcode-macos-arm64.dmg
 ```
 
-Add `~/.graphcode/bin` to your `PATH` to use the CLI directly.
+or clear the flag after dragging it across:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/graphcode.app
+```
+
+**Claude Code must already be on your `PATH`** — graphcode launches it, it doesn't bundle
+it.
 
 ### From source
 
