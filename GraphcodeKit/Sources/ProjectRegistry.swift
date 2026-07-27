@@ -23,7 +23,7 @@ public actor ProjectRegistry {
   private var stores: [String: GraphStore] = [:]
   private var connectionFileDescriptors: [UUID: Int32] = [:]
   private var connectionProjectPaths: [UUID: Set<String>] = [:]
-  private let ensureSession: (@Sendable (LoopNode) -> Void)?
+  private let ensureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let terminateSession: (@Sendable (LoopNode) -> Void)?
   private let evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)?
   private let deliverMessage: (@Sendable (LoopNode, String) async -> Bool)?
@@ -37,7 +37,7 @@ public actor ProjectRegistry {
   /// closures, or `nil` to touch no real sessions or subprocesses at all.
   public init(
     persistenceDirectory: URL,
-    ensureSession: (@Sendable (LoopNode) -> Void)? = CLISessionBackend.ensureSession,
+    ensureSession: (@Sendable (LoopNode, String?) -> Void)? = CLISessionBackend.ensureSession,
     terminateSession: (@Sendable (LoopNode) -> Void)? = CLISessionBackend.terminateSession,
     evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)? = ShellPredicateEvaluator
       .evaluate,

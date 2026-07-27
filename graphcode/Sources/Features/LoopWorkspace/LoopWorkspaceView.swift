@@ -168,6 +168,10 @@ struct LoopWorkspaceView: View {
     GhosttyTerminalView(
       sessionName: ref.zmxSessionName,
       launchesClaudeCode: ref.launchesClaudeCode,
+      // The loop's own backend and tier, so an attached session matches what
+      // `graphcoded` would have launched detached.
+      backend: store.node.backend,
+      modelTier: store.node.effectiveModelTier,
       // Only the agent surface of an unattended node starts from a prompt (a time-based
       // loop's `/loop`, a goal-based loop's goal); a turn-based loop's session opens
       // bare, and extra tabs/splits are plain shells either way.

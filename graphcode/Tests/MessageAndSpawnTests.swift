@@ -193,7 +193,7 @@ struct MessageAndSpawnTests {
       edges: [LoopEdge(from: trigger.id, to: template.id, kind: .spawn)])
     let started = LockIsolated<[LoopNode]>([])
     let store = GraphStore(
-      graph: graph, onEnsureSession: { node in started.withValue { $0.append(node) } })
+      graph: graph, onEnsureSession: { node, _ in started.withValue { $0.append(node) } })
 
     await store.handle(.nodeCheckApproved(trigger.id))
 

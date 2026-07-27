@@ -12,7 +12,7 @@ struct CompositeAndGlobalGraphTests {
   private func storeWithComposite(
     pilotState: PilotState = .notPiloted,
     subNodes: [LoopNode] = [],
-    onEnsureSession: (@Sendable (LoopNode) -> Void)? = nil
+    onEnsureSession: (@Sendable (LoopNode, String?) -> Void)? = nil
   ) async -> (store: GraphStore, compositeID: UUID) {
     let composite = LoopNode(
       title: "Triage inbox", loopType: .proactive,
@@ -141,7 +141,7 @@ struct CompositeAndGlobalGraphTests {
       title: "Worker", loopType: .timeBased, triggerPrompt: "/loop 1h Check")
     let (store, compositeID) = await storeWithComposite(
       subNodes: [worker],
-      onEnsureSession: { node in started.withValue { $0.append(node) } })
+      onEnsureSession: { node, _ in started.withValue { $0.append(node) } })
 
     await store.handle(.pilotComposite(compositeID))
 

@@ -70,37 +70,60 @@ struct NodeDraftTests {
 
   @Test
   func aBackendThatCannotHostTheLoopTypeIsRefused() {
-    // Codex hasn't been spiked, so its capability row is all-false — it can host a
-    // turn-based loop (which needs nothing but a session) and nothing else.
+    // Copilot has no `/loop`-equivalent, so a time-based loop on it would run once and
+    // look like a broken schedule; and no verified sub-agent fan-out, so no composites.
     #expect(
       NodeDraft(
-        title: "Research", loopType: .turnBased, checkDescription: "Sound?", backend: .codex
+        title: "Research", loopType: .turnBased, checkDescription: "Sound?",
+        backend: .copilotCLI
+      ).isValid)
+    #expect(
+      NodeDraft(
+        title: "Ship", loopType: .goalBased, goal: GoalSpec(summary: "Tests pass"),
+        backend: .copilotCLI
       ).isValid)
     #expect(
       !NodeDraft(
-        title: "Ship", loopType: .goalBased, goal: GoalSpec(summary: "Tests pass"),
-        backend: .codex
+        title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 1h Check",
+        backend: .copilotCLI
+      ).isValid)
+    #expect(
+      !NodeDraft(title: "Triage", loopType: .proactive, backend: .copilotCLI).isValid)
+  }
+
+  @Test
+  func anUnspikedBackendHostsNothingAtAll() {
+    // The trap this closes: the app's terminal launches whatever the backend says, and
+    // for an unspiked one there is nothing to launch. Allowing turn-based loops on it —
+    // as an earlier version did, reasoning they need only "a session to type into" —
+    // meant a loop labelled Codex silently opened a Claude Code session.
+    for loopType in LoopType.allCases {
+      #expect(!CLISessionBackendKind.codex.canHost(loopType))
+    }
+    #expect(CLISessionBackendKind.codex.executableName == nil)
+    #expect(
+      !NodeDraft(
+        title: "Research", loopType: .turnBased, checkDescription: "Sound?", backend: .codex
       ).isValid)
   }
 
   @Test
-  func onlyClaudeCodeIsMarkedSpiked() {
-    // The other two rows are conservative placeholders, not findings. If this ever flips
-    // it should be because someone actually ran the CLI (docs/07-roadmap.md#phase-5).
+  func onlyCodexRemainsUnspiked() {
+    // Claude Code is the reference backend; Copilot was spiked against the real CLI
+    // (0.0.410). Codex isn't installed here, and a capability row written from memory is
+    // exactly the confident-but-wrong claim `isSpiked` exists to prevent.
     #expect(CLISessionBackendKind.claudeCode.isSpiked)
-    #expect(!CLISessionBackendKind.copilotCLI.isSpiked)
+    #expect(CLISessionBackendKind.copilotCLI.isSpiked)
     #expect(!CLISessionBackendKind.codex.isSpiked)
   }
 
   @Test
-  func everyBackendCanHostATurnBasedLoop() {
-    // Turn-based is the floor: a session to type into is all it needs, so no backend is
-    // ever excluded from it.
-    for backend in CLISessionBackendKind.allCases {
-      #expect(backend.canHost(.turnBased))
-    }
-    #expect(CLISessionBackendKind.hosting(.turnBased).count == CLISessionBackendKind.allCases.count)
-    #expect(CLISessionBackendKind.hosting(.goalBased) == [.claudeCode])
+  func theHostingMatrixMatchesTheSpikedCapabilities() {
+    #expect(CLISessionBackendKind.hosting(.turnBased) == [.claudeCode, .copilotCLI])
+    #expect(CLISessionBackendKind.hosting(.goalBased) == [.claudeCode, .copilotCLI])
+    // Both of these need something only Claude Code has been shown to do.
+    #expect(CLISessionBackendKind.hosting(.timeBased) == [.claudeCode])
+    #expect(CLISessionBackendKind.hosting(.proactive) == [.claudeCode])
   }
 
   @Test

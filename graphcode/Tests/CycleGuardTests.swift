@@ -151,7 +151,7 @@ struct CycleGuardTests {
     // session ended when it resolved, and nothing else would revive it.
     let started = LockIsolated<[LoopNode]>([])
     let store = GraphStore(
-      onEnsureSession: { node in started.withValue { $0.append(node) } },
+      onEnsureSession: { node, _ in started.withValue { $0.append(node) } },
       onEvaluatePredicate: { _ in false })
     await store.handle(
       .createNode(

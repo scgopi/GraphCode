@@ -25,14 +25,19 @@ struct ZmxSessionLauncherTests {
     // `-d` follows the name, not the subcommand: `zmx run -d <name>` would create a
     // session literally called "-d". And the name must match what the app's primary
     // surface attaches to.
-    //
+    #expect(Array(arguments.prefix(3)) == ["run", expectedName, "-d"])
+    #expect(expectedName == "graphcode-\(node.id.uuidString)")
+
+    // Wrapped in an *interactive* login zsh. Without `-i` the shell never reads
+    // `~/.zshrc`, which is where a developer's PATH usually lives, and the daemon's
+    // launchd PATH doesn't include `claude` — the failure was `command not found`.
+    #expect(Array(arguments.dropFirst(3).prefix(4)) == ["/bin/zsh", "-i", "-l", "-c"])
+    #expect(arguments.contains(#"exec claude "$@""#))
+
     // `--model haiku` is the orchestrator's tier routing, not a hardcoded choice: a
     // time-based node defaults to `.fast` because polling is routine work
     // (docs/08-quality-and-token-budgets.md).
-    #expect(
-      Array(arguments.dropLast()) == ["run", expectedName, "-d", "claude", "--model", "haiku"])
-    #expect(arguments.last == "/loop 1h Check for new reports")
-    #expect(expectedName == "graphcode-\(node.id.uuidString)")
+    #expect(Array(arguments.suffix(3)) == ["--model", "haiku", "/loop 1h Check for new reports"])
   }
 
   @Test
@@ -64,9 +69,27 @@ struct ZmxSessionLauncherTests {
     let hostile = #"/loop 1h "; rm -rf ~; echo $(whoami) `id` 'quoted'"#
     let arguments = ZmxSessionLauncher.arguments(forNode: Self.node(prompt: hostile))
 
-    // run, name, -d, claude, --model, haiku, prompt
-    #expect(arguments?.count == 7)
+    // The prompt must be its own trailing argument, reaching the command through `$@`.
+    // It must never appear inside the `-c` script, where it would be shell syntax.
     #expect(arguments?.last == hostile)
+    #expect(arguments?.filter { $0.contains("rm -rf") }.count == 1)
+    #expect(arguments?.contains(#"exec claude "$@""#) == true)
+  }
+
+  @Test
+  func wrapsTheCommandInAnInteractiveLoginShell() {
+    // The goal-based failure this guards: `zmx run` executes what it's given under bash,
+    // which never reads `~/.zshrc`, so a bare `claude …` died with `command not found`
+    // under the daemon's launchd PATH.
+    let node = LoopNode(
+      title: "Reach it", loopType: .goalBased,
+      goal: GoalSpec(summary: "Check if the loop is working"))
+    let arguments = ZmxSessionLauncher.arguments(forNode: node) ?? []
+
+    #expect(arguments.contains("-i"))
+    #expect(arguments.contains("-l"))
+    #expect(!arguments.contains("claude"))  // bare `claude` is what used to fail
+    #expect(arguments.contains(#"exec claude "$@""#))
   }
 
   @Test
@@ -89,6 +112,38 @@ struct ZmxSessionLauncherTests {
 
     #expect(check == ["get", "graphcode-\(node.id.uuidString)"])
     #expect(check.last == ZmxSessionLauncher.arguments(forNode: node)?[1])
+  }
+
+  @Test
+  func opensInTheProjectWhenTheNodeHasNoWorktree() {
+    // `graphcoded`'s own directory is `/` under launchd, so falling through to nil ran
+    // unattended loops nowhere near the project they were created in.
+    let node = Self.node(prompt: "/loop 1h Check")
+    #expect(
+      ZmxSessionLauncher.workingDirectory(forNode: node, projectPath: "/tmp") == "/tmp")
+  }
+
+  @Test
+  func prefersTheNodesOwnWorktreeOverTheProject() {
+    var node = Self.node(prompt: "/loop 1h Check")
+    node.worktreeBinding = WorktreeRef(
+      id: "wt", repositoryPath: "/usr", worktreePath: "/tmp", branch: "feature")
+    #expect(
+      ZmxSessionLauncher.workingDirectory(forNode: node, projectPath: "/usr") == "/tmp")
+  }
+
+  @Test
+  func refusesAProjectPathThatIsNotARealDirectory() {
+    // The global Orchestrator Graph's path is the reserved URI `graphcode://global`, and
+    // a project folder can also be deleted out from under a saved graph. Either way,
+    // handing it to a process as a working directory would fail the launch outright.
+    let node = Self.node(prompt: "/loop 1h Check")
+    #expect(
+      ZmxSessionLauncher.workingDirectory(forNode: node, projectPath: LoopGraphScope.globalPath)
+        == nil)
+    #expect(
+      ZmxSessionLauncher.workingDirectory(forNode: node, projectPath: "/no/such/folder") == nil)
+    #expect(ZmxSessionLauncher.workingDirectory(forNode: node, projectPath: nil) == nil)
   }
 
   @Test

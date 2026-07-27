@@ -22,6 +22,16 @@ public struct BackendCapabilities: Codable, Equatable, Sendable {
   /// `.spawn`, which start a session rather than interrupt one
   /// (docs/02-graph-of-loops.md#inter-loop-messaging-in-practice).
   public var supportsMidSessionInput: Bool
+  /// Can the *session itself* re-trigger its own work on a cadence — Claude Code's
+  /// `/loop` and `/schedule`?
+  ///
+  /// This is what a time-based loop is actually built on: graphcode holds no interval of
+  /// its own and deliberately never inspects the prompt (`LoopNode.triggerPrompt`), so
+  /// the recurrence has to live inside the agent. A backend without it can still be
+  /// handed a `/loop …` prompt — it will simply do the work once and stop, which looks
+  /// like a broken schedule rather than an unsupported one. Hence its own capability
+  /// rather than being inferred from something adjacent.
+  public var supportsInSessionRecurrence: Bool
 
   public init(
     supportsGoalMode: Bool = false,
@@ -29,7 +39,8 @@ public struct BackendCapabilities: Codable, Equatable, Sendable {
     supportsStructuredOutput: Bool = false,
     supportsSubAgents: Bool = false,
     supportsMCP: Bool = false,
-    supportsMidSessionInput: Bool = false
+    supportsMidSessionInput: Bool = false,
+    supportsInSessionRecurrence: Bool = false
   ) {
     self.supportsGoalMode = supportsGoalMode
     self.supportsHooks = supportsHooks
@@ -37,6 +48,7 @@ public struct BackendCapabilities: Codable, Equatable, Sendable {
     self.supportsSubAgents = supportsSubAgents
     self.supportsMCP = supportsMCP
     self.supportsMidSessionInput = supportsMidSessionInput
+    self.supportsInSessionRecurrence = supportsInSessionRecurrence
   }
 }
 
@@ -67,32 +79,68 @@ extension CLISessionBackendKind {
         supportsStructuredOutput: true,
         supportsSubAgents: true,
         supportsMCP: true,
-        supportsMidSessionInput: true)
-    case .copilotCLI, .codex:
+        supportsMidSessionInput: true,
+        supportsInSessionRecurrence: true)
+
+    case .copilotCLI:
+      // Spiked against GitHub Copilot CLI 0.0.410 — every entry below was read off the
+      // real `copilot --help`, not assumed.
+      //
+      // `--interactive <prompt>` is the one that matters: it starts an ordinary
+      // attachable session that auto-runs a prompt, which is exactly graphcode's session
+      // model. (`-p/--prompt` exists too but exits on completion, so it's the headless
+      // shape graphcode deliberately moved away from.) `--model` is real, and includes
+      // Claude and GPT families. MCP is first-class (`--additional-mcp-config`, built-in
+      // github-mcp-server). It's a TUI in a PTY, so `zmx send` can type into it.
+      //
+      // The two falses are the honest ones. No lifecycle-hook mechanism appears in its
+      // help, so presence falls back to the heuristic rather than being reported. And
+      // there is no `/loop`-equivalent — nothing that makes the *session* re-trigger
+      // itself — so a time-based loop would run once and look like a broken schedule.
+      return BackendCapabilities(
+        supportsGoalMode: true,
+        supportsHooks: false,
+        supportsStructuredOutput: true,
+        supportsSubAgents: false,
+        supportsMCP: true,
+        supportsMidSessionInput: true,
+        supportsInSessionRecurrence: false)
+
+    case .codex:
+      // Not spiked — it isn't installed here, and a capability row written from memory
+      // is exactly the kind of confident-but-wrong claim `isSpiked` exists to prevent.
       return BackendCapabilities()
     }
   }
 
-  /// Whether anyone has actually verified this backend's row against the real CLI.
-  /// Until then it hosts turn-based loops only — the one loop type that needs nothing
-  /// from a backend beyond a session to type into.
-  public var isSpiked: Bool { self == .claudeCode }
+  /// Whether anyone has actually verified this backend's row against the real CLI *and*
+  /// written an adapter that can launch it.
+  ///
+  /// Until both are true the backend can host nothing at all. An earlier version let an
+  /// unspiked backend take turn-based loops on the reasoning that they need nothing but
+  /// "a session to type into" — which was wrong in a way that mattered: the app's
+  /// terminal launches `claude` unconditionally
+  /// (`GhosttyTerminalView.command`), so a loop labelled Codex opened a Claude Code
+  /// session. Silently running a different agent than the one the picker says is worse
+  /// than refusing, so this now gates every loop type.
+  public var isSpiked: Bool { self != .codex }
 
   /// Whether this backend can host that loop type at all. The refusal
   /// docs/04-cli-backends.md asks `OrchestratorClient` to make, kept next to the
   /// capability table it reads from.
   public func canHost(_ loopType: LoopType) -> Bool {
+    // Nothing graphcode can't actually launch may host anything.
+    guard isSpiked else { return false }
     switch loopType {
     case .turnBased:
       return true
     case .goalBased:
       return capabilities.supportsGoalMode
     case .timeBased:
-      // The cadence lives inside the session as a `/loop` directive, so this needs a
-      // backend with a real skill vocabulary rather than one that merely accepts a
-      // prompt — which is what `supportsStructuredOutput` stands in for until each CLI
-      // is spiked.
-      return capabilities.supportsStructuredOutput
+      // The cadence lives inside the session, so this needs a backend whose agent can
+      // re-trigger its own work. Without that a `/loop …` prompt runs once and stops,
+      // which reads as a broken schedule rather than an unsupported one.
+      return capabilities.supportsInSessionRecurrence
     case .proactive:
       return capabilities.supportsSubAgents
     }

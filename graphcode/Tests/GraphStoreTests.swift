@@ -28,7 +28,7 @@ struct GraphStoreTests {
     // it deliberately schedules nothing, since the `/loop` in the prompt is what
     // re-triggers the work from inside the session.
     let started = LockIsolated<[LoopNode]>([])
-    let store = GraphStore(onEnsureSession: { node in started.withValue { $0.append(node) } })
+    let store = GraphStore(onEnsureSession: { node, _ in started.withValue { $0.append(node) } })
 
     await store.handle(
       .createNode(
@@ -48,7 +48,7 @@ struct GraphStoreTests {
     // What gets a persisted loop running again after a reboot — turn-based nodes must
     // not be swept up, since a human opening them is what starts those.
     let started = LockIsolated<[LoopNode]>([])
-    let store = GraphStore(onEnsureSession: { node in started.withValue { $0.append(node) } })
+    let store = GraphStore(onEnsureSession: { node, _ in started.withValue { $0.append(node) } })
     await store.handle(
       .createNode(NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "Sound?")))
     await store.handle(
@@ -311,7 +311,7 @@ struct GraphStoreTests {
     // Rejecting the node but still launching its session would leave an orphan `claude`
     // with nothing in the graph pointing at it.
     let started = LockIsolated<[LoopNode]>([])
-    let store = GraphStore(onEnsureSession: { node in started.withValue { $0.append(node) } })
+    let store = GraphStore(onEnsureSession: { node, _ in started.withValue { $0.append(node) } })
 
     await store.handle(.createNode(NodeDraft(title: "No prompt", loopType: .timeBased)))
 

@@ -21,7 +21,7 @@ struct GoalBasedLoopTests {
     // Unlike every other node type it doesn't wait in `.idle`: there's no human turn
     // and no trigger between creation and the work starting.
     let started = LockIsolated<[LoopNode]>([])
-    let store = GraphStore(onEnsureSession: { node in started.withValue { $0.append(node) } })
+    let store = GraphStore(onEnsureSession: { node, _ in started.withValue { $0.append(node) } })
 
     await store.handle(
       .createNode(
@@ -228,7 +228,7 @@ struct GoalBasedLoopTests {
           state: .running),
       ])
     let store = GraphStore(
-      graph: graph, onEnsureSession: { node in started.withValue { $0.append(node) } })
+      graph: graph, onEnsureSession: { node, _ in started.withValue { $0.append(node) } })
 
     await store.ensureUnattendedSessions()
 

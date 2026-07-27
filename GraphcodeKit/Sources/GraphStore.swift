@@ -32,7 +32,7 @@ public actor GraphStore {
   public private(set) var graph: LoopGraph
   private var connections: [UUID: Int32] = [:]
   private let onGraphChanged: (@Sendable (LoopGraph) -> Void)?
-  private let onEnsureSession: (@Sendable (LoopNode) -> Void)?
+  private let onEnsureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let onTerminateSession: (@Sendable (LoopNode) -> Void)?
   private let onEvaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)?
   private let onDeliverMessage: (@Sendable (LoopNode, String) async -> Bool)?
@@ -64,7 +64,7 @@ public actor GraphStore {
   public init(
     graph: LoopGraph = LoopGraph(project: ProjectRef(path: "", name: "Untitled")),
     onGraphChanged: (@Sendable (LoopGraph) -> Void)? = nil,
-    onEnsureSession: (@Sendable (LoopNode) -> Void)? = nil,
+    onEnsureSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
     onTerminateSession: (@Sendable (LoopNode) -> Void)? = nil,
     onEvaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)? = nil,
     onDeliverMessage: (@Sendable (LoopNode, String) async -> Bool)? = nil,
@@ -81,6 +81,17 @@ public actor GraphStore {
     self.onCaptureScript = onCaptureScript
     self.onReadUsage = onReadUsage
     self.onSpawnIntoProject = onSpawnIntoProject
+  }
+
+  /// Every session start goes through here rather than calling `onEnsureSession` directly,
+  /// so no call site can forget the project path — and there are six of them, across node
+  /// creation, composite piloting, spawning, and cycle re-entry.
+  ///
+  /// The path is where the session opens when the node has no worktree of its own. Without
+  /// it a daemon-launched loop inherits `graphcoded`'s own directory, which under launchd
+  /// is `/`, so the loop ran nowhere near the project it was created in.
+  private func ensureSession(_ node: LoopNode) {
+    onEnsureSession?(node, graph.project.path)
   }
 
   // MARK: - Connections
@@ -108,7 +119,7 @@ public actor GraphStore {
         // Start it now rather than waiting for someone to open it — the loop is supposed
         // to run whether or not the app is up, which is the whole reason `graphcoded`
         // exists (docs/03-architecture.md#background-daemons).
-        onEnsureSession?(node)
+        ensureSession(node)
       }
       if node.loopType == .goalBased {
         armGoalPoller(for: node)
@@ -230,7 +241,7 @@ public actor GraphStore {
     // sessions, real output, real cost — just not wired to the recurring trigger yet.
     if let subGraph = graph.nodes[id: nodeID]?.subGraph {
       for child in subGraph.nodes where child.runsUnattended {
-        onEnsureSession?(child)
+        ensureSession(child)
       }
     }
     graph.nodes[id: nodeID]?.pilotState = .piloted
@@ -383,13 +394,13 @@ public actor GraphStore {
       state: template.loopType == .goalBased || isComposite ? .running : .idle)
     graph.nodes.append(instance)
 
-    if instance.runsUnattended { onEnsureSession?(instance) }
+    if instance.runsUnattended { ensureSession(instance) }
     if instance.loopType == .goalBased { armGoalPoller(for: instance) }
     // A composite's work is its sub-graph's, so instantiating one has to start what's
     // inside it — otherwise the spawn produces a node that merely looks busy.
     if let subGraph = instance.subGraph {
       for child in subGraph.nodes where child.runsUnattended {
-        onEnsureSession?(child)
+        ensureSession(child)
       }
     }
   }
@@ -465,7 +476,7 @@ public actor GraphStore {
     for nodeID in members {
       guard let node = graph.nodes[id: nodeID] else { continue }
       if node.loopType == .goalBased { armGoalPoller(for: node) }
-      if node.runsUnattended { onEnsureSession?(node) }
+      if node.runsUnattended { ensureSession(node) }
     }
   }
 
@@ -665,7 +676,7 @@ public actor GraphStore {
         guard !node.isResolved else { continue }
         armGoalPoller(for: node)
       }
-      onEnsureSession?(node)
+      ensureSession(node)
     }
   }
 

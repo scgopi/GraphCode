@@ -121,7 +121,7 @@ struct CompositeSpawnTests {
         project: ProjectRef(path: "/tmp/p", name: "p"),
         nodes: [trigger, template],
         edges: [LoopEdge(from: trigger.id, to: template.id, kind: .spawn)]),
-      onEnsureSession: { node in started.withValue { $0.append(node.title) } })
+      onEnsureSession: { node, _ in started.withValue { $0.append(node.title) } })
 
     await store.handle(.nodeCheckApproved(trigger.id))
 

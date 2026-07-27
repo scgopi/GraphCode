@@ -22,7 +22,11 @@ public struct CLISessionBackend: Sendable {
 
   /// Start (or adopt) the node's detached session. Idempotent: a session that already
   /// exists is joined, never restarted.
-  public var launch: @Sendable (LoopNode) async -> Void
+  ///
+  /// `projectPath` is where the session should open when the node has no worktree of
+  /// its own. Without it a daemon-launched loop inherits `graphcoded`'s directory,
+  /// which is `/` under launchd — nowhere near the project the loop belongs to.
+  public var launch: @Sendable (LoopNode, String?) async -> Void
   /// End the node's session for good.
   public var terminate: @Sendable (LoopNode) async -> Void
   /// Push text into a live session. The transport behind a `.message` edge — see
@@ -37,7 +41,7 @@ public struct CLISessionBackend: Sendable {
 
   public init(
     kind: CLISessionBackendKind,
-    launch: @escaping @Sendable (LoopNode) async -> Void,
+    launch: @escaping @Sendable (LoopNode, String?) async -> Void,
     terminate: @escaping @Sendable (LoopNode) async -> Void,
     sendInput: @escaping @Sendable (LoopNode, String) async -> Bool,
     presence: @escaping @Sendable (LoopNode) async -> PresenceReading,
@@ -61,7 +65,9 @@ extension CLISessionBackend {
   /// into whether or not anything is attached to it.
   public static let claudeCode = CLISessionBackend(
     kind: .claudeCode,
-    launch: { node in await ZmxSessionLauncher.start(node) },
+    launch: { node, projectPath in
+      await ZmxSessionLauncher.start(node, projectPath: projectPath)
+    },
     terminate: { node in await ZmxSessionLauncher.kill(node) },
     sendInput: { node, text in await ZmxSessionLauncher.send(text, to: node) },
     presence: { node in await ZmxSessionLauncher.presence(of: node) },
@@ -79,7 +85,7 @@ extension CLISessionBackend {
   public static func unspiked(_ kind: CLISessionBackendKind) -> CLISessionBackend {
     CLISessionBackend(
       kind: kind,
-      launch: { _ in },
+      launch: { _, _ in },
       terminate: { _ in },
       sendInput: { _, _ in false },
       presence: { _ in PresenceReading(presence: .absent, confidence: .reported) },
@@ -106,8 +112,8 @@ extension CLISessionBackend {
   /// caller is an actor applying a graph command and shouldn't block on process
   /// spawning. Routing through `backend(for:)` is what makes a node's chosen backend
   /// mean something at runtime rather than only in the picker.
-  public static let ensureSession: @Sendable (LoopNode) -> Void = { node in
-    Task.detached { await backend(for: node).launch(node) }
+  public static let ensureSession: @Sendable (LoopNode, String?) -> Void = { node, path in
+    Task.detached { await backend(for: node).launch(node, path) }
   }
 
   public static let terminateSession: @Sendable (LoopNode) -> Void = { node in

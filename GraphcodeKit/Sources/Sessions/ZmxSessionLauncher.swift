@@ -45,6 +45,24 @@ public enum ZmxSessionLauncher {
     return ["send", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, singleLine]
   }
 
+  /// Wraps a backend command in an **interactive login** shell, so it resolves the same
+  /// way it would if a human typed it into a terminal.
+  ///
+  /// `-i` is the load-bearing flag, not decoration. `graphcoded` runs under `launchd` with
+  /// `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, and a developer's real `PATH` is typically set
+  /// in `~/.zshrc` — which zsh reads only when *interactive*. A plain `zsh -l -c` sources
+  /// `.zprofile`/`.zlogin` and never `.zshrc`, so the command isn't found. And `zmx run`
+  /// executes what it's given under **bash**, which can't see `~/.zshrc` at all, so a bare
+  /// `claude …` there fails with `command not found` no matter what.
+  ///
+  /// Arguments ride in after the script as `$@` rather than being interpolated into it.
+  /// zsh hands them to the command untouched, so a goal or prompt containing quotes, `;`,
+  /// or `$(…)` is one argument and cannot become shell syntax.
+  static func loginShellInvocation(of command: String, arguments: [String]) -> [String] {
+    // `$0` has to be something, and it shows up in error messages — name it after us.
+    ["/bin/zsh", "-i", "-l", "-c", "exec \(command) \"$@\"", "graphcode"] + arguments
+  }
+
   /// `zmx get <name> <key>` reads a per-session label. This is the channel a backend's
   /// own lifecycle hooks report presence through — a Claude Code hook running
   /// `zmx set "$ZMX_SESSION" presence=busy` is what makes a reading `.reported` rather
@@ -159,6 +177,10 @@ public enum ZmxSessionLauncher {
   /// `claude` as exactly one word no matter what quotes, `$(…)`, or `;` it contains.
   static func arguments(forNode node: LoopNode) -> [String]? {
     guard let prompt = node.sessionPrompt, !prompt.isEmpty else { return nil }
+    // A backend graphcode can't launch has no argv. `canHost` already refuses to create
+    // such a node, so this is the belt to that braces — but silently starting the wrong
+    // agent is the failure it exists to prevent, so it's worth both.
+    guard let executable = node.backend.executableName else { return nil }
     // CR/LF are the one thing quoting can't save us from: zmx terminates the command it
     // types with `\r`, and the PTY's line discipline would accept the line early at an
     // embedded one, truncating the prompt. Prompts come from a single-line text field, so
@@ -168,18 +190,37 @@ public enum ZmxSessionLauncher {
       .replacingOccurrences(of: "\r\n", with: " ")
       .replacingOccurrences(of: "\r", with: " ")
       .replacingOccurrences(of: "\n", with: " ")
-    // Model tier is applied here rather than baked into the prompt: it's the
-    // orchestrator's scheduling decision (docs/05-orchestrator.md#responsibilities item
-    // 7), and `--model` is how a backend takes one. `.standard` passes no flag at all,
-    // which lets the backend's own default apply instead of us asserting what it is.
-    let modelArguments = node.effectiveModelTier.modelAlias.map { ["--model", $0] } ?? []
+    // Both the executable and the shape of its arguments come from the node's backend —
+    // `claude` takes its prompt positionally, `copilot` as `--interactive <prompt>`. Model
+    // tier is applied here rather than baked into the prompt: it's the orchestrator's
+    // scheduling decision (docs/05-orchestrator.md#responsibilities item 7).
+    let arguments = node.backend.launchArguments(
+      prompt: singleLine, tier: node.effectiveModelTier)
     return [
       "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
-      "claude",
-    ] + modelArguments + [singleLine]
+    ] + Self.loginShellInvocation(of: executable, arguments: arguments)
   }
 
-  static func start(_ node: LoopNode) async {
+  /// Where an unattended session should open, mirroring what the app already does for a
+  /// loop a human opens (`LoopWorkspaceView.surfaceView`): the node's own worktree if it
+  /// has one, otherwise the project it belongs to.
+  ///
+  /// Falling through to `nil` means inheriting the caller's directory, and `graphcoded`'s
+  /// is `/` under launchd — which is how an unattended loop ended up running somewhere
+  /// unrelated to the project it was created in. `projectPath` is checked for being a real
+  /// directory rather than trusted: the global Orchestrator Graph's path is the reserved
+  /// URI `graphcode://global`, which names no directory at all.
+  static func workingDirectory(forNode node: LoopNode, projectPath: String?) -> String? {
+    if let worktree = node.worktreeBinding?.worktreePath { return worktree }
+    guard let projectPath else { return nil }
+    var isDirectory: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: projectPath, isDirectory: &isDirectory),
+      isDirectory.boolValue
+    else { return nil }
+    return projectPath
+  }
+
+  static func start(_ node: LoopNode, projectPath: String? = nil) async {
     guard ZmxLocator.isInstalled else { return }
     guard let arguments = arguments(forNode: node) else { return }
 
@@ -196,7 +237,7 @@ public enum ZmxSessionLauncher {
       let launch = try PTYProcessSession(
         executable: ZmxLocator.binaryURL.path,
         arguments: arguments,
-        workingDirectory: node.worktreeBinding?.worktreePath)
+        workingDirectory: workingDirectory(forNode: node, projectPath: projectPath))
       // `zmx run -d` returns as soon as it has handed the command to the session daemon,
       // which then outlives it. Waiting keeps this short-lived launcher process (and its
       // PTY) alive until then rather than tearing it down mid-spawn.
