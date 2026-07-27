@@ -25,9 +25,35 @@ struct ZmxSessionLauncherTests {
     // `-d` follows the name, not the subcommand: `zmx run -d <name>` would create a
     // session literally called "-d". And the name must match what the app's primary
     // surface attaches to.
-    #expect(Array(arguments.dropLast()) == ["run", expectedName, "-d", "claude"])
+    //
+    // `--model haiku` is the orchestrator's tier routing, not a hardcoded choice: a
+    // time-based node defaults to `.fast` because polling is routine work
+    // (docs/08-quality-and-token-budgets.md).
+    #expect(
+      Array(arguments.dropLast()) == ["run", expectedName, "-d", "claude", "--model", "haiku"])
     #expect(arguments.last == "/loop 1h Check for new reports")
     #expect(expectedName == "graphcode-\(node.id.uuidString)")
+  }
+
+  @Test
+  func aPinnedModelTierOverridesTheDefaultRouting() {
+    let node = LoopNode(
+      title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 1h Check", modelTier: .capable)
+    let arguments = ZmxSessionLauncher.arguments(forNode: node) ?? []
+
+    #expect(arguments.contains("--model"))
+    #expect(arguments.contains("opus"))
+  }
+
+  @Test
+  func theStandardTierPassesNoModelFlagAtAll() {
+    // Passing no flag lets the backend's own default apply, which is different from us
+    // asserting what we think its default is.
+    let node = LoopNode(
+      title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 1h Check", modelTier: .standard)
+    let arguments = ZmxSessionLauncher.arguments(forNode: node) ?? []
+
+    #expect(!arguments.contains("--model"))
   }
 
   @Test
@@ -38,7 +64,8 @@ struct ZmxSessionLauncherTests {
     let hostile = #"/loop 1h "; rm -rf ~; echo $(whoami) `id` 'quoted'"#
     let arguments = ZmxSessionLauncher.arguments(forNode: Self.node(prompt: hostile))
 
-    #expect(arguments?.count == 5)
+    // run, name, -d, claude, --model, haiku, prompt
+    #expect(arguments?.count == 7)
     #expect(arguments?.last == hostile)
   }
 

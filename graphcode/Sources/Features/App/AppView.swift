@@ -28,6 +28,33 @@ struct AppView: View {
     // in light mode the system's near-black label colors would land on it unreadable.
     .preferredColorScheme(.dark)
     .task { await store.send(.task).finish() }
+    .confirmationDialog(
+      // Naming the loop matters here in a way it didn't on the canvas: from the sidebar
+      // you may be several projects away from the thing you right-clicked.
+      "Delete “\(store.pendingLoopDeletion?.node.title ?? "")”?",
+      isPresented: Binding(
+        get: { store.pendingLoopDeletion != nil },
+        set: { if !$0 { cancelPendingDeletion() } }
+      ),
+      titleVisibility: .visible
+    ) {
+      Button("Delete", role: .destructive) { confirmPendingDeletion() }
+      Button("Cancel", role: .cancel) { cancelPendingDeletion() }
+    } message: {
+      Text(
+        "Its terminal session is ended and every edge touching it is removed. "
+          + "This can't be undone.")
+    }
+  }
+
+  private func confirmPendingDeletion() {
+    guard let path = store.pendingLoopDeletion?.projectPath else { return }
+    store.send(.projects(.element(id: path, action: .deleteNodeConfirmed)))
+  }
+
+  private func cancelPendingDeletion() {
+    guard let path = store.pendingLoopDeletion?.projectPath else { return }
+    store.send(.projects(.element(id: path, action: .deleteNodeCancelled)))
   }
 
   @ViewBuilder

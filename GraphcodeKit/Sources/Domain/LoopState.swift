@@ -11,4 +11,11 @@ public enum LoopState: Codable, Equatable, Sendable {
   case succeeded
   case failed
   case stalled
+  /// A human stopped it from the orchestrator monitor
+  /// (docs/05-orchestrator.md#monitoring-surface).
+  ///
+  /// Distinct from `.failed` on purpose: the work didn't go wrong, someone decided it
+  /// shouldn't continue. Collapsing the two would file every deliberate stop into the
+  /// monitor's "Failed" queue, which is precisely the noise the rollup exists to avoid.
+  case stopped
 }

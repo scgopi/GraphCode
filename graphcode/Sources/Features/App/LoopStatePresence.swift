@@ -16,6 +16,9 @@ extension LoopState {
     case .succeeded: .green
     case .failed: .red
     case .stalled: .purple
+    // Deliberately grey rather than red: a loop someone turned off is finished, not
+    // broken, and the monitor's colours are how you tell those apart at a glance.
+    case .stopped: .gray
     }
   }
 }

@@ -20,6 +20,12 @@ opt_in_rules:
 
 disabled_rules:
   - todo
+  # Conflicts head-on with `.swift-format`'s `multiElementCollectionTrailingCommas: true`,
+  # which this project has deliberately enabled. `make format` runs swift-format first and
+  # swiftlint --fix second, so with both active the two tools would undo each other and
+  # `make check` could never pass on a multiline collection literal. swift-format's
+  # setting is the explicit choice here, so it wins.
+  - trailing_comma
 
 line_length:
   warning: 120

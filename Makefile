@@ -4,6 +4,7 @@
 
 SCHEME_APP := graphcode
 SCHEME_DAEMON := graphcoded
+SCHEME_CLI := graphcode-cli
 WORKSPACE := graphcode.xcworkspace
 DESTINATION := platform=macOS
 
@@ -16,7 +17,7 @@ BUILD_DIR := $(CURDIR)/.build
 # PATH for every zig build below and is a no-op for all other xcrun calls.
 ZIG_SDK_SHIM := $(CURDIR)/Tools/zig-sdk-shim
 
-SUPPORT_DIR := $(HOME)/Library/Application Support/graphcode
+SUPPORT_DIR := $(HOME)/.graphcode
 LAUNCH_AGENTS_DIR := $(HOME)/Library/LaunchAgents
 DAEMON_LABEL := dev.graphcode.graphcoded
 DAEMON_PLIST := $(LAUNCH_AGENTS_DIR)/$(DAEMON_LABEL).plist
@@ -81,10 +82,20 @@ build-zmx:
 
 # Installs to the fixed path GraphcodeKit's ZmxLocator looks for at runtime (see
 # GraphcodeKit/Sources/Sessions/ZmxLocator.swift) — simpler than requiring zmx on
-# PATH, and matches how graphcoded itself lives under Application Support.
+# PATH, and matches how graphcoded itself lives under ~/.graphcode.
 install-zmx: build-zmx
 	@mkdir -p "$(SUPPORT_DIR)/bin"
+	@# Remove before copying, then re-sign in place. Copying over a path whose old
+	@# inode macOS has already validated leaves a stale cached signature, and the
+	@# result is SIGKILLed at exec ("Taskgated Invalid Signature") even though
+	@# `codesign -v` reports it valid on disk. That failure is near-silent — zmx
+	@# prints nothing and dies before main() — so every session graphcode tries to
+	@# start just quietly never appears.
+	@rm -f "$(SUPPORT_DIR)/bin/zmx"
 	@cp "$(BUILD_DIR)/zmx/bin/zmx" "$(SUPPORT_DIR)/bin/zmx"
+	@codesign --force --sign - "$(SUPPORT_DIR)/bin/zmx" 2>/dev/null
+	@"$(SUPPORT_DIR)/bin/zmx" version >/dev/null 2>&1 \
+		|| { echo "zmx installed but won't run — check its code signature"; exit 1; }
 	@echo "zmx installed: $(SUPPORT_DIR)/bin/zmx"
 
 build-ghostty:
@@ -128,6 +139,23 @@ build-app: generate
 build-daemon: generate
 	set -o pipefail && $(MISE) xcodebuild -workspace $(WORKSPACE) -scheme $(SCHEME_DAEMON) \
 		-destination '$(DESTINATION)' build | $(MISE) xcbeautify
+
+build-cli: generate
+	set -o pipefail && $(MISE) xcodebuild -workspace $(WORKSPACE) -scheme $(SCHEME_CLI) \
+		-destination '$(DESTINATION)' build | $(MISE) xcbeautify
+
+# Puts `graphcode` on PATH next to the zmx we already install under Application
+# Support, so the CLI is reachable without hunting through DerivedData.
+install-cli: build-cli
+	@mkdir -p "$(SUPPORT_DIR)/bin"
+	@BIN_PATH=$$($(MISE) xcodebuild -workspace $(WORKSPACE) -scheme $(SCHEME_CLI) \
+		-destination '$(DESTINATION)' -showBuildSettings 2>/dev/null \
+		| awk -F'= ' '/ BUILT_PRODUCTS_DIR /{print $$2; exit}')/graphcode; \
+	rm -f "$(SUPPORT_DIR)/bin/graphcode"; \
+	cp "$$BIN_PATH" "$(SUPPORT_DIR)/bin/graphcode"; \
+	"$(SUPPORT_DIR)/bin/graphcode" --help >/dev/null 2>&1 \
+		|| { echo "graphcode installed but won't run — check its code signature"; exit 1; }; \
+	echo "installed: $(SUPPORT_DIR)/bin/graphcode"
 
 run-app: build-app install-zmx
 	@APP_PATH=$$($(MISE) xcodebuild -workspace $(WORKSPACE) -scheme $(SCHEME_APP) \
@@ -176,10 +204,12 @@ test: generate
 
 check:
 	$(MISE) swiftlint lint
-	swift format lint --recursive --strict --configuration .swift-format graphcode graphcoded
+	swift format lint --recursive --strict --configuration .swift-format \
+		GraphcodeKit graphcode graphcode-cli graphcoded
 
 format:
-	swift format format --recursive --in-place --configuration .swift-format graphcode graphcoded
+	swift format format --recursive --in-place --configuration .swift-format \
+		GraphcodeKit graphcode graphcode-cli graphcoded
 	$(MISE) swiftlint lint --fix
 
 clean:

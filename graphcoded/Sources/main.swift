@@ -17,8 +17,11 @@ import GraphcodeKit
 
 let fileManager = FileManager.default
 
-let supportDirectory = DaemonSocketPath.url.deletingLastPathComponent()
-try? fileManager.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
+// Migrates a pre-existing `~/Library/Application Support/graphcode` and creates the
+// directory. Has to happen before anything reads or writes — including the socket bind
+// immediately below.
+SupportDirectory.prepare()
+let supportDirectory = SupportDirectory.url
 
 let socketURL = DaemonSocketPath.url
 // Clear a stale socket file left behind by a previous run that didn't shut down cleanly.

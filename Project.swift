@@ -72,6 +72,26 @@ let project = Project(
             ],
             dependencies: [.target(name: "graphcode")]
         ),
+        // `graphcode` the CLI (docs/03-architecture.md#cli-graphcode) — a separate
+        // product from `graphcode` the app, talking to `graphcoded` over the same socket
+        // the app uses. Named `graphcode-cli` as a Tuist target because two targets
+        // can't share a name; the built binary is what a human types.
+        .target(
+            name: "graphcode-cli",
+            destinations: .macOS,
+            product: .commandLineTool,
+            // Without this the binary is `graphcode_cli` — Tuist sanitizes the hyphen
+            // out of the target name. The thing a human types is `graphcode`.
+            productName: "graphcode",
+            bundleId: "\(bundleIdPrefix).cli",
+            deploymentTargets: .macOS("15.0"),
+            buildableFolders: [
+                "graphcode-cli/Sources"
+            ],
+            dependencies: [
+                .target(name: "GraphcodeKit")
+            ]
+        ),
         .target(
             name: "graphcoded",
             destinations: .macOS,

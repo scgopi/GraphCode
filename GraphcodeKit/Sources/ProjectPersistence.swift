@@ -1,8 +1,8 @@
 import Foundation
 
 /// Reads/writes the on-disk state Phase 4 adds: one JSON file per project's `LoopGraph`
-/// plus a small recent-projects index, both under `~/Library/Application
-/// Support/graphcode/` — never inside the project folder itself, so opening a folder in
+/// plus small recents and open-projects indexes, all under `~/.graphcode` (see
+/// `SupportDirectory`) — never inside the project folder itself, so opening a folder in
 /// graphcode never touches that folder's own contents (confirmed with the user before
 /// building this; see docs/07-roadmap.md#phase-4--projects).
 ///
@@ -36,7 +36,7 @@ public struct ProjectPersistence: Sendable {
 
   /// Throws away a project's loops for good — the "Delete Loops…" half of the sidebar's
   /// context menu, which is why it's separate from `forgetProject`. Only ever touches
-  /// graphcode's own file under Application Support; the project folder itself is never
+  /// graphcode's own file under `~/.graphcode`; the project folder itself is never
   /// written to, deleted from, or otherwise modified.
   public func deleteGraph(path: String) {
     try? FileManager.default.removeItem(at: fileURL(forProjectPath: path))

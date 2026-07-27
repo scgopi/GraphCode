@@ -103,12 +103,17 @@ struct LoopWorkspaceView: View {
     }
   }
 
-  /// A time-based loop's agent tab is labelled "Loop" rather than "Claude Code" — the
-  /// session there is running its own `/loop`, and the distinction is the one thing a
-  /// glance at the tab strip should tell you apart from a turn-based loop's session.
+  /// An unattended loop's agent tab is labelled for what it's actually doing rather than
+  /// "Claude Code" — a time-based session is running its own `/loop`, a goal-based one is
+  /// working toward a stop condition, and that distinction is the one thing a glance at
+  /// the tab strip should tell you apart from a turn-based loop's session.
   private func agentTabTitle(for tab: TabLayout) -> String {
     guard tab.primary.launchesClaudeCode else { return "Shell" }
-    return store.node.loopType == .timeBased ? "Loop" : "Claude Code"
+    switch store.node.loopType {
+    case .timeBased: return "Loop"
+    case .goalBased: return "Goal"
+    case .turnBased, .proactive: return "Claude Code"
+    }
   }
 
   private func hiddenShortcut(
@@ -163,9 +168,10 @@ struct LoopWorkspaceView: View {
     GhosttyTerminalView(
       sessionName: ref.zmxSessionName,
       launchesClaudeCode: ref.launchesClaudeCode,
-      // Only the agent surface of a time-based node starts from a prompt; a turn-based
-      // loop's session opens bare, and extra tabs/splits are plain shells either way.
-      initialPrompt: ref.launchesClaudeCode ? store.node.triggerPrompt : nil,
+      // Only the agent surface of an unattended node starts from a prompt (a time-based
+      // loop's `/loop`, a goal-based loop's goal); a turn-based loop's session opens
+      // bare, and extra tabs/splits are plain shells either way.
+      initialPrompt: ref.launchesClaudeCode ? store.node.sessionPrompt : nil,
       // A node without its own worktree yet still belongs to a project — its shells
       // should open there, not wherever the app process happened to launch from.
       workingDirectory: store.node.worktreeBinding?.worktreePath ?? store.projectPath
@@ -212,6 +218,7 @@ private struct PresenceBadge: View {
     case .succeeded: "Succeeded"
     case .failed: "Failed"
     case .stalled: "Stalled"
+    case .stopped: "Stopped"
     }
   }
 }

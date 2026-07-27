@@ -112,12 +112,23 @@ public final class PTYProcessSession: @unchecked Sendable {
   /// `graphcoded` uses for a time-based node's trigger, where there's no human present
   /// to read output or type input. Returns once `.terminated` arrives.
   public func waitUntilFinished() async -> Bool {
+    await waitCollectingOutput().succeeded
+  }
+
+  /// Same, but keeps what the process printed. Needed for the `zmx` queries whose
+  /// *answer* is on stdout rather than in the exit status — reading a session's presence
+  /// label, for one.
+  public func waitCollectingOutput() async -> (succeeded: Bool, output: String) {
     var succeeded = false
+    var output = ""
     for await event in events {
-      if case .terminated(let didSucceed) = event {
+      switch event {
+      case .output(let chunk):
+        output += chunk
+      case .terminated(let didSucceed):
         succeeded = didSucceed
       }
     }
-    return succeeded
+    return (succeeded, output)
   }
 }

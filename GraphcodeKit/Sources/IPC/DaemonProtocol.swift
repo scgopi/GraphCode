@@ -16,6 +16,10 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
   /// once at launch; the daemon replies with one `.graphChanged` per project, which is
   /// exactly what `.openProject` produces, so the app needs no separate restore path.
   case restoreOpenProjects
+  /// Join the one always-resident global Orchestrator Graph. It arrives as an ordinary
+  /// `.graphChanged` like any project's, distinguishable by its reserved
+  /// `graphcode://global` path.
+  case openGlobalGraph
   /// Drop a project from the sidebar, keeping it in recents so Add Folder can bring it
   /// straight back.
   case closeProject(path: String)
@@ -34,15 +38,47 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
 /// so far. There's no `deleteNode`/`updateGraph` — not because they're hard, but
 /// because nothing in the app needs them yet, and a wire protocol is easier to extend
 /// than to narrow.
-public enum GraphCommand: Codable, Sendable, Equatable {
-  case createTurnBasedNode(title: String, checkDescription: String)
-  /// No interval travels with this — a time-based node's cadence lives inside its own
-  /// session, written into `prompt` as a `/loop`/`/schedule` directive. See
-  /// `LoopNode.triggerPrompt`.
-  case createTimeBasedNode(title: String, prompt: String)
-  case createEdge(from: UUID, to: UUID)
+/// `indirect` because `.subGraphCommand` nests a `GraphCommand` inside itself — a
+/// proactive node's sub-graph takes exactly the same commands its parent graph does,
+/// which is the point: there's no second execution engine, just the orchestrator running
+/// a graph inside a graph (docs/05-orchestrator.md#responsibilities item 6).
+public indirect enum GraphCommand: Codable, Sendable, Equatable {
+  /// One command for every loop type — see `NodeDraft` for why the three type-specific
+  /// create commands collapsed into this. An invalid draft is rejected by the daemon,
+  /// not silently turned into a half-configured node.
+  ///
+  /// Note what a time-based draft does *not* carry: an interval. That cadence lives
+  /// inside the node's own session, written into its prompt as a `/loop`/`/schedule`
+  /// directive (see `LoopNode.triggerPrompt`).
+  case createNode(NodeDraft)
+  /// `spec` carries what the canvas's edge drop editor collected — kind, condition,
+  /// payload transform (docs/06-ux-terminals.md#creating-edges). `EdgeSpec()`'s
+  /// defaults reproduce the plain always-firing `.handoff` every edge was before the
+  /// editor existed.
+  case createEdge(from: UUID, to: UUID, spec: EdgeSpec)
   case nodeCheckApproved(UUID)
   case nodeCheckRejected(UUID)
+  /// Removes the node, every edge touching it, and its detached session. Irreversible
+  /// — the app confirms before sending this.
+  case deleteNode(UUID)
+  case deleteEdge(UUID)
+  /// Stop a running loop from the monitor: its session ends and it resolves to
+  /// `.stopped`. The node itself stays in the graph — stopping is not deleting.
+  case stopNode(UUID)
+  /// Route a command into a proactive node's sub-graph. Editing a composite's insides is
+  /// the same set of operations as editing any graph, so it reuses them wholesale rather
+  /// than growing a parallel vocabulary.
+  case subGraphCommand(nodeID: UUID, command: GraphCommand)
+  /// Dry-run a proactive node's sub-graph once, before its real trigger is armed
+  /// (docs/08-quality-and-token-budgets.md#managing-token-usage).
+  case pilotComposite(UUID)
+  /// Arm a piloted proactive node against its live trigger. Refused unless it has
+  /// actually been piloted — that refusal is the whole safety mechanism.
+  case armComposite(UUID)
+  /// Pull fresh usage readings for every node from their backends. Explicit rather than
+  /// polled: it costs a subprocess per session, and nobody needs it except while the
+  /// usage panel is open.
+  case refreshUsage
 }
 
 /// What `graphcoded` pushes back — to the client that sent a command and to every

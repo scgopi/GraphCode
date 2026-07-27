@@ -23,6 +23,64 @@ struct AppFeature {
     var projects: IdentifiedArrayOf<ProjectFeature.State> = []
     var selectedProjectPath: String?
     var openLoop: LoopWorkspaceFeature.State?
+
+    /// The orchestrator's needs-attention rollup, across every open project
+    /// (docs/05-orchestrator.md#monitoring-surface). Derived rather than stored: it's a
+    /// pure function of the graphs the daemon already broadcasts, and a cached copy
+    /// would just be one more thing that can disagree with them.
+    ///
+    /// Cross-project on purpose — a human with four projects open has one attention
+    /// queue, not four.
+    var attentionItems: [AttentionItem] {
+      AttentionRollup.fullRollup(across: projects.map(\.graph))
+    }
+
+    /// The loop a "Delete Loop…" confirmation is currently up for, and which project it
+    /// belongs to.
+    ///
+    /// The pending id lives on `ProjectFeature.State`, but the *dialog* has to be hosted
+    /// by `AppView`: `ProjectCanvasView` is only rendered when that project's canvas is
+    /// the visible detail pane, so a deletion started from the sidebar while a terminal
+    /// was open would set the state with nothing anywhere to present it — the loop would
+    /// silently never be deleted.
+    var pendingLoopDeletion: (projectPath: String, node: LoopNode)? {
+      for project in projects {
+        guard let nodeID = project.nodePendingDeletion,
+          let node = project.graph.nodes[id: nodeID]
+        else { continue }
+        return (project.id, node)
+      }
+      return nil
+    }
+
+    /// Cost and token totals across every open project, always paired with how much of
+    /// the graph is actually reporting — see `usageSection` in `AppSidebarView`.
+    var usageRollup: UsageRollup {
+      let graphs = projects.map(\.graph)
+      let total = graphs.reduce(0) { $0 + $1.nodes.count }
+      let reporting = graphs.reduce(0) { $0 + $1.usageCoverage.reporting }
+      let samples = graphs.compactMap(\.usage)
+      guard let combined = samples.first.map({ samples.dropFirst().reduce($0, +) }) else {
+        return UsageRollup(
+          headline: "No usage reported",
+          coverage: "\(total) loops · none reporting", total: total)
+      }
+      var parts: [String] = []
+      if let cost = combined.costUSD { parts.append(String(format: "$%.2f", cost)) }
+      if let tokens = combined.totalTokens { parts.append("\(tokens) tokens") }
+      return UsageRollup(
+        headline: parts.isEmpty ? "No usage reported" : parts.joined(separator: " · "),
+        coverage: "\(reporting)/\(total) loops reporting",
+        total: total)
+    }
+  }
+
+  /// The cost line and its coverage, which always travel together — see
+  /// `AppSidebarView.usageSection` for why a total is never shown on its own.
+  struct UsageRollup: Equatable {
+    let headline: String
+    let coverage: String
+    let total: Int
   }
 
   enum Action {
@@ -39,6 +97,13 @@ struct AppFeature {
     case welcome(WelcomeFeature.Action)
     case projects(IdentifiedActionOf<ProjectFeature>)
     case openLoop(LoopWorkspaceFeature.Action)
+    /// Jump straight to the loop that needs a human, from the monitor's rollup.
+    case attentionItemTapped(AttentionItem)
+    /// The stop/kill affordance docs/05-orchestrator.md asks the monitor for.
+    case stopNodeTapped(projectPath: String, nodeID: UUID)
+    /// Refresh usage for every open project at once — the panel is cross-project, so
+    /// refreshing one of them would leave the total half-stale.
+    case refreshUsageTapped
   }
 
   private enum CancelID { case daemonSubscription }
@@ -65,7 +130,11 @@ struct AppFeature {
           // daemon has been persisting every project all along — the app just never
           // asked for them back. Each restored project arrives as an ordinary
           // `.graphChanged`, handled below.
-          .run { _ in try? await orchestratorClient.send(.restoreOpenProjects) }
+          .run { _ in try? await orchestratorClient.send(.restoreOpenProjects) },
+          // The global Orchestrator Graph is always resident, so the app joins it every
+          // launch rather than restoring it — it isn't a folder anyone opened, and its
+          // triggers have been running whether or not this window existed.
+          .run { _ in try? await orchestratorClient.send(.openGlobalGraph) }
         )
 
       case .daemonEvent(let event):
@@ -86,8 +155,19 @@ struct AppFeature {
           }
           // Keep an open workspace's node in sync (title, presence dot, check bar) —
           // the workspace doesn't own a daemon subscription itself.
-          if let openNodeID = state.openLoop?.node.id, let updated = graph.nodes[id: openNodeID] {
-            state.openLoop?.node = updated
+          if let openLoop = state.openLoop, openLoop.projectPath == path {
+            if let updated = graph.nodes[id: openLoop.node.id] {
+              state.openLoop?.node = updated
+            } else {
+              // The loop was deleted out from under its own terminal — easy to do now
+              // that the sidebar can delete a loop while its workspace is the visible
+              // detail pane. Its `zmx` session has already been killed, so leaving the
+              // workspace up would show a terminal for something that no longer exists.
+              // Scoped to this node's own project: another project's broadcast says
+              // nothing about whether this loop still exists.
+              state.openLoop = nil
+              state.selectedProjectPath = path
+            }
           }
           return .send(.projects(.element(id: path, action: .daemonEvent(event))))
 
@@ -114,6 +194,28 @@ struct AppFeature {
         removeFromSidebar(&state, path: path)
         state.welcome.recentProjects.removeAll { $0.path == path }
         return .run { _ in try? await orchestratorClient.send(.deleteProjectGraph(path: path)) }
+
+      case .attentionItemTapped(let item):
+        // The rollup's whole purpose is getting a human to the loop, so it routes
+        // through the same open-the-loop path a sidebar tap does rather than merely
+        // selecting its project.
+        return .send(
+          .projects(.element(id: item.projectPath, action: .nodeTapped(item.nodeID))))
+
+      case .refreshUsageTapped:
+        let paths = state.projects.map(\.graph.project.path)
+        return .run { _ in
+          for path in paths {
+            try? await orchestratorClient.send(
+              .graphCommand(projectPath: path, command: .refreshUsage))
+          }
+        }
+
+      case .stopNodeTapped(let projectPath, let nodeID):
+        return .run { _ in
+          try? await orchestratorClient.send(
+            .graphCommand(projectPath: projectPath, command: .stopNode(nodeID)))
+        }
 
       case .projects(.element(id: let path, action: .nodeTapped(let nodeID))):
         // Every loop type opens the same way. A time-based node used to be excluded

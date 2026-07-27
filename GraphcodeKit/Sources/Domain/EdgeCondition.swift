@@ -10,4 +10,23 @@ public enum EdgeCondition: String, Codable, CaseIterable, Sendable {
   case always
   case onSuccess
   case onFailure
+
+  public var displayName: String {
+    switch self {
+    case .always: return "Always"
+    case .onSuccess: return "On success"
+    case .onFailure: return "On failure"
+    }
+  }
+
+  /// Whether an edge with this condition should fire given how its source resolved.
+  /// Lives here rather than inline in `GraphStore` so the edge editor can explain the
+  /// same rule it enforces.
+  public func isSatisfied(sourceSucceeded: Bool) -> Bool {
+    switch self {
+    case .always: return true
+    case .onSuccess: return sourceSucceeded
+    case .onFailure: return !sourceSucceeded
+    }
+  }
 }

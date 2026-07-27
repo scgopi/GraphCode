@@ -34,7 +34,8 @@ struct ProjectRegistryTests {
     await registry.handle(
       .graphCommand(
         projectPath: "/tmp/project-a",
-        command: .createTurnBasedNode(title: "Research", checkDescription: "Sound?")),
+        command: .createNode(
+          NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "Sound?"))),
       connectionID: firstConnection)
 
     let secondConnection = UUID()
@@ -43,7 +44,8 @@ struct ProjectRegistryTests {
     await registry.handle(
       .graphCommand(
         projectPath: "/tmp/project-a",
-        command: .createTurnBasedNode(title: "Implement", checkDescription: "Correct?")),
+        command: .createNode(
+          NodeDraft(title: "Implement", loopType: .turnBased, checkDescription: "Correct?"))),
       connectionID: secondConnection)
 
     // If the two connections had landed on separate `GraphStore` instances, the second
@@ -63,14 +65,16 @@ struct ProjectRegistryTests {
     await registry.handle(
       .graphCommand(
         projectPath: "/tmp/project-a",
-        command: .createTurnBasedNode(title: "Research", checkDescription: "Sound?")),
+        command: .createNode(
+          NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "Sound?"))),
       connectionID: connectionID)
 
     await registry.handle(.openProject(path: "/tmp/project-b"), connectionID: connectionID)
     await registry.handle(
       .graphCommand(
         projectPath: "/tmp/project-b",
-        command: .createTurnBasedNode(title: "Design", checkDescription: "Clear?")),
+        command: .createNode(
+          NodeDraft(title: "Design", loopType: .turnBased, checkDescription: "Clear?"))),
       connectionID: connectionID)
 
     #expect(persistence.loadGraph(path: "/tmp/project-a")?.nodes.count == 1)
@@ -87,7 +91,8 @@ struct ProjectRegistryTests {
     await registry.handle(
       .graphCommand(
         projectPath: "/tmp/never-opened",
-        command: .createTurnBasedNode(title: "Research", checkDescription: "Sound?")),
+        command: .createNode(
+          NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "Sound?"))),
       connectionID: UUID())
   }
 
@@ -119,7 +124,8 @@ struct ProjectRegistryTests {
       await registry.handle(
         .graphCommand(
           projectPath: "/tmp/project-a",
-          command: .createTurnBasedNode(title: "Research", checkDescription: "Sound?")),
+          command: .createNode(
+            NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "Sound?"))),
         connectionID: connectionID)
     }()
 
@@ -187,7 +193,8 @@ struct ProjectRegistryTests {
     await registry.handle(
       .graphCommand(
         projectPath: "/tmp/project-d",
-        command: .createTurnBasedNode(title: "Research", checkDescription: "Sound?")),
+        command: .createNode(
+          NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "Sound?"))),
       connectionID: connectionID)
 
     await registry.handle(.forgetProject(path: "/tmp/project-d"), connectionID: connectionID)
@@ -208,7 +215,8 @@ struct ProjectRegistryTests {
     await registry.handle(
       .graphCommand(
         projectPath: "/tmp/project-e",
-        command: .createTurnBasedNode(title: "Research", checkDescription: "Sound?")),
+        command: .createNode(
+          NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "Sound?"))),
       connectionID: connectionID)
 
     await registry.handle(.deleteProjectGraph(path: "/tmp/project-e"), connectionID: connectionID)

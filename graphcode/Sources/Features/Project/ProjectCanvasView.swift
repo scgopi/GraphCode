@@ -48,6 +48,12 @@ struct ProjectCanvasView: View {
     .sheet(isPresented: $store.showingNewNodeForm) {
       newNodeForm
     }
+    .sheet(item: $store.pendingEdge) { _ in
+      edgeForm
+    }
+    // The delete confirmation is deliberately *not* here — it's hosted by `AppView`, so
+    // it can also present for a deletion started from the sidebar while this canvas
+    // isn't the visible detail pane. See `AppFeature.State.pendingLoopDeletion`.
   }
 
   private var canvas: some View {
@@ -91,9 +97,25 @@ struct ProjectCanvasView: View {
   private var edgesLayer: some View {
     ForEach(store.graph.edges) { edge in
       if let from = store.nodePositions[edge.from], let to = store.nodePositions[edge.to] {
-        EdgeLineView(from: from, to: to, fired: edge.fired)
+        EdgeLineView(from: from, to: to, kind: edge.kind, fired: edge.fired)
+          .contextMenu {
+            Text(edgeSummary(edge))
+            Button("Delete Edge", role: .destructive) {
+              store.send(.deleteEdgeTapped(edge.id))
+            }
+          }
       }
     }
+  }
+
+  private func edgeSummary(_ edge: LoopEdge) -> String {
+    var parts = [edge.kind.displayName, edge.condition.displayName]
+    if let transform = edge.payloadTransform.summary { parts.append(transform) }
+    if let cycleGuard = edge.cycleGuard {
+      // The pass count is the one thing you want at a glance on a running cycle.
+      parts.append("loop \(edge.fireCount)/\(cycleGuard.summary)")
+    }
+    return parts.joined(separator: " · ")
   }
 
   @ViewBuilder
@@ -114,9 +136,22 @@ struct ProjectCanvasView: View {
         Spacer()
         Circle().fill(node.state.presenceColor).frame(width: 8, height: 8)
       }
-      Text(node.loopType.rawValue).font(.caption2).foregroundStyle(.secondary)
-      if node.state == .blocked {
-        Label("Blocked", systemImage: "lock.fill")
+      HStack(spacing: 4) {
+        Text(node.loopType.rawValue).font(.caption2).foregroundStyle(.secondary)
+        if node.backend != .claudeCode {
+          // Only shown when it isn't the default — a badge on every card would be noise
+          // in the overwhelmingly common single-backend graph.
+          Text(node.backend.displayName).font(.caption2).foregroundStyle(.tertiary)
+        }
+        if node.worktreeBinding != nil {
+          Image(systemName: "arrow.triangle.branch")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+        }
+      }
+      CompositeBadge(node: node)
+      if let reason = attentionReason(for: node) {
+        Label(reason.displayName, systemImage: "exclamationmark.circle.fill")
           .font(.caption2)
           .foregroundStyle(.orange)
       }
@@ -124,14 +159,40 @@ struct ProjectCanvasView: View {
     .padding(10)
     .frame(width: 220, alignment: .leading)
     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+    // docs/06-ux-terminals.md#graph-canvas: nodes needing attention are distinguished on
+    // the canvas itself, not only in the side panel — you should be able to tell from
+    // the graph's shape where the problem is.
     .overlay(
       RoundedRectangle(cornerRadius: 10)
-        .stroke(node.state == .blocked ? Color.orange : Color.secondary.opacity(0.3))
+        .stroke(
+          attentionReason(for: node) == nil
+            ? Color.secondary.opacity(0.3) : Color.orange,
+          lineWidth: attentionReason(for: node) == nil ? 1 : 2)
     )
     .contentShape(Rectangle())
     .onTapGesture { store.send(.nodeTapped(node.id)) }
+    .contextMenu { nodeMenu(for: node) }
     .overlay(alignment: .trailing) {
       connectorHandle(for: node.id).offset(x: 14)
+    }
+  }
+
+  @ViewBuilder
+  private func nodeMenu(for node: LoopNode) -> some View {
+    Button("Open Terminal") { store.send(.nodeTapped(node.id)) }
+    if node.loopType == .proactive {
+      // Pilot always available (re-piloting a composite you've changed is normal);
+      // arming only after a pilot, which is the docs/08 gate.
+      Button("Pilot Once…") { store.send(.pilotCompositeTapped(node.id)) }
+      Button("Arm Schedule") { store.send(.armCompositeTapped(node.id)) }
+        .disabled(!node.pilotState.canArm)
+    }
+    if !node.isResolved {
+      Button("Stop Loop") { store.send(.stopNodeTapped(node.id)) }
+    }
+    Divider()
+    Button("Delete Loop…", role: .destructive) {
+      store.send(.deleteNodeRequested(node.id))
     }
   }
 
@@ -167,60 +228,100 @@ struct ProjectCanvasView: View {
     return nil
   }
 
-  private var newNodeForm: some View {
-    VStack(spacing: 12) {
-      Text("New Loop Node").font(.headline)
-      Form {
-        Picker("Type", selection: $store.draftLoopType) {
-          Text("Turn-based").tag(LoopType.turnBased)
-          Text("Time-based").tag(LoopType.timeBased)
-        }
-        .pickerStyle(.segmented)
-
-        TextField("Title", text: $store.draftTitle)
-
-        switch store.draftLoopType {
-        case .turnBased:
-          TextField("Check", text: $store.draftCheck)
-        case .timeBased:
-          // No interval field: the cadence goes in the prompt itself, as a `/loop` or
-          // `/schedule` directive the session runs on its own (see
-          // `LoopNode.triggerPrompt`). The placeholder is the whole documentation.
-          TextField("/loop 1h Check for new reports", text: $store.draftPrompt)
-        case .goalBased, .proactive:
-          EmptyView()
-        }
-      }
-      HStack {
-        Button("Cancel") { store.send(.cancelNewNodeForm) }
-        Spacer()
-        Button("Create") { store.send(.createNodeConfirmed) }
-          .keyboardShortcut(.defaultAction)
-      }
+  /// Shown on drop, before the edge is committed. The `?? pending` fallback in the
+  /// binding never actually fires — the sheet only exists while `pendingEdge` is
+  /// non-nil — it's just what lets a nested field bind without an optional dance.
+  @ViewBuilder
+  private var edgeForm: some View {
+    if let pending = store.pendingEdge {
+      EdgeSpecForm(
+        pending: Binding(
+          get: { store.pendingEdge ?? pending },
+          set: { store.pendingEdge = $0 }
+        ),
+        fromTitle: nodeTitle(pending.from),
+        toTitle: nodeTitle(pending.to),
+        onCancel: { store.send(.cancelEdgeForm) },
+        onCreate: { store.send(.createEdgeConfirmed) }
+      )
     }
-    .padding(24)
-    .frame(width: 360)
+  }
+
+  /// Same rollup the sidebar's monitor uses, scoped to this graph — one definition of
+  /// "needs attention" rather than a canvas-flavoured second opinion.
+  private func attentionReason(for node: LoopNode) -> AttentionReason? {
+    store.attentionReasons[node.id]
+  }
+
+  private func nodeTitle(_ id: UUID) -> String {
+    store.graph.nodes[id: id]?.title ?? "?"
   }
 }
 
-/// A dashed line means the edge exists but its condition hasn't resolved yet (the
-/// source node hasn't succeeded/failed); solid accent means `graphcoded` has already
-/// fired it. There's no manual "Fire" affordance anymore — from Phase 3 on, firing is
-/// automatic (see `graphcoded/Sources/GraphStore.swift`), so this view is read-only.
+/// Edges are drawn distinctly per `EdgeKind`, per
+/// docs/06-ux-terminals.md#graph-canvas: a solid line for `.handoff`, a long-dashed
+/// line for `.message`, a dotted line for `.spawn`. On top of that, a `.handoff` that
+/// `graphcoded` hasn't fired yet is drawn dimmed and dashed — so "which relationship is
+/// this" and "has it happened yet" stay two separate readings of the same line.
+///
+/// There's no manual "Fire" affordance — from Phase 3 on, firing is automatic (see
+/// `GraphcodeKit/Sources/GraphStore.swift`), so this view is read-only.
+/// A composite's card has to say how big the thing inside it is and whether it's live —
+/// an armed routine that can spawn hundreds of agents shouldn't look identical to one
+/// that has never run.
+private struct CompositeBadge: View {
+  let node: LoopNode
+
+  @ViewBuilder
+  var body: some View {
+    if node.loopType == .proactive, let subGraph = node.subGraph {
+      Label(
+        "\(subGraph.nodes.count) loops · \(node.pilotState.displayName)",
+        systemImage: node.pilotState == .armed ? "bolt.fill" : "bolt.slash"
+      )
+      .font(.caption2)
+      .foregroundStyle(node.pilotState == .armed ? Color.accentColor : .secondary)
+    }
+  }
+}
+
 private struct EdgeLineView: View {
   let from: CGPoint
   let to: CGPoint
+  let kind: EdgeKind
   let fired: Bool
 
   var body: some View {
+    ZStack {
+      // A 1.5pt dashed line is almost impossible to right-click. This invisible
+      // fat stroke is the hit target; the visible line is drawn on top of it.
+      line.stroke(Color.clear.opacity(0.001), style: StrokeStyle(lineWidth: 12))
+        .contentShape(line.stroke(style: StrokeStyle(lineWidth: 12)))
+      line.stroke(color, style: StrokeStyle(lineWidth: fired ? 2 : 1.5, dash: dashPattern))
+    }
+  }
+
+  private var line: Path {
     Path { path in
       path.move(to: from)
       path.addLine(to: to)
     }
-    .stroke(
-      fired ? Color.accentColor : Color.secondary,
-      style: StrokeStyle(lineWidth: fired ? 2 : 1.5, dash: fired ? [] : [5, 4])
-    )
+  }
+
+  private var color: Color {
+    switch kind {
+    case .handoff: return fired ? Color.accentColor : Color.secondary
+    case .message: return Color.teal
+    case .spawn: return Color.purple
+    }
+  }
+
+  private var dashPattern: [CGFloat] {
+    switch kind {
+    case .handoff: return fired ? [] : [5, 4]
+    case .message: return [10, 5]
+    case .spawn: return [2, 4]
+    }
   }
 }
 
