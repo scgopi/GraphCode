@@ -9,28 +9,41 @@ extension ProjectCanvasView {
   var newNodeForm: some View {
     VStack(spacing: 12) {
       Text("New Loop Node").font(.headline)
-      Form {
-        // Loop type is chosen first and determines the rest of the form, mirroring the
-        // taxonomy (docs/06-ux-terminals.md#node-configuration-panel). `.proactive` is
-        // absent because a composite's sub-graph editor doesn't exist yet — offering it
-        // would be a picker entry that can't produce a node.
-        Picker("Type", selection: $store.draftLoopType) {
-          Text("Turn-based").tag(LoopType.turnBased)
-          Text("Goal-based").tag(LoopType.goalBased)
-          Text("Time-based").tag(LoopType.timeBased)
-          Text("Proactive").tag(LoopType.proactive)
-        }
-        .pickerStyle(.segmented)
 
+      // Loop type is chosen first and determines the rest of the form, mirroring the
+      // taxonomy (docs/06-ux-terminals.md#node-configuration-panel).
+      //
+      // Outside the `Form` and with its label hidden on purpose. Inside, macOS gives a
+      // segmented control the content column only, and four segments don't fit what's
+      // left after the label column — the row overflowed the sheet and got clipped at
+      // both edges. Out here it spans the full width and reads as what it already
+      // behaves like: the dialog's mode switch, not one field among several.
+      Picker("Type", selection: $store.draftLoopType) {
+        Text("Turn-based").tag(LoopType.turnBased)
+        Text("Goal-based").tag(LoopType.goalBased)
+        Text("Time-based").tag(LoopType.timeBased)
+        Text("Proactive").tag(LoopType.proactive)
+      }
+      .pickerStyle(.segmented)
+      .labelsHidden()
+
+      Form {
         TextField("Title", text: $store.draftTitle)
 
         switch store.draftLoopType {
         case .turnBased:
           TextField("Check", text: $store.draftCheck)
         case .goalBased:
-          TextField("Goal — what does done look like?", text: $store.draftGoal)
-          TextField("Stop condition (optional shell command)", text: $store.draftPredicate)
-            .font(.system(.body, design: .monospaced))
+          // Short labels with the explanation in `prompt:`. In a macOS `Form` a
+          // `TextField`'s first argument is the *label*, sitting in a column sized to
+          // the widest one — so a sentence-long label doesn't read as placeholder text,
+          // it drags the whole column past the sheet's edge.
+          TextField("Goal", text: $store.draftGoal, prompt: Text("what does done look like?"))
+          TextField(
+            "Stop when", text: $store.draftPredicate,
+            prompt: Text("shell command exits 0 — optional")
+          )
+          .font(.system(.body, design: .monospaced))
           Text(
             store.draftPredicate.isEmpty
               ? "Without a command, the loop resolves when its session finishes."
@@ -42,7 +55,9 @@ extension ProjectCanvasView {
           // No interval field: the cadence goes in the prompt itself, as a `/loop` or
           // `/schedule` directive the session runs on its own (see
           // `LoopNode.triggerPrompt`). The placeholder is the whole documentation.
-          TextField("/loop 1h Check for new reports", text: $store.draftPrompt)
+          TextField(
+            "Prompt", text: $store.draftPrompt,
+            prompt: Text("/loop 1h Check for new reports"))
         case .proactive:
           // No fields: a composite is built by editing its sub-graph after it exists.
           // Saying so beats an empty section that looks like something failed to load.
@@ -68,12 +83,19 @@ extension ProjectCanvasView {
         }
 
         if store.draftWorktree == .newBranch {
-          TextField("branch name", text: $store.draftBranch)
+          TextField("Branch", text: $store.draftBranch, prompt: Text("branch name"))
             .font(.system(.body, design: .monospaced))
         }
 
         BackendPicker(selection: $store.draftBackend, loopType: store.draftLoopType)
       }
+      // `.columns` rather than `.automatic` so the label column is a decision rather
+      // than something that changes shape with the presentation context, and
+      // `fixedSize` vertically because a `Form` is otherwise greedy — that greed was
+      // the empty band between the type picker and the first field.
+      .formStyle(.columns)
+      .fixedSize(horizontal: false, vertical: true)
+
       HStack {
         Button("Cancel") { store.send(.cancelNewNodeForm) }
         Spacer()
@@ -85,6 +107,9 @@ extension ProjectCanvasView {
       }
     }
     .padding(24)
-    .frame(width: 360)
+    // Wide enough for four segments across the top and the widest label column any
+    // branch of the switch produces. The old 360 fit neither, and a `Form` that doesn't
+    // fit its frame doesn't shrink — it overflows and gets clipped at both edges.
+    .frame(width: 460)
   }
 }
