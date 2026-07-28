@@ -11,7 +11,6 @@ struct LoopWorkspaceView: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      folderHeader
       // No divider under the strip: its own shadow line is that edge now, and stacking a
       // system `Divider` on top of it draws the seam twice.
       tabBar
@@ -33,24 +32,38 @@ struct LoopWorkspaceView: View {
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
-    // Up into the titlebar band. With `.windowStyle(.hiddenTitleBar)` the window has no
-    // titlebar left to draw, but SwiftUI still insets the detail pane below where one
-    // would have been — which left the tab strip sitting under an empty row. Claiming
-    // that inset puts the tabs at the very top of the window, level with the traffic
-    // lights, the way a terminal app's tab strip sits.
-    .ignoresSafeArea(.container, edges: .top)
+    // The folder header goes in the toolbar, not in the `VStack` above, and the pane
+    // does *not* claim the titlebar inset. Both were tried: `.ignoresSafeArea(.top)`
+    // does slide content up into the band, but whatever lands there is drawn under the
+    // window's titlebar layer and is simply never seen — a plain red rectangle put
+    // there is as invisible as this header was. A toolbar item is the supported way
+    // into that band, and it puts the folder name level with the window controls while
+    // the tab strip keeps the row below to itself.
+    .toolbar { folderToolbar }
   }
 
-  /// Which project's terminal this is. Sized to the window-control row it shares — the
-  /// workspace draws into the titlebar band (see `body`), so this sits level with the
-  /// traffic lights rather than adding a band of its own.
-  private var folderHeader: some View {
-    HStack {
-      ProjectHeader(name: store.projectName)
-      Spacer(minLength: 0)
+  /// The folder name, at the leading edge of the titlebar band.
+  ///
+  /// `.navigation` rather than `.principal` so it sits left, next to the sidebar's own
+  /// controls, instead of floating in the middle of the window.
+  ///
+  /// macOS 26 gives every toolbar item a glass capsule behind it, which around a plain
+  /// icon-and-name reads as a button you can press — it isn't one. `sharedBackground
+  /// Visibility(.hidden)` takes the capsule away and leaves the label; it doesn't exist
+  /// before macOS 26, and the deployment target is 15, hence the branch. On 15 the item
+  /// simply renders without a capsule anyway.
+  @ToolbarContentBuilder
+  private var folderToolbar: some ToolbarContent {
+    if #available(macOS 26.0, *) {
+      ToolbarItem(placement: .navigation) {
+        ProjectHeader(name: store.projectName)
+      }
+      .sharedBackgroundVisibility(.hidden)
+    } else {
+      ToolbarItem(placement: .navigation) {
+        ProjectHeader(name: store.projectName)
+      }
     }
-    .padding(.horizontal, 10)
-    .frame(height: 30)
   }
 
   /// The tab strip is the workspace's only chrome. There used to be a header row above
