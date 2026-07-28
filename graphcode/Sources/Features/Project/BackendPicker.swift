@@ -41,6 +41,6 @@ struct BackendPicker: View {
   private var unsupportedReason: String {
     selection.isSpiked
       ? "\(selection.displayName) can't host a \(loopType.rawValue) loop."
-      : "\(selection.displayName) isn't wired up yet — graphcode can't launch it."
+      : "\(selection.displayName) isn't wired up yet — GraphCode can't launch it."
   }
 }

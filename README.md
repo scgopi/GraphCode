@@ -1,4 +1,4 @@
-# graphcode
+# GraphCode
 
 A macOS app for running **graphs of agentic loops**. Each node is a unit of work running
 inside a real CLI coding-agent session (Claude Code today); each edge is a hand-off,
@@ -20,7 +20,7 @@ Four kinds of loop, differing in what you hand off:
 
 Two design choices are worth knowing up front, because they explain most of the rest:
 
-- **graphcode schedules nothing.** A time-based loop's recurrence lives *inside* its
+- **GraphCode schedules nothing.** A time-based loop's recurrence lives *inside* its
   session, written into the prompt with the agent's own `/loop` or `/schedule` skill. The
   daemon only makes sure the session is alive. That's what keeps a running loop something
   you can attach to and correct, rather than a job that already finished somewhere.
@@ -48,8 +48,8 @@ Requires **Apple Silicon** (arm64) macOS. Claude Code must be on your `PATH`.
 
 ### From a release
 
-Download the `.dmg` from [Releases](https://github.com/scgopi/graphcode/releases), open it,
-and drag **graphcode** to Applications. That's the whole install.
+Download the `.dmg` from [Releases](https://github.com/scgopi/GraphCode/releases), open it,
+and drag **GraphCode** to Applications. That's the whole install.
 
 The app carries `graphcoded`, `graphcode` (the CLI), and `zmx` inside it, and puts them in
 `~/.graphcode/bin` on first launch, along with the launchd agent that keeps the daemon
@@ -61,7 +61,7 @@ is damaged."* Either fetch the disk image with `curl`, which sets no quarantine:
 
 ```sh
 curl -L -o graphcode.dmg \
-  https://github.com/scgopi/graphcode/releases/latest/download/graphcode-macos-arm64.dmg
+  https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg
 ```
 
 or clear the flag after dragging it across:
@@ -70,7 +70,7 @@ or clear the flag after dragging it across:
 xattr -dr com.apple.quarantine /Applications/graphcode.app
 ```
 
-**Claude Code must already be on your `PATH`** — graphcode launches it, it doesn't bundle
+**Claude Code must already be on your `PATH`** — GraphCode launches it, it doesn't bundle
 it.
 
 ### From source
@@ -134,5 +134,5 @@ Design docs live in `docs/` and are kept local (gitignored) for now.
 ## Third-party
 
 [Ghostty](https://ghostty.org) and [zmx](https://zmx.sh) are independent open-source
-projects, vendored as submodules under `ThirdParty/` and used as dependencies — graphcode's
+projects, vendored as submodules under `ThirdParty/` and used as dependencies — GraphCode's
 own integration of each, not code taken from any other tool.

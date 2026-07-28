@@ -115,7 +115,7 @@ struct AppSidebarView: View {
   @ViewBuilder
   private func projectMenu(for project: ProjectFeature.State) -> some View {
     Button("Close") { store.send(.projectCloseTapped(project.id)) }
-    Button("Remove from Graphcode") { store.send(.projectRemoveTapped(project.id)) }
+    Button("Remove from GraphCode") { store.send(.projectRemoveTapped(project.id)) }
     Divider()
     Button("Delete Loops…", role: .destructive) { projectPendingLoopDeletion = project }
   }

@@ -39,7 +39,14 @@ let project = Project(
             product: .app,
             bundleId: "\(bundleIdPrefix).app",
             deploymentTargets: .macOS("15.0"),
-            infoPlist: .extendingDefault(with: ["CFBundleIconName": "AppIcon"]),
+            infoPlist: .extendingDefault(with: [
+                // The name a human sees — menu bar, Finder, Dock, About. Distinct from
+                // the bundle's filename and from `graphcode` the CLI, which stay lower
+                // case because they are a path and a command someone types.
+                "CFBundleName": "GraphCode",
+                "CFBundleDisplayName": "GraphCode",
+                "CFBundleIconName": "AppIcon",
+            ]),
             resources: [
                 "graphcode/Resources/**"
             ],
