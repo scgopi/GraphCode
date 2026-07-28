@@ -46,6 +46,11 @@ let project = Project(
                 "CFBundleName": "GraphCode",
                 "CFBundleDisplayName": "GraphCode",
                 "CFBundleIconName": "AppIcon",
+                // The app reported Tuist's default 1.0 while every release was tagged
+                // v0.0.x, so About said one thing and the download page another. Keep
+                // this in step with the git tag when cutting a release.
+                "CFBundleShortVersionString": "0.0.5",
+                "CFBundleVersion": "5",
             ]),
             resources: [
                 "graphcode/Resources/**"
