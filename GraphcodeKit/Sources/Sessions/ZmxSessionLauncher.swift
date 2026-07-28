@@ -58,9 +58,21 @@ public enum ZmxSessionLauncher {
   /// Arguments ride in after the script as `$@` rather than being interpolated into it.
   /// zsh hands them to the command untouched, so a goal or prompt containing quotes, `;`,
   /// or `$(…)` is one argument and cannot become shell syntax.
-  static func loginShellInvocation(of command: String, arguments: [String]) -> [String] {
+  static func loginShellInvocation(
+    of command: String, arguments: [String], environment: [String: String] = [:]
+  ) -> [String] {
+    // `env K=V …` rather than exporting: it scopes the variables to this one process, and
+    // keeps the script a single `exec` so the shell doesn't linger as a parent. Values are
+    // double-quoted because a project path can contain spaces; the whole script is one
+    // argument, which `zmx` shell-quotes before typing it.
+    let exports =
+      environment.keys.sorted()
+      .map { key in "\(key)=\"\(environment[key] ?? "")\" " }
+      .joined()
+    let prefix = exports.isEmpty ? "" : "env \(exports)"
     // `$0` has to be something, and it shows up in error messages — name it after us.
-    ["/bin/zsh", "-i", "-l", "-c", "exec \(command) \"$@\"", "graphcode"] + arguments
+    return ["/bin/zsh", "-i", "-l", "-c", "exec \(prefix)\(command) \"$@\"", "graphcode"]
+      + arguments
   }
 
   /// `zmx get <name> <key>` reads a per-session label. This is the channel a backend's
@@ -175,7 +187,7 @@ public enum ZmxSessionLauncher {
   /// `zmx` shell-quotes every argument before typing the command into the session's shell
   /// (`util.shellQuote`, a standard shlex-style single-quote escape), so it reaches
   /// `claude` as exactly one word no matter what quotes, `$(…)`, or `;` it contains.
-  static func arguments(forNode node: LoopNode) -> [String]? {
+  static func arguments(forNode node: LoopNode, projectPath: String? = nil) -> [String]? {
     guard let prompt = node.sessionPrompt, !prompt.isEmpty else { return nil }
     // A backend graphcode can't launch has no argv. `canHost` already refuses to create
     // such a node, so this is the belt to that braces — but silently starting the wrong
@@ -185,20 +197,78 @@ public enum ZmxSessionLauncher {
     // types with `\r`, and the PTY's line discipline would accept the line early at an
     // embedded one, truncating the prompt. Prompts come from a single-line text field, so
     // this only ever fires on a paste.
-    let singleLine =
-      prompt
+    let singleLine = Self.flattened(prompt)
+    // What the session is told about the graph it belongs to, so a loop can fan work out
+    // into more loops when the work genuinely calls for it (`SessionBriefing`). Written to
+    // a file and passed by *path*: the prose itself is far longer than a typed command
+    // line can carry — see `SessionBriefing` for the failure that taught us so.
+    // Read per launch, not cached: changing a setting in the app then applies to the very
+    // next loop the daemon starts, with nothing to restart.
+    let settings = GraphcodeSettingsStore.load()
+    let briefingFile =
+      settings.briefsSessionsAboutTheGraph
+      ? SessionBriefing.write(projectPath: projectPath) : nil
+    // Both the executable and the shape of its arguments come from the node's backend —
+    // `claude` takes its prompt positionally and its briefing via `--append-system-prompt`,
+    // `copilot` takes both together as `--interactive <prompt>`. Model tier is applied
+    // here rather than baked into the prompt: it's the orchestrator's scheduling decision
+    // (docs/05-orchestrator.md#responsibilities item 7).
+    let arguments = node.backend.launchArguments(
+      prompt: singleLine, tier: node.effectiveModelTier, briefingFile: briefingFile,
+      settings: settings)
+    let command =
+      [
+        "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
+      ]
+      + Self.loginShellInvocation(
+        of: executable, arguments: arguments,
+        environment: Self.environment(forBackend: node.backend, briefingFile: briefingFile))
+
+    // `zmx` types this command into the session's shell, and a tty in canonical mode
+    // discards everything past `MAX_CANON` (1024 bytes on macOS). Overrunning it does not
+    // fail loudly: the tail is dropped mid-argument and the shell waits forever at a
+    // continuation prompt for a quote that was eaten. Dropping the briefing is the one
+    // safe thing to give up — the prompt is the human's, and a loop that launches without
+    // its briefing merely can't fan out, where a truncated one does nothing at all.
+    guard Self.fitsInATypedCommandLine(command) else {
+      let unbriefed = node.backend.launchArguments(
+        prompt: singleLine, tier: node.effectiveModelTier, settings: settings)
+      return [
+        "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
+      ] + Self.loginShellInvocation(of: executable, arguments: unbriefed)
+    }
+    return command
+  }
+
+  /// Environment a session needs beyond what its shell provides. Only Copilot uses one:
+  /// it discovers custom instructions by searching directories, and this is how it is told
+  /// about the one holding this project's briefing (`SessionBriefing`).
+  static func environment(forBackend backend: CLISessionBackendKind, briefingFile: URL?)
+    -> [String: String]
+  {
+    guard backend == .copilotCLI, let briefingFile else { return [:] }
+    return [
+      SessionBriefing.copilotInstructionsDirectoryVariable:
+        briefingFile.deletingLastPathComponent().path
+    ]
+  }
+
+  /// Whether the assembled command survives being typed into a terminal. Budgeted well
+  /// under `MAX_CANON` because `zmx` shell-quotes every argument before typing it, which
+  /// only ever makes the line longer than what's measured here.
+  static func fitsInATypedCommandLine(_ command: [String]) -> Bool {
+    command.reduce(0) { $0 + $1.utf8.count + 3 } <= maximumTypedCommandBytes
+  }
+
+  /// 1024 is the kernel's limit; this leaves room for quoting and for `zmx`'s own framing.
+  static let maximumTypedCommandBytes = 800
+
+  /// Newlines are the one thing quoting can't save us from — see `arguments(forNode:)`.
+  private static func flattened(_ text: String) -> String {
+    text
       .replacingOccurrences(of: "\r\n", with: " ")
       .replacingOccurrences(of: "\r", with: " ")
       .replacingOccurrences(of: "\n", with: " ")
-    // Both the executable and the shape of its arguments come from the node's backend —
-    // `claude` takes its prompt positionally, `copilot` as `--interactive <prompt>`. Model
-    // tier is applied here rather than baked into the prompt: it's the orchestrator's
-    // scheduling decision (docs/05-orchestrator.md#responsibilities item 7).
-    let arguments = node.backend.launchArguments(
-      prompt: singleLine, tier: node.effectiveModelTier)
-    return [
-      "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
-    ] + Self.loginShellInvocation(of: executable, arguments: arguments)
   }
 
   /// Where an unattended session should open, mirroring what the app already does for a
@@ -222,7 +292,7 @@ public enum ZmxSessionLauncher {
 
   static func start(_ node: LoopNode, projectPath: String? = nil) async {
     guard ZmxLocator.isInstalled else { return }
-    guard let arguments = arguments(forNode: node) else { return }
+    guard let arguments = arguments(forNode: node, projectPath: projectPath) else { return }
 
     do {
       // Create only. A session that already exists is left strictly alone — it's either

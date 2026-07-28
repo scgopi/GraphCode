@@ -1,0 +1,170 @@
+import Foundation
+
+/// What a session is told about the graph it's running inside.
+///
+/// Until this existed, a loop's session was an ordinary agent in a folder with no idea it
+/// was a node in anything — so "fan this out into one loop per issue" was impossible to
+/// ask for, however the prompt was worded. The `graphcode` CLI could always create nodes;
+/// nothing ever told the agent that.
+///
+/// **The briefing goes in a file, and only its path is passed on the command line.** The
+/// first cut passed the prose itself as an argument, and it did not survive contact with
+/// a terminal: `zmx` starts a session by *typing* the launch command into a shell, and a
+/// tty in canonical mode drops everything past `MAX_CANON` — 1024 bytes on macOS
+/// (`sys/syslimits.h`). A briefing of a thousand-odd characters pushed the line past that
+/// limit, the tail was silently discarded mid-quote, and the shell sat forever at a `>`
+/// continuation prompt waiting for a closing `'` that had been eaten. A path is ~60 bytes
+/// and cannot do that.
+///
+/// It also means the text is free to be as long and as readable as it needs to be: a file
+/// has no line-length limit and no quoting hazard.
+public enum SessionBriefing {
+  /// Where a drag-to-Applications install puts the CLI. Named explicitly because the
+  /// daemon's launchd `PATH` is not a human's: a session that inherits it may not find
+  /// `graphcode` by name, and "command not found" would read to the agent as "this
+  /// machine has no graphcode" rather than "try the absolute path".
+  public static let installedCLIPath = "~/.graphcode/bin/graphcode"
+
+  /// Written briefings live here, one directory per project.
+  public static var directory: URL {
+    SupportDirectory.url.appendingPathComponent("briefings", isDirectory: true)
+  }
+
+  /// A project's own briefing directory. A directory rather than a bare file because
+  /// Copilot discovers instructions by *searching a directory*, so the briefing has to sit
+  /// inside one that contains nothing else.
+  public static func directory(forProjectPath projectPath: String) -> URL {
+    directory.appendingPathComponent(slug(for: projectPath), isDirectory: true)
+  }
+
+  /// The filename Copilot looks for when it searches a directory, and the file Claude Code
+  /// is handed by path. One file, two delivery mechanisms, no duplication.
+  public static let fileName = "AGENTS.md"
+
+  /// The briefing for a node in `projectPath`'s graph, or `nil` when there's no path to
+  /// tell it about — every command the briefing describes takes one, so a briefing
+  /// without it would describe commands the session can't run.
+  public static func text(projectPath: String?) -> String? {
+    guard let projectPath, !projectPath.isEmpty else { return nil }
+    return """
+      # You are a loop in a graphcode graph
+
+      This session is one node in a graph of agentic coding sessions for the project at
+      \(projectPath). A human can open, steer, and stop you from graphcode's sidebar.
+
+      ## Fanning work out into more loops
+
+      If the work you have been given genuinely splits into independent pieces that should
+      each run as their own session — one per GitHub issue, one per failing test, one per
+      package to migrate — create a loop for each instead of working through them yourself
+      in sequence:
+
+      ```sh
+      graphcode node create \(projectPath) --title <title> --type goal --goal <what done looks like>
+      ```
+
+      ## Choosing the loop type
+
+      Choose by **what decides the loop is finished**. This matters more than it looks:
+      two of the three types start running the moment you create them, and one does not.
+
+      - `--type goal --goal <what done looks like>` — **the default, and what you almost
+        always want.** The loop starts immediately and resolves when its own session
+        finishes the goal. Add `--predicate <shell command>` only when a command can
+        actually decide it (exit 0 means met, e.g. a test run); without one, finishing the
+        work is what resolves it.
+      - `--type time --prompt <prompt carrying its own cadence>` — for work that never
+        finishes because it repeats: watching, polling, monitoring, anything phrased as
+        "every hour", "keep checking", "each morning". Also starts immediately.
+        **The cadence goes inside the prompt**, as a directive the session runs on itself
+        (`/loop 1h Check for new reports`, `/schedule …`) — graphcode holds no timer of its
+        own, so a time-based loop whose prompt carries no cadence just runs once and stops.
+        Do not reach for this for one-off work: "check the build" is a goal, "check the
+        build every hour" is time-based.
+      - `--type turn --check <what a human verifies>` — for work a **human** must review
+        each turn before it continues. **A turn-based loop does not start on its own**:
+        nothing runs until a person opens its terminal. Create one only when a human really
+        is the thing standing between turns; otherwise you will have made a loop that sits
+        in the sidebar doing nothing.
+
+      Worked examples, since the wording of the request is the whole signal:
+
+      | What you were asked | Type | Why |
+      |---|---|---|
+      | "spin up five loops and have each say hello" | `goal` ×5 | Nobody needs to approve a greeting, and it ends when it has been said. Turn-based ones would never even run. |
+      | "fix each of these five issues" | `goal` ×5, `--predicate` if a test proves it | The work decides when it is done. |
+      | "fix these five, I want to review each fix" | `turn` ×5 | You have been told a human stands between turns. |
+      | "watch for new issues every hour and triage them" | `time` ×1 | It recurs; the cadence goes in the prompt. One watcher that fans out beats five identical watchers. |
+
+      `graphcode status \(projectPath)` lists the loops that already exist. Check it before
+      creating any, so you extend the graph rather than duplicating it.
+
+      If `graphcode` is not on your `PATH`, it is at `\(installedCLIPath)`.
+
+      Give each loop a title that says what it is for and a goal that says what done looks
+      like — they are what a human sees in the sidebar.
+
+      ## When not to
+
+      Do not create loops for ordinary subtasks you can simply carry out, for steps that
+      must happen in order, or to parallelise something small. A graph full of loops nobody
+      asked for is worse than one loop that did the work.
+
+      Never create a loop whose job is to create more loops.
+      """
+  }
+
+  /// The env var Copilot CLI searches for custom instructions, beyond the git root and
+  /// working directory (`copilot help environment`).
+  ///
+  /// This is how Copilot gets the briefing *properly*. The first cut prepended "read this
+  /// file" to the prompt, which put housekeeping in front of the human's actual request,
+  /// left it in the session's scrollback, and relied on the agent choosing to follow it.
+  /// Pointing this at a directory graphcode owns makes the briefing a real custom
+  /// instruction — loaded before the session starts, exactly like Claude Code's
+  /// `--append-system-prompt-file` — without writing an `AGENTS.md` into someone's
+  /// repository, which is not graphcode's to touch.
+  public static let copilotInstructionsDirectoryVariable = "COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
+
+  /// Writes the briefing for `projectPath` and returns where it landed, or `nil` if there
+  /// is nothing to write or writing failed.
+  ///
+  /// Rewritten on every launch rather than cached: it costs one small write per session
+  /// start, and it means a briefing never goes stale against a graphcode that has been
+  /// upgraded underneath it.
+  public static func write(projectPath: String?) -> URL? {
+    guard let projectPath, let text = text(projectPath: projectPath) else { return nil }
+    let directory = directory(forProjectPath: projectPath)
+    let url = directory.appendingPathComponent(fileName)
+    do {
+      try FileManager.default.createDirectory(
+        at: directory, withIntermediateDirectories: true)
+      try text.write(to: url, atomically: true, encoding: .utf8)
+      return url
+    } catch {
+      // A session with no briefing is the pre-briefing behaviour, which works. Failing the
+      // launch over this would trade a missing capability for a missing loop.
+      return nil
+    }
+  }
+
+  /// A project path flattened into one filename-safe component. Not a hash: the point of
+  /// keeping it readable is that someone looking in `~/.graphcode/briefings` can tell
+  /// which project a file belongs to.
+  static func slug(for projectPath: String) -> String {
+    let flattened = projectPath.map { character -> Character in
+      character.isLetter || character.isNumber || character == "-" ? character : "-"
+    }
+    return String(flattened).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+  }
+
+  /// Whether a string is safe to pass through `zmx`'s type-it-into-a-shell launch — see
+  /// this type's doc comment for both hazards.
+  public static func isSafeToType(_ text: String) -> Bool {
+    !text.contains("\n") && !text.contains("\r") && text.utf8.count <= safeArgumentBudget
+  }
+
+  /// How much of `MAX_CANON`'s 1024 bytes any one argument may claim. The rest is for the
+  /// shell wrapper, the session name, the model flag, and the human's own prompt.
+  public static let safeArgumentBudget = 256
+}

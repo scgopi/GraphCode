@@ -171,7 +171,8 @@ struct ProjectFeature {
         state.draftPrompt = ""
         state.draftGoal = ""
         state.draftPredicate = ""
-        state.draftBackend = .claudeCode
+        // The human's default, not a hardcoded one (Settings → Sessions).
+        state.draftBackend = GraphcodeSettingsStore.load().defaultBackend
         state.draftWorktree = .none
         state.draftBranch = ""
         state.showingNewNodeForm = true

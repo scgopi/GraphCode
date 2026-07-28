@@ -36,8 +36,14 @@ struct ZmxSessionLauncherTests {
 
     // `--model haiku` is the orchestrator's tier routing, not a hardcoded choice: a
     // time-based node defaults to `.fast` because polling is routine work
-    // (docs/08-quality-and-token-budgets.md).
-    #expect(Array(arguments.suffix(3)) == ["--model", "haiku", "/loop 1h Check for new reports"])
+    // (docs/08-quality-and-token-budgets.md). Asserted by position rather than as a
+    // suffix: the permission mode now sits between the model flag and the prompt, and
+    // pinning the whole tail made this fail for a reason that had nothing to do with it.
+    let model = arguments.firstIndex(of: "--model")
+    #expect(model != nil)
+    #expect(arguments[(model ?? 0) + 1] == "haiku")
+    // The prompt stays last — `claude` takes it positionally.
+    #expect(arguments.last == "/loop 1h Check for new reports")
   }
 
   @Test

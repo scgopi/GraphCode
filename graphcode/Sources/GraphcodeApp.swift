@@ -35,5 +35,11 @@ struct GraphcodeApp: App {
     // the sidebar collapsed AppKit still reserves room for the window controls rather
     // than letting them land on content.
     .windowStyle(.hiddenTitleBar)
+
+    // ⌘, — the native home for the handful of things that were hardcoded until someone
+    // reasonably wanted them different. See `SettingsView`.
+    Settings {
+      SettingsView()
+    }
   }
 }

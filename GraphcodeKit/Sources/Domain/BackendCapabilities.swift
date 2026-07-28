@@ -147,6 +147,17 @@ extension CLISessionBackendKind {
   }
 
   /// Backends that can host a given loop type, for the node form's picker.
+  /// The backends worth offering as a *default* — the ones graphcode can actually launch.
+  ///
+  /// Narrower than `allCases` on purpose. `BackendPicker` still lists everything and
+  /// greys out what can't host the chosen loop type, because there the question is "why
+  /// can't I use Codex for this?" and a missing row wouldn't answer it. A settings picker
+  /// asks a different question — "what should new loops use?" — and an option that would
+  /// produce loops that never run is not an answer to it.
+  public static var offerableAsDefault: [CLISessionBackendKind] {
+    allCases.filter(\.isSpiked)
+  }
+
   public static func hosting(_ loopType: LoopType) -> [CLISessionBackendKind] {
     allCases.filter { $0.canHost(loopType) }
   }
