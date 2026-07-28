@@ -11,10 +11,10 @@ struct LoopWorkspaceView: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      header
-      Divider()
+      folderHeader
+      // No divider under the strip: its own shadow line is that edge now, and stacking a
+      // system `Divider` on top of it draws the seam twice.
       tabBar
-      Divider()
       // Every tab's surface(s) stay mounted, all the time — only the selected tab's
       // is visible/hittable. Rendering just the selected tab (as this used to) tears
       // the terminal down and rebuilds it on every switch: `GhosttyTerminalView`
@@ -33,17 +33,31 @@ struct LoopWorkspaceView: View {
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
+    // Up into the titlebar band. With `.windowStyle(.hiddenTitleBar)` the window has no
+    // titlebar left to draw, but SwiftUI still insets the detail pane below where one
+    // would have been — which left the tab strip sitting under an empty row. Claiming
+    // that inset puts the tabs at the very top of the window, level with the traffic
+    // lights, the way a terminal app's tab strip sits.
+    .ignoresSafeArea(.container, edges: .top)
   }
 
-  private var header: some View {
+  /// Which project's terminal this is. Sized to the window-control row it shares — the
+  /// workspace draws into the titlebar band (see `body`), so this sits level with the
+  /// traffic lights rather than adding a band of its own.
+  private var folderHeader: some View {
     HStack {
-      Text(store.node.title).font(.headline)
-      Spacer()
-      PresenceBadge(state: store.node.state)
+      ProjectHeader(name: store.projectName)
+      Spacer(minLength: 0)
     }
-    .padding(8)
+    .padding(.horizontal, 10)
+    .frame(height: 30)
   }
 
+  /// The tab strip is the workspace's only chrome. There used to be a header row above
+  /// it carrying the loop's title and a state badge, and neither survived: the title is
+  /// already the selected row in the sidebar, and the state is already the colored dot
+  /// beside it. On a screen whose entire job is showing terminals, a full-width strip
+  /// repeating what the sidebar says was the most expensive thing on it.
   private var tabBar: some View {
     HStack(spacing: 6) {
       HStack(spacing: 4) {
@@ -73,7 +87,9 @@ struct LoopWorkspaceView: View {
     }
     .padding(.horizontal, 8)
     .padding(.vertical, 6)
-    .background(Theme.tabBarBackground)
+    .background(Theme.tabBarGloss)
+    .overlay(alignment: .top) { Rectangle().fill(Theme.tabBarHighlight).frame(height: 1) }
+    .overlay(alignment: .bottom) { Rectangle().fill(Theme.tabBarShadowLine).frame(height: 1) }
     .background(workspaceKeyboardShortcuts)
   }
 
@@ -128,15 +144,7 @@ struct LoopWorkspaceView: View {
   private func tabBarIconButton(
     _ systemImage: String, help: String, action: @escaping () -> Void
   ) -> some View {
-    Button(action: action) {
-      Image(systemName: systemImage)
-        .font(.system(size: 11, weight: .medium))
-        .foregroundStyle(.secondary)
-        .frame(width: 22, height: 22)
-        .contentShape(Rectangle())
-    }
-    .buttonStyle(.plain)
-    .help(help)
+    GlossyIconButton(systemImage: systemImage, help: help, action: action)
   }
 
   @ViewBuilder
@@ -200,33 +208,6 @@ struct LoopWorkspaceView: View {
   }
 }
 
-private struct PresenceBadge: View {
-  let state: LoopState
-
-  var body: some View {
-    Text(label)
-      .font(.caption)
-      .padding(.horizontal, 8)
-      .padding(.vertical, 4)
-      .background(state.presenceColor.opacity(0.2))
-      .foregroundStyle(state.presenceColor)
-      .clipShape(Capsule())
-  }
-
-  private var label: String {
-    switch state {
-    case .idle: "Idle"
-    case .running: "Running"
-    case .awaitingInput: "Awaiting Input"
-    case .blocked: "Blocked"
-    case .succeeded: "Succeeded"
-    case .failed: "Failed"
-    case .stalled: "Stalled"
-    case .stopped: "Stopped"
-    }
-  }
-}
-
 /// One tab pill — fills the space its siblings leave it (matching a terminal app's
 /// tab strip, not a browser's hug-the-title one), shows its ⌘-number by default and
 /// swaps that for a close button on hover, and only the selected pill gets a lighter
@@ -252,8 +233,12 @@ private struct TabPillView: View {
     }
     .padding(.horizontal, 10)
     .padding(.vertical, 5)
-    .frame(minWidth: 92, maxWidth: 220)
-    .frame(maxWidth: .infinity)
+    // One frame, not two. It used to cap the *content* at 220 and then stretch the pill
+    // around it, which left the title and its ⌘-number floating in the middle of a wide
+    // pill with dead space either side — and put the close button nowhere near the edge
+    // you reach for. Stretching the content itself is what pins the trailing glyph to
+    // the pill's own right edge.
+    .frame(minWidth: 92, maxWidth: .infinity)
     .background(
       RoundedRectangle(cornerRadius: 6)
         .fill(isSelected ? Theme.tabSelectedBackground : Color.clear)

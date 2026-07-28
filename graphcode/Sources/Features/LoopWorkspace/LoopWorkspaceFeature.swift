@@ -22,6 +22,10 @@ struct LoopWorkspaceFeature {
     // in — a loop's shells shouldn't land in the app's own launch directory (usually
     // the user's home) just because this node has no worktree of its own yet.
     var projectPath: String
+    /// What the folder header calls this workspace's project. Carried rather than
+    /// derived from `projectPath`'s last component so it matches the sidebar exactly,
+    /// including the global graph — whose path is a reserved URL, not a folder.
+    var projectName: String
 
     var id: UUID { node.id }
   }

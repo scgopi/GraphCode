@@ -27,7 +27,8 @@ struct LoopWorkspaceFeatureTests {
   private func makeState() -> LoopWorkspaceFeature.State {
     let node = LoopNode(title: "Research", checkDescription: "Sound?")
     return LoopWorkspaceFeature.State(
-      node: node, layout: .defaultLayout(forNode: node.id), projectPath: "/tmp/project-a")
+      node: node, layout: .defaultLayout(forNode: node.id), projectPath: "/tmp/project-a",
+      projectName: "project-a")
   }
 
   @Test

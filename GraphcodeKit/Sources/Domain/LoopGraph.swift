@@ -93,6 +93,53 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     return copy
   }
 
+  // MARK: - Start anchors
+
+  /// The nodes that hang directly off the canvas's start marker — the graph's entry
+  /// points (see docs/06-ux-terminals.md#graph-canvas).
+  ///
+  /// A graph of loops is usually several unrelated chains rather than one tree, so an
+  /// un-anchored canvas reads as scattered cards with no beginning. Drawing a single
+  /// start marker and running a line to each entry point gives the whole thing one
+  /// origin to be read from, without inventing edges between loops that have nothing to
+  /// do with each other.
+  ///
+  /// Entry point means "nothing hands off to it". Every other node is already reachable
+  /// by walking edges backwards from one — with one exception: a component that is a
+  /// pure cycle has no such node at all, so it would float free. Those get their first
+  /// node anchored so the "everything descends from start" reading holds for every
+  /// shape a graph can take.
+  ///
+  /// Returned in `nodes` order, so the canvas's lines don't reshuffle between renders.
+  public var startAnchors: [UUID] {
+    let targeted = Set(edges.map(\.to))
+    let entries = nodes.map(\.id).filter { !targeted.contains($0) }
+
+    var anchored = Set(entries)
+    // Walk out from the entry points; whatever the walk never reaches is a cycle-only
+    // component, and the first of its nodes becomes that component's anchor.
+    var reached = anchored
+    var frontier = entries
+    while let current = frontier.popLast() {
+      for edge in edges where edge.from == current && !reached.contains(edge.to) {
+        reached.insert(edge.to)
+        frontier.append(edge.to)
+      }
+    }
+    for node in nodes where !reached.contains(node.id) {
+      anchored.insert(node.id)
+      var frontier = [node.id]
+      reached.insert(node.id)
+      while let current = frontier.popLast() {
+        for edge in edges where edge.from == current && !reached.contains(edge.to) {
+          reached.insert(edge.to)
+          frontier.append(edge.to)
+        }
+      }
+    }
+    return nodes.map(\.id).filter(anchored.contains)
+  }
+
   // MARK: - Coding
 
   private enum CodingKeys: String, CodingKey {

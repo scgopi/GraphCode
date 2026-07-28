@@ -227,7 +227,11 @@ struct AppFeature {
           node.state != .blocked
         else { return .none }
         let layout = terminalLayoutStore.load(forNode: nodeID) ?? .defaultLayout(forNode: nodeID)
-        state.openLoop = LoopWorkspaceFeature.State(node: node, layout: layout, projectPath: path)
+        state.openLoop = LoopWorkspaceFeature.State(
+          node: node,
+          layout: layout,
+          projectPath: path,
+          projectName: state.projects[id: path]?.graph.project.name ?? path)
         state.selectedProjectPath = path
         return .none
 

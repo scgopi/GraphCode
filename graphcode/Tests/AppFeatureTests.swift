@@ -200,7 +200,8 @@ struct AppFeatureTests {
     state.projects.append(
       ProjectFeature.State(graph: LoopGraph(project: Self.projectA, nodes: [node])))
     state.openLoop = LoopWorkspaceFeature.State(
-      node: node, layout: .defaultLayout(forNode: node.id), projectPath: Self.projectA.path)
+      node: node, layout: .defaultLayout(forNode: node.id), projectPath: Self.projectA.path,
+      projectName: Self.projectA.name)
 
     let store = TestStore(initialState: state) {
       AppFeature()
@@ -226,7 +227,8 @@ struct AppFeatureTests {
     state.projects.append(ProjectFeature.State(graph: LoopGraph(project: Self.projectB)))
     state.selectedProjectPath = Self.projectA.path
     state.openLoop = LoopWorkspaceFeature.State(
-      node: node, layout: .defaultLayout(forNode: node.id), projectPath: Self.projectA.path)
+      node: node, layout: .defaultLayout(forNode: node.id), projectPath: Self.projectA.path,
+      projectName: Self.projectA.name)
 
     let store = TestStore(initialState: state) {
       AppFeature()
@@ -247,7 +249,8 @@ struct AppFeatureTests {
       ProjectFeature.State(graph: LoopGraph(project: Self.projectA, nodes: [node])))
     state.selectedProjectPath = Self.projectA.path
     state.openLoop = LoopWorkspaceFeature.State(
-      node: node, layout: .defaultLayout(forNode: node.id), projectPath: Self.projectA.path)
+      node: node, layout: .defaultLayout(forNode: node.id), projectPath: Self.projectA.path,
+      projectName: Self.projectA.name)
 
     let sentCommands = SentCommandsBox()
     let store = TestStore(initialState: state) {

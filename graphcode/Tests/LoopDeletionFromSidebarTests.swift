@@ -88,7 +88,8 @@ struct LoopDeletionFromSidebarTests {
     var state = AppFeature.State(
       projects: [ProjectFeature.State(graph: Self.graph(nodes: [node]))])
     state.openLoop = LoopWorkspaceFeature.State(
-      node: node, layout: .defaultLayout(forNode: node.id), projectPath: Self.project.path)
+      node: node, layout: .defaultLayout(forNode: node.id), projectPath: Self.project.path,
+      projectName: Self.project.name)
     let store = TestStore(initialState: state) { AppFeature() }
     store.exhaustivity = .off
 
@@ -110,7 +111,8 @@ struct LoopDeletionFromSidebarTests {
     var state = AppFeature.State(
       projects: [ProjectFeature.State(graph: Self.graph(nodes: [node]))])
     state.openLoop = LoopWorkspaceFeature.State(
-      node: node, layout: .defaultLayout(forNode: node.id), projectPath: Self.project.path)
+      node: node, layout: .defaultLayout(forNode: node.id), projectPath: Self.project.path,
+      projectName: Self.project.name)
     // A second project that is *already* open. (A graph for a project the app has never
     // seen is a different case entirely — that's "project opened", which deliberately
     // switches away from whatever was showing.)
@@ -133,7 +135,8 @@ struct LoopDeletionFromSidebarTests {
     var state = AppFeature.State(
       projects: [ProjectFeature.State(graph: Self.graph(nodes: [node]))])
     state.openLoop = LoopWorkspaceFeature.State(
-      node: node, layout: .defaultLayout(forNode: node.id), projectPath: Self.project.path)
+      node: node, layout: .defaultLayout(forNode: node.id), projectPath: Self.project.path,
+      projectName: Self.project.name)
     let store = TestStore(initialState: state) { AppFeature() }
     store.exhaustivity = .off
 

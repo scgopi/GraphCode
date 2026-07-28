@@ -15,6 +15,10 @@ import SwiftUI
 /// content, so the button is naturally unavailable while a node's terminal is showing
 /// instead — no separate enablement logic needed.
 struct ProjectCanvasView: View {
+  /// One notebook square, in canvas points — a bit under half a node card's width, so a
+  /// card spans a couple of squares and the ruling reads as scale rather than texture.
+  private static let gridCellSize: CGFloat = 96
+
   @Bindable var store: StoreOf<ProjectFeature>
 
   @State private var canvasOffset: CGSize = .zero
@@ -34,6 +38,7 @@ struct ProjectCanvasView: View {
           .background(Color.red)
       }
       canvas
+        .overlay { emptyState }
     }
     .background(Theme.windowBackground)
     .toolbar {
@@ -44,6 +49,11 @@ struct ProjectCanvasView: View {
           Label("New Node", systemImage: "plus.circle")
         }
       }
+      // No folder header here on purpose. The canvas is only ever reached by picking a
+      // project in the sidebar, which leaves that project's row selected in view — and
+      // a second toolbar item would fuse into one pill with "New Node" anyway. The
+      // header belongs on a loop's workspace, where the terminal fills the pane and the
+      // project is no longer on screen; see `LoopWorkspaceView.folderHeader`.
     }
     .sheet(isPresented: $store.showingNewNodeForm) {
       newNodeForm
@@ -59,6 +69,7 @@ struct ProjectCanvasView: View {
   private var canvas: some View {
     GeometryReader { _ in
       ZStack {
+        startLayer
         edgesLayer
         nodesLayer
         dragPreview
@@ -70,7 +81,19 @@ struct ProjectCanvasView: View {
           width: canvasOffset.width + dragOffset.width,
           height: canvasOffset.height + dragOffset.height))
     }
-    .background(Theme.canvasBackground)
+    .background {
+      // Ruled like graph paper, and glued to the graph rather than to the window: the
+      // rules pan and zoom with the nodes, so dragging empty space reads as moving the
+      // sheet under you instead of nothing happening. See `NotebookGrid`.
+      NotebookGrid(
+        cellSize: Self.gridCellSize,
+        offset: CGSize(
+          width: canvasOffset.width + dragOffset.width,
+          height: canvasOffset.height + dragOffset.height),
+        scale: canvasScale
+      )
+      .background(Theme.canvasBackground)
+    }
     .contentShape(Rectangle())
     .gesture(
       DragGesture()
@@ -87,6 +110,18 @@ struct ProjectCanvasView: View {
     )
   }
 
+  /// Drawn as an overlay rather than as a branch on `canvas` so panning and zooming
+  /// stay live underneath: `CanvasEmptyState` fills no hit-testable shape, so drags on
+  /// the surrounding space still reach the canvas gesture.
+  @ViewBuilder
+  private var emptyState: some View {
+    if store.graph.nodes.isEmpty {
+      CanvasEmptyState(projectName: store.graph.project.name) {
+        store.send(.addNodeButtonTapped)
+      }
+    }
+  }
+
   private var nodesLayer: some View {
     ForEach(store.graph.nodes) { node in
       nodeCard(for: node)
@@ -94,28 +129,53 @@ struct ProjectCanvasView: View {
     }
   }
 
+  /// The graph's origin: one dot every entry point hangs off, so the canvas reads as a
+  /// connected graph with a beginning rather than as scattered cards.
+  ///
+  /// The tethers are deliberately quieter than any `EdgeLineView` — thinner, dimmer, no
+  /// kind or fired state. They are not edges: nothing travels along them and there is
+  /// nothing to right-click. Making them look like handoffs would be a lie about how
+  /// the graph runs. See `LoopGraph.startAnchors` for which nodes get one.
+  @ViewBuilder
+  private var startLayer: some View {
+    if let origin = startPosition {
+      ForEach(store.graph.startAnchors, id: \.self) { anchorID in
+        if let target = store.nodePositions[anchorID] {
+          Path { path in
+            path.move(to: origin)
+            path.addLine(to: target)
+          }
+          .stroke(Color.secondary.opacity(0.35), lineWidth: 1)
+        }
+      }
+      StartMarker().position(origin)
+    }
+  }
+
+  /// Left of the leftmost card and centred on the graph's vertical extent, so the
+  /// tethers fan out rather than doubling back over the cards. Derived from the live
+  /// positions instead of being a fixed point, so it stays put as the graph grows.
+  private var startPosition: CGPoint? {
+    let positions = store.graph.nodes.compactMap { store.nodePositions[$0.id] }
+    guard let leftmost = positions.map(\.x).min(),
+      let top = positions.map(\.y).min(),
+      let bottom = positions.map(\.y).max()
+    else { return nil }
+    return CGPoint(x: leftmost - 150, y: (top + bottom) / 2)
+  }
+
   private var edgesLayer: some View {
     ForEach(store.graph.edges) { edge in
       if let from = store.nodePositions[edge.from], let to = store.nodePositions[edge.to] {
         EdgeLineView(from: from, to: to, kind: edge.kind, fired: edge.fired)
           .contextMenu {
-            Text(edgeSummary(edge))
+            Text(edge.canvasSummary)
             Button("Delete Edge", role: .destructive) {
               store.send(.deleteEdgeTapped(edge.id))
             }
           }
       }
     }
-  }
-
-  private func edgeSummary(_ edge: LoopEdge) -> String {
-    var parts = [edge.kind.displayName, edge.condition.displayName]
-    if let transform = edge.payloadTransform.summary { parts.append(transform) }
-    if let cycleGuard = edge.cycleGuard {
-      // The pass count is the one thing you want at a glance on a running cycle.
-      parts.append("loop \(edge.fireCount)/\(cycleGuard.summary)")
-    }
-    return parts.joined(separator: " · ")
   }
 
   @ViewBuilder
@@ -255,73 +315,6 @@ struct ProjectCanvasView: View {
 
   private func nodeTitle(_ id: UUID) -> String {
     store.graph.nodes[id: id]?.title ?? "?"
-  }
-}
-
-/// Edges are drawn distinctly per `EdgeKind`, per
-/// docs/06-ux-terminals.md#graph-canvas: a solid line for `.handoff`, a long-dashed
-/// line for `.message`, a dotted line for `.spawn`. On top of that, a `.handoff` that
-/// `graphcoded` hasn't fired yet is drawn dimmed and dashed — so "which relationship is
-/// this" and "has it happened yet" stay two separate readings of the same line.
-///
-/// There's no manual "Fire" affordance — from Phase 3 on, firing is automatic (see
-/// `GraphcodeKit/Sources/GraphStore.swift`), so this view is read-only.
-/// A composite's card has to say how big the thing inside it is and whether it's live —
-/// an armed routine that can spawn hundreds of agents shouldn't look identical to one
-/// that has never run.
-private struct CompositeBadge: View {
-  let node: LoopNode
-
-  @ViewBuilder
-  var body: some View {
-    if node.loopType == .proactive, let subGraph = node.subGraph {
-      Label(
-        "\(subGraph.nodes.count) loops · \(node.pilotState.displayName)",
-        systemImage: node.pilotState == .armed ? "bolt.fill" : "bolt.slash"
-      )
-      .font(.caption2)
-      .foregroundStyle(node.pilotState == .armed ? Color.accentColor : .secondary)
-    }
-  }
-}
-
-private struct EdgeLineView: View {
-  let from: CGPoint
-  let to: CGPoint
-  let kind: EdgeKind
-  let fired: Bool
-
-  var body: some View {
-    ZStack {
-      // A 1.5pt dashed line is almost impossible to right-click. This invisible
-      // fat stroke is the hit target; the visible line is drawn on top of it.
-      line.stroke(Color.clear.opacity(0.001), style: StrokeStyle(lineWidth: 12))
-        .contentShape(line.stroke(style: StrokeStyle(lineWidth: 12)))
-      line.stroke(color, style: StrokeStyle(lineWidth: fired ? 2 : 1.5, dash: dashPattern))
-    }
-  }
-
-  private var line: Path {
-    Path { path in
-      path.move(to: from)
-      path.addLine(to: to)
-    }
-  }
-
-  private var color: Color {
-    switch kind {
-    case .handoff: return fired ? Color.accentColor : Color.secondary
-    case .message: return Color.teal
-    case .spawn: return Color.purple
-    }
-  }
-
-  private var dashPattern: [CGFloat] {
-    switch kind {
-    case .handoff: return fired ? [] : [5, 4]
-    case .message: return [10, 5]
-    case .spawn: return [2, 4]
-    }
   }
 }
 

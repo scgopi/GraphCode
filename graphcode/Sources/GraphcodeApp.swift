@@ -28,5 +28,12 @@ struct GraphcodeApp: App {
     WindowGroup {
       AppView(store: Self.store)
     }
+    // No titlebar: it only ever said "graphcode", which the Dock, the menu bar and the
+    // app icon all already say, and it cost a strip of height across the full window
+    // width — real estate the canvas and the terminal workspaces both want. The toolbar
+    // items survive (they move inline above the sidebar and the detail pane), and with
+    // the sidebar collapsed AppKit still reserves room for the window controls rather
+    // than letting them land on content.
+    .windowStyle(.hiddenTitleBar)
   }
 }
