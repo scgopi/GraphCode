@@ -104,9 +104,30 @@ final class GhosttyTerminalNSView: NSView {
     return super.resignFirstResponder()
   }
 
+  /// Whether this surface belongs to the tab currently on screen. Every tab's surfaces
+  /// stay mounted at once (see `LoopWorkspaceView`), so "is in the window" says nothing
+  /// about "is the one the user is looking at" — this is what tells them apart.
+  var isActive: Bool = false
+
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
+    // Only claim focus if no other terminal already holds it. Mounting used to take it
+    // unconditionally, so with several tabs alive the last surface to appear captured
+    // the keyboard no matter which tab was showing — typing, and prefixes like tmux's
+    // ctrl+a, went to a shell that wasn't on screen.
+    guard !(window?.firstResponder is GhosttyTerminalNSView) else { return }
     window?.makeFirstResponder(self)
+  }
+
+  /// Move the keyboard here if it is currently parked on a surface the user can't see.
+  /// Deliberately does not steal focus from another *visible* surface — that would fight
+  /// the user clicking between the two panes of a split.
+  func focusIfKeyboardIsOnAHiddenSurface() {
+    guard isActive, let window else { return }
+    if let holder = window.firstResponder as? GhosttyTerminalNSView {
+      guard !holder.isActive else { return }
+    }
+    window.makeFirstResponder(self)
   }
 
   // MARK: - Keyboard
@@ -137,14 +158,52 @@ final class GhosttyTerminalNSView: NSView {
     keyEvent.action = action
     keyEvent.keycode = UInt32(event.keyCode)
     keyEvent.mods = Self.mods(for: event.modifierFlags)
+    // macOS won't tell us which modifiers were consumed producing the text, so use
+    // upstream Ghostty's long-standing heuristic: control and command never contribute
+    // to translation, everything else did.
+    keyEvent.consumed_mods = Self.mods(for: event.modifierFlags.subtracting([.control, .command]))
+    keyEvent.composing = false
 
-    guard let characters = event.characters, !characters.isEmpty else {
+    // `characters` and friends are only meaningful on key events — `flagsChanged` comes
+    // through here too, and asking a modifier event for its characters is not valid.
+    let isKeyEvent = event.type == .keyDown || event.type == .keyUp
+    // What the key would type with nothing held. Ghostty encodes control sequences
+    // itself from this — without it, ctrl+<key> has no base character to work from and
+    // a prefix like tmux's ctrl+a never arrives as 0x01.
+    let unshifted = isKeyEvent ? event.characters(byApplyingModifiers: []) : nil
+    if let scalar = unshifted?.unicodeScalars.first {
+      keyEvent.unshifted_codepoint = scalar.value
+    }
+
+    // Text is deliberately withheld for control characters: Ghostty's own key encoder
+    // owns that mapping, and handing it a pre-encoded control byte *and* the ctrl
+    // modifier makes it encode the wrong thing (upstream hit this with ctrl+enter).
+    guard isKeyEvent, let text = Self.text(for: event),
+      let firstByte = text.utf8.first, firstByte >= 0x20
+    else {
       return ghostty_surface_key(surface, keyEvent)
     }
-    return characters.withCString { textPtr in
+    return text.withCString { textPtr in
       keyEvent.text = textPtr
       return ghostty_surface_key(surface, keyEvent)
     }
+  }
+
+  /// The text a key event should contribute, mirroring upstream Ghostty's
+  /// `NSEvent.ghosttyCharacters`.
+  private static func text(for event: NSEvent) -> String? {
+    guard let characters = event.characters else { return nil }
+    if characters.count == 1, let scalar = characters.unicodeScalars.first {
+      // A lone control character: hand back what the key types *without* control, and
+      // let Ghostty apply the control encoding itself.
+      if scalar.value < 0x20 {
+        return event.characters(byApplyingModifiers: event.modifierFlags.subtracting(.control))
+      }
+      // Function keys arrive as private-use codepoints; they are keys, not text, and
+      // must not be written into the terminal as characters.
+      if scalar.value >= 0xF700 && scalar.value <= 0xF8FF { return nil }
+    }
+    return characters
   }
 
   private static func mods(for flags: NSEvent.ModifierFlags) -> ghostty_input_mods_e {

@@ -199,7 +199,10 @@ struct LoopWorkspaceView: View {
       initialPrompt: ref.launchesClaudeCode ? store.node.sessionPrompt : nil,
       // A node without its own worktree yet still belongs to a project — its shells
       // should open there, not wherever the app process happened to launch from.
-      workingDirectory: store.node.worktreeBinding?.worktreePath ?? store.projectPath
+      workingDirectory: store.node.worktreeBinding?.worktreePath ?? store.projectPath,
+      // Only the showing tab's surfaces may hold the keyboard — the rest stay mounted
+      // and must not.
+      isActive: tab.id == store.layout.selectedTabID
     ) { succeeded in
       if ref.launchesClaudeCode {
         store.send(.primarySurfaceExited(succeeded: succeeded))

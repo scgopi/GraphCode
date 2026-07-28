@@ -35,6 +35,9 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// opened before the daemon got to it, or with `zmx` not installed.
   var initialPrompt: String?
   let workingDirectory: String?
+  /// Whether this surface's tab is the one on screen. Every tab stays mounted, so
+  /// without this the keyboard can end up parked on a surface nobody can see.
+  var isActive: Bool = true
   let onProcessExited: (Bool) -> Void
 
   /// Carries `initialPrompt` into the shell as a variable instead of interpolating it
@@ -48,10 +51,17 @@ struct GhosttyTerminalView: NSViewRepresentable {
       workingDirectory: workingDirectory,
       environment: initialPrompt.map { [Self.promptVariable: $0] } ?? [:])
     view.onProcessExited = onProcessExited
+    view.isActive = isActive
     return view
   }
 
-  func updateNSView(_ nsView: GhosttyTerminalNSView, context: Context) {}
+  func updateNSView(_ nsView: GhosttyTerminalNSView, context: Context) {
+    nsView.isActive = isActive
+    // Switching tabs with ⌘-number moves what's visible but not what's focused — AppKit
+    // only reassigns first responder on a click. Without this, hitting ⌘2 and typing
+    // sent the keystrokes to tab 1's shell.
+    nsView.focusIfKeyboardIsOnAHiddenSurface()
+  }
 
   /// The agent invocation, built from the node's own backend rather than assumed.
   ///
