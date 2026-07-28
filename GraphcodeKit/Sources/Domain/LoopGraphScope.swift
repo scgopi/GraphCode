@@ -32,7 +32,12 @@ public enum LoopGraphScope: Equatable, Sendable {
   public var projectRef: ProjectRef {
     switch self {
     case .global:
-      return ProjectRef(path: Self.globalPath, name: "Orchestrator")
+      // "Graph", not "Orchestrator": in the sidebar this row sits above every folder and
+      // its canvas is the whole workspace drawn as one graph (see `GraphOverview`), so
+      // the name has to say what you get when you click it. "Orchestrator" named the
+      // daemon-side machinery instead — a component nobody clicking a sidebar row is
+      // looking for.
+      return ProjectRef(path: Self.globalPath, name: "Graph")
     case .project(let ref):
       return ref
     }

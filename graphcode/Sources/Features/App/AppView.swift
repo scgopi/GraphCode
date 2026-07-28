@@ -63,6 +63,11 @@ struct AppView: View {
       WelcomeView(store: store.scope(state: \.welcome, action: \.welcome))
     } else if let workspaceStore = store.scope(state: \.openLoop, action: \.openLoop) {
       LoopWorkspaceView(store: workspaceStore)
+    } else if store.selectedProjectPath == LoopGraphScope.globalPath {
+      // The Graph row's canvas is the whole workspace, not the global graph's own nodes
+      // in isolation — it needs every open project's graph, which no project-scoped
+      // store can see. See `GraphOverviewView`.
+      GraphOverviewView(store: store)
     } else if let path = store.selectedProjectPath, let projectStore = selectedProjectStore(path) {
       ProjectCanvasView(store: projectStore)
     } else {

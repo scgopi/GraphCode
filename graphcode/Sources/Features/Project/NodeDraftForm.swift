@@ -4,9 +4,15 @@ import SwiftUI
 
 /// The node-configuration panel (docs/06-ux-terminals.md#node-configuration-panel):
 /// loop type first, then the fields that type actually needs, then the bindings every
-/// type shares. Split out of `ProjectCanvasView` purely for size.
-extension ProjectCanvasView {
-  var newNodeForm: some View {
+/// type shares.
+///
+/// A view of its own rather than a property on `ProjectCanvasView`: the Graph overview
+/// (`GraphOverviewView`) presents the same form for the global graph's own triggers, and
+/// two copies of a form whose fields are load-bearing would drift.
+struct NodeDraftForm: View {
+  @Bindable var store: StoreOf<ProjectFeature>
+
+  var body: some View {
     VStack(spacing: 12) {
       Text("New Loop Node").font(.headline)
 

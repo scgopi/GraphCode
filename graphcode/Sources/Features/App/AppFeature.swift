@@ -148,7 +148,16 @@ struct AppFeature {
           guard state.projects[id: path] != nil else {
             // Not an already-open project — this snapshot is the reply to the
             // `.openProject` that just added it, i.e. this *is* "project opened."
-            state.projects.append(ProjectFeature.State(graph: graph))
+            //
+            // The Graph is pinned to the front rather than appended: it isn't a folder
+            // anyone opened, it's the one row that's always there, and it arrives last
+            // (the app asks for it after `.restoreOpenProjects`) so appending would
+            // leave it below folders that came back from a previous session.
+            if graph.isGlobal {
+              state.projects.insert(ProjectFeature.State(graph: graph), at: 0)
+            } else {
+              state.projects.append(ProjectFeature.State(graph: graph))
+            }
             state.selectedProjectPath = path
             state.openLoop = nil
             return .none
@@ -181,16 +190,24 @@ struct AppFeature {
         state.openLoop = nil
         return .none
 
+      // None of the three verbs applies to the Graph: it's always resident in the daemon
+      // whether or not a window is open, isn't in recents, and its reserved path isn't a
+      // folder to forget. The sidebar doesn't offer them on that row — this is the
+      // backstop, so no future caller can close the one row that's meant to always be
+      // there.
       case .projectCloseTapped(let path):
+        guard !isGlobal(path) else { return .none }
         removeFromSidebar(&state, path: path)
         return .run { _ in try? await orchestratorClient.send(.closeProject(path: path)) }
 
       case .projectRemoveTapped(let path):
+        guard !isGlobal(path) else { return .none }
         removeFromSidebar(&state, path: path)
         state.welcome.recentProjects.removeAll { $0.path == path }
         return .run { _ in try? await orchestratorClient.send(.forgetProject(path: path)) }
 
       case .projectDeleteLoopsConfirmed(let path):
+        guard !isGlobal(path) else { return .none }
         removeFromSidebar(&state, path: path)
         state.welcome.recentProjects.removeAll { $0.path == path }
         return .run { _ in try? await orchestratorClient.send(.deleteProjectGraph(path: path)) }
@@ -266,6 +283,8 @@ struct AppFeature {
   /// have to be cleared too: both are cross-project (see this type's doc comment), so a
   /// workspace belonging to the removed project would otherwise stay on screen with
   /// nothing in the sidebar pointing at it.
+  private func isGlobal(_ path: String) -> Bool { path == LoopGraphScope.globalPath }
+
   private func removeFromSidebar(_ state: inout State, path: String) {
     state.projects.remove(id: path)
     if state.openLoop?.projectPath == path {

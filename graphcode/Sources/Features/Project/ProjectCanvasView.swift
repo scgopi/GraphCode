@@ -21,11 +21,20 @@ struct ProjectCanvasView: View {
 
   @Bindable var store: StoreOf<ProjectFeature>
 
-  @State private var canvasOffset: CGSize = .zero
+  /// Where this canvas is looking. Shared with the Graph overview — see
+  /// `CanvasTransform` for why the scale and offset are one value with arithmetic on it
+  /// rather than two numbers the gestures nudge.
+  @State private var transform = CanvasTransform()
   @State private var dragOffset: CGSize = .zero
-  @State private var canvasScale: CGFloat = 1
-  @State private var dragSourceID: UUID?
-  @State private var dragLocation: CGPoint?
+  /// The scale the current pinch started from. `MagnifyGesture.magnification` is
+  /// relative to the start of *that* gesture, so without a captured baseline every new
+  /// pinch would snap the canvas back to 1× before it moved anywhere.
+  @State private var pinchBaseScale: CGFloat?
+  @State private var viewport: CGSize = .zero
+  /// The in-flight edge drag. Not `private` because `connectorHandle` — which sets
+  /// them — lives in `ProjectCanvasForms.swift`, and Swift scopes `private` to a file.
+  @State var dragSourceID: UUID?
+  @State var dragLocation: CGPoint?
 
   var body: some View {
     VStack(spacing: 0) {
@@ -39,6 +48,9 @@ struct ProjectCanvasView: View {
       }
       canvas
         .overlay { emptyState }
+        .overlay(alignment: .bottomTrailing) {
+          CanvasZoomControls(transform: $transform, viewport: viewport, content: contentSize)
+        }
     }
     .background(Theme.windowBackground)
     .toolbar {
@@ -56,7 +68,7 @@ struct ProjectCanvasView: View {
       // project is no longer on screen; see `LoopWorkspaceView.folderHeader`.
     }
     .sheet(isPresented: $store.showingNewNodeForm) {
-      newNodeForm
+      NodeDraftForm(store: store)
     }
     .sheet(item: $store.pendingEdge) { _ in
       edgeForm
@@ -66,31 +78,68 @@ struct ProjectCanvasView: View {
     // isn't the visible detail pane. See `AppFeature.State.pendingLoopDeletion`.
   }
 
+  /// Scale and offset as the canvas is currently drawn — the committed transform plus
+  /// whatever the in-flight pan has moved so far.
+  private var liveOffset: CGSize {
+    CGSize(
+      width: transform.offset.width + dragOffset.width,
+      height: transform.offset.height + dragOffset.height)
+  }
+
+  /// How much room the graph takes up, for actual-size and fit. Measured out to the far
+  /// edge of the furthest card rather than to its centre, so fitting doesn't crop the
+  /// thing it was asked to fit.
+  private var contentSize: CGSize {
+    let positions = store.graph.nodes.compactMap { store.nodePositions[$0.id] }
+    guard let right = positions.map(\.x).max(), let bottom = positions.map(\.y).max() else {
+      return .zero
+    }
+    let chipBottom = subGraph.placements.map(\.position.y).max() ?? 0
+    return CGSize(width: right + 160, height: max(bottom, chipBottom) + 120)
+  }
+
+  /// Centres the graph, but only while the canvas is still where it started: once
+  /// someone has panned or zoomed, their view is theirs and nothing here moves it.
+  private func centreIfUntouched(in viewport: CGSize) {
+    guard transform == CanvasTransform(), viewport != .zero, contentSize != .zero else {
+      return
+    }
+    transform = .centred(contentSize, in: viewport)
+  }
+
   private var canvas: some View {
-    GeometryReader { _ in
+    GeometryReader { proxy in
       ZStack {
         startLayer
         edgesLayer
+        subGraphLinksLayer
         nodesLayer
+        subGraphChipsLayer
         dragPreview
       }
       .coordinateSpace(name: "canvas")
-      .scaleEffect(canvasScale)
-      .offset(
-        CGSize(
-          width: canvasOffset.width + dragOffset.width,
-          height: canvasOffset.height + dragOffset.height))
+      .scaleEffect(transform.scale)
+      .offset(liveOffset)
+      .onAppear {
+        viewport = proxy.size
+        centreIfUntouched(in: proxy.size)
+      }
+      .onChange(of: proxy.size) { _, size in
+        viewport = size
+        centreIfUntouched(in: size)
+      }
+      // The graph arrives from the daemon a beat after this view does, so the first
+      // paint often has nothing to centre on. Re-centring when the content first has a
+      // size is what puts the start marker — the leftmost thing on the canvas — on
+      // screen instead of hard against the pane's left edge.
+      .onChange(of: contentSize) { _, _ in centreIfUntouched(in: viewport) }
     }
     .background {
       // Ruled like graph paper, and glued to the graph rather than to the window: the
       // rules pan and zoom with the nodes, so dragging empty space reads as moving the
       // sheet under you instead of nothing happening. See `NotebookGrid`.
       NotebookGrid(
-        cellSize: Self.gridCellSize,
-        offset: CGSize(
-          width: canvasOffset.width + dragOffset.width,
-          height: canvasOffset.height + dragOffset.height),
-        scale: canvasScale
+        cellSize: Self.gridCellSize, offset: liveOffset, scale: transform.scale
       )
       .background(Theme.canvasBackground)
     }
@@ -99,14 +148,23 @@ struct ProjectCanvasView: View {
       DragGesture()
         .onChanged { value in dragOffset = value.translation }
         .onEnded { value in
-          canvasOffset.width += value.translation.width
-          canvasOffset.height += value.translation.height
+          transform.offset.width += value.translation.width
+          transform.offset.height += value.translation.height
           dragOffset = .zero
         }
     )
+    // Trackpad pinch, anchored where the fingers are, exactly as on the Graph overview —
+    // `magnification` is relative to the start of this gesture, so it multiplies the
+    // scale the pinch began at rather than replacing it.
     .simultaneousGesture(
-      MagnificationGesture()
-        .onChanged { value in canvasScale = max(0.4, min(2.5, value)) }
+      MagnifyGesture()
+        .onChanged { value in
+          let base = pinchBaseScale ?? transform.scale
+          pinchBaseScale = base
+          transform = transform.zoomed(
+            to: base * value.magnification, around: value.startLocation, in: viewport)
+        }
+        .onEnded { _ in pinchBaseScale = nil }
     )
   }
 
@@ -136,6 +194,14 @@ struct ProjectCanvasView: View {
   /// kind or fired state. They are not edges: nothing travels along them and there is
   /// nothing to right-click. Making them look like handoffs would be a lie about how
   /// the graph runs. See `LoopGraph.startAnchors` for which nodes get one.
+  /// **Emits siblings — never wrap this in a container.** Every layer here is placed with
+  /// `.position()`, which resolves against *its immediate parent's* frame. These views
+  /// have to land directly in `canvas`'s `ZStack`, which fills the pane, so canvas
+  /// coordinates and screen coordinates agree. Wrapping them in a `ZStack` of their own
+  /// re-bases every one of them onto that inner stack's shrink-to-fit frame: the marker
+  /// lands at its canvas coordinates measured from the middle of the pane, and the
+  /// tethers are drawn to points that are no longer where the cards are — which reads as
+  /// "the start node moved and its edges vanished".
   @ViewBuilder
   private var startLayer: some View {
     if let origin = startPosition {
@@ -155,13 +221,13 @@ struct ProjectCanvasView: View {
   /// Left of the leftmost card and centred on the graph's vertical extent, so the
   /// tethers fan out rather than doubling back over the cards. Derived from the live
   /// positions instead of being a fixed point, so it stays put as the graph grows.
+  ///
+  /// Floored clear of the pane's left edge by `CanvasStart` — the grid lays its first
+  /// column out at x=160, so the plain `leftmost - 150` this used to be put the marker
+  /// at x=10 with half the dot and most of its caption clipped away, which is why the
+  /// project canvas looked like it had no start node at all.
   private var startPosition: CGPoint? {
-    let positions = store.graph.nodes.compactMap { store.nodePositions[$0.id] }
-    guard let leftmost = positions.map(\.x).min(),
-      let top = positions.map(\.y).min(),
-      let bottom = positions.map(\.y).max()
-    else { return nil }
-    return CGPoint(x: leftmost - 150, y: (top + bottom) / 2)
+    CanvasStart.origin(of: store.graph.nodes.compactMap { store.nodePositions[$0.id] })
   }
 
   private var edgesLayer: some View {
@@ -256,66 +322,6 @@ struct ProjectCanvasView: View {
     }
   }
 
-  private func connectorHandle(for nodeID: UUID) -> some View {
-    Circle()
-      .fill(Color.accentColor)
-      .frame(width: 14, height: 14)
-      .contentShape(Circle().inset(by: -8))  // bigger hit target than the visible dot
-      .gesture(
-        DragGesture(minimumDistance: 4, coordinateSpace: .named("canvas"))
-          .onChanged { value in
-            dragSourceID = nodeID
-            dragLocation = value.location
-          }
-          .onEnded { value in
-            if let targetID = hitTestNode(at: value.location, excluding: nodeID) {
-              store.send(.edgeDrawn(from: nodeID, to: targetID))
-            }
-            dragSourceID = nil
-            dragLocation = nil
-          }
-      )
-  }
-
-  /// Which node (if any) contains `point`, in "canvas"-space — approximate card frame,
-  /// good enough for drop hit-testing without threading real card sizes through state.
-  private func hitTestNode(at point: CGPoint, excluding: UUID) -> UUID? {
-    for node in store.graph.nodes where node.id != excluding {
-      guard let position = store.nodePositions[node.id] else { continue }
-      let rect = CGRect(x: position.x - 110, y: position.y - 45, width: 220, height: 90)
-      if rect.contains(point) { return node.id }
-    }
-    return nil
-  }
-
-  /// Shown on drop, before the edge is committed. The `?? pending` fallback in the
-  /// binding never actually fires — the sheet only exists while `pendingEdge` is
-  /// non-nil — it's just what lets a nested field bind without an optional dance.
-  @ViewBuilder
-  private var edgeForm: some View {
-    if let pending = store.pendingEdge {
-      EdgeSpecForm(
-        pending: Binding(
-          get: { store.pendingEdge ?? pending },
-          set: { store.pendingEdge = $0 }
-        ),
-        fromTitle: nodeTitle(pending.from),
-        toTitle: nodeTitle(pending.to),
-        onCancel: { store.send(.cancelEdgeForm) },
-        onCreate: { store.send(.createEdgeConfirmed) }
-      )
-    }
-  }
-
-  /// Same rollup the sidebar's monitor uses, scoped to this graph — one definition of
-  /// "needs attention" rather than a canvas-flavoured second opinion.
-  private func attentionReason(for node: LoopNode) -> AttentionReason? {
-    store.attentionReasons[node.id]
-  }
-
-  private func nodeTitle(_ id: UUID) -> String {
-    store.graph.nodes[id: id]?.title ?? "?"
-  }
 }
 
 #Preview {

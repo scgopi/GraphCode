@@ -28,100 +28,6 @@ struct AppSidebarView: View {
     case node(UUID)
   }
 
-  /// The orchestrator monitor's needs-attention rollup
-  /// (docs/05-orchestrator.md#monitoring-surface), pinned above the projects.
-  ///
-  /// It lives here rather than in a panel of its own because "surface the one thing that
-  /// needs me" only works if it's where you already are. It disappears entirely when
-  /// nothing needs attention — an always-present empty queue trains people to stop
-  /// looking at it.
-  @ViewBuilder
-  private var attentionSection: some View {
-    let items = store.attentionItems
-    if !items.isEmpty {
-      Text("Needs attention")
-        .font(.caption)
-        .foregroundStyle(.secondary)
-      ForEach(items) { item in
-        attentionRow(for: item)
-      }
-      Divider()
-    }
-  }
-
-  /// The usage rollup from docs/05-orchestrator.md#monitoring-surface, in the same panel
-  /// as needs-attention because "cost and attention are both things the orchestrator's
-  /// monitoring surface exists to answer".
-  ///
-  /// It always states its coverage — "$0.12 · 2/9 loops reporting" — because graphcode
-  /// cannot see inside a running `claude` and only knows what a backend's hooks tell it.
-  /// A bare total would read as the whole bill when it might be a fraction of it, and a
-  /// cost figure a human might act on has to be honest about what it left out.
-  @ViewBuilder
-  private var usageSection: some View {
-    let usage = store.usageRollup
-    if usage.total > 0 {
-      HStack(spacing: 6) {
-        Image(systemName: "chart.bar").foregroundStyle(.secondary)
-        VStack(alignment: .leading, spacing: 1) {
-          Text(usage.headline).font(.callout)
-          Text(usage.coverage).font(.caption2).foregroundStyle(.secondary)
-        }
-        Spacer()
-        Button {
-          store.send(.refreshUsageTapped)
-        } label: {
-          Image(systemName: "arrow.clockwise")
-        }
-        .buttonStyle(.borderless)
-        .help("Ask each loop's backend what it has spent")
-      }
-      Divider()
-    }
-  }
-
-  private func attentionRow(for item: AttentionItem) -> some View {
-    HStack(spacing: 6) {
-      Image(systemName: icon(for: item.reason))
-        .foregroundStyle(color(for: item.reason))
-      VStack(alignment: .leading, spacing: 1) {
-        Text(item.nodeTitle).font(.callout).lineLimit(1)
-        // The project name matters here in a way it doesn't in the per-project rows
-        // below: this list is the one place loops from different projects sit together.
-        Text("\(item.reason.displayName) · \(item.projectName)")
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-          .lineLimit(1)
-      }
-      Spacer()
-    }
-    .contentShape(Rectangle())
-    .onTapGesture { store.send(.attentionItemTapped(item)) }
-    .contextMenu {
-      Button("Stop Loop", role: .destructive) {
-        store.send(.stopNodeTapped(projectPath: item.projectPath, nodeID: item.nodeID))
-      }
-    }
-  }
-
-  private func icon(for reason: AttentionReason) -> String {
-    switch reason {
-    case .failed: return "xmark.octagon.fill"
-    case .stalled: return "clock.badge.exclamationmark.fill"
-    case .awaitingInput: return "bubble.left.fill"
-    case .blocked: return "lock.fill"
-    }
-  }
-
-  private func color(for reason: AttentionReason) -> Color {
-    switch reason {
-    case .failed: return .red
-    case .stalled: return .purple
-    case .awaitingInput: return .orange
-    case .blocked: return .orange
-    }
-  }
-
   var body: some View {
     List(selection: selectionBinding) {
       attentionSection
@@ -130,7 +36,13 @@ struct AppSidebarView: View {
       ForEach(store.projects) { project in
         projectHeaderRow(for: project)
           .tag(SidebarSelection.project(project.id))
-          .contextMenu { projectMenu(for: project) }
+          // No menu on the Graph row: it can't be closed, forgotten, or deleted, and a
+          // menu of three disabled items reads as a bug rather than as a rule.
+          .contextMenu {
+            if !project.graph.isGlobal {
+              projectMenu(for: project)
+            }
+          }
 
         if !collapsedProjectPaths.contains(project.id) {
           ForEach(project.graph.nodes) { node in
@@ -218,19 +130,35 @@ struct AppSidebarView: View {
 
   private func projectHeaderRow(for project: ProjectFeature.State) -> some View {
     HStack(spacing: 4) {
-      Button {
-        toggleExpanded(project.id)
-      } label: {
-        Image(
-          systemName: collapsedProjectPaths.contains(project.id) ? "chevron.right" : "chevron.down"
-        )
-        .font(.caption2)
-        .foregroundStyle(.secondary)
-        .frame(width: 12)
+      // A disclosure control only where there is something to disclose, and no blank
+      // held open where there isn't: a row with nothing under it sits flush left, which
+      // is itself the signal that it holds no loops. Reserving the space instead would
+      // line every row up behind a control half of them don't have — tidier, but it
+      // makes an empty folder look identical to a collapsed one.
+      if canExpand(project) {
+        Button {
+          toggleExpanded(project.id)
+        } label: {
+          Image(
+            systemName: collapsedProjectPaths.contains(project.id)
+              ? "chevron.right" : "chevron.down"
+          )
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .frame(width: 12)
+        }
+        .buttonStyle(.plain)
       }
-      .buttonStyle(.plain)
 
-      Image(systemName: "folder.fill").foregroundStyle(.secondary)
+      // The Graph is not a folder and its row doesn't open one — it opens the whole
+      // workspace drawn as one graph (`GraphOverviewView`), so it carries the same
+      // connected-nodes glyph the canvas uses for itself rather than a folder icon it
+      // would otherwise be indistinguishable from.
+      Image(
+        systemName: project.graph.isGlobal
+          ? "point.3.connected.trianglepath.dotted" : "folder.fill"
+      )
+      .foregroundStyle(project.graph.isGlobal ? Color.accentColor : .secondary)
       Text(project.graph.project.name).lineLimit(1)
       Spacer()
     }
@@ -303,6 +231,13 @@ struct AppSidebarView: View {
         }
       }
     )
+  }
+
+  /// Whether this row has child rows at all. The Graph never does — its canvas is the
+  /// whole workspace rather than that graph's own nodes, and its triggers are created
+  /// from the CLI — and a folder doesn't until it has a loop in it.
+  private func canExpand(_ project: ProjectFeature.State) -> Bool {
+    !project.graph.isGlobal && !project.graph.nodes.isEmpty
   }
 
   private func toggleExpanded(_ path: String) {

@@ -41,8 +41,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode edge create <project-path> <from-id> <to-id> [--kind <k>] [--condition <c>]
       graphcode usage <project-path>
 
-    The reserved path graphcode://global addresses the always-resident Orchestrator
-    Graph, which every other verb accepts wherever <project-path> appears.
+    The reserved path graphcode://global addresses the always-resident global graph —
+    the app's pinned "Graph" row — which every other verb accepts wherever
+    <project-path> appears.
 
     NODE OPTIONS
       --check <text>       required for --type turn
