@@ -91,9 +91,19 @@ do {
     try runAndPrintGraph(projectPath: projectPath, [])
 
   case .createNode(let projectPath, let draft):
+    // A loop that fans work out into more loops is the origin of them, and the graph
+    // should show that rather than five entry points that appeared from nowhere. `zmx`
+    // injects `ZMX_SESSION` into every session it starts and graphcode names sessions
+    // after the node id, so when this command is run *from inside a loop* we can work out
+    // which loop without the agent having to pass anything. Run from a human's shell there
+    // is no such variable, and the node is correctly parentless.
+    var attributed = draft
+    attributed.createdBy =
+      SurfaceRef.nodeID(
+        fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
     try runAndPrintGraph(
       projectPath: projectPath,
-      [.graphCommand(projectPath: projectPath, command: .createNode(draft))])
+      [.graphCommand(projectPath: projectPath, command: .createNode(attributed))])
 
   case .createEdge(let projectPath, let from, let to, let spec):
     try runAndPrintGraph(

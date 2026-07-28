@@ -32,6 +32,15 @@ public struct NodeDraft: Codable, Equatable, Sendable {
   /// gets an empty shell. `nil` means "start empty", which is what the creation form
   /// sends.
   public var subGraph: LoopGraph?
+  /// The loop that asked for this one, when a running session created it through the CLI.
+  ///
+  /// Recorded so the graph shows what actually happened: a loop that fans work out into
+  /// five loops is the origin of those five, and drawing them as five unrelated entry
+  /// points hanging off the folder would say the opposite. `GraphStore` turns this into a
+  /// real, already-fired `.handoff` edge — see `createNode`.
+  ///
+  /// `nil` for anything a human created, which is the truth: the form is not a loop.
+  public var createdBy: UUID?
 
   public init(
     title: String,
@@ -42,7 +51,8 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     backend: CLISessionBackendKind = .claudeCode,
     modelTier: ModelTier? = nil,
     worktree: WorktreeRef? = nil,
-    subGraph: LoopGraph? = nil
+    subGraph: LoopGraph? = nil,
+    createdBy: UUID? = nil
   ) {
     self.title = title
     self.loopType = loopType
@@ -53,6 +63,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     self.modelTier = modelTier
     self.worktree = worktree
     self.subGraph = subGraph
+    self.createdBy = createdBy
   }
 
   /// docs/08-quality-and-token-budgets.md wants the cheap-to-ignore version of each

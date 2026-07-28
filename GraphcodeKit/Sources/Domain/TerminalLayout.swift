@@ -18,6 +18,19 @@ public struct SurfaceRef: Codable, Equatable, Sendable, Identifiable {
   }
 
   public var zmxSessionName: String { "graphcode-\(id.uuidString)" }
+
+  public static let zmxSessionPrefix = "graphcode-"
+
+  /// Which node a `zmx` session name belongs to — the inverse of `zmxSessionName`.
+  ///
+  /// This is what lets a running loop identify *itself*: `zmx` injects `ZMX_SESSION` into
+  /// every session's environment, and graphcode names its sessions after the node id. So
+  /// the `graphcode` CLI, invoked from inside a loop, can work out which loop invoked it
+  /// without the agent being told to pass anything.
+  public static func nodeID(fromZmxSessionName name: String) -> UUID? {
+    guard name.hasPrefix(zmxSessionPrefix) else { return nil }
+    return UUID(uuidString: String(name.dropFirst(zmxSessionPrefix.count)))
+  }
 }
 
 public enum SplitDirection: Codable, Equatable, Sendable {

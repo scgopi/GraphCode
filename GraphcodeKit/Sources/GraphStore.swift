@@ -115,6 +115,7 @@ public actor GraphStore {
       guard draft.isValid else { return }
       let node = draft.makeNode()
       graph.nodes.append(node)
+      linkToCreator(of: node, declaredBy: draft)
       if node.runsUnattended {
         // Start it now rather than waiting for someone to open it — the loop is supposed
         // to run whether or not the app is up, which is the whole reason `graphcoded`
@@ -361,6 +362,29 @@ public actor GraphStore {
       }
       commitFiring(edge.id)
     }
+  }
+
+  /// Draws the loop that asked for a node to the node it asked for.
+  ///
+  /// Without this, five loops a session fans out to are five nodes with no inbound edge —
+  /// which `LoopGraph.startAnchors` reads as five separate entry points, so every canvas
+  /// hangs them off the graph's origin as though nothing had produced them. The
+  /// relationship is real; it just had nowhere to live until `NodeDraft.createdBy`.
+  ///
+  /// The edge is created **already fired**. It is a `.handoff` because that is what
+  /// happened — work moved from one loop to another — but an unfired handoff *blocks* its
+  /// target (`EdgeKind.blocksTarget`), and these children are already running: the daemon
+  /// starts an unattended loop the moment it is created. Recording the hand-off as
+  /// complete says the true thing and leaves the child alone.
+  ///
+  /// A creator that isn't in this graph is ignored rather than invented — a session in
+  /// one project can name a loop in another, and a dangling edge would be worse than none.
+  private func linkToCreator(of node: LoopNode, declaredBy draft: NodeDraft) {
+    guard let creator = draft.createdBy, creator != node.id,
+      graph.nodes[id: creator] != nil
+    else { return }
+    graph.edges.append(
+      LoopEdge(from: creator, to: node.id, spec: EdgeSpec(kind: .handoff), fireCount: 1))
   }
 
   /// `.spawn` instantiates rather than unblocks (docs/02-graph-of-loops.md): the target
