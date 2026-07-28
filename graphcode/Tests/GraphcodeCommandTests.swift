@@ -62,11 +62,28 @@ struct GraphcodeCommandTests {
   func anIncompleteDraftIsRejectedBeforeItReachesTheDaemon() throws {
     // Exiting 0 on a command that silently created nothing is the failure mode this
     // prevents — the same rule the daemon enforces, applied early enough to explain.
+    // A goal with no summary describes nothing, so it stays refused.
     #expect(throws: GraphcodeCommand.ParseError.invalidDraft) {
       try GraphcodeCommand.parse([
-        "node", "create", "/tmp/x", "--title", "Research", "--type", "turn",
+        "node", "create", "/tmp/x", "--title", "Research", "--type", "goal",
       ])
     }
+  }
+
+  @Test
+  func aTurnBasedNodeNeedsNoCriterionOnTheCommandLine() throws {
+    // The criterion became optional: requiring it only taught people to pass `--check x`
+    // to get past the validation. The human verifying each turn is the hand-off, and they
+    // are there whether or not they wrote down what they would look for.
+    let command = try GraphcodeCommand.parse([
+      "node", "create", "/tmp/x", "--title", "Research", "--type", "turn",
+    ])
+    guard case .createNode(_, let draft) = command else {
+      Issue.record("expected a createNode command")
+      return
+    }
+    #expect(draft.checkDescription == nil)
+    #expect(draft.isValid)
   }
 
   @Test

@@ -13,12 +13,25 @@ import Testing
 @Suite
 struct NodeDraftTests {
   @Test
-  func aTurnBasedDraftNeedsARealCheck() {
+  func aTurnBasedDraftTakesACriterionButDoesNotDemandOne() {
+    // It used to be required, and requiring it taught people to type "check" in the box
+    // to get past the form. The hand-off this type names is a human watching the work,
+    // and that human is there whether or not they wrote the criterion down first.
     #expect(
       NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "Sound?").isValid)
-    #expect(!NodeDraft(title: "Research", loopType: .turnBased).isValid)
+    #expect(NodeDraft(title: "Research", loopType: .turnBased).isValid)
     #expect(
-      !NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "   ").isValid)
+      NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "   ").isValid)
+    // A title is still the one thing every draft needs.
+    #expect(!NodeDraft(title: "  ", loopType: .turnBased).isValid)
+  }
+
+  @Test
+  func aTurnBasedSessionStillStopsForReviewWithoutACriterion() throws {
+    let bare = try #require(
+      NodeDraft(title: "Research", loopType: .turnBased).makeNode().sessionPrompt)
+    #expect(bare.contains("stopping after each one"))
+    #expect(!bare.contains("verified against"))
   }
 
   @Test

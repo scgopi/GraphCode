@@ -46,7 +46,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
     <project-path> appears.
 
     NODE OPTIONS
-      --check <text>       required for --type turn
+      --check <text>       what a human verifies each turn; optional
       --goal <text>        required for --type goal
       --predicate <cmd>    optional stop condition for --type goal (exit 0 = met)
       --prompt <text>      required for --type time; put the cadence in it (/loop 1h …)

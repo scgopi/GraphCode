@@ -59,8 +59,8 @@ struct SessionBriefingTests {
   @Test
   func theBriefingLeadsWithGoalBasedAndWarnsThatTurnBasedDoesNotStart() throws {
     // Not a style preference — a defect this pins. `LoopNode.runsUnattended` is false for
-    // turn-based and its `sessionPrompt` is nil, so a turn-based loop an agent creates
-    // launches no process at all: five nodes appear in the sidebar and none of them run.
+    // turn-based, so a turn-based loop an agent creates launches no process at all: five
+    // nodes appear in the sidebar and none of them run until a person opens each one.
     // The first cut of this briefing led with `--type turn`, which made "spin up five
     // loops" produce exactly that.
     let briefing = try #require(SessionBriefing.text(projectPath: Self.project))

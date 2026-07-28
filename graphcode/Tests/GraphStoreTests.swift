@@ -295,7 +295,9 @@ struct GraphStoreTests {
     // the CLI, and a rule only one client applies isn't a rule.
     let store = GraphStore()
 
-    await store.handle(.createNode(NodeDraft(title: "No check", loopType: .turnBased)))
+    // A turn-based draft with no criterion is deliberately *not* in this list — that one
+    // is valid now, since the human doing the verifying is there either way.
+    await store.handle(.createNode(NodeDraft(title: "No goal", loopType: .goalBased)))
     await store.handle(.createNode(NodeDraft(title: "", loopType: .timeBased, triggerPrompt: "x")))
     await store.handle(
       .createNode(

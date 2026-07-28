@@ -78,7 +78,13 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     guard backend.canHost(loopType) else { return false }
     switch loopType {
     case .turnBased:
-      return !(checkDescription ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+      // A criterion is optional. docs/08 asks for the cheap-to-ignore version of each
+      // principle to be *structurally awkward*, and for goal-based it still is — a goal
+      // with no summary describes nothing. But a turn-based loop's hand-off is a human
+      // watching it, and that human exists whether or not they wrote down in advance what
+      // they would be looking for. Refusing the node taught people to type "check" in the
+      // box to get past the form, which is worse than an honest blank.
+      return true
     case .goalBased:
       return !(goal?.summary ?? "").trimmingCharacters(in: .whitespaces).isEmpty
     case .timeBased:

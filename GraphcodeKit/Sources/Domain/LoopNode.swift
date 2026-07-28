@@ -12,7 +12,13 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   public var title: String
   public var loopType: LoopType
   /// What a human verifies each turn before the loop continues (`.turnBased`) — see
-  /// docs/01-loop-taxonomy.md#turn-based--you-hand-off-the-check.
+  /// docs/01-loop-taxonomy.md#turn-based--you-hand-off-the-check. Surfaced as "Verify each
+  /// turn"; the stored name is unchanged so no saved graph loses what it holds.
+  ///
+  /// Optional. The hand-off this type names is a human watching the work, and that human
+  /// is there whether or not they wrote down in advance what they would be looking for —
+  /// see `NodeDraft.isValid`. Without one the session is still told to stop after each
+  /// turn for review, just not what the review is against.
   public var checkDescription: String?
   /// The initial prompt a time-based node's session starts with, passed through to the
   /// backend verbatim — see docs/01-loop-taxonomy.md#time-based--you-hand-off-the-trigger.
@@ -79,15 +85,44 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.createdAt = createdAt
   }
 
-  /// The opening prompt this node's `zmx` session should run, or `nil` for a node whose
-  /// session is just a shell a human drives. One place so `ZmxSessionLauncher` (daemon)
-  /// and `LoopWorkspaceView` (app) can never disagree about what a loop starts with.
+  /// The opening prompt this node's `zmx` session should run, or `nil` when there is
+  /// nothing to say. One place so `ZmxSessionLauncher` (daemon) and `LoopWorkspaceView`
+  /// (app) can never disagree about what a loop starts with.
+  ///
+  /// A turn-based node's criterion now travels with it. It used to be `nil` here, so what
+  /// the human wrote reached nothing: it sat in the graph as metadata, the session opened
+  /// knowing neither the criterion nor that it was a loop at all, and the human had to
+  /// retype what they had already written. Handing it over costs one sentence.
+  ///
+  /// This does **not** make a turn-based loop start itself. `runsUnattended` is a separate
+  /// rule and still excludes it, which is right: the type exists because a person is in the
+  /// sequence, so a person opening it is what should begin it.
   public var sessionPrompt: String? {
     switch loopType {
     case .timeBased: return triggerPrompt
     case .goalBased: return goal?.sessionPrompt
-    case .turnBased, .proactive: return nil
+    case .turnBased: return Self.turnBasedPrompt(check: checkDescription)
+    case .proactive: return nil
     }
+  }
+
+  /// What a turn-based session opens with: work in turns, stop for review, and here is
+  /// what the review is against.
+  ///
+  /// Phrased to ask for a pause rather than a report — the hand-off this type names is the
+  /// *check*, and a session that runs to completion and then summarises has already made
+  /// every decision the check existed to gate.
+  static func turnBasedPrompt(check: String?) -> String? {
+    let opening = """
+      Work in turns, stopping after each one so a human can review it before you continue \
+      rather than running to completion on your own.
+      """
+    let criterion = check?.trimmingCharacters(in: .whitespaces) ?? ""
+    // The criterion is optional; the *shape* of the loop is not. A turn-based session with
+    // nobody's stated criterion should still stop for review — the human is the hand-off
+    // whether or not they wrote down in advance what they would be looking for.
+    guard !criterion.isEmpty else { return opening }
+    return "\(opening) Each turn is verified against this: \(criterion)"
   }
 
   /// The tier this node actually runs on: the human's pin if there is one, otherwise

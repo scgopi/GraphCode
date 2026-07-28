@@ -248,9 +248,29 @@ struct GoalBasedLoopTests {
   }
 
   @Test
-  func aTurnBasedNodeStillHasNoSessionPrompt() {
-    // Its session opens bare — this is what stops the launcher from starting one.
+  func aTurnBasedNodeOpensWithItsCheck() throws {
+    // The check used to reach nothing: required at creation, then left in the graph as
+    // metadata while the session opened knowing neither the criterion nor that it was a
+    // loop. Now it travels with it.
+    let node = LoopNode(title: "Research", checkDescription: "Is the argument sound?")
+    let prompt = try #require(node.sessionPrompt)
+    #expect(prompt.contains("Is the argument sound?"))
+    // And it asks for a pause, not a summary — the hand-off this type names is the check,
+    // and a session that runs to completion has already made the decisions it gated.
+    #expect(prompt.contains("stopping after each one"))
+  }
+
+  @Test
+  func aTurnBasedNodeStillDoesNotStartItself() {
+    // Carrying a prompt is not the same as running unattended. A person opening it is
+    // what should begin it — that is the entire point of the type.
     let node = LoopNode(title: "Research", checkDescription: "Sound?")
-    #expect(node.sessionPrompt == nil)
+    #expect(!node.runsUnattended)
+  }
+
+  @Test
+  func aProactiveNodeStillOpensBare() {
+    // A composite is a graph, not a session; its sub-graph's loops carry the prompts.
+    #expect(LoopNode(title: "Pipeline", loopType: .proactive).sessionPrompt == nil)
   }
 }

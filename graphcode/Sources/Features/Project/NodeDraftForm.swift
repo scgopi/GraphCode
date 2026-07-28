@@ -25,9 +25,9 @@ struct NodeDraftForm: View {
       // both edges. Out here it spans the full width and reads as what it already
       // behaves like: the dialog's mode switch, not one field among several.
       Picker("Type", selection: $store.draftLoopType) {
-        Text("Turn-based").tag(LoopType.turnBased)
         Text("Goal-based").tag(LoopType.goalBased)
         Text("Time-based").tag(LoopType.timeBased)
+        Text("Turn-based").tag(LoopType.turnBased)
         Text("Proactive").tag(LoopType.proactive)
       }
       .pickerStyle(.segmented)
@@ -37,8 +37,6 @@ struct NodeDraftForm: View {
         TextField("Title", text: $store.draftTitle)
 
         switch store.draftLoopType {
-        case .turnBased:
-          TextField("Check", text: $store.draftCheck)
         case .goalBased:
           // Short labels with the explanation in `prompt:`. In a macOS `Form` a
           // `TextField`'s first argument is the *label*, sitting in a column sized to
@@ -64,6 +62,19 @@ struct NodeDraftForm: View {
           TextField(
             "Prompt", text: $store.draftPrompt,
             prompt: Text("/loop 1h Check for new reports"))
+        case .turnBased:
+          // "Check" said neither *when* it happens nor *who* does it, which is the whole
+          // distinguishing feature of this type — see docs/01's "you hand off the check".
+          TextField(
+            "Verify each turn", text: $store.draftCheck,
+            prompt: Text("what a human looks for before it continues — optional"))
+          Text(
+            store.draftCheck.isEmpty
+              ? "Without one, the session is still told to stop after each turn for review."
+              : "The session opens knowing this, and stops after each turn to be judged on it."
+          )
+          .font(.caption2)
+          .foregroundStyle(.secondary)
         case .proactive:
           // No fields: a composite is built by editing its sub-graph after it exists.
           // Saying so beats an empty section that looks like something failed to load.
