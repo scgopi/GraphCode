@@ -204,11 +204,49 @@ final class GhosttyTerminalNSView: NSView {
 
   override func scrollWheel(with event: NSEvent) {
     guard let surface else { return }
+
+    // A full-screen TUI (Claude Code, an editor, a pager) turns mouse reporting on, and
+    // libghostty then reports each wheel tick to the program *at the surface's last
+    // known cursor position* — it does not read the position off this event. A program
+    // that only scrolls the region under the pointer therefore ignores ticks aimed at a
+    // stale point, and because mouse reporting also suppresses Ghostty's own viewport
+    // scrolling, the wheel does nothing at all. Stating the position first is what makes
+    // the tick land where the pointer actually is.
+    sendMousePos(event)
+
+    var deltaX = event.scrollingDeltaX
+    var deltaY = event.scrollingDeltaY
+    let precise = event.hasPreciseScrollingDeltas
+    if precise {
+      // Matching upstream Ghostty's own surface view. Trackpad deltas are in pixels and
+      // the core only emits a line once they accumulate past a cell height, so at 1x a
+      // slow drag can accumulate for a long time before anything moves.
+      deltaX *= 2
+      deltaY *= 2
+    }
+
     ghostty_surface_mouse_scroll(
-      surface,
-      event.scrollingDeltaX,
-      event.scrollingDeltaY,
-      ghostty_input_scroll_mods_t(event.hasPreciseScrollingDeltas ? 1 : 0))
+      surface, deltaX, deltaY, Self.scrollMods(precise: precise, momentum: event.momentumPhase))
+  }
+
+  /// `input.ScrollMods` packed into the byte libghostty expects: precision in bit 0, the
+  /// momentum phase in bits 1–3 (see `src/input/mouse.zig`). Inertial frames arriving
+  /// labelled `.none` are indistinguishable from real ones, which is not what a terminal
+  /// wants to know about a flick.
+  private static func scrollMods(
+    precise: Bool, momentum: NSEvent.Phase
+  ) -> ghostty_input_scroll_mods_t {
+    let phase: Int32
+    switch momentum {
+    case .began: phase = 1
+    case .stationary: phase = 2
+    case .changed: phase = 3
+    case .ended: phase = 4
+    case .cancelled: phase = 5
+    case .mayBegin: phase = 6
+    default: phase = 0
+    }
+    return ghostty_input_scroll_mods_t((precise ? 1 : 0) | (phase << 1))
   }
 
   private var trackingArea: NSTrackingArea?
@@ -218,7 +256,17 @@ final class GhosttyTerminalNSView: NSView {
     if let trackingArea { removeTrackingArea(trackingArea) }
     let area = NSTrackingArea(
       rect: bounds,
-      options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect],
+      options: [
+        .mouseEnteredAndExited,
+        .mouseMoved,
+        .inVisibleRect,
+        // `.activeAlways`, not `.activeInKeyWindow`, for the same reason upstream
+        // Ghostty uses it: a surface has to keep reporting the mouse even when it isn't
+        // focused or its window isn't key. Under `.activeInKeyWindow` the pointer could
+        // move across a pane without a single position update, leaving every subsequent
+        // wheel tick reported at wherever it was last seen.
+        .activeAlways,
+      ],
       owner: self)
     addTrackingArea(area)
     trackingArea = area
