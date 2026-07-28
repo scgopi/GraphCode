@@ -55,9 +55,22 @@ struct AppSidebarView: View {
     }
     .listStyle(.sidebar)
     // The sidebar's own translucent material would ignore `Theme` and let the desktop
-    // through, so hide it and fill with the flat gray instead.
+    // through, so hide it and paint the chrome instead — see `Theme.sidebarGloss`.
     .scrollContentBackground(.hidden)
-    .background(Theme.sidebarBackground)
+    .background {
+      Theme.sidebarGloss
+        // Lit along the top edge, where the pane meets the titlebar.
+        .overlay(alignment: .top) {
+          Rectangle().fill(Theme.sidebarHighlight).frame(height: 1)
+        }
+        // And falling into shadow where the detail pane begins. Drawn on the sidebar
+        // rather than as a divider so it sits under the list's own selection highlight
+        // instead of on top of it.
+        .overlay(alignment: .trailing) {
+          Rectangle().fill(Theme.sidebarEdgeShadow).frame(width: 1)
+        }
+        .ignoresSafeArea()
+    }
     .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
     .toolbar {
       ToolbarItem(placement: .primaryAction) {

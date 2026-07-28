@@ -5,14 +5,51 @@ import SwiftUI
 /// material — materials shift value with the wallpaper behind them and go flat when the
 /// window loses focus, which makes the graph canvas look like it changed color.
 ///
-/// Three steps, darkest at the canvas: the sidebar reads as chrome, the canvas as depth
-/// the nodes float above.
+/// Three steps, darkest at the canvas: the sidebar sits *below* the window in value, the
+/// canvas below that. The lit pane is the one you work in; the sidebar is the recess it
+/// sits in, and the canvas is the depth the nodes float above.
+///
+/// Chrome is *painted* glossy — a gradient lit from above, a specular line on its top
+/// edge, a shadow line where it meets the next pane (`sidebarGloss`, `tabBarGloss`). Not
+/// a system material, for the reason above: glass would let the wallpaper tint the one
+/// piece of chrome that has to hold still, and desaturate it the moment the window lost
+/// focus.
 enum Theme {
   /// Window and detail-pane fill — the icon body's lower gray.
   static let windowBackground = Color(red: 0.118, green: 0.125, blue: 0.141)
 
-  /// Sidebar fill, a step lighter than the window so the split divider needs no help.
-  static let sidebarBackground = Color(red: 0.145, green: 0.153, blue: 0.169)
+  /// Sidebar fill, a step *darker* than the window. It used to be a step lighter, which
+  /// put the brightest chrome on the pane you look at least — a list of names you scan
+  /// once and then ignore in favour of the canvas beside it. Sinking it below the window
+  /// reads the way a native sidebar does: the content pane is what's lit, and the
+  /// sidebar is the recess it sits in.
+  static let sidebarBackground = Color(red: 0.098, green: 0.105, blue: 0.120)
+
+  /// The gloss painted over `sidebarBackground` — lit from above and falling off down
+  /// the pane, the same treatment `tabBarGloss` gives the tab strip, and painted for the
+  /// same reason (see this file's header, and `tabBarGloss` itself). The range is
+  /// deliberately narrower than the tab strip's: a sidebar is tall, so a gradient steep
+  /// enough to read on a 40pt strip becomes an obvious vertical smear on a full-height
+  /// pane. This one is meant to be felt rather than seen.
+  static let sidebarGloss = LinearGradient(
+    colors: [
+      Color(red: 0.125, green: 0.133, blue: 0.149),
+      Color(red: 0.102, green: 0.109, blue: 0.125),
+      Color(red: 0.086, green: 0.092, blue: 0.106),
+    ],
+    startPoint: .top,
+    endPoint: .bottom)
+
+  /// The specular line along the sidebar's top edge, where it meets the titlebar. Half
+  /// the tab strip's, because this one runs the full height of the window next to it and
+  /// a bright rule there would read as a border between two panes rather than as light.
+  static let sidebarHighlight = Color.white.opacity(0.045)
+
+  /// The shadow where the sidebar meets the detail pane. This is what actually separates
+  /// them now that the sidebar is the darker of the two — a `NavigationSplitView`'s own
+  /// divider is nearly invisible between two dark fills, and a hairline of black reads as
+  /// the content pane casting into the recess rather than as a drawn line.
+  static let sidebarEdgeShadow = Color.black.opacity(0.45)
 
   /// Graph canvas fill, the darkest step — white nodes read as lit against it.
   static let canvasBackground = Color(red: 0.075, green: 0.082, blue: 0.094)
