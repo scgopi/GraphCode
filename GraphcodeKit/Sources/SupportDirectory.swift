@@ -26,10 +26,33 @@ import Foundation
 /// `migrateFromLegacyLocationIfNeeded()` only ever moves in one direction, writing the
 /// mirror of it.
 public enum SupportDirectory {
-  /// `~/.graphcode`.
+  /// Names a directory to use instead of `~/.graphcode`, for running a second graphcode
+  /// beside an installed one.
+  ///
+  /// Without this, a build run from Xcode and the copy in `/Applications` share every
+  /// piece of state there is — the same graphs, the same terminal layouts, and therefore
+  /// the same `zmx` session names, since a surface's session is named after its id. Two
+  /// apps then attach to one session and fight over it, which surfaces as
+  /// `session "graphcode-…" does not exist` when one of them has already taken it down.
+  ///
+  /// A relative value is resolved against the home directory, so
+  /// `GRAPHCODE_SUPPORT_DIR=.graphcode.dev` does the obvious thing. The **daemon reads
+  /// this too**, and its socket lives inside the directory — so a second app needs a
+  /// second `graphcoded` started with the same value, or it will sit there unconnected.
+  public static let environmentKey = "GRAPHCODE_SUPPORT_DIR"
+
+  /// `~/.graphcode`, unless `GRAPHCODE_SUPPORT_DIR` says otherwise.
   public static var url: URL {
-    URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-      .appendingPathComponent(".graphcode", isDirectory: true)
+    let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+    guard let override = ProcessInfo.processInfo.environment[environmentKey],
+      !override.trimmingCharacters(in: .whitespaces).isEmpty
+    else {
+      return home.appendingPathComponent(".graphcode", isDirectory: true)
+    }
+    let expanded = (override as NSString).expandingTildeInPath
+    return expanded.hasPrefix("/")
+      ? URL(fileURLWithPath: expanded, isDirectory: true)
+      : home.appendingPathComponent(expanded, isDirectory: true)
   }
 
   /// Where graphcode kept its state before this moved. Read only by the migration below.
@@ -50,7 +73,14 @@ public enum SupportDirectory {
   /// safe to run concurrently and repeatedly — hence "move only when the destination is
   /// entirely absent" rather than any kind of merge.
   public static func prepare() {
-    prepare(destination: url, legacy: legacyURL)
+    // No migration when someone has named the directory themselves: moving the legacy
+    // Application Support folder into `~/.graphcode.dev` would empty the real location
+    // into a scratch one, which is the opposite of what asking for a separate directory
+    // means. Such a directory just starts empty.
+    let overridden =
+      ProcessInfo.processInfo.environment[environmentKey]?
+      .trimmingCharacters(in: .whitespaces).isEmpty == false
+    prepare(destination: url, legacy: overridden ? url : legacyURL)
   }
 
   /// The real work, with both paths injected.
