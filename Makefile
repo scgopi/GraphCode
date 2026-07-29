@@ -254,6 +254,18 @@ format:
 # dependency arriving later has to be signed before the enclosing bundle or the
 # outer signature is invalid the moment it is written.
 #
+# graphcode.entitlements carries no comments on purpose. codesign hands the file
+# to AMFIUnserializeXML, whose plist reader is not the lenient one — an XML
+# comment inside the <dict> is a hard parse error ("syntax error near line N")
+# and the signature never gets written. So the reasoning lives here instead:
+# the app is deliberately *not* sandboxed, because its whole job is spawning
+# arbitrary CLI backends against arbitrary directories; notarization needs only
+# the hardened runtime, not the sandbox. The TCC keys mirror Ghostty's release
+# set (ThirdParty/ghostty/macos/Ghostty.entitlements) — macOS attributes what a
+# PTY child asks for to the app that spawned it, so a session running `claude`
+# that wants the microphone is refused outright unless GraphCode itself holds
+# the entitlement. A terminal cannot enumerate in advance what its guests need.
+#
 # The disk image is then signed and notarized in its own right. Stapling the app
 # covers whoever drags it out to /Applications; stapling the DMG covers
 # Gatekeeper's check on the downloaded file itself, offline, before it is ever
