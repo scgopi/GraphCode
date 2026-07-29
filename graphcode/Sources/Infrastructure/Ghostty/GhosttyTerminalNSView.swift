@@ -38,7 +38,12 @@ final class GhosttyTerminalNSView: NSView {
     config.platform = ghostty_platform_u(
       macos: ghostty_platform_macos_s(nsview: Unmanaged.passUnretained(self).toOpaque()))
     config.scale_factor = Double(NSScreen.main?.backingScaleFactor ?? 2.0)
-    config.font_size = 0  // inherit default
+    // The app's zoom, so a terminal opened after someone pressed ⌘− comes up at the size
+    // every other terminal is already at — and an un-zoomed one at graphcode's own default
+    // rather than Ghostty's, which is why this is never the "inherit" sentinel of zero it
+    // used to be. Set here rather than applied after creation so the cell grid is right on
+    // the first frame instead of reflowing once the surface is on screen.
+    config.font_size = TerminalFontZoomStore.shared.zoom.surfaceConfigFontSize
 
     let envVars = environment.map { key, value in
       (key as NSString, value as NSString)
@@ -61,6 +66,10 @@ final class GhosttyTerminalNSView: NSView {
         }
       }
     }
+
+    // Weakly held, so this is registration for later zooms only — nothing to unregister
+    // when the terminal closes.
+    TerminalFontZoomStore.shared.register(self)
   }
 
   required init?(coder: NSCoder) {
@@ -165,6 +174,14 @@ final class GhosttyTerminalNSView: NSView {
   // MARK: - Keyboard
 
   override func keyDown(with event: NSEvent) {
+    // Zoom first, and never forwarded. libghostty binds these same keys itself, so letting
+    // the event through as well would apply the step twice — and would apply the second
+    // one to this surface alone, which is the per-surface behaviour the app-wide zoom
+    // exists to replace. See `TerminalFontZoom`.
+    if let adjustment = zoomAdjustment(for: event) {
+      TerminalFontZoomStore.shared.apply(adjustment)
+      return
+    }
     // `sendKeyEvent` already writes the key (including its text, for plain
     // characters) straight to the surface when it returns true — running
     // `interpretKeyEvents` afterward as well would redispatch that same text
@@ -176,7 +193,19 @@ final class GhosttyTerminalNSView: NSView {
   }
 
   override func keyUp(with event: NSEvent) {
+    // Swallowed to match the press. A release whose press the surface never saw is exactly
+    // the sort of thing the kitty keyboard protocol reports to the program on the other
+    // end, and a shell being told about a key nobody pressed is worse than being told
+    // nothing.
+    guard zoomAdjustment(for: event) == nil else { return }
     _ = sendKeyEvent(event, action: GHOSTTY_ACTION_RELEASE)
+  }
+
+  /// Whether this keystroke is one of the app's zoom shortcuts. See `TerminalFontZoom` for
+  /// the mapping, and for why graphcode answers them rather than libghostty.
+  private func zoomAdjustment(for event: NSEvent) -> TerminalFontZoom.Adjustment? {
+    TerminalFontZoom.adjustment(
+      forKey: event.charactersIgnoringModifiers, modifiers: event.modifierFlags)
   }
 
   override func flagsChanged(with event: NSEvent) {

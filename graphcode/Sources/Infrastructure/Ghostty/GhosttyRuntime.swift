@@ -19,6 +19,15 @@ final class GhosttyRuntime: @unchecked Sendable {
 
   let app: ghostty_app_t
 
+  /// The size terminal text is at with nothing zoomed — Ghostty's own `font-size`, after
+  /// the user's config has had its say.
+  ///
+  /// Read here rather than hardcoded in `TerminalFontZoom` because this is the only moment
+  /// it can be: `ghostty_config_t` is freed at the end of this initializer, and there is
+  /// no way to ask a surface or the app for it afterwards. Someone who set `font-size = 16`
+  /// should zoom from 16 and land back on 16 at ⌘0, not on graphcode's idea of a default.
+  let configuredFontSize: Double
+
   private init() {
     guard ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv) == GHOSTTY_SUCCESS else {
       fatalError("ghostty_init failed")
@@ -35,6 +44,16 @@ final class GhosttyRuntime: @unchecked Sendable {
     ghostty_config_load_default_files(config)
     ghostty_config_load_recursive_files(config)
     ghostty_config_finalize(config)
+
+    // After finalize, so this is the value the surfaces will actually be built with. The
+    // fallback is Ghostty's own macOS default (`src/config/Config.zig`) for the case where
+    // the C getter doesn't support the key — it would only cost the zoom its starting
+    // point, which is no reason to refuse to open a terminal.
+    var fontSize: Float = 0
+    let fontSizeKey = "font-size"
+    let read = ghostty_config_get(
+      config, &fontSize, fontSizeKey, UInt(fontSizeKey.utf8.count))
+    configuredFontSize = read && fontSize > 0 ? Double(fontSize) : 13
 
     var runtimeConfig = ghostty_runtime_config_s(
       userdata: nil,
