@@ -1,7 +1,7 @@
 .PHONY: doctor generate build-app build-daemon run-app run-daemon \
         daemon-install daemon-uninstall daemon-status test check format clean \
         third-party build-zmx install-zmx build-ghostty vendor-sdk \
-        build-cli install-cli release-dmg
+        build-cli install-cli release-dmg notarize signing-doctor
 
 SCHEME_APP := graphcode
 SCHEME_DAEMON := graphcoded
@@ -224,9 +224,50 @@ format:
 #
 # Release, and arm64 only: GhosttyKit is built `-Dxcframework-target=native` and
 # has no x86_64 slice, so a universal build fails at link time.
+#
+# Signing. With no SIGN_ID the bundle is ad-hoc signed, which is fine on the
+# machine that built it and nowhere else — Gatekeeper on any other Mac refuses
+# an ad-hoc signature outright ("graphcode is damaged and can't be opened"). To
+# cut a DMG a stranger can actually open:
+#
+#   make release-dmg SIGN_ID="Developer ID Application: Name (TEAMID)" \
+#                    NOTARY_PROFILE=graphcode
+#
+# `make signing-doctor` checks both of those exist and prints how to create them.
+# The identity must be a *Developer ID Application* certificate; the "Apple
+# Development" certificate Xcode's automatic signing creates cannot ship — it is
+# for debugging on machines in your own provisioning profile, and notarization
+# rejects anything signed with it.
+#
+# Note that Xcode's Signing & Capabilities pane is not where this lives: Tuist
+# regenerates graphcode.xcodeproj from Project.swift on every `make generate`,
+# so anything set there is discarded. Release signing is this recipe's job.
+#
+# The signed path goes inside out, one codesign call per nested binary, ending
+# with the bundle itself. `--deep` is what the ad-hoc path above uses and what
+# Apple tells you not to use for distribution: it applies the *same* entitlements
+# to every nested binary and silently skips anything it doesn't recognise as
+# code, and notarization rejects the result. The three helpers get the hardened
+# runtime but no entitlements — they are CLI tools, and TCC prompts on behalf of
+# the app that spawned them, not on their own behalf. Contents/Frameworks is
+# empty today because GhosttyKit is a *static* xcframework, but a dynamic
+# dependency arriving later has to be signed before the enclosing bundle or the
+# outer signature is invalid the moment it is written.
+#
+# The disk image is then signed and notarized in its own right. Stapling the app
+# covers whoever drags it out to /Applications; stapling the DMG covers
+# Gatekeeper's check on the downloaded file itself, offline, before it is ever
+# mounted.
 # ---------------------------------------------------------------------------
 RELEASE_DIR := $(BUILD_DIR)/release
 DMG_STAGE := $(RELEASE_DIR)/dmg
+DMG := $(RELEASE_DIR)/graphcode-macos-arm64.dmg
+ENTITLEMENTS := $(CURDIR)/graphcode/graphcode.entitlements
+
+# Empty means ad-hoc. See the block above.
+SIGN_ID ?=
+# The keychain profile name given to `xcrun notarytool store-credentials`.
+NOTARY_PROFILE ?= graphcode
 
 release-dmg: generate build-zmx
 	@set -e; \
@@ -247,15 +288,110 @@ release-dmg: generate build-zmx
 	cp "$$PRODUCTS/graphcoded" "$(DMG_STAGE)/graphcode.app/Contents/Resources/bin/graphcoded"; \
 	cp "$$PRODUCTS/graphcode" "$(DMG_STAGE)/graphcode.app/Contents/Resources/bin/graphcode"; \
 	cp "$(BUILD_DIR)/zmx/bin/zmx" "$(DMG_STAGE)/graphcode.app/Contents/Resources/bin/zmx"; \
+	APP="$(DMG_STAGE)/graphcode.app"; \
 	echo "signing the bundle (embedding helpers invalidates the outer signature)"; \
-	codesign --force --deep --sign - "$(DMG_STAGE)/graphcode.app"; \
-	codesign --verify --deep "$(DMG_STAGE)/graphcode.app" \
-		|| { echo "the packaged app failed signature verification"; exit 1; }; \
+	if [ -z "$(SIGN_ID)" ]; then \
+		codesign --force --deep --sign - "$$APP"; \
+		codesign --verify --deep "$$APP" \
+			|| { echo "the packaged app failed signature verification"; exit 1; }; \
+		echo "  ad-hoc — this DMG opens only on this Mac. See 'make signing-doctor'."; \
+	else \
+		echo "  identity: $(SIGN_ID)"; \
+		for helper in zmx graphcoded graphcode; do \
+			codesign --force --options runtime --timestamp \
+				--sign "$(SIGN_ID)" "$$APP/Contents/Resources/bin/$$helper" >/dev/null 2>&1 \
+				|| { echo "failed to sign helper $$helper"; exit 1; }; \
+		done; \
+		if [ -d "$$APP/Contents/Frameworks" ]; then \
+			find "$$APP/Contents/Frameworks" -type f \( -name '*.dylib' -o -perm -u+x \) -print0 \
+				| xargs -0 -I{} codesign --force --options runtime --timestamp \
+					--sign "$(SIGN_ID)" {} >/dev/null 2>&1 || true; \
+		fi; \
+		codesign --force --options runtime --timestamp \
+			--entitlements "$(ENTITLEMENTS)" --sign "$(SIGN_ID)" "$$APP" \
+			|| { echo "signing graphcode.app failed"; exit 1; }; \
+		codesign --verify --strict --verbose=2 "$$APP" \
+			|| { echo "the packaged app failed signature verification"; exit 1; }; \
+		$(MAKE) --no-print-directory notarize TARGET="$$APP"; \
+	fi; \
 	ln -s /Applications "$(DMG_STAGE)/Applications"; \
-	rm -f "$(RELEASE_DIR)/graphcode-macos-arm64.dmg"; \
+	rm -f "$(DMG)"; \
 	hdiutil create -volname "graphcode" -srcfolder "$(DMG_STAGE)" -ov -format UDZO \
-		"$(RELEASE_DIR)/graphcode-macos-arm64.dmg" >/dev/null; \
-	echo "built: $(RELEASE_DIR)/graphcode-macos-arm64.dmg"
+		"$(DMG)" >/dev/null; \
+	if [ -n "$(SIGN_ID)" ]; then \
+		codesign --force --timestamp --sign "$(SIGN_ID)" "$(DMG)" \
+			|| { echo "signing the disk image failed"; exit 1; }; \
+		$(MAKE) --no-print-directory notarize TARGET="$(DMG)"; \
+		spctl --assess --type open --context context:primary-signature -v "$(DMG)" \
+			|| { echo "Gatekeeper rejected the disk image"; exit 1; }; \
+	fi; \
+	echo "built: $(DMG)"
+
+# ---------------------------------------------------------------------------
+# notarize — submit TARGET to Apple, wait for the verdict, staple the ticket.
+#
+# Stapling is what lets the ticket travel with the file: without it every first
+# launch needs a round trip to Apple, and a user who is offline (or behind a
+# firewall that eats ocsp.apple.com) is told the app is damaged.
+#
+# notarytool accepts a .dmg, .pkg or .zip and never a bare .app, so a bundle is
+# zipped first. `ditto -c -k --keepParent` is the only archiver Apple supports
+# here — plain `zip` flattens the symlinks inside a bundle and the upload comes
+# back rejected for a signature that was fine on disk.
+# ---------------------------------------------------------------------------
+notarize:
+	@test -n "$(TARGET)" || { echo "notarize needs TARGET=<path to .app, .dmg or .zip>"; exit 1; }
+	@set -e; \
+	SUBMIT="$(TARGET)"; \
+	case "$(TARGET)" in \
+		*.app) SUBMIT="$(RELEASE_DIR)/notarize-upload.zip"; \
+			rm -f "$$SUBMIT"; \
+			ditto -c -k --keepParent "$(TARGET)" "$$SUBMIT";; \
+	esac; \
+	echo "notarizing $$(basename "$(TARGET)") — this waits on Apple, usually a minute or two"; \
+	xcrun notarytool submit "$$SUBMIT" --keychain-profile "$(NOTARY_PROFILE)" --wait \
+		|| { echo "notarization failed. For the reasons: xcrun notarytool log <id> --keychain-profile $(NOTARY_PROFILE)"; exit 1; }; \
+	xcrun stapler staple "$(TARGET)" \
+		|| { echo "could not staple the ticket to $(TARGET)"; exit 1; }; \
+	case "$(TARGET)" in *.app) rm -f "$(RELEASE_DIR)/notarize-upload.zip";; esac
+
+# ---------------------------------------------------------------------------
+# signing-doctor — the two credentials a shippable DMG needs, and how to get
+# each one. Separate from `doctor`, which is about building at all.
+# ---------------------------------------------------------------------------
+signing-doctor:
+	@echo "graphcode signing doctor"
+	@echo "------------------------"
+	@if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then \
+		echo "[ok] Developer ID Application certificate:"; \
+		security find-identity -v -p codesigning | grep "Developer ID Application" \
+			| sed 's/^/       /'; \
+		echo "     pass one to make as SIGN_ID=\"Developer ID Application: ...\""; \
+	else \
+		echo "[missing] no Developer ID Application certificate."; \
+		echo "     The 'Apple Development' certificates below are for debugging on your"; \
+		echo "     own machines — Gatekeeper refuses them elsewhere and notarization"; \
+		echo "     rejects them. Xcode's 'Automatically manage signing' never creates a"; \
+		echo "     Developer ID certificate; you make it once, by hand:"; \
+		echo "       Xcode > Settings > Accounts > (your Apple ID) > Manage Certificates"; \
+		echo "       > + > Developer ID Application"; \
+		echo "     Only the Account Holder of the team can create one, and it needs the"; \
+		echo "     paid Apple Developer Program membership (\$$99/yr) — a free account"; \
+		echo "     gets Development certificates only."; \
+		security find-identity -v -p codesigning 2>/dev/null | sed 's/^/       /'; \
+	fi
+	@if xcrun notarytool history --keychain-profile "$(NOTARY_PROFILE)" >/dev/null 2>&1; then \
+		echo "[ok] notarytool keychain profile: $(NOTARY_PROFILE)"; \
+	else \
+		echo "[missing] notarytool keychain profile '$(NOTARY_PROFILE)'. Create it with:"; \
+		echo "       xcrun notarytool store-credentials $(NOTARY_PROFILE) \\"; \
+		echo "         --apple-id <your-apple-id> --team-id <TEAMID> --password <app-specific-password>"; \
+		echo "     The password is NOT your Apple ID password — generate an app-specific"; \
+		echo "     one at appleid.apple.com > Sign-In and Security > App-Specific Passwords."; \
+		echo "     TEAMID is the parenthesised code in the certificate name above."; \
+	fi
+	@test -f "$(ENTITLEMENTS)" && echo "[ok] entitlements: $(ENTITLEMENTS)" \
+		|| echo "[missing] $(ENTITLEMENTS)"
 
 clean:
 	rm -rf $(WORKSPACE) graphcode.xcodeproj
