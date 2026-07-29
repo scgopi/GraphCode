@@ -322,6 +322,9 @@ struct ProjectCanvasView: View {
       Button("Arm Schedule") { store.send(.armCompositeTapped(node.id)) }
         .disabled(!node.pilotState.canArm)
     }
+    // Available on a resolved loop too: a finished loop is still something you read the
+    // graph by, and its name is what you read.
+    Button("Rename…") { store.send(.renameNodeRequested(node.id)) }
     if !node.isResolved {
       Button("Stop Loop") { store.send(.stopNodeTapped(node.id)) }
     }

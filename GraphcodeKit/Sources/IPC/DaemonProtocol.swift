@@ -34,10 +34,12 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
 
 /// Mutations against exactly one project's graph — this is what `GraphStore.handle`
 /// takes, and (before Phase 4) was itself called `DaemonCommand`. Deliberately thin:
-/// creating a node/edge or resolving a turn-based check are the only mutations built
-/// so far. There's no `deleteNode`/`updateGraph` — not because they're hard, but
-/// because nothing in the app needs them yet, and a wire protocol is easier to extend
-/// than to narrow.
+/// each case is a mutation something in the app actually reaches for. There's still no
+/// general `updateGraph` — not because it's hard, but because nothing needs it yet, and
+/// a wire protocol is easier to extend than to narrow. `renameNode` is the shape a
+/// further per-field edit should follow rather than the first argument for a
+/// catch-all: one named command says what changed, so the daemon can decide what a
+/// change of *that* field means.
 /// `indirect` because `.subGraphCommand` nests a `GraphCommand` inside itself — a
 /// proactive node's sub-graph takes exactly the same commands its parent graph does,
 /// which is the point: there's no second execution engine, just the orchestrator running
@@ -58,6 +60,14 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   case createEdge(from: UUID, to: UUID, spec: EdgeSpec)
   case nodeCheckApproved(UUID)
   case nodeCheckRejected(UUID)
+  /// Give a loop a new title. Only the title — a loop's identity is its `id` (which is
+  /// also its `zmx` session name, see `SurfaceRef`), so renaming touches nothing the
+  /// session, its edges, or its persistence are keyed on. A running loop keeps running
+  /// under the new name.
+  ///
+  /// An empty or whitespace-only title is refused rather than applied: the graph, the
+  /// sidebar, and the canvas would all render a nameless card, and there is no undo.
+  case renameNode(UUID, title: String)
   /// Removes the node, every edge touching it, and its detached session. Irreversible
   /// — the app confirms before sending this.
   case deleteNode(UUID)

@@ -53,6 +53,12 @@ struct ProjectFeature {
     /// only removes a relationship — doesn't.
     var nodePendingDeletion: UUID?
 
+    /// Set while the rename prompt is up, with `draftRenameTitle` holding what has been
+    /// typed so far. Two fields rather than one optional draft struct, to match how
+    /// `nodePendingDeletion` and the creation form's `draft*` fields already work here.
+    var nodePendingRename: UUID?
+    var draftRenameTitle = ""
+
     var id: String { graph.project.path }
 
     init(graph: LoopGraph) {
@@ -129,6 +135,14 @@ struct ProjectFeature {
     case deleteNodeRequested(UUID)
     case deleteNodeConfirmed
     case deleteNodeCancelled
+    case renameNodeRequested(UUID)
+    /// The prompt's text field, one keystroke at a time. Not a `binding` because the
+    /// field is hosted by `AppView` — see `AppFeature.State.pendingLoopRename` — which
+    /// holds the app store rather than any one project's, so it has no `@Bindable`
+    /// project store to bind through.
+    case renameTitleChanged(String)
+    case renameNodeConfirmed
+    case renameNodeCancelled
     case deleteEdgeTapped(UUID)
     case stopNodeTapped(UUID)
     case pilotCompositeTapped(UUID)
@@ -265,6 +279,36 @@ struct ProjectFeature {
           try? await orchestratorClient.send(
             .graphCommand(projectPath: projectPath, command: .deleteNode(nodeID)))
         }
+
+      case .renameNodeRequested(let nodeID):
+        guard let node = state.graph.nodes[id: nodeID] else { return .none }
+        state.nodePendingRename = nodeID
+        // Prefilled with the title it already has: renaming a loop is almost always
+        // amending a name, not writing a new one from nothing.
+        state.draftRenameTitle = node.title
+        return .none
+
+      case .renameTitleChanged(let title):
+        state.draftRenameTitle = title
+        return .none
+
+      case .renameNodeCancelled:
+        state.nodePendingRename = nil
+        state.draftRenameTitle = ""
+        return .none
+
+      case .renameNodeConfirmed:
+        guard let nodeID = state.nodePendingRename else { return .none }
+        let title = state.draftRenameTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let current = state.graph.nodes[id: nodeID]?.title
+        state.nodePendingRename = nil
+        state.draftRenameTitle = ""
+        // Nothing typed, or nothing changed: close the prompt and say nothing. The
+        // daemon refuses a blank title anyway (see `GraphStore.renameNode`); this is so
+        // an empty field reads as "never mind" rather than as a command that quietly
+        // did nothing.
+        guard !title.isEmpty, title != current else { return .none }
+        return send(state, .renameNode(nodeID, title: title))
 
       case .stopNodeTapped(let nodeID):
         return send(state, .stopNode(nodeID))

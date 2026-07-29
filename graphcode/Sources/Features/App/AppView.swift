@@ -54,6 +54,48 @@ struct AppView: View {
         "Its terminal session is ended and every edge touching it is removed. "
           + "This can't be undone.")
     }
+    // A loop's title is written before the work exists, so it's the one thing about a
+    // loop people want to change afterwards. An alert with a field rather than a sheet:
+    // there is exactly one thing to type, and it has to be able to open over a terminal
+    // as readily as over a canvas.
+    .alert(
+      "Rename “\(store.pendingLoopRename?.node.title ?? "")”",
+      isPresented: Binding(
+        get: { store.pendingLoopRename != nil },
+        set: { if !$0 { cancelPendingRename() } }
+      )
+    ) {
+      // Submitting from the keyboard goes through the same action Rename does, so
+      // Return commits instead of dismissing the alert with the typing thrown away.
+      TextField("Title", text: renameTitleBinding)
+        .onSubmit { confirmPendingRename() }
+      Button("Rename") { confirmPendingRename() }
+      Button("Cancel", role: .cancel) { cancelPendingRename() }
+    } message: {
+      Text("Only the name changes — the loop keeps its session, its edges, and its work.")
+    }
+  }
+
+  /// Reads and writes the pending rename's draft text straight through to the project it
+  /// belongs to. Built by hand rather than with `@Bindable`: this view holds the app
+  /// store, and which project's field is on screen isn't known until the prompt is up.
+  private var renameTitleBinding: Binding<String> {
+    Binding(
+      get: { store.pendingLoopRename?.title ?? "" },
+      set: { newValue in
+        guard let path = store.pendingLoopRename?.projectPath else { return }
+        store.send(.projects(.element(id: path, action: .renameTitleChanged(newValue))))
+      })
+  }
+
+  private func confirmPendingRename() {
+    guard let path = store.pendingLoopRename?.projectPath else { return }
+    store.send(.projects(.element(id: path, action: .renameNodeConfirmed)))
+  }
+
+  private func cancelPendingRename() {
+    guard let path = store.pendingLoopRename?.projectPath else { return }
+    store.send(.projects(.element(id: path, action: .renameNodeCancelled)))
   }
 
   private func confirmPendingDeletion() {

@@ -52,6 +52,22 @@ struct AppFeature {
       }
       return nil
     }
+
+    /// The loop a rename prompt is currently up for, which project it belongs to, and
+    /// what has been typed into the field so far.
+    ///
+    /// Hosted here for the same reason the deletion dialog is: renaming is reachable from
+    /// the sidebar, which is on screen even while a terminal fills the detail pane and
+    /// that project's canvas isn't rendered at all.
+    var pendingLoopRename: (projectPath: String, node: LoopNode, title: String)? {
+      for project in projects {
+        guard let nodeID = project.nodePendingRename,
+          let node = project.graph.nodes[id: nodeID]
+        else { continue }
+        return (project.id, node, project.draftRenameTitle)
+      }
+      return nil
+    }
   }
 
   enum Action {

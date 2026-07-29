@@ -147,6 +147,9 @@ public actor GraphStore {
     case .nodeCheckRejected(let nodeID):
       resolveNode(nodeID, succeeded: false)
 
+    case .renameNode(let nodeID, let title):
+      renameNode(nodeID, to: title)
+
     case .deleteNode(let nodeID):
       deleteNode(nodeID)
 
@@ -271,6 +274,28 @@ public actor GraphStore {
       guard let sample = await onReadUsage(node) else { continue }
       graph.nodes[id: node.id]?.usage = sample
     }
+  }
+
+  // MARK: - Renaming
+
+  /// A loop's title is the one thing about it a human is expected to change after the
+  /// fact: it's written before the work exists, and what the loop turns out to be doing
+  /// is known only once it's running.
+  ///
+  /// Deliberately does nothing else. The node keeps its `id`, so its `zmx` session, its
+  /// edges, its saved terminal layout and its place in the graph are all untouched —
+  /// renaming a running loop doesn't interrupt it. Nothing here re-derives a prompt
+  /// either: what a session was launched with is what it's already working on, and
+  /// rewriting that after the fact would say something to the agent that the human only
+  /// meant for the card.
+  ///
+  /// Blank titles are refused instead of stored (mirroring `NodeDraft.isValid`, which
+  /// refuses the same thing at creation): a card with no name is unreachable in the
+  /// sidebar, and there is no undo to reach for.
+  private func renameNode(_ nodeID: UUID, to title: String) {
+    let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, graph.nodes[id: nodeID] != nil else { return }
+    graph.nodes[id: nodeID]?.title = trimmed
   }
 
   // MARK: - Deletion

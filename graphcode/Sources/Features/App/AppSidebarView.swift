@@ -198,6 +198,8 @@ struct AppSidebarView: View {
         .disabled(!node.pilotState.canArm)
     }
 
+    Button("Rename…") { send(.renameNodeRequested(node.id), to: projectPath) }
+
     if !node.isResolved {
       Button("Stop Loop") { send(.stopNodeTapped(node.id), to: projectPath) }
     }
