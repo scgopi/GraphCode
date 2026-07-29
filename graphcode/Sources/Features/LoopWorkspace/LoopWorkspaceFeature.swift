@@ -37,6 +37,9 @@ struct LoopWorkspaceFeature {
     case selectNextTab
     case selectPreviousTab
     case splitButtonTapped(direction: SplitDirection)
+    /// The user clicked into one pane of a split. Sent by the surface itself on mouse
+    /// down, which is the only unambiguous "I meant this one" there is.
+    case paneFocused(tabID: UUID, surfaceID: UUID)
     case paneClosed(tabID: UUID, surfaceID: UUID)
     case primarySurfaceExited(succeeded: Bool)
   }
@@ -85,9 +88,22 @@ struct LoopWorkspaceFeature {
       case .splitButtonTapped(let direction):
         guard var tab = state.layout.tabs[id: state.layout.selectedTabID], tab.secondary == nil
         else { return .none }
-        tab.secondary = SurfaceRef(id: UUID(), launchesClaudeCode: false)
+        let secondary = SurfaceRef(id: UUID(), launchesClaudeCode: false)
+        tab.secondary = secondary
         tab.splitDirection = direction
+        // The new pane takes the keyboard, matching every terminal that splits — you
+        // asked for a second shell because you want to type in it. Leaving focus behind
+        // would also mean the pane you just created came up dimmed.
+        tab.focusedSurfaceID = secondary.id
         state.layout.tabs[id: tab.id] = tab
+        persist(state)
+        return .none
+
+      case .paneFocused(let tabID, let surfaceID):
+        guard var tab = state.layout.tabs[id: tabID], tab.isSplit else { return .none }
+        guard tab.focusedSurfaceID != surfaceID else { return .none }
+        tab.focusedSurfaceID = surfaceID
+        state.layout.tabs[id: tabID] = tab
         persist(state)
         return .none
 
@@ -102,6 +118,8 @@ struct LoopWorkspaceFeature {
           tab.primary = secondary
         }
         tab.secondary = nil
+        // Whichever side went, the survivor is now `primary` and holds the keyboard.
+        tab.focusedSurfaceID = tab.primary.id
         state.layout.tabs[id: tabID] = tab
         persist(state)
         return .none

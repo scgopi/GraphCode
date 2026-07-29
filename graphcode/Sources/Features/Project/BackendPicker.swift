@@ -38,9 +38,33 @@ struct BackendPicker: View {
     }
   }
 
+  /// Why this pairing is refused, and what to do instead.
+  ///
+  /// It used to say only that the backend "can't host a timeBased loop", which is true and
+  /// tells you nothing — you can't tell whether it is a missing feature, a bug, or
+  /// something you configured wrongly, and the honest answer is none of those. Each reason
+  /// now names the capability that is actually absent and points at the way forward.
   private var unsupportedReason: String {
-    selection.isSpiked
-      ? "\(selection.displayName) can't host a \(loopType.rawValue) loop."
-      : "\(selection.displayName) isn't wired up yet — GraphCode can't launch it."
+    guard selection.isSpiked else {
+      return "\(selection.displayName) isn't wired up yet — GraphCode can't launch it."
+    }
+    let name = selection.displayName
+    switch loopType {
+    case .timeBased:
+      // graphcode holds no timer of its own: a time-based loop's cadence lives *inside*
+      // the session, as a `/loop`-style directive the agent runs on itself. A backend
+      // without one would run the prompt once and look like a broken schedule.
+      return "\(name) has no way to re-trigger its own session — no /loop or /schedule "
+        + "equivalent — so a recurring loop would run once and stop. Claude Code can host "
+        + "this one."
+    case .goalBased:
+      return "\(name) has no goal mode — nothing to run turn after turn against a stop "
+        + "condition. Try turn-based, where you judge each turn yourself."
+    case .proactive:
+      return "\(name) has no verified sub-agent fan-out, and a composite is a graph of "
+        + "loops running inside one node. Claude Code can host this one."
+    case .turnBased:
+      return "\(name) can't host a turn-based loop."
+    }
   }
 }

@@ -87,7 +87,10 @@ struct CLISessionBackendTests {
   func onlyBackendsThatAcceptMidSessionInputCanReceiveMessages() {
     // docs/02-graph-of-loops.md: a backend that can't be interrupted mid-session can
     // never be the `to` side of a `.message` edge.
-    #expect(CLISessionBackendKind.claudeCode.capabilities.supportsMidSessionInput)
-    #expect(!CLISessionBackendKind.codex.capabilities.supportsMidSessionInput)
+    // All three are TUIs in a PTY, so `zmx send` can type into each of them — Codex
+    // included, now that it has been spiked (issue #1).
+    for backend in CLISessionBackendKind.allCases {
+      #expect(backend.capabilities.supportsMidSessionInput)
+    }
   }
 }

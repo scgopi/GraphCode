@@ -114,17 +114,25 @@ public enum SessionBriefing {
       """
   }
 
-  /// The env var Copilot CLI searches for custom instructions, beyond the git root and
-  /// working directory (`copilot help environment`).
+  /// How Copilot CLI is told about the briefing: a one-line preamble on the prompt, and
+  /// `--add-dir` so the session is allowed to read the file it names.
   ///
-  /// This is how Copilot gets the briefing *properly*. The first cut prepended "read this
-  /// file" to the prompt, which put housekeeping in front of the human's actual request,
-  /// left it in the session's scrollback, and relied on the agent choosing to follow it.
-  /// Pointing this at a directory graphcode owns makes the briefing a real custom
-  /// instruction — loaded before the session starts, exactly like Claude Code's
-  /// `--append-system-prompt-file` — without writing an `AGENTS.md` into someone's
-  /// repository, which is not graphcode's to touch.
-  public static let copilotInstructionsDirectoryVariable = "COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
+  /// **`COPILOT_CUSTOM_INSTRUCTIONS_DIRS` does not work.** `copilot help environment`
+  /// documents it as "additional directories to search for custom instructions files", and
+  /// it was the obvious right answer — a real system-level instruction, nothing in the
+  /// prompt, nothing written into anyone's repository. Measured against 1.0.75 it is simply
+  /// ignored: an `AGENTS.md` in a directory named by that variable has no effect, in either
+  /// the `AGENTS.md` or `.github/copilot-instructions.md` layout, while the identical file
+  /// in the working directory is picked up every time. Shipping on the documentation cost
+  /// a release where Copilot loops silently never fanned out (issue #2).
+  ///
+  /// `--add-dir` is the half that is easy to miss. Copilot verifies file paths, so a
+  /// session told to read `~/.graphcode/briefings/…` cannot reach it — the pointer alone
+  /// looks like the agent ignoring an instruction when it is actually being denied.
+  public static func pointer(toBriefingAt path: String) -> String {
+    "Before anything else, read \(path) — it explains the graph you are running inside and "
+      + "how to create additional loops when the work calls for it."
+  }
 
   /// Writes the briefing for `projectPath` and returns where it landed, or `nil` if there
   /// is nothing to write or writing failed.

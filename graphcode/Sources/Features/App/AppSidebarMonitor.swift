@@ -3,8 +3,15 @@ import GraphcodeKit
 import SwiftUI
 
 /// The orchestrator's monitoring surface as it appears in the sidebar
-/// (docs/05-orchestrator.md#monitoring-surface): what needs a human, and what it has all
-/// cost so far. Split out of `AppSidebarView` purely for size.
+/// (docs/05-orchestrator.md#monitoring-surface): what needs a human.
+///
+/// The cost half of that surface is deliberately absent. It could only ever say "none
+/// reporting": usage arrives from a backend writing `zmx set "$ZMX_SESSION" usage=…`
+/// from a lifecycle hook, and graphcode does not install hooks into someone's Claude
+/// Code settings on their behalf — so nothing ever wrote one. A panel that is
+/// permanently empty teaches people to stop looking at the panel next to it, which is
+/// the one that matters. `GraphStore` still collects usage and `graphcode usage <path>`
+/// still prints it, so the day a hook exists there is something to show.
 extension AppSidebarView {
   /// The orchestrator monitor's needs-attention rollup
   /// (docs/05-orchestrator.md#monitoring-surface), pinned above the projects.
@@ -27,41 +34,12 @@ extension AppSidebarView {
     }
   }
 
-  /// The usage rollup from docs/05-orchestrator.md#monitoring-surface, in the same panel
-  /// as needs-attention because "cost and attention are both things the orchestrator's
-  /// monitoring surface exists to answer".
-  ///
-  /// It always states its coverage — "$0.12 · 2/9 loops reporting" — because graphcode
-  /// cannot see inside a running `claude` and only knows what a backend's hooks tell it.
-  /// A bare total would read as the whole bill when it might be a fraction of it, and a
-  /// cost figure a human might act on has to be honest about what it left out.
-  @ViewBuilder
-  var usageSection: some View {
-    let usage = store.usageRollup
-    if usage.total > 0 {
-      HStack(spacing: 6) {
-        Image(systemName: "chart.bar").foregroundStyle(.secondary)
-        VStack(alignment: .leading, spacing: 1) {
-          Text(usage.headline).font(.callout)
-          Text(usage.coverage).font(.caption2).foregroundStyle(.secondary)
-        }
-        Spacer()
-        Button {
-          store.send(.refreshUsageTapped)
-        } label: {
-          Image(systemName: "arrow.clockwise")
-        }
-        .buttonStyle(.borderless)
-        .help("Ask each loop's backend what it has spent")
-      }
-      Divider()
-    }
-  }
-
   private func attentionRow(for item: AttentionItem) -> some View {
     HStack(spacing: 6) {
-      Image(systemName: icon(for: item.reason))
-        .foregroundStyle(color(for: item.reason))
+      // The same leading column every other sidebar row uses, so an attention row lines
+      // up with the project and loop rows under it rather than starting a column of its
+      // own — see `SidebarIcon`.
+      SidebarIcon(systemName: icon(for: item.reason), tint: color(for: item.reason))
       VStack(alignment: .leading, spacing: 1) {
         Text(item.nodeTitle).font(.callout).lineLimit(1)
         // The project name matters here in a way it doesn't in the per-project rows

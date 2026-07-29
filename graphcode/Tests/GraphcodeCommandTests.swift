@@ -88,13 +88,25 @@ struct GraphcodeCommandTests {
 
   @Test
   func anImpossibleBackendPairingIsRejected() throws {
-    // Codex hasn't been spiked, so it can't host a goal-based loop.
+    // Codex used to be the example here because it could host *nothing*. It is spiked now
+    // (issue #1) and takes turn- and goal-based loops fine — but a time-based loop needs
+    // the session to re-trigger itself, and Codex has no `/loop` equivalent, so that
+    // pairing would run once and look like a broken schedule.
     #expect(throws: GraphcodeCommand.ParseError.invalidDraft) {
       try GraphcodeCommand.parse([
-        "node", "create", "/tmp/x", "--title", "Green", "--type", "goal",
-        "--goal", "CI passes", "--backend", "codex",
+        "node", "create", "/tmp/x", "--title", "Poll", "--type", "time",
+        "--prompt", "/loop 1h Check", "--backend", "codex",
       ])
     }
+    // And the pairing that is fine now, which is the point of the change.
+    #expect(
+      throws: Never.self,
+      performing: {
+        try GraphcodeCommand.parse([
+          "node", "create", "/tmp/x", "--title", "Green", "--type", "goal",
+          "--goal", "CI passes", "--backend", "codex",
+        ])
+      })
   }
 
   @Test

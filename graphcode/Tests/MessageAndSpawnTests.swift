@@ -97,18 +97,19 @@ struct MessageAndSpawnTests {
   }
 
   @Test
-  func aBackendThatCannotBeInterruptedIsNeverAMessageTarget() async {
-    // docs/04-cli-backends.md: only `.handoff` and `.spawn` work for such a backend,
-    // because they start a session rather than interrupt one.
-    let delivered = LockIsolated<[Delivery]>([])
-    let store = await messagePair(
-      targetState: .running, targetBackend: .codex, delivered: delivered)
-    let sourceID = await store.graph.nodes[0].id
-
-    await store.handle(.nodeCheckApproved(sourceID))
-
-    #expect(delivered.value.isEmpty)
-    #expect(await store.undeliveredMessages.first?.reason == .backendCannotAcceptInput)
+  func everyBackendCanCurrentlyBeAMessageTarget() {
+    // docs/04-cli-backends.md says a backend that can't be interrupted mid-session can
+    // never be the `to` side of a `.message` edge, and `GraphStore` still refuses one with
+    // `.backendCannotAcceptInput`.
+    //
+    // That refusal is currently **unreachable**, because all three backends are TUIs in a
+    // PTY that `zmx send` can type into — Codex included, since it was spiked (issue #1).
+    // This asserts the state of the world that makes it unreachable, so the day a backend
+    // arrives that can't take input, this test fails and points at the rule that needs
+    // exercising again.
+    for backend in CLISessionBackendKind.allCases {
+      #expect(backend.capabilities.supportsMidSessionInput)
+    }
   }
 
   @Test

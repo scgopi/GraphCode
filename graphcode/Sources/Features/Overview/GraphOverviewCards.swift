@@ -70,16 +70,21 @@ extension GraphOverviewView {
     .help(folder.path)
   }
 
-  private func loopCard(_ loop: GraphOverview.Loop) -> some View {
-    let node = loop.node
-    let reason = attentionReasons[node.id]
-    return VStack(alignment: .leading, spacing: 5) {
+  /// What a loop card says, without the chrome around it — split out only so
+  /// `loopCard` stays inside the function-length limit.
+  private func loopCardBody(_ node: LoopNode, reason: AttentionReason?) -> some View {
+    VStack(alignment: .leading, spacing: 5) {
       HStack {
         Text(node.title).font(.headline).lineLimit(1)
         Spacer()
         Circle().fill(node.state.presenceColor).frame(width: 8, height: 8)
       }
       HStack(spacing: 4) {
+        // Same kind-colouring as the project canvas, so a loop reads identically in
+        // both — see `LoopTypeAppearance`.
+        Image(systemName: node.loopType.glyph)
+          .font(.caption2)
+          .foregroundStyle(node.loopType.accent)
         Text(node.loopType.rawValue).font(.caption2).foregroundStyle(.secondary)
         if node.backend != .claudeCode {
           Text(node.backend.displayName).font(.caption2).foregroundStyle(.tertiary)
@@ -95,29 +100,41 @@ extension GraphOverviewView {
           .foregroundStyle(.orange)
       }
     }
-    .padding(10)
-    .frame(width: 220, alignment: .leading)
-    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-    .overlay(
-      RoundedRectangle(cornerRadius: 10)
-        .stroke(
-          reason == nil ? Color.secondary.opacity(0.3) : Color.orange,
-          lineWidth: reason == nil ? 1 : 2)
-    )
-    .contentShape(Rectangle())
-    .onTapGesture { open(loop) }
-    .contextMenu {
-      Button("Open Terminal") { open(loop) }
-      Button("Reveal in \(folderName(loop.projectPath))") {
-        store.send(.projectHeaderTapped(loop.projectPath))
+  }
+
+  private func loopCard(_ loop: GraphOverview.Loop) -> some View {
+    let node = loop.node
+    let reason = attentionReasons[node.id]
+    return loopCardBody(node, reason: reason)
+      .padding(10)
+      .frame(width: 220, alignment: .leading)
+      .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+      .overlay(alignment: .leading) {
+        UnevenRoundedRectangle(topLeadingRadius: 10, bottomLeadingRadius: 10)
+          .fill(node.loopType.accent)
+          .frame(width: 4)
       }
-      if !node.isResolved {
-        Divider()
-        Button("Stop Loop", role: .destructive) {
-          store.send(.stopNodeTapped(projectPath: loop.projectPath, nodeID: node.id))
+      .clipShape(RoundedRectangle(cornerRadius: 10))
+      .overlay(
+        RoundedRectangle(cornerRadius: 10)
+          .stroke(
+            reason == nil ? Color.secondary.opacity(0.3) : Color.orange,
+            lineWidth: reason == nil ? 1 : 2)
+      )
+      .contentShape(Rectangle())
+      .onTapGesture { open(loop) }
+      .contextMenu {
+        Button("Open Terminal") { open(loop) }
+        Button("Reveal in \(folderName(loop.projectPath))") {
+          store.send(.projectHeaderTapped(loop.projectPath))
+        }
+        if !node.isResolved {
+          Divider()
+          Button("Stop Loop", role: .destructive) {
+            store.send(.stopNodeTapped(projectPath: loop.projectPath, nodeID: node.id))
+          }
         }
       }
-    }
   }
 
 }

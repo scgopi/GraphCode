@@ -299,11 +299,11 @@ struct GraphStoreTests {
     // is valid now, since the human doing the verifying is there either way.
     await store.handle(.createNode(NodeDraft(title: "No goal", loopType: .goalBased)))
     await store.handle(.createNode(NodeDraft(title: "", loopType: .timeBased, triggerPrompt: "x")))
+    // A composite on Copilot: sub-agent fan-out is the one capability still unverified
+    // there, so this is the pairing that stays impossible now that Codex is spiked.
     await store.handle(
       .createNode(
-        NodeDraft(
-          title: "Wrong backend", loopType: .goalBased, goal: GoalSpec(summary: "Done"),
-          backend: .codex)))
+        NodeDraft(title: "Wrong backend", loopType: .proactive, backend: .copilotCLI)))
 
     #expect(await store.graph.nodes.isEmpty)
   }

@@ -92,6 +92,26 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       case .allowEverything: return ["--allow-all"]
       }
     }
+
+    /// `--add-dir` for each directory a session legitimately needs to reach.
+    ///
+    /// Copilot gates **tools, paths and URLs separately**: `--allow-all-tools` lets it run
+    /// a tool without asking and says nothing about *where* that tool may read or write.
+    /// A session outside its working directory — a loop bound to a worktree needing the
+    /// project, or any loop needing its briefing — is denied, which reads as the agent
+    /// ignoring instructions rather than as a permission it was never given (issues #2
+    /// and #4).
+    ///
+    /// Named directories rather than `--allow-all-paths`: the point is that a loop may
+    /// reach the things graphcode pointed it at, not everything on the disk. Nothing to
+    /// add under `.allowEverything`, which has already opened every path, and nothing
+    /// under `.ask`, where a human is answering for each one anyway.
+    public func readableDirectories(_ paths: [String]) -> [String] {
+      guard self == .allowTools else { return [] }
+      var seen: Set<String> = []
+      return paths.filter { !$0.isEmpty && seen.insert($0).inserted }
+        .flatMap { ["--add-dir", $0] }
+    }
   }
 
   /// Which backend a new loop starts on before anyone touches the picker.
@@ -100,6 +120,65 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// unspiked backend would make every new loop start on something that can't run, which
   /// is a worse outcome than quietly correcting a value nobody can select in the UI
   /// anyway — it only arrives here by hand-editing the file or by downgrading.
+  /// How much a Codex session may do without stopping to ask.
+  ///
+  /// Codex splits this across two flags rather than one: `--ask-for-approval` decides when
+  /// it stops to ask, and `--sandbox` decides what it may touch when it doesn't. Setting
+  /// only the first produces a session that never asks *and* can't write, which looks like
+  /// a hung loop; they have to move together.
+  public enum CodexApprovals: String, Codable, CaseIterable, Sendable {
+    /// Codex's own default: it decides when to ask, and a human answers.
+    case ask
+    /// graphcode's default — never stops to ask, and may write inside its workspace.
+    case workspace
+    /// `--dangerously-bypass-approvals-and-sandbox`, which is exactly what it says.
+    case unsandboxed
+
+    public var displayName: String {
+      switch self {
+      case .ask: return "Ask when unsure"
+      case .workspace: return "Workspace (recommended)"
+      case .unsandboxed: return "No sandbox"
+      }
+    }
+
+    public var explanation: String {
+      switch self {
+      case .ask:
+        return "Codex's own default. An unattended loop will wait at the first prompt."
+      case .workspace:
+        return "Runs without asking, and may write inside the project it was given."
+      case .unsandboxed:
+        return "Skips every approval and the sandbox entirely — a loop can do anything "
+          + "you can, anywhere."
+      }
+    }
+
+    public var arguments: [String] {
+      switch self {
+      case .ask: return []
+      case .workspace: return ["--ask-for-approval", "never", "--sandbox", "workspace-write"]
+      case .unsandboxed: return ["--dangerously-bypass-approvals-and-sandbox"]
+      }
+    }
+
+    /// `--add-dir` for each directory the loop's work spans. Codex sandboxes writes to its
+    /// workspace, so a loop bound to a worktree cannot touch the repository it branched
+    /// from unless told — the same gap that made Copilot look like it was ignoring
+    /// instructions (issues #2 and #4).
+    ///
+    /// Nothing to add when there is no sandbox to widen, and nothing under `.ask`, where a
+    /// human is answering for each one anyway.
+    public func writableDirectories(_ paths: [String]) -> [String] {
+      guard self == .workspace else { return [] }
+      var seen: Set<String> = []
+      return paths.filter { !$0.isEmpty && seen.insert($0).inserted }
+        .flatMap { ["--add-dir", $0] }
+    }
+  }
+
+  public var codexApprovals: CodexApprovals
+
   public var defaultBackend: CLISessionBackendKind {
     didSet {
       if !defaultBackend.isSpiked { defaultBackend = oldValue.isSpiked ? oldValue : .claudeCode }
@@ -129,12 +208,14 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
 
   public init(
     defaultBackend: CLISessionBackendKind = .claudeCode,
+    codexApprovals: CodexApprovals = .workspace,
     claudePermissionMode: ClaudePermissionMode = .auto,
     copilotPermissions: CopilotPermissions = .allowTools,
     briefsSessionsAboutTheGraph: Bool = true,
     windowOpacity: Double = 0.95
   ) {
     self.defaultBackend = defaultBackend.isSpiked ? defaultBackend : .claudeCode
+    self.codexApprovals = codexApprovals
     self.claudePermissionMode = claudePermissionMode
     self.copilotPermissions = copilotPermissions
     self.briefsSessionsAboutTheGraph = briefsSessionsAboutTheGraph
@@ -150,6 +231,8 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       try container.decodeIfPresent(CLISessionBackendKind.self, forKey: .defaultBackend)
       ?? .claudeCode
     defaultBackend = storedBackend.isSpiked ? storedBackend : .claudeCode
+    codexApprovals =
+      try container.decodeIfPresent(CodexApprovals.self, forKey: .codexApprovals) ?? .workspace
     claudePermissionMode =
       try container.decodeIfPresent(ClaudePermissionMode.self, forKey: .claudePermissionMode)
       ?? .auto

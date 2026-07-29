@@ -95,8 +95,10 @@ struct NodeDraftTests {
         title: "Ship", loopType: .goalBased, goal: GoalSpec(summary: "Tests pass"),
         backend: .copilotCLI
       ).isValid)
+    // Time-based on Copilot is allowed now that it can re-trigger its own session; a
+    // composite is the pairing that stays refused, since sub-agent fan-out is unverified.
     #expect(
-      !NodeDraft(
+      NodeDraft(
         title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 1h Check",
         backend: .copilotCLI
       ).isValid)
@@ -105,37 +107,52 @@ struct NodeDraftTests {
   }
 
   @Test
-  func anUnspikedBackendHostsNothingAtAll() {
-    // The trap this closes: the app's terminal launches whatever the backend says, and
-    // for an unspiked one there is nothing to launch. Allowing turn-based loops on it —
-    // as an earlier version did, reasoning they need only "a session to type into" —
-    // meant a loop labelled Codex silently opened a Claude Code session.
-    for loopType in LoopType.allCases {
-      #expect(!CLISessionBackendKind.codex.canHost(loopType))
+  func nothingHostsALoopItCannotLaunch() {
+    // The trap this closes: the app's terminal launches whatever the backend says, and for
+    // an unspiked one there is nothing to launch. An earlier version allowed turn-based
+    // loops on such a backend, reasoning they need only "a session to type into" — so a
+    // loop labelled Codex silently opened a Claude Code session.
+    //
+    // Codex used to be the fixture here. It has a real adapter now (issue #1), so the
+    // invariant is asserted directly instead: anything that can host a loop type has a
+    // binary to launch, and anything that can't host one refuses the draft too.
+    for backend in CLISessionBackendKind.allCases {
+      for loopType in LoopType.allCases where backend.canHost(loopType) {
+        #expect(backend.executableName != nil)
+        #expect(backend.isSpiked)
+      }
     }
-    #expect(CLISessionBackendKind.codex.executableName == nil)
+    // Codex has no `/loop` equivalent, so the pairing is refused all the way through to
+    // the draft — the same path an unspiked backend used to take for every type.
+    #expect(!CLISessionBackendKind.codex.canHost(.timeBased))
     #expect(
       !NodeDraft(
-        title: "Research", loopType: .turnBased, checkDescription: "Sound?", backend: .codex
+        title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 1h", backend: .codex
       ).isValid)
   }
 
   @Test
-  func onlyCodexRemainsUnspiked() {
-    // Claude Code is the reference backend; Copilot was spiked against the real CLI
-    // (0.0.410). Codex isn't installed here, and a capability row written from memory is
-    // exactly the confident-but-wrong claim `isSpiked` exists to prevent.
-    #expect(CLISessionBackendKind.claudeCode.isSpiked)
-    #expect(CLISessionBackendKind.copilotCLI.isSpiked)
-    #expect(!CLISessionBackendKind.codex.isSpiked)
+  func everyBackendHasBeenSpiked() {
+    // Claude Code is the reference backend; Copilot was spiked against the real CLI, and
+    // Codex against 0.145.0 once it was installed (issue #1). None of these rows is
+    // written from memory, which is the whole point of `isSpiked`.
+    for backend in CLISessionBackendKind.allCases {
+      #expect(backend.isSpiked)
+    }
   }
 
   @Test
   func theHostingMatrixMatchesTheSpikedCapabilities() {
-    #expect(CLISessionBackendKind.hosting(.turnBased) == [.claudeCode, .copilotCLI])
-    #expect(CLISessionBackendKind.hosting(.goalBased) == [.claudeCode, .copilotCLI])
-    // Both of these need something only Claude Code has been shown to do.
-    #expect(CLISessionBackendKind.hosting(.timeBased) == [.claudeCode])
+    // All three can host the two types that need nothing of the agent beyond a session:
+    // a turn-based loop is judged by a human, and a goal's predicate is polled by the
+    // daemon from outside.
+    #expect(CLISessionBackendKind.hosting(.turnBased) == [.claudeCode, .copilotCLI, .codex])
+    #expect(CLISessionBackendKind.hosting(.goalBased) == [.claudeCode, .copilotCLI, .codex])
+    // Time-based needs the session to re-trigger itself, since graphcode holds no timer.
+    // Copilot gained that; Codex has no `/loop` equivalent in its CLI surface.
+    #expect(CLISessionBackendKind.hosting(.timeBased) == [.claudeCode, .copilotCLI])
+    // A composite still needs sub-agent fan-out, which only Claude Code has been shown
+    // to do.
     #expect(CLISessionBackendKind.hosting(.proactive) == [.claudeCode])
   }
 

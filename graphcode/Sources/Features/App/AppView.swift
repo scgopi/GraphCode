@@ -24,6 +24,11 @@ struct AppView: View {
     // Paints the window itself, so the titlebar and toolbar match instead of sitting a
     // shade lighter above the content.
     .containerBackground(Theme.windowBackground, for: .window)
+    // The toolbar deliberately keeps its own system material rather than being painted
+    // black to match: `.toolbarBackground(_:for: .windowToolbar)` does darken the
+    // titlebar band, and it was tried — a black titlebar over a black terminal loses the
+    // one edge that tells you where the window starts. The system's own toolbar value is
+    // the right one here.
     // The window is a fixed dark gray (`Theme`), so the appearance has to be dark too —
     // in light mode the system's near-black label colors would land on it unreadable.
     .preferredColorScheme(.dark)

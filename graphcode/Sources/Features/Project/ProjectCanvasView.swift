@@ -15,10 +15,6 @@ import SwiftUI
 /// content, so the button is naturally unavailable while a node's terminal is showing
 /// instead — no separate enablement logic needed.
 struct ProjectCanvasView: View {
-  /// One notebook square, in canvas points — a bit under half a node card's width, so a
-  /// card spans a couple of squares and the ruling reads as scale rather than texture.
-  private static let gridCellSize: CGFloat = 96
-
   @Bindable var store: StoreOf<ProjectFeature>
 
   /// Where this canvas is looking. Shared with the Graph overview — see
@@ -139,7 +135,7 @@ struct ProjectCanvasView: View {
       // rules pan and zoom with the nodes, so dragging empty space reads as moving the
       // sheet under you instead of nothing happening. See `NotebookGrid`.
       NotebookGrid(
-        cellSize: Self.gridCellSize, offset: liveOffset, scale: transform.scale
+        cellSize: NotebookGrid.defaultCellSize, offset: liveOffset, scale: transform.scale
       )
       .background(Theme.canvasBackground)
     }
@@ -263,6 +259,10 @@ struct ProjectCanvasView: View {
         Circle().fill(node.state.presenceColor).frame(width: 8, height: 8)
       }
       HStack(spacing: 4) {
+        // Glyph carries the colour, text keeps its own ink — see `LoopTypeAppearance`.
+        Image(systemName: node.loopType.glyph)
+          .font(.caption2)
+          .foregroundStyle(node.loopType.accent)
         Text(node.loopType.rawValue).font(.caption2).foregroundStyle(.secondary)
         if node.backend != .claudeCode {
           // Only shown when it isn't the default — a badge on every card would be noise
@@ -285,6 +285,15 @@ struct ProjectCanvasView: View {
     .padding(10)
     .frame(width: 220, alignment: .leading)
     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+    // The kind, readable before you read anything. A stripe rather than a tinted card:
+    // the border is already spoken for by attention and the dot by state, so this is the
+    // one channel on the card that was still free.
+    .overlay(alignment: .leading) {
+      UnevenRoundedRectangle(topLeadingRadius: 10, bottomLeadingRadius: 10)
+        .fill(node.loopType.accent)
+        .frame(width: 4)
+    }
+    .clipShape(RoundedRectangle(cornerRadius: 10))
     // docs/06-ux-terminals.md#graph-canvas: nodes needing attention are distinguished on
     // the canvas itself, not only in the side panel — you should be able to tell from
     // the graph's shape where the problem is.

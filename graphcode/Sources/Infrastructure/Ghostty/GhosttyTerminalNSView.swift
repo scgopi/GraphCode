@@ -17,6 +17,15 @@ final class GhosttyTerminalNSView: NSView {
   private(set) var surface: ghostty_surface_t!
   var onProcessExited: ((Bool) -> Void)?
 
+  /// Called when the user clicks into this surface, so the workspace can record which
+  /// pane of a split they meant.
+  ///
+  /// Hung off mouse down rather than `becomeFirstResponder()`, which would seem the
+  /// natural place: that also fires while surfaces are being mounted, and with several
+  /// panes coming up at once whichever one happened to win the race would report itself
+  /// as the user's choice. A click is the only signal that can't be anything else.
+  var onFocusRequested: (() -> Void)?
+
   private var markedText: String = ""
 
   init(command: [String], workingDirectory: String?, environment: [String: String]) {
@@ -76,16 +85,32 @@ final class GhosttyTerminalNSView: NSView {
 
   override func setFrameSize(_ newSize: NSSize) {
     super.setFrameSize(newSize)
-    guard let surface else { return }
-    let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
-    ghostty_surface_set_size(
-      surface, UInt32(newSize.width * scale), UInt32(newSize.height * scale))
+    syncSurfaceSize()
   }
 
   override func viewDidChangeBackingProperties() {
     super.viewDidChangeBackingProperties()
     guard let surface, let window else { return }
-    ghostty_surface_set_content_scale(surface, window.backingScaleFactor, window.backingScaleFactor)
+    let scale = window.backingScaleFactor
+    ghostty_surface_set_content_scale(surface, scale, scale)
+    // And the size again, which is the half that was missing. `ghostty_surface_set_size`
+    // takes **backing pixels**, so dragging a window between displays of different scale
+    // changes the surface's pixel dimensions while its *point* size is untouched — and a
+    // point size that didn't change means `setFrameSize` never fires. libghostty was left
+    // with the new scale and the old pixel count, so it laid out its cell grid against
+    // dimensions that no longer existed and the text came back at the wrong size.
+    syncSurfaceSize()
+  }
+
+  /// Tells libghostty how big the surface is, in the backing pixels it measures in.
+  ///
+  /// One implementation for both callers on purpose: the size and the scale are two halves
+  /// of the same fact, and the bug this fixes was them being updated in different places.
+  private func syncSurfaceSize() {
+    guard let surface else { return }
+    let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+    ghostty_surface_set_size(
+      surface, UInt32(bounds.width * scale), UInt32(bounds.height * scale))
   }
 
   // MARK: - Focus
@@ -123,9 +148,12 @@ final class GhosttyTerminalNSView: NSView {
     window?.makeFirstResponder(self)
   }
 
-  /// Move the keyboard here if it is currently parked on a surface the user can't see.
-  /// Deliberately does not steal focus from another *visible* surface — that would fight
-  /// the user clicking between the two panes of a split.
+  /// Move the keyboard here if it is currently parked on a surface that isn't the active
+  /// one — a hidden tab's, or the other half of this tab's split.
+  ///
+  /// It never takes focus *from* the active surface, so it can't fight a click: clicking
+  /// the other pane makes that pane active first (see `onFocusRequested`), and this then
+  /// agrees with the decision rather than making one.
   func focusIfKeyboardIsOnAHiddenSurface() {
     guard isActive, let window else { return }
     if let holder = window.firstResponder as? GhosttyTerminalNSView {

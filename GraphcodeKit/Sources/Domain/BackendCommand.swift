@@ -15,7 +15,7 @@ extension CLISessionBackendKind {
     switch self {
     case .claudeCode: return "claude"
     case .copilotCLI: return "copilot"
-    case .codex: return nil
+    case .codex: return "codex"
     }
   }
 
@@ -39,6 +39,9 @@ extension CLISessionBackendKind {
       case .capable: return ["--model", "claude-opus-4.6"]
       }
     case .codex:
+      // `-m` is real, but the valid model ids are not visible from `codex --help` and a
+      // wrong one fails at launch. Passing nothing lets Codex's own default apply, which
+      // is honest, where a guessed id would be a confident break.
       return []
     }
   }
@@ -59,16 +62,15 @@ extension CLISessionBackendKind {
   /// conversation. `copilot` has no equivalent — its custom instructions come from
   /// `AGENTS.md` files it discovers on disk (hence `--no-custom-instructions` to switch
   /// that off), which graphcode has no business writing into someone's repository. So
-  /// there the briefing arrives through the environment instead —
-  /// `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, set by `ZmxSessionLauncher` — which is Copilot's
-  /// own supported channel for custom instructions and needs nothing in the prompt.
+  /// Copilot has no equivalent flag and no working equivalent mechanism, so it is told to
+  /// read the file by a preamble on the prompt and granted access to it with `--add-dir`.
   ///
   /// Neither carries the prose on the command line. See `SessionBriefing` for why that is
   /// load-bearing rather than tidy: the launch command is typed into a terminal, and a
   /// briefing-sized argument overruns the tty's canonical input buffer.
   public func launchArguments(
     prompt: String?, tier: ModelTier, briefingFile: URL? = nil,
-    settings: GraphcodeSettings = GraphcodeSettings()
+    settings: GraphcodeSettings = GraphcodeSettings(), workspacePaths: [String] = []
   ) -> [String] {
     let model = modelArguments(for: tier) + permissionArguments(settings)
     guard let prompt, !prompt.isEmpty else { return model }
@@ -77,13 +79,29 @@ extension CLISessionBackendKind {
       let system = briefingFile.map { ["--append-system-prompt-file", $0.path] } ?? []
       return model + system + [prompt]
     case .copilotCLI:
-      // Nothing about the briefing rides in the prompt. Copilot reads it from the
-      // directory `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` points at, which
-      // `ZmxSessionLauncher` sets on the session's environment — so the human's request
-      // is the only thing in the conversation, exactly as it is for Claude Code.
-      return model + ["--interactive", prompt]
+      // Copilot gates tools, paths and URLs separately, so `--allow-all-tools` alone
+      // leaves a session unable to touch anything outside its working directory — its
+      // own project when it opened in a worktree, and the briefing either way. Both
+      // failures read as the agent ignoring instructions (issues #2 and #4), which is
+      // why the directories are granted explicitly rather than trusted to the tool flag.
+      let access = settings.copilotPermissions.readableDirectories(
+        workspacePaths + [briefingFile?.deletingLastPathComponent().path].compactMap { $0 })
+      guard let briefingFile else { return model + access + ["--interactive", prompt] }
+      // And the preamble telling it the briefing is there to read. See
+      // `SessionBriefing.pointer` for why the tidier env-var route was abandoned.
+      return model + access
+        + [
+          "--interactive", "\(SessionBriefing.pointer(toBriefingAt: briefingFile.path)) \(prompt)",
+        ]
     case .codex:
-      return []
+      // Same shape as Claude Code — an interactive TUI taking its prompt positionally —
+      // so the briefing rides the same way Copilot's does: `--add-dir` for access, a
+      // preamble to point at it. Codex has no `--append-system-prompt` equivalent.
+      let access = settings.codexApprovals.writableDirectories(workspacePaths)
+      guard let briefingFile else { return model + access + [prompt] }
+      let briefingDirectory = briefingFile.deletingLastPathComponent().path
+      return model + access + ["--add-dir", briefingDirectory]
+        + ["\(SessionBriefing.pointer(toBriefingAt: briefingFile.path)) \(prompt)"]
     }
   }
 
@@ -108,7 +126,7 @@ extension CLISessionBackendKind {
     switch self {
     case .claudeCode: return settings.claudePermissionMode.arguments
     case .copilotCLI: return settings.copilotPermissions.arguments
-    case .codex: return []
+    case .codex: return settings.codexApprovals.arguments
     }
   }
 }

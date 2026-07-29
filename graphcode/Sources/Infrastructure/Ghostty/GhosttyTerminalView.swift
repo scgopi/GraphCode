@@ -35,9 +35,13 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// opened before the daemon got to it, or with `zmx` not installed.
   var initialPrompt: String?
   let workingDirectory: String?
-  /// Whether this surface's tab is the one on screen. Every tab stays mounted, so
-  /// without this the keyboard can end up parked on a surface nobody can see.
+  /// Whether this is *the* surface the user is typing into — its tab is the one on
+  /// screen **and** it is that tab's focused pane. Every tab stays mounted and a split
+  /// has two live terminals, so without this the keyboard can end up parked on a surface
+  /// nobody can see, and both panes of a split draw a filled cursor as though each had it.
   var isActive: Bool = true
+  /// The user clicked into this surface. See `GhosttyTerminalNSView.onFocusRequested`.
+  var onFocusRequested: (() -> Void)?
   let onProcessExited: (Bool) -> Void
 
   /// Carries `initialPrompt` into the shell as a variable instead of interpolating it
@@ -51,12 +55,16 @@ struct GhosttyTerminalView: NSViewRepresentable {
       workingDirectory: workingDirectory,
       environment: initialPrompt.map { [Self.promptVariable: $0] } ?? [:])
     view.onProcessExited = onProcessExited
+    view.onFocusRequested = onFocusRequested
     view.isActive = isActive
     return view
   }
 
   func updateNSView(_ nsView: GhosttyTerminalNSView, context: Context) {
     nsView.isActive = isActive
+    // Re-assigned every pass: the closure captures the store action for *this* pane in
+    // *this* tab, and a stale one from an earlier layout would focus the wrong pane.
+    nsView.onFocusRequested = onFocusRequested
     // Switching tabs with ⌘-number moves what's visible but not what's focused — AppKit
     // only reassigns first responder on a click. Without this, hitting ⌘2 and typing
     // sent the keystrokes to tab 1's shell.

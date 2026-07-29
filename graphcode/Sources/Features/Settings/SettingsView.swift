@@ -59,6 +59,16 @@ struct SettingsView: View {
           .font(.caption2)
           .foregroundStyle(.secondary)
           .fixedSize(horizontal: false, vertical: true)
+
+        Picker("Codex", selection: $model.settings.codexApprovals) {
+          ForEach(GraphcodeSettings.CodexApprovals.allCases, id: \.self) { mode in
+            Text(mode.displayName).tag(mode)
+          }
+        }
+        Text(model.settings.codexApprovals.explanation)
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
       } header: {
         Text("Permissions")
       } footer: {

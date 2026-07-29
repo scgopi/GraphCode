@@ -97,17 +97,12 @@ struct GraphcodeSettingsTests {
   }
 
   @Test
-  func codexIsNotOfferedAsADefaultUntilItIsSpiked() {
-    // graphcode can't launch it, so making it the default would set every new loop to
-    // something that never starts.
-    #expect(!CLISessionBackendKind.offerableAsDefault.contains(.codex))
-    #expect(CLISessionBackendKind.offerableAsDefault == [.claudeCode, .copilotCLI])
-    // And a file naming it — hand-edited, or written by a build where it was offered —
-    // falls back rather than being honoured.
-    #expect(GraphcodeSettings(defaultBackend: .codex).defaultBackend == .claudeCode)
-    var settings = GraphcodeSettings(defaultBackend: .copilotCLI)
-    settings.defaultBackend = .codex
-    #expect(settings.defaultBackend == .copilotCLI)
+  func everySpikedBackendIsOfferedAsADefault() {
+    // Codex was withheld while it had no adapter — making it the default would have set
+    // every new loop to something that never starts. It has one now (issue #1).
+    #expect(
+      CLISessionBackendKind.offerableAsDefault == [.claudeCode, .copilotCLI, .codex])
+    #expect(GraphcodeSettings(defaultBackend: .codex).defaultBackend == .codex)
   }
 
   @Test

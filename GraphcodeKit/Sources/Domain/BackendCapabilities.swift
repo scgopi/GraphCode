@@ -93,10 +93,15 @@ extension CLISessionBackendKind {
       // Claude and GPT families. MCP is first-class (`--additional-mcp-config`, built-in
       // github-mcp-server). It's a TUI in a PTY, so `zmx send` can type into it.
       //
-      // The two falses are the honest ones. No lifecycle-hook mechanism appears in its
-      // help, so presence falls back to the heuristic rather than being reported. And
-      // there is no `/loop`-equivalent — nothing that makes the *session* re-trigger
-      // itself — so a time-based loop would run once and look like a broken schedule.
+      // `supportsHooks` stays false: no lifecycle-hook mechanism appears in its help, so
+      // presence falls back to the heuristic rather than being reported.
+      //
+      // `supportsInSessionRecurrence` was false and is now true. It was set from the
+      // interactive command list of 1.0.75, which has no `/loop` or `/schedule` — and a
+      // time-based loop needs the *session* to re-trigger itself, since graphcode holds no
+      // timer of its own. Copilot has since grown one. Worth knowing if a recurring loop
+      // runs once and stops: that is the symptom of a Copilot too old to have it, and
+      // `copilot help commands` on the machine running the loop is where to check.
       return BackendCapabilities(
         supportsGoalMode: true,
         supportsHooks: false,
@@ -104,12 +109,33 @@ extension CLISessionBackendKind {
         supportsSubAgents: false,
         supportsMCP: true,
         supportsMidSessionInput: true,
-        supportsInSessionRecurrence: false)
+        supportsInSessionRecurrence: true)
 
     case .codex:
-      // Not spiked — it isn't installed here, and a capability row written from memory
-      // is exactly the kind of confident-but-wrong claim `isSpiked` exists to prevent.
-      return BackendCapabilities()
+      // Spiked against Codex CLI 0.145.0 — every entry read off the real `codex --help`,
+      // and every uncertain one left false.
+      //
+      // Its launch shape is the same as Claude Code's: `codex [OPTIONS] [PROMPT]` opens an
+      // interactive TUI with the prompt as a positional argument, which is exactly
+      // graphcode's session model. (`codex exec` is the non-interactive shape, and the one
+      // graphcode deliberately doesn't use.) MCP is first-class — `codex mcp` manages
+      // external servers. It's a TUI in a PTY, so `zmx send` can type into it.
+      //
+      // The falses are the honest ones rather than the discouraging ones. Hooks exist in
+      // some form (`--dangerously-bypass-hook-trust` implies a trust store for them), but
+      // nothing in its help describes a lifecycle hook that could report presence the way
+      // Claude Code's do, so presence stays heuristic. Sub-agent fan-out and a
+      // `/loop`-equivalent aren't visible in the CLI surface at all; if either exists it
+      // will be inside the TUI, and a capability claimed on a hunch is exactly what
+      // `isSpiked` exists to prevent.
+      return BackendCapabilities(
+        supportsGoalMode: true,
+        supportsHooks: false,
+        supportsStructuredOutput: false,
+        supportsSubAgents: false,
+        supportsMCP: true,
+        supportsMidSessionInput: true,
+        supportsInSessionRecurrence: false)
     }
   }
 
@@ -123,7 +149,10 @@ extension CLISessionBackendKind {
   /// (`GhosttyTerminalView.command`), so a loop labelled Codex opened a Claude Code
   /// session. Silently running a different agent than the one the picker says is worse
   /// than refusing, so this now gates every loop type.
-  public var isSpiked: Bool { self != .codex }
+  /// All three, now that Codex has an adapter and a row read off its real CLI (issue #1).
+  /// Kept as a property rather than deleted: the *concept* is what stopped Codex being
+  /// claimed as working for months, and the next backend added will need it again.
+  public var isSpiked: Bool { true }
 
   /// Whether this backend can host that loop type at all. The refusal
   /// docs/04-cli-backends.md asks `OrchestratorClient` to make, kept next to the

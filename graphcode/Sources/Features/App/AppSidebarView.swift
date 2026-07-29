@@ -31,7 +31,6 @@ struct AppSidebarView: View {
   var body: some View {
     List(selection: selectionBinding) {
       attentionSection
-      usageSection
 
       ForEach(store.projects) { project in
         projectHeaderRow(for: project)
@@ -142,7 +141,7 @@ struct AppSidebarView: View {
   }
 
   private func projectHeaderRow(for project: ProjectFeature.State) -> some View {
-    HStack(spacing: 4) {
+    HStack(spacing: 6) {
       // A disclosure control only where there is something to disclose, and no blank
       // held open where there isn't: a row with nothing under it sits flush left, which
       // is itself the signal that it holds no loops. Reserving the space instead would
@@ -167,11 +166,14 @@ struct AppSidebarView: View {
       // workspace drawn as one graph (`GraphOverviewView`), so it carries the same
       // connected-nodes glyph the canvas uses for itself rather than a folder icon it
       // would otherwise be indistinguishable from.
-      Image(
+      //
+      // `folder`, not `folder.fill`, and in label ink rather than `.secondary`: a filled
+      // folder at this size is a grey rectangle, and dimmed on top of that it was the
+      // least legible thing in the window. See `SidebarIcon`.
+      SidebarIcon(
         systemName: project.graph.isGlobal
-          ? "point.3.connected.trianglepath.dotted" : "folder.fill"
-      )
-      .foregroundStyle(project.graph.isGlobal ? Color.accentColor : .secondary)
+          ? "point.3.connected.trianglepath.dotted" : "folder",
+        tint: project.graph.isGlobal ? Color.accentColor : .primary)
       Text(project.graph.project.name).lineLimit(1)
       Spacer()
     }
@@ -211,15 +213,29 @@ struct AppSidebarView: View {
     store.send(.projects(.element(id: projectPath, action: action)))
   }
 
+  /// Kind leads, state trails.
+  ///
+  /// These are two different questions and each still keeps its own place in the row —
+  /// but they used to be the other way round, and the leading slot held an 8pt dot. A
+  /// sidebar's leading column is its most legible position and a dot is the least
+  /// legible thing that can go in one; it was the whole reason these rows were harder to
+  /// read than Photos'. So the kind glyph takes the column, at the size every other
+  /// leading symbol uses, and the presence dot moves to the trailing edge — which is
+  /// where Apple's own sidebars put a row's status (Photos' lock, Mail's unread count).
+  ///
+  /// The glyph no longer repeats in the caption line underneath, where it was a second
+  /// copy of the same fact at a size that made it a smudge.
   private func nodeRow(for node: LoopNode) -> some View {
-    Label {
-      VStack(alignment: .leading, spacing: 2) {
+    HStack(spacing: 6) {
+      SidebarIcon(systemName: node.loopType.glyph, tint: node.loopType.accent)
+      VStack(alignment: .leading, spacing: 1) {
         Text(node.title).lineLimit(1)
         Text(node.loopType.rawValue).font(.caption2).foregroundStyle(.secondary)
       }
-    } icon: {
+      Spacer(minLength: 4)
       Circle().fill(node.state.presenceColor).frame(width: 8, height: 8)
     }
+    .contentShape(Rectangle())
     .padding(.leading, 16)
   }
 

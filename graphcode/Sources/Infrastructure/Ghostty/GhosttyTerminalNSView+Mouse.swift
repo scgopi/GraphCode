@@ -9,6 +9,10 @@ import GhosttyKit
 /// backing pixels, `ghostty_surface_mouse_pos` takes points. See `sendMousePos`.
 extension GhosttyTerminalNSView {
   override func mouseDown(with event: NSEvent) {
+    // Before forwarding, not after: the click is what makes this the focused pane, and
+    // the terminal's own handling of it (placing a selection anchor) belongs to a pane
+    // that is already focused.
+    onFocusRequested?()
     sendMouseButton(event, state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_LEFT)
   }
 

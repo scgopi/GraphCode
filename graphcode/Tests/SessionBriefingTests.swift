@@ -135,37 +135,38 @@ struct SessionBriefingTests {
   }
 
   @Test
-  func copilotGetsTheBriefingPrependedToThePromptInstead() throws {
-    // `copilot` has no `--append-system-prompt`; its custom instructions come from
-    // `AGENTS.md` files on disk, which graphcode has no business writing into someone's
-    // repository. So the briefing rides in front of the prompt.
+  func copilotIsBothToldToReadTheBriefingAndAllowedTo() throws {
+    // `copilot` has no `--append-system-prompt`, and the documented
+    // COPILOT_CUSTOM_INSTRUCTIONS_DIRS is ignored in 1.0.75 — measured, not assumed.
     let arguments = try #require(
       ZmxSessionLauncher.arguments(
         forNode: node(backend: .copilotCLI), projectPath: Self.project))
 
     #expect(!arguments.contains("--append-system-prompt-file"))
-    let interactive = try #require(arguments.firstIndex(of: "--interactive"))
-    // The human's request and nothing else. The briefing arrives through the environment,
-    // not as a preamble on the prompt — it used to ride in front of it, which put
-    // housekeeping ahead of the actual request and left it in the scrollback.
-    #expect(arguments[interactive + 1] == "/loop 1h Check")
 
-    // `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` is Copilot's own channel for this: it searches
-    // the directories named there for instruction files.
-    let script = try #require(arguments.first { $0.hasPrefix("exec ") })
-    #expect(script.contains(SessionBriefing.copilotInstructionsDirectoryVariable))
-    #expect(script.contains("briefings"))
-    #expect(script.hasSuffix("copilot \"$@\""))
+    // Copilot needs *both* halves, and shipping only one is issue #2: a preamble telling
+    // it to read the briefing, and `--add-dir` letting it. Copilot verifies file paths, so
+    // without the second the session is denied the file it was just told to open — which
+    // looks exactly like an agent ignoring its instructions.
+    // Every granted directory, not just the first: a session is given its project and its
+    // worktree as well, and asserting on `firstIndex` alone quietly depended on there
+    // being exactly one.
+    let granted = zip(arguments, arguments.dropFirst())
+      .filter { $0.0 == "--add-dir" }.map(\.1)
+    #expect(granted.contains { $0.contains("briefings") })
+
+    let interactive = try #require(arguments.firstIndex(of: "--interactive"))
+    let opening = arguments[interactive + 1]
+    #expect(opening.contains(".md"))
+    #expect(opening.hasSuffix("/loop 1h Check"))
   }
 
   @Test
-  func claudeCodeIsGivenNoEnvironmentItDoesNotNeed() throws {
-    // Only Copilot discovers instructions by searching directories; setting the variable
-    // for a backend that ignores it would be cargo cult.
+  func claudeCodeGetsNoAddDirBecauseItsFlagTakesTheFileDirectly() throws {
     let arguments = try #require(
       ZmxSessionLauncher.arguments(forNode: node(), projectPath: Self.project))
+    #expect(!arguments.contains("--add-dir"))
     let script = try #require(arguments.first { $0.hasPrefix("exec ") })
-    #expect(!script.contains(SessionBriefing.copilotInstructionsDirectoryVariable))
     #expect(script == "exec claude \"$@\"")
   }
 
@@ -227,13 +228,63 @@ struct SessionBriefingTests {
   }
 
   @Test
-  func aBackendGraphcodeCannotLaunchStillGetsNothing() {
-    // Codex has no adapter — a briefing must not turn "can't launch this" into an argv
-    // that looks launchable.
+  func copilotIsGivenTheDirectoriesItsWorkSpans() throws {
+    // Issue #4. Copilot gates tools, paths and URLs separately: `--allow-all-tools` says
+    // nothing about *where* a tool may read, so a loop bound to a worktree is denied the
+    // repository it was branched from — indistinguishable, from the outside, from an agent
+    // ignoring its instructions.
+    let worktree = WorktreeRef(
+      id: "wt", repositoryPath: Self.project, worktreePath: "/tmp/wt", branch: "x")
+    let node = LoopNode(
+      title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 1h Check",
+      backend: .copilotCLI, worktreeBinding: worktree)
+    let arguments = try #require(
+      ZmxSessionLauncher.arguments(forNode: node, projectPath: Self.project))
+
+    let granted = zip(arguments, arguments.dropFirst())
+      .filter { $0.0 == "--add-dir" }.map(\.1)
+    #expect(granted.contains(Self.project))
+    #expect(granted.contains("/tmp/wt"))
+    #expect(granted.contains { $0.contains("briefings") })
+    // Named directories, not the whole disk.
+    #expect(!arguments.contains("--allow-all-paths"))
+  }
+
+  @Test
+  func theWiderAndStricterSettingsAddNoDirectories() {
+    // `.allowEverything` has already opened every path, and under `.ask` a human is
+    // answering for each one — in both cases `--add-dir` would be noise.
     #expect(
-      CLISessionBackendKind.codex.launchArguments(
-        prompt: "do the thing", tier: .standard,
-        briefingFile: URL(fileURLWithPath: "/tmp/brief.md")
-      ).isEmpty)
+      GraphcodeSettings.CopilotPermissions.allowEverything.readableDirectories(["/a"]).isEmpty)
+    #expect(GraphcodeSettings.CopilotPermissions.ask.readableDirectories(["/a"]).isEmpty)
+    #expect(
+      GraphcodeSettings.CopilotPermissions.allowTools.readableDirectories(["/a", "/a", ""])
+        == ["--add-dir", "/a"])
+  }
+
+  @Test
+  func theGlobalGraphsReservedPathIsNotOfferedAsADirectory() {
+    // `graphcode://global` names no directory; handing it to `--add-dir` would be asking
+    // the CLI to grant access to something that cannot exist.
+    let paths = ZmxSessionLauncher.workspacePaths(
+      forNode: LoopNode(title: "x"), projectPath: LoopGraphScope.globalPath)
+    #expect(paths.isEmpty)
+  }
+
+  @Test
+  func codexIsBothToldToReadTheBriefingAndAllowedTo() throws {
+    // Codex used to return no argv at all, because it had no adapter. It has one now
+    // (issue #1), and it needs the same two halves Copilot does: it sandboxes writes to
+    // its workspace, so a session told to read a briefing outside that workspace cannot
+    // reach it.
+    let arguments = CLISessionBackendKind.codex.launchArguments(
+      prompt: "do the thing", tier: .standard,
+      briefingFile: URL(fileURLWithPath: "/tmp/briefings/x/AGENTS.md"))
+
+    let addDir = try #require(arguments.firstIndex(of: "--add-dir"))
+    #expect(arguments[addDir + 1] == "/tmp/briefings/x")
+    // The prompt stays last and positional, the way `codex [OPTIONS] [PROMPT]` takes it.
+    #expect(arguments.last?.hasSuffix("do the thing") == true)
+    #expect(arguments.last?.contains("AGENTS.md") == true)
   }
 }

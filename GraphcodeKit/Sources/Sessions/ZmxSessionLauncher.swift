@@ -215,7 +215,8 @@ public enum ZmxSessionLauncher {
     // (docs/05-orchestrator.md#responsibilities item 7).
     let arguments = node.backend.launchArguments(
       prompt: singleLine, tier: node.effectiveModelTier, briefingFile: briefingFile,
-      settings: settings)
+      settings: settings,
+      workspacePaths: Self.workspacePaths(forNode: node, projectPath: projectPath))
     let command =
       [
         "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
@@ -232,7 +233,8 @@ public enum ZmxSessionLauncher {
     // its briefing merely can't fan out, where a truncated one does nothing at all.
     guard Self.fitsInATypedCommandLine(command) else {
       let unbriefed = node.backend.launchArguments(
-        prompt: singleLine, tier: node.effectiveModelTier, settings: settings)
+        prompt: singleLine, tier: node.effectiveModelTier, settings: settings,
+        workspacePaths: Self.workspacePaths(forNode: node, projectPath: projectPath))
       return [
         "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
       ] + Self.loginShellInvocation(of: executable, arguments: unbriefed)
@@ -240,17 +242,27 @@ public enum ZmxSessionLauncher {
     return command
   }
 
-  /// Environment a session needs beyond what its shell provides. Only Copilot uses one:
-  /// it discovers custom instructions by searching directories, and this is how it is told
-  /// about the one holding this project's briefing (`SessionBriefing`).
+  /// The directories a loop's work legitimately spans: the project, and its worktree when
+  /// it has one. A backend that verifies paths (Copilot) is told about both, because a
+  /// loop bound to a worktree opens *there* and would otherwise be denied the repository
+  /// it was branched from — see `CopilotPermissions.readableDirectories`.
+  ///
+  /// The global graph's reserved `graphcode://` path names no directory and is dropped.
+  static func workspacePaths(forNode node: LoopNode, projectPath: String?) -> [String] {
+    var paths: [String] = []
+    if let projectPath, !projectPath.hasPrefix("graphcode://") { paths.append(projectPath) }
+    if let worktree = node.worktreeBinding?.worktreePath { paths.append(worktree) }
+    return paths
+  }
+
+  /// Environment a session needs beyond what its shell provides. Nothing does, currently —
+  /// Copilot's briefing rides on its argv (see `CLISessionBackendKind.launchArguments`)
+  /// after the documented environment route turned out not to work. Kept because the
+  /// plumbing is the awkward part and the next backend will want it.
   static func environment(forBackend backend: CLISessionBackendKind, briefingFile: URL?)
     -> [String: String]
   {
-    guard backend == .copilotCLI, let briefingFile else { return [:] }
-    return [
-      SessionBriefing.copilotInstructionsDirectoryVariable:
-        briefingFile.deletingLastPathComponent().path
-    ]
+    [:]
   }
 
   /// Whether the assembled command survives being typed into a terminal. Budgeted well

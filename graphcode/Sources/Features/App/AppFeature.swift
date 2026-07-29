@@ -52,35 +52,6 @@ struct AppFeature {
       }
       return nil
     }
-
-    /// Cost and token totals across every open project, always paired with how much of
-    /// the graph is actually reporting — see `usageSection` in `AppSidebarView`.
-    var usageRollup: UsageRollup {
-      let graphs = projects.map(\.graph)
-      let total = graphs.reduce(0) { $0 + $1.nodes.count }
-      let reporting = graphs.reduce(0) { $0 + $1.usageCoverage.reporting }
-      let samples = graphs.compactMap(\.usage)
-      guard let combined = samples.first.map({ samples.dropFirst().reduce($0, +) }) else {
-        return UsageRollup(
-          headline: "No usage reported",
-          coverage: "\(total) loops · none reporting", total: total)
-      }
-      var parts: [String] = []
-      if let cost = combined.costUSD { parts.append(String(format: "$%.2f", cost)) }
-      if let tokens = combined.totalTokens { parts.append("\(tokens) tokens") }
-      return UsageRollup(
-        headline: parts.isEmpty ? "No usage reported" : parts.joined(separator: " · "),
-        coverage: "\(reporting)/\(total) loops reporting",
-        total: total)
-    }
-  }
-
-  /// The cost line and its coverage, which always travel together — see
-  /// `AppSidebarView.usageSection` for why a total is never shown on its own.
-  struct UsageRollup: Equatable {
-    let headline: String
-    let coverage: String
-    let total: Int
   }
 
   enum Action {
@@ -101,9 +72,6 @@ struct AppFeature {
     case attentionItemTapped(AttentionItem)
     /// The stop/kill affordance docs/05-orchestrator.md asks the monitor for.
     case stopNodeTapped(projectPath: String, nodeID: UUID)
-    /// Refresh usage for every open project at once — the panel is cross-project, so
-    /// refreshing one of them would leave the total half-stale.
-    case refreshUsageTapped
   }
 
   private enum CancelID { case daemonSubscription }
@@ -218,15 +186,6 @@ struct AppFeature {
         // selecting its project.
         return .send(
           .projects(.element(id: item.projectPath, action: .nodeTapped(item.nodeID))))
-
-      case .refreshUsageTapped:
-        let paths = state.projects.map(\.graph.project.path)
-        return .run { _ in
-          for path in paths {
-            try? await orchestratorClient.send(
-              .graphCommand(projectPath: path, command: .refreshUsage))
-          }
-        }
 
       case .stopNodeTapped(let projectPath, let nodeID):
         return .run { _ in

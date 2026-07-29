@@ -13,6 +13,16 @@ import SwiftUI
 /// offset. Drop the second term and the ruling slides out from under the nodes as soon
 /// as you zoom.
 struct NotebookGrid: View {
+  /// One notebook square, in canvas points — roughly a fifth of a node card's width, so a
+  /// card sits on the ruling rather than being framed by it. 96pt landed about two squares
+  /// to a card, which read as a box drawn around each node; 24pt was tried and is too
+  /// fine, turning the surface into a texture that competes with the graph instead of
+  /// sitting behind it.
+  ///
+  /// Shared by both canvases: two graph papers at different scales in one app would read
+  /// as two different surfaces.
+  static let defaultCellSize: CGFloat = 48
+
   let cellSize: CGFloat
   let offset: CGSize
   let scale: CGFloat

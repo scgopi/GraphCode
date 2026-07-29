@@ -47,16 +47,50 @@ public struct TabLayout: Codable, Equatable, Sendable, Identifiable {
   public var secondary: SurfaceRef?
   public var splitDirection: SplitDirection
 
+  /// Which of this tab's panes has the keyboard.
+  ///
+  /// A split has two live terminals and only one of them can be typed into, so something
+  /// has to say which — and it has to be *this*, not AppKit's first responder. Both are
+  /// real, and when they disagree you get the failure this fixes: two panes each drawing a
+  /// filled cursor, with no way to tell which one your keystrokes are going to. The view
+  /// derives everything from this value (cursor, dimming, first responder), so there is
+  /// one answer rather than two that have to be kept in step.
+  ///
+  /// Optional because it is also the "not decided yet" state: a layout persisted before
+  /// this existed decodes with no value, and nothing should be dimmed until a pane has
+  /// actually been chosen. Read it through `focusedSurface`, which resolves both that case
+  /// and an id left pointing at a pane that has since been closed.
+  public var focusedSurfaceID: UUID?
+
   public init(
     id: UUID = UUID(),
     primary: SurfaceRef,
     secondary: SurfaceRef? = nil,
-    splitDirection: SplitDirection = .horizontal
+    splitDirection: SplitDirection = .horizontal,
+    focusedSurfaceID: UUID? = nil
   ) {
     self.id = id
     self.primary = primary
     self.secondary = secondary
     self.splitDirection = splitDirection
+    self.focusedSurfaceID = focusedSurfaceID
+  }
+
+  /// Whether this tab is showing two panes.
+  public var isSplit: Bool { secondary != nil }
+
+  /// The pane with the keyboard, falling back to `primary`.
+  ///
+  /// Self-healing rather than trusting the stored id: collapsing a split promotes the
+  /// secondary into `primary` and a stale `focusedSurfaceID` would then name a pane that
+  /// no longer exists — which would leave *neither* pane focused, so the tab would take no
+  /// keystrokes at all. Resolving against the panes that are actually here means the worst
+  /// case is focus landing on `primary`, never nowhere.
+  public var focusedSurface: SurfaceRef {
+    guard let focusedSurfaceID else { return primary }
+    if primary.id == focusedSurfaceID { return primary }
+    if let secondary, secondary.id == focusedSurfaceID { return secondary }
+    return primary
   }
 }
 

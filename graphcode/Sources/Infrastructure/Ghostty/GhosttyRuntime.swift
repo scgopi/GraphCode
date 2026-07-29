@@ -27,6 +27,11 @@ final class GhosttyRuntime: @unchecked Sendable {
     guard let config = ghostty_config_new() else {
       fatalError("ghostty_config_new failed")
     }
+    // graphcode's own colors go in first so the user's config, loaded next, still wins —
+    // see `GhosttyAppearance` for why the terminal needs told at all.
+    if let defaults = GhosttyAppearance.writeConfigurationFile() {
+      ghostty_config_load_file(config, defaults)
+    }
     ghostty_config_load_default_files(config)
     ghostty_config_load_recursive_files(config)
     ghostty_config_finalize(config)

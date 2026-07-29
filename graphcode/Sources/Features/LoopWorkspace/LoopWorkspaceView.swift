@@ -160,31 +160,34 @@ struct LoopWorkspaceView: View {
     GlossyIconButton(systemImage: systemImage, help: help, action: action)
   }
 
-  @ViewBuilder
+  /// One tab's panes, in a container whose *identity* never changes.
+  ///
+  /// Splitting used to swap a bare `surfaceView` for a stack containing two, and swapping
+  /// one view structure for another is how you tell SwiftUI the old view is gone: it tore
+  /// down the pane that was already there and called `makeNSView` again, destroying a live
+  /// Ghostty surface and building a fresh one in its place. The terminal you were working
+  /// in came back rebuilt — which is what "⌘D breaks the existing pane" was.
+  ///
+  /// `AnyLayout` is the fix for the axis, and it exists for this: it changes how children
+  /// are arranged without changing what they are, so flipping a split from side-by-side to
+  /// stacked doesn't recreate either surface. Each pane already carries its own `.id(ref.id)`
+  /// (see `surfaceView`), which is what pins the surviving half when the other appears or
+  /// disappears — the container being the same type in both cases is what makes that hold.
   private func paneContent(for tab: TabLayout) -> some View {
-    if let secondary = tab.secondary {
-      let axis: Axis.Set = tab.splitDirection == .horizontal ? .horizontal : .vertical
-      splitStack(axis: axis) {
-        surfaceView(tab: tab, ref: tab.primary)
+    let layout =
+      tab.splitDirection == .horizontal
+      ? AnyLayout(HStackLayout(spacing: 0))
+      : AnyLayout(VStackLayout(spacing: 0))
+    return layout {
+      surfaceView(tab: tab, ref: tab.primary)
+      if let secondary = tab.secondary {
         Divider()
         surfaceView(tab: tab, ref: secondary)
       }
-    } else {
-      surfaceView(tab: tab, ref: tab.primary)
     }
   }
 
   @ViewBuilder
-  private func splitStack<Content: View>(
-    axis: Axis.Set, @ViewBuilder content: () -> Content
-  ) -> some View {
-    if axis == .horizontal {
-      HStack(spacing: 0) { content() }
-    } else {
-      VStack(spacing: 0) { content() }
-    }
-  }
-
   private func surfaceView(tab: TabLayout, ref: SurfaceRef) -> some View {
     GhosttyTerminalView(
       sessionName: ref.zmxSessionName,
@@ -200,9 +203,12 @@ struct LoopWorkspaceView: View {
       // A node without its own worktree yet still belongs to a project — its shells
       // should open there, not wherever the app process happened to launch from.
       workingDirectory: store.node.worktreeBinding?.worktreePath ?? store.projectPath,
-      // Only the showing tab's surfaces may hold the keyboard — the rest stay mounted
-      // and must not.
-      isActive: tab.id == store.layout.selectedTabID
+      // Only *one* surface in the whole workspace is the live one: the showing tab's
+      // focused pane. Every other surface stays mounted and must not hold the keyboard —
+      // including the other half of this tab's own split, which is what stops both panes
+      // drawing a filled cursor as though each of them had it.
+      isActive: tab.id == store.layout.selectedTabID && ref.id == tab.focusedSurface.id,
+      onFocusRequested: { store.send(.paneFocused(tabID: tab.id, surfaceID: ref.id)) }
     ) { succeeded in
       if ref.launchesClaudeCode {
         store.send(.primarySurfaceExited(succeeded: succeeded))
@@ -216,6 +222,15 @@ struct LoopWorkspaceView: View {
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
+    // The unfocused half of a split reads as the one you aren't in. Only in a split —
+    // a lone pane has nothing to be dimmer *than*, and veiling it would just make every
+    // terminal look faded. `allowsHitTesting(false)` so the veil never swallows the very
+    // click that would focus the pane underneath it.
+    .overlay {
+      if tab.isSplit && ref.id != tab.focusedSurface.id {
+        Theme.unfocusedPaneVeil.allowsHitTesting(false)
+      }
+    }
     // `ref.id` (not just this slot's structural position) is a surface's real
     // identity — without this, collapsing a split (which reassigns `tab.primary` to
     // what used to be `tab.secondary`, see `.paneClosed`) would keep reusing the old

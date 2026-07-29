@@ -83,14 +83,17 @@ struct CopilotBackendTests {
   }
 
   @Test
-  func copilotCanHostTurnBasedAndGoalBasedOnly() {
+  func copilotHostsEverythingButComposites() {
     // Goal-based works because a goal is just a prompt plus a predicate the *daemon*
     // polls from outside — nothing about it needs a skill the agent has to own.
     #expect(CLISessionBackendKind.copilotCLI.canHost(.turnBased))
     #expect(CLISessionBackendKind.copilotCLI.canHost(.goalBased))
-    // Time-based does: the cadence lives inside the session as a `/loop` directive, and
-    // Copilot has no equivalent, so it would run once and look like a broken schedule.
-    #expect(!CLISessionBackendKind.copilotCLI.canHost(.timeBased))
+    // Time-based needs the session to re-trigger itself, since graphcode holds no timer.
+    // Copilot had no `/loop` equivalent when this row was first written against 1.0.75;
+    // it has one now, which is what allows this pairing (issue #3).
+    #expect(CLISessionBackendKind.copilotCLI.canHost(.timeBased))
+    // A composite is a graph of loops running inside one node, and sub-agent fan-out is
+    // still unverified here — the one row that stays refused.
     #expect(!CLISessionBackendKind.copilotCLI.canHost(.proactive))
   }
 
@@ -107,21 +110,36 @@ struct CopilotBackendTests {
   }
 
   @Test
-  func aCopilotNodeGetsTheRealAdapterNotTheStub() {
+  func everyBackendNowHasARealAdapter() {
     let backend = CLISessionBackend.backend(for: node())
     #expect(backend.kind == .copilotCLI)
-    // Codex still gets the honest no-op stub.
-    #expect(CLISessionBackendKind.codex.executableName == nil)
+    // Codex used to be the stub — `executableName` was nil, which is what made it host
+    // nothing. It has an adapter now (issue #1), so nothing is left pointing at a binary
+    // graphcode can't launch.
+    for kind in CLISessionBackendKind.allCases {
+      #expect(kind.executableName != nil)
+      #expect(kind.isSpiked)
+    }
   }
 
   @Test
-  func aBackendWithNoExecutableLaunchesNothing() {
-    // Belt to `canHost`'s braces: even if such a node existed, no argv is built for it,
-    // so nothing is silently started in its place.
-    let codexNode = LoopNode(
+  func aCodexNodeLaunchesTheRealBinaryWithItsApprovalsSettled() throws {
+    // The pairing that used to produce no argv at all.
+    let node = LoopNode(
       title: "Ship", loopType: .goalBased, goal: GoalSpec(summary: "Tests pass"),
       backend: .codex)
+    let arguments = try #require(ZmxSessionLauncher.arguments(forNode: node))
 
-    #expect(ZmxSessionLauncher.arguments(forNode: codexNode) == nil)
+    #expect(arguments.contains(#"exec codex "$@""#))
+    // Codex splits "when do I stop to ask" from "what may I touch", and a session given
+    // only the first never asks *and* cannot write — indistinguishable from a hung loop.
+    let approval = try #require(arguments.firstIndex(of: "--ask-for-approval"))
+    #expect(arguments[approval + 1] == "never")
+    let sandbox = try #require(arguments.firstIndex(of: "--sandbox"))
+    #expect(arguments[sandbox + 1] == "workspace-write")
+    // No `--model`: valid ids aren't discoverable from its help, and a guess fails at
+    // launch, so its own default applies.
+    #expect(!arguments.contains("--model"))
+    #expect(arguments.last == "Work toward this goal until it is met: Tests pass")
   }
 }

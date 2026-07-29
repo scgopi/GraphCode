@@ -5,9 +5,18 @@ import SwiftUI
 /// material — materials shift value with the wallpaper behind them and go flat when the
 /// window loses focus, which makes the graph canvas look like it changed color.
 ///
-/// Three steps, darkest at the canvas: the sidebar sits *below* the window in value, the
-/// canvas below that. The lit pane is the one you work in; the sidebar is the recess it
-/// sits in, and the canvas is the depth the nodes float above.
+/// **One tone, everywhere**: `windowBackground` (`#1E1E1E`) is the sidebar, the titlebar,
+/// the canvas, the tab strip and the terminal alike, and the chrome only varies around it
+/// by the few points of gloss that say where the light is. Sampled off supacode, which is
+/// flat within four values from titlebar to terminal.
+///
+/// The two arrangements this replaced are both worth not repeating. A ladder of greys —
+/// window, then sidebar a step under, then canvas under that — meant every boundary was a
+/// colour change, and the eye reads a colour change as an object. Then the panes went to
+/// real black, which forced every piece of chrome to be *some* grey just to be visible,
+/// and the tab strip ended up the brightest thing in the window. One tone dissolves the
+/// problem instead of tuning it: boundaries are hairlines and shadows, and the only real
+/// colour left in the window is a loop's own.
 ///
 /// Chrome is *painted* glossy — a gradient lit from above, a specular line on its top
 /// edge, a shadow line where it meets the next pane (`sidebarGloss`, `tabBarGloss`). Not
@@ -15,64 +24,91 @@ import SwiftUI
 /// piece of chrome that has to hold still, and desaturate it the moment the window lost
 /// focus.
 enum Theme {
-  /// Window and detail-pane fill — the icon body's lower gray.
-  static let windowBackground = Color(red: 0.118, green: 0.125, blue: 0.141)
+  /// The one value nearly every surface in this app is: `#1E1E1E`.
+  ///
+  /// Sampled off supacode, which is the reference for this and turns out to be a single
+  /// flat tone from titlebar to terminal — sidebar `28,28,28`, tab strip `27,30,30`,
+  /// terminal `27,31,31`. Not black, and not a stack of greys either. Real black is what
+  /// this used to be, and against it every piece of chrome had to be *some* grey to be
+  /// visible at all, which is how the window ended up with a light strip across the top
+  /// of a black pane. One tone removes the problem rather than tuning it.
+  ///
+  /// Neutral rather than the blue-tinted greys the rest of this file used to carry —
+  /// supacode is dead neutral, and a tint only shows itself when there is something
+  /// untinted beside it to compare against.
+  static let windowBackground = Color(white: 0.118)
 
-  /// Sidebar fill, a step *darker* than the window. It used to be a step lighter, which
-  /// put the brightest chrome on the pane you look at least — a list of names you scan
-  /// once and then ignore in favour of the canvas beside it. Sinking it below the window
-  /// reads the way a native sidebar does: the content pane is what's lit, and the
-  /// sidebar is the recess it sits in.
-  static let sidebarBackground = Color(red: 0.098, green: 0.105, blue: 0.120)
-
-  /// The gloss painted over `sidebarBackground` — lit from above and falling off down
-  /// the pane, the same treatment `tabBarGloss` gives the tab strip, and painted for the
-  /// same reason (see this file's header, and `tabBarGloss` itself). The range is
-  /// deliberately narrower than the tab strip's: a sidebar is tall, so a gradient steep
-  /// enough to read on a 40pt strip becomes an obvious vertical smear on a full-height
-  /// pane. This one is meant to be felt rather than seen.
+  /// The sidebar's fill: one light source above the titlebar, falling off down the pane.
+  ///
+  /// Centred on `windowBackground` rather than sitting a step off it — it starts a shade
+  /// above and ends a shade below, so the pane averages out to the same tone as
+  /// everything else and the gloss is light on one surface instead of a second colour.
+  ///
+  /// **Why this is painted and not `NSVisualEffectView(.sidebar)`**, which is what a
+  /// native Mac sidebar actually is: that material blurs and *tints from the desktop
+  /// wallpaper* behind the window, and desaturates the moment the window stops being key.
+  /// The one piece of chrome that has to hold still would be the one piece that never
+  /// does, and the sidebar would change color when you moved the window. Everything below
+  /// is the Aqua recipe that material replaced — vertical gloss, specular top edge,
+  /// shadow where the next pane begins — which is why it still reads as a Mac sidebar
+  /// without borrowing the wallpaper to do it.
+  ///
+  /// Stops rather than evenly spaced colors, because evenly spaced is what made the old
+  /// version invisible: a linear ramp over a full window height is a 1-value-per-hundred
+  /// -points change, which is nothing. Real gloss puts most of its falloff in the top
+  /// fifth — near the light — and is almost flat below that. Same shape as `tabBarGloss`,
+  /// stretched over a pane instead of a 40pt strip.
   static let sidebarGloss = LinearGradient(
-    colors: [
-      Color(red: 0.125, green: 0.133, blue: 0.149),
-      Color(red: 0.102, green: 0.109, blue: 0.125),
-      Color(red: 0.086, green: 0.092, blue: 0.106),
+    stops: [
+      .init(color: Color(white: 0.145), location: 0.00),
+      .init(color: Color(white: 0.129), location: 0.16),
+      .init(color: Color(white: 0.118), location: 0.48),
+      .init(color: Color(white: 0.102), location: 1.00),
     ],
     startPoint: .top,
     endPoint: .bottom)
 
-  /// The specular line along the sidebar's top edge, where it meets the titlebar. Half
-  /// the tab strip's, because this one runs the full height of the window next to it and
-  /// a bright rule there would read as a border between two panes rather than as light.
-  static let sidebarHighlight = Color.white.opacity(0.045)
+  /// The specular line along the sidebar's top edge, where it meets the titlebar — the
+  /// thing that actually says "lit from above" rather than "filled with a gradient".
+  /// Still under the tab strip's: this rule runs the full width of a tall pane, and at
+  /// the strip's brightness it stops reading as light and starts reading as a border.
+  static let sidebarHighlight = Color.white.opacity(0.07)
 
-  /// The shadow where the sidebar meets the detail pane. This is what actually separates
-  /// them now that the sidebar is the darker of the two — a `NavigationSplitView`'s own
+  /// The shadow where the sidebar meets the detail pane — and, now that both panes are the
+  /// same tone, the only thing separating them at all. A `NavigationSplitView`'s own
   /// divider is nearly invisible between two dark fills, and a hairline of black reads as
   /// the content pane casting into the recess rather than as a drawn line.
   static let sidebarEdgeShadow = Color.black.opacity(0.45)
 
-  /// Graph canvas fill, the darkest step — white nodes read as lit against it.
-  static let canvasBackground = Color(red: 0.075, green: 0.082, blue: 0.094)
+  /// Graph canvas fill — the same tone as everything else. A canvas and the terminal that
+  /// replaces it in the same pane should not be two different colours.
+  static let canvasBackground = windowBackground
 
   /// The canvas's notebook ruling. One step off `canvasBackground` and no further: the
   /// grid is there to give panning something to move against and to make the empty
   /// canvas read as a surface, so it has to lose to every edge and node drawn over it.
-  static let canvasGridLine = Color(red: 0.129, green: 0.137, blue: 0.153)
+  ///
+  /// It moved up with the canvas. A ruling is only ever "one step off" whatever it is
+  /// drawn on, so left where it was — a value picked against black — it would have all
+  /// but vanished on a canvas that is now brighter than the line was.
+  static let canvasGridLine = Color(white: 0.180)
 
-  /// A loop workspace's tab bar fill — reads as its own chrome strip above the
-  /// terminal, the same role `sidebarBackground` plays next to the canvas.
-  static let tabBarBackground = Color(red: 0.145, green: 0.153, blue: 0.169)
-
-  /// The gloss painted over `tabBarBackground`: lit from above, falling off to a shade
-  /// darker than the flat fill at the bottom. Painted rather than a system material on
-  /// purpose — for the reason at the top of this file, glass would desaturate the strip
-  /// whenever the window lost focus and let the wallpaper tint it, so the one piece of
-  /// chrome sitting against the terminal would be the one piece that never held still.
+  /// A loop workspace's tab strip — the sidebar's gloss, on a strip instead of a pane.
+  ///
+  /// Painted rather than a system material for the reason at the top of this file: glass
+  /// would desaturate the strip whenever the window lost focus and let the wallpaper tint
+  /// it, so the one piece of chrome sitting against the terminal would be the one piece
+  /// that never held still.
+  ///
+  /// It used to top out at 0.180 against a black terminal, and that was the grey band
+  /// across the top of the window — the strip was the brightest thing on screen, which is
+  /// exactly backwards for a row of tab labels. What separates it from the terminal now is
+  /// `tabBarShadowLine` below it, not its own value.
   static let tabBarGloss = LinearGradient(
     colors: [
-      Color(red: 0.180, green: 0.188, blue: 0.208),
-      Color(red: 0.145, green: 0.153, blue: 0.169),
-      Color(red: 0.125, green: 0.133, blue: 0.149),
+      Color(white: 0.145),
+      Color(white: 0.122),
+      Color(white: 0.106),
     ],
     startPoint: .top,
     endPoint: .bottom)
@@ -84,6 +120,16 @@ enum Theme {
   /// The shadow line where the strip meets the terminal, so the gloss ends on an edge
   /// rather than fading into the pane below it.
   static let tabBarShadowLine = Color.black.opacity(0.35)
+
+  /// Laid over the unfocused half of a split, so the pane you are typing into is the one
+  /// that looks live.
+  ///
+  /// The terminal's own background at 15%, which is Ghostty's `unfocused-split-fill` and
+  /// `unfocused-split-opacity` (0.85) — the same values supacode resolves out of its
+  /// config. It pulls the inactive pane's text toward the background rather than greying
+  /// it: still perfectly readable, which matters because the whole reason to split is
+  /// watching one pane while working in the other.
+  static let unfocusedPaneVeil = windowBackground.opacity(0.15)
 
   /// The folder glyph in a loop workspace's header — the Finder blue, so a folder on a
   /// dark chrome strip reads as a folder before you've read the name next to it.
@@ -112,7 +158,7 @@ enum Theme {
   /// The lit top edge of a control, matching `tabBarHighlight`'s role on the strip.
   static let controlBorder = Color.white.opacity(0.10)
 
-  /// The selected tab's pill — lighter than `tabBarBackground` so it stands off the
+  /// The selected tab's pill — lighter than `tabBarGloss` so it stands off the
   /// strip the way a real terminal app's active tab does, without reaching for the
   /// system accent color (this isn't a selection, it's "what's showing").
   static let tabSelectedBackground = Color(red: 0.235, green: 0.245, blue: 0.267)

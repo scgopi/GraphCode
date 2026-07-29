@@ -105,8 +105,10 @@ struct GraphOverviewView: View {
       .onChange(of: overview.size) { _, _ in centreIfUntouched(in: viewport) }
     }
     .background {
-      NotebookGrid(cellSize: 96, offset: liveOffset, scale: transform.scale)
-        .background(Theme.canvasBackground)
+      NotebookGrid(
+        cellSize: NotebookGrid.defaultCellSize, offset: liveOffset, scale: transform.scale
+      )
+      .background(Theme.canvasBackground)
     }
     .contentShape(Rectangle())
     .gesture(
