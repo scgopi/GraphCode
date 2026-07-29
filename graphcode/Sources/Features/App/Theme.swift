@@ -124,12 +124,12 @@ enum Theme {
   /// Laid over the unfocused half of a split, so the pane you are typing into is the one
   /// that looks live.
   ///
-  /// The terminal's own background at 15%, which is Ghostty's `unfocused-split-fill` and
-  /// `unfocused-split-opacity` (0.85) — the same values supacode resolves out of its
-  /// config. It pulls the inactive pane's text toward the background rather than greying
-  /// it: still perfectly readable, which matters because the whole reason to split is
-  /// watching one pane while working in the other.
-  static let unfocusedPaneVeil = windowBackground.opacity(0.15)
+  /// The terminal's own background at 35% — heavier than Ghostty's own
+  /// `unfocused-split-opacity` (0.85, i.e. a 15% veil), which was too faint to tell the
+  /// two halves apart at a glance. It still pulls the inactive pane's text toward the
+  /// background rather than greying it, so that pane stays readable — which matters
+  /// because the whole reason to split is watching one pane while working in the other.
+  static let unfocusedPaneVeil = windowBackground.opacity(0.35)
 
   /// The folder glyph in a loop workspace's header — the Finder blue, so a folder on a
   /// dark chrome strip reads as a folder before you've read the name next to it.
