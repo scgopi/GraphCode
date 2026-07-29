@@ -55,20 +55,10 @@ The app carries `graphcoded`, `graphcode` (the CLI), and `zmx` inside it, and pu
 `~/.graphcode/bin` on first launch, along with the launchd agent that keeps the daemon
 running. Add that directory to your `PATH` for the CLI.
 
-**Gatekeeper.** These builds are ad-hoc signed, not notarized, so a browser download picks
-up a quarantine flag and macOS refuses to open the app — with a misleading *"graphcode.app
-is damaged."* Either fetch the disk image with `curl`, which sets no quarantine:
-
-```sh
-curl -L -o graphcode.dmg \
-  https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg
-```
-
-or clear the flag after dragging it across:
-
-```sh
-xattr -dr com.apple.quarantine /Applications/graphcode.app
-```
+Releases from 0.0.9 on are Developer ID signed and notarized, so a browser download opens
+on a double-click. Earlier builds were ad-hoc signed and picked up a quarantine flag that
+made macOS refuse them with a misleading *"graphcode.app is damaged"* — if you are holding
+one of those, `xattr -dr com.apple.quarantine /Applications/graphcode.app` clears it.
 
 **Claude Code must already be on your `PATH`** — GraphCode launches it, it doesn't bundle
 it.
