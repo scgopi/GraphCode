@@ -264,10 +264,23 @@ DMG_STAGE := $(RELEASE_DIR)/dmg
 DMG := $(RELEASE_DIR)/graphcode-macos-arm64.dmg
 ENTITLEMENTS := $(CURDIR)/graphcode/graphcode.entitlements
 
+# Aliased so the recipe below can recurse without the literal string `$(MAKE)`
+# appearing in it. GNU make treats any recipe line mentioning $(MAKE) as a
+# recursive invocation and runs it even under `-n` — and since the whole of
+# release-dmg is one backslash-joined logical line, that would make a dry run
+# perform a full Release build and sign it for real.
+SUBMAKE := $(MAKE)
+
 # Empty means ad-hoc. See the block above.
 SIGN_ID ?=
 # The keychain profile name given to `xcrun notarytool store-credentials`.
 NOTARY_PROFILE ?= graphcode
+
+# NOTARIZE=0 signs but does not submit to Apple. Useful only for checking the
+# signing pipeline before the notarytool credentials exist — the resulting DMG
+# is Developer ID signed but *not* notarized, so Gatekeeper on another Mac still
+# quarantines it. Never publish the output of a NOTARIZE=0 run.
+NOTARIZE ?= 1
 
 release-dmg: generate build-zmx
 	@set -e; \
@@ -312,7 +325,9 @@ release-dmg: generate build-zmx
 			|| { echo "signing graphcode.app failed"; exit 1; }; \
 		codesign --verify --strict --verbose=2 "$$APP" \
 			|| { echo "the packaged app failed signature verification"; exit 1; }; \
-		$(MAKE) --no-print-directory notarize TARGET="$$APP"; \
+		if [ "$(NOTARIZE)" = "1" ]; then \
+			$(SUBMAKE) --no-print-directory notarize TARGET="$$APP"; \
+		else echo "  NOTARIZE=0 — skipping notarization of the app"; fi; \
 	fi; \
 	ln -s /Applications "$(DMG_STAGE)/Applications"; \
 	rm -f "$(DMG)"; \
@@ -321,9 +336,13 @@ release-dmg: generate build-zmx
 	if [ -n "$(SIGN_ID)" ]; then \
 		codesign --force --timestamp --sign "$(SIGN_ID)" "$(DMG)" \
 			|| { echo "signing the disk image failed"; exit 1; }; \
-		$(MAKE) --no-print-directory notarize TARGET="$(DMG)"; \
-		spctl --assess --type open --context context:primary-signature -v "$(DMG)" \
-			|| { echo "Gatekeeper rejected the disk image"; exit 1; }; \
+		if [ "$(NOTARIZE)" = "1" ]; then \
+			$(SUBMAKE) --no-print-directory notarize TARGET="$(DMG)"; \
+			spctl --assess --type open --context context:primary-signature -v "$(DMG)" \
+				|| { echo "Gatekeeper rejected the disk image"; exit 1; }; \
+		else \
+			echo "  NOTARIZE=0 — signed but NOT notarized; do not publish this DMG"; \
+		fi; \
 	fi; \
 	echo "built: $(DMG)"
 

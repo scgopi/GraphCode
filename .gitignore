@@ -24,5 +24,15 @@ xcuserdata/
 # Logs
 *.log
 
+# Browser-automation scratch (snapshots, screenshots, console dumps)
+.playwright-mcp/
+
+# Signing material must never land in the repo. The Developer ID private key
+# lives in ~/Developer/certificates and in the login keychain, nowhere else.
+*.key
+*.p12
+*.cer
+*.certSigningRequest
+
 # Design docs — kept locally for now, not pushed to the remote yet.
 /docs/
