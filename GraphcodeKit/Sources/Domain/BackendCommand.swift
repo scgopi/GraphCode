@@ -122,7 +122,12 @@ extension CLISessionBackendKind {
   /// verification and URL checks, letting a session reach outside the project it was
   /// started in. Auto-approving work *in the folder the loop was pointed at* is the
   /// bargain a loop implies; reaching past it is not.
-  func permissionArguments(_ settings: GraphcodeSettings) -> [String] {
+  /// Public because the app builds its own argv rather than going through
+  /// `launchArguments`: `GhosttyTerminalView` assembles a *shell command string*, where
+  /// the daemon assembles an argv array. Both still have to answer this question the same
+  /// way, and the app answering it by omission is what left app-created sessions on the
+  /// CLI's interactive default while daemon-created ones were on `auto`.
+  public func permissionArguments(_ settings: GraphcodeSettings) -> [String] {
     switch self {
     case .claudeCode: return settings.claudePermissionMode.arguments
     case .copilotCLI: return settings.copilotPermissions.arguments

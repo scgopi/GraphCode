@@ -83,13 +83,29 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// `~/.zshrc`, which zsh reads only when interactive. The app inherits `launchd`'s
   /// minimal `PATH` when opened from Finder, so without `-i` this finds the agent only
   /// when the app happened to be launched from an already-configured shell.
-  private var agentCommand: [String]? {
+  ///
+  /// How much the session may do without asking comes from the same setting the daemon
+  /// reads (`GraphcodeSettings.claudePermissionMode` and its per-backend siblings), for
+  /// the reason the two paths exist at all: which one starts a node's session is a race —
+  /// the daemon if it got there first, this view if the node was opened before it did, or
+  /// with `zmx` not installed. Omitting the flag here meant that race decided whether a
+  /// loop ran on the setting a human chose or on the CLI's interactive default, where it
+  /// sits at the first prompt while the graph reports it as `running`.
+  ///
+  /// Loaded per launch rather than held, matching `ZmxSessionLauncher`: changing the
+  /// setting then applies to the next session opened, with nothing to restart.
+  /// `settings` is a parameter rather than a read inside the body so a test can state what
+  /// a human chose and check what the shell is told — the omission this fixes was
+  /// invisible precisely because there was nothing to assert against.
+  func agentCommand(settings: GraphcodeSettings = GraphcodeSettingsStore.load()) -> [String]? {
     guard let executable = backend.executableName else { return nil }
     let model = backend.modelArguments(for: modelTier).joined(separator: " ")
+    let permissions = backend.permissionArguments(settings).joined(separator: " ")
     let prompt = initialPrompt == nil ? "" : "\"$\(Self.promptVariable)\""
 
     var parts = ["exec", executable]
     if !model.isEmpty { parts.append(model) }
+    if !permissions.isEmpty { parts.append(permissions) }
     if !prompt.isEmpty {
       if backend == .copilotCLI { parts.append("--interactive") }
       parts.append(prompt)
@@ -99,7 +115,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
 
   private var command: [String] {
     let shell = ["/bin/zsh", "-l"]
-    guard let agentCommand else {
+    guard let agentCommand = agentCommand() else {
       // A backend graphcode can't launch gets a plain shell rather than the wrong agent.
       // `canHost` already refuses to create such a node, so this is unreachable in
       // practice and deliberately inert if it ever isn't.
