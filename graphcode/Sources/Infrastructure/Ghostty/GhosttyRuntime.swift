@@ -93,9 +93,19 @@ final class GhosttyRuntime: @unchecked Sendable {
   // owning `GhosttyTerminalNSView` (see that file's `ghostty_surface_config_s`
   // construction).
 
+  /// One in-flight main-thread tick at a time. See `TickCoalescer` for why.
+  private static let tickCoalescer = TickCoalescer()
+
   private static func wakeup() {
     // May be called from any thread; ghostty_app_tick must happen on the main thread.
-    DispatchQueue.main.async { GhosttyRuntime.shared.tick() }
+    guard tickCoalescer.claim() else { return }
+    DispatchQueue.main.async {
+      // Released *before* the tick, not after: a wakeup that arrives while this one is
+      // running has to be able to queue the next tick, or its work waits for the next
+      // unrelated wakeup. An extra tick is free; a dropped one is a stalled surface.
+      GhosttyRuntime.tickCoalescer.release()
+      GhosttyRuntime.shared.tick()
+    }
   }
 
   private static func view(from userdata: UnsafeMutableRawPointer?) -> GhosttyTerminalNSView? {

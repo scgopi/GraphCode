@@ -5,13 +5,11 @@ import SwiftUI
 /// A folder canvas's composites drawn open — the loops inside each `.proactive` node's
 /// `subGraph`, stacked under the card that owns them. See `SubGraphLayout` for the
 /// placement and for why sub-graphs live here rather than in the Graph view.
+/// The layout itself is built once per body pass and passed in — see
+/// `ProjectCanvasView.body` for why these don't compute their own.
 extension ProjectCanvasView {
-  var subGraph: SubGraphLayout {
-    SubGraphLayout(nodes: store.graph.nodes, positions: store.nodePositions)
-  }
-
   /// Containment lines and the sub-graph's own edges, drawn under the chips.
-  var subGraphLinksLayer: some View {
+  func subGraphLinksLayer(_ subGraph: SubGraphLayout) -> some View {
     ForEach(subGraph.links) { link in
       switch link.kind {
       case .edge(let kind, let fired):
@@ -34,7 +32,7 @@ extension ProjectCanvasView {
   /// Siblings, not a nested stack — see `ProjectCanvasView.startLayer` for what a
   /// container does to `.position()` here.
   @ViewBuilder
-  var subGraphChipsLayer: some View {
+  func subGraphChipsLayer(_ subGraph: SubGraphLayout) -> some View {
     ForEach(subGraph.placements) { placement in
       subGraphChip(placement).position(placement.position)
     }

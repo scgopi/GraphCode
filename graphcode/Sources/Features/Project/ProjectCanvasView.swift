@@ -32,8 +32,28 @@ struct ProjectCanvasView: View {
   @State var dragSourceID: UUID?
   @State var dragLocation: CGPoint?
 
+  /// The canvas's derived values, computed once per body pass — see `body`.
+  struct Derived {
+    let subGraph: SubGraphLayout
+    let attentionReasons: [UUID: AttentionReason]
+  }
+
+  /// Everything the canvas draws that is *derived* from the store rather than stored in
+  /// it, built exactly once per body pass and handed down to the layers.
+  ///
+  /// This is a performance contract, not a style choice. `SubGraphLayout` walks every
+  /// composite's sub-graph recursively and `attentionReasons` rolls the whole graph up,
+  /// and both used to be computed properties the layers read directly — so one body pass
+  /// built the sub-graph layout five times over, and `attentionReason(for:)` re-rolled the
+  /// entire graph three times *per card*, which is quadratic in the number of loops. A pan
+  /// re-evaluates this body on every pointer event, so all of that landed on the main
+  /// thread at gesture rate. Read each derived value once, here, and pass it along.
   var body: some View {
-    VStack(spacing: 0) {
+    let derived = Derived(
+      subGraph: SubGraphLayout(nodes: store.graph.nodes, positions: store.nodePositions),
+      attentionReasons: store.attentionReasons)
+
+    return VStack(spacing: 0) {
       if let connectionError = store.connectionError {
         Text("Not connected to graphcoded: \(connectionError)")
           .font(.caption)
@@ -42,10 +62,11 @@ struct ProjectCanvasView: View {
           .padding(6)
           .background(Color.red)
       }
-      canvas
+      canvas(derived)
         .overlay { emptyState }
         .overlay(alignment: .bottomTrailing) {
-          CanvasZoomControls(transform: $transform, viewport: viewport, content: contentSize)
+          CanvasZoomControls(
+            transform: $transform, viewport: viewport, content: contentSize(derived.subGraph))
         }
     }
     .background(Theme.windowBackground)
@@ -85,7 +106,9 @@ struct ProjectCanvasView: View {
   /// How much room the graph takes up, for actual-size and fit. Measured out to the far
   /// edge of the furthest card rather than to its centre, so fitting doesn't crop the
   /// thing it was asked to fit.
-  private var contentSize: CGSize {
+  ///
+  /// Takes the already-built sub-graph layout rather than reaching for one: see `body`.
+  func contentSize(_ subGraph: SubGraphLayout) -> CGSize {
     let positions = store.graph.nodes.compactMap { store.nodePositions[$0.id] }
     guard let right = positions.map(\.x).max(), let bottom = positions.map(\.y).max() else {
       return .zero
@@ -96,21 +119,22 @@ struct ProjectCanvasView: View {
 
   /// Centres the graph, but only while the canvas is still where it started: once
   /// someone has panned or zoomed, their view is theirs and nothing here moves it.
-  private func centreIfUntouched(in viewport: CGSize) {
-    guard transform == CanvasTransform(), viewport != .zero, contentSize != .zero else {
+  private func centreIfUntouched(in viewport: CGSize, content: CGSize) {
+    guard transform == CanvasTransform(), viewport != .zero, content != .zero else {
       return
     }
-    transform = .centred(contentSize, in: viewport)
+    transform = .centred(content, in: viewport)
   }
 
-  private var canvas: some View {
-    GeometryReader { proxy in
+  private func canvas(_ derived: Derived) -> some View {
+    let content = contentSize(derived.subGraph)
+    return GeometryReader { proxy in
       ZStack {
         startLayer
         edgesLayer
-        subGraphLinksLayer
-        nodesLayer
-        subGraphChipsLayer
+        subGraphLinksLayer(derived.subGraph)
+        nodesLayer(derived.attentionReasons)
+        subGraphChipsLayer(derived.subGraph)
         dragPreview
       }
       .coordinateSpace(name: "canvas")
@@ -118,17 +142,17 @@ struct ProjectCanvasView: View {
       .offset(liveOffset)
       .onAppear {
         viewport = proxy.size
-        centreIfUntouched(in: proxy.size)
+        centreIfUntouched(in: proxy.size, content: content)
       }
       .onChange(of: proxy.size) { _, size in
         viewport = size
-        centreIfUntouched(in: size)
+        centreIfUntouched(in: size, content: content)
       }
       // The graph arrives from the daemon a beat after this view does, so the first
       // paint often has nothing to centre on. Re-centring when the content first has a
       // size is what puts the start marker — the leftmost thing on the canvas — on
       // screen instead of hard against the pane's left edge.
-      .onChange(of: contentSize) { _, _ in centreIfUntouched(in: viewport) }
+      .onChange(of: content) { _, size in centreIfUntouched(in: viewport, content: size) }
     }
     .background {
       // Ruled like graph paper, and glued to the graph rather than to the window: the
@@ -176,9 +200,9 @@ struct ProjectCanvasView: View {
     }
   }
 
-  private var nodesLayer: some View {
+  private func nodesLayer(_ reasons: [UUID: AttentionReason]) -> some View {
     ForEach(store.graph.nodes) { node in
-      nodeCard(for: node)
+      nodeCard(for: node, reason: reasons[node.id])
         .position(store.nodePositions[node.id] ?? .zero)
     }
   }
@@ -251,7 +275,7 @@ struct ProjectCanvasView: View {
     }
   }
 
-  private func nodeCard(for node: LoopNode) -> some View {
+  private func nodeCard(for node: LoopNode, reason: AttentionReason?) -> some View {
     VStack(alignment: .leading, spacing: 6) {
       HStack {
         Text(node.title).font(.headline).lineLimit(1)
@@ -276,7 +300,7 @@ struct ProjectCanvasView: View {
         }
       }
       CompositeBadge(node: node)
-      if let reason = attentionReason(for: node) {
+      if let reason {
         Label(reason.displayName, systemImage: "exclamationmark.circle.fill")
           .font(.caption2)
           .foregroundStyle(.orange)
@@ -300,9 +324,8 @@ struct ProjectCanvasView: View {
     .overlay(
       RoundedRectangle(cornerRadius: 10)
         .stroke(
-          attentionReason(for: node) == nil
-            ? Color.secondary.opacity(0.3) : Color.orange,
-          lineWidth: attentionReason(for: node) == nil ? 1 : 2)
+          reason == nil ? Color.secondary.opacity(0.3) : Color.orange,
+          lineWidth: reason == nil ? 1 : 2)
     )
     .contentShape(Rectangle())
     .onTapGesture { store.send(.nodeTapped(node.id)) }

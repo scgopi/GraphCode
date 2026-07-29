@@ -33,16 +33,22 @@ struct GraphOverviewView: View {
   /// location to work from — can still zoom about its centre.
   @State private var viewport: CGSize = .zero
 
-  var overview: GraphOverview {
-    GraphOverview(graphs: store.projects.map(\.graph))
-  }
-
-  /// Which loops want a human, by node id — the same rollup the sidebar's monitor and
-  /// every project canvas use, so the overview can't disagree with either about what
-  /// "needs attention" means.
-  var attentionReasons: [UUID: AttentionReason] {
-    Dictionary(
-      store.attentionItems.map { ($0.nodeID, $0.reason) }, uniquingKeysWith: { first, _ in first })
+  /// Everything this view draws that is *derived* from the store rather than stored in
+  /// it, built once per body pass and handed to the layers.
+  ///
+  /// A performance contract, the same one `ProjectCanvasView.body` documents, and this is
+  /// where it was costing the most. `GraphOverview` lays out every open folder's whole
+  /// graph, and `attentionReasons` rolls up across all of them — both were computed
+  /// properties the layers read directly, so a single body pass built the overview seven
+  /// times over and re-rolled every project's attention state *once per loop card*, which
+  /// is quadratic in the number of loops on screen. Panning re-evaluates this body on
+  /// every pointer event, so all of it ran on the main thread at gesture rate.
+  struct Derived {
+    let overview: GraphOverview
+    /// Which loops want a human, by node id — the same rollup the sidebar's monitor and
+    /// every project canvas use, so the overview can't disagree with either about what
+    /// "needs attention" means.
+    let attentionReasons: [UUID: AttentionReason]
   }
 
   /// No toolbar at all, on purpose. This view shows loops; it does not make them — not
@@ -53,8 +59,14 @@ struct GraphOverviewView: View {
   /// for. Global triggers are created from the CLI (`graphcode node create
   /// graphcode://global …`); a folder's loops are created on that folder's own canvas.
   var body: some View {
-    canvas
-      .overlay(alignment: .bottomTrailing) { zoomControls }
+    let derived = Derived(
+      overview: GraphOverview(graphs: store.projects.map(\.graph)),
+      attentionReasons: Dictionary(
+        store.attentionItems.map { ($0.nodeID, $0.reason) },
+        uniquingKeysWith: { first, _ in first }))
+
+    return canvas(derived)
+      .overlay(alignment: .bottomTrailing) { zoomControls(derived.overview) }
       .background(Theme.windowBackground)
   }
 
@@ -68,19 +80,22 @@ struct GraphOverviewView: View {
 
   /// Centres the graph, but only while the canvas is still where it started: once
   /// someone has panned or zoomed, their view is theirs and nothing here moves it.
-  private func centreIfUntouched(in viewport: CGSize) {
-    guard transform == CanvasTransform(), viewport != .zero, overview.size != .zero else {
+  private func centreIfUntouched(in viewport: CGSize, content: CGSize) {
+    guard transform == CanvasTransform(), viewport != .zero, content != .zero else {
       return
     }
-    transform = .centred(overview.size, in: viewport)
+    transform = .centred(content, in: viewport)
   }
 
-  private var canvas: some View {
-    GeometryReader { proxy in
+  /// The drawn graph itself, sized against the pane it's in. Split from `canvas` only to
+  /// keep each function under the length limit.
+  private func layers(_ derived: Derived) -> some View {
+    let overview = derived.overview
+    return GeometryReader { proxy in
       ZStack {
-        linksLayer
-        foldersLayer
-        loopsLayer
+        linksLayer(overview)
+        foldersLayer(overview)
+        loopsLayer(overview, reasons: derived.attentionReasons)
         // Nothing open means nothing to originate — the empty state speaks for the
         // canvas instead. Same rule as a folder's canvas; see `CanvasStart.origin`.
         if !overview.isEmpty {
@@ -89,54 +104,60 @@ struct GraphOverviewView: View {
       }
       .scaleEffect(transform.scale)
       .offset(liveOffset)
-      .overlay { emptyState }
+      .overlay { emptyState(overview) }
       // Nothing has been panned yet, so first paint should put the graph where the eye
       // is rather than in the top-left corner with the lanes running off the bottom.
       .onAppear {
         viewport = proxy.size
-        centreIfUntouched(in: proxy.size)
+        centreIfUntouched(in: proxy.size, content: overview.size)
       }
       .onChange(of: proxy.size) { _, size in
         viewport = size
-        centreIfUntouched(in: size)
+        centreIfUntouched(in: size, content: overview.size)
       }
       // Folders arrive from the daemon after this view does, so the first paint has
       // nothing to centre on.
-      .onChange(of: overview.size) { _, _ in centreIfUntouched(in: viewport) }
+      .onChange(of: overview.size) { _, size in
+        centreIfUntouched(in: viewport, content: size)
+      }
     }
-    .background {
-      NotebookGrid(
-        cellSize: NotebookGrid.defaultCellSize, offset: liveOffset, scale: transform.scale
-      )
-      .background(Theme.canvasBackground)
-    }
-    .contentShape(Rectangle())
-    .gesture(
-      DragGesture()
-        .onChanged { value in dragOffset = value.translation }
-        .onEnded { value in
-          transform.offset.width += value.translation.width
-          transform.offset.height += value.translation.height
-          dragOffset = .zero
-        }
-    )
-    // Trackpad pinch, anchored where the fingers are: the graph under them stays put
-    // while everything else moves around it, which is what makes zooming feel like
-    // moving a sheet rather than like resizing a picture. `magnification` is relative to
-    // the start of this gesture, so it multiplies the scale the pinch began at.
-    .simultaneousGesture(
-      MagnifyGesture()
-        .onChanged { value in
-          let base = pinchBaseScale ?? transform.scale
-          pinchBaseScale = base
-          transform = transform.zoomed(
-            to: base * value.magnification, around: value.startLocation, in: viewport)
-        }
-        .onEnded { _ in pinchBaseScale = nil }
-    )
   }
 
-  private var zoomControls: some View {
+  private func canvas(_ derived: Derived) -> some View {
+    layers(derived)
+      .background {
+        NotebookGrid(
+          cellSize: NotebookGrid.defaultCellSize, offset: liveOffset, scale: transform.scale
+        )
+        .background(Theme.canvasBackground)
+      }
+      .contentShape(Rectangle())
+      .gesture(
+        DragGesture()
+          .onChanged { value in dragOffset = value.translation }
+          .onEnded { value in
+            transform.offset.width += value.translation.width
+            transform.offset.height += value.translation.height
+            dragOffset = .zero
+          }
+      )
+      // Trackpad pinch, anchored where the fingers are: the graph under them stays put
+      // while everything else moves around it, which is what makes zooming feel like
+      // moving a sheet rather than like resizing a picture. `magnification` is relative to
+      // the start of this gesture, so it multiplies the scale the pinch began at.
+      .simultaneousGesture(
+        MagnifyGesture()
+          .onChanged { value in
+            let base = pinchBaseScale ?? transform.scale
+            pinchBaseScale = base
+            transform = transform.zoomed(
+              to: base * value.magnification, around: value.startLocation, in: viewport)
+          }
+          .onEnded { _ in pinchBaseScale = nil }
+      )
+  }
+
+  private func zoomControls(_ overview: GraphOverview) -> some View {
     CanvasZoomControls(
       transform: $transform, viewport: viewport,
       content: overview.isEmpty ? .zero : overview.size)
@@ -148,7 +169,7 @@ struct GraphOverviewView: View {
   /// graph is empty on purpose and puts the first step in it, the way `CanvasEmptyState`
   /// does for a project.
   @ViewBuilder
-  private var emptyState: some View {
+  private func emptyState(_ overview: GraphOverview) -> some View {
     if overview.loops.isEmpty {
       VStack(spacing: 10) {
         Image(systemName: "point.3.filled.connected.trianglepath.dotted")

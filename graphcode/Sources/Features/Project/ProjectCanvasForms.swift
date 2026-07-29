@@ -25,12 +25,6 @@ extension ProjectCanvasView {
     }
   }
 
-  /// Same rollup the sidebar's monitor uses, scoped to this graph — one definition of
-  /// "needs attention" rather than a canvas-flavoured second opinion.
-  func attentionReason(for node: LoopNode) -> AttentionReason? {
-    store.attentionReasons[node.id]
-  }
-
   func nodeTitle(_ id: UUID) -> String {
     store.graph.nodes[id: id]?.title ?? "?"
   }

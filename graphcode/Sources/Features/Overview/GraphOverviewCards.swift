@@ -5,8 +5,10 @@ import SwiftUI
 /// What the Graph view actually draws: the lines, the folder chips, and one card per
 /// loop. Split out of `GraphOverviewView` purely for size — the same split
 /// `NodeDraftForm` got out of `ProjectCanvasView`.
+/// The overview and the attention rollup are built once per body pass and passed in —
+/// see `GraphOverviewView.Derived` for why these don't compute their own.
 extension GraphOverviewView {
-  var linksLayer: some View {
+  func linksLayer(_ overview: GraphOverview) -> some View {
     ForEach(overview.links) { link in
       switch link.kind {
       case .edge(let kind, let fired):
@@ -31,7 +33,7 @@ extension GraphOverviewView {
     }
   }
 
-  var foldersLayer: some View {
+  func foldersLayer(_ overview: GraphOverview) -> some View {
     ForEach(overview.folders) { folder in
       folderChip(folder).position(folder.position)
     }
@@ -39,9 +41,11 @@ extension GraphOverviewView {
 
   /// One card per loop, all of them clickable — a composite is drawn as the single loop
   /// it is, not expanded into its sub-graph. See `GraphOverview` for why.
-  var loopsLayer: some View {
+  func loopsLayer(
+    _ overview: GraphOverview, reasons: [UUID: AttentionReason]
+  ) -> some View {
     ForEach(overview.loops) { loop in
-      loopCard(loop).position(loop.position)
+      loopCard(loop, reason: reasons[loop.node.id]).position(loop.position)
     }
   }
 
@@ -102,9 +106,8 @@ extension GraphOverviewView {
     }
   }
 
-  private func loopCard(_ loop: GraphOverview.Loop) -> some View {
+  private func loopCard(_ loop: GraphOverview.Loop, reason: AttentionReason?) -> some View {
     let node = loop.node
-    let reason = attentionReasons[node.id]
     return loopCardBody(node, reason: reason)
       .padding(10)
       .frame(width: 220, alignment: .leading)
