@@ -168,9 +168,15 @@ struct GraphOverviewView: View {
   /// empty lane, which looks identical to a canvas that failed to load. This says the
   /// graph is empty on purpose and puts the first step in it, the way `CanvasEmptyState`
   /// does for a project.
+  ///
+  /// Gated on the same `isEmpty` the start marker and zoom controls use, not on
+  /// `loops.isEmpty`: a folder with no loops yet still draws its chip and tether, and
+  /// this overlay used to appear on top of them — the canvas showing something and
+  /// claiming to be empty at once, with an "Open Folder…" button for a folder that was
+  /// already open. The chip's own "0 loops" is the empty state for that case.
   @ViewBuilder
   private func emptyState(_ overview: GraphOverview) -> some View {
-    if overview.loops.isEmpty {
+    if overview.isEmpty {
       VStack(spacing: 10) {
         Image(systemName: "point.3.filled.connected.trianglepath.dotted")
           .font(.system(size: 34))

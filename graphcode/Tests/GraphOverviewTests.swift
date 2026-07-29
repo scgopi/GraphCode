@@ -170,6 +170,17 @@ struct GraphOverviewTests {
     #expect(overview.links.isEmpty)
   }
 
+  /// A folder with no loops yet still draws its chip, so the overview is *not* empty —
+  /// `isEmpty` is what gates the "Nothing running yet" overlay, and it used to sit on
+  /// top of that chip telling you to open a folder you'd already opened.
+  @Test
+  func aFolderWithNoLoopsIsNotAnEmptyOverview() {
+    let overview = GraphOverview(graphs: [LoopGraph(project: Self.projectA)])
+    #expect(!overview.isEmpty)
+    #expect(overview.folders.count == 1)
+    #expect(overview.loops.isEmpty)
+  }
+
   @Test
   func theGlobalGraphIsNamedForWhatItShowsRatherThanForTheDaemon() {
     // The sidebar row's label comes straight from here.
