@@ -90,7 +90,7 @@ struct ModelAutoSelectionTests {
   func attachedSessionHonoursTheSetting() throws {
     func command(autoSelecting: Bool, pinned: ModelTier?) -> String {
       let view = GhosttyTerminalView(
-        sessionName: "s", launchesClaudeCode: true, backend: .claudeCode,
+        surfaceID: UUID(), sessionName: "s", launchesClaudeCode: true, backend: .claudeCode,
         pinnedModelTier: pinned, loopType: .turnBased, initialPrompt: nil,
         workingDirectory: nil, onProcessExited: { _ in })
       let settings = GraphcodeSettings(autoSelectsModel: autoSelecting)

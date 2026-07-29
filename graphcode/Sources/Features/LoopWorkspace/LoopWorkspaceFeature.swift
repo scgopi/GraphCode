@@ -2,10 +2,10 @@ import ComposableArchitecture
 import Foundation
 import GraphcodeKit
 
-/// One loop's whole terminal workspace — tabs, each optionally split into two panes,
-/// the way a supacode worktree's own terminal area works (drawn on for shape only, not
-/// code) but scoped to exactly one loop's node instead of a worktree. Replaces Phase
-/// 4's `LoopNodeDetailFeature`, which only ever showed a single terminal.
+/// One loop's whole terminal workspace — tabs, each holding a tree of split panes (see
+/// `SplitNode`), the way a supacode worktree's own terminal area works (drawn on for shape
+/// only, not code) but scoped to exactly one loop's node instead of a worktree. Replaces
+/// Phase 4's `LoopNodeDetailFeature`, which only ever showed a single terminal.
 ///
 /// `layout` is persisted to disk (`TerminalLayoutStore`) on every mutation, keyed by
 /// this loop's node id — reopening the same loop, even after quitting the app, loads
@@ -45,6 +45,10 @@ struct LoopWorkspaceFeature {
   }
 
   @Dependency(\.terminalLayoutStore) var terminalLayoutStore
+  /// Closing a tab or a pane is the one thing that should still end a surface. Switching
+  /// loops deliberately doesn't — see `TerminalSurfaceStore` — so without telling it
+  /// here, a closed pane's terminal would linger until it aged out of the cache.
+  @Dependency(\.terminalSurfaceClient) var terminalSurfaceClient
 
   var body: some ReducerOf<Self> {
     Reduce { state, action in
@@ -64,9 +68,12 @@ struct LoopWorkspaceFeature {
 
       case .tabClosed(let id):
         // A workspace always keeps at least one tab.
-        guard state.layout.tabs.count > 1, let index = state.layout.tabs.index(id: id) else {
+        guard state.layout.tabs.count > 1, let index = state.layout.tabs.index(id: id),
+          let tab = state.layout.tabs[id: id]
+        else {
           return .none
         }
+        terminalSurfaceClient.retire(tab.surfaces.map(\.id))
         state.layout.tabs.remove(id: id)
         if state.layout.selectedTabID == id {
           let fallbackIndex = min(index, state.layout.tabs.count - 1)
@@ -85,16 +92,20 @@ struct LoopWorkspaceFeature {
         step(&state, by: -1)
         return .none
 
+      // ⌘D / ⌘⇧D, and the two tab-strip buttons. Splitting is unbounded: it divides the
+      // pane you are in, so pressing ⌘D three times gives four panes rather than two and
+      // two ignored keystrokes.
       case .splitButtonTapped(let direction):
-        guard var tab = state.layout.tabs[id: state.layout.selectedTabID], tab.secondary == nil
-        else { return .none }
-        let secondary = SurfaceRef(id: UUID(), launchesClaudeCode: false)
-        tab.secondary = secondary
-        tab.splitDirection = direction
+        guard var tab = state.layout.tabs[id: state.layout.selectedTabID] else { return .none }
+        let addition = SurfaceRef(id: UUID(), launchesClaudeCode: false)
+        // The focused pane is the one that divides — the same anchor supacode's terminal
+        // splits at. Always splitting `primary` instead would drop every new pane next to
+        // the first one, wherever you were actually working.
+        tab.root = tab.root.splitting(tab.focusedSurface.id, with: addition, direction: direction)
         // The new pane takes the keyboard, matching every terminal that splits — you
-        // asked for a second shell because you want to type in it. Leaving focus behind
+        // asked for another shell because you want to type in it. Leaving focus behind
         // would also mean the pane you just created came up dimmed.
-        tab.focusedSurfaceID = secondary.id
+        tab.focusedSurfaceID = addition.id
         state.layout.tabs[id: tab.id] = tab
         persist(state)
         return .none
@@ -109,17 +120,24 @@ struct LoopWorkspaceFeature {
 
       case .paneClosed(let tabID, let surfaceID):
         guard var tab = state.layout.tabs[id: tabID] else { return .none }
-        guard let secondary = tab.secondary else {
-          // Not split — this pane is the whole tab, so closing it closes the tab.
+        let paneOrder = tab.surfaces
+        guard let closedIndex = paneOrder.firstIndex(where: { $0.id == surfaceID })
+        else { return .none }
+        guard let root = tab.root.removing(surfaceID) else {
+          // The tab's only pane — closing it closes the tab.
           return .send(.tabClosed(tabID))
         }
-        // Closing one side of a split keeps the other as the tab's single pane.
-        if tab.primary.id == surfaceID {
-          tab.primary = secondary
+        // Only the pane that went is retired. Every survivor is the same live terminal it
+        // was, and is about to be re-mounted in the space the closed one gave up.
+        terminalSurfaceClient.retire([surfaceID])
+        tab.root = root
+        if tab.focusedSurfaceID == surfaceID {
+          // Where the keyboard lands, matching supacode (and Ghostty, which it follows):
+          // the pane before the one that closed, or the new first pane if the one that
+          // closed *was* first.
+          let survivors = tab.surfaces
+          tab.focusedSurfaceID = survivors[max(0, closedIndex - 1)].id
         }
-        tab.secondary = nil
-        // Whichever side went, the survivor is now `primary` and holds the keyboard.
-        tab.focusedSurfaceID = tab.primary.id
         state.layout.tabs[id: tabID] = tab
         persist(state)
         return .none

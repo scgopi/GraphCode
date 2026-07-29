@@ -28,6 +28,20 @@ final class GhosttyTerminalNSView: NSView {
 
   private var markedText: String = ""
 
+  // The visibility caches, stored here rather than in `+Visibility` for the reason
+  // `trackingArea` is stored here rather than in `+Mouse`: an extension cannot hold stored
+  // properties. Not `private` for the same reason — Swift scopes that to a file.
+
+  /// The last value handed to `ghostty_surface_set_occlusion`, so a resize or a window
+  /// notification that doesn't actually change visibility costs nothing. `nil` until the
+  /// first sync, so the first one always lands.
+  var lastOcclusion: Bool?
+
+  /// The last display id handed to libghostty, for the same reason.
+  var lastDisplayID: UInt32?
+
+  var windowObservers: [NSObjectProtocol] = []
+
   init(command: [String], workingDirectory: String?, environment: [String: String]) {
     super.init(frame: .zero)
     wantsLayer = true
@@ -77,6 +91,7 @@ final class GhosttyTerminalNSView: NSView {
   }
 
   deinit {
+    for observer in windowObservers { NotificationCenter.default.removeObserver(observer) }
     if let surface {
       ghostty_surface_free(surface)
     }
@@ -138,10 +153,18 @@ final class GhosttyTerminalNSView: NSView {
     return super.resignFirstResponder()
   }
 
-  /// Whether this surface belongs to the tab currently on screen. Every tab's surfaces
-  /// stay mounted at once (see `LoopWorkspaceView`), so "is in the window" says nothing
-  /// about "is the one the user is looking at" — this is what tells them apart.
+  /// Whether this surface is *the* one the user is typing into — its tab is showing and
+  /// it is that tab's focused pane. Drives the keyboard, not the renderer: the other half
+  /// of a split is inactive but very much visible. See `isVisible`.
   var isActive: Bool = false
+
+  /// Whether this surface's tab is the one on screen. Every tab's surfaces stay mounted
+  /// at once (see `LoopWorkspaceView`), so "is in the window" says nothing about "is the
+  /// one the user is looking at" — this is what tells them apart, and it is what
+  /// libghostty needs to know. Both panes of a split are visible; only one is active.
+  var isVisible: Bool = false {
+    didSet { syncOcclusion() }
+  }
 
   /// Owned here rather than in `+Mouse` because an extension cannot hold stored
   /// properties; `updateTrackingAreas` alongside the rest of the mouse code uses it.
@@ -149,26 +172,16 @@ final class GhosttyTerminalNSView: NSView {
 
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
+    observeWindow()
+    syncDisplayID()
+    syncOcclusion()
+    guard window != nil else { return }
     // Only claim focus if no other terminal already holds it. Mounting used to take it
     // unconditionally, so with several tabs alive the last surface to appear captured
     // the keyboard no matter which tab was showing — typing, and prefixes like tmux's
     // ctrl+a, went to a shell that wasn't on screen.
     guard !(window?.firstResponder is GhosttyTerminalNSView) else { return }
     window?.makeFirstResponder(self)
-  }
-
-  /// Move the keyboard here if it is currently parked on a surface that isn't the active
-  /// one — a hidden tab's, or the other half of this tab's split.
-  ///
-  /// It never takes focus *from* the active surface, so it can't fight a click: clicking
-  /// the other pane makes that pane active first (see `onFocusRequested`), and this then
-  /// agrees with the decision rather than making one.
-  func focusIfKeyboardIsOnAHiddenSurface() {
-    guard isActive, let window else { return }
-    if let holder = window.firstResponder as? GhosttyTerminalNSView {
-      guard !holder.isActive else { return }
-    }
-    window.makeFirstResponder(self)
   }
 
   // MARK: - Keyboard

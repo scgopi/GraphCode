@@ -45,10 +45,29 @@ struct SplitPaneFocusTests {
     await store.send(.splitButtonTapped(direction: .vertical))
 
     let tab = store.state.layout.tabs[0]
-    let secondary = try #require(tab.secondary)
-    #expect(tab.focusedSurface.id == secondary.id)
+    let addition = try #require(tab.surfaces.last)
+    #expect(tab.focusedSurface.id == addition.id)
     // …and exactly one pane is focused, which is the whole point.
     #expect(tab.primary.id != tab.focusedSurface.id)
+  }
+
+  /// Splitting divides the pane you are in. With three panes open that is the only thing
+  /// that puts the new one where you were looking.
+  @Test
+  @MainActor
+  func splittingDividesTheFocusedPaneNotTheFirstOne() async throws {
+    let store = makeStore()
+    await store.send(.splitButtonTapped(direction: .horizontal))
+    let first = store.state.layout.tabs[0].primary.id
+    let second = store.state.layout.tabs[0].focusedSurface.id
+
+    // Move back to the first pane, then split again: the new pane belongs beside *it*.
+    await store.send(.paneFocused(tabID: store.state.layout.tabs[0].id, surfaceID: first))
+    await store.send(.splitButtonTapped(direction: .horizontal))
+
+    let tab = store.state.layout.tabs[0]
+    let third = tab.focusedSurface.id
+    #expect(tab.surfaces.map(\.id) == [first, third, second])
   }
 
   @Test
@@ -90,6 +109,25 @@ struct SplitPaneFocusTests {
 
     tab.focusedSurfaceID = UUID()
     #expect(tab.focusedSurface.id == tab.primary.id)
+  }
+
+  /// Three panes deep, the keyboard has somewhere sensible to go and it isn't "the first
+  /// pane, always" — supacode (and Ghostty under it) hand it to the pane before the one
+  /// that closed.
+  @Test
+  @MainActor
+  func closingAMiddlePaneFocusesTheOneBeforeIt() async throws {
+    let store = makeStore()
+    await store.send(.splitButtonTapped(direction: .horizontal))
+    await store.send(.splitButtonTapped(direction: .horizontal))
+    let tab = store.state.layout.tabs[0]
+    let panes = tab.surfaces.map(\.id)
+    #expect(panes.count == 3)
+
+    await store.send(.paneFocused(tabID: tab.id, surfaceID: panes[1]))
+    await store.send(.paneClosed(tabID: tab.id, surfaceID: panes[1]))
+
+    #expect(store.state.layout.tabs[0].focusedSurface.id == panes[0])
   }
 
   @Test

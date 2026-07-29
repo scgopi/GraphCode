@@ -79,10 +79,39 @@ final class GhosttyRuntime: @unchecked Sendable {
     }
     self.app = app
     ghostty_config_free(config)
+    observeAppActivation()
   }
 
   func tick() {
     ghostty_app_tick(app)
+  }
+
+  /// Keeps libghostty told whether graphcode is the frontmost app.
+  ///
+  /// This is separate from `ghostty_surface_set_focus`, which says *which surface* holds
+  /// the keyboard — this says whether the app holds it at all. libghostty picks a
+  /// renderer thread QoS class from it: an unfocused-but-visible surface renders at
+  /// `.user_initiated` rather than `.user_interactive`, so a graphcode window sitting
+  /// behind someone's editor stops competing with it in the top priority band. Never
+  /// setting it left every surface claiming to be foreground for the app's whole life.
+  ///
+  /// Seeded from `NSApp.isActive` rather than assumed true: the app can come up in the
+  /// background — opened by `launchd`, or restored behind another app.
+  private func observeAppActivation() {
+    ghostty_app_set_focus(app, NSApp.isActive)
+    let center = NotificationCenter.default
+    center.addObserver(
+      forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      guard let self else { return }
+      ghostty_app_set_focus(self.app, true)
+    }
+    center.addObserver(
+      forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      guard let self else { return }
+      ghostty_app_set_focus(self.app, false)
+    }
   }
 
   // MARK: - Runtime callbacks

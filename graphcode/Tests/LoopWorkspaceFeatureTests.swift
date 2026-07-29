@@ -45,20 +45,51 @@ struct LoopWorkspaceFeatureTests {
     #expect(newTab?.primary.launchesClaudeCode == false)
   }
 
+  /// Issue #11: ⌘D used to add a pane once per tab and then do nothing at all.
   @Test
   @MainActor
-  func splitButtonAddsASecondaryPaneOnceNotAgain() async {
+  func splitButtonAddsAPaneEveryTimeItIsPressed() async {
     let store = makeStore(makeState())
     let tabID = store.state.layout.selectedTabID
 
     await store.send(.splitButtonTapped(direction: .horizontal))
-    #expect(store.state.layout.tabs[id: tabID]?.secondary != nil)
-    #expect(store.state.layout.tabs[id: tabID]?.splitDirection == .horizontal)
+    #expect(store.state.layout.tabs[id: tabID]?.surfaces.count == 2)
 
-    // Already split — a second split request on the same tab is a no-op.
-    let secondaryBefore = store.state.layout.tabs[id: tabID]?.secondary
+    await store.send(.splitButtonTapped(direction: .horizontal))
+    #expect(store.state.layout.tabs[id: tabID]?.surfaces.count == 3)
+
+    await store.send(.splitButtonTapped(direction: .horizontal))
+    #expect(store.state.layout.tabs[id: tabID]?.surfaces.count == 4)
+
+    // Four panes on one axis, not a stack of nested halves — repeated ⌘D divides the row
+    // it already made rather than subdividing the pane it just added.
+    guard case .split(let direction, let children) = store.state.layout.tabs[id: tabID]?.root
+    else { return #expect(Bool(false), "the tab should be split") }
+    #expect(direction == .horizontal)
+    #expect(children.count == 4)
+    #expect(children.allSatisfy { !$0.isSplit })
+  }
+
+  /// The other axis nests, because it has to: a column inside one pane of a row is the
+  /// only thing "split this pane downward" can mean.
+  @Test
+  @MainActor
+  func splittingTheOtherWayNestsInsideTheFocusedPane() async throws {
+    let store = makeStore(makeState())
+    let tabID = store.state.layout.selectedTabID
+
+    await store.send(.splitButtonTapped(direction: .horizontal))
     await store.send(.splitButtonTapped(direction: .vertical))
-    #expect(store.state.layout.tabs[id: tabID]?.secondary == secondaryBefore)
+
+    let tab = try #require(store.state.layout.tabs[id: tabID])
+    #expect(tab.surfaces.count == 3)
+    guard case .split(let direction, let children) = tab.root
+    else { return #expect(Bool(false), "the tab should be split") }
+    #expect(direction == .horizontal)
+    #expect(children.count == 2)
+    // The second pane — the one ⌘D made and left focused — is what ⌘⇧D divided.
+    #expect(children[0].isSplit == false)
+    #expect(children[1].isSplit)
   }
 
   @Test
@@ -121,13 +152,33 @@ struct LoopWorkspaceFeatureTests {
     let originalPrimary = try #require(store.state.layout.tabs[id: tabID]?.primary)
 
     await store.send(.splitButtonTapped(direction: .horizontal))
-    let secondary = try #require(store.state.layout.tabs[id: tabID]?.secondary)
+    let addition = try #require(store.state.layout.tabs[id: tabID]?.surfaces.last)
 
     await store.send(.paneClosed(tabID: tabID, surfaceID: originalPrimary.id))
 
     let tab = store.state.layout.tabs[id: tabID]
-    #expect(tab?.secondary == nil)
-    #expect(tab?.primary.id == secondary.id)
+    #expect(tab?.isSplit == false)
+    #expect(tab?.primary.id == addition.id)
+  }
+
+  /// Closing a pane out of three leaves a split of two, not a tab with a stray empty slot
+  /// in it — and the two that stay are the same live terminals they were.
+  @Test
+  @MainActor
+  func closingOnePaneOfThreeLeavesTheOtherTwoSplit() async throws {
+    let store = makeStore(makeState())
+    let tabID = store.state.layout.selectedTabID
+
+    await store.send(.splitButtonTapped(direction: .horizontal))
+    await store.send(.splitButtonTapped(direction: .horizontal))
+    let panes = try #require(store.state.layout.tabs[id: tabID]?.surfaces)
+    #expect(panes.count == 3)
+
+    await store.send(.paneClosed(tabID: tabID, surfaceID: panes[1].id))
+
+    let tab = try #require(store.state.layout.tabs[id: tabID])
+    #expect(tab.isSplit)
+    #expect(tab.surfaces.map(\.id) == [panes[0].id, panes[2].id])
   }
 
   @Test

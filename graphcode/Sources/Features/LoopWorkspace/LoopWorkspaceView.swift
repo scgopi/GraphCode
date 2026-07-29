@@ -160,36 +160,17 @@ struct LoopWorkspaceView: View {
     GlossyIconButton(systemImage: systemImage, help: help, action: action)
   }
 
-  /// One tab's panes, in a container whose *identity* never changes.
-  ///
-  /// Splitting used to swap a bare `surfaceView` for a stack containing two, and swapping
-  /// one view structure for another is how you tell SwiftUI the old view is gone: it tore
-  /// down the pane that was already there and called `makeNSView` again, destroying a live
-  /// Ghostty surface and building a fresh one in its place. The terminal you were working
-  /// in came back rebuilt — which is what "⌘D breaks the existing pane" was.
-  ///
-  /// `AnyLayout` is the fix for the axis, and it exists for this: it changes how children
-  /// are arranged without changing what they are, so flipping a split from side-by-side to
-  /// stacked doesn't recreate either surface. Each pane already carries its own `.id(ref.id)`
-  /// (see `surfaceView`), which is what pins the surviving half when the other appears or
-  /// disappears — the container being the same type in both cases is what makes that hold.
+  /// One tab's panes, however many splits deep they go.
   private func paneContent(for tab: TabLayout) -> some View {
-    let layout =
-      tab.splitDirection == .horizontal
-      ? AnyLayout(HStackLayout(spacing: 0))
-      : AnyLayout(VStackLayout(spacing: 0))
-    return layout {
-      surfaceView(tab: tab, ref: tab.primary)
-      if let secondary = tab.secondary {
-        Divider()
-        surfaceView(tab: tab, ref: secondary)
-      }
-    }
+    SplitTreeView(node: tab.root) { ref in surfaceView(tab: tab, ref: ref) }
   }
 
   @ViewBuilder
   private func surfaceView(tab: TabLayout, ref: SurfaceRef) -> some View {
     GhosttyTerminalView(
+      // The pane's own id, which is also the key its live surface is held under while
+      // some other loop is on screen — see `TerminalSurfaceStore`.
+      surfaceID: ref.id,
       sessionName: ref.zmxSessionName,
       launchesClaudeCode: ref.launchesClaudeCode,
       // The loop's own backend and tier, so an attached session matches what
@@ -210,6 +191,11 @@ struct LoopWorkspaceView: View {
       // including the other half of this tab's own split, which is what stops both panes
       // drawing a filled cursor as though each of them had it.
       isActive: tab.id == store.layout.selectedTabID && ref.id == tab.focusedSurface.id,
+      // Visible is the weaker claim, and the one libghostty renders on: this tab is
+      // showing, whether or not this pane of it has the keyboard. A hidden tab's surfaces
+      // are told so and stop drawing entirely — without that they render frames nobody
+      // can see, at the same thread priority as the pane you're actually looking at.
+      isVisible: tab.id == store.layout.selectedTabID,
       onFocusRequested: { store.send(.paneFocused(tabID: tab.id, surfaceID: ref.id)) }
     ) { succeeded in
       if ref.launchesClaudeCode {
@@ -238,6 +224,42 @@ struct LoopWorkspaceView: View {
     // what used to be `tab.secondary`, see `.paneClosed`) would keep reusing the old
     // primary's `NSView`/session instead of picking up the surviving one.
     .id(ref.id)
+  }
+}
+
+/// One node of a tab's split tree: a pane, or a row/column of nodes. Recursive, the way
+/// the tree it draws is — a split whose child is itself a split is how ⌘D then ⌘⇧D gets
+/// you a column inside a row.
+///
+/// `AnyLayout` rather than branching between `HStack` and `VStack`, and it exists for
+/// this: it changes how children are arranged without changing what they *are*, so
+/// flipping an axis doesn't recreate the panes on it. Each pane carries its own
+/// `.id(ref.id)` (see `LoopWorkspaceView.surfaceView`), which is what pins the panes that
+/// stay when a sibling appears or disappears beside them.
+///
+/// Rebuilding a pane is no longer the disaster it was when this drew at most two of them:
+/// `TerminalSurfaceStore` owns the live terminals now, so a remounted pane borrows the
+/// surface that is already running instead of freeing one and building another.
+private struct SplitTreeView<Pane: View>: View {
+  let node: SplitNode
+  let pane: (SurfaceRef) -> Pane
+
+  var body: some View {
+    switch node {
+    case .leaf(let ref):
+      pane(ref)
+    case .split(let direction, let children):
+      let layout =
+        direction == .horizontal
+        ? AnyLayout(HStackLayout(spacing: 0))
+        : AnyLayout(VStackLayout(spacing: 0))
+      layout {
+        ForEach(Array(children.enumerated()), id: \.element.id) { index, child in
+          if index > 0 { Divider() }
+          SplitTreeView(node: child, pane: pane)
+        }
+      }
+    }
   }
 }
 

@@ -104,15 +104,28 @@ extension GhosttyTerminalNSView {
       surface, point.x, bounds.height - point.y, Self.mods(for: event.modifierFlags))
   }
 
+  /// Wheel and trackpad scroll, forwarded and nothing else.
+  ///
+  /// There is deliberately no `sendMousePos` here, and there used to be — on the theory
+  /// that libghostty reports a wheel tick at the surface's last known cursor position, so
+  /// restating the position "costs nothing". It costs a great deal. Every wheel event
+  /// then entered libghostty's `cursorPosCallback`, which takes the **renderer state
+  /// mutex** — the same lock the render thread needs to rebuild cells and draw a frame —
+  /// reprocesses hyperlink hover, and can queue a render of its own. At trackpad event
+  /// rate that is lock contention between the input path and the render path for the
+  /// whole duration of a scroll, which is what made scrolling judder instead of tracking
+  /// the fingers.
+  ///
+  /// Worse, under a TUI with motion reporting on it also wrote a spurious mouse-*motion*
+  /// report to the PTY per tick, so the program on the other end redrew itself on every
+  /// wheel event for a pointer that never moved.
+  ///
+  /// The position it was restating was already current: `mouseMoved`/`mouseEntered`
+  /// tracking (`.activeAlways`, see `updateTrackingAreas`) keeps it so. Neither upstream
+  /// Ghostty's surface view nor supacode's sends a position from `scrollWheel`, and this
+  /// no longer does either.
   override func scrollWheel(with event: NSEvent) {
     guard let surface else { return }
-
-    // A full-screen TUI turns mouse reporting on, and libghostty reports each wheel tick
-    // at the surface's last known cursor position rather than reading one off this
-    // event. Enter/exit/move tracking keeps that position current, but stating it here
-    // too costs nothing and closes the gap when the pointer arrives without a move
-    // event ever landing.
-    sendMousePos(event)
 
     var deltaX = event.scrollingDeltaX
     var deltaY = event.scrollingDeltaY

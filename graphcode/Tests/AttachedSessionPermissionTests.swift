@@ -16,8 +16,8 @@ import Testing
 struct AttachedSessionPermissionTests {
   private func surface(_ backend: CLISessionBackendKind) -> GhosttyTerminalView {
     GhosttyTerminalView(
-      sessionName: "s", launchesClaudeCode: true, backend: backend, initialPrompt: "go",
-      workingDirectory: nil, onProcessExited: { _ in })
+      surfaceID: UUID(), sessionName: "s", launchesClaudeCode: true, backend: backend,
+      initialPrompt: "go", workingDirectory: nil, onProcessExited: { _ in })
   }
 
   /// The command Ghostty runs is a shell string, not an argv array, so the assertions are

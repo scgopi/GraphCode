@@ -94,6 +94,11 @@ struct AppFeature {
 
   @Dependency(\.orchestratorClient) var orchestratorClient
   @Dependency(\.terminalLayoutStore) var terminalLayoutStore
+  /// Only for the cases where a workspace goes away because the *loop* did. Merely
+  /// switching to another loop leaves its surfaces alive on purpose — see
+  /// `TerminalSurfaceStore` — but a deleted loop, or a closed project, is never coming
+  /// back, and its terminals shouldn't sit in the cache waiting to age out.
+  @Dependency(\.terminalSurfaceClient) var terminalSurfaceClient
 
   var body: some ReducerOf<Self> {
     Scope(state: \.welcome, action: \.welcome) {
@@ -158,7 +163,7 @@ struct AppFeature {
               // workspace up would show a terminal for something that no longer exists.
               // Scoped to this node's own project: another project's broadcast says
               // nothing about whether this loop still exists.
-              state.openLoop = nil
+              closeOpenWorkspace(&state)
               state.selectedProjectPath = path
             }
           }
@@ -260,10 +265,18 @@ struct AppFeature {
   /// nothing in the sidebar pointing at it.
   private func isGlobal(_ path: String) -> Bool { path == LoopGraphScope.globalPath }
 
+  /// Closes the open workspace *and ends its terminals* — for when the loop itself is
+  /// gone, as opposed to merely not being the one on screen any more.
+  private func closeOpenWorkspace(_ state: inout State) {
+    guard let openLoop = state.openLoop else { return }
+    terminalSurfaceClient.retire(openLoop.layout.tabs.flatMap { $0.surfaces.map(\.id) })
+    state.openLoop = nil
+  }
+
   private func removeFromSidebar(_ state: inout State, path: String) {
     state.projects.remove(id: path)
     if state.openLoop?.projectPath == path {
-      state.openLoop = nil
+      closeOpenWorkspace(&state)
     }
     if state.selectedProjectPath == path {
       state.selectedProjectPath = state.projects.first?.id

@@ -15,6 +15,10 @@ import SwiftUI
 /// since one loop can now have several surfaces (tabs/splits), only one of which
 /// launches Claude Code — see `SurfaceRef.launchesClaudeCode`.
 struct GhosttyTerminalView: NSViewRepresentable {
+  /// This surface's `SurfaceRef.id` — the key its live `GhosttyTerminalNSView` is held
+  /// under in `TerminalSurfaceStore`, so remounting the same pane borrows the terminal
+  /// that is already running rather than building a second one.
+  let surfaceID: UUID
   let sessionName: String
   let launchesClaudeCode: Bool
   /// Which agent this surface starts, when it starts one. Previously the command was
@@ -44,6 +48,11 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// has two live terminals, so without this the keyboard can end up parked on a surface
   /// nobody can see, and both panes of a split draw a filled cursor as though each had it.
   var isActive: Bool = true
+  /// Whether this surface's tab is the one on screen. Distinct from `isActive`, which is
+  /// about the keyboard: both panes of a split are visible, only one is active. This is
+  /// what libghostty is told, and it decides whether the surface renders at all — see
+  /// `GhosttyTerminalNSView.syncOcclusion`.
+  var isVisible: Bool = true
   /// The user clicked into this surface. See `GhosttyTerminalNSView.onFocusRequested`.
   var onFocusRequested: (() -> Void)?
   let onProcessExited: (Bool) -> Void
@@ -53,26 +62,43 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// break out of (or inject into) the command Ghostty runs.
   private static let promptVariable = "GRAPHCODE_TRIGGER_PROMPT"
 
-  func makeNSView(context: Context) -> GhosttyTerminalNSView {
-    let view = GhosttyTerminalNSView(
-      command: command,
-      workingDirectory: workingDirectory,
-      environment: initialPrompt.map { [Self.promptVariable: $0] } ?? [:])
-    view.onProcessExited = onProcessExited
-    view.onFocusRequested = onFocusRequested
-    view.isActive = isActive
-    return view
+  /// Returns a *host* rather than the surface itself, because the surface isn't this
+  /// view's to own — `TerminalSurfaceStore` holds it, and this borrows it for as long as
+  /// SwiftUI keeps the host mounted. See that type for why a terminal must outlive the
+  /// view showing it.
+  func makeNSView(context: Context) -> TerminalSurfaceHostView {
+    let host = TerminalSurfaceHostView()
+    let view = TerminalSurfaceStore.shared.surface(for: surfaceID) {
+      GhosttyTerminalNSView(
+        command: command,
+        workingDirectory: workingDirectory,
+        environment: initialPrompt.map { [Self.promptVariable: $0] } ?? [:])
+    }
+    apply(to: view)
+    host.adopt(view)
+    return host
   }
 
-  func updateNSView(_ nsView: GhosttyTerminalNSView, context: Context) {
-    nsView.isActive = isActive
-    // Re-assigned every pass: the closure captures the store action for *this* pane in
-    // *this* tab, and a stale one from an earlier layout would focus the wrong pane.
-    nsView.onFocusRequested = onFocusRequested
+  func updateNSView(_ host: TerminalSurfaceHostView, context: Context) {
+    guard let view = host.surfaceView else { return }
+    apply(to: view)
     // Switching tabs with ⌘-number moves what's visible but not what's focused — AppKit
     // only reassigns first responder on a click. Without this, hitting ⌘2 and typing
     // sent the keystrokes to tab 1's shell.
-    nsView.focusIfKeyboardIsOnAHiddenSurface()
+    view.focusIfKeyboardIsOnAHiddenSurface()
+  }
+
+  /// Everything about a surface that belongs to the *view* rather than to the terminal,
+  /// pushed on both mount and update.
+  ///
+  /// The callbacks have to be re-assigned every pass, and now more than ever: a surface
+  /// outlives the workspace that built it, so a closure captured when this pane last
+  /// appeared would send its actions into a store scope for a loop nobody is looking at.
+  private func apply(to view: GhosttyTerminalNSView) {
+    view.isActive = isActive
+    view.isVisible = isVisible
+    view.onFocusRequested = onFocusRequested
+    view.onProcessExited = onProcessExited
   }
 
   /// The agent invocation, built from the node's own backend rather than assumed.
