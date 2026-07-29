@@ -10,11 +10,11 @@ import GhosttyKit
 /// of a split, or to the tab that happened to have focus, is not a preference; it's a
 /// surface that no longer matches its neighbours.
 ///
-/// `UserDefaults` rather than `GraphcodeSettings`, which is where `windowOpacity` and the
-/// other cosmetic settings live: those are read by **`graphcoded`** out of a shared file,
-/// and every write goes to disk as JSON. Zoom is neither — no part of the daemon cares how
-/// big terminal text is, and holding ⌘− would rewrite that file once per keystroke. This
-/// is app-local view state, so it lives where app-local view state lives.
+/// `UserDefaults` rather than `GraphcodeSettings`, which is where the settings the daemon
+/// also acts on live: those are read by **`graphcoded`** out of a shared file, and every
+/// write goes to disk as JSON. Zoom is neither — no part of the daemon cares how big
+/// terminal text is, and holding ⌘− would rewrite that file once per keystroke. This is
+/// app-local view state, so it lives where app-local view state lives.
 @MainActor
 final class TerminalFontZoomStore {
   static let shared = TerminalFontZoomStore()

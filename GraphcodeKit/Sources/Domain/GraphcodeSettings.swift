@@ -204,20 +204,12 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// imposing — so it became a setting, defaulted to the behaviour people expected.
   public var autoSelectsModel: Bool
 
-  /// How opaque the window is, 1 being solid. Stored as opacity rather than as
-  /// "transparency" because every value then reads the same way it looks: 0.95 is a window
-  /// you can *just* see through, where "95% transparent" would mean the opposite.
-  ///
-  /// Clamped on the way in, not merely in the slider: a settings file edited by hand
-  /// shouldn't be able to make the window invisible and unrecoverable.
-  public var windowOpacity: Double {
-    didSet { windowOpacity = Self.clampedOpacity(windowOpacity) }
-  }
-
-  public static let minimumWindowOpacity = 0.5
-  public static func clampedOpacity(_ value: Double) -> Double {
-    min(max(value, minimumWindowOpacity), 1)
-  }
+  // There is deliberately no window-opacity setting here any more. graphcode used to own
+  // one and apply it as `NSWindow.alphaValue`, which fades the whole window — terminal
+  // text included — rather than only the background behind it. Ghostty already has
+  // `background-opacity`, which makes the background translucent and leaves the text
+  // crisp, and a terminal's own config is where someone looks for this. A key left in an
+  // older settings file is ignored.
 
   public init(
     defaultBackend: CLISessionBackendKind = .claudeCode,
@@ -225,8 +217,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     claudePermissionMode: ClaudePermissionMode = .auto,
     copilotPermissions: CopilotPermissions = .allowTools,
     briefsSessionsAboutTheGraph: Bool = true,
-    autoSelectsModel: Bool = false,
-    windowOpacity: Double = 0.95
+    autoSelectsModel: Bool = false
   ) {
     self.defaultBackend = defaultBackend.isSpiked ? defaultBackend : .claudeCode
     self.codexApprovals = codexApprovals
@@ -234,7 +225,6 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     self.copilotPermissions = copilotPermissions
     self.briefsSessionsAboutTheGraph = briefsSessionsAboutTheGraph
     self.autoSelectsModel = autoSelectsModel
-    self.windowOpacity = Self.clampedOpacity(windowOpacity)
   }
 
   /// Decoding tolerates a file written by an older or newer graphcode: a missing key takes
@@ -261,7 +251,5 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     // the fix has to reach people who already have a settings file, not just new ones.
     autoSelectsModel =
       try container.decodeIfPresent(Bool.self, forKey: .autoSelectsModel) ?? false
-    windowOpacity = Self.clampedOpacity(
-      try container.decodeIfPresent(Double.self, forKey: .windowOpacity) ?? 0.95)
   }
 }

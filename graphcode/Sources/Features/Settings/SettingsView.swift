@@ -11,13 +11,16 @@ import SwiftUI
 struct SettingsView: View {
   @Bindable private var model = SettingsModel.shared
 
+  /// One pane, no tabs. There was an Appearance tab, and it held exactly one control — a
+  /// window-opacity slider applied as `NSWindow.alphaValue`, which faded the terminal's
+  /// text along with everything else. Ghostty's own `background-opacity` does the job
+  /// properly (background only, text left crisp) and a terminal's config is where people
+  /// look for it, so the setting went rather than being reimplemented here. A tab holding
+  /// nothing is worse than no tab.
   var body: some View {
-    TabView {
-      sessions.tabItem { Label("Sessions", systemImage: "terminal") }
-      appearance.tabItem { Label("Appearance", systemImage: "paintbrush") }
-    }
-    .frame(width: 460)
-    .padding(.vertical, 4)
+    sessions
+      .frame(width: 460)
+      .padding(.vertical, 4)
   }
 
   private var sessions: some View {
@@ -113,40 +116,6 @@ struct SettingsView: View {
     .formStyle(.grouped)
   }
 
-  private var appearance: some View {
-    Form {
-      Section {
-        Slider(
-          value: $model.settings.windowOpacity,
-          in: GraphcodeSettings.minimumWindowOpacity...1,
-          step: 0.01
-        ) {
-          Text("Window opacity")
-        } minimumValueLabel: {
-          Text("\(Int(GraphcodeSettings.minimumWindowOpacity * 100))%").font(.caption2)
-        } maximumValueLabel: {
-          Text("100%").font(.caption2)
-        }
-        LabeledContent("Currently") {
-          Text("\(Int((model.settings.windowOpacity * 100).rounded()))%")
-            .font(.callout.monospacedDigit())
-        }
-      } header: {
-        Text("Transparency")
-      } footer: {
-        // Said plainly because it is the surprising part: this fades the whole window,
-        // terminal text included, rather than only its background.
-        Text(
-          "Applies to the whole window, text included — which is why it stops at "
-            + "\(Int(GraphcodeSettings.minimumWindowOpacity * 100))%. 95% is a window you "
-            + "can just see through."
-        )
-        .font(.caption2)
-        .foregroundStyle(.secondary)
-      }
-    }
-    .formStyle(.grouped)
-  }
 }
 
 #Preview {

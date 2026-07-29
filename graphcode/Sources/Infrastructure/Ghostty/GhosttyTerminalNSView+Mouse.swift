@@ -108,17 +108,19 @@ extension GhosttyTerminalNSView {
   ///
   /// There is deliberately no `sendMousePos` here, and there used to be — on the theory
   /// that libghostty reports a wheel tick at the surface's last known cursor position, so
-  /// restating the position "costs nothing". It costs a great deal. Every wheel event
-  /// then entered libghostty's `cursorPosCallback`, which takes the **renderer state
-  /// mutex** — the same lock the render thread needs to rebuild cells and draw a frame —
-  /// reprocesses hyperlink hover, and can queue a render of its own. At trackpad event
-  /// rate that is lock contention between the input path and the render path for the
-  /// whole duration of a scroll, which is what made scrolling judder instead of tracking
-  /// the fingers.
+  /// restating it costs nothing.
   ///
-  /// Worse, under a TUI with motion reporting on it also wrote a spurious mouse-*motion*
-  /// report to the PTY per tick, so the program on the other end redrew itself on every
-  /// wheel event for a pointer that never moved.
+  /// **This was removed as a correctness fix, not a speed one.** It was first argued for
+  /// on performance grounds: every wheel event entered `cursorPosCallback`, which takes
+  /// the renderer state mutex. Benchmarked against a live surface, 20k events per arm, it
+  /// made no difference at all — 1272ns vs 1257ns per event with mouse reporting off, and
+  /// 180ns vs 175ns with it on. The hyperlink-hover work that would have cost something is
+  /// skipped while the pointer is stationary, which it is throughout a scroll. Recorded
+  /// here so the claim is not re-invented.
+  ///
+  /// What it did do is real: under a TUI with motion reporting on, it wrote a spurious
+  /// mouse-*motion* report to the PTY per wheel tick, so the program on the other end was
+  /// told the pointer had moved when it had not.
   ///
   /// The position it was restating was already current: `mouseMoved`/`mouseEntered`
   /// tracking (`.activeAlways`, see `updateTrackingAreas`) keeps it so. Neither upstream

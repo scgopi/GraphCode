@@ -32,10 +32,6 @@ struct AppView: View {
     // The window is a fixed dark gray (`Theme`), so the appearance has to be dark too —
     // in light mode the system's near-black label colors would land on it unreadable.
     .preferredColorScheme(.dark)
-    // Read straight from the shared settings rather than through the store: this is a
-    // property of the window, not of any feature's state, and `@Observable` re-runs this
-    // body when the slider in Settings moves.
-    .windowOpacity(SettingsModel.shared.settings.windowOpacity)
     .task { await store.send(.task).finish() }
     .confirmationDialog(
       // Naming the loop matters here in a way it didn't on the canvas: from the sidebar

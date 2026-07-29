@@ -21,7 +21,6 @@ struct GraphcodeSettingsTests {
     #expect(settings.claudePermissionMode == .auto)
     #expect(settings.copilotPermissions == .allowTools)
     #expect(settings.briefsSessionsAboutTheGraph)
-    #expect(settings.windowOpacity == 0.95)
   }
 
   @Test
@@ -30,7 +29,7 @@ struct GraphcodeSettingsTests {
     defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
     let settings = GraphcodeSettings(
       defaultBackend: .copilotCLI, claudePermissionMode: .bypassPermissions,
-      copilotPermissions: .ask, briefsSessionsAboutTheGraph: false, windowOpacity: 0.8)
+      copilotPermissions: .ask, briefsSessionsAboutTheGraph: false)
 
     #expect(GraphcodeSettingsStore.save(settings, to: url))
     #expect(GraphcodeSettingsStore.load(from: url) == settings)
@@ -58,23 +57,17 @@ struct GraphcodeSettingsTests {
     defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
     try FileManager.default.createDirectory(
       at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try #"{"windowOpacity": 0.7}"#.write(to: url, atomically: true, encoding: .utf8)
+    // `windowOpacity` is a *retired* key — graphcode used to apply it as
+    // `NSWindow.alphaValue` and no longer has the setting at all. Every existing settings
+    // file still carries it, so a file that has it must still load rather than throwing
+    // and reverting everything else to defaults.
+    try #"{"windowOpacity": 0.7, "claudePermissionMode": "dontAsk"}"#
+      .write(to: url, atomically: true, encoding: .utf8)
 
     let loaded = GraphcodeSettingsStore.load(from: url)
-    #expect(loaded.windowOpacity == 0.7)
-    #expect(loaded.claudePermissionMode == .auto)
+    #expect(loaded.claudePermissionMode == .dontAsk)
     #expect(loaded.briefsSessionsAboutTheGraph)
-  }
-
-  @Test
-  func opacityCannotBeSetLowEnoughToLoseTheWindow() {
-    // Including by hand-editing the file — a window you can't see is a window you can't
-    // use to fix the setting that hid it.
-    #expect(
-      GraphcodeSettings(windowOpacity: 0).windowOpacity == GraphcodeSettings.minimumWindowOpacity)
-    #expect(
-      GraphcodeSettings(windowOpacity: -5).windowOpacity == GraphcodeSettings.minimumWindowOpacity)
-    #expect(GraphcodeSettings(windowOpacity: 4).windowOpacity == 1)
+    #expect(loaded.defaultBackend == .claudeCode)
   }
 
   @Test
