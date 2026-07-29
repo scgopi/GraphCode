@@ -213,8 +213,9 @@ public enum ZmxSessionLauncher {
     // `copilot` takes both together as `--interactive <prompt>`. Model tier is applied
     // here rather than baked into the prompt: it's the orchestrator's scheduling decision
     // (docs/05-orchestrator.md#responsibilities item 7).
+    let tier = node.effectiveModelTier(autoSelecting: settings.autoSelectsModel)
     let arguments = node.backend.launchArguments(
-      prompt: singleLine, tier: node.effectiveModelTier, briefingFile: briefingFile,
+      prompt: singleLine, tier: tier, briefingFile: briefingFile,
       settings: settings,
       workspacePaths: Self.workspacePaths(forNode: node, projectPath: projectPath))
     let command =
@@ -233,7 +234,7 @@ public enum ZmxSessionLauncher {
     // its briefing merely can't fan out, where a truncated one does nothing at all.
     guard Self.fitsInATypedCommandLine(command) else {
       let unbriefed = node.backend.launchArguments(
-        prompt: singleLine, tier: node.effectiveModelTier, settings: settings,
+        prompt: singleLine, tier: tier, settings: settings,
         workspacePaths: Self.workspacePaths(forNode: node, projectPath: projectPath))
       return [
         "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",

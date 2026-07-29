@@ -39,14 +39,39 @@ public enum ModelTier: String, Codable, CaseIterable, Sendable {
   }
 }
 
+extension ModelTier {
+  /// The tier a session actually runs at, given what the human pinned for the loop and
+  /// whether they've asked graphcode to route models on their behalf at all.
+  ///
+  /// The pin always wins — someone who picked a tier for a loop meant it, and the setting
+  /// is about what happens when *nobody* picked.
+  ///
+  /// Unpinned and auto-selection off yields `.standard`, which emits no `--model` for any
+  /// backend, so the CLI's own configured default applies. That is the honest answer to
+  /// "which model should this use" when nobody has said: whatever `claude`, `copilot` or
+  /// `codex` is already set up to use. graphcode routing by loop type was a reasonable
+  /// guess (docs/08's "choose the right model for the job") and a wrong one to make
+  /// silently — it quietly overrode the model people had deliberately configured in their
+  /// own CLI, which is what issue #10 is about. Off is the default for that reason.
+  public static func resolved(
+    pinned: ModelTier?, for loopType: LoopType, autoSelecting: Bool
+  ) -> ModelTier {
+    if let pinned { return pinned }
+    return autoSelecting ? loopType.defaultModelTier : .standard
+  }
+}
+
 extension LoopType {
-  /// The tier the orchestrator picks when a human hasn't. docs/08 is explicit that this
-  /// is a *scheduling* decision — something the orchestrator makes across a graph — not
-  /// something each node decides for itself.
+  /// The tier the orchestrator picks when a human hasn't **and** has turned model
+  /// auto-selection on. docs/08 is explicit that this is a *scheduling* decision —
+  /// something the orchestrator makes across a graph — not something each node decides
+  /// for itself.
   ///
   /// Turn-based is `.capable` because its entire job is judging whether work is good
   /// enough, which is exactly the judgment call docs/08 says to reserve the top tier
   /// for. Time-based polling is the routine end of the scale.
+  ///
+  /// Opt-in rather than the standing behaviour — see `ModelTier.resolved`.
   public var defaultModelTier: ModelTier {
     switch self {
     case .turnBased: return .capable

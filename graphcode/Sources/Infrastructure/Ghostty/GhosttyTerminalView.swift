@@ -22,9 +22,13 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// session — the picker and the running process disagreeing, with nothing on screen
   /// to say so.
   var backend: CLISessionBackendKind = .claudeCode
-  /// The tier that agent runs at, so an attached session matches what `graphcoded` would
-  /// have launched detached.
-  var modelTier: ModelTier = .standard
+  /// The tier the human pinned for this loop, and the loop's type — the two inputs the
+  /// routing policy takes. Deliberately *unresolved*: whether an unpinned loop gets a
+  /// model at all depends on a setting, and the settings read already happens inside
+  /// `agentCommand`. Resolving it out in `LoopWorkspaceView` instead would mean loading
+  /// the settings file on every SwiftUI body pass.
+  var pinnedModelTier: ModelTier?
+  var loopType: LoopType = .turnBased
   /// The prompt this surface's Claude Code session should start with — a time-based
   /// node's `/loop …` directive (see `LoopNode.triggerPrompt`). `nil` for a turn-based
   /// loop's session, which starts bare, and for every plain-shell surface.
@@ -99,7 +103,9 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// invisible precisely because there was nothing to assert against.
   func agentCommand(settings: GraphcodeSettings = GraphcodeSettingsStore.load()) -> [String]? {
     guard let executable = backend.executableName else { return nil }
-    let model = backend.modelArguments(for: modelTier).joined(separator: " ")
+    let tier = ModelTier.resolved(
+      pinned: pinnedModelTier, for: loopType, autoSelecting: settings.autoSelectsModel)
+    let model = backend.modelArguments(for: tier).joined(separator: " ")
     let permissions = backend.permissionArguments(settings).joined(separator: " ")
     let prompt = initialPrompt == nil ? "" : "\"$\(Self.promptVariable)\""
 

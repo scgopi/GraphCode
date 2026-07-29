@@ -126,9 +126,10 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   }
 
   /// The tier this node actually runs on: the human's pin if there is one, otherwise
-  /// the orchestrator's routing policy for its loop type.
-  public var effectiveModelTier: ModelTier {
-    modelTier ?? loopType.defaultModelTier
+  /// whatever `ModelTier.resolved` says — which, unless model auto-selection is switched
+  /// on in Settings, is "don't pass a model at all and let the CLI's own default stand".
+  public func effectiveModelTier(autoSelecting: Bool) -> ModelTier {
+    ModelTier.resolved(pinned: modelTier, for: loopType, autoSelecting: autoSelecting)
   }
 
   /// Loops `graphcoded` is responsible for keeping alive across its own restarts,

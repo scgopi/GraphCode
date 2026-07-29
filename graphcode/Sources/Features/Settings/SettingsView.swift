@@ -82,6 +82,21 @@ struct SettingsView: View {
       }
 
       Section {
+        Toggle("Pick a model for each loop", isOn: $model.settings.autoSelectsModel)
+      } header: {
+        Text("Model")
+      } footer: {
+        Text(
+          "Off, graphcode passes no model and your CLI runs on whatever it's already set "
+            + "up to use. On, a loop with no model of its own is routed by its type — "
+            + "turn-based loops get a more capable model, time-based polling a faster one. "
+            + "A model set on an individual loop always wins either way."
+        )
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+      }
+
+      Section {
         Toggle(
           "Tell sessions they're part of a graph",
           isOn: $model.settings.briefsSessionsAboutTheGraph)

@@ -191,6 +191,19 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// existed — they do the work they were given and never create anything.
   public var briefsSessionsAboutTheGraph: Bool
 
+  /// Whether graphcode picks a model for loops nobody chose one for.
+  ///
+  /// **Off by default.** On, an unpinned loop is routed by its type — a turn-based loop
+  /// gets the capable tier, a time-based one the fast tier (`LoopType.defaultModelTier`).
+  /// Off, no `--model` is passed at all and the backend runs on whatever `claude`,
+  /// `copilot` or `codex` is already configured to use.
+  ///
+  /// This was unconditional routing until issue #10: every loop created in the app left
+  /// `modelTier` nil, so *every* loop got a model graphcode chose, silently overriding the
+  /// one the human had set up in their own CLI. A guess worth offering, not worth
+  /// imposing — so it became a setting, defaulted to the behaviour people expected.
+  public var autoSelectsModel: Bool
+
   /// How opaque the window is, 1 being solid. Stored as opacity rather than as
   /// "transparency" because every value then reads the same way it looks: 0.95 is a window
   /// you can *just* see through, where "95% transparent" would mean the opposite.
@@ -212,6 +225,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     claudePermissionMode: ClaudePermissionMode = .auto,
     copilotPermissions: CopilotPermissions = .allowTools,
     briefsSessionsAboutTheGraph: Bool = true,
+    autoSelectsModel: Bool = false,
     windowOpacity: Double = 0.95
   ) {
     self.defaultBackend = defaultBackend.isSpiked ? defaultBackend : .claudeCode
@@ -219,6 +233,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     self.claudePermissionMode = claudePermissionMode
     self.copilotPermissions = copilotPermissions
     self.briefsSessionsAboutTheGraph = briefsSessionsAboutTheGraph
+    self.autoSelectsModel = autoSelectsModel
     self.windowOpacity = Self.clampedOpacity(windowOpacity)
   }
 
@@ -241,6 +256,11 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       ?? .allowTools
     briefsSessionsAboutTheGraph =
       try container.decodeIfPresent(Bool.self, forKey: .briefsSessionsAboutTheGraph) ?? true
+    // Absent in files written before the setting existed, and those loops were all being
+    // routed by graphcode. They take the new default — off — which is the point of #10:
+    // the fix has to reach people who already have a settings file, not just new ones.
+    autoSelectsModel =
+      try container.decodeIfPresent(Bool.self, forKey: .autoSelectsModel) ?? false
     windowOpacity = Self.clampedOpacity(
       try container.decodeIfPresent(Double.self, forKey: .windowOpacity) ?? 0.95)
   }

@@ -34,14 +34,13 @@ struct ZmxSessionLauncherTests {
     #expect(Array(arguments.dropFirst(3).prefix(4)) == ["/bin/zsh", "-i", "-l", "-c"])
     #expect(arguments.contains(#"exec claude "$@""#))
 
-    // `--model haiku` is the orchestrator's tier routing, not a hardcoded choice: a
-    // time-based node defaults to `.fast` because polling is routine work
-    // (docs/08-quality-and-token-budgets.md). Asserted by position rather than as a
-    // suffix: the permission mode now sits between the model flag and the prompt, and
-    // pinning the whole tail made this fail for a reason that had nothing to do with it.
-    let model = arguments.firstIndex(of: "--model")
-    #expect(model != nil)
-    #expect(arguments[(model ?? 0) + 1] == "haiku")
+    // No `--model` at all. This node pins no tier, and graphcode no longer picks one on
+    // a human's behalf unless they switch model auto-selection on (issue #10) — the
+    // backend runs on whatever `claude` is already configured to use. Tier routing still
+    // exists and is still `.fast` for a time-based node; it is just opt-in now. Both
+    // sides of that setting are covered hermetically in `ModelAutoSelectionTests`, which
+    // is where the assertion belongs — this one reads the real settings file.
+    #expect(!arguments.contains("--model"))
     // The prompt stays last — `claude` takes it positionally.
     #expect(arguments.last == "/loop 1h Check for new reports")
   }

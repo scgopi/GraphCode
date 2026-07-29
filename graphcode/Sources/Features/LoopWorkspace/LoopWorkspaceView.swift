@@ -193,9 +193,11 @@ struct LoopWorkspaceView: View {
       sessionName: ref.zmxSessionName,
       launchesClaudeCode: ref.launchesClaudeCode,
       // The loop's own backend and tier, so an attached session matches what
-      // `graphcoded` would have launched detached.
+      // `graphcoded` would have launched detached. The tier is passed unresolved — see
+      // `GhosttyTerminalView.pinnedModelTier`.
       backend: store.node.backend,
-      modelTier: store.node.effectiveModelTier,
+      pinnedModelTier: store.node.modelTier,
+      loopType: store.node.loopType,
       // Only the agent surface of an unattended node starts from a prompt (a time-based
       // loop's `/loop`, a goal-based loop's goal); a turn-based loop's session opens
       // bare, and extra tabs/splits are plain shells either way.
