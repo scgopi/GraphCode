@@ -14,8 +14,10 @@ to, watch, and steer — not headless jobs that report back when they're done.
 
 > Early and moving. Expect rough edges, and see [Known limitations](#known-limitations).
 
-**[How GraphCode works →](https://scgopi.github.io/GraphCode/)** — the full article:
-the mental model, then the machinery underneath it.
+**[Graph Engineering, simplified →](https://scgopi.github.io/GraphCode/)** — the full
+article: the mental model, then the machinery underneath it.
+
+![Five projects and dozens of connected loops on one GraphCode canvas — every node is a live terminal](screenshots/graph-hero.png)
 
 ## How it works
 
@@ -44,10 +46,9 @@ the test suite passes), and a second edge hands the fix to a turn-based reviewer
 you approve each change yourself. All three are live terminals the whole time — click any
 node and you're in that session, scrollback and all.
 
-![Projects fanning out from Start, with a chain of goal-based, turn-based, and time-based loops](screenshots/projects-and-chained-loops.png)
-
-Every project you add hangs off **Start**, and each carries its own graph — here the
-`graphcode` project chains three loops of different types, each color-coded by kind.
+Every project you add hangs off **Start**, and each carries its own graph — the
+screenshot above chains goal-based, turn-based, and time-based loops on one canvas,
+each color-coded by kind.
 
 ## Install
 
