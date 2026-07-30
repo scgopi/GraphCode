@@ -50,7 +50,7 @@ let project = Project(
                 // v0.0.x, so About said one thing and the download page another. Keep
                 // this in step with the git tag when cutting a release.
                 "CFBundleShortVersionString": "0.1.6",
-                "CFBundleVersion": "17",
+                "CFBundleVersion": "18",
             ]),
             resources: [
                 "graphcode/Resources/**"
