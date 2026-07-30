@@ -14,6 +14,9 @@ to, watch, and steer — not headless jobs that report back when they're done.
 
 > Early and moving. Expect rough edges, and see [Known limitations](#known-limitations).
 
+**[How GraphCode works →](https://scgopi.github.io/GraphCode/)** — the full article:
+the mental model, then the machinery underneath it.
+
 ## How it works
 
 Every loop type is "an agent runs repeatedly" — they differ in what *you* stop doing:

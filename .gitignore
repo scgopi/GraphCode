@@ -34,5 +34,9 @@ xcuserdata/
 *.cer
 *.certSigningRequest
 
-# Design docs — kept locally for now, not pushed to the remote yet.
-/docs/
+# Design docs — kept locally for now, not pushed to the remote yet. The GitHub Pages
+# site (index.md + _config.yml) is the one carve-out: ignore docs/ contents, not the
+# directory, so the site files can be re-included.
+/docs/*
+!/docs/index.md
+!/docs/_config.yml
