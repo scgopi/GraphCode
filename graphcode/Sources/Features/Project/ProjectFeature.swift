@@ -68,6 +68,14 @@ struct ProjectFeature {
 
     init(graph: LoopGraph) {
       self.graph = graph
+      var positions: [UUID: CGPoint] = [:]
+      var taken = Set<CGPoint>()
+      for node in graph.nodes {
+        let position = ProjectFeature.nextFreePosition(avoiding: taken)
+        positions[node.id] = position
+        taken.insert(position)
+      }
+      self.nodePositions = positions
     }
   }
 
