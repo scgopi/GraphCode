@@ -75,9 +75,10 @@ struct NodeDraftForm: View {
         case .proactive:
           // No fields: a composite is built by editing its sub-graph after it exists.
           // Saying so beats an empty section that looks like something failed to load.
+          // Same one-line plain-words treatment as turn-based — "composite", "pilot"
+          // and "arm" are this codebase's vocabulary, not the form-filler's.
           Text(
-            "A composite starts empty. Add its loops from the node's own canvas, then "
-              + "pilot it once before arming — it can't be armed until you have."
+            "A group of loops. Starts empty — open it to add loops, then test-run once before turning it on."
           )
           .font(.caption2)
           .foregroundStyle(.secondary)
