@@ -298,6 +298,11 @@ struct ProjectCanvasView: View {
             .font(.caption2)
             .foregroundStyle(.tertiary)
         }
+        if RemoteProjectLocation.parse(projectPath: store.graph.project.path) != nil {
+          Image(systemName: "network")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+        }
       }
       CompositeBadge(node: node)
       if let reason {
