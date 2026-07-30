@@ -22,6 +22,8 @@ struct AppSidebarView: View {
   /// confirmation dialog. Local view state: nothing outside this pane needs to know a
   /// dialog is up, and nothing should persist if the app quits mid-prompt.
   @State private var projectPendingLoopDeletion: ProjectFeature.State?
+  /// Nodes that are expanded to show their children in the sidebar.
+  @State private var expandedNodeIDs: Set<UUID> = []
 
   private enum SidebarSelection: Hashable {
     case project(String)
@@ -44,10 +46,11 @@ struct AppSidebarView: View {
           }
 
         if !collapsedProjectPaths.contains(project.id) {
-          ForEach(project.graph.nodes) { node in
-            nodeRow(for: node)
-              .tag(SidebarSelection.node(node.id))
-              .contextMenu { nodeMenu(for: node, in: project.id) }
+          let rootNodes = project.graph.nodes.filter { node in
+            !project.graph.edges.contains { $0.to == node.id }
+          }
+          ForEach(rootNodes) { node in
+            nodeRowWithChildren(node, in: project)
           }
         }
       }
@@ -315,6 +318,33 @@ struct AppSidebarView: View {
       collapsedProjectPaths.remove(path)
     } else {
       collapsedProjectPaths.insert(path)
+    }
+  }
+
+  @ViewBuilder
+  private func nodeRowWithChildren(_ node: LoopNode, in project: ProjectFeature.State) -> some View {
+    let children = project.graph.nodes.filter { child in
+      project.graph.edges.contains { $0.from == node.id && $0.to == child.id }
+    }
+
+    if children.isEmpty {
+      nodeRow(for: node)
+        .tag(SidebarSelection.node(node.id))
+        .contextMenu { nodeMenu(for: node, in: project.id) }
+    } else {
+      DisclosureGroup(isExpanded: Binding(
+        get: { expandedNodeIDs.contains(node.id) },
+        set: { if $0 { expandedNodeIDs.insert(node.id) } else { expandedNodeIDs.remove(node.id) } }
+      )) {
+        ForEach(children) { child in
+          nodeRowWithChildren(child, in: project)
+            .padding(.leading, 8)
+        }
+      } label: {
+        nodeRow(for: node)
+          .tag(SidebarSelection.node(node.id))
+      }
+      .contextMenu { nodeMenu(for: node, in: project.id) }
     }
   }
 
