@@ -14,6 +14,14 @@ struct GraphcodeApp: App {
   /// `liveValue` resolves its directory the first time a dependency is read, which can
   /// happen before any reducer runs.
   init() {
+    // Launched from a terminal that is itself inside a `zmx` session — `open` from a
+    // graphcode loop's own shell, say — the app inherits that session's `ZMX_SESSION`.
+    // Every terminal surface then inherits it in turn, and `zmx attach` reads it as
+    // "you are already inside a session": instead of attaching, it tries to *switch*
+    // the inherited session, and every pane in the app dies with `session "…" does not
+    // exist`. The app is never meaningfully inside a session, however it was launched,
+    // so the variable is scrubbed before anything can pass it on.
+    unsetenv("ZMX_SESSION")
     SupportDirectory.prepare()
     // A packaged app carries `graphcoded` and `zmx` inside it, so dragging it to
     // /Applications is the whole installation — this is what puts them in place and starts
