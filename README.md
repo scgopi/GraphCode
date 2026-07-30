@@ -54,7 +54,9 @@ Every project you add hangs off **Start**, and each carries its own graph — he
 Requires **macOS 15+ on Apple Silicon** (arm64), with **Claude Code on your `PATH`** —
 GraphCode launches it, it doesn't bundle it.
 
-Download the `.dmg` from [Releases](https://github.com/scgopi/GraphCode/releases), open it,
+Download the latest
+[`graphcode-macos-arm64.dmg`](https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg)
+(all versions under [Releases](https://github.com/scgopi/GraphCode/releases)), open it,
 and drag **GraphCode** to Applications. That's the whole install — releases are Developer
 ID signed and notarized, so a browser download opens on a double-click.
 
