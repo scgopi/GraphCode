@@ -104,7 +104,6 @@ struct GraphOverviewView: View {
       }
       .scaleEffect(transform.scale)
       .offset(liveOffset)
-      .overlay { emptyState(overview) }
       // Nothing has been panned yet, so first paint should put the graph where the eye
       // is rather than in the top-left corner with the lanes running off the bottom.
       .onAppear {
@@ -131,6 +130,10 @@ struct GraphOverviewView: View {
         )
         .background(Theme.canvasBackground)
       }
+      // On the full-pane view, not the layers' ZStack: with nothing to draw that stack
+      // collapses to zero size in the GeometryReader's top-leading corner, which put
+      // this overlay half under the sidebar instead of in the middle of the canvas.
+      .overlay { emptyState(derived.overview) }
       .contentShape(Rectangle())
       .gesture(
         DragGesture()

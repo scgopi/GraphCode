@@ -108,6 +108,7 @@ struct WelcomeFeature {
     case binding(BindingAction<State>)
     case openFolderButtonTapped
     case folderPickerResult(Result<URL, any Error>)
+    case openProjectFailed(String)
     case recentProjectTapped(ProjectRef)
     case setOpenPanelPresented(Bool)
     case cloneRepositoryButtonTapped
@@ -165,14 +166,18 @@ struct WelcomeFeature {
 
       case .folderPickerResult(.success(let url)):
         let path = url.path
-        return .run { _ in try? await orchestratorClient.send(.openProject(path: path)) }
+        return openProject(path)
 
       case .folderPickerResult(.failure):
         state.errorMessage = "Couldn't read the selected folder."
         return .none
 
+      case .openProjectFailed(let message):
+        state.errorMessage = message
+        return .none
+
       case .recentProjectTapped(let project):
-        return .run { _ in try? await orchestratorClient.send(.openProject(path: project.path)) }
+        return openProject(project.path)
 
       case .cloneRepositoryButtonTapped:
         var draft = CloneDraft()
@@ -287,6 +292,24 @@ struct WelcomeFeature {
       case .remoteCancelled:
         state.remoteDraft = nil
         return .cancel(id: CancelID.remoteValidation)
+      }
+    }
+  }
+
+  /// Ask the daemon to open a folder, and *say so* when it can't be reached. This was a
+  /// silent `try?` — on a machine where the daemon never came up (a fresh install whose
+  /// bootstrap failed, say), Add Folder did nothing at all, with no error anywhere to
+  /// explain why. An error that names the daemon is what turns "the app is broken" into
+  /// something diagnosable.
+  private func openProject(_ path: String) -> Effect<Action> {
+    .run { send in
+      do {
+        try await orchestratorClient.send(.openProject(path: path))
+      } catch {
+        await send(
+          .openProjectFailed(
+            "Couldn't open the folder — the graphcoded daemon didn't respond "
+              + "(\(String(describing: error))). Try quitting and reopening GraphCode."))
       }
     }
   }

@@ -146,6 +146,9 @@ struct AppFeature {
           return .none
 
         case .graphChanged(let graph):
+          // A broadcast means the daemon is alive and answering — whatever failure
+          // banner was up (a dead-daemon Add Folder, say) is stale now.
+          state.welcome.errorMessage = nil
           let path = graph.project.path
           guard state.projects[id: path] != nil else {
             // Not an already-open project — this snapshot is the reply to the

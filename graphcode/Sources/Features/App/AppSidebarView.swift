@@ -70,6 +70,18 @@ struct AppSidebarView: View {
       }
     }
     .listStyle(.sidebar)
+    // Errors used to render only on the Welcome screen, which no longer shows once the
+    // sidebar exists — so a failed Add Folder looked like nothing happening at all.
+    .safeAreaInset(edge: .bottom) {
+      if let errorMessage = store.welcome.errorMessage {
+        Text(errorMessage)
+          .font(.caption)
+          .foregroundStyle(.red)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(8)
+          .background(.thinMaterial)
+      }
+    }
     // The sidebar's own translucent material would ignore `Theme` and let the desktop
     // through, so hide it and paint the chrome instead — see `Theme.sidebarGloss`.
     .scrollContentBackground(.hidden)
