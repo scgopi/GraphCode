@@ -1,12 +1,14 @@
 ---
-title: How GraphCode Works
-description: Graphs of live, steerable Claude Code sessions on macOS — the mental model, and the machinery underneath it.
+title: Graph Engineering, Simplified — with GraphCode
+description: Graph engineering for coding agents on macOS — the mental model, and the machinery underneath it.
 ---
 
-# How GraphCode works
+# Graph Engineering, simplified — with GraphCode
 
 You can run one Claude Code session in a terminal. GraphCode lets you run ten —
-connected, unattended, and still yours to attach to and correct mid-run.
+connected, unattended, and still yours to attach to and correct mid-run. That's
+**graph engineering**: your agents' work arranged as a graph you design, instead of a
+pile of terminals you babysit.
 
 **[⬇ Download GraphCode (.dmg, latest release)](https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg)**
 · [All releases](https://github.com/scgopi/GraphCode/releases) ·
