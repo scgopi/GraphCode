@@ -24,6 +24,15 @@ struct AppFeature {
     var selectedProjectPath: String?
     var openLoop: LoopWorkspaceFeature.State?
 
+    /// Ad-hoc backend sessions with no loop semantics — the sidebar's Quick Chats
+    /// section. App-local (see `QuickChat`); loaded once at `.task` and saved on every
+    /// mutation. A chat's workspace is opened through the same `openLoop` as a loop's,
+    /// with a synthetic node — membership in this list is what marks it as a chat.
+    var quickChats: IdentifiedArrayOf<QuickChat> = []
+
+    /// Whether the open workspace is a quick chat rather than a graph node's loop.
+    func isQuickChat(_ nodeID: UUID) -> Bool { quickChats[id: nodeID] != nil }
+
     /// The orchestrator's needs-attention rollup, across every open project
     /// (docs/05-orchestrator.md#monitoring-surface). Derived rather than stored: it's a
     /// pure function of the graphs the daemon already broadcasts, and a cached copy
@@ -101,12 +110,18 @@ struct AppFeature {
     case selectPreviousLoop
     /// The stop/kill affordance docs/05-orchestrator.md asks the monitor for.
     case stopNodeTapped(projectPath: String, nodeID: UUID)
+    /// The Quick Chats section's actions — see `State.quickChats`.
+    case newQuickChatTapped
+    case quickChatTapped(UUID)
+    case quickChatRenamed(id: UUID, title: String)
+    case quickChatDeleteConfirmed(UUID)
   }
 
   private enum CancelID { case daemonSubscription }
 
   @Dependency(\.orchestratorClient) var orchestratorClient
   @Dependency(\.terminalLayoutStore) var terminalLayoutStore
+  @Dependency(\.quickChatStore) var quickChatStore
   /// Only for the cases where a workspace goes away because the *loop* did. Merely
   /// switching to another loop leaves its surfaces alive on purpose — see
   /// `TerminalSurfaceStore` — but a deleted loop, or a closed project, is never coming
@@ -120,6 +135,7 @@ struct AppFeature {
     Reduce { state, action in
       switch action {
       case .task:
+        state.quickChats = IdentifiedArray(uniqueElements: quickChatStore.load())
         return .merge(
           .run { send in
             for await event in orchestratorClient.connect() {
@@ -274,6 +290,43 @@ struct AppFeature {
             .graphCommand(projectPath: projectPath, command: .stopNode(nodeID)))
         }
 
+      case .newQuickChatTapped:
+        let chat = QuickChat(
+          title: "Chat — \(Date().formatted(.dateTime.month(.abbreviated).day()))",
+          backend: GraphcodeSettingsStore.load().defaultBackend)
+        state.quickChats.append(chat)
+        quickChatStore.save(Array(state.quickChats))
+        openQuickChat(chat, &state)
+        return .none
+
+      case .quickChatTapped(let id):
+        guard let chat = state.quickChats[id: id] else { return .none }
+        guard state.openLoop?.node.id != id else { return .none }
+        openQuickChat(chat, &state)
+        return .none
+
+      case .quickChatRenamed(let id, let title):
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, state.quickChats[id: id] != nil else { return .none }
+        state.quickChats[id: id]?.title = trimmed
+        quickChatStore.save(Array(state.quickChats))
+        if state.openLoop?.node.id == id {
+          state.openLoop?.node.title = trimmed
+        }
+        return .none
+
+      case .quickChatDeleteConfirmed(let id):
+        guard state.quickChats[id: id] != nil else { return .none }
+        state.quickChats.remove(id: id)
+        quickChatStore.save(Array(state.quickChats))
+        if state.openLoop?.node.id == id {
+          closeOpenWorkspace(&state)
+          state.selectedProjectPath = state.projects.first?.id
+        }
+        // The chat's session is app-owned — no daemon cleans it up the way GraphStore
+        // does for a deleted loop, so its zmx session is killed here.
+        return .run { _ in await ZmxSessionLauncher.killSession(id: id) }
+
       // When creating a new loop while another loop's workspace is open, inherit that
       // loop's backend. Matches `parentBackend: nil` only — the re-sent action carries
       // a value, so it falls through instead of looping.
@@ -308,6 +361,9 @@ struct AppFeature {
       case .openLoop(.primarySurfaceExited(let succeeded)):
         guard let id = state.openLoop?.node.id, let projectPath = state.selectedProjectPath
         else { return .none }
+        // A chat's session ending resolves nothing — there is no node in any graph for
+        // the daemon to update, so telling it would only earn an unknown-node error.
+        guard !state.isQuickChat(id) else { return .none }
         let command: GraphCommand = succeeded ? .nodeCheckApproved(id) : .nodeCheckRejected(id)
         return .run { _ in
           try? await orchestratorClient.send(
@@ -368,6 +424,28 @@ struct AppFeature {
     guard let openLoop = state.openLoop else { return }
     terminalSurfaceClient.retire(openLoop.layout.tabs.flatMap { $0.surfaces.map(\.id) })
     state.openLoop = nil
+  }
+
+  /// Opens a chat in the same terminal workspace a loop gets, via a synthetic node.
+  /// `.proactive` is the one loop type whose `sessionPrompt` is nil, which is exactly
+  /// what a chat wants: the backend starts bare, with nothing pre-typed into it. The
+  /// node's id is the chat's, so the workspace attaches to the chat's own long-lived
+  /// zmx session, scrollback and all. Home as the working directory — a chat belongs
+  /// to no project on purpose.
+  private func openQuickChat(_ chat: QuickChat, _ state: inout State) {
+    let node = LoopNode(
+      id: chat.id,
+      title: chat.title,
+      loopType: .proactive,
+      backend: chat.backend,
+      createdAt: chat.createdAt)
+    let layout = terminalLayoutStore.load(forNode: chat.id) ?? .defaultLayout(forNode: chat.id)
+    state.openLoop = LoopWorkspaceFeature.State(
+      node: node,
+      layout: layout,
+      projectPath: NSHomeDirectory(),
+      projectName: "Quick Chat")
+    state.selectedProjectPath = nil
   }
 
   private func removeFromSidebar(_ state: inout State, path: String) {

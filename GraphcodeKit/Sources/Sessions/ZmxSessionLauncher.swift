@@ -184,6 +184,13 @@ public enum ZmxSessionLauncher {
     return await session.waitUntilFinished()
   }
 
+  /// Kills the session behind an id that isn't a graph node — a quick chat. Public
+  /// because chats are app-owned: no daemon deletes their sessions for them, the way
+  /// `GraphStore` does when a loop is deleted.
+  public static func killSession(id: UUID) async {
+    await kill(LoopNode(id: id, title: ""))
+  }
+
   static func kill(_ node: LoopNode) async {
     guard ZmxLocator.isInstalled else { return }
     guard

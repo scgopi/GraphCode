@@ -31,44 +31,20 @@ struct AppSidebarView: View {
   private enum SidebarSelection: Hashable {
     case project(String)
     case node(UUID)
+    case chat(UUID)
   }
 
+  /// The chat a rename prompt is up for, and what has been typed so far. Local view
+  /// state, same rationale as `projectPendingLoopDeletion`.
+  @State private var chatPendingRename: QuickChat?
+  @State private var chatRenameDraft = ""
+  @State private var chatPendingDelete: QuickChat?
+
   var body: some View {
-    List(selection: selectionBinding) {
-      attentionSection
-
-      ForEach(store.projects) { project in
-        projectHeaderRow(for: project)
-          .tag(SidebarSelection.project(project.id))
-          // No menu on the Graph row: it can't be closed, forgotten, or deleted, and a
-          // menu of three disabled items reads as a bug rather than as a rule.
-          .contextMenu {
-            if !project.graph.isGlobal {
-              projectMenu(for: project)
-            }
-          }
-
-        if !collapsedProjectPaths.contains(project.id) {
-          let rows = flattenedNodeRows(in: project)
-          ForEach(rows) { entry in
-            nestedNodeRow(entry, in: project)
-          }
-          // Drag-to-reorder, scoped to this project's own ForEach: SwiftUI only moves
-          // rows within the ForEach the modifier hangs off, which is exactly the rule —
-          // a loop rearranges inside its project and can never be dropped into another.
-          // Only top-level rows reorder; a child's place is under its parent, so a drag
-          // that includes one is ignored rather than half-applied.
-          .onMove { offsets, target in
-            guard offsets.allSatisfy({ rows[$0].depth == 0 }) else { return }
-            var ids = rows.map(\.id)
-            ids.move(fromOffsets: offsets, toOffset: target)
-            let rootIDs = ids.filter { id in rows.first { $0.id == id }?.depth == 0 }
-            store.send(
-              .projects(.element(id: project.id, action: .sidebarNodesReordered(rootIDs))))
-          }
-        }
-      }
-    }
+    // The list's contents live in `sidebarList` and the row groups in their own
+    // properties — one literal holding every section pushed the expression past what
+    // the type-checker will resolve in reasonable time.
+    sidebarList
     .listStyle(.sidebar)
     // Errors used to render only on the Welcome screen, which no longer shows once the
     // sidebar exists — so a failed Add Folder looked like nothing happening at all.
@@ -180,6 +156,37 @@ struct AppSidebarView: View {
         for whenever you re-add it — or also delete its loops and move the folder to \
         the Trash, where it stays recoverable.
         """)
+    }
+    .alert(
+      "Rename Chat",
+      isPresented: Binding(
+        get: { chatPendingRename != nil },
+        set: { if !$0 { chatPendingRename = nil } }
+      ),
+      presenting: chatPendingRename
+    ) { chat in
+      TextField("Title", text: $chatRenameDraft)
+      Button("Rename") {
+        store.send(.quickChatRenamed(id: chat.id, title: chatRenameDraft))
+        chatPendingRename = nil
+      }
+      Button("Cancel", role: .cancel) { chatPendingRename = nil }
+    }
+    .confirmationDialog(
+      "Delete this chat?",
+      isPresented: Binding(
+        get: { chatPendingDelete != nil },
+        set: { if !$0 { chatPendingDelete = nil } }
+      ),
+      presenting: chatPendingDelete
+    ) { chat in
+      Button("Delete Chat", role: .destructive) {
+        store.send(.quickChatDeleteConfirmed(chat.id))
+        chatPendingDelete = nil
+      }
+      Button("Cancel", role: .cancel) { chatPendingDelete = nil }
+    } message: { chat in
+      Text("\(chat.title)'s session and scrollback will be permanently deleted.")
     }
   }
 
@@ -347,7 +354,9 @@ struct AppSidebarView: View {
   private var selectionBinding: Binding<SidebarSelection?> {
     Binding(
       get: {
-        if let id = store.openLoop?.node.id { return .node(id) }
+        if let id = store.openLoop?.node.id {
+          return store.quickChats[id: id] != nil ? .chat(id) : .node(id)
+        }
         if let path = store.selectedProjectPath { return .project(path) }
         return nil
       },
@@ -360,11 +369,96 @@ struct AppSidebarView: View {
             let path = store.projects.first(where: { $0.graph.nodes[id: id] != nil })?.id
           else { return }
           store.send(.projects(.element(id: path, action: .nodeTapped(id))))
+        case .chat(let id):
+          store.send(.quickChatTapped(id))
         case nil:
           break
         }
       }
     )
+  }
+
+  private var sidebarList: some View {
+    List(selection: selectionBinding) {
+      attentionSection
+      quickChatsSection
+      projectRows
+    }
+  }
+
+  private var projectRows: some View {
+    ForEach(store.projects) { project in
+      projectHeaderRow(for: project)
+        .tag(SidebarSelection.project(project.id))
+        // No menu on the Graph row: it can't be closed, forgotten, or deleted, and a
+        // menu of three disabled items reads as a bug rather than as a rule.
+        .contextMenu {
+          if !project.graph.isGlobal {
+            projectMenu(for: project)
+          }
+        }
+
+      if !collapsedProjectPaths.contains(project.id) {
+        let rows = flattenedNodeRows(in: project)
+        ForEach(rows) { entry in
+          nestedNodeRow(entry, in: project)
+        }
+        // Drag-to-reorder, scoped to this project's own ForEach: SwiftUI only moves
+        // rows within the ForEach the modifier hangs off, which is exactly the rule —
+        // a loop rearranges inside its project and can never be dropped into another.
+        // Only top-level rows reorder; a child's place is under its parent, so a drag
+        // that includes one is ignored rather than half-applied.
+        .onMove { offsets, target in
+          guard offsets.allSatisfy({ rows[$0].depth == 0 }) else { return }
+          var ids = rows.map(\.id)
+          ids.move(fromOffsets: offsets, toOffset: target)
+          let rootIDs = ids.filter { id in rows.first { $0.id == id }?.depth == 0 }
+          store.send(
+            .projects(.element(id: project.id, action: .sidebarNodesReordered(rootIDs))))
+        }
+      }
+    }
+  }
+
+  // MARK: - Quick chats
+
+  /// Ad-hoc conversations, above the projects: the quick-reach thing, not a member of
+  /// any graph. A `Section` is fine here where it wasn't for projects — this header is
+  /// a label with a button, not something that needs to be a selectable row.
+  private var quickChatsSection: some View {
+    Section {
+      ForEach(store.quickChats) { chat in
+        HStack(spacing: 6) {
+          SidebarIcon(systemName: "bubble.left", tint: .primary)
+          Text(chat.title).lineLimit(1)
+          Spacer()
+        }
+        .contentShape(Rectangle())
+        .tag(SidebarSelection.chat(chat.id))
+        .contextMenu {
+          Button("Rename…") {
+            chatRenameDraft = chat.title
+            chatPendingRename = chat
+          }
+          Divider()
+          Button("Delete Chat…", role: .destructive) { chatPendingDelete = chat }
+        }
+      }
+    } header: {
+      HStack {
+        Text("Quick Chats")
+        Spacer()
+        Button {
+          store.send(.newQuickChatTapped)
+        } label: {
+          Image(systemName: "plus")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("New Quick Chat")
+      }
+    }
   }
 
   /// Whether this row has child rows at all. The Graph never does — its canvas is the
