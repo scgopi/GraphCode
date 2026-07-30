@@ -1,7 +1,7 @@
 .PHONY: doctor generate build-app build-daemon run-app run-daemon \
         daemon-install daemon-uninstall daemon-status test check format clean \
         third-party build-zmx install-zmx build-ghostty vendor-sdk \
-        build-cli install-cli release-dmg notarize signing-doctor
+        build-cli install-cli release-dmg release-docs notarize signing-doctor
 
 SCHEME_APP := graphcode
 SCHEME_DAEMON := graphcoded
@@ -356,7 +356,28 @@ release-dmg: generate build-zmx
 			echo "  NOTARIZE=0 — signed but NOT notarized; do not publish this DMG"; \
 		fi; \
 	fi; \
-	echo "built: $(DMG)"
+	echo "built: $(DMG)"; \
+	echo "after tagging and publishing: 'make release-docs' updates the site's download link"
+
+# ---------------------------------------------------------------------------
+# release-docs — point the Pages article's download links at VERSION's dmg.
+#
+# The article (docs/index.md) links the dmg asset directly rather than
+# releases/latest, so every release has to move it forward or the site hands
+# out last version's build. VERSION defaults to the newest tag, so the flow is:
+# tag, publish the release, `make release-docs`, commit and push docs/index.md.
+# ---------------------------------------------------------------------------
+VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null)
+
+release-docs:
+	@test -n "$(VERSION)" || { echo "release-docs needs VERSION=vX.Y.Z (no git tag found)"; exit 1; }
+	@sed -i '' \
+		-e 's|releases/download/v[0-9][0-9.]*/graphcode-macos-arm64.dmg|releases/download/$(VERSION)/graphcode-macos-arm64.dmg|g' \
+		-e 's|Download GraphCode v[0-9][0-9.]*|Download GraphCode $(VERSION)|g' \
+		docs/index.md
+	@grep -q "releases/download/$(VERSION)/graphcode-macos-arm64.dmg" docs/index.md \
+		|| { echo "docs/index.md was not updated — its download links no longer match the pattern"; exit 1; }
+	@echo "docs/index.md now points at $(VERSION) — commit and push it to publish"
 
 # ---------------------------------------------------------------------------
 # notarize — submit TARGET to Apple, wait for the verdict, staple the ticket.
