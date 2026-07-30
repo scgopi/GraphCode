@@ -12,10 +12,14 @@ import SwiftUI
 /// at a glance against a wall of terminal text.
 struct ProjectHeader: View {
   let name: String
+  /// A remote repository wears the `network` glyph instead of the folder, matching its
+  /// sidebar row — the shells under this header run on another machine, and that is
+  /// worth a glance-level signal in exactly the place people check which repo they're in.
+  var isRemote = false
 
   var body: some View {
     HStack(spacing: 7) {
-      Image(systemName: "folder.fill")
+      Image(systemName: isRemote ? "network" : "folder.fill")
         .font(.system(size: 12))
         .foregroundStyle(Theme.folderGlyph)
       Text(name)

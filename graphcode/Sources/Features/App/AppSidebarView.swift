@@ -196,19 +196,27 @@ struct AppSidebarView: View {
       // The Graph is not a folder and its row doesn't open one — it opens the whole
       // workspace drawn as one graph (`GraphOverviewView`), so it carries the same
       // connected-nodes glyph the canvas uses for itself rather than a folder icon it
-      // would otherwise be indistinguishable from.
+      // would otherwise be indistinguishable from. A remote repository isn't a local
+      // folder either: it gets the same `network` glyph the Add Remote Repository menu
+      // item wears, so "this one lives on another machine" is readable at a glance —
+      // the name alone ("widget @ build-box") only says so once you've read it.
       //
       // `folder`, not `folder.fill`, and in label ink rather than `.secondary`: a filled
       // folder at this size is a grey rectangle, and dimmed on top of that it was the
       // least legible thing in the window. See `SidebarIcon`.
       SidebarIcon(
-        systemName: project.graph.isGlobal
-          ? "point.3.connected.trianglepath.dotted" : "folder",
+        systemName: sidebarGlyph(for: project),
         tint: project.graph.isGlobal ? Color.accentColor : .primary)
       Text(project.graph.project.name).lineLimit(1)
       Spacer()
     }
     .contentShape(Rectangle())
+  }
+
+  private func sidebarGlyph(for project: ProjectFeature.State) -> String {
+    if project.graph.isGlobal { return "point.3.connected.trianglepath.dotted" }
+    if RemoteProjectLocation.parse(projectPath: project.id) != nil { return "network" }
+    return "folder"
   }
 
   /// The sidebar lists every loop across every open project, so it's where people

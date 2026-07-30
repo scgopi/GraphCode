@@ -56,12 +56,16 @@ struct LoopWorkspaceView: View {
   private var folderToolbar: some ToolbarContent {
     if #available(macOS 26.0, *) {
       ToolbarItem(placement: .navigation) {
-        ProjectHeader(name: store.projectName)
+        ProjectHeader(
+          name: store.projectName,
+          isRemote: RemoteProjectLocation.parse(projectPath: store.projectPath) != nil)
       }
       .sharedBackgroundVisibility(.hidden)
     } else {
       ToolbarItem(placement: .navigation) {
-        ProjectHeader(name: store.projectName)
+        ProjectHeader(
+          name: store.projectName,
+          isRemote: RemoteProjectLocation.parse(projectPath: store.projectPath) != nil)
       }
     }
   }
