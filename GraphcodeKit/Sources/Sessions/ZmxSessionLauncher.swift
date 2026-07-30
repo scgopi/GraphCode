@@ -108,6 +108,24 @@ public enum ZmxSessionLauncher {
     return UsageSample.parse(output)
   }
 
+  /// The Enter keystroke, sent as its own `zmx send` after the text.
+  ///
+  /// `zmx send` writes exactly its payload to the PTY and nothing more — submission is
+  /// explicitly the caller's job (ThirdParty/zmx `src/main.zig`, `handleSend`). And the
+  /// `\r` cannot ride in the same payload as the text: an agent TUI's paste heuristic
+  /// treats text-plus-CR arriving in one chunk as a *pasted newline*, so the message
+  /// landed in the composer, rendered, and sat there unsent — which is exactly how the
+  /// bug was found, a `[graphcode]` message blinking in a Claude input box. A separate
+  /// send, after the composer has had a beat to settle, reads as a keystroke.
+  static func submitArguments(forNode node: LoopNode) -> [String] {
+    ["send", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "\r"]
+  }
+
+  /// How long the composer gets between the text and the Enter. Generous rather than
+  /// minimal: this path is a message between loops, where an extra beat costs nothing
+  /// and a lost message costs the whole point of sending it.
+  static let submitDelay: Duration = .milliseconds(400)
+
   static func send(_ text: String, to node: LoopNode) async -> Bool {
     guard ZmxLocator.isInstalled, !text.isEmpty else { return false }
     guard await sessionExists(node) else { return false }
@@ -116,7 +134,15 @@ public enum ZmxSessionLauncher {
         executable: ZmxLocator.binaryURL.path,
         arguments: sendArguments(text, toNode: node))
     else { return false }
-    return await session.waitUntilFinished()
+    guard await session.waitUntilFinished() else { return false }
+    // Typed is not sent: submit as a second, separate keystroke — see `submitArguments`.
+    try? await Task.sleep(for: submitDelay)
+    guard
+      let submit = try? PTYProcessSession(
+        executable: ZmxLocator.binaryURL.path,
+        arguments: submitArguments(forNode: node))
+    else { return false }
+    return await submit.waitUntilFinished()
   }
 
   /// Reads a session's presence, preferring what the backend reported over what we can

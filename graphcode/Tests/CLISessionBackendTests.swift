@@ -21,6 +21,20 @@ struct CLISessionBackendTests {
     #expect(arguments == ["send", expectedName, "please review"])
   }
 
+  /// Typed is not sent: `zmx send` writes exactly its payload and no `\r`, and a CR in
+  /// the same chunk as the text reads as a pasted newline to an agent TUI's paste
+  /// heuristic — the message sat in Claude's composer, rendered and unsent. Submission
+  /// is its own keystroke, sent separately after the text.
+  @Test
+  func submissionIsASeparateCarriageReturnKeystroke() {
+    let arguments = ZmxSessionLauncher.submitArguments(forNode: node)
+    let expectedName = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    #expect(arguments == ["send", expectedName, "\r"])
+    // And the message text itself never carries one — `sendArguments` flattens CR/LF
+    // precisely so the only Enter the session ever sees is the deliberate one.
+    #expect(!ZmxSessionLauncher.sendArguments("a\rb", toNode: node).last!.contains("\r"))
+  }
+
   @Test
   func aMultilineMessageIsFlattened() {
     // `zmx` terminates what it types with `\r`; an embedded newline would truncate the
