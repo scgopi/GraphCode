@@ -73,7 +73,7 @@ struct ProjectCanvasView: View {
     .toolbar {
       ToolbarItem(placement: .primaryAction) {
         Button {
-          store.send(.addNodeButtonTapped)
+          store.send(.addNodeButtonTapped(parentBackend: nil))
         } label: {
           Label("New Node", systemImage: "plus.circle")
         }
@@ -195,7 +195,7 @@ struct ProjectCanvasView: View {
   private var emptyState: some View {
     if store.graph.nodes.isEmpty {
       CanvasEmptyState(projectName: store.graph.project.name) {
-        store.send(.addNodeButtonTapped)
+        store.send(.addNodeButtonTapped(parentBackend: nil))
       }
     }
   }

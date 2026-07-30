@@ -55,7 +55,7 @@ struct ProjectFeatureTests {
     store.exhaustivity = .off
 
     // The form opens on its default type — goal-based — and only the goal is typed.
-    await store.send(.addNodeButtonTapped)
+    await store.send(.addNodeButtonTapped(parentBackend: nil))
     #expect(store.state.draftLoopType == .goalBased)
     await store.send(.binding(.set(\.draftGoal, "Say hello")))
     await store.send(.createNodeConfirmed)
@@ -94,7 +94,7 @@ struct ProjectFeatureTests {
     }
     store.exhaustivity = .off
 
-    await store.send(.addNodeButtonTapped)
+    await store.send(.addNodeButtonTapped(parentBackend: nil))
     await store.send(.binding(.set(\.draftTitle, "Research")))
     await store.send(.binding(.set(\.draftGoal, "Say hello")))
     await store.send(.createNodeConfirmed)

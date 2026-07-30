@@ -321,21 +321,30 @@ struct AppSidebarView: View {
     }
   }
 
-  @ViewBuilder
-  private func nodeRowWithChildren(_ node: LoopNode, in project: ProjectFeature.State) -> some View {
+  private func nodeRowWithChildren(_ node: LoopNode, in project: ProjectFeature.State) -> AnyView {
     let children = project.graph.nodes.filter { child in
       project.graph.edges.contains { $0.from == node.id && $0.to == child.id }
     }
 
     if children.isEmpty {
-      nodeRow(for: node)
-        .tag(SidebarSelection.node(node.id))
-        .contextMenu { nodeMenu(for: node, in: project.id) }
-    } else {
-      DisclosureGroup(isExpanded: Binding(
-        get: { expandedNodeIDs.contains(node.id) },
-        set: { if $0 { expandedNodeIDs.insert(node.id) } else { expandedNodeIDs.remove(node.id) } }
-      )) {
+      return AnyView(
+        nodeRow(for: node)
+          .tag(SidebarSelection.node(node.id))
+          .contextMenu { nodeMenu(for: node, in: project.id) })
+    }
+    return AnyView(
+      DisclosureGroup(
+        isExpanded: Binding(
+          get: { expandedNodeIDs.contains(node.id) },
+          set: { expanded in
+            if expanded {
+              expandedNodeIDs.insert(node.id)
+            } else {
+              expandedNodeIDs.remove(node.id)
+            }
+          }
+        )
+      ) {
         ForEach(children) { child in
           nodeRowWithChildren(child, in: project)
             .padding(.leading, 8)
@@ -344,8 +353,7 @@ struct AppSidebarView: View {
         nodeRow(for: node)
           .tag(SidebarSelection.node(node.id))
       }
-      .contextMenu { nodeMenu(for: node, in: project.id) }
-    }
+      .contextMenu { nodeMenu(for: node, in: project.id) })
   }
 
 }

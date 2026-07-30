@@ -85,7 +85,7 @@ struct ProjectFeature {
   enum Action: BindableAction {
     case binding(BindingAction<State>)
     case daemonEvent(DaemonEvent)
-    case addNodeButtonTapped(parentBackend: CLISessionBackendKind? = nil)
+    case addNodeButtonTapped(parentBackend: CLISessionBackendKind?)
     case createNodeConfirmed
     case cancelNewNodeForm
     case nodeTapped(UUID)

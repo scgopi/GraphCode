@@ -224,10 +224,13 @@ struct AppFeature {
             .graphCommand(projectPath: projectPath, command: .stopNode(nodeID)))
         }
 
-      case .projects(.element(id: let path, action: .addNodeButtonTapped)):
-        // When creating a new loop from within an open loop, inherit its backend.
-        let parentBackend = state.openLoop?.node.backend
-        return .send(.projects(.element(id: path, action: .addNodeButtonTapped(parentBackend: parentBackend))))
+      // When creating a new loop while another loop's workspace is open, inherit that
+      // loop's backend. Matches `parentBackend: nil` only — the re-sent action carries
+      // a value, so it falls through instead of looping.
+      case .projects(.element(id: let path, action: .addNodeButtonTapped(parentBackend: nil))):
+        guard let parentBackend = state.openLoop?.node.backend else { return .none }
+        return .send(
+          .projects(.element(id: path, action: .addNodeButtonTapped(parentBackend: parentBackend))))
 
       case .projects(.element(id: let path, action: .nodeTapped(let nodeID))):
         // Every loop type opens the same way. A time-based node used to be excluded
