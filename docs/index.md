@@ -8,8 +8,9 @@ description: Graphs of live, steerable Claude Code sessions on macOS — the men
 You can run one Claude Code session in a terminal. GraphCode lets you run ten —
 connected, unattended, and still yours to attach to and correct mid-run.
 
-**[⬇ Download the latest release](https://github.com/scgopi/GraphCode/releases/latest)**
-· [Source on GitHub](https://github.com/scgopi/GraphCode) · Requires macOS 15+ on Apple
+**[⬇ Download GraphCode v0.1.3 (.dmg)](https://github.com/scgopi/GraphCode/releases/download/v0.1.3/graphcode-macos-arm64.dmg)**
+· [All releases](https://github.com/scgopi/GraphCode/releases) ·
+[Source on GitHub](https://github.com/scgopi/GraphCode) · Requires macOS 15+ on Apple
 Silicon, with Claude Code on your `PATH`.
 
 <!-- VIDEO SLOT: demo video goes here when ready -->
@@ -214,7 +215,7 @@ lives in the README's
 
 ## Try it
 
-1. **[Download the latest release](https://github.com/scgopi/GraphCode/releases/latest)** —
+1. **[Download GraphCode v0.1.3 (.dmg)](https://github.com/scgopi/GraphCode/releases/download/v0.1.3/graphcode-macos-arm64.dmg)** —
    drag GraphCode to Applications; that's the whole install. Releases are Developer ID
    signed and notarized.
 2. Add a folder, create a loop, and connect a second one with an edge.
