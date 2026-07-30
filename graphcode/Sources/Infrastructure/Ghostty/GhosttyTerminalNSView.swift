@@ -174,6 +174,16 @@ final class GhosttyTerminalNSView: NSView {
     super.viewDidMoveToWindow()
     observeWindow()
     syncDisplayID()
+    // A surface that has left the view hierarchy is neither showing nor the pane anyone is
+    // typing in, and nothing else will say so: `GhosttyTerminalView.apply(to:)` only runs
+    // for surfaces SwiftUI still has mounted, and since `TerminalSurfaceStore` began
+    // outliving those views an unmounted one kept whatever it was last told. A stale
+    // `isActive` then let a surface belonging to a loop nobody is looking at behave as the
+    // focused pane.
+    if window == nil {
+      isActive = false
+      isVisible = false
+    }
     syncOcclusion()
     guard window != nil else { return }
     // Only claim focus if no other terminal already holds it. Mounting used to take it
