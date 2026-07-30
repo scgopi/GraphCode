@@ -114,6 +114,10 @@ public actor GraphStore {
       // CLI too, and a rule only one client enforces isn't a rule.
       guard draft.isValid else { return }
       let node = draft.makeNode()
+      // The draft's id is client-chosen now (see `NodeDraft.id`), so a re-sent command
+      // must not become a second node — or a crash: `IdentifiedArray.append` traps on a
+      // duplicate id, and this protocol is reachable from any client.
+      guard graph.nodes[id: node.id] == nil else { return }
       graph.nodes.append(node)
       linkToCreator(of: node, declaredBy: draft)
       if node.runsUnattended {

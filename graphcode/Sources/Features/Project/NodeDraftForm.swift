@@ -34,8 +34,7 @@ struct NodeDraftForm: View {
       .labelsHidden()
 
       Form {
-        TextField("Title", text: $store.draftTitle)
-
+        // The prompt leads and the title follows, below the switch — see there.
         switch store.draftLoopType {
         case .goalBased:
           // Short labels with the explanation in `prompt:`. In a macOS `Form` a
@@ -63,18 +62,16 @@ struct NodeDraftForm: View {
             "Prompt", text: $store.draftPrompt,
             prompt: Text("/loop 1h Check for new reports"))
         case .turnBased:
-          // "Check" said neither *when* it happens nor *who* does it, which is the whole
-          // distinguishing feature of this type — see docs/01's "you hand off the check".
+          // One plainly-named field and a one-line caption. This section has been
+          // wordier twice ("Verify each turn", then "Review criteria", each with
+          // two-sentence captions) and the lesson both times was the same: the form
+          // is for entering a value, not for documenting the loop type.
           TextField(
-            "Verify each turn", text: $store.draftCheck,
-            prompt: Text("what a human looks for before it continues — optional"))
-          Text(
-            store.draftCheck.isEmpty
-              ? "Without one, the session is still told to stop after each turn for review."
-              : "The session opens knowing this, and stops after each turn to be judged on it."
-          )
-          .font(.caption2)
-          .foregroundStyle(.secondary)
+            "Verifier", text: $store.draftCheck,
+            prompt: Text("e.g. tests pass and the diff stays small"))
+          Text("Pauses after each turn for your review — optional.")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
         case .proactive:
           // No fields: a composite is built by editing its sub-graph after it exists.
           // Saying so beats an empty section that looks like something failed to load.
@@ -85,6 +82,14 @@ struct NodeDraftForm: View {
           .font(.caption2)
           .foregroundStyle(.secondary)
         }
+
+        // Below the prompt and optional, because naming every loop up front was the
+        // most tedious field on the form: the prompt is what the human actually has in
+        // their head, and a blank title is filled in by the loop's own backend after
+        // creation (`claude -p` and friends — see `TitleSuggestionClient`).
+        TextField(
+          "Title", text: $store.draftTitle,
+          prompt: Text("optional — named for you"))
 
         Divider()
 

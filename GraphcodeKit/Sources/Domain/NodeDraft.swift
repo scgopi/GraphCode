@@ -15,6 +15,16 @@ import Foundation
 /// the thing it builds would just move the same validation somewhere less useful.
 /// `isValid` is where the real rules live.
 public struct NodeDraft: Codable, Equatable, Sendable {
+  /// The id the created node will carry — chosen by the *client*, not the daemon.
+  ///
+  /// This is what makes an async follow-up to creation addressable: the form fires a
+  /// title suggestion off to a backend when the human leaves the title blank, and by the
+  /// time the answer arrives the only handle it has is this id. Without it, the client
+  /// would have to diff two `graphChanged` broadcasts to guess which node it just made.
+  public var id: UUID
+  /// Optional — a blank title creates the node as "New Loop" (see `makeNode`), on the
+  /// theory that naming every loop up front was the most tedious field on the form and
+  /// the one a backend can fill in afterward.
   public var title: String
   public var loopType: LoopType
   /// `.turnBased`: what a human verifies each turn.
@@ -43,6 +53,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
   public var createdBy: UUID?
 
   public init(
+    id: UUID = UUID(),
     title: String,
     loopType: LoopType,
     checkDescription: String? = nil,
@@ -54,6 +65,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     subGraph: LoopGraph? = nil,
     createdBy: UUID? = nil
   ) {
+    self.id = id
     self.title = title
     self.loopType = loopType
     self.checkDescription = checkDescription
@@ -72,7 +84,11 @@ public struct NodeDraft: Codable, Equatable, Sendable {
   /// only in the form — the wire protocol is reachable from the CLI too, and a rule that
   /// only one client applies isn't a rule.
   public var isValid: Bool {
-    guard !title.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+    // No title requirement: `makeNode` falls back to "New Loop", and the app follows up
+    // with a backend-suggested name (see `TitleSuggestionClient`). Requiring one taught
+    // people to type a throwaway word to get past the form — the prompt is the field
+    // that means something, so it's the one each type below actually demands.
+    //
     // docs/04-cli-backends.md: refuse the pairing rather than silently degrading a loop
     // to something its backend can actually manage.
     guard backend.canHost(loopType) else { return false }
@@ -90,19 +106,33 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     case .timeBased:
       return !(triggerPrompt ?? "").trimmingCharacters(in: .whitespaces).isEmpty
     case .proactive:
-      // A title is all that's required up front: a composite is *built* by editing its
-      // sub-graph after creation, and demanding a populated one at creation time would
-      // mean a modal that can't be filled in until the thing it creates exists. The real
-      // gate is arming, which `PilotState` refuses until the composite has been run.
+      // Nothing is required up front: a composite is *built* by editing its sub-graph
+      // after creation, and demanding a populated one at creation time would mean a
+      // modal that can't be filled in until the thing it creates exists. The real gate
+      // is arming, which `PilotState` refuses until the composite has been run.
       return true
     }
+  }
+
+  /// What an untitled draft's node is called until something better arrives — the app
+  /// asks the loop's own backend for a real name and renames the node when it answers.
+  public static let untitledFallback = "New Loop"
+
+  /// The title the node is actually created with — never blank, because the graph, the
+  /// sidebar, and the canvas would all render a nameless card.
+  public var resolvedTitle: String {
+    let trimmed = title.trimmingCharacters(in: .whitespaces)
+    return trimmed.isEmpty ? Self.untitledFallback : trimmed
   }
 
   /// A goal-based loop is `.running` from creation: its session starts working
   /// immediately, with no human turn or trigger in between. Everything else waits.
   public func makeNode() -> LoopNode {
     LoopNode(
-      title: title,
+      // The draft's own id, not a fresh one — the client that built the draft may
+      // already be holding this id to address a follow-up at (see `id`).
+      id: id,
+      title: resolvedTitle,
       loopType: loopType,
       checkDescription: checkDescription,
       triggerPrompt: triggerPrompt,
@@ -115,8 +145,35 @@ public struct NodeDraft: Codable, Equatable, Sendable {
       // would have to guard against.
       subGraph: loopType == .proactive
         ? (subGraph?.reIdentified()
-          ?? LoopGraph(project: ProjectRef(path: "\(title)-subgraph", name: title)))
+          ?? LoopGraph(
+            project: ProjectRef(path: "\(resolvedTitle)-subgraph", name: resolvedTitle)))
         : nil,
       state: loopType == .goalBased ? .running : .idle)
+  }
+}
+
+extension NodeDraft {
+  private enum CodingKeys: String, CodingKey {
+    case id, title, loopType, checkDescription, triggerPrompt, goal, backend, modelTier
+    case worktree, subGraph, createdBy
+  }
+
+  /// `id` is `decodeIfPresent` because drafts also arrive over the wire from a CLI that
+  /// may predate it — a loop's already-installed `graphcode` binary keeps creating nodes
+  /// across the upgrade, its drafts simply getting daemon-assigned ids the way they
+  /// always did.
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+    title = try container.decode(String.self, forKey: .title)
+    loopType = try container.decode(LoopType.self, forKey: .loopType)
+    checkDescription = try container.decodeIfPresent(String.self, forKey: .checkDescription)
+    triggerPrompt = try container.decodeIfPresent(String.self, forKey: .triggerPrompt)
+    goal = try container.decodeIfPresent(GoalSpec.self, forKey: .goal)
+    backend = try container.decode(CLISessionBackendKind.self, forKey: .backend)
+    modelTier = try container.decodeIfPresent(ModelTier.self, forKey: .modelTier)
+    worktree = try container.decodeIfPresent(WorktreeRef.self, forKey: .worktree)
+    subGraph = try container.decodeIfPresent(LoopGraph.self, forKey: .subGraph)
+    createdBy = try container.decodeIfPresent(UUID.self, forKey: .createdBy)
   }
 }

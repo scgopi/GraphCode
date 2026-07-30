@@ -22,6 +22,7 @@ extension ProjectFeature.State {
   /// alongside the fields, so there's exactly one definition of what the form means.
   var draft: NodeDraft {
     NodeDraft(
+      id: draftID,
       title: draftTitle,
       loopType: draftLoopType,
       checkDescription: draftLoopType == .turnBased ? draftCheck : nil,
@@ -58,10 +59,66 @@ extension ProjectFeature.State {
   }
 }
 
-/// The two small types the form's derived values are expressed in. Nested on
-/// `ProjectFeature` rather than `State` so views can name them without going through
-/// the state type.
+/// The small types the form's derived values are expressed in, plus the edge editor's
+/// draft types. Nested on `ProjectFeature` rather than `State` so views can name them
+/// without going through the state type.
 extension ProjectFeature {
+  /// Which `PayloadTransform` case the edge editor's picker is on. A sibling of
+  /// `PendingEdge` rather than nested inside it only to keep nesting one level deep.
+  enum TransformMode: String, CaseIterable, Equatable {
+    case none, template, script
+
+    var displayName: String {
+      switch self {
+      case .none: return "Nothing"
+      case .template: return "Text"
+      case .script: return "Script"
+      }
+    }
+  }
+
+  /// An edge the human has drawn but not yet configured. Holds the draft `EdgeSpec`
+  /// directly so the editor's controls bind straight to what gets sent — no separate
+  /// pile of `draftEdge*` fields to keep in sync.
+  struct PendingEdge: Equatable, Identifiable {
+    let from: UUID
+    let to: UUID
+    var spec = EdgeSpec()
+    /// Which `PayloadTransform` case the picker is on. Kept alongside the text so
+    /// switching template↔script doesn't discard what was already typed.
+    var transformMode: TransformMode = .none
+    var transformText = ""
+    /// Off by default. Turning it on is what lets the edge fire more than once, and it
+    /// can't be turned on without a bound — see `CycleGuard`.
+    var loops = false
+    var maxIterations = 3
+    var untilCommand = ""
+
+    var id: String { "\(from)->\(to)" }
+
+    /// The spec actually sent, with the transform folded in from the picker + text.
+    var resolvedSpec: EdgeSpec {
+      var spec = self.spec
+      let text = transformText.trimmingCharacters(in: .whitespacesAndNewlines)
+      switch transformMode {
+      case .none: spec.payloadTransform = .none
+      case .template: spec.payloadTransform = text.isEmpty ? .none : .template(text)
+      case .script: spec.payloadTransform = text.isEmpty ? .none : .script(text)
+      }
+      spec.cycleGuard = loops ? cycleGuard : nil
+      return spec
+    }
+
+    /// The iteration cap always travels with a looping edge, even when an `until`
+    /// command is set. Two independent bounds is the conservative reading of docs/08 —
+    /// a predicate that never comes true shouldn't mean an unbounded loop.
+    var cycleGuard: CycleGuard {
+      CycleGuard(
+        maxIterations: max(1, maxIterations),
+        until: untilCommand.trimmingCharacters(in: .whitespaces).isEmpty ? nil : untilCommand)
+    }
+  }
+
   /// The `git worktree add` a node's creation should run first.
   struct WorktreeRequest: Equatable {
     let repositoryPath: String

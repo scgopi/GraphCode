@@ -22,8 +22,6 @@ struct NodeDraftTests {
     #expect(NodeDraft(title: "Research", loopType: .turnBased).isValid)
     #expect(
       NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "   ").isValid)
-    // A title is still the one thing every draft needs.
-    #expect(!NodeDraft(title: "  ", loopType: .turnBased).isValid)
   }
 
   @Test
@@ -52,10 +50,39 @@ struct NodeDraftTests {
     #expect(!NodeDraft(title: "Poll", loopType: .timeBased).isValid)
   }
 
+  /// The title used to be the one field every draft demanded, and it was the most
+  /// tedious one on the form — the prompt is what the human has in their head. A blank
+  /// title now creates the node as "New Loop", and the app follows up with a
+  /// backend-suggested name (see `TitleSuggestionClient`).
   @Test
-  func anUntitledDraftIsNeverValid() {
+  func anUntitledDraftIsValidAndFallsBackToAPlaceholderName() {
+    let draft = NodeDraft(title: "  ", loopType: .turnBased, checkDescription: "Sound?")
+    #expect(draft.isValid)
+    #expect(draft.makeNode().title == "New Loop")
+    // A typed title is used as typed.
     #expect(
-      !NodeDraft(title: "  ", loopType: .turnBased, checkDescription: "Sound?").isValid)
+      NodeDraft(title: "Research", loopType: .turnBased).makeNode().title == "Research")
+  }
+
+  /// The client picks the node's id, not the daemon — that's what lets the app rename
+  /// the node when the suggested title arrives, without diffing broadcasts to find it.
+  @Test
+  func theDraftsIDBecomesTheNodesID() {
+    let draft = NodeDraft(title: "Research", loopType: .turnBased)
+    #expect(draft.makeNode().id == draft.id)
+  }
+
+  /// A draft serialized by a CLI that predates `id` still decodes — its node simply
+  /// gets a fresh id, the way every draft's always did.
+  @Test
+  func aDraftWithoutAnIDStillDecodes() throws {
+    let json = """
+      {"title":"Research","loopType":"turnBased","backend":"claudeCode"}
+      """
+    let data = try #require(json.data(using: .utf8))
+    let draft = try JSONDecoder().decode(NodeDraft.self, from: data)
+    #expect(draft.title == "Research")
+    #expect(draft.makeNode().id == draft.id)
   }
 
   @Test

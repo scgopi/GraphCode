@@ -28,6 +28,11 @@ struct ProjectFeature {
     var graph: LoopGraph
     var nodePositions: [UUID: CGPoint] = [:]
     var showingNewNodeForm = false
+    /// The id the node being drafted will be created under, fixed when the form opens.
+    /// Stored rather than letting `NodeDraft.init` default one, because `draft` is
+    /// *computed* — a fresh id per access would mean the id sent in `.createNode` and
+    /// the id a later `.renameNode` targets were never the same node.
+    var draftID = UUID()
     var draftLoopType: LoopType = .turnBased
     var draftTitle = ""
     var draftCheck = ""
@@ -66,61 +71,8 @@ struct ProjectFeature {
     }
   }
 
-  /// Which `PayloadTransform` case the edge editor's picker is on. A sibling of
-  /// `PendingEdge` rather than nested inside it only to keep nesting one level deep.
-  enum TransformMode: String, CaseIterable, Equatable {
-    case none, template, script
-
-    var displayName: String {
-      switch self {
-      case .none: return "Nothing"
-      case .template: return "Text"
-      case .script: return "Script"
-      }
-    }
-  }
-
-  /// An edge the human has drawn but not yet configured. Holds the draft `EdgeSpec`
-  /// directly so the editor's controls bind straight to what gets sent — no separate
-  /// pile of `draftEdge*` fields to keep in sync.
-  struct PendingEdge: Equatable, Identifiable {
-    let from: UUID
-    let to: UUID
-    var spec = EdgeSpec()
-    /// Which `PayloadTransform` case the picker is on. Kept alongside the text so
-    /// switching template↔script doesn't discard what was already typed.
-    var transformMode: TransformMode = .none
-    var transformText = ""
-    /// Off by default. Turning it on is what lets the edge fire more than once, and it
-    /// can't be turned on without a bound — see `CycleGuard`.
-    var loops = false
-    var maxIterations = 3
-    var untilCommand = ""
-
-    var id: String { "\(from)->\(to)" }
-
-    /// The spec actually sent, with the transform folded in from the picker + text.
-    var resolvedSpec: EdgeSpec {
-      var spec = self.spec
-      let text = transformText.trimmingCharacters(in: .whitespacesAndNewlines)
-      switch transformMode {
-      case .none: spec.payloadTransform = .none
-      case .template: spec.payloadTransform = text.isEmpty ? .none : .template(text)
-      case .script: spec.payloadTransform = text.isEmpty ? .none : .script(text)
-      }
-      spec.cycleGuard = loops ? cycleGuard : nil
-      return spec
-    }
-
-    /// The iteration cap always travels with a looping edge, even when an `until`
-    /// command is set. Two independent bounds is the conservative reading of docs/08 —
-    /// a predicate that never comes true shouldn't mean an unbounded loop.
-    var cycleGuard: CycleGuard {
-      CycleGuard(
-        maxIterations: max(1, maxIterations),
-        until: untilCommand.trimmingCharacters(in: .whitespaces).isEmpty ? nil : untilCommand)
-    }
-  }
+  // `TransformMode` and `PendingEdge` — the edge editor's draft types — live in
+  // `ProjectFeatureState.swift` with the form's other small types.
 
   enum Action: BindableAction {
     case binding(BindingAction<State>)
@@ -153,6 +105,8 @@ struct ProjectFeature {
   }
 
   @Dependency(\.gitClient) var gitClient
+  /// Names an untitled loop after creation — see `createNodeConfirmed`.
+  @Dependency(\.titleSuggestionClient) var titleSuggestionClient
 
   @Dependency(\.orchestratorClient) var orchestratorClient
 
@@ -186,6 +140,7 @@ struct ProjectFeature {
         return .none
 
       case .addNodeButtonTapped:
+        state.draftID = UUID()
         state.draftLoopType = .turnBased
         state.draftTitle = ""
         state.draftCheck = ""
@@ -235,6 +190,21 @@ struct ProjectFeature {
           }
           try? await orchestratorClient.send(
             .graphCommand(projectPath: projectPath, command: .createNode(resolved)))
+
+          // A blank title creates the node as "New Loop" and asks the loop's own
+          // backend for a real one — after creation, so a slow (or absent) CLI never
+          // holds the node itself hostage. The rename can target the node because the
+          // draft's id *is* the node's id (see `NodeDraft.id`); no answer just means
+          // the fallback name stays.
+          guard draft.title.trimmingCharacters(in: .whitespaces).isEmpty,
+            let basis = [draft.checkDescription, draft.triggerPrompt, draft.goal?.summary]
+              .compactMap({ $0 })
+              .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
+            let title = await titleSuggestionClient.suggest(draft.backend, basis)
+          else { return }
+          try? await orchestratorClient.send(
+            .graphCommand(
+              projectPath: projectPath, command: .renameNode(draft.id, title: title)))
         }
 
       case .worktreeCreationFailed(let message):

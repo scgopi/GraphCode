@@ -296,9 +296,11 @@ struct GraphStoreTests {
     let store = GraphStore()
 
     // A turn-based draft with no criterion is deliberately *not* in this list — that one
-    // is valid now, since the human doing the verifying is there either way.
+    // is valid now, since the human doing the verifying is there either way. Neither is
+    // an untitled draft: a blank title creates the node as "New Loop" and the app names
+    // it properly afterward (see `TitleSuggestionClient`).
     await store.handle(.createNode(NodeDraft(title: "No goal", loopType: .goalBased)))
-    await store.handle(.createNode(NodeDraft(title: "", loopType: .timeBased, triggerPrompt: "x")))
+    await store.handle(.createNode(NodeDraft(title: "Bare", loopType: .timeBased)))
     // A composite on Copilot: sub-agent fan-out is the one capability still unverified
     // there, so this is the pairing that stays impossible now that Codex is spiked.
     await store.handle(
