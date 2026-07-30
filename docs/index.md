@@ -84,6 +84,25 @@ a goal-based loop at 3 a.m., and you click its node at 9, you are not reading a 
 what happened — you are in the session that did it, live, with its history above you and
 its process still running.
 
+### Projects don't have to be local
+
+A project can start three ways from the sidebar's ⊕ menu: open a **local folder**,
+**clone a repository from a URL** (progress streams into the form; the finished clone is
+an ordinary project), or **add a remote repository over SSH** — a repo on another
+machine, where the loops themselves run on that machine while your Mac draws the graph
+and steers them.
+
+The remote case follows directly from the session model: a loop's terminal was already
+"a `zmx` session somewhere, attached to on demand", and the only thing that knows *where*
+is the attach command — `zmx attach` becomes `ssh -t host zmx attach` and everything
+above it is unchanged. The daemon stays on your Mac; every remote effect is a command
+run over ssh. Connections are validated up front (key auth, the path being a repo, zmx
+installed there), because each of those failures would otherwise surface as a loop that
+silently does nothing. Remote rows wear a network glyph in the sidebar so where the
+shells run is readable at a glance. The current edges of remote support are listed in
+the README's
+[Known limitations](https://github.com/scgopi/GraphCode#known-limitations).
+
 ### Edges: the three ways loops talk
 
 Drag between two nodes and you get an edge. There are three kinds:
@@ -230,8 +249,9 @@ current list of rough edges lives in the README's
 1. **[Download GraphCode (.dmg, latest release)](https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg)** —
    drag GraphCode to Applications; that's the whole install. Releases are Developer ID
    signed and notarized.
-2. Add a folder, create a loop — just write the goal; the title is optional, GraphCode
-   names it for you — and connect a second one with an edge.
+2. Add a folder — or clone a URL, or connect a repo on another machine over SSH — then
+   create a loop: just write the goal; the title is optional, GraphCode names it for
+   you. Connect a second one with an edge.
 3. Close the app whenever you like — the loops won't notice.
 
 Building from source, development commands, and limitations are in the
