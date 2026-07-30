@@ -116,6 +116,15 @@ final class GhosttyTerminalNSView: NSView {
     super.viewDidChangeBackingProperties()
     guard let surface, let window else { return }
     let scale = window.backingScaleFactor
+    // The layer's own scale first: libghostty renders into this view's backing layer,
+    // and AppKit does not push backing changes down to it on its own — so after a drag
+    // to a display of a different scale the Metal drawable kept the old density and
+    // the terminal came back blurred or the wrong size. Wrapped to suppress the
+    // implicit animation, which would otherwise visibly "zoom" the glyphs into place.
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    layer?.contentsScale = scale
+    CATransaction.commit()
     ghostty_surface_set_content_scale(surface, scale, scale)
     // And the size again, which is the half that was missing. `ghostty_surface_set_size`
     // takes **backing pixels**, so dragging a window between displays of different scale
