@@ -266,6 +266,52 @@ struct AppFeatureTests {
         .graphCommand(projectPath: Self.projectA.path, command: .nodeCheckApproved(node.id))
       ])
   }
+
+  /// ⇧⌘]/⇧⌘[ walk the same flattened list the sidebar draws — across projects, skipping
+  /// blocked loops, wrapping at the ends — and go through `.nodeTapped` rather than a
+  /// path of their own, so what the shortcut opens is exactly what a click would.
+  @Test
+  @MainActor
+  func loopCycleShortcutStepsAcrossProjectsSkippingBlockedLoops() async {
+    let first = LoopNode(title: "First", checkDescription: "c")
+    var blocked = LoopNode(title: "Blocked", checkDescription: "c")
+    blocked.state = .blocked
+    let last = LoopNode(title: "Last", checkDescription: "c")
+    var state = AppFeature.State()
+    state.projects.append(
+      ProjectFeature.State(graph: LoopGraph(project: Self.projectA, nodes: [first, blocked])))
+    state.projects.append(
+      ProjectFeature.State(graph: LoopGraph(project: Self.projectB, nodes: [last])))
+    state.selectedProjectPath = Self.projectA.path
+
+    let store = TestStore(initialState: state) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalLayoutStore = makeTerminalLayoutStore()
+    }
+    store.exhaustivity = .off
+
+    // No workspace open yet: "next" starts at the top of the sidebar.
+    await store.send(.selectNextLoop)
+    await store.receive(\.projects)
+    #expect(store.state.openLoop?.node.id == first.id)
+
+    // Steps over the blocked loop and crosses the project boundary in one move.
+    await store.send(.selectNextLoop)
+    await store.receive(\.projects)
+    #expect(store.state.openLoop?.node.id == last.id)
+    #expect(store.state.selectedProjectPath == Self.projectB.path)
+
+    // Off the end wraps back to the beginning.
+    await store.send(.selectNextLoop)
+    await store.receive(\.projects)
+    #expect(store.state.openLoop?.node.id == first.id)
+
+    // And the previous direction wraps the other way.
+    await store.send(.selectPreviousLoop)
+    await store.receive(\.projects)
+    #expect(store.state.openLoop?.node.id == last.id)
+  }
 }
 
 private actor SentCommandsBox {

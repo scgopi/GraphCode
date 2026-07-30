@@ -109,7 +109,8 @@ struct LoopWorkspaceView: View {
   /// Invisible, zero-size buttons that are the only thing actually making these
   /// shortcuts work — the ⌘-number hint in each `TabPillView` is otherwise
   /// decorative. Modeled on supacode's terminal shortcuts (⌘D/⌘⇧D split, ⌘W close,
-  /// ⌘←/→ switch tabs) adapted to this workspace's own action set, not its code.
+  /// ⌘←/→ switch tabs) adapted to this workspace's own action set, not its code —
+  /// plus ⌘]/⌘[ between a split's panes, which are Ghostty's own goto_split keys.
   private var workspaceKeyboardShortcuts: some View {
     Group {
       ForEach(Array(store.layout.tabs.prefix(9).enumerated()), id: \.element.id) { index, tab in
@@ -129,6 +130,8 @@ struct LoopWorkspaceView: View {
       hiddenShortcut("d", modifiers: [.command, .shift]) {
         store.send(.splitButtonTapped(direction: .vertical))
       }
+      hiddenShortcut("]", modifiers: .command) { store.send(.focusNextPane) }
+      hiddenShortcut("[", modifiers: .command) { store.send(.focusPreviousPane) }
     }
   }
 

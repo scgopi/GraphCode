@@ -32,6 +32,7 @@ struct AppView: View {
     // The window is a fixed dark gray (`Theme`), so the appearance has to be dark too —
     // in light mode the system's near-black label colors would land on it unreadable.
     .preferredColorScheme(.dark)
+    .background(loopCycleShortcuts)
     .task { await store.send(.task).finish() }
     .confirmationDialog(
       // Naming the loop matters here in a way it didn't on the canvas: from the sidebar
@@ -70,6 +71,21 @@ struct AppView: View {
     } message: {
       Text("Only the name changes — the loop keeps its session, its edges, and its work.")
     }
+  }
+
+  /// Invisible, zero-size buttons carrying the app-wide loop shortcuts — the same trick
+  /// `LoopWorkspaceView.workspaceKeyboardShortcuts` plays, but mounted on the window
+  /// itself so ⇧⌘]/⇧⌘[ step between loops from a canvas as readily as from a terminal.
+  /// The shifted siblings of ⌘]/⌘[, which move between one tab's split panes.
+  private var loopCycleShortcuts: some View {
+    Group {
+      Button("") { store.send(.selectNextLoop) }
+        .keyboardShortcut("]", modifiers: [.command, .shift])
+      Button("") { store.send(.selectPreviousLoop) }
+        .keyboardShortcut("[", modifiers: [.command, .shift])
+    }
+    .frame(width: 0, height: 0)
+    .opacity(0)
   }
 
   /// Reads and writes the pending rename's draft text straight through to the project it

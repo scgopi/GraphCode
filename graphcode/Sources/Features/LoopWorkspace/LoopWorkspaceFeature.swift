@@ -40,6 +40,8 @@ struct LoopWorkspaceFeature {
     /// The user clicked into one pane of a split. Sent by the surface itself on mouse
     /// down, which is the only unambiguous "I meant this one" there is.
     case paneFocused(tabID: UUID, surfaceID: UUID)
+    case focusNextPane
+    case focusPreviousPane
     case paneClosed(tabID: UUID, surfaceID: UUID)
     case primarySurfaceExited(succeeded: Bool)
   }
@@ -118,6 +120,17 @@ struct LoopWorkspaceFeature {
         persist(state)
         return .none
 
+      // ⌘] / ⌘[, matching Ghostty's own goto_split next/previous keys. Steps through
+      // the showing tab's panes in on-screen order, wrapping — clicking was the only
+      // way to move between the halves of a split before this existed.
+      case .focusNextPane:
+        stepPaneFocus(&state, by: 1)
+        return .none
+
+      case .focusPreviousPane:
+        stepPaneFocus(&state, by: -1)
+        return .none
+
       case .paneClosed(let tabID, let surfaceID):
         guard var tab = state.layout.tabs[id: tabID] else { return .none }
         let paneOrder = tab.surfaces
@@ -151,6 +164,16 @@ struct LoopWorkspaceFeature {
         return .none
       }
     }
+  }
+
+  private func stepPaneFocus(_ state: inout State, by offset: Int) {
+    guard var tab = state.layout.tabs[id: state.layout.selectedTabID], tab.isSplit else { return }
+    let panes = tab.surfaces
+    guard let index = panes.firstIndex(where: { $0.id == tab.focusedSurface.id }) else { return }
+    let count = panes.count
+    tab.focusedSurfaceID = panes[((index + offset) % count + count) % count].id
+    state.layout.tabs[id: tab.id] = tab
+    persist(state)
   }
 
   private func step(_ state: inout State, by offset: Int) {

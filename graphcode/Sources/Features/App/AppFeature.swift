@@ -86,6 +86,10 @@ struct AppFeature {
     case openLoop(LoopWorkspaceFeature.Action)
     /// Jump straight to the loop that needs a human, from the monitor's rollup.
     case attentionItemTapped(AttentionItem)
+    /// ⇧⌘] / ⇧⌘[ — step the open workspace to the next/previous loop in sidebar order,
+    /// across every open project. See `stepOpenLoop`.
+    case selectNextLoop
+    case selectPreviousLoop
     /// The stop/kill affordance docs/05-orchestrator.md asks the monitor for.
     case stopNodeTapped(projectPath: String, nodeID: UUID)
   }
@@ -208,6 +212,12 @@ struct AppFeature {
         return .send(
           .projects(.element(id: item.projectPath, action: .nodeTapped(item.nodeID))))
 
+      case .selectNextLoop:
+        return stepOpenLoop(state, by: 1)
+
+      case .selectPreviousLoop:
+        return stepOpenLoop(state, by: -1)
+
       case .stopNodeTapped(let projectPath, let nodeID):
         return .run { _ in
           try? await orchestratorClient.send(
@@ -256,6 +266,35 @@ struct AppFeature {
     .forEach(\.projects, action: \.projects) {
       ProjectFeature()
     }
+  }
+
+  /// Steps the open workspace to another loop, in the order the sidebar draws them —
+  /// every open project's nodes, flattened — wrapping at the ends and skipping blocked
+  /// nodes, the same rule a direct `.nodeTapped` applies. With no workspace open it
+  /// lands on the first (or last) loop, so the shortcut also *opens* a loop from a
+  /// canvas. Routes through `.nodeTapped` rather than setting `openLoop` itself, so
+  /// keyboard and click cannot come to open a workspace two different ways.
+  private func stepOpenLoop(_ state: State, by offset: Int) -> Effect<Action> {
+    let loops = state.projects.flatMap { project in
+      project.graph.nodes
+        .filter { $0.state != .blocked }
+        .map { (projectPath: project.id, nodeID: $0.id) }
+    }
+    guard !loops.isEmpty else { return .none }
+    let current = state.openLoop.flatMap { open in
+      loops.firstIndex { $0.nodeID == open.node.id }
+    }
+    let index: Int
+    if let current {
+      index = ((current + offset) % loops.count + loops.count) % loops.count
+    } else {
+      index = offset > 0 ? 0 : loops.count - 1
+    }
+    let target = loops[index]
+    // The only loop there is, already open — reopening it would just rebuild the same
+    // workspace under the user's keystroke.
+    guard target.nodeID != state.openLoop?.node.id else { return .none }
+    return .send(.projects(.element(id: target.projectPath, action: .nodeTapped(target.nodeID))))
   }
 
   /// Shared by all three context-menu verbs — they differ only in what they ask the

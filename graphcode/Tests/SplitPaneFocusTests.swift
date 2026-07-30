@@ -100,6 +100,40 @@ struct SplitPaneFocusTests {
     #expect(after.focusedSurface.id == survivor)
   }
 
+  /// ⌘]/⌘[ step through the panes in on-screen order and wrap at the ends — before
+  /// these existed, the only way off one half of a split was the mouse.
+  @Test
+  @MainActor
+  func cyclingStepsThroughPanesInOrderAndWrapsAtTheEnds() async {
+    let store = makeStore()
+    await store.send(.splitButtonTapped(direction: .horizontal))
+    await store.send(.splitButtonTapped(direction: .horizontal))
+    let panes = store.state.layout.tabs[0].surfaces.map(\.id)
+    // Splitting focused the newest pane, which sits last.
+    #expect(store.state.layout.tabs[0].focusedSurface.id == panes[2])
+
+    await store.send(.focusNextPane)
+    #expect(store.state.layout.tabs[0].focusedSurface.id == panes[0])
+
+    await store.send(.focusNextPane)
+    #expect(store.state.layout.tabs[0].focusedSurface.id == panes[1])
+
+    await store.send(.focusPreviousPane)
+    #expect(store.state.layout.tabs[0].focusedSurface.id == panes[0])
+
+    await store.send(.focusPreviousPane)
+    #expect(store.state.layout.tabs[0].focusedSurface.id == panes[2])
+  }
+
+  @Test
+  @MainActor
+  func cyclingFocusOnAnUnsplitTabChangesNothing() async {
+    let store = makeStore()
+    let before = store.state.layout.tabs[0].focusedSurface.id
+    await store.send(.focusNextPane)
+    #expect(store.state.layout.tabs[0].focusedSurface.id == before)
+  }
+
   @Test
   func aStaleFocusIDNeverLeavesATabWithNoFocusedPane() {
     // Decoded from an older layout, or pointing at a pane that has since gone: resolving
