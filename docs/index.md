@@ -117,6 +117,24 @@ Each edge carries a **condition** — always, on success, or on failure — eval
 against how the source resolved. An `on failure` hand-off is how you build "if the
 nightly build breaks, wake the fixer."
 
+### And loops can just talk
+
+Edges are standing relationships a human drew in advance. For the one-off — a loop
+deciding *mid-run* that a peer should know something now — there's the CLI:
+
+```sh
+graphcode node send <project-path> <node-id> the API changed under you, heads up
+```
+
+The message is typed straight into the target's live terminal, attributed to the loop
+that sent it (`[graphcode] Hello loop 1: …`), and lands in front of the agent — and of
+you, if you're watching that pane — like anything else typed there. It obeys the same
+deliverability rules as a message edge: a target that's mid-review or not running
+refuses the message *out loud*, in the app's error banner and on the CLI's stderr,
+because the whole point was that a peer be told something. Every loop's briefing
+teaches it the verb, so "tell loop 5 to stop" is something you can ask a loop to do —
+edges stay the right tool for communication that should happen every time.
+
 ### Cycles are opt-in, and bounded by construction
 
 An unguarded edge fires exactly once. To make a cycle actually loop, you attach a
@@ -203,11 +221,18 @@ shared by the daemon and the app, so the two can never disagree about what a loo
 with.
 
 Every session also receives a **briefing** about the graph it runs inside — a file
-explaining the loop types and the `graphcode` CLI, delivered however its backend takes
-instructions (Claude Code as a system-prompt file, Copilot and Codex as a pointer the
-session is granted access to read). That's what lets a loop asked to "fix each of these
-five issues" create five sibling loops instead of grinding through them in sequence —
-fan-out is a capability of every session, whichever of the two launchers started it.
+explaining the loop types, the `graphcode` CLI, and how to message a peer, delivered
+however its backend takes instructions (Claude Code as a system-prompt file, Copilot
+and Codex as a pointer the session is granted access to read). That's what lets a loop
+asked to "fix each of these five issues" create five sibling loops instead of grinding
+through them in sequence, and a loop asked to "tell loop 5 to stop" actually reach it —
+fan-out and messaging are capabilities of every session, whichever of the two launchers
+started it.
+
+Message delivery has a detail worth knowing: `zmx send` writes exactly its payload to
+the PTY, and an agent TUI treats text-plus-newline in one chunk as a *pasted newline* —
+so the Enter is sent as its own keystroke, a beat after the text. Before that, every
+delivered message rendered in the target's composer and sat there, unsent.
 
 ### Presence and usage: reported, never estimated
 
