@@ -85,6 +85,16 @@ struct AppSidebarView: View {
     ) { result in
       store.send(.welcome(.folderPickerResult(result)))
     }
+    // The clone sheet. Dismissing it mid-clone cancels the clone — that's
+    // `.cloneCancelled`'s job, not a side effect of the binding.
+    .sheet(
+      isPresented: Binding(
+        get: { store.welcome.cloneDraft != nil },
+        set: { if !$0 { store.send(.welcome(.cloneCancelled)) } }
+      )
+    ) {
+      CloneRepositoryFormView(store: store.scope(state: \.welcome, action: \.welcome))
+    }
     .confirmationDialog(
       "Delete this project's loops?",
       isPresented: Binding(
@@ -125,6 +135,13 @@ struct AppSidebarView: View {
         store.send(.welcome(.openFolderButtonTapped))
       } label: {
         Label("Open Folder…", systemImage: "folder")
+      }
+      // A project can also start as a URL — the clone lands locally and opens through
+      // the same path a picked folder takes. See `WelcomeFeature.CloneDraft`.
+      Button {
+        store.send(.welcome(.cloneRepositoryButtonTapped))
+      } label: {
+        Label("Clone Repository…", systemImage: "square.and.arrow.down.on.square")
       }
       if !store.welcome.recentProjects.isEmpty {
         Divider()
