@@ -99,6 +99,21 @@ public enum SessionBriefing {
       `graphcode status \(projectPath)` lists the loops that already exist. Check it before
       creating any, so you extend the graph rather than duplicating it.
 
+      ## Talking to another loop
+
+      ```sh
+      graphcode node send \(projectPath) <node-id> <message…>
+      ```
+
+      Types your message directly into that loop's live session, attributed to you —
+      use it when a peer should know something *now*, mid-run: "the API changed under
+      you", "stop, I already fixed that file". `graphcode status \(projectPath)` shows
+      every loop's id. Delivery is refused (with the reason) when the target isn't
+      running or is mid-review — a message is for a live peer, not a way to start one.
+      For recurring communication, an edge is still the right tool: a `message` edge
+      fires automatically when you finish, a `handoff` sequences the other loop after
+      you. This command is the one-off.
+
       If `graphcode` is not on your `PATH`, it is at `\(installedCLIPath)`.
 
       Give each loop a title that says what it is for and a goal that says what done looks

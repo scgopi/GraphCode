@@ -68,6 +68,15 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// An empty or whitespace-only title is refused rather than applied: the graph, the
   /// sidebar, and the canvas would all render a nameless card, and there is no undo.
   case renameNode(UUID, title: String)
+  /// Type a message into a node's live session, right now — the ad-hoc counterpart to
+  /// a `.message` edge, sharing its transport and its deliverability rules
+  /// (`MessageBus`). This is what `graphcode node send` rides on, and its reason to
+  /// exist is loops talking to *each other*: an edge is a standing relationship a human
+  /// drew in advance, where this is one loop deciding mid-run that a peer should know
+  /// something. `from` is the sending loop when the CLI could attribute it
+  /// (`ZMX_SESSION`, the same mechanism as `NodeDraft.createdBy`), so the target sees
+  /// who's talking; nil from a human's shell.
+  case messageNode(UUID, text: String, from: UUID?)
   /// Removes the node, every edge touching it, and its detached session. Irreversible
   /// — the app confirms before sending this.
   case deleteNode(UUID)

@@ -224,4 +224,55 @@ struct MessageAndSpawnTests {
 
     #expect(await store.graph.nodes[1].state == .idle)
   }
+
+  // MARK: - Ad-hoc messages (`graphcode node send`)
+
+  @Test
+  func anAdHocMessageIsTypedIntoTheTargetAttributedToItsSender() async {
+    let delivered = LockIsolated<[Delivery]>([])
+    let store = await messagePair(targetState: .running, delivered: delivered)
+    let sender = await store.graph.nodes[0]
+    let target = await store.graph.nodes[1]
+
+    await store.handle(.messageNode(target.id, text: "the API changed", from: sender.id))
+
+    #expect(delivered.value.count == 1)
+    #expect(delivered.value[0].nodeTitle == "Review")
+    #expect(delivered.value[0].text == "[graphcode] Implement: the API changed")
+  }
+
+  @Test
+  func anAdHocMessageFromAHumanCarriesNoAttribution() async {
+    let delivered = LockIsolated<[Delivery]>([])
+    let store = await messagePair(targetState: .running, delivered: delivered)
+    let target = await store.graph.nodes[1]
+
+    await store.handle(.messageNode(target.id, text: "wrap it up", from: nil))
+
+    #expect(delivered.value == [Delivery(nodeTitle: "Review", text: "[graphcode] wrap it up")])
+  }
+
+  @Test
+  func anAdHocMessageRespectsTheSameDeliverabilityRulesAsEdges() async {
+    // Mid-check means a human is being asked something; typing into that terminal
+    // would interleave with them — the same refusal a message edge gets.
+    let delivered = LockIsolated<[Delivery]>([])
+    let store = await messagePair(targetState: .awaitingInput, delivered: delivered)
+    let target = await store.graph.nodes[1]
+
+    await store.handle(.messageNode(target.id, text: "hello?", from: nil))
+
+    #expect(delivered.value.isEmpty)
+  }
+
+  @Test
+  func anEmptyAdHocMessageIsNotDelivered() async {
+    let delivered = LockIsolated<[Delivery]>([])
+    let store = await messagePair(targetState: .running, delivered: delivered)
+    let target = await store.graph.nodes[1]
+
+    await store.handle(.messageNode(target.id, text: "   ", from: nil))
+
+    #expect(delivered.value.isEmpty)
+  }
 }

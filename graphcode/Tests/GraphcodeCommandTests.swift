@@ -273,4 +273,22 @@ struct GraphcodeCommandTests {
 
     #expect(output.contains("no loops yet"))
   }
+
+  @Test
+  func sendJoinsEverythingAfterTheIDIntoOneMessage() throws {
+    let id = UUID()
+    let command = try GraphcodeCommand.parse([
+      "node", "send", "/tmp/p", id.uuidString, "tests", "are", "green,", "ship", "it",
+    ])
+    #expect(
+      command
+        == .sendMessage(projectPath: "/tmp/p", nodeID: id, text: "tests are green, ship it"))
+  }
+
+  @Test
+  func sendWithoutAMessageIsRefused() {
+    #expect(throws: GraphcodeCommand.ParseError.missingArgument("message")) {
+      _ = try GraphcodeCommand.parse(["node", "send", "/tmp/p", UUID().uuidString])
+    }
+  }
 }

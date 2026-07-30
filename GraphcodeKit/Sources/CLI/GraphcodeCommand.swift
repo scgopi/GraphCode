@@ -17,6 +17,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
   case createNode(projectPath: String, draft: NodeDraft)
   case createEdge(projectPath: String, from: UUID, to: UUID, spec: EdgeSpec)
   case stopNode(projectPath: String, nodeID: UUID)
+  case sendMessage(projectPath: String, nodeID: UUID, text: String)
   case pilotComposite(projectPath: String, nodeID: UUID)
   case armComposite(projectPath: String, nodeID: UUID)
   case usage(projectPath: String)
@@ -36,6 +37,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode status <project-path>
       graphcode node create <project-path> --title <t> --type <turn|goal|time> [options]
       graphcode node stop <project-path> <node-id>
+      graphcode node send <project-path> <node-id> <message…>
       graphcode node pilot <project-path> <node-id>     dry-run a proactive composite
       graphcode node arm <project-path> <node-id>       arm it (needs a pilot first)
       graphcode edge create <project-path> <from-id> <to-id> [--kind <k>] [--condition <c>]
@@ -87,7 +89,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
       switch verb {
       case "create":
         return .createNode(projectPath: path, draft: try parseDraft(arguments))
-      case "stop", "pilot", "arm":
+      case "stop", "pilot", "arm", "send":
         let raw = try take(&arguments, name: "node-id")
         guard let nodeID = UUID(uuidString: raw) else {
           throw ParseError.invalidValue(argument: "node-id", value: raw)
@@ -95,6 +97,13 @@ public enum GraphcodeCommand: Equatable, Sendable {
         switch verb {
         case "pilot": return .pilotComposite(projectPath: path, nodeID: nodeID)
         case "arm": return .armComposite(projectPath: path, nodeID: nodeID)
+        case "send":
+          // Everything after the id is the message — joined rather than flagged, so
+          // `graphcode node send <path> <id> tests are green, ship it` needs no quoting
+          // gymnastics from the agent typing it.
+          let text = arguments.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+          guard !text.isEmpty else { throw ParseError.missingArgument("message") }
+          return .sendMessage(projectPath: path, nodeID: nodeID, text: text)
         default: return .stopNode(projectPath: path, nodeID: nodeID)
         }
       default:

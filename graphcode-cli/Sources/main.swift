@@ -119,6 +119,28 @@ do {
       projectPath: projectPath,
       [.graphCommand(projectPath: projectPath, command: .stopNode(nodeID))])
 
+  case .sendMessage(let projectPath, let nodeID, let text):
+    // Attributed the same way `node create` attributes `createdBy`: run from inside a
+    // loop, ZMX_SESSION names the sender, and the target sees who's talking.
+    let sender = SurfaceRef.nodeID(
+      fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
+    try client.send(.openProject(path: projectPath))
+    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try client.send(
+      .graphCommand(
+        projectPath: projectPath,
+        command: .messageNode(nodeID, text: text, from: sender)))
+    // Delivery is judged and attempted before the daemon broadcasts, so the first event
+    // back is the verdict: an error means it did not land, the graph means it did.
+    let verdict = try client.waitForEvent { event in
+      switch event {
+      case .graphChanged, .errorOccurred: return true
+      default: return false
+      }
+    }
+    if case .errorOccurred(let message) = verdict { fail(message) }
+    print("delivered")
+
   case .pilotComposite(let projectPath, let nodeID):
     try runAndPrintGraph(
       projectPath: projectPath,

@@ -151,6 +151,9 @@ public actor GraphStore {
     case .nodeCheckRejected(let nodeID):
       resolveNode(nodeID, succeeded: false)
 
+    case .messageNode(let nodeID, let text, let from):
+      await deliverAdHocMessage(to: nodeID, text: text, from: from)
+
     case .renameNode(let nodeID, let title):
       renameNode(nodeID, to: title)
 
@@ -612,6 +615,45 @@ public actor GraphStore {
       }
       guard graph.edges[id: edgeID] != nil else { continue }
       commitFiring(edgeID)
+    }
+  }
+
+  /// One loop telling another something, now — `graphcode node send`'s half of the
+  /// `.message` machinery. Same deliverability judgement and same transport as a
+  /// message edge (`MessageBus`, the target backend's `sendInput`), so there is one
+  /// definition of "may this session be typed into", not two.
+  ///
+  /// A failure is said out loud rather than swallowed: an `.errorOccurred` goes to
+  /// every connection, which the app shows as its error banner and the CLI prints —
+  /// the whole point of the message was that a peer be told something, and pretending
+  /// it landed is the one wrong answer.
+  private func deliverAdHocMessage(to nodeID: UUID, text: String, from senderID: UUID?) async {
+    guard let target = graph.nodes[id: nodeID] else {
+      announceError("message not delivered: no loop \(nodeID) in this graph")
+      return
+    }
+    if let refusal = MessageBus.deliverability(to: target) {
+      announceError("message to \(target.title) not delivered: \(refusal)")
+      return
+    }
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      announceError("message to \(target.title) not delivered: empty message")
+      return
+    }
+    // Attributed when the sender is a loop in this graph, the way a message edge names
+    // its source — the target should know who's talking without guessing.
+    let sender = senderID.flatMap { graph.nodes[id: $0]?.title }
+    let message = "[graphcode] \(sender.map { "\($0): " } ?? "")\(trimmed)"
+    guard let onDeliverMessage, await onDeliverMessage(target, message) else {
+      announceError("message to \(target.title) not delivered: transport failed")
+      return
+    }
+  }
+
+  private func announceError(_ message: String) {
+    for id in connections.keys {
+      send(.errorOccurred(message), to: id)
     }
   }
 
