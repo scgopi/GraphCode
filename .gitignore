@@ -40,3 +40,4 @@ xcuserdata/
 /docs/*
 !/docs/index.md
 !/docs/_config.yml
+!/docs/assets/

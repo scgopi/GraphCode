@@ -1,0 +1,41 @@
+---
+---
+
+// Dark palette for the Cayman theme. These are Cayman's own !default variables,
+// set before the import so the whole theme compiles dark; the handful of rules
+// after it cover what Cayman hard-codes (the white page background).
+$header-heading-color: #e6edf3;
+$header-bg-color: #163b2e;
+$header-bg-color-secondary: #0d1117;
+$section-headings-color: #3fb950;
+$body-text-color: #c9d1d9;
+$body-link-color: #58a6ff;
+$blockquote-text-color: #8b949e;
+$code-bg-color: #161b22;
+$code-text-color: #c9d1d9;
+$border-color: #30363d;
+$table-border-color: #30363d;
+$hr-border-color: #30363d;
+
+@import "{{ site.theme }}";
+
+body {
+  background-color: #0d1117;
+}
+
+.main-content {
+  table {
+    th {
+      background-color: #161b22;
+      color: #e6edf3;
+    }
+  }
+
+  .highlight {
+    background-color: #161b22;
+
+    pre {
+      background-color: #161b22;
+    }
+  }
+}
