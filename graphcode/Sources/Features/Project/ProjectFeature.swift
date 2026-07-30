@@ -33,7 +33,7 @@ struct ProjectFeature {
     /// *computed* — a fresh id per access would mean the id sent in `.createNode` and
     /// the id a later `.renameNode` targets were never the same node.
     var draftID = UUID()
-    var draftLoopType: LoopType = .turnBased
+    var draftLoopType: LoopType = .goalBased
     var draftTitle = ""
     var draftCheck = ""
     var draftPrompt = ""
@@ -141,7 +141,11 @@ struct ProjectFeature {
 
       case .addNodeButtonTapped:
         state.draftID = UUID()
-        state.draftLoopType = .turnBased
+        // Goal-based, matching `LoopType`'s own ordering and the segmented control's
+        // first segment: a loop that starts itself and knows when it is finished is what
+        // most work wants, where the old turn-based default made a loop that sits idle
+        // until a human opens it — surprising as the *default* outcome of Create.
+        state.draftLoopType = .goalBased
         state.draftTitle = ""
         state.draftCheck = ""
         state.draftPrompt = ""

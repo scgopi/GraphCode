@@ -48,14 +48,16 @@ struct ProjectFeatureTests {
       $0.orchestratorClient.send = { command in await sent.append(command) }
       $0.titleSuggestionClient.suggest = { backend, basis in
         #expect(backend == .claudeCode)
-        #expect(basis == "Sound?")
+        #expect(basis == "Say hello")
         return "Research"
       }
     }
     store.exhaustivity = .off
 
+    // The form opens on its default type — goal-based — and only the goal is typed.
     await store.send(.addNodeButtonTapped)
-    await store.send(.binding(.set(\.draftCheck, "Sound?")))
+    #expect(store.state.draftLoopType == .goalBased)
+    await store.send(.binding(.set(\.draftGoal, "Say hello")))
     await store.send(.createNodeConfirmed)
     await store.finish()
 
@@ -94,6 +96,7 @@ struct ProjectFeatureTests {
 
     await store.send(.addNodeButtonTapped)
     await store.send(.binding(.set(\.draftTitle, "Research")))
+    await store.send(.binding(.set(\.draftGoal, "Say hello")))
     await store.send(.createNodeConfirmed)
     await store.finish()
 
