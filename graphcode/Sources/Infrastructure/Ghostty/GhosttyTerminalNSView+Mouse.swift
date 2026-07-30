@@ -128,6 +128,9 @@ extension GhosttyTerminalNSView {
   /// no longer does either.
   override func scrollWheel(with event: NSEvent) {
     guard let surface else { return }
+    // Before the scroll is forwarded, because it decides whether the frames this gesture
+    // produces are paced against the display at all. See `ScrollFocusPolicy`.
+    claimKeyboardForScroll()
 
     var deltaX = event.scrollingDeltaX
     var deltaY = event.scrollingDeltaY

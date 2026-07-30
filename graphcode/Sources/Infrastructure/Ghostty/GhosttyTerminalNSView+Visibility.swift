@@ -95,4 +95,63 @@ extension GhosttyTerminalNSView {
     }
     window.makeFirstResponder(self)
   }
+
+  /// Take the keyboard back when nothing in the window is holding it.
+  ///
+  /// **This is a frame-pacing fix, not a keyboard one.** libghostty runs its
+  /// `CVDisplayLink` — the clock every frame is paced against — only while a surface is
+  /// focused, and the two entry points disagree about it:
+  ///
+  /// ```zig
+  /// setFocus(true)   => display_link.start()
+  /// setVisible(true) => if (visible and self.focused) start() else stop()
+  /// ```
+  ///
+  /// With the link stopped, `hasVsync()` is false, and `renderer.Thread.drawFrame` stops
+  /// deferring to the display — it renders "change-driven", so frames land when they are
+  /// ready rather than on the vertical blank. That is right for a window nobody is
+  /// touching and wrong for one being scrolled, and **scrolling never grants first
+  /// responder on macOS**: a surface that has lost focus renders the entire gesture
+  /// unpaced, which is what juddering scroll is.
+  ///
+  /// Focus really is lost, repeatedly, in ordinary use. Instrumented, wheel events arrive
+  /// with `firstResponder = AppKitWindow` — the window itself, which is AppKit's way of
+  /// saying nobody — while the surface is visible, on the showing tab, in the key window
+  /// of the frontmost app. Something in the SwiftUI hierarchy resigns it and nothing
+  /// claims it back, because the next thing that would (`focusIfKeyboardIsOnAHiddenSurface`
+  /// via `updateNSView`) needs a SwiftUI update, and scrolling doesn't cause one.
+  ///
+  /// Claiming it here is not stealing. It happens only when the holder is the window
+  /// itself; a real first responder — a text field, another surface — keeps it, so
+  /// scrolling past a terminal can never take the keyboard out of something being typed
+  /// in.
+  /// Gives this surface the keyboard when it is scrolled, so libghostty paces its frames.
+  ///
+  /// See `ScrollFocusPolicy` for why a scroll decides a frame rate at all, and for what is
+  /// and isn't taken from. Deliberately not gated on `isActive`: the measurement that
+  /// found this showed wheel events arriving at surfaces reading `isActive=false`, so
+  /// gating on it skipped the one surface being scrolled.
+  ///
+  /// The workspace is told as well as AppKit. They are two different records of the same
+  /// fact — one drives the keyboard, the other the dimming and the filled cursor — and
+  /// moving one without the other is how a split ends up with the veil over the pane you
+  /// are typing into.
+  func claimKeyboardForScroll() {
+    guard let window else { return }
+    let holder: ScrollFocusPolicy.Holder
+    switch window.firstResponder {
+    case let responder as GhosttyTerminalNSView:
+      holder = responder === self ? .thisSurface : .anotherSurface
+    case is NSTextView:
+      // `NSTextField` edits through a shared field editor, which is an `NSTextView`, so
+      // this covers a rename field as well as a real text view.
+      holder = .textInput
+    default:
+      holder = .somethingElse
+    }
+    guard ScrollFocusPolicy.shouldClaimKeyboard(holder: holder, windowIsKey: window.isKeyWindow)
+    else { return }
+    guard window.makeFirstResponder(self) else { return }
+    onFocusRequested?()
+  }
 }
