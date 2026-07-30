@@ -43,6 +43,12 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// opened before the daemon got to it, or with `zmx` not installed.
   var initialPrompt: String?
   let workingDirectory: String?
+  /// The project whose graph this loop belongs to — what the session's briefing tells it
+  /// to create further loops *in*. Distinct from `workingDirectory`, which is the
+  /// worktree when the node has one; a briefing built from the worktree path would have
+  /// the agent extending a graph that doesn't exist. `nil` for plain-shell surfaces,
+  /// which get no briefing.
+  var projectPath: String?
   /// Whether this is *the* surface the user is typing into — its tab is the one on
   /// screen **and** it is that tab's focused pane. Every tab stays mounted and a split
   /// has two live terminals, so without this the keyboard can end up parked on a surface
@@ -69,10 +75,13 @@ struct GhosttyTerminalView: NSViewRepresentable {
   func makeNSView(context: Context) -> TerminalSurfaceHostView {
     let host = TerminalSurfaceHostView()
     let view = TerminalSurfaceStore.shared.surface(for: surfaceID) {
-      GhosttyTerminalNSView(
-        command: command,
+      // Written once per surface build, not held: like `ZmxSessionLauncher`, rewriting
+      // on launch means the briefing never goes stale against an upgraded graphcode.
+      let briefingFile = self.briefingFile()
+      return GhosttyTerminalNSView(
+        command: command(briefingFile: briefingFile),
         workingDirectory: workingDirectory,
-        environment: initialPrompt.map { [Self.promptVariable: $0] } ?? [:])
+        environment: sessionEnvironment(briefingFile: briefingFile))
     }
     apply(to: view)
     host.adopt(view)
@@ -127,7 +136,9 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// `settings` is a parameter rather than a read inside the body so a test can state what
   /// a human chose and check what the shell is told — the omission this fixes was
   /// invisible precisely because there was nothing to assert against.
-  func agentCommand(settings: GraphcodeSettings = GraphcodeSettingsStore.load()) -> [String]? {
+  func agentCommand(
+    settings: GraphcodeSettings = GraphcodeSettingsStore.load(), briefingFile: URL? = nil
+  ) -> [String]? {
     guard let executable = backend.executableName else { return nil }
     let tier = ModelTier.resolved(
       pinned: pinnedModelTier, for: loopType, autoSelecting: settings.autoSelectsModel)
@@ -138,6 +149,22 @@ struct GhosttyTerminalView: NSViewRepresentable {
     var parts = ["exec", executable]
     if !model.isEmpty { parts.append(model) }
     if !permissions.isEmpty { parts.append(permissions) }
+    // The briefing, delivered the same per-backend way `BackendCommand.launchArguments`
+    // delivers it for a daemon-started session — before this, only daemon-started loops
+    // knew they could fan out, and a turn-based loop (which only ever starts here) asked
+    // to create more loops improvised with its backend's own sub-agents instead (the
+    // Copilot shape of issue #2). Claude takes the file itself as a flag; Copilot and
+    // Codex are granted the directory and pointed at the file inside their opening
+    // prompt — see `sessionEnvironment`, where the pointer rides in the env var and so
+    // needs no shell quoting.
+    if let briefingFile {
+      switch backend {
+      case .claudeCode:
+        parts.append("--append-system-prompt-file \(briefingFile.path)")
+      case .copilotCLI, .codex:
+        parts.append("--add-dir \(briefingFile.deletingLastPathComponent().path)")
+      }
+    }
     if !prompt.isEmpty {
       if backend == .copilotCLI { parts.append("--interactive") }
       parts.append(prompt)
@@ -145,9 +172,31 @@ struct GhosttyTerminalView: NSViewRepresentable {
     return ["/bin/zsh", "-i", "-l", "-c", parts.joined(separator: " ")]
   }
 
-  private var command: [String] {
+  /// Where the graph briefing for this session landed, or `nil` when it shouldn't get
+  /// one: a plain shell, a surface with no opening prompt to carry the pointer, a
+  /// briefing the human switched off, or nowhere to write.
+  func briefingFile(settings: GraphcodeSettings = GraphcodeSettingsStore.load()) -> URL? {
+    guard launchesClaudeCode, initialPrompt != nil, settings.briefsSessionsAboutTheGraph
+    else { return nil }
+    return SessionBriefing.write(projectPath: projectPath)
+  }
+
+  /// What rides into the session through the environment: the opening prompt, prefixed
+  /// for Copilot and Codex with the pointer at the briefing file. In the env var rather
+  /// than on the command line because the pointer is prose — inside `"$VAR"` it needs no
+  /// quoting and cannot break the shell string the command is joined into. Claude's
+  /// prompt stays untouched: its briefing arrives via `--append-system-prompt-file`.
+  func sessionEnvironment(briefingFile: URL?) -> [String: String] {
+    guard var prompt = initialPrompt else { return [:] }
+    if backend != .claudeCode, let briefingFile {
+      prompt = "\(SessionBriefing.pointer(toBriefingAt: briefingFile.path)) \(prompt)"
+    }
+    return [Self.promptVariable: prompt]
+  }
+
+  private func command(briefingFile: URL?) -> [String] {
     let shell = ["/bin/zsh", "-l"]
-    guard let agentCommand = agentCommand() else {
+    guard let agentCommand = agentCommand(briefingFile: briefingFile) else {
       // A backend graphcode can't launch gets a plain shell rather than the wrong agent.
       // `canHost` already refuses to create such a node, so this is unreachable in
       // practice and deliberately inert if it ever isn't.
