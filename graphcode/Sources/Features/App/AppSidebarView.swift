@@ -46,18 +46,22 @@ struct AppSidebarView: View {
           }
 
         if !collapsedProjectPaths.contains(project.id) {
-          let rootNodes = orderedRootNodes(in: project)
-          ForEach(rootNodes) { node in
-            nodeRowWithChildren(node, in: project)
+          let rows = flattenedNodeRows(in: project)
+          ForEach(rows) { entry in
+            nestedNodeRow(entry, in: project)
           }
           // Drag-to-reorder, scoped to this project's own ForEach: SwiftUI only moves
           // rows within the ForEach the modifier hangs off, which is exactly the rule —
           // a loop rearranges inside its project and can never be dropped into another.
+          // Only top-level rows reorder; a child's place is under its parent, so a drag
+          // that includes one is ignored rather than half-applied.
           .onMove { offsets, target in
-            var ids = rootNodes.map(\.id)
+            guard offsets.allSatisfy({ rows[$0].depth == 0 }) else { return }
+            var ids = rows.map(\.id)
             ids.move(fromOffsets: offsets, toOffset: target)
+            let rootIDs = ids.filter { id in rows.first { $0.id == id }?.depth == 0 }
             store.send(
-              .projects(.element(id: project.id, action: .sidebarNodesReordered(ids))))
+              .projects(.element(id: project.id, action: .sidebarNodesReordered(rootIDs))))
           }
         }
       }
@@ -343,39 +347,78 @@ struct AppSidebarView: View {
     }
   }
 
-  private func nodeRowWithChildren(_ node: LoopNode, in project: ProjectFeature.State) -> AnyView {
-    let children = project.graph.nodes.filter { child in
-      project.graph.edges.contains { $0.from == node.id && $0.to == child.id }
+  /// One visible row of the nested loop tree: the node, how deep it sits, and whether
+  /// it has children to disclose.
+  private struct NodeRowEntry: Identifiable {
+    let node: LoopNode
+    let depth: Int
+    let hasChildren: Bool
+    var id: UUID { node.id }
+  }
+
+  /// The loop tree flattened to the rows currently visible, depth-first — parents
+  /// first, each expanded parent followed by its children one level deeper. A flat
+  /// emission rather than nested `DisclosureGroup`s for the same reason the file
+  /// header gives for projects: the group's label swallows selection taps, and its
+  /// List styling outdents children instead of indenting them. `visited` guards
+  /// against edge cycles, which the graph explicitly allows (see `CycleGuard`).
+  private func flattenedNodeRows(in project: ProjectFeature.State) -> [NodeRowEntry] {
+    var rows: [NodeRowEntry] = []
+    var visited = Set<UUID>()
+
+    func orderedChildren(of parentID: UUID) -> [LoopNode] {
+      let childIDs = project.graph.edges.filter { $0.from == parentID }.map(\.to)
+      let order = project.sidebarNodeOrder
+      return childIDs.compactMap { project.graph.nodes[id: $0] }
+        .sorted { a, b in
+          (order.firstIndex(of: a.id) ?? .max) < (order.firstIndex(of: b.id) ?? .max)
+        }
     }
 
-    if children.isEmpty {
-      return AnyView(
-        nodeRow(for: node)
-          .tag(SidebarSelection.node(node.id))
-          .contextMenu { nodeMenu(for: node, in: project.id) })
+    func visit(_ node: LoopNode, depth: Int) {
+      guard visited.insert(node.id).inserted else { return }
+      let children = orderedChildren(of: node.id)
+      rows.append(NodeRowEntry(node: node, depth: depth, hasChildren: !children.isEmpty))
+      guard expandedNodeIDs.contains(node.id) else { return }
+      for child in children { visit(child, depth: depth + 1) }
     }
-    return AnyView(
-      DisclosureGroup(
-        isExpanded: Binding(
-          get: { expandedNodeIDs.contains(node.id) },
-          set: { expanded in
-            if expanded {
-              expandedNodeIDs.insert(node.id)
-            } else {
-              expandedNodeIDs.remove(node.id)
-            }
-          }
-        )
-      ) {
-        ForEach(children) { child in
-          nodeRowWithChildren(child, in: project)
-            .padding(.leading, 8)
+
+    for root in orderedRootNodes(in: project) { visit(root, depth: 0) }
+    return rows
+  }
+
+  /// A loop row at its place in the tree: indented one step per level — rightward,
+  /// under its parent — with a chevron only where there are children to show, the
+  /// same no-reserved-blank rule `projectHeaderRow` follows for its own chevron.
+  private func nestedNodeRow(_ entry: NodeRowEntry, in project: ProjectFeature.State) -> some View {
+    HStack(spacing: 4) {
+      if entry.hasChildren {
+        Button {
+          toggleNodeExpanded(entry.node.id)
+        } label: {
+          Image(
+            systemName: expandedNodeIDs.contains(entry.node.id)
+              ? "chevron.down" : "chevron.right"
+          )
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .frame(width: 12)
         }
-      } label: {
-        nodeRow(for: node)
-          .tag(SidebarSelection.node(node.id))
+        .buttonStyle(.plain)
       }
-      .contextMenu { nodeMenu(for: node, in: project.id) })
+      nodeRow(for: entry.node)
+    }
+    .padding(.leading, CGFloat(entry.depth) * 16)
+    .tag(SidebarSelection.node(entry.node.id))
+    .contextMenu { nodeMenu(for: entry.node, in: project.id) }
+  }
+
+  private func toggleNodeExpanded(_ id: UUID) {
+    if expandedNodeIDs.contains(id) {
+      expandedNodeIDs.remove(id)
+    } else {
+      expandedNodeIDs.insert(id)
+    }
   }
 
 }
