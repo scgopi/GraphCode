@@ -259,3 +259,6 @@ Building from source, development commands, and limitations are in the
 [MIT-licensed](https://github.com/scgopi/GraphCode/blob/main/LICENSE), built on the
 independent open-source projects [Ghostty](https://ghostty.org) and
 [zmx](https://zmx.sh).
+
+Questions, feedback, or just following along — find me on
+[X (@scgopi)](https://x.com/scgopi) or [LinkedIn](https://www.linkedin.com/in/scgopi/).
