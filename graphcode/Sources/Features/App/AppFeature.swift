@@ -224,6 +224,11 @@ struct AppFeature {
             .graphCommand(projectPath: projectPath, command: .stopNode(nodeID)))
         }
 
+      case .projects(.element(id: let path, action: .addNodeButtonTapped)):
+        // When creating a new loop from within an open loop, inherit its backend.
+        let parentBackend = state.openLoop?.node.backend
+        return .send(.projects(.element(id: path, action: .addNodeButtonTapped(parentBackend: parentBackend))))
+
       case .projects(.element(id: let path, action: .nodeTapped(let nodeID))):
         // Every loop type opens the same way. A time-based node used to be excluded
         // because it only existed as a headless `claude -p` the daemon fired on a timer;

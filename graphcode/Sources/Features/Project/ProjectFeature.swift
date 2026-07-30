@@ -85,7 +85,7 @@ struct ProjectFeature {
   enum Action: BindableAction {
     case binding(BindingAction<State>)
     case daemonEvent(DaemonEvent)
-    case addNodeButtonTapped
+    case addNodeButtonTapped(parentBackend: CLISessionBackendKind? = nil)
     case createNodeConfirmed
     case cancelNewNodeForm
     case nodeTapped(UUID)
@@ -147,7 +147,7 @@ struct ProjectFeature {
         }
         return .none
 
-      case .addNodeButtonTapped:
+      case .addNodeButtonTapped(let parentBackend):
         state.draftID = UUID()
         // Goal-based, matching `LoopType`'s own ordering and the segmented control's
         // first segment: a loop that starts itself and knows when it is finished is what
@@ -159,8 +159,8 @@ struct ProjectFeature {
         state.draftPrompt = ""
         state.draftGoal = ""
         state.draftPredicate = ""
-        // The human's default, not a hardcoded one (Settings → Sessions).
-        state.draftBackend = GraphcodeSettingsStore.load().defaultBackend
+        // Inherit parent backend if creating a child loop; otherwise use user's default.
+        state.draftBackend = parentBackend ?? GraphcodeSettingsStore.load().defaultBackend
         state.draftWorktree = .none
         state.draftBranch = ""
         state.showingNewNodeForm = true
