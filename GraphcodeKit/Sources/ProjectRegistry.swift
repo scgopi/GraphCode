@@ -208,16 +208,22 @@ public actor ProjectRegistry {
     return newStore
   }
 
-  /// The global graph's reserved path is a `graphcode://` URL, not a folder — running it
-  /// through `fileURLWithPath` would mangle it into a relative path under the cwd and
-  /// route its commands to a store that doesn't exist.
+  /// The global graph's reserved path is a `graphcode://` URL, and a remote project's
+  /// is an `ssh://` one — neither is a folder, and running either through
+  /// `fileURLWithPath` would mangle it into a relative path under the cwd and route its
+  /// commands to a store that doesn't exist.
   private static func canonicalize(_ path: String) -> String {
-    guard path != LoopGraphScope.globalPath else { return path }
+    guard path != LoopGraphScope.globalPath,
+      RemoteProjectLocation.parse(projectPath: path) == nil
+    else { return path }
     return URL(fileURLWithPath: path).resolvingSymlinksInPath().path
   }
 
   private static func displayName(for path: String) -> String {
-    URL(fileURLWithPath: path).lastPathComponent
+    if let remote = RemoteProjectLocation.parse(projectPath: path) {
+      return remote.displayName
+    }
+    return URL(fileURLWithPath: path).lastPathComponent
   }
 
   // MARK: - Unicast reply

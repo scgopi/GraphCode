@@ -12,6 +12,12 @@ import SwiftUI
 struct NodeDraftForm: View {
   @Bindable var store: StoreOf<ProjectFeature>
 
+  /// Whether this graph's repository lives on another machine — see
+  /// `RemoteProjectLocation`. Drives which bindings the form can honestly offer.
+  private var isRemoteProject: Bool {
+    RemoteProjectLocation.parse(projectPath: store.graph.project.path) != nil
+  }
+
   var body: some View {
     VStack(spacing: 12) {
       Text("New Loop Node").font(.headline)
@@ -96,18 +102,23 @@ struct NodeDraftForm: View {
 
         // Every node type also gets a worktree binding and a backend, per
         // docs/06-ux-terminals.md#node-configuration-panel. Optional on purpose: a
-        // research or review loop has nothing to isolate.
-        Picker("Worktree", selection: $store.draftWorktree) {
-          Text("None").tag(ProjectFeature.WorktreeSelection.none)
-          ForEach(store.availableWorktrees) { worktree in
-            Text(worktree.branch).tag(ProjectFeature.WorktreeSelection.existing(worktree))
+        // research or review loop has nothing to isolate. Hidden for a remote project:
+        // worktrees would have to be created on the remote host, which v1 doesn't do
+        // (docs/09-remote-repositories.md), and offering a picker whose every choice
+        // fails is worse than not asking.
+        if !isRemoteProject {
+          Picker("Worktree", selection: $store.draftWorktree) {
+            Text("None").tag(ProjectFeature.WorktreeSelection.none)
+            ForEach(store.availableWorktrees) { worktree in
+              Text(worktree.branch).tag(ProjectFeature.WorktreeSelection.existing(worktree))
+            }
+            Text("New branch…").tag(ProjectFeature.WorktreeSelection.newBranch)
           }
-          Text("New branch…").tag(ProjectFeature.WorktreeSelection.newBranch)
-        }
 
-        if store.draftWorktree == .newBranch {
-          TextField("Branch", text: $store.draftBranch, prompt: Text("branch name"))
-            .font(.system(.body, design: .monospaced))
+          if store.draftWorktree == .newBranch {
+            TextField("Branch", text: $store.draftBranch, prompt: Text("branch name"))
+              .font(.system(.body, design: .monospaced))
+          }
         }
 
         BackendPicker(selection: $store.draftBackend, loopType: store.draftLoopType)

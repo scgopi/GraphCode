@@ -205,8 +205,13 @@ public enum ZmxSessionLauncher {
     // Read per launch, not cached: changing a setting in the app then applies to the very
     // next loop the daemon starts, with nothing to restart.
     let settings = GraphcodeSettingsStore.load()
+    // No briefing for a remote project's session: the file is written on *this* machine
+    // and the session runs on another, and the CLI it describes talks to a daemon the
+    // remote host can't reach. A remote loop that can't fan out is a stated v1
+    // limitation (docs/09-remote-repositories.md), not a silent failure.
+    let remote = projectPath.flatMap { RemoteProjectLocation.parse(projectPath: $0) }
     let briefingFile =
-      settings.briefsSessionsAboutTheGraph
+      settings.briefsSessionsAboutTheGraph && remote == nil
       ? SessionBriefing.write(projectPath: projectPath) : nil
     // Both the executable and the shape of its arguments come from the node's backend —
     // `claude` takes its prompt positionally and its briefing via `--append-system-prompt`,
@@ -249,9 +254,17 @@ public enum ZmxSessionLauncher {
   /// it was branched from — see `CopilotPermissions.readableDirectories`.
   ///
   /// The global graph's reserved `graphcode://` path names no directory and is dropped.
+  /// A remote project contributes its *remote* path — the directory as the session
+  /// running on that host sees it, which is the one a path-verifying backend needs.
   static func workspacePaths(forNode node: LoopNode, projectPath: String?) -> [String] {
     var paths: [String] = []
-    if let projectPath, !projectPath.hasPrefix("graphcode://") { paths.append(projectPath) }
+    if let projectPath, !projectPath.hasPrefix("graphcode://") {
+      if let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+        paths.append(remote.remotePath)
+      } else {
+        paths.append(projectPath)
+      }
+    }
     if let worktree = node.worktreeBinding?.worktreePath { paths.append(worktree) }
     return paths
   }
@@ -303,7 +316,68 @@ public enum ZmxSessionLauncher {
     return projectPath
   }
 
+  // MARK: - Remote projects
+
+  /// The local `ssh` argv that checks whether a remote node's session exists — the same
+  /// `zmx get` exit-status test as local, run on the host the session lives on.
+  static func remoteExistenceInvocation(
+    forNode node: LoopNode, at location: RemoteProjectLocation
+  ) -> [String] {
+    let script = quotedCommand(["zmx"] + existenceCheckArguments(forNode: node))
+    return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+  }
+
+  /// The local `ssh` argv that starts a remote node's session, or `nil` when the node
+  /// has nothing to run. The zmx argv is exactly the local one — session name, detach,
+  /// nested login shell, backend command — assembled into one quoted string, because ssh
+  /// joins its arguments with spaces and hands them to the remote shell. `cd` first so
+  /// the session opens in the repository, the remote twin of `workingDirectory`.
+  static func remoteLaunchInvocation(
+    forNode node: LoopNode, at location: RemoteProjectLocation
+  ) -> [String]? {
+    guard let zmxArguments = arguments(forNode: node, projectPath: location.projectPath)
+    else { return nil }
+    let script =
+      "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && "
+      + quotedCommand(["zmx"] + zmxArguments)
+    return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+  }
+
+  /// One argv as one shell-safe string — each argument quoted, so a prompt containing
+  /// quotes, `$(…)`, or `;` stays one word through the remote shell exactly as it does
+  /// through zmx's own quoting locally. Public because the app's remote *attach* is
+  /// built from the same pieces (`GhosttyTerminalView.remoteCommand`).
+  public static func quotedCommand(_ argv: [String]) -> String {
+    argv.map(RemoteProjectLocation.shellQuoted).joined(separator: " ")
+  }
+
+  private static func startRemote(_ node: LoopNode, at location: RemoteProjectLocation) async {
+    guard let launch = remoteLaunchInvocation(forNode: node, at: location) else { return }
+    let existence = remoteExistenceInvocation(forNode: node, at: location)
+    do {
+      // Create only, same as local: a live remote session is the loop still running,
+      // and re-sending the command would type into it.
+      let existing = try PTYProcessSession(
+        executable: existence[0], arguments: Array(existence.dropFirst()))
+      guard await !existing.waitUntilFinished() else { return }
+
+      let session = try PTYProcessSession(
+        executable: launch[0], arguments: Array(launch.dropFirst()))
+      _ = await session.waitUntilFinished()
+    } catch {
+      // Same posture as the local path: no UI here, the node's state stays honest, and
+      // opening the loop retries.
+      return
+    }
+  }
+
   static func start(_ node: LoopNode, projectPath: String? = nil) async {
+    // A remote project's session starts on the remote host — local zmx isn't involved
+    // and doesn't need to be installed for it.
+    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+      await startRemote(node, at: remote)
+      return
+    }
     guard ZmxLocator.isInstalled else { return }
     guard let arguments = arguments(forNode: node, projectPath: projectPath) else { return }
 

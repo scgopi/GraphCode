@@ -60,12 +60,44 @@ struct WelcomeFeature {
     }
   }
 
+  /// What the add-remote-repository sheet is collecting. Validation runs in-feature so
+  /// a failure surfaces in the sheet's footer and the sheet stays open — the same
+  /// arrangement the clone form uses, for the same reason.
+  struct RemoteDraft: Equatable {
+    var server = ""
+    var port = ""
+    var user = ""
+    var remotePath = ""
+    var isValidating = false
+    var failureMessage: String?
+
+    /// The location the fields currently describe, or `nil` while they don't describe
+    /// one — the Add button's enablement. The path must be absolute: `~` means nothing
+    /// until a shell on the *remote* machine expands it, and storing it unexpanded
+    /// would bake the ambiguity into the project's identity.
+    var location: RemoteProjectLocation? {
+      let host = server.trimmingCharacters(in: .whitespaces)
+      let path = remotePath.trimmingCharacters(in: .whitespaces)
+      let userName = user.trimmingCharacters(in: .whitespaces)
+      let portText = port.trimmingCharacters(in: .whitespaces)
+      guard !host.isEmpty, path.hasPrefix("/") else { return nil }
+      let portNumber = portText.isEmpty ? nil : Int(portText)
+      if !portText.isEmpty, portNumber == nil { return nil }
+      return RemoteProjectLocation(
+        user: userName.isEmpty ? nil : userName, host: host, port: portNumber,
+        remotePath: path)
+    }
+
+    var canSubmit: Bool { location != nil && !isValidating }
+  }
+
   @ObservableState
   struct State: Equatable {
     var recentProjects: [ProjectRef] = []
     var isOpenPanelPresented = false
     var errorMessage: String?
     var cloneDraft: CloneDraft?
+    var remoteDraft: RemoteDraft?
     /// The clone sheet's own folder picker, for choosing `locationPath`. A sibling of
     /// `isOpenPanelPresented` rather than a reuse of it: that one's `fileImporter`
     /// opens a project, and a location pick must not.
@@ -85,6 +117,11 @@ struct WelcomeFeature {
     case cloneProgress(String)
     case cloneFinished(path: String)
     case cloneFailed(String)
+    case addRemoteRepositoryButtonTapped
+    case remoteSubmitted
+    case remoteCancelled
+    case remoteValidated(projectPath: String)
+    case remoteValidationFailed(String)
   }
 
   /// Remembers the last clone location across launches, so a burst of clones doesn't
@@ -92,10 +129,14 @@ struct WelcomeFeature {
   /// `GraphcodeSettings`: this is UI memory, not configuration anyone chose.
   static let lastCloneLocationKey = "lastCloneLocationPath"
 
-  private enum CancelID { case clone }
+  private enum CancelID {
+    case clone
+    case remoteValidation
+  }
 
   @Dependency(\.orchestratorClient) var orchestratorClient
   @Dependency(\.gitClient) var gitClient
+  @Dependency(\.remoteRepositoryClient) var remoteRepositoryClient
 
   var body: some ReducerOf<Self> {
     BindingReducer()
@@ -105,6 +146,10 @@ struct WelcomeFeature {
         // Any edit clears the last failure so a stale message doesn't outlive the
         // input that caused it.
         state.cloneDraft?.failureMessage = nil
+        return .none
+
+      case .binding(\.remoteDraft):
+        state.remoteDraft?.failureMessage = nil
         return .none
 
       case .binding:
@@ -206,6 +251,42 @@ struct WelcomeFeature {
       case .cloneCancelled:
         state.cloneDraft = nil
         return .cancel(id: CancelID.clone)
+
+      case .addRemoteRepositoryButtonTapped:
+        state.remoteDraft = RemoteDraft()
+        return .none
+
+      case .remoteSubmitted:
+        guard var draft = state.remoteDraft, let location = draft.location, draft.canSubmit
+        else { return .none }
+        draft.isValidating = true
+        draft.failureMessage = nil
+        state.remoteDraft = draft
+        return .run { send in
+          if let failure = await remoteRepositoryClient.validate(location) {
+            await send(.remoteValidationFailed(failure))
+          } else {
+            await send(.remoteValidated(projectPath: location.projectPath))
+          }
+        }
+        .cancellable(id: CancelID.remoteValidation, cancelInFlight: true)
+
+      case .remoteValidated(let projectPath):
+        // A validated connection opens like any other project — the ssh:// path is the
+        // project's identity from here on (see `RemoteProjectLocation`).
+        state.remoteDraft = nil
+        return .run { _ in
+          try? await orchestratorClient.send(.openProject(path: projectPath))
+        }
+
+      case .remoteValidationFailed(let message):
+        state.remoteDraft?.isValidating = false
+        state.remoteDraft?.failureMessage = message
+        return .none
+
+      case .remoteCancelled:
+        state.remoteDraft = nil
+        return .cancel(id: CancelID.remoteValidation)
       }
     }
   }

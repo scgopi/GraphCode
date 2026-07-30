@@ -95,6 +95,14 @@ struct AppSidebarView: View {
     ) {
       CloneRepositoryFormView(store: store.scope(state: \.welcome, action: \.welcome))
     }
+    .sheet(
+      isPresented: Binding(
+        get: { store.welcome.remoteDraft != nil },
+        set: { if !$0 { store.send(.welcome(.remoteCancelled)) } }
+      )
+    ) {
+      RemoteRepositoryFormView(store: store.scope(state: \.welcome, action: \.welcome))
+    }
     .confirmationDialog(
       "Delete this project's loops?",
       isPresented: Binding(
@@ -142,6 +150,12 @@ struct AppSidebarView: View {
         store.send(.welcome(.cloneRepositoryButtonTapped))
       } label: {
         Label("Clone Repository…", systemImage: "square.and.arrow.down.on.square")
+      }
+      // A repository on another machine, over SSH — loops run there, this Mac steers.
+      Button {
+        store.send(.welcome(.addRemoteRepositoryButtonTapped))
+      } label: {
+        Label("Add Remote Repository…", systemImage: "network")
       }
       if !store.welcome.recentProjects.isEmpty {
         Divider()

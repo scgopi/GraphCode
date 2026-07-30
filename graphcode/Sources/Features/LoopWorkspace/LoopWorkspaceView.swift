@@ -190,8 +190,10 @@ struct LoopWorkspaceView: View {
       // should open there, not wherever the app process happened to launch from.
       workingDirectory: store.node.worktreeBinding?.worktreePath ?? store.projectPath,
       // The graph's own project, for the session briefing — deliberately not the
-      // worktree, whose path names a graph that doesn't exist.
-      projectPath: ref.launchesClaudeCode ? store.projectPath : nil,
+      // worktree, whose path names a graph that doesn't exist. Every surface gets it,
+      // not just the agent's: a remote project's plain-shell tabs open on the remote
+      // host, and which host that is lives in this path.
+      projectPath: store.projectPath,
       // Only *one* surface in the whole workspace is the live one: the showing tab's
       // focused pane. Every other surface stays mounted and must not hold the keyboard —
       // including the other half of this tab's own split, which is what stops both panes

@@ -80,7 +80,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
       let briefingFile = self.briefingFile()
       return GhosttyTerminalNSView(
         command: command(briefingFile: briefingFile),
-        workingDirectory: workingDirectory,
+        workingDirectory: effectiveWorkingDirectory,
         environment: sessionEnvironment(briefingFile: briefingFile))
     }
     apply(to: view)
@@ -174,11 +174,27 @@ struct GhosttyTerminalView: NSViewRepresentable {
 
   /// Where the graph briefing for this session landed, or `nil` when it shouldn't get
   /// one: a plain shell, a surface with no opening prompt to carry the pointer, a
-  /// briefing the human switched off, or nowhere to write.
+  /// briefing the human switched off, nowhere to write — or a remote project, whose
+  /// session runs on a machine this file was never written to (a stated v1 limitation,
+  /// docs/09-remote-repositories.md).
   func briefingFile(settings: GraphcodeSettings = GraphcodeSettingsStore.load()) -> URL? {
-    guard launchesClaudeCode, initialPrompt != nil, settings.briefsSessionsAboutTheGraph
+    guard launchesClaudeCode, initialPrompt != nil, settings.briefsSessionsAboutTheGraph,
+      remoteLocation == nil
     else { return nil }
     return SessionBriefing.write(projectPath: projectPath)
+  }
+
+  /// Non-nil when this surface's project lives on another machine — the branch every
+  /// remote decision hangs off. See `RemoteProjectLocation`.
+  var remoteLocation: RemoteProjectLocation? {
+    projectPath.flatMap { RemoteProjectLocation.parse(projectPath: $0) }
+  }
+
+  /// The local working directory for the surface's process. A remote project's path
+  /// names no local folder — the `cd` happens inside the ssh command instead — and
+  /// handing Ghostty a directory that doesn't exist would fail the spawn outright.
+  var effectiveWorkingDirectory: String? {
+    remoteLocation == nil ? workingDirectory : nil
   }
 
   /// What rides into the session through the environment: the opening prompt, prefixed
@@ -194,7 +210,39 @@ struct GhosttyTerminalView: NSViewRepresentable {
     return [Self.promptVariable: prompt]
   }
 
+  /// The `ssh -t … zmx attach` argv for a surface whose project is remote — both kinds:
+  /// an agent surface attaches (or creates) the loop's session on the remote host, and a
+  /// plain shell opens a remote shell in the repository, which is the shell a remote
+  /// project's extra tabs should give you.
+  ///
+  /// The opening prompt cannot ride in through the local environment the way it does
+  /// locally: sshd does not accept arbitrary client env. It is assigned inside the
+  /// remote command instead, single-quote-escaped, where the session's shell — spawned
+  /// by remote zmx under this very process — inherits it and expands the same
+  /// `"$GRAPHCODE_TRIGGER_PROMPT"` reference the local path uses.
+  func remoteCommand(
+    at location: RemoteProjectLocation, settings: GraphcodeSettings
+  ) -> [String] {
+    let quoted = RemoteProjectLocation.shellQuoted
+    var script = "cd \(quoted(location.remotePath)) && "
+    guard launchesClaudeCode, let agentCommand = agentCommand(settings: settings) else {
+      script += ZmxSessionLauncher.quotedCommand(["zmx", "attach", sessionName])
+      return location.sshInvocation(
+        remoteCommand: location.remoteLoginShellCommand(script), interactive: true)
+    }
+    if let prompt = initialPrompt {
+      script += "export \(Self.promptVariable)=\(quoted(prompt)) && "
+    }
+    script += ZmxSessionLauncher.quotedCommand(["zmx", "attach", sessionName] + agentCommand)
+    return location.sshInvocation(
+      remoteCommand: location.remoteLoginShellCommand(script), interactive: true)
+  }
+
   private func command(briefingFile: URL?) -> [String] {
+    // A remote project's surfaces live on the remote host, local zmx or not.
+    if let location = remoteLocation {
+      return remoteCommand(at: location, settings: GraphcodeSettingsStore.load())
+    }
     let shell = ["/bin/zsh", "-l"]
     guard let agentCommand = agentCommand(briefingFile: briefingFile) else {
       // A backend graphcode can't launch gets a plain shell rather than the wrong agent.

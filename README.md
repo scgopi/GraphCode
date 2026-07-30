@@ -77,9 +77,11 @@ current release.
 
 ## Using it
 
-1. **Add a folder** — the sidebar's ⊕ menu. It becomes a project with its own graph. Whatever
-   was open is restored next launch; right-click a project to Close, Remove, or delete its
-   loops.
+1. **Add a project** — the sidebar's ⊕ menu: open a local folder, **clone a repository
+   from a URL**, or **add a remote repository over SSH** (key auth and zmx on the server
+   required — loops then run on the server while this Mac steers them). Each becomes a
+   project with its own graph. Whatever was open is restored next launch; right-click a
+   project to Close, Remove, or delete its loops.
 2. **Create a loop** — ⊕ on the canvas. Write the prompt and hit Create: the form opens
    on goal-based, and the title is optional — leave it blank and GraphCode asks the loop's
    own backend for a name. For a time-based loop put the cadence in the prompt itself:
@@ -151,6 +153,11 @@ Design docs live in `docs/` and are kept local (gitignored) for now.
   instance) — the queued command runs only after the profile finishes.
 - **Sessions aren't reaped.** Long-lived `graphcode-*` zmx sessions accumulate; list them
   with `zmx list` and remove dead ones with `zmx kill`.
+- **Remote repositories are attach-first.** Loops on an SSH remote launch and attach
+  fine, but deleting one doesn't kill its remote session, message edges into remote
+  loops report undelivered, presence/usage read "not reported", and worktrees and
+  loop fan-out aren't available there yet. And a sleeping Mac fires no edges — the
+  daemon stays local by design.
 
 ## Inspiration & third-party
 
