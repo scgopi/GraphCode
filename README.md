@@ -7,7 +7,7 @@ and steer mid-run — not headless jobs that report back when they're done.
 
 > Early and moving. Expect rough edges, and see [Known limitations](#known-limitations).
 
-![GraphCode Graph View](docs/screenshots/graph-view.png)
+![GraphCode Graph View](screenshots/graph-view.png)
 
 ## The idea
 
