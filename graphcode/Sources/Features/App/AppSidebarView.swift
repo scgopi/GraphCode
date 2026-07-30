@@ -22,6 +22,9 @@ struct AppSidebarView: View {
   /// confirmation dialog. Local view state: nothing outside this pane needs to know a
   /// dialog is up, and nothing should persist if the app quits mid-prompt.
   @State private var projectPendingLoopDeletion: ProjectFeature.State?
+  /// The project the Delete dialog is asking about — remove from GraphCode only, or
+  /// move the folder to the Trash too. Same local-state rationale as above.
+  @State private var projectPendingDelete: ProjectFeature.State?
   /// Nodes that are expanded to show their children in the sidebar.
   @State private var expandedNodeIDs: Set<UUID> = []
 
@@ -137,6 +140,35 @@ struct AppSidebarView: View {
         The folder itself is not touched.
         """)
     }
+    .confirmationDialog(
+      "Delete this project?",
+      isPresented: Binding(
+        get: { projectPendingDelete != nil },
+        set: { if !$0 { projectPendingDelete = nil } }
+      ),
+      presenting: projectPendingDelete
+    ) { project in
+      Button("Remove from GraphCode") {
+        store.send(.projectRemoveTapped(project.id))
+        projectPendingDelete = nil
+      }
+      // A remote project's folder lives on another machine — offering to trash it
+      // locally would be a lie, so the choice narrows to removal.
+      if RemoteProjectLocation.parse(projectPath: project.id) == nil {
+        Button("Move Folder to Trash", role: .destructive) {
+          store.send(.projectDeleteFromDiskConfirmed(project.id))
+          projectPendingDelete = nil
+        }
+      }
+      Button("Cancel", role: .cancel) { projectPendingDelete = nil }
+    } message: { project in
+      Text(
+        """
+        Remove \(project.graph.project.name) from GraphCode — its saved loops survive \
+        for whenever you re-add it — or also delete its loops and move the folder to \
+        the Trash, where it stays recoverable.
+        """)
+    }
   }
 
   /// Three verbs, deliberately distinct: closing is reversible from the Add Folder menu,
@@ -152,6 +184,9 @@ struct AppSidebarView: View {
     Button("Remove from GraphCode") { store.send(.projectRemoveTapped(project.id)) }
     Divider()
     Button("Delete Loops…", role: .destructive) { projectPendingLoopDeletion = project }
+    Button("Delete \"\(project.graph.project.name)\"…", role: .destructive) {
+      projectPendingDelete = project
+    }
   }
 
   private var addFolderMenu: some View {

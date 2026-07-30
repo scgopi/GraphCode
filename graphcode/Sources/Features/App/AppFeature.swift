@@ -81,6 +81,11 @@ struct AppFeature {
     case projectRemoveTapped(String)
     /// Discard a project's saved loops for good — the view confirms before sending this.
     case projectDeleteLoopsConfirmed(String)
+    /// Remove the project from GraphCode *and* move its folder to the Trash — the
+    /// view's Delete dialog confirms before sending this. Trash rather than a hard
+    /// delete, so a mistaken click stays recoverable.
+    case projectDeleteFromDiskConfirmed(String)
+    case projectDeleteFromDiskFailed(String)
     /// Step a project one slot up or down the sidebar. Within the sidebar only — the
     /// Graph row stays pinned at the front, and a project never leaves the list.
     case projectMoveUpTapped(String)
@@ -208,6 +213,28 @@ struct AppFeature {
         removeFromSidebar(&state, path: path)
         state.welcome.recentProjects.removeAll { $0.path == path }
         return .run { _ in try? await orchestratorClient.send(.deleteProjectGraph(path: path)) }
+
+      case .projectDeleteFromDiskConfirmed(let path):
+        // Never the Graph row, and never a remote project — its folder lives on
+        // another machine, so "delete from disk" would be a lie about what happened.
+        guard !isGlobal(path), RemoteProjectLocation.parse(projectPath: path) == nil
+        else { return .none }
+        removeFromSidebar(&state, path: path)
+        state.welcome.recentProjects.removeAll { $0.path == path }
+        return .run { send in
+          try? await orchestratorClient.send(.deleteProjectGraph(path: path))
+          try? await orchestratorClient.send(.forgetProject(path: path))
+          do {
+            try FileManager.default.trashItem(
+              at: URL(fileURLWithPath: path), resultingItemURL: nil)
+          } catch {
+            await send(.projectDeleteFromDiskFailed(String(describing: error)))
+          }
+        }
+
+      case .projectDeleteFromDiskFailed(let message):
+        state.welcome.errorMessage = "Couldn't move the folder to the Trash: \(message)"
+        return .none
 
       case .projectMoveUpTapped(let path):
         // The Graph row (isGlobal, always index 0 when present) never moves and is
