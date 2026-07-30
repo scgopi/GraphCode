@@ -145,13 +145,9 @@ Design docs live in `docs/` and are kept local (gitignored) for now.
 
 ## Inspiration & third-party
 
-GraphCode is inspired by [Supacode](https://github.com/supabitapp/supacode), a native macOS
-command center for running coding agents in parallel, and shares its architectural spine —
-real terminal sessions kept alive by a session daemon rather than owned by the app.
-Supacode's unit is the worktree; GraphCode's is the graph of loops on top.
-
-Built on [Ghostty](https://ghostty.org) and [zmx](https://zmx.sh) — independent open-source
-projects, vendored as submodules under `ThirdParty/`.
+Inspired by [Supacode](https://supacode.sh) — same spine of daemon-kept terminal sessions;
+its unit is the worktree, GraphCode's is the graph of loops. Built on
+[Ghostty](https://ghostty.org) and [zmx](https://zmx.sh), vendored under `ThirdParty/`.
 
 ## License
 
