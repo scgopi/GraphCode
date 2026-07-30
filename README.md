@@ -80,11 +80,15 @@ current release.
 1. **Add a folder** — the sidebar's ⊕ menu. It becomes a project with its own graph. Whatever
    was open is restored next launch; right-click a project to Close, Remove, or delete its
    loops.
-2. **Create a loop** — ⊕ on the canvas. Pick a type; the form changes to match. For a
-   time-based loop put the cadence in the prompt itself: `/loop 1h Check for new reports`.
+2. **Create a loop** — ⊕ on the canvas. Write the prompt and hit Create: the form opens
+   on goal-based, and the title is optional — leave it blank and GraphCode asks the loop's
+   own backend for a name. For a time-based loop put the cadence in the prompt itself:
+   `/loop 1h Check for new reports`.
 3. **Open it** — click the node. You get its terminal workspace: tabs (⌘T), splits (⌘D /
-   ⌘⇧D), and ⌘1–9 to switch. Every loop type opens the same way, including ones the daemon
-   started on its own — you're attaching to the live session, not a copy of its output.
+   ⌘⇧D — split as many times as you like), ⌘1–9 to switch tabs, ⌘]/⌘[ to move between a
+   split's panes, and ⇧⌘]/⇧⌘[ to step between loops. Every loop type opens the same way,
+   including ones the daemon started on its own — you're attaching to the live session,
+   not a copy of its output.
 4. **Connect loops** — drag between nodes. An edge is a hand-off by default (fires when the
    source resolves); it can also be a message or a spawn, with a condition and a cycle guard.
 
@@ -136,8 +140,10 @@ Design docs live in `docs/` and are kept local (gitignored) for now.
 
 - **Apple Silicon only.** GhosttyKit is built for the native architecture; there is no
   x86_64 slice, so a universal build won't link.
-- **Claude Code is the only working backend.** Copilot CLI and Codex exist in the model and
-  the picker refuses pairings it can't host, but only Claude Code is wired end to end.
+- **Claude Code is the most complete backend.** Copilot CLI and Codex sessions launch, run,
+  and can fan work out into new loops, but mid-session messaging and reported presence are
+  only wired for Claude Code — and the picker refuses pairings a backend can't host
+  (time-based needs the session to re-trigger itself; composites need verified sub-agents).
 - **A new folder stops at Claude's trust prompt.** An unattended loop started by the daemon
   in a folder Claude hasn't seen waits at *"Do you trust this folder?"* and shows as
   `running` while doing nothing. Attach once and answer it.

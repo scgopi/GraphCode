@@ -183,6 +183,13 @@ The opening prompt itself is computed in exactly one place (`LoopNode.sessionPro
 shared by the daemon and the app, so the two can never disagree about what a loop starts
 with.
 
+Every session also receives a **briefing** about the graph it runs inside — a file
+explaining the loop types and the `graphcode` CLI, delivered however its backend takes
+instructions (Claude Code as a system-prompt file, Copilot and Codex as a pointer the
+session is granted access to read). That's what lets a loop asked to "fix each of these
+five issues" create five sibling loops instead of grinding through them in sequence —
+fan-out is a capability of every session, whichever of the two launchers started it.
+
 ### Presence and usage: reported, never estimated
 
 GraphCode cannot see inside a running `claude`. Rather than guess, it reads per-session
@@ -210,9 +217,10 @@ wiped*. A graph saved by last month's build always loads in today's.
 
 ### What runs today
 
-Claude Code is the only backend wired end to end (Copilot CLI and Codex exist in the
-model; the picker refuses pairings it can't host). The full current list of rough edges
-lives in the README's
+Claude Code is the most complete backend. Copilot CLI and Codex sessions launch, run,
+and can fan work out into new loops; mid-session messaging and reported presence are
+still Claude Code-only, and the picker refuses pairings a backend can't host. The full
+current list of rough edges lives in the README's
 [Known limitations](https://github.com/scgopi/GraphCode#known-limitations).
 
 ---
@@ -222,7 +230,8 @@ lives in the README's
 1. **[Download GraphCode (.dmg, latest release)](https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg)** —
    drag GraphCode to Applications; that's the whole install. Releases are Developer ID
    signed and notarized.
-2. Add a folder, create a loop, and connect a second one with an edge.
+2. Add a folder, create a loop — just write the goal; the title is optional, GraphCode
+   names it for you — and connect a second one with an edge.
 3. Close the app whenever you like — the loops won't notice.
 
 Building from source, development commands, and limitations are in the
