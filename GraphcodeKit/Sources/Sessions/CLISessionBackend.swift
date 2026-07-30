@@ -57,22 +57,35 @@ public struct CLISessionBackend: Sendable {
 }
 
 extension CLISessionBackend {
+  /// The adapter every spiked backend shares, parameterized only by kind.
+  ///
+  /// All five operations go through `zmx`, which is what makes them work with no app
+  /// running — and what makes them backend-*agnostic*: the session is a real detached
+  /// PTY the daemon can start, inspect, type into, and kill whether it's running
+  /// `claude`, `copilot`, or `codex`. What differs per backend is the launch command,
+  /// and `ZmxSessionLauncher` already builds that from `node.backend`.
+  ///
+  /// This used to exist only as `claudeCode`, with Copilot and Codex still routed to
+  /// `unspiked` from before they were wired — which made every daemon-side operation on
+  /// their loops a silent no-op: a goal-based Copilot loop was created as a node that
+  /// *looked* running but had no session until a human opened it, deleting one left its
+  /// session alive forever, and message edges into one always failed.
+  public static func zmxBacked(_ kind: CLISessionBackendKind) -> CLISessionBackend {
+    CLISessionBackend(
+      kind: kind,
+      launch: { node, projectPath in
+        await ZmxSessionLauncher.start(node, projectPath: projectPath)
+      },
+      terminate: { node in await ZmxSessionLauncher.kill(node) },
+      sendInput: { node, text in await ZmxSessionLauncher.send(text, to: node) },
+      presence: { node in await ZmxSessionLauncher.presence(of: node) },
+      usage: { node in await ZmxSessionLauncher.usage(of: node) }
+    )
+  }
+
   /// The reference backend — every other capability row is diffed against this one,
   /// since Claude Code is what graphcode itself is built in.
-  ///
-  /// All four operations go through `zmx`, which is what makes them work with no app
-  /// running: the session is a real detached PTY the daemon can start, inspect, and type
-  /// into whether or not anything is attached to it.
-  public static let claudeCode = CLISessionBackend(
-    kind: .claudeCode,
-    launch: { node, projectPath in
-      await ZmxSessionLauncher.start(node, projectPath: projectPath)
-    },
-    terminate: { node in await ZmxSessionLauncher.kill(node) },
-    sendInput: { node, text in await ZmxSessionLauncher.send(text, to: node) },
-    presence: { node in await ZmxSessionLauncher.presence(of: node) },
-    usage: { node in await ZmxSessionLauncher.usage(of: node) }
-  )
+  public static let claudeCode = zmxBacked(.claudeCode)
 
   /// A backend graphcode knows the name of but has not been spiked against
   /// (docs/07-roadmap.md#phase-5--multi-backend).
@@ -80,8 +93,9 @@ extension CLISessionBackend {
   /// Every operation is a no-op that reports failure rather than a plausible-looking
   /// guess at the CLI's flags. An adapter that *looks* implemented but invokes a command
   /// nobody has run is worse than an honest stub: it turns "we haven't done this yet"
-  /// into a silent runtime failure a user has to debug. `canHost` already keeps these
-  /// backends to turn-based loops, where a human drives the session directly.
+  /// into a silent runtime failure a user has to debug. All three current backends are
+  /// spiked, so nothing reaches this today — it exists for the next backend added to the
+  /// enum before anyone has run its CLI.
   public static func unspiked(_ kind: CLISessionBackendKind) -> CLISessionBackend {
     CLISessionBackend(
       kind: kind,
@@ -93,11 +107,11 @@ extension CLISessionBackend {
     )
   }
 
+  /// Spiked backends share the zmx-backed adapter — the operations are session-level,
+  /// not agent-level, so they never needed a per-backend implementation. `unspiked`
+  /// remains the honest stub for any backend added to the enum before it's been run.
   public static func backend(for kind: CLISessionBackendKind) -> CLISessionBackend {
-    switch kind {
-    case .claudeCode: return .claudeCode
-    case .copilotCLI, .codex: return .unspiked(kind)
-    }
+    kind.isSpiked ? zmxBacked(kind) : unspiked(kind)
   }
 
   /// The adapter a node's own `backend` selects. One lookup so no call site has to

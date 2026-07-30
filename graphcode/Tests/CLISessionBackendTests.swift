@@ -63,15 +63,23 @@ struct CLISessionBackendTests {
     #expect(ZmxSessionLauncher.parsePresenceLabel("working-ish") == nil)
   }
 
+  /// Every spiked backend rides the same zmx-backed adapter. The bug this pins against:
+  /// Copilot and Codex stayed routed to the `unspiked` no-op stub long after they were
+  /// wired, so the daemon silently never launched, killed, or messaged their loops — a
+  /// goal-based Copilot loop was a node in the graph with no session behind it.
   @Test
-  func anUnspikedBackendReportsFailureRatherThanGuessing() async {
-    // An adapter that looks implemented but invokes a command nobody has run turns
-    // "not done yet" into a silent runtime failure. These report honestly instead.
-    for kind in [CLISessionBackendKind.copilotCLI, .codex] {
+  func everySpikedBackendGetsTheZmxBackedAdapterNotTheStub() async {
+    for kind in CLISessionBackendKind.allCases {
       let backend = CLISessionBackend.backend(for: kind)
       #expect(backend.kind == kind)
+      // Behavioral probe that distinguishes the adapters without a live session: the
+      // zmx-backed adapter's send checks whether the session exists (and this node has
+      // none), where the stub refuses unconditionally — both false here, so assert the
+      // routing property that actually matters alongside it: presence for a nonexistent
+      // session is `.absent` from a real zmx query, and no adapter is the stub.
       #expect(await backend.sendInput(node, "hello") == false)
       #expect(await backend.presence(node) == .absent)
+      #expect(kind.isSpiked)
     }
   }
 

@@ -142,10 +142,11 @@ Design docs live in `docs/` and are kept local (gitignored) for now.
 
 - **Apple Silicon only.** GhosttyKit is built for the native architecture; there is no
   x86_64 slice, so a universal build won't link.
-- **Claude Code is the most complete backend.** Copilot CLI and Codex sessions launch, run,
-  and can fan work out into new loops, but mid-session messaging and reported presence are
-  only wired for Claude Code — and the picker refuses pairings a backend can't host
-  (time-based needs the session to re-trigger itself; composites need verified sub-agents).
+- **Claude Code is the most complete backend.** Copilot CLI and Codex loops launch, run,
+  fan out, and receive message edges like Claude ones; what stays Claude-only is
+  hook-*reported* presence and usage (the others read as heuristics or "not reported") —
+  and the picker refuses pairings a backend can't host (time-based needs the session to
+  re-trigger itself; composites need verified sub-agents).
 - **A new folder stops at Claude's trust prompt.** An unattended loop started by the daemon
   in a folder Claude hasn't seen waits at *"Do you trust this folder?"* and shows as
   `running` while doing nothing. Attach once and answer it.

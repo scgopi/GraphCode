@@ -236,9 +236,9 @@ wiped*. A graph saved by last month's build always loads in today's.
 
 ### What runs today
 
-Claude Code is the most complete backend. Copilot CLI and Codex sessions launch, run,
-and can fan work out into new loops; mid-session messaging and reported presence are
-still Claude Code-only, and the picker refuses pairings a backend can't host. The full
+Claude Code is the most complete backend. Copilot CLI and Codex loops launch, run, fan
+out, and receive message edges like Claude ones; hook-reported presence and usage stay
+Claude Code-only, and the picker refuses pairings a backend can't host. The full
 current list of rough edges lives in the README's
 [Known limitations](https://github.com/scgopi/GraphCode#known-limitations).
 
