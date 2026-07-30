@@ -14,8 +14,6 @@ to, watch, and steer — not headless jobs that report back when they're done.
 
 > Early and moving. Expect rough edges, and see [Known limitations](#known-limitations).
 
-![GraphCode Graph View](screenshots/graph-view.png)
-
 ## How it works
 
 Every loop type is "an agent runs repeatedly" — they differ in what *you* stop doing:
