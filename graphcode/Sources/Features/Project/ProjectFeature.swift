@@ -64,6 +64,12 @@ struct ProjectFeature {
     var nodePendingRename: UUID?
     var draftRenameTitle = ""
 
+    /// The sidebar's display order for this project's loops, node ids first-to-last.
+    /// Local UI state like `nodePositions`: the daemon's graph carries no ordering a
+    /// human chose, so a `graphChanged` broadcast must not clobber a rearrangement —
+    /// new nodes append, deleted nodes drop out, and the rest keep their places.
+    var sidebarNodeOrder: [UUID] = []
+
     var id: String { graph.project.path }
 
     init(graph: LoopGraph) {
@@ -76,6 +82,7 @@ struct ProjectFeature {
         taken.insert(position)
       }
       self.nodePositions = positions
+      self.sidebarNodeOrder = graph.nodes.map(\.id)
     }
   }
 
@@ -104,6 +111,10 @@ struct ProjectFeature {
     case renameNodeConfirmed
     case renameNodeCancelled
     case deleteEdgeTapped(UUID)
+    /// The sidebar dropped a drag-to-reorder: the moved ids in their new order, which
+    /// take the front of `sidebarNodeOrder`; ids not in the list keep their relative
+    /// order behind them.
+    case sidebarNodesReordered([UUID])
     case stopNodeTapped(UUID)
     case pilotCompositeTapped(UUID)
     case armCompositeTapped(UUID)
@@ -140,6 +151,13 @@ struct ProjectFeature {
             state.nodePositions[node.id] = position
           }
           state.graph = newGraph
+          // Keep the human's sidebar arrangement across broadcasts: drop ids the graph
+          // no longer has, append ones it gained, and touch nothing else.
+          let currentIDs = Set(newGraph.nodes.map(\.id))
+          state.sidebarNodeOrder.removeAll { !currentIDs.contains($0) }
+          for node in newGraph.nodes where !state.sidebarNodeOrder.contains(node.id) {
+            state.sidebarNodeOrder.append(node.id)
+          }
         case .errorOccurred(let message):
           state.connectionError = message
         case .recentProjectsListed:
@@ -291,6 +309,11 @@ struct ProjectFeature {
         // did nothing.
         guard !title.isEmpty, title != current else { return .none }
         return send(state, .renameNode(nodeID, title: title))
+
+      case .sidebarNodesReordered(let orderedIDs):
+        let rest = state.sidebarNodeOrder.filter { !orderedIDs.contains($0) }
+        state.sidebarNodeOrder = orderedIDs + rest
+        return .none
 
       case .stopNodeTapped(let nodeID):
         return send(state, .stopNode(nodeID))

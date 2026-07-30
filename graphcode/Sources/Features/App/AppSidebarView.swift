@@ -46,11 +46,18 @@ struct AppSidebarView: View {
           }
 
         if !collapsedProjectPaths.contains(project.id) {
-          let rootNodes = project.graph.nodes.filter { node in
-            !project.graph.edges.contains { $0.to == node.id }
-          }
+          let rootNodes = orderedRootNodes(in: project)
           ForEach(rootNodes) { node in
             nodeRowWithChildren(node, in: project)
+          }
+          // Drag-to-reorder, scoped to this project's own ForEach: SwiftUI only moves
+          // rows within the ForEach the modifier hangs off, which is exactly the rule —
+          // a loop rearranges inside its project and can never be dropped into another.
+          .onMove { offsets, target in
+            var ids = rootNodes.map(\.id)
+            ids.move(fromOffsets: offsets, toOffset: target)
+            store.send(
+              .projects(.element(id: project.id, action: .sidebarNodesReordered(ids))))
           }
         }
       }
@@ -134,6 +141,9 @@ struct AppSidebarView: View {
   /// and carries the destructive role.
   @ViewBuilder
   private func projectMenu(for project: ProjectFeature.State) -> some View {
+    Button("Move Up") { store.send(.projectMoveUpTapped(project.id)) }
+    Button("Move Down") { store.send(.projectMoveDownTapped(project.id)) }
+    Divider()
     Button("Close") { store.send(.projectCloseTapped(project.id)) }
     Button("Remove from GraphCode") { store.send(.projectRemoveTapped(project.id)) }
     Divider()
@@ -318,6 +328,18 @@ struct AppSidebarView: View {
       collapsedProjectPaths.remove(path)
     } else {
       collapsedProjectPaths.insert(path)
+    }
+  }
+
+  /// This project's top-level rows — nodes nothing points at — in the human's
+  /// arrangement (`sidebarNodeOrder`), not the graph's insertion order.
+  private func orderedRootNodes(in project: ProjectFeature.State) -> [LoopNode] {
+    let roots = project.graph.nodes.filter { node in
+      !project.graph.edges.contains { $0.to == node.id }
+    }
+    let order = project.sidebarNodeOrder
+    return roots.sorted { a, b in
+      (order.firstIndex(of: a.id) ?? .max) < (order.firstIndex(of: b.id) ?? .max)
     }
   }
 

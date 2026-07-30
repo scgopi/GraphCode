@@ -81,6 +81,10 @@ struct AppFeature {
     case projectRemoveTapped(String)
     /// Discard a project's saved loops for good — the view confirms before sending this.
     case projectDeleteLoopsConfirmed(String)
+    /// Step a project one slot up or down the sidebar. Within the sidebar only — the
+    /// Graph row stays pinned at the front, and a project never leaves the list.
+    case projectMoveUpTapped(String)
+    case projectMoveDownTapped(String)
     case welcome(WelcomeFeature.Action)
     case projects(IdentifiedActionOf<ProjectFeature>)
     case openLoop(LoopWorkspaceFeature.Action)
@@ -204,6 +208,22 @@ struct AppFeature {
         removeFromSidebar(&state, path: path)
         state.welcome.recentProjects.removeAll { $0.path == path }
         return .run { _ in try? await orchestratorClient.send(.deleteProjectGraph(path: path)) }
+
+      case .projectMoveUpTapped(let path):
+        // The Graph row (isGlobal, always index 0 when present) never moves and is
+        // never displaced — a folder can climb no higher than the slot just below it.
+        guard let index = state.projects.index(id: path), !isGlobal(path) else { return .none }
+        let floor = state.projects.first?.graph.isGlobal == true ? 1 : 0
+        guard index > floor else { return .none }
+        state.projects.swapAt(index, index - 1)
+        return .none
+
+      case .projectMoveDownTapped(let path):
+        guard let index = state.projects.index(id: path), !isGlobal(path),
+          index < state.projects.count - 1
+        else { return .none }
+        state.projects.swapAt(index, index + 1)
+        return .none
 
       case .attentionItemTapped(let item):
         // The rollup's whole purpose is getting a human to the loop, so it routes
