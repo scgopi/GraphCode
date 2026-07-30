@@ -144,9 +144,16 @@ public enum SessionBriefing {
   /// `--add-dir` is the half that is easy to miss. Copilot verifies file paths, so a
   /// session told to read `~/.graphcode/briefings/…` cannot reach it — the pointer alone
   /// looks like the agent ignoring an instruction when it is actually being denied.
+  /// Deliberately ASCII-only, with plain words on both sides of the path. This string
+  /// travels through more layers than any other prose graphcode emits — argv, zmx's
+  /// typed command line, a canonical-mode tty, sometimes ssh — and an em dash sitting
+  /// right after the path came out the far end as `AGENTS. it explains`, the `.md`
+  /// eaten with the dash, on a machine where every ASCII character survived. The agent
+  /// then tried to read a file that doesn't exist.
   public static func pointer(toBriefingAt path: String) -> String {
-    "Before anything else, read \(path) — it explains the graph you are running inside and "
-      + "how to create additional loops when the work calls for it."
+    "Before anything else, read the briefing file at \(path) and follow it. It explains "
+      + "the graph you are running inside and how to create additional loops when the "
+      + "work calls for it."
   }
 
   /// Writes the briefing for `projectPath` and returns where it landed, or `nil` if there

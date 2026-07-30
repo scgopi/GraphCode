@@ -287,4 +287,17 @@ struct SessionBriefingTests {
     #expect(arguments.last?.hasSuffix("do the thing") == true)
     #expect(arguments.last?.contains("AGENTS.md") == true)
   }
+
+  /// The pointer travels through more layers than any other prose graphcode emits —
+  /// argv, zmx's typed command line, a canonical-mode tty, sometimes ssh — and an em
+  /// dash right after the path came out the far end as `AGENTS. it explains`, the
+  /// `.md` eaten with the dash. ASCII survives every one of those layers; nothing else
+  /// is allowed in.
+  @Test
+  func thePointerIsPureASCIIWithThePathIntact() {
+    let pointer = SessionBriefing.pointer(
+      toBriefingAt: "/Users/x/.graphcode/briefings/p/AGENTS.md")
+    #expect(pointer.allSatisfy { $0.isASCII })
+    #expect(pointer.contains("/Users/x/.graphcode/briefings/p/AGENTS.md and follow it."))
+  }
 }
