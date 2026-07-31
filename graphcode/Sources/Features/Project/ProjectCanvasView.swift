@@ -31,10 +31,6 @@ struct ProjectCanvasView: View {
   /// them — lives in `ProjectCanvasForms.swift`, and Swift scopes `private` to a file.
   @State var dragSourceID: UUID?
   @State var dragLocation: CGPoint?
-  /// Which card the pointer is over, so only that card shows its + handle — every
-  /// card wearing one at all times was sixteen accent dots of noise. Not `private`
-  /// for the same reason as the drag state above.
-  @State var hoveredNodeID: UUID?
 
   /// The canvas's derived values, computed once per body pass — see `body`.
   struct Derived {
@@ -206,8 +202,41 @@ struct ProjectCanvasView: View {
 
   private func nodesLayer(_ reasons: [UUID: AttentionReason]) -> some View {
     ForEach(store.graph.nodes) { node in
-      nodeCard(for: node, reason: reasons[node.id])
-        .position(store.nodePositions[node.id] ?? .zero)
+      // The hover that reveals a card's + handle lives in this per-card container,
+      // not in canvas-level `@State`: up here a hover flip re-evaluated the whole
+      // body — and with it `Derived`'s sub-graph walk and attention rollup, the exact
+      // computation the comment on `body` exists to keep off the input path.
+      HoverRevealingCard(isDragSource: dragSourceID == node.id) {
+        nodeCard(for: node, reason: reasons[node.id])
+      } handle: {
+        connectorHandle(for: node.id)
+      }
+      .position(store.nodePositions[node.id] ?? .zero)
+    }
+  }
+
+  /// One card plus its hover-revealed trailing handle, owning the hover state so a
+  /// pointer crossing cards re-renders exactly the cards it crossed. The handle stays
+  /// while hovered itself (it hangs half outside the card, so moving onto it must not
+  /// count as leaving) and while a drag it started is in flight.
+  private struct HoverRevealingCard<Card: View, Handle: View>: View {
+    let isDragSource: Bool
+    @ViewBuilder let card: () -> Card
+    @ViewBuilder let handle: () -> Handle
+
+    @State private var isHovered = false
+    @State private var isHandleHovered = false
+
+    var body: some View {
+      card()
+        .onHover { isHovered = $0 }
+        .overlay(alignment: .trailing) {
+          if isHovered || isHandleHovered || isDragSource {
+            handle()
+              .offset(x: 14)
+              .onHover { isHandleHovered = $0 }
+          }
+        }
     }
   }
 
@@ -339,25 +368,7 @@ struct ProjectCanvasView: View {
     .contentShape(Rectangle())
     .onTapGesture { store.send(.nodeTapped(node.id)) }
     .contextMenu { nodeMenu(for: node) }
-    // Hover reveals the handle; it stays while the pointer is on the handle itself
-    // (which hangs half outside the card, so leaving the card for it must not count
-    // as leaving) and while a drag it started is in flight.
-    .onHover { hovering in
-      if hovering {
-        hoveredNodeID = node.id
-      } else if hoveredNodeID == node.id {
-        hoveredNodeID = nil
-      }
-    }
-    .overlay(alignment: .trailing) {
-      if hoveredNodeID == node.id || dragSourceID == node.id {
-        connectorHandle(for: node.id)
-          .offset(x: 14)
-          .onHover { hovering in
-            if hovering { hoveredNodeID = node.id }
-          }
-      }
-    }
+    // The hover-revealed + handle is `HoverRevealingCard`'s job — see `nodesLayer`.
   }
 
   @ViewBuilder
