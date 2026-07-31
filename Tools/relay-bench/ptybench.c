@@ -205,9 +205,86 @@ static int until_frag(void) { return got_frag; }
 static int expected_pong = -1;
 static int until_pong(void) { return last_pong >= expected_pong; }
 
+// Two-client modes for testing the multi-attach relay path:
+//   --wheel N <cmd...>  attach, write N SGR wheel reports (one write() each,
+//                       5ms apart, deliberately split in half every 8th report
+//                       to exercise reassembly), never type, exit.
+//   --hold S <cmd...>   attach, claim leadership with one ping, sit for S
+//                       seconds, then print the workload's fragstat tally.
+static int run_wheel_mode(int n_reports) {
+  usleep(3000000);  // let the attach settle (snapshot, resize)
+  for (int i = 0; i < n_reports; i++) {
+    char seq[32];
+    int len = snprintf(seq, sizeof seq, "\x1b[<%d;%d;%dM", 64 + (i & 1),
+                       10 + (i % 80), 20 + (i % 40));
+    if (i % 8 == 7) {
+      // Split mid-parameters: the second write is exactly the "5;90;20M"-style
+      // tail that used to leak into composers as text.
+      write_master(seq, (size_t)(len / 2));
+      usleep(1000);
+      write_master(seq + len / 2, (size_t)(len - len / 2));
+    } else {
+      write_master(seq, (size_t)len);
+    }
+    usleep(5000);
+  }
+  usleep(1000000);
+  kill(child, SIGKILL);
+  waitpid(child, NULL, 0);
+  return 0;
+}
+
+static int run_hold_mode(int hold_secs) {
+  if (!pump(on_marker, until_ready, 15000)) {
+    fprintf(stderr, "hold: workload never reported ready\n");
+    return 1;
+  }
+  usleep(300000);
+  expected_pong = 0;
+  ping_sent[0] = now_ns();
+  sendf("ping 0\n");
+  if (!pump(on_marker, until_pong, 3000)) {
+    fprintf(stderr, "hold: leadership ping lost\n");
+    return 1;
+  }
+  uint64_t until = now_ns() + (uint64_t)hold_secs * 1000000000ull;
+  while (now_ns() < until) {
+    struct pollfd pfd = {.fd = master, .events = POLLIN};
+    if (poll(&pfd, 1, 100) > 0) {
+      char buf[4096];
+      ssize_t n = read(master, buf, sizeof buf);
+      if (n <= 0) {
+        if (n < 0 && (errno == EAGAIN || errno == EINTR)) continue;
+        fprintf(stderr, "hold: pty closed\n");
+        return 1;
+      }
+      scan(buf, n, on_marker);
+    }
+  }
+  sendf("fragstat\n");
+  if (!pump(on_marker, until_frag, 5000)) {
+    fprintf(stderr, "hold: no fragstat reply\n");
+    return 1;
+  }
+  printf("FRAG reads=%ld seqs=%ld splits=%ld\n", frag_reads, frag_seqs, frag_splits);
+  sendf("quit\n");
+  usleep(200000);
+  kill(child, SIGKILL);
+  waitpid(child, NULL, 0);
+  return 0;
+}
+
 int main(int argc, char **argv) {
-  if (argc < 2) {
-    fprintf(stderr, "usage: %s <command...>\n", argv[0]);
+  int wheel_n = 0, hold_s = 0, cmd_at = 1;
+  if (argc >= 4 && strcmp(argv[1], "--wheel") == 0) {
+    wheel_n = atoi(argv[2]);
+    cmd_at = 3;
+  } else if (argc >= 4 && strcmp(argv[1], "--hold") == 0) {
+    hold_s = atoi(argv[2]);
+    cmd_at = 3;
+  }
+  if (argc < cmd_at + 1) {
+    fprintf(stderr, "usage: %s [--wheel N | --hold S] <command...>\n", argv[0]);
     return 2;
   }
   struct winsize ws = {.ws_row = 60, .ws_col = 220};
@@ -217,10 +294,12 @@ int main(int argc, char **argv) {
     return 1;
   }
   if (child == 0) {
-    execvp(argv[1], argv + 1);
+    execvp(argv[cmd_at], argv + cmd_at);
     perror("execvp");
     _exit(127);
   }
+  if (wheel_n > 0) return run_wheel_mode(wheel_n);
+  if (hold_s > 0) return run_hold_mode(hold_s);
 
   if (!pump(on_marker, until_ready, 15000)) {
     fprintf(stderr, "workload never reported ready\n");
@@ -254,16 +333,29 @@ int main(int argc, char **argv) {
   double blast_secs = (double)(now_ns() - t0) / 1e9;
   double mb_moved = (double)(bytes_seen - bytes_before) / 1048576.0;
 
-  // 3. RTT under 60Hz redraw load, ping every 20ms
+  // 3. RTT under 60Hz redraw load, ping every 20ms — plus a stream of wheel
+  // reports, one write() every ~5ms, because scrolling is exactly "mouse input
+  // arriving while the TUI floods the output path". The workload's fragstat
+  // counts any report that arrives split across its read() boundaries.
   int first_load_ping = 500, n_load_pings = 0;
+  int wheel_sent = 0;
   sendf("burst 300 65536 16667\n");
   uint64_t next_ping = now_ns() + 20000000ull;
+  uint64_t next_wheel = now_ns() + 5000000ull;
   while (!got_burst_fin) {
     if (now_ns() >= next_ping && first_load_ping + n_load_pings < MAX_PINGS) {
       int seq = first_load_ping + n_load_pings++;
       ping_sent[seq] = now_ns();
       sendf("ping %d\n", seq);
       next_ping += 20000000ull;
+    }
+    if (now_ns() >= next_wheel) {
+      char seq[32];
+      int len = snprintf(seq, sizeof seq, "\x1b[<%d;%d;%dM", 64 + (wheel_sent & 1),
+                         10 + (wheel_sent % 80), 20 + (wheel_sent % 40));
+      write_master(seq, (size_t)len);
+      wheel_sent++;
+      next_wheel += 5000000ull;
     }
     struct pollfd pfd = {.fd = master, .events = POLLIN};
     int r = poll(&pfd, 1, 5);
