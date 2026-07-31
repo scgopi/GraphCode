@@ -68,6 +68,22 @@ struct DaemonBootstrapTests {
   }
 
   @Test
+  func aMissingInstalledHelperDefeatsTheUpToDateShortCircuit() {
+    // The 0.1.9-beta1 failure: an install that lost a helper after the stamp was
+    // written reported itself up to date forever — no daemon, no sessions, and an app
+    // that read as "corrupted". The stamp answers "which bundle was installed";
+    // only the bin directory can answer "is it still there".
+    let root = makeBundleDirectory(helpers: ["graphcoded", "zmx", "graphcode"])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = root.appendingPathComponent("bin")
+
+    #expect(DaemonBootstrap.helpersInstalled(in: binary))
+
+    try? FileManager.default.removeItem(at: binary.appendingPathComponent("zmx"))
+    #expect(!DaemonBootstrap.helpersInstalled(in: binary))
+  }
+
+  @Test
   func theLaunchAgentPointsAtTheInstalledDaemonNotTheBundle() {
     // Pointing launchd inside the app bundle would break the moment the app is replaced
     // or moved, and would keep a mounted disk image busy.
