@@ -103,6 +103,25 @@ struct ProjectFeatureTests {
     let commands = await sent.commands
     #expect(commands.count == 1)
   }
+
+  /// The form's metric fields become the goal's `metricCommand`/`metricDirection` —
+  /// a control that looks set but doesn't travel would be a silent no-op in shipping UI.
+  @Test
+  @MainActor
+  func theMetricFieldsTravelIntoTheGoalSpec() {
+    var state = ProjectFeature.State(graph: LoopGraph(project: Self.testProject))
+    state.draftLoopType = .goalBased
+    state.draftGoal = "lint is clean"
+    state.draftMetric = "swiftlint lint --quiet | wc -l"
+    state.draftMetricDirection = .minimize
+
+    #expect(state.draft.goal?.metricCommand == "swiftlint lint --quiet | wc -l")
+    #expect(state.draft.goal?.metricDirection == .minimize)
+
+    // An empty field means no metric, not an empty command.
+    state.draftMetric = ""
+    #expect(state.draft.goal?.metricCommand == nil)
+  }
 }
 
 private actor SentGraphCommandsBox {

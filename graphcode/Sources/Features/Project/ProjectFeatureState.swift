@@ -29,7 +29,10 @@ extension ProjectFeature.State {
       triggerPrompt: draftLoopType == .timeBased ? draftPrompt : nil,
       goal: draftLoopType == .goalBased
         ? GoalSpec(
-          summary: draftGoal, predicate: draftPredicate.isEmpty ? nil : draftPredicate)
+          summary: draftGoal,
+          predicate: draftPredicate.isEmpty ? nil : draftPredicate,
+          metricCommand: draftMetric.isEmpty ? nil : draftMetric,
+          metricDirection: draftMetricDirection)
         : nil,
       backend: draftBackend,
       // Only an *existing* worktree can be bound here; a new one has to be created on

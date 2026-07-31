@@ -60,6 +60,25 @@ struct NodeDraftForm: View {
           )
           .font(.caption2)
           .foregroundStyle(.secondary)
+
+          TextField(
+            "Metric", text: $store.draftMetric,
+            prompt: Text("command printing a number — optional")
+          )
+          .font(.system(.body, design: .monospaced))
+          if !store.draftMetric.isEmpty {
+            Picker("Better is", selection: $store.draftMetricDirection) {
+              Text("higher").tag(MetricDirection.maximize)
+              Text("lower").tag(MetricDirection.minimize)
+            }
+            .pickerStyle(.segmented)
+            Text(
+              "Read once per cycle pass; the history feeds the loop's memory and lets a "
+                + "looping edge stop when the number stops improving."
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+          }
         case .timeBased:
           // No interval field: the cadence goes in the prompt itself, as a `/loop` or
           // `/schedule` directive the session runs on its own (see
