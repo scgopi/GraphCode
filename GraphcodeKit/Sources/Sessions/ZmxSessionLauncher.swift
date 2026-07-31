@@ -375,28 +375,30 @@ public enum ZmxSessionLauncher {
 
   // MARK: - Remote projects
 
-  /// The local `ssh` argv that checks whether a remote node's session exists — the same
-  /// `zmx get` exit-status test as local, run on the host the session lives on.
-  static func remoteExistenceInvocation(
-    forNode node: LoopNode, at location: RemoteProjectLocation
-  ) -> [String] {
-    let script = quotedCommand(["zmx"] + existenceCheckArguments(forNode: node))
-    return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
-  }
-
-  /// The local `ssh` argv that starts a remote node's session, or `nil` when the node
-  /// has nothing to run. The zmx argv is exactly the local one — session name, detach,
-  /// nested login shell, backend command — assembled into one quoted string, because ssh
-  /// joins its arguments with spaces and hands them to the remote shell. `cd` first so
-  /// the session opens in the repository, the remote twin of `workingDirectory`.
-  static func remoteLaunchInvocation(
+  /// The local `ssh` argv that makes sure a remote node's session exists — `zmx get`
+  /// checks and `zmx run` creates, **in one remote shell**, create-only either way.
+  /// The zmx argv is exactly the local one — session name, detach, nested login shell,
+  /// backend command — assembled into one quoted string, because ssh joins its
+  /// arguments with spaces and hands them to the remote shell. `cd` first so the
+  /// session opens in the repository, the remote twin of `workingDirectory`.
+  ///
+  /// One shell, not two ssh round-trips, and the difference was a bug, not tidiness:
+  /// check-then-run left seconds of ssh latency between the two, and the app's own
+  /// terminal attach creates the session too (`zmx attach` creates if needed). A
+  /// `zmx run` that lands second doesn't fail — it *types the entire launch command
+  /// into the now-live agent* — which surfaced as the whole zsh/copilot line sitting
+  /// unsent in a remote Copilot's input bar. The `||` closes that window to what a
+  /// single shell costs.
+  static func remoteEnsureInvocation(
     forNode node: LoopNode, at location: RemoteProjectLocation
   ) -> [String]? {
     guard let zmxArguments = arguments(forNode: node, projectPath: location.projectPath)
     else { return nil }
+    let check = quotedCommand(["zmx"] + existenceCheckArguments(forNode: node))
+    let run = quotedCommand(["zmx"] + zmxArguments)
     let script =
-      "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && "
-      + quotedCommand(["zmx"] + zmxArguments)
+      "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { "
+      + "\(check) >/dev/null 2>&1 || \(run); }"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
   }
 
@@ -409,17 +411,12 @@ public enum ZmxSessionLauncher {
   }
 
   private static func startRemote(_ node: LoopNode, at location: RemoteProjectLocation) async {
-    guard let launch = remoteLaunchInvocation(forNode: node, at: location) else { return }
-    let existence = remoteExistenceInvocation(forNode: node, at: location)
+    guard let ensure = remoteEnsureInvocation(forNode: node, at: location) else { return }
     do {
-      // Create only, same as local: a live remote session is the loop still running,
-      // and re-sending the command would type into it.
-      let existing = try PTYProcessSession(
-        executable: existence[0], arguments: Array(existence.dropFirst()))
-      guard await !existing.waitUntilFinished() else { return }
-
+      // Create only, in one round-trip — see `remoteEnsureInvocation` for why the
+      // check and the run must share a shell.
       let session = try PTYProcessSession(
-        executable: launch[0], arguments: Array(launch.dropFirst()))
+        executable: ensure[0], arguments: Array(ensure.dropFirst()))
       _ = await session.waitUntilFinished()
     } catch {
       // Same posture as the local path: no UI here, the node's state stays honest, and
