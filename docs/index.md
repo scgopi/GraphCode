@@ -57,6 +57,10 @@ fifth entry next release; it's the space of loops possible:
 | **Time-based** | the trigger | you stop it — cadence lives in the prompt (`/loop 1h …`) | hourly issue triage |
 | **Proactive** | the prompt | a composite sub-graph runs it end to end | a pipeline that plans its own steps |
 
+The names aren't ours: the taxonomy follows the loop types Anthropic established in
+[*Getting started with loops*](https://x.com/ClaudeDevs/status/2074208949205881033).
+GraphCode's contribution is making each one a node in a graph.
+
 #### Turn-based — you stay in the sequence
 
 The session stops after every turn and waits for you. It exists because a person
