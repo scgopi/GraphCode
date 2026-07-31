@@ -108,11 +108,13 @@ public enum SessionBriefing {
       Types your message directly into that loop's live session, attributed to you —
       use it when a peer should know something *now*, mid-run: "the API changed under
       you", "stop, I already fixed that file". `graphcode status \(projectPath)` shows
-      every loop's id. Delivery is refused (with the reason) when the target isn't
-      running or is mid-review — a message is for a live peer, not a way to start one.
-      For recurring communication, an edge is still the right tool: a `message` edge
-      fires automatically when you finish, a `handoff` sequences the other loop after
-      you. This command is the one-off.
+      every loop's id. A target that isn't live gets the message staged into its
+      memory instead — it reads it at its next wake, and the command tells you which
+      happened. If you were created by another loop, your memory log's first entry is
+      the exact command for reporting results back to it. For recurring communication,
+      an edge is still the right tool: a `message` edge fires automatically when you
+      finish, a `handoff` sequences the other loop after you. This command is the
+      one-off.
 
       ## Remembering across passes
 
