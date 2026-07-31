@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://scgopi.github.io/GraphCode/">
+  <a href="https://graphcode.app/">
     <img src="docs/assets/banner.png" alt="GraphCode — graphs of live, steerable Claude Code sessions on macOS" width="100%">
   </a>
 </p>
@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://scgopi.github.io/GraphCode/">Website</a> ·
+  <a href="https://graphcode.app/">Website</a> ·
   <a href="https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg">Download .dmg</a> ·
   <a href="https://github.com/scgopi/GraphCode/releases">All releases</a>
 </p>
@@ -24,7 +24,7 @@ to, watch, and steer — not headless jobs that report back when they're done.
 
 > Early and moving. Expect rough edges, and see [Known limitations](#known-limitations).
 
-**[Graph Engineering, simplified →](https://scgopi.github.io/GraphCode/)** — the full
+**[Graph Engineering, simplified →](https://graphcode.app/)** — the full
 article: the mental model, then the machinery underneath it.
 
 ![Two projects and their connected loops on one GraphCode canvas — goal-based, time-based, and proactive nodes, every one a live terminal](screenshots/graph-hero.png)
