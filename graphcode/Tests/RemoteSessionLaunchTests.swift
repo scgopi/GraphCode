@@ -45,6 +45,44 @@ struct RemoteSessionLaunchTests {
   }
 
   @Test
+  func aRemoteCopilotLaunchSeedsFolderTrustFirst() throws {
+    // An unattended Copilot queues its --interactive goal behind a per-session
+    // folder-trust dialog nobody answers — the goal parked forever on a fresh remote
+    // loop. The ensure pre-trusts the one repository the loop was pointed at.
+    let node = LoopNode(
+      title: "hi", loopType: .goalBased, goal: GoalSpec(summary: "say hi"),
+      backend: .copilotCLI)
+    let invocation = try #require(
+      ZmxSessionLauncher.remoteEnsureInvocation(forNode: node, at: location))
+    let remoteCommand = try #require(invocation.last)
+
+    #expect(remoteCommand.contains("trustedFolders"))
+    #expect(remoteCommand.contains("python3"))
+    #expect(remoteCommand.contains("/home/dev/widget"))
+    // Never load-bearing: a failed seed must fall back to today's dialog, not block
+    // the launch.
+    #expect(remoteCommand.contains("|| true"))
+    // And the seed runs before the create-only pair.
+    let seed = try #require(remoteCommand.range(of: "trustedFolders"))
+    let get = try #require(remoteCommand.range(of: "'get'"))
+    #expect(seed.lowerBound < get.lowerBound)
+  }
+
+  @Test
+  func aRemoteClaudeLaunchIsUntouchedByTrustSeeding() throws {
+    // The seed is Copilot-scoped: Claude's remote script must stay exactly what it
+    // was — this is the no-regression pin for every other backend.
+    let node = LoopNode(
+      title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"))
+    let invocation = try #require(
+      ZmxSessionLauncher.remoteEnsureInvocation(forNode: node, at: location))
+    let remoteCommand = try #require(invocation.last)
+
+    #expect(!remoteCommand.contains("trustedFolders"))
+    #expect(!remoteCommand.contains("python3"))
+  }
+
+  @Test
   func aRemoteMessageRidesSSHAndSubmitsSeparately() throws {
     // Delivery used to speak only to the local zmx socket, which has never heard of a
     // remote loop's session — every message to one failed and staged. The send now

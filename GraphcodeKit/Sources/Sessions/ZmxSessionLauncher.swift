@@ -409,10 +409,36 @@ public enum ZmxSessionLauncher {
     else { return nil }
     let check = quotedCommand(["zmx"] + existenceCheckArguments(forNode: node))
     let run = quotedCommand(["zmx"] + zmxArguments)
+    // Copilot only, and remote only: an unattended Copilot queues its `--interactive`
+    // goal behind a per-session folder-trust dialog that nobody is present to answer,
+    // so a fresh remote Copilot loop booted to an idle screen with its goal parked
+    // forever (`--yolo` does not cover folder trust — measured). Pre-trusting the one
+    // repository the loop was pointed at, on the host it runs on, is the same consent
+    // the human gave by creating the loop there. The write is additive and idempotent
+    // (the `trustedFolders` list in `~/.copilot/config.json`, schema read off a real
+    // "remember this folder" answer), and any failure — no python3, malformed config —
+    // falls back to today's behaviour: the dialog, answerable by opening the loop.
+    let trustSeed =
+      node.backend == .copilotCLI
+      ? copilotTrustSeedScript(forRemotePath: location.remotePath) + "; " : ""
     let script =
       "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { "
+      + trustSeed
       + "\(check) >/dev/null 2>&1 || \(run); }"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+  }
+
+  /// The additive, idempotent trust write described above. The repository path rides as
+  /// an argument rather than being interpolated into the program, so a hostile path
+  /// cannot become Python syntax; the whole command is neutered with `|| true` because
+  /// a failed seed must never block the launch it precedes.
+  static func copilotTrustSeedScript(forRemotePath remotePath: String) -> String {
+    let program =
+      "import json,os,sys; p=os.path.expanduser('~/.copilot/config.json'); "
+      + "c=json.load(open(p)) if os.path.exists(p) else {}; "
+      + "f=c.get('trustedFolders') or []; t=sys.argv[1]; "
+      + "(t in f) or (f.append(t), c.update(trustedFolders=f), json.dump(c, open(p,'w')))"
+    return quotedCommand(["python3", "-c", program, remotePath]) + " 2>/dev/null || true"
   }
 
   /// One argv as one shell-safe string — each argument quoted, so a prompt containing
