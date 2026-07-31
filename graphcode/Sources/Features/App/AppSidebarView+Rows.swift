@@ -178,12 +178,17 @@ extension AppSidebarView {
     }
   }
 
-  /// This project's top-level rows — nodes nothing points at — in the human's
-  /// arrangement (`sidebarNodeOrder`), not the graph's insertion order.
+  /// This project's top-level rows, in the human's arrangement (`sidebarNodeOrder`).
+  ///
+  /// `startAnchors`, not a bare "nodes nothing points at" filter — the difference is a
+  /// bug this row tree had and the canvas never did: a closed cycle (a maker↔reviewer
+  /// pair, forward edge one way, guarded back-edge the other) has no node without an
+  /// inbound edge, so a walk from no-inbound roots alone dropped the whole cycle from
+  /// the sidebar — two loops running, neither listed. `startAnchors` anchors each
+  /// cycle-only component at its first node, and reusing it means the sidebar and the
+  /// canvas can never again disagree about which nodes exist.
   func orderedRootNodes(in project: ProjectFeature.State) -> [LoopNode] {
-    let roots = project.graph.nodes.filter { node in
-      !project.graph.edges.contains { $0.to == node.id }
-    }
+    let roots = project.graph.startAnchors.compactMap { project.graph.nodes[id: $0] }
     let order = project.sidebarNodeOrder
     return roots.sorted { a, b in
       (order.firstIndex(of: a.id) ?? .max) < (order.firstIndex(of: b.id) ?? .max)
