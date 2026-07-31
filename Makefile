@@ -409,20 +409,45 @@ notarize:
 # from the asset GitHub is already serving, so the cask cannot end up claiming a
 # version whose DMG nobody can download. VERSION defaults to the one
 # Project.swift ships.
+#
+# Two channels, two casks, because Homebrew has no notion of a pre-release: the
+# way every other project ships one (firefox@beta, visual-studio-code@insiders)
+# is a second cask beside the stable one, and that is what CHANNEL picks.
+#
+#   make tap-bump                                 # Casks/graphcode.rb,      tag v0.1.9
+#   make tap-bump CHANNEL=beta VERSION=0.1.9-beta1 # Casks/graphcode@beta.rb, tag 0.1.9-beta1
+#
+# The two channels differ in more than the filename. Their tags are shaped
+# differently — a release is tagged `v0.1.9`, a beta `0.1.9-beta1`, which is how
+# the betas have been tagged since 0.1.8 — so the prefix is per channel rather
+# than hardcoded. And a beta's version cannot be read out of Project.swift at
+# all: the bundle carries the release it is a beta *of* (0.1.9), never the
+# suffix, so VERSION is required for that channel instead of defaulted.
 # ---------------------------------------------------------------------------
 TAP_REPO ?= scgopi/homebrew-graphcode
 TAP_DIR ?= $(BUILD_DIR)/tap
+CHANNEL ?= stable
 
 tap-bump:
 	@set -e; \
+	case "$(CHANNEL)" in \
+		stable) CASK_NAME="graphcode"; TAG_PREFIX="v";; \
+		beta) CASK_NAME="graphcode@beta"; TAG_PREFIX="";; \
+		*) echo "CHANNEL must be stable or beta, not '$(CHANNEL)'"; exit 1;; \
+	esac; \
 	V="$(VERSION)"; \
-	[ -n "$$V" ] || V=$$(awk -F'"' '/CFBundleShortVersionString/{print $$4; exit}' Project.swift); \
-	SHA=$$(gh release view "v$$V" --json assets \
+	if [ -z "$$V" ]; then \
+		[ "$(CHANNEL)" = stable ] \
+			|| { echo "a beta's version is not in Project.swift — pass VERSION=0.1.9-beta1"; exit 1; }; \
+		V=$$(awk -F'"' '/CFBundleShortVersionString/{print $$4; exit}' Project.swift); \
+	fi; \
+	TAG="$$TAG_PREFIX$$V"; \
+	SHA=$$(gh release view "$$TAG" --json assets \
 		--jq '.assets[] | select(.name == "graphcode-macos-arm64.dmg") | .digest' \
 		| sed 's/^sha256://'); \
 	test -n "$$SHA" \
-		|| { echo "release v$$V carries no graphcode-macos-arm64.dmg — publish it first"; exit 1; }; \
-	echo "graphcode $$V"; \
+		|| { echo "release $$TAG carries no graphcode-macos-arm64.dmg — publish it first"; exit 1; }; \
+	echo "$$CASK_NAME $$V"; \
 	echo "  sha256 $$SHA"; \
 	if [ -d "$(TAP_DIR)/.git" ]; then \
 		git -C "$(TAP_DIR)" pull -q --ff-only; \
@@ -430,7 +455,8 @@ tap-bump:
 		rm -rf "$(TAP_DIR)"; \
 		git clone -q "https://github.com/$(TAP_REPO).git" "$(TAP_DIR)"; \
 	fi; \
-	CASK="$(TAP_DIR)/Casks/graphcode.rb"; \
+	CASK="$(TAP_DIR)/Casks/$$CASK_NAME.rb"; \
+	test -f "$$CASK" || { echo "$$CASK does not exist — create it before bumping it"; exit 1; }; \
 	/usr/bin/sed -i '' \
 		-e "s/^  version \".*\"/  version \"$$V\"/" \
 		-e "s/^  sha256 \".*\"/  sha256 \"$$SHA\"/" "$$CASK"; \
@@ -440,9 +466,9 @@ tap-bump:
 		|| { echo "the bumped cask is no longer valid Ruby — not pushing"; exit 1; }; \
 	grep -q "version \"$$V\"" "$$CASK" && grep -q "sha256 \"$$SHA\"" "$$CASK" \
 		|| { echo "the version and checksum lines did not take — not pushing"; exit 1; }; \
-	git -C "$(TAP_DIR)" commit -q -am "graphcode $$V"; \
+	git -C "$(TAP_DIR)" commit -q -am "$$CASK_NAME $$V"; \
 	git -C "$(TAP_DIR)" push -q origin HEAD; \
-	echo "  pushed — 'brew upgrade --cask graphcode' now finds $$V"
+	echo "  pushed — 'brew upgrade --cask $$CASK_NAME' now finds $$V"
 
 # ---------------------------------------------------------------------------
 # signing-doctor — the two credentials a shippable DMG needs, and how to get
