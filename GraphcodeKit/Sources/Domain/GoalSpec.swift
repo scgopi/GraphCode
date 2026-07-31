@@ -74,16 +74,28 @@ public struct GoalSpec: Codable, Equatable, Sendable {
   }
 
   /// The opening prompt for the node's session. States the goal, and — when there's a
-  /// predicate — tells the session the same thing the daemon is watching, so the two
-  /// aren't working to different definitions of done.
+  /// predicate or a metric — tells the session the same things the daemon is watching,
+  /// so the two aren't working to different definitions of done, or of better.
+  ///
+  /// The metric sentence is the half that makes it a *method* rather than a score: the
+  /// loop is told how its performance is measured and to measure itself while working,
+  /// the way an autonomous improvement loop is handed its own fitness function. The
+  /// orchestrator still samples the same command once per pass, so the recorded numbers
+  /// come from the measurement, never from the loop's self-report.
   public var sessionPrompt: String {
-    guard let predicate = effectivePredicate else {
-      return "Work toward this goal until it is met: \(summary)"
+    var parts = ["Work toward this goal until it is met: \(summary)"]
+    if let predicate = effectivePredicate {
+      parts.append("The goal counts as met when this command exits 0: \(predicate)")
     }
-    return """
-      Work toward this goal until it is met: \(summary) \
-      The goal counts as met when this command exits 0: \(predicate)
-      """
+    if let metric = effectiveMetricCommand {
+      // Kept terse on purpose: the launch prompt is typed into a terminal and shares a
+      // hard byte budget with everything else on the line (`SessionBriefing`) — every
+      // word here is space a long goal or predicate can no longer use.
+      parts.append(
+        "Measure your performance with this command (\(metricDirection.displayName)): "
+          + "\(metric) — run it as you work; the orchestrator samples it each pass.")
+    }
+    return parts.joined(separator: " ")
   }
 
   private enum CodingKeys: String, CodingKey {

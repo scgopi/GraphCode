@@ -62,8 +62,8 @@ struct NodeDraftForm: View {
           .foregroundStyle(.secondary)
 
           TextField(
-            "Metric", text: $store.draftMetric,
-            prompt: Text("command printing a number — optional")
+            "Measured by", text: $store.draftMetric,
+            prompt: Text("how to score progress — a command printing a number")
           )
           .font(.system(.body, design: .monospaced))
           if !store.draftMetric.isEmpty {
@@ -73,8 +73,9 @@ struct NodeDraftForm: View {
             }
             .pickerStyle(.segmented)
             Text(
-              "Read once per cycle pass; the history feeds the loop's memory and lets a "
-                + "looping edge stop when the number stops improving."
+              "The loop is told this is how it's measured and runs it as it works; "
+                + "the orchestrator samples it once per pass, and a looping edge can "
+                + "stop when the number stops improving."
             )
             .font(.caption2)
             .foregroundStyle(.secondary)
