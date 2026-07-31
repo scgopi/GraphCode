@@ -16,7 +16,7 @@ pile of terminals you babysit.
 [Source on GitHub](https://github.com/scgopi/GraphCode) · Requires macOS 15+ on Apple
 Silicon, with Claude Code on your `PATH`.
 
-![Five projects and dozens of connected loops on one GraphCode canvas — every node is a live terminal](assets/graph-hero.png)
+![Two projects and their connected loops on one GraphCode canvas — goal-based, time-based, and proactive nodes, every one a live terminal](assets/graph-hero.png)
 
 <!-- VIDEO SLOT: demo video goes here when ready -->
 
