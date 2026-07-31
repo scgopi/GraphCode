@@ -13,16 +13,40 @@ import GraphcodeKit
 /// project's canvas is the fallback" can live inside any one `ProjectFeature.State`.
 /// They live here instead: `openLoop` (at most one loop's whole terminal
 /// workspace — tabs and splits, see `LoopWorkspaceFeature` — is open at a time, the way
-/// a supacode worktree owns its own terminal area) and `selectedProjectPath` (which
-/// project's canvas is the fallback when no loop is open).
+/// a supacode worktree owns its own terminal area) and `detailSelection` (which canvas —
+/// a folder's, or Quick Chats' — is the fallback when no loop is open).
 @Reducer
 struct AppFeature {
+  /// Which canvas the detail pane falls back to when no loop's workspace is open.
+  ///
+  /// Quick Chats is a case rather than a reserved path because it is not a project and
+  /// has no graph the daemon knows about — it's the app's own surface, drawn like a
+  /// folder's canvas (see `QuickChatsCanvasView`) because that's what it is to a human:
+  /// another place sessions live.
+  enum DetailSelection: Equatable {
+    case project(String)
+    case quickChats
+  }
+
   @ObservableState
   struct State: Equatable {
     var welcome = WelcomeFeature.State()
     var projects: IdentifiedArrayOf<ProjectFeature.State> = []
-    var selectedProjectPath: String?
     var openLoop: LoopWorkspaceFeature.State?
+
+    var detailSelection: DetailSelection?
+
+    /// The selected *folder*, when the selection is one. Every caller that only ever
+    /// deals in projects — opening one, closing one, following a node tap — keeps
+    /// reading and writing selection through this; `nil` now also covers "Quick Chats",
+    /// which no folder path could ever name.
+    var selectedProjectPath: String? {
+      get {
+        if case .project(let path) = detailSelection { return path }
+        return nil
+      }
+      set { detailSelection = newValue.map(DetailSelection.project) }
+    }
 
     /// Ad-hoc backend sessions with no loop semantics — the sidebar's Quick Chats
     /// section. App-local (see `QuickChat`); loaded once at `.task` and saved on every
@@ -32,6 +56,20 @@ struct AppFeature {
 
     /// Whether the open workspace is a quick chat rather than a graph node's loop.
     func isQuickChat(_ nodeID: UUID) -> Bool { quickChats[id: nodeID] != nil }
+
+    /// The chat a rename prompt is up for, plus what has been typed so far, and the chat
+    /// a delete confirmation is up for.
+    ///
+    /// In the reducer rather than in a view's `@State` for the same reason
+    /// `pendingLoopRename` is: both the sidebar and the Quick Chats canvas start these
+    /// verbs, only one of the two is on screen at any moment, and the dialogs are hosted
+    /// once — by `AppView` — so neither surface can present a version of its own.
+    var chatPendingRename: UUID?
+    var draftChatTitle = ""
+    var chatPendingDeletion: UUID?
+
+    var pendingChatRename: QuickChat? { chatPendingRename.flatMap { quickChats[id: $0] } }
+    var pendingChatDeletion: QuickChat? { chatPendingDeletion.flatMap { quickChats[id: $0] } }
 
     /// Up on first launch (`.task` checks the persisted flag) and whenever the
     /// sidebar's help button asks for it again.
@@ -119,9 +157,19 @@ struct AppFeature {
     case onboardingDismissed
     /// The Quick Chats section's actions — see `State.quickChats`.
     case newQuickChatTapped
+    /// The Quick Chats header row: shows the chats' own canvas, the way a folder row
+    /// shows that folder's.
+    case quickChatsTapped
     case quickChatTapped(UUID)
-    case quickChatRenamed(id: UUID, title: String)
-    case quickChatDeleteConfirmed(UUID)
+    /// Rename and delete, each startable from the sidebar row *or* the canvas card —
+    /// which is why the prompt they raise lives in state; see `State.chatPendingRename`.
+    case quickChatRenameRequested(UUID)
+    case quickChatRenameTitleChanged(String)
+    case quickChatRenameConfirmed
+    case quickChatRenameCancelled
+    case quickChatDeleteRequested(UUID)
+    case quickChatDeleteConfirmed
+    case quickChatDeleteCancelled
   }
 
   private enum CancelID { case daemonSubscription }
@@ -139,6 +187,10 @@ struct AppFeature {
     Scope(state: \.welcome, action: \.welcome) {
       WelcomeFeature()
     }
+    // The Quick Chats section, in `AppFeature+QuickChats.swift` — the same state and
+    // actions, kept in one place of its own because chats are a whole surface (a sidebar
+    // section, a canvas, and two dialogs) that has nothing to do with projects or graphs.
+    quickChatsReducer
     Reduce { state, action in
       switch action {
       case .task:
@@ -313,42 +365,14 @@ struct AppFeature {
         UserDefaults.standard.set(true, forKey: "hasSeenOnboarding")
         return .none
 
-      case .newQuickChatTapped:
-        let chat = QuickChat(
-          title: "Chat — \(Date().formatted(.dateTime.month(.abbreviated).day()))",
-          backend: GraphcodeSettingsStore.load().defaultBackend)
-        state.quickChats.append(chat)
-        quickChatStore.save(Array(state.quickChats))
-        openQuickChat(chat, &state)
+      // Every Quick Chats action is handled by `quickChatsReducer`, in
+      // `AppFeature+QuickChats.swift` — listed here only so this switch stays exhaustive
+      // and a new action can't be added without deciding which of the two answers it.
+      case .newQuickChatTapped, .quickChatsTapped, .quickChatTapped,
+        .quickChatRenameRequested, .quickChatRenameTitleChanged, .quickChatRenameConfirmed,
+        .quickChatRenameCancelled, .quickChatDeleteRequested, .quickChatDeleteConfirmed,
+        .quickChatDeleteCancelled:
         return .none
-
-      case .quickChatTapped(let id):
-        guard let chat = state.quickChats[id: id] else { return .none }
-        guard state.openLoop?.node.id != id else { return .none }
-        openQuickChat(chat, &state)
-        return .none
-
-      case .quickChatRenamed(let id, let title):
-        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, state.quickChats[id: id] != nil else { return .none }
-        state.quickChats[id: id]?.title = trimmed
-        quickChatStore.save(Array(state.quickChats))
-        if state.openLoop?.node.id == id {
-          state.openLoop?.node.title = trimmed
-        }
-        return .none
-
-      case .quickChatDeleteConfirmed(let id):
-        guard state.quickChats[id: id] != nil else { return .none }
-        state.quickChats.remove(id: id)
-        quickChatStore.save(Array(state.quickChats))
-        if state.openLoop?.node.id == id {
-          closeOpenWorkspace(&state)
-          state.selectedProjectPath = state.projects.first?.id
-        }
-        // The chat's session is app-owned — no daemon cleans it up the way GraphStore
-        // does for a deleted loop, so its zmx session is killed here.
-        return .run { _ in await ZmxSessionLauncher.killSession(id: id) }
 
       // When creating a new loop while another loop's workspace is open, inherit that
       // loop's backend. Matches `parentBackend: nil` only — the re-sent action carries
@@ -442,33 +466,12 @@ struct AppFeature {
   private func isGlobal(_ path: String) -> Bool { path == LoopGraphScope.globalPath }
 
   /// Closes the open workspace *and ends its terminals* — for when the loop itself is
-  /// gone, as opposed to merely not being the one on screen any more.
-  private func closeOpenWorkspace(_ state: inout State) {
+  /// gone, as opposed to merely not being the one on screen any more. Not `private`
+  /// because a deleted chat needs the same treatment and lives in the other file.
+  func closeOpenWorkspace(_ state: inout State) {
     guard let openLoop = state.openLoop else { return }
     terminalSurfaceClient.retire(openLoop.layout.tabs.flatMap { $0.surfaces.map(\.id) })
     state.openLoop = nil
-  }
-
-  /// Opens a chat in the same terminal workspace a loop gets, via a synthetic node.
-  /// `.proactive` is the one loop type whose `sessionPrompt` is nil, which is exactly
-  /// what a chat wants: the backend starts bare, with nothing pre-typed into it. The
-  /// node's id is the chat's, so the workspace attaches to the chat's own long-lived
-  /// zmx session, scrollback and all. Home as the working directory — a chat belongs
-  /// to no project on purpose.
-  private func openQuickChat(_ chat: QuickChat, _ state: inout State) {
-    let node = LoopNode(
-      id: chat.id,
-      title: chat.title,
-      loopType: .proactive,
-      backend: chat.backend,
-      createdAt: chat.createdAt)
-    let layout = terminalLayoutStore.load(forNode: chat.id) ?? .defaultLayout(forNode: chat.id)
-    state.openLoop = LoopWorkspaceFeature.State(
-      node: node,
-      layout: layout,
-      projectPath: NSHomeDirectory(),
-      projectName: "Quick Chat")
-    state.selectedProjectPath = nil
   }
 
   /// The nearest project on the given side of `index` that lives in the same sidebar

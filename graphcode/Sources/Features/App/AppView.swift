@@ -85,6 +85,44 @@ struct AppView: View {
     } message: {
       Text("Only the name changes — the loop keeps its session, its edges, and its work.")
     }
+    // A chat's rename and delete are hosted here rather than by the sidebar for the
+    // reason a loop's are: either can be started from the sidebar row or from the Quick
+    // Chats canvas, and only one of those two is ever the surface on screen.
+    .alert(
+      "Rename Chat",
+      isPresented: Binding(
+        get: { store.pendingChatRename != nil },
+        set: { if !$0 { store.send(.quickChatRenameCancelled) } }
+      )
+    ) {
+      TextField("Title", text: chatTitleBinding)
+        .onSubmit { store.send(.quickChatRenameConfirmed) }
+      Button("Rename") { store.send(.quickChatRenameConfirmed) }
+      Button("Cancel", role: .cancel) { store.send(.quickChatRenameCancelled) }
+    }
+    .confirmationDialog(
+      "Delete this chat?",
+      isPresented: Binding(
+        get: { store.pendingChatDeletion != nil },
+        set: { if !$0 { store.send(.quickChatDeleteCancelled) } }
+      ),
+      titleVisibility: .visible
+    ) {
+      Button("Delete Chat", role: .destructive) { store.send(.quickChatDeleteConfirmed) }
+      Button("Cancel", role: .cancel) { store.send(.quickChatDeleteCancelled) }
+    } message: {
+      Text(
+        "\(store.pendingChatDeletion?.title ?? "This chat")'s session and scrollback "
+          + "will be permanently deleted.")
+    }
+  }
+
+  /// The chat rename field's draft, straight through to the reducer — the prompt is
+  /// raised from two different surfaces, so the text it holds can't live in either.
+  private var chatTitleBinding: Binding<String> {
+    Binding(
+      get: { store.draftChatTitle },
+      set: { store.send(.quickChatRenameTitleChanged($0)) })
   }
 
   /// Invisible, zero-size buttons carrying the app-wide loop shortcuts — the same trick
@@ -136,10 +174,15 @@ struct AppView: View {
 
   @ViewBuilder
   private var detail: some View {
-    if store.projects.isEmpty {
-      WelcomeView(store: store.scope(state: \.welcome, action: \.welcome))
-    } else if let workspaceStore = store.scope(state: \.openLoop, action: \.openLoop) {
+    // An open workspace comes first, and Quick Chats before the welcome fallback: both
+    // are the app's own surfaces and neither needs a folder to exist, so "no projects
+    // open yet" must not draw over something the human explicitly opened.
+    if let workspaceStore = store.scope(state: \.openLoop, action: \.openLoop) {
       LoopWorkspaceView(store: workspaceStore)
+    } else if store.detailSelection == .quickChats {
+      QuickChatsCanvasView(store: store)
+    } else if store.projects.isEmpty {
+      WelcomeView(store: store.scope(state: \.welcome, action: \.welcome))
     } else if store.selectedProjectPath == LoopGraphScope.globalPath {
       // The Graph row's canvas is the whole workspace, not the global graph's own nodes
       // in isolation — it needs every open project's graph, which no project-scoped

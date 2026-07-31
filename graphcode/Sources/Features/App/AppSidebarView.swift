@@ -39,14 +39,10 @@ struct AppSidebarView: View {
   enum SidebarSelection: Hashable {
     case project(String)
     case node(UUID)
+    /// The Quick Chats header row — the chats' own canvas, a peer of a folder's.
+    case chats
     case chat(UUID)
   }
-
-  /// The chat a rename prompt is up for, and what has been typed so far. Local view
-  /// state, same rationale as `projectPendingLoopDeletion`.
-  @State private var chatPendingRename: QuickChat?
-  @State private var chatRenameDraft = ""
-  @State private var chatPendingDelete: QuickChat?
 
   var body: some View {
     // The list's contents live in `sidebarList` and the row groups in their own
@@ -166,37 +162,10 @@ struct AppSidebarView: View {
         the Trash, where it stays recoverable.
         """)
     }
-    .alert(
-      "Rename Chat",
-      isPresented: Binding(
-        get: { chatPendingRename != nil },
-        set: { if !$0 { chatPendingRename = nil } }
-      ),
-      presenting: chatPendingRename
-    ) { chat in
-      TextField("Title", text: $chatRenameDraft)
-      Button("Rename") {
-        store.send(.quickChatRenamed(id: chat.id, title: chatRenameDraft))
-        chatPendingRename = nil
-      }
-      Button("Cancel", role: .cancel) { chatPendingRename = nil }
-    }
-    .confirmationDialog(
-      "Delete this chat?",
-      isPresented: Binding(
-        get: { chatPendingDelete != nil },
-        set: { if !$0 { chatPendingDelete = nil } }
-      ),
-      presenting: chatPendingDelete
-    ) { chat in
-      Button("Delete Chat", role: .destructive) {
-        store.send(.quickChatDeleteConfirmed(chat.id))
-        chatPendingDelete = nil
-      }
-      Button("Cancel", role: .cancel) { chatPendingDelete = nil }
-    } message: { chat in
-      Text("\(chat.title)'s session and scrollback will be permanently deleted.")
-    }
+    // The chat rename prompt and delete confirmation are deliberately *not* here — they
+    // are hosted by `AppView`, so the Quick Chats canvas can raise the same two dialogs
+    // while the sidebar row that also offers them isn't the surface being used. Same
+    // arrangement as a loop's; see `AppFeature.State.chatPendingRename`.
   }
 
   private var addFolderMenu: some View {
@@ -267,8 +236,11 @@ struct AppSidebarView: View {
         if let id = store.openLoop?.node.id {
           return store.quickChats[id: id] != nil ? .chat(id) : .node(id)
         }
-        if let path = store.selectedProjectPath { return .project(path) }
-        return nil
+        switch store.detailSelection {
+        case .project(let path): return .project(path)
+        case .quickChats: return .chats
+        case nil: return nil
+        }
       },
       set: { selection in
         switch selection {
@@ -279,6 +251,8 @@ struct AppSidebarView: View {
             let path = store.projects.first(where: { $0.graph.nodes[id: id] != nil })?.id
           else { return }
           store.send(.projects(.element(id: path, action: .nodeTapped(id))))
+        case .chats:
+          store.send(.quickChatsTapped)
         case .chat(let id):
           store.send(.quickChatTapped(id))
         case nil:
@@ -332,6 +306,10 @@ struct AppSidebarView: View {
   /// same header-then-indented-children shape as a folder, because that's what it is —
   /// another project, just not tied to a folder on disk. Not a `Section`, whose grey
   /// header read as a disabled control sitting above everything it wasn't.
+  ///
+  /// The header row is selectable for the same reason a folder's is: clicking it opens
+  /// the chats' own canvas (`QuickChatsCanvasView`), which is where a chat is created,
+  /// renamed, or deleted without hunting for a context menu in the sidebar.
   @ViewBuilder
   private var quickChatsGroup: some View {
     HStack(spacing: 6) {
@@ -371,6 +349,7 @@ struct AppSidebarView: View {
         hoveredRowKey = nil
       }
     }
+    .tag(SidebarSelection.chats)
     .contextMenu {
       Button("New Chat") { store.send(.newQuickChatTapped) }
     }
@@ -385,16 +364,13 @@ struct AppSidebarView: View {
         .padding(.leading, 16)
         .tag(SidebarSelection.chat(chat.id))
         .contextMenu {
-          Button("Rename…") {
-            chatRenameDraft = chat.title
-            chatPendingRename = chat
-          }
+          Button("Rename…") { store.send(.quickChatRenameRequested(chat.id)) }
           Divider()
-          Button("Delete Chat…", role: .destructive) { chatPendingDelete = chat }
+          Button("Delete Chat…", role: .destructive) {
+            store.send(.quickChatDeleteRequested(chat.id))
+          }
         }
       }
     }
   }
-
-
 }
