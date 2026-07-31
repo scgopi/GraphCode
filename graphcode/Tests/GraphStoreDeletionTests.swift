@@ -68,7 +68,7 @@ struct GraphStoreDeletionTests {
   @Test
   func deletingANodeEndsItsSession() async {
     let killed = LockIsolated<[LoopNode]>([])
-    let store = GraphStore(onTerminateSession: { node in killed.withValue { $0.append(node) } })
+    let store = GraphStore(onTerminateSession: { node, _ in killed.withValue { $0.append(node) } })
     await store.handle(
       .createNode(
         NodeDraft(title: "Poll inbox", loopType: .timeBased, triggerPrompt: "/loop 1h Check")))

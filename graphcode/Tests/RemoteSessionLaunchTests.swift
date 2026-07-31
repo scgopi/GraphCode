@@ -45,6 +45,39 @@ struct RemoteSessionLaunchTests {
   }
 
   @Test
+  func aRemoteMessageRidesSSHAndSubmitsSeparately() throws {
+    // Delivery used to speak only to the local zmx socket, which has never heard of a
+    // remote loop's session — every message to one failed and staged. The send now
+    // rides ssh, and keeps the local path's paste-heuristic dance: text, a beat, then
+    // Enter as its own keystroke, all in one remote shell.
+    let node = LoopNode(title: "hi", loopType: .goalBased, goal: GoalSpec(summary: "g"))
+    let invocation = ZmxSessionLauncher.remoteSendInvocation(
+      "[graphcode] parent: task done", toNode: node, at: location)
+
+    #expect(invocation.first == "/usr/bin/ssh")
+    let remoteCommand = try #require(invocation.last)
+    #expect(remoteCommand.contains("send"))
+    #expect(remoteCommand.contains("task done"))
+    #expect(remoteCommand.contains("sleep"))
+    #expect(
+      remoteCommand.contains(SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName))
+  }
+
+  @Test
+  func aRemoteKillReachesTheRemoteZmx() throws {
+    // Stop and delete route their kill by project path; without this a remote loop's
+    // session outlived its node forever — the local zmx had nothing to kill.
+    let node = LoopNode(title: "hi", loopType: .goalBased, goal: GoalSpec(summary: "g"))
+    let invocation = ZmxSessionLauncher.remoteKillInvocation(forNode: node, at: location)
+
+    #expect(invocation.first == "/usr/bin/ssh")
+    let remoteCommand = try #require(invocation.last)
+    #expect(remoteCommand.contains("kill"))
+    #expect(
+      remoteCommand.contains(SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName))
+  }
+
+  @Test
   func aRemoteSessionGetsNoLocalBriefing() {
     // The briefing file is written on this machine and describes a CLI that talks to
     // this machine's daemon; a remote session can use neither. Stated v1 limitation.

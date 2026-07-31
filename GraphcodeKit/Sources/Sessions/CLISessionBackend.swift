@@ -27,12 +27,17 @@ public struct CLISessionBackend: Sendable {
   /// its own. Without it a daemon-launched loop inherits `graphcoded`'s directory,
   /// which is `/` under launchd — nowhere near the project the loop belongs to.
   public var launch: @Sendable (LoopNode, String?) async -> Void
-  /// End the node's session for good.
-  public var terminate: @Sendable (LoopNode) async -> Void
+  /// End the node's session for good. `projectPath` is what routes the kill to the
+  /// right zmx: a remote project's session lives in another host's zmx daemon, and a
+  /// kill spoken only to the local socket left remote sessions running forever after
+  /// their node was stopped or deleted.
+  public var terminate: @Sendable (LoopNode, String?) async -> Void
   /// Push text into a live session. The transport behind a `.message` edge — see
   /// `MessageBusClient`. Returns false when the backend can't accept mid-session input
-  /// or the session isn't live.
-  public var sendInput: @Sendable (LoopNode, String) async -> Bool
+  /// or the session isn't live. `projectPath` routes the send the same way `terminate`'s
+  /// is routed: the local zmx has never heard of a remote loop's session, so every
+  /// delivery to one failed (and staged) until the send learned to ride ssh.
+  public var sendInput: @Sendable (LoopNode, String, String?) async -> Bool
   /// What the session is doing right now.
   public var presence: @Sendable (LoopNode) async -> PresenceReading
   /// What the backend says it has spent on this loop, or `nil` when it doesn't report.
@@ -42,8 +47,8 @@ public struct CLISessionBackend: Sendable {
   public init(
     kind: CLISessionBackendKind,
     launch: @escaping @Sendable (LoopNode, String?) async -> Void,
-    terminate: @escaping @Sendable (LoopNode) async -> Void,
-    sendInput: @escaping @Sendable (LoopNode, String) async -> Bool,
+    terminate: @escaping @Sendable (LoopNode, String?) async -> Void,
+    sendInput: @escaping @Sendable (LoopNode, String, String?) async -> Bool,
     presence: @escaping @Sendable (LoopNode) async -> PresenceReading,
     usage: @escaping @Sendable (LoopNode) async -> UsageSample?
   ) {
@@ -76,8 +81,12 @@ extension CLISessionBackend {
       launch: { node, projectPath in
         await ZmxSessionLauncher.start(node, projectPath: projectPath)
       },
-      terminate: { node in await ZmxSessionLauncher.kill(node) },
-      sendInput: { node, text in await ZmxSessionLauncher.send(text, to: node) },
+      terminate: { node, projectPath in
+        await ZmxSessionLauncher.kill(node, projectPath: projectPath)
+      },
+      sendInput: { node, text, projectPath in
+        await ZmxSessionLauncher.send(text, to: node, projectPath: projectPath)
+      },
       presence: { node in await ZmxSessionLauncher.presence(of: node) },
       usage: { node in await ZmxSessionLauncher.usage(of: node) }
     )
@@ -100,8 +109,8 @@ extension CLISessionBackend {
     CLISessionBackend(
       kind: kind,
       launch: { _, _ in },
-      terminate: { _ in },
-      sendInput: { _, _ in false },
+      terminate: { _, _ in },
+      sendInput: { _, _, _ in false },
       presence: { _ in PresenceReading(presence: .absent, confidence: .reported) },
       usage: { _ in nil }
     )
@@ -130,14 +139,15 @@ extension CLISessionBackend {
     Task.detached { await backend(for: node).launch(node, path) }
   }
 
-  public static let terminateSession: @Sendable (LoopNode) -> Void = { node in
-    Task.detached { await backend(for: node).terminate(node) }
+  public static let terminateSession: @Sendable (LoopNode, String?) -> Void = { node, path in
+    Task.detached { await backend(for: node).terminate(node, path) }
   }
 
   /// The `.message` transport `GraphStore` is wired with — routed through the *target's*
   /// backend, since it's the target's session being typed into.
-  public static let deliverMessage: @Sendable (LoopNode, String) async -> Bool = { node, text in
-    await backend(for: node).sendInput(node, text)
+  public static let deliverMessage: @Sendable (LoopNode, String, String?) async -> Bool = {
+    node, text, path in
+    await backend(for: node).sendInput(node, text, path)
   }
 
   /// The usage-reading hook `GraphStore` is wired with.

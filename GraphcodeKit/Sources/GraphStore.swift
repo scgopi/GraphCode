@@ -33,9 +33,9 @@ public actor GraphStore {
   private var connections: [UUID: Int32] = [:]
   private let onGraphChanged: (@Sendable (LoopGraph) -> Void)?
   private let onEnsureSession: (@Sendable (LoopNode, String?) -> Void)?
-  private let onTerminateSession: (@Sendable (LoopNode) -> Void)?
+  private let onTerminateSession: (@Sendable (LoopNode, String?) -> Void)?
   private let onEvaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)?
-  private let onDeliverMessage: (@Sendable (LoopNode, String) async -> Bool)?
+  private let onDeliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)?
   private let onCaptureScript: (@Sendable (ShellPredicate) async -> String?)?
   private let onReadUsage: (@Sendable (LoopNode) async -> UsageSample?)?
   /// Cross-graph `.spawn`. `GraphStore` owns exactly one graph and cannot reach another,
@@ -81,9 +81,9 @@ public actor GraphStore {
     graph: LoopGraph = LoopGraph(project: ProjectRef(path: "", name: "Untitled")),
     onGraphChanged: (@Sendable (LoopGraph) -> Void)? = nil,
     onEnsureSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
-    onTerminateSession: (@Sendable (LoopNode) -> Void)? = nil,
+    onTerminateSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
     onEvaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)? = nil,
-    onDeliverMessage: (@Sendable (LoopNode, String) async -> Bool)? = nil,
+    onDeliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)? = nil,
     onCaptureScript: (@Sendable (ShellPredicate) async -> String?)? = nil,
     onReadUsage: (@Sendable (LoopNode) async -> UsageSample?)? = nil,
     onSpawnIntoProject: (@Sendable (String, NodeDraft) -> Void)? = nil,
@@ -105,6 +105,21 @@ public actor GraphStore {
 
   private func recordMemory(_ nodeID: UUID, _ entry: String) {
     onAppendMemory?(nodeID, entry)
+  }
+
+  /// Every kill goes through here so no call site can forget the project path — which
+  /// is what routes a remote loop's kill to the zmx daemon that actually owns its
+  /// session (`ZmxSessionLauncher.kill`).
+  private func terminateSession(_ node: LoopNode) {
+    onTerminateSession?(node, graph.project.path)
+  }
+
+  /// Every delivery goes through here for the same reason: the path is what lets a
+  /// send reach a remote session over ssh instead of asking the local zmx about a
+  /// session it has never heard of.
+  private func deliverToSession(_ target: LoopNode, _ message: String) async -> Bool {
+    guard let onDeliverMessage else { return false }
+    return await onDeliverMessage(target, message, graph.project.path)
   }
 
   /// Every session start goes through here rather than calling `onEnsureSession` directly,
@@ -530,7 +545,7 @@ public actor GraphStore {
     // The graph was the only handle on a detached session; dropping the node without
     // this would leave a `claude` running with nothing in the UI pointing at it. Its
     // memory goes the same way — a log for a loop that no longer exists is litter.
-    onTerminateSession?(node)
+    terminateSession(node)
     onRemoveMemory?(node.id)
   }
 
@@ -561,7 +576,7 @@ public actor GraphStore {
     graph.nodes[id: nodeID]?.state = .stopped
     cancelGoalPoller(nodeID)
     recordMemory(nodeID, "stopped by request")
-    onTerminateSession?(node)
+    terminateSession(node)
     fireOutgoingEdges(from: nodeID, sourceSucceeded: false)
 
     // A stopped coordinator must not leave the workers it fanned out running headless.
@@ -571,7 +586,7 @@ public actor GraphStore {
       graph.nodes[id: child.id]?.state = .stopped
       cancelGoalPoller(child.id)
       recordMemory(child.id, "stopped with \(node.title), which created this loop")
-      onTerminateSession?(child)
+      terminateSession(child)
       fireOutgoingEdges(from: child.id, sourceSucceeded: false)
     }
   }
@@ -832,7 +847,7 @@ public actor GraphStore {
         undeliveredMessages.append((edgeID, .emptyMessage))
         continue
       }
-      guard let onDeliverMessage, await onDeliverMessage(target, text) else {
+      guard await deliverToSession(target, text) else {
         undeliveredMessages.append((edgeID, .transportFailed))
         continue
       }
@@ -937,8 +952,8 @@ public actor GraphStore {
       let message = "[graphcode] " + parts.joined(separator: " ")
 
       var delivered = false
-      if MessageBus.deliverability(to: target) == nil, let onDeliverMessage {
-        delivered = await onDeliverMessage(target, message)
+      if MessageBus.deliverability(to: target) == nil {
+        delivered = await deliverToSession(target, message)
       }
       // Staged, not dropped: the wake digest carries it into the next session.
       recordMemory(
@@ -966,10 +981,9 @@ public actor GraphStore {
     while !pendingNudges.isEmpty {
       let (nodeID, text) = pendingNudges.removeFirst()
       guard let target = graph.nodes[id: nodeID],
-        MessageBus.deliverability(to: target) == nil,
-        let onDeliverMessage
+        MessageBus.deliverability(to: target) == nil
       else { continue }
-      _ = await onDeliverMessage(target, text)
+      _ = await deliverToSession(target, text)
     }
   }
 
@@ -1010,7 +1024,7 @@ public actor GraphStore {
           + "it will read it when it next wakes")
       return
     }
-    guard let onDeliverMessage, await onDeliverMessage(target, message) else {
+    guard await deliverToSession(target, message) else {
       recordMemory(nodeID, "while you were away: \(message)")
       announceError(
         "delivery to \(target.title)'s session failed — message staged to its memory; "
