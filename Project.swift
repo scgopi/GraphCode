@@ -52,8 +52,8 @@ let project = Project(
                 // lives on the tag only — the marketing version is the release it is a
                 // beta *of*, and the build number is what actually distinguishes one
                 // beta from the next (0.1.6-beta was 17, -beta2 18, the release 19).
-                "CFBundleShortVersionString": "0.1.10",
-                "CFBundleVersion": "34",
+                "CFBundleShortVersionString": "0.1.11",
+                "CFBundleVersion": "35",
             ]),
             resources: [
                 "graphcode/Resources/**"
