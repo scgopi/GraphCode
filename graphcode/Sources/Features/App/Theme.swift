@@ -66,10 +66,10 @@ enum Theme {
   /// below this and every piece of chrome has to fight to be visible again.
   static let sidebarGloss = LinearGradient(
     stops: [
-      .init(color: Color(white: 0.112), location: 0.00),
-      .init(color: Color(white: 0.096), location: 0.16),
-      .init(color: Color(white: 0.085), location: 0.48),
-      .init(color: Color(white: 0.069), location: 1.00),
+      .init(color: Color(white: 0.100), location: 0.00),
+      .init(color: Color(white: 0.084), location: 0.16),
+      .init(color: Color(white: 0.073), location: 0.48),
+      .init(color: Color(white: 0.057), location: 1.00),
     ],
     startPoint: .top,
     endPoint: .bottom)
@@ -86,18 +86,20 @@ enum Theme {
   /// the content pane casting into the recess rather than as a drawn line.
   static let sidebarEdgeShadow = Color.black.opacity(0.45)
 
-  /// Graph canvas fill — the same tone as everything else. A canvas and the terminal that
-  /// replaces it in the same pane should not be two different colours.
-  static let canvasBackground = windowBackground
+  /// Graph canvas fill — both canvases, the Graph overview and a project's. Darkened
+  /// below `windowBackground` in the same review that recessed the sidebar: with the
+  /// sidebar sitting at ~0.073, a canvas still at the window tone read as the brightest
+  /// pane in the window, and the cards lost their lift. A shade above the sidebar keeps
+  /// the ordering — sidebar deepest, canvas above it, cards and chrome on top.
+  static let canvasBackground = Color(white: 0.095)
 
   /// The canvas's notebook ruling. One step off `canvasBackground` and no further: the
   /// grid is there to give panning something to move against and to make the empty
   /// canvas read as a surface, so it has to lose to every edge and node drawn over it.
   ///
-  /// It moved up with the canvas. A ruling is only ever "one step off" whatever it is
-  /// drawn on, so left where it was — a value picked against black — it would have all
-  /// but vanished on a canvas that is now brighter than the line was.
-  static let canvasGridLine = Color(white: 0.180)
+  /// It moves *with* the canvas — a ruling is only ever "one step off" whatever it is
+  /// drawn on, which is why it darkened in step when the canvas did.
+  static let canvasGridLine = Color(white: 0.155)
 
   /// A loop workspace's tab strip — the sidebar's gloss, on a strip instead of a pane.
   ///
