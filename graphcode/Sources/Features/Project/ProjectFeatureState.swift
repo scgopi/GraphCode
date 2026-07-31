@@ -93,6 +93,12 @@ extension ProjectFeature {
     var loops = false
     var maxIterations = 3
     var untilCommand = ""
+    /// The plateau bound: stop re-firing when the source loop's metric hasn't improved
+    /// across this many consecutive passes. Off by default — it only means something
+    /// when the source loop carries a metric command, which the form can't know from
+    /// here, so the control says so instead of hiding.
+    var stopsOnPlateau = false
+    var plateauPasses = 2
 
     var id: String { "\(from)->\(to)" }
 
@@ -110,12 +116,14 @@ extension ProjectFeature {
     }
 
     /// The iteration cap always travels with a looping edge, even when an `until`
-    /// command is set. Two independent bounds is the conservative reading of docs/08 —
-    /// a predicate that never comes true shouldn't mean an unbounded loop.
+    /// command or plateau bound is set. Two independent bounds is the conservative
+    /// reading of docs/08 — a predicate that never comes true (or a metric that never
+    /// exists) shouldn't mean an unbounded loop.
     var cycleGuard: CycleGuard {
       CycleGuard(
         maxIterations: max(1, maxIterations),
-        until: untilCommand.trimmingCharacters(in: .whitespaces).isEmpty ? nil : untilCommand)
+        until: untilCommand.trimmingCharacters(in: .whitespaces).isEmpty ? nil : untilCommand,
+        stopAfterPassesWithoutImprovement: stopsOnPlateau ? max(1, plateauPasses) : nil)
     }
   }
 

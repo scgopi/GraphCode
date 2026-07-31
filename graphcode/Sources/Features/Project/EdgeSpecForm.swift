@@ -77,6 +77,21 @@ struct EdgeSpecForm: View {
               value: $pending.maxIterations, in: 1...50)
             TextField("stop early when this exits 0 (optional)", text: $pending.untilCommand)
               .font(.system(.body, design: .monospaced))
+
+            Toggle("Stop when the metric stops improving", isOn: $pending.stopsOnPlateau)
+            if pending.stopsOnPlateau {
+              Stepper(
+                "after \(pending.plateauPasses) flat pass\(pending.plateauPasses == 1 ? "" : "es")",
+                value: $pending.plateauPasses, in: 1...20)
+              Text(
+                "Needs a metric on \(fromTitle)'s goal — its number is read once per "
+                  + "pass, and \(pending.plateauPasses) passes without improvement end "
+                  + "the cycle as stalled."
+              )
+              .font(.caption2)
+              .foregroundStyle(.secondary)
+            }
+
             Text("Each pass resets the loops between here and the target.")
               .font(.caption2)
               .foregroundStyle(.secondary)
