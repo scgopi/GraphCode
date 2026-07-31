@@ -48,9 +48,12 @@ let project = Project(
                 "CFBundleIconName": "AppIcon",
                 // The app reported Tuist's default 1.0 while every release was tagged
                 // v0.0.x, so About said one thing and the download page another. Keep
-                // this in step with the git tag when cutting a release.
-                "CFBundleShortVersionString": "0.1.8",
-                "CFBundleVersion": "21",
+                // this in step with the git tag when cutting a release. A beta's suffix
+                // lives on the tag only — the marketing version is the release it is a
+                // beta *of*, and the build number is what actually distinguishes one
+                // beta from the next (0.1.6-beta was 17, -beta2 18, the release 19).
+                "CFBundleShortVersionString": "0.1.9",
+                "CFBundleVersion": "22",
             ]),
             resources: [
                 "graphcode/Resources/**"
