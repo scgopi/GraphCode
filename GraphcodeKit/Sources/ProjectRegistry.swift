@@ -24,9 +24,9 @@ public actor ProjectRegistry {
   private var connectionFileDescriptors: [UUID: Int32] = [:]
   private var connectionProjectPaths: [UUID: Set<String>] = [:]
   private let ensureSession: (@Sendable (LoopNode, String?) -> Void)?
-  private let terminateSession: (@Sendable (LoopNode) -> Void)?
+  private let terminateSession: (@Sendable (LoopNode, String?) -> Void)?
   private let evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)?
-  private let deliverMessage: (@Sendable (LoopNode, String) async -> Bool)?
+  private let deliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)?
   private let captureScript: (@Sendable (ShellPredicate) async -> String?)?
   private let readUsage: (@Sendable (LoopNode) async -> UsageSample?)?
 
@@ -38,11 +38,12 @@ public actor ProjectRegistry {
   public init(
     persistenceDirectory: URL,
     ensureSession: (@Sendable (LoopNode, String?) -> Void)? = CLISessionBackend.ensureSession,
-    terminateSession: (@Sendable (LoopNode) -> Void)? = CLISessionBackend.terminateSession,
+    terminateSession: (@Sendable (LoopNode, String?) -> Void)? =
+      CLISessionBackend.terminateSession,
     evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)? = ShellPredicateEvaluator
       .evaluate,
-    deliverMessage: (@Sendable (LoopNode, String) async -> Bool)? = CLISessionBackend
-      .deliverMessage,
+    deliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)? =
+      CLISessionBackend.deliverMessage,
     captureScript: (@Sendable (ShellPredicate) async -> String?)? = ShellPredicateEvaluator.capture,
     readUsage: (@Sendable (LoopNode) async -> UsageSample?)? = CLISessionBackend.readUsage
   ) {

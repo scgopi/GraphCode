@@ -26,7 +26,7 @@ struct SelfImprovingLoopTests {
     let memory = LockIsolated<[(nodeID: UUID, entry: String)]>([])
     let store = GraphStore(
       onEvaluatePredicate: { _ in false },
-      onDeliverMessage: { node, text in
+      onDeliverMessage: { node, text, _ in
         delivered.withValue { $0.append((node.title, text)) }
         return deliverySucceeds
       },
@@ -98,7 +98,7 @@ struct SelfImprovingLoopTests {
   func scriptPayloadRidesTheHandoff() async {
     let delivered = LockIsolated<[String]>([])
     let store = GraphStore(
-      onDeliverMessage: { _, text in
+      onDeliverMessage: { _, text, _ in
         delivered.withValue { $0.append(text) }
         return true
       },
@@ -318,7 +318,7 @@ struct SelfImprovingLoopTests {
     let delivered = LockIsolated<[String]>([])
     let store = GraphStore(
       onEvaluatePredicate: { _ in false },
-      onDeliverMessage: { _, text in
+      onDeliverMessage: { _, text, _ in
         delivered.withValue { $0.append(text) }
         return true
       },

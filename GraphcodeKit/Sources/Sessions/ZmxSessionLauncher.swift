@@ -126,7 +126,14 @@ public enum ZmxSessionLauncher {
   /// and a lost message costs the whole point of sending it.
   static let submitDelay: Duration = .milliseconds(400)
 
-  static func send(_ text: String, to node: LoopNode) async -> Bool {
+  static func send(_ text: String, to node: LoopNode, projectPath: String? = nil) async -> Bool {
+    // A remote loop's session lives in another host's zmx daemon — the local socket has
+    // never heard of it, so a local send was a guaranteed failure (observed as every
+    // message to a remote loop landing in "staged to its memory"). The send rides ssh
+    // instead, same as the launch does.
+    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+      return await sendRemote(text, to: node, at: remote)
+    }
     guard ZmxLocator.isInstalled, !text.isEmpty else { return false }
     guard await sessionExists(node) else { return false }
     guard
@@ -191,7 +198,13 @@ public enum ZmxSessionLauncher {
     await kill(LoopNode(id: id, title: ""))
   }
 
-  static func kill(_ node: LoopNode) async {
+  static func kill(_ node: LoopNode, projectPath: String? = nil) async {
+    // Same routing as `send`: a remote session's kill has to reach the remote zmx, or
+    // stopping and deleting remote loops leaves their sessions running forever.
+    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+      await killRemote(node, at: remote)
+      return
+    }
     guard ZmxLocator.isInstalled else { return }
     guard
       let session = try? PTYProcessSession(
@@ -408,6 +421,48 @@ public enum ZmxSessionLauncher {
   /// built from the same pieces (`GhosttyTerminalView.remoteCommand`).
   public static func quotedCommand(_ argv: [String]) -> String {
     argv.map(RemoteProjectLocation.shellQuoted).joined(separator: " ")
+  }
+
+  /// The remote twin of the local text-then-Enter delivery, in one ssh round-trip:
+  /// type, give the composer its beat, then the Enter as its own keystroke — the same
+  /// paste-heuristic dance the local path does, run on the host that owns the session.
+  /// `zmx send` into a session that doesn't exist exits non-zero, so a dead remote
+  /// loop reports failure and the caller stages the message, exactly like local.
+  static func remoteSendInvocation(
+    _ text: String, toNode node: LoopNode, at location: RemoteProjectLocation
+  ) -> [String] {
+    let send = quotedCommand(["zmx"] + sendArguments(text, toNode: node))
+    let submit = quotedCommand(["zmx"] + submitArguments(forNode: node))
+    let script = "\(send) && sleep 0.4 && \(submit)"
+    return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+  }
+
+  static func sendRemote(
+    _ text: String, to node: LoopNode, at location: RemoteProjectLocation
+  ) async -> Bool {
+    guard !text.isEmpty else { return false }
+    let invocation = remoteSendInvocation(text, toNode: node, at: location)
+    guard
+      let session = try? PTYProcessSession(
+        executable: invocation[0], arguments: Array(invocation.dropFirst()))
+    else { return false }
+    return await session.waitUntilFinished()
+  }
+
+  static func remoteKillInvocation(
+    forNode node: LoopNode, at location: RemoteProjectLocation
+  ) -> [String] {
+    let script = quotedCommand(["zmx"] + killArguments(forNode: node))
+    return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+  }
+
+  static func killRemote(_ node: LoopNode, at location: RemoteProjectLocation) async {
+    let invocation = remoteKillInvocation(forNode: node, at: location)
+    guard
+      let session = try? PTYProcessSession(
+        executable: invocation[0], arguments: Array(invocation.dropFirst()))
+    else { return }
+    _ = await session.waitUntilFinished()
   }
 
   private static func startRemote(_ node: LoopNode, at location: RemoteProjectLocation) async {

@@ -91,7 +91,7 @@ struct CLISessionBackendTests {
       // none), where the stub refuses unconditionally — both false here, so assert the
       // routing property that actually matters alongside it: presence for a nonexistent
       // session is `.absent` from a real zmx query, and no adapter is the stub.
-      #expect(await backend.sendInput(node, "hello") == false)
+      #expect(await backend.sendInput(node, "hello", nil) == false)
       #expect(await backend.presence(node) == .absent)
       #expect(kind.isSpiked)
     }

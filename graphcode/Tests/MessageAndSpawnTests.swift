@@ -31,7 +31,7 @@ struct MessageAndSpawnTests {
       ])
     return GraphStore(
       graph: graph,
-      onDeliverMessage: { node, text in
+      onDeliverMessage: { node, text, _ in
         delivered.withValue { $0.append(Delivery(nodeTitle: node.title, text: text)) }
         return transportSucceeds
       },

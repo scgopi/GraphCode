@@ -58,7 +58,7 @@ struct CreatedByLoopTests {
     // reporting results to a parent that had already resolved — the report vanished.
     let memory = LockIsolated<[(nodeID: UUID, entry: String)]>([])
     let store = GraphStore(
-      onDeliverMessage: { _, _ in
+      onDeliverMessage: { _, _, _ in
         Issue.record("a resolved target has no live session to type into")
         return false
       },
@@ -82,7 +82,7 @@ struct CreatedByLoopTests {
     // and a drawn edge to a peer is a relationship, not custody, so the peer survives.
     let terminated = LockIsolated<[String]>([])
     let store = GraphStore(
-      onTerminateSession: { node in terminated.withValue { $0.append(node.title) } })
+      onTerminateSession: { node, _ in terminated.withValue { $0.append(node.title) } })
     await store.handle(.createNode(draft("parent", createdBy: nil)))
     let parentID = try #require(await store.graph.nodes.first?.id)
     await store.handle(.createNode(draft("child", createdBy: parentID)))
