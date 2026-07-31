@@ -47,7 +47,13 @@ final class GhosttyTerminalNSView: NSView {
   var pendingScrollDeltaX: CGFloat = 0
   var pendingScrollDeltaY: CGFloat = 0
   var pendingScrollMods: ghostty_input_scroll_mods_t = 0
-  var scrollFlushScheduled = false
+  /// The display link that paces those flushes — created on the first wheel event of a
+  /// gesture, invalidated after an idle tick. A link, not a timer: the first cut of
+  /// this flushed on an 8ms `asyncAfter`, and a wall-clock cadence detached from the
+  /// display is exactly the wrong-times-not-slow-frames judder documented in the scroll
+  /// investigation. Flushing on the refresh the frame will actually be drawn against
+  /// keeps the coalescing *and* the pacing.
+  var scrollFlushLink: CADisplayLink?
 
   var windowObservers: [NSObjectProtocol] = []
 

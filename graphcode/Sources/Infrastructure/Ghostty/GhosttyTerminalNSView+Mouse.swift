@@ -161,25 +161,27 @@ extension GhosttyTerminalNSView {
     // gesture as it stands now.
     pendingScrollMods = Self.scrollMods(precise: precise, momentum: event.momentumPhase)
 
-    guard !scrollFlushScheduled else { return }
-    scrollFlushScheduled = true
-    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(8)) { [weak self] in
-      self?.flushPendingScroll()
+    // Paced by the display, not a timer — see `scrollFlushLink`. The link runs only
+    // while a gesture is feeding it; `flushPendingScroll` retires it on an idle tick.
+    if scrollFlushLink == nil {
+      let link = displayLink(target: self, selector: #selector(flushPendingScroll))
+      link.add(to: .main, forMode: .common)
+      scrollFlushLink = link
     }
   }
 
-  private func flushPendingScroll() {
-    scrollFlushScheduled = false
-    guard let surface else {
-      pendingScrollDeltaX = 0
-      pendingScrollDeltaY = 0
-      return
-    }
+  @objc func flushPendingScroll() {
     let deltaX = pendingScrollDeltaX
     let deltaY = pendingScrollDeltaY
     pendingScrollDeltaX = 0
     pendingScrollDeltaY = 0
-    guard deltaX != 0 || deltaY != 0 else { return }
+    guard deltaX != 0 || deltaY != 0 else {
+      // An idle refresh means the gesture is over — stop ticking until the next one.
+      scrollFlushLink?.invalidate()
+      scrollFlushLink = nil
+      return
+    }
+    guard let surface else { return }
     ghostty_surface_mouse_scroll(surface, deltaX, deltaY, pendingScrollMods)
   }
 
