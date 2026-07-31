@@ -133,7 +133,16 @@ public actor GraphStore {
 
   public func handle(_ command: GraphCommand) async {
     switch command {
-    case .createNode(let draft):
+    case .createNode(var draft):
+      // A child inherits its creator's backend unless one was named: a Copilot loop
+      // fanning work out must produce Copilot loops, not whatever the CLI's default
+      // happened to be. Resolved here rather than in any client — the CLI can't see the
+      // graph to look its parent up, and a rule only one client enforces isn't a rule.
+      // Resolved *before* validation, so the pairing check judges the backend the node
+      // will actually run on.
+      if draft.backend == nil, let creator = draft.createdBy {
+        draft.backend = graph.nodes[id: creator]?.backend
+      }
       // Validated here rather than only in the form: this protocol is reachable from the
       // CLI too, and a rule only one client enforces isn't a rule.
       guard draft.isValid else { return }

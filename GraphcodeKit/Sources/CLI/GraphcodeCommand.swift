@@ -56,7 +56,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
       --goal <text>        required for --type goal
       --predicate <cmd>    optional stop condition for --type goal (exit 0 = met)
       --prompt <text>      required for --type time; put the cadence in it (/loop 1h …)
-      --backend <name>     claudeCode | copilotCLI | codex     (default: claudeCode)
+      --backend <name>     claudeCode | copilotCLI | codex — default: run from inside a
+                           loop, the creating loop's backend; otherwise claudeCode
       --model <tier>       fast | standard | capable           (default: by loop type)
       --metric <cmd>       how the loop's performance is measured — fed into its prompt
                            so it can score itself as it works, and sampled by graphcoded
@@ -184,7 +185,11 @@ public enum GraphcodeCommand: Equatable, Sendable {
     default: throw ParseError.invalidValue(argument: "--type", value: rawType)
     }
 
-    var backend = CLISessionBackendKind.claudeCode
+    // No flag means no choice — the draft travels with `backend: nil` and the daemon
+    // resolves it: the creating loop's own backend when this command came from inside a
+    // session, Claude Code otherwise. Hardcoding the default here was how a Copilot
+    // loop's children came out as Claude Code loops.
+    var backend: CLISessionBackendKind?
     if let raw = flags["backend"] {
       guard let parsed = CLISessionBackendKind(rawValue: raw) else {
         throw ParseError.invalidValue(argument: "--backend", value: raw)
