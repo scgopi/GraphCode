@@ -119,6 +119,11 @@ do {
       projectPath: projectPath,
       [.graphCommand(projectPath: projectPath, command: .stopNode(nodeID))])
 
+  case .deleteNode(let projectPath, let nodeID):
+    try runAndPrintGraph(
+      projectPath: projectPath,
+      [.graphCommand(projectPath: projectPath, command: .deleteNode(nodeID))])
+
   case .sendMessage(let projectPath, let nodeID, let text):
     // Attributed the same way `node create` attributes `createdBy`: run from inside a
     // loop, ZMX_SESSION names the sender, and the target sees who's talking.

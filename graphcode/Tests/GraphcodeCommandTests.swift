@@ -110,6 +110,17 @@ struct GraphcodeCommandTests {
   }
 
   @Test
+  func deleteParsesLikeEveryOtherNodeVerb() throws {
+    // Deletion existed on the wire since the app grew it; the CLI just had no verb —
+    // which left agents stopping loops they meant to remove, and humans in the sidebar.
+    let id = UUID()
+    let command = try GraphcodeCommand.parse([
+      "node", "delete", "/tmp/x", id.uuidString,
+    ])
+    #expect(command == .deleteNode(projectPath: "/tmp/x", nodeID: id))
+  }
+
+  @Test
   func omittingTheBackendLeavesTheChoiceToTheDaemon() throws {
     // No flag must mean no choice: the draft travels with nil so the daemon can give a
     // Copilot loop's children Copilot sessions. Hardcoding claudeCode here was the bug.
