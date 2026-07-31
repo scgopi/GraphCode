@@ -55,15 +55,31 @@ each color-coded by kind.
 Requires **macOS 15+ on Apple Silicon** (arm64), with **Claude Code on your `PATH`** —
 GraphCode launches it, it doesn't bundle it.
 
-Download the latest
+```sh
+brew tap scgopi/graphcode
+brew install --cask graphcode
+```
+
+That pulls the same signed release, and puts the `graphcode` CLI on your `PATH` while it's
+there. `brew upgrade --cask graphcode` from then on. The tap is
+[scgopi/homebrew-graphcode](https://github.com/scgopi/homebrew-graphcode) — its own
+repository, since Homebrew's cask index takes only projects past a notability threshold
+GraphCode hasn't reached yet.
+
+Homebrew 6 warns that a third-party tap is untrusted. It's a gate on taps in general, not
+a finding about this one; `brew trust --tap scgopi/graphcode` settles it, and gets ahead of
+the release that stops making it optional.
+
+Or download the latest
 [`graphcode-macos-arm64.dmg`](https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg)
 (all versions under [Releases](https://github.com/scgopi/GraphCode/releases)), open it,
-and drag **GraphCode** to Applications. That's the whole install — releases are Developer
-ID signed and notarized, so a browser download opens on a double-click.
+and drag **GraphCode** to Applications. Releases are Developer ID signed and notarized, so
+a browser download opens on a double-click.
 
-The app carries `graphcoded`, `graphcode` (the CLI), and `zmx` inside it, and puts them in
-`~/.graphcode/bin` on first launch, along with the launchd agent that keeps the daemon
-running. Add that directory to your `PATH` for the CLI.
+Either way the app carries `graphcoded`, `graphcode` (the CLI), and `zmx` inside it, and
+puts them in `~/.graphcode/bin` on first launch, along with the launchd agent that keeps
+the daemon running. If you installed from the DMG, add that directory to your `PATH` for
+the CLI; Homebrew links it for you.
 
 <details>
 <summary>Holding a pre-0.0.9 build?</summary>

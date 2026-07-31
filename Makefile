@@ -1,7 +1,7 @@
 .PHONY: doctor generate build-app build-daemon run-app run-daemon \
         daemon-install daemon-uninstall daemon-status test check format clean \
         third-party build-zmx install-zmx build-ghostty vendor-sdk \
-        build-cli install-cli release-dmg notarize signing-doctor
+        build-cli install-cli release-dmg notarize signing-doctor tap-bump
 
 SCHEME_APP := graphcode
 SCHEME_DAEMON := graphcoded
@@ -394,6 +394,55 @@ notarize:
 	xcrun stapler staple "$(TARGET)" \
 		|| { echo "could not staple the ticket to $(TARGET)"; exit 1; }; \
 	case "$(TARGET)" in *.app) rm -f "$(RELEASE_DIR)/notarize-upload.zip";; esac
+
+# ---------------------------------------------------------------------------
+# tap-bump — point the Homebrew cask at a release that is already published.
+#
+# The cask lives in its own repository, scgopi/homebrew-graphcode, because that
+# is what a tap is: `brew install --cask scgopi/graphcode/graphcode` resolves
+# the middle name straight to `homebrew-graphcode` on GitHub. Homebrew's own
+# cask repository takes only projects past its notability threshold — 75 stars,
+# or 30 forks or watchers — so until GraphCode is there, this tap is the
+# published route rather than a stopgap.
+#
+# Run this *after* `gh release create`, never before: the checksum is read back
+# from the asset GitHub is already serving, so the cask cannot end up claiming a
+# version whose DMG nobody can download. VERSION defaults to the one
+# Project.swift ships.
+# ---------------------------------------------------------------------------
+TAP_REPO ?= scgopi/homebrew-graphcode
+TAP_DIR ?= $(BUILD_DIR)/tap
+
+tap-bump:
+	@set -e; \
+	V="$(VERSION)"; \
+	[ -n "$$V" ] || V=$$(awk -F'"' '/CFBundleShortVersionString/{print $$4; exit}' Project.swift); \
+	SHA=$$(gh release view "v$$V" --json assets \
+		--jq '.assets[] | select(.name == "graphcode-macos-arm64.dmg") | .digest' \
+		| sed 's/^sha256://'); \
+	test -n "$$SHA" \
+		|| { echo "release v$$V carries no graphcode-macos-arm64.dmg — publish it first"; exit 1; }; \
+	echo "graphcode $$V"; \
+	echo "  sha256 $$SHA"; \
+	if [ -d "$(TAP_DIR)/.git" ]; then \
+		git -C "$(TAP_DIR)" pull -q --ff-only; \
+	else \
+		rm -rf "$(TAP_DIR)"; \
+		git clone -q "https://github.com/$(TAP_REPO).git" "$(TAP_DIR)"; \
+	fi; \
+	CASK="$(TAP_DIR)/Casks/graphcode.rb"; \
+	/usr/bin/sed -i '' \
+		-e "s/^  version \".*\"/  version \"$$V\"/" \
+		-e "s/^  sha256 \".*\"/  sha256 \"$$SHA\"/" "$$CASK"; \
+	if git -C "$(TAP_DIR)" diff --quiet; then \
+		echo "  the cask already says $$V — nothing to push"; exit 0; fi; \
+	ruby -c "$$CASK" >/dev/null \
+		|| { echo "the bumped cask is no longer valid Ruby — not pushing"; exit 1; }; \
+	grep -q "version \"$$V\"" "$$CASK" && grep -q "sha256 \"$$SHA\"" "$$CASK" \
+		|| { echo "the version and checksum lines did not take — not pushing"; exit 1; }; \
+	git -C "$(TAP_DIR)" commit -q -am "graphcode $$V"; \
+	git -C "$(TAP_DIR)" push -q origin HEAD; \
+	echo "  pushed — 'brew upgrade --cask graphcode' now finds $$V"
 
 # ---------------------------------------------------------------------------
 # signing-doctor — the two credentials a shippable DMG needs, and how to get
