@@ -68,19 +68,16 @@ struct GraphOverviewView: View {
     return canvas(derived)
       .overlay(alignment: .bottomTrailing) { zoomControls(derived.overview) }
       .background(Theme.windowBackground)
-      // On the canvas top-right rather than in the toolbar, same placement and
-      // prominence as a project canvas's New Loop — see there for why.
+      // On the canvas top-right rather than in the toolbar, same placement and quiet
+      // + styling as a project canvas's New Loop — see there for why.
       .overlay(alignment: .topTrailing) {
-        Button {
+        CanvasAddButton(help: "New Loop") {
           store.send(
             .projects(
               .element(
                 id: LoopGraphScope.globalPath,
                 action: .addNodeButtonTapped(parentBackend: nil))))
-        } label: {
-          Label("New Loop", systemImage: "plus.circle.fill")
         }
-        .buttonStyle(.borderedProminent)
         .padding(12)
       }
       .background {

@@ -31,6 +31,10 @@ struct ProjectCanvasView: View {
   /// them — lives in `ProjectCanvasForms.swift`, and Swift scopes `private` to a file.
   @State var dragSourceID: UUID?
   @State var dragLocation: CGPoint?
+  /// Which card the pointer is over, so only that card shows its + handle — every
+  /// card wearing one at all times was sixteen accent dots of noise. Not `private`
+  /// for the same reason as the drag state above.
+  @State var hoveredNodeID: UUID?
 
   /// The canvas's derived values, computed once per body pass — see `body`.
   struct Derived {
@@ -69,15 +73,13 @@ struct ProjectCanvasView: View {
             transform: $transform, viewport: viewport, content: contentSize(derived.subGraph))
         }
         // On the canvas itself, top-right, rather than in the window toolbar: up there
-        // it fused into one grey pill with the system chrome and read as furniture —
-        // the one authoring affordance on this surface deserves to look like one.
+        // it fused into one grey pill with the system chrome and read as furniture.
+        // A quiet + in system materials, not a filled accent pill — HIG-style: the
+        // affordance should be findable, not the loudest thing on the canvas.
         .overlay(alignment: .topTrailing) {
-          Button {
+          CanvasAddButton(help: "New Loop") {
             store.send(.addNodeButtonTapped(parentBackend: nil))
-          } label: {
-            Label("New Loop", systemImage: "plus.circle.fill")
           }
-          .buttonStyle(.borderedProminent)
           .padding(12)
         }
     }
@@ -337,8 +339,24 @@ struct ProjectCanvasView: View {
     .contentShape(Rectangle())
     .onTapGesture { store.send(.nodeTapped(node.id)) }
     .contextMenu { nodeMenu(for: node) }
+    // Hover reveals the handle; it stays while the pointer is on the handle itself
+    // (which hangs half outside the card, so leaving the card for it must not count
+    // as leaving) and while a drag it started is in flight.
+    .onHover { hovering in
+      if hovering {
+        hoveredNodeID = node.id
+      } else if hoveredNodeID == node.id {
+        hoveredNodeID = nil
+      }
+    }
     .overlay(alignment: .trailing) {
-      connectorHandle(for: node.id).offset(x: 14)
+      if hoveredNodeID == node.id || dragSourceID == node.id {
+        connectorHandle(for: node.id)
+          .offset(x: 14)
+          .onHover { hovering in
+            if hovering { hoveredNodeID = node.id }
+          }
+      }
     }
   }
 

@@ -17,18 +17,22 @@ import UniformTypeIdentifiers
 struct AppSidebarView: View {
   @Bindable var store: StoreOf<AppFeature>
 
-  @State private var collapsedProjectPaths: Set<String> = []
+  // Several of the stored properties and the selection type below are not `private`
+  // because the project/node row machinery lives in `AppSidebarView+Rows.swift`, and
+  // Swift scopes `private` to a file — same arrangement as `ProjectCanvasView`'s drag
+  // state.
+  @State var collapsedProjectPaths: Set<String> = []
   /// The project whose loops "Delete Loops…" is about to discard, driving the
   /// confirmation dialog. Local view state: nothing outside this pane needs to know a
   /// dialog is up, and nothing should persist if the app quits mid-prompt.
-  @State private var projectPendingLoopDeletion: ProjectFeature.State?
+  @State var projectPendingLoopDeletion: ProjectFeature.State?
   /// The project the Delete dialog is asking about — remove from GraphCode only, or
   /// move the folder to the Trash too. Same local-state rationale as above.
-  @State private var projectPendingDelete: ProjectFeature.State?
+  @State var projectPendingDelete: ProjectFeature.State?
   /// Nodes that are expanded to show their children in the sidebar.
-  @State private var expandedNodeIDs: Set<UUID> = []
+  @State var expandedNodeIDs: Set<UUID> = []
 
-  private enum SidebarSelection: Hashable {
+  enum SidebarSelection: Hashable {
     case project(String)
     case node(UUID)
     case chat(UUID)
@@ -199,24 +203,6 @@ struct AppSidebarView: View {
     }
   }
 
-  /// Three verbs, deliberately distinct: closing is reversible from the Add Folder menu,
-  /// removing forgets the project but keeps its loops for whenever you re-add it, and
-  /// deleting throws the loops away. Only the last is destructive, so only it confirms
-  /// and carries the destructive role.
-  @ViewBuilder
-  private func projectMenu(for project: ProjectFeature.State) -> some View {
-    Button("Move Up") { store.send(.projectMoveUpTapped(project.id)) }
-    Button("Move Down") { store.send(.projectMoveDownTapped(project.id)) }
-    Divider()
-    Button("Close") { store.send(.projectCloseTapped(project.id)) }
-    Button("Remove from GraphCode") { store.send(.projectRemoveTapped(project.id)) }
-    Divider()
-    Button("Delete Loops…", role: .destructive) { projectPendingLoopDeletion = project }
-    Button("Delete \"\(project.graph.project.name)\"…", role: .destructive) {
-      projectPendingDelete = project
-    }
-  }
-
   private var addFolderMenu: some View {
     Menu {
       Button {
@@ -251,89 +237,6 @@ struct AppSidebarView: View {
     .menuIndicator(.hidden)
   }
 
-  private func projectHeaderRow(for project: ProjectFeature.State) -> some View {
-    HStack(spacing: 6) {
-      // A disclosure control only where there is something to disclose, and no blank
-      // held open where there isn't: a row with nothing under it sits flush left, which
-      // is itself the signal that it holds no loops. Reserving the space instead would
-      // line every row up behind a control half of them don't have — tidier, but it
-      // makes an empty folder look identical to a collapsed one.
-      if canExpand(project) {
-        Button {
-          toggleExpanded(project.id)
-        } label: {
-          Image(
-            systemName: collapsedProjectPaths.contains(project.id)
-              ? "chevron.right" : "chevron.down"
-          )
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-          .frame(width: 12)
-        }
-        .buttonStyle(.plain)
-      }
-
-      // The Graph is not a folder and its row doesn't open one — it opens the whole
-      // workspace drawn as one graph (`GraphOverviewView`), so it carries the same
-      // connected-nodes glyph the canvas uses for itself rather than a folder icon it
-      // would otherwise be indistinguishable from. A remote repository isn't a local
-      // folder either: it gets the same `network` glyph the Add Remote Repository menu
-      // item wears, so "this one lives on another machine" is readable at a glance —
-      // the name alone ("widget @ build-box") only says so once you've read it.
-      //
-      // `folder`, not `folder.fill`, and in label ink rather than `.secondary`: a filled
-      // folder at this size is a grey rectangle, and dimmed on top of that it was the
-      // least legible thing in the window. See `SidebarIcon`.
-      SidebarIcon(
-        systemName: sidebarGlyph(for: project),
-        tint: project.graph.isGlobal ? Color.accentColor : .primary)
-      Text(project.graph.project.name).lineLimit(1)
-      Spacer()
-    }
-    .contentShape(Rectangle())
-  }
-
-  private func sidebarGlyph(for project: ProjectFeature.State) -> String {
-    if project.graph.isGlobal { return "point.3.connected.trianglepath.dotted" }
-    if RemoteProjectLocation.parse(projectPath: project.id) != nil { return "network" }
-    return "folder"
-  }
-
-  /// The sidebar lists every loop across every open project, so it's where people
-  /// actually reach for a loop — right-clicking one here previously did nothing at all,
-  /// with the same actions available only on the canvas card.
-  ///
-  /// Mirrors `ProjectCanvasView`'s node menu rather than offering a different subset:
-  /// two right-click menus on the same object that disagree about what you can do to it
-  /// is worse than either menu alone. The actions route into that loop's own project
-  /// scope, since the sidebar spans several.
-  @ViewBuilder
-  private func nodeMenu(for node: LoopNode, in projectPath: String) -> some View {
-    Button("Open Terminal") { send(.nodeTapped(node.id), to: projectPath) }
-
-    if node.loopType == .proactive {
-      Button("Pilot Once…") { send(.pilotCompositeTapped(node.id), to: projectPath) }
-      Button("Arm Schedule") { send(.armCompositeTapped(node.id), to: projectPath) }
-        .disabled(!node.pilotState.canArm)
-    }
-
-    Button("Rename…") { send(.renameNodeRequested(node.id), to: projectPath) }
-
-    if !node.isResolved {
-      Button("Stop Loop") { send(.stopNodeTapped(node.id), to: projectPath) }
-    }
-
-    Divider()
-
-    Button("Delete Loop…", role: .destructive) {
-      send(.deleteNodeRequested(node.id), to: projectPath)
-    }
-  }
-
-  private func send(_ action: ProjectFeature.Action, to projectPath: String) {
-    store.send(.projects(.element(id: projectPath, action: action)))
-  }
-
   /// Kind leads, state trails.
   ///
   /// These are two different questions and each still keeps its own place in the row —
@@ -346,9 +249,11 @@ struct AppSidebarView: View {
   ///
   /// The glyph no longer repeats in the caption line underneath, where it was a second
   /// copy of the same fact at a size that made it a smudge.
-  private func nodeRow(for node: LoopNode) -> some View {
+  /// No loop-type glyph here on purpose — in a narrow list of small rows the coloured
+  /// icons read as noise, and the caption underneath already names the type. The canvas
+  /// keeps its glyphs; the type's colour matters there, where the cards have room.
+  func nodeRow(for node: LoopNode) -> some View {
     HStack(spacing: 6) {
-      SidebarIcon(systemName: node.loopType.glyph, tint: node.loopType.accent)
       VStack(alignment: .leading, spacing: 1) {
         Text(node.title).lineLimit(1)
         Text(node.loopType.rawValue).font(.caption2).foregroundStyle(.secondary)
@@ -390,59 +295,76 @@ struct AppSidebarView: View {
   private var sidebarList: some View {
     List(selection: selectionBinding) {
       attentionSection
-      quickChatsSection
-      projectRows
-    }
-  }
-
-  private var projectRows: some View {
-    ForEach(store.projects) { project in
-      projectHeaderRow(for: project)
-        .tag(SidebarSelection.project(project.id))
-        // No menu on the Graph row: it can't be closed, forgotten, or deleted, and a
-        // menu of three disabled items reads as a bug rather than as a rule.
-        .contextMenu {
-          if !project.graph.isGlobal {
-            projectMenu(for: project)
-          }
-        }
-
-      if !collapsedProjectPaths.contains(project.id) {
-        let rows = flattenedNodeRows(in: project)
-        ForEach(rows) { entry in
-          nestedNodeRow(entry, in: project)
-        }
-        // Drag-to-reorder, scoped to this project's own ForEach: SwiftUI only moves
-        // rows within the ForEach the modifier hangs off, which is exactly the rule —
-        // a loop rearranges inside its project and can never be dropped into another.
-        // Only top-level rows reorder; a child's place is under its parent, so a drag
-        // that includes one is ignored rather than half-applied.
-        .onMove { offsets, target in
-          guard offsets.allSatisfy({ rows[$0].depth == 0 }) else { return }
-          var ids = rows.map(\.id)
-          ids.move(fromOffsets: offsets, toOffset: target)
-          let rootIDs = ids.filter { id in rows.first { $0.id == id }?.depth == 0 }
-          store.send(
-            .projects(.element(id: project.id, action: .sidebarNodesReordered(rootIDs))))
-        }
+      // The Graph first, then Quick Chats as a project-like row of its own — a peer of
+      // the folders, just not tied to one — then, past a quiet divider, the folders.
+      // The divider is what makes the two read as sections: the app's own surfaces
+      // above it, the human's repositories below.
+      if let global = store.projects.first(where: { $0.graph.isGlobal }) {
+        projectGroup(for: global)
+      }
+      quickChatsGroup
+      let folders = store.projects.filter { !$0.graph.isGlobal }
+      if !folders.isEmpty {
+        Divider()
+          .padding(.vertical, 4)
+      }
+      ForEach(folders) { project in
+        projectGroup(for: project)
       }
     }
   }
 
   // MARK: - Quick chats
 
-  /// Ad-hoc conversations, above the projects: the quick-reach thing, not a member of
-  /// any graph. A `Section` is fine here where it wasn't for projects — this header is
-  /// a label with a button, not something that needs to be a selectable row.
-  private var quickChatsSection: some View {
-    Section {
+  @State private var chatsCollapsed = false
+
+  /// Quick Chats drawn as a project-like row between the Graph and the folders: the
+  /// same header-then-indented-children shape as a folder, because that's what it is —
+  /// another project, just not tied to a folder on disk. Not a `Section`, whose grey
+  /// header read as a disabled control sitting above everything it wasn't.
+  @ViewBuilder
+  private var quickChatsGroup: some View {
+    HStack(spacing: 6) {
+      // Chevron slot always reserved, same alignment rule as `projectHeaderRow`.
+      if !store.quickChats.isEmpty {
+        Button {
+          chatsCollapsed.toggle()
+        } label: {
+          Image(systemName: chatsCollapsed ? "chevron.right" : "chevron.down")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .frame(width: 12)
+        }
+        .buttonStyle(.plain)
+      } else {
+        Color.clear.frame(width: 12)
+      }
+      SidebarIcon(systemName: "bubble.left.and.bubble.right", tint: .primary)
+      Text("Quick Chats").lineLimit(1)
+      Spacer()
+      Button {
+        store.send(.newQuickChatTapped)
+      } label: {
+        Image(systemName: "plus")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+      .buttonStyle(.plain)
+      .help("New Quick Chat")
+    }
+    .contentShape(Rectangle())
+    .contextMenu {
+      Button("New Chat") { store.send(.newQuickChatTapped) }
+    }
+
+    if !chatsCollapsed {
       ForEach(store.quickChats) { chat in
         HStack(spacing: 6) {
-          SidebarIcon(systemName: "bubble.left", tint: .primary)
           Text(chat.title).lineLimit(1)
           Spacer()
         }
         .contentShape(Rectangle())
+        .padding(.leading, 16)
         .tag(SidebarSelection.chat(chat.id))
         .contextMenu {
           Button("Rename…") {
@@ -453,123 +375,8 @@ struct AppSidebarView: View {
           Button("Delete Chat…", role: .destructive) { chatPendingDelete = chat }
         }
       }
-    } header: {
-      HStack {
-        Text("Quick Chats")
-        Spacer()
-        Button {
-          store.send(.newQuickChatTapped)
-        } label: {
-          Image(systemName: "plus")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
-        .buttonStyle(.plain)
-        .help("New Quick Chat")
-      }
     }
   }
 
-  /// Whether this row has child rows at all — nothing does until it has a loop in it.
-  /// The Graph row counts now too: its own loops (watchers and other cross-cutting
-  /// triggers, creatable from its canvas since the overview gained "New Loop") list
-  /// under it like any folder's.
-  private func canExpand(_ project: ProjectFeature.State) -> Bool {
-    !project.graph.nodes.isEmpty
-  }
-
-  private func toggleExpanded(_ path: String) {
-    if collapsedProjectPaths.contains(path) {
-      collapsedProjectPaths.remove(path)
-    } else {
-      collapsedProjectPaths.insert(path)
-    }
-  }
-
-  /// This project's top-level rows — nodes nothing points at — in the human's
-  /// arrangement (`sidebarNodeOrder`), not the graph's insertion order.
-  private func orderedRootNodes(in project: ProjectFeature.State) -> [LoopNode] {
-    let roots = project.graph.nodes.filter { node in
-      !project.graph.edges.contains { $0.to == node.id }
-    }
-    let order = project.sidebarNodeOrder
-    return roots.sorted { a, b in
-      (order.firstIndex(of: a.id) ?? .max) < (order.firstIndex(of: b.id) ?? .max)
-    }
-  }
-
-  /// One visible row of the nested loop tree: the node, how deep it sits, and whether
-  /// it has children to disclose.
-  private struct NodeRowEntry: Identifiable {
-    let node: LoopNode
-    let depth: Int
-    let hasChildren: Bool
-    var id: UUID { node.id }
-  }
-
-  /// The loop tree flattened to the rows currently visible, depth-first — parents
-  /// first, each expanded parent followed by its children one level deeper. A flat
-  /// emission rather than nested `DisclosureGroup`s for the same reason the file
-  /// header gives for projects: the group's label swallows selection taps, and its
-  /// List styling outdents children instead of indenting them. `visited` guards
-  /// against edge cycles, which the graph explicitly allows (see `CycleGuard`).
-  private func flattenedNodeRows(in project: ProjectFeature.State) -> [NodeRowEntry] {
-    var rows: [NodeRowEntry] = []
-    var visited = Set<UUID>()
-
-    func orderedChildren(of parentID: UUID) -> [LoopNode] {
-      let childIDs = project.graph.edges.filter { $0.from == parentID }.map(\.to)
-      let order = project.sidebarNodeOrder
-      return childIDs.compactMap { project.graph.nodes[id: $0] }
-        .sorted { a, b in
-          (order.firstIndex(of: a.id) ?? .max) < (order.firstIndex(of: b.id) ?? .max)
-        }
-    }
-
-    func visit(_ node: LoopNode, depth: Int) {
-      guard visited.insert(node.id).inserted else { return }
-      let children = orderedChildren(of: node.id)
-      rows.append(NodeRowEntry(node: node, depth: depth, hasChildren: !children.isEmpty))
-      guard expandedNodeIDs.contains(node.id) else { return }
-      for child in children { visit(child, depth: depth + 1) }
-    }
-
-    for root in orderedRootNodes(in: project) { visit(root, depth: 0) }
-    return rows
-  }
-
-  /// A loop row at its place in the tree: indented one step per level — rightward,
-  /// under its parent — with a chevron only where there are children to show, the
-  /// same no-reserved-blank rule `projectHeaderRow` follows for its own chevron.
-  private func nestedNodeRow(_ entry: NodeRowEntry, in project: ProjectFeature.State) -> some View {
-    HStack(spacing: 4) {
-      if entry.hasChildren {
-        Button {
-          toggleNodeExpanded(entry.node.id)
-        } label: {
-          Image(
-            systemName: expandedNodeIDs.contains(entry.node.id)
-              ? "chevron.down" : "chevron.right"
-          )
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-          .frame(width: 12)
-        }
-        .buttonStyle(.plain)
-      }
-      nodeRow(for: entry.node)
-    }
-    .padding(.leading, CGFloat(entry.depth) * 16)
-    .tag(SidebarSelection.node(entry.node.id))
-    .contextMenu { nodeMenu(for: entry.node, in: project.id) }
-  }
-
-  private func toggleNodeExpanded(_ id: UUID) {
-    if expandedNodeIDs.contains(id) {
-      expandedNodeIDs.remove(id)
-    } else {
-      expandedNodeIDs.insert(id)
-    }
-  }
 
 }
