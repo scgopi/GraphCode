@@ -48,9 +48,11 @@ let project = Project(
                 "CFBundleIconName": "AppIcon",
                 // The app reported Tuist's default 1.0 while every release was tagged
                 // v0.0.x, so About said one thing and the download page another. Keep
-                // this in step with the git tag when cutting a release.
-                "CFBundleShortVersionString": "0.1.8",
-                "CFBundleVersion": "21",
+                // this in step with the git tag when cutting a release. Build numbers
+                // stay globally monotonic across channels — 0.1.9's betas hold 22–24,
+                // so this patch takes 25 even though its version sorts earlier.
+                "CFBundleShortVersionString": "0.1.8.1",
+                "CFBundleVersion": "25",
             ]),
             resources: [
                 "graphcode/Resources/**"

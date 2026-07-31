@@ -68,6 +68,44 @@ struct DaemonBootstrapTests {
   }
 
   @Test
+  func aMissingInstalledHelperDefeatsTheUpToDateShortCircuit() {
+    // The 0.1.9-beta1 failure: an install that lost a helper after the stamp was
+    // written reported itself up to date forever — no daemon, no sessions, and an app
+    // that read as "corrupted". The stamp answers "which bundle was installed";
+    // only the bin directory can answer "is it still there".
+    let root = makeBundleDirectory(helpers: ["graphcoded", "zmx", "graphcode"])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let binary = root.appendingPathComponent("bin")
+
+    #expect(DaemonBootstrap.helpersInstalled(in: binary))
+
+    try? FileManager.default.removeItem(at: binary.appendingPathComponent("zmx"))
+    #expect(!DaemonBootstrap.helpersInstalled(in: binary))
+  }
+
+  @Test
+  func installingAHelperClearsItsQuarantineFlag() {
+    // The other-machine failure: `copyItem` faithfully carries `com.apple.quarantine`
+    // from a downloaded bundle into ~/.graphcode/bin, and launchd's first spawn of a
+    // quarantined daemon is met with "Apple could not verify 'graphcoded' is free of
+    // malware". The build machine never sees it — its quarantine is already approved.
+    let root = makeBundleDirectory(helpers: ["graphcoded"])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let helper = root.appendingPathComponent("bin/graphcoded")
+
+    let quarantine = "0083;00000000;Safari;"
+    setxattr(helper.path, "com.apple.quarantine", quarantine, quarantine.utf8.count, 0, 0)
+    #expect(getxattr(helper.path, "com.apple.quarantine", nil, 0, 0, 0) > 0)
+
+    DaemonBootstrap.clearQuarantine(helper)
+    #expect(getxattr(helper.path, "com.apple.quarantine", nil, 0, 0, 0) == -1)
+
+    // Clearing a file that never had the flag must be harmless — that's every install
+    // performed on the machine the release was built on.
+    DaemonBootstrap.clearQuarantine(helper)
+  }
+
+  @Test
   func theLaunchAgentPointsAtTheInstalledDaemonNotTheBundle() {
     // Pointing launchd inside the app bundle would break the moment the app is replaced
     // or moved, and would keep a mounted disk image busy.

@@ -59,13 +59,29 @@ public enum DaemonBootstrap {
     .joined(separator: "\n")
   }
 
+  /// Whether every helper is actually present and runnable where it was installed.
+  ///
+  /// The stamp alone cannot answer this: it records which *bundle* was installed, not
+  /// whether the installed copies still exist. A bin directory that lost a helper — an
+  /// interrupted install, a hand-run `rm`, a cleanup tool — while the stamp survived
+  /// produced an app that reported itself up to date over a missing daemon, forever.
+  /// That is the "the beta is corrupted" failure: nothing was corrupt, the bootstrap
+  /// just refused to look.
+  static func helpersInstalled(in directory: URL = SupportDirectory.binDirectory) -> Bool {
+    helpers.allSatisfy {
+      FileManager.default.isExecutableFile(atPath: directory.appendingPathComponent($0).path)
+    }
+  }
+
   @discardableResult
   public static func installIfNeeded() -> Outcome {
     guard let bundled = bundledHelperDirectory() else { return .notPackaged }
 
     let expected = stamp(forHelpersIn: bundled)
     let current = try? String(contentsOf: stampURL, encoding: .utf8)
-    if current == expected, FileManager.default.fileExists(atPath: launchAgentURL.path) {
+    if current == expected, FileManager.default.fileExists(atPath: launchAgentURL.path),
+      helpersInstalled()
+    {
       return .upToDate
     }
 
@@ -76,6 +92,18 @@ public enum DaemonBootstrap {
       try expected.write(to: stampURL, atomically: true, encoding: .utf8)
       return .installed
     } catch {
+      // Written somewhere a human (or a bug report) can find: the app has no console,
+      // and a bootstrap that failed silently is how a machine ends up looking
+      // "corrupted" with nothing to say why.
+      let report = "\(Date().ISO8601Format())  helper install failed: \(error)\n"
+      let log = SupportDirectory.url.appendingPathComponent("bootstrap.err.log")
+      if let handle = try? FileHandle(forWritingTo: log) {
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: Data(report.utf8))
+        try? handle.close()
+      } else {
+        try? report.write(to: log, atomically: true, encoding: .utf8)
+      }
       return .failed("\(error)")
     }
   }
@@ -87,24 +115,40 @@ public enum DaemonBootstrap {
 
     for name in helpers {
       let target = destination.appendingPathComponent(name)
-      // Remove before copying, then re-sign in place. Writing over a path macOS has
-      // already validated leaves a stale cached signature and the result is SIGKILLed at
-      // exec ("Taskgated Invalid Signature") even though the signature is valid on disk —
+      // Stage the copy next to the target, then swap. The earlier remove-then-copy
+      // order meant a copy that failed left neither binary — an interrupted first
+      // launch gutted `~/.graphcode/bin`, and with the stamp check above blind to it,
+      // every later launch called that state up to date. Staging costs one rename and
+      // means the old helper survives until its replacement has fully landed.
+      //
+      // The swap also gives the target a fresh inode, which preserves the original fix
+      // here: writing over a path macOS has already validated leaves a stale cached
+      // signature and the result is SIGKILLed at exec ("Taskgated Invalid Signature") —
       // a near-silent failure, since the binary dies before it can print anything.
+      //
+      // What deliberately does *not* happen anymore: an ad-hoc re-sign. The copy keeps
+      // the bundle's own Developer ID signature byte for byte; forcing `--sign -` over
+      // it replaced a notarized identity with an anonymous one. Combined with the
+      // quarantine flag `copyItem` faithfully carries over from a downloaded install,
+      // that produced a quarantined, ad-hoc-signed daemon — which launchd's first spawn
+      // on a fresh machine greets with "Apple could not verify 'graphcoded' is free of
+      // malware". It looked fine on the build machine only because its quarantine was
+      // already marked approved. Clearing the xattr is the install step Finder would
+      // have performed had a human dragged the helper out themselves.
+      let staged = destination.appendingPathComponent("\(name).new")
+      try? fileManager.removeItem(at: staged)
+      try fileManager.copyItem(at: bundled.appendingPathComponent(name), to: staged)
+      clearQuarantine(staged)
       try? fileManager.removeItem(at: target)
-      try fileManager.copyItem(at: bundled.appendingPathComponent(name), to: target)
-      resign(target)
+      try fileManager.moveItem(at: staged, to: target)
     }
   }
 
-  private static func resign(_ url: URL) {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-    process.arguments = ["--force", "--sign", "-", url.path]
-    process.standardOutput = FileHandle.nullDevice
-    process.standardError = FileHandle.nullDevice
-    try? process.run()
-    process.waitUntilExit()
+  /// Drops `com.apple.quarantine` from an installed helper. Failure is ignored: a file
+  /// that never had the xattr (a build-machine install) errors with ENOATTR, and that
+  /// is the healthy case.
+  static func clearQuarantine(_ url: URL) {
+    removexattr(url.path, "com.apple.quarantine", 0)
   }
 
   static var launchAgentURL: URL {
