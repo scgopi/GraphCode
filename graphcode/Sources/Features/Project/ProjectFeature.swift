@@ -39,6 +39,11 @@ struct ProjectFeature {
     var draftPrompt = ""
     var draftGoal = ""
     var draftPredicate = ""
+    /// The goal's optional score — `GoalSpec.metricCommand`, sampled once per cycle
+    /// pass. Distinct from the predicate on purpose: one answers "done?", the other
+    /// "how is it going?".
+    var draftMetric = ""
+    var draftMetricDirection: MetricDirection = .maximize
     var draftBackend: CLISessionBackendKind = .claudeCode
     var draftWorktree: WorktreeSelection = .none
     var draftBranch = ""
@@ -368,6 +373,8 @@ struct ProjectFeature {
     state.draftPrompt = ""
     state.draftGoal = ""
     state.draftPredicate = ""
+    state.draftMetric = ""
+    state.draftMetricDirection = .maximize
     // The parent's backend when there is one; the human's default otherwise
     // (Settings → Sessions), never a hardcoded one.
     state.draftBackend = backend ?? GraphcodeSettingsStore.load().defaultBackend
