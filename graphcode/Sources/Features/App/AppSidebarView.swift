@@ -356,7 +356,13 @@ struct AppSidebarView: View {
         hoveredRowKey = nil
       }
     }
-    .padding(.top, 6)
+    // The gap above the caption is what makes the sidebar read as sections at a
+    // glance — the caption alone, flush against the previous group's last row, read
+    // as one more item in it. Sized to the clear band the reference sidebars put
+    // before a muted group label, and carried by the header so it collapses with
+    // nothing when the group is absent.
+    .padding(.top, 18)
+    .padding(.bottom, 2)
   }
 
   // MARK: - Quick chats
