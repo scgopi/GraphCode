@@ -17,7 +17,7 @@ to, watch, and steer — not headless jobs that report back when they're done.
 **[Graph Engineering, simplified →](https://scgopi.github.io/GraphCode/)** — the full
 article: the mental model, then the machinery underneath it.
 
-![Five projects and dozens of connected loops on one GraphCode canvas — every node is a live terminal](screenshots/graph-hero.png)
+![Two projects and their connected loops on one GraphCode canvas — goal-based, time-based, and proactive nodes, every one a live terminal](screenshots/graph-hero.png)
 
 ## How it works
 
