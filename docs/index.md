@@ -1,6 +1,6 @@
 ---
 title: Graph Engineering, Simplified — with GraphCode
-description: Graph engineering for coding agents on macOS — the mental model, self-improving loops, and the machinery underneath.
+description: Graph engineering for coding agents on macOS — loops and their types, self-improving loops, and the machinery underneath.
 ---
 
 # Graph Engineering, simplified — with GraphCode
@@ -18,12 +18,13 @@ GraphCode launches it, it doesn't bundle it.
 
 <!-- VIDEO SLOT: demo video goes here when ready -->
 
-This article is in three parts: the mental model, the self-improving loop — where the
-graph starts to learn — and, for contributors, the machinery underneath.
+This article is in three parts: the four loops an AI session can run — the claim the
+rest is built on — the self-improving loop, where the graph starts to learn, and, for
+contributors, the machinery underneath.
 
 ---
 
-## Part 1 — The mental model
+## Part 1 — The four loops an AI session can run
 
 ### The problem
 
@@ -36,22 +37,58 @@ inside a real CLI session, each edge a relationship between two of them. The ses
 stay real, attachable terminals the whole time — the automation lives in the graph
 around them, not in taking the terminal away.
 
-### Loops: what you hand off
+### Every loop is an AI session that runs repeatedly
 
-Every loop is "an agent runs repeatedly" — the types differ in what *you* stop doing:
+The unit of work in GraphCode is the **loop**: a real CLI agent session — Claude Code,
+Copilot CLI, or Codex — that runs again and again instead of once. Not a script that
+calls a model, not a job that reports back when it's done: a live terminal you can open
+mid-run, with an agent inside that keeps going.
 
-| Loop type | You hand off | Runs until |
-|---|---|---|
-| **Turn-based** | the check | you end it — each turn pauses for your review |
-| **Goal-based** | the stop condition | the goal is met (optionally: a shell command exits 0) |
-| **Time-based** | the trigger | you stop it — cadence lives in the prompt (`/loop 1h …`) |
-| **Proactive** | the prompt | a composite sub-graph runs it end to end |
+Here's the claim this whole design rests on. When you put an agent on repeat, you are
+handing it something you used to do yourself — and there are only four things you can
+hand off: the **check**, the **stop condition**, the **trigger**, or the **prompt
+itself**. Four hand-offs, four loop types. This isn't a feature list that will grow a
+fifth entry next release; it's the space of loops possible:
 
-A turn-based loop exists because a person is in the sequence — the session stops after
-every turn, and your criterion travels into its opening prompt so you never retype it.
-A goal-based loop is handed a statement of "done" (the form refuses an empty one). A
-time-based loop is handed a trigger. A proactive node is handed the whole prompt: a
-graph running inside a graph.
+| Loop type | You hand off | Runs until | For example |
+|---|---|---|---|
+| **Turn-based** | the check | you end it — each turn pauses for your review | a refactor you eyeball step by step |
+| **Goal-based** | the stop condition | the goal is met (optionally: a shell command exits 0) | "fix the build" — done when `make test` passes |
+| **Time-based** | the trigger | you stop it — cadence lives in the prompt (`/loop 1h …`) | hourly issue triage |
+| **Proactive** | the prompt | a composite sub-graph runs it end to end | a pipeline that plans its own steps |
+
+#### Turn-based — you stay in the sequence
+
+The session stops after every turn and waits for you. It exists because a person
+belongs in this sequence: your review criterion travels into the loop's opening prompt,
+so you state it once and never retype it. The loop does the work; you keep the
+judgment. Use it for the refactor you want to watch happen, change by change.
+
+#### Goal-based — you hand off "done"
+
+You hand this loop a statement of done (the form refuses an empty one), and optionally
+a shell predicate — a command the daemon polls, where exit 0 means finished. "Fix the
+build" resolves itself the moment `make test` passes, whether you were watching or
+asleep. This is the workhorse type, and the one the self-improving cycle in Part 2 is
+built around.
+
+#### Time-based — you hand off the trigger
+
+You hand this loop its cadence, and the cadence lives *inside the session* — written
+into the prompt with the agent's own `/loop` or `/schedule` skill (`/loop 1h Triage
+new bug reports`). Nothing external fires it; the session re-triggers itself, which is
+why you can attach at any point and see every pass it has ever run in one scrollback.
+
+#### Proactive — you hand off the prompt
+
+The whole prompt, that is. A proactive node is a composite: a sub-graph that plans its
+own steps and runs them end to end — a graph running inside a graph. You describe the
+outcome; it decides the loops.
+
+Pick the type by what you're ready to let go of — the check, the stop condition, the
+trigger, or the prompt itself. A working graph usually mixes them: a time-based triage
+loop hands findings to a goal-based fixer, which hands the fix to a turn-based
+reviewer where you approve each change yourself.
 
 ### GraphCode schedules nothing
 
