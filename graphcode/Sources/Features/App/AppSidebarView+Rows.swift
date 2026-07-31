@@ -272,4 +272,32 @@ extension AppSidebarView {
       expandedNodeIDs.insert(id)
     }
   }
+
+  /// Every node id across the open projects — what `onChange` watches to notice a loop
+  /// being created.
+  var allNodeIDs: Set<UUID> {
+    Set(store.projects.flatMap { $0.graph.nodes.map(\.id) })
+  }
+
+  /// The parents to disclose so every newly created loop is visible: each new node's
+  /// full inbound-edge chain, walked across every open graph. The sidebar tree nests
+  /// by edges, so visibility means the whole chain up to a root — a grandchild behind
+  /// a collapsed grandparent is exactly as hidden as one behind its parent. The
+  /// visited set guards the walk against edge cycles, which the graph allows.
+  static func parentsToExpand(for newIDs: Set<UUID>, in graphs: [LoopGraph]) -> Set<UUID> {
+    var parents: Set<UUID> = []
+    for newID in newIDs {
+      var id = newID
+      var visited: Set<UUID> = [newID]
+      while let parent = graphs.lazy.compactMap({ graph in
+        graph.edges.first { $0.to == id }?.from
+      }).first,
+        visited.insert(parent).inserted
+      {
+        parents.insert(parent)
+        id = parent
+      }
+    }
+    return parents
+  }
 }

@@ -31,6 +31,10 @@ struct AppSidebarView: View {
   @State var projectPendingDelete: ProjectFeature.State?
   /// Nodes that are expanded to show their children in the sidebar.
   @State var expandedNodeIDs: Set<UUID> = []
+  /// Every node id seen across the open projects, for telling a freshly created loop
+  /// from one that was already there. `nil` until the first observation, so a relaunch
+  /// seeds silently instead of springing every parent in the graph open.
+  @State var knownNodeIDs: Set<UUID>?
   /// The row the pointer is over, keyed by project path, node id string, or the chats
   /// row's own key — the trailing controls (+ and the disclosure chevron) only draw on
   /// this row, supacode-style: quiet rows, controls on approach.
@@ -49,119 +53,131 @@ struct AppSidebarView: View {
     // properties — one literal holding every section pushed the expression past what
     // the type-checker will resolve in reasonable time.
     sidebarList
-    .listStyle(.sidebar)
-    // Errors used to render only on the Welcome screen, which no longer shows once the
-    // sidebar exists — so a failed Add Folder looked like nothing happening at all.
-    .safeAreaInset(edge: .bottom) {
-      if let errorMessage = store.welcome.errorMessage {
-        Text(errorMessage)
-          .font(.caption)
-          .foregroundStyle(.red)
-          .frame(maxWidth: .infinity, alignment: .leading)
-          .padding(8)
-          .background(.thinMaterial)
+      .listStyle(.sidebar)
+      // A loop that fans out shouldn't hide its children behind an unexpanded chevron —
+      // the human watching the sidebar should see new loops appear, not wonder where
+      // they went. Every newly created node's parent chain is disclosed the moment the
+      // node shows up; existing nodes on relaunch stay as the human left them.
+      .onChange(of: allNodeIDs, initial: true) { _, current in
+        if let known = knownNodeIDs {
+          expandedNodeIDs.formUnion(
+            Self.parentsToExpand(
+              for: current.subtracting(known), in: store.projects.map(\.graph)))
+        }
+        knownNodeIDs = current
       }
-    }
-    // The sidebar is the system's translucent material — Liquid Glass on macOS 26,
-    // the classic sidebar material on 15, both automatic for a `.listStyle(.sidebar)`
-    // list in a split view. This replaced a painted recess (a gradient + hairline
-    // overlays that hid the material with `scrollContentBackground(.hidden)`): Apple's
-    // Liquid Glass adoption guidance is that custom backgrounds in split views
-    // "overlay or interfere" with the system effect and should be removed outright,
-    // not layered. The objections that justified the paint are settled elsewhere —
-    // the app forces `.preferredColorScheme(.dark)` so the glass stays dark, and the
-    // desktop glowing through is the effect's point, not a leak.
-    .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
-    .toolbar {
-      ToolbarItem(placement: .primaryAction) {
-        addFolderMenu
-      }
-      // Reopens the first-launch terminology primer — its whole audience is someone
-      // who dismissed it before the words had anything on screen to stick to.
-      ToolbarItem(placement: .primaryAction) {
-        Button {
-          store.send(.onboardingRequested)
-        } label: {
-          Label("GraphCode Basics", systemImage: "questionmark.circle")
+      // Errors used to render only on the Welcome screen, which no longer shows once the
+      // sidebar exists — so a failed Add Folder looked like nothing happening at all.
+      .safeAreaInset(edge: .bottom) {
+        if let errorMessage = store.welcome.errorMessage {
+          Text(errorMessage)
+            .font(.caption)
+            .foregroundStyle(.red)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(8)
+            .background(.thinMaterial)
         }
       }
-    }
-    .fileImporter(
-      isPresented: Binding(
-        get: { store.welcome.isOpenPanelPresented },
-        set: { store.send(.welcome(.setOpenPanelPresented($0))) }
-      ),
-      allowedContentTypes: [.folder]
-    ) { result in
-      store.send(.welcome(.folderPickerResult(result)))
-    }
-    // The clone sheet. Dismissing it mid-clone cancels the clone — that's
-    // `.cloneCancelled`'s job, not a side effect of the binding.
-    .sheet(
-      isPresented: Binding(
-        get: { store.welcome.cloneDraft != nil },
-        set: { if !$0 { store.send(.welcome(.cloneCancelled)) } }
-      )
-    ) {
-      CloneRepositoryFormView(store: store.scope(state: \.welcome, action: \.welcome))
-    }
-    .sheet(
-      isPresented: Binding(
-        get: { store.welcome.remoteDraft != nil },
-        set: { if !$0 { store.send(.welcome(.remoteCancelled)) } }
-      )
-    ) {
-      RemoteRepositoryFormView(store: store.scope(state: \.welcome, action: \.welcome))
-    }
-    .confirmationDialog(
-      "Delete this project's loops?",
-      isPresented: Binding(
-        get: { projectPendingLoopDeletion != nil },
-        set: { if !$0 { projectPendingLoopDeletion = nil } }
-      ),
-      presenting: projectPendingLoopDeletion
-    ) { project in
-      Button("Delete Loops", role: .destructive) {
-        store.send(.projectDeleteLoopsConfirmed(project.id))
-        projectPendingLoopDeletion = nil
+      // The sidebar is the system's translucent material — Liquid Glass on macOS 26,
+      // the classic sidebar material on 15, both automatic for a `.listStyle(.sidebar)`
+      // list in a split view. This replaced a painted recess (a gradient + hairline
+      // overlays that hid the material with `scrollContentBackground(.hidden)`): Apple's
+      // Liquid Glass adoption guidance is that custom backgrounds in split views
+      // "overlay or interfere" with the system effect and should be removed outright,
+      // not layered. The objections that justified the paint are settled elsewhere —
+      // the app forces `.preferredColorScheme(.dark)` so the glass stays dark, and the
+      // desktop glowing through is the effect's point, not a leak.
+      .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
+      .toolbar {
+        ToolbarItem(placement: .primaryAction) {
+          addFolderMenu
+        }
+        // Reopens the first-launch terminology primer — its whole audience is someone
+        // who dismissed it before the words had anything on screen to stick to.
+        ToolbarItem(placement: .primaryAction) {
+          Button {
+            store.send(.onboardingRequested)
+          } label: {
+            Label("GraphCode Basics", systemImage: "questionmark.circle")
+          }
+        }
       }
-      Button("Cancel", role: .cancel) { projectPendingLoopDeletion = nil }
-    } message: { project in
-      Text(
-        """
-        \(project.graph.project.name)'s nodes and edges will be permanently deleted. \
-        The folder itself is not touched.
-        """)
-    }
-    .confirmationDialog(
-      "Delete this project?",
-      isPresented: Binding(
-        get: { projectPendingDelete != nil },
-        set: { if !$0 { projectPendingDelete = nil } }
-      ),
-      presenting: projectPendingDelete
-    ) { project in
-      Button("Remove from GraphCode") {
-        store.send(.projectRemoveTapped(project.id))
-        projectPendingDelete = nil
+      .fileImporter(
+        isPresented: Binding(
+          get: { store.welcome.isOpenPanelPresented },
+          set: { store.send(.welcome(.setOpenPanelPresented($0))) }
+        ),
+        allowedContentTypes: [.folder]
+      ) { result in
+        store.send(.welcome(.folderPickerResult(result)))
       }
-      // A remote project's folder lives on another machine — offering to trash it
-      // locally would be a lie, so the choice narrows to removal.
-      if RemoteProjectLocation.parse(projectPath: project.id) == nil {
-        Button("Move Folder to Trash", role: .destructive) {
-          store.send(.projectDeleteFromDiskConfirmed(project.id))
+      // The clone sheet. Dismissing it mid-clone cancels the clone — that's
+      // `.cloneCancelled`'s job, not a side effect of the binding.
+      .sheet(
+        isPresented: Binding(
+          get: { store.welcome.cloneDraft != nil },
+          set: { if !$0 { store.send(.welcome(.cloneCancelled)) } }
+        )
+      ) {
+        CloneRepositoryFormView(store: store.scope(state: \.welcome, action: \.welcome))
+      }
+      .sheet(
+        isPresented: Binding(
+          get: { store.welcome.remoteDraft != nil },
+          set: { if !$0 { store.send(.welcome(.remoteCancelled)) } }
+        )
+      ) {
+        RemoteRepositoryFormView(store: store.scope(state: \.welcome, action: \.welcome))
+      }
+      .confirmationDialog(
+        "Delete this project's loops?",
+        isPresented: Binding(
+          get: { projectPendingLoopDeletion != nil },
+          set: { if !$0 { projectPendingLoopDeletion = nil } }
+        ),
+        presenting: projectPendingLoopDeletion
+      ) { project in
+        Button("Delete Loops", role: .destructive) {
+          store.send(.projectDeleteLoopsConfirmed(project.id))
+          projectPendingLoopDeletion = nil
+        }
+        Button("Cancel", role: .cancel) { projectPendingLoopDeletion = nil }
+      } message: { project in
+        Text(
+          """
+          \(project.graph.project.name)'s nodes and edges will be permanently deleted. \
+          The folder itself is not touched.
+          """)
+      }
+      .confirmationDialog(
+        "Delete this project?",
+        isPresented: Binding(
+          get: { projectPendingDelete != nil },
+          set: { if !$0 { projectPendingDelete = nil } }
+        ),
+        presenting: projectPendingDelete
+      ) { project in
+        Button("Remove from GraphCode") {
+          store.send(.projectRemoveTapped(project.id))
           projectPendingDelete = nil
         }
+        // A remote project's folder lives on another machine — offering to trash it
+        // locally would be a lie, so the choice narrows to removal.
+        if RemoteProjectLocation.parse(projectPath: project.id) == nil {
+          Button("Move Folder to Trash", role: .destructive) {
+            store.send(.projectDeleteFromDiskConfirmed(project.id))
+            projectPendingDelete = nil
+          }
+        }
+        Button("Cancel", role: .cancel) { projectPendingDelete = nil }
+      } message: { project in
+        Text(
+          """
+          Remove \(project.graph.project.name) from GraphCode — its saved loops survive \
+          for whenever you re-add it — or also delete its loops and move the folder to \
+          the Trash, where it stays recoverable.
+          """)
       }
-      Button("Cancel", role: .cancel) { projectPendingDelete = nil }
-    } message: { project in
-      Text(
-        """
-        Remove \(project.graph.project.name) from GraphCode — its saved loops survive \
-        for whenever you re-add it — or also delete its loops and move the folder to \
-        the Trash, where it stays recoverable.
-        """)
-    }
     // The chat rename prompt and delete confirmation are deliberately *not* here — they
     // are hosted by `AppView`, so the Quick Chats canvas can raise the same two dialogs
     // while the sidebar row that also offers them isn't the surface being used. Same
