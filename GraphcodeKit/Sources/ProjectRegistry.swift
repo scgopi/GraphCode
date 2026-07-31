@@ -199,7 +199,16 @@ public actor ProjectRegistry {
       onDeliverMessage: deliverMessage,
       onCaptureScript: captureScript,
       onReadUsage: readUsage,
-      onSpawnIntoProject: spawnIntoProject)
+      onSpawnIntoProject: spawnIntoProject,
+      // The node memory log (`NodeMemory`): episode records in, whole directory out
+      // when the node is deleted. Keyed by this store's project path, captured here so
+      // `GraphStore` stays unaware of where memory lives — the same split as sessions.
+      onAppendMemory: { nodeID, entry in
+        NodeMemory.append(entry, projectPath: path, nodeID: nodeID)
+      },
+      onRemoveMemory: { nodeID in
+        NodeMemory.remove(projectPath: path, nodeID: nodeID)
+      })
     stores[path] = newStore
     // Only on first load of this project — a time-based node's session outlives the app
     // but not a reboot, so something has to restart it, and this is the moment the

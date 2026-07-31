@@ -99,12 +99,25 @@ func handleConnection(_ fileDescriptor: Int32) {
     await registry.addConnection(id: connectionID, fileDescriptor: fileDescriptor)
     FileHandle.standardOutput.write(Data("graphcoded: client connected\n".utf8))
     while true {
+      let data: Data
       do {
-        let data = try await readFrameAsync(from: fileDescriptor)
+        data = try await readFrameAsync(from: fileDescriptor)
+      } catch {
+        break
+      }
+      do {
         let command = try JSONDecoder().decode(DaemonCommand.self, from: data)
         await registry.handle(command, connectionID: connectionID)
       } catch {
-        break
+        // A frame that read fine but didn't decode is version skew, not a dead socket:
+        // a newer CLI sent a command this daemon predates. Dropping the connection here
+        // failed *silently* — the client just saw a hang-up — so answer instead and
+        // keep serving the commands this daemon does understand.
+        let event = DaemonEvent.errorOccurred(
+          "unrecognized command — graphcoded may be older than the client that sent it")
+        if let encoded = try? JSONEncoder().encode(event) {
+          try? FramedMessageIO.writeFrame(encoded, to: fileDescriptor)
+        }
       }
     }
     await registry.removeConnection(connectionID)

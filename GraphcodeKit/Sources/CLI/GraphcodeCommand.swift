@@ -18,6 +18,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
   case createEdge(projectPath: String, from: UUID, to: UUID, spec: EdgeSpec)
   case stopNode(projectPath: String, nodeID: UUID)
   case sendMessage(projectPath: String, nodeID: UUID, text: String)
+  case updateNode(projectPath: String, nodeID: UUID, update: NodeUpdate)
+  case memoNode(projectPath: String, nodeID: UUID, text: String)
   case pilotComposite(projectPath: String, nodeID: UUID)
   case armComposite(projectPath: String, nodeID: UUID)
   case usage(projectPath: String)
@@ -38,6 +40,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode node create <project-path> --title <t> --type <turn|goal|time> [options]
       graphcode node stop <project-path> <node-id>
       graphcode node send <project-path> <node-id> <message…>
+      graphcode node update <project-path> <node-id> [options]
+      graphcode node memo <project-path> <node-id> <note…>
       graphcode node pilot <project-path> <node-id>     dry-run a proactive composite
       graphcode node arm <project-path> <node-id>       arm it (needs a pilot first)
       graphcode edge create <project-path> <from-id> <to-id> [--kind <k>] [--condition <c>]
@@ -54,6 +58,19 @@ public enum GraphcodeCommand: Equatable, Sendable {
       --prompt <text>      required for --type time; put the cadence in it (/loop 1h …)
       --backend <name>     claudeCode | copilotCLI | codex     (default: claudeCode)
       --model <tier>       fast | standard | capable           (default: by loop type)
+      --metric <cmd>       command whose last stdout line is a number, sampled once per
+                           cycle pass — how the loop's progress is measured
+      --direction <d>      minimize | maximize                 (default: maximize)
+
+    UPDATE OPTIONS (node update; pass only what changes)
+      --goal, --predicate, --prompt, --check, --model, --metric, --direction as above
+      --poll <seconds>     how often the predicate is polled
+      --stall <seconds>    stall bound; 0 clears it
+      A loop may not change its own --predicate: the verifier stays outside the
+      verified. Session-facing changes reach a live session as a [graphcode] notice.
+
+    node memo appends a note to the loop's own memory log — what the next pass reads
+    before starting. Record dead ends and decisions, not a transcript.
 
     EDGE OPTIONS
       --kind <k>           handoff | message | spawn           (default: handoff)
@@ -89,7 +106,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
       switch verb {
       case "create":
         return .createNode(projectPath: path, draft: try parseDraft(arguments))
-      case "stop", "pilot", "arm", "send":
+      case "stop", "pilot", "arm", "send", "update", "memo":
         let raw = try take(&arguments, name: "node-id")
         guard let nodeID = UUID(uuidString: raw) else {
           throw ParseError.invalidValue(argument: "node-id", value: raw)
@@ -104,6 +121,13 @@ public enum GraphcodeCommand: Equatable, Sendable {
           let text = arguments.joined(separator: " ").trimmingCharacters(in: .whitespaces)
           guard !text.isEmpty else { throw ParseError.missingArgument("message") }
           return .sendMessage(projectPath: path, nodeID: nodeID, text: text)
+        case "update":
+          return .updateNode(projectPath: path, nodeID: nodeID, update: try parseUpdate(arguments))
+        case "memo":
+          // Joined like `send`, and for the same reason: a note should cost no quoting.
+          let text = arguments.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+          guard !text.isEmpty else { throw ParseError.missingArgument("note") }
+          return .memoNode(projectPath: path, nodeID: nodeID, text: text)
         default: return .stopNode(projectPath: path, nodeID: nodeID)
         }
       default:
@@ -175,12 +199,24 @@ public enum GraphcodeCommand: Equatable, Sendable {
       modelTier = parsed
     }
 
+    var metricDirection = MetricDirection.maximize
+    if let raw = flags["direction"] {
+      guard let parsed = MetricDirection(rawValue: raw) else {
+        throw ParseError.invalidValue(argument: "--direction", value: raw)
+      }
+      metricDirection = parsed
+    }
+
     let draft = NodeDraft(
       title: title,
       loopType: loopType,
       checkDescription: flags["check"],
       triggerPrompt: flags["prompt"],
-      goal: flags["goal"].map { GoalSpec(summary: $0, predicate: flags["predicate"]) },
+      goal: flags["goal"].map {
+        GoalSpec(
+          summary: $0, predicate: flags["predicate"],
+          metricCommand: flags["metric"], metricDirection: metricDirection)
+      },
       backend: backend,
       modelTier: modelTier)
 
@@ -188,6 +224,54 @@ public enum GraphcodeCommand: Equatable, Sendable {
     // missing instead of exiting 0 on a command that quietly did nothing.
     guard draft.isValid else { throw ParseError.invalidDraft }
     return draft
+  }
+
+  /// The partial edit `node update` sends — only the flags present travel, so the
+  /// daemon can tell "leave alone" (absent) from "clear" (empty string / 0).
+  private static func parseUpdate(_ arguments: [String]) throws -> NodeUpdate {
+    let flags = parseFlags(arguments)
+
+    var pollIntervalSeconds: Double?
+    if let raw = flags["poll"] {
+      guard let value = Double(raw) else {
+        throw ParseError.invalidValue(argument: "--poll", value: raw)
+      }
+      pollIntervalSeconds = value
+    }
+    var stallAfterSeconds: Double?
+    if let raw = flags["stall"] {
+      guard let value = Double(raw) else {
+        throw ParseError.invalidValue(argument: "--stall", value: raw)
+      }
+      stallAfterSeconds = value
+    }
+    var metricDirection: MetricDirection?
+    if let raw = flags["direction"] {
+      guard let parsed = MetricDirection(rawValue: raw) else {
+        throw ParseError.invalidValue(argument: "--direction", value: raw)
+      }
+      metricDirection = parsed
+    }
+    var modelTier: ModelTier?
+    if let raw = flags["model"] {
+      guard let parsed = ModelTier(rawValue: raw) else {
+        throw ParseError.invalidValue(argument: "--model", value: raw)
+      }
+      modelTier = parsed
+    }
+
+    let update = NodeUpdate(
+      goalSummary: flags["goal"],
+      goalPredicate: flags["predicate"],
+      pollIntervalSeconds: pollIntervalSeconds,
+      stallAfterSeconds: stallAfterSeconds,
+      metricCommand: flags["metric"],
+      metricDirection: metricDirection,
+      triggerPrompt: flags["prompt"],
+      checkDescription: flags["check"],
+      modelTier: modelTier)
+    guard !update.isEmpty else { throw ParseError.missingArgument("an option to change") }
+    return update
   }
 
   /// `--name value` pairs. Bare positional arguments are ignored here; every caller has

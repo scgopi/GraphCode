@@ -43,6 +43,13 @@ public actor GraphStore {
   /// open project — the same split that keeps this actor unaware multi-project routing
   /// exists at all.
   private let onSpawnIntoProject: (@Sendable (String, NodeDraft) -> Void)?
+  /// Appends one episode record to a node's memory log (`NodeMemory`) — objective facts
+  /// the daemon witnessed: pass boundaries, resolutions, metric readings, staged
+  /// hand-offs. Injected like every other side effect so the store stays unit-testable
+  /// with no filesystem.
+  private let onAppendMemory: (@Sendable (UUID, String) -> Void)?
+  /// Tears a deleted node's memory down alongside its session.
+  private let onRemoveMemory: (@Sendable (UUID) -> Void)?
   private var goalPollers: [UUID: Task<Void, Never>] = [:]
   /// Guarded edges whose re-fire is waiting on an `until` predicate — see
   /// `fireOutgoingEdges`, drained by `handle` before it broadcasts.
@@ -50,6 +57,15 @@ public actor GraphStore {
   /// `.message` edges whose delivery is waiting on a live-session check and possibly a
   /// script run — drained alongside cycle re-entries.
   private var pendingMessages: [UUID] = []
+  /// `.handoff` edges that just fired and owe their target a word — the nudge that
+  /// tells a still-live session its next pass exists, plus the edge's payload when it
+  /// carries one. Queued because both need awaiting (a script run, a `zmx send`), and
+  /// drained before anyone is told what the graph looks like.
+  private var pendingHandoffDeliveries: [(edgeID: UUID, isCycleReentry: Bool)] = []
+  /// One-off notices to a node's live session (an updated goal, a revised check).
+  /// Best-effort: the same fact is always in the memory log first, so a session that
+  /// couldn't be reached reads it at its next wake instead.
+  private var pendingNudges: [(nodeID: UUID, text: String)] = []
   /// Messages the orchestrator declined to deliver, newest last. Surfaced so an
   /// undelivered message is visible rather than silently dropped.
   public private(set) var undeliveredMessages:
@@ -70,7 +86,9 @@ public actor GraphStore {
     onDeliverMessage: (@Sendable (LoopNode, String) async -> Bool)? = nil,
     onCaptureScript: (@Sendable (ShellPredicate) async -> String?)? = nil,
     onReadUsage: (@Sendable (LoopNode) async -> UsageSample?)? = nil,
-    onSpawnIntoProject: (@Sendable (String, NodeDraft) -> Void)? = nil
+    onSpawnIntoProject: (@Sendable (String, NodeDraft) -> Void)? = nil,
+    onAppendMemory: (@Sendable (UUID, String) -> Void)? = nil,
+    onRemoveMemory: (@Sendable (UUID) -> Void)? = nil
   ) {
     self.graph = graph
     self.onGraphChanged = onGraphChanged
@@ -81,6 +99,12 @@ public actor GraphStore {
     self.onCaptureScript = onCaptureScript
     self.onReadUsage = onReadUsage
     self.onSpawnIntoProject = onSpawnIntoProject
+    self.onAppendMemory = onAppendMemory
+    self.onRemoveMemory = onRemoveMemory
+  }
+
+  private func recordMemory(_ nodeID: UUID, _ entry: String) {
+    onAppendMemory?(nodeID, entry)
   }
 
   /// Every session start goes through here rather than calling `onEnsureSession` directly,
@@ -157,6 +181,12 @@ public actor GraphStore {
     case .renameNode(let nodeID, let title):
       renameNode(nodeID, to: title)
 
+    case .updateNode(let nodeID, let update):
+      updateNode(nodeID, with: update)
+
+    case .memoNode(let nodeID, let text, let from):
+      memoNode(nodeID, text: text, from: from)
+
     case .deleteNode(let nodeID):
       deleteNode(nodeID)
 
@@ -181,10 +211,10 @@ public actor GraphStore {
 
     // Guarded re-fires need an `until` predicate answered first, which means a
     // subprocess — so they're queued during the synchronous pass and settled here,
-    // before anyone is told what the graph looks like.
-    await drainPendingMessages()
-    await drainPendingCycleReentries()
-    broadcast()
+    // before anyone is told what the graph looks like. Cycle re-entries run before
+    // hand-off deliveries because a re-entry *queues* one; nudges last, since an
+    // update's memory record must exist before its session is told to go look.
+    await drainAndBroadcast()
   }
 
   // MARK: - Proactive composites
@@ -209,7 +239,9 @@ public actor GraphStore {
       onTerminateSession: onTerminateSession,
       onEvaluatePredicate: onEvaluatePredicate,
       onDeliverMessage: onDeliverMessage,
-      onCaptureScript: onCaptureScript)
+      onCaptureScript: onCaptureScript,
+      onAppendMemory: onAppendMemory,
+      onRemoveMemory: onRemoveMemory)
     await child.handle(command)
     graph.nodes[id: nodeID]?.subGraph = await child.graph
     rollUpComposite(nodeID)
@@ -305,6 +337,143 @@ public actor GraphStore {
     graph.nodes[id: nodeID]?.title = trimmed
   }
 
+  // MARK: - Updating a live loop
+
+  /// Applies a partial edit to a node's configuration — `GraphCommand.updateNode`.
+  ///
+  /// Two classes of field, two behaviours. Observer-side fields (predicate, poll
+  /// interval, stall bound, metric) change only what the daemon itself does, so they
+  /// take effect immediately by re-arming the poller. Session-facing fields (goal
+  /// summary, trigger prompt, check) were baked into the session's opening prompt at
+  /// launch — so the change is *told* to a live session as a nudge, and is in the
+  /// memory log either way for the next wake. Persisting a new goal the running
+  /// session would never hear about would make the canvas lie about what the loop is
+  /// doing, which is the failure this method exists to avoid.
+  ///
+  /// One rule with teeth: a loop may not change its **own** stop condition. The
+  /// verifier stays outside the verified — the same reason maker and critic are
+  /// separate sessions. Provenance comes from `NodeUpdate.updatedBy` (`ZMX_SESSION`
+  /// attribution, honest-by-default rather than tamper-proof, matching the trust model
+  /// every other CLI verb already has).
+  private func updateNode(_ nodeID: UUID, with update: NodeUpdate) {
+    guard var node = graph.nodes[id: nodeID], !update.isEmpty else { return }
+    if update.touchesStopCondition, update.updatedBy == nodeID {
+      announceError("update refused: \(node.title) may not change its own stop condition")
+      recordMemory(nodeID, "update refused: a loop may not change its own stop condition")
+      return
+    }
+
+    var sessionFacing: [String] = []
+    var observerSide: [String] = []
+
+    switch node.loopType {
+    case .goalBased:
+      var goal = node.goal ?? GoalSpec(summary: "")
+      if let summary = update.goalSummary {
+        let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+          announceError("update refused: a goal needs a non-empty summary")
+          return
+        }
+        goal.summary = trimmed
+        sessionFacing.append("goal is now: \(trimmed)")
+      }
+      if let predicate = update.goalPredicate {
+        goal.predicate = predicate
+        observerSide.append(
+          goal.effectivePredicate.map { "predicate: `\($0)`" } ?? "predicate cleared")
+      }
+      if let poll = update.pollIntervalSeconds {
+        goal.pollIntervalSeconds = max(1, poll)
+        observerSide.append("poll interval: \(Int(goal.pollIntervalSeconds))s")
+      }
+      if let stall = update.stallAfterSeconds {
+        goal.stallAfterSeconds = stall > 0 ? stall : nil
+        observerSide.append(
+          goal.stallAfterSeconds.map { "stall bound: \(Int($0))s" } ?? "stall bound cleared")
+      }
+      if let metric = update.metricCommand {
+        goal.metricCommand = metric
+        observerSide.append(
+          goal.effectiveMetricCommand.map { "metric: `\($0)`" } ?? "metric cleared")
+      }
+      if let direction = update.metricDirection {
+        goal.metricDirection = direction
+        observerSide.append("metric direction: \(direction.displayName)")
+      }
+      node.goal = goal
+
+    case .timeBased:
+      if let prompt = update.triggerPrompt {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+          announceError("update refused: a time-based loop needs a non-empty prompt")
+          return
+        }
+        node.triggerPrompt = trimmed
+        sessionFacing.append("prompt is now: \(trimmed)")
+      }
+
+    case .turnBased:
+      if let check = update.checkDescription {
+        node.checkDescription = check
+        sessionFacing.append("each turn is now verified against: \(check)")
+      }
+
+    case .proactive:
+      break
+    }
+
+    if let tier = update.modelTier {
+      node.modelTier = tier
+      observerSide.append("model tier: \(tier.rawValue) (next launch)")
+    }
+    guard !sessionFacing.isEmpty || !observerSide.isEmpty else {
+      announceError("update refused: nothing in it applies to a \(node.loopType.rawValue) loop")
+      return
+    }
+    graph.nodes[id: nodeID] = node
+
+    // Re-arm rather than patch: `armGoalPoller` replaces any existing poller, and an
+    // update that removed both the predicate and the stall bound must also stop the
+    // old one from polling a condition that no longer exists.
+    if node.loopType == .goalBased, !node.isResolved {
+      cancelGoalPoller(nodeID)
+      armGoalPoller(for: node)
+    }
+
+    let author = update.updatedBy.flatMap { graph.nodes[id: $0]?.title } ?? "a human"
+    let changes = (sessionFacing + observerSide).joined(separator: "; ")
+    recordMemory(nodeID, "instructions updated by \(author): \(changes)")
+    if !sessionFacing.isEmpty {
+      pendingNudges.append(
+        (
+          nodeID,
+          "[graphcode] Your instructions were revised: "
+            + sessionFacing.joined(separator: "; ")
+        ))
+    }
+  }
+
+  /// A learned note into a node's memory log — `graphcode node memo`, the agent-written
+  /// half of the log (the daemon's episode records being the objective half). The store
+  /// only routes it; byte caps and formatting live in `NodeMemory`.
+  private func memoNode(_ nodeID: UUID, text: String, from senderID: UUID?) {
+    guard graph.nodes[id: nodeID] != nil else {
+      announceError("memo not recorded: no loop \(nodeID) in this graph")
+      return
+    }
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      announceError("memo not recorded: empty note")
+      return
+    }
+    // A note from the loop itself is the normal case and needs no attribution; a peer's
+    // note names its author, the way a message edge does.
+    let sender = senderID.flatMap { $0 == nodeID ? nil : graph.nodes[id: $0]?.title }
+    recordMemory(nodeID, "note\(sender.map { " (from \($0))" } ?? ""): \(trimmed)")
+  }
+
   // MARK: - Deletion
 
   /// Removing a node also removes every edge touching it — a dangling edge whose
@@ -323,8 +492,10 @@ public actor GraphStore {
     }
 
     // The graph was the only handle on a detached session; dropping the node without
-    // this would leave a `claude` running with nothing in the UI pointing at it.
+    // this would leave a `claude` running with nothing in the UI pointing at it. Its
+    // memory goes the same way — a log for a loop that no longer exists is litter.
     onTerminateSession?(node)
+    onRemoveMemory?(node.id)
   }
 
   /// The stop/kill affordance from docs/05-orchestrator.md#monitoring-surface — "a
@@ -337,6 +508,7 @@ public actor GraphStore {
     guard let node = graph.nodes[id: nodeID], !node.isResolved else { return }
     graph.nodes[id: nodeID]?.state = .stopped
     cancelGoalPoller(nodeID)
+    recordMemory(nodeID, "stopped by request")
     onTerminateSession?(node)
     fireOutgoingEdges(from: nodeID, sourceSucceeded: false)
   }
@@ -353,6 +525,7 @@ public actor GraphStore {
     guard graph.nodes[id: nodeID] != nil else { return }
     graph.nodes[id: nodeID]?.state = succeeded ? .succeeded : .failed
     cancelGoalPoller(nodeID)
+    recordMemory(nodeID, "resolved: \(succeeded ? "succeeded" : "failed")")
     fireOutgoingEdges(from: nodeID, sourceSucceeded: succeeded)
   }
 
@@ -385,10 +558,11 @@ public actor GraphStore {
       case .handoff:
         break
       }
-      if edge.cycleGuard != nil, edge.fireCount > 0 {
-        // A re-fire has to clear the `until` predicate first, which means a subprocess.
-        // Deferred to `pendingCycleRefires` so this stays synchronous; `handle` drains
-        // it before broadcasting.
+      if edge.cycleGuard != nil {
+        // Every guarded fire goes through the drain: a re-fire has to clear the `until`
+        // predicate and the plateau bound first (subprocesses, so async), and even the
+        // unconditional *first* fire owes the pass its metric reading — pass one's
+        // number is the baseline every later trend decision compares against.
         pendingCycleReentries.append(edge.id)
         continue
       }
@@ -501,8 +675,10 @@ public actor GraphStore {
     graph.edges[id: edgeID]?.fireCount += 1
     if edge.cycleGuard != nil {
       reenterCycle(through: edge)
+      pendingHandoffDeliveries.append((edgeID, true))
     } else {
       unblockIfStillIdle(edge.to)
+      pendingHandoffDeliveries.append((edgeID, false))
     }
   }
 
@@ -516,9 +692,12 @@ public actor GraphStore {
   /// `fireCount` is deliberately *not* reset; it's the thing enforcing the bound.
   private func reenterCycle(through edge: LoopEdge) {
     let members = cycleMembers(from: edge.to, backTo: edge.from)
+    let reentry = graph.edges[id: edge.id]?.fireCount ?? 0
+    let bound = edge.cycleGuard?.maxIterations.map { " of \($0)" } ?? ""
     for nodeID in members {
       graph.nodes[id: nodeID]?.state = .idle
       cancelGoalPoller(nodeID)
+      recordMemory(nodeID, "cycle re-entry \(reentry)\(bound): pass restarting")
     }
     for other in graph.edges where other.id != edge.id {
       guard members.contains(other.from), members.contains(other.to) else { continue }
@@ -606,15 +785,128 @@ public actor GraphStore {
       let edgeID = pendingCycleReentries.removeFirst()
       guard let edge = graph.edges[id: edgeID], edge.mayFireAgain else { continue }
 
-      if let until = edge.cycleGuard?.effectiveUntil, let onEvaluatePredicate {
-        let workingDirectory = graph.nodes[id: edge.from]?.worktreeBinding?.worktreePath
-        let satisfied = await onEvaluatePredicate(
-          ShellPredicate(command: until, workingDirectory: workingDirectory))
-        // The condition holds, so the loop is done — stop without another pass.
-        if satisfied { continue }
+      // One metric reading per pass, taken at the same boundary the stop decisions run —
+      // before them, so even a final pass gets its number recorded.
+      await captureMetric(forNode: edge.from)
+
+      // The vetoes apply to *re*-fires only: the first fire is what starts the cycle,
+      // unconditionally — the guard governs whether another pass is earned, not whether
+      // the cycle may begin.
+      if edge.fireCount > 0 {
+        if let until = edge.cycleGuard?.effectiveUntil, let onEvaluatePredicate {
+          let workingDirectory = graph.nodes[id: edge.from]?.worktreeBinding?.worktreePath
+          let satisfied = await onEvaluatePredicate(
+            ShellPredicate(command: until, workingDirectory: workingDirectory))
+          // The condition holds, so the loop is done — stop without another pass.
+          if satisfied {
+            recordMemory(edge.from, "cycle stopped: until predicate held (`\(until)`)")
+            continue
+          }
+        }
+        // The plateau bound: kept running, stopped getting better. Decided on the
+        // pass-end samples just captured, so "no improvement in K passes" means K real
+        // passes.
+        if let passes = edge.cycleGuard?.stopAfterPassesWithoutImprovement, passes > 0,
+          let source = graph.nodes[id: edge.from], let goal = source.goal,
+          MetricTrend.plateaued(
+            source.metricHistory.map(\.value), direction: goal.metricDirection, passes: passes)
+        {
+          let note = "cycle stopped: metric showed no improvement across \(passes) passes"
+          recordMemory(edge.from, note)
+          recordMemory(edge.to, note)
+          continue
+        }
       }
       guard graph.edges[id: edgeID] != nil else { continue }
       commitFiring(edgeID)
+    }
+  }
+
+  /// Runs the node's metric command (when it has one) and appends the reading to its
+  /// bounded on-node history and its memory log. A failed run or a non-numeric answer
+  /// records "not measured" — never a guessed zero, the `UsageSample` rule.
+  private func captureMetric(forNode nodeID: UUID) async {
+    guard let node = graph.nodes[id: nodeID], let goal = node.goal,
+      let command = goal.effectiveMetricCommand, let onCaptureScript
+    else { return }
+    let output = await onCaptureScript(
+      ShellPredicate(command: command, workingDirectory: node.worktreeBinding?.worktreePath))
+    guard let output, let value = MetricTrend.value(fromScriptOutput: output) else {
+      recordMemory(nodeID, "metric: not measured (command failed or printed no number)")
+      return
+    }
+    guard graph.nodes[id: nodeID] != nil else { return }
+    graph.nodes[id: nodeID]?.metricHistory.append(MetricSample(value: value))
+    if let count = graph.nodes[id: nodeID]?.metricHistory.count,
+      count > LoopNode.maxMetricSamples
+    {
+      graph.nodes[id: nodeID]?.metricHistory.removeFirst(count - LoopNode.maxMetricSamples)
+    }
+    recordMemory(nodeID, "metric: \(value) (\(goal.metricDirection.displayName))")
+  }
+
+  /// Tells a fired hand-off's target what just happened: a nudge naming the pass (so a
+  /// still-live session actually starts it — without this, a cycle re-entry was
+  /// bookkeeping the agent never heard about), plus the edge's payload when it carries
+  /// one. Delivered into a live session, or staged into the target's memory so its next
+  /// wake reads it — a hand-off is never quietly dropped, which is what separates it
+  /// from a `.message`.
+  private func drainPendingHandoffDeliveries() async {
+    while !pendingHandoffDeliveries.isEmpty {
+      let pending = pendingHandoffDeliveries.removeFirst()
+      guard let edge = graph.edges[id: pending.edgeID], edge.kind == .handoff,
+        let source = graph.nodes[id: edge.from],
+        let target = graph.nodes[id: edge.to]
+      else { continue }
+
+      var parts: [String] = []
+      if pending.isCycleReentry {
+        let bound = edge.cycleGuard?.maxIterations.map { " of \($0)" } ?? ""
+        parts.append(
+          "Cycle re-entry \(edge.fireCount)\(bound) — the stop condition is not yet met. "
+            + "Continue toward your goal.")
+      } else {
+        parts.append("\(source.title) finished and handed its work off to you.")
+      }
+      if let payload = await handoffPayload(for: edge, from: source) {
+        parts.append(payload)
+      }
+      let message = "[graphcode] " + parts.joined(separator: " ")
+
+      var delivered = false
+      if MessageBus.deliverability(to: target) == nil, let onDeliverMessage {
+        delivered = await onDeliverMessage(target, message)
+      }
+      // Staged, not dropped: the wake digest carries it into the next session.
+      recordMemory(
+        target.id, delivered ? "delivered: \(message)" : "while you were away: \(message)")
+    }
+  }
+
+  /// What a hand-off carries across, per its transform — the same three shapes a
+  /// `.message` edge's content has (`MessageBus.messageText`), minus the "finished"
+  /// boilerplate the nudge already says.
+  private func handoffPayload(for edge: LoopEdge, from source: LoopNode) async -> String? {
+    switch edge.payloadTransform {
+    case .none:
+      return nil
+    case .template(let text):
+      return text.isEmpty ? nil : text
+    case .script(let command):
+      guard let onCaptureScript else { return nil }
+      return await onCaptureScript(
+        ShellPredicate(command: command, workingDirectory: source.worktreeBinding?.worktreePath))
+    }
+  }
+
+  private func drainPendingNudges() async {
+    while !pendingNudges.isEmpty {
+      let (nodeID, text) = pendingNudges.removeFirst()
+      guard let target = graph.nodes[id: nodeID],
+        MessageBus.deliverability(to: target) == nil,
+        let onDeliverMessage
+      else { continue }
+      _ = await onDeliverMessage(target, text)
     }
   }
 
@@ -718,7 +1010,7 @@ public actor GraphStore {
       now.timeIntervalSince(node.createdAt) >= stallAfter
     {
       markStalled(nodeID)
-      broadcast()
+      await drainAndBroadcast()
       return
     }
 
@@ -735,6 +1027,17 @@ public actor GraphStore {
     // or its session exited and resolved it) while the predicate was running.
     guard let current = graph.nodes[id: nodeID], !current.isResolved else { return }
     resolveNode(nodeID, succeeded: true)
+    await drainAndBroadcast()
+  }
+
+  /// The same settle-then-tell sequence `handle` ends with, for the paths that mutate
+  /// outside a command — goal polling resolves nodes and fires edges too, and an edge
+  /// fired from a poll must not wait for the next unrelated command to be delivered.
+  private func drainAndBroadcast() async {
+    await drainPendingMessages()
+    await drainPendingCycleReentries()
+    await drainPendingHandoffDeliveries()
+    await drainPendingNudges()
     broadcast()
   }
 
@@ -745,6 +1048,7 @@ public actor GraphStore {
   private func markStalled(_ nodeID: UUID) {
     graph.nodes[id: nodeID]?.state = .stalled
     cancelGoalPoller(nodeID)
+    recordMemory(nodeID, "stalled: exceeded its stall bound without resolving")
     fireOutgoingEdges(from: nodeID, sourceSucceeded: false)
   }
 

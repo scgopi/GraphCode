@@ -50,6 +50,11 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// What the backend has reported spending on this loop, if anything. Never estimated —
   /// see `UsageSample`.
   public var usage: UsageSample?
+  /// Recent readings of the goal's `metricCommand`, oldest first — one per cycle pass,
+  /// capped at `LoopNode.maxMetricSamples` so per-poll persistence stays bounded. The
+  /// full unbounded series lives in the node's memory log; this is the cache the canvas
+  /// and the plateau rule read.
+  public var metricHistory: [MetricSample]
   public var state: LoopState
   public var createdAt: Date
 
@@ -66,6 +71,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     subGraph: LoopGraph? = nil,
     pilotState: PilotState = .notPiloted,
     usage: UsageSample? = nil,
+    metricHistory: [MetricSample] = [],
     state: LoopState = .idle,
     createdAt: Date = Date()
   ) {
@@ -81,9 +87,15 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.subGraph = subGraph
     self.pilotState = pilotState
     self.usage = usage
+    self.metricHistory = metricHistory
     self.state = state
     self.createdAt = createdAt
   }
+
+  /// How many metric samples the node itself carries — enough for a sparkline and any
+  /// sane plateau bound, small enough that the per-mutation full-graph persist and
+  /// broadcast stay cheap.
+  public static let maxMetricSamples = 20
 
   /// The opening prompt this node's `zmx` session should run, or `nil` when there is
   /// nothing to say. One place so `ZmxSessionLauncher` (daemon) and `LoopWorkspaceView`
@@ -152,7 +164,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
 
   private enum CodingKeys: String, CodingKey {
     case id, title, loopType, checkDescription, triggerPrompt, goal, backend, modelTier
-    case worktreeBinding, subGraph, pilotState, usage, state, createdAt
+    case worktreeBinding, subGraph, pilotState, usage, metricHistory, state, createdAt
   }
 
   /// Hand-written for the same reason `LoopEdge`'s is: `ProjectPersistence.loadGraph`
@@ -173,6 +185,8 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     subGraph = try container.decodeIfPresent(LoopGraph.self, forKey: .subGraph)
     pilotState = try container.decodeIfPresent(PilotState.self, forKey: .pilotState) ?? .notPiloted
     usage = try container.decodeIfPresent(UsageSample.self, forKey: .usage)
+    metricHistory =
+      try container.decodeIfPresent([MetricSample].self, forKey: .metricHistory) ?? []
     state = try container.decodeIfPresent(LoopState.self, forKey: .state) ?? .idle
     createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
   }

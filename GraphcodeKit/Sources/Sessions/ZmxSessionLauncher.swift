@@ -246,16 +246,36 @@ public enum ZmxSessionLauncher {
     let briefingFile =
       settings.briefsSessionsAboutTheGraph && remote == nil
       ? SessionBriefing.write(projectPath: projectPath) : nil
+    // The node's wake digest (`NodeMemory`): what previous passes learned, budgeted,
+    // delivered by path for the same MAX_CANON reason as the briefing. `nil` on a first
+    // launch (no memory yet) and for remote sessions (the file is written on this
+    // machine; the session runs on another). Pointed at from the *prompt* rather than
+    // the shared per-project briefing file, because two nodes launching concurrently
+    // rewrite that same AGENTS.md — per-node content there would race.
+    let wakeFile =
+      remote == nil && projectPath != nil
+      ? NodeMemory.writeWakeDigest(projectPath: projectPath ?? "", nodeID: node.id) : nil
+    let promptWithMemory =
+      wakeFile.map { "Read your loop memory at \($0.path) before starting. Then: \(singleLine)" }
+      ?? singleLine
     // Both the executable and the shape of its arguments come from the node's backend —
     // `claude` takes its prompt positionally and its briefing via `--append-system-prompt`,
     // `copilot` takes both together as `--interactive <prompt>`. Model tier is applied
     // here rather than baked into the prompt: it's the orchestrator's scheduling decision
     // (docs/05-orchestrator.md#responsibilities item 7).
     let tier = node.effectiveModelTier(autoSelecting: settings.autoSelectsModel)
+    // The wake digest's directory joins the granted paths: Copilot and Codex verify
+    // file access, and a pointer at a file the session is denied reads as the agent
+    // ignoring its instructions — the same failure the briefing's `--add-dir` exists
+    // to prevent. Claude Code ignores workspace paths, so this costs the others two
+    // argv entries and Claude nothing.
+    let paths =
+      Self.workspacePaths(forNode: node, projectPath: projectPath)
+      + (wakeFile.map { [$0.deletingLastPathComponent().path] } ?? [])
     let arguments = node.backend.launchArguments(
-      prompt: singleLine, tier: tier, briefingFile: briefingFile,
+      prompt: promptWithMemory, tier: tier, briefingFile: briefingFile,
       settings: settings,
-      workspacePaths: Self.workspacePaths(forNode: node, projectPath: projectPath))
+      workspacePaths: paths)
     let command =
       [
         "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",

@@ -141,6 +141,48 @@ do {
     if case .errorOccurred(let message) = verdict { fail(message) }
     print("delivered")
 
+  case .updateNode(let projectPath, let nodeID, let update):
+    // Attributed like `node create`/`node send`: run from inside a loop, ZMX_SESSION
+    // names the author — which is also what lets the daemon refuse a loop loosening
+    // its own stop condition.
+    var attributed = update
+    attributed.updatedBy = SurfaceRef.nodeID(
+      fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
+    try client.send(.openProject(path: projectPath))
+    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try client.send(
+      .graphCommand(
+        projectPath: projectPath, command: .updateNode(nodeID, update: attributed)))
+    // A refusal arrives as an error, an applied update as the changed graph — wait for
+    // whichever comes first so `update` can't print a graph that ignored it.
+    let updateVerdict = try client.waitForEvent { event in
+      switch event {
+      case .graphChanged, .errorOccurred: return true
+      default: return false
+      }
+    }
+    if case .errorOccurred(let message) = updateVerdict { fail(message) }
+    if case .graphChanged(let graph) = updateVerdict {
+      print(GraphcodeCommand.render(graph))
+    }
+
+  case .memoNode(let projectPath, let nodeID, let text):
+    let author = SurfaceRef.nodeID(
+      fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
+    try client.send(.openProject(path: projectPath))
+    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try client.send(
+      .graphCommand(
+        projectPath: projectPath, command: .memoNode(nodeID, text: text, from: author)))
+    let memoVerdict = try client.waitForEvent { event in
+      switch event {
+      case .graphChanged, .errorOccurred: return true
+      default: return false
+      }
+    }
+    if case .errorOccurred(let message) = memoVerdict { fail(message) }
+    print("noted")
+
   case .pilotComposite(let projectPath, let nodeID):
     try runAndPrintGraph(
       projectPath: projectPath,

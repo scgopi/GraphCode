@@ -68,6 +68,15 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// An empty or whitespace-only title is refused rather than applied: the graph, the
   /// sidebar, and the canvas would all render a nameless card, and there is no undo.
   case renameNode(UUID, title: String)
+  /// Edit a live loop's configuration — the partial-edit counterpart to `renameNode`,
+  /// carrying only the fields being changed (`NodeUpdate`). Observer-side fields
+  /// (predicate, intervals, metric) apply immediately; session-facing ones (goal
+  /// summary, prompt, check) are nudged into a live session and recorded in the node's
+  /// memory for its next wake. A loop may not change its *own* stop condition.
+  case updateNode(UUID, update: NodeUpdate)
+  /// Append a learned note to a node's memory log (`NodeMemory`) — what `graphcode
+  /// node memo` rides on. `from` is attributed the same way `messageNode`'s is.
+  case memoNode(UUID, text: String, from: UUID?)
   /// Type a message into a node's live session, right now — the ad-hoc counterpart to
   /// a `.message` edge, sharing its transport and its deliverability rules
   /// (`MessageBus`). This is what `graphcode node send` rides on, and its reason to
