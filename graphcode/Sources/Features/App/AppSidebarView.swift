@@ -282,9 +282,10 @@ struct AppSidebarView: View {
     List(selection: selectionBinding) {
       attentionSection
       // The Graph first, then Quick Chats as a project-like row of its own — a peer of
-      // the folders, just not tied to one — then the folders, split by where they
-      // live. The dividers are what make the sidebar read as sections: the app's own
-      // surfaces on top, local folders next, remote repositories last.
+      // the folders, just not tied to one — then the folders under captioned group
+      // headers, split by where they live: the app's own surfaces on top, local
+      // projects next, remote repositories last. Each header folds its whole group
+      // with the same hover-chevron manners every other header row has.
       if let global = store.projects.first(where: { $0.graph.isGlobal }) {
         projectGroup(for: global)
       }
@@ -297,20 +298,65 @@ struct AppSidebarView: View {
         RemoteProjectLocation.parse(projectPath: $0.id) != nil
       }
       if !localFolders.isEmpty {
-        Divider()
-          .padding(.vertical, 4)
-      }
-      ForEach(localFolders) { project in
-        projectGroup(for: project)
+        sectionHeaderRow(
+          "Local Projects", key: Self.localSectionKey, collapsed: $localSectionCollapsed)
+        if !localSectionCollapsed {
+          ForEach(localFolders) { project in
+            projectGroup(for: project)
+          }
+        }
       }
       if !remoteFolders.isEmpty {
-        Divider()
-          .padding(.vertical, 4)
-      }
-      ForEach(remoteFolders) { project in
-        projectGroup(for: project)
+        sectionHeaderRow(
+          "Remote Repositories", key: Self.remoteSectionKey,
+          collapsed: $remoteSectionCollapsed)
+        if !remoteSectionCollapsed {
+          ForEach(remoteFolders) { project in
+            projectGroup(for: project)
+          }
+        }
       }
     }
+  }
+
+  // MARK: - Folder sections
+
+  /// Whether the Local Projects / Remote Repositories groups are folded away. View
+  /// state like the chats' own flag: a fold is a reading preference, not graph state.
+  @State private var localSectionCollapsed = false
+  @State private var remoteSectionCollapsed = false
+  static let localSectionKey = "section-local-projects"
+  static let remoteSectionKey = "section-remote-repositories"
+
+  /// A group caption with the same hover-chevron manners as every header row. Not
+  /// selectable — it names the rows below it rather than opening anything — so the
+  /// whole row is the toggle rather than just the chevron.
+  private func sectionHeaderRow(
+    _ title: String, key: String, collapsed: Binding<Bool>
+  ) -> some View {
+    HStack(spacing: 6) {
+      Text(title)
+        .font(.caption)
+        .fontWeight(.semibold)
+        .foregroundStyle(.secondary)
+      Spacer()
+      if hoveredRowKey == key {
+        Image(systemName: collapsed.wrappedValue ? "chevron.right" : "chevron.down")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .frame(width: 12)
+      }
+    }
+    .contentShape(Rectangle())
+    .onTapGesture { collapsed.wrappedValue.toggle() }
+    .onHover { hovering in
+      if hovering {
+        hoveredRowKey = key
+      } else if hoveredRowKey == key {
+        hoveredRowKey = nil
+      }
+    }
+    .padding(.top, 6)
   }
 
   // MARK: - Quick chats
