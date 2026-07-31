@@ -57,19 +57,30 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   }
 
   /// The same choice for Copilot CLI, whose flags don't map one-to-one.
+  ///
+  /// Copilot gates tools, paths, and URLs as three separate confirmations, and only
+  /// YOLO (`--yolo`, its own name for `--allow-all`) covers all three. `allowTools` was
+  /// the default on the reasoning that a loop's bargain covers its own folder and no
+  /// further — and field experience overruled it: an unattended Copilot loop doing any
+  /// real work (fetching a URL, touching a path beyond its granted directories) stalled
+  /// at a confirmation dialog nobody was watching, reported as `running` the whole
+  /// time. YOLO is what an unattended loop actually needs, so it's the default; the
+  /// narrower modes remain for humans who plan to sit with their loops.
+  ///
+  /// Raw values predate the renaming and stay as they are — they're what saved
+  /// settings files hold.
   public enum CopilotPermissions: String, Codable, CaseIterable, Sendable {
     case ask
-    /// Tools run without confirmation — the nearest thing to Claude Code's `auto`.
+    /// Tools only — Copilot still confirms URL access and unlisted paths.
     case allowTools
-    /// `--allow-all`: also disables path verification and URL checks, so a session can
-    /// reach outside the project it was started in.
+    /// Copilot's `--yolo`: tools, paths, and URLs all approved.
     case allowEverything
 
     public var displayName: String {
       switch self {
       case .ask: return "Ask every time"
-      case .allowTools: return "Allow tools (recommended)"
-      case .allowEverything: return "Allow everything"
+      case .allowTools: return "Allow tools only"
+      case .allowEverything: return "YOLO (recommended)"
       }
     }
 
@@ -78,10 +89,12 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       case .ask:
         return "Copilot's own default. An unattended loop will wait at the first prompt."
       case .allowTools:
-        return "Tools run without confirmation, still scoped to this project's paths."
+        return "Tools run without confirmation, but URL access and paths beyond the "
+          + "granted directories still prompt — an unattended loop can stall on a "
+          + "dialog nobody sees."
       case .allowEverything:
-        return "Also disables path and URL checks — a session can reach outside the "
-          + "project it was started in."
+        return "Copilot's --yolo: tools, paths, and URLs all approved — what an "
+          + "unattended loop needs to run without a human at the pane."
       }
     }
 
@@ -89,7 +102,9 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       switch self {
       case .ask: return []
       case .allowTools: return ["--allow-all-tools"]
-      case .allowEverything: return ["--allow-all"]
+      // `--yolo` and `--allow-all` are the same flag; emitted under the name Copilot
+      // itself promotes, so what appears in `ps` matches what its docs say.
+      case .allowEverything: return ["--yolo"]
       }
     }
 
@@ -215,7 +230,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     defaultBackend: CLISessionBackendKind = .claudeCode,
     codexApprovals: CodexApprovals = .workspace,
     claudePermissionMode: ClaudePermissionMode = .auto,
-    copilotPermissions: CopilotPermissions = .allowTools,
+    copilotPermissions: CopilotPermissions = .allowEverything,
     briefsSessionsAboutTheGraph: Bool = true,
     autoSelectsModel: Bool = false
   ) {
@@ -243,7 +258,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       ?? .auto
     copilotPermissions =
       try container.decodeIfPresent(CopilotPermissions.self, forKey: .copilotPermissions)
-      ?? .allowTools
+      ?? .allowEverything
     briefsSessionsAboutTheGraph =
       try container.decodeIfPresent(Bool.self, forKey: .briefsSessionsAboutTheGraph) ?? true
     // Absent in files written before the setting existed, and those loops were all being

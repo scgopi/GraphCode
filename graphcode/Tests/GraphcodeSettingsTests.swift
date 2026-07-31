@@ -19,7 +19,7 @@ struct GraphcodeSettingsTests {
     let settings = GraphcodeSettings()
     #expect(settings.defaultBackend == .claudeCode)
     #expect(settings.claudePermissionMode == .auto)
-    #expect(settings.copilotPermissions == .allowTools)
+    #expect(settings.copilotPermissions == .allowEverything)
     #expect(settings.briefsSessionsAboutTheGraph)
   }
 
@@ -83,10 +83,12 @@ struct GraphcodeSettingsTests {
 
     let loose = GraphcodeSettings(
       claudePermissionMode: .bypassPermissions, copilotPermissions: .allowEverything)
+    // Emitted as `--yolo` — the same flag as `--allow-all`, under the name Copilot
+    // itself promotes.
     #expect(
       CLISessionBackendKind.copilotCLI.launchArguments(
         prompt: "go", tier: .standard, settings: loose
-      ).contains("--allow-all"))
+      ).contains("--yolo"))
   }
 
   @Test

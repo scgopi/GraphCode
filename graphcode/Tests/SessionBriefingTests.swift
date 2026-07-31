@@ -145,15 +145,17 @@ struct SessionBriefingTests {
     #expect(!arguments.contains("--append-system-prompt-file"))
 
     // Copilot needs *both* halves, and shipping only one is issue #2: a preamble telling
-    // it to read the briefing, and `--add-dir` letting it. Copilot verifies file paths, so
-    // without the second the session is denied the file it was just told to open — which
-    // looks exactly like an agent ignoring its instructions.
-    // Every granted directory, not just the first: a session is given its project and its
-    // worktree as well, and asserting on `firstIndex` alone quietly depended on there
-    // being exactly one.
-    let granted = zip(arguments, arguments.dropFirst())
-      .filter { $0.0 == "--add-dir" }.map(\.1)
-    #expect(granted.contains { $0.contains("briefings") })
+    // it to read the briefing, and permission to actually open it. Copilot verifies file
+    // paths, so without the second the session is denied the file it was just told to
+    // open — which looks exactly like an agent ignoring its instructions. Under YOLO
+    // every path is already allowed; under the narrower tools-only mode the briefing's
+    // directory must be granted by name. The launcher reads the machine's real settings,
+    // so the assertion accepts whichever route this machine is on.
+    if !arguments.contains("--yolo") {
+      let granted = zip(arguments, arguments.dropFirst())
+        .filter { $0.0 == "--add-dir" }.map(\.1)
+      #expect(granted.contains { $0.contains("briefings") })
+    }
 
     let interactive = try #require(arguments.firstIndex(of: "--interactive"))
     let opening = arguments[interactive + 1]
@@ -205,26 +207,27 @@ struct SessionBriefingTests {
     let copilot = try #require(
       ZmxSessionLauncher.arguments(
         forNode: node(backend: .copilotCLI), projectPath: Self.project))
-    #expect(copilot.contains("--allow-all-tools"))
+    // Some permission answer must be present — which one depends on this machine's
+    // settings, since the launcher reads the real store.
+    #expect(copilot.contains("--yolo") || copilot.contains("--allow-all-tools"))
   }
 
   @Test
-  func neitherBackendIsGivenTheKeysToTheWholeMachine() {
-    // The setting is "approve the ordinary work of a coding session in this folder", not
-    // "skip every check". These are the flags that would cross that line.
+  func theDefaultPermissionsMatchEachBackendsBargain() {
+    // Claude Code's `auto` approves the ordinary work of a coding session with its
+    // guardrails intact — bypassing them stays a choice, never a default.
     let claude = CLISessionBackendKind.claudeCode.launchArguments(
-      prompt: "go", tier: .standard)
+      prompt: "go", tier: .standard, settings: GraphcodeSettings())
     #expect(!claude.contains("--dangerously-skip-permissions"))
     #expect(!claude.contains("bypassPermissions"))
 
+    // Copilot's default is deliberately its `--yolo`: it confirms tools, paths, and
+    // URLs separately, and the narrower tools-only default left unattended loops
+    // stalling at URL and path dialogs nobody was watching — see
+    // `GraphcodeSettings.CopilotPermissions`.
     let copilot = CLISessionBackendKind.copilotCLI.launchArguments(
-      prompt: "go", tier: .standard)
-    // `--allow-all`/`--yolo` also disable path verification and URL checks, which would
-    // let a loop reach outside the project it was pointed at.
-    #expect(!copilot.contains("--allow-all"))
-    #expect(!copilot.contains("--yolo"))
-    #expect(!copilot.contains("--allow-all-paths"))
-    #expect(!copilot.contains("--allow-all-urls"))
+      prompt: "go", tier: .standard, settings: GraphcodeSettings())
+    #expect(copilot.contains("--yolo"))
   }
 
   @Test
@@ -241,13 +244,21 @@ struct SessionBriefingTests {
     let arguments = try #require(
       ZmxSessionLauncher.arguments(forNode: node, projectPath: Self.project))
 
-    let granted = zip(arguments, arguments.dropFirst())
-      .filter { $0.0 == "--add-dir" }.map(\.1)
-    #expect(granted.contains(Self.project))
-    #expect(granted.contains("/tmp/wt"))
-    #expect(granted.contains { $0.contains("briefings") })
-    // Named directories, not the whole disk.
-    #expect(!arguments.contains("--allow-all-paths"))
+    // Under YOLO every path is already open and named grants would be noise (see
+    // `theWiderAndStricterSettingsAddNoDirectories`); under tools-only mode each
+    // directory the work spans must be granted by name. The launcher reads this
+    // machine's real settings, so the assertion follows whichever mode it's on.
+    if arguments.contains("--yolo") {
+      #expect(!arguments.contains("--add-dir"))
+    } else {
+      let granted = zip(arguments, arguments.dropFirst())
+        .filter { $0.0 == "--add-dir" }.map(\.1)
+      #expect(granted.contains(Self.project))
+      #expect(granted.contains("/tmp/wt"))
+      #expect(granted.contains { $0.contains("briefings") })
+      // Named directories, not the whole disk.
+      #expect(!arguments.contains("--allow-all-paths"))
+    }
   }
 
   @Test

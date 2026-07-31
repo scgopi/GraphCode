@@ -113,15 +113,13 @@ extension CLISessionBackendKind {
   /// graph reports it as `running`, which is the same "looks alive, does nothing" failure
   /// as the trust-this-folder dialog.
   ///
-  /// The defaults are deliberately *not* the most permissive setting either backend
-  /// offers, though a human can choose those in Settings. Claude Code's
-  /// `auto` keeps its guardrails while approving the ordinary work of a coding session;
-  /// `bypassPermissions` (and `--dangerously-skip-permissions`) removes the checks
-  /// entirely. Copilot's nearest equivalent is `--allow-all-tools` — tools run without
-  /// confirmation — rather than `--allow-all`/`--yolo`, which additionally disable path
-  /// verification and URL checks, letting a session reach outside the project it was
-  /// started in. Auto-approving work *in the folder the loop was pointed at* is the
-  /// bargain a loop implies; reaching past it is not.
+  /// Claude Code's default is `auto` — guardrails intact, ordinary work approved;
+  /// `bypassPermissions` removes the checks entirely and is offered, not defaulted.
+  /// Copilot's default is `--yolo`: it gates tools, paths, and URLs as three separate
+  /// confirmations, and the narrower `--allow-all-tools` default this used to have left
+  /// unattended loops stalling at URL and path dialogs nobody was watching — reported
+  /// as `running` the whole time. See `GraphcodeSettings.CopilotPermissions` for the
+  /// full reasoning; the narrower modes remain for attended use.
   /// Public because the app builds its own argv rather than going through
   /// `launchArguments`: `GhosttyTerminalView` assembles a *shell command string*, where
   /// the daemon assembles an argv array. Both still have to answer this question the same
