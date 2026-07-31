@@ -248,6 +248,30 @@ struct GoalBasedLoopTests {
   }
 
   @Test
+  func theSessionPromptCarriesTheMeasurementMethod() throws {
+    // The metric is a method the loop is handed, not just a score the daemon keeps: a
+    // loop that doesn't know how it's measured can't steer toward improving. The same
+    // command is still sampled daemon-side, so the recorded numbers never come from the
+    // loop's self-report.
+    let node = LoopNode(
+      title: "Lint", loopType: .goalBased,
+      goal: GoalSpec(
+        summary: "lint is clean", metricCommand: "swiftlint | wc -l",
+        metricDirection: .minimize))
+
+    let prompt = try #require(node.sessionPrompt)
+    #expect(prompt.contains("swiftlint | wc -l"))
+    #expect(prompt.contains("lower is better"))
+    #expect(prompt.contains("run it as you work"))
+
+    // No metric, no measurement sentence — the base prompt stays word-for-word what it
+    // always was.
+    let bare = LoopNode(
+      title: "Docs", loopType: .goalBased, goal: GoalSpec(summary: "docs read clearly"))
+    #expect(bare.sessionPrompt == "Work toward this goal until it is met: docs read clearly")
+  }
+
+  @Test
   func aTurnBasedNodeOpensWithItsCheck() throws {
     // The check used to reach nothing: required at creation, then left in the graph as
     // metadata while the session opened knowing neither the criterion nor that it was a

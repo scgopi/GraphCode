@@ -58,8 +58,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
       --prompt <text>      required for --type time; put the cadence in it (/loop 1h …)
       --backend <name>     claudeCode | copilotCLI | codex     (default: claudeCode)
       --model <tier>       fast | standard | capable           (default: by loop type)
-      --metric <cmd>       command whose last stdout line is a number, sampled once per
-                           cycle pass — how the loop's progress is measured
+      --metric <cmd>       how the loop's performance is measured — fed into its prompt
+                           so it can score itself as it works, and sampled by graphcoded
+                           once per cycle pass (last stdout line must be a number)
       --direction <d>      minimize | maximize                 (default: maximize)
 
     UPDATE OPTIONS (node update; pass only what changes)

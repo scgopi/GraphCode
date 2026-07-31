@@ -392,14 +392,18 @@ public actor GraphStore {
         observerSide.append(
           goal.stallAfterSeconds.map { "stall bound: \(Int($0))s" } ?? "stall bound cleared")
       }
+      // Session-facing, not observer-side: the metric is part of what the session was
+      // told at launch — how its performance is measured — so changing it has to reach
+      // a live session the same way a changed goal does.
       if let metric = update.metricCommand {
         goal.metricCommand = metric
-        observerSide.append(
-          goal.effectiveMetricCommand.map { "metric: `\($0)`" } ?? "metric cleared")
+        sessionFacing.append(
+          goal.effectiveMetricCommand.map { "you are now measured by: \($0)" }
+            ?? "the metric was removed")
       }
       if let direction = update.metricDirection {
         goal.metricDirection = direction
-        observerSide.append("metric direction: \(direction.displayName)")
+        sessionFacing.append("for your metric, \(direction.displayName)")
       }
       node.goal = goal
 
