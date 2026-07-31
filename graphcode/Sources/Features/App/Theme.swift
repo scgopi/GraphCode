@@ -58,12 +58,18 @@ enum Theme {
   /// -points change, which is nothing. Real gloss puts most of its falloff in the top
   /// fifth — near the light — and is almost flat below that. Same shape as `tabBarGloss`,
   /// stretched over a pane instead of a 40pt strip.
+  /// Since the sidebar grew sections (Graph/chats, local, remote), it sits a shade —
+  /// ~15% — under `windowBackground` rather than centred on it: enough recession to
+  /// read as the frame around the lit workspace, close enough that the boundary stays
+  /// the edge-shadow's job rather than becoming a colour change. Deliberately the one
+  /// exception to the one-tone rule above; if it ever drops further the real-black-era
+  /// problem comes back.
   static let sidebarGloss = LinearGradient(
     stops: [
-      .init(color: Color(white: 0.145), location: 0.00),
-      .init(color: Color(white: 0.129), location: 0.16),
-      .init(color: Color(white: 0.118), location: 0.48),
-      .init(color: Color(white: 0.102), location: 1.00),
+      .init(color: Color(white: 0.127), location: 0.00),
+      .init(color: Color(white: 0.111), location: 0.16),
+      .init(color: Color(white: 0.100), location: 0.48),
+      .init(color: Color(white: 0.084), location: 1.00),
     ],
     startPoint: .top,
     endPoint: .bottom)
