@@ -1,3 +1,4 @@
+import AppKit
 import ComposableArchitecture
 import GraphcodeKit
 import SwiftUI
@@ -29,7 +30,22 @@ struct GraphcodeApp: App {
     // developer's own `make daemon-install` setup is left alone. Synchronous because it
     // only does real work on first launch or after an update, and the app is more useful
     // with its daemon already up than a fraction of a second earlier.
-    DaemonBootstrap.installIfNeeded()
+    //
+    // A failure is said to the human's face. Discarding it was how a machine whose
+    // helper install went wrong presented as "the app is corrupted": no daemon, no
+    // sessions, and not one word about why. The alert is deferred to the next runloop
+    // turn because `NSAlert` needs the app to have finished launching.
+    if case .failed(let reason) = DaemonBootstrap.installIfNeeded() {
+      DispatchQueue.main.async {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "GraphCode couldn't install its background helpers"
+        alert.informativeText =
+          "\(reason)\n\nLoops can't run until this succeeds. Relaunching the app retries; "
+          + "details are in ~/.graphcode/bootstrap.err.log."
+        alert.runModal()
+      }
+    }
   }
 
   var body: some Scene {

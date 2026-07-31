@@ -59,13 +59,29 @@ public enum DaemonBootstrap {
     .joined(separator: "\n")
   }
 
+  /// Whether every helper is actually present and runnable where it was installed.
+  ///
+  /// The stamp alone cannot answer this: it records which *bundle* was installed, not
+  /// whether the installed copies still exist. A bin directory that lost a helper — an
+  /// interrupted install, a hand-run `rm`, a cleanup tool — while the stamp survived
+  /// produced an app that reported itself up to date over a missing daemon, forever.
+  /// That is the "the beta is corrupted" failure: nothing was corrupt, the bootstrap
+  /// just refused to look.
+  static func helpersInstalled(in directory: URL = SupportDirectory.binDirectory) -> Bool {
+    helpers.allSatisfy {
+      FileManager.default.isExecutableFile(atPath: directory.appendingPathComponent($0).path)
+    }
+  }
+
   @discardableResult
   public static func installIfNeeded() -> Outcome {
     guard let bundled = bundledHelperDirectory() else { return .notPackaged }
 
     let expected = stamp(forHelpersIn: bundled)
     let current = try? String(contentsOf: stampURL, encoding: .utf8)
-    if current == expected, FileManager.default.fileExists(atPath: launchAgentURL.path) {
+    if current == expected, FileManager.default.fileExists(atPath: launchAgentURL.path),
+      helpersInstalled()
+    {
       return .upToDate
     }
 
@@ -76,6 +92,18 @@ public enum DaemonBootstrap {
       try expected.write(to: stampURL, atomically: true, encoding: .utf8)
       return .installed
     } catch {
+      // Written somewhere a human (or a bug report) can find: the app has no console,
+      // and a bootstrap that failed silently is how a machine ends up looking
+      // "corrupted" with nothing to say why.
+      let report = "\(Date().ISO8601Format())  helper install failed: \(error)\n"
+      let log = SupportDirectory.url.appendingPathComponent("bootstrap.err.log")
+      if let handle = try? FileHandle(forWritingTo: log) {
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: Data(report.utf8))
+        try? handle.close()
+      } else {
+        try? report.write(to: log, atomically: true, encoding: .utf8)
+      }
       return .failed("\(error)")
     }
   }
@@ -87,13 +115,23 @@ public enum DaemonBootstrap {
 
     for name in helpers {
       let target = destination.appendingPathComponent(name)
-      // Remove before copying, then re-sign in place. Writing over a path macOS has
-      // already validated leaves a stale cached signature and the result is SIGKILLed at
-      // exec ("Taskgated Invalid Signature") even though the signature is valid on disk —
-      // a near-silent failure, since the binary dies before it can print anything.
+      // Stage the copy next to the target, then swap. The earlier remove-then-copy
+      // order meant a copy that failed left neither binary — an interrupted first
+      // launch gutted `~/.graphcode/bin`, and with the stamp check above blind to it,
+      // every later launch called that state up to date. Staging costs one rename and
+      // means the old helper survives until its replacement has fully landed.
+      //
+      // The re-sign happens on the staged file and the swap gives the target a fresh
+      // inode, which also preserves the original fix here: writing over a path macOS
+      // has already validated leaves a stale cached signature and the result is
+      // SIGKILLed at exec ("Taskgated Invalid Signature") — a near-silent failure,
+      // since the binary dies before it can print anything.
+      let staged = destination.appendingPathComponent("\(name).new")
+      try? fileManager.removeItem(at: staged)
+      try fileManager.copyItem(at: bundled.appendingPathComponent(name), to: staged)
+      resign(staged)
       try? fileManager.removeItem(at: target)
-      try fileManager.copyItem(at: bundled.appendingPathComponent(name), to: target)
-      resign(target)
+      try fileManager.moveItem(at: staged, to: target)
     }
   }
 
