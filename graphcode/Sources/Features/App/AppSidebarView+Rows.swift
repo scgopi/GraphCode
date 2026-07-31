@@ -42,26 +42,6 @@ extension AppSidebarView {
 
   func projectHeaderRow(for project: ProjectFeature.State) -> some View {
     HStack(spacing: 6) {
-      // The chevron's slot is always reserved, chevron or not, so every header row's
-      // icon and name start at the same x — rows that shifted with their expandability
-      // read as misalignment, not as information.
-      if canExpand(project) {
-        Button {
-          toggleExpanded(project.id)
-        } label: {
-          Image(
-            systemName: collapsedProjectPaths.contains(project.id)
-              ? "chevron.right" : "chevron.down"
-          )
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-          .frame(width: 12)
-        }
-        .buttonStyle(.plain)
-      } else {
-        Color.clear.frame(width: 12)
-      }
-
       // The Graph is not a folder and its row doesn't open one — it opens the whole
       // workspace drawn as one graph (`GraphOverviewView`), so it carries the same
       // connected-nodes glyph the canvas uses for itself rather than a folder icon it
@@ -78,8 +58,48 @@ extension AppSidebarView {
         tint: project.graph.isGlobal ? Color.accentColor : .primary)
       Text(project.graph.project.name).lineLimit(1)
       Spacer()
+
+      // Trailing and hover-only, supacode-style: + to start a loop in this project,
+      // then the disclosure chevron, at the very end. Icons on the left start every
+      // row at the same edge; controls live where the pointer already is.
+      if hoveredRowKey == project.id {
+        Button {
+          // Select first so the project's canvas — which hosts the node form's
+          // sheet — becomes the visible detail before the form opens.
+          store.send(.projectHeaderTapped(project.id))
+          store.send(
+            .projects(.element(id: project.id, action: .addNodeButtonTapped(parentBackend: nil))))
+        } label: {
+          Image(systemName: "plus")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("New Loop in \(project.graph.project.name)")
+        if canExpand(project) {
+          Button {
+            toggleExpanded(project.id)
+          } label: {
+            Image(
+              systemName: collapsedProjectPaths.contains(project.id)
+                ? "chevron.right" : "chevron.down"
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .frame(width: 12)
+          }
+          .buttonStyle(.plain)
+        }
+      }
     }
     .contentShape(Rectangle())
+    .onHover { hovering in
+      if hovering {
+        hoveredRowKey = project.id
+      } else if hoveredRowKey == project.id {
+        hoveredRowKey = nil
+      }
+    }
   }
 
   func sidebarGlyph(for project: ProjectFeature.State) -> String {
@@ -210,12 +230,13 @@ extension AppSidebarView {
   }
 
   /// A loop row at its place in the tree: indented one step per level — rightward,
-  /// under its parent. The chevron slot is reserved on leaf rows too, the same
-  /// always-aligned rule the header rows follow, so siblings' titles share an edge
-  /// whether or not they have children.
+  /// under its parent. Its disclosure chevron sits at the trailing end and only under
+  /// the pointer, the same arrangement as the header rows, so titles share a left edge
+  /// with nothing reserved in front of them.
   func nestedNodeRow(_ entry: NodeRowEntry, in project: ProjectFeature.State) -> some View {
     HStack(spacing: 4) {
-      if entry.hasChildren {
+      nodeRow(for: entry.node)
+      if entry.hasChildren, hoveredRowKey == entry.node.id.uuidString {
         Button {
           toggleNodeExpanded(entry.node.id)
         } label: {
@@ -228,12 +249,17 @@ extension AppSidebarView {
           .frame(width: 12)
         }
         .buttonStyle(.plain)
-      } else {
-        Color.clear.frame(width: 12)
       }
-      nodeRow(for: entry.node)
     }
     .padding(.leading, CGFloat(entry.depth) * 16)
+    .contentShape(Rectangle())
+    .onHover { hovering in
+      if hovering {
+        hoveredRowKey = entry.node.id.uuidString
+      } else if hoveredRowKey == entry.node.id.uuidString {
+        hoveredRowKey = nil
+      }
+    }
     .tag(SidebarSelection.node(entry.node.id))
     .contextMenu { nodeMenu(for: entry.node, in: project.id) }
   }

@@ -31,6 +31,10 @@ struct AppSidebarView: View {
   @State var projectPendingDelete: ProjectFeature.State?
   /// Nodes that are expanded to show their children in the sidebar.
   @State var expandedNodeIDs: Set<UUID> = []
+  /// The row the pointer is over, keyed by project path, node id string, or the chats
+  /// row's own key — the trailing controls (+ and the disclosure chevron) only draw on
+  /// this row, supacode-style: quiet rows, controls on approach.
+  @State var hoveredRowKey: String?
 
   enum SidebarSelection: Hashable {
     case project(String)
@@ -317,6 +321,7 @@ struct AppSidebarView: View {
   // MARK: - Quick chats
 
   @State private var chatsCollapsed = false
+  static let chatsRowKey = "quick-chats"
 
   /// Quick Chats drawn as a project-like row between the Graph and the folders: the
   /// same header-then-indented-children shape as a folder, because that's what it is —
@@ -325,34 +330,42 @@ struct AppSidebarView: View {
   @ViewBuilder
   private var quickChatsGroup: some View {
     HStack(spacing: 6) {
-      // Chevron slot always reserved, same alignment rule as `projectHeaderRow`.
-      if !store.quickChats.isEmpty {
-        Button {
-          chatsCollapsed.toggle()
-        } label: {
-          Image(systemName: chatsCollapsed ? "chevron.right" : "chevron.down")
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .frame(width: 12)
-        }
-        .buttonStyle(.plain)
-      } else {
-        Color.clear.frame(width: 12)
-      }
       SidebarIcon(systemName: "bubble.left.and.bubble.right", tint: .primary)
       Text("Quick Chats").lineLimit(1)
       Spacer()
-      Button {
-        store.send(.newQuickChatTapped)
-      } label: {
-        Image(systemName: "plus")
-          .font(.caption)
-          .foregroundStyle(.secondary)
+      // Trailing, + then chevron, and only under the pointer — the supacode
+      // arrangement every header row now follows; see `projectHeaderRow`.
+      if hoveredRowKey == Self.chatsRowKey {
+        Button {
+          store.send(.newQuickChatTapped)
+        } label: {
+          Image(systemName: "plus")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("New Quick Chat")
+        if !store.quickChats.isEmpty {
+          Button {
+            chatsCollapsed.toggle()
+          } label: {
+            Image(systemName: chatsCollapsed ? "chevron.right" : "chevron.down")
+              .font(.caption2)
+              .foregroundStyle(.secondary)
+              .frame(width: 12)
+          }
+          .buttonStyle(.plain)
+        }
       }
-      .buttonStyle(.plain)
-      .help("New Quick Chat")
     }
     .contentShape(Rectangle())
+    .onHover { hovering in
+      if hovering {
+        hoveredRowKey = Self.chatsRowKey
+      } else if hoveredRowKey == Self.chatsRowKey {
+        hoveredRowKey = nil
+      }
+    }
     .contextMenu {
       Button("New Chat") { store.send(.newQuickChatTapped) }
     }
