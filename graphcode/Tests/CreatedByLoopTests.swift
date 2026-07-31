@@ -1,3 +1,4 @@
+import ComposableArchitecture
 import Foundation
 import Testing
 
@@ -27,6 +28,52 @@ struct CreatedByLoopTests {
     #expect(SurfaceRef.nodeID(fromZmxSessionName: "") == nil)
     #expect(SurfaceRef.nodeID(fromZmxSessionName: "my-shell") == nil)
     #expect(SurfaceRef.nodeID(fromZmxSessionName: "graphcode-not-a-uuid") == nil)
+  }
+
+  @Test
+  func aChildIsHandedTheReportBackRouteAtBirth() async throws {
+    // A Copilot child was observed inventing routes through its own platform's
+    // features when the time came to report results — the briefing describes
+    // `node send` in general terms, but a backend that only skims it needs the
+    // command spelled out. It goes into the child's memory before its session
+    // launches, so the wake digest opens with it.
+    let memory = LockIsolated<[(nodeID: UUID, entry: String)]>([])
+    let store = GraphStore(
+      onAppendMemory: { nodeID, entry in memory.withValue { $0.append((nodeID, entry)) } })
+    await store.handle(.createNode(draft("parent", createdBy: nil)))
+    let parentID = try #require(await store.graph.nodes.first?.id)
+
+    await store.handle(.createNode(draft("child", createdBy: parentID)))
+
+    let child = try #require(await store.graph.nodes.first { $0.title == "child" })
+    let route = try #require(memory.value.first { $0.nodeID == child.id }?.entry)
+    #expect(route.contains("graphcode node send"))
+    #expect(route.contains(parentID.uuidString))
+    #expect(route.contains("created by parent"))
+  }
+
+  @Test
+  func aMessageToAResolvedTargetIsStagedNotDropped() async throws {
+    // The refusal predated loops having memory; its sharpest edge was a child
+    // reporting results to a parent that had already resolved — the report vanished.
+    let memory = LockIsolated<[(nodeID: UUID, entry: String)]>([])
+    let store = GraphStore(
+      onDeliverMessage: { _, _ in
+        Issue.record("a resolved target has no live session to type into")
+        return false
+      },
+      onAppendMemory: { nodeID, entry in memory.withValue { $0.append((nodeID, entry)) } })
+    await store.handle(.createNode(draft("parent", createdBy: nil)))
+    let parentID = try #require(await store.graph.nodes.first?.id)
+    await store.handle(.nodeCheckApproved(parentID))
+
+    await store.handle(.messageNode(parentID, text: "task done: report attached", from: nil))
+
+    let staged = memory.value.filter {
+      $0.nodeID == parentID && $0.entry.contains("while you were away")
+    }
+    #expect(staged.count == 1)
+    #expect(staged[0].entry.contains("task done: report attached"))
   }
 
   @Test

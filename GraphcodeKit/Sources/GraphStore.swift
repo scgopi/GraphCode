@@ -153,6 +153,19 @@ public actor GraphStore {
       guard graph.nodes[id: node.id] == nil else { return }
       graph.nodes.append(node)
       linkToCreator(of: node, declaredBy: draft)
+      // A child is handed the report-back route at birth, verbatim. The briefing
+      // describes `node send` in general terms, but a backend that only skims it
+      // (Copilot reads the briefing as a pointed-at file, not a system prompt) was
+      // observed inventing routes through its *own* platform's features when the time
+      // came to report results. The exact command, with the real parent id, sits in
+      // the child's memory before its session launches — so the wake digest opens
+      // with it and there is nothing left to guess.
+      if let creator = draft.createdBy, let parent = graph.nodes[id: creator] {
+        recordMemory(
+          node.id,
+          "created by \(parent.title) — report results to it with: "
+            + "graphcode node send \(graph.project.path) \(creator.uuidString) <message>")
+      }
       if node.runsUnattended {
         // Start it now rather than waiting for someone to open it — the loop is supposed
         // to run whether or not the app is up, which is the whole reason `graphcoded`
@@ -937,10 +950,6 @@ public actor GraphStore {
       announceError("message not delivered: no loop \(nodeID) in this graph")
       return
     }
-    if let refusal = MessageBus.deliverability(to: target) {
-      announceError("message to \(target.title) not delivered: \(refusal)")
-      return
-    }
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
       announceError("message to \(target.title) not delivered: empty message")
@@ -950,8 +959,25 @@ public actor GraphStore {
     // its source — the target should know who's talking without guessing.
     let sender = senderID.flatMap { graph.nodes[id: $0]?.title }
     let message = "[graphcode] \(sender.map { "\($0): " } ?? "")\(trimmed)"
+
+    // Not live, or the transport failed — stage rather than drop. The refusal used to
+    // be final, which was designed before loops had memory, and its sharpest edge was
+    // a child reporting results to a parent that had already resolved: the report
+    // simply vanished. The message now lands in the target's log, its next wake reads
+    // it, and the sender is told the truth about what happened rather than either
+    // "delivered" or a dead end.
+    if MessageBus.deliverability(to: target) != nil {
+      recordMemory(nodeID, "while you were away: \(message)")
+      announceError(
+        "\(target.title) isn't live right now — message staged to its memory; "
+          + "it will read it when it next wakes")
+      return
+    }
     guard let onDeliverMessage, await onDeliverMessage(target, message) else {
-      announceError("message to \(target.title) not delivered: transport failed")
+      recordMemory(nodeID, "while you were away: \(message)")
+      announceError(
+        "delivery to \(target.title)'s session failed — message staged to its memory; "
+          + "it will read it when it next wakes")
       return
     }
   }
