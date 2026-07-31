@@ -10,11 +10,9 @@ connected, unattended, and still yours to attach to and correct mid-run. That's
 **graph engineering**: your agents' work arranged as a graph you design, instead of a
 pile of terminals you babysit.
 
-**`brew install --cask scgopi/graphcode/graphcode`**
-· [⬇ .dmg, latest release](https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg)
-· [All releases](https://github.com/scgopi/GraphCode/releases) ·
-[Source on GitHub](https://github.com/scgopi/GraphCode) · Requires macOS 15+ on Apple
-Silicon, with Claude Code on your `PATH`.
+Requires **macOS 15+ on Apple Silicon**, with **Claude Code on your `PATH`** —
+GraphCode launches it, it doesn't bundle it.
+[All releases →](https://github.com/scgopi/GraphCode/releases)
 
 ![Two projects and their connected loops on one GraphCode canvas — goal-based, time-based, and proactive nodes, every one a live terminal](assets/graph-hero.png)
 

@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="{{ site.lang | default: "en-US" }}">
+  <head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% seo %}
+    <link rel="stylesheet" href="{{ "/assets/css/style.css?v=" | append: site.github.build_revision | relative_url }}">
+    {% include head-custom.html %}
+  </head>
+  <body>
+    <a id="skip-to-content" href="#content">Skip to the content.</a>
+
+    <header class="gc-hero" role="banner">
+      <div class="gc-hero-inner">
+        <div class="gc-hero-text">
+          <div class="gc-brand">
+            <span class="gc-mark" aria-hidden="true">
+              <svg viewBox="0 0 92 92" width="64" height="64">
+                <g stroke="#c9cdd3" stroke-width="5" stroke-linecap="round" opacity="0.85">
+                  <line x1="34" y1="30" x2="63" y2="37"/>
+                  <line x1="34" y1="30" x2="27" y2="61"/>
+                  <line x1="34" y1="30" x2="55" y2="62"/>
+                  <line x1="63" y1="37" x2="55" y2="62"/>
+                  <line x1="27" y1="61" x2="55" y2="62"/>
+                </g>
+                <g fill="#ffffff">
+                  <circle cx="34" cy="30" r="9.5"/>
+                  <circle cx="63" cy="37" r="8"/>
+                  <circle cx="27" cy="61" r="8"/>
+                  <circle cx="55" cy="62" r="8.5"/>
+                </g>
+              </svg>
+            </span>
+            <span class="gc-wordmark">Graph<span class="gc-thin">Code</span></span>
+          </div>
+          <p class="gc-tagline">
+            Graphs of <strong>live, steerable Claude&nbsp;Code sessions</strong> on macOS.
+            Run ten at once — connected, unattended, still yours to attach to and correct mid-run.
+          </p>
+          <div class="gc-install"><span class="gc-prompt">$</span> brew install --cask scgopi/graphcode/graphcode<i class="gc-cursor"></i></div>
+          <div class="gc-links">
+            <a class="btn" href="https://github.com/scgopi/GraphCode">View on GitHub</a>
+            <a class="btn" href="https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg">⬇ Download .dmg</a>
+            <span class="gc-meta">macOS 15+ · Apple Silicon · MIT</span>
+          </div>
+        </div>
+        <svg class="gc-constellation" viewBox="850 20 640 470" fill="none" aria-hidden="true">
+          <defs>
+            <linearGradient id="gc-edge" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#9aa0a8" stop-opacity="0.55"/>
+              <stop offset="1" stop-color="#9aa0a8" stop-opacity="0.28"/>
+            </linearGradient>
+            <radialGradient id="gc-node" cx="0.35" cy="0.3" r="1">
+              <stop offset="0" stop-color="#ffffff"/>
+              <stop offset="1" stop-color="#dfe3e8"/>
+            </radialGradient>
+            <filter id="gc-glow-w" x="-120%" y="-120%" width="340%" height="340%">
+              <feGaussianBlur stdDeviation="10" result="b"/>
+              <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+            <filter id="gc-glow-t" x="-120%" y="-120%" width="340%" height="340%">
+              <feGaussianBlur stdDeviation="12" result="b"/>
+              <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+          </defs>
+          <g stroke="url(#gc-edge)" stroke-width="7" stroke-linecap="round">
+            <line x1="1015" y1="128" x2="1205" y2="92"/>
+            <line x1="1015" y1="128" x2="1128" y2="268"/>
+            <line x1="1205" y1="92"  x2="1330" y2="212"/>
+            <line x1="1128" y1="268" x2="1330" y2="212"/>
+            <line x1="1128" y1="268" x2="1042" y2="402"/>
+            <line x1="1128" y1="268" x2="1300" y2="392"/>
+            <line x1="1330" y1="212" x2="1300" y2="392"/>
+            <line x1="935"  y1="245" x2="1015" y2="128"/>
+            <line x1="935"  y1="245" x2="1128" y2="268"/>
+            <line x1="935"  y1="245" x2="1042" y2="402"/>
+            <line x1="1205" y1="92"  x2="1408" y2="60" stroke-opacity="0.5"/>
+            <line x1="1330" y1="212" x2="1452" y2="300" stroke-opacity="0.5"/>
+            <line x1="1300" y1="392" x2="1424" y2="452" stroke-opacity="0.45"/>
+          </g>
+          <g filter="url(#gc-glow-w)">
+            <circle cx="1015" cy="128" r="34" fill="url(#gc-node)"/>
+            <circle cx="1205" cy="92"  r="27" fill="url(#gc-node)"/>
+            <circle cx="1042" cy="402" r="29" fill="url(#gc-node)"/>
+            <circle cx="1408" cy="60"  r="17" fill="url(#gc-node)" opacity="0.85"/>
+            <circle cx="1452" cy="300" r="15" fill="url(#gc-node)" opacity="0.8"/>
+            <circle cx="1424" cy="452" r="13" fill="url(#gc-node)" opacity="0.7"/>
+          </g>
+          <g filter="url(#gc-glow-t)">
+            <circle cx="935"  cy="245" r="38" fill="#5eead4"/>
+            <circle cx="1128" cy="268" r="44" fill="#a5b4fc"/>
+            <circle cx="1330" cy="212" r="31" fill="#fcd34d"/>
+            <circle cx="1300" cy="392" r="25" fill="#f0abfc" opacity="0.95"/>
+          </g>
+          <g font-family="SF Mono, Menlo, monospace" font-weight="700" text-anchor="middle">
+            <text x="935"  y="257" font-size="34" fill="#0f2e29">&gt;_</text>
+            <text x="1128" y="282" font-size="40" fill="#272b52">&gt;_</text>
+            <text x="1330" y="223" font-size="28" fill="#4d3a06">&gt;_</text>
+          </g>
+        </svg>
+      </div>
+    </header>
+
+    <main id="content" class="main-content" role="main">
+      {{ content }}
+
+      <footer class="site-footer">
+        {% if site.github.is_project_page %}
+          <span class="site-footer-owner"><a href="{{ site.github.repository_url }}">{{ site.github.repository_name }}</a> is maintained by <a href="{{ site.github.owner_url }}">{{ site.github.owner_name }}</a>.</span>
+        {% endif %}
+        <span class="site-footer-credits">This page was generated by <a href="https://pages.github.com">GitHub Pages</a>.</span>
+      </footer>
+    </main>
+  </body>
+</html>

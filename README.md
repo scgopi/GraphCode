@@ -1,10 +1,20 @@
-# GraphCode
+<p align="center">
+  <a href="https://scgopi.github.io/GraphCode/">
+    <img src="docs/assets/banner.png" alt="GraphCode — graphs of live, steerable Claude Code sessions on macOS" width="100%">
+  </a>
+</p>
 
-*Graphs of live, steerable Claude Code sessions on macOS.*
+<p align="center">
+  <a href="https://github.com/scgopi/GraphCode/releases"><img src="https://img.shields.io/github/v/release/scgopi/GraphCode" alt="Release"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%2015%2B%20(Apple%20Silicon)-blue" alt="Platform">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT"></a>
+</p>
 
-[![Release](https://img.shields.io/github/v/release/scgopi/GraphCode)](https://github.com/scgopi/GraphCode/releases)
-![Platform](https://img.shields.io/badge/platform-macOS%2015%2B%20(Apple%20Silicon)-blue)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+<p align="center">
+  <a href="https://scgopi.github.io/GraphCode/">Website</a> ·
+  <a href="https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg">Download .dmg</a> ·
+  <a href="https://github.com/scgopi/GraphCode/releases">All releases</a>
+</p>
 
 You can run one Claude Code session in a terminal. GraphCode lets you run ten —
 connected, unattended, and still yours to attach to and correct mid-run. Each node in the
