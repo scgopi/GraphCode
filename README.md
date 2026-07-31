@@ -56,12 +56,13 @@ Requires **macOS 15+ on Apple Silicon** (arm64), with **Claude Code on your `PAT
 GraphCode launches it, it doesn't bundle it.
 
 ```sh
-brew tap scgopi/graphcode
-brew install --cask graphcode
+brew install --cask scgopi/graphcode/graphcode
 ```
 
 That pulls the same signed release, and puts the `graphcode` CLI on your `PATH` while it's
-there. `brew upgrade --cask graphcode` from then on. The tap is
+there — the long name adds the tap by itself, so `brew tap scgopi/graphcode` first is
+equivalent and makes later commands just `graphcode`. `brew upgrade --cask graphcode` from
+then on. The tap is
 [scgopi/homebrew-graphcode](https://github.com/scgopi/homebrew-graphcode) — its own
 repository, since Homebrew's cask index takes only projects past a notability threshold
 GraphCode hasn't reached yet.
