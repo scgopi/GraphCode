@@ -10,14 +10,15 @@ import Testing
 @Suite
 struct GhosttyAppearanceTests {
   @Test
-  func theTerminalIsToldTheWindowsOwnBackground() {
+  func theTerminalIsToldTheCanvasesOwnBackground() {
     #expect(GhosttyAppearance.hex(of: .black) == "000000")
     #expect(GhosttyAppearance.hex(of: .white) == "FFFFFF")
-    // The point of the whole file: the terminal's color is the window's color, not a
-    // second copy of it that can drift.
+    // The point of the whole file: a terminal replaces the canvas in the same pane, so
+    // it is told the *canvas's* color — one value, not a second copy that can drift.
+    // (These were the same tone until the canvases darkened below the window chrome.)
     #expect(
-      GhosttyAppearance.hex(of: Theme.windowBackground)
-        == GhosttyAppearance.hex(of: Theme.canvasBackground))
+      GhosttyAppearance.configurationText().contains(
+        GhosttyAppearance.hex(of: Theme.canvasBackground)))
   }
 
   @Test
