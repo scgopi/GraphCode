@@ -53,9 +53,10 @@ extension AppSidebarView {
       // `folder`, not `folder.fill`, and in label ink rather than `.secondary`: a filled
       // folder at this size is a grey rectangle, and dimmed on top of that it was the
       // least legible thing in the window. See `SidebarIcon`.
-      SidebarIcon(
-        systemName: sidebarGlyph(for: project),
-        tint: project.graph.isGlobal ? Color.accentColor : .primary)
+      // Label ink for every row's icon, the Graph's included — its accent-blue tint
+      // was the one coloured glyph in an otherwise monochrome column and read as a
+      // link, not a row.
+      SidebarIcon(systemName: sidebarGlyph(for: project), tint: .primary)
       Text(project.graph.project.name).lineLimit(1)
       Spacer()
 
