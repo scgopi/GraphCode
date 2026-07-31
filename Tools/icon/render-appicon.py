@@ -5,29 +5,47 @@ The artwork itself (`icon-master-1024.png`) is the source of truth and is never
 written to — every PNG in `AppIcon.appiconset` is derived from it here, so the sizes
 can't drift apart and a tweak means re-running this rather than editing seven files.
 
-The one adjustment this applies is darkening the icon's body. It is deliberately not a
-flat multiply: the nodes are near-white and their glow fades through the midtones, so
-scaling every pixel would grey the nodes and leave a dirty ring where the glow sits.
-Instead the darkening is weighted by how dark a pixel already is — the body takes it in
-full, the glow takes a fraction, the nodes take none. See `background_weight`.
+Two adjustments are applied, in order:
+
+1. A glow pass. The master's halos decay within ~2-3% of the icon width and the tile
+   gradient is twice as bright at the top as the bottom, so out of the box the upper
+   nodes read as unlit and the glow vanishes entirely at Dock sizes. The pass screens
+   three halos over the artwork — a tight rim and a wide bloom around the nodes, plus
+   a faint glow along the edges — with the gain ramped up toward the top of the tile
+   to cancel the gradient. See `glow`.
+
+2. Darkening of the icon's body. It is deliberately not a flat multiply: the nodes are
+   near-white and their glow fades through the midtones, so scaling every pixel would
+   grey the nodes and leave a dirty ring where the glow sits. Instead the darkening is
+   weighted by how dark a pixel already is — the body takes it in full, the glow takes
+   a fraction, the nodes take none. See `background_weight`.
+
+The 16 and 32 px renders come from `icon-master-small-1024.png` when it exists — a
+simplified three-node variant whose strokes survive the downscale (the full four-node
+graph mushes into noise below 48 px).
 
 Usage:
-    python3 Tools/icon/render-appicon.py                # default darkening
-    python3 Tools/icon/render-appicon.py --darken 1.0   # regenerate unchanged
+    python3 Tools/icon/render-appicon.py                # default glow + darkening
+    python3 Tools/icon/render-appicon.py --no-glow      # skip the glow pass
+    python3 Tools/icon/render-appicon.py --darken 1.0   # skip the darkening
     python3 Tools/icon/render-appicon.py --preview      # write a before/after strip
 """
 
 import argparse
 from pathlib import Path
 
-from PIL import Image
+import numpy as np
+from PIL import Image, ImageChops, ImageFilter
 
 ROOT = Path(__file__).resolve().parents[2]
 MASTER = Path(__file__).resolve().parent / "icon-master-1024.png"
+SMALL_MASTER = Path(__file__).resolve().parent / "icon-master-small-1024.png"
 APPICONSET = ROOT / "graphcode/Resources/Assets.xcassets/AppIcon.appiconset"
 
-# Every pixel size the appiconset references.
+# Every pixel size the appiconset references; sizes at or below SMALL_CUTOFF render
+# from the simplified master.
 SIZES = [16, 32, 64, 128, 256, 512, 1024]
+SMALL_CUTOFF = 32
 
 # Luminance below this is pure body colour and is darkened in full; above the upper
 # bound is node white and is left alone. Between them the weight eases off, which is
@@ -35,40 +53,66 @@ SIZES = [16, 32, 64, 128, 256, 512, 1024]
 BODY_LUMA = 0.10
 NODE_LUMA = 0.62
 
-# How much of the body's brightness to keep. Chosen so the gradient's dark end lands
-# near the canvas fill the nodes are drawn against in-app, rather than going flat black.
-DEFAULT_DARKEN = 0.58
+# How much of the body's brightness to keep. 0.58 matched the in-app canvas fill; 0.45
+# trades a little of that match for halo contrast — it lifts the glow-to-background
+# ratio from 1.36 to 1.43, which is where the nodes start to read as lit at Dock sizes
+# without the squircle edge dissolving into a dark desktop (0.32 crosses that line).
+DEFAULT_DARKEN = 0.45
+
+# Halo gains, tuned so the top-left node's halo sits ~0.08 luminance above the tile
+# where it used to sit ~0.03 (imperceptible), while the node edges stay hard.
+GLOW_TIGHT = 0.34   # sigma 9, crisp rim around the nodes
+GLOW_SOFT = 0.22    # sigma 34, wide bloom that survives Dock sizes
+GLOW_EDGE = 0.12    # sigma 14, faint glow along the connecting edges
+# The tile gradient runs ~0.32 luma at the top to ~0.14 at the bottom; ramping the
+# glow gain 1.3x (top) -> 1.0x (bottom) cancels it so the halos read evenly.
+GLOW_RAMP_TOP = 1.30
 
 
-def background_weight(luma: float) -> float:
-    """How much of the darkening a pixel at this luminance should take, 0..1."""
-    if luma <= BODY_LUMA:
-        return 1.0
-    if luma >= NODE_LUMA:
-        return 0.0
-    t = (luma - BODY_LUMA) / (NODE_LUMA - BODY_LUMA)
-    # Smoothstep, so the transition through the glow has no visible edge.
-    return 1.0 - (t * t * (3.0 - 2.0 * t))
+def glow(image: Image.Image) -> Image.Image:
+    rgb = image.convert("RGB")
+    gray = rgb.convert("L")
+
+    nodes_mask = gray.point(lambda v: max(0, (v - 178)) * 3)   # luma > 0.7: nodes
+    mid_mask = gray.point(lambda v: max(0, (v - 107)) * 2)     # luma > 0.42: + edges
+
+    height = image.height
+    ramp = Image.new("L", (1, height))
+    for y in range(height):
+        ramp.putpixel((0, y), round(255 * (GLOW_RAMP_TOP - (GLOW_RAMP_TOP - 1.0) * y / (height - 1)) / GLOW_RAMP_TOP))
+    ramp = ramp.resize(image.size)
+
+    def halo(mask: Image.Image, sigma: float, gain: float) -> Image.Image:
+        h = mask.filter(ImageFilter.GaussianBlur(sigma))
+        h = ImageChops.multiply(h, ramp)
+        return h.point(lambda v: min(255, round(v * gain)))
+
+    halos = ImageChops.add(
+        ImageChops.add(halo(nodes_mask, 9, GLOW_TIGHT), halo(nodes_mask, 34, GLOW_SOFT)),
+        halo(mid_mask, 14, GLOW_EDGE))
+
+    # Keep the glow inside the tile; the semi-transparent drop shadow stays untouched.
+    alpha = image.split()[3]
+    halos = ImageChops.multiply(halos, alpha.point(lambda a: 255 if a > 240 else 0))
+
+    out = ImageChops.screen(rgb, Image.merge("RGB", (halos, halos, halos)))
+    return Image.merge("RGBA", (*out.split(), alpha))
 
 
 def darken(image: Image.Image, factor: float) -> Image.Image:
     if factor >= 1.0:
         return image
-    out = image.copy()
-    pixels = out.load()
-    width, height = out.size
-    for y in range(height):
-        for x in range(width):
-            r, g, b, a = pixels[x, y]
-            if a == 0:
-                continue
-            luma = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
-            weight = background_weight(luma)
-            if weight == 0.0:
-                continue
-            scale = 1.0 - weight * (1.0 - factor)
-            pixels[x, y] = (round(r * scale), round(g * scale), round(b * scale), a)
-    return out
+    px = np.asarray(image, dtype=np.float32)
+    rgb, a = px[..., :3], px[..., 3:]
+    luma = (0.2126 * px[..., 0] + 0.7152 * px[..., 1] + 0.0722 * px[..., 2]) / 255.0
+    # Smoothstep from full darkening at BODY_LUMA to none at NODE_LUMA, so the
+    # transition through the glow has no visible edge.
+    t = np.clip((luma - BODY_LUMA) / (NODE_LUMA - BODY_LUMA), 0.0, 1.0)
+    weight = 1.0 - (t * t * (3.0 - 2.0 * t))
+    weight[a[..., 0] == 0] = 0.0
+    scale = 1.0 - weight * (1.0 - factor)
+    out = np.concatenate([np.round(rgb * scale[..., None]), a], axis=-1)
+    return Image.fromarray(out.astype(np.uint8), "RGBA")
 
 
 def sample(image: Image.Image, label: str) -> None:
@@ -80,6 +124,7 @@ def sample(image: Image.Image, label: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--darken", type=float, default=DEFAULT_DARKEN)
+    parser.add_argument("--no-glow", action="store_true")
     parser.add_argument(
         "--preview",
         nargs="?",
@@ -87,10 +132,16 @@ def main() -> None:
         help="write a before/after strip here instead of updating the appiconset")
     args = parser.parse_args()
 
-    master = Image.open(MASTER).convert("RGBA")
-    rendered = darken(master, args.darken)
+    def render(path: Path) -> Image.Image:
+        image = Image.open(path).convert("RGBA")
+        if not args.no_glow:
+            image = glow(image)
+        return darken(image, args.darken)
 
-    print(f"darken factor {args.darken}")
+    master = Image.open(MASTER).convert("RGBA")
+    rendered = render(MASTER)
+
+    print(f"darken factor {args.darken}, glow {'off' if args.no_glow else 'on'}")
     sample(master, "before")
     sample(rendered, "after")
 
@@ -104,8 +155,14 @@ def main() -> None:
         print(f"preview: {out}")
         return
 
+    small_rendered = None
+    if SMALL_MASTER.exists():
+        small_rendered = render(SMALL_MASTER)
+        print(f"small sizes (<= {SMALL_CUTOFF}px) from {SMALL_MASTER.name}")
+
     for size in SIZES:
-        resized = rendered if size == master.width else rendered.resize((size, size), Image.LANCZOS)
+        source = small_rendered if small_rendered is not None and size <= SMALL_CUTOFF else rendered
+        resized = source if size == source.width else source.resize((size, size), Image.LANCZOS)
         resized.save(APPICONSET / f"icon_{size}.png")
     print(f"wrote {len(SIZES)} PNGs to {APPICONSET.relative_to(ROOT)}")
 
