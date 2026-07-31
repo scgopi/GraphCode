@@ -342,6 +342,10 @@ public enum ZmxSessionLauncher {
   static func workingDirectory(forNode node: LoopNode, projectPath: String?) -> String? {
     if let worktree = node.worktreeBinding?.worktreePath { return worktree }
     guard let projectPath else { return nil }
+    // A global-graph loop — a watcher, or any trigger that belongs to no folder — opens
+    // at home. Its reserved `graphcode://` path names no directory, and falling through
+    // to nil would leave an unattended session in the daemon's own cwd, `/` under launchd.
+    if projectPath.hasPrefix("graphcode://") { return NSHomeDirectory() }
     var isDirectory: ObjCBool = false
     guard FileManager.default.fileExists(atPath: projectPath, isDirectory: &isDirectory),
       isDirectory.boolValue

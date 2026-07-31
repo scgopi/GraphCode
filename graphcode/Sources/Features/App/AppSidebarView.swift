@@ -80,6 +80,15 @@ struct AppSidebarView: View {
       ToolbarItem(placement: .primaryAction) {
         addFolderMenu
       }
+      // Reopens the first-launch terminology primer — its whole audience is someone
+      // who dismissed it before the words had anything on screen to stick to.
+      ToolbarItem(placement: .primaryAction) {
+        Button {
+          store.send(.onboardingRequested)
+        } label: {
+          Label("GraphCode Basics", systemImage: "questionmark.circle")
+        }
+      }
     }
     .fileImporter(
       isPresented: Binding(
@@ -461,11 +470,12 @@ struct AppSidebarView: View {
     }
   }
 
-  /// Whether this row has child rows at all. The Graph never does — its canvas is the
-  /// whole workspace rather than that graph's own nodes, and its triggers are created
-  /// from the CLI — and a folder doesn't until it has a loop in it.
+  /// Whether this row has child rows at all — nothing does until it has a loop in it.
+  /// The Graph row counts now too: its own loops (watchers and other cross-cutting
+  /// triggers, creatable from its canvas since the overview gained "New Loop") list
+  /// under it like any folder's.
   private func canExpand(_ project: ProjectFeature.State) -> Bool {
-    !project.graph.isGlobal && !project.graph.nodes.isEmpty
+    !project.graph.nodes.isEmpty
   }
 
   private func toggleExpanded(_ path: String) {

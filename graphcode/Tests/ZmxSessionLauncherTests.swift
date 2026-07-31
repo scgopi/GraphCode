@@ -138,14 +138,21 @@ struct ZmxSessionLauncherTests {
   }
 
   @Test
-  func refusesAProjectPathThatIsNotARealDirectory() {
-    // The global Orchestrator Graph's path is the reserved URI `graphcode://global`, and
-    // a project folder can also be deleted out from under a saved graph. Either way,
-    // handing it to a process as a working directory would fail the launch outright.
-    let node = Self.node(prompt: "/loop 1h Check")
+  func opensGlobalGraphLoopsAtHome() {
+    // A global-graph loop — an email watcher, say — belongs to no folder: its reserved
+    // `graphcode://` path names no directory, and before this it fell through to nil,
+    // which under launchd meant the daemon's own cwd, `/`.
+    let node = Self.node(prompt: "/loop 1h Check the inbox")
     #expect(
       ZmxSessionLauncher.workingDirectory(forNode: node, projectPath: LoopGraphScope.globalPath)
-        == nil)
+        == NSHomeDirectory())
+  }
+
+  @Test
+  func refusesAProjectPathThatIsNotARealDirectory() {
+    // A project folder can be deleted out from under a saved graph — handing its stale
+    // path to a process as a working directory would fail the launch outright.
+    let node = Self.node(prompt: "/loop 1h Check")
     #expect(
       ZmxSessionLauncher.workingDirectory(forNode: node, projectPath: "/no/such/folder") == nil)
     #expect(ZmxSessionLauncher.workingDirectory(forNode: node, projectPath: nil) == nil)

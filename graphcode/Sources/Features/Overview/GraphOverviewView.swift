@@ -51,13 +51,13 @@ struct GraphOverviewView: View {
     let attentionReasons: [UUID: AttentionReason]
   }
 
-  /// No toolbar at all, on purpose. This view shows loops; it does not make them — not
-  /// even the global graph's own triggers, which is why there's no "New Trigger" button
-  /// and no node form here. A create button in the Graph's top bar would be the one
-  /// affordance that authors something on a surface whose whole job is to be read, and
-  /// the loop it created would belong to a graph this view deliberately draws no chip
-  /// for. Global triggers are created from the CLI (`graphcode node create
-  /// graphcode://global …`); a folder's loops are created on that folder's own canvas.
+  /// This view once had no toolbar on purpose — global triggers were CLI-only. That
+  /// rule made the global graph's one legitimate use from the app unreachable: loops
+  /// that belong to no folder, like an email or Teams-message watcher, had nowhere a
+  /// human could create them. "New Loop" here files the loop into the global graph
+  /// through the same `ProjectFeature` form a folder's canvas uses; its session opens
+  /// at home (see `ZmxSessionLauncher.workingDirectory`), since there is no project
+  /// directory for it to belong to.
   var body: some View {
     let derived = Derived(
       overview: GraphOverview(graphs: store.projects.map(\.graph)),
@@ -68,6 +68,44 @@ struct GraphOverviewView: View {
     return canvas(derived)
       .overlay(alignment: .bottomTrailing) { zoomControls(derived.overview) }
       .background(Theme.windowBackground)
+      .toolbar {
+        ToolbarItem(placement: .primaryAction) {
+          Button {
+            store.send(
+              .projects(
+                .element(
+                  id: LoopGraphScope.globalPath,
+                  action: .addNodeButtonTapped(parentBackend: nil))))
+          } label: {
+            Label("New Loop", systemImage: "plus.circle")
+          }
+        }
+      }
+      .background {
+        if let globalStore = globalProjectStore {
+          GlobalNodeFormHost(store: globalStore)
+        }
+      }
+  }
+
+  private var globalProjectStore: StoreOf<ProjectFeature>? {
+    store.scope(
+      state: \.projects[id: LoopGraphScope.globalPath],
+      action: \.projects[id: LoopGraphScope.globalPath])
+  }
+
+  /// Hosts the global graph's node form. A separate view because the sheet binds to the
+  /// *project-scoped* store's `showingNewNodeForm`, and `@Bindable` needs a concrete
+  /// store to hold — the overview's own store is the whole app's.
+  private struct GlobalNodeFormHost: View {
+    @Bindable var store: StoreOf<ProjectFeature>
+
+    var body: some View {
+      Color.clear
+        .sheet(isPresented: $store.showingNewNodeForm) {
+          NodeDraftForm(store: store)
+        }
+    }
   }
 
   /// Scale and offset as the canvas is currently drawn — the committed transform plus

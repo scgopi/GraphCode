@@ -106,7 +106,9 @@ struct NodeDraftForm: View {
         // worktrees would have to be created on the remote host, which v1 doesn't do
         // (docs/09-remote-repositories.md), and offering a picker whose every choice
         // fails is worse than not asking.
-        if !isRemoteProject {
+        // Hidden for the global graph too: its loops belong to no repository, so every
+        // choice but "None" would be an operation on a directory that doesn't exist.
+        if !isRemoteProject && !store.graph.isGlobal {
           Picker("Worktree", selection: $store.draftWorktree) {
             Text("None").tag(ProjectFeature.WorktreeSelection.none)
             ForEach(store.availableWorktrees) { worktree in

@@ -191,8 +191,12 @@ struct LoopWorkspaceView: View {
       // bare, and extra tabs/splits are plain shells either way.
       initialPrompt: ref.launchesClaudeCode ? store.node.sessionPrompt : nil,
       // A node without its own worktree yet still belongs to a project — its shells
-      // should open there, not wherever the app process happened to launch from.
-      workingDirectory: store.node.worktreeBinding?.worktreePath ?? store.projectPath,
+      // should open there, not wherever the app process happened to launch from. A
+      // global-graph loop belongs to no folder at all: home, the same answer the
+      // daemon's `ZmxSessionLauncher.workingDirectory` gives its unattended launches.
+      workingDirectory: store.node.worktreeBinding?.worktreePath
+        ?? (store.projectPath.hasPrefix("graphcode://")
+          ? NSHomeDirectory() : store.projectPath),
       // The graph's own project, for the session briefing — deliberately not the
       // worktree, whose path names a graph that doesn't exist. Every surface gets it,
       // not just the agent's: a remote project's plain-shell tabs open on the remote
