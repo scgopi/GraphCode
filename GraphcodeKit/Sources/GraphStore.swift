@@ -508,11 +508,21 @@ public actor GraphStore {
   /// re-evaluated afterwards for exactly that reason.
   private func deleteNode(_ nodeID: UUID) {
     guard let node = graph.nodes[id: nodeID] else { return }
+    // Children go with the parent: deleting a coordinator must not strand the workers
+    // it fanned out, still running against a plan nobody owns anymore. Custody comes
+    // from `createdBy`, never from edges — a drawn handoff to a peer is a
+    // relationship, not ownership, and stays out of the blast radius.
+    for child in spawnedDescendants(of: nodeID) {
+      removeSingleNode(child)
+    }
+    removeSingleNode(node)
+  }
 
-    let downstream = Set(graph.edges.filter { $0.from == nodeID }.map(\.to))
-    graph.edges.removeAll { $0.from == nodeID || $0.to == nodeID }
-    graph.nodes.remove(id: nodeID)
-    cancelGoalPoller(nodeID)
+  private func removeSingleNode(_ node: LoopNode) {
+    let downstream = Set(graph.edges.filter { $0.from == node.id }.map(\.to))
+    graph.edges.removeAll { $0.from == node.id || $0.to == node.id }
+    graph.nodes.remove(id: node.id)
+    cancelGoalPoller(node.id)
     for targetID in downstream {
       unblockIfStillIdle(targetID)
     }
@@ -522,6 +532,22 @@ public actor GraphStore {
     // memory goes the same way — a log for a loop that no longer exists is litter.
     onTerminateSession?(node)
     onRemoveMemory?(node.id)
+  }
+
+  /// The fan-out descendants of a node — the loops it created, theirs, and so on,
+  /// walked through `LoopNode.createdBy`.
+  private func spawnedDescendants(of nodeID: UUID) -> [LoopNode] {
+    var found: [LoopNode] = []
+    var queue = [nodeID]
+    var visited: Set<UUID> = [nodeID]
+    while let current = queue.popLast() {
+      for node in graph.nodes
+      where node.createdBy == current && visited.insert(node.id).inserted {
+        found.append(node)
+        queue.append(node.id)
+      }
+    }
+    return found
   }
 
   /// The stop/kill affordance from docs/05-orchestrator.md#monitoring-surface — "a
@@ -537,6 +563,17 @@ public actor GraphStore {
     recordMemory(nodeID, "stopped by request")
     onTerminateSession?(node)
     fireOutgoingEdges(from: nodeID, sourceSucceeded: false)
+
+    // A stopped coordinator must not leave the workers it fanned out running headless.
+    // Custody (`createdBy`), not edges: stopping one side of a drawn maker→critic pair
+    // must not stop the other. Already-resolved children are left as they ended.
+    for child in spawnedDescendants(of: nodeID) where !child.isResolved {
+      graph.nodes[id: child.id]?.state = .stopped
+      cancelGoalPoller(child.id)
+      recordMemory(child.id, "stopped with \(node.title), which created this loop")
+      onTerminateSession?(child)
+      fireOutgoingEdges(from: child.id, sourceSucceeded: false)
+    }
   }
 
   private func deleteEdge(_ edgeID: UUID) {

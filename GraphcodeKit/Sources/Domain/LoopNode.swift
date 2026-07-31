@@ -55,6 +55,12 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// full unbounded series lives in the node's memory log; this is the cache the canvas
   /// and the plateau rule read.
   public var metricHistory: [MetricSample]
+  /// The loop that asked for this one, when a running session created it through the
+  /// CLI (`NodeDraft.createdBy`). Recorded on the node, not just as the already-fired
+  /// edge `linkToCreator` draws — a fired edge is indistinguishable from any drawn
+  /// handoff, and custody has to be: stopping or deleting a parent takes its spawned
+  /// descendants with it, while a drawn edge to a peer must never be caught in that.
+  public let createdBy: UUID?
   public var state: LoopState
   public var createdAt: Date
 
@@ -72,6 +78,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     pilotState: PilotState = .notPiloted,
     usage: UsageSample? = nil,
     metricHistory: [MetricSample] = [],
+    createdBy: UUID? = nil,
     state: LoopState = .idle,
     createdAt: Date = Date()
   ) {
@@ -88,6 +95,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.pilotState = pilotState
     self.usage = usage
     self.metricHistory = metricHistory
+    self.createdBy = createdBy
     self.state = state
     self.createdAt = createdAt
   }
@@ -164,7 +172,8 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
 
   private enum CodingKeys: String, CodingKey {
     case id, title, loopType, checkDescription, triggerPrompt, goal, backend, modelTier
-    case worktreeBinding, subGraph, pilotState, usage, metricHistory, state, createdAt
+    case worktreeBinding, subGraph, pilotState, usage, metricHistory, createdBy
+    case state, createdAt
   }
 
   /// Hand-written for the same reason `LoopEdge`'s is: `ProjectPersistence.loadGraph`
@@ -187,6 +196,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     usage = try container.decodeIfPresent(UsageSample.self, forKey: .usage)
     metricHistory =
       try container.decodeIfPresent([MetricSample].self, forKey: .metricHistory) ?? []
+    createdBy = try container.decodeIfPresent(UUID.self, forKey: .createdBy)
     state = try container.decodeIfPresent(LoopState.self, forKey: .state) ?? .idle
     createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
   }
