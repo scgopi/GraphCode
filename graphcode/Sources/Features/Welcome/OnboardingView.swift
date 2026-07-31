@@ -14,7 +14,7 @@ struct OnboardingView: View {
   let onDismiss: () -> Void
 
   @State private var page = 0
-  @State private var selectedBackend = GraphcodeSettingsStore.load().defaultBackend
+  @State private var selectedBackend = SettingsModel.shared.settings.defaultBackend
   private static let pageCount = 4
 
   var body: some View {
@@ -34,6 +34,14 @@ struct OnboardingView: View {
         case 2: OnboardingConnectPage()
         default: OnboardingBackendPage(selection: $selectedBackend)
         }
+      }
+      // Applied the moment a card is tapped, through the live model — the same
+      // no-Save-button rule the Settings window follows. Writing the store directly on
+      // "Get Started" bypassed `SettingsModel.shared`, which the Settings pane binds
+      // to and which already existed at launch: "New loops use" kept showing the old
+      // backend, and the pane's next save quietly reverted the onboarding choice.
+      .onChange(of: selectedBackend) { _, backend in
+        SettingsModel.shared.settings.defaultBackend = backend
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity)
       .padding(.horizontal, 32)
@@ -56,11 +64,7 @@ struct OnboardingView: View {
             .keyboardShortcut(.defaultAction)
         } else {
           Button("Get Started") {
-            // The backend choice lands in the same settings file the node form and
-            // the daemon read — see `GraphcodeSettingsStore`.
-            var settings = GraphcodeSettingsStore.load()
-            settings.defaultBackend = selectedBackend
-            GraphcodeSettingsStore.save(settings)
+            // Nothing to save here — the backend choice was applied when it was made.
             onDismiss()
           }
           .keyboardShortcut(.defaultAction)
@@ -284,10 +288,12 @@ private struct OnboardingBackendPage: View {
         backendCard(backend)
       }
 
-      Text("The CLI must be installed and on your PATH — GraphCode launches it, it doesn't bundle it.")
-        .font(.caption)
-        .foregroundStyle(.tertiary)
-        .multilineTextAlignment(.center)
+      Text(
+        "The CLI must be installed and on your PATH — GraphCode launches it, it doesn't bundle it."
+      )
+      .font(.caption)
+      .foregroundStyle(.tertiary)
+      .multilineTextAlignment(.center)
     }
     .frame(maxWidth: 400)
   }
