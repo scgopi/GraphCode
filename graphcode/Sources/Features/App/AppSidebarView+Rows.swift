@@ -242,7 +242,11 @@ extension AppSidebarView {
   func nestedNodeRow(_ entry: NodeRowEntry, in project: ProjectFeature.State) -> some View {
     HStack(spacing: 4) {
       nodeRow(for: entry.node)
-      if entry.hasChildren, hoveredRowKey == entry.node.id.uuidString {
+      // Always drawn when there are children, not only under the pointer: a hover-only
+      // chevron hid the very *existence* of collapsed children, and rows with loops
+      // beneath them read as leaves — running loops "missing" from the sidebar. Dimmer
+      // than the hover controls so quiet rows stay quiet, but never absent.
+      if entry.hasChildren {
         Button {
           toggleNodeExpanded(entry.node.id)
         } label: {
@@ -251,7 +255,9 @@ extension AppSidebarView {
               ? "chevron.down" : "chevron.right"
           )
           .font(.caption2)
-          .foregroundStyle(.secondary)
+          .foregroundStyle(
+            hoveredRowKey == entry.node.id.uuidString ? .secondary : .tertiary
+          )
           .frame(width: 12)
         }
         .buttonStyle(.plain)

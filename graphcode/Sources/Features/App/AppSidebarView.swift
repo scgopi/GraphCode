@@ -29,8 +29,18 @@ struct AppSidebarView: View {
   /// The project the Delete dialog is asking about — remove from GraphCode only, or
   /// move the folder to the Trash too. Same local-state rationale as above.
   @State var projectPendingDelete: ProjectFeature.State?
-  /// Nodes that are expanded to show their children in the sidebar.
-  @State var expandedNodeIDs: Set<UUID> = []
+  /// Nodes that are expanded to show their children in the sidebar. Persisted across
+  /// launches: this was plain view state, and every relaunch silently folded every
+  /// child away again — two running loops "missing" from the sidebar were sitting
+  /// behind a chevron that had reset overnight.
+  @State var expandedNodeIDs: Set<UUID> = Self.loadExpandedNodeIDs()
+
+  static let expandedNodeIDsDefaultsKey = "sidebarExpandedNodeIDs"
+
+  static func loadExpandedNodeIDs() -> Set<UUID> {
+    let stored = UserDefaults.standard.stringArray(forKey: expandedNodeIDsDefaultsKey) ?? []
+    return Set(stored.compactMap(UUID.init))
+  }
   /// Every node id seen across the open projects, for telling a freshly created loop
   /// from one that was already there. `nil` until the first observation, so a relaunch
   /// seeds silently instead of springing every parent in the graph open.
@@ -65,6 +75,10 @@ struct AppSidebarView: View {
               for: current.subtracting(known), in: store.projects.map(\.graph)))
         }
         knownNodeIDs = current
+      }
+      .onChange(of: expandedNodeIDs) { _, expanded in
+        UserDefaults.standard.set(
+          expanded.map(\.uuidString).sorted(), forKey: Self.expandedNodeIDsDefaultsKey)
       }
       // Errors used to render only on the Welcome screen, which no longer shows once the
       // sidebar exists — so a failed Add Folder looked like nothing happening at all.
