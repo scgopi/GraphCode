@@ -20,7 +20,6 @@ struct AppView: View {
         .background(Theme.windowBackground)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .background(Theme.windowBackground)
     // First launch only (and the sidebar's help button after that): the app's
     // vocabulary in one card, before the empty canvas has to explain itself.
     .sheet(
@@ -31,9 +30,14 @@ struct AppView: View {
     ) {
       OnboardingView { store.send(.onboardingDismissed) }
     }
-    // Paints the window itself, so the titlebar and toolbar match instead of sitting a
-    // shade lighter above the content.
-    .containerBackground(Theme.windowBackground, for: .window)
+    // The window's own backdrop, and the glass every `Theme` scrim is layered over —
+    // this is what makes the whole window translucent rather than only the sidebar.
+    // A material here (rather than a color) is what lets the window sample the desktop
+    // behind it; `.preferredColorScheme(.dark)` below keeps it dark whatever the
+    // wallpaper is. The root `.background` that used to sit under the split view is
+    // gone with it: an opaque fill behind the sidebar's own material dulled the very
+    // effect the sidebar was switched to.
+    .containerBackground(.ultraThinMaterial, for: .window)
     // The toolbar deliberately keeps its own system material rather than being painted
     // black to match: `.toolbarBackground(_:for: .windowToolbar)` does darken the
     // titlebar band, and it was tried — a black titlebar over a black terminal loses the

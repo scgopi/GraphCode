@@ -35,7 +35,7 @@ struct StartMarker: View {
       .fill(Color.accentColor)
       .frame(width: 12, height: 12)
       // The ring keeps the dot legible where a tether passes behind it.
-      .overlay(Circle().stroke(Theme.canvasBackground, lineWidth: 2))
+      .overlay(Circle().stroke(Theme.canvasTone, lineWidth: 2))
       .padding(3)
       .overlay(Circle().stroke(Color.accentColor.opacity(0.35), lineWidth: 1))
   }

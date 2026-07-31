@@ -57,7 +57,7 @@ extension ProjectCanvasView {
     .padding(.horizontal, 8)
     .padding(.vertical, 3)
     .frame(width: 190 - CGFloat(placement.depth) * 14, alignment: .leading)
-    .background(Theme.canvasBackground.opacity(0.92), in: RoundedRectangle(cornerRadius: 6))
+    .background(Theme.canvasTone.opacity(0.92), in: RoundedRectangle(cornerRadius: 6))
     .overlay(
       RoundedRectangle(cornerRadius: 6)
         .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
@@ -72,7 +72,7 @@ extension ProjectCanvasView {
       .foregroundStyle(.secondary)
       .padding(.horizontal, 8)
       .padding(.vertical, 2)
-      .background(Theme.canvasBackground.opacity(0.92), in: Capsule())
+      .background(Theme.canvasTone.opacity(0.92), in: Capsule())
       .overlay(Capsule().stroke(Color.secondary.opacity(0.2), lineWidth: 1))
       .help("Open this composite's own canvas to see all of it")
   }

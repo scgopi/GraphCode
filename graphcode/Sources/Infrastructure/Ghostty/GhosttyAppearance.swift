@@ -22,14 +22,21 @@ import SwiftUI
 enum GhosttyAppearance {
   /// The config file's contents.
   ///
-  /// The color is derived from `Theme.canvasBackground` rather than written out, because
-  /// a hardcoded hex here is a copy that silently stops matching the day the window's
-  /// color changes — which is exactly the mismatch this file exists to fix.
-  static func configurationText(background: Color = Theme.canvasBackground) -> String {
+  /// The color is derived from `Theme.canvasTone` rather than written out, because a
+  /// hardcoded hex here is a copy that silently stops matching the day the window's
+  /// color changes — which is exactly the mismatch this file exists to fix. The *tone*
+  /// and not the canvas scrim: `background-opacity` carries the translucency, so
+  /// passing an already-translucent color would only throw its alpha away (`hex(of:)`
+  /// reads RGB) and leave the two definitions of "how see-through" fighting.
+  static func configurationText(
+    background: Color = Theme.canvasTone,
+    opacity: Double = Theme.terminalBackgroundOpacity
+  ) -> String {
     """
     # Written by graphcode. Edited copies are overwritten on launch — put your own
     # settings in ~/.config/ghostty/config, which is loaded after this and wins.
     background = \(hex(of: background))
+    background-opacity = \(String(format: "%.2f", opacity))
 
     """
   }
@@ -39,7 +46,7 @@ enum GhosttyAppearance {
   /// not a reason to refuse to open a terminal at all.
   static func writeConfigurationFile(
     into directory: URL = SupportDirectory.url,
-    background: Color = Theme.canvasBackground
+    background: Color = Theme.canvasTone
   ) -> String? {
     let url = directory.appendingPathComponent("ghostty-defaults.conf", isDirectory: false)
     do {

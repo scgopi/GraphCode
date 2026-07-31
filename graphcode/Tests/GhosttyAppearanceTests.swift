@@ -18,7 +18,21 @@ struct GhosttyAppearanceTests {
     // (These were the same tone until the canvases darkened below the window chrome.)
     #expect(
       GhosttyAppearance.configurationText().contains(
-        GhosttyAppearance.hex(of: Theme.canvasBackground)))
+        GhosttyAppearance.hex(of: Theme.canvasTone)))
+  }
+
+  /// The terminal is glass like everything else, and `background-opacity` is the only
+  /// way to get there that leaves the *text* opaque — fading the view or the window
+  /// would take the glyphs with it.
+  @Test
+  func theTerminalBackgroundIsTranslucentButItsTextIsNot() {
+    let text = GhosttyAppearance.configurationText()
+    #expect(text.contains("background-opacity = "))
+    #expect(Theme.terminalBackgroundOpacity > 0 && Theme.terminalBackgroundOpacity < 1)
+    // Written in the decimal form Ghostty parses, not Swift's default description
+    // (which would emit `0.8` for some values and `0.8000000000000001` for others).
+    #expect(GhosttyAppearance.configurationText(background: .black, opacity: 0.8)
+      .contains("background-opacity = 0.80"))
   }
 
   @Test

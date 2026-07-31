@@ -60,6 +60,12 @@ final class GhosttyTerminalNSView: NSView {
   init(command: [String], workingDirectory: String?, environment: [String: String]) {
     super.init(frame: .zero)
     wantsLayer = true
+    // Ghostty renders its background at `background-opacity` (`GhosttyAppearance`), and
+    // that alpha only means anything if the layer it lands in is allowed to keep it.
+    // An opaque layer composites the surface against black, so the terminal would be
+    // the one pane in a glass window that isn't glass — and it would look like the
+    // config key had simply been ignored.
+    layer?.isOpaque = false
 
     var config = ghostty_surface_config_new()
     config.userdata = Unmanaged.passUnretained(self).toOpaque()
