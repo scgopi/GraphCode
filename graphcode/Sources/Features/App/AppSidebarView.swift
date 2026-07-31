@@ -300,19 +300,32 @@ struct AppSidebarView: View {
     List(selection: selectionBinding) {
       attentionSection
       // The Graph first, then Quick Chats as a project-like row of its own — a peer of
-      // the folders, just not tied to one — then, past a quiet divider, the folders.
-      // The divider is what makes the two read as sections: the app's own surfaces
-      // above it, the human's repositories below.
+      // the folders, just not tied to one — then the folders, split by where they
+      // live. The dividers are what make the sidebar read as sections: the app's own
+      // surfaces on top, local folders next, remote repositories last.
       if let global = store.projects.first(where: { $0.graph.isGlobal }) {
         projectGroup(for: global)
       }
       quickChatsGroup
       let folders = store.projects.filter { !$0.graph.isGlobal }
-      if !folders.isEmpty {
+      let localFolders = folders.filter {
+        RemoteProjectLocation.parse(projectPath: $0.id) == nil
+      }
+      let remoteFolders = folders.filter {
+        RemoteProjectLocation.parse(projectPath: $0.id) != nil
+      }
+      if !localFolders.isEmpty {
         Divider()
           .padding(.vertical, 4)
       }
-      ForEach(folders) { project in
+      ForEach(localFolders) { project in
+        projectGroup(for: project)
+      }
+      if !remoteFolders.isEmpty {
+        Divider()
+          .padding(.vertical, 4)
+      }
+      ForEach(remoteFolders) { project in
         projectGroup(for: project)
       }
     }

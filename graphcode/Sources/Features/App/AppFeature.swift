@@ -268,19 +268,21 @@ struct AppFeature {
         return .none
 
       case .projectMoveUpTapped(let path):
-        // The Graph row (isGlobal, always index 0 when present) never moves and is
-        // never displaced — a folder can climb no higher than the slot just below it.
-        guard let index = state.projects.index(id: path), !isGlobal(path) else { return .none }
-        let floor = state.projects.first?.graph.isGlobal == true ? 1 : 0
-        guard index > floor else { return .none }
-        state.projects.swapAt(index, index - 1)
+        // Within its own sidebar section only: a local folder steps over local folders,
+        // a remote repository over remote repositories, and the Graph row never moves.
+        // The swap targets the nearest *same-section* neighbour, so entries of the
+        // other kind sitting between them in the array are stepped over, not disturbed.
+        guard let index = state.projects.index(id: path), !isGlobal(path),
+          let target = sameSectionNeighbor(from: index, direction: -1, in: state.projects)
+        else { return .none }
+        state.projects.swapAt(index, target)
         return .none
 
       case .projectMoveDownTapped(let path):
         guard let index = state.projects.index(id: path), !isGlobal(path),
-          index < state.projects.count - 1
+          let target = sameSectionNeighbor(from: index, direction: +1, in: state.projects)
         else { return .none }
-        state.projects.swapAt(index, index + 1)
+        state.projects.swapAt(index, target)
         return .none
 
       case .attentionItemTapped(let item):
@@ -467,6 +469,26 @@ struct AppFeature {
       projectPath: NSHomeDirectory(),
       projectName: "Quick Chat")
     state.selectedProjectPath = nil
+  }
+
+  /// The nearest project on the given side of `index` that lives in the same sidebar
+  /// section — local folders and remote repositories are separate sections, and a move
+  /// must not carry a project across the divider. `nil` when there's nothing of its
+  /// kind left in that direction (or only the pinned Graph row).
+  private func sameSectionNeighbor(
+    from index: Int, direction: Int, in projects: IdentifiedArrayOf<ProjectFeature.State>
+  ) -> Int? {
+    let isRemote = RemoteProjectLocation.parse(projectPath: projects[index].id) != nil
+    var candidate = index + direction
+    while candidate >= 0 && candidate < projects.count {
+      let project = projects[candidate]
+      if project.graph.isGlobal { return nil }
+      if (RemoteProjectLocation.parse(projectPath: project.id) != nil) == isRemote {
+        return candidate
+      }
+      candidate += direction
+    }
+    return nil
   }
 
   private func removeFromSidebar(_ state: inout State, path: String) {
