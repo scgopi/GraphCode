@@ -107,7 +107,8 @@ body {
 }
 
 .gc-install {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
   margin-top: 1.3rem;
   padding: 0.6rem 1rem;
   background: rgba(10, 11, 12, 0.72);
@@ -134,6 +135,38 @@ body {
     vertical-align: text-bottom;
     opacity: 0.9;
     border-radius: 1.5px;
+  }
+
+  .gc-copy {
+    display: inline-flex;
+    align-items: center;
+    flex: none;
+    margin-left: 0.7rem;
+    padding: 0.25rem 0 0.25rem 0.7rem;
+    border: 0;
+    border-left: 1px solid rgba(255, 255, 255, 0.14);
+    background: none;
+    color: #8b929c;
+    cursor: pointer;
+
+    &:hover {
+      color: #eceef1;
+    }
+
+    .gc-check-icon {
+      display: none;
+      color: #3fb950;
+    }
+
+    &.gc-copied {
+      .gc-copy-icon {
+        display: none;
+      }
+
+      .gc-check-icon {
+        display: block;
+      }
+    }
   }
 }
 
