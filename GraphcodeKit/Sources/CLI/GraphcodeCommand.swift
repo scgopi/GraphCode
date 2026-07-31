@@ -17,6 +17,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
   case createNode(projectPath: String, draft: NodeDraft)
   case createEdge(projectPath: String, from: UUID, to: UUID, spec: EdgeSpec)
   case stopNode(projectPath: String, nodeID: UUID)
+  case deleteNode(projectPath: String, nodeID: UUID)
   case sendMessage(projectPath: String, nodeID: UUID, text: String)
   case updateNode(projectPath: String, nodeID: UUID, update: NodeUpdate)
   case memoNode(projectPath: String, nodeID: UUID, text: String)
@@ -39,6 +40,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode status <project-path>
       graphcode node create <project-path> --title <t> --type <turn|goal|time> [options]
       graphcode node stop <project-path> <node-id>
+      graphcode node delete <project-path> <node-id>   removes it, its edges, session
+                           and memory — irreversible; stop is the reversible verb
       graphcode node send <project-path> <node-id> <message…>
       graphcode node update <project-path> <node-id> [options]
       graphcode node memo <project-path> <node-id> <note…>
@@ -108,7 +111,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
       switch verb {
       case "create":
         return .createNode(projectPath: path, draft: try parseDraft(arguments))
-      case "stop", "pilot", "arm", "send", "update", "memo":
+      case "stop", "delete", "pilot", "arm", "send", "update", "memo":
         let raw = try take(&arguments, name: "node-id")
         guard let nodeID = UUID(uuidString: raw) else {
           throw ParseError.invalidValue(argument: "node-id", value: raw)
@@ -116,6 +119,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
         switch verb {
         case "pilot": return .pilotComposite(projectPath: path, nodeID: nodeID)
         case "arm": return .armComposite(projectPath: path, nodeID: nodeID)
+        case "delete": return .deleteNode(projectPath: path, nodeID: nodeID)
         case "send":
           // Everything after the id is the message — joined rather than flagged, so
           // `graphcode node send <path> <id> tests are green, ship it` needs no quoting
