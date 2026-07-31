@@ -40,6 +40,15 @@ final class GhosttyTerminalNSView: NSView {
   /// The last display id handed to libghostty, for the same reason.
   var lastDisplayID: UInt32?
 
+  /// Wheel deltas accumulated between flushes — `scrollWheel` (in `+Mouse`) coalesces
+  /// rather than forwarding per event; see there for the escape-sequence-fragmentation
+  /// story. Stored here because an extension can't hold stored properties, and not
+  /// `private` because Swift scopes that to a file.
+  var pendingScrollDeltaX: CGFloat = 0
+  var pendingScrollDeltaY: CGFloat = 0
+  var pendingScrollMods: ghostty_input_scroll_mods_t = 0
+  var scrollFlushScheduled = false
+
   var windowObservers: [NSObjectProtocol] = []
 
   init(command: [String], workingDirectory: String?, environment: [String: String]) {

@@ -126,8 +126,20 @@ extension GhosttyTerminalNSView {
   /// tracking (`.activeAlways`, see `updateTrackingAreas`) keeps it so. Neither upstream
   /// Ghostty's surface view nor supacode's sends a position from `scrollWheel`, and this
   /// no longer does either.
+  /// **Coalesced, not forwarded per event.** A trackpad flick delivers well over a
+  /// hundred wheel events a second, and under a TUI with mouse tracking on, libghostty
+  /// answers each cell-crossing tick with an SGR report written into the PTY the moment
+  /// it happens. Our sessions relay that PTY through a `zmx attach` child to the
+  /// daemon's session, and under that flood the relay's read/write chunk boundaries
+  /// land mid-sequence often enough that the program at the far end sees fragments —
+  /// which is exactly what "`<64;23;46M`" sitting in a Claude composer is. Accumulating
+  /// deltas and flushing at most once per ~8ms keeps the scroll feel identical (the
+  /// deltas sum; the core turns them into the same number of lines) while cutting the
+  /// report count several-fold and giving each report its own quiet window to land in
+  /// whole. Supacode doesn't need this because it speaks zmx's IPC directly rather
+  /// than through an attach process.
   override func scrollWheel(with event: NSEvent) {
-    guard let surface else { return }
+    guard surface != nil else { return }
     // Before the scroll is forwarded, because it decides whether the frames this gesture
     // produces are paced against the display at all. See `ScrollFocusPolicy`.
     claimKeyboardForScroll()
@@ -143,8 +155,32 @@ extension GhosttyTerminalNSView {
       deltaY *= 2
     }
 
-    ghostty_surface_mouse_scroll(
-      surface, deltaX, deltaY, Self.scrollMods(precise: precise, momentum: event.momentumPhase))
+    pendingScrollDeltaX += deltaX
+    pendingScrollDeltaY += deltaY
+    // The batch reports the latest event's phase — a flush mid-gesture describing the
+    // gesture as it stands now.
+    pendingScrollMods = Self.scrollMods(precise: precise, momentum: event.momentumPhase)
+
+    guard !scrollFlushScheduled else { return }
+    scrollFlushScheduled = true
+    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(8)) { [weak self] in
+      self?.flushPendingScroll()
+    }
+  }
+
+  private func flushPendingScroll() {
+    scrollFlushScheduled = false
+    guard let surface else {
+      pendingScrollDeltaX = 0
+      pendingScrollDeltaY = 0
+      return
+    }
+    let deltaX = pendingScrollDeltaX
+    let deltaY = pendingScrollDeltaY
+    pendingScrollDeltaX = 0
+    pendingScrollDeltaY = 0
+    guard deltaX != 0 || deltaY != 0 else { return }
+    ghostty_surface_mouse_scroll(surface, deltaX, deltaY, pendingScrollMods)
   }
 
   /// `input.ScrollMods` packed into the byte libghostty expects: precision in bit 0, the
