@@ -60,6 +60,10 @@ struct RemoteRepositoryTests {
     #expect(invocation.first == "/usr/bin/ssh")
     #expect(!invocation.contains("-t"))
     #expect(invocation.contains("BatchMode=yes"))
+    // Keepalives on every connection: without them a dead link is only discovered at
+    // the OS TCP timeout, which reads as a frozen terminal (~15s bound here).
+    #expect(invocation.contains("ServerAliveInterval=5"))
+    #expect(invocation.contains("ServerAliveCountMax=3"))
     // The command is the final argument, after `--` and the destination.
     #expect(invocation.last == "true")
     #expect(invocation[invocation.count - 2] == "--")
@@ -84,34 +88,86 @@ struct RemoteRepositoryTests {
     let view = surface(launchesClaudeCode: true, prompt: "fix the build")
     let invocation = view.remoteCommand(at: location, settings: GraphcodeSettings())
 
-    #expect(invocation.first == "/usr/bin/ssh")
+    // The surface is a local /bin/sh reconnect loop around the ssh dial, so a dropped
+    // connection redials itself instead of dying with the pane.
+    #expect(invocation.first == "/bin/sh")
+    #expect(invocation.dropFirst().first == "-c")
+    let script = try #require(invocation.last)
+    #expect(script.contains("/usr/bin/ssh"))
     // A terminal needs the remote side to have a tty.
-    #expect(invocation.contains("-t"))
-    let remoteCommand = try #require(invocation.last)
-    #expect(remoteCommand.contains("cd "))
-    #expect(remoteCommand.contains("/home/dev/widget"))
+    #expect(script.contains("'-t'"))
+    #expect(script.contains("cd "))
+    #expect(script.contains("/home/dev/widget"))
     // The prompt can't ride the local environment through sshd, so it is assigned
     // remotely — quoted, and expanded by the same "$GRAPHCODE_TRIGGER_PROMPT" the
     // local launch path uses.
-    #expect(remoteCommand.contains("export GRAPHCODE_TRIGGER_PROMPT="))
-    #expect(remoteCommand.contains("fix the build"))
-    #expect(remoteCommand.contains("attach"))
-    #expect(remoteCommand.contains("graphcode-s"))
-    #expect(remoteCommand.contains("claude"))
+    #expect(script.contains("export GRAPHCODE_TRIGGER_PROMPT="))
+    #expect(script.contains("fix the build"))
+    #expect(script.contains("attach"))
+    #expect(script.contains("graphcode-s"))
+    #expect(script.contains("claude"))
   }
 
   @Test
   func aPlainShellTabOpensARemoteShellInTheRepository() throws {
     let view = surface(launchesClaudeCode: false, prompt: nil)
     let invocation = view.remoteCommand(at: location, settings: GraphcodeSettings())
-    let remoteCommand = try #require(invocation.last)
+    #expect(invocation.first == "/bin/sh")
+    let script = try #require(invocation.last)
     // `zmx attach <name>` with no command — a login shell on the remote host, in the
     // repository, exactly what a remote project's extra tab should be.
-    #expect(remoteCommand.contains("cd "))
-    #expect(remoteCommand.contains("/home/dev/widget"))
-    #expect(remoteCommand.contains("attach"))
-    #expect(remoteCommand.contains("graphcode-s"))
-    #expect(!remoteCommand.contains("claude"))
+    #expect(script.contains("cd "))
+    #expect(script.contains("/home/dev/widget"))
+    #expect(script.contains("attach"))
+    #expect(script.contains("graphcode-s"))
+    #expect(!script.contains("claude"))
+  }
+
+  // MARK: - Reconnect
+
+  @Test
+  func theReconnectLoopRetriesOnlySSHConnectionFailures() {
+    let script = SSHReconnectLoop.script(connect: "DIAL_FIRST", reconnect: "DIAL_AGAIN")
+    // ssh reserves 255 for its own connection errors; every other exit passes through
+    // and closes the surface like a local shell exit.
+    #expect(script.contains(#"[ "$gc_rc" -ne 255 ] && exit "$gc_rc""#))
+    // Connect runs once, then only the reconnect line retries, with capped backoff.
+    #expect(script.contains("DIAL_FIRST"))
+    let loopBody = script.range(of: "while :; do").map { script[$0.upperBound...] }
+    #expect(loopBody?.contains("DIAL_AGAIN") == true)
+    #expect(loopBody?.contains("DIAL_FIRST") == false)
+    #expect(script.contains("gc_delay=$((gc_delay * 2))"))
+    #expect(script.contains("gc_delay=\(SSHReconnectLoop.maxDelaySeconds)"))
+    // Ctrl-C during the wait is the escape hatch.
+    #expect(script.hasPrefix("trap 'exit 130' INT; "))
+  }
+
+  @Test
+  func anAgentSurfaceReconnectNeverRelaunchesTheAgent() throws {
+    // The session ending while disconnected is the loop finishing, not a reason to
+    // start a second agent pass: the reconnect line reattaches an existing session
+    // only, and otherwise closes the pane with a notice.
+    let view = surface(launchesClaudeCode: true, prompt: "fix the build")
+    let script = try #require(view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
+    let loopBody = try #require(script.range(of: "while :; do").map { script[$0.upperBound...] })
+    #expect(loopBody.contains("'get'"))
+    #expect(loopBody.contains("attach"))
+    #expect(loopBody.contains("ended while disconnected"))
+    #expect(!loopBody.contains("claude"))
+    #expect(!loopBody.contains("GRAPHCODE_TRIGGER_PROMPT"))
+  }
+
+  @Test
+  func aShellSurfaceReconnectRecreatesTheShell() throws {
+    // A plain shell has no side effect to guard: create-or-attach is the right
+    // reconnect, so a tab that died with the host comes back as a fresh shell in the
+    // repository.
+    let view = surface(launchesClaudeCode: false, prompt: nil)
+    let script = try #require(view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
+    let loopBody = try #require(script.range(of: "while :; do").map { script[$0.upperBound...] })
+    #expect(loopBody.contains("attach"))
+    #expect(loopBody.contains("/home/dev/widget"))
+    #expect(!loopBody.contains("'get'"))
   }
 
   @Test

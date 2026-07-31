@@ -87,13 +87,30 @@ public struct RemoteProjectLocation: Equatable, Sendable {
   /// a password prompt — key auth or fail fast, the same rule the clone form applies.
   /// `interactive` adds `-t`: a terminal surface needs the remote side to have a tty
   /// (zmx attaches a full-screen session), where a launch/query must *not* take one.
+  ///
+  /// `ServerAlive*` on every connection: without keepalives a dead link (a Codespace
+  /// idle-stopping, a network change) is only discovered at the OS TCP timeout, which
+  /// reads as a frozen terminal. 5s × 3 bounds detection at ~15s, and an interactive
+  /// surface's exit-255 is what the reconnect loop (`SSHReconnectLoop`) retries on.
   public func sshInvocation(remoteCommand: String, interactive: Bool = false) -> [String] {
     var invocation = ["/usr/bin/ssh"]
     if interactive { invocation.append("-t") }
-    invocation += ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+    invocation += [
+      "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+      "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3",
+    ]
     if let port { invocation += ["-p", String(port)] }
     invocation += [sshDestination, "--", remoteCommand]
     return invocation
+  }
+
+  /// The `sshInvocation` argv as one `/bin/sh`-safe string — every token single-quoted —
+  /// for the one caller that embeds an ssh dial *inside* a local shell script rather
+  /// than exec'ing it directly: the surface reconnect loop, which needs the dial as a
+  /// line it can re-run.
+  public func sshCommandLine(remoteCommand: String, interactive: Bool = false) -> String {
+    sshInvocation(remoteCommand: remoteCommand, interactive: interactive)
+      .map(Self.shellQuoted).joined(separator: " ")
   }
 
   /// Wraps a remote command so it resolves `PATH` the way a human's terminal would —
