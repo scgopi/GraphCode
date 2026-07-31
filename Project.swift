@@ -53,7 +53,7 @@ let project = Project(
                 // beta *of*, and the build number is what actually distinguishes one
                 // beta from the next (0.1.6-beta was 17, -beta2 18, the release 19).
                 "CFBundleShortVersionString": "0.1.9",
-                "CFBundleVersion": "26",
+                "CFBundleVersion": "27",
             ]),
             resources: [
                 "graphcode/Resources/**"
