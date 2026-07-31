@@ -77,6 +77,56 @@ struct CreatedByLoopTests {
   }
 
   @Test
+  func stoppingAParentStopsItsSpawnedDescendantsButNotPeers() async throws {
+    // A stopped coordinator must not leave the workers it fanned out running headless —
+    // and a drawn edge to a peer is a relationship, not custody, so the peer survives.
+    let terminated = LockIsolated<[String]>([])
+    let store = GraphStore(
+      onTerminateSession: { node in terminated.withValue { $0.append(node.title) } })
+    await store.handle(.createNode(draft("parent", createdBy: nil)))
+    let parentID = try #require(await store.graph.nodes.first?.id)
+    await store.handle(.createNode(draft("child", createdBy: parentID)))
+    let childID = try #require(await store.graph.nodes.first { $0.title == "child" }?.id)
+    await store.handle(.createNode(draft("grandchild", createdBy: childID)))
+    await store.handle(.createNode(draft("peer", createdBy: nil)))
+    let peerID = try #require(await store.graph.nodes.first { $0.title == "peer" }?.id)
+    await store.handle(.createEdge(from: parentID, to: peerID, spec: EdgeSpec()))
+
+    await store.handle(.stopNode(parentID))
+
+    let graph = await store.graph
+    #expect(graph.nodes[id: parentID]?.state == .stopped)
+    #expect(graph.nodes[id: childID]?.state == .stopped)
+    #expect(graph.nodes.first { $0.title == "grandchild" }?.state == .stopped)
+    #expect(graph.nodes[id: peerID]?.state != .stopped)
+    #expect(Set(terminated.value) == ["parent", "child", "grandchild"])
+  }
+
+  @Test
+  func deletingAParentDeletesItsSpawnedDescendants() async throws {
+    // Deleting a coordinator takes its fan-out tree — sessions, edges, memory — while
+    // an ordinary peer connected by a drawn edge stays in the graph.
+    let removedMemory = LockIsolated<[UUID]>([])
+    let store = GraphStore(
+      onRemoveMemory: { nodeID in removedMemory.withValue { $0.append(nodeID) } })
+    await store.handle(.createNode(draft("parent", createdBy: nil)))
+    let parentID = try #require(await store.graph.nodes.first?.id)
+    await store.handle(.createNode(draft("child", createdBy: parentID)))
+    let childID = try #require(await store.graph.nodes.first { $0.title == "child" }?.id)
+    await store.handle(.createNode(draft("peer", createdBy: nil)))
+    let peerID = try #require(await store.graph.nodes.first { $0.title == "peer" }?.id)
+
+    await store.handle(.deleteNode(parentID))
+
+    let graph = await store.graph
+    #expect(graph.nodes[id: parentID] == nil)
+    #expect(graph.nodes[id: childID] == nil)
+    #expect(graph.nodes[id: peerID] != nil)
+    #expect(graph.edges.isEmpty)
+    #expect(Set(removedMemory.value) == [parentID, childID])
+  }
+
+  @Test
   func aChildInheritsItsCreatorsBackend() async throws {
     // A Copilot loop fanning work out must produce Copilot loops. The CLI used to
     // hardcode claudeCode as the draft default, so every agent-created child silently

@@ -160,6 +160,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
           ?? LoopGraph(
             project: ProjectRef(path: "\(resolvedTitle)-subgraph", name: resolvedTitle)))
         : nil,
+      createdBy: createdBy,
       state: loopType == .goalBased ? .running : .idle)
   }
 }
