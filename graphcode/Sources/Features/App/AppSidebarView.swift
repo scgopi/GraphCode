@@ -66,23 +66,15 @@ struct AppSidebarView: View {
           .background(.thinMaterial)
       }
     }
-    // The sidebar's own translucent material would ignore `Theme` and let the desktop
-    // through, so hide it and paint the chrome instead — see `Theme.sidebarGloss`.
-    .scrollContentBackground(.hidden)
-    .background {
-      Theme.sidebarGloss
-        // Lit along the top edge, where the pane meets the titlebar.
-        .overlay(alignment: .top) {
-          Rectangle().fill(Theme.sidebarHighlight).frame(height: 1)
-        }
-        // And falling into shadow where the detail pane begins. Drawn on the sidebar
-        // rather than as a divider so it sits under the list's own selection highlight
-        // instead of on top of it.
-        .overlay(alignment: .trailing) {
-          Rectangle().fill(Theme.sidebarEdgeShadow).frame(width: 1)
-        }
-        .ignoresSafeArea()
-    }
+    // The sidebar is the system's translucent material — Liquid Glass on macOS 26,
+    // the classic sidebar material on 15, both automatic for a `.listStyle(.sidebar)`
+    // list in a split view. This replaced a painted recess (a gradient + hairline
+    // overlays that hid the material with `scrollContentBackground(.hidden)`): Apple's
+    // Liquid Glass adoption guidance is that custom backgrounds in split views
+    // "overlay or interfere" with the system effect and should be removed outright,
+    // not layered. The objections that justified the paint are settled elsewhere —
+    // the app forces `.preferredColorScheme(.dark)` so the glass stays dark, and the
+    // desktop glowing through is the effect's point, not a leak.
     .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
     .toolbar {
       ToolbarItem(placement: .primaryAction) {

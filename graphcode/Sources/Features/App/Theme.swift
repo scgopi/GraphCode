@@ -18,11 +18,17 @@ import SwiftUI
 /// problem instead of tuning it: boundaries are hairlines and shadows, and the only real
 /// colour left in the window is a loop's own.
 ///
-/// Chrome is *painted* glossy — a gradient lit from above, a specular line on its top
-/// edge, a shadow line where it meets the next pane (`sidebarGloss`, `tabBarGloss`). Not
-/// a system material, for the reason above: glass would let the wallpaper tint the one
-/// piece of chrome that has to hold still, and desaturate it the moment the window lost
-/// focus.
+/// Chrome that sits against the terminal is *painted* glossy — a gradient lit from
+/// above, a specular line on its top edge, a shadow line where it meets the next pane
+/// (`tabBarGloss`). Not a system material, for the reason above: glass would let the
+/// wallpaper tint the one piece of chrome that has to hold still, and desaturate it
+/// the moment the window lost focus.
+///
+/// The sidebar is the deliberate exception since adopting the system's glass: it is
+/// the native sidebar material again (Liquid Glass on macOS 26), per Apple's Liquid
+/// Glass adoption guidance that custom backgrounds in split views interfere with the
+/// system effect and should be removed. The desktop tinting it is that effect's point;
+/// `.preferredColorScheme(.dark)` keeps it dark. See `AppSidebarView`.
 enum Theme {
   /// The one value nearly every surface in this app is: `#1E1E1E`.
   ///
@@ -38,59 +44,12 @@ enum Theme {
   /// untinted beside it to compare against.
   static let windowBackground = Color(white: 0.118)
 
-  /// The sidebar's fill: one light source above the titlebar, falling off down the pane.
-  ///
-  /// Centred on `windowBackground` rather than sitting a step off it — it starts a shade
-  /// above and ends a shade below, so the pane averages out to the same tone as
-  /// everything else and the gloss is light on one surface instead of a second colour.
-  ///
-  /// **Why this is painted and not `NSVisualEffectView(.sidebar)`**, which is what a
-  /// native Mac sidebar actually is: that material blurs and *tints from the desktop
-  /// wallpaper* behind the window, and desaturates the moment the window stops being key.
-  /// The one piece of chrome that has to hold still would be the one piece that never
-  /// does, and the sidebar would change color when you moved the window. Everything below
-  /// is the Aqua recipe that material replaced — vertical gloss, specular top edge,
-  /// shadow where the next pane begins — which is why it still reads as a Mac sidebar
-  /// without borrowing the wallpaper to do it.
-  ///
-  /// Stops rather than evenly spaced colors, because evenly spaced is what made the old
-  /// version invisible: a linear ramp over a full window height is a 1-value-per-hundred
-  /// -points change, which is nothing. Real gloss puts most of its falloff in the top
-  /// fifth — near the light — and is almost flat below that. Same shape as `tabBarGloss`,
-  /// stretched over a pane instead of a 40pt strip.
-  /// Since the sidebar grew sections (Graph/chats, local, remote), it sits well under
-  /// `windowBackground` rather than centred on it — first a ~15% step, then deepened
-  /// to ~28% (centre ≈0.085) on review: the subtler version didn't recess enough to
-  /// read as the frame around the lit workspace. Deliberately the one exception to the
-  /// one-tone rule above; the floor to respect is the real-black era's lesson — much
-  /// below this and every piece of chrome has to fight to be visible again.
-  static let sidebarGloss = LinearGradient(
-    stops: [
-      .init(color: Color(white: 0.100), location: 0.00),
-      .init(color: Color(white: 0.084), location: 0.16),
-      .init(color: Color(white: 0.073), location: 0.48),
-      .init(color: Color(white: 0.057), location: 1.00),
-    ],
-    startPoint: .top,
-    endPoint: .bottom)
-
-  /// The specular line along the sidebar's top edge, where it meets the titlebar — the
-  /// thing that actually says "lit from above" rather than "filled with a gradient".
-  /// Still under the tab strip's: this rule runs the full width of a tall pane, and at
-  /// the strip's brightness it stops reading as light and starts reading as a border.
-  static let sidebarHighlight = Color.white.opacity(0.07)
-
-  /// The shadow where the sidebar meets the detail pane — and, now that both panes are the
-  /// same tone, the only thing separating them at all. A `NavigationSplitView`'s own
-  /// divider is nearly invisible between two dark fills, and a hairline of black reads as
-  /// the content pane casting into the recess rather than as a drawn line.
-  static let sidebarEdgeShadow = Color.black.opacity(0.45)
-
   /// Graph canvas fill — both canvases, the Graph overview and a project's. Darkened
-  /// below `windowBackground` in the same review that recessed the sidebar: with the
-  /// sidebar sitting at ~0.073, a canvas still at the window tone read as the brightest
-  /// pane in the window, and the cards lost their lift. A shade above the sidebar keeps
-  /// the ordering — sidebar deepest, canvas above it, cards and chrome on top.
+  /// below `windowBackground` in the review that recessed the (then-painted) sidebar:
+  /// a canvas at the window tone read as the brightest pane in the window, and the
+  /// cards lost their lift. The ordering it keeps — sidebar deepest, canvas above it,
+  /// cards and chrome on top — survives the sidebar's move to the system material,
+  /// which in dark appearance sits visually below this value.
   static let canvasBackground = Color(white: 0.095)
 
   /// The canvas's notebook ruling. One step off `canvasBackground` and no further: the
@@ -101,7 +60,8 @@ enum Theme {
   /// drawn on, which is why it darkened in step when the canvas did.
   static let canvasGridLine = Color(white: 0.155)
 
-  /// A loop workspace's tab strip — the sidebar's gloss, on a strip instead of a pane.
+  /// A loop workspace's tab strip — painted gloss on a 40pt strip: one light source
+  /// above, most of the falloff near it.
   ///
   /// Painted rather than a system material for the reason at the top of this file: glass
   /// would desaturate the strip whenever the window lost focus and let the wallpaper tint
