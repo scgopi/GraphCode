@@ -30,6 +30,54 @@ struct CreatedByLoopTests {
   }
 
   @Test
+  func aChildInheritsItsCreatorsBackend() async throws {
+    // A Copilot loop fanning work out must produce Copilot loops. The CLI used to
+    // hardcode claudeCode as the draft default, so every agent-created child silently
+    // switched provider — the wire couldn't tell "explicitly Claude" from "defaulted".
+    let store = GraphStore()
+    await store.handle(
+      .createNode(
+        NodeDraft(
+          title: "Copilot triage", loopType: .goalBased,
+          goal: GoalSpec(summary: "triage"), backend: .copilotCLI)))
+    let parentID = try #require(await store.graph.nodes.first?.id)
+
+    await store.handle(.createNode(draft("child", createdBy: parentID)))
+
+    let child = try #require(await store.graph.nodes.first { $0.title == "child" })
+    #expect(child.backend == .copilotCLI)
+  }
+
+  @Test
+  func anExplicitBackendOnAChildIsNotSecondGuessed() async throws {
+    // `--backend` names a choice; inheritance only fills silence.
+    let store = GraphStore()
+    await store.handle(
+      .createNode(
+        NodeDraft(
+          title: "Copilot triage", loopType: .goalBased,
+          goal: GoalSpec(summary: "triage"), backend: .copilotCLI)))
+    let parentID = try #require(await store.graph.nodes.first?.id)
+
+    var explicit = draft("child", createdBy: parentID)
+    explicit.backend = .claudeCode
+    await store.handle(.createNode(explicit))
+
+    let child = try #require(await store.graph.nodes.first { $0.title == "child" })
+    #expect(child.backend == .claudeCode)
+  }
+
+  @Test
+  func aParentlessDraftStillDefaultsToClaudeCode() async throws {
+    // A human's shell has no creating loop; the resolution falls through to the same
+    // default the CLI always had.
+    let store = GraphStore()
+    await store.handle(.createNode(draft("orphan", createdBy: nil)))
+    let node = try #require(await store.graph.nodes.first)
+    #expect(node.backend == .claudeCode)
+  }
+
+  @Test
   func loopsALoopCreatesHangOffItRatherThanOffTheGraphsOrigin() async throws {
     let store = GraphStore()
     await store.handle(.createNode(draft("triage", createdBy: nil)))

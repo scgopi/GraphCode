@@ -33,7 +33,12 @@ public struct NodeDraft: Codable, Equatable, Sendable {
   public var triggerPrompt: String?
   /// `.goalBased`: the stop condition.
   public var goal: GoalSpec?
-  public var backend: CLISessionBackendKind
+  /// `nil` means "nobody chose one": the daemon resolves it at creation — the creating
+  /// loop's own backend when this draft came from a session fanning out (`createdBy`),
+  /// Claude Code otherwise. Optional precisely so that inheritance is expressible: a
+  /// non-optional field made every CLI-created child silently Claude Code, because the
+  /// wire couldn't tell "explicitly Claude" from "defaulted".
+  public var backend: CLISessionBackendKind?
   /// `nil` leaves the tier to the orchestrator's routing policy for this loop type.
   public var modelTier: ModelTier?
   public var worktree: WorktreeRef?
@@ -59,7 +64,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     checkDescription: String? = nil,
     triggerPrompt: String? = nil,
     goal: GoalSpec? = nil,
-    backend: CLISessionBackendKind = .claudeCode,
+    backend: CLISessionBackendKind? = nil,
     modelTier: ModelTier? = nil,
     worktree: WorktreeRef? = nil,
     subGraph: LoopGraph? = nil,
@@ -91,7 +96,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     //
     // docs/04-cli-backends.md: refuse the pairing rather than silently degrading a loop
     // to something its backend can actually manage.
-    guard backend.canHost(loopType) else { return false }
+    guard effectiveBackend.canHost(loopType) else { return false }
     switch loopType {
     case .turnBased:
       // A criterion is optional. docs/08 asks for the cheap-to-ignore version of each
@@ -118,6 +123,13 @@ public struct NodeDraft: Codable, Equatable, Sendable {
   /// asks the loop's own backend for a real name and renames the node when it answers.
   public static let untitledFallback = "New Loop"
 
+  /// The backend this draft builds with when nobody resolved one. `GraphStore` resolves
+  /// inheritance *before* this is consulted — a child created by a running loop takes
+  /// that loop's backend — so this fallback only decides for drafts with no creator.
+  public var effectiveBackend: CLISessionBackendKind {
+    backend ?? .claudeCode
+  }
+
   /// The title the node is actually created with — never blank, because the graph, the
   /// sidebar, and the canvas would all render a nameless card.
   public var resolvedTitle: String {
@@ -137,7 +149,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
       checkDescription: checkDescription,
       triggerPrompt: triggerPrompt,
       goal: goal,
-      backend: backend,
+      backend: effectiveBackend,
       modelTier: modelTier,
       worktreeBinding: worktree,
       // A composite always gets a sub-graph, empty to begin with — its own graph is what
@@ -170,7 +182,7 @@ extension NodeDraft {
     checkDescription = try container.decodeIfPresent(String.self, forKey: .checkDescription)
     triggerPrompt = try container.decodeIfPresent(String.self, forKey: .triggerPrompt)
     goal = try container.decodeIfPresent(GoalSpec.self, forKey: .goal)
-    backend = try container.decode(CLISessionBackendKind.self, forKey: .backend)
+    backend = try container.decodeIfPresent(CLISessionBackendKind.self, forKey: .backend)
     modelTier = try container.decodeIfPresent(ModelTier.self, forKey: .modelTier)
     worktree = try container.decodeIfPresent(WorktreeRef.self, forKey: .worktree)
     subGraph = try container.decodeIfPresent(LoopGraph.self, forKey: .subGraph)

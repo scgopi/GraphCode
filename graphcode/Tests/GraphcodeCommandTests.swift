@@ -110,6 +110,29 @@ struct GraphcodeCommandTests {
   }
 
   @Test
+  func omittingTheBackendLeavesTheChoiceToTheDaemon() throws {
+    // No flag must mean no choice: the draft travels with nil so the daemon can give a
+    // Copilot loop's children Copilot sessions. Hardcoding claudeCode here was the bug.
+    let command = try GraphcodeCommand.parse([
+      "node", "create", "/tmp/x", "--title", "Child", "--type", "goal",
+      "--goal", "say hi",
+    ])
+    guard case .createNode(_, let draft) = command else {
+      return #expect(Bool(false), "expected createNode, got \(command)")
+    }
+    #expect(draft.backend == nil)
+
+    let explicit = try GraphcodeCommand.parse([
+      "node", "create", "/tmp/x", "--title", "Child", "--type", "goal",
+      "--goal", "say hi", "--backend", "copilotCLI",
+    ])
+    guard case .createNode(_, let explicitDraft) = explicit else {
+      return #expect(Bool(false), "expected createNode, got \(explicit)")
+    }
+    #expect(explicitDraft.backend == .copilotCLI)
+  }
+
+  @Test
   func anUnknownEnumValueNamesTheOffendingFlag() throws {
     #expect(
       throws: GraphcodeCommand.ParseError.invalidValue(argument: "--type", value: "sideways")

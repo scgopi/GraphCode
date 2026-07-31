@@ -237,7 +237,7 @@ struct ProjectFeature {
             let basis = [draft.checkDescription, draft.triggerPrompt, draft.goal?.summary]
               .compactMap({ $0 })
               .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
-            let title = await titleSuggestionClient.suggest(draft.backend, basis)
+            let title = await titleSuggestionClient.suggest(draft.effectiveBackend, basis)
           else { return }
           try? await orchestratorClient.send(
             .graphCommand(
