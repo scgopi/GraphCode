@@ -70,7 +70,12 @@ third-party: build-zmx build-ghostty
 
 build-zmx:
 	@test -d ThirdParty/zmx || { echo "ThirdParty/zmx missing — run: git submodule update --init --recursive"; exit 1; }
+	@# -Doptimize is load-bearing: zig defaults to Debug, whose ghostty-vt runs
+	@# page-integrity verification on every scrolled line. Measured via
+	@# Tools/relay-bench: Debug zmx relays 0.3 MB/s and turns a 60Hz TUI redraw
+	@# stream into ~4Hz; ReleaseFast is at parity with a bare PTY.
 	cd ThirdParty/zmx && PATH="$(ZIG_SDK_SHIM):$$PATH" $(MISE) zig build \
+		-Doptimize=ReleaseFast \
 		--prefix "$(BUILD_DIR)/zmx" \
 		--global-cache-dir "$(BUILD_DIR)/zmx/.zig-global-cache"
 	@# zig's own linker-generated ad-hoc signature (produced while linking against the
@@ -107,7 +112,11 @@ build-ghostty:
 	@# -Demit-macos-app=false: graphcode needs GhosttyKit.xcframework only. Ghostty's
 	@# own Ghostty.app bundle is a separate xcodebuild step that graphcode never uses,
 	@# and it fails here on an unrelated CoreSimulator version mismatch.
+	@# -Doptimize for the same reason as build-zmx: without it GhosttyKit is a zig
+	@# Debug build — the app's terminal emulation with runtime safety checks the
+	@# real Ghostty.app compiles out. ReleaseFast matches Ghostty's own releases.
 	cd ThirdParty/ghostty && PATH="$(ZIG_SDK_SHIM):$$PATH" $(MISE) zig build \
+		-Doptimize=ReleaseFast \
 		-Demit-xcframework=true -Dxcframework-target=native -Demit-macos-app=false \
 		--prefix "$(BUILD_DIR)/ghostty" \
 		--global-cache-dir "$(BUILD_DIR)/ghostty-cache"
