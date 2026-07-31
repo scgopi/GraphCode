@@ -12,34 +12,36 @@ struct RemoteSessionLaunchTests {
     user: "dev", host: "build-box", port: 2222, remotePath: "/home/dev/widget")
 
   @Test
-  func aRemoteLaunchRunsZmxOnTheRemoteHostInTheRepository() throws {
+  func aRemoteEnsureChecksAndRunsInOneShell() throws {
     let node = LoopNode(
       title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"))
     let invocation = try #require(
-      ZmxSessionLauncher.remoteLaunchInvocation(forNode: node, at: location))
+      ZmxSessionLauncher.remoteEnsureInvocation(forNode: node, at: location))
 
     #expect(invocation.first == "/usr/bin/ssh")
     let remoteCommand = try #require(invocation.last)
-    // Login shell for the remote PATH, cd into the repository, zmx run detached under
-    // the same session name the app attaches to. The whole script is single-quote
-    // wrapped by the login-shell layer, so assertions here are on content, not on
-    // exact escaping — `hostileTextSurvivesShellQuoting` pins the escaping itself.
+    // Login shell for the remote PATH, cd into the repository, then the create-only
+    // pair: `zmx get || zmx run`, detached, under the same session name the app
+    // attaches to. The whole script is single-quote wrapped by the login-shell layer,
+    // so assertions here are on content, not exact escaping —
+    // `hostileTextSurvivesShellQuoting` pins the escaping itself.
     #expect(remoteCommand.hasPrefix("exec zsh -l -i -c '"))
     #expect(remoteCommand.contains("cd "))
     #expect(remoteCommand.contains("/home/dev/widget"))
-    #expect(remoteCommand.contains("zmx"))
+    #expect(remoteCommand.contains("'get'"))
+    #expect(remoteCommand.contains("||"))
     #expect(remoteCommand.contains("run"))
     #expect(
       remoteCommand.contains(SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName))
     #expect(remoteCommand.contains("tests pass"))
-  }
 
-  @Test
-  func aRemoteExistenceCheckAsksTheRemoteZmx() {
-    let node = LoopNode(title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "g"))
-    let invocation = ZmxSessionLauncher.remoteExistenceInvocation(forNode: node, at: location)
-    #expect(invocation.first == "/usr/bin/ssh")
-    #expect(invocation.last?.contains("'get'") == true)
+    // The check must come first: run-then-check would defeat the whole point. Two ssh
+    // round-trips here was the composer bug — the app's attach created the session in
+    // the seconds between them, and the daemon's late `zmx run` typed the entire
+    // launch command into the live agent's input bar.
+    let get = try #require(remoteCommand.range(of: "'get'"))
+    let run = try #require(remoteCommand.range(of: "'run'"))
+    #expect(get.lowerBound < run.lowerBound)
   }
 
   @Test
