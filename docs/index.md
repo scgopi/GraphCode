@@ -10,7 +10,8 @@ connected, unattended, and still yours to attach to and correct mid-run. That's
 **graph engineering**: your agents' work arranged as a graph you design, instead of a
 pile of terminals you babysit.
 
-**[⬇ Download GraphCode (.dmg, latest release)](https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg)**
+**`brew install --cask scgopi/graphcode/graphcode`**
+· [⬇ .dmg, latest release](https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg)
 · [All releases](https://github.com/scgopi/GraphCode/releases) ·
 [Source on GitHub](https://github.com/scgopi/GraphCode) · Requires macOS 15+ on Apple
 Silicon, with Claude Code on your `PATH`.
@@ -271,9 +272,10 @@ current list of rough edges lives in the README's
 
 ## Try it
 
-1. **[Download GraphCode (.dmg, latest release)](https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg)** —
-   drag GraphCode to Applications; that's the whole install. Releases are Developer ID
-   signed and notarized.
+1. **`brew install --cask scgopi/graphcode/graphcode`** — or
+   [download the .dmg](https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg)
+   and drag GraphCode to Applications; that's the whole install either way. Releases are
+   Developer ID signed and notarized.
 2. Add a folder — or clone a URL, or connect a repo on another machine over SSH — then
    create a loop: just write the goal; the title is optional, GraphCode names it for
    you. Connect a second one with an edge.
