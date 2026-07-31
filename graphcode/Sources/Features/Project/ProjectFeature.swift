@@ -42,6 +42,10 @@ struct ProjectFeature {
     var draftBackend: CLISessionBackendKind = .claudeCode
     var draftWorktree: WorktreeSelection = .none
     var draftBranch = ""
+    /// Set when the form was opened from a node card's + handle: the node the new loop
+    /// hangs off. Creation then also draws a hand-off edge from it — see
+    /// `createNodeConfirmed`.
+    var draftParentNodeID: UUID?
     /// Worktrees already present in this project's repository, loaded when the form
     /// opens. Empty for a folder that isn't a git repo — the picker then only offers
     /// "None" and "New branch", and creating one simply fails and reports why.
@@ -93,6 +97,9 @@ struct ProjectFeature {
     case binding(BindingAction<State>)
     case daemonEvent(DaemonEvent)
     case addNodeButtonTapped(parentBackend: CLISessionBackendKind?)
+    /// The + handle on a node card: opens the same form, and the created loop gets a
+    /// hand-off edge from this node.
+    case addChildNodeTapped(UUID)
     case createNodeConfirmed
     case cancelNewNodeForm
     case nodeTapped(UUID)
@@ -166,29 +173,13 @@ struct ProjectFeature {
         return .none
 
       case .addNodeButtonTapped(let parentBackend):
-        state.draftID = UUID()
-        // Goal-based, matching `LoopType`'s own ordering and the segmented control's
-        // first segment: a loop that starts itself and knows when it is finished is what
-        // most work wants, where the old turn-based default made a loop that sits idle
-        // until a human opens it — surprising as the *default* outcome of Create.
-        state.draftLoopType = .goalBased
-        state.draftTitle = ""
-        state.draftCheck = ""
-        state.draftPrompt = ""
-        state.draftGoal = ""
-        state.draftPredicate = ""
-        // Inherit parent backend if creating a child loop; otherwise use user's default.
-        state.draftBackend = parentBackend ?? GraphcodeSettingsStore.load().defaultBackend
-        state.draftWorktree = .none
-        state.draftBranch = ""
-        state.showingNewNodeForm = true
-        let repositoryPath = state.graph.project.path
-        return .run { send in
-          // A non-repo folder just yields nothing — a missing worktree list is not worth
-          // an error banner when the picker degrades to "None" on its own.
-          let worktrees = (try? await gitClient.listWorktrees(repositoryPath)) ?? []
-          await send(.worktreesLoaded(worktrees))
-        }
+        return openNodeForm(&state, backend: parentBackend, parentNodeID: nil)
+
+      case .addChildNodeTapped(let parentID):
+        // The child inherits its parent's backend, same rule as creating from within an
+        // open loop's workspace.
+        return openNodeForm(
+          &state, backend: state.graph.nodes[id: parentID]?.backend, parentNodeID: parentID)
 
       case .cancelNewNodeForm:
         state.showingNewNodeForm = false
@@ -201,6 +192,11 @@ struct ProjectFeature {
         // the backstop for the keyboard shortcut path.
         guard draft.isValid else { return .none }
         let projectPath = state.graph.project.path
+        // A form opened from a node card's + handle also wires the new loop up: a
+        // default hand-off edge from the parent, created right after the node so the
+        // graph never broadcasts a child floating unconnected.
+        let parentNodeID = state.draftParentNodeID
+        state.draftParentNodeID = nil
         state.showingNewNodeForm = false
 
         // Creating the worktree is the app's job, not the daemon's: `GitClient` lives
@@ -220,6 +216,12 @@ struct ProjectFeature {
           }
           try? await orchestratorClient.send(
             .graphCommand(projectPath: projectPath, command: .createNode(resolved)))
+          if let parentNodeID {
+            try? await orchestratorClient.send(
+              .graphCommand(
+                projectPath: projectPath,
+                command: .createEdge(from: parentNodeID, to: draft.id, spec: EdgeSpec())))
+          }
 
           // A blank title creates the node as "New Loop" and asks the loop's own
           // backend for a real one — after creation, so a slow (or absent) CLI never
@@ -346,6 +348,39 @@ struct ProjectFeature {
               command: .createEdge(from: pending.from, to: pending.to, spec: spec)))
         }
       }
+    }
+  }
+
+  /// Resets the draft fields and opens the node form — the shared half of
+  /// `.addNodeButtonTapped` and `.addChildNodeTapped`.
+  ///
+  /// Goal-based by default, matching `LoopType`'s own ordering and the segmented
+  /// control's first segment: a loop that starts itself and knows when it is finished
+  /// is what most work wants, where the old turn-based default made a loop that sits
+  /// idle until a human opens it — surprising as the *default* outcome of Create.
+  private func openNodeForm(
+    _ state: inout State, backend: CLISessionBackendKind?, parentNodeID: UUID?
+  ) -> Effect<Action> {
+    state.draftID = UUID()
+    state.draftLoopType = .goalBased
+    state.draftTitle = ""
+    state.draftCheck = ""
+    state.draftPrompt = ""
+    state.draftGoal = ""
+    state.draftPredicate = ""
+    // The parent's backend when there is one; the human's default otherwise
+    // (Settings → Sessions), never a hardcoded one.
+    state.draftBackend = backend ?? GraphcodeSettingsStore.load().defaultBackend
+    state.draftWorktree = .none
+    state.draftBranch = ""
+    state.draftParentNodeID = parentNodeID
+    state.showingNewNodeForm = true
+    let repositoryPath = state.graph.project.path
+    return .run { send in
+      // A non-repo folder just yields nothing — a missing worktree list is not worth
+      // an error banner when the picker degrades to "None" on its own.
+      let worktrees = (try? await gitClient.listWorktrees(repositoryPath)) ?? []
+      await send(.worktreesLoaded(worktrees))
     }
   }
 

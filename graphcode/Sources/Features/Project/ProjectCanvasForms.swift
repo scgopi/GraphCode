@@ -29,25 +29,35 @@ extension ProjectCanvasView {
     store.graph.nodes[id: id]?.title ?? "?"
   }
 
+  /// The + at a card's right-centre does double duty: a *click* creates a new loop
+  /// already wired to this one (a hand-off edge from it — `.addChildNodeTapped`), a
+  /// *drag* draws an edge to an existing node exactly as the plain dot always did. One
+  /// element, because they're one idea — "continue the graph from here" — and two
+  /// controls sharing a card edge would fight for the same 14 points.
   func connectorHandle(for nodeID: UUID) -> some View {
-    Circle()
-      .fill(Color.accentColor)
-      .frame(width: 14, height: 14)
-      .contentShape(Circle().inset(by: -8))  // bigger hit target than the visible dot
-      .gesture(
-        DragGesture(minimumDistance: 4, coordinateSpace: .named("canvas"))
-          .onChanged { value in
-            dragSourceID = nodeID
-            dragLocation = value.location
+    ZStack {
+      Circle().fill(Color.accentColor)
+      Image(systemName: "plus")
+        .font(.system(size: 9, weight: .bold))
+        .foregroundStyle(.white)
+    }
+    .frame(width: 14, height: 14)
+    .contentShape(Circle().inset(by: -8))  // bigger hit target than the visible dot
+    .onTapGesture { store.send(.addChildNodeTapped(nodeID)) }
+    .gesture(
+      DragGesture(minimumDistance: 4, coordinateSpace: .named("canvas"))
+        .onChanged { value in
+          dragSourceID = nodeID
+          dragLocation = value.location
+        }
+        .onEnded { value in
+          if let targetID = hitTestNode(at: value.location, excluding: nodeID) {
+            store.send(.edgeDrawn(from: nodeID, to: targetID))
           }
-          .onEnded { value in
-            if let targetID = hitTestNode(at: value.location, excluding: nodeID) {
-              store.send(.edgeDrawn(from: nodeID, to: targetID))
-            }
-            dragSourceID = nil
-            dragLocation = nil
-          }
-      )
+          dragSourceID = nil
+          dragLocation = nil
+        }
+    )
   }
 
   /// Which node (if any) contains `point`, in "canvas"-space — approximate card frame,

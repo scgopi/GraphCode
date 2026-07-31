@@ -68,22 +68,24 @@ struct ProjectCanvasView: View {
           CanvasZoomControls(
             transform: $transform, viewport: viewport, content: contentSize(derived.subGraph))
         }
+        // On the canvas itself, top-right, rather than in the window toolbar: up there
+        // it fused into one grey pill with the system chrome and read as furniture —
+        // the one authoring affordance on this surface deserves to look like one.
+        .overlay(alignment: .topTrailing) {
+          Button {
+            store.send(.addNodeButtonTapped(parentBackend: nil))
+          } label: {
+            Label("New Loop", systemImage: "plus.circle.fill")
+          }
+          .buttonStyle(.borderedProminent)
+          .padding(12)
+        }
     }
     .background(Theme.windowBackground)
-    .toolbar {
-      ToolbarItem(placement: .primaryAction) {
-        Button {
-          store.send(.addNodeButtonTapped(parentBackend: nil))
-        } label: {
-          Label("New Node", systemImage: "plus.circle")
-        }
-      }
-      // No folder header here on purpose. The canvas is only ever reached by picking a
-      // project in the sidebar, which leaves that project's row selected in view — and
-      // a second toolbar item would fuse into one pill with "New Node" anyway. The
-      // header belongs on a loop's workspace, where the terminal fills the pane and the
-      // project is no longer on screen; see `LoopWorkspaceView.folderHeader`.
-    }
+    // No folder header in the toolbar on purpose. The canvas is only ever reached by
+    // picking a project in the sidebar, which leaves that project's row selected in
+    // view. The header belongs on a loop's workspace, where the terminal fills the
+    // pane and the project is no longer on screen; see `LoopWorkspaceView.folderHeader`.
     .sheet(isPresented: $store.showingNewNodeForm) {
       NodeDraftForm(store: store)
     }
