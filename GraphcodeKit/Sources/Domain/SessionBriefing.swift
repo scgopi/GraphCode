@@ -114,6 +114,21 @@ public enum SessionBriefing {
       fires automatically when you finish, a `handoff` sequences the other loop after
       you. This command is the one-off.
 
+      ## Remembering across passes
+
+      Loops that run in cycles get relaunched, and a relaunched session starts fresh.
+      Each loop has a memory log for exactly this; when yours has one, your opening
+      prompt points at it — read it before working. Record anything a future pass must
+      know the moment you learn it:
+
+      ```sh
+      graphcode node memo \(projectPath) <your-node-id> <note>
+      ```
+
+      Record decisions, dead ends, and constraints ("approach X fails because Y") — not
+      a transcript, and nothing the code or git history already says. Your node id is
+      the suffix of `$ZMX_SESSION` after `graphcode-`.
+
       If `graphcode` is not on your `PATH`, it is at `\(installedCLIPath)`.
 
       Give each loop a title that says what it is for and a goal that says what done looks

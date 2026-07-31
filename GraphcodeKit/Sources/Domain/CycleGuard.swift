@@ -17,10 +17,24 @@ public struct CycleGuard: Codable, Equatable, Sendable {
   /// The escape hatch for loops whose end is a condition rather than a count ("until the
   /// test suite is green").
   public var until: String?
+  /// Stop re-firing when the source node's metric (`GoalSpec.metricCommand`) has shown
+  /// no improvement across this many consecutive passes. The plateau bound: a cycle
+  /// that keeps running but has stopped getting better is done, and "kept spending
+  /// without learning" is exactly what `.stalled` exists to name.
+  ///
+  /// Only meaningful when the node whose resolution drives the cycle has a metric; a
+  /// cycle with no metric never plateaus, so this alone bounds nothing on such a graph —
+  /// pair it with `maxIterations` unless the metric is known to exist.
+  public var stopAfterPassesWithoutImprovement: Int?
 
-  public init(maxIterations: Int? = nil, until: String? = nil) {
+  public init(
+    maxIterations: Int? = nil,
+    until: String? = nil,
+    stopAfterPassesWithoutImprovement: Int? = nil
+  ) {
     self.maxIterations = maxIterations
     self.until = until
+    self.stopAfterPassesWithoutImprovement = stopAfterPassesWithoutImprovement
   }
 
   public var effectiveUntil: String? {
@@ -29,12 +43,13 @@ public struct CycleGuard: Codable, Equatable, Sendable {
     return trimmed.isEmpty ? nil : trimmed
   }
 
-  /// A guard with neither a count nor a condition bounds nothing, and would turn a cycle
-  /// into an unattended infinite loop spending tokens forever. `GraphStore` refuses to
-  /// attach one, which is the whole point of the type.
+  /// A guard with neither a count, a condition, nor a plateau rule bounds nothing, and
+  /// would turn a cycle into an unattended infinite loop spending tokens forever.
+  /// `GraphStore` refuses to attach one, which is the whole point of the type.
   public var isBounded: Bool {
     if let maxIterations { return maxIterations > 0 }
-    return effectiveUntil != nil
+    if effectiveUntil != nil { return true }
+    return (stopAfterPassesWithoutImprovement ?? 0) > 0
   }
 
   /// Whether the edge may fire again, on count alone. The `until` half is asked
@@ -45,11 +60,12 @@ public struct CycleGuard: Codable, Equatable, Sendable {
   }
 
   public var summary: String {
-    switch (maxIterations, effectiveUntil) {
-    case (let max?, let until?): return "≤\(max)× or until `\(until)`"
-    case (let max?, nil): return "≤\(max)×"
-    case (nil, let until?): return "until `\(until)`"
-    case (nil, nil): return "unbounded"
+    var parts: [String] = []
+    if let maxIterations { parts.append("≤\(maxIterations)×") }
+    if let until = effectiveUntil { parts.append("until `\(until)`") }
+    if let passes = stopAfterPassesWithoutImprovement, passes > 0 {
+      parts.append("\(passes) flat passes")
     }
+    return parts.isEmpty ? "unbounded" : parts.joined(separator: " or ")
   }
 }

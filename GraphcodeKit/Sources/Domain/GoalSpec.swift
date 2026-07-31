@@ -29,17 +29,33 @@ public struct GoalSpec: Codable, Equatable, Sendable {
   /// (docs/05-orchestrator.md#responsibilities). `nil` means it runs until it resolves,
   /// which is the right default for goals with no predictable duration.
   public var stallAfterSeconds: Double?
+  /// A shell command whose stdout's last line is a *number* measuring how the work is
+  /// going — distinct from `predicate`, which answers done/not-done. Kept separate
+  /// because the idiomatic predicates are quiet (`git diff --quiet`,
+  /// `test $(…) -eq 0`), so overloading their stdout would collide with exactly the
+  /// commands people reach for first.
+  ///
+  /// Sampled once per cycle pass, at re-entry, alongside the guard's `until` predicate —
+  /// not on every poll, so an expensive metric (a test-suite run) costs one run per
+  /// pass, per docs/08's conservative-polling stance.
+  public var metricCommand: String?
+  /// Which way `metricCommand`'s number should move. Defaults to `.maximize`.
+  public var metricDirection: MetricDirection
 
   public init(
     summary: String,
     predicate: String? = nil,
     pollIntervalSeconds: Double = 60,
-    stallAfterSeconds: Double? = nil
+    stallAfterSeconds: Double? = nil,
+    metricCommand: String? = nil,
+    metricDirection: MetricDirection = .maximize
   ) {
     self.summary = summary
     self.predicate = predicate
     self.pollIntervalSeconds = pollIntervalSeconds
     self.stallAfterSeconds = stallAfterSeconds
+    self.metricCommand = metricCommand
+    self.metricDirection = metricDirection
   }
 
   /// Non-empty predicate or nil — an all-whitespace field is a human leaving it blank,
@@ -47,6 +63,13 @@ public struct GoalSpec: Codable, Equatable, Sendable {
   public var effectivePredicate: String? {
     guard let predicate else { return nil }
     let trimmed = predicate.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+  }
+
+  /// Non-empty metric command or nil, by the same rule as `effectivePredicate`.
+  public var effectiveMetricCommand: String? {
+    guard let metricCommand else { return nil }
+    let trimmed = metricCommand.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty ? nil : trimmed
   }
 
@@ -65,6 +88,7 @@ public struct GoalSpec: Codable, Equatable, Sendable {
 
   private enum CodingKeys: String, CodingKey {
     case summary, predicate, pollIntervalSeconds, stallAfterSeconds
+    case metricCommand, metricDirection
   }
 
   /// Hand-written for the same reason `LoopEdge`'s is: a field added after a graph was
@@ -76,5 +100,8 @@ public struct GoalSpec: Codable, Equatable, Sendable {
     pollIntervalSeconds =
       try container.decodeIfPresent(Double.self, forKey: .pollIntervalSeconds) ?? 60
     stallAfterSeconds = try container.decodeIfPresent(Double.self, forKey: .stallAfterSeconds)
+    metricCommand = try container.decodeIfPresent(String.self, forKey: .metricCommand)
+    metricDirection =
+      try container.decodeIfPresent(MetricDirection.self, forKey: .metricDirection) ?? .maximize
   }
 }
