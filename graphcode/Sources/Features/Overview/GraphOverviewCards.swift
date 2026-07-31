@@ -67,6 +67,9 @@ extension GraphOverviewView {
       RoundedRectangle(cornerRadius: 8)
         .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
     )
+    // A folder has no loop kind to tint with, so the default neutral lift — see
+    // `cardGlow`.
+    .cardGlow()
     .contentShape(Rectangle())
     // A folder chip goes to that folder's own canvas — where you can actually edit it.
     // The overview is for seeing the whole thing, not for rewiring it.
@@ -124,6 +127,8 @@ extension GraphOverviewView {
             reason == nil ? Color.secondary.opacity(0.3) : Color.orange,
             lineWidth: reason == nil ? 1 : 2)
       )
+      // Same lift and attention glow as `ProjectCanvasView`'s cards — see `cardGlow`.
+      .cardGlow(reason == nil ? node.loopType.accent : .orange, emphasized: reason != nil)
       .contentShape(Rectangle())
       .onTapGesture { open(loop) }
       .contextMenu {
