@@ -21,6 +21,16 @@ struct AppView: View {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(Theme.windowBackground)
+    // First launch only (and the sidebar's help button after that): the app's
+    // vocabulary in one card, before the empty canvas has to explain itself.
+    .sheet(
+      isPresented: Binding(
+        get: { store.showingOnboarding },
+        set: { if !$0 { store.send(.onboardingDismissed) } }
+      )
+    ) {
+      OnboardingView { store.send(.onboardingDismissed) }
+    }
     // Paints the window itself, so the titlebar and toolbar match instead of sitting a
     // shade lighter above the content.
     .containerBackground(Theme.windowBackground, for: .window)

@@ -33,6 +33,10 @@ struct AppFeature {
     /// Whether the open workspace is a quick chat rather than a graph node's loop.
     func isQuickChat(_ nodeID: UUID) -> Bool { quickChats[id: nodeID] != nil }
 
+    /// Up on first launch (`.task` checks the persisted flag) and whenever the
+    /// sidebar's help button asks for it again.
+    var showingOnboarding = false
+
     /// The orchestrator's needs-attention rollup, across every open project
     /// (docs/05-orchestrator.md#monitoring-surface). Derived rather than stored: it's a
     /// pure function of the graphs the daemon already broadcasts, and a cached copy
@@ -110,6 +114,9 @@ struct AppFeature {
     case selectPreviousLoop
     /// The stop/kill affordance docs/05-orchestrator.md asks the monitor for.
     case stopNodeTapped(projectPath: String, nodeID: UUID)
+    /// The first-launch terminology primer — see `OnboardingView`.
+    case onboardingRequested
+    case onboardingDismissed
     /// The Quick Chats section's actions — see `State.quickChats`.
     case newQuickChatTapped
     case quickChatTapped(UUID)
@@ -136,6 +143,11 @@ struct AppFeature {
       switch action {
       case .task:
         state.quickChats = IdentifiedArray(uniqueElements: quickChatStore.load())
+        // Once, not every launch: the primer's value is on day one, and re-showing it
+        // to someone who has loops running would read as the app forgetting them.
+        if !UserDefaults.standard.bool(forKey: "hasSeenOnboarding") {
+          state.showingOnboarding = true
+        }
         return .merge(
           .run { send in
             for await event in orchestratorClient.connect() {
@@ -289,6 +301,15 @@ struct AppFeature {
           try? await orchestratorClient.send(
             .graphCommand(projectPath: projectPath, command: .stopNode(nodeID)))
         }
+
+      case .onboardingRequested:
+        state.showingOnboarding = true
+        return .none
+
+      case .onboardingDismissed:
+        state.showingOnboarding = false
+        UserDefaults.standard.set(true, forKey: "hasSeenOnboarding")
+        return .none
 
       case .newQuickChatTapped:
         let chat = QuickChat(
