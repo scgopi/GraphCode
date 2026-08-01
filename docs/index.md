@@ -312,6 +312,23 @@ can't host. Current rough edges live in the README's
    guarded back-edge.
 3. Close the app whenever you like — the loops won't notice.
 
+{% if site.buttondown_username %}
+<form class="gc-subscribe"
+      action="https://buttondown.com/api/emails/embed-subscribe/{{ site.buttondown_username }}"
+      method="post"
+      target="_blank">
+  <label class="gc-subscribe-label" for="gc-email">
+    <strong>Get the next one.</strong>
+    New releases and the next article — nothing else, and one click to leave.
+  </label>
+  <div class="gc-subscribe-row">
+    <input class="gc-subscribe-input" type="email" id="gc-email" name="email"
+           placeholder="you@example.com" autocomplete="email" required>
+    <button class="gc-subscribe-btn" type="submit">Subscribe</button>
+  </div>
+</form>
+{% endif %}
+
 Building from source, development commands, and limitations are in the
 [README](https://github.com/scgopi/GraphCode#readme). GraphCode is
 [MIT-licensed](https://github.com/scgopi/GraphCode/blob/main/LICENSE), built on the

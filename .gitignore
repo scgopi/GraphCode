@@ -41,4 +41,5 @@ xcuserdata/
 !/docs/index.md
 !/docs/_config.yml
 !/docs/_layouts/
+!/docs/_includes/
 !/docs/assets/

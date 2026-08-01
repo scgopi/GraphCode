@@ -229,6 +229,68 @@ body {
   }
 }
 
+.gc-subscribe {
+  margin: 2.5rem 0;
+  padding: 1.5rem 1.6rem;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  background-color: #161b22;
+}
+
+.gc-subscribe-label {
+  display: block;
+  margin-bottom: 1rem;
+  color: #c9d1d9;
+  font-size: 0.95rem;
+  line-height: 1.5;
+
+  strong {
+    color: #e6edf3;
+  }
+}
+
+.gc-subscribe-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.gc-subscribe-input {
+  flex: 1 1 16rem;
+  min-width: 0;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  background-color: #0d1117;
+  color: #e6edf3;
+  font-size: 0.95rem;
+
+  &::placeholder {
+    color: #6e7681;
+  }
+
+  &:focus {
+    outline: none;
+    border-color: #3fb950;
+  }
+}
+
+.gc-subscribe-btn {
+  flex: 0 0 auto;
+  padding: 0.6rem 1.4rem;
+  border: 1px solid #3fb950;
+  border-radius: 6px;
+  background-color: transparent;
+  color: #3fb950;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+
+  &:hover {
+    background-color: rgba(63, 185, 80, 0.12);
+  }
+}
+
 .main-content {
   table {
     th {

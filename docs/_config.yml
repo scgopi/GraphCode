@@ -1,3 +1,10 @@
 theme: jekyll-theme-cayman
 title: GraphCode
 description: Graphs of live, steerable Claude Code sessions on macOS
+
+# Both are inert until filled in — the analytics beacon and the subscribe form each
+# render only when their value is present, so an empty value ships nothing at all.
+# Cloudflare › Web Analytics › add graphcode.app › copy the beacon token.
+cloudflare_analytics_token:
+# The username in your Buttondown account URL.
+buttondown_username:
