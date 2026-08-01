@@ -22,8 +22,6 @@ graph is a unit of work running inside a real CLI coding-agent session; each edg
 hand-off, message, or spawn between them. The sessions are real terminals you can attach
 to, watch, and steer — not headless jobs that report back when they're done.
 
-> Early and moving. Expect rough edges, and see [Known limitations](#known-limitations).
-
 **[Graph Engineering, simplified →](https://graphcode.app/)** — the full
 article: the mental model, then the machinery underneath it.
 
