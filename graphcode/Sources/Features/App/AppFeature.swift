@@ -85,6 +85,11 @@ struct AppFeature {
     var jumpQuery = ""
     var jumpSelection = 0
 
+    /// State changes seen since launch, for the activity strip — see
+    /// `AppFeature+Activity.swift`. Bounded, and deliberately not persisted.
+    var activityLog: [ActivityEvent] = []
+    var activityFilterIsAttention = false
+
     /// The orchestrator's needs-attention rollup, across every open project
     /// (docs/05-orchestrator.md#monitoring-surface). Derived rather than stored: it's a
     /// pure function of the graphs the daemon already broadcasts, and a cached copy
@@ -159,6 +164,8 @@ struct AppFeature {
     /// ⌘⇧R and the canvas rail's Review button — open the loop that has been waiting
     /// longest, then the next one on each press. See `reviewNextAttentionItem`.
     case reviewAttentionTapped
+    /// The activity strip's "Only attention" filter — see `ActivityStripView`.
+    case activityFilterToggled
     /// ⌘K's jump palette — see `JumpPalette`.
     case jumpPaletteRequested
     case jumpPaletteDismissed
@@ -250,6 +257,11 @@ struct AppFeature {
           // banner was up (a dead-daemon Add Folder, say) is stale now.
           state.welcome.errorMessage = nil
           let path = graph.project.path
+          // Before the graph is replaced: what changed between the two is the only
+          // record anyone has of *when* a loop changed state. See `recordActivity`.
+          Self.recordActivity(
+            previous: state.projects[id: path]?.graph, next: graph, path: path,
+            at: Date(), into: &state.activityLog)
           guard state.projects[id: path] != nil else {
             // Not an already-open project — this snapshot is the reply to the
             // `.openProject` that just added it, i.e. this *is* "project opened."
@@ -366,6 +378,10 @@ struct AppFeature {
         // selecting its project.
         return .send(
           .projects(.element(id: item.projectPath, action: .nodeTapped(item.nodeID))))
+
+      case .activityFilterToggled:
+        state.activityFilterIsAttention.toggle()
+        return .none
 
       case .reviewAttentionTapped:
         guard let item = reviewNextAttentionItem(&state) else { return .none }

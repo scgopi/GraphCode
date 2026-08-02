@@ -52,7 +52,19 @@ struct LoopCardPresentation: Equatable {
 
   // MARK: - Live line
 
+  /// What the loop is doing if anything says so, and what it was handed if nothing does.
+  ///
+  /// `"pass 4 · editing UsageReport.swift"` is the reported form: the pass count comes
+  /// off `metricHistory`, the rest off `LoopNode.activity`, which a backend hook writes
+  /// and which is `nil` in every session that has no such hook. The fallback is the
+  /// goal, prompt or check the loop was created with — less immediate, and never wrong.
   private static func liveLine(_ node: LoopNode) -> String? {
+    guard let reported = collapsed(node.activity) else { return handedLine(node) }
+    let passes = node.metricHistory.count
+    return passes > 0 ? "pass \(passes) · \(reported)" : reported
+  }
+
+  private static func handedLine(_ node: LoopNode) -> String? {
     switch node.loopType {
     case .goalBased: collapsed(node.goal?.summary)
     case .timeBased: collapsed(node.triggerPrompt)

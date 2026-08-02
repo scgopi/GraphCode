@@ -43,6 +43,9 @@ public struct CLISessionBackend: Sendable {
   /// What the backend says it has spent on this loop, or `nil` when it doesn't report.
   /// Never estimated — see `UsageSample`.
   public var usage: @Sendable (LoopNode) async -> UsageSample?
+  /// What the session says it is doing right now, or `nil` when nothing reports it —
+  /// see `LoopNode.activity`.
+  public var activity: @Sendable (LoopNode) async -> String?
 
   public init(
     kind: CLISessionBackendKind,
@@ -50,7 +53,8 @@ public struct CLISessionBackend: Sendable {
     terminate: @escaping @Sendable (LoopNode, String?) async -> Void,
     sendInput: @escaping @Sendable (LoopNode, String, String?) async -> Bool,
     presence: @escaping @Sendable (LoopNode) async -> PresenceReading,
-    usage: @escaping @Sendable (LoopNode) async -> UsageSample?
+    usage: @escaping @Sendable (LoopNode) async -> UsageSample?,
+    activity: @escaping @Sendable (LoopNode) async -> String? = { _ in nil }
   ) {
     self.kind = kind
     self.launch = launch
@@ -58,6 +62,7 @@ public struct CLISessionBackend: Sendable {
     self.sendInput = sendInput
     self.presence = presence
     self.usage = usage
+    self.activity = activity
   }
 }
 
@@ -88,7 +93,8 @@ extension CLISessionBackend {
         await ZmxSessionLauncher.send(text, to: node, projectPath: projectPath)
       },
       presence: { node in await ZmxSessionLauncher.presence(of: node) },
-      usage: { node in await ZmxSessionLauncher.usage(of: node) }
+      usage: { node in await ZmxSessionLauncher.usage(of: node) },
+      activity: { node in await ZmxSessionLauncher.activity(of: node) }
     )
   }
 
@@ -153,5 +159,10 @@ extension CLISessionBackend {
   /// The usage-reading hook `GraphStore` is wired with.
   public static let readUsage: @Sendable (LoopNode) async -> UsageSample? = { node in
     await backend(for: node).usage(node)
+  }
+
+  /// The activity-reading hook `GraphStore` is wired with.
+  public static let readActivity: @Sendable (LoopNode) async -> String? = { node in
+    await backend(for: node).activity(node)
   }
 }

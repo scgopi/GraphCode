@@ -165,4 +165,28 @@ struct ZmxSessionLauncherTests {
     #expect(ZmxSessionLauncher.arguments(forNode: Self.node(prompt: nil)) == nil)
     #expect(ZmxSessionLauncher.arguments(forNode: Self.node(prompt: "")) == nil)
   }
+
+  @Test
+  func aReportedActivityLabelIsCollapsedToOneBoundedLine() {
+    // A label is whatever a hook wrote. One that arrives as a paragraph must not reach
+    // the graph, the broadcast, and every card's one-line row — so it is cut here, once,
+    // where the cut is a decision rather than an accident of layout.
+    #expect(
+      ZmxSessionLauncher.parseActivityLabel("activity=  editing\n  UsageReport.swift ")
+        == "editing UsageReport.swift")
+    #expect(ZmxSessionLauncher.parseActivityLabel("   ") == nil)
+    #expect(
+      ZmxSessionLauncher.parseActivityLabel(String(repeating: "x", count: 500))?.count
+        == ZmxSessionLauncher.maxActivityLength)
+  }
+
+  @Test
+  func activityIsReadFromTheSessionsOwnLabelStore() {
+    // The same channel presence and usage come over — one session, three labels, and
+    // nothing graphcode has to scrape from a terminal to guess at.
+    let node = LoopNode(title: "loop")
+    #expect(
+      ZmxSessionLauncher.activityLabelArguments(forNode: node)
+        == ["get", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "activity"])
+  }
 }

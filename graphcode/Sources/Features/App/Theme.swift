@@ -183,6 +183,10 @@ enum Theme {
   static let workspaceRail = Color(red: 0.114, green: 0.114, blue: 0.129)  // #1d1d21
   static let paneFocusTint = Color(red: 0.039, green: 0.518, blue: 1.0)  // #0a84ff
 
+  /// The activity strip along the window's bottom edge — a shade off the rail's tone,
+  /// so the two pieces of chrome that frame the canvas read as the same material.
+  static let activityStrip = Color(red: 0.114, green: 0.114, blue: 0.125)  // #1d1d20
+
   /// A loop card's hairline. The attention variant is the orange itself: the border is
   /// the cheapest ring to read at 40% zoom, and at that size it is doing the work the
   /// pill's word does up close.

@@ -12,7 +12,27 @@ import SwiftUI
 struct AppView: View {
   @Bindable var store: StoreOf<AppFeature>
 
+  /// What the activity strip's clock reads — the window's one 30s tick, shared with the
+  /// canvases' cards. See `CanvasClock`.
+  @State private var now = Date()
+  /// Read once at launch, like every other `GraphcodeSettings` value the app uses: the
+  /// file is the daemon's too, and re-reading it per body pass would put a disk hit on
+  /// the render path.
+  @State private var showsActivityStrip = GraphcodeSettingsStore.load().showsActivityStrip
+
   var body: some View {
+    VStack(spacing: 0) {
+      split
+      // Full width, under the sidebar as well as the canvas: what happened happened to
+      // the workspace, not to whichever pane is on screen.
+      if showsActivityStrip {
+        ActivityStripView(store: store, now: now)
+      }
+    }
+    .onReceive(CanvasClock.tick) { now = $0 }
+  }
+
+  private var split: some View {
     NavigationSplitView {
       AppSidebarView(store: store)
     } detail: {

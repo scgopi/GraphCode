@@ -50,6 +50,18 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// What the backend has reported spending on this loop, if anything. Never estimated —
   /// see `UsageSample`.
   public var usage: UsageSample?
+  /// The last thing the session said it was doing — `"editing UsageReport.swift"`.
+  ///
+  /// Reported, never inferred, by exactly the mechanism `presence` and `usage` use: a
+  /// backend lifecycle hook writing `zmx set "$ZMX_SESSION" activity=…` into the
+  /// session's own label store. graphcode cannot see inside a running `claude`, and the
+  /// alternative — scraping the terminal — would put a guess about what an agent is
+  /// doing on the card next to the facts about what it has done.
+  ///
+  /// `nil` until something reports one, which is the common case, and the card's live
+  /// line then says what the loop was *handed* instead. That fallback is honest and is
+  /// what shipped before this field existed.
+  public var activity: String?
   /// Recent readings of the goal's `metricCommand`, oldest first — one per cycle pass,
   /// capped at `LoopNode.maxMetricSamples` so per-poll persistence stays bounded. The
   /// full unbounded series lives in the node's memory log; this is the cache the canvas
@@ -77,6 +89,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     subGraph: LoopGraph? = nil,
     pilotState: PilotState = .notPiloted,
     usage: UsageSample? = nil,
+    activity: String? = nil,
     metricHistory: [MetricSample] = [],
     createdBy: UUID? = nil,
     state: LoopState = .idle,
@@ -94,6 +107,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.subGraph = subGraph
     self.pilotState = pilotState
     self.usage = usage
+    self.activity = activity
     self.metricHistory = metricHistory
     self.createdBy = createdBy
     self.state = state
