@@ -73,6 +73,12 @@ struct ProjectFeature {
     var nodePendingRename: UUID?
     var draftRenameTitle = ""
 
+    /// Loops a human said really are a beginning, despite having no edges — the answer
+    /// to a card's "Mark as entry". View state, not graph state: the graph's own answer
+    /// to "does this start something" is its edges, and a stored flag would be a second
+    /// answer free to disagree with them. See `CardEntryRole`.
+    var declaredEntryIDs: Set<UUID> = []
+
     /// The sidebar's display order for this project's loops, node ids first-to-last.
     /// Local UI state like `nodePositions`: the daemon's graph carries no ordering a
     /// human chose, so a `graphChanged` broadcast must not clobber a rearrangement —
@@ -112,6 +118,8 @@ struct ProjectFeature {
     /// *this folder's* canvas, so the loop it opens should be one you can see. ⌘⇧R from
     /// the window is the cross-project door — see `AppFeature.reviewAttentionTapped`.
     case reviewAttentionTapped
+    /// "Mark as entry" on a loop wired to nothing — see `CardEntryRole`.
+    case markAsEntryTapped(UUID)
     case edgeDrawn(from: UUID, to: UUID)
     case createEdgeConfirmed
     case cancelEdgeForm
@@ -259,6 +267,10 @@ struct ProjectFeature {
       case .nodeTapped:
         // Handled by `AppFeature`'s parent `Reduce`, which owns cross-project
         // selection — nothing to do here.
+        return .none
+
+      case .markAsEntryTapped(let nodeID):
+        state.declaredEntryIDs.insert(nodeID)
         return .none
 
       case .reviewAttentionTapped:

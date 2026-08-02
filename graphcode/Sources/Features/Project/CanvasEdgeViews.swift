@@ -28,8 +28,13 @@ struct EdgeLineView: View {
   /// something other than a loop card can say so.
   var targetSize: CGSize = LoopCardView.Metrics.size
 
-  private var tip: CGPoint {
-    CanvasEdgeGeometry.anchor(from: from, to: to, cardSize: targetSize)
+  /// Where the curve starts, ends, and bends. Computed once — the path, the hit target,
+  /// the head, the pip and the label all read the same three points, and a second
+  /// derivation is how they drift apart by a pixel each.
+  private var route: (start: CGPoint, end: CGPoint, controls: (CGPoint, CGPoint)) {
+    let start = CanvasEdgeGeometry.exit(from: from, toward: to, cardSize: targetSize)
+    let end = CanvasEdgeGeometry.entry(at: to, from: from, cardSize: targetSize)
+    return (start, end, CanvasEdgeGeometry.controls(from: start, to: end))
   }
 
   var body: some View {
@@ -47,14 +52,14 @@ struct EdgeLineView: View {
             width: CanvasEdgeGeometry.firedDotRadius * 2,
             height: CanvasEdgeGeometry.firedDotRadius * 2
           )
-          .position(CanvasEdgeGeometry.midpoint(from, tip))
+          .position(CanvasEdgeGeometry.midpoint(route.start, route.end))
       }
       if let label {
         Text(label)
           .font(.system(size: 10.5, design: .monospaced))
           .foregroundStyle(Self.guardInk)
           .fixedSize()
-          .position(CanvasEdgeGeometry.midpoint(from, tip))
+          .position(CanvasEdgeGeometry.midpoint(route.start, route.end))
           .offset(y: 11)
           .allowsHitTesting(false)
       }
@@ -62,15 +67,19 @@ struct EdgeLineView: View {
   }
 
   private var line: Path {
-    Path { path in
-      path.move(to: from)
-      path.addLine(to: tip)
+    let route = route
+    return Path { path in
+      path.move(to: route.start)
+      path.addCurve(to: route.end, control1: route.controls.0, control2: route.controls.1)
     }
   }
 
   private var head: Path {
-    Path { path in
-      let corners = CanvasEdgeGeometry.arrowhead(at: tip, from: from)
+    let route = route
+    let approach = CanvasEdgeGeometry.arrivalTangent(
+      control: route.controls.1, end: route.end)
+    return Path { path in
+      let corners = CanvasEdgeGeometry.arrowhead(at: route.end, from: approach)
       guard let first = corners.first else { return }
       path.move(to: first)
       for corner in corners.dropFirst() { path.addLine(to: corner) }

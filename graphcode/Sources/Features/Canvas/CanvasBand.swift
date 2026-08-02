@@ -21,6 +21,14 @@ enum CanvasBand {
   static let fill = Color.white.opacity(0.022)
   static let border = Color.white.opacity(0.05)
 
+  /// Where the entry rail sits inside the band's leading edge, and how far the stub
+  /// reaches from it to a port. `padding - stub` is what puts the rail exactly one stub
+  /// away from a first-column card's leading edge.
+  static let railInset: CGFloat = padding - stubLength
+  static let stubLength: CGFloat = 12
+  static let railWidth: CGFloat = 3
+  static let railTint = Color.white.opacity(0.22)
+
   /// The band enclosing cards *centred* at `positions` — the project canvas's case,
   /// where a human drags cards anywhere they like and the band has to follow.
   ///
@@ -52,6 +60,9 @@ struct CanvasBandView: View {
   var name: String?
   var caption: String?
   var glyph = "folder.fill"
+  /// Where each root's port sits, in canvas coordinates: the centre of the circle on
+  /// that card's leading edge. The rail spans them and a stub reaches each one.
+  var entryPorts: [CGPoint] = []
   var onCaptionTapped: (() -> Void)?
 
   var body: some View {
@@ -65,12 +76,42 @@ struct CanvasBandView: View {
         // The band covers its whole lane, so one that took clicks would swallow every
         // pan that started on empty canvas — which is most of them.
         .allowsHitTesting(false)
+      entryRail.allowsHitTesting(false)
       captionRow
         .padding(.leading, CanvasBand.captionInset.width)
         .padding(.top, CanvasBand.captionInset.height)
     }
     .frame(width: rect.width, height: rect.height)
     .position(x: rect.midX, y: rect.midY)
+  }
+
+  /// A bar, not a node. The distinction is the whole point: a marker with lines running
+  /// out of it looks like something work travels along, and nothing travels this. A rail
+  /// is a boundary — it says "the graph starts on this side" and can't imply flow.
+  @ViewBuilder
+  private var entryRail: some View {
+    if let top = entryPorts.map(\.y).min(), let bottom = entryPorts.map(\.y).max() {
+      let railX = CanvasBand.railInset
+      ZStack(alignment: .topLeading) {
+        Capsule()
+          .fill(CanvasBand.railTint)
+          .frame(width: CanvasBand.railWidth, height: bottom - top + 24)
+          .offset(x: railX, y: top - rect.minY - 12)
+        ForEach(Array(entryPorts.enumerated()), id: \.offset) { _, port in
+          Rectangle()
+            .fill(CanvasBand.railTint)
+            .frame(width: CanvasBand.stubLength, height: 2)
+            .offset(x: port.x - rect.minX - CanvasBand.stubLength, y: port.y - rect.minY - 1)
+        }
+        Text("ENTRY")
+          .font(.system(size: 10.5, weight: .bold))
+          .tracking(0.4)
+          .foregroundStyle(.white.opacity(0.42))
+          .fixedSize()
+          .rotationEffect(.degrees(-90))
+          .offset(x: railX - 20, y: (top + bottom) / 2 - rect.minY)
+      }
+    }
   }
 
   @ViewBuilder

@@ -23,12 +23,20 @@ struct LoopCardView: View {
   /// Drawn as a glyph rather than a word in the meta row, which is already full. The
   /// canvas knows this, the node doesn't — it is a property of where the project lives.
   var isRemote: Bool = false
+  /// Where this loop sits in the question "where does the graph begin" — see
+  /// `CardEntryRole`. Comes off `LoopGraph`, which is the only thing that can answer it.
+  var entryRole: CardEntryRole = .interior
   let onPrimaryAction: () -> Void
+  /// The two verbs an unwired loop offers. Nothing else on the card uses them.
+  var onWireUp: (() -> Void)?
+  var onMarkAsEntry: (() -> Void)?
 
   enum Metrics {
     static let size = CGSize(width: 250, height: 106)
     static let radius: CGFloat = 11
     static let stripe: CGFloat = 4
+    /// The entry port, half of it outside the card's leading edge.
+    static let port: CGFloat = 10
   }
 
   /// The rollup decides, never the state on its own. A node blocked on an upstream that
@@ -43,8 +51,18 @@ struct LoopCardView: View {
     let card = LoopCardPresentation(node: node, now: now)
     return VStack(alignment: .leading, spacing: 7) {
       titleRow
-      liveLine(card.liveLine)
-      detail(card.detail)
+      if entryRole == .unwired {
+        // Its own sentence, in prose rather than mono: this is the card talking about
+        // the loop rather than quoting what the loop was handed.
+        Text("Nothing runs it and it hands to nothing.")
+          .font(.system(size: 11))
+          .foregroundStyle(.white.opacity(0.5))
+          .lineLimit(1)
+        unwiredActions
+      } else {
+        liveLine(card.liveLine)
+        detail(card.detail)
+      }
       Spacer(minLength: 0)
       metaRow(card.meta)
     }
@@ -57,7 +75,7 @@ struct LoopCardView: View {
       UnevenRoundedRectangle(
         topLeadingRadius: Metrics.radius, bottomLeadingRadius: Metrics.radius
       )
-      .fill(node.loopType.accent)
+      .fill(node.loopType.accent.opacity(entryRole == .unwired ? 0.35 : 1))
       .frame(width: Metrics.stripe)
     }
     .clipShape(RoundedRectangle(cornerRadius: Metrics.radius))
@@ -65,12 +83,31 @@ struct LoopCardView: View {
       RoundedRectangle(cornerRadius: Metrics.radius)
         .stroke(
           needsAttention ? Theme.loopCardAttentionBorder : Theme.loopCardBorder,
-          lineWidth: 1)
+          style: StrokeStyle(lineWidth: 1, dash: entryRole == .unwired ? [4, 3] : []))
     }
     .cardGlow(needsAttention ? .orange : node.loopType.accent, emphasized: needsAttention)
+    // The port hangs half outside the card, so it goes on last and outside the clip.
+    .overlay(alignment: .leading) { entryPort }
     // Attention arriving is not a layout change: the ring and the glow cross-fade so a
     // graph someone is reading doesn't jump under them.
     .animation(.easeInOut(duration: 0.2), value: needsAttention)
+  }
+
+  /// A root's mark: a filled circle straddling the leading edge, ringed in the canvas
+  /// tone so it reads as attached to the card rather than as something behind it.
+  ///
+  /// This is what replaced the start node. The fact "the graph begins here" belongs to
+  /// the loop, so N roots cost N ports — where N tethers to one dot cost a starburst.
+  @ViewBuilder
+  private var entryPort: some View {
+    if entryRole == .entry {
+      Circle()
+        .fill(node.loopType.accent)
+        .overlay(Circle().stroke(Theme.canvasTone, lineWidth: 2))
+        .frame(width: Metrics.port, height: Metrics.port)
+        .offset(x: -Metrics.port / 2)
+        .allowsHitTesting(false)
+    }
   }
 
   private var titleRow: some View {
@@ -133,6 +170,25 @@ struct LoopCardView: View {
     }
   }
 
+  /// The two verbs for a loop wired to nothing — one to give it an upstream, one to say
+  /// it was meant to be a beginning all along. Both are cheaper than deleting it and
+  /// starting again, which is what people did instead.
+  private var unwiredActions: some View {
+    HStack(spacing: 6) {
+      Button("Wire it up") { onWireUp?() }
+        .buttonStyle(.plain)
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(.white.opacity(0.85))
+        .padding(.vertical, 3)
+        .padding(.horizontal, 9)
+        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 5))
+      Button("Mark as entry") { onMarkAsEntry?() }
+        .buttonStyle(.plain)
+        .font(.system(size: 11))
+        .foregroundStyle(.white.opacity(0.5))
+    }
+  }
+
   private func metaRow(_ parts: [String]) -> some View {
     HStack(spacing: 5) {
       // A drawn square rather than the kind's SF Symbol: the glyphs have wildly
@@ -148,6 +204,11 @@ struct LoopCardView: View {
         .truncationMode(.middle)
       if isRemote {
         Image(systemName: "network").font(.system(size: 9)).foregroundStyle(.white.opacity(0.4))
+      }
+      switch entryRole {
+      case .entry: EntryChip()
+      case .cycleOnly: CycleChip()
+      case .interior, .unwired: EmptyView()
       }
     }
   }

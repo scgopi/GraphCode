@@ -39,6 +39,8 @@ struct GraphOverview: Equatable {
     /// `"5 loops · 3 running"`, or `nil` for a folder with nothing in it yet — see
     /// `Self.caption`.
     let caption: String?
+    /// Every root's port in this lane, for the band's entry rail.
+    let entryPorts: [CGPoint]
     let isGlobal: Bool
     /// The band, in canvas coordinates. Its top-left corner is where the caption goes.
     let band: CGRect
@@ -52,8 +54,17 @@ struct GraphOverview: Equatable {
     let node: LoopNode
     let projectPath: String
     let position: CGPoint
+    /// Where this loop sits in "where does the graph begin" — resolved once here, off
+    /// the graph, rather than per card on the gesture path.
+    let entryRole: CardEntryRole
 
     var id: UUID { node.id }
+
+    /// The centre of the entry port on this card's leading edge, when it has one.
+    var entryPort: CGPoint? {
+      guard entryRole == .entry else { return nil }
+      return CGPoint(x: position.x - Metrics.card.width / 2, y: position.y)
+    }
   }
 
   /// Every line on the canvas, already resolved to two points — the shared `CanvasLink`,
@@ -130,6 +141,7 @@ struct GraphOverview: Equatable {
 
   private static func layOutLane(_ graph: LoopGraph, top: CGFloat) -> Lane {
     let path = graph.project.path
+    let roles = CardEntryRole.roles(in: graph)
     var loops: [Loop] = []
     var links: [Link] = []
     var positions: [UUID: CGPoint] = [:]
@@ -140,7 +152,10 @@ struct GraphOverview: Equatable {
         let position = CGPoint(
           x: Metrics.firstLoopX + CGFloat(column) * Metrics.columnWidth, y: rowCentre)
         positions[node.id] = position
-        loops.append(Loop(node: node, projectPath: path, position: position))
+        loops.append(
+          Loop(
+            node: node, projectPath: path, position: position,
+            entryRole: roles[node.id] ?? .interior))
       }
       rowCentre += Metrics.rowHeight
     }
@@ -165,6 +180,7 @@ struct GraphOverview: Equatable {
       name: graph.isGlobal ? "No folder" : graph.project.name,
       loopCount: graph.nodes.count,
       caption: caption(for: graph),
+      entryPorts: loops.compactMap(\.entryPort),
       isGlobal: graph.isGlobal,
       band: CGRect(x: Metrics.bandX, y: top, width: Metrics.bandWidth, height: height))
 
@@ -180,9 +196,16 @@ struct GraphOverview: Equatable {
   /// most worth knowing about this folder.
   static func caption(for graph: LoopGraph) -> String? {
     guard !graph.nodes.isEmpty else { return nil }
-    let state = graph.aggregateState
-    let matching = graph.nodes.count { $0.state == state }
     let loops = graph.nodes.count == 1 ? "1 loop" : "\(graph.nodes.count) loops"
+    let state = graph.aggregateState
+    // Nothing is happening, so say something that is: how many places this lane starts.
+    // "10 loops · 10 idle" is a count of the absence of news.
+    guard state != .idle else {
+      let entries = graph.entryPoints.count
+      guard entries > 0 else { return loops }
+      return "\(loops) · \(entries) entry point\(entries == 1 ? "" : "s")"
+    }
+    let matching = graph.nodes.count { $0.state == state }
     // The kind-independent reading of the word: a lane is speaking about a folder, and a
     // folder has no loop type for `idle` to mean "scheduled" against.
     return "\(loops) · \(matching) \(state.displayWord(for: .goalBased).lowercased())"

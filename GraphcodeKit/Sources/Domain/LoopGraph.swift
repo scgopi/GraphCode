@@ -110,6 +110,47 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   /// node anchored so the "everything descends from start" reading holds for every
   /// shape a graph can take.
   ///
+  /// Loops with no edge in either direction.
+  ///
+  /// Kept apart from `entryPoints` on purpose. By the "nothing hands off to it" rule a
+  /// loose loop is a root, and treating it as one is how ten unwired loops became a
+  /// ten-line starburst from a single dot. A loop that runs nothing and is run by
+  /// nothing is usually an accident, and the canvas says so rather than dressing it up
+  /// as the beginning of a graph.
+  public var unwiredNodeIDs: Set<UUID> {
+    let touched = Set(edges.map(\.from)).union(edges.map(\.to))
+    return Set(nodes.map(\.id).filter { !touched.contains($0) })
+  }
+
+  /// Where the graph actually begins: nothing hands off to these, and they hand off to
+  /// something. Returned in `nodes` order so the canvas doesn't reshuffle between
+  /// renders.
+  public var entryPoints: [UUID] {
+    let targeted = Set(edges.map(\.to))
+    let loose = unwiredNodeIDs
+    return nodes.map(\.id).filter { !targeted.contains($0) && !loose.contains($0) }
+  }
+
+  /// Nodes in a component that has no entry point at all — a closed cycle, where every
+  /// node is handed off to by another.
+  ///
+  /// Worth naming because the honest thing to draw for one is *not* a root:
+  /// `startAnchors` has to pick one arbitrarily to keep "everything descends from a
+  /// beginning" true, and a card marked "entry" on the strength of an arbitrary pick is
+  /// a card telling a lie the graph can't back up.
+  public var cycleOnlyNodeIDs: Set<UUID> {
+    var reached = Set(entryPoints)
+    var frontier = entryPoints
+    while let current = frontier.popLast() {
+      for edge in edges where edge.from == current && !reached.contains(edge.to) {
+        reached.insert(edge.to)
+        frontier.append(edge.to)
+      }
+    }
+    let loose = unwiredNodeIDs
+    return Set(nodes.map(\.id).filter { !reached.contains($0) && !loose.contains($0) })
+  }
+
   /// Returned in `nodes` order, so the canvas's lines don't reshuffle between renders.
   public var startAnchors: [UUID] {
     let targeted = Set(edges.map(\.to))

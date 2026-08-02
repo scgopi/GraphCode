@@ -6,14 +6,17 @@ import SwiftUI
 /// of `ProjectCanvasView` purely for size, the same split `GraphOverviewCards` is for
 /// the Graph view; the layers still land as siblings in the canvas's `ZStack`.
 extension ProjectCanvasView {
-  func nodesLayer(_ reasons: [UUID: AttentionReason], now: Date) -> some View {
+  func nodesLayer(
+    _ reasons: [UUID: AttentionReason], roles: [UUID: CardEntryRole], now: Date
+  ) -> some View {
     ForEach(store.graph.nodes) { node in
       // The hover that reveals a card's + handle lives in this per-card container,
       // not in canvas-level `@State`: up here a hover flip re-evaluated the whole
       // body — and with it `Derived`'s sub-graph walk and attention rollup, the exact
       // computation the comment on `body` exists to keep off the input path.
       HoverRevealingCard(isDragSource: dragSourceID == node.id) {
-        nodeCard(for: node, reason: reasons[node.id], now: now)
+        nodeCard(
+          for: node, reason: reasons[node.id], role: roles[node.id] ?? .interior, now: now)
       } handle: {
         connectorHandle(for: node.id)
       }
@@ -49,15 +52,20 @@ extension ProjectCanvasView {
   /// The card itself is `LoopCardView`, shared with the Graph overview — see there for
   /// what it draws. What stays here is what only a project's own canvas has: the tap
   /// that opens the loop, the context menu, and the hover-revealed connector handle.
-  private func nodeCard(for node: LoopNode, reason: AttentionReason?, now: Date) -> some View {
+  private func nodeCard(
+    for node: LoopNode, reason: AttentionReason?, role: CardEntryRole, now: Date
+  ) -> some View {
     LoopCardView(
       node: node,
       reason: reason,
       now: now,
-      isRemote: RemoteProjectLocation.parse(projectPath: store.graph.project.path) != nil
-    ) {
-      store.send(.nodeTapped(node.id))
-    }
+      isRemote: RemoteProjectLocation.parse(projectPath: store.graph.project.path) != nil,
+      entryRole: role,
+      onPrimaryAction: { store.send(.nodeTapped(node.id)) },
+      // Starts the same edge drag the hover handle does, from this card.
+      onWireUp: { dragSourceID = node.id },
+      onMarkAsEntry: { store.send(.markAsEntryTapped(node.id)) }
+    )
     .contentShape(Rectangle())
     .onTapGesture { store.send(.nodeTapped(node.id)) }
     .contextMenu { nodeMenu(for: node) }

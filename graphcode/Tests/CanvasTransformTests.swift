@@ -197,7 +197,7 @@ struct CanvasBandTests {
 /// 40% and 250% too — the three zoom levels the manual script asks for.
 @Suite
 struct CanvasEdgeGeometryTests {
-  private static let card = CGSize(width: 250, height: 106)
+  fileprivate static let card = CGSize(width: 250, height: 106)
 
   @Test
   func theHeadStopsOnTheCardsBorderRatherThanUnderIt() {
@@ -257,5 +257,70 @@ struct CanvasEdgeGeometryTests {
     #expect(corners.dropFirst().allSatisfy { $0.x == 300 - CanvasEdgeGeometry.arrowLength })
     #expect(
       abs(corners[1].y - corners[2].y) == CanvasEdgeGeometry.arrowWidth)
+  }
+
+  @Test
+  func bothEndsAttachAtTheCardsVerticalMiddles() {
+    // Corner anchors read as plumbing routed around an obstacle. Middle-to-middle reads
+    // as one loop handing to another, which is what it is.
+    let source = CGPoint(x: 200, y: 300)
+    let target = CGPoint(x: 800, y: 460)
+
+    let exit = CanvasEdgeGeometry.exit(from: source, toward: target, cardSize: Self.card)
+    let entry = CanvasEdgeGeometry.entry(at: target, from: source, cardSize: Self.card)
+
+    #expect(exit == CGPoint(x: source.x + Self.card.width / 2, y: source.y))
+    #expect(entry == CGPoint(x: target.x - Self.card.width / 2, y: target.y))
+  }
+
+  @Test
+  func anEdgeRunningRightToLeftLeavesAndArrivesOnTheFacingSides() {
+    let source = CGPoint(x: 800, y: 300)
+    let target = CGPoint(x: 200, y: 300)
+
+    #expect(
+      CanvasEdgeGeometry.exit(from: source, toward: target, cardSize: Self.card)
+        == CGPoint(x: source.x - Self.card.width / 2, y: source.y))
+    #expect(
+      CanvasEdgeGeometry.entry(at: target, from: source, cardSize: Self.card)
+        == CGPoint(x: target.x + Self.card.width / 2, y: target.y))
+  }
+
+  @Test
+  func controlPointsStayBetweenTheEndsRatherThanOvershooting() {
+    // The single thing that made the mocks read as pipework: a control past the far end
+    // makes the curve leave the source heading away from the target and double back.
+    for (start, end) in [
+      (CGPoint(x: 0, y: 0), CGPoint(x: 400, y: 120)),
+      (CGPoint(x: 400, y: 0), CGPoint(x: 0, y: 120)),
+      (CGPoint(x: 0, y: 0), CGPoint(x: 12, y: 200)),
+    ] {
+      let (first, second) = CanvasEdgeGeometry.controls(from: start, to: end)
+      let low = min(start.x, end.x)
+      let high = max(start.x, end.x)
+      // Monotone in x: each control is on its own side of the span, never past the other
+      // endpoint by more than the minimum reach that keeps a near-vertical edge curved.
+      #expect(first.x >= min(low, start.x) - 0.001)
+      #expect(second.x <= max(high, end.x) + 26.001)
+      // Horizontal-out and horizontal-in: the controls share their endpoint's y, which
+      // is what makes the curve leave and arrive level.
+      #expect(first.y == start.y)
+      #expect(second.y == end.y)
+    }
+  }
+
+  @Test
+  func theHeadPointsAlongTheCurvesArrivalRatherThanTheStraightLine() {
+    // On a curve those differ, and a head that ignores the difference sits askew on the
+    // border it lands on.
+    let start = CGPoint(x: 0, y: 0)
+    let end = CGPoint(x: 300, y: 200)
+    let (_, second) = CanvasEdgeGeometry.controls(from: start, to: end)
+    let approach = CanvasEdgeGeometry.arrivalTangent(control: second, end: end)
+
+    // The tangent continues past the end on the line from the last control, so the head
+    // is aimed level — the same direction the curve is travelling as it lands.
+    #expect(approach.y == end.y)
+    #expect(approach.x > end.x)
   }
 }

@@ -54,4 +54,46 @@ enum CanvasEdgeGeometry {
   static func midpoint(_ from: CGPoint, _ to: CGPoint) -> CGPoint {
     CGPoint(x: (from.x + to.x) / 2, y: (from.y + to.y) / 2)
   }
+
+  /// Where an edge leaves its source: the trailing edge, at the card's vertical middle.
+  ///
+  /// Both ends attach at vertical middles and never at corners. A corner anchor reads as
+  /// plumbing routed around an obstacle; a middle-to-middle curve reads as one loop
+  /// handing to another, which is what it is.
+  static func exit(from centre: CGPoint, toward target: CGPoint, cardSize: CGSize) -> CGPoint {
+    let side: CGFloat = target.x >= centre.x ? 1 : -1
+    return CGPoint(x: centre.x + side * cardSize.width / 2, y: centre.y)
+  }
+
+  /// Where it arrives: the facing edge of the target, again at the vertical middle.
+  static func entry(at centre: CGPoint, from source: CGPoint, cardSize: CGSize) -> CGPoint {
+    let side: CGFloat = source.x <= centre.x ? -1 : 1
+    return CGPoint(x: centre.x + side * cardSize.width / 2, y: centre.y)
+  }
+
+  /// The two Bézier controls, horizontal-out and horizontal-in.
+  ///
+  /// Their x values stay **monotone** between the endpoints — clamped to the span rather
+  /// than pushed past it. An overshooting control makes the curve leave the source
+  /// heading away from the target and double back, which is the single thing that made
+  /// the mocks read as pipework.
+  static func controls(
+    from start: CGPoint, to end: CGPoint
+  ) -> (CGPoint, CGPoint) {
+    let span = end.x - start.x
+    // Enough curve to read as a curve even when the two cards are nearly in line.
+    let reach = max(abs(span) * 0.5, 26)
+    let outward = span >= 0 ? min(reach, max(span, reach)) : -min(reach, max(-span, reach))
+    return (
+      CGPoint(x: start.x + outward, y: start.y),
+      CGPoint(x: end.x - outward, y: end.y)
+    )
+  }
+
+  /// The tangent the curve arrives on, for pointing the arrowhead. Taken from the last
+  /// control point rather than from the straight line between centres — on a curve those
+  /// differ, and a head that ignores the difference sits askew on the border it lands on.
+  static func arrivalTangent(control: CGPoint, end: CGPoint) -> CGPoint {
+    CGPoint(x: end.x * 2 - control.x, y: end.y * 2 - control.y)
+  }
 }

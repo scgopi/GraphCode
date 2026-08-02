@@ -36,6 +36,7 @@ extension GraphOverviewView {
         name: folder.name,
         caption: folder.caption,
         glyph: folder.isGlobal ? "globe" : "folder.fill",
+        entryPorts: folder.entryPorts,
         // A folder's caption goes to that folder's own canvas — where you can actually
         // edit it. The overview is for seeing the whole thing, not for rewiring it. The
         // global lane leads nowhere: this view already *is* it.
@@ -63,21 +64,28 @@ extension GraphOverviewView {
     _ loop: GraphOverview.Loop, reason: AttentionReason?, now: Date
   ) -> some View {
     let node = loop.node
-    return LoopCardView(node: node, reason: reason, now: now) { open(loop) }
-      .contentShape(Rectangle())
-      .onTapGesture { open(loop) }
-      .contextMenu {
-        Button("Open Terminal") { open(loop) }
-        Button("Reveal in \(folderName(loop.projectPath))") {
-          store.send(.projectHeaderTapped(loop.projectPath))
-        }
-        if !node.isResolved {
-          Divider()
-          Button("Stop Loop", role: .destructive) {
-            store.send(.stopNodeTapped(projectPath: loop.projectPath, nodeID: node.id))
-          }
+    return LoopCardView(
+      node: node, reason: reason, now: now, entryRole: loop.entryRole,
+      onPrimaryAction: { open(loop) },
+      // The overview is read-only — rewiring happens on the folder's own canvas, which
+      // is where you can see what you are rewiring. Both verbs go there.
+      onWireUp: { store.send(.projectHeaderTapped(loop.projectPath)) },
+      onMarkAsEntry: { store.send(.projectHeaderTapped(loop.projectPath)) }
+    )
+    .contentShape(Rectangle())
+    .onTapGesture { open(loop) }
+    .contextMenu {
+      Button("Open Terminal") { open(loop) }
+      Button("Reveal in \(folderName(loop.projectPath))") {
+        store.send(.projectHeaderTapped(loop.projectPath))
+      }
+      if !node.isResolved {
+        Divider()
+        Button("Stop Loop", role: .destructive) {
+          store.send(.stopNodeTapped(projectPath: loop.projectPath, nodeID: node.id))
         }
       }
+    }
   }
 
 }

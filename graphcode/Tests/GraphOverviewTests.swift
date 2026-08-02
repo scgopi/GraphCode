@@ -221,4 +221,68 @@ struct GraphOverviewTests {
     // The sidebar row's label comes straight from here.
     #expect(LoopGraph(scope: .global).project.name == "Graph")
   }
+
+  @Test
+  func everyRootGetsItsOwnPortRatherThanALineToOneDot() {
+    // The case the start marker failed: ten unwired loops fanned ten tethers out of a
+    // single dot. Roots now carry the fact themselves, so N of them cost N ports.
+    let first = LoopNode(title: "first")
+    let second = LoopNode(title: "second")
+    let third = LoopNode(title: "third")
+    let overview = GraphOverview(graphs: [
+      LoopGraph(
+        project: Self.projectA, nodes: [first, second, third],
+        edges: [
+          LoopEdge(from: first.id, to: third.id), LoopEdge(from: second.id, to: third.id),
+        ])
+    ])
+
+    let roles = Dictionary(
+      uniqueKeysWithValues: overview.loops.map { ($0.node.title, $0.entryRole) })
+    #expect(roles["first"] == .entry)
+    #expect(roles["second"] == .entry)
+    #expect(roles["third"] == .interior)
+    // Two ports, on the leading edge of each root's card, for the band's rail to reach.
+    #expect(overview.folders.first?.entryPorts.count == 2)
+  }
+
+  @Test
+  func aLoopWiredToNothingGetsNoPort() {
+    let overview = GraphOverview(graphs: [
+      LoopGraph(project: Self.projectA, nodes: [LoopNode(title: "loose")])
+    ])
+
+    #expect(overview.loops.first?.entryRole == .unwired)
+    #expect(overview.folders.first?.entryPorts.isEmpty == true)
+  }
+
+  @Test
+  func aCycleOnlyComponentIsMarkedAsOneRatherThanGivenAFakeRoot() {
+    let maker = LoopNode(title: "maker")
+    let reviewer = LoopNode(title: "reviewer")
+    let overview = GraphOverview(graphs: [
+      LoopGraph(
+        project: Self.projectA, nodes: [maker, reviewer],
+        edges: [
+          LoopEdge(from: maker.id, to: reviewer.id),
+          LoopEdge(from: reviewer.id, to: maker.id),
+        ])
+    ])
+
+    #expect(overview.loops.allSatisfy { $0.entryRole == .cycleOnly })
+    #expect(overview.folders.first?.entryPorts.isEmpty == true)
+  }
+
+  @Test
+  func aLaneWithNothingHappeningCountsItsBeginningsInstead() {
+    // "10 loops · 10 idle" is a count of the absence of news. How many places the lane
+    // starts is a fact worth the same row.
+    let first = LoopNode(title: "first", state: .idle)
+    let second = LoopNode(title: "second", state: .idle)
+    let graph = LoopGraph(
+      project: Self.projectA, nodes: [first, second],
+      edges: [LoopEdge(from: first.id, to: second.id)])
+
+    #expect(GraphOverview.caption(for: graph) == "2 loops · 1 entry point")
+  }
 }

@@ -42,10 +42,17 @@ struct ProjectCanvasView: View {
     /// read twice, so the rail can never name a loop the cards don't mark.
     let attentionItems: [AttentionItem]
     let attentionReasons: [UUID: AttentionReason]
+    /// Where each loop sits in "where does the graph begin" — one walk of the edge list
+    /// for the whole canvas rather than one per card.
+    let entryRoles: [UUID: CardEntryRole]
 
-    init(subGraph: SubGraphLayout, attentionItems: [AttentionItem]) {
+    init(
+      subGraph: SubGraphLayout, attentionItems: [AttentionItem],
+      entryRoles: [UUID: CardEntryRole]
+    ) {
       self.subGraph = subGraph
       self.attentionItems = attentionItems
+      self.entryRoles = entryRoles
       attentionReasons = Dictionary(
         attentionItems.map { ($0.nodeID, $0.reason) }, uniquingKeysWith: { first, _ in first })
     }
@@ -64,7 +71,9 @@ struct ProjectCanvasView: View {
   var body: some View {
     let derived = Derived(
       subGraph: SubGraphLayout(nodes: store.graph.nodes, positions: store.nodePositions),
-      attentionItems: store.attentionItems)
+      attentionItems: store.attentionItems,
+      entryRoles: CardEntryRole.roles(
+        in: store.graph, declaredEntries: store.declaredEntryIDs))
 
     return VStack(spacing: 0) {
       if let connectionError = store.connectionError {
@@ -152,10 +161,10 @@ struct ProjectCanvasView: View {
     let content = contentSize(derived.subGraph)
     return GeometryReader { proxy in
       ZStack {
-        bandLayer
+        bandLayer(derived)
         edgesLayer
         subGraphLinksLayer(derived.subGraph)
-        nodesLayer(derived.attentionReasons, now: now)
+        nodesLayer(derived.attentionReasons, roles: derived.entryRoles, now: now)
         subGraphChipsLayer(derived.subGraph)
         dragPreview
       }
@@ -240,9 +249,19 @@ struct ProjectCanvasView: View {
   /// coordinates and screen coordinates agree. An inner `ZStack` re-bases them onto its
   /// own shrink-to-fit frame, and the band lands somewhere the cards are not.
   @ViewBuilder
-  private var bandLayer: some View {
+  private func bandLayer(_ derived: Derived) -> some View {
     if let rect = bandRect {
-      CanvasBandView(rect: rect)
+      CanvasBandView(rect: rect, entryPorts: entryPorts(derived))
+    }
+  }
+
+  /// The leading-edge port of every root, for the band's entry rail.
+  private func entryPorts(_ derived: Derived) -> [CGPoint] {
+    store.graph.nodes.compactMap { node in
+      guard derived.entryRoles[node.id] == .entry,
+        let centre = store.nodePositions[node.id]
+      else { return nil }
+      return CGPoint(x: centre.x - LoopCardView.Metrics.size.width / 2, y: centre.y)
     }
   }
 
