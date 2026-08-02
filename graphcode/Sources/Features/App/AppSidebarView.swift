@@ -251,7 +251,7 @@ struct AppSidebarView: View {
     HStack(spacing: 6) {
       VStack(alignment: .leading, spacing: 1) {
         Text(node.title).lineLimit(1)
-        Text(node.loopType.rawValue).font(.caption2).foregroundStyle(.secondary)
+        Text(node.loopType.displayName).font(.caption2).foregroundStyle(.secondary)
       }
       Spacer(minLength: 4)
       Circle().fill(node.state.presenceColor).frame(width: 8, height: 8)

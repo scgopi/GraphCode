@@ -1,8 +1,9 @@
 import Foundation
+import GraphcodeKit
 import IdentifiedCollections
 import Testing
 
-@testable import GraphcodeKit
+@testable import graphcode
 
 /// The orchestrator's needs-attention rollup
 /// (docs/05-orchestrator.md#monitoring-surface).
@@ -156,5 +157,45 @@ struct AttentionRollupTests {
     // A project with no loops hasn't finished anything; calling it succeeded would put
     // a green tick on an empty canvas.
     #expect(graph(nodes: []).aggregateState == .idle)
+  }
+
+  @Test
+  func everyStateThatWantsAHumanIsOneTheRollupCanSurface() {
+    // `LoopState.wantsHuman` decides whether a card offers an action instead of a
+    // progress bar; this rollup decides what the attention rail and the sidebar list.
+    // If the two ever disagree, a card asks you a question that nothing on the window
+    // chrome can lead you to — you'd have to pan the canvas to find it, which is the
+    // whole failure this redesign is removing.
+    for state in LoopState.allCases where state.wantsHuman {
+      let upstream = LoopNode(title: "Upstream", state: .failed)
+      let node = LoopNode(title: "Wants a human", state: state)
+      let rollup = AttentionRollup.fullRollup(across: [
+        graph(
+          nodes: [upstream, node],
+          edges: [LoopEdge(from: upstream.id, to: node.id, condition: .onSuccess, fireCount: 0)])
+      ])
+
+      #expect(
+        rollup.contains { $0.nodeID == node.id },
+        "\(state) wants a human but the rollup never mentions it")
+    }
+  }
+
+  @Test
+  func aStateTheRollupIgnoresNeverClaimsToNeedAnswering() {
+    // The converse, and the weaker half on purpose: `failed` and `stalled` are in the
+    // rollup without being `wantsHuman`, because they are over — there is nothing to
+    // answer, only something to read.
+    for state in LoopState.allCases where state != .blocked {
+      // On its own, with nothing upstream of it — the only thing being asked here is
+      // what the state alone is worth reporting. `.blocked` is excluded because it is
+      // the one state whose answer needs the graph: see the stranded cases above.
+      let node = LoopNode(title: "n", state: state)
+      guard AttentionRollup.fullRollup(across: [graph(nodes: [node])]).isEmpty else {
+        continue
+      }
+
+      #expect(!state.wantsHuman, "\(state) asks for an answer nothing will ever request")
+    }
   }
 }

@@ -52,7 +52,7 @@ extension ProjectCanvasView {
         .frame(width: 5, height: 5)
       Text(placement.node.title).font(.caption).lineLimit(1)
       Spacer(minLength: 4)
-      Text(placement.node.loopType.rawValue).font(.caption2).foregroundStyle(.tertiary)
+      Text(placement.node.loopType.displayName).font(.caption2).foregroundStyle(.tertiary)
     }
     .padding(.horizontal, 8)
     .padding(.vertical, 3)

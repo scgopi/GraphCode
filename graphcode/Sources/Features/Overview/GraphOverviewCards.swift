@@ -92,7 +92,7 @@ extension GraphOverviewView {
         Image(systemName: node.loopType.glyph)
           .font(.caption2)
           .foregroundStyle(node.loopType.accent)
-        Text(node.loopType.rawValue).font(.caption2).foregroundStyle(.secondary)
+        Text(node.loopType.displayName).font(.caption2).foregroundStyle(.secondary)
         if node.backend != .claudeCode {
           Text(node.backend.displayName).font(.caption2).foregroundStyle(.tertiary)
         }

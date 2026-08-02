@@ -34,6 +34,25 @@ extension LoopType {
     }
   }
 
+  /// What the kind is called on a card, a row, or anywhere else a graph is being read.
+  ///
+  /// One word, because it shares a meta row with a branch name, a backend, and an
+  /// elapsed time, and the kind is the least of those once you know the graph. The
+  /// form's longer "Goal-based" phrasing stays in the form, where you are choosing a
+  /// kind rather than recognising one.
+  ///
+  /// Anything user-facing goes through here. `rawValue` is a serialisation detail, and
+  /// showing `goalBased` to a human while the form beside it says "Goal-based" was the
+  /// app admitting it had two vocabularies.
+  var displayName: String {
+    switch self {
+    case .goalBased: "Goal"
+    case .timeBased: "Timed"
+    case .turnBased: "Turn"
+    case .proactive: "Composite"
+    }
+  }
+
   /// A glyph that says what the kind *does*, so the distinction survives without colour:
   /// a goal-based loop runs at a target, a time-based one at a clock, a turn-based one
   /// waits for a person, and a proactive one is a stack of loops rather than a session.
