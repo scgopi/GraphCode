@@ -111,6 +111,14 @@ public enum AttentionRollup {
 
   /// A node's attention reason, or `nil` when it wants nothing.
   ///
+  /// **Read off `displayState`, and that is what makes `.awaitingInput` reachable at all.**
+  /// Against raw `state` this switch could only ever fire for `.failed` and `.stalled`:
+  /// nothing writes `.awaitingInput` into `state` — by design, since a loop whose agent
+  /// asked a question is still the running node its downstream edges wait on — so the
+  /// everyday case the whole queue exists for, an agent stopped mid-work asking a human
+  /// something, never once reached it. That is where the reading lives; see
+  /// `LoopNode.displayState`.
+  ///
   /// `.blocked` counts only when the block can never clear on its own. A node waiting on
   /// an upstream that is still running is working as designed; one waiting on an
   /// upstream that already failed, stalled, or resolved without firing this edge is
@@ -118,7 +126,7 @@ public enum AttentionRollup {
   /// the real problems under the normal ones — which is the failure mode this rollup
   /// exists to prevent.
   static func reason(for node: LoopNode) -> AttentionReason? {
-    switch node.state {
+    switch node.displayState {
     case .failed: return .failed
     case .stalled: return .stalled
     case .awaitingInput: return .awaitingInput
@@ -164,13 +172,16 @@ public enum AttentionRollup {
 extension LoopGraph {
   /// One rolled-up status for a whole graph, so a human doesn't have to open the canvas
   /// to know whether anything needs them (docs/05-orchestrator.md#monitoring-surface).
+  /// Read off `displayState` for the same reason `AttentionRollup.reason(for:)` is: a
+  /// session that is asking a human something is `.running` in the graph, so against raw
+  /// `state` a folder full of loops waiting on answers summarised as "running".
   public var aggregateState: LoopState {
-    if nodes.contains(where: { $0.state == .failed }) { return .failed }
-    if nodes.contains(where: { $0.state == .stalled }) { return .stalled }
-    if nodes.contains(where: { $0.state == .awaitingInput }) { return .awaitingInput }
-    if nodes.contains(where: { $0.state == .running }) { return .running }
-    if !nodes.isEmpty && nodes.allSatisfy({ $0.state == .succeeded }) { return .succeeded }
-    if nodes.contains(where: { $0.state == .blocked }) { return .blocked }
+    if nodes.contains(where: { $0.displayState == .failed }) { return .failed }
+    if nodes.contains(where: { $0.displayState == .stalled }) { return .stalled }
+    if nodes.contains(where: { $0.displayState == .awaitingInput }) { return .awaitingInput }
+    if nodes.contains(where: { $0.displayState == .running }) { return .running }
+    if !nodes.isEmpty && nodes.allSatisfy({ $0.displayState == .succeeded }) { return .succeeded }
+    if nodes.contains(where: { $0.displayState == .blocked }) { return .blocked }
     return .idle
   }
 }

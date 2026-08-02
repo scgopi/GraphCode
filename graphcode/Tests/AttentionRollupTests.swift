@@ -49,6 +49,29 @@ struct AttentionRollupTests {
   }
 
   @Test
+  func aRunningLoopWhoseSessionIsAskingSurfaces() {
+    // The only way `.awaitingInput` ever arises in production: nothing writes it into
+    // `state` — a loop asking a question is still the running node its downstream edges
+    // wait on — so a rollup reading raw `state` could only ever report failures and
+    // stalls, and the everyday "the agent asked you something" case, which is what the
+    // queue is *for*, went unreported for as long as this switch read the wrong field.
+    let asking = LoopNode(
+      title: "Asking",
+      presence: PresenceReading(presence: .awaitingInput, confidence: .reported),
+      state: .running)
+    let working = LoopNode(
+      title: "Working",
+      presence: PresenceReading(presence: .busy, confidence: .reported),
+      state: .running)
+
+    let rollup = AttentionRollup.fullRollup(across: [graph(nodes: [asking, working])])
+
+    #expect(rollup.map(\.nodeTitle) == ["Asking"])
+    #expect(rollup.first?.reason == .awaitingInput)
+    #expect(graph(nodes: [asking, working]).aggregateState == .awaitingInput)
+  }
+
+  @Test
   func aStoppedLoopIsNotSomethingToActOn() {
     // A human turned it off. Telling them it needs their attention is telling them
     // about their own decision.

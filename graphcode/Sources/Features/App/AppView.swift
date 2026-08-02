@@ -58,12 +58,23 @@ struct AppView: View {
     // gone with it: an opaque fill behind the sidebar's own material dulled the very
     // effect the sidebar was switched to.
     .containerBackground(.ultraThinMaterial, for: .window)
-    // The one strip on screen whatever pane is showing — including a full-window
-    // terminal, which is where the graph is furthest away. See `StatusRollupView`.
     .toolbar {
-      ToolbarItem(placement: .principal) {
-        StatusRollupView(
-          graphs: store.projects.map(\.graph), attention: store.attentionItems.count)
+      // Only when something is actually asking. The centre of the titlebar is on screen
+      // whatever pane is showing — including a full-window terminal, which is where the
+      // graph is furthest away — and that reach is worth spending on a queue with
+      // something in it, not on standing counts. See `NeedsYouChip`.
+      if !store.attentionItems.isEmpty {
+        ToolbarItem(placement: .principal) {
+          NeedsYouChip(count: store.attentionItems.count)
+        }
+      }
+      // Load-bearing, not cosmetic. A centred principal item is what used to sit between
+      // the leading items and this group and hold it against the trailing edge; with the
+      // chip gone for most of the app's life, macOS 26 packs `.primaryAction` up against
+      // the sidebar toggles and the jump field lands on the *left*. This is the space the
+      // principal item was implicitly providing.
+      if #available(macOS 26.0, *) {
+        ToolbarSpacer(.flexible, placement: .primaryAction)
       }
       ToolbarItem(placement: .primaryAction) {
         JumpFieldButton { store.send(.jumpPaletteRequested) }

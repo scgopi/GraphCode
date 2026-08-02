@@ -252,10 +252,9 @@ struct LoopStatePill: View {
 /// `repeatForever` opacity animation, which is the one kind that never settles: as long as
 /// a single running dot is on screen the window has a live animation attached and keeps
 /// recomposing at the display's refresh rate, forever. That is not one dot's worth of
-/// cost. The same indicator draws on every running card, every sidebar row, and the
-/// titlebar rollup — which is visible in *every* pane including a full-window terminal, so
-/// the app could never reach an idle frame while any loop was running, and the cost landed
-/// next to Ghostty's own rendering.
+/// cost. The same indicator draws on every running card and every sidebar row, so the app
+/// could never reach an idle frame while any loop was running, and the cost landed next to
+/// Ghostty's own rendering.
 ///
 /// Nothing is lost by removing it. `LoopStateAppearance` already carries state on three
 /// channels that survive greyscale, 40% zoom, and a protanope — hue, solid-or-hollow, and

@@ -279,7 +279,7 @@ struct GraphOverview: Equatable {
       guard entries > 0 else { return loops }
       return "\(loops) · \(entries) entry point\(entries == 1 ? "" : "s")"
     }
-    let matching = graph.nodes.count { $0.state == state }
+    let matching = graph.nodes.count { $0.displayState == state }
     // The kind-independent reading of the word: a lane is speaking about a folder, and a
     // folder has no loop type for `idle` to mean "scheduled" against.
     return "\(loops) · \(matching) \(state.displayWord(for: .goalBased).lowercased())"

@@ -202,24 +202,4 @@ struct ActivityFeedTests {
     #expect(LoopCardPresentation(node: node).liveLine == "tokens per request under 1.2")
   }
 
-  @Test
-  func theTitlebarRollupBucketsEveryLoopExactlyOnce() {
-    // Three chips have to add up to the graph, or the strip that is always on screen is
-    // the one place quietly reporting a different number of loops than the canvas.
-    let graph = LoopGraph(
-      project: ProjectRef(path: "/tmp/p", name: "p"),
-      nodes: [
-        LoopNode(title: "a", state: .running), LoopNode(title: "b", state: .running),
-        LoopNode(title: "c", state: .awaitingInput), LoopNode(title: "d", state: .blocked),
-        LoopNode(title: "e", state: .succeeded), LoopNode(title: "f", state: .idle),
-      ])
-    let rollup = StatusRollupView(graphs: [graph], attention: 1)
-
-    #expect(rollup.running == 2)
-    // `blocked` counts as wanting a human even when the rollup leaves it out of the
-    // queue — the buckets are about what a loop *is*, and the amber chip's own number
-    // comes from the rollup, which is why it is passed in rather than counted here.
-    #expect(rollup.idle == 2)
-    #expect(rollup.running + rollup.idle + 2 == graph.nodes.count)
-  }
 }
