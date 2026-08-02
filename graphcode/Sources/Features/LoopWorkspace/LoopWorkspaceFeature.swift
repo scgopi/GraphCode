@@ -25,6 +25,10 @@ struct LoopWorkspaceFeature {
     /// A quick chat passes an empty one: it belongs to no graph, which is exactly what
     /// the rail should then have to say about it.
     var graph = LoopGraph(scope: .global)
+    /// Whether the downstream rail is showing. In the reducer rather than in the view's
+    /// `@State` because the *toggle* lives in the window toolbar, which `AppView` owns —
+    /// and a control and the thing it controls cannot hold the answer separately.
+    var isRailVisible = LoopWorkspaceRail.loadVisible()
     var layout: TerminalLayout
     // The project folder every surface without its own worktree binding should open
     // in — a loop's shells shouldn't land in the app's own launch directory (usually
@@ -56,6 +60,8 @@ struct LoopWorkspaceFeature {
     /// All three are `AppFeature`'s to carry out — stopping talks to the daemon, and both
     /// of the others change what the whole window is showing — so they are declared here
     /// and handled up there, the way `.nodeTapped` already is.
+    /// ⌥G, and the toolbar's trailing panel toggle.
+    case railToggled
     case stopLoopTapped
     case showInGraphTapped
     case railTargetTapped(UUID)
@@ -176,6 +182,11 @@ struct LoopWorkspaceFeature {
       // which is what triggers automatic outgoing-edge firing.
       case .primarySurfaceExited(let succeeded):
         state.node.state = succeeded ? .succeeded : .failed
+        return .none
+
+      case .railToggled:
+        state.isRailVisible.toggle()
+        LoopWorkspaceRail.saveVisible(state.isRailVisible)
         return .none
 
       case .stopLoopTapped, .showInGraphTapped, .railTargetTapped:

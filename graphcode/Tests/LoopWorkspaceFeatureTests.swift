@@ -278,7 +278,9 @@ struct LoopWorkspaceFeatureTests {
   func theToggleStaysVisibleEvenWhenThereIsNothingToShow() {
     // Hiding it was the version that left ⌥G undiscoverable on three loops out of five.
     // The toolbar button is disabled instead: visibly unavailable answers "where did the
-    // panel go", where a missing control doesn't.
+    // panel go", where a missing control doesn't — and its tint follows what is on
+    // screen rather than the stored preference, so it can never look switched on while
+    // doing nothing.
     let alone = LoopNode(title: "alone")
     let graph = LoopGraph(project: ProjectRef(path: "/tmp/p", name: "p"), nodes: [alone])
 
@@ -286,14 +288,41 @@ struct LoopWorkspaceFeatureTests {
   }
 
   @Test
+  func togglingTheRailPersistsThroughTheReducer() async {
+    // The toggle lives in the window toolbar, which `AppView` owns, and the panel lives
+    // in the workspace — a control and the thing it controls cannot hold the answer
+    // separately, so the state moved into the store.
+    let key = LoopWorkspaceRail.visibleDefaultsKey
+    let saved = UserDefaults.standard.object(forKey: key)
+    defer {
+      if let saved {
+        UserDefaults.standard.set(saved, forKey: key)
+      } else {
+        UserDefaults.standard.removeObject(forKey: key)
+      }
+    }
+    UserDefaults.standard.set(false, forKey: key)
+
+    let store = TestStore(
+      initialState: LoopWorkspaceFeature.State(
+        node: LoopNode(title: "a"), layout: .defaultLayout(forNode: UUID()),
+        projectPath: "/tmp/p", projectName: "p")
+    ) { LoopWorkspaceFeature() }
+    store.exhaustivity = .off
+
+    await store.send(.railToggled) { $0.isRailVisible = true }
+    #expect(LoopWorkspaceRail.loadVisible())
+  }
+
+  @Test
   func theRailStartsHiddenUntilSomebodyAsksForIt() {
     // Defaulting it on is what put an empty panel in front of every loop that feeds
     // nothing. Turning it on persists, so wiring a graph costs the toggle once.
-    let key = LoopWorkspaceView.railVisibleDefaultsKey
+    let key = LoopWorkspaceRail.visibleDefaultsKey
     let saved = UserDefaults.standard.object(forKey: key)
     UserDefaults.standard.removeObject(forKey: key)
     defer { if let saved { UserDefaults.standard.set(saved, forKey: key) } }
 
-    #expect(LoopWorkspaceView.loadRailVisible() == false)
+    #expect(LoopWorkspaceRail.loadVisible() == false)
   }
 }

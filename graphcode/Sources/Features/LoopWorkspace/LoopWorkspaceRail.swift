@@ -16,6 +16,18 @@ struct LoopWorkspaceRail: View {
 
   static let width: CGFloat = 212
 
+  static let visibleDefaultsKey = "loopWorkspaceRailVisible"
+
+  /// **Off** until someone asks for it. It used to default on, which meant every loop
+  /// that feeds nothing opened with 212 points of empty panel beside its terminal.
+  static func loadVisible() -> Bool {
+    UserDefaults.standard.object(forKey: visibleDefaultsKey) as? Bool ?? false
+  }
+
+  static func saveVisible(_ visible: Bool) {
+    UserDefaults.standard.set(visible, forKey: visibleDefaultsKey)
+  }
+
   /// Whether this loop gives the rail anything to say.
   ///
   /// 212 points is 15% of the window, taken from the terminal — the pane someone is

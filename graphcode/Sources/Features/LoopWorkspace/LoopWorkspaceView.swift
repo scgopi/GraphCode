@@ -12,26 +12,11 @@ struct LoopWorkspaceView: View {
   /// What the loop bar's elapsed label is measured against — the window's one 30s tick,
   /// the same one the canvases' cards use. See `CanvasClock`.
   @State private var now = Date()
-  /// Whether the downstream rail is showing. Persisted the way the sidebar's expanded
-  /// nodes are (`AppSidebarView`): a panel someone folded away should stay folded across
-  /// relaunches, and this is view state — nothing in the graph changes with it.
-  @State private var isRailVisible = Self.loadRailVisible()
-
-  static let railVisibleDefaultsKey = "loopWorkspaceRailVisible"
-
-  /// **Off** until someone asks for it. It used to default on, which meant every loop
-  /// that fed nothing opened with 212 points of empty panel beside its terminal — and
-  /// the first thing anyone asked about it was what it was for. Turning it on persists,
-  /// so people who wire graphs pay the toggle once.
-  static func loadRailVisible() -> Bool {
-    UserDefaults.standard.object(forKey: railVisibleDefaultsKey) as? Bool ?? false
-  }
-
   var body: some View {
     HStack(spacing: 0) {
       workspace
       // Never drawn empty, whatever the toggle says — see `LoopWorkspaceRail.hasContent`.
-      if isRailVisible && railHasContent {
+      if store.isRailVisible && railHasContent {
         LoopWorkspaceRail(node: store.node, graph: store.graph, now: now) { targetID in
           store.send(.railTargetTapped(targetID))
         }
@@ -40,7 +25,6 @@ struct LoopWorkspaceView: View {
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .onReceive(CanvasClock.tick) { now = $0 }
     .background(railShortcut)
-    .toolbar { railToolbarItem }
     // The folder header goes in the toolbar, not in the `VStack` above, and the pane
     // does *not* claim the titlebar inset. Both were tried: `.ignoresSafeArea(.top)`
     // does slide content up into the band, but whatever lands there is drawn under the
@@ -51,17 +35,13 @@ struct LoopWorkspaceView: View {
     .toolbar { folderToolbar }
   }
 
-  private var railHasContent: Bool {
+  /// Whether this loop gives the rail anything to say — see `LoopWorkspaceRail`.
+  var railHasContent: Bool {
     LoopWorkspaceRail.hasContent(node: store.node, graph: store.graph)
   }
 
-  private func setRailVisible(_ visible: Bool) {
-    isRailVisible = visible
-    UserDefaults.standard.set(visible, forKey: Self.railVisibleDefaultsKey)
-  }
-
   private var railShortcut: some View {
-    Button("") { setRailVisible(!isRailVisible) }
+    Button("") { store.send(.railToggled) }
       .keyboardShortcut("g", modifiers: .option)
       .frame(width: 0, height: 0)
       .opacity(0)
@@ -97,43 +77,6 @@ struct LoopWorkspaceView: View {
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
-  }
-
-  /// The rail's toggle, at the toolbar's trailing edge — where macOS puts an inspector
-  /// toggle, and the reason this is a symbol rather than the worded button it started
-  /// as: a panel toggle is a piece of window furniture people already know, and putting
-  /// it in the loop bar made it look like something about the loop.
-  ///
-  /// `sidebar.trailing` rather than `sidebar.right`: the trailing symbol flips with the
-  /// layout direction, and the panel it toggles is on the trailing edge, not the right
-  /// one.
-  ///
-  /// Disabled rather than hidden when this loop has nothing to show. Hiding it was the
-  /// version that left ⌥G undiscoverable on three loops out of five — a control that is
-  /// visibly unavailable answers "where did the panel go", where a missing one doesn't.
-  @ToolbarContentBuilder
-  private var railToolbarItem: some ToolbarContent {
-    ToolbarItem(placement: .primaryAction) {
-      Button {
-        setRailVisible(!isRailVisible)
-      } label: {
-        Image(systemName: "sidebar.trailing")
-          .foregroundStyle(isRailVisible ? Color.accentColor : .secondary)
-      }
-      .disabled(!railHasContent)
-      .help(railHelp)
-    }
-  }
-
-  private var railHelp: String {
-    guard railHasContent else {
-      return "This loop hands off to nothing and has no metric — nothing to show yet"
-    }
-    let downstream = LoopWorkspaceRail.downstreamCount(node: store.node, graph: store.graph)
-    let what = downstream == 1 ? "1 hand-off" : "\(downstream) hand-offs"
-    return isRailVisible
-      ? "Hide this loop's panel (⌥G)"
-      : "Show what this loop feeds — \(what) (⌥G)"
   }
 
   /// The folder name, at the leading edge of the titlebar band.

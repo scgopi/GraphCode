@@ -68,6 +68,14 @@ struct AppView: View {
       ToolbarItem(placement: .primaryAction) {
         JumpFieldButton { store.send(.jumpPaletteRequested) }
       }
+      // A spacer, or macOS 26 fuses every trailing item into one glass capsule and the
+      // panel toggle reads as part of the jump field rather than as its own control.
+      if #available(macOS 26.0, *) {
+        ToolbarSpacer(.fixed, placement: .primaryAction)
+      }
+      if store.openLoop != nil {
+        ToolbarItem(placement: .primaryAction) { railToggle }
+      }
     }
     // The toolbar deliberately keeps its own system material rather than being painted
     // black to match: `.toolbarBackground(_:for: .windowToolbar)` does darken the
@@ -155,6 +163,40 @@ struct AppView: View {
         "\(store.pendingChatDeletion?.title ?? "This chat")'s session and scrollback "
           + "will be permanently deleted.")
     }
+  }
+
+  /// The open loop's trailing panel, toggled from where macOS puts an inspector toggle.
+  ///
+  /// The tint follows what is actually on screen rather than the stored preference. It
+  /// used to follow the preference, so a loop with nothing to show rendered the button
+  /// bright accent-blue *and* disabled — it looked switched on and did nothing when
+  /// clicked, which is the worst of both.
+  @ViewBuilder
+  private var railToggle: some View {
+    let hasContent =
+      store.openLoop.map {
+        LoopWorkspaceRail.hasContent(node: $0.node, graph: $0.graph)
+      } ?? false
+    let showing = (store.openLoop?.isRailVisible ?? false) && hasContent
+    Button {
+      store.send(.openLoop(.railToggled))
+    } label: {
+      Image(systemName: "sidebar.trailing")
+        .foregroundStyle(showing ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+    }
+    .disabled(!hasContent)
+    .help(railHelp(hasContent: hasContent, showing: showing))
+  }
+
+  private func railHelp(hasContent: Bool, showing: Bool) -> String {
+    guard let open = store.openLoop, hasContent else {
+      return "This loop hands off to nothing and has no metric — nothing to show yet"
+    }
+    let count = LoopWorkspaceRail.downstreamCount(node: open.node, graph: open.graph)
+    let what = count == 1 ? "1 hand-off" : "\(count) hand-offs"
+    return showing
+      ? "Hide this loop's panel (⌥G)"
+      : "Show what this loop feeds — \(what) (⌥G)"
   }
 
   /// The chat rename field's draft, straight through to the reducer — the prompt is
