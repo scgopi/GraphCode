@@ -388,11 +388,38 @@ public actor GraphStore {
   /// Resolved nodes are skipped. Their work is over by definition, nothing is going to
   /// change what the graph believes about them, and probing a session per resolved node
   /// costs a subprocess for an answer no surface reads.
-  private func refreshPresence() async {
-    guard let onReadPresence else { return }
+  /// Returns whether any reading actually changed, which is what keeps the poller from
+  /// telling every client the graph moved when nothing did.
+  @discardableResult
+  private func refreshPresence() async -> Bool {
+    guard let onReadPresence else { return false }
+    var changed = false
     for node in graph.nodes where !node.isResolved {
-      graph.nodes[id: node.id]?.presence = await onReadPresence(node)
+      let reading = await onReadPresence(node)
+      guard graph.nodes[id: node.id]?.presence != reading else { continue }
+      graph.nodes[id: node.id]?.presence = reading
+      changed = true
     }
+    return changed
+  }
+
+  /// One tick of the presence poll (`ProjectRegistry.startPresencePolling`).
+  ///
+  /// Two guards, both of which exist to make this cost nothing when nobody is looking.
+  ///
+  /// **No connections, no poll.** A reading exists to be shown; with no client attached
+  /// there is no surface to show it on, and the subprocesses would be spent to update a
+  /// field that is thrown away before anyone reads it (`LoopNode` decodes `presence` as
+  /// nil). The daemon keeps running loops with the app closed — it just stops asking them
+  /// how they're doing.
+  ///
+  /// **Nothing changed, nothing sent.** And when something *has* changed this notifies
+  /// clients without going through `broadcast()`, because that persists the graph — a
+  /// write per tick, forever, of the one field that is deliberately never restored.
+  public func pollPresence() async {
+    guard !connections.isEmpty, onReadPresence != nil else { return }
+    guard await refreshPresence() else { return }
+    notifyClients()
   }
 
   // MARK: - Renaming
@@ -1239,6 +1266,16 @@ public actor GraphStore {
 
   private func broadcast() {
     onGraphChanged?(graph)
+    notifyClients()
+  }
+
+  /// The half of `broadcast` that tells clients, without the half that writes to disk.
+  ///
+  /// Split out for the presence poll, which changes a field that is never restored from
+  /// disk: persisting it would be a write every tick for bytes nothing reads back. Every
+  /// other caller wants `broadcast` — a graph change that isn't saved is a graph change
+  /// lost at the next daemon restart.
+  private func notifyClients() {
     for id in connections.keys {
       send(.graphChanged(graph), to: id)
     }

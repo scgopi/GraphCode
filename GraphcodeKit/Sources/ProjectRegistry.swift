@@ -31,6 +31,8 @@ public actor ProjectRegistry {
   private let readUsage: (@Sendable (LoopNode) async -> UsageSample?)?
   private let readActivity: (@Sendable (LoopNode) async -> String?)?
   private let readPresence: (@Sendable (LoopNode) async -> PresenceReading)?
+  /// Non-nil only while at least one client is attached — see `startPresencePolling`.
+  private var presencePoller: Task<Void, Never>?
 
   /// These default to the real `ZmxSessionLauncher`/`ShellPredicateEvaluator` closures —
   /// every `GraphStore` this registry creates gets them, so an unattended node's session
@@ -66,6 +68,7 @@ public actor ProjectRegistry {
 
   public func addConnection(id: UUID, fileDescriptor: Int32) {
     connectionFileDescriptors[id] = fileDescriptor
+    startPresencePolling()
   }
 
   public func removeConnection(_ id: UUID) async {
@@ -75,6 +78,50 @@ public actor ProjectRegistry {
     }
     connectionFileDescriptors.removeValue(forKey: id)
     connectionProjectPaths.removeValue(forKey: id)
+    if connectionFileDescriptors.isEmpty { stopPresencePolling() }
+  }
+
+  // MARK: - Presence polling
+
+  /// How often a live session is asked what it is doing.
+  ///
+  /// The trade is plain: this is the lag between a loop finishing its turn and its card
+  /// admitting it, and the cost is one `zmx get` per *unresolved loop* per tick. Not per
+  /// app and not per project — per loop, because `zmx` has no way to read many sessions'
+  /// labels at once (`list --where k=v` is in its help but returns every session whatever
+  /// you filter on, so it cannot be used to batch this).
+  ///
+  /// Fifteen seconds puts a handful of millisecond-long socket round-trips a minute
+  /// against a canvas that tells the truth within a glance. It is the one number to turn
+  /// up if a graph ever grows to hundreds of loops.
+  static let presencePollInterval: Duration = .seconds(15)
+
+  /// Polling runs only while a client is attached — see `GraphStore.pollPresence` for why
+  /// the same guard is repeated per store. Started by the first connection and cancelled
+  /// by the last, so a daemon running loops with no app open spends nothing on this.
+  private func startPresencePolling() {
+    guard presencePoller == nil, readPresence != nil else { return }
+    presencePoller = Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(for: Self.presencePollInterval)
+        guard !Task.isCancelled else { return }
+        await self?.pollPresence()
+      }
+    }
+  }
+
+  private func stopPresencePolling() {
+    presencePoller?.cancel()
+    presencePoller = nil
+  }
+
+  /// Sequential rather than concurrent across projects: each store's poll already spawns
+  /// one subprocess per loop, and firing every project's at once would turn a quiet
+  /// background tick into a burst of them.
+  private func pollPresence() async {
+    for store in stores.values {
+      await store.pollPresence()
+    }
   }
 
   // MARK: - Commands
