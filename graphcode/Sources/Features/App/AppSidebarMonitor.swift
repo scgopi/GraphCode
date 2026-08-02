@@ -22,34 +22,64 @@ extension AppSidebarView {
   /// looking at it.
   @ViewBuilder
   var attentionSection: some View {
-    let items = store.attentionItems
+    // Oldest first, not worst first. This is a queue someone works through rather than a
+    // list they read, and the loop ignored longest is the one to answer next — the same
+    // order ⌘⇧R walks. See `Array<AttentionItem>.oldestFirst`.
+    let items = store.attentionItems.oldestFirst
     if !items.isEmpty {
-      Text("Needs attention")
-        .font(.caption)
-        .foregroundStyle(.secondary)
-      ForEach(items) { item in
-        attentionRow(for: item)
+      HStack(spacing: 6) {
+        Text("NEEDS YOU")
+          .font(.system(size: 10.5, weight: .bold))
+          .tracking(0.6)
+          .foregroundStyle(Self.captionInk)
+        Text("\(items.count)")
+          .font(.system(size: 10, weight: .bold))
+          .foregroundStyle(Color(red: 0.106, green: 0.106, blue: 0.114))
+          .padding(.vertical, 1)
+          .padding(.horizontal, 6)
+          .background(Self.badgeFill, in: Capsule())
+        Spacer(minLength: 0)
+      }
+      ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+        // Only the oldest is tinted. Tinting all of them would make the section one
+        // amber block, which says "several things are wrong" and not "start here".
+        attentionRow(for: item, isOldest: index == 0)
       }
       Divider()
     }
   }
 
-  private func attentionRow(for item: AttentionItem) -> some View {
-    HStack(spacing: 6) {
-      // The same leading column every other sidebar row uses, so an attention row lines
-      // up with the project and loop rows under it rather than starting a column of its
-      // own — see `SidebarIcon`.
-      SidebarIcon(systemName: icon(for: item.reason), tint: color(for: item.reason))
+  private func attentionRow(for item: AttentionItem, isOldest: Bool) -> some View {
+    HStack(spacing: 7) {
+      StateIndicator(state: state(for: item.reason), diameter: 7)
       VStack(alignment: .leading, spacing: 1) {
-        Text(item.nodeTitle).font(.callout).lineLimit(1)
+        Text(item.nodeTitle)
+          .font(.system(size: 12.5))
+          .foregroundStyle(.white.opacity(0.92))
+          .lineLimit(1)
         // The project name matters here in a way it doesn't in the per-project rows
         // below: this list is the one place loops from different projects sit together.
         Text("\(item.reason.displayName) · \(item.projectName)")
-          .font(.caption2)
-          .foregroundStyle(.secondary)
+          .font(.system(size: 10.5))
+          .foregroundStyle(Self.reasonInk)
           .lineLimit(1)
       }
-      Spacer()
+      Spacer(minLength: 4)
+      // How long it has been waiting. The one fact that turns a list of names into an
+      // order of work, and the rollup was already sorting on it.
+      Text(LoopCardPresentation.duration(sidebarNow.timeIntervalSince(item.createdAt)))
+        .font(.system(size: 10.5, design: .monospaced))
+        .foregroundStyle(.white.opacity(0.52))
+    }
+    .padding(.vertical, 6)
+    .padding(.horizontal, 8)
+    .background(
+      isOldest ? Self.oldestFill : .clear, in: RoundedRectangle(cornerRadius: 6)
+    )
+    .overlay {
+      if isOldest {
+        RoundedRectangle(cornerRadius: 6).stroke(Self.oldestBorder, lineWidth: 1)
+      }
     }
     .contentShape(Rectangle())
     .onTapGesture { store.send(.attentionItemTapped(item)) }
@@ -59,6 +89,23 @@ extension AppSidebarView {
       }
     }
   }
+
+  /// The state a reason came from, so the row's indicator is the same solid-or-hollow
+  /// mark the card and the tab dot use rather than a third vocabulary.
+  private func state(for reason: AttentionReason) -> LoopState {
+    switch reason {
+    case .failed: return .failed
+    case .stalled: return .stalled
+    case .awaitingInput: return .awaitingInput
+    case .blocked: return .blocked
+    }
+  }
+
+  private static let captionInk = Color(red: 1.0, green: 0.745, blue: 0.361)  // #ffbe5c
+  private static let badgeFill = Color(red: 1.0, green: 0.624, blue: 0.039)
+  private static let reasonInk = Color(red: 1.0, green: 0.745, blue: 0.361).opacity(0.75)
+  private static let oldestFill = Color(red: 1.0, green: 0.624, blue: 0.039).opacity(0.1)
+  private static let oldestBorder = Color(red: 1.0, green: 0.624, blue: 0.039).opacity(0.22)
 
   private func icon(for reason: AttentionReason) -> String {
     switch reason {

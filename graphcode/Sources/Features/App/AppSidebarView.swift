@@ -45,6 +45,9 @@ struct AppSidebarView: View {
   /// from one that was already there. `nil` until the first observation, so a relaunch
   /// seeds silently instead of springing every parent in the graph open.
   @State var knownNodeIDs: Set<UUID>?
+  /// What the rows' ages are measured against — the window's one 30s tick, the same one
+  /// the canvases' cards use. See `CanvasClock`.
+  @State var sidebarNow = Date()
   /// The row the pointer is over, keyed by project path, node id string, or the chats
   /// row's own key — the trailing controls (+ and the disclosure chevron) only draw on
   /// this row, supacode-style: quiet rows, controls on approach.
@@ -64,6 +67,7 @@ struct AppSidebarView: View {
     // the type-checker will resolve in reasonable time.
     sidebarList
       .listStyle(.sidebar)
+      .onReceive(CanvasClock.tick) { sidebarNow = $0 }
       // A loop that fans out shouldn't hide its children behind an unexpanded chevron —
       // the human watching the sidebar should see new loops appear, not wonder where
       // they went. Every newly created node's parent chain is disclosed the moment the
@@ -242,19 +246,28 @@ struct AppSidebarView: View {
   /// leading symbol uses, and the presence dot moves to the trailing edge — which is
   /// where Apple's own sidebars put a row's status (Photos' lock, Mail's unread count).
   ///
-  /// The glyph no longer repeats in the caption line underneath, where it was a second
-  /// copy of the same fact at a size that made it a smudge.
-  /// No loop-type glyph here on purpose — in a narrow list of small rows the coloured
-  /// icons read as noise, and the caption underneath already names the type. The canvas
-  /// keeps its glyphs; the type's colour matters there, where the cards have room.
+  /// One loop in the sidebar: kind as a stripe, name, age, state.
+  ///
+  /// The kind used to be printed underneath as a word, on its own line, in a list where
+  /// every row is 12.5pt — two lines to say a thing the canvas says with a colour. A
+  /// 3×14pt stripe is the same identity channel the card uses and costs a row nothing,
+  /// which leaves the second line free for what a list of running work should say
+  /// instead: how long it has been going.
+  ///
+  /// The state indicator is the card's, not a plain dot: hollow-vs-solid is what keeps
+  /// `blocked` apart from `awaitingInput` here as well, where there is no room for a
+  /// word. See `LoopStateAppearance`.
   func nodeRow(for node: LoopNode) -> some View {
-    HStack(spacing: 6) {
-      VStack(alignment: .leading, spacing: 1) {
-        Text(node.title).lineLimit(1)
-        Text(node.loopType.displayName).font(.caption2).foregroundStyle(.secondary)
-      }
+    HStack(spacing: 7) {
+      RoundedRectangle(cornerRadius: 1.5)
+        .fill(node.loopType.accent)
+        .frame(width: 3, height: 14)
+      Text(node.title).font(.system(size: 12.5)).lineLimit(1)
       Spacer(minLength: 4)
-      Circle().fill(node.state.presenceColor).frame(width: 8, height: 8)
+      Text(LoopCardPresentation.duration(sidebarNow.timeIntervalSince(node.createdAt)))
+        .font(.system(size: 10.5, design: .monospaced))
+        .foregroundStyle(.white.opacity(0.5))
+      StateIndicator(state: node.state, diameter: 7)
     }
     .contentShape(Rectangle())
     .padding(.leading, 16)

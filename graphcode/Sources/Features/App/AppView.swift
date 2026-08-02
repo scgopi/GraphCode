@@ -58,6 +58,17 @@ struct AppView: View {
     // gone with it: an opaque fill behind the sidebar's own material dulled the very
     // effect the sidebar was switched to.
     .containerBackground(.ultraThinMaterial, for: .window)
+    // The one strip on screen whatever pane is showing — including a full-window
+    // terminal, which is where the graph is furthest away. See `StatusRollupView`.
+    .toolbar {
+      ToolbarItem(placement: .principal) {
+        StatusRollupView(
+          graphs: store.projects.map(\.graph), attention: store.attentionItems.count)
+      }
+      ToolbarItem(placement: .primaryAction) {
+        JumpFieldButton { store.send(.jumpPaletteRequested) }
+      }
+    }
     // The toolbar deliberately keeps its own system material rather than being painted
     // black to match: `.toolbarBackground(_:for: .windowToolbar)` does darken the
     // titlebar band, and it was tried — a black titlebar over a black terminal loses the
