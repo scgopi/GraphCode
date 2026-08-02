@@ -75,6 +75,11 @@ struct AppFeature {
     /// sidebar's help button asks for it again.
     var showingOnboarding = false
 
+    /// The loop ⌘⇧R landed on last, so pressing it again moves to the next one waiting
+    /// instead of re-opening the same loop forever. View state only, and deliberately
+    /// not persisted: a queue position is about this sitting, not about this graph.
+    var lastReviewedNodeID: UUID?
+
     /// The orchestrator's needs-attention rollup, across every open project
     /// (docs/05-orchestrator.md#monitoring-surface). Derived rather than stored: it's a
     /// pure function of the graphs the daemon already broadcasts, and a cached copy
@@ -146,6 +151,9 @@ struct AppFeature {
     case openLoop(LoopWorkspaceFeature.Action)
     /// Jump straight to the loop that needs a human, from the monitor's rollup.
     case attentionItemTapped(AttentionItem)
+    /// ⌘⇧R and the canvas rail's Review button — open the loop that has been waiting
+    /// longest, then the next one on each press. See `reviewNextAttentionItem`.
+    case reviewAttentionTapped
     /// ⇧⌘] / ⇧⌘[ — step the open workspace to the next/previous loop in sidebar order,
     /// across every open project. See `stepOpenLoop`.
     case selectNextLoop
@@ -344,6 +352,10 @@ struct AppFeature {
         return .send(
           .projects(.element(id: item.projectPath, action: .nodeTapped(item.nodeID))))
 
+      case .reviewAttentionTapped:
+        guard let item = reviewNextAttentionItem(&state) else { return .none }
+        return .send(.attentionItemTapped(item))
+
       case .selectNextLoop:
         return stepOpenLoop(state, by: 1)
 
@@ -456,6 +468,31 @@ struct AppFeature {
     // workspace under the user's keystroke.
     guard target.nodeID != state.openLoop?.node.id else { return .none }
     return .send(.projects(.element(id: target.projectPath, action: .nodeTapped(target.nodeID))))
+  }
+
+  /// The next loop for a human to look at: oldest waiting first, then the one after it
+  /// on each press, wrapping when the queue runs out.
+  ///
+  /// Oldest-first and not worst-first, which is what the *list* is ordered by. A queue
+  /// you work through is not a list you read: the thing ignored longest is the one to
+  /// do next, and it also guarantees repeat presses move — a worst-first cursor would
+  /// land on the same failure every time until someone dealt with it.
+  ///
+  /// Cycling on the node id rather than an index: the queue is rebuilt from live graphs
+  /// between presses, and an index into a list that just lost an entry points at a
+  /// different loop than the one it did a moment ago.
+  private func reviewNextAttentionItem(_ state: inout State) -> AttentionItem? {
+    let queue = state.attentionItems.oldestFirst
+    guard !queue.isEmpty else {
+      state.lastReviewedNodeID = nil
+      return nil
+    }
+    let previous = state.lastReviewedNodeID.flatMap { id in
+      queue.firstIndex { $0.nodeID == id }
+    }
+    let item = queue[previous.map { ($0 + 1) % queue.count } ?? 0]
+    state.lastReviewedNodeID = item.nodeID
+    return item
   }
 
   /// Shared by all three context-menu verbs — they differ only in what they ask the

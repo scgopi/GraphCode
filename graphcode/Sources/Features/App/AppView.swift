@@ -135,6 +135,11 @@ struct AppView: View {
         .keyboardShortcut("]", modifiers: [.command, .shift])
       Button("") { store.send(.selectPreviousLoop) }
         .keyboardShortcut("[", modifiers: [.command, .shift])
+      // ⌘⇧R belongs on the window, not on the canvas that draws the rail: the loop you
+      // need to answer is most often the one you can't see, because you are inside a
+      // terminal working on a different one.
+      Button("") { store.send(.reviewAttentionTapped) }
+        .keyboardShortcut("r", modifiers: [.command, .shift])
     }
     .frame(width: 0, height: 0)
     .opacity(0)

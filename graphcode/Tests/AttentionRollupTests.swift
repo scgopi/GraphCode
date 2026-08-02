@@ -160,6 +160,35 @@ struct AttentionRollupTests {
   }
 
   @Test
+  func theReviewQueueIsTheSameListReadOldestFirst() {
+    // The rail and ⌘⇧R work the queue; the sidebar reads the list. Worst-first is right
+    // for reading — the broken thing belongs at the top — and oldest-first is right for
+    // working, because the loop ignored longest is the one to answer next and because
+    // repeat presses have to move rather than landing on the same failure forever.
+    let old = LoopNode(
+      title: "Asking since breakfast", state: .awaitingInput,
+      createdAt: Date(timeIntervalSince1970: 0))
+    let recent = LoopNode(
+      title: "Just broke", state: .failed, createdAt: Date(timeIntervalSince1970: 9999))
+
+    let rollup = AttentionRollup.fullRollup(across: [graph(nodes: [recent, old])])
+
+    #expect(rollup.map(\.nodeTitle) == ["Just broke", "Asking since breakfast"])
+    #expect(rollup.oldestFirst.map(\.nodeTitle) == ["Asking since breakfast", "Just broke"])
+    // Same set either way — one rollup, two readings, never two opinions.
+    #expect(Set(rollup.map(\.nodeID)) == Set(rollup.oldestFirst.map(\.nodeID)))
+  }
+
+  @Test
+  func anItemCarriesTheAgeTheRailReportsAsOldest() {
+    let node = LoopNode(
+      title: "Asking", state: .awaitingInput, createdAt: Date(timeIntervalSince1970: 1200))
+    let rollup = AttentionRollup.fullRollup(across: [graph(nodes: [node])])
+
+    #expect(rollup.first?.createdAt == node.createdAt)
+  }
+
+  @Test
   func everyStateThatWantsAHumanIsOneTheRollupCanSurface() {
     // `LoopState.wantsHuman` decides whether a card offers an action instead of a
     // progress bar; this rollup decides what the attention rail and the sidebar list.

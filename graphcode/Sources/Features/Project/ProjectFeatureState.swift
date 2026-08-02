@@ -8,14 +8,17 @@ import GraphcodeKit
 /// fields, deliberately computed rather than cached so nothing can disagree with the
 /// graph the daemon broadcast.
 extension ProjectFeature.State {
-  /// Which of this project's loops want a human, by node id — the same rollup the
-  /// sidebar's monitor shows, scoped to this graph so the canvas can mark them
+  /// Which of this project's loops want a human — the same rollup the sidebar's monitor
+  /// shows, scoped to this graph so the canvas can mark them
   /// (docs/06-ux-terminals.md#graph-canvas) without a second opinion about what
   /// "needs attention" means.
-  var attentionReasons: [UUID: AttentionReason] {
-    Dictionary(
-      uniqueKeysWithValues: AttentionRollup.fullRollup(across: [graph])
-        .map { ($0.nodeID, $0.reason) })
+  ///
+  /// Items rather than a `[UUID: AttentionReason]` dictionary: the canvas needs both —
+  /// the dictionary to tint cards, the list for its rail — and one rollup read twice is
+  /// the difference between this and a second opinion. `ProjectCanvasView.Derived` does
+  /// the reading; see the performance contract on its `body`.
+  var attentionItems: [AttentionItem] {
+    AttentionRollup.fullRollup(across: [graph])
   }
 
   /// The form's fields as the value actually sent. Built on demand rather than kept

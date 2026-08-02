@@ -48,10 +48,19 @@ struct GraphOverviewView: View {
   /// every pointer event, so all of it ran on the main thread at gesture rate.
   struct Derived {
     let overview: GraphOverview
+    /// The cross-project queue, for the rail.
+    let attentionItems: [AttentionItem]
     /// Which loops want a human, by node id — the same rollup the sidebar's monitor and
     /// every project canvas use, so the overview can't disagree with either about what
     /// "needs attention" means.
     let attentionReasons: [UUID: AttentionReason]
+
+    init(overview: GraphOverview, attentionItems: [AttentionItem]) {
+      self.overview = overview
+      self.attentionItems = attentionItems
+      attentionReasons = Dictionary(
+        attentionItems.map { ($0.nodeID, $0.reason) }, uniquingKeysWith: { first, _ in first })
+    }
   }
 
   /// This view once had no toolbar on purpose — global triggers were CLI-only. That
@@ -64,16 +73,21 @@ struct GraphOverviewView: View {
   var body: some View {
     let derived = Derived(
       overview: GraphOverview(graphs: store.projects.map(\.graph)),
-      attentionReasons: Dictionary(
-        store.attentionItems.map { ($0.nodeID, $0.reason) },
-        uniquingKeysWith: { first, _ in first }))
+      attentionItems: store.attentionItems)
 
     return canvas(derived)
       .overlay(alignment: .bottomTrailing) { zoomControls(derived.overview) }
       .background(Theme.windowBackground)
       .onReceive(CanvasClock.tick) { now = $0 }
+      // In screen space, not canvas space: the queue has to stay put while the graph
+      // pans under it, which is the whole point of a rail over a halo you pan-hunt for.
+      .overlay(alignment: .topLeading) {
+        CanvasAttentionRail(items: derived.attentionItems, now: now) {
+          store.send(.reviewAttentionTapped)
+        }
+      }
       // On the canvas top-right rather than in the toolbar, same placement and quiet
-      // + styling as a project canvas's New Loop — see there for why.
+      // styling as a project canvas's New Loop — see there for why.
       .overlay(alignment: .topTrailing) {
         CanvasAddButton(help: "New Loop") {
           store.send(
@@ -82,7 +96,8 @@ struct GraphOverviewView: View {
                 id: LoopGraphScope.globalPath,
                 action: .addNodeButtonTapped(parentBackend: nil))))
         }
-        .padding(12)
+        .padding(.trailing, 20)
+        .padding(.top, 18)
       }
       .background {
         if let globalStore = globalProjectStore {
@@ -134,14 +149,9 @@ struct GraphOverviewView: View {
     let overview = derived.overview
     return GeometryReader { proxy in
       ZStack {
+        bandsLayer(overview)
         linksLayer(overview)
-        foldersLayer(overview)
         loopsLayer(overview, reasons: derived.attentionReasons, now: now)
-        // Nothing open means nothing to originate — the empty state speaks for the
-        // canvas instead. Same rule as a folder's canvas; see `CanvasStart.origin`.
-        if !overview.isEmpty {
-          StartMarker().position(overview.start)
-        }
       }
       .scaleEffect(transform.scale)
       .offset(liveOffset)

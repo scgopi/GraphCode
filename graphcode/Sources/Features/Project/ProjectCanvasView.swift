@@ -38,7 +38,17 @@ struct ProjectCanvasView: View {
   /// The canvas's derived values, computed once per body pass — see `body`.
   struct Derived {
     let subGraph: SubGraphLayout
+    /// The queue, for the rail. The cards' tints come off the same list — one rollup,
+    /// read twice, so the rail can never name a loop the cards don't mark.
+    let attentionItems: [AttentionItem]
     let attentionReasons: [UUID: AttentionReason]
+
+    init(subGraph: SubGraphLayout, attentionItems: [AttentionItem]) {
+      self.subGraph = subGraph
+      self.attentionItems = attentionItems
+      attentionReasons = Dictionary(
+        attentionItems.map { ($0.nodeID, $0.reason) }, uniquingKeysWith: { first, _ in first })
+    }
   }
 
   /// Everything the canvas draws that is *derived* from the store rather than stored in
@@ -54,7 +64,7 @@ struct ProjectCanvasView: View {
   var body: some View {
     let derived = Derived(
       subGraph: SubGraphLayout(nodes: store.graph.nodes, positions: store.nodePositions),
-      attentionReasons: store.attentionReasons)
+      attentionItems: store.attentionItems)
 
     return VStack(spacing: 0) {
       if let connectionError = store.connectionError {
@@ -79,7 +89,15 @@ struct ProjectCanvasView: View {
           CanvasAddButton(help: "New Loop") {
             store.send(.addNodeButtonTapped(parentBackend: nil))
           }
-          .padding(12)
+          .padding(.trailing, 20)
+          .padding(.top, 18)
+        }
+        // In screen space, so the queue stays put while the graph pans under it. Fed the
+        // rollup this body already derived — never its own; see `body`.
+        .overlay(alignment: .topLeading) {
+          CanvasAttentionRail(items: derived.attentionItems, now: now) {
+            store.send(.reviewAttentionTapped)
+          }
         }
     }
     .background(Theme.windowBackground)
@@ -134,7 +152,7 @@ struct ProjectCanvasView: View {
     let content = contentSize(derived.subGraph)
     return GeometryReader { proxy in
       ZStack {
-        startLayer
+        bandLayer
         edgesLayer
         subGraphLinksLayer(derived.subGraph)
         nodesLayer(derived.attentionReasons, now: now)
@@ -208,59 +226,47 @@ struct ProjectCanvasView: View {
   // menu — lives in `ProjectCanvasCards.swift`, split out for size the way the Graph
   // view's cards are in `GraphOverviewCards.swift`.
 
-  /// The graph's origin: one dot every entry point hangs off, so the canvas reads as a
-  /// connected graph with a beginning rather than as scattered cards.
+  /// The band the folder's cards sit in — one, unlabelled, since a project's own canvas
+  /// is already entirely that project and a caption naming it would be the pane telling
+  /// you where you are.
   ///
-  /// The tethers are deliberately quieter than any `EdgeLineView` — thinner, dimmer, no
-  /// kind or fired state. They are not edges: nothing travels along them and there is
-  /// nothing to right-click. Making them look like handoffs would be a lie about how
-  /// the graph runs. See `LoopGraph.startAnchors` for which nodes get one.
-  /// **Emits siblings — never wrap this in a container.** Every layer here is placed with
-  /// `.position()`, which resolves against *its immediate parent's* frame. These views
-  /// have to land directly in `canvas`'s `ZStack`, which fills the pane, so canvas
-  /// coordinates and screen coordinates agree. Wrapping them in a `ZStack` of their own
-  /// re-bases every one of them onto that inner stack's shrink-to-fit frame: the marker
-  /// lands at its canvas coordinates measured from the middle of the pane, and the
-  /// tethers are drawn to points that are no longer where the cards are — which reads as
-  /// "the start node moved and its edges vanished".
+  /// This replaced the start marker and its tethers. The marker's job was making a
+  /// scatter read as a graph; a band does that with the space the cards already occupy,
+  /// and it costs no ink in the canvas's most legible column.
+  ///
+  /// **Emits a sibling — never wrap this in a container.** Every layer here is placed
+  /// with `.position()`, which resolves against *its immediate parent's* frame. These
+  /// views have to land directly in `canvas`'s `ZStack`, which fills the pane, so canvas
+  /// coordinates and screen coordinates agree. An inner `ZStack` re-bases them onto its
+  /// own shrink-to-fit frame, and the band lands somewhere the cards are not.
   @ViewBuilder
-  private var startLayer: some View {
-    if let origin = startPosition {
-      ForEach(store.graph.startAnchors, id: \.self) { anchorID in
-        if let target = store.nodePositions[anchorID] {
-          Path { path in
-            path.move(to: origin)
-            path.addLine(to: target)
-          }
-          .stroke(Color.secondary.opacity(0.35), lineWidth: 1)
-        }
-      }
-      StartMarker().position(origin)
+  private var bandLayer: some View {
+    if let rect = bandRect {
+      CanvasBandView(rect: rect)
     }
   }
 
-  /// Left of the leftmost card and centred on the graph's vertical extent, so the
-  /// tethers fan out rather than doubling back over the cards. Derived from the live
-  /// positions instead of being a fixed point, so it stays put as the graph grows.
-  ///
-  /// Floored clear of the pane's left edge by `CanvasStart` — the grid lays its first
-  /// column out at x=160, so the plain `leftmost - 150` this used to be put the marker
-  /// at x=10 with half the dot and most of its caption clipped away, which is why the
-  /// project canvas looked like it had no start node at all.
-  private var startPosition: CGPoint? {
-    CanvasStart.origin(of: store.graph.nodes.compactMap { store.nodePositions[$0.id] })
+  /// Around every card, or `nil` for an empty canvas — a band around nothing is a
+  /// rectangle on a blank pane, and `CanvasEmptyState` is already explaining that.
+  private var bandRect: CGRect? {
+    CanvasBand.rect(
+      around: store.graph.nodes.compactMap { store.nodePositions[$0.id] },
+      cardSize: LoopCardView.Metrics.size,
+      captioned: false)
   }
 
   private var edgesLayer: some View {
     ForEach(store.graph.edges) { edge in
       if let from = store.nodePositions[edge.from], let to = store.nodePositions[edge.to] {
-        EdgeLineView(from: from, to: to, kind: edge.kind, fired: edge.fired)
-          .contextMenu {
-            Text(edge.canvasSummary)
-            Button("Delete Edge", role: .destructive) {
-              store.send(.deleteEdgeTapped(edge.id))
-            }
+        EdgeLineView(
+          from: from, to: to, kind: edge.kind, fired: edge.fired, label: edge.cycleLabel
+        )
+        .contextMenu {
+          Text(edge.canvasSummary)
+          Button("Delete Edge", role: .destructive) {
+            store.send(.deleteEdgeTapped(edge.id))
           }
+        }
       }
     }
   }

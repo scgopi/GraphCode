@@ -12,30 +12,37 @@ extension GraphOverviewView {
     ForEach(overview.links) { link in
       switch link.kind {
       case .edge(let kind, let fired):
-        EdgeLineView(from: link.from, to: link.to, kind: kind, fired: fired)
-      case .tether:
-        // Quieter than any edge, and deliberately so: nothing travels along a tether.
-        // Same reasoning as `ProjectCanvasView.startLayer`.
-        line(link).stroke(Color.secondary.opacity(0.35), lineWidth: 1)
+        EdgeLineView(
+          from: link.from, to: link.to, kind: kind, fired: fired, label: link.label)
       case .containment:
         // The overview never emits one — sub-graphs are expanded on a folder's own
         // canvas, not here — but the renderer covers every kind the shared type has.
-        line(link).stroke(
-          Color.secondary.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
+        Path { path in
+          path.move(to: link.from)
+          path.addLine(to: link.to)
+        }
+        .stroke(Color.secondary.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
       }
     }
   }
 
-  private func line(_ link: GraphOverview.Link) -> Path {
-    Path { path in
-      path.move(to: link.from)
-      path.addLine(to: link.to)
-    }
-  }
-
-  func foldersLayer(_ overview: GraphOverview) -> some View {
+  /// One band per open folder, drawn under everything. The band *is* the folder now —
+  /// there is no chip and no tether, because a lane containing a project's loops says
+  /// "these belong together" without a line drawn to explain it.
+  func bandsLayer(_ overview: GraphOverview) -> some View {
     ForEach(overview.folders) { folder in
-      folderChip(folder).position(folder.position)
+      CanvasBandView(
+        rect: folder.band,
+        name: folder.name,
+        caption: folder.caption,
+        glyph: folder.isGlobal ? "globe" : "folder.fill",
+        // A folder's caption goes to that folder's own canvas — where you can actually
+        // edit it. The overview is for seeing the whole thing, not for rewiring it. The
+        // global lane leads nowhere: this view already *is* it.
+        onCaptionTapped: folder.isGlobal
+          ? nil : { store.send(.projectHeaderTapped(folder.path)) }
+      )
+      .help(folder.isGlobal ? "Loops that belong to no folder" : folder.path)
     }
   }
 
@@ -47,34 +54,6 @@ extension GraphOverviewView {
     ForEach(overview.loops) { loop in
       loopCard(loop, reason: reasons[loop.node.id], now: now).position(loop.position)
     }
-  }
-
-  private func folderChip(_ folder: GraphOverview.Folder) -> some View {
-    HStack(spacing: 6) {
-      Image(systemName: "folder.fill").foregroundStyle(.secondary)
-      VStack(alignment: .leading, spacing: 1) {
-        Text(folder.name).font(.callout).lineLimit(1)
-        Text(folder.loopCount == 1 ? "1 loop" : "\(folder.loopCount) loops")
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-      }
-    }
-    .padding(.horizontal, 10)
-    .padding(.vertical, 7)
-    .frame(width: 190, alignment: .leading)
-    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-    .overlay(
-      RoundedRectangle(cornerRadius: 8)
-        .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
-    )
-    // A folder has no loop kind to tint with, so the default neutral lift — see
-    // `cardGlow`.
-    .cardGlow()
-    .contentShape(Rectangle())
-    // A folder chip goes to that folder's own canvas — where you can actually edit it.
-    // The overview is for seeing the whole thing, not for rewiring it.
-    .onTapGesture { store.send(.projectHeaderTapped(folder.path)) }
-    .help(folder.path)
   }
 
   /// The same `LoopCardView` a project's own canvas draws, so a loop reads identically

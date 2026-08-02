@@ -21,20 +21,27 @@ import GraphcodeKit
 /// cached copy against the next `.graphChanged`. Positions are deliberately *derived*
 /// rather than stored — this is a viewer, not a second canvas you arrange by hand.
 struct GraphOverview: Equatable {
-  /// One folder's lane header — the thing the start node actually tethers to. Clicking
-  /// it selects that folder, so the overview is also how you get to a project's own
-  /// canvas.
+  /// One folder's lane: the band its loops sit in, and the caption on it.
   ///
-  /// Only real folders get one. The global graph is *this view* — a chip labelled
-  /// "Graph" sitting inside the Graph, tethered to the Graph's own start node, says
-  /// nothing you didn't already know from having clicked Graph to get here. Its own
-  /// triggers still appear; they just hang straight off the start node, which is what
-  /// they are: entry points that belong to no folder.
+  /// This replaced a chip tethered to a start marker. The chip said a name and a count
+  /// and needed a line drawn to it to explain what it belonged to; the band *contains*
+  /// what it belongs to, which is the same statement made by position instead of by ink,
+  /// and it leaves the caption free to say how the folder is doing rather than only how
+  /// big it is.
+  ///
+  /// The global graph gets a lane too, captioned for what it is — loops that belong to
+  /// no folder. It is not named "Graph": a band labelled Graph inside the Graph says
+  /// nothing you didn't know from having clicked Graph to get here.
   struct Folder: Identifiable, Equatable {
     let path: String
     let name: String
     let loopCount: Int
-    let position: CGPoint
+    /// `"5 loops · 3 running"`, or `nil` for a folder with nothing in it yet — see
+    /// `Self.caption`.
+    let caption: String?
+    let isGlobal: Bool
+    /// The band, in canvas coordinates. Its top-left corner is where the caption goes.
+    let band: CGRect
 
     var id: String { path }
   }
@@ -53,7 +60,6 @@ struct GraphOverview: Equatable {
   /// so the overview and a project's canvas can't drift on how a tether is drawn.
   typealias Link = CanvasLink
 
-  var start: CGPoint = .zero
   var folders: [Folder] = []
   var loops: [Loop] = []
   var links: [Link] = []
@@ -67,15 +73,26 @@ struct GraphOverview: Equatable {
 
   // MARK: - Layout
 
-  private enum Metrics {
-    static let startX: CGFloat = 90
-    static let folderX: CGFloat = 300
-    static let firstLoopX: CGFloat = 580
-    static let columnWidth: CGFloat = 280
-    static let rowHeight: CGFloat = 118
-    static let laneGap: CGFloat = 56
-    static let laneTop: CGFloat = 110
+  enum Metrics {
+    static let card = LoopCardView.Metrics.size
+    /// Every band starts at the same x and is the same width, however few loops are in
+    /// it. Ragged lanes read as a collage; aligned ones read as a table of projects.
+    static let bandX: CGFloat = 20
+    /// Clear of the attention rail, which floats over the canvas's top-left corner.
+    static let laneTop: CGFloat = 62
+    static let laneGap: CGFloat = 24
+    static let columnGap: CGFloat = 40
+    static let rowGap: CGFloat = 24
     static let columns = 4
+
+    static let columnWidth = card.width + columnGap
+    static let rowHeight = card.height + rowGap
+    static let bandWidth =
+      CanvasBand.padding * 2 + CGFloat(columns) * card.width
+      + CGFloat(columns - 1) * columnGap
+    /// The first card's centre, inside the band and below the caption.
+    static let firstLoopX = bandX + CanvasBand.padding + card.width / 2
+    static let firstRowInset = CanvasBand.captionHeight + CanvasBand.padding + card.height / 2
   }
 
   init() {}
@@ -84,72 +101,31 @@ struct GraphOverview: Equatable {
     // The global graph's lane goes first — it's the one that dispatches into the others,
     // so reading top-to-bottom follows the direction work actually travels. Stable
     // partition rather than a sort, so the remaining folders keep sidebar order. A global
-    // graph with no triggers of its own is dropped outright: an empty lane with no chip
-    // would be a band of blank canvas above everything with nothing to explain it.
+    // graph with no triggers of its own is dropped outright: an empty lane would be a
+    // band of blank canvas above everything with nothing to explain it.
     let lanes =
       graphs.filter { $0.isGlobal && !$0.nodes.isEmpty } + graphs.filter { !$0.isGlobal }
-    // Even with nothing open the marker has to sit somewhere sensible: `.zero` would
-    // park it in the window's top-left corner, reading as a stray dot rather than as
-    // the origin of a graph that happens to be empty.
-    start = CGPoint(x: Metrics.startX, y: Metrics.laneTop)
     guard !lanes.isEmpty else { return }
 
-    // Filled in once every lane is placed, since the start node's own position depends on
-    // where they all landed.
-    var pendingTethers: [(id: String, to: CGPoint)] = []
-    var laneCentres: [CGFloat] = []
     var laneTop = Metrics.laneTop
-
     for graph in lanes {
       let lane = Self.layOutLane(graph, top: laneTop)
+      folders.append(lane.folder)
       loops.append(contentsOf: lane.loops)
       links.append(contentsOf: lane.links)
-      laneCentres.append(lane.folder.position.y)
-
-      // A folder's entry points hang off its chip; the global graph has no chip, so its
-      // triggers hang off the start node directly.
-      if graph.isGlobal {
-        pendingTethers += lane.anchorIDs.compactMap { anchorID in
-          guard let target = lane.positions[anchorID] else { return nil }
-          return (id: "start-trigger-\(anchorID)", to: target)
-        }
-      } else {
-        folders.append(lane.folder)
-        pendingTethers.append((id: "start-\(graph.project.path)", to: lane.folder.position))
-        links.append(
-          contentsOf: lane.anchorIDs.compactMap { anchorID in
-            guard let target = lane.positions[anchorID] else { return nil }
-            return Link(
-              id: "anchor-\(graph.project.path)-\(anchorID)",
-              from: lane.folder.position, to: target, kind: .tether)
-          })
-      }
-      laneTop += lane.height + Metrics.laneGap
+      laneTop = lane.folder.band.maxY + Metrics.laneGap
     }
 
-    // Centred on the lanes rather than on the canvas, so the tethers fan out from the
-    // middle of what they connect to however many folders are open.
-    start = CGPoint(
-      x: Metrics.startX, y: ((laneCentres.min() ?? 0) + (laneCentres.max() ?? 0)) / 2)
-    links.append(
-      contentsOf: pendingTethers.map {
-        Link(id: $0.id, from: start, to: $0.to, kind: .tether)
-      })
-
     size = CGSize(
-      width: Metrics.firstLoopX + CGFloat(Metrics.columns) * Metrics.columnWidth,
+      width: Metrics.bandX * 2 + Metrics.bandWidth,
       height: laneTop - Metrics.laneGap + Metrics.laneTop)
   }
 
-  /// What one folder's lane came out as. `positions` is kept so the caller can draw the
-  /// chip's tethers without re-deriving where anything landed.
+  /// What one folder's lane came out as.
   private struct Lane {
     let folder: Folder
     let loops: [Loop]
     let links: [Link]
-    let positions: [UUID: CGPoint]
-    let anchorIDs: [UUID]
-    let height: CGFloat
   }
 
   private static func layOutLane(_ graph: LoopGraph, top: CGFloat) -> Lane {
@@ -157,16 +133,16 @@ struct GraphOverview: Equatable {
     var loops: [Loop] = []
     var links: [Link] = []
     var positions: [UUID: CGPoint] = [:]
-    var rowTop = top
+    var rowCentre = top + Metrics.firstRowInset
 
     for row in Array(graph.nodes).chunked(into: Metrics.columns) {
       for (column, node) in row.enumerated() {
         let position = CGPoint(
-          x: Metrics.firstLoopX + CGFloat(column) * Metrics.columnWidth, y: rowTop)
+          x: Metrics.firstLoopX + CGFloat(column) * Metrics.columnWidth, y: rowCentre)
         positions[node.id] = position
         loops.append(Loop(node: node, projectPath: path, position: position))
       }
-      rowTop += Metrics.rowHeight
+      rowCentre += Metrics.rowHeight
     }
 
     for edge in graph.edges {
@@ -174,22 +150,42 @@ struct GraphOverview: Equatable {
       links.append(
         Link(
           id: "edge-\(edge.id)", from: from, to: to,
-          kind: .edge(edge.kind, fired: edge.fired)))
+          kind: .edge(edge.kind, fired: edge.fired), label: edge.cycleLabel))
     }
 
-    // An empty folder still gets a lane a row tall — a chip tethered to nothing is how
-    // the overview says "this folder has no loops yet", and collapsing it to zero height
-    // would jam it against its neighbours instead.
-    let height = max(rowTop - top, Metrics.rowHeight)
+    // An empty folder still gets a band one row tall — that is how the overview says
+    // "this folder has no loops yet", and collapsing it to its caption would leave a
+    // sliver jammed against the lane below.
+    let rows = max((graph.nodes.count + Metrics.columns - 1) / Metrics.columns, 1)
+    let height =
+      CanvasBand.captionHeight + CanvasBand.padding * 2 + CGFloat(rows) * Metrics.card.height
+      + CGFloat(rows - 1) * Metrics.rowGap
     let folder = Folder(
       path: path,
-      name: graph.project.name,
+      name: graph.isGlobal ? "No folder" : graph.project.name,
       loopCount: graph.nodes.count,
-      position: CGPoint(x: Metrics.folderX, y: top + height / 2 - Metrics.rowHeight / 2))
+      caption: caption(for: graph),
+      isGlobal: graph.isGlobal,
+      band: CGRect(x: Metrics.bandX, y: top, width: Metrics.bandWidth, height: height))
 
-    return Lane(
-      folder: folder, loops: loops, links: links, positions: positions,
-      anchorIDs: graph.startAnchors, height: height)
+    return Lane(folder: folder, loops: loops, links: links)
+  }
+
+  /// `"5 loops · 3 running"`.
+  ///
+  /// The second half counts the nodes in the graph's own `aggregateState` rather than
+  /// counting states itself — one rollup, read twice, so a lane can never claim a folder
+  /// is fine while the sidebar's monitor says it isn't. `aggregateState` already ranks
+  /// worst-first, which is what makes the count worth reading: it is a count of the thing
+  /// most worth knowing about this folder.
+  static func caption(for graph: LoopGraph) -> String? {
+    guard !graph.nodes.isEmpty else { return nil }
+    let state = graph.aggregateState
+    let matching = graph.nodes.count { $0.state == state }
+    let loops = graph.nodes.count == 1 ? "1 loop" : "\(graph.nodes.count) loops"
+    // The kind-independent reading of the word: a lane is speaking about a folder, and a
+    // folder has no loop type for `idle` to mean "scheduled" against.
+    return "\(loops) · \(matching) \(state.displayWord(for: .goalBased).lowercased())"
   }
 }
 

@@ -22,9 +22,6 @@ extension ProjectCanvasView {
           $0.addLine(to: link.to)
         }
         .stroke(Color.secondary.opacity(0.3), style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
-      case .tether:
-        // Only `startLayer` draws tethers on this canvas.
-        EmptyView()
       }
     }
   }

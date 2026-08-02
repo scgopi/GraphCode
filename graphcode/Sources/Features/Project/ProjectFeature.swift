@@ -108,6 +108,10 @@ struct ProjectFeature {
     case createNodeConfirmed
     case cancelNewNodeForm
     case nodeTapped(UUID)
+    /// This canvas's attention rail. Scoped to this project on purpose: the rail sits on
+    /// *this folder's* canvas, so the loop it opens should be one you can see. ⌘⇧R from
+    /// the window is the cross-project door — see `AppFeature.reviewAttentionTapped`.
+    case reviewAttentionTapped
     case edgeDrawn(from: UUID, to: UUID)
     case createEdgeConfirmed
     case cancelEdgeForm
@@ -256,6 +260,12 @@ struct ProjectFeature {
         // Handled by `AppFeature`'s parent `Reduce`, which owns cross-project
         // selection — nothing to do here.
         return .none
+
+      case .reviewAttentionTapped:
+        // Oldest first: the loop that has been waiting longest is the one to answer,
+        // and it is the same rule the window's ⌘⇧R follows.
+        guard let oldest = state.attentionItems.oldestFirst.first else { return .none }
+        return .send(.nodeTapped(oldest.nodeID))
 
       case .edgeDrawn(let from, let to):
         guard from != to else { return .none }
