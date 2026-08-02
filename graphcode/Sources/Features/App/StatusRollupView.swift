@@ -94,7 +94,10 @@ struct JumpFieldButton: View {
           .font(.system(size: 10.5, design: .monospaced))
           .foregroundStyle(.white.opacity(0.5))
       }
-      .padding(.horizontal, 2)
+      // The capsule is the toolbar's, so this padding is what sets its inset: at 2 the
+      // text sat against the glass edge and the whole item read as cramped.
+      .padding(.horizontal, 8)
+      .padding(.vertical, 3)
     }
     .buttonStyle(.plain)
     .onHover { isHovered = $0 }

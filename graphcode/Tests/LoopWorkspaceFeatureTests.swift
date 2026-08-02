@@ -275,6 +275,17 @@ struct LoopWorkspaceFeatureTests {
   }
 
   @Test
+  func theToggleStaysVisibleEvenWhenThereIsNothingToShow() {
+    // Hiding it was the version that left ⌥G undiscoverable on three loops out of five.
+    // The toolbar button is disabled instead: visibly unavailable answers "where did the
+    // panel go", where a missing control doesn't.
+    let alone = LoopNode(title: "alone")
+    let graph = LoopGraph(project: ProjectRef(path: "/tmp/p", name: "p"), nodes: [alone])
+
+    #expect(!LoopWorkspaceRail.hasContent(node: alone, graph: graph))
+  }
+
+  @Test
   func theRailStartsHiddenUntilSomebodyAsksForIt() {
     // Defaulting it on is what put an empty panel in front of every loop that feeds
     // nothing. Turning it on persists, so wiring a graph costs the toggle once.

@@ -40,6 +40,7 @@ struct LoopWorkspaceView: View {
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .onReceive(CanvasClock.tick) { now = $0 }
     .background(railShortcut)
+    .toolbar { railToolbarItem }
     // The folder header goes in the toolbar, not in the `VStack` above, and the pane
     // does *not* claim the titlebar inset. Both were tried: `.ignoresSafeArea(.top)`
     // does slide content up into the band, but whatever lands there is drawn under the
@@ -73,12 +74,6 @@ struct LoopWorkspaceView: View {
       LoopWorkspaceLoopBar(
         node: store.node,
         now: now,
-        downstream: LoopWorkspaceRail.downstreamCount(node: store.node, graph: store.graph),
-        // The rail's own affordance lives here, on chrome that is already on screen and
-        // costs the terminal nothing: reachability without a panel you have to tolerate.
-        railHasContent: railHasContent,
-        isRailVisible: isRailVisible,
-        onToggleRail: { setRailVisible(!isRailVisible) },
         onStop: { store.send(.stopLoopTapped) },
         onShowInGraph: { store.send(.showInGraphTapped) })
       // No divider under the strip: its own shadow line is that edge now, and stacking a
@@ -102,6 +97,43 @@ struct LoopWorkspaceView: View {
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
+  }
+
+  /// The rail's toggle, at the toolbar's trailing edge — where macOS puts an inspector
+  /// toggle, and the reason this is a symbol rather than the worded button it started
+  /// as: a panel toggle is a piece of window furniture people already know, and putting
+  /// it in the loop bar made it look like something about the loop.
+  ///
+  /// `sidebar.trailing` rather than `sidebar.right`: the trailing symbol flips with the
+  /// layout direction, and the panel it toggles is on the trailing edge, not the right
+  /// one.
+  ///
+  /// Disabled rather than hidden when this loop has nothing to show. Hiding it was the
+  /// version that left ⌥G undiscoverable on three loops out of five — a control that is
+  /// visibly unavailable answers "where did the panel go", where a missing one doesn't.
+  @ToolbarContentBuilder
+  private var railToolbarItem: some ToolbarContent {
+    ToolbarItem(placement: .primaryAction) {
+      Button {
+        setRailVisible(!isRailVisible)
+      } label: {
+        Image(systemName: "sidebar.trailing")
+          .foregroundStyle(isRailVisible ? Color.accentColor : .secondary)
+      }
+      .disabled(!railHasContent)
+      .help(railHelp)
+    }
+  }
+
+  private var railHelp: String {
+    guard railHasContent else {
+      return "This loop hands off to nothing and has no metric — nothing to show yet"
+    }
+    let downstream = LoopWorkspaceRail.downstreamCount(node: store.node, graph: store.graph)
+    let what = downstream == 1 ? "1 hand-off" : "\(downstream) hand-offs"
+    return isRailVisible
+      ? "Hide this loop's panel (⌥G)"
+      : "Show what this loop feeds — \(what) (⌥G)"
   }
 
   /// The folder name, at the leading edge of the titlebar band.
