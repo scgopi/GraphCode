@@ -13,8 +13,8 @@ import GraphcodeKit
 /// **One card per loop, and nothing below that.** A composite's `subGraph` is not
 /// expanded here: this view's job is to show every loop in the workspace, and a composite
 /// that fans out to a dozen templates would drown the folder it sits in under a dozen
-/// things that aren't running. The card says how big the composite is via
-/// `CompositeBadge`, and the composite's own canvas is where its insides are for.
+/// things that aren't running. The card's live line says how big the composite is and
+/// whether it is armed, and the composite's own canvas is where its insides are for.
 ///
 /// A pure value computed from the graphs `graphcoded` broadcasts, so there is nothing to
 /// keep in sync and nothing to persist: recomputing it is cheaper than reconciling a

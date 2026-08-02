@@ -42,10 +42,10 @@ extension GraphOverviewView {
   /// One card per loop, all of them clickable — a composite is drawn as the single loop
   /// it is, not expanded into its sub-graph. See `GraphOverview` for why.
   func loopsLayer(
-    _ overview: GraphOverview, reasons: [UUID: AttentionReason]
+    _ overview: GraphOverview, reasons: [UUID: AttentionReason], now: Date
   ) -> some View {
     ForEach(overview.loops) { loop in
-      loopCard(loop, reason: reasons[loop.node.id]).position(loop.position)
+      loopCard(loop, reason: reasons[loop.node.id], now: now).position(loop.position)
     }
   }
 
@@ -77,58 +77,14 @@ extension GraphOverviewView {
     .help(folder.path)
   }
 
-  /// What a loop card says, without the chrome around it — split out only so
-  /// `loopCard` stays inside the function-length limit.
-  private func loopCardBody(_ node: LoopNode, reason: AttentionReason?) -> some View {
-    VStack(alignment: .leading, spacing: 5) {
-      HStack {
-        Text(node.title).font(.headline).lineLimit(1)
-        Spacer()
-        Circle().fill(node.state.presenceColor).frame(width: 8, height: 8)
-      }
-      HStack(spacing: 4) {
-        // Same kind-colouring as the project canvas, so a loop reads identically in
-        // both — see `LoopTypeAppearance`.
-        Image(systemName: node.loopType.glyph)
-          .font(.caption2)
-          .foregroundStyle(node.loopType.accent)
-        Text(node.loopType.displayName).font(.caption2).foregroundStyle(.secondary)
-        if node.backend != .claudeCode {
-          Text(node.backend.displayName).font(.caption2).foregroundStyle(.tertiary)
-        }
-        if node.worktreeBinding != nil {
-          Image(systemName: "arrow.triangle.branch").font(.caption2).foregroundStyle(.tertiary)
-        }
-      }
-      CompositeBadge(node: node)
-      if let reason {
-        Label(reason.displayName, systemImage: "exclamationmark.circle.fill")
-          .font(.caption2)
-          .foregroundStyle(.orange)
-      }
-    }
-  }
-
-  private func loopCard(_ loop: GraphOverview.Loop, reason: AttentionReason?) -> some View {
+  /// The same `LoopCardView` a project's own canvas draws, so a loop reads identically
+  /// wherever you meet it. Only the menu differs: from here a loop can be opened or
+  /// revealed in its folder, but not rewired — see this view's own doc comment.
+  private func loopCard(
+    _ loop: GraphOverview.Loop, reason: AttentionReason?, now: Date
+  ) -> some View {
     let node = loop.node
-    return loopCardBody(node, reason: reason)
-      .padding(10)
-      .frame(width: 220, alignment: .leading)
-      .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-      .overlay(alignment: .leading) {
-        UnevenRoundedRectangle(topLeadingRadius: 10, bottomLeadingRadius: 10)
-          .fill(node.loopType.accent)
-          .frame(width: 4)
-      }
-      .clipShape(RoundedRectangle(cornerRadius: 10))
-      .overlay(
-        RoundedRectangle(cornerRadius: 10)
-          .stroke(
-            reason == nil ? Color.secondary.opacity(0.3) : Color.orange,
-            lineWidth: reason == nil ? 1 : 2)
-      )
-      // Same lift and attention glow as `ProjectCanvasView`'s cards — see `cardGlow`.
-      .cardGlow(reason == nil ? node.loopType.accent : .orange, emphasized: reason != nil)
+    return LoopCardView(node: node, reason: reason, now: now) { open(loop) }
       .contentShape(Rectangle())
       .onTapGesture { open(loop) }
       .contextMenu {

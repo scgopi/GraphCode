@@ -142,4 +142,35 @@ enum Theme {
   /// strip the way a real terminal app's active tab does, without reaching for the
   /// system accent color (this isn't a selection, it's "what's showing").
   static let tabSelectedBackground = Color(red: 0.235, green: 0.245, blue: 0.267)
+
+  /// A loop card, lit from above like the rest of the painted chrome.
+  ///
+  /// Paint rather than `.regularMaterial`, which is what cards used to be: at 106pt tall
+  /// a card is four rows of small type, and glass let the wallpaper under it decide how
+  /// much contrast a state pill and a mono meta row had. The canvas keeps its glass; the
+  /// things you read on it hold still.
+  static let loopCard = LinearGradient(
+    colors: [
+      Color(red: 0.173, green: 0.173, blue: 0.188),  // #2c2c30
+      Color(red: 0.137, green: 0.137, blue: 0.149),  // #232326
+    ],
+    startPoint: .top,
+    endPoint: .bottom)
+
+  /// The same card with the warmth of the attention orange mixed into it — enough that a
+  /// card wanting a human reads as a different object from across a zoomed-out graph,
+  /// not so much that it becomes an alert.
+  static let loopCardAttention = LinearGradient(
+    colors: [
+      Color(red: 0.188, green: 0.165, blue: 0.133),  // #302a22
+      Color(red: 0.149, green: 0.133, blue: 0.125),  // #262220
+    ],
+    startPoint: .top,
+    endPoint: .bottom)
+
+  /// A loop card's hairline. The attention variant is the orange itself: the border is
+  /// the cheapest ring to read at 40% zoom, and at that size it is doing the work the
+  /// pill's word does up close.
+  static let loopCardBorder = Color.white.opacity(0.09)
+  static let loopCardAttentionBorder = Color(red: 1.0, green: 0.624, blue: 0.039).opacity(0.55)
 }

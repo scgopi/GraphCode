@@ -49,25 +49,6 @@ struct EdgeLineView: View {
   }
 }
 
-/// A composite's card has to say how big the thing inside it is and whether it's live —
-/// an armed routine that can spawn hundreds of agents shouldn't look identical to one
-/// that has never run.
-struct CompositeBadge: View {
-  let node: LoopNode
-
-  @ViewBuilder
-  var body: some View {
-    if node.loopType == .proactive, let subGraph = node.subGraph {
-      Label(
-        "\(subGraph.nodes.count) loops · \(node.pilotState.displayName)",
-        systemImage: node.pilotState == .armed ? "bolt.fill" : "bolt.slash"
-      )
-      .font(.caption2)
-      .foregroundStyle(node.pilotState == .armed ? Color.accentColor : .secondary)
-    }
-  }
-}
-
 extension LoopEdge {
   /// What an edge says about itself in the canvas's context menu — the line's shape and
   /// color already carry the kind, so this is where everything the drawing can't show

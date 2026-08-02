@@ -27,6 +27,9 @@ struct ProjectCanvasView: View {
   /// pinch would snap the canvas back to 1× before it moved anywhere.
   @State private var pinchBaseScale: CGFloat?
   @State private var viewport: CGSize = .zero
+  /// What the cards' elapsed labels are measured against, advanced by the window's one
+  /// 30-second tick — see `CanvasClock`.
+  @State private var now = Date()
   /// The in-flight edge drag. Not `private` because `connectorHandle` — which sets
   /// them — lives in `ProjectCanvasForms.swift`, and Swift scopes `private` to a file.
   @State var dragSourceID: UUID?
@@ -80,6 +83,7 @@ struct ProjectCanvasView: View {
         }
     }
     .background(Theme.windowBackground)
+    .onReceive(CanvasClock.tick) { now = $0 }
     // No folder header in the toolbar on purpose. The canvas is only ever reached by
     // picking a project in the sidebar, which leaves that project's row selected in
     // view. The header belongs on a loop's workspace, where the terminal fills the
@@ -133,7 +137,7 @@ struct ProjectCanvasView: View {
         startLayer
         edgesLayer
         subGraphLinksLayer(derived.subGraph)
-        nodesLayer(derived.attentionReasons)
+        nodesLayer(derived.attentionReasons, now: now)
         subGraphChipsLayer(derived.subGraph)
         dragPreview
       }

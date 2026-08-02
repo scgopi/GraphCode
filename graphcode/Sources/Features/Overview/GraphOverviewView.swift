@@ -32,6 +32,9 @@ struct GraphOverviewView: View {
   /// The pane's size, kept so the zoom buttons and shortcuts — which have no gesture
   /// location to work from — can still zoom about its centre.
   @State private var viewport: CGSize = .zero
+  /// What the cards' elapsed labels are measured against, advanced by the window's one
+  /// 30-second tick — see `CanvasClock`.
+  @State private var now = Date()
 
   /// Everything this view draws that is *derived* from the store rather than stored in
   /// it, built once per body pass and handed to the layers.
@@ -68,6 +71,7 @@ struct GraphOverviewView: View {
     return canvas(derived)
       .overlay(alignment: .bottomTrailing) { zoomControls(derived.overview) }
       .background(Theme.windowBackground)
+      .onReceive(CanvasClock.tick) { now = $0 }
       // On the canvas top-right rather than in the toolbar, same placement and quiet
       // + styling as a project canvas's New Loop — see there for why.
       .overlay(alignment: .topTrailing) {
@@ -132,7 +136,7 @@ struct GraphOverviewView: View {
       ZStack {
         linksLayer(overview)
         foldersLayer(overview)
-        loopsLayer(overview, reasons: derived.attentionReasons)
+        loopsLayer(overview, reasons: derived.attentionReasons, now: now)
         // Nothing open means nothing to originate — the empty state speaks for the
         // canvas instead. Same rule as a folder's canvas; see `CanvasStart.origin`.
         if !overview.isEmpty {
