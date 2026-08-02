@@ -275,12 +275,12 @@ struct LoopWorkspaceFeatureTests {
   }
 
   @Test
-  func theToggleStaysVisibleEvenWhenThereIsNothingToShow() {
-    // Hiding it was the version that left ⌥G undiscoverable on three loops out of five.
-    // The toolbar button is disabled instead: visibly unavailable answers "where did the
-    // panel go", where a missing control doesn't — and its tint follows what is on
-    // screen rather than the stored preference, so it can never look switched on while
-    // doing nothing.
+  func aLoopWithNoPanelGetsNoToggleAtAll() {
+    // It was shown greyed for a while, on the argument that a visibly-unavailable
+    // control answers "where did the panel go". In use it read as broken instead: a
+    // permanently dim button whose reason lives in a tooltip nobody hovers is a question
+    // mark in the toolbar. `hasContent` is what the toolbar item is now gated on, so a
+    // loop wired to nothing shows no button — and gets one the moment it is wired.
     let alone = LoopNode(title: "alone")
     let graph = LoopGraph(project: ProjectRef(path: "/tmp/p", name: "p"), nodes: [alone])
 

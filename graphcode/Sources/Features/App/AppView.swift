@@ -68,12 +68,18 @@ struct AppView: View {
       ToolbarItem(placement: .primaryAction) {
         JumpFieldButton { store.send(.jumpPaletteRequested) }
       }
-      // A spacer, or macOS 26 fuses every trailing item into one glass capsule and the
-      // panel toggle reads as part of the jump field rather than as its own control.
-      if #available(macOS 26.0, *) {
-        ToolbarSpacer(.fixed, placement: .primaryAction)
-      }
-      if store.openLoop != nil {
+      // Only when the open loop has a panel worth opening. It was shown greyed before,
+      // on the argument that a visibly-unavailable control answers "where did the panel
+      // go" — but a permanently dim button whose reason lives in a tooltip nobody hovers
+      // is just a question mark in the toolbar, and it was read as broken rather than as
+      // unavailable. ⌥G still works; the panel only matters once a loop is wired to
+      // something, and that is exactly when the button comes back.
+      if railHasContent {
+        // A spacer, or macOS 26 fuses every trailing item into one glass capsule and the
+        // toggle reads as part of the jump field rather than as its own control.
+        if #available(macOS 26.0, *) {
+          ToolbarSpacer(.fixed, placement: .primaryAction)
+        }
         ToolbarItem(placement: .primaryAction) { railToggle }
       }
     }
@@ -171,27 +177,26 @@ struct AppView: View {
   /// used to follow the preference, so a loop with nothing to show rendered the button
   /// bright accent-blue *and* disabled — it looked switched on and did nothing when
   /// clicked, which is the worst of both.
+  /// Whether the open loop has a panel worth a button.
+  private var railHasContent: Bool {
+    guard let open = store.openLoop else { return false }
+    return LoopWorkspaceRail.hasContent(node: open.node, graph: open.graph)
+  }
+
   @ViewBuilder
   private var railToggle: some View {
-    let hasContent =
-      store.openLoop.map {
-        LoopWorkspaceRail.hasContent(node: $0.node, graph: $0.graph)
-      } ?? false
-    let showing = (store.openLoop?.isRailVisible ?? false) && hasContent
+    let showing = store.openLoop?.isRailVisible ?? false
     Button {
       store.send(.openLoop(.railToggled))
     } label: {
       Image(systemName: "sidebar.trailing")
         .foregroundStyle(showing ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
     }
-    .disabled(!hasContent)
-    .help(railHelp(hasContent: hasContent, showing: showing))
+    .help(railHelp(showing: showing))
   }
 
-  private func railHelp(hasContent: Bool, showing: Bool) -> String {
-    guard let open = store.openLoop, hasContent else {
-      return "This loop hands off to nothing and has no metric — nothing to show yet"
-    }
+  private func railHelp(showing: Bool) -> String {
+    guard let open = store.openLoop else { return "" }
     let count = LoopWorkspaceRail.downstreamCount(node: open.node, graph: open.graph)
     let what = count == 1 ? "1 hand-off" : "\(count) hand-offs"
     return showing
