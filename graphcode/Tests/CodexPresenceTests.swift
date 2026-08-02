@@ -65,8 +65,9 @@ struct CodexPresenceTests {
   func nowhereToReportMeansNoFlagRatherThanABrokenOne() {
     // A remote session, or a machine with no zmx: the override would name a binary that
     // isn't there, and Codex would run it once per turn forever.
-    #expect(CLISessionBackendKind.codex.presenceArguments(
-      hooksFile: nil, sessionName: "graphcode-A", zmxPath: nil) == [])
+    #expect(
+      CLISessionBackendKind.codex.presenceArguments(
+        hooksFile: nil, sessionName: "graphcode-A", zmxPath: nil) == [])
   }
 
   @Test

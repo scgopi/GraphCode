@@ -159,7 +159,8 @@ struct GhosttyTerminalView: NSViewRepresentable {
     let presence =
       backend.presenceArguments(
         hooksFile: hooksFile, sessionName: sessionName,
-        zmxPath: ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil)
+        zmxPath: ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil
+      )
       .map(PresenceHooks.singleQuoted)
       .joined(separator: " ")
     if !presence.isEmpty { parts.append(presence) }
@@ -290,7 +291,8 @@ struct GhosttyTerminalView: NSViewRepresentable {
       return remoteCommand(at: location, settings: GraphcodeSettingsStore.load())
     }
     let shell = ["/bin/zsh", "-l"]
-    guard let agentCommand = agentCommand(briefingFile: briefingFile, hooksFile: presenceHooksFile())
+    guard
+      let agentCommand = agentCommand(briefingFile: briefingFile, hooksFile: presenceHooksFile())
     else {
       // A backend graphcode can't launch gets a plain shell rather than the wrong agent.
       // `canHost` already refuses to create such a node, so this is unreachable in

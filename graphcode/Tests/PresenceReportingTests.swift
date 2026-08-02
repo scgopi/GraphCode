@@ -85,8 +85,9 @@ struct PresenceReportingTests {
     // By path, because `zmx` types the launch command into a tty capped at `MAX_CANON`
     // and the hook bodies are several hundred bytes of shell.
     let file = URL(fileURLWithPath: "/tmp/hooks.json")
-    #expect(CLISessionBackendKind.claudeCode.presenceArguments(hooksFile: file)
-      == ["--settings", "/tmp/hooks.json"])
+    #expect(
+      CLISessionBackendKind.claudeCode.presenceArguments(hooksFile: file)
+        == ["--settings", "/tmp/hooks.json"])
     #expect(CLISessionBackendKind.claudeCode.presenceArguments(hooksFile: nil) == [])
   }
 
@@ -149,8 +150,9 @@ struct PresenceReportingTests {
     #expect(node(.running, nil).displayState == .running)
     #expect(PresenceHooks.json(forBackend: .copilotCLI, zmxPath: zmx) == nil)
     #expect(PresenceHooks.json(forBackend: .codex, zmxPath: zmx) == nil)
-    #expect(CLISessionBackendKind.copilotCLI.presenceArguments(
-      hooksFile: URL(fileURLWithPath: "/tmp/hooks.json")) == [])
+    #expect(
+      CLISessionBackendKind.copilotCLI.presenceArguments(
+        hooksFile: URL(fileURLWithPath: "/tmp/hooks.json")) == [])
   }
 
   @Test

@@ -17,13 +17,13 @@ struct CopilotPresenceTests {
     let directory = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     try """
-      id: \(UUID().uuidString)
-      cwd: /tmp/project
-      client_name: github/cli
-      name: \(name)
-      user_named: true
-      """.write(
-        to: directory.appendingPathComponent("workspace.yaml"), atomically: true, encoding: .utf8)
+    id: \(UUID().uuidString)
+    cwd: /tmp/project
+    client_name: github/cli
+    name: \(name)
+    user_named: true
+    """.write(
+      to: directory.appendingPathComponent("workspace.yaml"), atomically: true, encoding: .utf8)
     let log = events.map { #"{"type": "\#($0)", "data": {}}"# }.joined(separator: "\n")
     try log.write(
       to: directory.appendingPathComponent("events.jsonl"), atomically: true, encoding: .utf8)
@@ -129,11 +129,13 @@ struct CopilotPresenceTests {
   func copilotIsGivenTheNameThatMakesItFindable() {
     // Without `--name` the session-state directory is a bare UUID Copilot chose, and its
     // log — the only presence signal this backend has — belongs to nobody.
-    #expect(CLISessionBackendKind.copilotCLI.presenceArguments(
-      hooksFile: nil, sessionName: "graphcode-D") == ["--name", "graphcode-D"])
+    #expect(
+      CLISessionBackendKind.copilotCLI.presenceArguments(
+        hooksFile: nil, sessionName: "graphcode-D") == ["--name", "graphcode-D"])
     // And the hook file it has no mechanism for changes nothing.
-    #expect(CLISessionBackendKind.copilotCLI.presenceArguments(
-      hooksFile: URL(fileURLWithPath: "/tmp/hooks.json"), sessionName: nil) == [])
+    #expect(
+      CLISessionBackendKind.copilotCLI.presenceArguments(
+        hooksFile: URL(fileURLWithPath: "/tmp/hooks.json"), sessionName: nil) == [])
   }
 
   @Test
