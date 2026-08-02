@@ -59,20 +59,24 @@ struct AppView: View {
     // effect the sidebar was switched to.
     .containerBackground(.ultraThinMaterial, for: .window)
     .toolbar {
-      // Only when something is actually asking. The centre of the titlebar is on screen
-      // whatever pane is showing — including a full-window terminal, which is where the
-      // graph is furthest away — and that reach is worth spending on a queue with
-      // something in it, not on standing counts. See `NeedsYouChip`.
-      if !store.attentionItems.isEmpty {
-        ToolbarItem(placement: .principal) {
+      // The *item* is unconditional; its content is not. The centre of the titlebar is on
+      // screen whatever pane is showing — including a full-window terminal, which is where
+      // the graph is furthest away — and that reach is worth spending on a queue with
+      // something in it, not on standing counts, so the count itself is absent whenever the
+      // answer is zero. See `NeedsYouChip`.
+      //
+      // Dropping the whole item when the count is zero is what put the jump field on the
+      // left: a principal item is what makes macOS lay the titlebar out as leading /
+      // centre / trailing runs at all, and without one every item flows left-to-right from
+      // the sidebar toggles. `ToolbarSpacer(.flexible)` was tried in that arrangement and
+      // contributed no width — the trailing group has to be measured against something.
+      ToolbarItem(placement: .principal) {
+        if store.attentionItems.isEmpty {
+          Color.clear.frame(width: 1, height: 1)
+        } else {
           NeedsYouChip(count: store.attentionItems.count)
         }
       }
-      // Load-bearing, not cosmetic. A centred principal item is what used to sit between
-      // the leading items and this group and hold it against the trailing edge; with the
-      // chip gone for most of the app's life, macOS 26 packs `.primaryAction` up against
-      // the sidebar toggles and the jump field lands on the *left*. This is the space the
-      // principal item was implicitly providing.
       if #available(macOS 26.0, *) {
         ToolbarSpacer(.flexible, placement: .primaryAction)
       }
