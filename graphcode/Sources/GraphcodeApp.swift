@@ -59,6 +59,16 @@ struct GraphcodeApp: App {
     // the sidebar collapsed AppKit still reserves room for the window controls rather
     // than letting them land on content.
     .windowStyle(.hiddenTitleBar)
+    // Reopens the first-launch terminology primer — its whole audience is someone who
+    // dismissed it before the words had anything on screen to stick to. In Help rather
+    // than the sidebar toolbar, where a second item overflowed the column into a » menu.
+    .commands {
+      CommandGroup(after: .help) {
+        Button("GraphCode Basics") {
+          Self.store.send(.onboardingRequested)
+        }
+      }
+    }
 
     // ⌘, — the native home for the handful of things that were hardcoded until someone
     // reasonably wanted them different. See `SettingsView`.

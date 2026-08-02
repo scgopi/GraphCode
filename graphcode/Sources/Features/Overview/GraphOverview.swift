@@ -102,10 +102,11 @@ struct GraphOverview: Equatable {
     static let columnWidth = card.width + columnGap
     static let rowHeight = card.height + rowGap
     static let bandWidth =
-      CanvasBand.padding * 2 + CGFloat(columns) * card.width
+      CanvasBand.padding * 2 + CanvasBand.originLane + CGFloat(columns) * card.width
       + CGFloat(columns - 1) * columnGap
     /// The first card's centre, inside the band and below the caption.
-    static let firstLoopX = bandX + CanvasBand.padding + card.width / 2
+    static let firstLoopX =
+      bandX + CanvasBand.padding + CanvasBand.originLane + card.width / 2
     static let firstRowInset = CanvasBand.captionHeight + CanvasBand.padding + card.height / 2
   }
 
@@ -142,13 +143,31 @@ struct GraphOverview: Equatable {
     let links: [Link]
   }
 
+  /// How many hand-offs from a beginning each loop sits — its column.
+  ///
+  /// Capped by the walk itself rather than by a visited set: a cycle would otherwise
+  /// raise its own depth forever, and the column is clamped to the lane's width anyway.
+  private static func depths(in graph: LoopGraph, from starts: [UUID]) -> [UUID: Int] {
+    var depths = Dictionary(uniqueKeysWithValues: starts.map { ($0, 0) })
+    var frontier = starts
+    while let current = frontier.popLast() {
+      let next = (depths[current] ?? 0) + 1
+      guard next < Metrics.columns else { continue }
+      for edge in graph.edges where edge.from == current {
+        guard (depths[edge.to] ?? -1) < next else { continue }
+        depths[edge.to] = next
+        frontier.append(edge.to)
+      }
+    }
+    return depths
+  }
+
   private static func layOutLane(_ graph: LoopGraph, top: CGFloat) -> Lane {
     let path = graph.project.path
     let roles = CardEntryRole.roles(in: graph)
     var loops: [Loop] = []
     var links: [Link] = []
     var positions: [UUID: CGPoint] = [:]
-    var rowCentre = top + Metrics.firstRowInset
 
     // Entry points first, then everything else, each group keeping its own order.
     //
@@ -157,25 +176,63 @@ struct GraphOverview: Equatable {
     // sitting three columns right would need a connector long enough to read as an edge —
     // which is exactly what a rail must not imply. Laying the roots out first also makes
     // the lane read left-to-right in the direction work actually travels.
+    // Laid out by *depth from a beginning* rather than in graph order: everything
+    // nothing hands off to goes in column 0, one per row, and each chain flows right
+    // along its own row.
+    //
+    // Filling rows left-to-right put all four rootless cards of a real graph side by
+    // side, which hid the origin's fan behind them — cards draw over the lines, so the
+    // connectors showed only in the gaps and read as one card chained to the next. A
+    // column of beginnings is also how the graph reads: down the left is where work
+    // starts, across is where it goes.
     let hangsOffOrigin: (LoopNode) -> Bool = {
       roles[$0.id] == .entry || roles[$0.id] == .unwired
     }
-    let ordered =
-      Array(graph.nodes).filter(hangsOffOrigin)
-      + Array(graph.nodes).filter { !hangsOffOrigin($0) }
+    let starts = Array(graph.nodes).filter(hangsOffOrigin)
+    let depths = Self.depths(in: graph, from: starts.map(\.id))
 
-    for row in ordered.chunked(into: Metrics.columns) {
-      for (column, node) in row.enumerated() {
-        let position = CGPoint(
-          x: Metrics.firstLoopX + CGFloat(column) * Metrics.columnWidth, y: rowCentre)
-        positions[node.id] = position
-        loops.append(
-          Loop(
-            node: node, projectPath: path, position: position,
-            entryRole: roles[node.id] ?? .interior))
+    var slots: [UUID: (column: Int, row: Int)] = [:]
+    var takenRows: Set<Int> = []
+    var occupied: Set<String> = []
+
+    func place(_ node: LoopNode, preferring row: Int) {
+      guard slots[node.id] == nil else { return }
+      let column = min(depths[node.id] ?? 0, Metrics.columns - 1)
+      var candidate = row
+      while occupied.contains("\(column)-\(candidate)") { candidate += 1 }
+      slots[node.id] = (column, candidate)
+      occupied.insert("\(column)-\(candidate)")
+      takenRows.insert(candidate)
+      // Walk this chain onward on the same row, so a hand-off reads as one line of work.
+      for edge in graph.edges where edge.from == node.id {
+        guard let next = graph.nodes[id: edge.to] else { continue }
+        place(next, preferring: candidate)
       }
-      rowCentre += Metrics.rowHeight
     }
+
+    var nextRow = 0
+    for node in starts {
+      while takenRows.contains(nextRow) { nextRow += 1 }
+      place(node, preferring: nextRow)
+    }
+    // Whatever a walk from a beginning never reached: a closed cycle, which has none.
+    for node in graph.nodes where slots[node.id] == nil {
+      while takenRows.contains(nextRow) { nextRow += 1 }
+      place(node, preferring: nextRow)
+    }
+
+    for node in graph.nodes {
+      guard let slot = slots[node.id] else { continue }
+      let position = CGPoint(
+        x: Metrics.firstLoopX + CGFloat(slot.column) * Metrics.columnWidth,
+        y: top + Metrics.firstRowInset + CGFloat(slot.row) * Metrics.rowHeight)
+      positions[node.id] = position
+      loops.append(
+        Loop(
+          node: node, projectPath: path, position: position,
+          entryRole: roles[node.id] ?? .interior))
+    }
+    let rowCount = max((slots.values.map(\.row).max() ?? 0) + 1, 1)
 
     for edge in graph.edges {
       guard let from = positions[edge.from], let to = positions[edge.to] else { continue }
@@ -188,7 +245,7 @@ struct GraphOverview: Equatable {
     // An empty folder still gets a band one row tall — that is how the overview says
     // "this folder has no loops yet", and collapsing it to its caption would leave a
     // sliver jammed against the lane below.
-    let rows = max((graph.nodes.count + Metrics.columns - 1) / Metrics.columns, 1)
+    let rows = graph.nodes.isEmpty ? 1 : rowCount
     let height =
       CanvasBand.captionHeight + CanvasBand.padding * 2 + CGFloat(rows) * Metrics.card.height
       + CGFloat(rows - 1) * Metrics.rowGap

@@ -27,9 +27,13 @@ enum CanvasBand {
   static let railInset: CGFloat = padding - stubLength
   static let stubLength: CGFloat = 12
   static let railWidth: CGFloat = 3
-  /// The origin dot, and how far it sits from the leading port it serves.
+  /// The origin dot, and the strip of band kept clear for it down the leading edge.
+  ///
+  /// A lane of its own rather than a gap subtracted from the first card's position: the
+  /// dot sat 34pt left of the leading port, which put it outside the band and clipped it
+  /// and its caption against the edge.
   static let originDiameter: CGFloat = 12
-  static let originGap: CGFloat = 34
+  static let originLane: CGFloat = 62
   static let railTint = Color.white.opacity(0.22)
 
   /// The band enclosing cards *centred* at `positions` — the project canvas's case,
@@ -37,8 +41,10 @@ enum CanvasBand {
   ///
   /// `nil` for no cards: a band around nothing is a rectangle on an empty canvas, and
   /// `CanvasEmptyState` is already saying what to do about that.
+  /// `originLane` is the clear strip on the leading edge the origin dot lives in — zero
+  /// for a band that has none to draw.
   static func rect(
-    around positions: [CGPoint], cardSize: CGSize, captioned: Bool
+    around positions: [CGPoint], cardSize: CGSize, captioned: Bool, originLane: CGFloat = 0
   ) -> CGRect? {
     guard let minX = positions.map(\.x).min(), let maxX = positions.map(\.x).max(),
       let minY = positions.map(\.y).min(), let maxY = positions.map(\.y).max()
@@ -46,9 +52,9 @@ enum CanvasBand {
 
     let top = minY - cardSize.height / 2 - padding - (captioned ? captionHeight : 0)
     return CGRect(
-      x: minX - cardSize.width / 2 - padding,
+      x: minX - cardSize.width / 2 - padding - originLane,
       y: top,
-      width: (maxX - minX) + cardSize.width + padding * 2,
+      width: (maxX - minX) + cardSize.width + padding * 2 + originLane,
       height: (maxY - minY) + cardSize.height + padding * 2 + (captioned ? captionHeight : 0))
   }
 }
@@ -108,11 +114,14 @@ struct CanvasBandView: View {
   /// the lines are for saying.
   @ViewBuilder
   private var entryRail: some View {
-    if let top = entryPorts.map(\.y).min(), let bottom = entryPorts.map(\.y).max(),
-      let leading = entryPorts.map(\.x).min()
-    {
-      let originX = max(leading - rect.minX - CanvasBand.originGap, CanvasBand.railInset)
-      let originY = (top + bottom) / 2 - rect.minY
+    if !entryPorts.isEmpty {
+      // Vertically centred on the band and alone in the lane kept clear for it, so every
+      // line out of it is visible for its whole length. Sitting level with the first row
+      // put the dot behind its own connectors: cards are drawn over them, so a fan that
+      // ran straight through the first row showed only in the gaps between cards and read
+      // as one card chained to the next.
+      let originX = CanvasBand.originLane / 2
+      let originY = rect.height / 2
       ZStack(alignment: .topLeading) {
         ForEach(Array(entryPorts.enumerated()), id: \.offset) { _, port in
           connector(

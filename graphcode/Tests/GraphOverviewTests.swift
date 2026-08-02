@@ -260,9 +260,10 @@ struct GraphOverviewTests {
   }
 
   @Test
-  func everythingNothingHandsOffToIsLaidOutFirst() {
-    // Position is what makes the origin's lines short and parallel instead of a fan
-    // across the whole lane.
+  func beginningsStackDownTheFirstColumnAndChainsFlowRight() {
+    // The layout the origin dot depends on. Filling rows left-to-right put every
+    // rootless card side by side, which hid the fan behind them: cards draw over the
+    // connectors, so they showed only in the gaps and read as card-chained-to-card.
     let root = LoopNode(title: "root")
     let downstream = LoopNode(title: "downstream")
     let loose = LoopNode(title: "loose")
@@ -272,10 +273,26 @@ struct GraphOverviewTests {
         edges: [LoopEdge(from: root.id, to: downstream.id)])
     ])
 
-    let byTitle = Dictionary(
-      uniqueKeysWithValues: overview.loops.map { ($0.node.title, $0.position.x) })
-    #expect((byTitle["root"] ?? 0) < (byTitle["downstream"] ?? 0))
-    #expect((byTitle["loose"] ?? 0) < (byTitle["downstream"] ?? 0))
+    let at = Dictionary(uniqueKeysWithValues: overview.loops.map { ($0.node.title, $0.position) })
+    // Both beginnings in the same column, on different rows.
+    #expect(at["root"]?.x == at["loose"]?.x)
+    #expect(at["root"]?.y != at["loose"]?.y)
+    // The chain continues rightward on its own row.
+    #expect((at["downstream"]?.x ?? 0) > (at["root"]?.x ?? 0))
+    #expect(at["downstream"]?.y == at["root"]?.y)
+  }
+
+  @Test
+  func theOriginDotHasALaneOfItsOwnLeftOfEveryCard() {
+    // It used to sit 34pt left of the leading port, which put it outside the band and
+    // clipped it and its caption against the edge.
+    let overview = GraphOverview(graphs: [
+      LoopGraph(project: Self.projectA, nodes: [LoopNode(title: "a")])
+    ])
+    let band = overview.folders.first?.band
+    let port = overview.folders.first?.entryPorts.first
+
+    #expect((port?.x ?? 0) - (band?.minX ?? 0) >= CanvasBand.originLane)
   }
 
   @Test

@@ -106,18 +106,13 @@ struct AppSidebarView: View {
       // the app forces `.preferredColorScheme(.dark)` so the glass stays dark, and the
       // desktop glowing through is the effect's point, not a leak.
       .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
+      // Add Folder is the sidebar's only toolbar item. GraphCode Basics used to sit
+      // beside it, but a second item overflows the narrow column into a » menu — the
+      // primer now reopens from Help, where a "teach me the words again" command
+      // belongs. See `GraphcodeApp`'s commands.
       .toolbar {
         ToolbarItem(placement: .primaryAction) {
           addFolderMenu
-        }
-        // Reopens the first-launch terminology primer — its whole audience is someone
-        // who dismissed it before the words had anything on screen to stick to.
-        ToolbarItem(placement: .primaryAction) {
-          Button {
-            store.send(.onboardingRequested)
-          } label: {
-            Label("GraphCode Basics", systemImage: "questionmark.circle")
-          }
         }
       }
       .fileImporter(

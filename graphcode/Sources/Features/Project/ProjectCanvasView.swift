@@ -250,7 +250,7 @@ struct ProjectCanvasView: View {
   /// own shrink-to-fit frame, and the band lands somewhere the cards are not.
   @ViewBuilder
   private func bandLayer(_ derived: Derived) -> some View {
-    if let rect = bandRect {
+    if let rect = bandRect(derived) {
       CanvasBandView(rect: rect, entryPorts: entryPorts(derived))
     }
   }
@@ -269,11 +269,13 @@ struct ProjectCanvasView: View {
 
   /// Around every card, or `nil` for an empty canvas — a band around nothing is a
   /// rectangle on a blank pane, and `CanvasEmptyState` is already explaining that.
-  private var bandRect: CGRect? {
+  private func bandRect(_ derived: Derived) -> CGRect? {
     CanvasBand.rect(
       around: store.graph.nodes.compactMap { store.nodePositions[$0.id] },
       cardSize: LoopCardView.Metrics.size,
-      captioned: false)
+      captioned: false,
+      // Only when there is a dot to keep clear of the cards.
+      originLane: entryPorts(derived).isEmpty ? 0 : CanvasBand.originLane)
   }
 
   private var edgesLayer: some View {
