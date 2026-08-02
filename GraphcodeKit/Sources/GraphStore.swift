@@ -38,6 +38,7 @@ public actor GraphStore {
   private let onDeliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)?
   private let onCaptureScript: (@Sendable (ShellPredicate) async -> String?)?
   private let onReadUsage: (@Sendable (LoopNode) async -> UsageSample?)?
+  private let onReadActivity: (@Sendable (LoopNode) async -> String?)?
   /// Cross-graph `.spawn`. `GraphStore` owns exactly one graph and cannot reach another,
   /// so it hands the request up to `ProjectRegistry`, which is the layer that knows every
   /// open project — the same split that keeps this actor unaware multi-project routing
@@ -86,6 +87,7 @@ public actor GraphStore {
     onDeliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)? = nil,
     onCaptureScript: (@Sendable (ShellPredicate) async -> String?)? = nil,
     onReadUsage: (@Sendable (LoopNode) async -> UsageSample?)? = nil,
+    onReadActivity: (@Sendable (LoopNode) async -> String?)? = nil,
     onSpawnIntoProject: (@Sendable (String, NodeDraft) -> Void)? = nil,
     onAppendMemory: (@Sendable (UUID, String) -> Void)? = nil,
     onRemoveMemory: (@Sendable (UUID) -> Void)? = nil
@@ -98,6 +100,7 @@ public actor GraphStore {
     self.onDeliverMessage = onDeliverMessage
     self.onCaptureScript = onCaptureScript
     self.onReadUsage = onReadUsage
+    self.onReadActivity = onReadActivity
     self.onSpawnIntoProject = onSpawnIntoProject
     self.onAppendMemory = onAppendMemory
     self.onRemoveMemory = onRemoveMemory
@@ -243,7 +246,11 @@ public actor GraphStore {
       armComposite(nodeID)
 
     case .refreshUsage:
+      // The same command polls both labels: they come off one session, over one channel,
+      // and a second command on its own timer would double the subprocess count for the
+      // sake of separating two `zmx get`s.
       await refreshUsage()
+      await refreshActivity()
     }
 
     // Guarded re-fires need an `until` predicate answered first, which means a
@@ -349,6 +356,20 @@ public actor GraphStore {
     for node in graph.nodes {
       guard let sample = await onReadUsage(node) else { continue }
       graph.nodes[id: node.id]?.usage = sample
+    }
+  }
+
+  /// Asks each live session what it is doing. Same shape and same honesty as
+  /// `refreshUsage`: a session reporting nothing keeps `activity == nil`, and the card's
+  /// live line falls back to what the loop was handed rather than to a stale line from
+  /// twenty minutes ago.
+  ///
+  /// Unreported is written back too — that is what clears the label when a session ends,
+  /// so a finished loop doesn't keep claiming to be editing a file.
+  private func refreshActivity() async {
+    guard let onReadActivity else { return }
+    for node in graph.nodes {
+      graph.nodes[id: node.id]?.activity = await onReadActivity(node)
     }
   }
 

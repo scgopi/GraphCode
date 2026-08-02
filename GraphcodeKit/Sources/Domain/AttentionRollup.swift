@@ -43,18 +43,37 @@ public struct AttentionItem: Identifiable, Equatable, Sendable {
   public let projectPath: String
   public let projectName: String
   public let reason: AttentionReason
+  /// The node's own `createdAt`, carried so a surface can say *how long* this has been
+  /// waiting without going back to the graph for it. The rollup already sorts on it; a
+  /// queue that shows "oldest 12m" and a rail that reviews oldest-first would otherwise
+  /// each have to re-derive an age the rollup had in hand and threw away.
+  public let createdAt: Date
 
   public var id: UUID { nodeID }
 
   public init(
     nodeID: UUID, nodeTitle: String, projectPath: String, projectName: String,
-    reason: AttentionReason
+    reason: AttentionReason, createdAt: Date
   ) {
     self.nodeID = nodeID
     self.nodeTitle = nodeTitle
     self.projectPath = projectPath
     self.projectName = projectName
     self.reason = reason
+    self.createdAt = createdAt
+  }
+}
+
+extension Array where Element == AttentionItem {
+  /// The same queue, oldest first — what ⌘⇧R steps through and what the attention rail
+  /// counts an age from.
+  ///
+  /// A second reading of one list, never a second rollup. Worst-first is right for a
+  /// list you *read* (the broken thing belongs at the top); oldest-first is right for a
+  /// queue you *work* (the thing ignored longest goes next, and repeat presses can't
+  /// keep landing on the same loop).
+  public var oldestFirst: [AttentionItem] {
+    sorted { $0.createdAt == $1.createdAt ? $0.reason < $1.reason : $0.createdAt < $1.createdAt }
   }
 }
 
@@ -75,7 +94,7 @@ public enum AttentionRollup {
           (
             AttentionItem(
               nodeID: node.id, nodeTitle: node.title, projectPath: graph.project.path,
-              projectName: graph.project.name, reason: reason),
+              projectName: graph.project.name, reason: reason, createdAt: node.createdAt),
             node.createdAt
           ))
       }
@@ -135,7 +154,7 @@ public enum AttentionRollup {
         items.append(
           AttentionItem(
             nodeID: node.id, nodeTitle: node.title, projectPath: graph.project.path,
-            projectName: graph.project.name, reason: .blocked))
+            projectName: graph.project.name, reason: .blocked, createdAt: node.createdAt))
       }
     }
     return items.sorted { $0.reason < $1.reason }

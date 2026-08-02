@@ -30,6 +30,19 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// fires headlessly. It also means cron and self-pacing work without graphcode
   /// modelling either, and nothing here inspects or validates the prompt.
   public var triggerPrompt: String?
+  /// `.turnBased`: what the session is actually asked to do.
+  ///
+  /// Without this the type had no task field at all — a turn-based session opened
+  /// knowing it should stop after each turn and what the human would be checking, but
+  /// never what work to start. The criterion is the hand-off; this is the job.
+  public var firstInstruction: String?
+  /// `.turnBased`: pause only where it would change something, rather than after every
+  /// turn. Reads and searches run through.
+  ///
+  /// Stored rather than folded into the prompt at creation, so a loop can say later what
+  /// it agreed to — and so the prompt stays derivable from the node instead of being a
+  /// sentence nobody can re-read.
+  public var pausesBeforeWritesOnly: Bool
   /// The stop condition a goal-based node was handed (`.goalBased`) — see
   /// docs/01-loop-taxonomy.md#goal-based--you-hand-off-the-stop-condition.
   public var goal: GoalSpec?
@@ -50,6 +63,18 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// What the backend has reported spending on this loop, if anything. Never estimated —
   /// see `UsageSample`.
   public var usage: UsageSample?
+  /// The last thing the session said it was doing — `"editing UsageReport.swift"`.
+  ///
+  /// Reported, never inferred, by exactly the mechanism `presence` and `usage` use: a
+  /// backend lifecycle hook writing `zmx set "$ZMX_SESSION" activity=…` into the
+  /// session's own label store. graphcode cannot see inside a running `claude`, and the
+  /// alternative — scraping the terminal — would put a guess about what an agent is
+  /// doing on the card next to the facts about what it has done.
+  ///
+  /// `nil` until something reports one, which is the common case, and the card's live
+  /// line then says what the loop was *handed* instead. That fallback is honest and is
+  /// what shipped before this field existed.
+  public var activity: String?
   /// Recent readings of the goal's `metricCommand`, oldest first — one per cycle pass,
   /// capped at `LoopNode.maxMetricSamples` so per-poll persistence stays bounded. The
   /// full unbounded series lives in the node's memory log; this is the cache the canvas
@@ -70,6 +95,8 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     loopType: LoopType = .turnBased,
     checkDescription: String? = nil,
     triggerPrompt: String? = nil,
+    firstInstruction: String? = nil,
+    pausesBeforeWritesOnly: Bool = false,
     goal: GoalSpec? = nil,
     backend: CLISessionBackendKind = .claudeCode,
     modelTier: ModelTier? = nil,
@@ -77,6 +104,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     subGraph: LoopGraph? = nil,
     pilotState: PilotState = .notPiloted,
     usage: UsageSample? = nil,
+    activity: String? = nil,
     metricHistory: [MetricSample] = [],
     createdBy: UUID? = nil,
     state: LoopState = .idle,
@@ -87,6 +115,8 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.loopType = loopType
     self.checkDescription = checkDescription
     self.triggerPrompt = triggerPrompt
+    self.firstInstruction = firstInstruction
+    self.pausesBeforeWritesOnly = pausesBeforeWritesOnly
     self.goal = goal
     self.backend = backend
     self.modelTier = modelTier
@@ -94,6 +124,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.subGraph = subGraph
     self.pilotState = pilotState
     self.usage = usage
+    self.activity = activity
     self.metricHistory = metricHistory
     self.createdBy = createdBy
     self.state = state
@@ -121,7 +152,10 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     switch loopType {
     case .timeBased: return triggerPrompt
     case .goalBased: return goal?.sessionPrompt
-    case .turnBased: return Self.turnBasedPrompt(check: checkDescription)
+    case .turnBased:
+      return Self.turnBasedPrompt(
+        instruction: firstInstruction, check: checkDescription,
+        beforeWritesOnly: pausesBeforeWritesOnly)
     case .proactive: return nil
     }
   }
@@ -132,8 +166,17 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// Phrased to ask for a pause rather than a report — the hand-off this type names is the
   /// *check*, and a session that runs to completion and then summarises has already made
   /// every decision the check existed to gate.
-  static func turnBasedPrompt(check: String?) -> String? {
-    let opening = """
+  static func turnBasedPrompt(
+    instruction: String?, check: String?, beforeWritesOnly: Bool = false
+  ) -> String? {
+    let task = instruction?.trimmingCharacters(in: .whitespaces) ?? ""
+    let pause =
+      beforeWritesOnly
+      ? """
+      Work in turns. Stop for a human's review before anything that changes files or \
+      state; reading, searching and reasoning can run straight through.
+      """
+      : """
       Work in turns, stopping after each one so a human can review it before you continue \
       rather than running to completion on your own.
       """
@@ -141,8 +184,10 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     // The criterion is optional; the *shape* of the loop is not. A turn-based session with
     // nobody's stated criterion should still stop for review — the human is the hand-off
     // whether or not they wrote down in advance what they would be looking for.
-    guard !criterion.isEmpty else { return opening }
-    return "\(opening) Each turn is verified against this: \(criterion)"
+    var parts = task.isEmpty ? [] : [task]
+    parts.append(pause)
+    if !criterion.isEmpty { parts.append("Each turn is verified against this: \(criterion)") }
+    return parts.isEmpty ? nil : parts.joined(separator: " ")
   }
 
   /// The tier this node actually runs on: the human's pin if there is one, otherwise
@@ -173,7 +218,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   private enum CodingKeys: String, CodingKey {
     case id, title, loopType, checkDescription, triggerPrompt, goal, backend, modelTier
     case worktreeBinding, subGraph, pilotState, usage, metricHistory, createdBy
-    case state, createdAt
+    case state, createdAt, activity, firstInstruction, pausesBeforeWritesOnly
   }
 
   /// Hand-written for the same reason `LoopEdge`'s is: `ProjectPersistence.loadGraph`
@@ -186,6 +231,11 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     loopType = try container.decodeIfPresent(LoopType.self, forKey: .loopType) ?? .turnBased
     checkDescription = try container.decodeIfPresent(String.self, forKey: .checkDescription)
     triggerPrompt = try container.decodeIfPresent(String.self, forKey: .triggerPrompt)
+    firstInstruction = try container.decodeIfPresent(String.self, forKey: .firstInstruction)
+    // Absent from graphs saved before the field existed. Those loops paused after every
+    // turn, which is what `false` says.
+    pausesBeforeWritesOnly =
+      try container.decodeIfPresent(Bool.self, forKey: .pausesBeforeWritesOnly) ?? false
     goal = try container.decodeIfPresent(GoalSpec.self, forKey: .goal)
     backend =
       try container.decodeIfPresent(CLISessionBackendKind.self, forKey: .backend) ?? .claudeCode
@@ -194,6 +244,9 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     subGraph = try container.decodeIfPresent(LoopGraph.self, forKey: .subGraph)
     pilotState = try container.decodeIfPresent(PilotState.self, forKey: .pilotState) ?? .notPiloted
     usage = try container.decodeIfPresent(UsageSample.self, forKey: .usage)
+    // Never restored from disk as a live fact — a session's last reported line is about
+    // a session that is no longer running by the time a graph is reloaded.
+    activity = nil
     metricHistory =
       try container.decodeIfPresent([MetricSample].self, forKey: .metricHistory) ?? []
     createdBy = try container.decodeIfPresent(UUID.self, forKey: .createdBy)

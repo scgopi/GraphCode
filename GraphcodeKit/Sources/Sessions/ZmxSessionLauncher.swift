@@ -96,6 +96,43 @@ public enum ZmxSessionLauncher {
     ["get", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "usage"]
   }
 
+  /// `zmx get <name> activity` — the third label on the same channel as presence and
+  /// usage, and under the same constraint: a hook writes it or nothing does.
+  static func activityLabelArguments(forNode node: LoopNode) -> [String] {
+    ["get", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "activity"]
+  }
+
+  /// What the session says it is doing, or `nil` when nothing reported.
+  ///
+  /// Trimmed and truncated here rather than at the card: a label is whatever a hook
+  /// wrote, and one that arrives as a paragraph would otherwise reach the graph, the
+  /// broadcast, and every card's one-line row.
+  static func activity(of node: LoopNode) async -> String? {
+    guard ZmxLocator.isInstalled, await sessionExists(node) else { return nil }
+    guard
+      let session = try? PTYProcessSession(
+        executable: ZmxLocator.binaryURL.path,
+        arguments: activityLabelArguments(forNode: node))
+    else { return nil }
+    let (succeeded, output) = await session.waitCollectingOutput()
+    guard succeeded else { return nil }
+    return parseActivityLabel(output)
+  }
+
+  static func parseActivityLabel(_ output: String) -> String? {
+    let collapsed =
+      output
+      .replacingOccurrences(of: "activity=", with: "")
+      .split(whereSeparator: \.isWhitespace)
+      .joined(separator: " ")
+    guard !collapsed.isEmpty else { return nil }
+    return String(collapsed.prefix(maxActivityLength))
+  }
+
+  /// One line of a 250pt card, at 10.5pt mono. Past this a label is not being read, it
+  /// is being truncated somewhere further down where nobody chose the cut.
+  static let maxActivityLength = 80
+
   static func usage(of node: LoopNode) async -> UsageSample? {
     guard ZmxLocator.isInstalled, await sessionExists(node) else { return nil }
     guard

@@ -31,8 +31,9 @@ struct GhosttyAppearanceTests {
     #expect(Theme.terminalBackgroundOpacity > 0 && Theme.terminalBackgroundOpacity < 1)
     // Written in the decimal form Ghostty parses, not Swift's default description
     // (which would emit `0.8` for some values and `0.8000000000000001` for others).
-    #expect(GhosttyAppearance.configurationText(background: .black, opacity: 0.8)
-      .contains("background-opacity = 0.80"))
+    #expect(
+      GhosttyAppearance.configurationText(background: .black, opacity: 0.8)
+        .contains("background-opacity = 0.80"))
   }
 
   @Test

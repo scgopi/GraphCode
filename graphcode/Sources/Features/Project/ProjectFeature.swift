@@ -44,6 +44,25 @@ struct ProjectFeature {
     /// "how is it going?".
     var draftMetric = ""
     var draftMetricDirection: MetricDirection = .maximize
+    /// Collapsed by default — a metric is off the path for the common goal loop, and a
+    /// command field sitting open invites people to fill it in because it is there.
+    var isMetricExpanded = false
+    /// What pressing **Test** on the done check found, and whether one is in flight.
+    var doneCheckOutcome: DoneCheckOutcome?
+    var isTestingDoneCheck = false
+    /// `.turnBased`: what the session is asked to do, and where it pauses.
+    var draftFirstInstruction = ""
+    var draftPausesBeforeWritesOnly = false
+    /// `.timeBased`: how often, and what to do each time. GraphCode composes the `/loop`
+    /// directive from the two — see `ProjectFeature.State.composedTriggerPrompt`.
+    var draftInterval: IntervalChoice = .hourly
+    var draftCustomInterval = ""
+    var draftTimedTask = ""
+    var draftStopAfter = ""
+    /// `.proactive`: the schedule this composite is *meant* for. Nothing runs at
+    /// creation, so it is a statement of intent until the thing is piloted and armed.
+    var draftSchedule: CompositeSchedule = .daily
+    var draftScheduleTime = "09:00"
     var draftBackend: CLISessionBackendKind = .claudeCode
     var draftWorktree: WorktreeSelection = .none
     var draftBranch = ""
@@ -72,6 +91,12 @@ struct ProjectFeature {
     /// `nodePendingDeletion` and the creation form's `draft*` fields already work here.
     var nodePendingRename: UUID?
     var draftRenameTitle = ""
+
+    /// Loops a human said really are a beginning, despite having no edges — the answer
+    /// to a card's "Mark as entry". View state, not graph state: the graph's own answer
+    /// to "does this start something" is its edges, and a stored flag would be a second
+    /// answer free to disagree with them. See `CardEntryRole`.
+    var declaredEntryIDs: Set<UUID> = []
 
     /// The sidebar's display order for this project's loops, node ids first-to-last.
     /// Local UI state like `nodePositions`: the daemon's graph carries no ordering a
@@ -108,6 +133,16 @@ struct ProjectFeature {
     case createNodeConfirmed
     case cancelNewNodeForm
     case nodeTapped(UUID)
+    /// This canvas's attention rail. Scoped to this project on purpose: the rail sits on
+    /// *this folder's* canvas, so the loop it opens should be one you can see. ⌘⇧R from
+    /// the window is the cross-project door — see `AppFeature.reviewAttentionTapped`.
+    case reviewAttentionTapped
+    /// "Mark as entry" on a loop wired to nothing — see `CardEntryRole`.
+    case markAsEntryTapped(UUID)
+    /// The **Test** button beside a goal's done check: runs the command exactly the way
+    /// `graphcoded` will and reports what happened.
+    case doneCheckTestTapped
+    case doneCheckTested(passed: Bool, duration: TimeInterval)
     case edgeDrawn(from: UUID, to: UUID)
     case createEdgeConfirmed
     case cancelEdgeForm
@@ -256,6 +291,35 @@ struct ProjectFeature {
         // Handled by `AppFeature`'s parent `Reduce`, which owns cross-project
         // selection — nothing to do here.
         return .none
+
+      case .doneCheckTestTapped:
+        let command = state.draftPredicate.trimmingCharacters(in: .whitespaces)
+        guard !command.isEmpty, !state.isTestingDoneCheck else { return .none }
+        state.isTestingDoneCheck = true
+        state.doneCheckOutcome = nil
+        let directory = state.graph.project.path
+        return .run { send in
+          let result = await ShellPredicateEvaluator.probe(
+            ShellPredicate(command: command, workingDirectory: directory))
+          await send(
+            .doneCheckTested(
+              passed: result?.passed ?? false, duration: result?.duration ?? 0))
+        }
+
+      case .doneCheckTested(let passed, let duration):
+        state.isTestingDoneCheck = false
+        state.doneCheckOutcome = DoneCheckOutcome(passed: passed, duration: duration)
+        return .none
+
+      case .markAsEntryTapped(let nodeID):
+        state.declaredEntryIDs.insert(nodeID)
+        return .none
+
+      case .reviewAttentionTapped:
+        // Oldest first: the loop that has been waiting longest is the one to answer,
+        // and it is the same rule the window's ⌘⇧R follows.
+        guard let oldest = state.attentionItems.oldestFirst.first else { return .none }
+        return .send(.nodeTapped(oldest.nodeID))
 
       case .edgeDrawn(let from, let to):
         guard from != to else { return .none }

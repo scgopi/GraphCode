@@ -31,6 +31,7 @@ struct GraphcodeCommandTests {
   func creatingATurnBasedNode() throws {
     let command = try GraphcodeCommand.parse([
       "node", "create", "/tmp/x", "--title", "Research", "--type", "turn", "--check", "Sound?",
+      "--prompt", "Read the RFC",
     ])
 
     guard case .createNode(let path, let draft) = command else {
@@ -41,6 +42,9 @@ struct GraphcodeCommandTests {
     #expect(draft.title == "Research")
     #expect(draft.loopType == .turnBased)
     #expect(draft.checkDescription == "Sound?")
+    // `--prompt` is the task for this type too — one flag for "what to do", rather than
+    // a second one meaning the same thing under another name.
+    #expect(draft.firstInstruction == "Read the RFC")
   }
 
   @Test
@@ -77,6 +81,7 @@ struct GraphcodeCommandTests {
     // are there whether or not they wrote down what they would look for.
     let command = try GraphcodeCommand.parse([
       "node", "create", "/tmp/x", "--title", "Research", "--type", "turn",
+      "--prompt", "Read the RFC",
     ])
     guard case .createNode(_, let draft) = command else {
       Issue.record("expected a createNode command")
@@ -84,6 +89,17 @@ struct GraphcodeCommandTests {
     }
     #expect(draft.checkDescription == nil)
     #expect(draft.isValid)
+  }
+
+  @Test
+  func aTurnBasedNodeStillNeedsSomethingToDo() {
+    // The other half of the same rule: no criterion is fine, no task is not. The CLI
+    // says so at parse time rather than exiting 0 on a command that quietly did nothing.
+    #expect(throws: GraphcodeCommand.ParseError.invalidDraft) {
+      try GraphcodeCommand.parse([
+        "node", "create", "/tmp/x", "--title", "Research", "--type", "turn",
+      ])
+    }
   }
 
   @Test

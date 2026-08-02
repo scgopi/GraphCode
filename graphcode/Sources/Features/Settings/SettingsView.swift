@@ -100,6 +100,18 @@ struct SettingsView: View {
       }
 
       Section {
+        Toggle("Show the activity strip", isOn: $model.settings.showsActivityStrip)
+      } footer: {
+        Text(
+          "A strip along the window's bottom listing passes, hand-offs and state changes "
+            + "as they happen. It is derived from the graph rather than stored, so it "
+            + "starts empty after a relaunch and fills as things happen."
+        )
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+      }
+
+      Section {
         Toggle(
           "Tell sessions they're part of a graph",
           isOn: $model.settings.briefsSessionsAboutTheGraph)

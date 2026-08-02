@@ -32,6 +32,21 @@ public enum ShellPredicateEvaluator {
     return trimmed.isEmpty ? nil : trimmed
   }
 
+  /// What a human sees when they press **Test** on a done check: did it pass, and how
+  /// long did it take.
+  ///
+  /// Only pass/fail, not the exit code itself: the session reports `terminationStatus ==
+  /// 0` and nothing finer, and inventing a number for the failing case would be the
+  /// dialog making up the one detail a person would act on. Same command, same shell,
+  /// same working directory the daemon will use — a Test that ran it differently would
+  /// be worse than no Test at all.
+  public static let probe:
+    @Sendable (ShellPredicate) async -> (passed: Bool, duration: TimeInterval)? = { predicate in
+      let started = Date()
+      guard let result = await run(predicate) else { return nil }
+      return (result.succeeded, Date().timeIntervalSince(started))
+    }
+
   private static func run(_ predicate: ShellPredicate) async -> (succeeded: Bool, output: String)? {
     let trimmed = predicate.command.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return nil }

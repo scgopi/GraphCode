@@ -9,8 +9,61 @@ import SwiftUI
 struct LoopWorkspaceView: View {
   @Bindable var store: StoreOf<LoopWorkspaceFeature>
 
+  /// What the loop bar's elapsed label is measured against — the window's one 30s tick,
+  /// the same one the canvases' cards use. See `CanvasClock`.
+  @State private var now = Date()
+  /// Whether the downstream rail is showing. Persisted the way the sidebar's expanded
+  /// nodes are (`AppSidebarView`): a panel someone folded away should stay folded across
+  /// relaunches, and this is view state — nothing in the graph changes with it.
+  @State private var isRailVisible = Self.loadRailVisible()
+
+  static let railVisibleDefaultsKey = "loopWorkspaceRailVisible"
+
+  static func loadRailVisible() -> Bool {
+    UserDefaults.standard.object(forKey: railVisibleDefaultsKey) as? Bool ?? true
+  }
+
   var body: some View {
+    HStack(spacing: 0) {
+      workspace
+      if isRailVisible {
+        LoopWorkspaceRail(node: store.node, graph: store.graph, now: now) { targetID in
+          store.send(.railTargetTapped(targetID))
+        }
+      }
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .onReceive(CanvasClock.tick) { now = $0 }
+    .background(railShortcut)
+    // The folder header goes in the toolbar, not in the `VStack` above, and the pane
+    // does *not* claim the titlebar inset. Both were tried: `.ignoresSafeArea(.top)`
+    // does slide content up into the band, but whatever lands there is drawn under the
+    // window's titlebar layer and is simply never seen — a plain red rectangle put
+    // there is as invisible as this header was. A toolbar item is the supported way
+    // into that band, and it puts the folder name level with the window controls while
+    // the tab strip keeps the row below to itself.
+    .toolbar { folderToolbar }
+  }
+
+  private var railShortcut: some View {
+    Button("") {
+      isRailVisible.toggle()
+      UserDefaults.standard.set(isRailVisible, forKey: Self.railVisibleDefaultsKey)
+    }
+    .keyboardShortcut("g", modifiers: .option)
+    .frame(width: 0, height: 0)
+    .opacity(0)
+  }
+
+  private var workspace: some View {
     VStack(spacing: 0) {
+      // The loop itself, over its terminals — see `LoopWorkspaceLoopBar` for why a band
+      // that was once removed from here is back.
+      LoopWorkspaceLoopBar(
+        node: store.node,
+        now: now,
+        onStop: { store.send(.stopLoopTapped) },
+        onShowInGraph: { store.send(.showInGraphTapped) })
       // No divider under the strip: its own shadow line is that edge now, and stacking a
       // system `Divider` on top of it draws the seam twice.
       tabBar
@@ -32,14 +85,6 @@ struct LoopWorkspaceView: View {
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
-    // The folder header goes in the toolbar, not in the `VStack` above, and the pane
-    // does *not* claim the titlebar inset. Both were tried: `.ignoresSafeArea(.top)`
-    // does slide content up into the band, but whatever lands there is drawn under the
-    // window's titlebar layer and is simply never seen — a plain red rectangle put
-    // there is as invisible as this header was. A toolbar item is the supported way
-    // into that band, and it puts the folder name level with the window controls while
-    // the tab strip keeps the row below to itself.
-    .toolbar { folderToolbar }
   }
 
   /// The folder name, at the leading edge of the titlebar band.
@@ -81,6 +126,9 @@ struct LoopWorkspaceView: View {
         ForEach(Array(store.layout.tabs.enumerated()), id: \.element.id) { index, tab in
           TabPillView(
             title: agentTabTitle(for: tab),
+            // Only the agent tab has a loop state to report — a plain shell is a shell.
+            // This is the fix for "a background tab asked a question and nothing said so".
+            state: tab.surfaces.contains(where: \.launchesClaudeCode) ? store.node.state : nil,
             isSelected: tab.id == store.layout.selectedTabID,
             shortcutHint: index < 9 ? "⌘\(index + 1)" : nil,
             canClose: store.layout.tabs.count > 1,
@@ -174,6 +222,24 @@ struct LoopWorkspaceView: View {
 
   @ViewBuilder
   private func surfaceView(tab: TabLayout, ref: SurfaceRef) -> some View {
+    let isFocused = ref.id == tab.focusedSurface.id
+    VStack(spacing: 0) {
+      // 22pt of "which pane is this and does it have the keyboard". The veil below says
+      // only the second half, and two identical black rectangles said neither.
+      PaneHeaderView(
+        title: ref.launchesClaudeCode ? "agent" : "shell",
+        isFocused: isFocused && tab.id == store.layout.selectedTabID,
+        detail: ref.launchesClaudeCode ? store.node.backend.displayName.lowercased() : "zsh")
+      terminal(tab: tab, ref: ref)
+    }
+    // `ref.id` (not just this slot's structural position) is a surface's real
+    // identity — without this, collapsing a split (which reassigns `tab.primary` to
+    // what used to be `tab.secondary`, see `.paneClosed`) would keep reusing the old
+    // primary's `NSView`/session instead of picking up the surviving one.
+    .id(ref.id)
+  }
+
+  private func terminal(tab: TabLayout, ref: SurfaceRef) -> some View {
     GhosttyTerminalView(
       // The pane's own id, which is also the key its live surface is held under while
       // some other loop is on screen — see `TerminalSurfaceStore`.
@@ -235,103 +301,14 @@ struct LoopWorkspaceView: View {
         Theme.unfocusedPaneVeil.allowsHitTesting(false)
       }
     }
-    // `ref.id` (not just this slot's structural position) is a surface's real
-    // identity — without this, collapsing a split (which reassigns `tab.primary` to
-    // what used to be `tab.secondary`, see `.paneClosed`) would keep reusing the old
-    // primary's `NSView`/session instead of picking up the surviving one.
-    .id(ref.id)
-  }
-}
-
-/// One node of a tab's split tree: a pane, or a row/column of nodes. Recursive, the way
-/// the tree it draws is — a split whose child is itself a split is how ⌘D then ⌘⇧D gets
-/// you a column inside a row.
-///
-/// `AnyLayout` rather than branching between `HStack` and `VStack`, and it exists for
-/// this: it changes how children are arranged without changing what they *are*, so
-/// flipping an axis doesn't recreate the panes on it. Each pane carries its own
-/// `.id(ref.id)` (see `LoopWorkspaceView.surfaceView`), which is what pins the panes that
-/// stay when a sibling appears or disappears beside them.
-///
-/// Rebuilding a pane is no longer the disaster it was when this drew at most two of them:
-/// `TerminalSurfaceStore` owns the live terminals now, so a remounted pane borrows the
-/// surface that is already running instead of freeing one and building another.
-private struct SplitTreeView<Pane: View>: View {
-  let node: SplitNode
-  let pane: (SurfaceRef) -> Pane
-
-  var body: some View {
-    switch node {
-    case .leaf(let ref):
-      pane(ref)
-    case .split(let direction, let children):
-      let layout =
-        direction == .horizontal
-        ? AnyLayout(HStackLayout(spacing: 0))
-        : AnyLayout(VStackLayout(spacing: 0))
-      layout {
-        ForEach(Array(children.enumerated()), id: \.element.id) { index, child in
-          if index > 0 { Divider() }
-          SplitTreeView(node: child, pane: pane)
-        }
+    // The focused pane of a split carries an inset ring as well as the header's tint —
+    // at a glance across a four-way split the ring is what you actually see.
+    .overlay {
+      if tab.isSplit && ref.id == tab.focusedSurface.id {
+        Rectangle()
+          .stroke(Theme.paneFocusTint.opacity(0.28), lineWidth: 1)
+          .allowsHitTesting(false)
       }
-    }
-  }
-}
-
-/// One tab pill — fills the space its siblings leave it (matching a terminal app's
-/// tab strip, not a browser's hug-the-title one), shows its ⌘-number by default and
-/// swaps that for a close button on hover, and only the selected pill gets a lighter
-/// fill so the strip reads as chrome with exactly one thing "showing" on it.
-private struct TabPillView: View {
-  let title: String
-  let isSelected: Bool
-  let shortcutHint: String?
-  let canClose: Bool
-  let onSelect: () -> Void
-  let onClose: () -> Void
-
-  @State private var isHovering = false
-
-  var body: some View {
-    HStack(spacing: 6) {
-      Text(title)
-        .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
-        .foregroundStyle(isSelected ? .primary : .secondary)
-        .lineLimit(1)
-      Spacer(minLength: 4)
-      trailingGlyph
-    }
-    .padding(.horizontal, 10)
-    .padding(.vertical, 5)
-    // One frame, not two. It used to cap the *content* at 220 and then stretch the pill
-    // around it, which left the title and its ⌘-number floating in the middle of a wide
-    // pill with dead space either side — and put the close button nowhere near the edge
-    // you reach for. Stretching the content itself is what pins the trailing glyph to
-    // the pill's own right edge.
-    .frame(minWidth: 92, maxWidth: .infinity)
-    .background(
-      RoundedRectangle(cornerRadius: 6)
-        .fill(isSelected ? Theme.tabSelectedBackground : Color.clear)
-    )
-    .contentShape(Rectangle())
-    .onTapGesture(perform: onSelect)
-    .onHover { isHovering = $0 }
-  }
-
-  @ViewBuilder
-  private var trailingGlyph: some View {
-    if canClose && isHovering {
-      Button(action: onClose) {
-        Image(systemName: "xmark")
-          .font(.system(size: 8, weight: .bold))
-          .foregroundStyle(.secondary)
-      }
-      .buttonStyle(.plain)
-    } else if let shortcutHint {
-      Text(shortcutHint)
-        .font(.system(size: 10, design: .monospaced))
-        .foregroundStyle(.tertiary)
     }
   }
 }

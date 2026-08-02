@@ -89,4 +89,69 @@ struct StartAnchorTests {
   func anEmptyGraphHasNothingToAnchor() {
     #expect(graph(nodes: [], edges: []).startAnchors.isEmpty)
   }
+
+  @Test
+  func aLooseNodeIsNotAnEntryPoint() {
+    // By the "nothing hands off to it" rule a loose loop is a root, and treating it as
+    // one is how ten unwired loops became a ten-line starburst out of a single dot. It
+    // is still a `startAnchor` — the canvas has to be able to find it — but it is not a
+    // beginning, and the card says so instead of drawing a port.
+    let alone = node("Alone")
+    let graph = graph(nodes: [alone], edges: [])
+
+    #expect(graph.startAnchors == [alone.id])
+    #expect(graph.entryPoints.isEmpty)
+    #expect(graph.unwiredNodeIDs == [alone.id])
+    #expect(graph.cycleOnlyNodeIDs.isEmpty)
+  }
+
+  @Test
+  func aRealRootIsAnEntryPointAndItsDownstreamIsNot() {
+    let first = node("First")
+    let second = node("Second")
+    let chain = graph(
+      nodes: [first, second], edges: [LoopEdge(from: first.id, to: second.id)])
+
+    #expect(chain.entryPoints == [first.id])
+    #expect(chain.unwiredNodeIDs.isEmpty)
+    #expect(chain.cycleOnlyNodeIDs.isEmpty)
+  }
+
+  @Test
+  func aClosedCycleHasNoEntryPointAtAll() {
+    // `startAnchors` still picks one so the graph has somewhere to be read from. The
+    // card must not repeat that pick as a fact: nothing in the graph makes either loop
+    // the beginning, and a port on one of them would be a coin toss drawn as structure.
+    let maker = node("Maker")
+    let reviewer = node("Reviewer")
+    let ring = graph(
+      nodes: [maker, reviewer],
+      edges: [
+        LoopEdge(from: maker.id, to: reviewer.id),
+        LoopEdge(from: reviewer.id, to: maker.id),
+      ])
+
+    #expect(ring.entryPoints.isEmpty)
+    #expect(ring.cycleOnlyNodeIDs == [maker.id, reviewer.id])
+    // And both still appear, which is what the anchor is for.
+    #expect(ring.startAnchors == [maker.id])
+  }
+
+  @Test
+  func aCycleHangingOffARootKeepsTheRootAsItsEntryPoint() {
+    // The shape that matters in practice: a maker/reviewer loop fed by an explorer.
+    let head = node("Head")
+    let maker = node("Maker")
+    let reviewer = node("Reviewer")
+    let lasso = graph(
+      nodes: [head, maker, reviewer],
+      edges: [
+        LoopEdge(from: head.id, to: maker.id),
+        LoopEdge(from: maker.id, to: reviewer.id),
+        LoopEdge(from: reviewer.id, to: maker.id),
+      ])
+
+    #expect(lasso.entryPoints == [head.id])
+    #expect(lasso.cycleOnlyNodeIDs.isEmpty)
+  }
 }

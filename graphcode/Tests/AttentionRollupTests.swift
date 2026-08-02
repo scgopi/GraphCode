@@ -1,8 +1,9 @@
 import Foundation
+import GraphcodeKit
 import IdentifiedCollections
 import Testing
 
-@testable import GraphcodeKit
+@testable import graphcode
 
 /// The orchestrator's needs-attention rollup
 /// (docs/05-orchestrator.md#monitoring-surface).
@@ -156,5 +157,74 @@ struct AttentionRollupTests {
     // A project with no loops hasn't finished anything; calling it succeeded would put
     // a green tick on an empty canvas.
     #expect(graph(nodes: []).aggregateState == .idle)
+  }
+
+  @Test
+  func theReviewQueueIsTheSameListReadOldestFirst() {
+    // The rail and ⌘⇧R work the queue; the sidebar reads the list. Worst-first is right
+    // for reading — the broken thing belongs at the top — and oldest-first is right for
+    // working, because the loop ignored longest is the one to answer next and because
+    // repeat presses have to move rather than landing on the same failure forever.
+    let old = LoopNode(
+      title: "Asking since breakfast", state: .awaitingInput,
+      createdAt: Date(timeIntervalSince1970: 0))
+    let recent = LoopNode(
+      title: "Just broke", state: .failed, createdAt: Date(timeIntervalSince1970: 9999))
+
+    let rollup = AttentionRollup.fullRollup(across: [graph(nodes: [recent, old])])
+
+    #expect(rollup.map(\.nodeTitle) == ["Just broke", "Asking since breakfast"])
+    #expect(rollup.oldestFirst.map(\.nodeTitle) == ["Asking since breakfast", "Just broke"])
+    // Same set either way — one rollup, two readings, never two opinions.
+    #expect(Set(rollup.map(\.nodeID)) == Set(rollup.oldestFirst.map(\.nodeID)))
+  }
+
+  @Test
+  func anItemCarriesTheAgeTheRailReportsAsOldest() {
+    let node = LoopNode(
+      title: "Asking", state: .awaitingInput, createdAt: Date(timeIntervalSince1970: 1200))
+    let rollup = AttentionRollup.fullRollup(across: [graph(nodes: [node])])
+
+    #expect(rollup.first?.createdAt == node.createdAt)
+  }
+
+  @Test
+  func everyStateThatWantsAHumanIsOneTheRollupCanSurface() {
+    // `LoopState.wantsHuman` decides whether a card offers an action instead of a
+    // progress bar; this rollup decides what the attention rail and the sidebar list.
+    // If the two ever disagree, a card asks you a question that nothing on the window
+    // chrome can lead you to — you'd have to pan the canvas to find it, which is the
+    // whole failure this redesign is removing.
+    for state in LoopState.allCases where state.wantsHuman {
+      let upstream = LoopNode(title: "Upstream", state: .failed)
+      let node = LoopNode(title: "Wants a human", state: state)
+      let rollup = AttentionRollup.fullRollup(across: [
+        graph(
+          nodes: [upstream, node],
+          edges: [LoopEdge(from: upstream.id, to: node.id, condition: .onSuccess, fireCount: 0)])
+      ])
+
+      #expect(
+        rollup.contains { $0.nodeID == node.id },
+        "\(state) wants a human but the rollup never mentions it")
+    }
+  }
+
+  @Test
+  func aStateTheRollupIgnoresNeverClaimsToNeedAnswering() {
+    // The converse, and the weaker half on purpose: `failed` and `stalled` are in the
+    // rollup without being `wantsHuman`, because they are over — there is nothing to
+    // answer, only something to read.
+    for state in LoopState.allCases where state != .blocked {
+      // On its own, with nothing upstream of it — the only thing being asked here is
+      // what the state alone is worth reporting. `.blocked` is excluded because it is
+      // the one state whose answer needs the graph: see the stranded cases above.
+      let node = LoopNode(title: "n", state: state)
+      guard AttentionRollup.fullRollup(across: [graph(nodes: [node])]).isEmpty else {
+        continue
+      }
+
+      #expect(!state.wantsHuman, "\(state) asks for an answer nothing will ever request")
+    }
   }
 }

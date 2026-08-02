@@ -3,7 +3,11 @@
 /// docs/02-graph-of-loops.md.
 ///
 /// `Idle → Running → { AwaitingInput, Blocked } → Running → { Succeeded, Failed, Stalled }`
-public enum LoopState: Codable, Equatable, Sendable {
+/// `CaseIterable` so the presentation layer can be checked exhaustively rather than
+/// case by case: every state has to have a word and an indicator style that no other
+/// state shares, and a test that enumerates the ones it remembers is the test that
+/// misses the ninth.
+public enum LoopState: Codable, Equatable, CaseIterable, Sendable {
   case idle
   case running
   case awaitingInput

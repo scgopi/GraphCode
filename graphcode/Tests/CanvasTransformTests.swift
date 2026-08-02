@@ -1,4 +1,7 @@
 import CoreGraphics
+import Foundation
+import GraphcodeKit
+import IdentifiedCollections
 import Testing
 
 @testable import graphcode
@@ -93,9 +96,35 @@ struct CanvasTransformTests {
   }
 
   @Test
-  func actualSizeNeverPushesTheStartNodeOffTheTopLeft() {
+  func fittingFramesEveryLaneBandIncludingItsCaption() {
+    // ⌘9 on a real workspace: three folders, a dozen loops. A band whose caption falls
+    // outside the viewport is a lane you can't identify, and the caption is at the very
+    // top-left corner of the band — the first thing a slightly-too-tight fit loses.
+    let graphs = (0..<3).map { index in
+      LoopGraph(
+        project: ProjectRef(path: "/tmp/p\(index)", name: "p\(index)"),
+        nodes: IdentifiedArrayOf<LoopNode>(
+          uniqueElements: (0..<4).map { LoopNode(title: "loop-\(index)-\($0)") }))
+    }
+    let overview = GraphOverview(graphs: graphs)
+    let transform = CanvasTransform.fitting(overview.size, in: Self.viewport)
+
+    for band in overview.folders.map(\.band) {
+      let corners = [
+        CGPoint(x: band.minX, y: band.minY), CGPoint(x: band.maxX, y: band.maxY),
+      ]
+      for corner in corners {
+        let onScreen = screenPosition(of: corner, under: transform, in: Self.viewport)
+        #expect(onScreen.x >= 0 && onScreen.x <= Self.viewport.width)
+        #expect(onScreen.y >= 0 && onScreen.y <= Self.viewport.height)
+      }
+    }
+  }
+
+  @Test
+  func actualSizeNeverPushesTheGraphsTopLeftOffScreen() {
     // A graph bigger than the pane can't be centred without moving its origin off
-    // screen — and the origin is where the start marker and the folder chips are.
+    // screen — and the origin is where the first lane band and its caption are.
     let transform = CanvasTransform.centred(CGSize(width: 2400, height: 1800), in: Self.viewport)
     #expect(transform.scale == 1)
     #expect(transform.offset.width == 0)
@@ -120,30 +149,178 @@ struct CanvasTransformTests {
   }
 }
 
-/// Where a canvas's start marker goes. The regression this guards is subtle to see and
-/// obvious once you do: at the grid's first column (x=160) the old `leftmost - 150` put
-/// the marker at x=10, clipped against the pane's edge — which reads as no start node.
+/// The band a lane of cards sits in — what replaced the start marker and its tethers.
+/// The property that matters is that it encloses every card with room to spare: a band
+/// that crops its own contents reads as a misdrawn rectangle rather than as a group.
 @Suite
-struct CanvasStartTests {
+struct CanvasBandTests {
+  private static let card = CGSize(width: 250, height: 106)
+
   @Test
-  func theMarkerSitsLeftOfTheLeftmostCardAndCentredOnTheGraph() {
-    let origin = CanvasStart.origin(of: [
-      CGPoint(x: 600, y: 100), CGPoint(x: 900, y: 500), CGPoint(x: 640, y: 300),
-    ])
-    #expect(origin == CGPoint(x: 600 - CanvasStart.gap, y: 300))
+  func theBandClearsEveryCardItEncloses() {
+    let positions = [CGPoint(x: 200, y: 150), CGPoint(x: 700, y: 400)]
+    let rect = CanvasBand.rect(around: positions, cardSize: Self.card, captioned: false)
+
+    let cards = positions.map {
+      CGRect(
+        x: $0.x - Self.card.width / 2, y: $0.y - Self.card.height / 2,
+        width: Self.card.width, height: Self.card.height)
+    }
+    #expect(cards.allSatisfy { rect?.contains($0) == true })
+    #expect(rect?.minX == 200 - Self.card.width / 2 - CanvasBand.padding)
+    #expect(rect?.maxY == 400 + Self.card.height / 2 + CanvasBand.padding)
   }
 
   @Test
-  func theMarkerNeverClipsAgainstThePanesLeftEdge() {
-    // The project canvas's own first column, which is what made this visible.
-    let origin = CanvasStart.origin(of: [CGPoint(x: 160, y: 140), CGPoint(x: 420, y: 140)])
-    #expect(origin?.x == CanvasStart.minimumX)
+  func aCaptionedBandGrowsUpwardsSoTheCaptionSitsAboveTheCards() {
+    // The caption lives inside the band at its top-left. Without the extra strip it
+    // would print over the first row of cards.
+    let positions = [CGPoint(x: 200, y: 150)]
+    let plain = CanvasBand.rect(around: positions, cardSize: Self.card, captioned: false)
+    let captioned = CanvasBand.rect(around: positions, cardSize: Self.card, captioned: true)
+
+    #expect(captioned?.minY == (plain?.minY ?? 0) - CanvasBand.captionHeight)
+    #expect(captioned?.maxY == plain?.maxY)
   }
 
   @Test
-  func aGraphWithNoCardsHasNoOrigin() {
-    // An origin with nothing hanging off it is a dot in an empty field, and the canvas's
-    // empty state already explains itself. Nothing to originate, nothing to draw.
-    #expect(CanvasStart.origin(of: []) == nil)
+  func anEmptyCanvasHasNoBand() {
+    // A band around nothing is a rectangle on a blank pane, and `CanvasEmptyState` is
+    // already explaining that.
+    #expect(CanvasBand.rect(around: [], cardSize: Self.card, captioned: true) == nil)
+  }
+}
+
+/// Where an edge stops and which way it points. Pure arithmetic on canvas coordinates,
+/// which is the whole reason it can be checked here: the canvas applies its own
+/// `scaleEffect`, so an anchor that lands on the card's border at 100% lands there at
+/// 40% and 250% too — the three zoom levels the manual script asks for.
+@Suite
+struct CanvasEdgeGeometryTests {
+  fileprivate static let card = CGSize(width: 250, height: 106)
+
+  @Test
+  func theHeadStopsOnTheCardsBorderRatherThanUnderIt() {
+    // Straight in from the left: the head belongs on the leading edge, half a card's
+    // width back from the centre.
+    let anchor = CanvasEdgeGeometry.anchor(
+      from: CGPoint(x: 100, y: 300), to: CGPoint(x: 600, y: 300), cardSize: Self.card)
+
+    #expect(anchor == CGPoint(x: 600 - Self.card.width / 2, y: 300))
+  }
+
+  @Test
+  func aSteepEdgeStopsOnTheTopBorderInsteadOfTheSide() {
+    // Trimming by half-width alone would leave the head floating well above a card
+    // approached from directly overhead.
+    let anchor = CanvasEdgeGeometry.anchor(
+      from: CGPoint(x: 600, y: 0), to: CGPoint(x: 600, y: 300), cardSize: Self.card)
+
+    #expect(anchor == CGPoint(x: 600, y: 300 - Self.card.height / 2))
+  }
+
+  @Test
+  func theAnchorIsAlwaysOnTheBorderWhateverTheAngle() {
+    let centre = CGPoint(x: 600, y: 300)
+    for degrees in stride(from: 0, to: 360, by: 15) {
+      let radians = Double(degrees) * .pi / 180
+      let source = CGPoint(x: centre.x + cos(radians) * 400, y: centre.y + sin(radians) * 400)
+      let anchor = CanvasEdgeGeometry.anchor(from: source, to: centre, cardSize: Self.card)
+
+      let dx = abs(anchor.x - centre.x)
+      let dy = abs(anchor.y - centre.y)
+      // On the border means: one axis is exactly at its half-extent, neither is past it.
+      let onEdge =
+        abs(dx - Self.card.width / 2) < 0.001 || abs(dy - Self.card.height / 2) < 0.001
+      #expect(onEdge)
+      #expect(dx <= Self.card.width / 2 + 0.001)
+      #expect(dy <= Self.card.height / 2 + 0.001)
+    }
+  }
+
+  @Test
+  func aDegenerateEdgeDrawsNoHeadRatherThanOnePointingNowhere() {
+    let point = CGPoint(x: 40, y: 40)
+    #expect(
+      CanvasEdgeGeometry.anchor(from: point, to: point, cardSize: Self.card) == point)
+    #expect(CanvasEdgeGeometry.arrowhead(at: point, from: point).isEmpty)
+  }
+
+  @Test
+  func theHeadPointsTheWayTheEdgeTravels() {
+    let corners = CanvasEdgeGeometry.arrowhead(
+      at: CGPoint(x: 300, y: 100), from: CGPoint(x: 100, y: 100))
+
+    #expect(corners.count == 3)
+    #expect(corners[0] == CGPoint(x: 300, y: 100))
+    // The two back corners sit one arrow-length behind the tip, either side of the line.
+    #expect(corners.dropFirst().allSatisfy { $0.x == 300 - CanvasEdgeGeometry.arrowLength })
+    #expect(
+      abs(corners[1].y - corners[2].y) == CanvasEdgeGeometry.arrowWidth)
+  }
+
+  @Test
+  func bothEndsAttachAtTheCardsVerticalMiddles() {
+    // Corner anchors read as plumbing routed around an obstacle. Middle-to-middle reads
+    // as one loop handing to another, which is what it is.
+    let source = CGPoint(x: 200, y: 300)
+    let target = CGPoint(x: 800, y: 460)
+
+    let exit = CanvasEdgeGeometry.exit(from: source, toward: target, cardSize: Self.card)
+    let entry = CanvasEdgeGeometry.entry(at: target, from: source, cardSize: Self.card)
+
+    #expect(exit == CGPoint(x: source.x + Self.card.width / 2, y: source.y))
+    #expect(entry == CGPoint(x: target.x - Self.card.width / 2, y: target.y))
+  }
+
+  @Test
+  func anEdgeRunningRightToLeftLeavesAndArrivesOnTheFacingSides() {
+    let source = CGPoint(x: 800, y: 300)
+    let target = CGPoint(x: 200, y: 300)
+
+    #expect(
+      CanvasEdgeGeometry.exit(from: source, toward: target, cardSize: Self.card)
+        == CGPoint(x: source.x - Self.card.width / 2, y: source.y))
+    #expect(
+      CanvasEdgeGeometry.entry(at: target, from: source, cardSize: Self.card)
+        == CGPoint(x: target.x + Self.card.width / 2, y: target.y))
+  }
+
+  @Test
+  func controlPointsStayBetweenTheEndsRatherThanOvershooting() {
+    // The single thing that made the mocks read as pipework: a control past the far end
+    // makes the curve leave the source heading away from the target and double back.
+    for (start, end) in [
+      (CGPoint(x: 0, y: 0), CGPoint(x: 400, y: 120)),
+      (CGPoint(x: 400, y: 0), CGPoint(x: 0, y: 120)),
+      (CGPoint(x: 0, y: 0), CGPoint(x: 12, y: 200)),
+    ] {
+      let (first, second) = CanvasEdgeGeometry.controls(from: start, to: end)
+      let low = min(start.x, end.x)
+      let high = max(start.x, end.x)
+      // Monotone in x: each control is on its own side of the span, never past the other
+      // endpoint by more than the minimum reach that keeps a near-vertical edge curved.
+      #expect(first.x >= min(low, start.x) - 0.001)
+      #expect(second.x <= max(high, end.x) + 26.001)
+      // Horizontal-out and horizontal-in: the controls share their endpoint's y, which
+      // is what makes the curve leave and arrive level.
+      #expect(first.y == start.y)
+      #expect(second.y == end.y)
+    }
+  }
+
+  @Test
+  func theHeadPointsAlongTheCurvesArrivalRatherThanTheStraightLine() {
+    // On a curve those differ, and a head that ignores the difference sits askew on the
+    // border it lands on.
+    let start = CGPoint(x: 0, y: 0)
+    let end = CGPoint(x: 300, y: 200)
+    let (_, second) = CanvasEdgeGeometry.controls(from: start, to: end)
+    let approach = CanvasEdgeGeometry.arrivalTangent(control: second, end: end)
+
+    // The tangent continues past the end on the line from the last control, so the head
+    // is aimed level — the same direction the curve is travelling as it lands.
+    #expect(approach.y == end.y)
+    #expect(approach.x > end.x)
   }
 }

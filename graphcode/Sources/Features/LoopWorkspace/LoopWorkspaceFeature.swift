@@ -17,6 +17,14 @@ struct LoopWorkspaceFeature {
   @ObservableState
   struct State: Equatable, Identifiable {
     var node: LoopNode
+    /// The graph this loop belongs to, so the workspace can say what it hands off to
+    /// without the terminal having to be closed to find out. Kept in sync by
+    /// `AppFeature` alongside `node`, from the same broadcast — see the right rail
+    /// (`LoopWorkspaceRail`), which is the only thing that reads it.
+    ///
+    /// A quick chat passes an empty one: it belongs to no graph, which is exactly what
+    /// the rail should then have to say about it.
+    var graph = LoopGraph(scope: .global)
     var layout: TerminalLayout
     // The project folder every surface without its own worktree binding should open
     // in — a loop's shells shouldn't land in the app's own launch directory (usually
@@ -44,6 +52,13 @@ struct LoopWorkspaceFeature {
     case focusPreviousPane
     case paneClosed(tabID: UUID, surfaceID: UUID)
     case primarySurfaceExited(succeeded: Bool)
+    /// The loop bar's Stop loop and Show in graph, and the right rail's downstream rows.
+    /// All three are `AppFeature`'s to carry out — stopping talks to the daemon, and both
+    /// of the others change what the whole window is showing — so they are declared here
+    /// and handled up there, the way `.nodeTapped` already is.
+    case stopLoopTapped
+    case showInGraphTapped
+    case railTargetTapped(UUID)
   }
 
   @Dependency(\.terminalLayoutStore) var terminalLayoutStore
@@ -161,6 +176,10 @@ struct LoopWorkspaceFeature {
       // which is what triggers automatic outgoing-edge firing.
       case .primarySurfaceExited(let succeeded):
         state.node.state = succeeded ? .succeeded : .failed
+        return .none
+
+      case .stopLoopTapped, .showInGraphTapped, .railTargetTapped:
+        // Handled by `AppFeature`'s parent `Reduce` — see the actions' own doc comment.
         return .none
       }
     }

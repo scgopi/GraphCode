@@ -23,7 +23,10 @@ struct LoopRenameTests {
   func renamingChangesTheTitleAndNothingElse() async {
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "Reserch", loopType: .turnBased, checkDescription: "Sound?")))
+      .createNode(
+        NodeDraft(
+          title: "Reserch", loopType: .turnBased, checkDescription: "Sound?",
+          firstInstruction: "Work")))
     let before = await store.graph.nodes[0]
 
     await store.handle(.renameNode(before.id, title: "Research"))
@@ -44,7 +47,10 @@ struct LoopRenameTests {
     let store = GraphStore()
     for title in ["Research", "Implement"] {
       await store.handle(
-        .createNode(NodeDraft(title: title, loopType: .turnBased, checkDescription: "?")))
+        .createNode(
+          NodeDraft(
+            title: title, loopType: .turnBased, checkDescription: "?",
+            firstInstruction: "Work")))
     }
     let nodes = await store.graph.nodes
     await store.handle(.createEdge(from: nodes[0].id, to: nodes[1].id, spec: EdgeSpec()))
@@ -64,7 +70,10 @@ struct LoopRenameTests {
     // unreachable in the sidebar and there is no undo to reach for.
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "Research", loopType: .turnBased, checkDescription: "?",
+          firstInstruction: "Work")))
     let nodeID = await store.graph.nodes[0].id
 
     await store.handle(.renameNode(nodeID, title: "   "))
@@ -76,7 +85,10 @@ struct LoopRenameTests {
   func surroundingWhitespaceIsTrimmed() async {
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "Research", loopType: .turnBased, checkDescription: "?",
+          firstInstruction: "Work")))
     let nodeID = await store.graph.nodes[0].id
 
     await store.handle(.renameNode(nodeID, title: "  Research  "))
@@ -90,7 +102,10 @@ struct LoopRenameTests {
     // long as it takes a deletion to broadcast.
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "Research", loopType: .turnBased, checkDescription: "?",
+          firstInstruction: "Work")))
 
     await store.handle(.renameNode(UUID(), title: "Something else"))
 
@@ -105,7 +120,10 @@ struct LoopRenameTests {
     let saved = GraphBox()
     let store = GraphStore(onGraphChanged: { graph in Task { await saved.record(graph) } })
     await store.handle(
-      .createNode(NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "Research", loopType: .turnBased, checkDescription: "?",
+          firstInstruction: "Work")))
     let nodeID = await store.graph.nodes[0].id
 
     await store.handle(.renameNode(nodeID, title: "Research (v2)"))
@@ -126,7 +144,9 @@ struct LoopRenameTests {
       .subGraphCommand(
         nodeID: compositeID,
         command: .createNode(
-          NodeDraft(title: "Trige", loopType: .turnBased, checkDescription: "?"))))
+          NodeDraft(
+            title: "Trige", loopType: .turnBased, checkDescription: "?",
+            firstInstruction: "Work"))))
     let innerID = await store.graph.nodes[id: compositeID]?.subGraph?.nodes[0].id
 
     await store.handle(

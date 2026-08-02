@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 """Render the app icon set from the master artwork.
 
-The artwork itself (`icon-master-1024.png`) is the source of truth and is never
-written to — every PNG in `AppIcon.appiconset` is derived from it here, so the sizes
-can't drift apart and a tweak means re-running this rather than editing seven files.
+The artwork (`icon-master-1024.png`, drawn by `make-master.py`) is the source of truth
+and is never written to — every PNG in `AppIcon.appiconset` is derived from it here, so
+the sizes can't drift apart and a tweak means re-running this rather than editing seven
+files.
 
-Two adjustments are applied, in order:
+**Both adjustments below are off by default now.** They existed to compensate for the
+previous hand-produced master: its halos decayed within 2-3% of the icon width and its
+tile was twice as bright at the top as the bottom. The master is drawn from the design
+spec's own numbers, so a pass that re-lights or re-darkens it is a pass that overrides
+the colours the spec fixed — the body came out near-black (rgb 36,36,40 against a
+specified #3E3E47) and the node glow the spec deliberately replaced with a drop shadow
+came back. Both flags remain for re-tuning artwork that needs them.
+
+The two adjustments, when enabled:
 
 1. A glow pass. The master's halos decay within ~2-3% of the icon width and the tile
    gradient is twice as bright at the top as the bottom, so out of the box the upper
@@ -25,9 +34,9 @@ simplified three-node variant whose strokes survive the downscale (the full four
 graph mushes into noise below 48 px).
 
 Usage:
-    python3 Tools/icon/render-appicon.py                # default glow + darkening
-    python3 Tools/icon/render-appicon.py --no-glow      # skip the glow pass
-    python3 Tools/icon/render-appicon.py --darken 1.0   # skip the darkening
+    python3 Tools/icon/render-appicon.py                # the master, unaltered
+    python3 Tools/icon/render-appicon.py --glow         # re-light a master with weak halos
+    python3 Tools/icon/render-appicon.py --darken 0.45  # the old tuning
     python3 Tools/icon/render-appicon.py --preview      # write a before/after strip
 """
 
@@ -57,7 +66,7 @@ NODE_LUMA = 0.62
 # trades a little of that match for halo contrast — it lifts the glow-to-background
 # ratio from 1.36 to 1.43, which is where the nodes start to read as lit at Dock sizes
 # without the squircle edge dissolving into a dark desktop (0.32 crosses that line).
-DEFAULT_DARKEN = 0.45
+DEFAULT_DARKEN = 1.0
 
 # Halo gains, tuned so the top-left node's halo sits ~0.08 luminance above the tile
 # where it used to sit ~0.03 (imperceptible), while the node edges stay hard.
@@ -124,7 +133,9 @@ def sample(image: Image.Image, label: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--darken", type=float, default=DEFAULT_DARKEN)
-    parser.add_argument("--no-glow", action="store_true")
+    parser.add_argument(
+        "--glow", action="store_true",
+        help="re-light the nodes; only needed by a master whose halos decay too fast")
     parser.add_argument(
         "--preview",
         nargs="?",
@@ -134,14 +145,14 @@ def main() -> None:
 
     def render(path: Path) -> Image.Image:
         image = Image.open(path).convert("RGBA")
-        if not args.no_glow:
+        if args.glow:
             image = glow(image)
         return darken(image, args.darken)
 
     master = Image.open(MASTER).convert("RGBA")
     rendered = render(MASTER)
 
-    print(f"darken factor {args.darken}, glow {'off' if args.no_glow else 'on'}")
+    print(f"darken factor {args.darken}, glow {'on' if args.glow else 'off'}")
     sample(master, "before")
     sample(rendered, "after")
 

@@ -75,6 +75,21 @@ struct AppFeature {
     /// sidebar's help button asks for it again.
     var showingOnboarding = false
 
+    /// The loop ⌘⇧R landed on last, so pressing it again moves to the next one waiting
+    /// instead of re-opening the same loop forever. View state only, and deliberately
+    /// not persisted: a queue position is about this sitting, not about this graph.
+    var lastReviewedNodeID: UUID?
+
+    /// ⌘K's jump palette — see `AppFeature+JumpPalette.swift`.
+    var isJumpPresented = false
+    var jumpQuery = ""
+    var jumpSelection = 0
+
+    /// State changes seen since launch, for the activity strip — see
+    /// `AppFeature+Activity.swift`. Bounded, and deliberately not persisted.
+    var activityLog: [ActivityEvent] = []
+    var activityFilterIsAttention = false
+
     /// The orchestrator's needs-attention rollup, across every open project
     /// (docs/05-orchestrator.md#monitoring-surface). Derived rather than stored: it's a
     /// pure function of the graphs the daemon already broadcasts, and a cached copy
@@ -146,6 +161,17 @@ struct AppFeature {
     case openLoop(LoopWorkspaceFeature.Action)
     /// Jump straight to the loop that needs a human, from the monitor's rollup.
     case attentionItemTapped(AttentionItem)
+    /// ⌘⇧R and the canvas rail's Review button — open the loop that has been waiting
+    /// longest, then the next one on each press. See `reviewNextAttentionItem`.
+    case reviewAttentionTapped
+    /// The activity strip's "Only attention" filter — see `ActivityStripView`.
+    case activityFilterToggled
+    /// ⌘K's jump palette — see `JumpPalette`.
+    case jumpPaletteRequested
+    case jumpPaletteDismissed
+    case jumpQueryChanged(String)
+    case jumpSelectionMoved(Int)
+    case jumpItemSelected(JumpPalette.Result)
     /// ⇧⌘] / ⇧⌘[ — step the open workspace to the next/previous loop in sidebar order,
     /// across every open project. See `stepOpenLoop`.
     case selectNextLoop
@@ -191,6 +217,7 @@ struct AppFeature {
     // actions, kept in one place of its own because chats are a whole surface (a sidebar
     // section, a canvas, and two dialogs) that has nothing to do with projects or graphs.
     quickChatsReducer
+    jumpPaletteReducer
     Reduce { state, action in
       switch action {
       case .task:
@@ -230,6 +257,11 @@ struct AppFeature {
           // banner was up (a dead-daemon Add Folder, say) is stale now.
           state.welcome.errorMessage = nil
           let path = graph.project.path
+          // Before the graph is replaced: what changed between the two is the only
+          // record anyone has of *when* a loop changed state. See `recordActivity`.
+          Self.recordActivity(
+            previous: state.projects[id: path]?.graph, next: graph, path: path,
+            at: Date(), into: &state.activityLog)
           guard state.projects[id: path] != nil else {
             // Not an already-open project — this snapshot is the reply to the
             // `.openProject` that just added it, i.e. this *is* "project opened."
@@ -252,6 +284,9 @@ struct AppFeature {
           if let openLoop = state.openLoop, openLoop.projectPath == path {
             if let updated = graph.nodes[id: openLoop.node.id] {
               state.openLoop?.node = updated
+              // The rail's downstream list comes off this — a handoff drawn while the
+              // terminal is up should appear there without reopening the workspace.
+              state.openLoop?.graph = graph
             } else {
               // The loop was deleted out from under its own terminal — easy to do now
               // that the sidebar can delete a loop while its workspace is the visible
@@ -344,6 +379,20 @@ struct AppFeature {
         return .send(
           .projects(.element(id: item.projectPath, action: .nodeTapped(item.nodeID))))
 
+      case .activityFilterToggled:
+        state.activityFilterIsAttention.toggle()
+        return .none
+
+      case .reviewAttentionTapped:
+        guard let item = reviewNextAttentionItem(&state) else { return .none }
+        return .send(.attentionItemTapped(item))
+
+      // Every ⌘K action is handled by `jumpPaletteReducer`, in
+      // `AppFeature+JumpPalette.swift` — listed here only so this switch stays exhaustive.
+      case .jumpPaletteRequested, .jumpPaletteDismissed, .jumpQueryChanged,
+        .jumpSelectionMoved, .jumpItemSelected:
+        return .none
+
       case .selectNextLoop:
         return stepOpenLoop(state, by: 1)
 
@@ -394,6 +443,7 @@ struct AppFeature {
         let layout = terminalLayoutStore.load(forNode: nodeID) ?? .defaultLayout(forNode: nodeID)
         state.openLoop = LoopWorkspaceFeature.State(
           node: node,
+          graph: state.projects[id: path]?.graph ?? LoopGraph(scope: .global),
           layout: layout,
           projectPath: path,
           projectName: state.projects[id: path]?.graph.project.name ?? path)
@@ -416,6 +466,24 @@ struct AppFeature {
           try? await orchestratorClient.send(
             .graphCommand(projectPath: projectPath, command: command))
         }
+
+      case .openLoop(.stopLoopTapped):
+        guard let id = state.openLoop?.node.id, let path = state.openLoop?.projectPath
+        else { return .none }
+        return .send(.stopNodeTapped(projectPath: path, nodeID: id))
+
+      case .openLoop(.showInGraphTapped):
+        // Closing the workspace *without* ending its terminals: the loop keeps running,
+        // you are just looking at the graph again. `closeOpenWorkspace` is the other
+        // thing, for when the loop itself is going away.
+        guard let path = state.openLoop?.projectPath else { return .none }
+        state.openLoop = nil
+        state.selectedProjectPath = path
+        return .none
+
+      case .openLoop(.railTargetTapped(let nodeID)):
+        guard let path = state.openLoop?.projectPath else { return .none }
+        return .send(.projects(.element(id: path, action: .nodeTapped(nodeID))))
 
       case .openLoop, .welcome, .projects:
         return .none
@@ -456,6 +524,31 @@ struct AppFeature {
     // workspace under the user's keystroke.
     guard target.nodeID != state.openLoop?.node.id else { return .none }
     return .send(.projects(.element(id: target.projectPath, action: .nodeTapped(target.nodeID))))
+  }
+
+  /// The next loop for a human to look at: oldest waiting first, then the one after it
+  /// on each press, wrapping when the queue runs out.
+  ///
+  /// Oldest-first and not worst-first, which is what the *list* is ordered by. A queue
+  /// you work through is not a list you read: the thing ignored longest is the one to
+  /// do next, and it also guarantees repeat presses move — a worst-first cursor would
+  /// land on the same failure every time until someone dealt with it.
+  ///
+  /// Cycling on the node id rather than an index: the queue is rebuilt from live graphs
+  /// between presses, and an index into a list that just lost an entry points at a
+  /// different loop than the one it did a moment ago.
+  private func reviewNextAttentionItem(_ state: inout State) -> AttentionItem? {
+    let queue = state.attentionItems.oldestFirst
+    guard !queue.isEmpty else {
+      state.lastReviewedNodeID = nil
+      return nil
+    }
+    let previous = state.lastReviewedNodeID.flatMap { id in
+      queue.firstIndex { $0.nodeID == id }
+    }
+    let item = queue[previous.map { ($0 + 1) % queue.count } ?? 0]
+    state.lastReviewedNodeID = item.nodeID
+    return item
   }
 
   /// Shared by all three context-menu verbs — they differ only in what they ask the

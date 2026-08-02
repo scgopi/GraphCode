@@ -142,4 +142,61 @@ enum Theme {
   /// strip the way a real terminal app's active tab does, without reaching for the
   /// system accent color (this isn't a selection, it's "what's showing").
   static let tabSelectedBackground = Color(red: 0.235, green: 0.245, blue: 0.267)
+
+  /// A loop card, lit from above like the rest of the painted chrome.
+  ///
+  /// Paint rather than `.regularMaterial`, which is what cards used to be: at 106pt tall
+  /// a card is four rows of small type, and glass let the wallpaper under it decide how
+  /// much contrast a state pill and a mono meta row had. The canvas keeps its glass; the
+  /// things you read on it hold still.
+  static let loopCard = LinearGradient(
+    colors: [
+      Color(red: 0.173, green: 0.173, blue: 0.188),  // #2c2c30
+      Color(red: 0.137, green: 0.137, blue: 0.149),  // #232326
+    ],
+    startPoint: .top,
+    endPoint: .bottom)
+
+  /// The same card with the warmth of the attention orange mixed into it — enough that a
+  /// card wanting a human reads as a different object from across a zoomed-out graph,
+  /// not so much that it becomes an alert.
+  static let loopCardAttention = LinearGradient(
+    colors: [
+      Color(red: 0.188, green: 0.165, blue: 0.133),  // #302a22
+      Color(red: 0.149, green: 0.133, blue: 0.125),  // #262220
+    ],
+    startPoint: .top,
+    endPoint: .bottom)
+
+  /// The workspace's loop bar — the band carrying the loop itself over its terminals.
+  /// Lit like `tabBarGloss` and a step lighter, so the two strips read as one piece of
+  /// chrome with the loop above the tabs rather than as two competing headers.
+  static let loopBar = LinearGradient(
+    colors: [
+      Color(red: 0.141, green: 0.141, blue: 0.165),  // #24242a
+      Color(red: 0.118, green: 0.118, blue: 0.133),  // #1e1e22
+    ],
+    startPoint: .top,
+    endPoint: .bottom)
+
+  /// The workspace's right rail and a pane header's focused tint.
+  static let workspaceRail = Color(red: 0.114, green: 0.114, blue: 0.129)  // #1d1d21
+  static let paneFocusTint = Color(red: 0.039, green: 0.518, blue: 1.0)  // #0a84ff
+
+  /// The activity strip along the window's bottom edge — a shade off the rail's tone,
+  /// so the two pieces of chrome that frame the canvas read as the same material.
+  static let activityStrip = Color(red: 0.114, green: 0.114, blue: 0.125)  // #1d1d20
+
+  /// The new-loop sheet and the fields on it.
+  static let sheet = Color(red: 0.165, green: 0.165, blue: 0.180)  // #2a2a2e
+  static let draftField = Color(red: 0.118, green: 0.118, blue: 0.133)  // #1e1e22
+  /// The onboarding sheet, a shade deeper than the dialog: it is a full-bleed page
+  /// rather than a panel over a canvas.
+  static let onboardingSheet = Color(red: 0.137, green: 0.137, blue: 0.149)  // #232326
+
+  /// A loop card's hairline. The attention variant is the orange itself: the border is
+  /// the cheapest ring to read at 40% zoom, and at that size it is doing the work the
+  /// pill's word does up close.
+  static let loopCardBorder = Color.white.opacity(0.09)
+  static let loopCardAttentionBorder = Color(red: 1.0, green: 0.624, blue: 0.039).opacity(0.55)
 }

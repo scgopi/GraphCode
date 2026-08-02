@@ -219,6 +219,15 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// imposing — so it became a setting, defaulted to the behaviour people expected.
   public var autoSelectsModel: Bool
 
+  /// Whether the window carries the activity strip along its bottom edge.
+  ///
+  /// **Off by default**, and the reason is the strip's own honesty: it is *derived*
+  /// rather than logged (see the app's `ActivityFeed`), so it starts empty at every
+  /// launch and knows only the state changes it has watched since. That is genuinely
+  /// useful during a working session and genuinely thin the moment you relaunch, which
+  /// is a trade worth offering and not worth imposing.
+  public var showsActivityStrip: Bool
+
   // There is deliberately no window-opacity setting here any more. graphcode used to own
   // one and apply it as `NSWindow.alphaValue`, which fades the whole window — terminal
   // text included — rather than only the background behind it. Ghostty already has
@@ -232,7 +241,8 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     claudePermissionMode: ClaudePermissionMode = .auto,
     copilotPermissions: CopilotPermissions = .allowEverything,
     briefsSessionsAboutTheGraph: Bool = true,
-    autoSelectsModel: Bool = false
+    autoSelectsModel: Bool = false,
+    showsActivityStrip: Bool = false
   ) {
     self.defaultBackend = defaultBackend.isSpiked ? defaultBackend : .claudeCode
     self.codexApprovals = codexApprovals
@@ -240,6 +250,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     self.copilotPermissions = copilotPermissions
     self.briefsSessionsAboutTheGraph = briefsSessionsAboutTheGraph
     self.autoSelectsModel = autoSelectsModel
+    self.showsActivityStrip = showsActivityStrip
   }
 
   /// Decoding tolerates a file written by an older or newer graphcode: a missing key takes
@@ -266,5 +277,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     // the fix has to reach people who already have a settings file, not just new ones.
     autoSelectsModel =
       try container.decodeIfPresent(Bool.self, forKey: .autoSelectsModel) ?? false
+    showsActivityStrip =
+      try container.decodeIfPresent(Bool.self, forKey: .showsActivityStrip) ?? false
   }
 }

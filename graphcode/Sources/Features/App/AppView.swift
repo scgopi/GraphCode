@@ -12,7 +12,27 @@ import SwiftUI
 struct AppView: View {
   @Bindable var store: StoreOf<AppFeature>
 
+  /// What the activity strip's clock reads — the window's one 30s tick, shared with the
+  /// canvases' cards. See `CanvasClock`.
+  @State private var now = Date()
+  /// Read once at launch, like every other `GraphcodeSettings` value the app uses: the
+  /// file is the daemon's too, and re-reading it per body pass would put a disk hit on
+  /// the render path.
+  @State private var showsActivityStrip = GraphcodeSettingsStore.load().showsActivityStrip
+
   var body: some View {
+    VStack(spacing: 0) {
+      split
+      // Full width, under the sidebar as well as the canvas: what happened happened to
+      // the workspace, not to whichever pane is on screen.
+      if showsActivityStrip {
+        ActivityStripView(store: store, now: now)
+      }
+    }
+    .onReceive(CanvasClock.tick) { now = $0 }
+  }
+
+  private var split: some View {
     NavigationSplitView {
       AppSidebarView(store: store)
     } detail: {
@@ -38,6 +58,17 @@ struct AppView: View {
     // gone with it: an opaque fill behind the sidebar's own material dulled the very
     // effect the sidebar was switched to.
     .containerBackground(.ultraThinMaterial, for: .window)
+    // The one strip on screen whatever pane is showing — including a full-window
+    // terminal, which is where the graph is furthest away. See `StatusRollupView`.
+    .toolbar {
+      ToolbarItem(placement: .principal) {
+        StatusRollupView(
+          graphs: store.projects.map(\.graph), attention: store.attentionItems.count)
+      }
+      ToolbarItem(placement: .primaryAction) {
+        JumpFieldButton { store.send(.jumpPaletteRequested) }
+      }
+    }
     // The toolbar deliberately keeps its own system material rather than being painted
     // black to match: `.toolbarBackground(_:for: .windowToolbar)` does darken the
     // titlebar band, and it was tried — a black titlebar over a black terminal loses the
@@ -47,6 +78,15 @@ struct AppView: View {
     // in light mode the system's near-black label colors would land on it unreadable.
     .preferredColorScheme(.dark)
     .background(loopCycleShortcuts)
+    // Hosted here for the reason the rename and delete prompts are: ⌘K has to open over
+    // a terminal as readily as over a canvas, and only one of those is ever on screen.
+    .sheet(
+      isPresented: Binding(
+        get: { store.isJumpPresented },
+        set: { if !$0 { store.send(.jumpPaletteDismissed) } })
+    ) {
+      JumpPaletteView(store: store)
+    }
     .task { await store.send(.task).finish() }
     .confirmationDialog(
       // Naming the loop matters here in a way it didn't on the canvas: from the sidebar
@@ -135,6 +175,13 @@ struct AppView: View {
         .keyboardShortcut("]", modifiers: [.command, .shift])
       Button("") { store.send(.selectPreviousLoop) }
         .keyboardShortcut("[", modifiers: [.command, .shift])
+      // ⌘⇧R belongs on the window, not on the canvas that draws the rail: the loop you
+      // need to answer is most often the one you can't see, because you are inside a
+      // terminal working on a different one.
+      Button("") { store.send(.reviewAttentionTapped) }
+        .keyboardShortcut("r", modifiers: [.command, .shift])
+      Button("") { store.send(.jumpPaletteRequested) }
+        .keyboardShortcut("k", modifiers: .command)
     }
     .frame(width: 0, height: 0)
     .opacity(0)

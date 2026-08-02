@@ -6,8 +6,8 @@ import Testing
 @testable import graphcode
 
 /// The Graph view's layout (docs/06-ux-terminals.md#the-graph-view) — every open
-/// folder's loops on one canvas, hanging off a single start node, with each composite's
-/// sub-graph drawn inside the card that owns it.
+/// folder's loops on one canvas, each folder in a lane band of its own, with each
+/// composite's sub-graph drawn inside the card that owns it.
 ///
 /// Tested as a pure value rather than through the view: what matters is that nothing in
 /// the workspace can be missing from the picture and that everything drawn has somewhere
@@ -18,43 +18,76 @@ struct GraphOverviewTests {
   private static let projectB = ProjectRef(path: "/tmp/project-b", name: "project-b")
 
   @Test
-  func everyOpenFolderGetsALaneTetheredToTheOneStartNode() {
+  func everyOpenFolderGetsALaneBandOfItsOwn() {
     let overview = GraphOverview(graphs: [
       LoopGraph(scope: .global),
       LoopGraph(project: Self.projectA, nodes: [LoopNode(title: "A", checkDescription: "?")]),
       LoopGraph(project: Self.projectB),
     ])
 
-    // Two folders, not three: the global graph gets no chip of its own. A chip labelled
-    // "Graph" inside the Graph, tethered to the Graph's start node, says nothing.
+    // Two lanes, not three: an empty global graph is dropped outright. A *folder* with
+    // no loops still gets one — that's how the overview says "nothing here yet" rather
+    // than omitting the folder entirely.
     #expect(overview.folders.map(\.path) == [Self.projectA.path, Self.projectB.path])
-    // A *folder* with no loops still gets a lane — that's how the overview says "nothing
-    // here yet" rather than omitting the folder entirely.
-    #expect(overview.folders.map(\.path).contains(Self.projectB.path))
-
-    let tethered = Set(
-      overview.links.filter { $0.kind == .tether && $0.from == overview.start }.map(\.to))
-    #expect(tethered == Set(overview.folders.map(\.position)))
+    // The bands stack rather than overlap; that they do is the whole grouping claim.
+    let bands = overview.folders.map(\.band)
+    #expect(bands.allSatisfy { $0.height > 0 && $0.width > 0 })
+    #expect(bands[0].maxY < bands[1].minY)
   }
 
   @Test
-  func theGlobalGraphsOwnTriggersHangStraightOffTheStartNode() {
-    // No chip for the Graph, but its triggers are loops like any other and still have to
-    // be visible — they're entry points that belong to no folder, so the start node is
-    // exactly what they hang from.
+  func aLoopSitsInsideItsOwnFoldersBand() {
+    // The band replaced a chip and a tether: "these loops belong to this folder" is now
+    // said by containment, so containment is what has to hold.
+    let overview = GraphOverview(graphs: [
+      LoopGraph(
+        project: Self.projectA,
+        nodes: [LoopNode(title: "A", checkDescription: "?"), LoopNode(title: "B")]),
+      LoopGraph(project: Self.projectB, nodes: [LoopNode(title: "C")]),
+    ])
+
+    for loop in overview.loops {
+      let band = overview.folders.first { $0.path == loop.projectPath }?.band
+      #expect(band?.contains(loop.position) == true)
+    }
+  }
+
+  @Test
+  func theGlobalGraphsOwnTriggersGetALaneThatIsNotNamedGraph() {
+    // Its triggers are loops like any other and still have to be visible — but a band
+    // labelled "Graph" inside the Graph says nothing you didn't know from having clicked
+    // Graph to get here. It is captioned for what it is: loops belonging to no folder.
     let trigger = LoopNode(title: "watch inbox", loopType: .timeBased, triggerPrompt: "/loop 1h")
     let overview = GraphOverview(graphs: [
       LoopGraph(scope: .global, nodes: [trigger]),
       LoopGraph(project: Self.projectA, nodes: [LoopNode(title: "A", checkDescription: "?")]),
     ])
 
-    #expect(overview.folders.count == 1)
+    #expect(overview.folders.count == 2)
+    let global = overview.folders.first { $0.isGlobal }
+    #expect(global?.name != "Graph")
     let triggerCard = overview.loops.first { $0.id == trigger.id }
-    #expect(triggerCard != nil)
-    #expect(
-      overview.links.contains {
-        $0.kind == .tether && $0.from == overview.start && $0.to == triggerCard?.position
-      })
+    #expect(global?.band.contains(triggerCard?.position ?? .zero) == true)
+  }
+
+  @Test
+  func aLanesCaptionCountsOffTheSameRollupTheMonitorReads() {
+    // Not a second count: the second half names the graph's own `aggregateState` and
+    // counts the nodes in it, so a lane can't call a folder fine while the sidebar's
+    // monitor says it isn't.
+    let running = LoopGraph(
+      project: Self.projectA,
+      nodes: [
+        LoopNode(title: "a", state: .running), LoopNode(title: "b", state: .running),
+        LoopNode(title: "c", state: .idle),
+      ])
+    let broken = LoopGraph(
+      project: Self.projectB,
+      nodes: [LoopNode(title: "d", state: .failed), LoopNode(title: "e", state: .running)])
+
+    #expect(GraphOverview.caption(for: running) == "3 loops · 2 running")
+    #expect(GraphOverview.caption(for: broken) == "2 loops · 1 failed")
+    #expect(GraphOverview.caption(for: LoopGraph(project: Self.projectA)) == nil)
   }
 
   @Test
@@ -68,9 +101,8 @@ struct GraphOverviewTests {
     let withoutGlobal = GraphOverview(graphs: [
       LoopGraph(project: Self.projectA, nodes: [LoopNode(title: "A", checkDescription: "?")])
     ])
-    #expect(withGlobal.folders.map(\.position) == withoutGlobal.folders.map(\.position))
+    #expect(withGlobal.folders.map(\.band) == withoutGlobal.folders.map(\.band))
     #expect(withGlobal.loops.map(\.position) == withoutGlobal.loops.map(\.position))
-    #expect(withGlobal.start == withoutGlobal.start)
   }
 
   @Test
@@ -133,12 +165,12 @@ struct GraphOverviewTests {
     }
     #expect(edges.count == 1)
 
-    // `second` is handed off to, so only `first` is an entry point — anchoring both
-    // would say the graph has two beginnings when it has one.
-    let chip = try #require(overview.folders.first).position
+    // Only real edges are drawn now. The tethers that used to say "this is where the
+    // folder begins" are gone with the start marker — the band says it by enclosing them.
+    let band = try #require(overview.folders.first).band
     let entry = try #require(overview.loops.first { $0.id == first.id }).position
-    let anchored = overview.links.filter { $0.kind == .tether && $0.from == chip }.map(\.to)
-    #expect(anchored == [entry])
+    #expect(band.contains(entry))
+    #expect(overview.links.count == 1)
   }
 
   @Test
@@ -179,11 +211,119 @@ struct GraphOverviewTests {
     #expect(!overview.isEmpty)
     #expect(overview.folders.count == 1)
     #expect(overview.loops.isEmpty)
+    // Still a band a row tall, so the lane below doesn't jam against a caption-height
+    // sliver — the same rule the old lane layout had.
+    #expect((overview.folders.first?.band.height ?? 0) > CanvasBand.captionHeight)
   }
 
   @Test
   func theGlobalGraphIsNamedForWhatItShowsRatherThanForTheDaemon() {
     // The sidebar row's label comes straight from here.
     #expect(LoopGraph(scope: .global).project.name == "Graph")
+  }
+
+  @Test
+  func everyRootGetsItsOwnPortRatherThanALineToOneDot() {
+    // The case the start marker failed: ten unwired loops fanned ten tethers out of a
+    // single dot. Roots now carry the fact themselves, so N of them cost N ports.
+    let first = LoopNode(title: "first")
+    let second = LoopNode(title: "second")
+    let third = LoopNode(title: "third")
+    let overview = GraphOverview(graphs: [
+      LoopGraph(
+        project: Self.projectA, nodes: [first, second, third],
+        edges: [
+          LoopEdge(from: first.id, to: third.id), LoopEdge(from: second.id, to: third.id),
+        ])
+    ])
+
+    let roles = Dictionary(
+      uniqueKeysWithValues: overview.loops.map { ($0.node.title, $0.entryRole) })
+    #expect(roles["first"] == .entry)
+    #expect(roles["second"] == .entry)
+    #expect(roles["third"] == .interior)
+    // Two ports, on the leading edge of each root's card, for the band's rail to reach.
+    #expect(overview.folders.first?.entryPorts.count == 2)
+  }
+
+  @Test
+  func aLoopWiredToNothingStillHangsOffTheOrigin() {
+    // It is still marked as the accident it probably is — dashed border, desaturated
+    // stripe — but it gets a port and a line, because a card floating in the middle of a
+    // canvas is how the whole thing went back to reading as scattered cards.
+    let overview = GraphOverview(graphs: [
+      LoopGraph(project: Self.projectA, nodes: [LoopNode(title: "loose")])
+    ])
+
+    #expect(overview.loops.first?.entryRole == .unwired)
+    #expect(overview.folders.first?.entryPorts.count == 1)
+  }
+
+  @Test
+  func beginningsStackDownTheFirstColumnAndChainsFlowRight() {
+    // The layout the origin dot depends on. Filling rows left-to-right put every
+    // rootless card side by side, which hid the fan behind them: cards draw over the
+    // connectors, so they showed only in the gaps and read as card-chained-to-card.
+    let root = LoopNode(title: "root")
+    let downstream = LoopNode(title: "downstream")
+    let loose = LoopNode(title: "loose")
+    let overview = GraphOverview(graphs: [
+      LoopGraph(
+        project: Self.projectA, nodes: [downstream, root, loose],
+        edges: [LoopEdge(from: root.id, to: downstream.id)])
+    ])
+
+    let at = Dictionary(uniqueKeysWithValues: overview.loops.map { ($0.node.title, $0.position) })
+    // Both beginnings in the same column, on different rows.
+    #expect(at["root"]?.x == at["loose"]?.x)
+    #expect(at["root"]?.y != at["loose"]?.y)
+    // The chain continues rightward on its own row.
+    #expect((at["downstream"]?.x ?? 0) > (at["root"]?.x ?? 0))
+    #expect(at["downstream"]?.y == at["root"]?.y)
+  }
+
+  @Test
+  func theOriginDotHasALaneOfItsOwnLeftOfEveryCard() {
+    // It used to sit 34pt left of the leading port, which put it outside the band and
+    // clipped it and its caption against the edge.
+    let overview = GraphOverview(graphs: [
+      LoopGraph(project: Self.projectA, nodes: [LoopNode(title: "a")])
+    ])
+    let band = overview.folders.first?.band
+    let port = overview.folders.first?.entryPorts.first
+
+    #expect((port?.x ?? 0) - (band?.minX ?? 0) >= CanvasBand.originLane)
+  }
+
+  @Test
+  func aCycleOnlyComponentIsMarkedAsOneRatherThanGivenAFakeRoot() {
+    let maker = LoopNode(title: "maker")
+    let reviewer = LoopNode(title: "reviewer")
+    let overview = GraphOverview(graphs: [
+      LoopGraph(
+        project: Self.projectA, nodes: [maker, reviewer],
+        edges: [
+          LoopEdge(from: maker.id, to: reviewer.id),
+          LoopEdge(from: reviewer.id, to: maker.id),
+        ])
+    ])
+
+    #expect(overview.loops.allSatisfy { $0.entryRole == .cycleOnly })
+    // A closed cycle is the one thing that gets neither a port nor a line: every node in
+    // it is handed off to, so there is no honest place for the graph to begin.
+    #expect(overview.folders.first?.entryPorts.isEmpty == true)
+  }
+
+  @Test
+  func aLaneWithNothingHappeningCountsItsBeginningsInstead() {
+    // "10 loops · 10 idle" is a count of the absence of news. How many places the lane
+    // starts is a fact worth the same row.
+    let first = LoopNode(title: "first", state: .idle)
+    let second = LoopNode(title: "second", state: .idle)
+    let graph = LoopGraph(
+      project: Self.projectA, nodes: [first, second],
+      edges: [LoopEdge(from: first.id, to: second.id)])
+
+    #expect(GraphOverview.caption(for: graph) == "2 loops · 1 entry point")
   }
 }

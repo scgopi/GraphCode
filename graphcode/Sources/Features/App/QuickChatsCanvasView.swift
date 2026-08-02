@@ -21,6 +21,12 @@ import SwiftUI
 struct QuickChatsCanvasView: View {
   @Bindable var store: StoreOf<AppFeature>
 
+  /// Narrower than a loop card: a chat has a name and an age, not a state, a goal, and a
+  /// trend. Kept here so the band that encloses these cards knows how wide they are.
+  private static let cardWidth: CGFloat = 220
+  /// Only the band needs this — the card itself is sized by its content.
+  private static let cardHeight: CGFloat = 64
+
   /// Where the canvas is looking. See `CanvasTransform` for why the scale and offset are
   /// one value with arithmetic on it rather than two numbers the gestures nudge.
   @State private var transform = CanvasTransform()
@@ -97,7 +103,7 @@ struct QuickChatsCanvasView: View {
     let content = contentSize(placements)
     return GeometryReader { proxy in
       ZStack {
-        startLayer(placements)
+        bandLayer(placements)
         cardsLayer(placements)
       }
       .scaleEffect(transform.scale)
@@ -147,21 +153,22 @@ struct QuickChatsCanvasView: View {
     )
   }
 
-  /// The origin dot and its tethers. **Emits siblings — never wrap this in a container**:
-  /// every view here is placed with `.position()`, which resolves against its immediate
-  /// parent's frame, so these have to land directly in `canvas`'s pane-filling `ZStack`.
-  /// See `ProjectCanvasView.startLayer` for what wrapping them breaks.
+  /// The band the chats sit in — unlabelled, like a project canvas's, since this pane is
+  /// already entirely Quick Chats. It replaced an origin dot and a tether per card: chats
+  /// hand off to nothing and start nowhere, so lines drawn from a shared origin were
+  /// saying something about them that was never true.
+  ///
+  /// **Emits a sibling — never wrap this in a container**: it is placed with
+  /// `.position()`, which resolves against its immediate parent's frame, so it has to
+  /// land directly in `canvas`'s pane-filling `ZStack`.
   @ViewBuilder
-  private func startLayer(_ placements: [Placement]) -> some View {
-    if let origin = CanvasStart.origin(of: placements.map(\.position)) {
-      ForEach(placements) { placement in
-        Path { path in
-          path.move(to: origin)
-          path.addLine(to: placement.position)
-        }
-        .stroke(Color.secondary.opacity(0.35), lineWidth: 1)
-      }
-      StartMarker().position(origin)
+  private func bandLayer(_ placements: [Placement]) -> some View {
+    let rect = CanvasBand.rect(
+      around: placements.map(\.position),
+      cardSize: CGSize(width: Self.cardWidth, height: Self.cardHeight),
+      captioned: false)
+    if let rect {
+      CanvasBandView(rect: rect)
     }
   }
 
@@ -187,7 +194,7 @@ struct QuickChatsCanvasView: View {
       }
     }
     .padding(10)
-    .frame(width: 220, alignment: .leading)
+    .frame(width: Self.cardWidth, alignment: .leading)
     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
     // A neutral stripe, not one of the four loop-kind hues: those four mean "this is what
     // the loop does", and a fifth colour here would read as a fifth kind of loop rather

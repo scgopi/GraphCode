@@ -16,7 +16,10 @@ struct GraphStoreDeletionTests {
     let store = GraphStore()
     for title in ["A", "B", "C"] {
       await store.handle(
-        .createNode(NodeDraft(title: title, loopType: .turnBased, checkDescription: "?")))
+        .createNode(
+          NodeDraft(
+            title: title, loopType: .turnBased, checkDescription: "?",
+            firstInstruction: "Work")))
     }
     let nodes = await store.graph.nodes
     await store.handle(.createEdge(from: nodes[0].id, to: nodes[1].id, spec: EdgeSpec()))
@@ -33,9 +36,15 @@ struct GraphStoreDeletionTests {
   func deletingANodeUnblocksWhateverWasWaitingOnIt() async {
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "Research", loopType: .turnBased, checkDescription: "?",
+          firstInstruction: "Work")))
     await store.handle(
-      .createNode(NodeDraft(title: "Implement", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "Implement", loopType: .turnBased, checkDescription: "?",
+          firstInstruction: "Work")))
     let nodes = await store.graph.nodes
     await store.handle(.createEdge(from: nodes[0].id, to: nodes[1].id, spec: EdgeSpec()))
     #expect(await store.graph.nodes[id: nodes[1].id]?.state == .blocked)
@@ -52,7 +61,10 @@ struct GraphStoreDeletionTests {
     let store = GraphStore()
     for title in ["A", "B", "Target"] {
       await store.handle(
-        .createNode(NodeDraft(title: title, loopType: .turnBased, checkDescription: "?")))
+        .createNode(
+          NodeDraft(
+            title: title, loopType: .turnBased, checkDescription: "?",
+            firstInstruction: "Work")))
     }
     let nodes = await store.graph.nodes
     await store.handle(.createEdge(from: nodes[0].id, to: nodes[2].id, spec: EdgeSpec()))
@@ -83,9 +95,15 @@ struct GraphStoreDeletionTests {
   func deletingAnEdgeUnblocksItsTarget() async {
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "A", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "A", loopType: .turnBased, checkDescription: "?", firstInstruction: "Work"))
+    )
     await store.handle(
-      .createNode(NodeDraft(title: "B", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "B", loopType: .turnBased, checkDescription: "?", firstInstruction: "Work"))
+    )
     let nodes = await store.graph.nodes
     await store.handle(.createEdge(from: nodes[0].id, to: nodes[1].id, spec: EdgeSpec()))
     let edgeID = await store.graph.edges[0].id
@@ -104,9 +122,15 @@ struct GraphStoreDeletionTests {
     // an inbound edge is not a reason to un-resolve finished work.
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "A", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "A", loopType: .turnBased, checkDescription: "?", firstInstruction: "Work"))
+    )
     await store.handle(
-      .createNode(NodeDraft(title: "B", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "B", loopType: .turnBased, checkDescription: "?", firstInstruction: "Work"))
+    )
     let nodes = await store.graph.nodes
     await store.handle(.createEdge(from: nodes[0].id, to: nodes[1].id, spec: EdgeSpec()))
     await store.handle(.nodeCheckApproved(nodes[0].id))
@@ -122,7 +146,10 @@ struct GraphStoreDeletionTests {
   func deletingSomethingThatIsGoneIsANoOpNotACrash() async {
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "A", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "A", loopType: .turnBased, checkDescription: "?", firstInstruction: "Work"))
+    )
 
     await store.handle(.deleteNode(UUID()))
     await store.handle(.deleteEdge(UUID()))

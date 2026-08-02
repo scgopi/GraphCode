@@ -1,0 +1,222 @@
+import GraphcodeKit
+import SwiftUI
+
+/// The workspace's 212pt right rail — where this loop sits in the graph, what it hands
+/// off to, and how its metric has moved. ⌥G hides it.
+///
+/// Inside a terminal the graph disappears: the one surface that says a loop has a
+/// downstream at all is the canvas, and getting back to it means leaving the work.
+/// This is the graph made reachable without going anywhere — deliberately read-only,
+/// because rewiring belongs on the canvas where you can see what you're rewiring.
+struct LoopWorkspaceRail: View {
+  let node: LoopNode
+  let graph: LoopGraph
+  let now: Date
+  let onTargetTapped: (UUID) -> Void
+
+  static let width: CGFloat = 212
+
+  private var outbound: [(edge: LoopEdge, target: LoopNode)] {
+    graph.edges
+      .filter { $0.from == node.id }
+      .compactMap { edge in
+        guard let target = graph.nodes[id: edge.to] else { return nil }
+        return (edge, target)
+      }
+  }
+
+  private var inbound: [LoopNode] {
+    graph.edges.filter { $0.to == node.id }.compactMap { graph.nodes[id: $0.from] }
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      section("THIS LOOP") {
+        RailMinimap(node: node, upstream: inbound, downstream: outbound.map(\.target))
+      }
+      if !outbound.isEmpty {
+        section("HANDS OFF TO") {
+          VStack(alignment: .leading, spacing: 4) {
+            ForEach(outbound, id: \.edge.id) { handoff in
+              handoffRow(handoff.edge, handoff.target)
+            }
+          }
+        }
+      }
+      if node.metricHistory.count >= 2 {
+        section("RECENT PASSES") { RailSparkline(node: node) }
+      }
+      Spacer(minLength: 0)
+      footer
+    }
+    .padding(12)
+    .frame(width: Self.width, alignment: .leading)
+    .frame(maxHeight: .infinity)
+    .background(Theme.workspaceRail)
+    .overlay(alignment: .leading) {
+      Rectangle().fill(.white.opacity(0.07)).frame(width: 1)
+    }
+  }
+
+  private func section<Content: View>(
+    _ title: String, @ViewBuilder content: () -> Content
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Text(title)
+        .font(.system(size: 10.5, weight: .bold))
+        .tracking(0.6)
+        .foregroundStyle(.white.opacity(0.4))
+      content()
+    }
+  }
+
+  private func handoffRow(_ edge: LoopEdge, _ target: LoopNode) -> some View {
+    HStack(spacing: 7) {
+      RoundedRectangle(cornerRadius: 1.5)
+        .fill(target.loopType.accent)
+        .frame(width: 3, height: 20)
+      VStack(alignment: .leading, spacing: 1) {
+        Text(target.title).font(.system(size: 12)).lineLimit(1)
+        Text(condition(edge))
+          .font(.system(size: 10))
+          .foregroundStyle(.white.opacity(0.45))
+          .lineLimit(1)
+      }
+      Spacer(minLength: 0)
+      StateIndicator(state: target.state, diameter: 5)
+    }
+    .padding(.vertical, 3)
+    .padding(.horizontal, 5)
+    .background(
+      target.state.wantsHuman ? Color.orange.opacity(0.1) : .clear,
+      in: RoundedRectangle(cornerRadius: 5)
+    )
+    .contentShape(Rectangle())
+    .onTapGesture { onTargetTapped(target.id) }
+  }
+
+  /// What has to be true for the handoff to happen, plus whether it already has — a row
+  /// that only said "On success" would leave you wondering every time whether it went.
+  private func condition(_ edge: LoopEdge) -> String {
+    edge.fired ? "\(edge.condition.displayName.lowercased()) · fired" : edge.condition.displayName
+  }
+
+  private var footer: some View {
+    VStack(alignment: .leading, spacing: 2) {
+      if let branch = node.worktreeBinding?.branch {
+        Text(branch).lineLimit(1).truncationMode(.middle)
+      }
+      Text(started)
+    }
+    .font(.system(size: 9.5, design: .monospaced))
+    .foregroundStyle(.white.opacity(0.4))
+  }
+
+  private var started: String {
+    var parts = ["started \(node.createdAt.formatted(date: .omitted, time: .shortened))"]
+    if let tokens = node.usage?.totalTokens { parts.append(LoopCardPresentation.tokens(tokens)) }
+    return parts.joined(separator: " · ")
+  }
+}
+
+/// The loop's own one-hop neighbourhood — what feeds it, itself, what it feeds. One hop
+/// and no further: a rail that drew the whole graph would be a second canvas, badly, in
+/// 212 points.
+private struct RailMinimap: View {
+  let node: LoopNode
+  let upstream: [LoopNode]
+  let downstream: [LoopNode]
+
+  var body: some View {
+    VStack(spacing: 10) {
+      row(upstream)
+      chip(node, width: 36, height: 16, isSelf: true)
+      row(downstream)
+    }
+    .frame(maxWidth: .infinity)
+    .frame(height: 118)
+    .background(Self.surface, in: RoundedRectangle(cornerRadius: 8))
+    .overlay {
+      RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.06), lineWidth: 1)
+    }
+  }
+
+  @ViewBuilder
+  private func row(_ nodes: [LoopNode]) -> some View {
+    if nodes.isEmpty {
+      Text("—").font(.system(size: 10)).foregroundStyle(.white.opacity(0.25))
+    } else {
+      HStack(spacing: 5) {
+        ForEach(nodes.prefix(4)) { chip($0, width: 26, height: 12, isSelf: false) }
+      }
+    }
+  }
+
+  private func chip(
+    _ node: LoopNode, width: CGFloat, height: CGFloat, isSelf: Bool
+  ) -> some View {
+    RoundedRectangle(cornerRadius: 3)
+      .fill(node.loopType.accent.opacity(isSelf ? 0.9 : 0.5))
+      .frame(width: width, height: height)
+      .overlay {
+        if isSelf {
+          RoundedRectangle(cornerRadius: 3)
+            .stroke(Theme.paneFocusTint.opacity(0.7), lineWidth: 1.5)
+        }
+      }
+      .overlay(alignment: .topTrailing) {
+        if node.state.wantsHuman {
+          Circle().fill(.orange).frame(width: 3, height: 3).offset(x: 1, y: -1)
+        }
+      }
+      .help(node.title)
+  }
+
+  private static let surface = Color(red: 0.086, green: 0.086, blue: 0.102)  // #16161a
+}
+
+/// The metric's last few passes as bars, newest at full strength.
+private struct RailSparkline: View {
+  let node: LoopNode
+
+  private var samples: [MetricSample] { Array(node.metricHistory.suffix(7)) }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 4) {
+      HStack(alignment: .bottom, spacing: 3) {
+        ForEach(Array(samples.enumerated()), id: \.offset) { index, sample in
+          RoundedRectangle(cornerRadius: 1)
+            .fill(node.loopType.accent.opacity(index == samples.count - 1 ? 1 : 0.45))
+            .frame(height: max(3, 34 * height(of: sample.value)))
+        }
+      }
+      .frame(height: 34)
+      Text(caption)
+        .font(.system(size: 9.5, design: .monospaced))
+        .foregroundStyle(.white.opacity(0.45))
+        .lineLimit(1)
+    }
+  }
+
+  /// Scaled across the window shown, not from zero: seven readings of 0.71, 0.72, 0.70
+  /// drawn from a zero baseline are seven identical bars, which is the one thing this is
+  /// meant to tell apart.
+  private func height(of value: Double) -> Double {
+    let values = samples.map(\.value)
+    guard let low = values.min(), let high = values.max(), high > low else { return 0.5 }
+    let fraction = (value - low) / (high - low)
+    // Direction-aware: with a metric being minimised, lower is a taller bar, so "the bars
+    // are growing" means the same thing either way.
+    return node.goal?.metricDirection == .minimize ? 1 - fraction : fraction
+  }
+
+  private var caption: String {
+    guard let last = samples.last?.value else { return "" }
+    guard samples.count >= 2 else { return LoopCardPresentation.number(last) }
+    let previous = samples[samples.count - 2].value
+    let delta = last - previous
+    let sign = delta > 0 ? "+" : (delta < 0 ? "−" : "±")
+    return
+      "\(LoopCardPresentation.number(last)) · \(sign)\(LoopCardPresentation.number(abs(delta))) this pass"
+  }
+}
