@@ -80,6 +80,11 @@ struct AppFeature {
     /// not persisted: a queue position is about this sitting, not about this graph.
     var lastReviewedNodeID: UUID?
 
+    /// ⌘K's jump palette — see `AppFeature+JumpPalette.swift`.
+    var isJumpPresented = false
+    var jumpQuery = ""
+    var jumpSelection = 0
+
     /// The orchestrator's needs-attention rollup, across every open project
     /// (docs/05-orchestrator.md#monitoring-surface). Derived rather than stored: it's a
     /// pure function of the graphs the daemon already broadcasts, and a cached copy
@@ -154,6 +159,12 @@ struct AppFeature {
     /// ⌘⇧R and the canvas rail's Review button — open the loop that has been waiting
     /// longest, then the next one on each press. See `reviewNextAttentionItem`.
     case reviewAttentionTapped
+    /// ⌘K's jump palette — see `JumpPalette`.
+    case jumpPaletteRequested
+    case jumpPaletteDismissed
+    case jumpQueryChanged(String)
+    case jumpSelectionMoved(Int)
+    case jumpItemSelected(JumpPalette.Result)
     /// ⇧⌘] / ⇧⌘[ — step the open workspace to the next/previous loop in sidebar order,
     /// across every open project. See `stepOpenLoop`.
     case selectNextLoop
@@ -199,6 +210,7 @@ struct AppFeature {
     // actions, kept in one place of its own because chats are a whole surface (a sidebar
     // section, a canvas, and two dialogs) that has nothing to do with projects or graphs.
     quickChatsReducer
+    jumpPaletteReducer
     Reduce { state, action in
       switch action {
       case .task:
@@ -260,6 +272,9 @@ struct AppFeature {
           if let openLoop = state.openLoop, openLoop.projectPath == path {
             if let updated = graph.nodes[id: openLoop.node.id] {
               state.openLoop?.node = updated
+              // The rail's downstream list comes off this — a handoff drawn while the
+              // terminal is up should appear there without reopening the workspace.
+              state.openLoop?.graph = graph
             } else {
               // The loop was deleted out from under its own terminal — easy to do now
               // that the sidebar can delete a loop while its workspace is the visible
@@ -356,6 +371,12 @@ struct AppFeature {
         guard let item = reviewNextAttentionItem(&state) else { return .none }
         return .send(.attentionItemTapped(item))
 
+      // Every ⌘K action is handled by `jumpPaletteReducer`, in
+      // `AppFeature+JumpPalette.swift` — listed here only so this switch stays exhaustive.
+      case .jumpPaletteRequested, .jumpPaletteDismissed, .jumpQueryChanged,
+        .jumpSelectionMoved, .jumpItemSelected:
+        return .none
+
       case .selectNextLoop:
         return stepOpenLoop(state, by: 1)
 
@@ -406,6 +427,7 @@ struct AppFeature {
         let layout = terminalLayoutStore.load(forNode: nodeID) ?? .defaultLayout(forNode: nodeID)
         state.openLoop = LoopWorkspaceFeature.State(
           node: node,
+          graph: state.projects[id: path]?.graph ?? LoopGraph(scope: .global),
           layout: layout,
           projectPath: path,
           projectName: state.projects[id: path]?.graph.project.name ?? path)
@@ -428,6 +450,24 @@ struct AppFeature {
           try? await orchestratorClient.send(
             .graphCommand(projectPath: projectPath, command: command))
         }
+
+      case .openLoop(.stopLoopTapped):
+        guard let id = state.openLoop?.node.id, let path = state.openLoop?.projectPath
+        else { return .none }
+        return .send(.stopNodeTapped(projectPath: path, nodeID: id))
+
+      case .openLoop(.showInGraphTapped):
+        // Closing the workspace *without* ending its terminals: the loop keeps running,
+        // you are just looking at the graph again. `closeOpenWorkspace` is the other
+        // thing, for when the loop itself is going away.
+        guard let path = state.openLoop?.projectPath else { return .none }
+        state.openLoop = nil
+        state.selectedProjectPath = path
+        return .none
+
+      case .openLoop(.railTargetTapped(let nodeID)):
+        guard let path = state.openLoop?.projectPath else { return .none }
+        return .send(.projects(.element(id: path, action: .nodeTapped(nodeID))))
 
       case .openLoop, .welcome, .projects:
         return .none

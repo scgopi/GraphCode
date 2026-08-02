@@ -47,6 +47,15 @@ struct AppView: View {
     // in light mode the system's near-black label colors would land on it unreadable.
     .preferredColorScheme(.dark)
     .background(loopCycleShortcuts)
+    // Hosted here for the reason the rename and delete prompts are: ⌘K has to open over
+    // a terminal as readily as over a canvas, and only one of those is ever on screen.
+    .sheet(
+      isPresented: Binding(
+        get: { store.isJumpPresented },
+        set: { if !$0 { store.send(.jumpPaletteDismissed) } })
+    ) {
+      JumpPaletteView(store: store)
+    }
     .task { await store.send(.task).finish() }
     .confirmationDialog(
       // Naming the loop matters here in a way it didn't on the canvas: from the sidebar
@@ -140,6 +149,8 @@ struct AppView: View {
       // terminal working on a different one.
       Button("") { store.send(.reviewAttentionTapped) }
         .keyboardShortcut("r", modifiers: [.command, .shift])
+      Button("") { store.send(.jumpPaletteRequested) }
+        .keyboardShortcut("k", modifiers: .command)
     }
     .frame(width: 0, height: 0)
     .opacity(0)

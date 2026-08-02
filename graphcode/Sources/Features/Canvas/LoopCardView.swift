@@ -214,8 +214,9 @@ struct StateIndicator: View {
 }
 
 /// The 3pt progress track. Its own view so an empty history draws nothing at all rather
-/// than a zero-width fill — see `LoopCardPresentation.Detail`.
-private struct ProgressTrack: View {
+/// than a zero-width fill — see `LoopCardPresentation.Detail`. Shared with the
+/// workspace's loop bar, which shows the same trend as the card.
+struct ProgressTrack: View {
   let fraction: Double
   let accent: Color
 

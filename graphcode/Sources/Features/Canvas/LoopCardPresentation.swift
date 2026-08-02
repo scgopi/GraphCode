@@ -172,6 +172,14 @@ struct LoopCardPresentation: Equatable {
     return "\(text(first)) → \(text(last))"
   }
 
+  /// What a backend reported spending, at the precision anyone reads it — `262k tok`.
+  /// Never derived from anything but a real `UsageSample`: see the rule there.
+  static func tokens(_ count: Int) -> String {
+    if count >= 1_000_000 { return "\(String(format: "%.1f", Double(count) / 1_000_000))M tok" }
+    if count >= 1000 { return "\(count / 1000)k tok" }
+    return "\(count) tok"
+  }
+
   /// Coarse on purpose — the card is redrawn from a 30-second tick, so a seconds figure
   /// on anything older than a minute would be stale as often as it was right.
   static func duration(_ seconds: TimeInterval) -> String {

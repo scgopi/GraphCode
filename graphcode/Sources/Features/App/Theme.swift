@@ -168,6 +168,21 @@ enum Theme {
     startPoint: .top,
     endPoint: .bottom)
 
+  /// The workspace's loop bar — the band carrying the loop itself over its terminals.
+  /// Lit like `tabBarGloss` and a step lighter, so the two strips read as one piece of
+  /// chrome with the loop above the tabs rather than as two competing headers.
+  static let loopBar = LinearGradient(
+    colors: [
+      Color(red: 0.141, green: 0.141, blue: 0.165),  // #24242a
+      Color(red: 0.118, green: 0.118, blue: 0.133),  // #1e1e22
+    ],
+    startPoint: .top,
+    endPoint: .bottom)
+
+  /// The workspace's right rail and a pane header's focused tint.
+  static let workspaceRail = Color(red: 0.114, green: 0.114, blue: 0.129)  // #1d1d21
+  static let paneFocusTint = Color(red: 0.039, green: 0.518, blue: 1.0)  // #0a84ff
+
   /// A loop card's hairline. The attention variant is the orange itself: the border is
   /// the cheapest ring to read at 40% zoom, and at that size it is doing the work the
   /// pill's word does up close.
