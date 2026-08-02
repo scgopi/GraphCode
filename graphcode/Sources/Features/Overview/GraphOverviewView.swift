@@ -12,12 +12,15 @@ import SwiftUI
 /// through the exact same action a sidebar row sends, so navigating from here isn't a
 /// second way in with its own behaviour.
 ///
-/// **Read-only.** Nothing here creates, deletes, or rewires anything: no dragging cards
-/// around, no drawing edges between folders, no create button. A `.handoff` between two
-/// projects isn't a thing graphcode can express (docs/02-graph-of-loops.md keeps the
-/// hierarchy flat and non-recursive), so offering the gesture would only ever end in a
-/// refusal — and a surface whose job is "see everything at once" is the wrong place to
-/// edit one thing. Editing happens on a folder's own canvas.
+/// **Creates, but never rewires.** The two `+`s a folder's canvas has are both here —
+/// New Loop at the top right, and a hover-revealed one on every card that starts a loop
+/// handed off from it — because "I can see the loop I want to continue from" is the
+/// moment you want to continue from it, and crossing to that folder's canvas first only
+/// to click the same handle is a detour. What stays out is rewiring: no dragging cards
+/// around, no drawing edges between folders. A `.handoff` between two projects isn't a
+/// thing graphcode can express (docs/02-graph-of-loops.md keeps the hierarchy flat and
+/// non-recursive), so offering that gesture would only ever end in a refusal. A card's
+/// `+` sidesteps it by creating into the folder the parent already belongs to.
 struct GraphOverviewView: View {
   @Bindable var store: StoreOf<AppFeature>
 
@@ -99,23 +102,28 @@ struct GraphOverviewView: View {
         .padding(.trailing, 20)
         .padding(.top, 18)
       }
-      .background {
-        if let globalStore = globalProjectStore {
-          GlobalNodeFormHost(store: globalStore)
-        }
-      }
+      .background { nodeFormHosts }
   }
 
-  private var globalProjectStore: StoreOf<ProjectFeature>? {
-    store.scope(
-      state: \.projects[id: LoopGraphScope.globalPath],
-      action: \.projects[id: LoopGraphScope.globalPath])
+  /// One host per open folder, all of them mounted for the life of this view.
+  ///
+  /// Two forms can be opened from here now — the global graph's, from the New Loop
+  /// button, and any folder's, from a card's `+` handle — and which folder the second
+  /// one belongs to isn't known until the click. Mounting a host per folder rather than
+  /// inserting one when a form opens is what makes the sheet actually present: a
+  /// `.sheet` whose host arrives in the same update that flips its binding misses the
+  /// transition and shows nothing. Only one can be open at a time, so the rest are
+  /// `Color.clear` with a `false` binding.
+  private var nodeFormHosts: some View {
+    ForEach(store.scope(state: \.projects, action: \.projects), id: \.state.id) { projectStore in
+      NodeFormHost(store: projectStore)
+    }
   }
 
-  /// Hosts the global graph's node form. A separate view because the sheet binds to the
+  /// Hosts one folder's node form. A separate view because the sheet binds to the
   /// *project-scoped* store's `showingNewNodeForm`, and `@Bindable` needs a concrete
   /// store to hold — the overview's own store is the whole app's.
-  private struct GlobalNodeFormHost: View {
+  private struct NodeFormHost: View {
     @Bindable var store: StoreOf<ProjectFeature>
 
     var body: some View {

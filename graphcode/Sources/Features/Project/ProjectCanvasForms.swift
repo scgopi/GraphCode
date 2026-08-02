@@ -35,32 +35,22 @@ extension ProjectCanvasView {
   /// element, because they're one idea — "continue the graph from here" — and two
   /// controls sharing a card edge would fight for the same 14 points.
   func connectorHandle(for nodeID: UUID) -> some View {
-    ZStack {
-      // System materials, not accent fill — the same quiet treatment as
-      // `CanvasAddButton`, and it only appears on hover anyway.
-      Circle().fill(.regularMaterial)
-      Circle().stroke(Color.secondary.opacity(0.4), lineWidth: 1)
-      Image(systemName: "plus")
-        .font(.system(size: 9, weight: .bold))
-        .foregroundStyle(.primary)
-    }
-    .frame(width: 14, height: 14)
-    .contentShape(Circle().inset(by: -8))  // bigger hit target than the visible dot
-    .onTapGesture { store.send(.addChildNodeTapped(nodeID)) }
-    .gesture(
-      DragGesture(minimumDistance: 4, coordinateSpace: .named("canvas"))
-        .onChanged { value in
-          dragSourceID = nodeID
-          dragLocation = value.location
-        }
-        .onEnded { value in
-          if let targetID = hitTestNode(at: value.location, excluding: nodeID) {
-            store.send(.edgeDrawn(from: nodeID, to: targetID))
+    CanvasConnectorHandle()
+      .onTapGesture { store.send(.addChildNodeTapped(nodeID)) }
+      .gesture(
+        DragGesture(minimumDistance: 4, coordinateSpace: .named("canvas"))
+          .onChanged { value in
+            dragSourceID = nodeID
+            dragLocation = value.location
           }
-          dragSourceID = nil
-          dragLocation = nil
-        }
-    )
+          .onEnded { value in
+            if let targetID = hitTestNode(at: value.location, excluding: nodeID) {
+              store.send(.edgeDrawn(from: nodeID, to: targetID))
+            }
+            dragSourceID = nil
+            dragLocation = nil
+          }
+      )
   }
 
   /// Which node (if any) contains `point`, in "canvas"-space — approximate card frame,

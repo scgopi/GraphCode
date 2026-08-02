@@ -10,10 +10,6 @@ extension ProjectCanvasView {
     _ reasons: [UUID: AttentionReason], roles: [UUID: CardEntryRole], now: Date
   ) -> some View {
     ForEach(store.graph.nodes) { node in
-      // The hover that reveals a card's + handle lives in this per-card container,
-      // not in canvas-level `@State`: up here a hover flip re-evaluated the whole
-      // body — and with it `Derived`'s sub-graph walk and attention rollup, the exact
-      // computation the comment on `body` exists to keep off the input path.
       HoverRevealingCard(isDragSource: dragSourceID == node.id) {
         nodeCard(
           for: node, reason: reasons[node.id], role: roles[node.id] ?? .interior, now: now)
@@ -21,31 +17,6 @@ extension ProjectCanvasView {
         connectorHandle(for: node.id)
       }
       .position(store.nodePositions[node.id] ?? .zero)
-    }
-  }
-
-  /// One card plus its hover-revealed trailing handle, owning the hover state so a
-  /// pointer crossing cards re-renders exactly the cards it crossed. The handle stays
-  /// while hovered itself (it hangs half outside the card, so moving onto it must not
-  /// count as leaving) and while a drag it started is in flight.
-  private struct HoverRevealingCard<Card: View, Handle: View>: View {
-    let isDragSource: Bool
-    @ViewBuilder let card: () -> Card
-    @ViewBuilder let handle: () -> Handle
-
-    @State private var isHovered = false
-    @State private var isHandleHovered = false
-
-    var body: some View {
-      card()
-        .onHover { isHovered = $0 }
-        .overlay(alignment: .trailing) {
-          if isHovered || isHandleHovered || isDragSource {
-            handle()
-              .offset(x: 14)
-              .onHover { isHandleHovered = $0 }
-          }
-        }
     }
   }
 

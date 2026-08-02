@@ -53,8 +53,30 @@ extension GraphOverviewView {
     _ overview: GraphOverview, reasons: [UUID: AttentionReason], now: Date
   ) -> some View {
     ForEach(overview.loops) { loop in
-      loopCard(loop, reason: reasons[loop.node.id], now: now).position(loop.position)
+      HoverRevealingCard {
+        loopCard(loop, reason: reasons[loop.node.id], now: now)
+      } handle: {
+        connectorHandle(for: loop)
+      }
+      .position(loop.position)
     }
+  }
+
+  /// The same hover-revealed `+` a folder's canvas puts on a card, minus the drag half:
+  /// a click creates a loop in *that card's folder*, already handed off from it.
+  ///
+  /// Tap-only because a `.handoff` between two folders isn't something graphcode can
+  /// express (docs/02-graph-of-loops.md keeps the hierarchy flat), so a wire dragged
+  /// across lanes could only ever end in a refusal. Creating from here is a different
+  /// matter — the loop lands on the folder the parent already belongs to, which is a
+  /// thing the graph can hold, and it saves crossing to that folder's canvas to say so.
+  private func connectorHandle(for loop: GraphOverview.Loop) -> some View {
+    CanvasConnectorHandle()
+      .onTapGesture {
+        store.send(
+          .projects(.element(id: loop.projectPath, action: .addChildNodeTapped(loop.node.id))))
+      }
+      .help("New loop handed off from \(loop.node.title)")
   }
 
   /// The same `LoopCardView` a project's own canvas draws, so a loop reads identically

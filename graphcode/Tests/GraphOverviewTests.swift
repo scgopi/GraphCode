@@ -1,3 +1,4 @@
+import ComposableArchitecture
 import Foundation
 import GraphcodeKit
 import IdentifiedCollections
@@ -9,9 +10,11 @@ import Testing
 /// folder's loops on one canvas, each folder in a lane band of its own, with each
 /// composite's sub-graph drawn inside the card that owns it.
 ///
-/// Tested as a pure value rather than through the view: what matters is that nothing in
-/// the workspace can be missing from the picture and that everything drawn has somewhere
-/// to hang from. Both are statements about the layout, not about SwiftUI.
+/// The layout is tested as a pure value rather than through the view: what matters is
+/// that nothing in the workspace can be missing from the picture and that everything
+/// drawn has somewhere to hang from. Both are statements about the layout, not about
+/// SwiftUI. What the view's own controls *do* is the exception at the bottom — the card
+/// `+` is the one thing here that changes the workspace rather than describing it.
 @Suite
 struct GraphOverviewTests {
   private static let projectA = ProjectRef(path: "/tmp/project-a", name: "project-a")
@@ -325,5 +328,34 @@ struct GraphOverviewTests {
       edges: [LoopEdge(from: first.id, to: second.id)])
 
     #expect(GraphOverview.caption(for: graph) == "2 loops · 1 entry point")
+  }
+
+  /// The card `+` sends this — and the Graph view is the *global* graph's canvas, so the
+  /// one way it could go wrong is filing the new loop there instead of with its parent.
+  /// A cross-folder handoff is not expressible (docs/02-graph-of-loops.md), so the child
+  /// has to land in the folder the parent already belongs to.
+  @Test
+  @MainActor
+  func aChildCreatedFromTheGraphViewLandsInItsParentsFolder() async {
+    let parent = LoopNode(title: "Research", checkDescription: "Sound?")
+    var state = AppFeature.State()
+    state.projects.append(ProjectFeature.State(graph: LoopGraph(scope: .global)))
+    state.projects.append(
+      ProjectFeature.State(graph: LoopGraph(project: Self.projectA, nodes: [parent])))
+    state.selectedProjectPath = LoopGraphScope.globalPath
+
+    let store = TestStore(initialState: state) {
+      AppFeature()
+    } withDependencies: {
+      $0.gitClient.listWorktrees = { _ in [] }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .projects(.element(id: Self.projectA.path, action: .addChildNodeTapped(parent.id))))
+
+    #expect(store.state.projects[id: Self.projectA.path]?.showingNewNodeForm == true)
+    #expect(store.state.projects[id: Self.projectA.path]?.draftParentNodeID == parent.id)
+    #expect(store.state.projects[id: LoopGraphScope.globalPath]?.showingNewNodeForm == false)
   }
 }
