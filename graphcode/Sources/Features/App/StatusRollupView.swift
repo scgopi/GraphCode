@@ -86,6 +86,8 @@ struct JumpFieldButton: View {
   @State private var isHovered = false
 
   var body: some View {
+    // No pill of its own: the toolbar already wraps the item in the system's glass
+    // capsule, and a hand-drawn rounded rect inside it read as a button on a button.
     Button(action: action) {
       HStack(spacing: 8) {
         Text("Jump to loop")
@@ -95,12 +97,7 @@ struct JumpFieldButton: View {
           .font(.system(size: 10.5, design: .monospaced))
           .foregroundStyle(.white.opacity(0.5))
       }
-      .padding(.horizontal, 9)
-      .frame(height: 24)
-      .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
-      .overlay {
-        RoundedRectangle(cornerRadius: 6).stroke(.white.opacity(0.07), lineWidth: 1)
-      }
+      .padding(.horizontal, 2)
     }
     .buttonStyle(.plain)
     .onHover { isHovered = $0 }
