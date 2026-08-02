@@ -60,9 +60,12 @@ struct GraphOverview: Equatable {
 
     var id: UUID { node.id }
 
-    /// The centre of the entry port on this card's leading edge, when it has one.
+    /// The centre of the entry port on this card's leading edge, when it has one —
+    /// every loop nothing hands off to, whether it hands off to something (a root) or to
+    /// nothing (an accident). Both hang off the lane's origin; only the second is drawn
+    /// as a mistake.
     var entryPort: CGPoint? {
-      guard entryRole == .entry else { return nil }
+      guard entryRole == .entry || entryRole == .unwired else { return nil }
       return CGPoint(x: position.x - Metrics.card.width / 2, y: position.y)
     }
   }
@@ -147,7 +150,21 @@ struct GraphOverview: Equatable {
     var positions: [UUID: CGPoint] = [:]
     var rowCentre = top + Metrics.firstRowInset
 
-    for row in Array(graph.nodes).chunked(into: Metrics.columns) {
+    // Entry points first, then everything else, each group keeping its own order.
+    //
+    // Position is what makes the rail mean anything: a rail down the lane's leading edge
+    // with a 12pt stub to each port only reaches cards in the first column, and an entry
+    // sitting three columns right would need a connector long enough to read as an edge —
+    // which is exactly what a rail must not imply. Laying the roots out first also makes
+    // the lane read left-to-right in the direction work actually travels.
+    let hangsOffOrigin: (LoopNode) -> Bool = {
+      roles[$0.id] == .entry || roles[$0.id] == .unwired
+    }
+    let ordered =
+      Array(graph.nodes).filter(hangsOffOrigin)
+      + Array(graph.nodes).filter { !hangsOffOrigin($0) }
+
+    for row in ordered.chunked(into: Metrics.columns) {
       for (column, node) in row.enumerated() {
         let position = CGPoint(
           x: Metrics.firstLoopX + CGFloat(column) * Metrics.columnWidth, y: rowCentre)

@@ -247,13 +247,35 @@ struct GraphOverviewTests {
   }
 
   @Test
-  func aLoopWiredToNothingGetsNoPort() {
+  func aLoopWiredToNothingStillHangsOffTheOrigin() {
+    // It is still marked as the accident it probably is — dashed border, desaturated
+    // stripe — but it gets a port and a line, because a card floating in the middle of a
+    // canvas is how the whole thing went back to reading as scattered cards.
     let overview = GraphOverview(graphs: [
       LoopGraph(project: Self.projectA, nodes: [LoopNode(title: "loose")])
     ])
 
     #expect(overview.loops.first?.entryRole == .unwired)
-    #expect(overview.folders.first?.entryPorts.isEmpty == true)
+    #expect(overview.folders.first?.entryPorts.count == 1)
+  }
+
+  @Test
+  func everythingNothingHandsOffToIsLaidOutFirst() {
+    // Position is what makes the origin's lines short and parallel instead of a fan
+    // across the whole lane.
+    let root = LoopNode(title: "root")
+    let downstream = LoopNode(title: "downstream")
+    let loose = LoopNode(title: "loose")
+    let overview = GraphOverview(graphs: [
+      LoopGraph(
+        project: Self.projectA, nodes: [downstream, root, loose],
+        edges: [LoopEdge(from: root.id, to: downstream.id)])
+    ])
+
+    let byTitle = Dictionary(
+      uniqueKeysWithValues: overview.loops.map { ($0.node.title, $0.position.x) })
+    #expect((byTitle["root"] ?? 0) < (byTitle["downstream"] ?? 0))
+    #expect((byTitle["loose"] ?? 0) < (byTitle["downstream"] ?? 0))
   }
 
   @Test
@@ -270,6 +292,8 @@ struct GraphOverviewTests {
     ])
 
     #expect(overview.loops.allSatisfy { $0.entryRole == .cycleOnly })
+    // A closed cycle is the one thing that gets neither a port nor a line: every node in
+    // it is handed off to, so there is no honest place for the graph to begin.
     #expect(overview.folders.first?.entryPorts.isEmpty == true)
   }
 

@@ -100,9 +100,13 @@ struct LoopCardView: View {
   /// the loop, so N roots cost N ports — where N tethers to one dot cost a starburst.
   @ViewBuilder
   private var entryPort: some View {
-    if entryRole == .entry {
+    if entryRole == .entry || entryRole == .unwired {
+      // An unwired loop gets one too, dimmed. It is where the graph begins by default —
+      // nothing hands off to it — and leaving it portless is what left three cards
+      // floating in the middle of a canvas with a line-less origin beside them. The
+      // dashed border and the desaturated stripe still say it was probably an accident.
       Circle()
-        .fill(node.loopType.accent)
+        .fill(node.loopType.accent.opacity(entryRole == .unwired ? 0.4 : 1))
         .overlay(Circle().stroke(Theme.canvasTone, lineWidth: 2))
         .frame(width: Metrics.port, height: Metrics.port)
         .offset(x: -Metrics.port / 2)

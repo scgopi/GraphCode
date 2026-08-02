@@ -255,10 +255,12 @@ struct ProjectCanvasView: View {
     }
   }
 
-  /// The leading-edge port of every root, for the band's entry rail.
+  /// The leading-edge port of everything nothing hands off to — roots and loose loops
+  /// alike, so the lane's origin reaches every card that would otherwise float.
   private func entryPorts(_ derived: Derived) -> [CGPoint] {
     store.graph.nodes.compactMap { node in
-      guard derived.entryRoles[node.id] == .entry,
+      let role = derived.entryRoles[node.id]
+      guard role == .entry || role == .unwired,
         let centre = store.nodePositions[node.id]
       else { return nil }
       return CGPoint(x: centre.x - LoopCardView.Metrics.size.width / 2, y: centre.y)

@@ -27,6 +27,9 @@ enum CanvasBand {
   static let railInset: CGFloat = padding - stubLength
   static let stubLength: CGFloat = 12
   static let railWidth: CGFloat = 3
+  /// The origin dot, and how far it sits from the leading port it serves.
+  static let originDiameter: CGFloat = 12
+  static let originGap: CGFloat = 34
   static let railTint = Color.white.opacity(0.22)
 
   /// The band enclosing cards *centred* at `positions` — the project canvas's case,
@@ -85,33 +88,73 @@ struct CanvasBandView: View {
     .position(x: rect.midX, y: rect.midY)
   }
 
-  /// A bar, not a node. The distinction is the whole point: a marker with lines running
-  /// out of it looks like something work travels along, and nothing travels this. A rail
-  /// is a boundary — it says "the graph starts on this side" and can't imply flow.
+  /// The lane's origin: one dot, with a line to every card nothing hands off to.
+  ///
+  /// This is a deliberate departure from the handoff, which retired the start marker in
+  /// favour of a rail. The rail is the better idea in a wired graph — it is a boundary
+  /// and cannot imply flow — and it failed the graph people actually have: with three
+  /// loose loops and one root, a bar down the left edge labels nothing you can see it
+  /// touching, and the canvas reads as scattered cards again.
+  ///
+  /// So the dot is back, with two things it did not have before. It hangs off the
+  /// *ports on the cards*, which are still what carries "this is a beginning" into
+  /// greyscale, zoom-out and the sidebar; and it reaches unwired loops too, so nothing
+  /// on the canvas floats. What it must not become again is the old marker: these lines
+  /// are quieter than any `EdgeLineView`, carry no arrowhead and no fired state, because
+  /// nothing travels them.
+  ///
+  /// The cost is the one the handoff named: N rootless loops is N lines. That is a real
+  /// starburst at twenty, and the answer then is to wire the graph up — which is what
+  /// the lines are for saying.
   @ViewBuilder
   private var entryRail: some View {
-    if let top = entryPorts.map(\.y).min(), let bottom = entryPorts.map(\.y).max() {
-      let railX = CanvasBand.railInset
+    if let top = entryPorts.map(\.y).min(), let bottom = entryPorts.map(\.y).max(),
+      let leading = entryPorts.map(\.x).min()
+    {
+      let originX = max(leading - rect.minX - CanvasBand.originGap, CanvasBand.railInset)
+      let originY = (top + bottom) / 2 - rect.minY
       ZStack(alignment: .topLeading) {
-        Capsule()
-          .fill(CanvasBand.railTint)
-          .frame(width: CanvasBand.railWidth, height: bottom - top + 24)
-          .offset(x: railX, y: top - rect.minY - 12)
         ForEach(Array(entryPorts.enumerated()), id: \.offset) { _, port in
-          Rectangle()
-            .fill(CanvasBand.railTint)
-            .frame(width: CanvasBand.stubLength, height: 2)
-            .offset(x: port.x - rect.minX - CanvasBand.stubLength, y: port.y - rect.minY - 1)
+          connector(
+            from: CGPoint(x: originX, y: originY),
+            to: CGPoint(x: port.x - rect.minX, y: port.y - rect.minY))
         }
+        origin.offset(
+          x: originX - CanvasBand.originDiameter / 2,
+          y: originY - CanvasBand.originDiameter / 2)
+      }
+    }
+  }
+
+  private var origin: some View {
+    Circle()
+      .fill(CanvasBand.railTint)
+      .frame(width: CanvasBand.originDiameter, height: CanvasBand.originDiameter)
+      // Knocked out of the canvas so a connector passing behind it doesn't show through.
+      .overlay(Circle().stroke(Theme.canvasTone, lineWidth: 2))
+      .overlay(alignment: .bottom) {
         Text("ENTRY")
-          .font(.system(size: 10.5, weight: .bold))
+          .font(.system(size: 9.5, weight: .bold))
           .tracking(0.4)
           .foregroundStyle(.white.opacity(0.42))
           .fixedSize()
-          .rotationEffect(.degrees(-90))
-          .offset(x: railX - 20, y: (top + bottom) / 2 - rect.minY)
+          .offset(y: 13)
       }
+  }
+
+  /// Curved, not straight, and quiet. A straight 1.5pt line between two cards is what an
+  /// edge looks like; this one bends out of the origin and flattens into the port, which
+  /// reads as structure rather than as a hand-off.
+  private func connector(from origin: CGPoint, to port: CGPoint) -> some View {
+    Path { path in
+      path.move(to: origin)
+      let reach = max((port.x - origin.x) * 0.55, 20)
+      path.addCurve(
+        to: port,
+        control1: CGPoint(x: origin.x + reach, y: origin.y),
+        control2: CGPoint(x: port.x - reach, y: port.y))
     }
+    .stroke(CanvasBand.railTint, lineWidth: 1.5)
   }
 
   @ViewBuilder
