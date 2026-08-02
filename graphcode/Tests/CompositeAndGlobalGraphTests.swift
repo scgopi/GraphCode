@@ -39,12 +39,16 @@ struct CompositeAndGlobalGraphTests {
       .subGraphCommand(
         nodeID: compositeID,
         command: .createNode(
-          NodeDraft(title: "Classify", loopType: .turnBased, checkDescription: "?"))))
+          NodeDraft(
+            title: "Classify", loopType: .turnBased, checkDescription: "?",
+            firstInstruction: "Work"))))
     await store.handle(
       .subGraphCommand(
         nodeID: compositeID,
         command: .createNode(
-          NodeDraft(title: "Draft reply", loopType: .turnBased, checkDescription: "?"))))
+          NodeDraft(
+            title: "Draft reply", loopType: .turnBased, checkDescription: "?",
+            firstInstruction: "Work"))))
 
     let sub = try? #require(await store.graph.nodes[id: compositeID]?.subGraph)
     #expect(sub?.nodes.count == 2)
@@ -72,7 +76,9 @@ struct CompositeAndGlobalGraphTests {
       .subGraphCommand(
         nodeID: compositeID,
         command: .createNode(
-          NodeDraft(title: "Another", loopType: .turnBased, checkDescription: "?"))))
+          NodeDraft(
+            title: "Another", loopType: .turnBased, checkDescription: "?",
+            firstInstruction: "Work"))))
 
     #expect(await store.graph.nodes[id: compositeID]?.state == .running)
   }
@@ -106,14 +112,19 @@ struct CompositeAndGlobalGraphTests {
   func aSubGraphCommandAimedAtANonCompositeIsIgnored() async {
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "Plain", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "Plain", loopType: .turnBased, checkDescription: "?",
+          firstInstruction: "Work")))
     let nodeID = await store.graph.nodes[0].id
 
     await store.handle(
       .subGraphCommand(
         nodeID: nodeID,
         command: .createNode(
-          NodeDraft(title: "Sneaky", loopType: .turnBased, checkDescription: "?"))))
+          NodeDraft(
+            title: "Sneaky", loopType: .turnBased, checkDescription: "?",
+            firstInstruction: "Work"))))
 
     #expect(await store.graph.nodes.count == 1)
     #expect(await store.graph.nodes[0].subGraph == nil)
@@ -157,7 +168,10 @@ struct CompositeAndGlobalGraphTests {
   func pilotingANodeWithNoSubGraphDoesNothing() async {
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "Plain", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "Plain", loopType: .turnBased, checkDescription: "?",
+          firstInstruction: "Work")))
     let nodeID = await store.graph.nodes[0].id
 
     await store.handle(.pilotComposite(nodeID))

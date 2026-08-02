@@ -10,11 +10,21 @@ import Testing
 /// node's resolution.
 @Suite
 struct GraphStoreTests {
+  /// The fixture every test here starts from. A turn-based loop needs a first
+  /// instruction to be valid — without one `createNode` refuses it, and a test that
+  /// silently created nothing would fail three assertions later on an empty graph.
+  private func turnDraft(_ title: String, check: String = "?") -> NodeDraft {
+    NodeDraft(
+      title: title, loopType: .turnBased, checkDescription: check,
+      firstInstruction: "Work")
+  }
+
   @Test
   func creatingATurnBasedNodeAddsItStandalone() async {
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "Sound?")))
+      .createNode(
+        turnDraft("Research", check: "Sound?")))
 
     let graph = await store.graph
     #expect(graph.nodes.count == 1)
@@ -50,7 +60,8 @@ struct GraphStoreTests {
     let started = LockIsolated<[LoopNode]>([])
     let store = GraphStore(onEnsureSession: { node, _ in started.withValue { $0.append(node) } })
     await store.handle(
-      .createNode(NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "Sound?")))
+      .createNode(
+        turnDraft("Research", check: "Sound?")))
     await store.handle(
       .createNode(
         NodeDraft(title: "Poll inbox", loopType: .timeBased, triggerPrompt: "/loop 1h Check")))
@@ -70,9 +81,11 @@ struct GraphStoreTests {
   func approvingASourceNodeAutomaticallyFiresItsEdgeAndUnblocksTheTarget() async {
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "Sound?")))
+      .createNode(
+        turnDraft("Research", check: "Sound?")))
     await store.handle(
-      .createNode(NodeDraft(title: "Implement", loopType: .turnBased, checkDescription: "Correct?"))
+      .createNode(
+        turnDraft("Implement", check: "Correct?"))
     )
 
     let nodesBeforeEdge = await store.graph.nodes
@@ -100,10 +113,11 @@ struct GraphStoreTests {
     // the source resolved, not just on success.
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "Sound?")))
+      .createNode(
+        turnDraft("Research", check: "Sound?")))
     await store.handle(
       .createNode(
-        NodeDraft(title: "Escalate", loopType: .turnBased, checkDescription: "Needs help?")))
+        turnDraft("Escalate", check: "Needs help?")))
 
     let nodes = await store.graph.nodes
     let sourceID = nodes[0].id
@@ -121,9 +135,13 @@ struct GraphStoreTests {
   func creatingADuplicateEdgeIsIgnored() async {
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "A", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        turnDraft("A", check: "?"))
+    )
     await store.handle(
-      .createNode(NodeDraft(title: "B", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        turnDraft("B", check: "?"))
+    )
     let nodes = await store.graph.nodes
     let (nodeA, nodeB) = (nodes[0].id, nodes[1].id)
 
@@ -137,7 +155,9 @@ struct GraphStoreTests {
   func selfLoopEdgeIsRejected() async {
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "A", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        turnDraft("A", check: "?"))
+    )
     let nodeID = await store.graph.nodes[0].id
 
     await store.handle(.createEdge(from: nodeID, to: nodeID, spec: EdgeSpec()))
@@ -149,10 +169,12 @@ struct GraphStoreTests {
   func onSuccessEdgeStaysUnfiredWhenTheSourceFails() async {
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "Implement", loopType: .turnBased, checkDescription: "Correct?"))
+      .createNode(
+        turnDraft("Implement", check: "Correct?"))
     )
     await store.handle(
-      .createNode(NodeDraft(title: "Ship", loopType: .turnBased, checkDescription: "Ready?")))
+      .createNode(
+        turnDraft("Ship", check: "Ready?")))
     let nodes = await store.graph.nodes
     let (sourceID, targetID) = (nodes[0].id, nodes[1].id)
     await store.handle(
@@ -171,10 +193,12 @@ struct GraphStoreTests {
   func onFailureEdgeFiresOnlyWhenTheSourceFails() async {
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "Implement", loopType: .turnBased, checkDescription: "Correct?"))
+      .createNode(
+        turnDraft("Implement", check: "Correct?"))
     )
     await store.handle(
-      .createNode(NodeDraft(title: "Escalate", loopType: .turnBased, checkDescription: "Handled?")))
+      .createNode(
+        turnDraft("Escalate", check: "Handled?")))
     let nodes = await store.graph.nodes
     let (sourceID, targetID) = (nodes[0].id, nodes[1].id)
     await store.handle(
@@ -187,10 +211,12 @@ struct GraphStoreTests {
     // than re-resolving an already-succeeded node.
     let failing = GraphStore()
     await failing.handle(
-      .createNode(NodeDraft(title: "Implement", loopType: .turnBased, checkDescription: "Correct?"))
+      .createNode(
+        turnDraft("Implement", check: "Correct?"))
     )
     await failing.handle(
-      .createNode(NodeDraft(title: "Escalate", loopType: .turnBased, checkDescription: "Handled?")))
+      .createNode(
+        turnDraft("Escalate", check: "Handled?")))
     let failingNodes = await failing.graph.nodes
     await failing.handle(
       .createEdge(
@@ -208,10 +234,12 @@ struct GraphStoreTests {
     // target sitting in `.blocked` waiting for a handoff that will never come.
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "Implement", loopType: .turnBased, checkDescription: "Correct?"))
+      .createNode(
+        turnDraft("Implement", check: "Correct?"))
     )
     await store.handle(
-      .createNode(NodeDraft(title: "Review", loopType: .turnBased, checkDescription: "Sound?")))
+      .createNode(
+        turnDraft("Review", check: "Sound?")))
     let nodes = await store.graph.nodes
 
     await store.handle(
@@ -229,10 +257,12 @@ struct GraphStoreTests {
     // the next spawn.
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "Triage", loopType: .turnBased, checkDescription: "Classified?"))
+      .createNode(
+        turnDraft("Triage", check: "Classified?"))
     )
     await store.handle(
-      .createNode(NodeDraft(title: "Template", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        turnDraft("Template", check: "?")))
     let nodes = await store.graph.nodes
     await store.handle(
       .createEdge(from: nodes[0].id, to: nodes[1].id, spec: EdgeSpec(kind: .spawn)))
@@ -256,9 +286,13 @@ struct GraphStoreTests {
     // talk mid-flight.
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "A", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        turnDraft("A", check: "?"))
+    )
     await store.handle(
-      .createNode(NodeDraft(title: "B", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        turnDraft("B", check: "?"))
+    )
     let nodes = await store.graph.nodes
 
     await store.handle(.createEdge(from: nodes[0].id, to: nodes[1].id, spec: EdgeSpec()))
@@ -276,9 +310,13 @@ struct GraphStoreTests {
   func aPayloadTransformSurvivesTheRoundTripToTheStore() async {
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "A", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        turnDraft("A", check: "?"))
+    )
     await store.handle(
-      .createNode(NodeDraft(title: "B", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        turnDraft("B", check: "?"))
+    )
     let nodes = await store.graph.nodes
 
     await store.handle(
@@ -326,7 +364,8 @@ struct GraphStoreTests {
   func newConnectionReceivesCurrentGraphImmediately() async {
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "Sound?")))
+      .createNode(
+        turnDraft("Research", check: "Sound?")))
 
     // No real socket needed to prove this: addConnection's first `send` call is a
     // no-op for an unknown/invalid fd (silently dropped, not thrown), so this just

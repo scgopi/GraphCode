@@ -44,6 +44,25 @@ struct ProjectFeature {
     /// "how is it going?".
     var draftMetric = ""
     var draftMetricDirection: MetricDirection = .maximize
+    /// Collapsed by default — a metric is off the path for the common goal loop, and a
+    /// command field sitting open invites people to fill it in because it is there.
+    var isMetricExpanded = false
+    /// What pressing **Test** on the done check found, and whether one is in flight.
+    var doneCheckOutcome: DoneCheckOutcome?
+    var isTestingDoneCheck = false
+    /// `.turnBased`: what the session is asked to do, and where it pauses.
+    var draftFirstInstruction = ""
+    var draftPausesBeforeWritesOnly = false
+    /// `.timeBased`: how often, and what to do each time. GraphCode composes the `/loop`
+    /// directive from the two — see `ProjectFeature.State.composedTriggerPrompt`.
+    var draftInterval: IntervalChoice = .hourly
+    var draftCustomInterval = ""
+    var draftTimedTask = ""
+    var draftStopAfter = ""
+    /// `.proactive`: the schedule this composite is *meant* for. Nothing runs at
+    /// creation, so it is a statement of intent until the thing is piloted and armed.
+    var draftSchedule: CompositeSchedule = .daily
+    var draftScheduleTime = "09:00"
     var draftBackend: CLISessionBackendKind = .claudeCode
     var draftWorktree: WorktreeSelection = .none
     var draftBranch = ""
@@ -120,6 +139,10 @@ struct ProjectFeature {
     case reviewAttentionTapped
     /// "Mark as entry" on a loop wired to nothing — see `CardEntryRole`.
     case markAsEntryTapped(UUID)
+    /// The **Test** button beside a goal's done check: runs the command exactly the way
+    /// `graphcoded` will and reports what happened.
+    case doneCheckTestTapped
+    case doneCheckTested(passed: Bool, duration: TimeInterval)
     case edgeDrawn(from: UUID, to: UUID)
     case createEdgeConfirmed
     case cancelEdgeForm
@@ -267,6 +290,25 @@ struct ProjectFeature {
       case .nodeTapped:
         // Handled by `AppFeature`'s parent `Reduce`, which owns cross-project
         // selection — nothing to do here.
+        return .none
+
+      case .doneCheckTestTapped:
+        let command = state.draftPredicate.trimmingCharacters(in: .whitespaces)
+        guard !command.isEmpty, !state.isTestingDoneCheck else { return .none }
+        state.isTestingDoneCheck = true
+        state.doneCheckOutcome = nil
+        let directory = state.graph.project.path
+        return .run { send in
+          let result = await ShellPredicateEvaluator.probe(
+            ShellPredicate(command: command, workingDirectory: directory))
+          await send(
+            .doneCheckTested(
+              passed: result?.passed ?? false, duration: result?.duration ?? 0))
+        }
+
+      case .doneCheckTested(let passed, let duration):
+        state.isTestingDoneCheck = false
+        state.doneCheckOutcome = DoneCheckOutcome(passed: passed, duration: duration)
         return .none
 
       case .markAsEntryTapped(let nodeID):

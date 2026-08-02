@@ -187,6 +187,13 @@ enum Theme {
   /// so the two pieces of chrome that frame the canvas read as the same material.
   static let activityStrip = Color(red: 0.114, green: 0.114, blue: 0.125)  // #1d1d20
 
+  /// The new-loop sheet and the fields on it.
+  static let sheet = Color(red: 0.165, green: 0.165, blue: 0.180)  // #2a2a2e
+  static let draftField = Color(red: 0.118, green: 0.118, blue: 0.133)  // #1e1e22
+  /// The onboarding sheet, a shade deeper than the dialog: it is a full-bleed page
+  /// rather than a panel over a canvas.
+  static let onboardingSheet = Color(red: 0.137, green: 0.137, blue: 0.149)  // #232326
+
   /// A loop card's hairline. The attention variant is the orange itself: the border is
   /// the cheapest ring to read at 40% zoom, and at that size it is doing the work the
   /// pill's word does up close.

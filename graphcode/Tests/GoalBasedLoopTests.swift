@@ -45,7 +45,10 @@ struct GoalBasedLoopTests {
           title: "Green build", loopType: .goalBased,
           goal: GoalSpec(summary: "CI passes", predicate: "make test"))))
     await store.handle(
-      .createNode(NodeDraft(title: "Ship", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "Ship", loopType: .turnBased, checkDescription: "?",
+          firstInstruction: "Work")))
     let nodes = await store.graph.nodes
     await store.handle(.createEdge(from: nodes[0].id, to: nodes[1].id, spec: EdgeSpec()))
 

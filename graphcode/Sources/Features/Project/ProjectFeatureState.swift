@@ -29,7 +29,9 @@ extension ProjectFeature.State {
       title: draftTitle,
       loopType: draftLoopType,
       checkDescription: draftLoopType == .turnBased ? draftCheck : nil,
-      triggerPrompt: draftLoopType == .timeBased ? draftPrompt : nil,
+      triggerPrompt: composedTriggerPrompt,
+      firstInstruction: draftLoopType == .turnBased ? draftFirstInstruction : nil,
+      pausesBeforeWritesOnly: draftLoopType == .turnBased && draftPausesBeforeWritesOnly,
       goal: draftLoopType == .goalBased
         ? GoalSpec(
           summary: draftGoal,
@@ -45,6 +47,35 @@ extension ProjectFeature.State {
         return nil
       }())
   }
+
+  /// What a timed loop's session actually opens with, composed rather than typed.
+  ///
+  /// The old form had one free-text field whose placeholder was the whole documentation:
+  /// you had to know that the cadence lives *inside* the prompt as a `/loop` directive
+  /// (see `LoopNode.triggerPrompt`) and what the syntax was. GraphCode knows both, so it
+  /// writes that part and the human writes the work.
+  ///
+  /// A composite carries its intended schedule here instead — nothing runs at creation,
+  /// so it is a statement of intent until the thing is piloted and armed.
+  var composedTriggerPrompt: String? {
+    switch draftLoopType {
+    case .timeBased:
+      let task = draftTimedTask.trimmingCharacters(in: .whitespaces)
+      guard !task.isEmpty else { return nil }
+      var directive = "/loop \(draftInterval.directiveValue(custom: draftCustomInterval)) \(task)"
+      let stop = draftStopAfter.trimmingCharacters(in: .whitespaces)
+      if !stop.isEmpty { directive += " Stop after \(stop)." }
+      return directive
+    case .proactive:
+      return "Intended schedule: \(draftSchedule.summary(at: draftScheduleTime))"
+    case .goalBased, .turnBased:
+      return nil
+    }
+  }
+
+  /// The mono line the dialog shows under the interval control, so what will be written
+  /// is visible before it is written.
+  var triggerPreview: String { composedTriggerPrompt ?? "" }
 
   /// The `git worktree add` to run before creating the node, if the human asked for a
   /// new branch. The worktree lands next to the repository rather than inside it, so
@@ -69,6 +100,64 @@ extension ProjectFeature.State {
 /// draft types. Nested on `ProjectFeature` rather than `State` so views can name them
 /// without going through the state type.
 extension ProjectFeature {
+  /// What pressing **Test** on a done check found. No exit code: the shell session
+  /// reports pass/fail and nothing finer, and a made-up number is the one detail
+  /// somebody would act on.
+  struct DoneCheckOutcome: Equatable {
+    let passed: Bool
+    let duration: TimeInterval
+
+    var summary: String {
+      "\(passed ? "passed" : "did not pass") · \(String(format: "%.1f", duration))s"
+    }
+  }
+
+  /// How often a timed loop runs. The five the control offers, plus whatever someone
+  /// types — GraphCode writes the directive either way.
+  enum IntervalChoice: String, CaseIterable, Equatable {
+    case quarterHour, hourly, sixHourly, daily, custom
+
+    var displayName: String {
+      switch self {
+      case .quarterHour: return "15m"
+      case .hourly: return "1h"
+      case .sixHourly: return "6h"
+      case .daily: return "Daily"
+      case .custom: return "Custom…"
+      }
+    }
+
+    func directiveValue(custom: String) -> String {
+      switch self {
+      case .quarterHour: return "15m"
+      case .hourly: return "1h"
+      case .sixHourly: return "6h"
+      case .daily: return "24h"
+      case .custom:
+        let trimmed = custom.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? "1h" : trimmed
+      }
+    }
+  }
+
+  /// A composite's intended cadence — see `State.composedTriggerPrompt`.
+  enum CompositeSchedule: String, CaseIterable, Equatable {
+    case daily, weekdays, weekly, onATrigger
+
+    var displayName: String {
+      switch self {
+      case .daily: return "Daily"
+      case .weekdays: return "Weekdays"
+      case .weekly: return "Weekly"
+      case .onATrigger: return "On a trigger"
+      }
+    }
+
+    func summary(at time: String) -> String {
+      self == .onATrigger ? "on a trigger" : "\(displayName.lowercased()) at \(time)"
+    }
+  }
+
   /// Which `PayloadTransform` case the edge editor's picker is on. A sibling of
   /// `PendingEdge` rather than nested inside it only to keep nesting one level deep.
   enum TransformMode: String, CaseIterable, Equatable {

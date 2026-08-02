@@ -2,6 +2,8 @@ import Foundation
 import GraphcodeKit
 import Testing
 
+@testable import graphcode
+
 /// `NodeDraft.isValid` is where docs/08-quality-and-token-budgets.md's "make the
 /// cheap-to-ignore version structurally awkward" actually lives: no check means no
 /// turn-based node, no stop condition means no goal-based node, and an impossible
@@ -18,18 +20,56 @@ struct NodeDraftTests {
     // to get past the form. The hand-off this type names is a human watching the work,
     // and that human is there whether or not they wrote the criterion down first.
     #expect(
-      NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "Sound?").isValid)
-    #expect(NodeDraft(title: "Research", loopType: .turnBased).isValid)
+      NodeDraft(
+        title: "Research", loopType: .turnBased, checkDescription: "Sound?",
+        firstInstruction: "Read the RFC"
+      ).isValid)
     #expect(
-      NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "   ").isValid)
+      NodeDraft(title: "Research", loopType: .turnBased, firstInstruction: "Read the RFC")
+        .isValid)
+    #expect(
+      NodeDraft(
+        title: "Research", loopType: .turnBased, checkDescription: "   ",
+        firstInstruction: "Read the RFC"
+      ).isValid)
   }
 
   @Test
-  func aTurnBasedSessionStillStopsForReviewWithoutACriterion() throws {
-    let bare = try #require(
-      NodeDraft(title: "Research", loopType: .turnBased).makeNode().sessionPrompt)
-    #expect(bare.contains("stopping after each one"))
-    #expect(!bare.contains("verified against"))
+  func aTurnBasedDraftDoesDemandSomethingToDo() {
+    // The one field this type never had. Without it the session opened knowing it should
+    // pause and what it would be judged on, and never what to start — which is not a
+    // loop, it is a waiting room.
+    #expect(!NodeDraft(title: "Research", loopType: .turnBased).isValid)
+    #expect(
+      !NodeDraft(title: "Research", loopType: .turnBased, firstInstruction: "  ").isValid)
+    // A criterion is not a task: knowing what it will be judged on tells a session
+    // nothing about what to begin.
+    #expect(
+      !NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "Sound?").isValid)
+  }
+
+  @Test
+  func aTurnBasedSessionIsToldTheJobThenTheShapeThenTheBar() throws {
+    let full = try #require(
+      NodeDraft(
+        title: "Research", loopType: .turnBased, checkDescription: "Sound?",
+        firstInstruction: "Read the RFC"
+      ).makeNode().sessionPrompt)
+    #expect(full.hasPrefix("Read the RFC"))
+    #expect(full.contains("stopping after each one"))
+    #expect(full.contains("verified against"))
+  }
+
+  @Test
+  func pausingOnlyBeforeWritesChangesWhatTheSessionIsAskedFor() throws {
+    // The radio pair is not decoration: it is the sentence the agent actually reads.
+    let guarded = try #require(
+      NodeDraft(
+        title: "Port", loopType: .turnBased, firstInstruction: "Port the settings screen",
+        pausesBeforeWritesOnly: true
+      ).makeNode().sessionPrompt)
+    #expect(guarded.contains("before anything that changes files"))
+    #expect(!guarded.contains("stopping after each one"))
   }
 
   @Test
@@ -56,7 +96,9 @@ struct NodeDraftTests {
   /// backend-suggested name (see `TitleSuggestionClient`).
   @Test
   func anUntitledDraftIsValidAndFallsBackToAPlaceholderName() {
-    let draft = NodeDraft(title: "  ", loopType: .turnBased, checkDescription: "Sound?")
+    let draft = NodeDraft(
+      title: "  ", loopType: .turnBased, checkDescription: "Sound?",
+      firstInstruction: "Read the RFC")
     #expect(draft.isValid)
     #expect(draft.makeNode().title == "New Loop")
     // A typed title is used as typed.
@@ -92,6 +134,10 @@ struct NodeDraftTests {
     // it creates exists. The real gate is arming, not creating.
     let draft = NodeDraft(title: "Triage inbox", loopType: .proactive)
     #expect(draft.isValid)
+    // The name, though, is required for this type alone: every other kind gets one from
+    // its own backend once it starts working, and a composite never starts. "New Loop"
+    // would be its name for good.
+    #expect(!NodeDraft(title: "  ", loopType: .proactive).isValid)
 
     let node = draft.makeNode()
     #expect(node.subGraph != nil)
@@ -104,8 +150,11 @@ struct NodeDraftTests {
   @Test
   func onlyAProactiveNodeGetsASubGraph() {
     #expect(
-      NodeDraft(title: "Research", loopType: .turnBased, checkDescription: "?")
-        .makeNode().subGraph == nil)
+      NodeDraft(
+        title: "Research", loopType: .turnBased, checkDescription: "?",
+        firstInstruction: "Work"
+      )
+      .makeNode().subGraph == nil)
   }
 
   @Test
@@ -115,7 +164,7 @@ struct NodeDraftTests {
     #expect(
       NodeDraft(
         title: "Research", loopType: .turnBased, checkDescription: "Sound?",
-        backend: .copilotCLI
+        firstInstruction: "Read the RFC", backend: .copilotCLI
       ).isValid)
     #expect(
       NodeDraft(
@@ -196,7 +245,8 @@ struct NodeDraftTests {
   @Test
   func otherLoopTypesStartIdle() {
     let node = NodeDraft(
-      title: "Research", loopType: .turnBased, checkDescription: "Sound?"
+      title: "Research", loopType: .turnBased, checkDescription: "Sound?",
+      firstInstruction: "Work"
     ).makeNode()
 
     #expect(node.state == .idle)
@@ -210,9 +260,75 @@ struct NodeDraftTests {
     let worktree = WorktreeRef(
       id: "feature", repositoryPath: "/repo", worktreePath: "/repo-feature", branch: "feature")
     let node = NodeDraft(
-      title: "Implement", loopType: .turnBased, checkDescription: "Correct?", worktree: worktree
+      title: "Implement", loopType: .turnBased, checkDescription: "Correct?",
+      firstInstruction: "Work", worktree: worktree
     ).makeNode()
 
     #expect(node.worktreeBinding == worktree)
+  }
+
+  @Test
+  func theIntervalControlWritesTheSameDirectiveThePromptFieldUsedToHold() {
+    // The old form had one free-text field whose placeholder was the whole
+    // documentation — you had to know the cadence lives *inside* the prompt as a `/loop`
+    // directive, and what its syntax was. What gets stored has to be identical.
+    var state = ProjectFeature.State(
+      graph: LoopGraph(project: ProjectRef(path: "/tmp/p", name: "p")))
+    state.draftLoopType = .timeBased
+    state.draftInterval = .hourly
+    state.draftTimedTask = "Check for new crash reports"
+
+    #expect(state.draft.triggerPrompt == "/loop 1h Check for new crash reports")
+    #expect(state.draft.isValid)
+
+    state.draftStopAfter = "20 runs"
+    #expect(state.draft.triggerPrompt == "/loop 1h Check for new crash reports Stop after 20 runs.")
+
+    state.draftInterval = .custom
+    state.draftCustomInterval = "45m"
+    #expect(state.draft.triggerPrompt?.hasPrefix("/loop 45m ") == true)
+  }
+
+  @Test
+  func aTimedDraftWithNothingToDoIsNotValidHoweverOftenItWouldRun() {
+    var state = ProjectFeature.State(
+      graph: LoopGraph(project: ProjectRef(path: "/tmp/p", name: "p")))
+    state.draftLoopType = .timeBased
+    state.draftInterval = .daily
+
+    #expect(state.draft.triggerPrompt == nil)
+    #expect(!state.draft.isValid)
+  }
+
+  @Test
+  func aCompositeCarriesTheScheduleItIsIntendedFor() {
+    // Nothing runs at creation, so this is a statement of intent — but one the composite
+    // should still be holding when someone comes back to arm it.
+    var state = ProjectFeature.State(
+      graph: LoopGraph(project: ProjectRef(path: "/tmp/p", name: "p")))
+    state.draftLoopType = .proactive
+    state.draftTitle = "Nightly sweep"
+    state.draftSchedule = .weekdays
+    state.draftScheduleTime = "07:30"
+
+    #expect(state.draft.triggerPrompt == "Intended schedule: weekdays at 07:30")
+    #expect(state.draft.isValid)
+  }
+
+  @Test
+  func changingTheTypeStillFallsTheBackendBack() {
+    // The rule `BackendPicker.onChange` applied, now that the dialog draws the note
+    // itself: an impossible pairing left selected is a form that refuses to submit
+    // without saying which field is at fault.
+    #expect(!CLISessionBackendKind.codex.canHost(.timeBased))
+    #expect(CLISessionBackendKind.hosting(.timeBased).first == .claudeCode)
+    // And the note the dialog shows for it is the picker's own sentence, not a second
+    // version of the same refusal.
+    #expect(
+      BackendPicker.unsupportedReason(backend: .codex, loopType: .timeBased)
+        == BackendPicker.unsupportedReason(backend: .codex, loopType: .timeBased))
+    #expect(
+      BackendPicker.unsupportedReason(backend: .codex, loopType: .timeBased)
+        .contains("run once and stop"))
   }
 }

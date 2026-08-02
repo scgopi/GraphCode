@@ -36,9 +36,15 @@ struct SelfImprovingLoopTests {
       })
 
     await store.handle(
-      .createNode(NodeDraft(title: "Maker", loopType: .turnBased, checkDescription: "builds")))
+      .createNode(
+        NodeDraft(
+          title: "Maker", loopType: .turnBased, checkDescription: "builds",
+          firstInstruction: "Work")))
     await store.handle(
-      .createNode(NodeDraft(title: "Critic", loopType: .turnBased, checkDescription: "honest")))
+      .createNode(
+        NodeDraft(
+          title: "Critic", loopType: .turnBased, checkDescription: "honest",
+          firstInstruction: "Work")))
     let nodes = await store.graph.nodes
     let maker = nodes[0].id
     let critic = nodes[1].id
@@ -105,9 +111,15 @@ struct SelfImprovingLoopTests {
       onCaptureScript: { _ in "3 files changed, 40 insertions" })
 
     await store.handle(
-      .createNode(NodeDraft(title: "Maker", loopType: .turnBased, checkDescription: "x")))
+      .createNode(
+        NodeDraft(
+          title: "Maker", loopType: .turnBased, checkDescription: "x",
+          firstInstruction: "Work")))
     await store.handle(
-      .createNode(NodeDraft(title: "Critic", loopType: .turnBased, checkDescription: "y")))
+      .createNode(
+        NodeDraft(
+          title: "Critic", loopType: .turnBased, checkDescription: "y",
+          firstInstruction: "Work")))
     let nodes = await store.graph.nodes
     await store.handle(
       .createEdge(
@@ -140,7 +152,10 @@ struct SelfImprovingLoopTests {
           title: "Critic", loopType: .goalBased,
           goal: GoalSpec(summary: "quality", metricCommand: "count-failures"))))
     await store.handle(
-      .createNode(NodeDraft(title: "Maker", loopType: .turnBased, checkDescription: "x")))
+      .createNode(
+        NodeDraft(
+          title: "Maker", loopType: .turnBased, checkDescription: "x",
+          firstInstruction: "Work")))
     let nodes = await store.graph.nodes
     let critic = nodes[0].id
     let maker = nodes[1].id
@@ -171,7 +186,10 @@ struct SelfImprovingLoopTests {
           goal: GoalSpec(
             summary: "quality", metricCommand: "count-failures", metricDirection: .minimize))))
     await store.handle(
-      .createNode(NodeDraft(title: "Maker", loopType: .turnBased, checkDescription: "x")))
+      .createNode(
+        NodeDraft(
+          title: "Maker", loopType: .turnBased, checkDescription: "x",
+          firstInstruction: "Work")))
     let nodes = await store.graph.nodes
     let critic = nodes[0].id
     let maker = nodes[1].id
@@ -206,7 +224,10 @@ struct SelfImprovingLoopTests {
           goal: GoalSpec(
             summary: "quality", metricCommand: "count-failures", metricDirection: .minimize))))
     await store.handle(
-      .createNode(NodeDraft(title: "Maker", loopType: .turnBased, checkDescription: "x")))
+      .createNode(
+        NodeDraft(
+          title: "Maker", loopType: .turnBased, checkDescription: "x",
+          firstInstruction: "Work")))
     let nodes = await store.graph.nodes
     let critic = nodes[0].id
     let maker = nodes[1].id
@@ -302,7 +323,10 @@ struct SelfImprovingLoopTests {
           title: "Fixer", loopType: .goalBased,
           goal: GoalSpec(summary: "tests pass", predicate: "make test"))))
     await store.handle(
-      .createNode(NodeDraft(title: "Engineer", loopType: .turnBased, checkDescription: "x")))
+      .createNode(
+        NodeDraft(
+          title: "Engineer", loopType: .turnBased, checkDescription: "x",
+          firstInstruction: "Work")))
     let nodes = await store.graph.nodes
 
     await store.handle(
@@ -360,7 +384,10 @@ struct SelfImprovingLoopTests {
     let store = GraphStore(
       onAppendMemory: { nodeID, entry in memory.withValue { $0.append((nodeID, entry)) } })
     await store.handle(
-      .createNode(NodeDraft(title: "Fixer", loopType: .turnBased, checkDescription: "x")))
+      .createNode(
+        NodeDraft(
+          title: "Fixer", loopType: .turnBased, checkDescription: "x",
+          firstInstruction: "Work")))
     let nodeID = await store.graph.nodes[0].id
 
     await store.handle(

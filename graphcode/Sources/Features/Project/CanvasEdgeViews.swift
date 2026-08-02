@@ -31,10 +31,18 @@ struct EdgeLineView: View {
   /// Where the curve starts, ends, and bends. Computed once — the path, the hit target,
   /// the head, the pip and the label all read the same three points, and a second
   /// derivation is how they drift apart by a pixel each.
-  private var route: (start: CGPoint, end: CGPoint, controls: (CGPoint, CGPoint)) {
+  private var route: Route {
     let start = CanvasEdgeGeometry.exit(from: from, toward: to, cardSize: targetSize)
     let end = CanvasEdgeGeometry.entry(at: to, from: from, cardSize: targetSize)
-    return (start, end, CanvasEdgeGeometry.controls(from: start, to: end))
+    let controls = CanvasEdgeGeometry.controls(from: start, to: end)
+    return Route(start: start, end: end, outControl: controls.0, inControl: controls.1)
+  }
+
+  private struct Route {
+    let start: CGPoint
+    let end: CGPoint
+    let outControl: CGPoint
+    let inControl: CGPoint
   }
 
   var body: some View {
@@ -70,14 +78,13 @@ struct EdgeLineView: View {
     let route = route
     return Path { path in
       path.move(to: route.start)
-      path.addCurve(to: route.end, control1: route.controls.0, control2: route.controls.1)
+      path.addCurve(to: route.end, control1: route.outControl, control2: route.inControl)
     }
   }
 
   private var head: Path {
     let route = route
-    let approach = CanvasEdgeGeometry.arrivalTangent(
-      control: route.controls.1, end: route.end)
+    let approach = CanvasEdgeGeometry.arrivalTangent(control: route.inControl, end: route.end)
     return Path { path in
       let corners = CanvasEdgeGeometry.arrowhead(at: route.end, from: approach)
       guard let first = corners.first else { return }

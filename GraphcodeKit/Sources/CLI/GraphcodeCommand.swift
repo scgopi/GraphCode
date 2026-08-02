@@ -222,6 +222,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
       loopType: loopType,
       checkDescription: flags["check"],
       triggerPrompt: flags["prompt"],
+      // A turn-based loop needs something to do. `--prompt` is what a caller already
+      // types for a timed loop's opening instruction, so it means the same thing here
+      // rather than making them learn a second flag for the same idea.
+      firstInstruction: loopType == .turnBased ? flags["prompt"] : nil,
       goal: flags["goal"].map {
         GoalSpec(
           summary: $0, predicate: flags["predicate"],

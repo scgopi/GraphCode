@@ -24,9 +24,15 @@ struct CycleGuardTests {
   ) async -> Cycle {
     let store = GraphStore(onEvaluatePredicate: { _ in predicateMet })
     await store.handle(
-      .createNode(NodeDraft(title: "Implement", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "Implement", loopType: .turnBased, checkDescription: "?",
+          firstInstruction: "Work")))
     await store.handle(
-      .createNode(NodeDraft(title: "Review", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "Review", loopType: .turnBased, checkDescription: "?",
+          firstInstruction: "Work")))
     let nodes = await store.graph.nodes
     let (nodeA, nodeB) = (nodes[0].id, nodes[1].id)
     await store.handle(.createEdge(from: nodeA, to: nodeB, spec: EdgeSpec()))
@@ -41,9 +47,15 @@ struct CycleGuardTests {
     // has to keep behaving identically.
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "A", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "A", loopType: .turnBased, checkDescription: "?", firstInstruction: "Work"))
+    )
     await store.handle(
-      .createNode(NodeDraft(title: "B", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "B", loopType: .turnBased, checkDescription: "?", firstInstruction: "Work"))
+    )
     let nodes = await store.graph.nodes
     await store.handle(.createEdge(from: nodes[0].id, to: nodes[1].id, spec: EdgeSpec()))
 
@@ -60,9 +72,15 @@ struct CycleGuardTests {
     // turn a loop the human asked for into a one-shot.
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "A", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "A", loopType: .turnBased, checkDescription: "?", firstInstruction: "Work"))
+    )
     await store.handle(
-      .createNode(NodeDraft(title: "B", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "B", loopType: .turnBased, checkDescription: "?", firstInstruction: "Work"))
+    )
     let nodes = await store.graph.nodes
 
     await store.handle(
@@ -157,7 +175,10 @@ struct CycleGuardTests {
       .createNode(
         NodeDraft(title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 1h Check")))
     await store.handle(
-      .createNode(NodeDraft(title: "Review", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "Review", loopType: .turnBased, checkDescription: "?",
+          firstInstruction: "Work")))
     let nodes = await store.graph.nodes
     let (poll, review) = (nodes[0].id, nodes[1].id)
     await store.handle(.createEdge(from: poll, to: review, spec: EdgeSpec()))
@@ -178,9 +199,15 @@ struct CycleGuardTests {
     // how many passes are allowed, not whether this one earned a pass.
     let store = GraphStore(onEvaluatePredicate: { _ in false })
     await store.handle(
-      .createNode(NodeDraft(title: "A", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "A", loopType: .turnBased, checkDescription: "?", firstInstruction: "Work"))
+    )
     await store.handle(
-      .createNode(NodeDraft(title: "B", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "B", loopType: .turnBased, checkDescription: "?", firstInstruction: "Work"))
+    )
     let nodes = await store.graph.nodes
     await store.handle(.createEdge(from: nodes[0].id, to: nodes[1].id, spec: EdgeSpec()))
     await store.handle(

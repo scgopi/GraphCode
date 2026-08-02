@@ -29,8 +29,15 @@ public struct NodeDraft: Codable, Equatable, Sendable {
   public var loopType: LoopType
   /// `.turnBased`: what a human verifies each turn.
   public var checkDescription: String?
-  /// `.timeBased`: the opening prompt, cadence included as a `/loop` directive.
+  /// `.timeBased`: the opening prompt, cadence included as a `/loop` directive. Also
+  /// where a `.proactive` draft carries the schedule it is *intended* to run on — the
+  /// composite doesn't run at creation, so this is a statement of intent until it's
+  /// piloted and armed.
   public var triggerPrompt: String?
+  /// `.turnBased`: what the session should actually do. See `LoopNode.firstInstruction`.
+  public var firstInstruction: String?
+  /// `.turnBased`: pause only before writes rather than after every turn.
+  public var pausesBeforeWritesOnly: Bool
   /// `.goalBased`: the stop condition.
   public var goal: GoalSpec?
   /// `nil` means "nobody chose one": the daemon resolves it at creation — the creating
@@ -63,6 +70,8 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     loopType: LoopType,
     checkDescription: String? = nil,
     triggerPrompt: String? = nil,
+    firstInstruction: String? = nil,
+    pausesBeforeWritesOnly: Bool = false,
     goal: GoalSpec? = nil,
     backend: CLISessionBackendKind? = nil,
     modelTier: ModelTier? = nil,
@@ -75,6 +84,8 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     self.loopType = loopType
     self.checkDescription = checkDescription
     self.triggerPrompt = triggerPrompt
+    self.firstInstruction = firstInstruction
+    self.pausesBeforeWritesOnly = pausesBeforeWritesOnly
     self.goal = goal
     self.backend = backend
     self.modelTier = modelTier
@@ -99,23 +110,30 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     guard effectiveBackend.canHost(loopType) else { return false }
     switch loopType {
     case .turnBased:
-      // A criterion is optional. docs/08 asks for the cheap-to-ignore version of each
-      // principle to be *structurally awkward*, and for goal-based it still is — a goal
-      // with no summary describes nothing. But a turn-based loop's hand-off is a human
-      // watching it, and that human exists whether or not they wrote down in advance what
-      // they would be looking for. Refusing the node taught people to type "check" in the
-      // box to get past the form, which is worse than an honest blank.
-      return true
+      // The *criterion* stays optional, for the reason it always was: a turn-based
+      // loop's hand-off is a human watching it, and that human exists whether or not
+      // they wrote down in advance what they would be looking for. Refusing the node
+      // over that taught people to type "check" in the box to get past the form.
+      //
+      // The **first instruction** is not optional, and this is the one type where that
+      // used to be missing entirely: with no task field the session opened knowing it
+      // should pause and what it would be judged on, but never what to start doing. A
+      // loop with nothing to do is not a loop.
+      return !(firstInstruction ?? "").trimmingCharacters(in: .whitespaces).isEmpty
     case .goalBased:
       return !(goal?.summary ?? "").trimmingCharacters(in: .whitespaces).isEmpty
     case .timeBased:
       return !(triggerPrompt ?? "").trimmingCharacters(in: .whitespaces).isEmpty
     case .proactive:
-      // Nothing is required up front: a composite is *built* by editing its sub-graph
-      // after creation, and demanding a populated one at creation time would mean a
-      // modal that can't be filled in until the thing it creates exists. The real gate
-      // is arming, which `PilotState` refuses until the composite has been run.
-      return true
+      // Its *contents* are still not required — a composite is built by editing its
+      // sub-graph after creation, and demanding a populated one at creation time would
+      // mean a modal that can't be filled in until the thing it creates exists. The real
+      // gate is arming, which `PilotState` refuses until the composite has been run.
+      //
+      // A name is required, though, and only here: every other type gets one from its
+      // own backend after it starts working (`TitleSuggestionClient`), and a composite
+      // never starts. "New Loop" would be its name for good.
+      return !title.trimmingCharacters(in: .whitespaces).isEmpty
     }
   }
 
@@ -148,6 +166,8 @@ public struct NodeDraft: Codable, Equatable, Sendable {
       loopType: loopType,
       checkDescription: checkDescription,
       triggerPrompt: triggerPrompt,
+      firstInstruction: firstInstruction,
+      pausesBeforeWritesOnly: pausesBeforeWritesOnly,
       goal: goal,
       backend: effectiveBackend,
       modelTier: modelTier,
@@ -168,7 +188,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
 extension NodeDraft {
   private enum CodingKeys: String, CodingKey {
     case id, title, loopType, checkDescription, triggerPrompt, goal, backend, modelTier
-    case worktree, subGraph, createdBy
+    case worktree, subGraph, createdBy, firstInstruction, pausesBeforeWritesOnly
   }
 
   /// `id` is `decodeIfPresent` because drafts also arrive over the wire from a CLI that
@@ -182,6 +202,11 @@ extension NodeDraft {
     loopType = try container.decode(LoopType.self, forKey: .loopType)
     checkDescription = try container.decodeIfPresent(String.self, forKey: .checkDescription)
     triggerPrompt = try container.decodeIfPresent(String.self, forKey: .triggerPrompt)
+    firstInstruction = try container.decodeIfPresent(String.self, forKey: .firstInstruction)
+    // Absent from drafts written by a CLI that predates the field. Those loops paused
+    // after every turn, which is what `false` means.
+    pausesBeforeWritesOnly =
+      try container.decodeIfPresent(Bool.self, forKey: .pausesBeforeWritesOnly) ?? false
     goal = try container.decodeIfPresent(GoalSpec.self, forKey: .goal)
     backend = try container.decodeIfPresent(CLISessionBackendKind.self, forKey: .backend)
     modelTier = try container.decodeIfPresent(ModelTier.self, forKey: .modelTier)

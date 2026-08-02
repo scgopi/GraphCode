@@ -162,9 +162,15 @@ struct MessageAndSpawnTests {
   func spawningTwiceProducesTwoDistinctlyNamedInstances() async {
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "Triage", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "Triage", loopType: .turnBased, checkDescription: "?",
+          firstInstruction: "Work")))
     await store.handle(
-      .createNode(NodeDraft(title: "Worker", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "Worker", loopType: .turnBased, checkDescription: "?",
+          firstInstruction: "Work")))
     let nodes = await store.graph.nodes
     await store.handle(
       .createEdge(
@@ -214,9 +220,15 @@ struct MessageAndSpawnTests {
     // unopenable and stop it ever being spawned from again.
     let store = GraphStore()
     await store.handle(
-      .createNode(NodeDraft(title: "Trigger", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "Trigger", loopType: .turnBased, checkDescription: "?",
+          firstInstruction: "Work")))
     await store.handle(
-      .createNode(NodeDraft(title: "Worker", loopType: .turnBased, checkDescription: "?")))
+      .createNode(
+        NodeDraft(
+          title: "Worker", loopType: .turnBased, checkDescription: "?",
+          firstInstruction: "Work")))
     let nodes = await store.graph.nodes
 
     await store.handle(
