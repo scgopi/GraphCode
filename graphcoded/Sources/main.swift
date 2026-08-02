@@ -17,6 +17,11 @@ import GraphcodeKit
 
 let fileManager = FileManager.default
 
+// Launched by an agent rather than launchd — `make daemon-install` from a loop's own
+// shell — the daemon inherits that session's identity and would hand it to every backend
+// it starts. See `AgentEnvironment`.
+AgentEnvironment.scrubInheritedAgentIdentity()
+
 // Migrates a pre-existing `~/Library/Application Support/graphcode` and creates the
 // directory. Has to happen before anything reads or writes — including the socket bind
 // immediately below.

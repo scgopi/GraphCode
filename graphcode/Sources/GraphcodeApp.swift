@@ -23,6 +23,7 @@ struct GraphcodeApp: App {
     // exist`. The app is never meaningfully inside a session, however it was launched,
     // so the variable is scrubbed before anything can pass it on.
     unsetenv("ZMX_SESSION")
+    AgentEnvironment.scrubInheritedAgentIdentity()
     SupportDirectory.prepare()
     // A packaged app carries `graphcoded` and `zmx` inside it, so dragging it to
     // /Applications is the whole installation — this is what puts them in place and starts
