@@ -137,7 +137,8 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// a human chose and check what the shell is told — the omission this fixes was
   /// invisible precisely because there was nothing to assert against.
   func agentCommand(
-    settings: GraphcodeSettings = GraphcodeSettingsStore.load(), briefingFile: URL? = nil
+    settings: GraphcodeSettings = GraphcodeSettingsStore.load(), briefingFile: URL? = nil,
+    hooksFile: URL? = nil
   ) -> [String]? {
     guard let executable = backend.executableName else { return nil }
     let tier = ModelTier.resolved(
@@ -149,6 +150,19 @@ struct GhosttyTerminalView: NSViewRepresentable {
     var parts = ["exec", executable]
     if !model.isEmpty { parts.append(model) }
     if !permissions.isEmpty { parts.append(permissions) }
+    // Presence reporting, from the same place the daemon gets it (`PresenceHooks`). It
+    // matters most here: a turn-based loop's session only ever starts from this view, so
+    // without it the one loop type a human watches most closely would be the one that
+    // could never say what it was doing. Quoted, unlike the model and permission flags,
+    // because this one carries a path and the support directory can be relocated
+    // (`GRAPHCODE_SUPPORT_DIR`) somewhere with a space in it.
+    let presence =
+      backend.presenceArguments(
+        hooksFile: hooksFile, sessionName: sessionName,
+        zmxPath: ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil)
+      .map(PresenceHooks.singleQuoted)
+      .joined(separator: " ")
+    if !presence.isEmpty { parts.append(presence) }
     // The briefing, delivered the same per-backend way `BackendCommand.launchArguments`
     // delivers it for a daemon-started session — before this, only daemon-started loops
     // knew they could fan out, and a turn-based loop (which only ever starts here) asked
@@ -182,6 +196,19 @@ struct GhosttyTerminalView: NSViewRepresentable {
       remoteLocation == nil
     else { return nil }
     return SessionBriefing.write(projectPath: projectPath)
+  }
+
+  /// Where this session's presence hooks landed, or `nil` when it shouldn't get any: a
+  /// plain shell has no agent to report, and a remote session runs on a machine this file
+  /// was never written to.
+  ///
+  /// Unlike the briefing this has no setting to switch it off. A briefing changes what a
+  /// loop *does* — it's prose in the agent's system prompt — so a human may reasonably not
+  /// want it. Reporting only changes what the graph can see about work it is already
+  /// doing, and an off switch there would only ever produce cards that lie.
+  func presenceHooksFile() -> URL? {
+    guard launchesClaudeCode, remoteLocation == nil else { return nil }
+    return PresenceHooks.write(forBackend: backend)
   }
 
   /// Non-nil when this surface's project lives on another machine — the branch every
@@ -263,7 +290,8 @@ struct GhosttyTerminalView: NSViewRepresentable {
       return remoteCommand(at: location, settings: GraphcodeSettingsStore.load())
     }
     let shell = ["/bin/zsh", "-l"]
-    guard let agentCommand = agentCommand(briefingFile: briefingFile) else {
+    guard let agentCommand = agentCommand(briefingFile: briefingFile, hooksFile: presenceHooksFile())
+    else {
       // A backend graphcode can't launch gets a plain shell rather than the wrong agent.
       // `canHost` already refuses to create such a node, so this is unreachable in
       // practice and deliberately inert if it ever isn't.

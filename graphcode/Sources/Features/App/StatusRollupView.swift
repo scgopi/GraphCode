@@ -16,8 +16,12 @@ struct StatusRollupView: View {
   let graphs: [LoopGraph]
   let attention: Int
 
+  /// Counted off `displayState`, like every card and dot, so the titlebar and the canvas
+  /// cannot disagree about the same loop. Against raw `state` this number was every
+  /// goal loop ever created and not yet resolved — which is the count of loops that
+  /// *exist*, not of loops doing anything.
   var running: Int {
-    graphs.reduce(0) { $0 + $1.nodes.count { $0.state == .running } }
+    graphs.reduce(0) { $0 + $1.nodes.count { $0.displayState == .running } }
   }
 
   /// Everything that isn't running and isn't asking. Deliberately one bucket: a titlebar
@@ -25,7 +29,7 @@ struct StatusRollupView: View {
   /// same states the cards already spell out.
   var idle: Int {
     graphs.reduce(0) { total, graph in
-      total + graph.nodes.count { $0.state != .running && !$0.state.wantsHuman }
+      total + graph.nodes.count { $0.displayState != .running && !$0.displayState.wantsHuman }
     }
   }
 
@@ -37,18 +41,14 @@ struct StatusRollupView: View {
       if attention > 0 {
         chip(
           count: attention, label: "need you", tint: Self.attentionTint,
-          ink: Self.attentionInk, pulses: false)
+          ink: Self.attentionInk)
       }
       chip(count: idle, label: "idle", tint: .clear, ink: .white.opacity(0.45))
     }
   }
 
-  private func chip(
-    count: Int, label: String, tint: Color, ink: Color, pulses: Bool = true
-  ) -> some View {
+  private func chip(count: Int, label: String, tint: Color, ink: Color) -> some View {
     HStack(spacing: 5) {
-      // The running dot pulses and nothing else does — the same rule the canvas follows,
-      // so a moving dot means the same thing in both places.
       StateIndicator(state: dotState(label), diameter: 6)
       Text("\(count) \(label)")
         .font(.system(size: 11, weight: .semibold))

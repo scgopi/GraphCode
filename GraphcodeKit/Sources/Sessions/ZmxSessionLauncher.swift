@@ -78,9 +78,12 @@ public enum ZmxSessionLauncher {
   /// `zmx get <name> <key>` reads a per-session label. This is the channel a backend's
   /// own lifecycle hooks report presence through — a Claude Code hook running
   /// `zmx set "$ZMX_SESSION" presence=busy` is what makes a reading `.reported` rather
-  /// than inferred. graphcode does not install those hooks itself: that means writing
-  /// into the user's own Claude Code settings, which is their call to make, not
-  /// something to do behind their back on first launch.
+  /// than inferred.
+  ///
+  /// graphcode writes those hooks (`PresenceHooks`) but still doesn't touch the user's
+  /// own `~/.claude/settings.json`, which is theirs to keep: `claude --settings <file>`
+  /// loads an additional source, so the hooks live under `~/.graphcode/` and reach
+  /// exactly the sessions graphcode starts.
   static func presenceLabelArguments(forNode node: LoopNode) -> [String] {
     ["get", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "presence"]
   }
@@ -186,7 +189,11 @@ public enum ZmxSessionLauncher {
         executable: ZmxLocator.binaryURL.path,
         arguments: submitArguments(forNode: node))
     else { return false }
-    return await submit.waitUntilFinished()
+    let delivered = await submit.waitUntilFinished()
+    // Typing into a Codex session starts a turn, and Codex has no way to say so itself.
+    // Clearing the label here is that missing edge — see `codexPresence`.
+    if delivered, node.backend == .codex { await clearPresenceLabel(of: node) }
+    return delivered
   }
 
   /// Reads a session's presence, preferring what the backend reported over what we can
@@ -208,6 +215,55 @@ public enum ZmxSessionLauncher {
     return PresenceReading(presence: reported, confidence: .reported)
   }
 
+  /// Codex's presence, which is read the other way up from everyone else's.
+  ///
+  /// Codex reports exactly one edge — `notify` fires on `agent-turn-complete`, writing
+  /// `presence=idle` (`PresenceHooks.codexNotifyOverride`). Nothing reports the *start* of
+  /// a turn, so a missing label on a live session is read as busy rather than as no
+  /// information.
+  ///
+  /// That inversion is sound for this backend specifically, and only this one. A Codex
+  /// turn begins in exactly two ways: graphcode launched the session, or graphcode typed
+  /// into it — and the second clears the label on the way past (see `send`). It cannot
+  /// begin any other way, because `BackendCapabilities` records Codex as having no
+  /// in-session recurrence: unlike Claude Code's `/loop`, its agent has no way to wake
+  /// itself. So "live, and has not reported finishing a turn" really does mean mid-turn.
+  ///
+  /// Reported at `.scanned` rather than `.reported` for the half graphcode inferred. If
+  /// `notify` never fires — a Codex too old for it, an override the user has replaced —
+  /// this degrades to permanently busy, which is the failure it was built to fix. That is
+  /// the one thing worth watching when this backend is next spiked against a live login.
+  static func codexPresence(of node: LoopNode) async -> PresenceReading {
+    guard ZmxLocator.isInstalled, await sessionExists(node) else { return .absent }
+    guard
+      let session = try? PTYProcessSession(
+        executable: ZmxLocator.binaryURL.path,
+        arguments: presenceLabelArguments(forNode: node))
+    else { return PresenceReading(presence: .busy, confidence: .scanned) }
+
+    let (succeeded, output) = await session.waitCollectingOutput()
+    guard succeeded, let reported = parsePresenceLabel(output) else {
+      return PresenceReading(presence: .busy, confidence: .scanned)
+    }
+    return PresenceReading(presence: reported, confidence: .reported)
+  }
+
+  /// Clears the presence label so the next reading falls back to busy. Codex only, and
+  /// only because Codex is the backend with no way to say a turn has *started* — see
+  /// `codexPresence`. Every other backend reports both edges and must not have its label
+  /// second-guessed here.
+  static func clearPresenceLabel(of node: LoopNode) async {
+    guard ZmxLocator.isInstalled else { return }
+    guard
+      let session = try? PTYProcessSession(
+        executable: ZmxLocator.binaryURL.path,
+        arguments: [
+          "set", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "presence=",
+        ])
+    else { return }
+    _ = await session.waitUntilFinished()
+  }
+
   /// Labels come back as raw text; anything we don't recognise is treated as no label at
   /// all rather than coerced into the nearest case.
   static func parsePresenceLabel(_ output: String) -> Presence? {
@@ -219,7 +275,10 @@ public enum ZmxSessionLauncher {
     return Presence(rawValue: trimmed)
   }
 
-  private static func sessionExists(_ node: LoopNode) async -> Bool {
+  /// Whether the node has a live session at all. Internal rather than private because
+  /// `CopilotSessionLog` needs the same liveness gate before it trusts a log tail: a
+  /// killed session's log still ends at whatever it was doing.
+  static func sessionExists(_ node: LoopNode) async -> Bool {
     guard
       let session = try? PTYProcessSession(
         executable: ZmxLocator.binaryURL.path,
@@ -322,10 +381,22 @@ public enum ZmxSessionLauncher {
     let paths =
       Self.workspacePaths(forNode: node, projectPath: projectPath)
       + (wakeFile.map { [$0.deletingLastPathComponent().path] } ?? [])
+    // The hooks that make the session report what it is doing (`PresenceHooks`). Skipped
+    // for a remote project for the same reason the briefing is: the file is written here
+    // and the session runs there, and a `--settings` pointing at a path the remote host
+    // doesn't have is worse than no hooks at all.
+    let hooksFile = remote == nil ? PresenceHooks.write(forBackend: node.backend) : nil
+    // Codex needs no file, only somewhere to report to. Nil for a remote session for the
+    // same reason: it would name a binary the remote host doesn't have.
+    let reportingPath =
+      remote == nil && ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil
     let arguments = node.backend.launchArguments(
       prompt: promptWithMemory, tier: tier, briefingFile: briefingFile,
       settings: settings,
-      workspacePaths: paths)
+      workspacePaths: paths,
+      hooksFile: hooksFile,
+      sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
+      zmxPath: reportingPath)
     let command =
       [
         "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
@@ -341,9 +412,15 @@ public enum ZmxSessionLauncher {
     // safe thing to give up — the prompt is the human's, and a loop that launches without
     // its briefing merely can't fan out, where a truncated one does nothing at all.
     guard Self.fitsInATypedCommandLine(command) else {
+      // The hooks stay: they are two argv entries against the briefing's several hundred
+      // bytes, and a loop that overran the line is exactly the one worth being able to
+      // see the real state of.
       let unbriefed = node.backend.launchArguments(
         prompt: singleLine, tier: tier, settings: settings,
-        workspacePaths: Self.workspacePaths(forNode: node, projectPath: projectPath))
+        workspacePaths: Self.workspacePaths(forNode: node, projectPath: projectPath),
+        hooksFile: hooksFile,
+        sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
+        zmxPath: reportingPath)
       return [
         "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
       ] + Self.loginShellInvocation(of: executable, arguments: unbriefed)

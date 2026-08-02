@@ -262,7 +262,7 @@ struct AppSidebarView: View {
       Text(LoopCardPresentation.duration(sidebarNow.timeIntervalSince(node.createdAt)))
         .font(.system(size: 10.5, design: .monospaced))
         .foregroundStyle(.white.opacity(0.5))
-      StateIndicator(state: node.state, diameter: 7)
+      StateIndicator(state: node.displayState, diameter: 7)
     }
     .contentShape(Rectangle())
     .padding(.leading, 16)

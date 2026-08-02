@@ -44,7 +44,7 @@ struct LoopCardPresentation: Equatable {
   let meta: [String]
 
   init(node: LoopNode, now: Date = Date()) {
-    word = node.state.displayWord(for: node.loopType)
+    word = node.displayState.displayWord(for: node.loopType)
     liveLine = Self.liveLine(node)
     detail = Self.detail(node, now: now)
     meta = Self.meta(node, now: now)

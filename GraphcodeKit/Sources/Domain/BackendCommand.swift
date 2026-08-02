@@ -70,9 +70,12 @@ extension CLISessionBackendKind {
   /// briefing-sized argument overruns the tty's canonical input buffer.
   public func launchArguments(
     prompt: String?, tier: ModelTier, briefingFile: URL? = nil,
-    settings: GraphcodeSettings = GraphcodeSettings(), workspacePaths: [String] = []
+    settings: GraphcodeSettings = GraphcodeSettings(), workspacePaths: [String] = [],
+    hooksFile: URL? = nil, sessionName: String? = nil, zmxPath: String? = nil
   ) -> [String] {
-    let model = modelArguments(for: tier) + permissionArguments(settings)
+    let model =
+      modelArguments(for: tier) + permissionArguments(settings)
+      + presenceArguments(hooksFile: hooksFile, sessionName: sessionName, zmxPath: zmxPath)
     guard let prompt, !prompt.isEmpty else { return model }
     switch self {
     case .claudeCode:
@@ -130,6 +133,43 @@ extension CLISessionBackendKind {
     case .claudeCode: return settings.claudePermissionMode.arguments
     case .copilotCLI: return settings.copilotPermissions.arguments
     case .codex: return settings.codexApprovals.arguments
+    }
+  }
+
+  /// The argv that makes a backend's session observable — what graphcode adds so that
+  /// "is this loop actually working?" has an answer.
+  ///
+  /// The two backends answer it from opposite ends, which is why one function takes both
+  /// arguments rather than each getting its own:
+  ///
+  /// - **Claude Code pushes.** It has lifecycle hooks, so it is handed a settings file
+  ///   whose hooks write the answer into the session's own label store (`PresenceHooks`).
+  ///   By *path*, like the briefing and for the same reason: `--settings` also takes a
+  ///   JSON string, and inlining several hundred bytes of shell would overrun the
+  ///   `MAX_CANON`-capped line `zmx` types (see `SessionBriefing`).
+  /// - **Copilot is read.** It has no hook mechanism at all, so nothing can be installed
+  ///   into it; instead it is given a *name*, which is the only handle that ties the
+  ///   session-state directory it writes back to the node that owns it
+  ///   (`CopilotSessionLog`). Without this flag the directory is a bare UUID Copilot
+  ///   chose, and its event log — which marks turn boundaries better than any transcript
+  ///   graphcode reads — belongs to nobody.
+  ///
+  /// Empty when the handle isn't available, which leaves presence at the heuristic: what
+  /// every session did before any of this existed.
+  public func presenceArguments(
+    hooksFile: URL?, sessionName: String? = nil, zmxPath: String? = nil
+  ) -> [String] {
+    switch self {
+    case .claudeCode:
+      return hooksFile.map { ["--settings", $0.path] } ?? []
+    case .copilotCLI:
+      return sessionName.map { ["--name", $0] } ?? []
+    case .codex:
+      // Codex reports only the *end* of a turn, through `notify`, and needs no file to do
+      // it — just somewhere to write, which is why this is the one backend that takes the
+      // `zmx` path rather than a path to something graphcode wrote. Its other edge is
+      // covered without asking Codex anything: see `ZmxSessionLauncher.codexPresence`.
+      return zmxPath.map { ["-c", PresenceHooks.codexNotifyOverride(zmxPath: $0)] } ?? []
     }
   }
 }

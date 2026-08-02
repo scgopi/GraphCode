@@ -121,7 +121,7 @@ struct LoopCardView: View {
         .foregroundStyle(.white.opacity(0.95))
         .lineLimit(1)
       Spacer(minLength: 4)
-      LoopStatePill(state: node.state, loopType: node.loopType)
+      LoopStatePill(state: node.displayState, loopType: node.loopType)
     }
   }
 
@@ -246,26 +246,27 @@ struct LoopStatePill: View {
 }
 
 /// The dot — filled, or a ring for the states that are present without producing
-/// anything. Pulses only while running, so the one thing moving on the canvas is the one
-/// thing changing under you.
+/// anything.
+///
+/// **It used to pulse while running, and that is deliberately gone.** The pulse was a
+/// `repeatForever` opacity animation, which is the one kind that never settles: as long as
+/// a single running dot is on screen the window has a live animation attached and keeps
+/// recomposing at the display's refresh rate, forever. That is not one dot's worth of
+/// cost. The same indicator draws on every running card, every sidebar row, and the
+/// titlebar rollup — which is visible in *every* pane including a full-window terminal, so
+/// the app could never reach an idle frame while any loop was running, and the cost landed
+/// next to Ghostty's own rendering.
+///
+/// Nothing is lost by removing it. `LoopStateAppearance` already carries state on three
+/// channels that survive greyscale, 40% zoom, and a protanope — hue, solid-or-hollow, and
+/// a word — and motion was a fourth saying what the word already said.
 struct StateIndicator: View {
   let state: LoopState
   var diameter: CGFloat = 6
 
-  @State private var dimmed = false
-
   var body: some View {
     indicator
       .frame(width: diameter, height: diameter)
-      .opacity(dimmed ? 0.35 : 1)
-      .animation(
-        state.pulses
-          ? .easeInOut(duration: 0.95).repeatForever(autoreverses: true)
-          : .default,
-        value: dimmed
-      )
-      .onAppear { dimmed = state.pulses }
-      .onChange(of: state.pulses) { _, pulses in dimmed = pulses }
   }
 
   @ViewBuilder

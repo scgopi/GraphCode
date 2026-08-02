@@ -75,6 +75,20 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// line then says what the loop was *handed* instead. That fallback is honest and is
   /// what shipped before this field existed.
   public var activity: String?
+  /// What the session is doing right now, as last read off its own label store
+  /// (`PresenceHooks` writes it, `ZmxSessionLauncher.presence` reads it).
+  ///
+  /// Deliberately alongside `state` rather than folded into it — see `Presence` for why
+  /// the two are different questions. `state` is what the graph believes about a loop's
+  /// place in the work; this is what its session is doing this second. A goal loop stays
+  /// `.running` from creation until something resolves it, so it is this field, and only
+  /// this field, that can tell a card mid-work from a card whose agent finished its turn
+  /// half an hour ago.
+  ///
+  /// `nil` until something reports one — a backend with no hooks, a session that hasn't
+  /// been polled yet, or `zmx` not installed. Every surface treats that as "no better
+  /// information than `state`", which is exactly what shipped before this existed.
+  public var presence: PresenceReading?
   /// Recent readings of the goal's `metricCommand`, oldest first — one per cycle pass,
   /// capped at `LoopNode.maxMetricSamples` so per-poll persistence stays bounded. The
   /// full unbounded series lives in the node's memory log; this is the cache the canvas
@@ -105,6 +119,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     pilotState: PilotState = .notPiloted,
     usage: UsageSample? = nil,
     activity: String? = nil,
+    presence: PresenceReading? = nil,
     metricHistory: [MetricSample] = [],
     createdBy: UUID? = nil,
     state: LoopState = .idle,
@@ -125,6 +140,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.pilotState = pilotState
     self.usage = usage
     self.activity = activity
+    self.presence = presence
     self.metricHistory = metricHistory
     self.createdBy = createdBy
     self.state = state
@@ -204,6 +220,40 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     loopType == .timeBased || loopType == .goalBased
   }
 
+  /// The state a surface should show, which is `state` corrected by what the session is
+  /// actually doing.
+  ///
+  /// Only `.running` is ever corrected, and that is the whole point. Every other state is
+  /// a fact about the loop's place in the graph that no session reading can improve on: a
+  /// `.blocked` node is waiting on an edge whether or not its session is alive, and a
+  /// `.succeeded` one is finished whatever is still running in its pane. `.running` is the
+  /// odd one out because it is set at *creation* and cleared only by resolution — so
+  /// between those two moments it is a claim about the present tense that nothing was
+  /// checking. A goal loop whose agent answered and stopped reads RUNNING, pulsing, for
+  /// as long as it takes a human to notice and stop it.
+  ///
+  /// Deliberately derived rather than written back into `state`. `state` is what the graph
+  /// believes, and edge firing, `MessageBus.deliverability` and resolution all read it; a
+  /// loop that went quiet for a minute has not stopped being the running node its
+  /// downstream edges are waiting on. This is the presentation of that fact, not a
+  /// revision of it.
+  ///
+  /// A backend that reports nothing leaves `presence` nil and this returns `state`
+  /// untouched, which is exactly the behaviour every surface had before presence existed.
+  public var displayState: LoopState {
+    guard state == .running, let presence = presence?.presence else { return state }
+    switch presence {
+    case .busy: return .running
+    // `.idle` is already the word for both readings a stopped-for-now loop deserves —
+    // "SCHEDULED" for a time-based loop between ticks, "IDLE" for anything else — so this
+    // needs no ninth state, only the honesty to use the eighth.
+    case .idle, .absent: return .idle
+    // The combination `Presence` was written for: running in the graph, waiting on a
+    // human in its session.
+    case .awaitingInput: return .awaitingInput
+    }
+  }
+
   /// Whether this node has finished for good. Used to stop a resolved goal from being
   /// re-pursued when its project is reloaded.
   public var isResolved: Bool {
@@ -218,7 +268,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   private enum CodingKeys: String, CodingKey {
     case id, title, loopType, checkDescription, triggerPrompt, goal, backend, modelTier
     case worktreeBinding, subGraph, pilotState, usage, metricHistory, createdBy
-    case state, createdAt, activity, firstInstruction, pausesBeforeWritesOnly
+    case state, createdAt, activity, presence, firstInstruction, pausesBeforeWritesOnly
   }
 
   /// Hand-written for the same reason `LoopEdge`'s is: `ProjectPersistence.loadGraph`
@@ -244,9 +294,12 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     subGraph = try container.decodeIfPresent(LoopGraph.self, forKey: .subGraph)
     pilotState = try container.decodeIfPresent(PilotState.self, forKey: .pilotState) ?? .notPiloted
     usage = try container.decodeIfPresent(UsageSample.self, forKey: .usage)
-    // Never restored from disk as a live fact — a session's last reported line is about
-    // a session that is no longer running by the time a graph is reloaded.
+    // Never restored from disk as live facts — a session's last reported line, and what
+    // it was doing when it wrote it, are both about a session that is no longer running
+    // by the time a graph is reloaded. A persisted `busy` would be the exact lie this
+    // field was added to remove.
     activity = nil
+    presence = nil
     metricHistory =
       try container.decodeIfPresent([MetricSample].self, forKey: .metricHistory) ?? []
     createdBy = try container.decodeIfPresent(UUID.self, forKey: .createdBy)

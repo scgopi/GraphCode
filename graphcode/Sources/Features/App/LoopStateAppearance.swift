@@ -16,12 +16,18 @@ extension LoopState {
   /// The pill's word. Takes the kind rather than reading it off a colour, because
   /// `idle` is the one state whose meaning depends on it: a time-based loop sitting at
   /// `idle` is between ticks and will run again on its own, and anything else at `idle`
-  /// simply hasn't started.
+  /// hasn't started or has stopped working for the moment.
   ///
   /// That second case reads IDLE and not STOPPED: nobody stopped it, and a state pill
   /// that reports a decision no human made is the kind of small lie this redesign is
   /// removing. The two stay apart on the indicator anyway — `idle` is solid, `stopped`
   /// hollow.
+  ///
+  /// Feed this `LoopNode.displayState` rather than `state`. The two differ for exactly
+  /// one node — a `.running` one whose session has gone quiet — and that node is the
+  /// reason this doc's "hasn't started" gained an "or has stopped working": a goal loop
+  /// is `.running` from creation to resolution, so `state` alone had it pulsing RUNNING
+  /// long after its agent answered and stopped.
   func displayWord(for loopType: LoopType) -> String {
     switch self {
     case .running: "RUNNING"
@@ -109,10 +115,6 @@ extension LoopState {
     }
   }
 
-  /// The only animation on the canvas. It marks the one state that is changing while
-  /// you look at it; a graph where several things breathe at once is a graph you can't
-  /// read.
-  var pulses: Bool { self == .running }
 }
 
 /// The state hues at their specified values, kept in one place so the pill, the

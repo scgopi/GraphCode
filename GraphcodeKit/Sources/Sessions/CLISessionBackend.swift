@@ -92,7 +92,17 @@ extension CLISessionBackend {
       sendInput: { node, text, projectPath in
         await ZmxSessionLauncher.send(text, to: node, projectPath: projectPath)
       },
-      presence: { node in await ZmxSessionLauncher.presence(of: node) },
+      // The one operation that is genuinely per-backend, because how a session can be
+      // asked what it is doing is the thing the three CLIs differ on most. Claude Code
+      // reports into its own label store through hooks graphcode installs; Copilot has no
+      // hook mechanism at all and is read from the event log it writes regardless.
+      presence: { node in
+        switch kind {
+        case .claudeCode: return await ZmxSessionLauncher.presence(of: node)
+        case .copilotCLI: return await CopilotSessionLog.presence(of: node)
+        case .codex: return await ZmxSessionLauncher.codexPresence(of: node)
+        }
+      },
       usage: { node in await ZmxSessionLauncher.usage(of: node) },
       activity: { node in await ZmxSessionLauncher.activity(of: node) }
     )
@@ -164,5 +174,13 @@ extension CLISessionBackend {
   /// The activity-reading hook `GraphStore` is wired with.
   public static let readActivity: @Sendable (LoopNode) async -> String? = { node in
     await backend(for: node).activity(node)
+  }
+
+  /// The presence-reading hook `GraphStore` is wired with. The last missing link in a
+  /// chain that was otherwise complete: `presence` was implemented on every adapter and
+  /// called by nothing, so every surface had only `LoopState` to go on and a loop that
+  /// had finished its turn read RUNNING until a human stopped it.
+  public static let readPresence: @Sendable (LoopNode) async -> PresenceReading = { node in
+    await backend(for: node).presence(node)
   }
 }

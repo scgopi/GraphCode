@@ -91,11 +91,11 @@ struct LoopStateAppearanceTests {
     #expect(allStates.filter(\.wantsHuman) == [.awaitingInput, .blocked])
   }
 
-  @Test
-  func onlyARunningLoopAnimates() {
-    // One moving thing on a canvas is a signal; several are wallpaper.
-    #expect(allStates.filter(\.pulses) == [.running])
-  }
+  // There is no test that the running dot doesn't pulse, and that is on purpose: SwiftUI
+  // offers no way to assert the absence of an animation that isn't a reflection trick
+  // more fragile than the thing it guards. The reason it was removed is on
+  // `StateIndicator`, where anyone tempted to put it back will read it — a `repeatForever`
+  // animation never settles, and this indicator is on screen in every pane.
 
   @Test
   func everyKindHasAOneWordNameAndNoneOfThemIsARawValue() {

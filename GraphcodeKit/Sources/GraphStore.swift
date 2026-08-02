@@ -39,6 +39,7 @@ public actor GraphStore {
   private let onCaptureScript: (@Sendable (ShellPredicate) async -> String?)?
   private let onReadUsage: (@Sendable (LoopNode) async -> UsageSample?)?
   private let onReadActivity: (@Sendable (LoopNode) async -> String?)?
+  private let onReadPresence: (@Sendable (LoopNode) async -> PresenceReading)?
   /// Cross-graph `.spawn`. `GraphStore` owns exactly one graph and cannot reach another,
   /// so it hands the request up to `ProjectRegistry`, which is the layer that knows every
   /// open project — the same split that keeps this actor unaware multi-project routing
@@ -88,6 +89,7 @@ public actor GraphStore {
     onCaptureScript: (@Sendable (ShellPredicate) async -> String?)? = nil,
     onReadUsage: (@Sendable (LoopNode) async -> UsageSample?)? = nil,
     onReadActivity: (@Sendable (LoopNode) async -> String?)? = nil,
+    onReadPresence: (@Sendable (LoopNode) async -> PresenceReading)? = nil,
     onSpawnIntoProject: (@Sendable (String, NodeDraft) -> Void)? = nil,
     onAppendMemory: (@Sendable (UUID, String) -> Void)? = nil,
     onRemoveMemory: (@Sendable (UUID) -> Void)? = nil
@@ -101,6 +103,7 @@ public actor GraphStore {
     self.onCaptureScript = onCaptureScript
     self.onReadUsage = onReadUsage
     self.onReadActivity = onReadActivity
+    self.onReadPresence = onReadPresence
     self.onSpawnIntoProject = onSpawnIntoProject
     self.onAppendMemory = onAppendMemory
     self.onRemoveMemory = onRemoveMemory
@@ -246,11 +249,12 @@ public actor GraphStore {
       armComposite(nodeID)
 
     case .refreshUsage:
-      // The same command polls both labels: they come off one session, over one channel,
-      // and a second command on its own timer would double the subprocess count for the
-      // sake of separating two `zmx get`s.
+      // The same command polls all three labels: they come off one session, over one
+      // channel, and a second command on its own timer would triple the subprocess count
+      // for the sake of separating three `zmx get`s.
       await refreshUsage()
       await refreshActivity()
+      await refreshPresence()
     }
 
     // Guarded re-fires need an `until` predicate answered first, which means a
@@ -370,6 +374,24 @@ public actor GraphStore {
     guard let onReadActivity else { return }
     for node in graph.nodes {
       graph.nodes[id: node.id]?.activity = await onReadActivity(node)
+    }
+  }
+
+  /// Asks each session what it is doing, the third reading on the same channel and the
+  /// same trip as the other two.
+  ///
+  /// Written back unconditionally, `activity`-style rather than `usage`-style: a node
+  /// whose session has ended must lose its last reading, or a loop that finished an hour
+  /// ago keeps claiming to be working — which is the whole failure this reading exists to
+  /// end, and it would be perverse to reintroduce it here.
+  ///
+  /// Resolved nodes are skipped. Their work is over by definition, nothing is going to
+  /// change what the graph believes about them, and probing a session per resolved node
+  /// costs a subprocess for an answer no surface reads.
+  private func refreshPresence() async {
+    guard let onReadPresence else { return }
+    for node in graph.nodes where !node.isResolved {
+      graph.nodes[id: node.id]?.presence = await onReadPresence(node)
     }
   }
 

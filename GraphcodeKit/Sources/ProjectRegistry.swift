@@ -30,6 +30,7 @@ public actor ProjectRegistry {
   private let captureScript: (@Sendable (ShellPredicate) async -> String?)?
   private let readUsage: (@Sendable (LoopNode) async -> UsageSample?)?
   private let readActivity: (@Sendable (LoopNode) async -> String?)?
+  private let readPresence: (@Sendable (LoopNode) async -> PresenceReading)?
 
   /// These default to the real `ZmxSessionLauncher`/`ShellPredicateEvaluator` closures —
   /// every `GraphStore` this registry creates gets them, so an unattended node's session
@@ -47,7 +48,8 @@ public actor ProjectRegistry {
       CLISessionBackend.deliverMessage,
     captureScript: (@Sendable (ShellPredicate) async -> String?)? = ShellPredicateEvaluator.capture,
     readUsage: (@Sendable (LoopNode) async -> UsageSample?)? = CLISessionBackend.readUsage,
-    readActivity: (@Sendable (LoopNode) async -> String?)? = CLISessionBackend.readActivity
+    readActivity: (@Sendable (LoopNode) async -> String?)? = CLISessionBackend.readActivity,
+    readPresence: (@Sendable (LoopNode) async -> PresenceReading)? = CLISessionBackend.readPresence
   ) {
     persistence = ProjectPersistence(baseDirectory: persistenceDirectory)
     self.ensureSession = ensureSession
@@ -57,6 +59,7 @@ public actor ProjectRegistry {
     self.captureScript = captureScript
     self.readUsage = readUsage
     self.readActivity = readActivity
+    self.readPresence = readPresence
   }
 
   // MARK: - Connections
@@ -204,6 +207,7 @@ public actor ProjectRegistry {
       onCaptureScript: captureScript,
       onReadUsage: readUsage,
       onReadActivity: readActivity,
+      onReadPresence: readPresence,
       onSpawnIntoProject: spawnIntoProject,
       // The node memory log (`NodeMemory`): episode records in, whole directory out
       // when the node is deleted. Keyed by this store's project path, captured here so

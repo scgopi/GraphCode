@@ -45,7 +45,7 @@ extension ProjectCanvasView {
   private func subGraphChip(_ placement: SubGraphLayout.Placement) -> some View {
     HStack(spacing: 5) {
       Circle()
-        .fill(placement.node.state.presenceColor.opacity(0.7))
+        .fill(placement.node.displayState.presenceColor.opacity(0.7))
         .frame(width: 5, height: 5)
       Text(placement.node.title).font(.caption).lineLimit(1)
       Spacer(minLength: 4)
