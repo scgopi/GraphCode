@@ -19,14 +19,19 @@ struct LoopWorkspaceView: View {
 
   static let railVisibleDefaultsKey = "loopWorkspaceRailVisible"
 
+  /// **Off** until someone asks for it. It used to default on, which meant every loop
+  /// that fed nothing opened with 212 points of empty panel beside its terminal — and
+  /// the first thing anyone asked about it was what it was for. Turning it on persists,
+  /// so people who wire graphs pay the toggle once.
   static func loadRailVisible() -> Bool {
-    UserDefaults.standard.object(forKey: railVisibleDefaultsKey) as? Bool ?? true
+    UserDefaults.standard.object(forKey: railVisibleDefaultsKey) as? Bool ?? false
   }
 
   var body: some View {
     HStack(spacing: 0) {
       workspace
-      if isRailVisible {
+      // Never drawn empty, whatever the toggle says — see `LoopWorkspaceRail.hasContent`.
+      if isRailVisible && railHasContent {
         LoopWorkspaceRail(node: store.node, graph: store.graph, now: now) { targetID in
           store.send(.railTargetTapped(targetID))
         }
@@ -45,14 +50,20 @@ struct LoopWorkspaceView: View {
     .toolbar { folderToolbar }
   }
 
+  private var railHasContent: Bool {
+    LoopWorkspaceRail.hasContent(node: store.node, graph: store.graph)
+  }
+
+  private func setRailVisible(_ visible: Bool) {
+    isRailVisible = visible
+    UserDefaults.standard.set(visible, forKey: Self.railVisibleDefaultsKey)
+  }
+
   private var railShortcut: some View {
-    Button("") {
-      isRailVisible.toggle()
-      UserDefaults.standard.set(isRailVisible, forKey: Self.railVisibleDefaultsKey)
-    }
-    .keyboardShortcut("g", modifiers: .option)
-    .frame(width: 0, height: 0)
-    .opacity(0)
+    Button("") { setRailVisible(!isRailVisible) }
+      .keyboardShortcut("g", modifiers: .option)
+      .frame(width: 0, height: 0)
+      .opacity(0)
   }
 
   private var workspace: some View {
@@ -62,6 +73,12 @@ struct LoopWorkspaceView: View {
       LoopWorkspaceLoopBar(
         node: store.node,
         now: now,
+        downstream: LoopWorkspaceRail.downstreamCount(node: store.node, graph: store.graph),
+        // The rail's own affordance lives here, on chrome that is already on screen and
+        // costs the terminal nothing: reachability without a panel you have to tolerate.
+        railHasContent: railHasContent,
+        isRailVisible: isRailVisible,
+        onToggleRail: { setRailVisible(!isRailVisible) },
         onStop: { store.send(.stopLoopTapped) },
         onShowInGraph: { store.send(.showInGraphTapped) })
       // No divider under the strip: its own shadow line is that edge now, and stacking a

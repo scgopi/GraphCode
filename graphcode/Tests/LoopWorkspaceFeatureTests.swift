@@ -229,4 +229,60 @@ struct LoopWorkspaceFeatureTests {
 
     #expect(terminalLayoutStore.load(forNode: state.node.id)?.tabs.count == 2)
   }
+
+  @Test
+  func theRailIsSilentAboutALoopWiredToNothing() {
+    // What prompted this: a workspace opened with 212 points of panel beside its
+    // terminal saying nothing — a caption, a rect between two dashes, and a date. 15% of
+    // the window, taken from the pane someone is actually working in.
+    let alone = LoopNode(title: "alone")
+    let graph = LoopGraph(project: ProjectRef(path: "/tmp/p", name: "p"), nodes: [alone])
+
+    #expect(!LoopWorkspaceRail.hasContent(node: alone, graph: graph))
+    #expect(LoopWorkspaceRail.downstreamCount(node: alone, graph: graph) == 0)
+  }
+
+  @Test
+  func anEdgeInEitherDirectionIsWorthTheRail() {
+    // Downstream is the obvious case; upstream matters too, because the minimap is how
+    // you see what feeds this loop without leaving the terminal.
+    let first = LoopNode(title: "first")
+    let second = LoopNode(title: "second")
+    let graph = LoopGraph(
+      project: ProjectRef(path: "/tmp/p", name: "p"), nodes: [first, second],
+      edges: [LoopEdge(from: first.id, to: second.id)])
+
+    #expect(LoopWorkspaceRail.hasContent(node: first, graph: graph))
+    #expect(LoopWorkspaceRail.hasContent(node: second, graph: graph))
+    #expect(LoopWorkspaceRail.downstreamCount(node: first, graph: graph) == 1)
+    #expect(LoopWorkspaceRail.downstreamCount(node: second, graph: graph) == 0)
+  }
+
+  @Test
+  func aMetricEarnsTheRailOnItsOwn() {
+    // A goal loop with a trend has something to show even with nothing wired to it —
+    // the sparkline is the one part of the rail that needs no edges at all.
+    let measured = LoopNode(
+      title: "measured",
+      metricHistory: [MetricSample(value: 1), MetricSample(value: 2)])
+    let graph = LoopGraph(project: ProjectRef(path: "/tmp/p", name: "p"), nodes: [measured])
+
+    #expect(LoopWorkspaceRail.hasContent(node: measured, graph: graph))
+    // One sample is not a trend, and the sparkline refuses to draw it.
+    var single = measured
+    single.metricHistory = [MetricSample(value: 1)]
+    #expect(!LoopWorkspaceRail.hasContent(node: single, graph: graph))
+  }
+
+  @Test
+  func theRailStartsHiddenUntilSomebodyAsksForIt() {
+    // Defaulting it on is what put an empty panel in front of every loop that feeds
+    // nothing. Turning it on persists, so wiring a graph costs the toggle once.
+    let key = LoopWorkspaceView.railVisibleDefaultsKey
+    let saved = UserDefaults.standard.object(forKey: key)
+    UserDefaults.standard.removeObject(forKey: key)
+    defer { if let saved { UserDefaults.standard.set(saved, forKey: key) } }
+
+    #expect(LoopWorkspaceView.loadRailVisible() == false)
+  }
 }

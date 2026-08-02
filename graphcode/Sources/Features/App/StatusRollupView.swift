@@ -30,6 +30,8 @@ struct StatusRollupView: View {
   }
 
   var body: some View {
+    // Bare chips: the toolbar's own glass capsule is the container, same as
+    // `JumpFieldButton` — a second rounded rect around them doubled the chrome.
     HStack(spacing: 4) {
       chip(count: running, label: "running", tint: Self.runningTint, ink: Self.runningInk)
       if attention > 0 {
@@ -38,11 +40,6 @@ struct StatusRollupView: View {
           ink: Self.attentionInk, pulses: false)
       }
       chip(count: idle, label: "idle", tint: .clear, ink: .white.opacity(0.45))
-    }
-    .padding(4)
-    .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 7))
-    .overlay {
-      RoundedRectangle(cornerRadius: 7).stroke(.white.opacity(0.06), lineWidth: 1)
     }
   }
 

@@ -16,6 +16,23 @@ struct LoopWorkspaceRail: View {
 
   static let width: CGFloat = 212
 
+  /// Whether this loop gives the rail anything to say.
+  ///
+  /// 212 points is 15% of the window, taken from the terminal — the pane someone is
+  /// actually working in. A loop wired to nothing with no metric renders as a caption, a
+  /// rect between two dashes, and a date; blank chrome is worse than absent chrome, and
+  /// a panel that is permanently empty teaches people to stop looking at the panel next
+  /// to it (the argument that already keeps the cost rollup out of the sidebar).
+  static func hasContent(node: LoopNode, graph: LoopGraph) -> Bool {
+    graph.edges.contains { $0.from == node.id || $0.to == node.id }
+      || node.metricHistory.count >= 2
+  }
+
+  /// How many loops this one hands off to — what the loop bar's control counts.
+  static func downstreamCount(node: LoopNode, graph: LoopGraph) -> Int {
+    graph.edges.count { $0.from == node.id }
+  }
+
   private var outbound: [(edge: LoopEdge, target: LoopNode)] {
     graph.edges
       .filter { $0.from == node.id }

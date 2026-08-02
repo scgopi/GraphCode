@@ -15,6 +15,11 @@ import SwiftUI
 struct LoopWorkspaceLoopBar: View {
   let node: LoopNode
   let now: Date
+  /// How many loops this one hands off to, for the rail's control.
+  var downstream = 0
+  var railHasContent = false
+  var isRailVisible = false
+  var onToggleRail: () -> Void = {}
   let onStop: () -> Void
   let onShowInGraph: () -> Void
 
@@ -101,8 +106,33 @@ struct LoopWorkspaceLoopBar: View {
     return parts.joined(separator: " · ")
   }
 
+  /// What the right rail used to have to be open to tell you: that this loop feeds
+  /// something, and how much. On chrome that is already here, so the terminal keeps its
+  /// full width and the rail becomes something you open on purpose.
+  @ViewBuilder
+  private var railToggle: some View {
+    if railHasContent {
+      Button(action: onToggleRail) {
+        HStack(spacing: 5) {
+          Text(downstream > 0 ? "hands off to \(downstream)" : "this loop")
+            .font(.system(size: 11, design: .monospaced))
+          Image(systemName: isRailVisible ? "chevron.right" : "chevron.left")
+            .font(.system(size: 8, weight: .bold))
+        }
+        .foregroundStyle(.white.opacity(isRailVisible ? 0.8 : 0.55))
+        .padding(.vertical, 3)
+        .padding(.horizontal, 8)
+        .background(
+          .white.opacity(isRailVisible ? 0.08 : 0.04), in: RoundedRectangle(cornerRadius: 6))
+      }
+      .buttonStyle(.plain)
+      .help(isRailVisible ? "Hide the loop's rail (⌥G)" : "Show what this loop feeds (⌥G)")
+    }
+  }
+
   private var actions: some View {
     HStack(spacing: 8) {
+      railToggle
       // No Pause button. The design has one and the daemon has nothing behind it —
       // `graphcoded` can stop a loop, not suspend one — and a control that looks like it
       // holds a running agent while the agent keeps working is worse than no control.
