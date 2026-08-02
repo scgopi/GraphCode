@@ -34,11 +34,17 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 ICON_PACKAGE = ROOT / "graphcode/Resources/AppIcon.icon"
 
-# The graph's topology; node positions and sizes are measured from the master.
-EDGES = [(0, 1), (0, 2), (0, 3), (1, 3), (2, 3)]
-NODE_LUMA = 0.8
-EDGE_LUMA = 0.42
+# Geometry comes from `make-master.py`, which is what draws the master — one set of
+# numbers, so the two renditions still can't drift.
+#
+# It used to be *detected* from the master's pixels, by finding bright blobs. That was
+# right while the artwork was a hand-produced PNG nothing could regenerate, and it broke
+# the moment one node became the aqua accent: an accent node isn't bright, so the
+# detector found three of four and refused to run.
 NODE_COLOR = (248, 249, 251)
+# The mid stop of the entry node's aqua gradient — a flat fill here, because the glass
+# renderer applies its own depth and a gradient under it reads as a smudge.
+ACCENT_COLOR = (34, 182, 129)
 EDGE_COLOR = (145, 148, 155)
 SUPERSAMPLE = 4
 
@@ -50,46 +56,23 @@ def load(name: str):
     return module
 
 render = load("render-appicon")
+master_art = load("make-master")
+EDGES = master_art.EDGES
 
 
 def luma(px: np.ndarray) -> np.ndarray:
     return (0.2126 * px[..., 0] + 0.7152 * px[..., 1] + 0.0722 * px[..., 2]) / 255.0
 
 
-def find_nodes(lum: np.ndarray) -> list[tuple[int, int, float]]:
-    """Bright connected components -> (cx, cy, r), left-to-right by first sighting."""
-    bright = lum > NODE_LUMA
-    seen = np.zeros_like(bright)
-    nodes = []
-    ys, xs = np.where(bright)
-    for y0, x0 in zip(ys[::50], xs[::50]):
-        if seen[y0, x0]:
-            continue
-        stack, pts = [(y0, x0)], []
-        while stack:
-            y, x = stack.pop()
-            if 0 <= y < lum.shape[0] and 0 <= x < lum.shape[1] and bright[y, x] and not seen[y, x]:
-                seen[y, x] = True
-                pts.append((y, x))
-                stack += [(y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)]
-        if len(pts) > 3000:
-            pys, pxs = [p[0] for p in pts], [p[1] for p in pts]
-            nodes.append(((min(pxs) + max(pxs)) / 2, (min(pys) + max(pys)) / 2,
-                          (max(pxs) - min(pxs)) / 2))
-    if len(nodes) != 4:
-        raise SystemExit(f"expected 4 nodes in master, found {len(nodes)}")
-    # stable order: top-left, right, bottom-left, bottom-mid (by y then x)
-    nodes.sort(key=lambda n: (round(n[1] / 200), n[0]))
-    return nodes
+def find_nodes(lum: np.ndarray) -> list[tuple[float, float, float]]:
+    """(cx, cy, r) per node, straight from the artwork's own numbers."""
+    return [
+        (float(x), float(y), float(master_art.NODE_RADIUS)) for x, y in master_art.NODES
+    ]
 
 
 def measure_stroke(lum: np.ndarray, nodes) -> float:
-    """Width of the horizontal bottom edge, scanned midway between its endpoints."""
-    (ax, ay, _), (bx, by, _) = nodes[2], nodes[3]
-    x = int((ax + bx) / 2)
-    y0 = int(min(ay, by)) - 60
-    col = np.where(lum[y0:y0 + 120, x] > EDGE_LUMA)[0]
-    return float(col.max() - col.min() + 1)
+    return float(master_art.EDGE_STROKE)
 
 
 def srgb(rgb) -> str:
@@ -117,9 +100,13 @@ def main() -> None:
         bx, by, _ = tiled[b]
         draw.line([(ax * ss, ay * ss), (bx * ss, by * ss)],
                   fill=(*EDGE_COLOR, 255), width=round(stroke * scale) * ss)
-    for cx, cy, r in tiled:
+    for index, (cx, cy, r) in enumerate(tiled):
+        # The accent node travels into the glass rendition too. It is the whole
+        # Dock-identity fix — at 16 px it is the only thing still identifying the app —
+        # and a glass icon that dropped it would be the one place the app is grey again.
+        fill = ACCENT_COLOR if index == master_art.ACCENT_NODE else NODE_COLOR
         draw.ellipse([(cx - r) * ss, (cy - r) * ss, (cx + r) * ss, (cy + r) * ss],
-                     fill=(*NODE_COLOR, 255))
+                     fill=(*fill, 255))
     layer = layer.resize((1024, 1024), Image.LANCZOS)
     (ICON_PACKAGE / "Assets").mkdir(parents=True, exist_ok=True)
     layer.save(ICON_PACKAGE / "Assets/graph.png")
@@ -129,6 +116,8 @@ def main() -> None:
     ends = Image.new("RGBA", (1, 2))
     ends.putpixel((0, 0), tuple(int(v) for v in px[top + 8, cx]))
     ends.putpixel((0, 1), tuple(int(v) for v in px[bottom - 8, cx]))
+    # `DEFAULT_DARKEN` is 1.0 now — the master is drawn to the spec's own colours, so
+    # this is a no-op kept for the case where someone re-tunes artwork that needs it.
     ends = render.darken(ends, render.DEFAULT_DARKEN)
     fill_top, fill_bottom = ends.getpixel((0, 0))[:3], ends.getpixel((0, 1))[:3]
 
