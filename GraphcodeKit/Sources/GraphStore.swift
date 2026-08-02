@@ -234,7 +234,7 @@ public actor GraphStore {
       deleteEdge(edgeID)
 
     case .stopNode(let nodeID):
-      stopNode(nodeID)
+      await stopNode(nodeID)
 
     case .subGraphCommand(let nodeID, let inner):
       await runInSubGraph(nodeID, inner)
@@ -592,24 +592,47 @@ public actor GraphStore {
   /// Downstream edges fire as if the loop failed. Not because stopping *is* a failure,
   /// but because the alternative is every node waiting on this one sitting blocked
   /// forever with no way to proceed — the same reasoning as a stall.
-  private func stopNode(_ nodeID: UUID) {
+  private func stopNode(_ nodeID: UUID) async {
     guard let node = graph.nodes[id: nodeID], !node.isResolved else { return }
-    graph.nodes[id: nodeID]?.state = .stopped
-    cancelGoalPoller(nodeID)
-    recordMemory(nodeID, "stopped by request")
-    terminateSession(node)
-    fireOutgoingEdges(from: nodeID, sourceSucceeded: false)
+    await requestStop(of: node, reason: "stopped by request")
 
     // A stopped coordinator must not leave the workers it fanned out running headless.
     // Custody (`createdBy`), not edges: stopping one side of a drawn maker→critic pair
     // must not stop the other. Already-resolved children are left as they ended.
     for child in spawnedDescendants(of: nodeID) where !child.isResolved {
-      graph.nodes[id: child.id]?.state = .stopped
-      cancelGoalPoller(child.id)
-      recordMemory(child.id, "stopped with \(node.title), which created this loop")
-      terminateSession(child)
-      fireOutgoingEdges(from: child.id, sourceSucceeded: false)
+      await requestStop(of: child, reason: "stopped with \(node.title), which created this loop")
     }
+  }
+
+  /// Stops one loop: the session is *asked* to stop rather than killed.
+  ///
+  /// Killing the PTY took the whole agent with it — the transcript, the scrollback, and
+  /// any chance of asking the loop where it got to — for what is meant to be the
+  /// reversible verb (delete is the irreversible one). Worse, the cadence a loop runs on
+  /// generally lives outside its PTY: a cron entry or a scheduled wakeup it created
+  /// survives the kill and keeps firing against a loop the graph shows as stopped. Only
+  /// the loop can cancel those, so it has to be told rather than shot.
+  ///
+  /// The kill stays as the fallback for a session that cannot be spoken to at all — not
+  /// live, or a backend that takes no mid-session input. "Stopped" has to mean stopped,
+  /// and a request nobody received would leave the loop running.
+  private func requestStop(of node: LoopNode, reason: String) async {
+    // Asked before the state changes: `MessageBus.deliverability` reads that state, and a
+    // node already marked `.stopped` reads as unreachable — which would fall straight
+    // through to the kill this exists to avoid.
+    var asked = false
+    if MessageBus.deliverability(to: node) == nil {
+      asked = await deliverToSession(node, MessageBus.stopRequest)
+    }
+    graph.nodes[id: node.id]?.state = .stopped
+    cancelGoalPoller(node.id)
+    recordMemory(
+      node.id,
+      asked
+        ? "\(reason) — its session was asked to stop looping"
+        : "\(reason) — its session could not be reached, so it was killed")
+    if !asked { terminateSession(node) }
+    fireOutgoingEdges(from: node.id, sourceSucceeded: false)
   }
 
   private func deleteEdge(_ edgeID: UUID) {

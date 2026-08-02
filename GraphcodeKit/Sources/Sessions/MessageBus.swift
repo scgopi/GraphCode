@@ -39,6 +39,23 @@ public enum MessageBus {
     return nil
   }
 
+  /// What a stop request types into a loop's session (`GraphStore.stopNode`). Stopping
+  /// is a message now rather than a kill: only the loop itself can cancel the cadence it
+  /// set up — a `/loop`, a scheduled wakeup, a cron entry — and killing the PTY left
+  /// every one of those running against a loop the graph considered stopped.
+  ///
+  /// Phrased as an instruction rather than a command string because the command differs
+  /// per backend and per looping skill, while "stop looping, don't schedule another
+  /// pass" is understood by all of them.
+  ///
+  /// It says *stop*, never "end" or "finish": to an agent those read as instructions to
+  /// exit the session, which is the very thing this replaced.
+  public static let stopRequest =
+    "[graphcode] Stop requested from the graph. Stop this loop now: turn off any "
+    + "recurring schedule you set up for it — a /loop, a scheduled wakeup, a cron entry "
+    + "— and do not start another pass. Stop where you are, say where you got to, and "
+    + "stay in the session: the loop is what stops, not you. Do not exit or quit."
+
   /// What actually gets typed into the target. The edge's transform decides the content;
   /// a `.script` transform runs to produce it, which is docs/08's "a script is cheaper
   /// than reasoning through the steps every time" applied to a hand-off.

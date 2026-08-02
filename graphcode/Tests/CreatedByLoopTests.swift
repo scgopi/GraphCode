@@ -77,12 +77,58 @@ struct CreatedByLoopTests {
   }
 
   @Test
+  func stoppingALoopAsksItsSessionRatherThanKillingIt() async throws {
+    // Stopping is the reversible verb: the agent, its transcript, and its scrollback all
+    // survive, and the loop gets to cancel the cadence it set up — a cron entry or a
+    // scheduled wakeup outlives a killed PTY and would keep firing at a stopped loop.
+    let asked = LockIsolated<[String]>([])
+    let terminated = LockIsolated<[String]>([])
+    let store = GraphStore(
+      onTerminateSession: { node, _ in terminated.withValue { $0.append(node.title) } },
+      onDeliverMessage: { node, text, _ in
+        if text == MessageBus.stopRequest { asked.withValue { $0.append(node.title) } }
+        return true
+      })
+    await store.handle(.createNode(draft("parent", createdBy: nil)))
+    let parentID = try #require(await store.graph.nodes.first?.id)
+    await store.handle(.createNode(draft("child", createdBy: parentID)))
+
+    await store.handle(.stopNode(parentID))
+
+    #expect(await store.graph.nodes[id: parentID]?.state == .stopped)
+    #expect(Set(asked.value) == ["parent", "child"])
+    #expect(terminated.value.isEmpty)
+  }
+
+  @Test
+  func aLoopThatCannotBeAskedToStopIsKilledInstead() async throws {
+    // "Stopped" has to mean stopped: a request nobody can receive would otherwise leave
+    // the loop running with the graph claiming it isn't.
+    let terminated = LockIsolated<[String]>([])
+    let store = GraphStore(
+      onTerminateSession: { node, _ in terminated.withValue { $0.append(node.title) } },
+      onDeliverMessage: { _, _, _ in false })
+    await store.handle(.createNode(draft("parent", createdBy: nil)))
+    let parentID = try #require(await store.graph.nodes.first?.id)
+
+    await store.handle(.stopNode(parentID))
+
+    #expect(await store.graph.nodes[id: parentID]?.state == .stopped)
+    #expect(terminated.value == ["parent"])
+  }
+
+  @Test
   func stoppingAParentStopsItsSpawnedDescendantsButNotPeers() async throws {
     // A stopped coordinator must not leave the workers it fanned out running headless —
     // and a drawn edge to a peer is a relationship, not custody, so the peer survives.
-    let terminated = LockIsolated<[String]>([])
+    // Only the stop requests count: the peer's own handoff nudge rides the same
+    // transport, and it is the thing being asserted absent.
+    let stopped = LockIsolated<[String]>([])
     let store = GraphStore(
-      onTerminateSession: { node, _ in terminated.withValue { $0.append(node.title) } })
+      onDeliverMessage: { node, text, _ in
+        if text == MessageBus.stopRequest { stopped.withValue { $0.append(node.title) } }
+        return true
+      })
     await store.handle(.createNode(draft("parent", createdBy: nil)))
     let parentID = try #require(await store.graph.nodes.first?.id)
     await store.handle(.createNode(draft("child", createdBy: parentID)))
@@ -99,7 +145,7 @@ struct CreatedByLoopTests {
     #expect(graph.nodes[id: childID]?.state == .stopped)
     #expect(graph.nodes.first { $0.title == "grandchild" }?.state == .stopped)
     #expect(graph.nodes[id: peerID]?.state != .stopped)
-    #expect(Set(terminated.value) == ["parent", "child", "grandchild"])
+    #expect(Set(stopped.value) == ["parent", "child", "grandchild"])
   }
 
   @Test

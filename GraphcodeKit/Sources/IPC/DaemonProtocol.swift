@@ -90,8 +90,10 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// — the app confirms before sending this.
   case deleteNode(UUID)
   case deleteEdge(UUID)
-  /// Stop a running loop from the monitor: its session ends and it resolves to
-  /// `.stopped`. The node itself stays in the graph — stopping is not deleting.
+  /// Stop a running loop from the monitor: it resolves to `.stopped` and its session is
+  /// asked to stop looping (`MessageBus.stopRequest`), keeping the transcript and the
+  /// agent alive. The session is only killed when it can't be reached to be asked. The
+  /// node itself stays in the graph — stopping is not deleting.
   case stopNode(UUID)
   /// Route a command into a proactive node's sub-graph. Editing a composite's insides is
   /// the same set of operations as editing any graph, so it reuses them wholesale rather
