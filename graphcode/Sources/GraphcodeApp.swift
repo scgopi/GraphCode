@@ -68,6 +68,9 @@ struct GraphcodeApp: App {
           Self.store.send(.onboardingRequested)
         }
       }
+      // The Loop and Terminal menus. Every shortcut in them already worked as an
+      // invisible zero-size button; a menu item is the half that tells anyone so.
+      GraphcodeCommands(store: Self.store)
     }
 
     // ⌘, — the native home for the handful of things that were hardcoded until someone

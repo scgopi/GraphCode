@@ -91,7 +91,6 @@ struct AppView: View {
     // The window is a fixed dark gray (`Theme`), so the appearance has to be dark too —
     // in light mode the system's near-black label colors would land on it unreadable.
     .preferredColorScheme(.dark)
-    .background(loopCycleShortcuts)
     // Hosted here for the reason the rename and delete prompts are: ⌘K has to open over
     // a terminal as readily as over a canvas, and only one of those is ever on screen.
     .sheet(
@@ -210,28 +209,6 @@ struct AppView: View {
     Binding(
       get: { store.draftChatTitle },
       set: { store.send(.quickChatRenameTitleChanged($0)) })
-  }
-
-  /// Invisible, zero-size buttons carrying the app-wide loop shortcuts — the same trick
-  /// `LoopWorkspaceView.workspaceKeyboardShortcuts` plays, but mounted on the window
-  /// itself so ⇧⌘]/⇧⌘[ step between loops from a canvas as readily as from a terminal.
-  /// The shifted siblings of ⌘]/⌘[, which move between one tab's split panes.
-  private var loopCycleShortcuts: some View {
-    Group {
-      Button("") { store.send(.selectNextLoop) }
-        .keyboardShortcut("]", modifiers: [.command, .shift])
-      Button("") { store.send(.selectPreviousLoop) }
-        .keyboardShortcut("[", modifiers: [.command, .shift])
-      // ⌘⇧R belongs on the window, not on the canvas that draws the rail: the loop you
-      // need to answer is most often the one you can't see, because you are inside a
-      // terminal working on a different one.
-      Button("") { store.send(.reviewAttentionTapped) }
-        .keyboardShortcut("r", modifiers: [.command, .shift])
-      Button("") { store.send(.jumpPaletteRequested) }
-        .keyboardShortcut("k", modifiers: .command)
-    }
-    .frame(width: 0, height: 0)
-    .opacity(0)
   }
 
   /// Reads and writes the pending rename's draft text straight through to the project it

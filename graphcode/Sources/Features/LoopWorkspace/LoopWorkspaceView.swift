@@ -24,7 +24,6 @@ struct LoopWorkspaceView: View {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .onReceive(CanvasClock.tick) { now = $0 }
-    .background(railShortcut)
     // The folder header goes in the toolbar, not in the `VStack` above, and the pane
     // does *not* claim the titlebar inset. Both were tried: `.ignoresSafeArea(.top)`
     // does slide content up into the band, but whatever lands there is drawn under the
@@ -150,32 +149,14 @@ struct LoopWorkspaceView: View {
     .background(workspaceKeyboardShortcuts)
   }
 
-  /// Invisible, zero-size buttons that are the only thing actually making these
-  /// shortcuts work — the ⌘-number hint in each `TabPillView` is otherwise
-  /// decorative. Modeled on supacode's terminal shortcuts (⌘D/⌘⇧D split, ⌘W close,
-  /// ⌘←/→ switch tabs) adapted to this workspace's own action set, not its code —
-  /// plus ⌘]/⌘[ between a split's panes, which are Ghostty's own goto_split keys.
+  /// ⌘1…⌘9, the one set of shortcuts a static menu can't express: which tab each number
+  /// selects depends on the tabs this workspace happens to have. Everything else moved
+  /// to the Loop and Terminal menus, where it is visible — see `GraphcodeCommands`.
   private var workspaceKeyboardShortcuts: some View {
-    Group {
-      ForEach(Array(store.layout.tabs.prefix(9).enumerated()), id: \.element.id) { index, tab in
-        hiddenShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command) {
-          store.send(.tabSelected(tab.id))
-        }
+    ForEach(Array(store.layout.tabs.prefix(9).enumerated()), id: \.element.id) { index, tab in
+      hiddenShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command) {
+        store.send(.tabSelected(tab.id))
       }
-      hiddenShortcut(.rightArrow, modifiers: .command) { store.send(.selectNextTab) }
-      hiddenShortcut(.leftArrow, modifiers: .command) { store.send(.selectPreviousTab) }
-      hiddenShortcut("t", modifiers: .command) { store.send(.newTabButtonTapped) }
-      hiddenShortcut("w", modifiers: .command) {
-        store.send(.tabClosed(store.layout.selectedTabID))
-      }
-      hiddenShortcut("d", modifiers: .command) {
-        store.send(.splitButtonTapped(direction: .horizontal))
-      }
-      hiddenShortcut("d", modifiers: [.command, .shift]) {
-        store.send(.splitButtonTapped(direction: .vertical))
-      }
-      hiddenShortcut("]", modifiers: .command) { store.send(.focusNextPane) }
-      hiddenShortcut("[", modifiers: .command) { store.send(.focusPreviousPane) }
     }
   }
 
