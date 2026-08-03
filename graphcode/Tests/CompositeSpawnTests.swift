@@ -187,8 +187,10 @@ struct CompositeSpawnTests {
     // were left running with live sessions under a node that read stopped.
     let asked = LockIsolated<[String]>([])
     let template = compositeTemplate(subNodes: [
-      LoopNode(title: "Classify", loopType: .timeBased, triggerPrompt: "/loop 1h Check", state: .running),
-      LoopNode(title: "Reply", loopType: .timeBased, triggerPrompt: "/loop 1h Reply", state: .running),
+      LoopNode(
+        title: "Classify", loopType: .timeBased, triggerPrompt: "/loop 1h Check", state: .running),
+      LoopNode(
+        title: "Reply", loopType: .timeBased, triggerPrompt: "/loop 1h Reply", state: .running),
     ])
     let store = GraphStore(
       graph: LoopGraph(

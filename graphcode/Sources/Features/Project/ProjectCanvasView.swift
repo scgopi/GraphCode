@@ -144,7 +144,9 @@ struct ProjectCanvasView: View {
   /// from an empty project — which is how you end up adding loops to the wrong graph.
   private func compositeBreadcrumb(_ composite: LoopNode) -> some View {
     HStack(spacing: 6) {
-      Button { store.send(.compositeClosed) } label: {
+      Button {
+        store.send(.compositeClosed)
+      } label: {
         HStack(spacing: 4) {
           Image(systemName: "chevron.left")
           Text(store.graph.project.name)

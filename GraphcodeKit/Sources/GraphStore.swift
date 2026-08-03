@@ -303,8 +303,7 @@ public actor GraphStore {
       // target sits; wrap the command for the branch that holds it and let the child
       // store repeat the search. Without this, `node create --into <nested-composite>`
       // went nowhere at all.
-      if let owner = graph.nodes.first(where: { $0.subGraph?.containsAtAnyDepth(nodeID) == true })
-      {
+      if let owner = graph.nodes.first(where: { $0.subGraph?.containsAtAnyDepth(nodeID) == true }) {
         await runInSubGraph(owner.id, .subGraphCommand(nodeID: nodeID, command: command))
         return
       }
