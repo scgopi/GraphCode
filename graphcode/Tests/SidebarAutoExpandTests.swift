@@ -55,4 +55,35 @@ struct SidebarAutoExpandTests {
     let parents = AppSidebarView.parentsToExpand(for: [b.id], in: [g])
     #expect(parents.contains(a.id))
   }
+
+  /// A loop made from a card's + handle arrives in two broadcasts — the node, then the
+  /// hand-off edge that puts it under its parent. The second one is the one that can
+  /// hide it, so it is the one that has to disclose the chain.
+  @Test
+  func aChildWiredUpAfterItArrivesStillDisclosesItsParent() {
+    let parent = LoopNode(title: "parent")
+    let child = LoopNode(title: "child")
+
+    // Broadcast one: the child exists, unwired. It shows as a root row, and there is
+    // no chain to open.
+    let unwired = graph(nodes: [parent, child], edges: [])
+    let seeded = Set(unwired.edges.map(\.id))
+    #expect(AppSidebarView.parentsToExpand(forEdgesNotIn: seeded, in: [unwired]).isEmpty)
+
+    // Broadcast two: the hand-off lands. The child is now a row under `parent`, so
+    // `parent` has to be disclosed or the loop has no visible row at all.
+    let wired = graph(nodes: [parent, child], edges: [LoopEdge(from: parent.id, to: child.id)])
+    #expect(AppSidebarView.parentsToExpand(forEdgesNotIn: seeded, in: [wired]) == [parent.id])
+  }
+
+  /// The other half of the same rule: edges that were already there on relaunch open
+  /// nothing, or every graph would spring fully open every launch.
+  @Test
+  func edgesThatWereAlreadyThereDiscloseNothing() {
+    let parent = LoopNode(title: "parent")
+    let child = LoopNode(title: "child")
+    let g = graph(nodes: [parent, child], edges: [LoopEdge(from: parent.id, to: child.id)])
+
+    #expect(AppSidebarView.parentsToExpand(forEdgesNotIn: Set(g.edges.map(\.id)), in: [g]).isEmpty)
+  }
 }

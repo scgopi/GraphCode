@@ -41,10 +41,11 @@ struct AppSidebarView: View {
     let stored = UserDefaults.standard.stringArray(forKey: expandedNodeIDsDefaultsKey) ?? []
     return Set(stored.compactMap(UUID.init))
   }
-  /// Every node id seen across the open projects, for telling a freshly created loop
-  /// from one that was already there. `nil` until the first observation, so a relaunch
-  /// seeds silently instead of springing every parent in the graph open.
-  @State var knownNodeIDs: Set<UUID>?
+  /// Every edge id seen across the open projects, for telling a loop that has just been
+  /// wired under a parent from one that was already there. `nil` until the first
+  /// observation, so a relaunch seeds silently instead of springing every parent in the
+  /// graph open.
+  @State var knownEdgeIDs: Set<UUID>?
   /// What the rows' ages are measured against — the window's one 30s tick, the same one
   /// the canvases' cards use. See `CanvasClock`.
   @State var sidebarNow = Date()
@@ -70,15 +71,15 @@ struct AppSidebarView: View {
       .onReceive(CanvasClock.tick) { sidebarNow = $0 }
       // A loop that fans out shouldn't hide its children behind an unexpanded chevron —
       // the human watching the sidebar should see new loops appear, not wonder where
-      // they went. Every newly created node's parent chain is disclosed the moment the
-      // node shows up; existing nodes on relaunch stay as the human left them.
-      .onChange(of: allNodeIDs, initial: true) { _, current in
-        if let known = knownNodeIDs {
+      // they went. Every newly drawn hand-off's parent chain is disclosed the moment the
+      // edge shows up — which is the moment a loop stops being a root row and starts
+      // being a child one; existing edges on relaunch stay as the human left them.
+      .onChange(of: allEdgeIDs, initial: true) { _, current in
+        if let known = knownEdgeIDs {
           expandedNodeIDs.formUnion(
-            Self.parentsToExpand(
-              for: current.subtracting(known), in: store.projects.map(\.graph)))
+            Self.parentsToExpand(forEdgesNotIn: known, in: store.projects.map(\.graph)))
         }
-        knownNodeIDs = current
+        knownEdgeIDs = current
       }
       .onChange(of: expandedNodeIDs) { _, expanded in
         UserDefaults.standard.set(
