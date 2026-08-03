@@ -25,7 +25,25 @@ to, watch, and steer — not headless jobs that report back when they're done.
 **[Graph Engineering, simplified →](https://graphcode.app/)** — the full
 article: the mental model, then the machinery underneath it.
 
-![Two projects and their connected loops on one GraphCode canvas — goal-based, time-based, and proactive nodes, every one a live terminal](screenshots/graph-hero.png)
+![Two projects and their connected loops on one GraphCode canvas — every node a live terminal you can attach to](screenshots/graph-hero.png)
+
+## New in 0.1.12
+
+Every surface was rebuilt to answer **what are my loops doing right now** rather than
+*what kind of loop is this* ([full notes](https://github.com/scgopi/GraphCode/releases/tag/v0.1.12)):
+
+- **State-first cards.** Each state carries a word — RUNNING, NEEDS YOU, BLOCKED, DONE,
+  FAILED, STALLED, SCHEDULED, STOPPED — an indicator and its own paint, instead of eight
+  states sharing five colours and an 8pt dot.
+- **Project lanes with an origin.** Every loop nothing hands off to hangs off its lane's
+  entry point, and chains flow right along their own rows, so nothing floats.
+- **An attention rail you can reach.** `⌘⇧R` works the queue oldest-first from anywhere,
+  including inside a terminal, and the titlebar names who needs you only when someone does.
+- **⌘K to jump to any loop** by name across every open project.
+- **A downstream rail** (`⌥G`) with a one-hop minimap and a metric sparkline — off by
+  default, and never drawn empty.
+- **A new-loop dialog rebuilt around what each type needs**, including a **Test** button
+  that runs a done check exactly as the daemon will.
 
 ## How it works
 
@@ -54,9 +72,10 @@ the test suite passes), and a second edge hands the fix to a turn-based reviewer
 you approve each change yourself. All three are live terminals the whole time — click any
 node and you're in that session, scrollback and all.
 
-Every project you add hangs off **Start**, and each carries its own graph — the
-screenshot above chains goal-based, turn-based, and time-based loops on one canvas,
-each color-coded by kind.
+Each project you add carries its own graph, laid out as a lane: an origin the loops
+nothing hands off to hang from, and every chain flowing right from there. A card is
+painted by the state it is in, not by its kind — what you read off the canvas is which
+loops are running, which are done, and which are waiting on you.
 
 ## Install
 
@@ -107,15 +126,19 @@ current release.
    required — loops then run on the server while this Mac steers them). Each becomes a
    project with its own graph. Whatever was open is restored next launch; right-click a
    project to Close, Remove, or delete its loops.
-2. **Create a loop** — ⊕ on the canvas. Write the prompt and hit Create: the form opens
-   on goal-based, and the title is optional — leave it blank and GraphCode asks the loop's
-   own backend for a name. For a time-based loop put the cadence in the prompt itself:
-   `/loop 1h Check for new reports`.
+2. **Create a loop** — ⊕ on the canvas or the Graph view. Write the prompt and hit Create:
+   the form opens on goal-based, the type chooser explains what each kind hands off, and
+   the title is optional — leave it blank and GraphCode asks the loop's own backend for a
+   name. A time-based loop's `/loop 1h Check for new reports` directive is composed for
+   you, and a goal-based loop's done check has a **Test** button that runs it exactly as
+   the daemon will.
 3. **Open it** — click the node. You get its terminal workspace: tabs (⌘T), splits (⌘D /
    ⌘⇧D — split as many times as you like), ⌘1–9 to switch tabs, ⌘]/⌘[ to move between a
-   split's panes, and ⇧⌘]/⇧⌘[ to step between loops. Every loop type opens the same way,
-   including ones the daemon started on its own — you're attaching to the live session,
-   not a copy of its output.
+   split's panes, and ⇧⌘]/⇧⌘[ to step between loops. ⌘K jumps to any loop by name, ⌥G
+   opens the downstream rail, and ⌘⇧R walks the loops asking for you, oldest first — all
+   of them listed in the menu bar. Every loop type opens the same way, including ones the
+   daemon started on its own — you're attaching to the live session, not a copy of its
+   output.
 4. **Connect loops** — drag between nodes. An edge is a hand-off by default (fires when the
    source resolves); it can also be a message or a spawn, with a condition and a cycle guard.
 
