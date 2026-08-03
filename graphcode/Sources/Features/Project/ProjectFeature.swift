@@ -59,7 +59,7 @@ struct ProjectFeature {
     var draftCustomInterval = ""
     var draftTimedTask = ""
     var draftStopAfter = ""
-    /// `.proactive`: the schedule this composite is *meant* for. Nothing runs at
+    /// `.composite`: the schedule this composite is *meant* for. Nothing runs at
     /// creation, so it is a statement of intent until the thing is piloted and armed.
     var draftSchedule: CompositeSchedule = .daily
     var draftScheduleTime = "09:00"

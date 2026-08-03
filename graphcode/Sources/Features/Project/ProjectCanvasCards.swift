@@ -46,7 +46,7 @@ extension ProjectCanvasView {
   @ViewBuilder
   private func nodeMenu(for node: LoopNode) -> some View {
     Button("Open Terminal") { store.send(.nodeTapped(node.id)) }
-    if node.loopType == .proactive {
+    if node.loopType == .composite {
       // Pilot always available (re-piloting a composite you've changed is normal);
       // arming only after a pilot, which is the docs/08 gate.
       Button("Pilot Once…") { store.send(.pilotCompositeTapped(node.id)) }

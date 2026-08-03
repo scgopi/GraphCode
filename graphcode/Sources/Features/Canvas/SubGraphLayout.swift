@@ -3,7 +3,7 @@ import Foundation
 import GraphcodeKit
 import IdentifiedCollections
 
-/// A folder canvas's composites, opened up: every loop inside a `.proactive` node's
+/// A folder canvas's composites, opened up: every loop inside a `.composite` node's
 /// `subGraph`, placed under the card that owns it, with the lines that say what contains
 /// what and how the insides are wired.
 ///

@@ -72,7 +72,7 @@ struct NodeDraftForm: View {
     case .goalBased: GoalDraftFields(store: store)
     case .timeBased: TimedDraftFields(store: store)
     case .turnBased: TurnDraftFields(store: store)
-    case .proactive: CompositeDraftFields(store: store)
+    case .composite: CompositeDraftFields(store: store)
     }
   }
 
@@ -149,7 +149,7 @@ struct NodeDraftForm: View {
       store.send(.createNodeConfirmed)
     } label: {
       HStack(spacing: 6) {
-        Text(store.draftLoopType == .proactive ? "Create & open" : "Create loop")
+        Text(store.draftLoopType == .composite ? "Create & open" : "Create loop")
           .font(.system(size: 13, weight: .semibold))
         Text("⏎").font(.system(size: 11, design: .monospaced)).opacity(0.7)
       }
@@ -177,7 +177,7 @@ struct NodeDraftForm: View {
     case .goalBased: return "Say what done looks like to continue"
     case .timeBased: return "Say what to do each time to continue"
     case .turnBased: return "Add a first instruction to continue"
-    case .proactive: return "Name it to continue"
+    case .composite: return "Name it to continue"
     }
   }
 }

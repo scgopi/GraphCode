@@ -18,7 +18,7 @@ struct SubGraphLayoutTests {
     _ title: String, holding nodes: [LoopNode], edges: [LoopEdge] = []
   ) -> LoopNode {
     LoopNode(
-      title: title, loopType: .proactive,
+      title: title, loopType: .composite,
       subGraph: LoopGraph(
         project: Self.project, nodes: IdentifiedArrayOf(uniqueElements: nodes),
         edges: IdentifiedArrayOf(uniqueElements: edges)))

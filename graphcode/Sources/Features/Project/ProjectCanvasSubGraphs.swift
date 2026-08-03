@@ -2,7 +2,7 @@ import ComposableArchitecture
 import GraphcodeKit
 import SwiftUI
 
-/// A folder canvas's composites drawn open — the loops inside each `.proactive` node's
+/// A folder canvas's composites drawn open — the loops inside each `.composite` node's
 /// `subGraph`, stacked under the card that owns them. See `SubGraphLayout` for the
 /// placement and for why sub-graphs live here rather than in the Graph view.
 /// The layout itself is built once per body pass and passed in — see

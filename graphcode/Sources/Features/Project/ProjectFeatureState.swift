@@ -66,7 +66,7 @@ extension ProjectFeature.State {
       let stop = draftStopAfter.trimmingCharacters(in: .whitespaces)
       if !stop.isEmpty { directive += " Stop after \(stop)." }
       return directive
-    case .proactive:
+    case .composite:
       return "Intended schedule: \(draftSchedule.summary(at: draftScheduleTime))"
     case .goalBased, .turnBased:
       return nil

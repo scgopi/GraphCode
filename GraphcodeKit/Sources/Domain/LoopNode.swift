@@ -6,7 +6,7 @@ import Foundation
 /// `checkDescription`/`triggerPrompt` stand in for the richer `HandoffSpec`
 /// the full taxonomy describes — plain fields for now, one per loop type actually
 /// wired up (turn-based, time-based), rather than a whole payload-type hierarchy for
-/// types (`.goalBased`, `.proactive`) nothing constructs yet.
+/// types (`.goalBased`, `.composite`) nothing constructs yet.
 public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   public let id: UUID
   public var title: String
@@ -52,12 +52,12 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// the absence of a pin is meaningfully different from a pin that happens to match.
   public var modelTier: ModelTier?
   public var worktreeBinding: WorktreeRef?
-  /// A `.proactive` node's own graph — "a proactive node is the orchestrator running a
+  /// A `.composite` node's own graph — "a proactive node is the orchestrator running a
   /// graph inside a graph" (docs/05-orchestrator.md#responsibilities item 6). The
   /// recursion is finite because it goes through `IdentifiedArrayOf`, whose storage is
   /// heap-allocated.
   public var subGraph: LoopGraph?
-  /// Where a `.proactive` node is in the pilot-before-arm flow. Meaningless for other
+  /// Where a `.composite` node is in the pilot-before-arm flow. Meaningless for other
   /// loop types, which have nothing to fan out.
   public var pilotState: PilotState
   /// What the backend has reported spending on this loop, if anything. Never estimated —
@@ -172,7 +172,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
       return Self.turnBasedPrompt(
         instruction: firstInstruction, check: checkDescription,
         beforeWritesOnly: pausesBeforeWritesOnly)
-    case .proactive: return nil
+    case .composite: return nil
     }
   }
 

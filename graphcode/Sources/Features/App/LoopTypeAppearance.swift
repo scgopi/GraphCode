@@ -30,7 +30,7 @@ extension LoopType {
     case .goalBased: Color(red: 0.098, green: 0.620, blue: 0.439)  // aqua  #199e70
     case .timeBased: Color(red: 0.788, green: 0.522, blue: 0.000)  // yellow #c98500
     case .turnBased: Color(red: 0.835, green: 0.318, blue: 0.506)  // magenta #d55181
-    case .proactive: Color(red: 0.565, green: 0.522, blue: 0.914)  // violet #9085e9
+    case .composite: Color(red: 0.565, green: 0.522, blue: 0.914)  // violet #9085e9
     }
   }
 
@@ -49,19 +49,19 @@ extension LoopType {
     case .goalBased: "Goal"
     case .timeBased: "Timed"
     case .turnBased: "Turn"
-    case .proactive: "Composite"
+    case .composite: "Composite"
     }
   }
 
   /// A glyph that says what the kind *does*, so the distinction survives without colour:
   /// a goal-based loop runs at a target, a time-based one at a clock, a turn-based one
-  /// waits for a person, and a proactive one is a stack of loops rather than a session.
+  /// waits for a person, and a composite one is a stack of loops rather than a session.
   var glyph: String {
     switch self {
     case .goalBased: "target"
     case .timeBased: "clock"
     case .turnBased: "person"
-    case .proactive: "square.stack.3d.up"
+    case .composite: "square.stack.3d.up"
     }
   }
 }

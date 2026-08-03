@@ -54,7 +54,7 @@ Every loop type is "an agent runs repeatedly" — they differ in what *you* stop
 | **Turn-based** | the check | you end it — each turn pauses for your review inside the session | a refactor you want to eyeball step by step |
 | **Goal-based** | the stop condition | a goal is met (optionally a shell predicate exits 0) | "fix the build" — done when `make test` passes |
 | **Time-based** | the trigger | you stop it — cadence lives in the prompt (`/loop 1h …`) | hourly issue triage |
-| **Proactive** | the prompt | a composite sub-graph runs it end to end | a pipeline that plans its own steps |
+| **Composite** | the prompt | a sub-graph of loops runs it end to end | a pipeline that plans its own steps |
 
 Two design choices explain most of the rest:
 

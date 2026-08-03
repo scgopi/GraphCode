@@ -69,7 +69,7 @@ struct LoopCardPresentation: Equatable {
     case .goalBased: collapsed(node.goal?.summary)
     case .timeBased: collapsed(node.triggerPrompt)
     case .turnBased: collapsed(node.checkDescription)
-    case .proactive: compositeLine(node)
+    case .composite: compositeLine(node)
     }
   }
 

@@ -265,16 +265,16 @@ public actor GraphStore {
     await drainAndBroadcast()
   }
 
-  // MARK: - Proactive composites
+  // MARK: - Composites
 
-  /// Runs a command against a proactive node's sub-graph, then rolls the result up.
+  /// Runs a command against a composite node's sub-graph, then rolls the result up.
   ///
   /// The nested graph is orchestrated by a real `GraphStore` — the same type, the same
   /// rules — rather than a cut-down interpreter. docs/05 is explicit that a composite is
   /// "the orchestrator running a graph inside a graph"; a second implementation would be
   /// a second set of bugs about edge firing.
   private func runInSubGraph(_ nodeID: UUID, _ command: GraphCommand) async {
-    guard let node = graph.nodes[id: nodeID], node.loopType == .proactive,
+    guard let node = graph.nodes[id: nodeID], node.loopType == .composite,
       let subGraph = node.subGraph
     else { return }
 
@@ -322,7 +322,7 @@ public actor GraphStore {
   /// graphcode doesn't have. The point being served is that a human sees a real result
   /// and a real cost before hundreds of agents can be spawned, and one pass does that.
   private func pilotComposite(_ nodeID: UUID) async {
-    guard let node = graph.nodes[id: nodeID], node.loopType == .proactive,
+    guard let node = graph.nodes[id: nodeID], node.loopType == .composite,
       node.subGraph != nil
     else { return }
     graph.nodes[id: nodeID]?.pilotState = .piloting
@@ -343,7 +343,7 @@ public actor GraphStore {
   /// docs/08's "proactive node armed against a live trigger → dry-run-on-a-slice is the
   /// default first step in the creation flow, not a separate manual command".
   private func armComposite(_ nodeID: UUID) {
-    guard let node = graph.nodes[id: nodeID], node.loopType == .proactive,
+    guard let node = graph.nodes[id: nodeID], node.loopType == .composite,
       node.pilotState.canArm
     else { return }
     graph.nodes[id: nodeID]?.pilotState = .armed
@@ -531,7 +531,7 @@ public actor GraphStore {
         sessionFacing.append("each turn is now verified against: \(check)")
       }
 
-    case .proactive:
+    case .composite:
       break
     }
 
@@ -540,7 +540,7 @@ public actor GraphStore {
       observerSide.append("model tier: \(tier.rawValue) (next launch)")
     }
     guard !sessionFacing.isEmpty || !observerSide.isEmpty else {
-      announceError("update refused: nothing in it applies to a \(node.loopType.rawValue) loop")
+      announceError("update refused: nothing in it applies to a \(node.loopType) loop")
       return
     }
     graph.nodes[id: nodeID] = node
@@ -774,7 +774,7 @@ public actor GraphStore {
   /// its work.
   private func spawnInstance(of templateID: UUID) {
     guard let template = graph.nodes[id: templateID] else { return }
-    let isComposite = template.loopType == .proactive
+    let isComposite = template.loopType == .composite
     let instance = LoopNode(
       title: Self.instanceTitle(for: template, existing: graph.nodes.map(\.title)),
       loopType: template.loopType,

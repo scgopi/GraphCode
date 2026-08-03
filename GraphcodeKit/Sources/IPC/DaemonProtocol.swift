@@ -41,7 +41,7 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
 /// catch-all: one named command says what changed, so the daemon can decide what a
 /// change of *that* field means.
 /// `indirect` because `.subGraphCommand` nests a `GraphCommand` inside itself — a
-/// proactive node's sub-graph takes exactly the same commands its parent graph does,
+/// composite node's sub-graph takes exactly the same commands its parent graph does,
 /// which is the point: there's no second execution engine, just the orchestrator running
 /// a graph inside a graph (docs/05-orchestrator.md#responsibilities item 6).
 public indirect enum GraphCommand: Codable, Sendable, Equatable {
@@ -95,14 +95,14 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// agent alive. The session is only killed when it can't be reached to be asked. The
   /// node itself stays in the graph — stopping is not deleting.
   case stopNode(UUID)
-  /// Route a command into a proactive node's sub-graph. Editing a composite's insides is
+  /// Route a command into a composite node's sub-graph. Editing a composite's insides is
   /// the same set of operations as editing any graph, so it reuses them wholesale rather
   /// than growing a parallel vocabulary.
   case subGraphCommand(nodeID: UUID, command: GraphCommand)
-  /// Dry-run a proactive node's sub-graph once, before its real trigger is armed
+  /// Dry-run a composite node's sub-graph once, before its real trigger is armed
   /// (docs/08-quality-and-token-budgets.md#managing-token-usage).
   case pilotComposite(UUID)
-  /// Arm a piloted proactive node against its live trigger. Refused unless it has
+  /// Arm a piloted composite node against its live trigger. Refused unless it has
   /// actually been piloted — that refusal is the whole safety mechanism.
   case armComposite(UUID)
   /// Pull fresh usage readings for every node from their backends. Explicit rather than

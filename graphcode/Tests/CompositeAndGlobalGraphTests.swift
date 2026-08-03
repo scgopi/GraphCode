@@ -5,7 +5,7 @@ import Testing
 
 @testable import GraphcodeKit
 
-/// Phase 6's last three pieces: proactive composites, the pilot-before-arm gate, and the
+/// Phase 6's last three pieces: composites, the pilot-before-arm gate, and the
 /// global Orchestrator Graph's cross-graph `.spawn`.
 @Suite
 struct CompositeAndGlobalGraphTests {
@@ -15,7 +15,7 @@ struct CompositeAndGlobalGraphTests {
     onEnsureSession: (@Sendable (LoopNode, String?) -> Void)? = nil
   ) async -> (store: GraphStore, compositeID: UUID) {
     let composite = LoopNode(
-      title: "Triage inbox", loopType: .proactive,
+      title: "Triage inbox", loopType: .composite,
       subGraph: LoopGraph(
         project: ProjectRef(path: "sub", name: "sub"),
         nodes: IdentifiedArray(uniqueElements: subNodes)),
@@ -89,7 +89,7 @@ struct CompositeAndGlobalGraphTests {
     // node — the whole reason the roll-up has to reach a real resolution.
     let done = LoopNode(title: "Worker", state: .succeeded)
     let composite = LoopNode(
-      title: "Triage", loopType: .proactive,
+      title: "Triage", loopType: .composite,
       subGraph: LoopGraph(project: ProjectRef(path: "sub", name: "sub"), nodes: [done]))
     let downstream = LoopNode(title: "Report", checkDescription: "?")
     let store = GraphStore(

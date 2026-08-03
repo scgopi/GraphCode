@@ -14,7 +14,7 @@ public struct BackendCapabilities: Codable, Equatable, Sendable {
   /// back to scanning the terminal stream?
   public var supportsHooks: Bool
   public var supportsStructuredOutput: Bool
-  /// Can it fan out to sub-agents itself — the thing a proactive composite leans on.
+  /// Can it fan out to sub-agents itself — the thing a composite leans on.
   public var supportsSubAgents: Bool
   public var supportsMCP: Bool
   /// Can a message be injected into a live session? A backend that can't be interrupted
@@ -170,7 +170,7 @@ extension CLISessionBackendKind {
       // re-trigger its own work. Without that a `/loop …` prompt runs once and stops,
       // which reads as a broken schedule rather than an unsupported one.
       return capabilities.supportsInSessionRecurrence
-    case .proactive:
+    case .composite:
       return capabilities.supportsSubAgents
     }
   }

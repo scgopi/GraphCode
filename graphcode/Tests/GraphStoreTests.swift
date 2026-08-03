@@ -343,7 +343,7 @@ struct GraphStoreTests {
     // there, so this is the pairing that stays impossible now that Codex is spiked.
     await store.handle(
       .createNode(
-        NodeDraft(title: "Wrong backend", loopType: .proactive, backend: .copilotCLI)))
+        NodeDraft(title: "Wrong backend", loopType: .composite, backend: .copilotCLI)))
 
     #expect(await store.graph.nodes.isEmpty)
   }

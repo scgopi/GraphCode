@@ -77,7 +77,7 @@ extension LoopType {
     case .turnBased: return .capable
     case .goalBased: return .standard
     case .timeBased: return .fast
-    case .proactive: return .standard
+    case .composite: return .standard
     }
   }
 }

@@ -45,7 +45,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode node send <project-path> <node-id> <message…>
       graphcode node update <project-path> <node-id> [options]
       graphcode node memo <project-path> <node-id> <note…>
-      graphcode node pilot <project-path> <node-id>     dry-run a proactive composite
+      graphcode node pilot <project-path> <node-id>     dry-run a composite
       graphcode node arm <project-path> <node-id>       arm it (needs a pilot first)
       graphcode edge create <project-path> <from-id> <to-id> [--kind <k>] [--condition <c>]
       graphcode usage <project-path>
@@ -340,7 +340,7 @@ extension GraphcodeCommand {
       return lines.joined(separator: "\n")
     }
     for node in graph.nodes {
-      var line = "  \(node.id)  \(node.state)  \(node.loopType.rawValue)  \(node.title)"
+      var line = "  \(node.id)  \(node.state)  \(node.loopType)  \(node.title)"
       if let reason = AttentionRollup.reason(for: node) {
         line += "  ← \(reason.displayName)"
       }

@@ -5,14 +5,14 @@ import Testing
 
 @testable import GraphcodeKit
 
-/// Spawning a `.proactive` template — the case where "one loop generates another" has to
+/// Spawning a `.composite` template — the case where "one loop generates another" has to
 /// carry a whole nested routine across, not just a handful of scalar fields.
 @Suite
 struct CompositeSpawnTests {
   private func compositeTemplate(subNodes: [LoopNode]) -> LoopNode {
     LoopNode(
       title: "Triage",
-      loopType: .proactive,
+      loopType: .composite,
       subGraph: LoopGraph(
         project: ProjectRef(path: "sub", name: "sub"),
         nodes: IdentifiedArray(uniqueElements: subNodes)),
@@ -21,7 +21,7 @@ struct CompositeSpawnTests {
 
   @Test
   func spawningACompositeCarriesItsRoutine() async {
-    // Without this the spawn produced a proactive node with no sub-graph at all: it can't
+    // Without this the spawn produced a composite node with no sub-graph at all: it can't
     // be piloted, can't be run, and does nothing — a node that merely looks busy.
     let trigger = LoopNode(title: "Watch", state: .idle)
     let template = compositeTemplate(subNodes: [
@@ -95,7 +95,7 @@ struct CompositeSpawnTests {
     // A composite inside a composite needs the same treatment for the same reason.
     let grandchild = LoopNode(title: "Deep")
     let child = LoopNode(
-      title: "Middle", loopType: .proactive,
+      title: "Middle", loopType: .composite,
       subGraph: LoopGraph(project: ProjectRef(path: "s", name: "s"), nodes: [grandchild]))
     let original = LoopGraph(project: ProjectRef(path: "sub", name: "sub"), nodes: [child])
 

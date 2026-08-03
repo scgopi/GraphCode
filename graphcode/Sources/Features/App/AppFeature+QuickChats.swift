@@ -95,7 +95,7 @@ extension AppFeature {
   }
 
   /// Opens a chat in the same terminal workspace a loop gets, via a synthetic node.
-  /// `.proactive` is the one loop type whose `sessionPrompt` is nil, which is exactly
+  /// `.composite` is the one loop type whose `sessionPrompt` is nil, which is exactly
   /// what a chat wants: the backend starts bare, with nothing pre-typed into it. The
   /// node's id is the chat's, so the workspace attaches to the chat's own long-lived
   /// zmx session, scrollback and all. Home as the working directory — a chat belongs
@@ -104,7 +104,7 @@ extension AppFeature {
     let node = LoopNode(
       id: chat.id,
       title: chat.title,
-      loopType: .proactive,
+      loopType: .composite,
       backend: chat.backend,
       createdAt: chat.createdAt)
     let layout = terminalLayoutStore.load(forNode: chat.id) ?? .defaultLayout(forNode: chat.id)

@@ -138,7 +138,7 @@ struct LoopRenameTests {
     // Sub-graphs take the same vocabulary their parent graph does — that's the whole
     // point of `.subGraphCommand`, and rename is no exception.
     let store = GraphStore()
-    await store.handle(.createNode(NodeDraft(title: "Nightly", loopType: .proactive)))
+    await store.handle(.createNode(NodeDraft(title: "Nightly", loopType: .composite)))
     let compositeID = await store.graph.nodes[0].id
     await store.handle(
       .subGraphCommand(

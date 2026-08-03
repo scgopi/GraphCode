@@ -30,7 +30,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
   /// `.turnBased`: what a human verifies each turn.
   public var checkDescription: String?
   /// `.timeBased`: the opening prompt, cadence included as a `/loop` directive. Also
-  /// where a `.proactive` draft carries the schedule it is *intended* to run on — the
+  /// where a `.composite` draft carries the schedule it is *intended* to run on — the
   /// composite doesn't run at creation, so this is a statement of intent until it's
   /// piloted and armed.
   public var triggerPrompt: String?
@@ -49,7 +49,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
   /// `nil` leaves the tier to the orchestrator's routing policy for this loop type.
   public var modelTier: ModelTier?
   public var worktree: WorktreeRef?
-  /// A `.proactive` draft's sub-graph, when one is being carried across — a cross-graph
+  /// A `.composite` draft's sub-graph, when one is being carried across — a cross-graph
   /// `.spawn` of a composite has to bring the routine with it, or the receiving project
   /// gets an empty shell. `nil` means "start empty", which is what the creation form
   /// sends.
@@ -124,7 +124,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
       return !(goal?.summary ?? "").trimmingCharacters(in: .whitespaces).isEmpty
     case .timeBased:
       return !(triggerPrompt ?? "").trimmingCharacters(in: .whitespaces).isEmpty
-    case .proactive:
+    case .composite:
       // Its *contents* are still not required — a composite is built by editing its
       // sub-graph after creation, and demanding a populated one at creation time would
       // mean a modal that can't be filled in until the thing it creates exists. The real
@@ -175,7 +175,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
       // A composite always gets a sub-graph, empty to begin with — its own graph is what
       // it *is*, and a nil one would just be an unrepresentable state every call site
       // would have to guard against.
-      subGraph: loopType == .proactive
+      subGraph: loopType == .composite
         ? (subGraph?.reIdentified()
           ?? LoopGraph(
             project: ProjectRef(path: "\(resolvedTitle)-subgraph", name: resolvedTitle)))

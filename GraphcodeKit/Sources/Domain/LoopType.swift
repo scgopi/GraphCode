@@ -5,7 +5,7 @@
 /// `allCases` walks and the order every picker shows: goal-based first, since a loop that
 /// knows when it is finished is what most work wants and the only kind that both starts
 /// itself and ends itself; then time-based, which starts itself but never ends; then
-/// turn-based, which does neither without a person; then proactive, which is a graph
+/// turn-based, which does neither without a person; then composite, which is a graph
 /// rather than a session and belongs at the end for that reason alone.
 ///
 /// Raw values are unchanged by that ordering, so every graph already on disk decodes
@@ -14,5 +14,8 @@ public enum LoopType: String, Codable, CaseIterable, Sendable {
   case goalBased
   case timeBased
   case turnBased
-  case proactive
+  /// Serialised as `proactive`, the name this type shipped under. Every graph written so
+  /// far carries that string, and a daemon or CLI in `~/.graphcode/bin` can be a version
+  /// behind the app that wrote it — so the on-disk word outlives the vocabulary change.
+  case composite = "proactive"
 }

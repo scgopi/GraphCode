@@ -128,16 +128,16 @@ struct NodeDraftTests {
   }
 
   @Test
-  func aProactiveDraftNeedsOnlyATitleAndGetsAnEmptySubGraph() {
+  func aCompositeDraftNeedsOnlyATitleAndGetsAnEmptySubGraph() {
     // A composite is built by editing its sub-graph after creation, so demanding a
     // populated one up front would mean a modal that can't be filled in until the thing
     // it creates exists. The real gate is arming, not creating.
-    let draft = NodeDraft(title: "Triage inbox", loopType: .proactive)
+    let draft = NodeDraft(title: "Triage inbox", loopType: .composite)
     #expect(draft.isValid)
     // The name, though, is required for this type alone: every other kind gets one from
     // its own backend once it starts working, and a composite never starts. "New Loop"
     // would be its name for good.
-    #expect(!NodeDraft(title: "  ", loopType: .proactive).isValid)
+    #expect(!NodeDraft(title: "  ", loopType: .composite).isValid)
 
     let node = draft.makeNode()
     #expect(node.subGraph != nil)
@@ -148,7 +148,7 @@ struct NodeDraftTests {
   }
 
   @Test
-  func onlyAProactiveNodeGetsASubGraph() {
+  func onlyACompositeNodeGetsASubGraph() {
     #expect(
       NodeDraft(
         title: "Research", loopType: .turnBased, checkDescription: "?",
@@ -179,7 +179,7 @@ struct NodeDraftTests {
         backend: .copilotCLI
       ).isValid)
     #expect(
-      !NodeDraft(title: "Triage", loopType: .proactive, backend: .copilotCLI).isValid)
+      !NodeDraft(title: "Triage", loopType: .composite, backend: .copilotCLI).isValid)
   }
 
   @Test
@@ -229,7 +229,7 @@ struct NodeDraftTests {
     #expect(CLISessionBackendKind.hosting(.timeBased) == [.claudeCode, .copilotCLI])
     // A composite still needs sub-agent fan-out, which only Claude Code has been shown
     // to do.
-    #expect(CLISessionBackendKind.hosting(.proactive) == [.claudeCode])
+    #expect(CLISessionBackendKind.hosting(.composite) == [.claudeCode])
   }
 
   @Test
@@ -306,7 +306,7 @@ struct NodeDraftTests {
     // should still be holding when someone comes back to arm it.
     var state = ProjectFeature.State(
       graph: LoopGraph(project: ProjectRef(path: "/tmp/p", name: "p")))
-    state.draftLoopType = .proactive
+    state.draftLoopType = .composite
     state.draftTitle = "Nightly sweep"
     state.draftSchedule = .weekdays
     state.draftScheduleTime = "07:30"

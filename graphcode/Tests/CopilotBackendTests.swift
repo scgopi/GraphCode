@@ -94,7 +94,7 @@ struct CopilotBackendTests {
     #expect(CLISessionBackendKind.copilotCLI.canHost(.timeBased))
     // A composite is a graph of loops running inside one node, and sub-agent fan-out is
     // still unverified here — the one row that stays refused.
-    #expect(!CLISessionBackendKind.copilotCLI.canHost(.proactive))
+    #expect(!CLISessionBackendKind.copilotCLI.canHost(.composite))
   }
 
   @Test

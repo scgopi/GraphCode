@@ -74,7 +74,7 @@ struct BackendPicker: View {
     case .goalBased:
       return "\(name) has no goal mode — nothing to run turn after turn against a stop "
         + "condition. Try turn-based, where you judge each turn yourself."
-    case .proactive:
+    case .composite:
       return "\(name) has no verified sub-agent fan-out, and a composite is a graph of "
         + "loops running inside one node. Claude Code can host this one."
     case .turnBased:

@@ -14,7 +14,7 @@ Requires **macOS 15+ on Apple Silicon**, with **Claude Code on your `PATH`** —
 GraphCode launches it, it doesn't bundle it.
 [All releases →](https://github.com/scgopi/GraphCode/releases)
 
-![Two projects and their connected loops on one GraphCode canvas — goal-based, time-based, and proactive nodes, every one a live terminal](assets/graph-hero.png)
+![Two projects and their connected loops on one GraphCode canvas — every node a live terminal you can attach to](assets/graph-hero.png)
 
 <!-- VIDEO SLOT: demo video goes here when ready -->
 
@@ -55,11 +55,13 @@ fifth entry next release; it's the space of loops possible:
 | **Turn-based** | the check | you end it — each turn pauses for your review | a refactor you eyeball step by step |
 | **Goal-based** | the stop condition | the goal is met (optionally: a shell command exits 0) | "fix the build" — done when `make test` passes |
 | **Time-based** | the trigger | you stop it — cadence lives in the prompt (`/loop 1h …`) | hourly issue triage |
-| **Proactive** | the prompt | a composite sub-graph runs it end to end | a pipeline that plans its own steps |
+| **Composite** | the prompt | a sub-graph of loops runs it end to end | a pipeline that plans its own steps |
 
 The names aren't ours: the taxonomy follows the loop types Anthropic established in
 [*Getting started with loops*](https://x.com/ClaudeDevs/status/2074208949205881033).
-GraphCode's contribution is making each one a node in a graph.
+GraphCode's contribution is making each one a node in a graph — which is also why the
+fourth one is called **composite** here rather than proactive: in a graph, that is
+exactly what it is.
 
 #### Turn-based — you stay in the sequence
 
@@ -83,11 +85,11 @@ into the prompt with the agent's own `/loop` or `/schedule` skill (`/loop 1h Tri
 new bug reports`). Nothing external fires it; the session re-triggers itself, which is
 why you can attach at any point and see every pass it has ever run in one scrollback.
 
-#### Proactive — you hand off the prompt
+#### Composite — you hand off the prompt
 
-The whole prompt, that is. A proactive node is a composite: a sub-graph that plans its
-own steps and runs them end to end — a graph running inside a graph. You describe the
-outcome; it decides the loops.
+The whole prompt, that is. A composite node is a sub-graph that plans its own steps and
+runs them end to end — a graph running inside a graph. You describe the outcome; it
+decides the loops.
 
 Pick the type by what you're ready to let go of — the check, the stop condition, the
 trigger, or the prompt itself. A working graph usually mixes them: a time-based triage

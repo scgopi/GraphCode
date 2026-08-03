@@ -296,8 +296,8 @@ struct GoalBasedLoopTests {
   }
 
   @Test
-  func aProactiveNodeStillOpensBare() {
+  func aCompositeNodeStillOpensBare() {
     // A composite is a graph, not a session; its sub-graph's loops carry the prompts.
-    #expect(LoopNode(title: "Pipeline", loopType: .proactive).sessionPrompt == nil)
+    #expect(LoopNode(title: "Pipeline", loopType: .composite).sessionPrompt == nil)
   }
 }

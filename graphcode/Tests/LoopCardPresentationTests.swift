@@ -122,7 +122,7 @@ struct LoopCardPresentationTests {
       project: ProjectRef(path: "/tmp/p", name: "p"),
       nodes: [LoopNode(title: "one"), LoopNode(title: "two")])
     let composite = LoopNode(
-      title: "Nightly", loopType: .proactive, subGraph: inner, pilotState: .armed)
+      title: "Nightly", loopType: .composite, subGraph: inner, pilotState: .armed)
 
     #expect(LoopCardPresentation(node: composite).liveLine == "2 loops · Armed")
   }

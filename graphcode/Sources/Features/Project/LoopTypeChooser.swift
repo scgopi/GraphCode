@@ -67,7 +67,7 @@ struct LoopTypeChooser: View {
     case .goalBased: "Works until a condition is met"
     case .timeBased: "Runs again on a schedule"
     case .turnBased: "Pauses for you each turn"
-    case .proactive: "A group of loops, armed later"
+    case .composite: "A group of loops, armed later"
     }
   }
 
@@ -78,7 +78,7 @@ struct LoopTypeChooser: View {
     case .goalBased: "Stops when your check passes"
     case .timeBased: "Never — it runs again each interval"
     case .turnBased: "Stops after every turn, for you"
-    case .proactive: "Doesn't run until you arm it"
+    case .composite: "Doesn't run until you arm it"
     }
   }
 }

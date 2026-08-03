@@ -139,7 +139,7 @@ extension AppSidebarView {
   func nodeMenu(for node: LoopNode, in projectPath: String) -> some View {
     Button("Open Terminal") { send(.nodeTapped(node.id), to: projectPath) }
 
-    if node.loopType == .proactive {
+    if node.loopType == .composite {
       Button("Pilot Once…") { send(.pilotCompositeTapped(node.id), to: projectPath) }
       Button("Arm Schedule") { send(.armCompositeTapped(node.id), to: projectPath) }
         .disabled(!node.pilotState.canArm)

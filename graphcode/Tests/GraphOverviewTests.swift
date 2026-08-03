@@ -117,10 +117,10 @@ struct GraphOverviewTests {
     let inner = LoopNode(title: "explore", checkDescription: "?")
     let deeper = LoopNode(title: "judge", checkDescription: "?")
     let nestedComposite = LoopNode(
-      title: "sub-composite", loopType: .proactive,
+      title: "sub-composite", loopType: .composite,
       subGraph: LoopGraph(project: Self.projectA, nodes: [deeper]))
     let composite = LoopNode(
-      title: "pipeline", loopType: .proactive,
+      title: "pipeline", loopType: .composite,
       subGraph: LoopGraph(project: Self.projectA, nodes: [inner, nestedComposite]))
     let plain = LoopNode(title: "review", checkDescription: "?")
 

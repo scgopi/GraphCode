@@ -307,13 +307,13 @@ struct CompositeDraftFields: View {
         .padding(.vertical, 7)
         .padding(.horizontal, 9)
         .background(
-          index == 0 ? LoopType.proactive.accent.opacity(0.14) : Color.white.opacity(0.035),
+          index == 0 ? LoopType.composite.accent.opacity(0.14) : Color.white.opacity(0.035),
           in: RoundedRectangle(cornerRadius: 8)
         )
         .overlay {
           if index == 0 {
             RoundedRectangle(cornerRadius: 8)
-              .stroke(LoopType.proactive.accent.opacity(0.45), lineWidth: 1)
+              .stroke(LoopType.composite.accent.opacity(0.45), lineWidth: 1)
           }
         }
       }
@@ -365,7 +365,7 @@ struct NodeDraftRecap: View {
         "Waits until you open it, then works in turns — pausing "
         + (draft.pausesBeforeWritesOnly ? "before it writes anything" : "after each one")
         + " for your review."
-    case .proactive:
+    case .composite:
       return
         "Creates an empty group called “\(draft.resolvedTitle)” and opens it so you can "
         + "add loops. It won't run — and can't be armed — until you pilot it once."

@@ -4,7 +4,7 @@
 /// docs/07-roadmap.md#phase-3--orchestrator-automation. The cycle-guard cases the full
 /// taxonomy describes (`.maxIterations`, `.until`) are still deferred: nothing in the
 /// current edge/node model can re-fire the same edge or re-create nodes, so a cycle
-/// can't actually run away yet — revisit once spawn/proactive composites (Phase 6)
+/// can't actually run away yet — revisit once spawn edges and composites (Phase 6)
 /// make that possible.
 public enum EdgeCondition: String, Codable, CaseIterable, Sendable {
   case always

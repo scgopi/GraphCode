@@ -55,7 +55,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   /// A structural copy with brand-new identities throughout — same loops, same wiring,
   /// nothing shared with the original.
   ///
-  /// Required when instantiating a `.proactive` template: a node's id *is* its `zmx`
+  /// Required when instantiating a `.composite` template: a node's id *is* its `zmx`
   /// session name (`SurfaceRef(id:).zmxSessionName`), so a value-copied sub-graph would
   /// have every spawned instance attaching to the very same sessions as the template and
   /// as each other. Two instances would then be driving one terminal.
