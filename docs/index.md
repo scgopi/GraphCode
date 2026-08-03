@@ -332,8 +332,10 @@ can't host. Current rough edges live in the README's
 {% endif %}
 
 Building from source, development commands, and limitations are in the
-[README](https://github.com/scgopi/GraphCode#readme). GraphCode is
-[MIT-licensed](https://github.com/scgopi/GraphCode/blob/main/LICENSE), built on the
+[README](https://github.com/scgopi/GraphCode#readme). The app is under the
+[Functional Source License](https://github.com/scgopi/GraphCode/blob/main/LICENSE)
+— free to use, read, change and self-host, converting to MIT two years after each
+release — while `GraphcodeKit` and the `graphcode` CLI stay MIT. It is built on the
 independent open-source projects [Ghostty](https://ghostty.org) and
 [zmx](https://zmx.sh).
 

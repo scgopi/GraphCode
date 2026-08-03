@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/scgopi/GraphCode/releases"><img src="https://img.shields.io/github/v/release/scgopi/GraphCode" alt="Release"></a>
   <img src="https://img.shields.io/badge/platform-macOS%2015%2B%20(Apple%20Silicon)-blue" alt="Platform">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-FSL--1.1--MIT-green" alt="License: FSL-1.1-MIT"></a>
 </p>
 
 <p align="center">
@@ -216,4 +216,16 @@ its unit is the worktree, GraphCode's is the graph of loops. Built on
 
 ## License
 
-[MIT](LICENSE).
+The app and the daemon are under the [Functional Source
+License](https://fsl.software) v1.1 with an MIT future license
+([FSL-1.1-MIT](LICENSE)). Use it, read it, change it, self-host it, redistribute
+it — the one thing it does not permit is shipping a competing commercial product
+built from it. Every release converts to plain MIT two years after that release
+goes out.
+
+`GraphcodeKit/` and `graphcode-cli/` stay [MIT](GraphcodeKit/LICENSE), so
+scripting against `graphcode` or linking the domain types never raises a
+licensing question.
+
+Contributions are accepted under the [Developer Certificate of
+Origin](DCO) — add a `Signed-off-by` line with `git commit -s`.
