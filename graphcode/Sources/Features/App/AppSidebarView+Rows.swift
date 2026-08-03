@@ -284,10 +284,26 @@ extension AppSidebarView {
     }
   }
 
-  /// Every node id across the open projects — what `onChange` watches to notice a loop
-  /// being created.
-  var allNodeIDs: Set<UUID> {
-    Set(store.projects.flatMap { $0.graph.nodes.map(\.id) })
+  /// Every edge id across the open projects — what `onChange` watches to notice a loop
+  /// being put under a parent.
+  var allEdgeIDs: Set<UUID> {
+    Set(store.projects.flatMap { $0.graph.edges.map(\.id) })
+  }
+
+  /// The parents to disclose after a graph change: the ancestor chain of every loop an
+  /// edge that wasn't there before now points at.
+  ///
+  /// Watching the *edges* rather than the nodes is the whole point. A loop created from
+  /// a card's + handle is two daemon commands, so it arrives in two broadcasts: the node
+  /// first, with no inbound edge and therefore no chain to disclose, and the hand-off
+  /// edge second — which moves it from a root row to a child row under a parent that may
+  /// well be collapsed. The node set is unchanged by that second broadcast, so keying on
+  /// nodes meant nothing looked again and the loop simply had no visible row.
+  static func parentsToExpand(
+    forEdgesNotIn known: Set<UUID>, in graphs: [LoopGraph]
+  ) -> Set<UUID> {
+    let targets = graphs.flatMap { $0.edges }.filter { !known.contains($0.id) }.map(\.to)
+    return parentsToExpand(for: Set(targets), in: graphs)
   }
 
   /// The parents to disclose so every newly created loop is visible: each new node's
