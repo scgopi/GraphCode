@@ -52,6 +52,13 @@ public actor GraphStore {
   private let onAppendMemory: (@Sendable (UUID, String) -> Void)?
   /// Tears a deleted node's memory down alongside its session.
   private let onRemoveMemory: (@Sendable (UUID) -> Void)?
+  /// Whether this store is driving a composite's sub-graph rather than a project's own
+  /// graph — see `runInSubGraph`, which is the only thing that sets it.
+  ///
+  /// What hangs on it is one rule: a loop in a sub-graph is a *template* until the
+  /// composite is piloted. So nothing created here runs, and nothing created here may
+  /// claim to be running.
+  private let isSubGraph: Bool
   private var goalPollers: [UUID: Task<Void, Never>] = [:]
 
   /// A poller holds `self` weakly, so a store going away already stops it *doing*
@@ -99,9 +106,11 @@ public actor GraphStore {
     onReadPresence: (@Sendable (LoopNode) async -> PresenceReading)? = nil,
     onSpawnIntoProject: (@Sendable (String, NodeDraft) -> Void)? = nil,
     onAppendMemory: (@Sendable (UUID, String) -> Void)? = nil,
-    onRemoveMemory: (@Sendable (UUID) -> Void)? = nil
+    onRemoveMemory: (@Sendable (UUID) -> Void)? = nil,
+    isSubGraph: Bool = false
   ) {
     self.graph = graph
+    self.isSubGraph = isSubGraph
     self.onGraphChanged = onGraphChanged
     self.onEnsureSession = onEnsureSession
     self.onTerminateSession = onTerminateSession
@@ -174,7 +183,13 @@ public actor GraphStore {
       // Validated here rather than only in the form: this protocol is reachable from the
       // CLI too, and a rule only one client enforces isn't a rule.
       guard draft.isValid else { return }
-      let node = draft.makeNode()
+      var node = draft.makeNode()
+      // A goal loop is born `.running`, which is right on a project canvas and a lie in a
+      // sub-graph: nothing here has a session until the composite is piloted. Unfixed,
+      // the first goal loop added rolled its composite up to RUNNING while `pilotState`
+      // still read "Not piloted" and not one process existed — the card claimed the
+      // routine was working, which is the exact opposite of what the pilot gate promises.
+      if isSubGraph { node.state = .idle }
       // The draft's id is client-chosen now (see `NodeDraft.id`), so a re-sent command
       // must not become a second node — or a crash: `IdentifiedArray.append` traps on a
       // duplicate id, and this protocol is reachable from any client.
@@ -282,6 +297,17 @@ public actor GraphStore {
   /// a second set of bugs about edge firing.
   private func runInSubGraph(_ nodeID: UUID, _ command: GraphCommand) async {
     guard let node = graph.nodes[id: nodeID] else {
+      // The id may name a composite further down — a composite inside a composite is the
+      // shape docs/01 describes, and its contents are not in *this* graph's nodes. Ids
+      // are unique across the whole tree, so a caller has no reason to know how deep its
+      // target sits; wrap the command for the branch that holds it and let the child
+      // store repeat the search. Without this, `node create --into <nested-composite>`
+      // went nowhere at all.
+      if let owner = graph.nodes.first(where: { $0.subGraph?.containsAtAnyDepth(nodeID) == true })
+      {
+        await runInSubGraph(owner.id, .subGraphCommand(nodeID: nodeID, command: command))
+        return
+      }
       announceError("no loop \(nodeID) in this graph")
       return
     }
@@ -311,7 +337,8 @@ public actor GraphStore {
       onDeliverMessage: onDeliverMessage,
       onCaptureScript: onCaptureScript,
       onAppendMemory: onAppendMemory,
-      onRemoveMemory: onRemoveMemory)
+      onRemoveMemory: onRemoveMemory,
+      isSubGraph: true)
     await child.handle(command)
     graph.nodes[id: nodeID]?.subGraph = await child.graph
     rollUpComposite(nodeID)

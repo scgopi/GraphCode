@@ -52,6 +52,17 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
       edges: edges)
   }
 
+  /// Whether this graph holds `nodeID` anywhere beneath it, composites' contents
+  /// included.
+  ///
+  /// Node ids are unique across the whole tree — that is what makes them `zmx` session
+  /// names — so a caller naming one has no reason to know, or say, how deep it sits.
+  /// Addressing a nested composite would otherwise mean spelling out the chain of
+  /// parents to reach it.
+  public func containsAtAnyDepth(_ nodeID: UUID) -> Bool {
+    nodes.contains { $0.id == nodeID || ($0.subGraph?.containsAtAnyDepth(nodeID) ?? false) }
+  }
+
   /// A structural copy with brand-new identities throughout — same loops, same wiring,
   /// nothing shared with the original.
   ///

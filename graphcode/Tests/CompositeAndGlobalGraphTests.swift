@@ -30,6 +30,47 @@ struct CompositeAndGlobalGraphTests {
   // MARK: - Composites
 
   @Test
+  func anUnpilotedCompositeDoesNotClaimToBeRunning() async {
+    // A goal loop is born `.running`, so the first one added rolled its composite up to
+    // RUNNING while `pilotState` still read "Not piloted" and not one process existed.
+    // The card said the routine was working; the pilot gate is the promise that it isn't.
+    let (store, compositeID) = await storeWithComposite()
+
+    await store.handle(
+      .subGraphCommand(
+        nodeID: compositeID,
+        command: .createNode(
+          NodeDraft(
+            title: "Draft reply", loopType: .goalBased,
+            goal: GoalSpec(summary: "Every item has a reply")))))
+
+    let composite = await store.graph.nodes[id: compositeID]
+    #expect(composite?.subGraph?.nodes.count == 1)
+    #expect(composite?.state != .running)
+  }
+
+  @Test
+  func aCompositeInsideACompositeCanBeAddressedDirectly() async throws {
+    // Ids are unique across the whole tree, so naming a nested composite must be enough —
+    // spelling out the chain of parents to reach it is not something a caller can be
+    // expected to do. This went nowhere at all: the command was dropped in silence.
+    let (store, outerID) = await storeWithComposite()
+    await store.handle(
+      .subGraphCommand(
+        nodeID: outerID, command: .createNode(NodeDraft(title: "Inner", loopType: .composite))))
+
+    let innerID = try #require(await store.graph.nodes[id: outerID]?.subGraph?.nodes.first?.id)
+    await store.handle(
+      .subGraphCommand(
+        nodeID: innerID,
+        command: .createNode(
+          NodeDraft(title: "Deep", loopType: .timeBased, triggerPrompt: "/loop 1h deep"))))
+
+    let inner = await store.graph.nodes[id: outerID]?.subGraph?.nodes[id: innerID]
+    #expect(inner?.subGraph?.nodes.map(\.title) == ["Deep"])
+  }
+
+  @Test
   func addingALoopInsideACompositeDoesNotStartIt() async {
     // `createNode` starts a session for every unattended loop it makes, which is right
     // on a project canvas and wrong inside a composite: a loop in a sub-graph is a
