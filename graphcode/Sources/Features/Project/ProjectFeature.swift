@@ -27,6 +27,13 @@ struct ProjectFeature {
   struct State: Equatable, Identifiable {
     var graph: LoopGraph
     var nodePositions: [UUID: CGPoint] = [:]
+    /// The composite the canvas is currently *inside*, if any — see `canvasGraph`.
+    ///
+    /// A composite is "a graph inside a graph" (docs/01-loop-taxonomy.md), and until this
+    /// existed there was no way to get in: the new-loop dialog promised "Add loops inside"
+    /// and offered a **Create & open** button, and nothing anywhere could open one or put
+    /// a loop in one, so every composite ever created stayed empty for good.
+    var openCompositeID: UUID?
     var showingNewNodeForm = false
     /// The id the node being drafted will be created under, fixed when the form opens.
     /// Stored rather than letting `NodeDraft.init` default one, because `draft` is
@@ -133,6 +140,10 @@ struct ProjectFeature {
     case createNodeConfirmed
     case cancelNewNodeForm
     case nodeTapped(UUID)
+    /// Drill into a composite — the canvas starts drawing its sub-graph instead.
+    case compositeOpened(UUID)
+    /// The breadcrumb's way back out to the project's own graph.
+    case compositeClosed
     /// This canvas's attention rail. Scoped to this project on purpose: the rail sits on
     /// *this folder's* canvas, so the loop it opens should be one you can see. ⌘⇧R from
     /// the window is the cross-project door — see `AppFeature.reviewAttentionTapped`.
@@ -192,7 +203,11 @@ struct ProjectFeature {
           // so the next node landed exactly on top of an existing card — four loops
           // rendering as one, with the rest hidden underneath.
           var taken = Set(state.nodePositions.values)
-          for node in newGraph.nodes where state.nodePositions[node.id] == nil {
+          // Composites' contents get slots too, or a drilled-in canvas draws every card
+          // at the same unplaced point. Positions are keyed by node id and ids are unique
+          // across the whole tree, so one flat table serves every level.
+          for node in newGraph.nodes.flatMap({ [$0] + ($0.subGraph?.nodes ?? []) })
+          where state.nodePositions[node.id] == nil {
             let position = Self.nextFreePosition(avoiding: taken)
             taken.insert(position)
             state.nodePositions[node.id] = position
@@ -238,6 +253,16 @@ struct ProjectFeature {
         let parentNodeID = state.draftParentNodeID
         state.draftParentNodeID = nil
         state.showingNewNodeForm = false
+        // Inside a composite, the same commands are addressed at its sub-graph. This is
+        // the app half of "add loops inside" — the step the dialog's own strip promises.
+        let insideComposite = state.openCompositeID
+        // **Create & open**, honoured: a composite made from the project canvas opens
+        // straight away, which is what its button has always said it would do. Only from
+        // the top level — a composite created inside another would otherwise take the
+        // canvas somewhere the human didn't ask to go.
+        if draft.loopType == .composite, insideComposite == nil {
+          state.openCompositeID = draft.id
+        }
 
         // Creating the worktree is the app's job, not the daemon's: `GitClient` lives
         // here, and a failure needs somewhere to be shown. If it fails, the node is
@@ -254,13 +279,17 @@ struct ProjectFeature {
               await send(.worktreeCreationFailed(String(describing: error)))
             }
           }
+          func addressed(_ command: GraphCommand) -> GraphCommand {
+            insideComposite.map { .subGraphCommand(nodeID: $0, command: command) } ?? command
+          }
           try? await orchestratorClient.send(
-            .graphCommand(projectPath: projectPath, command: .createNode(resolved)))
+            .graphCommand(projectPath: projectPath, command: addressed(.createNode(resolved))))
           if let parentNodeID {
             try? await orchestratorClient.send(
               .graphCommand(
                 projectPath: projectPath,
-                command: .createEdge(from: parentNodeID, to: draft.id, spec: EdgeSpec())))
+                command: addressed(
+                  .createEdge(from: parentNodeID, to: draft.id, spec: EdgeSpec()))))
           }
 
           // A blank title creates the node as "New Loop" and asks the loop's own
@@ -276,7 +305,7 @@ struct ProjectFeature {
           else { return }
           try? await orchestratorClient.send(
             .graphCommand(
-              projectPath: projectPath, command: .renameNode(draft.id, title: title)))
+              projectPath: projectPath, command: addressed(.renameNode(draft.id, title: title))))
         }
 
       case .worktreeCreationFailed(let message):
@@ -290,6 +319,15 @@ struct ProjectFeature {
       case .nodeTapped:
         // Handled by `AppFeature`'s parent `Reduce`, which owns cross-project
         // selection — nothing to do here.
+        return .none
+
+      case .compositeOpened(let nodeID):
+        guard state.graph.nodes[id: nodeID]?.loopType == .composite else { return .none }
+        state.openCompositeID = nodeID
+        return .none
+
+      case .compositeClosed:
+        state.openCompositeID = nil
         return .none
 
       case .doneCheckTestTapped:

@@ -9,7 +9,7 @@ extension ProjectCanvasView {
   func nodesLayer(
     _ reasons: [UUID: AttentionReason], roles: [UUID: CardEntryRole], now: Date
   ) -> some View {
-    ForEach(store.graph.nodes) { node in
+    ForEach(store.canvasGraph.nodes) { node in
       HoverRevealingCard(isDragSource: dragSourceID == node.id) {
         nodeCard(
           for: node, reason: reasons[node.id], role: roles[node.id] ?? .interior, now: now)
@@ -38,7 +38,12 @@ extension ProjectCanvasView {
       onMarkAsEntry: { store.send(.markAsEntryTapped(node.id)) }
     )
     .contentShape(Rectangle())
-    .onTapGesture { store.send(.nodeTapped(node.id)) }
+    // A composite has no session of its own to open (`LoopNode.firstInstruction` is nil
+    // for one), so the tap that opens a terminal everywhere else opens the group here —
+    // otherwise clicking the card is the one gesture on the canvas that does nothing.
+    .onTapGesture {
+      store.send(node.loopType == .composite ? .compositeOpened(node.id) : .nodeTapped(node.id))
+    }
     .contextMenu { nodeMenu(for: node) }
     // The hover-revealed + handle is `HoverRevealingCard`'s job — see `nodesLayer`.
   }
@@ -47,6 +52,9 @@ extension ProjectCanvasView {
   private func nodeMenu(for node: LoopNode) -> some View {
     Button("Open Terminal") { store.send(.nodeTapped(node.id)) }
     if node.loopType == .composite {
+      // First, because it is the step everything else depends on: a composite with
+      // nothing inside can be piloted and armed and still do nothing at all.
+      Button("Open Group") { store.send(.compositeOpened(node.id)) }
       // Pilot always available (re-piloting a composite you've changed is normal);
       // arming only after a pilot, which is the docs/08 gate.
       Button("Pilot Once…") { store.send(.pilotCompositeTapped(node.id)) }

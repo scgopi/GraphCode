@@ -26,7 +26,7 @@ extension ProjectCanvasView {
   }
 
   func nodeTitle(_ id: UUID) -> String {
-    store.graph.nodes[id: id]?.title ?? "?"
+    store.canvasGraph.nodes[id: id]?.title ?? "?"
   }
 
   /// The + at a card's right-centre does double duty: a *click* creates a new loop
@@ -56,7 +56,7 @@ extension ProjectCanvasView {
   /// Which node (if any) contains `point`, in "canvas"-space — approximate card frame,
   /// good enough for drop hit-testing without threading real card sizes through state.
   private func hitTestNode(at point: CGPoint, excluding: UUID) -> UUID? {
-    for node in store.graph.nodes where node.id != excluding {
+    for node in store.canvasGraph.nodes where node.id != excluding {
       guard let position = store.nodePositions[node.id] else { continue }
       let rect = CGRect(x: position.x - 110, y: position.y - 45, width: 220, height: 90)
       if rect.contains(point) { return node.id }

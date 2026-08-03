@@ -14,7 +14,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
   case help
   case listProjects
   case status(projectPath: String)
-  case createNode(projectPath: String, draft: NodeDraft)
+  /// `into` is the composite whose sub-graph the loop belongs in, when one was named —
+  /// the command is the same, addressed at a nested graph instead of this one.
+  case createNode(projectPath: String, draft: NodeDraft, into: UUID? = nil)
   case createEdge(projectPath: String, from: UUID, to: UUID, spec: EdgeSpec)
   case stopNode(projectPath: String, nodeID: UUID)
   case deleteNode(projectPath: String, nodeID: UUID)
@@ -38,7 +40,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
     USAGE
       graphcode projects
       graphcode status <project-path>
-      graphcode node create <project-path> --title <t> --type <turn|goal|time> [options]
+      graphcode node create <project-path> --title <t> --type <turn|goal|time|composite> [options]
       graphcode node stop <project-path> <node-id>
       graphcode node delete <project-path> <node-id>   removes it, its edges, session
                            and memory — irreversible; stop is the reversible verb
@@ -55,6 +57,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
     <project-path> appears.
 
     NODE OPTIONS
+      --into <composite-id>  create this loop *inside* that composite's sub-graph rather
+                           than beside it — the CLI half of "add loops inside".
+                           (`edge create` has its own --into; that one takes a project
+                           path and only means anything on a --kind spawn.)
       --check <text>       what a human verifies each turn; optional
       --goal <text>        required for --type goal
       --predicate <cmd>    optional stop condition for --type goal (exit 0 = met)
@@ -110,7 +116,14 @@ public enum GraphcodeCommand: Equatable, Sendable {
       let path = try take(&arguments, name: "project-path")
       switch verb {
       case "create":
-        return .createNode(projectPath: path, draft: try parseDraft(arguments))
+        var into: UUID?
+        if let raw = parseFlags(arguments)["into"] {
+          guard let id = UUID(uuidString: raw) else {
+            throw ParseError.invalidValue(argument: "--into", value: raw)
+          }
+          into = id
+        }
+        return .createNode(projectPath: path, draft: try parseDraft(arguments), into: into)
       case "stop", "delete", "pilot", "arm", "send", "update", "memo":
         let raw = try take(&arguments, name: "node-id")
         guard let nodeID = UUID(uuidString: raw) else {
@@ -186,6 +199,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
     case "turn", "turnBased": loopType = .turnBased
     case "goal", "goalBased": loopType = .goalBased
     case "time", "timeBased": loopType = .timeBased
+    // `proactive` too, because that is what a composite still serialises as and what a
+    // human reading an existing graph off disk will have in front of them.
+    case "composite", "proactive": loopType = .composite
     default: throw ParseError.invalidValue(argument: "--type", value: rawType)
     }
 

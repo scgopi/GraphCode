@@ -70,10 +70,10 @@ struct ProjectCanvasView: View {
   /// thread at gesture rate. Read each derived value once, here, and pass it along.
   var body: some View {
     let derived = Derived(
-      subGraph: SubGraphLayout(nodes: store.graph.nodes, positions: store.nodePositions),
+      subGraph: SubGraphLayout(nodes: store.canvasGraph.nodes, positions: store.nodePositions),
       attentionItems: store.attentionItems,
       entryRoles: CardEntryRole.roles(
-        in: store.graph, declaredEntries: store.declaredEntryIDs))
+        in: store.canvasGraph, declaredEntries: store.declaredEntryIDs))
 
     return VStack(spacing: 0) {
       if let connectionError = store.connectionError {
@@ -83,6 +83,9 @@ struct ProjectCanvasView: View {
           .frame(maxWidth: .infinity)
           .padding(6)
           .background(Color.red)
+      }
+      if let composite = store.openComposite {
+        compositeBreadcrumb(composite)
       }
       canvas(derived)
         .overlay { emptyState }
@@ -134,13 +137,41 @@ struct ProjectCanvasView: View {
       height: transform.offset.height + dragOffset.height)
   }
 
+  /// Where you are when the canvas is showing a composite's insides, and the way back.
+  ///
+  /// A bar rather than a changed title: the cards below look exactly like the project's
+  /// own, so without something saying otherwise an empty composite is indistinguishable
+  /// from an empty project — which is how you end up adding loops to the wrong graph.
+  private func compositeBreadcrumb(_ composite: LoopNode) -> some View {
+    HStack(spacing: 6) {
+      Button { store.send(.compositeClosed) } label: {
+        HStack(spacing: 4) {
+          Image(systemName: "chevron.left")
+          Text(store.graph.project.name)
+        }
+      }
+      .buttonStyle(.plain)
+      .foregroundStyle(.secondary)
+
+      Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+      Text(composite.title).fontWeight(.medium)
+      let count = composite.subGraph?.nodes.count ?? 0
+      Text(count == 1 ? "1 loop" : "\(count) loops").foregroundStyle(.secondary)
+      Spacer()
+    }
+    .font(.caption)
+    .padding(.horizontal, 12)
+    .padding(.vertical, 7)
+    .background(.ultraThinMaterial)
+  }
+
   /// How much room the graph takes up, for actual-size and fit. Measured out to the far
   /// edge of the furthest card rather than to its centre, so fitting doesn't crop the
   /// thing it was asked to fit.
   ///
   /// Takes the already-built sub-graph layout rather than reaching for one: see `body`.
   func contentSize(_ subGraph: SubGraphLayout) -> CGSize {
-    let positions = store.graph.nodes.compactMap { store.nodePositions[$0.id] }
+    let positions = store.canvasGraph.nodes.compactMap { store.nodePositions[$0.id] }
     guard let right = positions.map(\.x).max(), let bottom = positions.map(\.y).max() else {
       return .zero
     }
@@ -224,8 +255,8 @@ struct ProjectCanvasView: View {
   /// the surrounding space still reach the canvas gesture.
   @ViewBuilder
   private var emptyState: some View {
-    if store.graph.nodes.isEmpty {
-      CanvasEmptyState(projectName: store.graph.project.name) {
+    if store.canvasGraph.nodes.isEmpty {
+      CanvasEmptyState(projectName: store.openComposite?.title ?? store.graph.project.name) {
         store.send(.addNodeButtonTapped(parentBackend: nil))
       }
     }
@@ -258,7 +289,7 @@ struct ProjectCanvasView: View {
   /// The leading-edge port of everything nothing hands off to — roots and loose loops
   /// alike, so the lane's origin reaches every card that would otherwise float.
   private func entryPorts(_ derived: Derived) -> [CGPoint] {
-    store.graph.nodes.compactMap { node in
+    store.canvasGraph.nodes.compactMap { node in
       let role = derived.entryRoles[node.id]
       guard role == .entry || role == .unwired,
         let centre = store.nodePositions[node.id]
@@ -271,7 +302,7 @@ struct ProjectCanvasView: View {
   /// rectangle on a blank pane, and `CanvasEmptyState` is already explaining that.
   private func bandRect(_ derived: Derived) -> CGRect? {
     CanvasBand.rect(
-      around: store.graph.nodes.compactMap { store.nodePositions[$0.id] },
+      around: store.canvasGraph.nodes.compactMap { store.nodePositions[$0.id] },
       cardSize: LoopCardView.Metrics.size,
       captioned: false,
       // Only when there is a dot to keep clear of the cards.
@@ -279,7 +310,7 @@ struct ProjectCanvasView: View {
   }
 
   private var edgesLayer: some View {
-    ForEach(store.graph.edges) { edge in
+    ForEach(store.canvasGraph.edges) { edge in
       if let from = store.nodePositions[edge.from], let to = store.nodePositions[edge.to] {
         EdgeLineView(
           from: from, to: to, kind: edge.kind, fired: edge.fired, label: edge.cycleLabel

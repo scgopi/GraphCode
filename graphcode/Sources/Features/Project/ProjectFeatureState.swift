@@ -21,6 +21,24 @@ extension ProjectFeature.State {
     AttentionRollup.fullRollup(across: [graph])
   }
 
+  /// What the canvas draws: the open composite's own sub-graph when one is open, this
+  /// project's graph otherwise. Swapping what the canvas *is* rather than pushing a
+  /// second view keeps one set of cards, edges, gestures and forms — a composite's
+  /// contents are loops like any other, and deserve the same canvas.
+  ///
+  /// Falls back to the project graph rather than trapping when the id no longer resolves,
+  /// so a composite deleted underneath an open canvas leaves you somewhere real.
+  var canvasGraph: LoopGraph {
+    guard let id = openCompositeID, let subGraph = graph.nodes[id: id]?.subGraph
+    else { return graph }
+    return subGraph
+  }
+
+  /// The composite whose canvas is open, for the breadcrumb that offers the way back out.
+  var openComposite: LoopNode? {
+    openCompositeID.flatMap { graph.nodes[id: $0] }
+  }
+
   /// The form's fields as the value actually sent. Built on demand rather than kept
   /// alongside the fields, so there's exactly one definition of what the form means.
   var draft: NodeDraft {

@@ -30,6 +30,28 @@ struct CompositeAndGlobalGraphTests {
   // MARK: - Composites
 
   @Test
+  func addingALoopInsideACompositeDoesNotStartIt() async {
+    // `createNode` starts a session for every unattended loop it makes, which is right
+    // on a project canvas and wrong inside a composite: a loop in a sub-graph is a
+    // template until the composite is piloted. Forwarding the callback would have adding
+    // a loop launch it on the spot — the un-piloted, un-armed running `PilotState` exists
+    // to prevent, and it would fire from a dialog that says "Nothing runs when you press
+    // Create."
+    let started = LockIsolated<[String]>([])
+    let (store, compositeID) = await storeWithComposite(
+      onEnsureSession: { node, _ in started.withValue { $0.append(node.title) } })
+
+    await store.handle(
+      .subGraphCommand(
+        nodeID: compositeID,
+        command: .createNode(
+          NodeDraft(title: "Sweep", loopType: .timeBased, triggerPrompt: "/loop 1h Check"))))
+
+    #expect(await store.graph.nodes[id: compositeID]?.subGraph?.nodes.count == 1)
+    #expect(started.value.isEmpty)
+  }
+
+  @Test
   func aSubGraphIsOrchestratedByTheSameRulesAsAnyGraph() async {
     // "No separate execution engine" — a composite's insides take the very same commands
     // and fire edges the same way.

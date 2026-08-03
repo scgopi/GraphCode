@@ -90,7 +90,7 @@ do {
   case .status(let projectPath):
     try runAndPrintGraph(projectPath: projectPath, [])
 
-  case .createNode(let projectPath, let draft):
+  case .createNode(let projectPath, let draft, let into):
     // A loop that fans work out into more loops is the origin of them, and the graph
     // should show that rather than five entry points that appeared from nowhere. `zmx`
     // injects `ZMX_SESSION` into every session it starts and graphcode names sessions
@@ -101,9 +101,18 @@ do {
     attributed.createdBy =
       SurfaceRef.nodeID(
         fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
+    // Named a composite, and the very same command is addressed at its sub-graph
+    // instead — which is what makes the CLI able to build one at all. Without this
+    // there was no surface anywhere that could put a loop inside a composite, so the
+    // type could be created and never filled.
+    let create = GraphCommand.createNode(attributed)
     try runAndPrintGraph(
       projectPath: projectPath,
-      [.graphCommand(projectPath: projectPath, command: .createNode(attributed))])
+      [
+        .graphCommand(
+          projectPath: projectPath,
+          command: into.map { .subGraphCommand(nodeID: $0, command: create) } ?? create)
+      ])
 
   case .createEdge(let projectPath, let from, let to, let spec):
     try runAndPrintGraph(

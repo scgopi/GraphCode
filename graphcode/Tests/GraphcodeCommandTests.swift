@@ -34,7 +34,7 @@ struct GraphcodeCommandTests {
       "--prompt", "Read the RFC",
     ])
 
-    guard case .createNode(let path, let draft) = command else {
+    guard case .createNode(let path, let draft, _) = command else {
       Issue.record("expected createNode, got \(command)")
       return
     }
@@ -54,7 +54,7 @@ struct GraphcodeCommandTests {
       "--goal", "CI passes", "--predicate", "make test",
     ])
 
-    guard case .createNode(_, let draft) = command else {
+    guard case .createNode(_, let draft, _) = command else {
       Issue.record("expected createNode")
       return
     }
@@ -83,7 +83,7 @@ struct GraphcodeCommandTests {
       "node", "create", "/tmp/x", "--title", "Research", "--type", "turn",
       "--prompt", "Read the RFC",
     ])
-    guard case .createNode(_, let draft) = command else {
+    guard case .createNode(_, let draft, _) = command else {
       Issue.record("expected a createNode command")
       return
     }
@@ -144,7 +144,7 @@ struct GraphcodeCommandTests {
       "node", "create", "/tmp/x", "--title", "Child", "--type", "goal",
       "--goal", "say hi",
     ])
-    guard case .createNode(_, let draft) = command else {
+    guard case .createNode(_, let draft, _) = command else {
       return #expect(Bool(false), "expected createNode, got \(command)")
     }
     #expect(draft.backend == nil)
@@ -153,7 +153,7 @@ struct GraphcodeCommandTests {
       "node", "create", "/tmp/x", "--title", "Child", "--type", "goal",
       "--goal", "say hi", "--backend", "copilotCLI",
     ])
-    guard case .createNode(_, let explicitDraft) = explicit else {
+    guard case .createNode(_, let explicitDraft, _) = explicit else {
       return #expect(Bool(false), "expected createNode, got \(explicit)")
     }
     #expect(explicitDraft.backend == .copilotCLI)
@@ -177,7 +177,7 @@ struct GraphcodeCommandTests {
       "--prompt", "/loop 1h Check", "--model", "capable",
     ])
 
-    guard case .createNode(_, let draft) = command else {
+    guard case .createNode(_, let draft, _) = command else {
       Issue.record("expected createNode")
       return
     }
@@ -339,6 +339,52 @@ struct GraphcodeCommandTests {
   func sendWithoutAMessageIsRefused() {
     #expect(throws: GraphcodeCommand.ParseError.missingArgument("message")) {
       _ = try GraphcodeCommand.parse(["node", "send", "/tmp/p", UUID().uuidString])
+    }
+  }
+
+  @Test
+  func creatingALoopInsideAComposite() throws {
+    // The CLI had no way to put a loop inside a composite at all, so the type could be
+    // created and never filled. `--into` addresses the same command at its sub-graph.
+    let composite = UUID()
+    let command = try GraphcodeCommand.parse([
+      "node", "create", "/tmp/x", "--title", "Classify", "--type", "goal",
+      "--goal", "Sort the queue", "--into", composite.uuidString,
+    ])
+
+    guard case .createNode(_, let draft, let into) = command else {
+      Issue.record("expected createNode, got \(command)")
+      return
+    }
+    #expect(into == composite)
+    #expect(draft.title == "Classify")
+  }
+
+  @Test
+  func compositeIsCreatableFromTheCLIUnderEitherName() throws {
+    // `proactive` too: that is what a composite still serialises as, so it is the word a
+    // human reading an existing graph off disk has in front of them.
+    for spelling in ["composite", "proactive"] {
+      let command = try GraphcodeCommand.parse([
+        "node", "create", "/tmp/x", "--title", "Nightly sweep", "--type", spelling,
+      ])
+      guard case .createNode(_, let draft, _) = command else {
+        Issue.record("expected createNode for --type \(spelling), got \(command)")
+        return
+      }
+      #expect(draft.loopType == .composite)
+    }
+  }
+
+  @Test
+  func anIntoThatIsNotAUUIDIsRefused() {
+    #expect(
+      throws: GraphcodeCommand.ParseError.invalidValue(argument: "--into", value: "Releaser")
+    ) {
+      _ = try GraphcodeCommand.parse([
+        "node", "create", "/tmp/x", "--title", "T", "--type", "goal", "--goal", "G",
+        "--into", "Releaser",
+      ])
     }
   }
 }

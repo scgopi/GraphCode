@@ -53,6 +53,13 @@ public actor GraphStore {
   /// Tears a deleted node's memory down alongside its session.
   private let onRemoveMemory: (@Sendable (UUID) -> Void)?
   private var goalPollers: [UUID: Task<Void, Never>] = [:]
+
+  /// A poller holds `self` weakly, so a store going away already stops it *doing*
+  /// anything — but the task itself keeps sleeping in its loop forever. That was
+  /// harmless while every store outlived the process; `runInSubGraph` builds one per
+  /// command and throws it away, so without this a goal loop inside a composite leaks a
+  /// sleeping task every time anything addresses that sub-graph.
+  deinit { for poller in goalPollers.values { poller.cancel() } }
   /// Guarded edges whose re-fire is waiting on an `until` predicate — see
   /// `fireOutgoingEdges`, drained by `handle` before it broadcasts.
   private var pendingCycleReentries: [UUID] = []
@@ -274,16 +281,31 @@ public actor GraphStore {
   /// "the orchestrator running a graph inside a graph"; a second implementation would be
   /// a second set of bugs about edge firing.
   private func runInSubGraph(_ nodeID: UUID, _ command: GraphCommand) async {
-    guard let node = graph.nodes[id: nodeID], node.loopType == .composite,
-      let subGraph = node.subGraph
-    else { return }
+    guard let node = graph.nodes[id: nodeID] else {
+      announceError("no loop \(nodeID) in this graph")
+      return
+    }
+    // Said out loud rather than returned silently: this is reachable from `node create
+    // --into`, and a command that exits 0 having quietly done nothing is the one answer
+    // worse than refusing.
+    guard node.loopType == .composite, let subGraph = node.subGraph else {
+      announceError("\(node.title) is not a composite, so it has no sub-graph to run in")
+      return
+    }
 
     // Built fresh per command rather than cached: the sub-graph lives on the parent
     // node, which is the persisted source of truth, so a long-lived child store would
     // just be a copy that can drift from it.
     let child = GraphStore(
       graph: subGraph,
-      onEnsureSession: onEnsureSession,
+      // Deliberately *not* forwarded. A loop inside a composite is a template with no
+      // `zmx` session until the composite is piloted (`ProjectCanvasSubGraphs`), and
+      // `createNode` starts a session for every unattended loop it makes — so forwarding
+      // this would have adding a loop inside launch it on the spot, which is precisely
+      // the un-piloted, un-armed running that `PilotState` exists to prevent. Piloting
+      // starts them, and `pilotComposite` does that from here rather than through this
+      // store. Stopping is still forwarded below: those sessions are real once piloted.
+      onEnsureSession: nil,
       onTerminateSession: onTerminateSession,
       onEvaluatePredicate: onEvaluatePredicate,
       onDeliverMessage: onDeliverMessage,
