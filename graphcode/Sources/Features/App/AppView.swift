@@ -15,10 +15,11 @@ struct AppView: View {
   /// What the activity strip's clock reads — the window's one 30s tick, shared with the
   /// canvases' cards. See `CanvasClock`.
   @State private var now = Date()
-  /// Read once at launch, like every other `GraphcodeSettings` value the app uses: the
-  /// file is the daemon's too, and re-reading it per body pass would put a disk hit on
-  /// the render path.
-  @State private var showsActivityStrip = GraphcodeSettingsStore.load().showsActivityStrip
+  /// Followed live rather than read once at launch: a strip that only appears after a
+  /// relaunch reads as a setting that didn't take. `SettingsModel` is the app's in-memory
+  /// view of the file and is `@Observable`, so tracking it here flips the strip on the
+  /// same pass the toggle does without putting a disk hit on the render path.
+  private var showsActivityStrip: Bool { SettingsModel.shared.settings.showsActivityStrip }
 
   var body: some View {
     VStack(spacing: 0) {
