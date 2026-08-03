@@ -179,4 +179,32 @@ struct CompositeSpawnTests {
     #expect(instance?.state == .idle)
     #expect(instance?.pilotState == .notPiloted)
   }
+
+  @Test
+  func stoppingACompositeStopsTheLoopsInsideIt() async throws {
+    // A composite's workers are the one fan-out `spawnedDescendants` cannot walk: they
+    // live in its sub-graph rather than in `graph.nodes` and carry no `createdBy`. They
+    // were left running with live sessions under a node that read stopped.
+    let asked = LockIsolated<[String]>([])
+    let template = compositeTemplate(subNodes: [
+      LoopNode(title: "Classify", loopType: .timeBased, triggerPrompt: "/loop 1h Check", state: .running),
+      LoopNode(title: "Reply", loopType: .timeBased, triggerPrompt: "/loop 1h Reply", state: .running),
+    ])
+    let store = GraphStore(
+      graph: LoopGraph(
+        project: ProjectRef(path: "/tmp/p", name: "p"), nodes: [template]),
+      onDeliverMessage: { node, text, _ in
+        if text == MessageBus.stopRequest { asked.withValue { $0.append(node.title) } }
+        return true
+      })
+
+    await store.handle(.stopNode(template.id))
+
+    let stopped = await store.graph.nodes[id: template.id]
+    #expect(stopped?.state == .stopped)
+    #expect(Set(asked.value) == ["Triage", "Classify", "Reply"])
+    // A graph of stopped nodes aggregates to `.idle`, so the roll-up must not be what
+    // has the last word on the parent's state.
+    #expect(stopped?.subGraph?.nodes.allSatisfy { $0.state == .stopped } == true)
+  }
 }

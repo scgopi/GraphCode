@@ -666,6 +666,21 @@ public actor GraphStore {
   /// live, or a backend that takes no mid-session input. "Stopped" has to mean stopped,
   /// and a request nobody received would leave the loop running.
   private func requestStop(of node: LoopNode, reason: String) async {
+    // A composite's workers are its sub-graph's, and those nodes live on this one rather
+    // than in `graph.nodes` — so the custody walk in `stopNode` cannot see them, and
+    // without this the sessions `pilotComposite` and `spawnInstance` started for them
+    // keep running under a node that reads stopped. Recursion comes free: the sub-graph
+    // is driven by a real `GraphStore`, so a nested composite gets the same treatment.
+    //
+    // Descended *before* this node's own state is written, because the roll-up that
+    // every sub-graph command ends with would otherwise land on top of the `.stopped`
+    // set below — a graph whose nodes have all stopped aggregates to `.idle`.
+    if node.loopType == .composite, let subGraph = node.subGraph {
+      for child in subGraph.nodes where !child.isResolved {
+        await runInSubGraph(node.id, .stopNode(child.id))
+      }
+    }
+
     // Asked before the state changes: `MessageBus.deliverability` reads that state, and a
     // node already marked `.stopped` reads as unreachable — which would fall straight
     // through to the kill this exists to avoid.
