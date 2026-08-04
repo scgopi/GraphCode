@@ -136,9 +136,13 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// `settings` is a parameter rather than a read inside the body so a test can state what
   /// a human chose and check what the shell is told — the omission this fixes was
   /// invisible precisely because there was nothing to assert against.
+  /// `remoteSettingsPath` is the remote twin of `hooksFile`, as a `$HOME` shell
+  /// expression rather than a URL: the file lives on the session's host, whose home
+  /// directory only the remote shell knows, and the whole command is a `zsh -c` script
+  /// precisely so the expansion happens there.
   func agentCommand(
     settings: GraphcodeSettings = GraphcodeSettingsStore.load(), briefingFile: URL? = nil,
-    hooksFile: URL? = nil
+    hooksFile: URL? = nil, remoteSettingsPath: String? = nil
   ) -> [String]? {
     guard let executable = backend.executableName else { return nil }
     let tier = ModelTier.resolved(
@@ -164,6 +168,9 @@ struct GhosttyTerminalView: NSViewRepresentable {
       .map(PresenceHooks.singleQuoted)
       .joined(separator: " ")
     if !presence.isEmpty { parts.append(presence) }
+    // Double-quoted, not `singleQuoted`: the `$HOME` inside must expand when the remote
+    // shell evaluates this script.
+    if let remoteSettingsPath { parts.append("--settings \"\(remoteSettingsPath)\"") }
     // The briefing, delivered the same per-backend way `BackendCommand.launchArguments`
     // delivers it for a daemon-started session — before this, only daemon-started loops
     // knew they could fan out, and a turn-based loop (which only ever starts here) asked
@@ -259,20 +266,40 @@ struct GhosttyTerminalView: NSViewRepresentable {
   func remoteCommand(
     at location: RemoteProjectLocation, settings: GraphcodeSettings
   ) -> [String] {
+    RemoteProjectLocation.prepareControlSocketDirectory()
     let quoted = RemoteProjectLocation.shellQuoted
     var script = "cd \(quoted(location.remotePath)) && "
     let reconnectScript: String
-    if launchesClaudeCode, let agentCommand = agentCommand(settings: settings) {
+    let agentLaunch =
+      launchesClaudeCode
+      ? agentCommand(
+        settings: settings,
+        remoteSettingsPath: backend == .claudeCode ? PresenceHooks.remotePathExpression : nil)
+      : nil
+    if let agentLaunch {
+      // The attach below creates the session when it doesn't exist yet, so the presence
+      // hooks are written first, on the host they will run on — the same file, same
+      // rewrite-per-launch bargain as the daemon's ensure (`remoteEnsureInvocation`).
+      if backend == .claudeCode, let hooksWrite = PresenceHooks.remoteWriteFragment() {
+        script += hooksWrite + " && "
+      }
       if let prompt = initialPrompt {
         script += "export \(Self.promptVariable)=\(quoted(prompt)) && "
       }
-      script += ZmxSessionLauncher.quotedCommand(["zmx", "attach", sessionName] + agentCommand)
-      // `zmx get` exits 0 only for a live session — the same existence probe the
-      // daemon's ensure uses. The get-then-attach race (session dying in between)
-      // recreates a blank shell, accepted because the window is milliseconds.
+      script += ZmxSessionLauncher.quotedCommand(["zmx", "attach", sessionName] + agentLaunch)
+      // `zmx get` exits 0 for a live session and 1 for a missing one — the same
+      // existence probe the daemon's ensure uses. Only that explicit 1 may end the
+      // pane: any other failure (`command not found` while the remote host is still
+      // booting, a broken login shell after wake) says nothing about the session, so
+      // it exits 255 — the one code the outer loop retries — instead of letting a
+      // transient error read as "the loop finished". The get-then-attach race (session
+      // dying in between) recreates a blank shell, accepted because the window is
+      // milliseconds.
       reconnectScript =
-        "if \(ZmxSessionLauncher.quotedCommand(["zmx", "get", sessionName])) >/dev/null 2>&1; "
+        "\(ZmxSessionLauncher.quotedCommand(["zmx", "get", sessionName])) >/dev/null 2>&1; "
+        + "gc_rc=$?; if [ \"$gc_rc\" -eq 0 ]; "
         + "then exec \(ZmxSessionLauncher.quotedCommand(["zmx", "attach", sessionName])); fi; "
+        + "[ \"$gc_rc\" -ne 1 ] && exit 255; "
         + #"printf '\033[2m── Remote session ended while disconnected. ──\033[0m\r\n'; exit 0"#
     } else {
       script += ZmxSessionLauncher.quotedCommand(["zmx", "attach", sessionName])

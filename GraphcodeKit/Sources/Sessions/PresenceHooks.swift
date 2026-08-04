@@ -105,6 +105,31 @@ public enum PresenceHooks {
     }
   }
 
+  // MARK: - Remote sessions
+
+  /// Where the hooks land on a remote host — a `$HOME` expression rather than a path,
+  /// because only a shell on that machine knows the home directory, and Claude Code is
+  /// handed the flag inside a shell script exactly so this expands there
+  /// (`ZmxSessionLauncher.loginShellInvocation`'s `scriptSuffix`).
+  public static let remotePathExpression = "$HOME/.graphcode/hooks/claude-code.json"
+
+  /// The shell fragment a remote ensure/attach runs before creating the session: writes
+  /// the same hooks the local launcher writes, on the host where they will run. `zmx` by
+  /// bare name — the hook's `sh` inherits the agent's `PATH`, which came from the
+  /// interactive login shell that found `zmx` in the first place (the same resolution
+  /// the connection form validated). Errors are squelched: a host that can't take the
+  /// write gets the pre-hook behaviour, a heuristic presence, not a failed launch. The
+  /// launch still passes `--settings`; if the file has never once been written the
+  /// launch fails visibly in the loop's own terminal, which beats silently running an
+  /// unobservable session.
+  public static func remoteWriteFragment() -> String? {
+    guard let json = json(forBackend: .claudeCode, zmxPath: "zmx") else { return nil }
+    // `|| true` so both call sites can chain it with `&&` — a failed write must never
+    // block the launch it precedes.
+    return "{ mkdir -p \"$HOME/.graphcode/hooks\" && printf '%s' \(singleQuoted(json))"
+      + " > \"\(remotePathExpression)\"; } 2>/dev/null || true"
+  }
+
   /// Codex's `-c notify=…` override: the program Codex runs when a turn completes.
   ///
   /// Codex is the third shape of the same problem. It has no `--settings` to layer hooks

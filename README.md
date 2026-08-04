@@ -185,11 +185,12 @@ Design docs live in `docs/` and are kept local (gitignored) for now.
   instance) — the queued command runs only after the profile finishes.
 - **Sessions aren't reaped.** Long-lived `graphcode-*` zmx sessions accumulate; list them
   with `zmx list` and remove dead ones with `zmx kill`.
-- **Remote repositories are attach-first.** Loops on an SSH remote launch and attach
-  fine, but deleting one doesn't kill its remote session, message edges into remote
-  loops report undelivered, presence/usage read "not reported", and worktrees and
-  loop fan-out aren't available there yet. And a sleeping Mac fires no edges — the
-  daemon stays local by design.
+- **Remote repositories run over one multiplexed SSH connection per host.** Launch,
+  attach, kill, messages, and the presence/usage/activity readings all ride it; a
+  dropped link redials itself, degrades readings to "unknown" rather than "stopped",
+  and never resolves a loop it merely lost sight of. Worktrees and loop fan-out
+  aren't available there yet, and a sleeping Mac fires no edges — the daemon stays
+  local by design.
 
 ## Inspiration & third-party
 

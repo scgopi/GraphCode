@@ -91,16 +91,42 @@ public struct RemoteProjectLocation: Equatable, Sendable {
   /// idle-stopping, a network change) is only discovered at the OS TCP timeout, which
   /// reads as a frozen terminal. 5s × 3 bounds detection at ~15s, and an interactive
   /// surface's exit-255 is what the reconnect loop (`SSHReconnectLoop`) retries on.
+  ///
+  /// `ControlMaster=auto` multiplexes every invocation to one host over one connection.
+  /// Without it each presence/usage/activity read, send, and ensure is its own TCP dial
+  /// and key exchange — N loops × several reads per poll tick — and that handshake storm
+  /// is where the sporadic "ssh failed, retrying" noise on healthy networks came from.
+  /// A mux channel over a live master cannot fail in transport the way a fresh dial can.
+  /// `ControlPersist` keeps the master up between ticks; a dead master is redialed by
+  /// whichever command comes next. If the socket directory is missing ssh just warns and
+  /// dials directly, so this degrades to the old behaviour, never to a failure.
   public func sshInvocation(remoteCommand: String, interactive: Bool = false) -> [String] {
     var invocation = ["/usr/bin/ssh"]
     if interactive { invocation.append("-t") }
     invocation += [
       "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
       "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3",
+      "-o", "ControlMaster=auto", "-o", "ControlPath=\(Self.controlSocketDirectory.path)/%C",
+      "-o", "ControlPersist=600",
     ]
     if let port { invocation += ["-p", String(port)] }
     invocation += [sshDestination, "--", remoteCommand]
     return invocation
+  }
+
+  /// Where the multiplexing sockets live: under `~/.graphcode`, whose short path is
+  /// exactly why `SupportDirectory` moved there — `sun_path` is 104 bytes on Darwin and
+  /// `%C` alone spends 40 of them.
+  public static var controlSocketDirectory: URL {
+    SupportDirectory.url.appendingPathComponent("ssh", isDirectory: true)
+  }
+
+  /// Best-effort, called by the spawn sites rather than baked into `sshInvocation` so
+  /// building an argv stays a pure function. A failure costs multiplexing, not the
+  /// connection.
+  public static func prepareControlSocketDirectory() {
+    try? FileManager.default.createDirectory(
+      at: controlSocketDirectory, withIntermediateDirectories: true)
   }
 
   /// The `sshInvocation` argv as one `/bin/sh`-safe string — every token single-quoted —

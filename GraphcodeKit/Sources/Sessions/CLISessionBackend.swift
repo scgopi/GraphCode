@@ -38,23 +38,25 @@ public struct CLISessionBackend: Sendable {
   /// is routed: the local zmx has never heard of a remote loop's session, so every
   /// delivery to one failed (and staged) until the send learned to ride ssh.
   public var sendInput: @Sendable (LoopNode, String, String?) async -> Bool
-  /// What the session is doing right now.
-  public var presence: @Sendable (LoopNode) async -> PresenceReading
+  /// What the session is doing right now. `projectPath` routes the reading the same way
+  /// `terminate`'s is routed: a remote loop's session can only be asked over ssh, and a
+  /// probe of the local zmx answered `.absent` for every healthy remote loop there was.
+  public var presence: @Sendable (LoopNode, String?) async -> PresenceReading
   /// What the backend says it has spent on this loop, or `nil` when it doesn't report.
-  /// Never estimated — see `UsageSample`.
-  public var usage: @Sendable (LoopNode) async -> UsageSample?
+  /// Never estimated — see `UsageSample`. `projectPath` routed as `presence`'s is.
+  public var usage: @Sendable (LoopNode, String?) async -> UsageSample?
   /// What the session says it is doing right now, or `nil` when nothing reports it —
-  /// see `LoopNode.activity`.
-  public var activity: @Sendable (LoopNode) async -> String?
+  /// see `LoopNode.activity`. `projectPath` routed as `presence`'s is.
+  public var activity: @Sendable (LoopNode, String?) async -> String?
 
   public init(
     kind: CLISessionBackendKind,
     launch: @escaping @Sendable (LoopNode, String?) async -> Void,
     terminate: @escaping @Sendable (LoopNode, String?) async -> Void,
     sendInput: @escaping @Sendable (LoopNode, String, String?) async -> Bool,
-    presence: @escaping @Sendable (LoopNode) async -> PresenceReading,
-    usage: @escaping @Sendable (LoopNode) async -> UsageSample?,
-    activity: @escaping @Sendable (LoopNode) async -> String? = { _ in nil }
+    presence: @escaping @Sendable (LoopNode, String?) async -> PresenceReading,
+    usage: @escaping @Sendable (LoopNode, String?) async -> UsageSample?,
+    activity: @escaping @Sendable (LoopNode, String?) async -> String? = { _, _ in nil }
   ) {
     self.kind = kind
     self.launch = launch
@@ -96,15 +98,22 @@ extension CLISessionBackend {
       // asked what it is doing is the thing the three CLIs differ on most. Claude Code
       // reports into its own label store through hooks graphcode installs; Copilot has no
       // hook mechanism at all and is read from the event log it writes regardless.
-      presence: { node in
+      presence: { node, projectPath in
         switch kind {
-        case .claudeCode: return await ZmxSessionLauncher.presence(of: node)
-        case .copilotCLI: return await CopilotSessionLog.presence(of: node)
-        case .codex: return await ZmxSessionLauncher.codexPresence(of: node)
+        case .claudeCode:
+          return await ZmxSessionLauncher.presence(of: node, projectPath: projectPath)
+        case .copilotCLI:
+          return await CopilotSessionLog.presence(of: node, projectPath: projectPath)
+        case .codex:
+          return await ZmxSessionLauncher.codexPresence(of: node, projectPath: projectPath)
         }
       },
-      usage: { node in await ZmxSessionLauncher.usage(of: node) },
-      activity: { node in await ZmxSessionLauncher.activity(of: node) }
+      usage: { node, projectPath in
+        await ZmxSessionLauncher.usage(of: node, projectPath: projectPath)
+      },
+      activity: { node, projectPath in
+        await ZmxSessionLauncher.activity(of: node, projectPath: projectPath)
+      }
     )
   }
 
@@ -127,8 +136,8 @@ extension CLISessionBackend {
       launch: { _, _ in },
       terminate: { _, _ in },
       sendInput: { _, _, _ in false },
-      presence: { _ in PresenceReading(presence: .absent, confidence: .reported) },
-      usage: { _ in nil }
+      presence: { _, _ in PresenceReading(presence: .absent, confidence: .reported) },
+      usage: { _, _ in nil }
     )
   }
 
@@ -167,20 +176,23 @@ extension CLISessionBackend {
   }
 
   /// The usage-reading hook `GraphStore` is wired with.
-  public static let readUsage: @Sendable (LoopNode) async -> UsageSample? = { node in
-    await backend(for: node).usage(node)
+  public static let readUsage: @Sendable (LoopNode, String?) async -> UsageSample? = {
+    node, path in
+    await backend(for: node).usage(node, path)
   }
 
   /// The activity-reading hook `GraphStore` is wired with.
-  public static let readActivity: @Sendable (LoopNode) async -> String? = { node in
-    await backend(for: node).activity(node)
+  public static let readActivity: @Sendable (LoopNode, String?) async -> String? = {
+    node, path in
+    await backend(for: node).activity(node, path)
   }
 
   /// The presence-reading hook `GraphStore` is wired with. The last missing link in a
   /// chain that was otherwise complete: `presence` was implemented on every adapter and
   /// called by nothing, so every surface had only `LoopState` to go on and a loop that
   /// had finished its turn read RUNNING until a human stopped it.
-  public static let readPresence: @Sendable (LoopNode) async -> PresenceReading = { node in
-    await backend(for: node).presence(node)
+  public static let readPresence: @Sendable (LoopNode, String?) async -> PresenceReading = {
+    node, path in
+    await backend(for: node).presence(node, path)
   }
 }

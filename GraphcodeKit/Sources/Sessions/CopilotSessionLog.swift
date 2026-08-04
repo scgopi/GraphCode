@@ -124,7 +124,16 @@ public enum CopilotSessionLog {
   /// outright leaves its log ending at whatever it was doing — usually `assistant.turn_end`
   /// — and reporting that as idle would describe a session that no longer exists as one
   /// quietly waiting for work.
-  public static func presence(of node: LoopNode) async -> PresenceReading {
+  ///
+  /// A remote Copilot's log lives on the remote host, so this reading falls back to the
+  /// ssh-backed zmx probe: existence and the label channel are real over there, the
+  /// `~/.copilot` tail is not.
+  public static func presence(of node: LoopNode, projectPath: String? = nil) async
+    -> PresenceReading
+  {
+    if let projectPath, RemoteProjectLocation.parse(projectPath: projectPath) != nil {
+      return await ZmxSessionLauncher.presence(of: node, projectPath: projectPath)
+    }
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     guard ZmxLocator.isInstalled, await ZmxSessionLauncher.sessionExists(node) else {
       return .absent
