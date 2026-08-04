@@ -441,6 +441,14 @@ public actor GraphStore {
   @discardableResult
   private func refreshPresence() async -> Bool {
     guard let onReadPresence else { return false }
+    // A remote project's sessions live in the remote host's `zmx` daemon, and every
+    // reading here is taken from the local one — which has never heard of them, so the
+    // answer is always `.absent` and `displayState` demotes a working remote loop to
+    // IDLE. Taking no reading leaves `presence` nil, which every surface already treats
+    // as "no better information than `state`".
+    guard RemoteProjectLocation.parse(projectPath: graph.project.path) == nil else {
+      return false
+    }
     var changed = false
     for node in graph.nodes where !node.isResolved {
       let reading = await onReadPresence(node)

@@ -140,6 +140,28 @@ struct PresencePollingTests {
   }
 
   @Test
+  func aRemoteProjectIsNeverAsked() async {
+    // A remote loop's session lives in the remote host's `zmx` daemon and the reader asks
+    // the local one, so every reading came back `.absent` — demoting a remote loop that
+    // was working to IDLE on every card, dot and rollup. No reading leaves `presence` nil,
+    // which reads as "no better information than `state`".
+    let probe = Probe()
+    var remote = LoopGraph(
+      scope: LoopGraphScope(projectPath: "ssh://user@host/srv/repo", name: "repo"))
+    remote.nodes.append(node("A", .running))
+    let store = GraphStore(graph: remote, onReadPresence: { await probe.read($0) })
+    let descriptor = await attach(to: store)
+    defer { close(descriptor) }
+
+    await store.pollPresence()
+
+    #expect(await probe.asked.isEmpty)
+    let updated = await store.graph.nodes.first
+    #expect(updated?.presence == nil)
+    #expect(updated?.displayState == .running)
+  }
+
+  @Test
   func theIntervalIsSlowEnoughToBeBackgroundNoise() {
     // Fifteen seconds is the lag a human sees between a loop finishing and its card
     // saying so. Worth pinning: dropping it to a second would multiply the subprocess
