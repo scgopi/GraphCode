@@ -37,9 +37,9 @@ public actor GraphStore {
   private let onEvaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)?
   private let onDeliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)?
   private let onCaptureScript: (@Sendable (ShellPredicate) async -> String?)?
-  private let onReadUsage: (@Sendable (LoopNode) async -> UsageSample?)?
-  private let onReadActivity: (@Sendable (LoopNode) async -> String?)?
-  private let onReadPresence: (@Sendable (LoopNode) async -> PresenceReading)?
+  private let onReadUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)?
+  private let onReadActivity: (@Sendable (LoopNode, String?) async -> String?)?
+  private let onReadPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)?
   /// Cross-graph `.spawn`. `GraphStore` owns exactly one graph and cannot reach another,
   /// so it hands the request up to `ProjectRegistry`, which is the layer that knows every
   /// open project — the same split that keeps this actor unaware multi-project routing
@@ -101,9 +101,9 @@ public actor GraphStore {
     onEvaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)? = nil,
     onDeliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)? = nil,
     onCaptureScript: (@Sendable (ShellPredicate) async -> String?)? = nil,
-    onReadUsage: (@Sendable (LoopNode) async -> UsageSample?)? = nil,
-    onReadActivity: (@Sendable (LoopNode) async -> String?)? = nil,
-    onReadPresence: (@Sendable (LoopNode) async -> PresenceReading)? = nil,
+    onReadUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)? = nil,
+    onReadActivity: (@Sendable (LoopNode, String?) async -> String?)? = nil,
+    onReadPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)? = nil,
     onSpawnIntoProject: (@Sendable (String, NodeDraft) -> Void)? = nil,
     onAppendMemory: (@Sendable (UUID, String) -> Void)? = nil,
     onRemoveMemory: (@Sendable (UUID) -> Void)? = nil,
@@ -235,10 +235,14 @@ public actor GraphStore {
       unblockIfStillIdle(to)
 
     case .nodeCheckApproved(let nodeID):
-      resolveNode(nodeID, succeeded: true)
+      if await remoteSessionPermitsResolution(nodeID) {
+        resolveNode(nodeID, succeeded: true)
+      }
 
     case .nodeCheckRejected(let nodeID):
-      resolveNode(nodeID, succeeded: false)
+      if await remoteSessionPermitsResolution(nodeID) {
+        resolveNode(nodeID, succeeded: false)
+      }
 
     case .messageNode(let nodeID, let text, let from):
       await deliverAdHocMessage(to: nodeID, text: text, from: from)
@@ -406,7 +410,7 @@ public actor GraphStore {
   private func refreshUsage() async {
     guard let onReadUsage else { return }
     for node in graph.nodes {
-      guard let sample = await onReadUsage(node) else { continue }
+      guard let sample = await onReadUsage(node, graph.project.path) else { continue }
       graph.nodes[id: node.id]?.usage = sample
     }
   }
@@ -421,7 +425,7 @@ public actor GraphStore {
   private func refreshActivity() async {
     guard let onReadActivity else { return }
     for node in graph.nodes {
-      graph.nodes[id: node.id]?.activity = await onReadActivity(node)
+      graph.nodes[id: node.id]?.activity = await onReadActivity(node, graph.project.path)
     }
   }
 
@@ -443,7 +447,7 @@ public actor GraphStore {
     guard let onReadPresence else { return false }
     var changed = false
     for node in graph.nodes where !node.isResolved {
-      let reading = await onReadPresence(node)
+      let reading = await onReadPresence(node, graph.project.path)
       guard graph.nodes[id: node.id]?.presence != reading else { continue }
       graph.nodes[id: node.id]?.presence = reading
       changed = true
@@ -754,6 +758,32 @@ public actor GraphStore {
   }
 
   // MARK: - Resolution + automatic edge firing
+
+  /// Whether a resolution reported by a *surface* may be believed. Always, for a local
+  /// project: the surface owned the process, and its exit is the fact being recorded.
+  ///
+  /// For a remote project the surface only ever held an ssh attach to a session that
+  /// lives on the other machine, and its exit is a claim relayed over the very link
+  /// whose failure is being handled — an interrupted dial closes the pane with the
+  /// session running fine. So the session itself is asked first, and resolution — which
+  /// fires outgoing edges and is irreversible — proceeds only on a confirmed `.absent`:
+  /// ssh answered, no such session. Both a live session and an unreachable host refuse
+  /// it; the presence poll keeps the card honest either way, and reopening the loop
+  /// reattaches. The one probe (bounded by ssh's own ConnectTimeout) is deliberately
+  /// not retried: this actor serializes a project's commands, and a resolution can
+  /// simply arrive again once the link is back.
+  private func remoteSessionPermitsResolution(_ nodeID: UUID) async -> Bool {
+    guard RemoteProjectLocation.parse(projectPath: graph.project.path) != nil,
+      let onReadPresence, let node = graph.nodes[id: nodeID], !node.isResolved
+    else { return true }
+    let reading = await onReadPresence(node, graph.project.path)
+    if reading.presence == .absent { return true }
+    recordMemory(
+      nodeID,
+      "surface reported an exit, but the remote session was "
+        + "\(reading.presence == .unknown ? "unreachable" : "still live") — not resolved")
+    return false
+  }
 
   private func resolveNode(_ nodeID: UUID, succeeded: Bool) {
     guard graph.nodes[id: nodeID] != nil else { return }

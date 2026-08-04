@@ -251,6 +251,9 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     // The combination `Presence` was written for: running in the graph, waiting on a
     // human in its session.
     case .awaitingInput: return .awaitingInput
+    // A probe that failed in transport observed nothing — the graph's own belief is
+    // the only honest thing left to show, exactly as if no reading existed.
+    case .unknown: return state
     }
   }
 

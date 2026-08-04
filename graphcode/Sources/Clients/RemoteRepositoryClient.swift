@@ -15,6 +15,7 @@ struct RemoteRepositoryClient: Sendable {
 
 extension RemoteRepositoryClient: DependencyKey {
   static let liveValue = RemoteRepositoryClient { location in
+    RemoteProjectLocation.prepareControlSocketDirectory()
     let quoted = RemoteProjectLocation.shellQuoted
     // Ordered so the first failure names the actual problem: an unreachable host would
     // otherwise read as "not a repository", which sends someone debugging the wrong

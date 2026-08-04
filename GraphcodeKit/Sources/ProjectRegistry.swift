@@ -28,9 +28,9 @@ public actor ProjectRegistry {
   private let evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)?
   private let deliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)?
   private let captureScript: (@Sendable (ShellPredicate) async -> String?)?
-  private let readUsage: (@Sendable (LoopNode) async -> UsageSample?)?
-  private let readActivity: (@Sendable (LoopNode) async -> String?)?
-  private let readPresence: (@Sendable (LoopNode) async -> PresenceReading)?
+  private let readUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)?
+  private let readActivity: (@Sendable (LoopNode, String?) async -> String?)?
+  private let readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)?
   /// Non-nil only while at least one client is attached — see `startPresencePolling`.
   private var presencePoller: Task<Void, Never>?
 
@@ -49,9 +49,12 @@ public actor ProjectRegistry {
     deliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)? =
       CLISessionBackend.deliverMessage,
     captureScript: (@Sendable (ShellPredicate) async -> String?)? = ShellPredicateEvaluator.capture,
-    readUsage: (@Sendable (LoopNode) async -> UsageSample?)? = CLISessionBackend.readUsage,
-    readActivity: (@Sendable (LoopNode) async -> String?)? = CLISessionBackend.readActivity,
-    readPresence: (@Sendable (LoopNode) async -> PresenceReading)? = CLISessionBackend.readPresence
+    readUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)? =
+      CLISessionBackend.readUsage,
+    readActivity: (@Sendable (LoopNode, String?) async -> String?)? =
+      CLISessionBackend.readActivity,
+    readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)? =
+      CLISessionBackend.readPresence
   ) {
     persistence = ProjectPersistence(baseDirectory: persistenceDirectory)
     self.ensureSession = ensureSession

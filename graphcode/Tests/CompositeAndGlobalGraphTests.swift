@@ -326,7 +326,7 @@ struct CompositeAndGlobalGraphTests {
       graph: LoopGraph(
         project: ProjectRef(path: "/tmp/p", name: "p"),
         nodes: [LoopNode(title: "A"), LoopNode(title: "B")]),
-      onReadUsage: { node in
+      onReadUsage: { node, _ in
         node.title == "A" ? UsageSample(inputTokens: 100, outputTokens: 50, costUSD: 0.02) : nil
       })
 

@@ -54,7 +54,7 @@ struct PresencePollingTests {
     let probe = Probe()
     let store = GraphStore(
       graph: graph([node("A", .running), node("B", .running)]),
-      onReadPresence: { await probe.read($0) })
+      onReadPresence: { node, _ in await probe.read(node) })
 
     await store.pollPresence()
 
@@ -72,7 +72,7 @@ struct PresencePollingTests {
         node("failed", .failed), node("stopped", .stopped), node("stalled", .stalled),
         node("blocked", .blocked),
       ]),
-      onReadPresence: { await probe.read($0) })
+      onReadPresence: { node, _ in await probe.read(node) })
     let descriptor = await attach(to: store)
     defer { close(descriptor) }
 
@@ -89,7 +89,7 @@ struct PresencePollingTests {
     let probe = Probe()
     let store = GraphStore(
       graph: graph((1...5).map { node("n\($0)", .running) }),
-      onReadPresence: { await probe.read($0) })
+      onReadPresence: { node, _ in await probe.read(node) })
     let descriptor = await attach(to: store)
     defer { close(descriptor) }
 
@@ -107,7 +107,7 @@ struct PresencePollingTests {
     let store = GraphStore(
       graph: graph([node("A", .running)]),
       onGraphChanged: { _ in Issue.record("the poll must not persist the graph") },
-      onReadPresence: { await probe.read($0) })
+      onReadPresence: { node, _ in await probe.read(node) })
     let descriptor = await attach(to: store)
     defer { close(descriptor) }
 
@@ -126,7 +126,7 @@ struct PresencePollingTests {
     await probe.answer("A", with: .idle)
     let store = GraphStore(
       graph: graph([node("A", .running)]),
-      onReadPresence: { await probe.read($0) })
+      onReadPresence: { node, _ in await probe.read(node) })
     let descriptor = await attach(to: store)
     defer { close(descriptor) }
 

@@ -16,6 +16,12 @@ public enum Presence: String, Codable, Equatable, Sendable {
   case idle
   /// No session at all.
   case absent
+  /// The session could not be asked — a remote project's probe failed in transport,
+  /// which says nothing about the session itself. Distinct from `.absent` because the
+  /// difference is the whole point: a dropped ssh link must degrade to "don't know",
+  /// never to "stopped". `LoopNode.displayState` leaves `state` untouched for this
+  /// reading, exactly as if no presence had ever been observed.
+  case unknown
 
   /// Whether this presence is the kind a human needs to do something about.
   public var needsAttention: Bool { self == .awaitingInput }
@@ -44,4 +50,5 @@ public struct PresenceReading: Codable, Equatable, Sendable {
   }
 
   public static let absent = PresenceReading(presence: .absent, confidence: .reported)
+  public static let unknown = PresenceReading(presence: .unknown, confidence: .heuristic)
 }

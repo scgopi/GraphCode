@@ -58,8 +58,13 @@ public enum ZmxSessionLauncher {
   /// Arguments ride in after the script as `$@` rather than being interpolated into it.
   /// zsh hands them to the command untouched, so a goal or prompt containing quotes, `;`,
   /// or `$(…)` is one argument and cannot become shell syntax.
+  /// `scriptSuffix` is extra command line that must be *evaluated by this shell* rather
+  /// than ride through `"$@"`: positional arguments pass untouched, so a `$HOME` in one
+  /// stays a literal dollar sign forever. The remote hooks flag needs the expansion —
+  /// the path is on a machine whose home directory only that shell knows.
   static func loginShellInvocation(
-    of command: String, arguments: [String], environment: [String: String] = [:]
+    of command: String, arguments: [String], environment: [String: String] = [:],
+    scriptSuffix: String = ""
   ) -> [String] {
     // `env K=V …` rather than exporting: it scopes the variables to this one process, and
     // keeps the script a single `exec` so the shell doesn't linger as a parent. Values are
@@ -71,8 +76,10 @@ public enum ZmxSessionLauncher {
       .joined()
     let prefix = exports.isEmpty ? "" : "env \(exports)"
     // `$0` has to be something, and it shows up in error messages — name it after us.
-    return ["/bin/zsh", "-i", "-l", "-c", "exec \(prefix)\(command) \"$@\"", "graphcode"]
-      + arguments
+    return [
+      "/bin/zsh", "-i", "-l", "-c", "exec \(prefix)\(command) \"$@\"\(scriptSuffix)",
+      "graphcode",
+    ] + arguments
   }
 
   /// `zmx get <name> <key>` reads a per-session label. This is the channel a backend's
@@ -110,7 +117,13 @@ public enum ZmxSessionLauncher {
   /// Trimmed and truncated here rather than at the card: a label is whatever a hook
   /// wrote, and one that arrives as a paragraph would otherwise reach the graph, the
   /// broadcast, and every card's one-line row.
-  static func activity(of node: LoopNode) async -> String? {
+  static func activity(of node: LoopNode, projectPath: String? = nil) async -> String? {
+    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+      guard case .live(let label) = await remoteStatus(of: node, label: "activity", at: remote),
+        let label
+      else { return nil }
+      return parseActivityLabel(label)
+    }
     guard ZmxLocator.isInstalled, await sessionExists(node) else { return nil }
     guard
       let session = try? PTYProcessSession(
@@ -136,7 +149,13 @@ public enum ZmxSessionLauncher {
   /// is being truncated somewhere further down where nobody chose the cut.
   static let maxActivityLength = 80
 
-  static func usage(of node: LoopNode) async -> UsageSample? {
+  static func usage(of node: LoopNode, projectPath: String? = nil) async -> UsageSample? {
+    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+      guard case .live(let label) = await remoteStatus(of: node, label: "usage", at: remote),
+        let label
+      else { return nil }
+      return UsageSample.parse(label)
+    }
     guard ZmxLocator.isInstalled, await sessionExists(node) else { return nil }
     guard
       let session = try? PTYProcessSession(
@@ -200,7 +219,15 @@ public enum ZmxSessionLauncher {
   /// infer. A live session with no label is reported as idle at `.heuristic` confidence
   /// rather than guessed at — docs/04-cli-backends.md asks for the fallback to be
   /// visibly lower-confidence, not dressed up as a fact.
-  static func presence(of node: LoopNode) async -> PresenceReading {
+  ///
+  /// A remote loop's session is asked over ssh — the local zmx has never heard of it,
+  /// and asking it anyway is why every remote loop used to read IDLE forever.
+  static func presence(of node: LoopNode, projectPath: String? = nil) async -> PresenceReading {
+    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+      return await remotePresence(
+        of: node, at: remote,
+        liveWithoutLabel: PresenceReading(presence: .idle, confidence: .heuristic))
+    }
     guard ZmxLocator.isInstalled, await sessionExists(node) else { return .absent }
     guard
       let session = try? PTYProcessSession(
@@ -233,7 +260,14 @@ public enum ZmxSessionLauncher {
   /// `notify` never fires — a Codex too old for it, an override the user has replaced —
   /// this degrades to permanently busy, which is the failure it was built to fix. That is
   /// the one thing worth watching when this backend is next spiked against a live login.
-  static func codexPresence(of node: LoopNode) async -> PresenceReading {
+  static func codexPresence(of node: LoopNode, projectPath: String? = nil) async
+    -> PresenceReading
+  {
+    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+      return await remotePresence(
+        of: node, at: remote,
+        liveWithoutLabel: PresenceReading(presence: .busy, confidence: .scanned))
+    }
     guard ZmxLocator.isInstalled, await sessionExists(node) else { return .absent }
     guard
       let session = try? PTYProcessSession(
@@ -381,15 +415,18 @@ public enum ZmxSessionLauncher {
     let paths =
       Self.workspacePaths(forNode: node, projectPath: projectPath)
       + (wakeFile.map { [$0.deletingLastPathComponent().path] } ?? [])
-    // The hooks that make the session report what it is doing (`PresenceHooks`). Skipped
-    // for a remote project for the same reason the briefing is: the file is written here
-    // and the session runs there, and a `--settings` pointing at a path the remote host
-    // doesn't have is worse than no hooks at all.
+    // The hooks that make the session report what it is doing (`PresenceHooks`). For a
+    // remote project the file can't come from here — it is written *on the remote host*
+    // by the ensure script (`remoteEnsureInvocation`) and referenced as a `$HOME` path
+    // only the remote shell can mint, via `scriptSuffix` below.
     let hooksFile = remote == nil ? PresenceHooks.write(forBackend: node.backend) : nil
     // Codex needs no file, only somewhere to report to. Nil for a remote session for the
     // same reason: it would name a binary the remote host doesn't have.
     let reportingPath =
       remote == nil && ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil
+    let remoteHooksSuffix =
+      remote != nil && node.backend == .claudeCode
+      ? " --settings \"\(PresenceHooks.remotePathExpression)\"" : ""
     let arguments = node.backend.launchArguments(
       prompt: promptWithMemory, tier: tier, briefingFile: briefingFile,
       settings: settings,
@@ -403,7 +440,8 @@ public enum ZmxSessionLauncher {
       ]
       + Self.loginShellInvocation(
         of: executable, arguments: arguments,
-        environment: Self.environment(forBackend: node.backend, briefingFile: briefingFile))
+        environment: Self.environment(forBackend: node.backend, briefingFile: briefingFile),
+        scriptSuffix: remoteHooksSuffix)
 
     // `zmx` types this command into the session's shell, and a tty in canonical mode
     // discards everything past `MAX_CANON` (1024 bytes on macOS). Overrunning it does not
@@ -423,7 +461,9 @@ public enum ZmxSessionLauncher {
         zmxPath: reportingPath)
       return [
         "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
-      ] + Self.loginShellInvocation(of: executable, arguments: unbriefed)
+      ]
+        + Self.loginShellInvocation(
+          of: executable, arguments: unbriefed, scriptSuffix: remoteHooksSuffix)
     }
     return command
   }
@@ -535,9 +575,16 @@ public enum ZmxSessionLauncher {
     let trustSeed =
       node.backend == .copilotCLI
       ? copilotTrustSeedScript(forRemotePath: location.remotePath) + "; " : ""
+    // The presence hooks, written on the host where they will run — the launch line
+    // (via `loginShellInvocation`'s `scriptSuffix`) points Claude at this very file, and
+    // rewriting it per ensure keeps an upgraded graphcode's hooks current, the same
+    // bargain `PresenceHooks.write` makes locally.
+    let hooksWrite =
+      node.backend == .claudeCode
+      ? (PresenceHooks.remoteWriteFragment().map { $0 + "; " } ?? "") : ""
     let script =
       "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { "
-      + trustSeed
+      + trustSeed + hooksWrite
       + "\(check) >/dev/null 2>&1 || \(run); }"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
   }
@@ -581,12 +628,122 @@ public enum ZmxSessionLauncher {
     _ text: String, to node: LoopNode, at location: RemoteProjectLocation
   ) async -> Bool {
     guard !text.isEmpty else { return false }
+    RemoteProjectLocation.prepareControlSocketDirectory()
     let invocation = remoteSendInvocation(text, toNode: node, at: location)
     guard
       let session = try? PTYProcessSession(
         executable: invocation[0], arguments: Array(invocation.dropFirst()))
     else { return false }
     return await session.waitUntilFinished()
+  }
+
+  /// What a remote session probe learned — and the three-way split is the point.
+  /// `.unreachable` (the ssh dial failed) is a fact about the *link*; `.absent` (ssh
+  /// answered, no such session) is a fact about the *session*. Collapsing them is how a
+  /// network drop used to read as a stopped loop.
+  enum RemoteSessionStatus: Equatable {
+    case unreachable
+    case absent
+    case live(label: String?)
+  }
+
+  /// The one line of a probe's output this side parses. A marker rather than raw
+  /// output because the remote login shell is interactive (`remoteLoginShellCommand`
+  /// explains why) and a `~/.zshrc` is free to print whatever it likes first.
+  static let remoteProbeMarker = "graphcode-status:"
+
+  /// One ssh round-trip that answers existence and reads one label: exists-then-read as
+  /// two dials would double the poll's connection count for no information.
+  ///
+  /// The script always exits 0 when it ran at all, so the process's exit status is left
+  /// meaning exactly one thing: the transport. ssh failing (255) or the remote shell
+  /// never reaching the script are `.unreachable`; what the session is up to travels on
+  /// the marker line instead.
+  static func remoteStatusInvocation(
+    forNode node: LoopNode, label: String, at location: RemoteProjectLocation
+  ) -> [String] {
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    let check = quotedCommand(["zmx", "get", name])
+    let read = quotedCommand(["zmx", "get", name, label])
+    let script =
+      "if \(check) >/dev/null 2>&1; then "
+      + "echo \"\(remoteProbeMarker) live $(\(read) 2>/dev/null)\"; "
+      + "else echo '\(remoteProbeMarker) absent'; fi"
+    return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+  }
+
+  static func remoteStatus(
+    of node: LoopNode, label: String, at location: RemoteProjectLocation
+  ) async -> RemoteSessionStatus {
+    RemoteProjectLocation.prepareControlSocketDirectory()
+    let invocation = remoteStatusInvocation(forNode: node, label: label, at: location)
+    guard
+      let session = try? PTYProcessSession(
+        executable: invocation[0], arguments: Array(invocation.dropFirst()))
+    else { return .unreachable }
+    let (succeeded, output) = await session.waitCollectingOutput()
+    return parseRemoteStatus(succeeded: succeeded, output: output)
+  }
+
+  /// The last marker line wins: everything before it is `~/.zshrc` chatter, and a probe
+  /// that exited 0 without ever printing the marker didn't run, which is `.unreachable`
+  /// too — not proof of anything about the session.
+  static func parseRemoteStatus(succeeded: Bool, output: String) -> RemoteSessionStatus {
+    guard succeeded else { return .unreachable }
+    let lines = output.split(whereSeparator: \.isNewline)
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    guard let marked = lines.last(where: { $0.hasPrefix(remoteProbeMarker) }) else {
+      return .unreachable
+    }
+    let status = marked.dropFirst(remoteProbeMarker.count)
+      .trimmingCharacters(in: .whitespaces)
+    if status == "absent" { return .absent }
+    guard status.hasPrefix("live") else { return .unreachable }
+    let label = status.dropFirst("live".count).trimmingCharacters(in: .whitespaces)
+    return .live(label: label.isEmpty ? nil : label)
+  }
+
+  /// The remote read behind `presence(of:projectPath:)` — both flavours share it, and
+  /// differ only in what a live-but-silent session should be called (idle for a backend
+  /// whose hooks report both edges, busy for Codex — see `codexPresence`).
+  static func remotePresence(
+    of node: LoopNode, at location: RemoteProjectLocation,
+    liveWithoutLabel: PresenceReading
+  ) async -> PresenceReading {
+    presenceReading(
+      from: await remoteStatus(of: node, label: "presence", at: location),
+      liveWithoutLabel: liveWithoutLabel)
+  }
+
+  static func presenceReading(
+    from status: RemoteSessionStatus, liveWithoutLabel: PresenceReading
+  ) -> PresenceReading {
+    switch status {
+    case .unreachable: return .unknown
+    case .absent: return .absent
+    case .live(let label):
+      guard let label, let reported = parsePresenceLabel(label) else { return liveWithoutLabel }
+      return PresenceReading(presence: reported, confidence: .reported)
+    }
+  }
+
+  /// Bounded retry with backoff for remote commands whose failure is overwhelmingly a
+  /// transport blip — the multiplexed master redialing after a drop. Strictly for
+  /// idempotent commands: ensure is create-only and kill is a no-op on a dead session,
+  /// where a retried *send* could type the same message twice (its caller already has a
+  /// staging fallback for the honest failure).
+  static func runRemoteRetrying(_ invocation: [String], attempts: Int = 3) async -> Bool {
+    RemoteProjectLocation.prepareControlSocketDirectory()
+    for attempt in 1...attempts {
+      if let session = try? PTYProcessSession(
+        executable: invocation[0], arguments: Array(invocation.dropFirst())),
+        await session.waitUntilFinished()
+      {
+        return true
+      }
+      if attempt < attempts { try? await Task.sleep(for: .seconds(1 << (attempt - 1))) }
+    }
+    return false
   }
 
   static func remoteKillInvocation(
@@ -597,27 +754,16 @@ public enum ZmxSessionLauncher {
   }
 
   static func killRemote(_ node: LoopNode, at location: RemoteProjectLocation) async {
-    let invocation = remoteKillInvocation(forNode: node, at: location)
-    guard
-      let session = try? PTYProcessSession(
-        executable: invocation[0], arguments: Array(invocation.dropFirst()))
-    else { return }
-    _ = await session.waitUntilFinished()
+    _ = await runRemoteRetrying(remoteKillInvocation(forNode: node, at: location))
   }
 
   private static func startRemote(_ node: LoopNode, at location: RemoteProjectLocation) async {
     guard let ensure = remoteEnsureInvocation(forNode: node, at: location) else { return }
-    do {
-      // Create only, in one round-trip — see `remoteEnsureInvocation` for why the
-      // check and the run must share a shell.
-      let session = try PTYProcessSession(
-        executable: ensure[0], arguments: Array(ensure.dropFirst()))
-      _ = await session.waitUntilFinished()
-    } catch {
-      // Same posture as the local path: no UI here, the node's state stays honest, and
-      // opening the loop retries.
-      return
-    }
+    // Create only, in one round-trip — see `remoteEnsureInvocation` for why the check
+    // and the run must share a shell. A failure after the retries is the same posture
+    // as the local path: no UI here, the node's state stays honest, opening the loop
+    // retries.
+    _ = await runRemoteRetrying(ensure)
   }
 
   static func start(_ node: LoopNode, projectPath: String? = nil) async {
