@@ -367,11 +367,15 @@ struct CheckForUpdatesTests {
 
   @Test
   @MainActor
-  func downloadOpensTheDMGInTheBrowserAndTakesTheAlertDown() async throws {
+  func downloadStillWorksAfterSwiftUIAlreadyDismissedTheAlert() async throws {
+    // The order SwiftUI actually delivers (#35): the alert's presentation binding is
+    // cleared — sending updateAlertDismissed — *before* the tapped button's action
+    // runs. The download must survive that, which is what `offeredUpdate` is for.
     let release = try fixtureRelease()
     let update = try #require(AppUpdate.available(current: "0.1.14", release: release))
     var state = AppFeature.State()
     state.availableUpdate = update
+    state.offeredUpdate = update
 
     let opened = OpenedURLsBox()
     let store = TestStore(initialState: state) {
@@ -384,6 +388,7 @@ struct CheckForUpdatesTests {
     }
     store.exhaustivity = .off
 
+    await store.send(.updateAlertDismissed)
     await store.send(.updateDownloadTapped)
     await store.finish()
 

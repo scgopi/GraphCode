@@ -1,3 +1,4 @@
+import Foundation
 import GraphcodeKit
 import Observation
 
@@ -22,7 +23,23 @@ final class SettingsModel {
     }
   }
 
+  /// The update channel as a switch (#36) — app-only, so `UserDefaults` rather than
+  /// `GraphcodeSettings`: the daemon never checks for updates, and `UpdateClient` reads
+  /// the same `updateChannel` key. Starts on the install's effective channel — a beta
+  /// build reads as on — and the first flip writes an explicit override either way.
+  var betaUpdates: Bool {
+    didSet {
+      UserDefaults.standard.set(betaUpdates ? "beta" : "stable", forKey: "updateChannel")
+    }
+  }
+
   private init() {
     settings = GraphcodeSettingsStore.load()
+    let version =
+      Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+    betaUpdates =
+      UpdateChannel.channel(
+        for: version, override: UserDefaults.standard.string(forKey: "updateChannel"))
+      == .beta
   }
 }
