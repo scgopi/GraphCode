@@ -69,7 +69,7 @@ struct GraphcodeApp: App {
         Button("Check for Updates…") {
           Self.store.send(.checkForUpdatesTapped)
         }
-        .disabled(Self.store.isCheckingForUpdates)
+        .disabled(Self.store.isCheckingForUpdates || Self.store.updateInstallProgress != nil)
       }
       CommandGroup(after: .help) {
         Button("GraphCode Basics") {

@@ -124,6 +124,21 @@ struct SettingsView: View {
         .font(.caption2)
         .foregroundStyle(.secondary)
       }
+
+      Section {
+        Toggle("Get beta releases", isOn: $model.betaUpdates)
+      } header: {
+        Text("Updates")
+      } footer: {
+        Text(
+          "On, Check for Updates offers pre-releases as well as stable releases — "
+            + "newer features, less soak time. Off, stable releases only. A beta "
+            + "install starts on; switching off keeps it as it is until the next "
+            + "stable ships."
+        )
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+      }
     }
     .formStyle(.grouped)
   }
