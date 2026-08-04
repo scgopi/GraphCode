@@ -27,23 +27,21 @@ article: the mental model, then the machinery underneath it.
 
 ![Two projects and their connected loops on one GraphCode canvas — every node a live terminal you can attach to](screenshots/graph-hero.png)
 
-## New in 0.1.12
+## New in 0.1.16
 
-Every surface was rebuilt to answer **what are my loops doing right now** rather than
-*what kind of loop is this* ([full notes](https://github.com/scgopi/GraphCode/releases/tag/v0.1.12)):
+GraphCode now keeps itself current
+([full notes](https://github.com/scgopi/GraphCode/releases/tag/v0.1.16)):
 
-- **State-first cards.** Each state carries a word — RUNNING, NEEDS YOU, BLOCKED, DONE,
-  FAILED, STALLED, SCHEDULED, STOPPED — an indicator and its own paint, instead of eight
-  states sharing five colours and an 8pt dot.
-- **Project lanes with an origin.** Every loop nothing hands off to hangs off its lane's
-  entry point, and chains flow right along their own rows, so nothing floats.
-- **An attention rail you can reach.** `⌘⇧R` works the queue oldest-first from anywhere,
-  including inside a terminal, and the titlebar names who needs you only when someone does.
-- **⌘K to jump to any loop** by name across every open project.
-- **A downstream rail** (`⌥G`) with a one-hop minimap and a metric sparkline — off by
-  default, and never drawn empty.
-- **A new-loop dialog rebuilt around what each type needs**, including a **Test** button
-  that runs a done check exactly as the daemon will.
+- **Updates install themselves.** Check for Updates downloads the new release, verifies
+  its Developer ID signature, swaps it into Applications, and offers the relaunch —
+  no browser, no drag. Sessions live in the daemon and run right through it.
+- **An update channel.** A stable install is only ever offered stable releases; a beta
+  build follows the beta line. **Settings → Get beta releases** flips either way.
+- **A loop created from the app opens itself**, and switching loops lands the keyboard
+  in the session on the first click.
+- Since 0.1.12, releases also brought **composites you can put loops in**
+  ([v0.1.14](https://github.com/scgopi/GraphCode/releases/tag/v0.1.14)) — a graph inside
+  a graph, opened on its own canvas, creatable from the app or the CLI.
 
 ## How it works
 
