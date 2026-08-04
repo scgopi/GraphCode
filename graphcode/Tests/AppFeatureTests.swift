@@ -192,6 +192,48 @@ struct AppFeatureTests {
     #expect(store.state.selectedProjectPath == Self.projectA.path)
   }
 
+  /// Issue #24, end to end: confirming the new-loop form opens the loop's workspace as
+  /// soon as the daemon's broadcast delivers the node — the human asked for this loop,
+  /// so the screen goes to it without a second tap.
+  @Test
+  @MainActor
+  func aLoopCreatedFromTheFormOpensItsWorkspaceWhenTheBroadcastLands() async {
+    var project = ProjectFeature.State(graph: LoopGraph(project: Self.projectA))
+    project.draftTitle = "Research"
+    project.draftGoal = "Say hello"
+    project.draftLoopType = .goalBased
+    var state = AppFeature.State()
+    state.projects.append(project)
+    state.selectedProjectPath = Self.projectA.path
+
+    let store = TestStore(initialState: state) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalLayoutStore = makeTerminalLayoutStore()
+      $0.orchestratorClient.send = { _ in }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .projects(.element(id: Self.projectA.path, action: .createNodeConfirmed)))
+    guard let draftID = store.state.projects[id: Self.projectA.path]?.draftID else {
+      return #expect(Bool(false), "the project under test disappeared")
+    }
+    #expect(store.state.openLoop == nil)
+
+    let created = LoopNode(id: draftID, title: "Research", checkDescription: "Sound?")
+    await store.send(
+      .daemonEvent(.graphChanged(LoopGraph(project: Self.projectA, nodes: [created]))))
+    // The broadcast reaches the project as a forwarded `.daemonEvent`, which answers
+    // with the `.nodeTapped` that opens the workspace — drain both.
+    await store.receive(\.projects)
+    await store.receive(\.projects)
+
+    #expect(store.state.openLoop?.node.id == draftID)
+    #expect(store.state.selectedProjectPath == Self.projectA.path)
+    await store.finish()
+  }
+
   @Test
   @MainActor
   func aGraphChangedRefreshesTheOpenWorkspacesNodeInPlace() async {

@@ -111,6 +111,14 @@ struct ProjectFeature {
     /// new nodes append, deleted nodes drop out, and the rest keep their places.
     var sidebarNodeOrder: [UUID] = []
 
+    /// A loop just created from this app's own form, waiting for the daemon's
+    /// `graphChanged` broadcast to deliver it — at which point its workspace opens via
+    /// `.nodeTapped`. The node can't be opened at creation time because it doesn't
+    /// exist locally until the broadcast lands. Only ever set on the form path: a loop
+    /// created from the CLI arrives as a bare broadcast with nothing pending, so it
+    /// never steals focus.
+    var pendingCreatedNodeID: UUID?
+
     var id: String { graph.project.path }
 
     init(graph: LoopGraph) {
@@ -220,6 +228,13 @@ struct ProjectFeature {
           for node in newGraph.nodes where !state.sidebarNodeOrder.contains(node.id) {
             state.sidebarNodeOrder.append(node.id)
           }
+          // The broadcast that delivers a form-created loop is what makes it openable —
+          // switch to it now, the way tapping it would. Matched by id so an unrelated
+          // broadcast (another loop finishing, a CLI edit) leaves the pending id waiting.
+          if let pending = state.pendingCreatedNodeID, newGraph.nodes[id: pending] != nil {
+            state.pendingCreatedNodeID = nil
+            return .send(.nodeTapped(pending))
+          }
         case .errorOccurred(let message):
           state.connectionError = message
         case .recentProjectsListed:
@@ -262,6 +277,14 @@ struct ProjectFeature {
         // canvas somewhere the human didn't ask to go.
         if draft.loopType == .composite, insideComposite == nil {
           state.openCompositeID = draft.id
+        }
+        // A loop created from the form switches to itself once its broadcast lands —
+        // see `pendingCreatedNodeID`. Not composites: opening their sub-graph canvas
+        // (above) already is the switch. Not inside a composite either: the drilled-in
+        // canvas the human is looking at is where the new card appears, and workspace
+        // opening (`AppFeature`'s `.nodeTapped`) only reaches top-level nodes anyway.
+        if draft.loopType != .composite, insideComposite == nil {
+          state.pendingCreatedNodeID = draft.id
         }
 
         // Creating the worktree is the app's job, not the daemon's: `GitClient` lives
