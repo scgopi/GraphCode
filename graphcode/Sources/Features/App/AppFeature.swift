@@ -85,6 +85,13 @@ struct AppFeature {
     var jumpQuery = ""
     var jumpSelection = 0
 
+    /// Check for Updates — see `AppFeature+Updates.swift`. The newer release a check
+    /// found (the offer alert is up while non-nil), the "nothing to do" outcome (up to
+    /// date, or why the check failed), and the in-flight flag the menu item disables on.
+    var availableUpdate: AvailableUpdate?
+    var updateNotice: UpdateNotice?
+    var isCheckingForUpdates = false
+
     /// State changes seen since launch, for the activity strip — see
     /// `AppFeature+Activity.swift`. Bounded, and deliberately not persisted.
     var activityLog: [ActivityEvent] = []
@@ -181,6 +188,13 @@ struct AppFeature {
     /// The first-launch terminology primer — see `OnboardingView`.
     case onboardingRequested
     case onboardingDismissed
+    /// The app menu's "Check for Updates…" — see `AppFeature+Updates.swift`.
+    case checkForUpdatesTapped
+    case updateCheckCompleted(Result<AvailableUpdate?, any Error>)
+    case updateDownloadTapped
+    case updateReleaseNotesTapped
+    case updateAlertDismissed
+    case updateNoticeDismissed
     /// The Quick Chats section's actions — see `State.quickChats`.
     case newQuickChatTapped
     /// The Quick Chats header row: shows the chats' own canvas, the way a folder row
@@ -203,6 +217,8 @@ struct AppFeature {
   @Dependency(\.orchestratorClient) var orchestratorClient
   @Dependency(\.terminalLayoutStore) var terminalLayoutStore
   @Dependency(\.quickChatStore) var quickChatStore
+  @Dependency(\.updateClient) var updateClient
+  @Dependency(\.openURL) var openURL
   /// Only for the cases where a workspace goes away because the *loop* did. Merely
   /// switching to another loop leaves its surfaces alive on purpose — see
   /// `TerminalSurfaceStore` — but a deleted loop, or a closed project, is never coming
@@ -218,6 +234,7 @@ struct AppFeature {
     // section, a canvas, and two dialogs) that has nothing to do with projects or graphs.
     quickChatsReducer
     jumpPaletteReducer
+    updatesReducer
     Reduce { state, action in
       switch action {
       case .task:
@@ -414,6 +431,12 @@ struct AppFeature {
         UserDefaults.standard.set(true, forKey: "hasSeenOnboarding")
         return .none
 
+      // Every update action is handled by `updatesReducer`, in
+      // `AppFeature+Updates.swift` — listed here only so this switch stays exhaustive.
+      case .checkForUpdatesTapped, .updateCheckCompleted, .updateDownloadTapped,
+        .updateReleaseNotesTapped, .updateAlertDismissed, .updateNoticeDismissed:
+        return .none
+
       // Every Quick Chats action is handled by `quickChatsReducer`, in
       // `AppFeature+QuickChats.swift` — listed here only so this switch stays exhaustive
       // and a new action can't be added without deciding which of the two answers it.
@@ -496,7 +519,11 @@ struct AppFeature {
       ProjectFeature()
     }
   }
+}
 
+// The reducer's helpers — an extension so the type body stays inside the lint budget as
+// the state and actions above keep growing.
+extension AppFeature {
   /// Steps the open workspace to another loop, in the order the sidebar draws them —
   /// every open project's nodes, flattened — wrapping at the ends and skipping blocked
   /// nodes, the same rule a direct `.nodeTapped` applies. With no workspace open it

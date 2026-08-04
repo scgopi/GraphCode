@@ -184,6 +184,36 @@ struct AppView: View {
         "\(store.pendingChatDeletion?.title ?? "This chat")'s session and scrollback "
           + "will be permanently deleted.")
     }
+    // Check for Updates — hosted here like every other dialog, so the answer can open
+    // over a terminal as readily as over a canvas. Two alerts because the outcomes ask
+    // different things of you: a found update offers verbs, the rest is one sentence.
+    .alert(
+      "GraphCode \(store.availableUpdate?.version ?? "") is available",
+      isPresented: Binding(
+        get: { store.availableUpdate != nil },
+        set: { if !$0 { store.send(.updateAlertDismissed) } }
+      )
+    ) {
+      Button("Download Update") { store.send(.updateDownloadTapped) }
+      Button("Release Notes") { store.send(.updateReleaseNotesTapped) }
+      Button("Later", role: .cancel) { store.send(.updateAlertDismissed) }
+    } message: {
+      Text(
+        "You're running \(store.availableUpdate?.currentVersion ?? ""). The download "
+          + "opens in your browser — drag GraphCode into Applications to install it, "
+          + "and the app takes care of its helpers on the next launch.")
+    }
+    .alert(
+      store.updateNotice?.title ?? "",
+      isPresented: Binding(
+        get: { store.updateNotice != nil },
+        set: { if !$0 { store.send(.updateNoticeDismissed) } }
+      )
+    ) {
+      Button("OK") { store.send(.updateNoticeDismissed) }
+    } message: {
+      Text(store.updateNotice?.message ?? "")
+    }
   }
 
   /// The open loop's trailing panel, toggled from where macOS puts an inspector toggle.
