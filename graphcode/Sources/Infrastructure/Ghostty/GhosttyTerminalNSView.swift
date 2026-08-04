@@ -216,12 +216,13 @@ final class GhosttyTerminalNSView: NSView {
     }
     syncOcclusion()
     guard window != nil else { return }
-    // Only claim focus if no other terminal already holds it. Mounting used to take it
-    // unconditionally, so with several tabs alive the last surface to appear captured
-    // the keyboard no matter which tab was showing — typing, and prefixes like tmux's
-    // ctrl+a, went to a shell that wasn't on screen.
-    guard !(window?.firstResponder is GhosttyTerminalNSView) else { return }
-    window?.makeFirstResponder(self)
+    // Mounting used to take the keyboard unconditionally, so with several tabs alive the
+    // last surface to appear captured it no matter which tab was showing; the guard that
+    // fixed that declined whenever *any* terminal held it — including the outgoing
+    // loop's still-mounted surface, which is why switching loops needed a second click
+    // before typing worked (issue #30). Both rules now live in `MountFocusPolicy`,
+    // evaluated a run-loop turn later once the old pane is gone.
+    claimKeyboardOnMount()
   }
 
   // MARK: - Keyboard
