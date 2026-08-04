@@ -1,8 +1,9 @@
 import ComposableArchitecture
 import Foundation
 
-/// Check for Updates — the app-menu item, the check against GitHub's newest stable
-/// release, and the two alerts `AppView` hosts for the outcome (issue #27).
+/// Check for Updates — the app-menu item, the check against GitHub's releases on the
+/// install's channel (issue #27; beta channel #33), and the two alerts `AppView` hosts
+/// for the outcome.
 ///
 /// The update itself is a download, not an in-place swap: dragging the DMG's app over
 /// /Applications *is* the whole installation — `DaemonBootstrap` re-stages the bundled
@@ -39,9 +40,18 @@ extension AppFeature {
         state.isCheckingForUpdates = true
         return .run { send in
           do {
-            let release = try await updateClient.latestRelease()
-            let update = AppUpdate.available(
-              current: updateClient.currentVersion(), release: release)
+            let current = updateClient.currentVersion()
+            let update: AvailableUpdate?
+            switch UpdateChannel.channel(
+              for: current, override: updateClient.channelOverride())
+            {
+            case .stable:
+              update = AppUpdate.available(
+                current: current, release: try await updateClient.latestRelease())
+            case .beta:
+              update = AppUpdate.available(
+                current: current, releases: try await updateClient.allReleases())
+            }
             await send(.updateCheckCompleted(.success(update)))
           } catch {
             await send(.updateCheckCompleted(.failure(error)))
