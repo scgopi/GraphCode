@@ -28,22 +28,6 @@ article: the mental model, then the machinery underneath it.
 
 ![Two projects and their connected loops on one GraphCode canvas — every node a live terminal you can attach to](screenshots/graph-hero.png)
 
-## New in 0.1.16
-
-GraphCode now keeps itself current
-([full notes](https://github.com/scgopi/GraphCode/releases/tag/v0.1.16)):
-
-- **Updates install themselves.** Check for Updates downloads the new release, verifies
-  its Developer ID signature, swaps it into Applications, and offers the relaunch —
-  no browser, no drag. Sessions live in the daemon and run right through it.
-- **An update channel.** A stable install is only ever offered stable releases; a beta
-  build follows the beta line. **Settings → Get beta releases** flips either way.
-- **A loop created from the app opens itself**, and switching loops lands the keyboard
-  in the session on the first click.
-- Since 0.1.12, releases also brought **composites you can put loops in**
-  ([v0.1.14](https://github.com/scgopi/GraphCode/releases/tag/v0.1.14)) — a graph inside
-  a graph, opened on its own canvas, creatable from the app or the CLI.
-
 ## How it works
 
 Every loop type is "an agent runs repeatedly" — they differ in what *you* stop doing:
