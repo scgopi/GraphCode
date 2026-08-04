@@ -13,7 +13,8 @@
 <p align="center">
   <a href="https://graphcode.app/">Website</a> ·
   <a href="https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg">Download .dmg</a> ·
-  <a href="https://github.com/scgopi/GraphCode/releases">All releases</a>
+  <a href="https://github.com/scgopi/GraphCode/releases">All releases</a> ·
+  <a href="https://graphcode.app/shortcuts.html">Shortcuts</a>
 </p>
 
 You can run one Claude Code session in a terminal. GraphCode lets you run ten —

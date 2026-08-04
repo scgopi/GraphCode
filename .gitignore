@@ -39,6 +39,7 @@ xcuserdata/
 # directory, so the site files can be re-included.
 /docs/*
 !/docs/index.md
+!/docs/shortcuts.md
 !/docs/_config.yml
 !/docs/_layouts/
 !/docs/_includes/

@@ -12,7 +12,8 @@ pile of terminals you babysit.
 
 Requires **macOS 15+ on Apple Silicon**, with **Claude Code on your `PATH`** —
 GraphCode launches it, it doesn't bundle it.
-[All releases →](https://github.com/scgopi/GraphCode/releases)
+[All releases →](https://github.com/scgopi/GraphCode/releases) ·
+[Keyboard shortcuts →](shortcuts.html)
 
 ![Two projects and their connected loops on one GraphCode canvas — every node a live terminal you can attach to](assets/graph-hero.png)
 
