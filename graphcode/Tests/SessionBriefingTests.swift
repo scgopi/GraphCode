@@ -290,7 +290,7 @@ struct SessionBriefingTests {
     // reach it.
     let arguments = CLISessionBackendKind.codex.launchArguments(
       prompt: "do the thing", tier: .standard,
-      briefingFile: URL(fileURLWithPath: "/tmp/briefings/x/AGENTS.md"))
+      briefingPath: "/tmp/briefings/x/AGENTS.md")
 
     let addDir = try #require(arguments.firstIndex(of: "--add-dir"))
     #expect(arguments[addDir + 1] == "/tmp/briefings/x")

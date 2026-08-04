@@ -68,8 +68,11 @@ extension CLISessionBackendKind {
   /// Neither carries the prose on the command line. See `SessionBriefing` for why that is
   /// load-bearing rather than tidy: the launch command is typed into a terminal, and a
   /// briefing-sized argument overruns the tty's canonical input buffer.
+  /// `briefingPath` is a path *string*, not a URL, because it may name a file on a
+  /// different machine: a remote session's briefing lands at a `~/`-relative path the
+  /// remote shell expands, which no local `URL` can represent honestly.
   public func launchArguments(
-    prompt: String?, tier: ModelTier, briefingFile: URL? = nil,
+    prompt: String?, tier: ModelTier, briefingPath: String? = nil,
     settings: GraphcodeSettings = GraphcodeSettings(), workspacePaths: [String] = [],
     hooksFile: URL? = nil, sessionName: String? = nil, zmxPath: String? = nil
   ) -> [String] {
@@ -77,9 +80,10 @@ extension CLISessionBackendKind {
       modelArguments(for: tier) + permissionArguments(settings)
       + presenceArguments(hooksFile: hooksFile, sessionName: sessionName, zmxPath: zmxPath)
     guard let prompt, !prompt.isEmpty else { return model }
+    let briefingDirectory = (briefingPath as NSString?)?.deletingLastPathComponent
     switch self {
     case .claudeCode:
-      let system = briefingFile.map { ["--append-system-prompt-file", $0.path] } ?? []
+      let system = briefingPath.map { ["--append-system-prompt-file", $0] } ?? []
       return model + system + [prompt]
     case .copilotCLI:
       // Copilot gates tools, paths and URLs separately, so `--allow-all-tools` alone
@@ -88,23 +92,22 @@ extension CLISessionBackendKind {
       // failures read as the agent ignoring instructions (issues #2 and #4), which is
       // why the directories are granted explicitly rather than trusted to the tool flag.
       let access = settings.copilotPermissions.readableDirectories(
-        workspacePaths + [briefingFile?.deletingLastPathComponent().path].compactMap { $0 })
-      guard let briefingFile else { return model + access + ["--interactive", prompt] }
+        workspacePaths + [briefingDirectory].compactMap { $0 })
+      guard let briefingPath else { return model + access + ["--interactive", prompt] }
       // And the preamble telling it the briefing is there to read. See
       // `SessionBriefing.pointer` for why the tidier env-var route was abandoned.
       return model + access
         + [
-          "--interactive", "\(SessionBriefing.pointer(toBriefingAt: briefingFile.path)) \(prompt)",
+          "--interactive", "\(SessionBriefing.pointer(toBriefingAt: briefingPath)) \(prompt)",
         ]
     case .codex:
       // Same shape as Claude Code — an interactive TUI taking its prompt positionally —
       // so the briefing rides the same way Copilot's does: `--add-dir` for access, a
       // preamble to point at it. Codex has no `--append-system-prompt` equivalent.
       let access = settings.codexApprovals.writableDirectories(workspacePaths)
-      guard let briefingFile else { return model + access + [prompt] }
-      let briefingDirectory = briefingFile.deletingLastPathComponent().path
+      guard let briefingPath, let briefingDirectory else { return model + access + [prompt] }
       return model + access + ["--add-dir", briefingDirectory]
-        + ["\(SessionBriefing.pointer(toBriefingAt: briefingFile.path)) \(prompt)"]
+        + ["\(SessionBriefing.pointer(toBriefingAt: briefingPath)) \(prompt)"]
     }
   }
 

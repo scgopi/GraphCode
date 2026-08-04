@@ -40,6 +40,12 @@ extension RemoteRepositoryClient: DependencyKey {
         "zmx isn't installed on \(location.host) — sessions live in it. "
           + "Install it there and try again."
       ),
+      (
+        location.remoteLoginShellCommand("command -v python3"),
+        "python3 isn't installed on \(location.host) — the remote `graphcode` CLI "
+          + "runs on it, and without that a loop there can't reach the graph. "
+          + "Install it there and try again."
+      ),
     ]
     for check in checks {
       let invocation = location.sshInvocation(remoteCommand: check.command)

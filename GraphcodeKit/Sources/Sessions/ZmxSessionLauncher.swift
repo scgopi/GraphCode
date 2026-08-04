@@ -363,7 +363,10 @@ public enum ZmxSessionLauncher {
   /// `zmx` shell-quotes every argument before typing the command into the session's shell
   /// (`util.shellQuote`, a standard shlex-style single-quote escape), so it reaches
   /// `claude` as exactly one word no matter what quotes, `$(…)`, or `;` it contains.
-  static func arguments(forNode node: LoopNode, projectPath: String? = nil) -> [String]? {
+  static func arguments(
+    forNode node: LoopNode, projectPath: String? = nil,
+    settings: GraphcodeSettings = GraphcodeSettingsStore.load()
+  ) -> [String]? {
     guard let prompt = node.sessionPrompt, !prompt.isEmpty else { return nil }
     // A backend graphcode can't launch has no argv. `canHost` already refuses to create
     // such a node, so this is the belt to that braces — but silently starting the wrong
@@ -380,26 +383,43 @@ public enum ZmxSessionLauncher {
     // line can carry — see `SessionBriefing` for the failure that taught us so.
     // Read per launch, not cached: changing a setting in the app then applies to the very
     // next loop the daemon starts, with nothing to restart.
-    let settings = GraphcodeSettingsStore.load()
-    // No briefing for a remote project's session: the file is written on *this* machine
-    // and the session runs on another, and the CLI it describes talks to a daemon the
-    // remote host can't reach. A remote loop that can't fan out is a stated v1
-    // limitation (docs/09-remote-repositories.md), not a silent failure.
+    //
+    // A remote project's session gets the same briefing at a *remote* path: the ensure
+    // dial delivers the file there (`remoteDeliveryScript`) and the forwarded socket
+    // (`RemoteSocketForwarder`) makes the CLI it describes actually work from that host.
     let remote = projectPath.flatMap { RemoteProjectLocation.parse(projectPath: $0) }
-    let briefingFile =
-      settings.briefsSessionsAboutTheGraph && remote == nil
-      ? SessionBriefing.write(projectPath: projectPath) : nil
+    let briefingPath: String?
+    if settings.briefsSessionsAboutTheGraph, let projectPath {
+      briefingPath =
+        remote == nil
+        ? SessionBriefing.write(projectPath: projectPath)?.path
+        : SessionBriefing.text(projectPath: projectPath)
+          .map { _ in RemoteGraphAccess.briefingPath(forProjectPath: projectPath) }
+    } else {
+      briefingPath = nil
+    }
     // The node's wake digest (`NodeMemory`): what previous passes learned, budgeted,
     // delivered by path for the same MAX_CANON reason as the briefing. `nil` on a first
-    // launch (no memory yet) and for remote sessions (the file is written on this
-    // machine; the session runs on another). Pointed at from the *prompt* rather than
-    // the shared per-project briefing file, because two nodes launching concurrently
-    // rewrite that same AGENTS.md — per-node content there would race.
+    // launch (no memory yet). Pointed at from the *prompt* rather than the shared
+    // per-project briefing file, because two nodes launching concurrently rewrite that
+    // same AGENTS.md — per-node content there would race. The digest is always written
+    // locally — the log lives on this machine either way — and a remote session is
+    // pointed at the copy the ensure dial delivers to its own home directory. That
+    // delivered copy is what makes a message staged to a sleeping remote loop actually
+    // reach it at its next wake.
     let wakeFile =
-      remote == nil && projectPath != nil
+      projectPath != nil
       ? NodeMemory.writeWakeDigest(projectPath: projectPath ?? "", nodeID: node.id) : nil
+    let wakePath: String?
+    if let projectPath, remote != nil {
+      wakePath =
+        wakeFile != nil
+        ? RemoteGraphAccess.wakePath(forProjectPath: projectPath, nodeID: node.id) : nil
+    } else {
+      wakePath = wakeFile?.path
+    }
     let promptWithMemory =
-      wakeFile.map { "Read your loop memory at \($0.path) before starting. Then: \(singleLine)" }
+      wakePath.map { "Read your loop memory at \($0) before starting. Then: \(singleLine)" }
       ?? singleLine
     // Both the executable and the shape of its arguments come from the node's backend —
     // `claude` takes its prompt positionally and its briefing via `--append-system-prompt`,
@@ -412,23 +432,32 @@ public enum ZmxSessionLauncher {
     // ignoring its instructions — the same failure the briefing's `--add-dir` exists
     // to prevent. Claude Code ignores workspace paths, so this costs the others two
     // argv entries and Claude nothing.
+    let wakeDirectory: String?
+    if let projectPath, remote != nil {
+      wakeDirectory =
+        wakePath != nil
+        ? RemoteGraphAccess.memoryDirectory(forProjectPath: projectPath, nodeID: node.id) : nil
+    } else {
+      wakeDirectory = wakeFile?.deletingLastPathComponent().path
+    }
     let paths =
       Self.workspacePaths(forNode: node, projectPath: projectPath)
-      + (wakeFile.map { [$0.deletingLastPathComponent().path] } ?? [])
+      + (wakeDirectory.map { [$0] } ?? [])
     // The hooks that make the session report what it is doing (`PresenceHooks`). For a
     // remote project the file can't come from here — it is written *on the remote host*
     // by the ensure script (`remoteEnsureInvocation`) and referenced as a `$HOME` path
     // only the remote shell can mint, via `scriptSuffix` below.
     let hooksFile = remote == nil ? PresenceHooks.write(forBackend: node.backend) : nil
     // Codex needs no file, only somewhere to report to. Nil for a remote session for the
-    // same reason: it would name a binary the remote host doesn't have.
+    // same reason: it would name a binary at this machine's path on a host that has its
+    // own.
     let reportingPath =
       remote == nil && ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil
     let remoteHooksSuffix =
       remote != nil && node.backend == .claudeCode
       ? " --settings \"\(PresenceHooks.remotePathExpression)\"" : ""
     let arguments = node.backend.launchArguments(
-      prompt: promptWithMemory, tier: tier, briefingFile: briefingFile,
+      prompt: promptWithMemory, tier: tier, briefingPath: briefingPath,
       settings: settings,
       workspacePaths: paths,
       hooksFile: hooksFile,
@@ -440,7 +469,7 @@ public enum ZmxSessionLauncher {
       ]
       + Self.loginShellInvocation(
         of: executable, arguments: arguments,
-        environment: Self.environment(forBackend: node.backend, briefingFile: briefingFile),
+        environment: Self.environment(forBackend: node.backend, briefingPath: briefingPath),
         scriptSuffix: remoteHooksSuffix)
 
     // `zmx` types this command into the session's shell, and a tty in canonical mode
@@ -493,7 +522,7 @@ public enum ZmxSessionLauncher {
   /// Copilot's briefing rides on its argv (see `CLISessionBackendKind.launchArguments`)
   /// after the documented environment route turned out not to work. Kept because the
   /// plumbing is the awkward part and the next backend will want it.
-  static func environment(forBackend backend: CLISessionBackendKind, briefingFile: URL?)
+  static func environment(forBackend backend: CLISessionBackendKind, briefingPath: String?)
     -> [String: String]
   {
     [:]
@@ -557,12 +586,15 @@ public enum ZmxSessionLauncher {
   /// unsent in a remote Copilot's input bar. The `||` closes that window to what a
   /// single shell costs.
   static func remoteEnsureInvocation(
-    forNode node: LoopNode, at location: RemoteProjectLocation
+    forNode node: LoopNode, at location: RemoteProjectLocation,
+    settings: GraphcodeSettings = GraphcodeSettingsStore.load()
   ) -> [String]? {
-    guard let zmxArguments = arguments(forNode: node, projectPath: location.projectPath)
+    guard
+      let zmxArguments = arguments(
+        forNode: node, projectPath: location.projectPath, settings: settings)
     else { return nil }
     let check = quotedCommand(["zmx"] + existenceCheckArguments(forNode: node))
-    let run = quotedCommand(["zmx"] + zmxArguments)
+    let run = remoteQuotedCommand(["zmx"] + zmxArguments)
     // Copilot only, and remote only: an unattended Copilot queues its `--interactive`
     // goal behind a per-session folder-trust dialog that nobody is present to answer,
     // so a fresh remote Copilot loop booted to an idle screen with its goal parked
@@ -575,18 +607,58 @@ public enum ZmxSessionLauncher {
     let trustSeed =
       node.backend == .copilotCLI
       ? copilotTrustSeedScript(forRemotePath: location.remotePath) + "; " : ""
-    // The presence hooks, written on the host where they will run — the launch line
-    // (via `loginShellInvocation`'s `scriptSuffix`) points Claude at this very file, and
-    // rewriting it per ensure keeps an upgraded graphcode's hooks current, the same
-    // bargain `PresenceHooks.write` makes locally.
     let hooksWrite =
       node.backend == .claudeCode
       ? (PresenceHooks.remoteWriteFragment().map { $0 + "; " } ?? "") : ""
+    let delivery =
+      remoteDeliveryScript(forNode: node, at: location, settings: settings)
+      .map { $0 + "; " } ?? ""
     let script =
       "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { "
-      + trustSeed + hooksWrite
+      + trustSeed + hooksWrite + delivery
       + "\(check) >/dev/null 2>&1 || \(run); }"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+  }
+
+  /// The files a remote session needs on its own disk, as one installer fragment
+  /// (`RemoteGraphAccess.installerScript`): always the CLI shim, plus the briefing when
+  /// briefing is on and the node's wake digest when it has one. `node` is optional
+  /// because the app's *attach* delivers too, before any node exists to have memory.
+  /// Public for exactly that caller (`GhosttyTerminalView.remoteCommand`).
+  public static func remoteDeliveryScript(
+    forNode node: LoopNode?, at location: RemoteProjectLocation, settings: GraphcodeSettings
+  ) -> String? {
+    var files = [RemoteGraphAccess.cliInstallPath: RemoteGraphAccess.cliShimSource]
+    if settings.briefsSessionsAboutTheGraph,
+      let text = SessionBriefing.text(projectPath: location.projectPath)
+    {
+      files[RemoteGraphAccess.briefingPath(forProjectPath: location.projectPath)] = text
+    }
+    if let node {
+      let wakeURL = NodeMemory.directory(
+        forProjectPath: location.projectPath, nodeID: node.id
+      ).appendingPathComponent(NodeMemory.wakeFileName)
+      if let wake = try? String(contentsOf: wakeURL, encoding: .utf8) {
+        files[RemoteGraphAccess.wakePath(forProjectPath: location.projectPath, nodeID: node.id)] =
+          wake
+      }
+    }
+    return RemoteGraphAccess.installerScript(files: files)
+  }
+
+  /// `quotedCommand`, except that arguments naming graphcode's own remote files —
+  /// the `~/.graphcode/…` paths `RemoteGraphAccess` mints — keep their tilde outside
+  /// the quotes as `~/'…'`, so the *remote* login shell expands it before `zmx`
+  /// re-quotes the argv it received. Nothing local knows the remote home directory,
+  /// and a fully-quoted `~` would reach the backend as a literal it can't open.
+  /// Scoped to the `~/.graphcode/` prefix rather than any `~/` so a prompt that
+  /// happens to start with a tilde is never rewritten.
+  static func remoteQuotedCommand(_ argv: [String]) -> String {
+    argv.map { argument in
+      argument.hasPrefix("~/.graphcode/")
+        ? "~/" + RemoteProjectLocation.shellQuoted(String(argument.dropFirst(2)))
+        : RemoteProjectLocation.shellQuoted(argument)
+    }.joined(separator: " ")
   }
 
   /// The additive, idempotent trust write described above. The repository path rides as
@@ -758,6 +830,10 @@ public enum ZmxSessionLauncher {
   }
 
   private static func startRemote(_ node: LoopNode, at location: RemoteProjectLocation) async {
+    // The forwarded socket is what makes the delivered CLI's dial land on this Mac's
+    // daemon — without it the shim's commands have nowhere to go. Kept alive per host,
+    // not per launch; see `RemoteSocketForwarder`.
+    await RemoteSocketForwarder.shared.ensureForwarding(to: location)
     guard let ensure = remoteEnsureInvocation(forNode: node, at: location) else { return }
     // Create only, in one round-trip — see `remoteEnsureInvocation` for why the check
     // and the run must share a shell. A failure after the retries is the same posture

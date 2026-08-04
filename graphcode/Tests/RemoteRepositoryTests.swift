@@ -174,9 +174,30 @@ struct RemoteRepositoryTests {
   func aRemoteSurfaceGetsNoLocalWorkingDirectoryOrBriefing() {
     let view = surface(launchesClaudeCode: true, prompt: "go")
     // The ssh:// path names no local folder; handing it to Ghostty would fail the
-    // spawn. The cd happens inside the remote command instead.
+    // spawn. The cd happens inside the remote command instead — and the briefing is
+    // not a local *file* either: `remoteBriefingPath` names the delivered copy.
     #expect(view.effectiveWorkingDirectory == nil)
     #expect(view.briefingFile(settings: GraphcodeSettings()) == nil)
+  }
+
+  @Test
+  func aRemoteAgentSurfaceIsBriefedAtItsOwnHostsPath() throws {
+    // The attach creates the session when the daemon hasn't (a turn-based loop's only
+    // ever starts here), so it must deliver and reference the same remote briefing
+    // the daemon's ensure does — or exactly the loops a human steers most closely
+    // would be the ones that never learn they can fan out.
+    let view = surface(launchesClaudeCode: true, prompt: "go")
+    let script = try #require(
+      view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
+    #expect(script.contains("--append-system-prompt-file ~/.graphcode/briefings/"))
+    // The delivery fragment rides the same dial, ahead of the attach.
+    #expect(script.contains("b64decode"))
+
+    #expect(
+      view.remoteBriefingPath(settings: GraphcodeSettings())?
+        .hasPrefix("~/.graphcode/briefings/") == true)
+    let disabled = GraphcodeSettings(briefsSessionsAboutTheGraph: false)
+    #expect(view.remoteBriefingPath(settings: disabled) == nil)
   }
 
   // MARK: - The add form
