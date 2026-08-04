@@ -104,6 +104,92 @@ struct ProjectFeatureTests {
     #expect(commands.count == 1)
   }
 
+  /// Creating a loop from the form switches to it — but only once the daemon's
+  /// broadcast delivers it, because until then there is no node to open. The switch
+  /// itself is a `.nodeTapped`, which `AppFeature` turns into an open workspace.
+  @Test
+  @MainActor
+  func aLoopCreatedFromTheFormOpensOnceItsBroadcastLands() async {
+    let store = TestStore(
+      initialState: ProjectFeature.State(graph: LoopGraph(project: Self.testProject))
+    ) {
+      ProjectFeature()
+    } withDependencies: {
+      $0.gitClient.listWorktrees = { _ in [] }
+      $0.orchestratorClient.send = { _ in }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.addNodeButtonTapped(parentBackend: nil))
+    await store.send(.binding(.set(\.draftTitle, "Research")))
+    await store.send(.binding(.set(\.draftGoal, "Say hello")))
+    await store.send(.createNodeConfirmed)
+    let draftID = store.state.draftID
+    #expect(store.state.pendingCreatedNodeID == draftID)
+
+    // A broadcast without the new node — some unrelated change won the race — must
+    // neither open anything nor forget what is being waited for.
+    let stranger = LoopNode(title: "Other", checkDescription: "Done?")
+    await store.send(
+      .daemonEvent(.graphChanged(LoopGraph(project: Self.testProject, nodes: [stranger]))))
+    #expect(store.state.pendingCreatedNodeID == draftID)
+
+    let created = LoopNode(id: draftID, title: "Research", checkDescription: "Sound?")
+    await store.send(
+      .daemonEvent(
+        .graphChanged(LoopGraph(project: Self.testProject, nodes: [stranger, created]))))
+    await store.receive(\.nodeTapped, draftID)
+    #expect(store.state.pendingCreatedNodeID == nil)
+    await store.finish()
+  }
+
+  /// The other half of the deal: a loop created from the CLI arrives as a bare
+  /// broadcast and must not steal the screen. Exhaustive on purpose — a `.nodeTapped`
+  /// emitted here would fail the test as an unreceived action.
+  @Test
+  @MainActor
+  func aLoopArrivingFromTheCLIDoesNotSwitchToItself() async {
+    let store = TestStore(
+      initialState: ProjectFeature.State(graph: LoopGraph(project: Self.testProject))
+    ) {
+      ProjectFeature()
+    }
+
+    let node = LoopNode(title: "Research", checkDescription: "Sound?")
+    let graph = LoopGraph(project: Self.testProject, nodes: [node])
+
+    await store.send(.daemonEvent(.graphChanged(graph))) {
+      $0.graph = graph
+      $0.nodePositions[node.id] = ProjectFeature.gridPosition(0)
+      $0.sidebarNodeOrder = [node.id]
+    }
+  }
+
+  /// A composite's **Create & open** already moves the canvas into its sub-graph —
+  /// that *is* the switch, so no workspace open is queued on top of it.
+  @Test
+  @MainActor
+  func aCompositeCreatedFromTheFormOpensItsCanvasNotAWorkspace() async {
+    let store = TestStore(
+      initialState: ProjectFeature.State(graph: LoopGraph(project: Self.testProject))
+    ) {
+      ProjectFeature()
+    } withDependencies: {
+      $0.gitClient.listWorktrees = { _ in [] }
+      $0.orchestratorClient.send = { _ in }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.addNodeButtonTapped(parentBackend: nil))
+    await store.send(.binding(.set(\.draftLoopType, .composite)))
+    await store.send(.binding(.set(\.draftTitle, "Nightly")))
+    await store.send(.createNodeConfirmed)
+
+    #expect(store.state.openCompositeID == store.state.draftID)
+    #expect(store.state.pendingCreatedNodeID == nil)
+    await store.finish()
+  }
+
   /// The form's metric fields become the goal's `metricCommand`/`metricDirection` —
   /// a control that looks set but doesn't travel would be a silent no-op in shipping UI.
   @Test
