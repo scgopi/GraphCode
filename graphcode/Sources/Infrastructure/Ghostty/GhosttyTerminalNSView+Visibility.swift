@@ -96,6 +96,38 @@ extension GhosttyTerminalNSView {
     window.makeFirstResponder(self)
   }
 
+  /// Claims the keyboard for a surface that just entered the window, one run-loop turn
+  /// later — the moment `viewDidMoveToWindow` fires, the outgoing loop's surface is
+  /// still mounted (and still first responder), and a sidebar click's `List` selection
+  /// hasn't finished moving first responder to its table. Deciding then reads a world
+  /// that is about to change; a turn later both have settled and `MountFocusPolicy` can
+  /// look at what actually holds the keyboard. See that type for the rule and issue #30
+  /// for the second-click symptom this removes.
+  func claimKeyboardOnMount() {
+    DispatchQueue.main.async { [weak self] in
+      MainActor.assumeIsolated {
+        guard let self, let window = self.window else { return }
+        let holder: MountFocusPolicy.Holder
+        switch window.firstResponder {
+        case let responder as GhosttyTerminalNSView:
+          holder =
+            responder === self
+            ? .thisSurface : responder.isActive ? .activeSurface : .inactiveSurface
+        case is NSTextView:
+          // `NSTextField` edits through a shared field editor, which is an `NSTextView`,
+          // so this covers a rename field as well as a real text view.
+          holder = .textInput
+        default:
+          holder = .somethingElse
+        }
+        guard
+          MountFocusPolicy.shouldClaimKeyboard(holder: holder, surfaceIsActive: self.isActive)
+        else { return }
+        window.makeFirstResponder(self)
+      }
+    }
+  }
+
   /// Take the keyboard back when nothing in the window is holding it.
   ///
   /// **This is a frame-pacing fix, not a keyboard one.** libghostty runs its
