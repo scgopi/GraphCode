@@ -16,9 +16,8 @@ import Foundation
 ///
 /// Holding surfaces here inverts it: SwiftUI may build and tear down its views as often as
 /// it likes, and `GhosttyTerminalView` merely borrows the surface for as long as it is on
-/// screen. This is the arrangement supacode uses (its `WorktreeTerminalManager` owns the
-/// surface views and hands built ones to the representable) and the reason switching
-/// worktrees there is instant.
+/// screen. Owning the surface views here and handing built ones to the representable is
+/// what makes switching between loops instant.
 ///
 /// A retained surface that isn't on screen is not idle by accident: `GhosttyTerminalNSView`
 /// tells libghostty it is occluded as soon as it loses its window, which drops its render

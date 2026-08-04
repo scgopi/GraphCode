@@ -9,8 +9,8 @@ import AppKit
 /// into it as a subview. Unmounting throws away the host; the surface goes back to being
 /// held only by the store, loses its window, and is told it is occluded.
 ///
-/// Re-parenting a live surface is safe and is what supacode does with its own surface
-/// views: the Metal layer belongs to the surface view, not to whatever is above it, so
+/// Re-parenting a live surface is safe: the Metal layer belongs to the surface view,
+/// not to whatever is above it, so
 /// moving the view moves the layer with it and the terminal never notices.
 final class TerminalSurfaceHostView: NSView {
   private(set) weak var surfaceView: GhosttyTerminalNSView?

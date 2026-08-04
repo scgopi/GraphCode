@@ -1,7 +1,7 @@
 import Foundation
 
-/// A local `/bin/sh` retry loop around two ssh command lines — supacode's remote-surface
-/// reconnect (shape, not code), adopted for the same failure: a live surface whose ssh
+/// A local `/bin/sh` retry loop around two ssh command lines, for the failure it exists
+/// to survive: a live surface whose ssh
 /// drops (a Codespace idle-stopping, sleep, a network change) died on screen even though
 /// the remote zmx session kept the agent running, and recovery meant closing and
 /// reopening the loop's terminal by hand.

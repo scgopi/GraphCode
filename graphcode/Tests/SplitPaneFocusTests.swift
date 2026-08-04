@@ -146,8 +146,7 @@ struct SplitPaneFocusTests {
   }
 
   /// Three panes deep, the keyboard has somewhere sensible to go and it isn't "the first
-  /// pane, always" — supacode (and Ghostty under it) hand it to the pane before the one
-  /// that closed.
+  /// pane, always" — Ghostty hands it to the pane before the one that closed.
   @Test
   @MainActor
   func closingAMiddlePaneFocusesTheOneBeforeIt() async throws {

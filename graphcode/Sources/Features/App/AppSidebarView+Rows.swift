@@ -60,7 +60,7 @@ extension AppSidebarView {
       Text(project.graph.project.name).lineLimit(1)
       Spacer()
 
-      // Trailing and hover-only, supacode-style: + to start a loop in this project,
+      // Trailing and hover-only: + to start a loop in this project,
       // then the disclosure chevron, at the very end. Icons on the left start every
       // row at the same edge; controls live where the pointer already is.
       if hoveredRowKey == project.id {

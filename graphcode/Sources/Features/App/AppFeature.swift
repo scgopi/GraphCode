@@ -12,8 +12,8 @@ import GraphcodeKit
 /// every open project, so neither "which loop's terminal workspace is open" nor "which
 /// project's canvas is the fallback" can live inside any one `ProjectFeature.State`.
 /// They live here instead: `openLoop` (at most one loop's whole terminal
-/// workspace — tabs and splits, see `LoopWorkspaceFeature` — is open at a time, the way
-/// a supacode worktree owns its own terminal area) and `detailSelection` (which canvas —
+/// workspace — tabs and splits, see `LoopWorkspaceFeature` — is open at a time) and
+/// `detailSelection` (which canvas —
 /// a folder's, or Quick Chats' — is the fallback when no loop is open).
 @Reducer
 struct AppFeature {

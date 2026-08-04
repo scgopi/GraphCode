@@ -3,8 +3,7 @@ import Foundation
 import GraphcodeKit
 
 /// One loop's whole terminal workspace — tabs, each holding a tree of split panes (see
-/// `SplitNode`), the way a supacode worktree's own terminal area works (drawn on for shape
-/// only, not code) but scoped to exactly one loop's node instead of a worktree. Replaces
+/// `SplitNode`), scoped to exactly one loop's node. Replaces
 /// Phase 4's `LoopNodeDetailFeature`, which only ever showed a single terminal.
 ///
 /// `layout` is persisted to disk (`TerminalLayoutStore`) on every mutation, keyed by
@@ -121,9 +120,9 @@ struct LoopWorkspaceFeature {
       case .splitButtonTapped(let direction):
         guard var tab = state.layout.tabs[id: state.layout.selectedTabID] else { return .none }
         let addition = SurfaceRef(id: UUID(), launchesClaudeCode: false)
-        // The focused pane is the one that divides — the same anchor supacode's terminal
-        // splits at. Always splitting `primary` instead would drop every new pane next to
-        // the first one, wherever you were actually working.
+        // The focused pane is the one that divides. Always splitting `primary` instead
+        // would drop every new pane next to the first one, wherever you were actually
+        // working.
         tab.root = tab.root.splitting(tab.focusedSurface.id, with: addition, direction: direction)
         // The new pane takes the keyboard, matching every terminal that splits — you
         // asked for another shell because you want to type in it. Leaving focus behind
@@ -166,8 +165,8 @@ struct LoopWorkspaceFeature {
         terminalSurfaceClient.retire([surfaceID])
         tab.root = root
         if tab.focusedSurfaceID == surfaceID {
-          // Where the keyboard lands, matching supacode (and Ghostty, which it follows):
-          // the pane before the one that closed, or the new first pane if the one that
+          // Where the keyboard lands, matching Ghostty: the pane before the one that
+          // closed, or the new first pane if the one that
           // closed *was* first.
           let survivors = tab.surfaces
           tab.focusedSurfaceID = survivors[max(0, closedIndex - 1)].id

@@ -5,9 +5,7 @@ import UniformTypeIdentifiers
 
 /// The left pane, showing every open project — not just one (the multi-project sidebar
 /// follow-up to Phase 4, docs/07-roadmap.md#phase-4--projects; before this, opening a
-/// folder replaced whatever was open instead of adding to a list, the way supacode's
-/// own sidebar lists several repositories at once — drawn on for the overall shape
-/// here, no code or text reused).
+/// folder replaced whatever was open instead of adding to a list).
 ///
 /// One flat `List`, not `Section`/`DisclosureGroup`: a `Section` header isn't a
 /// selectable row on macOS, and `DisclosureGroup`'s label swallows taps meant for
@@ -51,7 +49,7 @@ struct AppSidebarView: View {
   @State var sidebarNow = Date()
   /// The row the pointer is over, keyed by project path, node id string, or the chats
   /// row's own key — the trailing controls (+ and the disclosure chevron) only draw on
-  /// this row, supacode-style: quiet rows, controls on approach.
+  /// this row: quiet rows, controls on approach.
   @State var hoveredRowKey: String?
 
   enum SidebarSelection: Hashable {
@@ -407,8 +405,8 @@ struct AppSidebarView: View {
       SidebarIcon(systemName: "bubble.left.and.bubble.right", tint: .primary)
       Text("Quick Chats").lineLimit(1)
       Spacer()
-      // Trailing, + then chevron, and only under the pointer — the supacode
-      // arrangement every header row now follows; see `projectHeaderRow`.
+      // Trailing, + then chevron, and only under the pointer — the arrangement every
+      // header row now follows; see `projectHeaderRow`.
       if hoveredRowKey == Self.chatsRowKey {
         Button {
           store.send(.newQuickChatTapped)

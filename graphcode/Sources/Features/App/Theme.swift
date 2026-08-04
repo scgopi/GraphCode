@@ -28,8 +28,8 @@ import SwiftUI
 /// system effect and should be removed. The desktop tinting it is that effect's point;
 /// `.preferredColorScheme(.dark)` keeps it dark. See `AppSidebarView`.
 enum Theme {
-  /// The tone nearly every scrim in this app is mixed from: `#1E1E1E`, sampled off
-  /// supacode, dead neutral. Kept opaque here so things that need the tone at full
+  /// The tone nearly every scrim in this app is mixed from: `#1E1E1E`, dead neutral.
+  /// Kept opaque here so things that need the tone at full
   /// strength (the unfocused-pane veil, the terminal's background colour) don't
   /// compound with scrim opacity.
   static let windowTone = Color(white: 0.118)

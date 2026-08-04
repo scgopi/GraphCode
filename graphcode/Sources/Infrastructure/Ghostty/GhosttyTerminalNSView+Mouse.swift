@@ -94,8 +94,8 @@ extension GhosttyTerminalNSView {
   /// `ghostty_surface_mouse_pos` wants points. Scaling this by `backingScaleFactor`
   /// therefore reported every click, drag and wheel tick at twice its real position on a
   /// Retina display — selections started in the wrong cell, and a tmux pane or TUI
-  /// hit-testing the report got a point that wasn't under the pointer. Both upstream
-  /// Ghostty's surface view and supacode pass the unscaled point; so does this now.
+  /// hit-testing the report got a point that wasn't under the pointer. Upstream
+  /// Ghostty's surface view passes the unscaled point; so does this now.
   private func sendMousePos(_ event: NSEvent) {
     guard let surface else { return }
     let point = convert(event.locationInWindow, from: nil)
@@ -123,9 +123,9 @@ extension GhosttyTerminalNSView {
   /// told the pointer had moved when it had not.
   ///
   /// The position it was restating was already current: `mouseMoved`/`mouseEntered`
-  /// tracking (`.activeAlways`, see `updateTrackingAreas`) keeps it so. Neither upstream
-  /// Ghostty's surface view nor supacode's sends a position from `scrollWheel`, and this
-  /// no longer does either.
+  /// tracking (`.activeAlways`, see `updateTrackingAreas`) keeps it so. Upstream
+  /// Ghostty's surface view does not send a position from `scrollWheel`, and this no
+  /// longer does either.
   /// **Coalesced, not forwarded per event.** A trackpad flick delivers well over a
   /// hundred wheel events a second, and under a TUI with mouse tracking on, libghostty
   /// answers each cell-crossing tick with an SGR report written into the PTY the moment
@@ -136,8 +136,8 @@ extension GhosttyTerminalNSView {
   /// deltas and flushing at most once per ~8ms keeps the scroll feel identical (the
   /// deltas sum; the core turns them into the same number of lines) while cutting the
   /// report count several-fold and giving each report its own quiet window to land in
-  /// whole. Supacode doesn't need this because it speaks zmx's IPC directly rather
-  /// than through an attach process.
+  /// whole. This is needed because the surface talks to zmx through an attach process
+  /// rather than over its IPC directly.
   override func scrollWheel(with event: NSEvent) {
     guard surface != nil else { return }
     // Before the scroll is forwarded, because it decides whether the frames this gesture

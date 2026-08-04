@@ -13,9 +13,9 @@ struct GitClient: Sendable {
   var listWorktrees: @Sendable (_ repositoryPath: String) async throws -> [WorktreeRef]
   var removeWorktree: @Sendable (_ worktree: WorktreeRef) async throws -> Void
   /// Streams a `git clone --progress` into `destination`: progress lines while it runs,
-  /// `.finished` on success, a thrown `GitClientError` on failure. The drawn-on shape is
-  /// supacode's `cloneStream` (structure, not code): streaming is what lets the form show
-  /// a live percentage instead of a spinner over a multi-minute network operation.
+  /// `.finished` on success, a thrown `GitClientError` on failure. Streaming is what lets
+  /// the form show a live percentage instead of a spinner over a multi-minute network
+  /// operation.
   var clone:
     @Sendable (_ url: String, _ destination: URL, _ branch: String?, _ depth: Int?) ->
       AsyncThrowingStream<GitCloneEvent, any Error>

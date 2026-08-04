@@ -1,8 +1,7 @@
 import Foundation
 
 /// A project whose working tree lives on another machine, reached over SSH — the
-/// docs/09-remote-repositories.md Phase B model, drawn on supacode's remote connections
-/// (shape, not code).
+/// docs/09-remote-repositories.md Phase B model.
 ///
 /// **The project path *is* the identity.** A remote project's path is the URI
 /// `ssh://user@host[:port]/absolute/path`, following the precedent the global graph set
