@@ -64,6 +64,13 @@ struct GraphcodeApp: App {
     // dismissed it before the words had anything on screen to stick to. In Help rather
     // than the sidebar toolbar, where a second item overflowed the column into a » menu.
     .commands {
+      // Right under About, where every Mac app that can update itself puts it.
+      CommandGroup(after: .appInfo) {
+        Button("Check for Updates…") {
+          Self.store.send(.checkForUpdatesTapped)
+        }
+        .disabled(Self.store.isCheckingForUpdates)
+      }
       CommandGroup(after: .help) {
         Button("GraphCode Basics") {
           Self.store.send(.onboardingRequested)
