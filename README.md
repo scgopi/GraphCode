@@ -201,10 +201,11 @@ Design docs live in `docs/` and are kept local (gitignored) for now.
   instance) — the queued command runs only after the profile finishes.
 - **Sessions aren't reaped.** Long-lived `graphcode-*` zmx sessions accumulate; list them
   with `zmx list` and remove dead ones with `zmx kill`.
-- **Remote repositories are attach-first.** Loops on an SSH remote launch and attach
-  fine, but deleting one doesn't kill its remote session, message edges into remote
-  loops report undelivered, presence/usage read "not reported", and worktrees and
-  loop fan-out aren't available there yet. And a sleeping Mac fires no edges — the
+- **Remote repositories have some limits.** Loops on an SSH remote launch, attach,
+  brief, fan out, and exchange messages like local ones — a forwarded daemon socket
+  and a delivered Python CLI shim make `graphcode node create/send/memo` work. But
+  worktrees aren't available there, goal predicates run locally (write an explicit
+  `ssh host …` if the check is remote), and a sleeping Mac fires no edges — the
   daemon stays local by design.
 
 ## Inspiration & third-party
