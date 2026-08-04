@@ -75,13 +75,19 @@ struct GhosttyTerminalView: NSViewRepresentable {
   func makeNSView(context: Context) -> TerminalSurfaceHostView {
     let host = TerminalSurfaceHostView()
     let view = TerminalSurfaceStore.shared.surface(for: surfaceID) {
+      // A remote surface needs the daemon's socket present on its host before the
+      // delivered CLI can reach the graph — same forward the daemon's own launches
+      // keep alive, started here for the sessions only an attach ever creates.
+      if let location = remoteLocation {
+        Task { await RemoteSocketForwarder.shared.ensureForwarding(to: location) }
+      }
       // Written once per surface build, not held: like `ZmxSessionLauncher`, rewriting
       // on launch means the briefing never goes stale against an upgraded graphcode.
-      let briefingFile = self.briefingFile()
+      let briefingPath = self.briefingFile()?.path
       return GhosttyTerminalNSView(
-        command: command(briefingFile: briefingFile),
+        command: command(briefingPath: briefingPath),
         workingDirectory: effectiveWorkingDirectory,
-        environment: sessionEnvironment(briefingFile: briefingFile))
+        environment: sessionEnvironment(briefingPath: briefingPath))
     }
     apply(to: view)
     host.adopt(view)
@@ -141,7 +147,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// directory only the remote shell knows, and the whole command is a `zsh -c` script
   /// precisely so the expansion happens there.
   func agentCommand(
-    settings: GraphcodeSettings = GraphcodeSettingsStore.load(), briefingFile: URL? = nil,
+    settings: GraphcodeSettings = GraphcodeSettingsStore.load(), briefingPath: String? = nil,
     hooksFile: URL? = nil, remoteSettingsPath: String? = nil
   ) -> [String]? {
     guard let executable = backend.executableName else { return nil }
@@ -179,12 +185,15 @@ struct GhosttyTerminalView: NSViewRepresentable {
     // Codex are granted the directory and pointed at the file inside their opening
     // prompt — see `sessionEnvironment`, where the pointer rides in the env var and so
     // needs no shell quoting.
-    if let briefingFile {
+    // A remote session's briefing path is `~/`-relative and deliberately unquoted
+    // here: this whole string is the remote zsh's `-c` script, and that shell's own
+    // tilde expansion is the only thing that knows the remote home directory.
+    if let briefingPath {
       switch backend {
       case .claudeCode:
-        parts.append("--append-system-prompt-file \(briefingFile.path)")
+        parts.append("--append-system-prompt-file \(briefingPath)")
       case .copilotCLI, .codex:
-        parts.append("--add-dir \(briefingFile.deletingLastPathComponent().path)")
+        parts.append("--add-dir \((briefingPath as NSString).deletingLastPathComponent)")
       }
     }
     if !prompt.isEmpty {
@@ -197,13 +206,22 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// Where the graph briefing for this session landed, or `nil` when it shouldn't get
   /// one: a plain shell, a surface with no opening prompt to carry the pointer, a
   /// briefing the human switched off, nowhere to write — or a remote project, whose
-  /// session runs on a machine this file was never written to (a stated v1 limitation,
-  /// docs/09-remote-repositories.md).
+  /// briefing is not a local file at all: `remoteBriefingPath` names where the attach
+  /// dial delivers it on the session's own host.
   func briefingFile(settings: GraphcodeSettings = GraphcodeSettingsStore.load()) -> URL? {
     guard launchesClaudeCode, initialPrompt != nil, settings.briefsSessionsAboutTheGraph,
       remoteLocation == nil
     else { return nil }
     return SessionBriefing.write(projectPath: projectPath)
+  }
+
+  /// The remote twin of `briefingFile`: the `~/`-relative path the briefing is
+  /// delivered to on the remote host, under the same guards.
+  func remoteBriefingPath(settings: GraphcodeSettings = GraphcodeSettingsStore.load()) -> String? {
+    guard launchesClaudeCode, initialPrompt != nil, settings.briefsSessionsAboutTheGraph,
+      remoteLocation != nil, let projectPath
+    else { return nil }
+    return RemoteGraphAccess.briefingPath(forProjectPath: projectPath)
   }
 
   /// Where this session's presence hooks landed, or `nil` when it shouldn't get any: a
@@ -237,10 +255,10 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// than on the command line because the pointer is prose — inside `"$VAR"` it needs no
   /// quoting and cannot break the shell string the command is joined into. Claude's
   /// prompt stays untouched: its briefing arrives via `--append-system-prompt-file`.
-  func sessionEnvironment(briefingFile: URL?) -> [String: String] {
+  func sessionEnvironment(briefingPath: String?) -> [String: String] {
     guard var prompt = initialPrompt else { return [:] }
-    if backend != .claudeCode, let briefingFile {
-      prompt = "\(SessionBriefing.pointer(toBriefingAt: briefingFile.path)) \(prompt)"
+    if backend != .claudeCode, let briefingPath {
+      prompt = "\(SessionBriefing.pointer(toBriefingAt: briefingPath)) \(prompt)"
     }
     return [Self.promptVariable: prompt]
   }
@@ -268,22 +286,23 @@ struct GhosttyTerminalView: NSViewRepresentable {
   ) -> [String] {
     RemoteProjectLocation.prepareControlSocketDirectory()
     let quoted = RemoteProjectLocation.shellQuoted
-    var script = "cd \(quoted(location.remotePath)) && "
+    let delivery =
+      ZmxSessionLauncher.remoteDeliveryScript(forNode: nil, at: location, settings: settings)
+      .map { $0 + "; " } ?? ""
+    let briefingPath = remoteBriefingPath(settings: settings)
+    var script = delivery + "cd \(quoted(location.remotePath)) && "
     let reconnectScript: String
     let agentLaunch =
       launchesClaudeCode
       ? agentCommand(
-        settings: settings,
+        settings: settings, briefingPath: briefingPath,
         remoteSettingsPath: backend == .claudeCode ? PresenceHooks.remotePathExpression : nil)
       : nil
     if let agentLaunch {
-      // The attach below creates the session when it doesn't exist yet, so the presence
-      // hooks are written first, on the host they will run on — the same file, same
-      // rewrite-per-launch bargain as the daemon's ensure (`remoteEnsureInvocation`).
       if backend == .claudeCode, let hooksWrite = PresenceHooks.remoteWriteFragment() {
         script += hooksWrite + " && "
       }
-      if let prompt = initialPrompt {
+      if let prompt = sessionEnvironment(briefingPath: briefingPath)[Self.promptVariable] {
         script += "export \(Self.promptVariable)=\(quoted(prompt)) && "
       }
       script += ZmxSessionLauncher.quotedCommand(["zmx", "attach", sessionName] + agentLaunch)
@@ -312,14 +331,14 @@ struct GhosttyTerminalView: NSViewRepresentable {
     return ["/bin/sh", "-c", SSHReconnectLoop.script(connect: connect, reconnect: reconnect)]
   }
 
-  private func command(briefingFile: URL?) -> [String] {
+  private func command(briefingPath: String?) -> [String] {
     // A remote project's surfaces live on the remote host, local zmx or not.
     if let location = remoteLocation {
       return remoteCommand(at: location, settings: GraphcodeSettingsStore.load())
     }
     let shell = ["/bin/zsh", "-l"]
     guard
-      let agentCommand = agentCommand(briefingFile: briefingFile, hooksFile: presenceHooksFile())
+      let agentCommand = agentCommand(briefingPath: briefingPath, hooksFile: presenceHooksFile())
     else {
       // A backend graphcode can't launch gets a plain shell rather than the wrong agent.
       // `canHost` already refuses to create such a node, so this is unreachable in

@@ -186,11 +186,13 @@ Design docs live in `docs/` and are kept local (gitignored) for now.
 - **Sessions aren't reaped.** Long-lived `graphcode-*` zmx sessions accumulate; list them
   with `zmx list` and remove dead ones with `zmx kill`.
 - **Remote repositories run over one multiplexed SSH connection per host.** Launch,
-  attach, kill, messages, and the presence/usage/activity readings all ride it; a
-  dropped link redials itself, degrades readings to "unknown" rather than "stopped",
-  and never resolves a loop it merely lost sight of. Worktrees and loop fan-out
-  aren't available there yet, and a sleeping Mac fires no edges — the daemon stays
-  local by design.
+  attach, kill, messages, fan-out, and presence/usage/activity readings all ride it;
+  a forwarded daemon socket and a delivered Python CLI shim make `graphcode node
+  create/send/memo` work on the remote host. A dropped link redials itself, degrades
+  readings to "unknown" rather than "stopped", and never resolves a loop it merely
+  lost sight of. Worktrees aren't available there, goal predicates run locally (write
+  an explicit `ssh host …` if the check is remote), and a sleeping Mac fires no
+  edges — the daemon stays local by design.
 
 ## Inspiration & third-party
 

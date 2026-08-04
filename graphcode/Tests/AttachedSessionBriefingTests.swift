@@ -13,7 +13,7 @@ import Testing
 /// sub-agents instead.
 @Suite
 struct AttachedSessionBriefingTests {
-  private let briefing = URL(fileURLWithPath: "/tmp/briefings/proj/AGENTS.md")
+  private let briefing = "/tmp/briefings/proj/AGENTS.md"
 
   private func surface(
     _ backend: CLISessionBackendKind, launchesClaudeCode: Bool = true,
@@ -26,15 +26,15 @@ struct AttachedSessionBriefingTests {
   }
 
   private func shellCommand(_ backend: CLISessionBackendKind) -> String {
-    surface(backend).agentCommand(settings: GraphcodeSettings(), briefingFile: briefing)?
+    surface(backend).agentCommand(settings: GraphcodeSettings(), briefingPath: briefing)?
       .last ?? ""
   }
 
   @Test
   func claudeTakesTheBriefingAsASystemPromptFile() {
-    #expect(shellCommand(.claudeCode).contains("--append-system-prompt-file \(briefing.path)"))
+    #expect(shellCommand(.claudeCode).contains("--append-system-prompt-file \(briefing)"))
     // And its prompt is not the delivery mechanism, so it stays untouched.
-    let environment = surface(.claudeCode).sessionEnvironment(briefingFile: briefing)
+    let environment = surface(.claudeCode).sessionEnvironment(briefingPath: briefing)
     #expect(environment["GRAPHCODE_TRIGGER_PROMPT"] == "go")
   }
 
@@ -47,9 +47,9 @@ struct AttachedSessionBriefingTests {
     #expect(command.contains("--interactive"))
 
     // The pointer rides inside the env var, where prose needs no shell quoting.
-    let environment = surface(.copilotCLI).sessionEnvironment(briefingFile: briefing)
+    let environment = surface(.copilotCLI).sessionEnvironment(briefingPath: briefing)
     let prompt = environment["GRAPHCODE_TRIGGER_PROMPT"] ?? ""
-    #expect(prompt.contains(briefing.path))
+    #expect(prompt.contains(briefing))
     #expect(prompt.hasSuffix(" go"))
   }
 
@@ -57,18 +57,18 @@ struct AttachedSessionBriefingTests {
   func codexRidesTheSameWayCopilotDoes() {
     #expect(shellCommand(.codex).contains("--add-dir /tmp/briefings/proj"))
     let prompt =
-      surface(.codex).sessionEnvironment(briefingFile: briefing)[
+      surface(.codex).sessionEnvironment(briefingPath: briefing)[
         "GRAPHCODE_TRIGGER_PROMPT"] ?? ""
-    #expect(prompt.contains(briefing.path))
+    #expect(prompt.contains(briefing))
   }
 
   @Test
   func noBriefingMeansTheCommandAndPromptOfBefore() {
     let command =
       surface(.copilotCLI).agentCommand(
-        settings: GraphcodeSettings(), briefingFile: nil)?.last ?? ""
+        settings: GraphcodeSettings(), briefingPath: nil)?.last ?? ""
     #expect(!command.contains("--add-dir"))
-    let environment = surface(.copilotCLI).sessionEnvironment(briefingFile: nil)
+    let environment = surface(.copilotCLI).sessionEnvironment(briefingPath: nil)
     #expect(environment["GRAPHCODE_TRIGGER_PROMPT"] == "go")
   }
 
