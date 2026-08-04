@@ -1,6 +1,11 @@
 [submodule "ThirdParty/ghostty"]
 	path = ThirdParty/ghostty
-	url = https://github.com/ghostty-org/ghostty.git
+	# A fork of ghostty-org/ghostty, not the upstream, because graphcode pins a commit
+	# that only exists on the fork's `graphcode-patches` branch: a plain link-modifier
+	# click (⌘-click) opens links even when the running TUI captures the mouse.
+	# Upstream is still the source of truth — the branch is rebased onto it, not a
+	# divergence to maintain.
+	url = https://github.com/scgopi/ghostty.git
 	shallow = true
 [submodule "ThirdParty/zmx"]
 	path = ThirdParty/zmx
