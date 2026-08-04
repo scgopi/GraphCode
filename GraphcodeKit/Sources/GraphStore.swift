@@ -52,13 +52,16 @@ public actor GraphStore {
   private let onAppendMemory: (@Sendable (UUID, String) -> Void)?
   /// Tears a deleted node's memory down alongside its session.
   private let onRemoveMemory: (@Sendable (UUID) -> Void)?
-  /// Whether this store is driving a composite's sub-graph rather than a project's own
-  /// graph — see `runInSubGraph`, which is the only thing that sets it.
+  /// How many composites deep this store sits: 0 at the project root, 1 inside the
+  /// first composite, and so on — see `runInSubGraph`, which increments it.
   ///
-  /// What hangs on it is one rule: a loop in a sub-graph is a *template* until the
-  /// composite is piloted. So nothing created here runs, and nothing created here may
-  /// claim to be running.
-  private let isSubGraph: Bool
+  /// Two things hang on it: (a) a loop in a sub-graph is a *template* until the
+  /// composite is piloted, so nothing created here runs or claims to be running; and
+  /// (b) nesting beyond `maxSubGraphDepth` is refused outright, so a runaway agent
+  /// can't stack composites forever.
+  private let subGraphDepth: Int
+  static let maxSubGraphDepth = 6
+  static let maxNodesPerGraph = 50
   private var goalPollers: [UUID: Task<Void, Never>] = [:]
 
   /// A poller holds `self` weakly, so a store going away already stops it *doing*
@@ -107,10 +110,10 @@ public actor GraphStore {
     onSpawnIntoProject: (@Sendable (String, NodeDraft) -> Void)? = nil,
     onAppendMemory: (@Sendable (UUID, String) -> Void)? = nil,
     onRemoveMemory: (@Sendable (UUID) -> Void)? = nil,
-    isSubGraph: Bool = false
+    subGraphDepth: Int = 0
   ) {
     self.graph = graph
-    self.isSubGraph = isSubGraph
+    self.subGraphDepth = subGraphDepth
     self.onGraphChanged = onGraphChanged
     self.onEnsureSession = onEnsureSession
     self.onTerminateSession = onTerminateSession
@@ -180,8 +183,14 @@ public actor GraphStore {
       if draft.backend == nil, let creator = draft.createdBy {
         draft.backend = graph.nodes[id: creator]?.backend
       }
-      // Validated here rather than only in the form: this protocol is reachable from the
-      // CLI too, and a rule only one client enforces isn't a rule.
+      guard graph.nodes.count < Self.maxNodesPerGraph else {
+        announceError("this graph already has \(graph.nodes.count) loops (limit \(Self.maxNodesPerGraph))")
+        return
+      }
+      if draft.loopType == .composite && subGraphDepth >= Self.maxSubGraphDepth {
+        announceError("composites are nested \(subGraphDepth) deep (limit \(Self.maxSubGraphDepth))")
+        return
+      }
       guard draft.isValid else { return }
       var node = draft.makeNode()
       // A goal loop is born `.running`, which is right on a project canvas and a lie in a
@@ -189,7 +198,7 @@ public actor GraphStore {
       // the first goal loop added rolled its composite up to RUNNING while `pilotState`
       // still read "Not piloted" and not one process existed — the card claimed the
       // routine was working, which is the exact opposite of what the pilot gate promises.
-      if isSubGraph { node.state = .idle }
+      if subGraphDepth > 0 { node.state = .idle }
       // The draft's id is client-chosen now (see `NodeDraft.id`), so a re-sent command
       // must not become a second node — or a crash: `IdentifiedArray.append` traps on a
       // duplicate id, and this protocol is reachable from any client.
@@ -341,7 +350,7 @@ public actor GraphStore {
       onCaptureScript: onCaptureScript,
       onAppendMemory: onAppendMemory,
       onRemoveMemory: onRemoveMemory,
-      isSubGraph: true)
+      subGraphDepth: subGraphDepth + 1)
     await child.handle(command)
     graph.nodes[id: nodeID]?.subGraph = await child.graph
     rollUpComposite(nodeID)

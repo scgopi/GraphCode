@@ -107,7 +107,7 @@ public struct RemoteProjectLocation: Equatable, Sendable {
       "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
       "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3",
       "-o", "ControlMaster=auto", "-o", "ControlPath=\(Self.controlSocketDirectory.path)/%C",
-      "-o", "ControlPersist=600",
+      "-o", "ControlPersist=3600",
     ]
     if let port { invocation += ["-p", String(port)] }
     invocation += [sshDestination, "--", remoteCommand]

@@ -93,6 +93,75 @@ struct CompositeAndGlobalGraphTests {
   }
 
   @Test
+  func aSubGraphRefusesMoreNodesThanTheLimit() async {
+    let (store, compositeID) = await storeWithComposite()
+    for i in 0..<GraphStore.maxNodesPerGraph {
+      await store.handle(
+        .subGraphCommand(
+          nodeID: compositeID,
+          command: .createNode(
+            NodeDraft(title: "N\(i)", loopType: .turnBased, checkDescription: "?",
+                      firstInstruction: "Work"))))
+    }
+    #expect(await store.graph.nodes[id: compositeID]?.subGraph?.nodes.count
+            == GraphStore.maxNodesPerGraph)
+
+    await store.handle(
+      .subGraphCommand(
+        nodeID: compositeID,
+        command: .createNode(
+          NodeDraft(title: "One too many", loopType: .turnBased, checkDescription: "?",
+                    firstInstruction: "Work"))))
+
+    #expect(await store.graph.nodes[id: compositeID]?.subGraph?.nodes.count
+            == GraphStore.maxNodesPerGraph)
+  }
+
+  @Test
+  func compositesCannotNestDeeperThanTheLimit() async {
+    let store = GraphStore(
+      graph: LoopGraph(project: ProjectRef(path: "/tmp/p", name: "p")))
+
+    var parentID: UUID?
+    for i in 0...GraphStore.maxSubGraphDepth {
+      let draft = NodeDraft(title: "Level \(i)", loopType: .composite)
+      if let pid = parentID {
+        await store.handle(.subGraphCommand(nodeID: pid, command: .createNode(draft)))
+      } else {
+        await store.handle(.createNode(draft))
+      }
+      let graph = await store.graph
+      if let pid = parentID {
+        func findComposite(in g: LoopGraph, id: UUID) -> LoopNode? {
+          for node in g.nodes {
+            if node.id == id { return node }
+            if let sub = node.subGraph, let found = findComposite(in: sub, id: id) {
+              return found
+            }
+          }
+          return nil
+        }
+        parentID = findComposite(in: graph, id: pid)?.subGraph?.nodes.last?.id
+      } else {
+        parentID = graph.nodes.last?.id
+      }
+    }
+
+    func maxDepth(of graph: LoopGraph) -> Int {
+      var deepest = 0
+      for node in graph.nodes {
+        if let sub = node.subGraph {
+          deepest = max(deepest, 1 + maxDepth(of: sub))
+        }
+      }
+      return deepest
+    }
+
+    let graph = await store.graph
+    #expect(maxDepth(of: graph) <= GraphStore.maxSubGraphDepth)
+  }
+
+  @Test
   func aSubGraphIsOrchestratedByTheSameRulesAsAnyGraph() async {
     // "No separate execution engine" — a composite's insides take the very same commands
     // and fire edges the same way.
