@@ -48,9 +48,26 @@ struct AppVersion: Equatable, Comparable, Sendable {
   }
 }
 
-/// The slice of a GitHub release the update check reads —
-/// `GET /repos/…/releases/latest`, which is GitHub's own "newest stable": drafts and
-/// prereleases never appear in it, matching what the DMG link and the cask ship.
+/// Which release line the check follows. Stable installs ask `releases/latest`, GitHub's
+/// own "newest stable", exactly as before; a beta build also weighs prereleases from the
+/// releases list, because `releases/latest` by definition never mentions a newer beta.
+enum UpdateChannel: String, Equatable, Sendable {
+  case stable
+  case beta
+
+  /// The channel an install follows: an explicit override wins, otherwise the installed
+  /// version speaks for itself — a prerelease build is on the beta channel. An override
+  /// that names neither channel is ignored rather than guessed at.
+  static func channel(for current: String, override: String?) -> UpdateChannel {
+    if let override, let chosen = UpdateChannel(rawValue: override) { return chosen }
+    return AppVersion(current)?.prerelease != nil ? .beta : .stable
+  }
+}
+
+/// The slice of a GitHub release the update check reads — one element of
+/// `GET /repos/…/releases`, or `releases/latest`, GitHub's own "newest stable": drafts
+/// and prereleases never appear in the latter, matching what the DMG link and the cask
+/// ship.
 struct UpdateRelease: Equatable, Sendable, Decodable {
   struct Asset: Equatable, Sendable, Decodable {
     var name: String
@@ -108,5 +125,17 @@ enum AppUpdate {
       currentVersion: current,
       downloadURL: release.dmgDownloadURL ?? release.htmlURL,
       releaseNotesURL: release.htmlURL)
+  }
+
+  /// The beta-channel decision: the newest of all releases — prereleases included —
+  /// judged by the same ordering. Stables are in the list too, so a beta install is
+  /// walked forward to the stable that closes its line, and a tag that doesn't parse
+  /// as a version simply doesn't compete.
+  static func available(current: String, releases: [UpdateRelease]) -> AvailableUpdate? {
+    let versioned = releases.compactMap { release in
+      AppVersion(release.tagName).map { ($0, release) }
+    }
+    guard let newest = versioned.max(by: { $0.0 < $1.0 })?.1 else { return nil }
+    return available(current: current, release: newest)
   }
 }

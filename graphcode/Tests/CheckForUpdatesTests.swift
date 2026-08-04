@@ -50,6 +50,21 @@ struct CheckForUpdatesTests {
     #expect(AppVersion("1.two.3") == nil)
   }
 
+  // MARK: - The channel
+
+  @Test
+  func theInstalledVersionPicksTheChannelAndAnOverrideWins() {
+    // A beta build follows betas, a stable install follows stables — no setting needed.
+    #expect(UpdateChannel.channel(for: "0.1.15-beta2", override: nil) == .beta)
+    #expect(UpdateChannel.channel(for: "0.1.15", override: nil) == .stable)
+    // The explicit setting beats the version in both directions.
+    #expect(UpdateChannel.channel(for: "0.1.15", override: "beta") == .beta)
+    #expect(UpdateChannel.channel(for: "0.1.15-beta2", override: "stable") == .stable)
+    // Garbage in the default and an unversioned dev build both fall back safely.
+    #expect(UpdateChannel.channel(for: "0.1.15", override: "nightly") == .stable)
+    #expect(UpdateChannel.channel(for: "unversioned", override: nil) == .stable)
+  }
+
   // MARK: - The release JSON
 
   private func release(_ json: String) throws -> UpdateRelease {
@@ -155,6 +170,88 @@ struct CheckForUpdatesTests {
     #expect(AppUpdate.available(current: "0.1.14", release: badTag) == nil)
   }
 
+  /// The releases list as the beta channel sees it: the newest beta, its predecessor,
+  /// and the stable line's newest, in GitHub's newest-first order.
+  private let releasesListJSON = """
+    [
+      {
+        "tag_name": "0.1.15-beta2",
+        "html_url": "https://example.com/releases/tag/0.1.15-beta2",
+        "prerelease": true,
+        "assets": [
+          {
+            "name": "graphcode-macos-arm64.dmg",
+            "browser_download_url": "https://example.com/0.1.15-beta2/graphcode-macos-arm64.dmg"
+          }
+        ]
+      },
+      {
+        "tag_name": "0.1.15-beta1",
+        "html_url": "https://example.com/releases/tag/0.1.15-beta1",
+        "prerelease": true,
+        "assets": []
+      },
+      {
+        "tag_name": "v0.1.14",
+        "html_url": "https://example.com/releases/tag/v0.1.14",
+        "prerelease": false,
+        "assets": []
+      }
+    ]
+    """
+
+  private func releasesList() throws -> [UpdateRelease] {
+    try JSONDecoder().decode([UpdateRelease].self, from: Data(releasesListJSON.utf8))
+  }
+
+  @Test
+  func aBetaInstallSeesTheNewerBetaAndItsDMG() throws {
+    // The issue's acceptance case: 0.1.15-beta1 is walked to 0.1.15-beta2.
+    let update = try AppUpdate.available(current: "0.1.15-beta1", releases: releasesList())
+    #expect(update?.version == "0.1.15-beta2")
+    #expect(
+      update?.downloadURL.absoluteString
+        == "https://example.com/0.1.15-beta2/graphcode-macos-arm64.dmg")
+
+    #expect(try AppUpdate.available(current: "0.1.15-beta2", releases: releasesList()) == nil)
+  }
+
+  @Test
+  func aStableThatClosesTheBetaLineWinsOverTheBetas() throws {
+    // Once v0.1.15 ships it outranks its own betas — the beta install is walked to
+    // the stable, not left on the prerelease line.
+    var releases = try releasesList()
+    releases.append(
+      try release(
+        """
+        {
+          "tag_name": "v0.1.15",
+          "html_url": "https://example.com/releases/tag/v0.1.15",
+          "assets": []
+        }
+        """))
+    let update = AppUpdate.available(current: "0.1.15-beta2", releases: releases)
+    #expect(update?.version == "0.1.15")
+  }
+
+  @Test
+  func unversionedTagsDoNotCompeteAndAnEmptyListOffersNothing() throws {
+    var releases = try releasesList()
+    releases.insert(
+      try release(
+        """
+        {
+          "tag_name": "nightly",
+          "html_url": "https://example.com/releases/tag/nightly",
+          "assets": []
+        }
+        """), at: 0)
+    let update = AppUpdate.available(current: "0.1.15-beta1", releases: releases)
+    #expect(update?.version == "0.1.15-beta2")
+
+    #expect(AppUpdate.available(current: "0.1.15-beta1", releases: []) == nil)
+  }
+
   // MARK: - The flow
 
   private func fixtureRelease() throws -> UpdateRelease {
@@ -180,6 +277,46 @@ struct CheckForUpdatesTests {
     #expect(!store.state.isCheckingForUpdates)
     #expect(store.state.availableUpdate?.version == "0.2.0")
     #expect(store.state.updateNotice == nil)
+  }
+
+  @Test
+  @MainActor
+  func aBetaBuildChecksTheReleasesListAndIsOfferedTheNewerBeta() async throws {
+    // `latestRelease` keeps the throwing test default — if the beta channel touched
+    // GitHub's stable answer at all, this test would fail with a check error.
+    let releases = try releasesList()
+    let store = TestStore(initialState: AppFeature.State()) {
+      AppFeature()
+    } withDependencies: {
+      $0.updateClient.allReleases = { releases }
+      $0.updateClient.currentVersion = { "0.1.15-beta1" }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.checkForUpdatesTapped)
+    await store.receive(\.updateCheckCompleted)
+
+    #expect(store.state.availableUpdate?.version == "0.1.15-beta2")
+    #expect(store.state.updateNotice == nil)
+  }
+
+  @Test
+  @MainActor
+  func aStableInstallOptedIntoBetaIsOfferedTheBetaToo() async throws {
+    let releases = try releasesList()
+    let store = TestStore(initialState: AppFeature.State()) {
+      AppFeature()
+    } withDependencies: {
+      $0.updateClient.allReleases = { releases }
+      $0.updateClient.currentVersion = { "0.1.14" }
+      $0.updateClient.channelOverride = { "beta" }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.checkForUpdatesTapped)
+    await store.receive(\.updateCheckCompleted)
+
+    #expect(store.state.availableUpdate?.version == "0.1.15-beta2")
   }
 
   @Test
