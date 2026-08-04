@@ -4,7 +4,9 @@ import Foundation
 /// `0.1.14-beta3`. One parser for both sides of the comparison, because the two
 /// spellings genuinely differ: stable tags carry a `v` prefix, beta tags don't
 /// (see `TAG_PREFIX` in the Makefile), and the bundle's own
-/// `CFBundleShortVersionString` carries neither prefix nor prerelease.
+/// `CFBundleShortVersionString` never carries the prefix — though since
+/// 0.1.15-beta3 a beta's does carry its prerelease suffix, which is what lets
+/// `UpdateChannel` recognise a beta install by its version alone.
 struct AppVersion: Equatable, Comparable, Sendable {
   var release: [Int]
   /// The prerelease's number — `0.1.14-beta3` is `3`. `nil` means a stable version,
