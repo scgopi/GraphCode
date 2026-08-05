@@ -29,7 +29,7 @@ struct RemoteLoopSurvivalTests {
     let invocation = location.sshInvocation(remoteCommand: "true")
     #expect(invocation.contains("ControlMaster=auto"))
     #expect(invocation.contains { $0.hasPrefix("ControlPath=") && $0.hasSuffix("/%C") })
-    #expect(invocation.contains("ControlPersist=3600"))
+    #expect(invocation.contains("ControlPersist=43200"))
     // The sockets live under the support directory, whose short path is what keeps
     // `ControlPath` inside Darwin's 104-byte `sun_path`.
     let controlPath = invocation.first { $0.hasPrefix("ControlPath=") } ?? ""
