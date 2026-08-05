@@ -112,6 +112,12 @@ struct PresenceReportingTests {
       state: state)
   }
 
+  private func node(_ state: LoopState, _ presence: Presence?, activeDependents: Bool) -> LoopNode {
+    var n = node(state, presence)
+    n.hasActiveDependents = activeDependents
+    return n
+  }
+
   @Test
   func aLoopThatFinishedItsTurnStopsClaimingToRun() {
     // The reported complaint, in one assertion.
@@ -129,6 +135,13 @@ struct PresenceReportingTests {
   @Test
   func aVanishedSessionIsNotWorkEither() {
     #expect(node(.running, .absent).displayState == .idle)
+  }
+
+  @Test
+  func aQuietSessionWithActiveDependentsIsWaiting() {
+    #expect(node(.running, .idle, activeDependents: true).displayState == .waiting)
+    #expect(node(.running, .absent, activeDependents: true).displayState == .waiting)
+    #expect(node(.running, .busy, activeDependents: true).displayState == .running)
   }
 
   @Test

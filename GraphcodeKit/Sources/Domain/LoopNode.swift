@@ -89,6 +89,10 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// been polled yet, or `zmx` not installed. Every surface treats that as "no better
   /// information than `state`", which is exactly what shipped before this existed.
   public var presence: PresenceReading?
+  /// Whether this node has outgoing fired edges to unresolved nodes. Set by
+  /// `GraphStore.refreshPresence` alongside `presence` — same lifecycle, same
+  /// non-persistence guarantee. Drives the `.waiting` derivation in `displayState`.
+  public var hasActiveDependents: Bool = false
   /// Recent readings of the goal's `metricCommand`, oldest first — one per cycle pass,
   /// capped at `LoopNode.maxMetricSamples` so per-poll persistence stays bounded. The
   /// full unbounded series lives in the node's memory log; this is the cache the canvas
@@ -244,10 +248,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     guard state == .running, let presence = presence?.presence else { return state }
     switch presence {
     case .busy: return .running
-    // `.idle` is already the word for both readings a stopped-for-now loop deserves —
-    // "SCHEDULED" for a time-based loop between ticks, "IDLE" for anything else — so this
-    // needs no ninth state, only the honesty to use the eighth.
-    case .idle, .absent: return .idle
+    case .idle, .absent: return hasActiveDependents ? .waiting : .idle
     // The combination `Presence` was written for: running in the graph, waiting on a
     // human in its session.
     case .awaitingInput: return .awaitingInput
@@ -262,7 +263,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   public var isResolved: Bool {
     switch state {
     case .succeeded, .failed, .stalled, .stopped: return true
-    case .idle, .running, .awaitingInput, .blocked: return false
+    case .idle, .running, .awaitingInput, .blocked, .waiting: return false
     }
   }
 

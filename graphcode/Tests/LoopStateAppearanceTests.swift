@@ -49,11 +49,14 @@ struct LoopStateAppearanceTests {
     // every hue unique and the shape channel quietly stops being exercised.
     #expect(LoopState.awaitingInput.indicatorTint == LoopState.blocked.indicatorTint)
     #expect(LoopState.idle.indicatorTint == LoopState.stopped.indicatorTint)
+    #expect(LoopState.running.indicatorTint == LoopState.waiting.indicatorTint)
     #expect(LoopState.blocked.indicatorIsHollow)
     #expect(LoopState.stopped.indicatorIsHollow)
+    #expect(LoopState.waiting.indicatorIsHollow)
     #expect(!LoopState.awaitingInput.indicatorIsHollow)
     #expect(!LoopState.idle.indicatorIsHollow)
-    #expect(allStates.filter(\.indicatorIsHollow).count == 2)
+    #expect(!LoopState.running.indicatorIsHollow)
+    #expect(allStates.filter(\.indicatorIsHollow).count == 3)
   }
 
   @Test
