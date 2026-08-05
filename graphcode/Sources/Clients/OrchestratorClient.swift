@@ -84,6 +84,7 @@ private actor DaemonConnection {
           do {
             let fileDescriptor = try await ensureConnected()
             connectedDescriptor = fileDescriptor
+            if await isReconnect() { try await rejoinProjects() }
             while true {
               let data = try await readFrameAsync(from: fileDescriptor)
               let event = try JSONDecoder().decode(DaemonEvent.self, from: data)
@@ -98,6 +99,34 @@ private actor DaemonConnection {
       }
       continuation.onTermination = { _ in task.cancel() }
     }
+  }
+
+  /// Whether a connection has been established before this one — `AppFeature.task` sends
+  /// the join commands for the first, and `rejoinProjects` covers every one after it.
+  private var hasConnectedBefore = false
+
+  private func isReconnect() -> Bool {
+    defer { hasConnectedBefore = true }
+    return hasConnectedBefore
+  }
+
+  /// Re-announces which projects this client wants, on a socket that replaced one that
+  /// failed.
+  ///
+  /// `graphcoded` keys a client's joined projects by *connection*
+  /// (`ProjectRegistry.connectionProjectPaths`), and the app asked to join from
+  /// `AppFeature.task` — once, at launch. So a reconnect left the new socket attached to
+  /// no `GraphStore` at all: commands still arrived and still took effect, but every
+  /// broadcast went to the connection that had gone. The app looked connected and stayed
+  /// frozen on whatever it last knew, which is how deleting a loop could remove it from
+  /// the daemon's graph while its row sat in the sidebar until the next relaunch.
+  ///
+  /// The same two commands the launch path sends: the daemon's own open-projects set is
+  /// the right one to restore from, and the global graph is joined by name because it is
+  /// deliberately not in that set.
+  private func rejoinProjects() async throws {
+    try await send(.restoreOpenProjects)
+    try await send(.openGlobalGraph)
   }
 
   func send(_ command: DaemonCommand) async throws {
