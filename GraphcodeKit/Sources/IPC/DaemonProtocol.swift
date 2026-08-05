@@ -13,8 +13,10 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
   case listRecentProjects
   case openProject(path: String)
   /// Reopen whichever projects were showing in the sidebar when the app last quit. Sent
-  /// once at launch; the daemon replies with one `.graphChanged` per project, which is
-  /// exactly what `.openProject` produces, so the app needs no separate restore path.
+  /// at launch and again on every reconnect — joining is per-connection, so a client that
+  /// dialled again is joined to nothing until it asks a second time. The daemon replies
+  /// with one `.graphChanged` per project, which is exactly what `.openProject` produces,
+  /// so the app needs no separate restore path.
   case restoreOpenProjects
   /// Join the one always-resident global Orchestrator Graph. It arrives as an ordinary
   /// `.graphChanged` like any project's, distinguishable by its reserved

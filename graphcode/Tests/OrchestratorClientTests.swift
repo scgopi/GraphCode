@@ -56,6 +56,37 @@ struct OrchestratorClientTests {
     #expect(await received == .errorOccurred("late but connected"))
   }
 
+  @Test
+  func reconnectingRejoinsTheProjectsItHadOpen() async throws {
+    // Joining is per-connection on the daemon's side, and the app asked to join once, from
+    // `AppFeature.task`. So a client that lost its socket dialled again and was attached to
+    // no `GraphStore` at all: commands still arrived and still took effect, but no
+    // broadcast ever came back. Deleting a loop removed it from the daemon's graph and left
+    // its row in the sidebar until the next relaunch.
+    let daemon = try StubDaemon()
+    defer { daemon.stop() }
+    let client = OrchestratorClient.live(socketPath: daemon.socketPath)
+
+    let events = client.connect()
+    async let received = firstEvent(of: events)
+    try await client.send(.listRecentProjects)
+    let opening = try #require(await daemon.nextCommand())
+    #expect(opening == .listRecentProjects)
+
+    // The daemon hangs up, the way a restart does.
+    daemon.closeConnection(at: 0)
+
+    // The replacement socket announces itself instead of waiting to be spoken to.
+    let rejoin = try #require(await daemon.nextCommand(onConnection: 1))
+    #expect(rejoin == .restoreOpenProjects)
+    let joinGlobal = try #require(await daemon.nextCommand(onConnection: 1))
+    #expect(joinGlobal == .openGlobalGraph)
+
+    // And it's a live subscription, not merely an open socket.
+    try daemon.reply(.errorOccurred("after reconnect"), onConnection: 1)
+    #expect(await received == .errorOccurred("after reconnect"))
+  }
+
   private func firstEvent(of events: AsyncStream<DaemonEvent>) async -> DaemonEvent? {
     for await event in events { return event }
     return nil
@@ -132,12 +163,12 @@ private final class StubDaemon: @unchecked Sendable {
     lock.withLock { acceptedDescriptors.count }
   }
 
-  /// Reads one framed command off the first accepted connection, waiting for the accept
-  /// to land. Blocking reads run off the cooperative pool.
-  func nextCommand() async -> DaemonCommand? {
+  /// Reads one framed command off an accepted connection, waiting for the accept to land.
+  /// Blocking reads run off the cooperative pool.
+  func nextCommand(onConnection index: Int = 0) async -> DaemonCommand? {
     await withCheckedContinuation { continuation in
       DispatchQueue.global().async { [self] in
-        guard let descriptor = waitForFirstConnection(),
+        guard let descriptor = waitForConnection(at: index),
           let data = try? FramedMessageIO.readFrame(from: descriptor),
           let command = try? JSONDecoder().decode(DaemonCommand.self, from: data)
         else {
@@ -150,25 +181,40 @@ private final class StubDaemon: @unchecked Sendable {
   }
 
   /// Writes an event back the way `graphcoded` does — on the accepted connection.
-  func reply(_ event: DaemonEvent) throws {
-    guard let descriptor = waitForFirstConnection() else { throw StubError.noConnection }
+  func reply(_ event: DaemonEvent, onConnection index: Int = 0) throws {
+    guard let descriptor = waitForConnection(at: index) else { throw StubError.noConnection }
     try FramedMessageIO.writeFrame(try JSONEncoder().encode(event), to: descriptor)
+  }
+
+  /// Hangs up on one accepted connection, leaving the listener up — a daemon restart as
+  /// the client experiences it. The slot is blanked rather than removed so later
+  /// connections keep their indices, and so `stop` doesn't close the number twice.
+  func closeConnection(at index: Int) {
+    lock.withLock {
+      guard acceptedDescriptors.indices.contains(index), acceptedDescriptors[index] >= 0
+      else { return }
+      close(acceptedDescriptors[index])
+      acceptedDescriptors[index] = -1
+    }
   }
 
   func stop() {
     lock.withLock {
       guard !stopped else { return }
       stopped = true
-      for descriptor in acceptedDescriptors { close(descriptor) }
+      for descriptor in acceptedDescriptors where descriptor >= 0 { close(descriptor) }
       acceptedDescriptors = []
     }
     close(listenerDescriptor)
     try? FileManager.default.removeItem(at: socketPath)
   }
 
-  private func waitForFirstConnection() -> Int32? {
+  private func waitForConnection(at index: Int) -> Int32? {
     for _ in 0..<200 {
-      if let descriptor = lock.withLock({ acceptedDescriptors.first }) { return descriptor }
+      let descriptor = lock.withLock {
+        acceptedDescriptors.indices.contains(index) ? acceptedDescriptors[index] : nil
+      }
+      if let descriptor, descriptor >= 0 { return descriptor }
       usleep(25_000)
     }
     return nil
