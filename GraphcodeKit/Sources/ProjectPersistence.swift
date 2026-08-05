@@ -26,7 +26,12 @@ public struct ProjectPersistence: Sendable {
 
   public func loadGraph(path: String) -> LoopGraph? {
     guard let data = try? Data(contentsOf: fileURL(forProjectPath: path)) else { return nil }
-    return try? JSONDecoder().decode(LoopGraph.self, from: data)
+    guard var graph = try? JSONDecoder().decode(LoopGraph.self, from: data) else { return nil }
+    for index in graph.nodes.indices {
+      graph.nodes[index].presence = nil
+      graph.nodes[index].activity = nil
+    }
+    return graph
   }
 
   public func saveGraph(_ graph: LoopGraph) {

@@ -356,7 +356,7 @@ extension GraphcodeCommand {
       return lines.joined(separator: "\n")
     }
     for node in graph.nodes {
-      var line = "  \(node.id)  \(node.state)  \(node.loopType)  \(node.title)"
+      var line = "  \(node.id)  \(node.displayState)  \(node.loopType)  \(node.title)"
       if let reason = AttentionRollup.reason(for: node) {
         line += "  ← \(reason.displayName)"
       }

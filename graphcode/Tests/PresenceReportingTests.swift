@@ -169,13 +169,20 @@ struct PresenceReportingTests {
   }
 
   @Test
-  func aReadingIsNeverRestoredFromDisk() throws {
-    // A persisted `busy` would be the exact lie the field was added to remove: by the
-    // time a graph is reloaded, the session it described is gone.
+  func aReadingSurvivesTheWire() throws {
+    // The daemon encodes presence into the graph it sends to clients. The decoder must
+    // preserve it, or every surface sees `.running` for a loop whose agent stopped an
+    // hour ago — the exact failure the presence system was built to fix.
     let encoded = try JSONEncoder().encode(node(.running, .busy))
     let decoded = try JSONDecoder().decode(LoopNode.self, from: encoded)
 
-    #expect(decoded.presence == nil)
+    #expect(decoded.presence?.presence == .busy)
     #expect(decoded.displayState == .running)
+
+    let idleEncoded = try JSONEncoder().encode(node(.running, .idle))
+    let idleDecoded = try JSONDecoder().decode(LoopNode.self, from: idleEncoded)
+
+    #expect(idleDecoded.presence?.presence == .idle)
+    #expect(idleDecoded.displayState == .idle)
   }
 }

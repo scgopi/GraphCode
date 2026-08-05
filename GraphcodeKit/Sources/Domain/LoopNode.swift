@@ -298,12 +298,8 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     subGraph = try container.decodeIfPresent(LoopGraph.self, forKey: .subGraph)
     pilotState = try container.decodeIfPresent(PilotState.self, forKey: .pilotState) ?? .notPiloted
     usage = try container.decodeIfPresent(UsageSample.self, forKey: .usage)
-    // Never restored from disk as live facts — a session's last reported line, and what
-    // it was doing when it wrote it, are both about a session that is no longer running
-    // by the time a graph is reloaded. A persisted `busy` would be the exact lie this
-    // field was added to remove.
-    activity = nil
-    presence = nil
+    activity = try container.decodeIfPresent(String.self, forKey: .activity)
+    presence = try container.decodeIfPresent(PresenceReading.self, forKey: .presence)
     metricHistory =
       try container.decodeIfPresent([MetricSample].self, forKey: .metricHistory) ?? []
     createdBy = try container.decodeIfPresent(UUID.self, forKey: .createdBy)
