@@ -179,14 +179,6 @@ extension AppSidebarView {
   }
 
   /// This project's top-level rows, in the human's arrangement (`sidebarNodeOrder`).
-  ///
-  /// `startAnchors`, not a bare "nodes nothing points at" filter — the difference is a
-  /// bug this row tree had and the canvas never did: a closed cycle (a maker↔reviewer
-  /// pair, forward edge one way, guarded back-edge the other) has no node without an
-  /// inbound edge, so a walk from no-inbound roots alone dropped the whole cycle from
-  /// the sidebar — two loops running, neither listed. `startAnchors` anchors each
-  /// cycle-only component at its first node, and reusing it means the sidebar and the
-  /// canvas can never again disagree about which nodes exist.
   func orderedRootNodes(in project: ProjectFeature.State) -> [LoopNode] {
     let roots = project.graph.startAnchors.compactMap { project.graph.nodes[id: $0] }
     let order = project.sidebarNodeOrder
@@ -205,11 +197,7 @@ extension AppSidebarView {
   }
 
   /// The loop tree flattened to the rows currently visible, depth-first — parents
-  /// first, each expanded parent followed by its children one level deeper. A flat
-  /// emission rather than nested `DisclosureGroup`s for the same reason the file
-  /// header gives for projects: the group's label swallows selection taps, and its
-  /// List styling outdents children instead of indenting them. `visited` guards
-  /// against edge cycles, which the graph explicitly allows (see `CycleGuard`).
+  /// first, each expanded parent followed by its children one level deeper.
   func flattenedNodeRows(in project: ProjectFeature.State) -> [NodeRowEntry] {
     var rows: [NodeRowEntry] = []
     var visited = Set<UUID>()
@@ -235,17 +223,9 @@ extension AppSidebarView {
     return rows
   }
 
-  /// A loop row at its place in the tree: indented one step per level — rightward,
-  /// under its parent. Its disclosure chevron sits at the trailing end and only under
-  /// the pointer, the same arrangement as the header rows, so titles share a left edge
-  /// with nothing reserved in front of them.
   func nestedNodeRow(_ entry: NodeRowEntry, in project: ProjectFeature.State) -> some View {
     HStack(spacing: 4) {
       nodeRow(for: entry.node)
-      // Always drawn when there are children, not only under the pointer: a hover-only
-      // chevron hid the very *existence* of collapsed children, and rows with loops
-      // beneath them read as leaves — running loops "missing" from the sidebar. Dimmer
-      // than the hover controls so quiet rows stay quiet, but never absent.
       if entry.hasChildren {
         Button {
           toggleNodeExpanded(entry.node.id)

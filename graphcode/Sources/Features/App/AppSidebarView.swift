@@ -67,11 +67,6 @@ struct AppSidebarView: View {
     sidebarList
       .listStyle(.sidebar)
       .onReceive(CanvasClock.tick) { sidebarNow = $0 }
-      // A loop that fans out shouldn't hide its children behind an unexpanded chevron —
-      // the human watching the sidebar should see new loops appear, not wonder where
-      // they went. Every newly drawn hand-off's parent chain is disclosed the moment the
-      // edge shows up — which is the moment a loop stops being a root row and starts
-      // being a child one; existing edges on relaunch stay as the human left them.
       .onChange(of: allEdgeIDs, initial: true) { _, current in
         if let known = knownEdgeIDs {
           expandedNodeIDs.formUnion(
@@ -301,7 +296,7 @@ struct AppSidebarView: View {
 
   private var sidebarList: some View {
     List(selection: selectionBinding) {
-      attentionSection
+      // attentionSection(collapsed: $attentionCollapsed)
       // The Graph first, then Quick Chats as a project-like row of its own — a peer of
       // the folders, just not tied to one — then the folders under captioned group
       // headers, split by where they live: the app's own surfaces on top, local
@@ -344,8 +339,10 @@ struct AppSidebarView: View {
 
   /// Whether the Local Projects / Remote Repositories groups are folded away. View
   /// state like the chats' own flag: a fold is a reading preference, not graph state.
+  @State private var attentionCollapsed = true
   @State private var localSectionCollapsed = false
   @State private var remoteSectionCollapsed = false
+  static let attentionSectionKey = "section-needs-you"
   static let localSectionKey = "section-local-projects"
   static let remoteSectionKey = "section-remote-repositories"
 

@@ -21,10 +21,7 @@ extension AppSidebarView {
   /// nothing needs attention — an always-present empty queue trains people to stop
   /// looking at it.
   @ViewBuilder
-  var attentionSection: some View {
-    // Oldest first, not worst first. This is a queue someone works through rather than a
-    // list they read, and the loop ignored longest is the one to answer next — the same
-    // order ⌘⇧R walks. See `Array<AttentionItem>.oldestFirst`.
+  func attentionSection(collapsed: Binding<Bool>) -> some View {
     let items = store.attentionItems.oldestFirst
     if !items.isEmpty {
       HStack(spacing: 6) {
@@ -39,13 +36,43 @@ extension AppSidebarView {
           .padding(.horizontal, 6)
           .background(Self.badgeFill, in: Capsule())
         Spacer(minLength: 0)
+        Image(systemName: collapsed.wrappedValue ? "chevron.right" : "chevron.down")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .frame(width: 12)
       }
-      ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-        // Only the oldest is tinted. Tinting all of them would make the section one
-        // amber block, which says "several things are wrong" and not "start here".
-        attentionRow(for: item, isOldest: index == 0)
+      .contentShape(Rectangle())
+      .onTapGesture { collapsed.wrappedValue.toggle() }
+      if collapsed.wrappedValue {
+        ForEach(items) { item in
+          attentionRowCompact(for: item)
+        }
+      } else {
+        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+          attentionRow(for: item, isOldest: index == 0)
+        }
       }
       Divider()
+    }
+  }
+
+  private func attentionRowCompact(for item: AttentionItem) -> some View {
+    HStack(spacing: 7) {
+      StateIndicator(state: state(for: item.reason), diameter: 7)
+      Text(item.nodeTitle)
+        .font(.system(size: 12))
+        .foregroundStyle(.white.opacity(0.85))
+        .lineLimit(1)
+      Spacer(minLength: 4)
+    }
+    .padding(.vertical, 2)
+    .padding(.horizontal, 8)
+    .contentShape(Rectangle())
+    .onTapGesture { store.send(.attentionItemTapped(item)) }
+    .contextMenu {
+      Button("Stop Loop", role: .destructive) {
+        store.send(.stopNodeTapped(projectPath: item.projectPath, nodeID: item.nodeID))
+      }
     }
   }
 
@@ -57,16 +84,12 @@ extension AppSidebarView {
           .font(.system(size: 12.5))
           .foregroundStyle(.white.opacity(0.92))
           .lineLimit(1)
-        // The project name matters here in a way it doesn't in the per-project rows
-        // below: this list is the one place loops from different projects sit together.
         Text("\(item.reason.displayName) · \(item.projectName)")
           .font(.system(size: 10.5))
           .foregroundStyle(Self.reasonInk)
           .lineLimit(1)
       }
       Spacer(minLength: 4)
-      // How long it has been waiting. The one fact that turns a list of names into an
-      // order of work, and the rollup was already sorting on it.
       Text(LoopCardPresentation.duration(sidebarNow.timeIntervalSince(item.createdAt)))
         .font(.system(size: 10.5, design: .monospaced))
         .foregroundStyle(.white.opacity(0.52))
