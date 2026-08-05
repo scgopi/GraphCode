@@ -35,7 +35,8 @@ public enum MessageBus {
       return .backendCannotAcceptInput
     }
     if node.state == .awaitingInput { return .targetBusyWithACheck }
-    guard node.state == .running || node.state == .idle else { return .targetNotLive }
+    guard node.state == .running || node.state == .idle || node.state == .waiting
+    else { return .targetNotLive }
     return nil
   }
 

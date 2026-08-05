@@ -11,6 +11,7 @@ extension LoopState {
     switch self {
     case .idle: .gray
     case .running: .blue
+    case .waiting: .blue
     case .awaitingInput: .orange
     case .blocked: .orange
     case .succeeded: .green

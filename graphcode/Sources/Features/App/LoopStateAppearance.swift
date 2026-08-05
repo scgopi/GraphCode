@@ -31,6 +31,7 @@ extension LoopState {
   func displayWord(for loopType: LoopType) -> String {
     switch self {
     case .running: "RUNNING"
+    case .waiting: "WAITING"
     case .awaitingInput: "NEEDS YOU"
     case .blocked: "BLOCKED"
     case .succeeded: "DONE"
@@ -47,7 +48,7 @@ extension LoopState {
   /// (`stopped`) — against the solid dot of a state that is its own author.
   var indicatorIsHollow: Bool {
     switch self {
-    case .blocked, .stopped: true
+    case .blocked, .stopped, .waiting: true
     case .idle, .running, .awaitingInput, .succeeded, .failed, .stalled: false
     }
   }
@@ -62,7 +63,7 @@ extension LoopState {
   var wantsHuman: Bool {
     switch self {
     case .awaitingInput, .blocked: true
-    case .idle, .running, .succeeded, .failed, .stalled, .stopped: false
+    case .idle, .running, .waiting, .succeeded, .failed, .stalled, .stopped: false
     }
   }
 
@@ -72,7 +73,7 @@ extension LoopState {
   /// oranges reads as a rendering bug.
   var indicatorTint: Color {
     switch self {
-    case .running: StateTint.running
+    case .running, .waiting: StateTint.running
     case .awaitingInput, .blocked: StateTint.attention
     case .succeeded: StateTint.success
     case .failed: StateTint.failure
@@ -87,6 +88,7 @@ extension LoopState {
   var pillFill: Color {
     switch self {
     case .running: StateTint.running.opacity(0.16)
+    case .waiting: StateTint.running.opacity(0.10)
     case .awaitingInput: StateTint.attention.opacity(0.22)
     case .blocked: StateTint.attention.opacity(0.14)
     case .succeeded: StateTint.success.opacity(0.16)
@@ -106,7 +108,7 @@ extension LoopState {
   /// the saturated hues are text you have to lean in for.
   var pillInk: Color {
     switch self {
-    case .running: StateTint.runningInk
+    case .running, .waiting: StateTint.runningInk
     case .awaitingInput, .blocked: StateTint.attentionInk
     case .succeeded: StateTint.successInk
     case .failed: StateTint.failureInk

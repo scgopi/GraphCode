@@ -2,7 +2,7 @@
 /// orchestrator (`graphcoded`'s `GraphStore`), not the app — see
 /// docs/02-graph-of-loops.md.
 ///
-/// `Idle → Running → { AwaitingInput, Blocked } → Running → { Succeeded, Failed, Stalled }`
+/// `Idle → Running → { AwaitingInput, Blocked, Waiting } → Running → { Succeeded, Failed, Stalled }`
 /// `CaseIterable` so the presentation layer can be checked exhaustively rather than
 /// case by case: every state has to have a word and an indicator style that no other
 /// state shares, and a test that enumerates the ones it remembers is the test that
@@ -15,6 +15,13 @@ public enum LoopState: Codable, Equatable, CaseIterable, Sendable {
   case succeeded
   case failed
   case stalled
+  /// The node's own session has gone quiet but downstream work it spawned is still in
+  /// flight. Distinct from `.idle` (nothing happening) and `.blocked` (waiting on
+  /// upstream): this node *did its part* and is parked until its dependents resolve.
+  ///
+  /// Graph-level, not provider-specific — derived from session presence + edge topology,
+  /// so it works for every backend (Claude Code, Copilot CLI, Codex).
+  case waiting
   /// A human stopped it from the orchestrator monitor
   /// (docs/05-orchestrator.md#monitoring-surface).
   ///

@@ -370,7 +370,7 @@ public actor GraphStore {
       resolveNode(nodeID, succeeded: true)
     case .failed, .stalled:
       resolveNode(nodeID, succeeded: false)
-    case .idle, .running, .awaitingInput, .blocked, .stopped:
+    case .idle, .running, .awaitingInput, .blocked, .waiting, .stopped:
       graph.nodes[id: nodeID]?.state = rolled
     }
   }
@@ -459,6 +459,22 @@ public actor GraphStore {
       let reading = await onReadPresence(node, graph.project.path)
       guard graph.nodes[id: node.id]?.presence != reading else { continue }
       graph.nodes[id: node.id]?.presence = reading
+      changed = true
+    }
+    if refreshActiveDependents() { changed = true }
+    return changed
+  }
+
+  private func refreshActiveDependents() -> Bool {
+    var changed = false
+    for node in graph.nodes where !node.isResolved {
+      let firedOutgoing = graph.edges.filter { $0.from == node.id && $0.fired }
+      let hasActive = firedOutgoing.contains { edge in
+        guard let target = graph.nodes[id: edge.to] else { return false }
+        return !target.isResolved
+      }
+      guard graph.nodes[id: node.id]?.hasActiveDependents != hasActive else { continue }
+      graph.nodes[id: node.id]?.hasActiveDependents = hasActive
       changed = true
     }
     return changed

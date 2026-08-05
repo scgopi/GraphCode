@@ -132,7 +132,7 @@ public enum AttentionRollup {
     case .awaitingInput: return .awaitingInput
     // `.stopped` is deliberately not here: a human turned it off, so telling them it
     // needs their attention is telling them about their own decision.
-    case .blocked, .idle, .running, .succeeded, .stopped: return nil
+    case .blocked, .idle, .running, .waiting, .succeeded, .stopped: return nil
     }
   }
 
@@ -180,6 +180,7 @@ extension LoopGraph {
     if nodes.contains(where: { $0.displayState == .stalled }) { return .stalled }
     if nodes.contains(where: { $0.displayState == .awaitingInput }) { return .awaitingInput }
     if nodes.contains(where: { $0.displayState == .running }) { return .running }
+    if nodes.contains(where: { $0.displayState == .waiting }) { return .waiting }
     if !nodes.isEmpty && nodes.allSatisfy({ $0.displayState == .succeeded }) { return .succeeded }
     if nodes.contains(where: { $0.displayState == .blocked }) { return .blocked }
     return .idle
