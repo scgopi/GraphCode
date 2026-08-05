@@ -45,10 +45,8 @@ public enum CopilotSessionLog {
     case "user.message", "assistant.turn_start",
       "tool.execution_start", "tool.execution_complete", "permission.completed":
       return .busy
-    case "permission.requested":
+    case "permission.requested", "assistant.turn_end":
       return .awaitingInput
-    case "assistant.turn_end":
-      return .idle
     case "session.shutdown":
       return .absent
     default:
@@ -125,14 +123,15 @@ public enum CopilotSessionLog {
   /// — and reporting that as idle would describe a session that no longer exists as one
   /// quietly waiting for work.
   ///
-  /// A remote Copilot's log lives on the remote host, so this reading falls back to the
-  /// ssh-backed zmx probe: existence and the label channel are real over there, the
-  /// `~/.copilot` tail is not.
+  /// A remote Copilot's log lives on the remote host, so the probe SSHs in and reads it
+  /// there — same event types, same mapping, expressed as grep/tail because it runs inside
+  /// a remote shell. The earlier fallback to `ZmxSessionLauncher.presence` read zmx labels
+  /// Copilot never writes, so remote Copilot nodes were permanently stuck at heuristic idle.
   public static func presence(of node: LoopNode, projectPath: String? = nil) async
     -> PresenceReading
   {
-    if let projectPath, RemoteProjectLocation.parse(projectPath: projectPath) != nil {
-      return await ZmxSessionLauncher.presence(of: node, projectPath: projectPath)
+    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+      return await remotePresence(of: node, at: remote)
     }
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     guard ZmxLocator.isInstalled, await ZmxSessionLauncher.sessionExists(node) else {
@@ -148,5 +147,73 @@ public enum CopilotSessionLog {
       return PresenceReading(presence: .idle, confidence: .heuristic)
     }
     return PresenceReading(presence: presence, confidence: .scanned)
+  }
+
+  // MARK: - Remote
+
+  static func remotePresenceInvocation(
+    forNode node: LoopNode, at location: RemoteProjectLocation
+  ) -> [String] {
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    let check = ZmxSessionLauncher.quotedCommand(["zmx", "get", name])
+    let marker = ZmxSessionLauncher.remoteProbeMarker
+
+    let findDir =
+      "D=''; for d in $(ls -t \"$HOME/.copilot/session-state/\" 2>/dev/null); do "
+      + "if grep -qx 'name: \(name)' \"$HOME/.copilot/session-state/$d/workspace.yaml\" 2>/dev/null; then "
+      + "D=\"$HOME/.copilot/session-state/$d\"; break; fi; done"
+
+    let readEvent =
+      "E=$(tail -c 65536 \"$D/events.jsonl\" 2>/dev/null"
+      + " | grep -o '\"type\":\"[^\"]*\"'"
+      + " | grep -E 'user\\.message|assistant\\.turn_start|tool\\.execution_start|tool\\.execution_complete|permission\\.completed|permission\\.requested|assistant\\.turn_end|session\\.shutdown'"
+      + " | tail -1 | sed 's/.*\"type\":\"//;s/\"//')"
+
+    let script =
+      "if \(check) >/dev/null 2>&1; then "
+      + "\(findDir); "
+      + "if [ -n \"$D\" ]; then \(readEvent); "
+      + "echo \"\(marker) live copilot=$E\"; "
+      + "else echo \"\(marker) live\"; fi; "
+      + "else echo '\(marker) absent'; fi"
+
+    return location.sshInvocation(
+      remoteCommand: location.remoteLoginShellCommand(script))
+  }
+
+  static func remotePresence(
+    of node: LoopNode, at location: RemoteProjectLocation
+  ) async -> PresenceReading {
+    RemoteProjectLocation.prepareControlSocketDirectory()
+    let invocation = remotePresenceInvocation(forNode: node, at: location)
+    guard
+      let session = try? PTYProcessSession(
+        executable: invocation[0], arguments: Array(invocation.dropFirst()))
+    else { return .unknown }
+    let (succeeded, output) = await session.waitCollectingOutput()
+    return parseRemotePresence(succeeded: succeeded, output: output)
+  }
+
+  static func parseRemotePresence(succeeded: Bool, output: String) -> PresenceReading {
+    let status = ZmxSessionLauncher.parseRemoteStatus(
+      succeeded: succeeded, output: output)
+    switch status {
+    case .unreachable: return .unknown
+    case .absent: return .absent
+    case .live(let label):
+      guard let label, let event = parseCopilotEventLabel(label),
+        let p = presence(forEvent: event)
+      else {
+        return PresenceReading(presence: .idle, confidence: .heuristic)
+      }
+      return PresenceReading(presence: p, confidence: .scanned)
+    }
+  }
+
+  static func parseCopilotEventLabel(_ label: String) -> String? {
+    let trimmed = label.trimmingCharacters(in: .whitespaces)
+    guard trimmed.hasPrefix("copilot=") else { return nil }
+    let event = String(trimmed.dropFirst("copilot=".count))
+    return event.isEmpty ? nil : event
   }
 }

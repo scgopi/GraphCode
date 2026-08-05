@@ -42,7 +42,7 @@ struct CopilotPresenceTests {
     // Copilot's log states turn boundaries outright, where Claude Code's transcript only
     // implies them through a `stop_reason`. Nothing here is inferred.
     #expect(CopilotSessionLog.presence(forEvent: "assistant.turn_start") == .busy)
-    #expect(CopilotSessionLog.presence(forEvent: "assistant.turn_end") == .idle)
+    #expect(CopilotSessionLog.presence(forEvent: "assistant.turn_end") == .awaitingInput)
     #expect(CopilotSessionLog.presence(forEvent: "tool.execution_start") == .busy)
     #expect(CopilotSessionLog.presence(forEvent: "permission.requested") == .awaitingInput)
     #expect(CopilotSessionLog.presence(forEvent: "session.shutdown") == .absent)
@@ -74,7 +74,7 @@ struct CopilotPresenceTests {
     let reading = CopilotSessionLog.lastStateChange(
       inLogAt: directory.appendingPathComponent("events.jsonl"))
 
-    #expect(reading == .idle)
+    #expect(reading == .awaitingInput)
   }
 
   @Test

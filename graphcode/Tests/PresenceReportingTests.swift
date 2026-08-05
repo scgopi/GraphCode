@@ -185,4 +185,66 @@ struct PresenceReportingTests {
     #expect(idleDecoded.presence?.presence == .idle)
     #expect(idleDecoded.displayState == .idle)
   }
+
+  // MARK: - Remote Copilot event-log presence
+
+  @Test
+  func aRemoteCopilotTurnEndReadsAwaitingInput() {
+    let reading = CopilotSessionLog.parseRemotePresence(
+      succeeded: true,
+      output: "graphcode-status: live copilot=assistant.turn_end")
+    #expect(reading.presence == .awaitingInput)
+    #expect(reading.confidence == .scanned)
+  }
+
+  @Test
+  func aRemoteCopilotPermissionRequestedReadsAwaitingInput() {
+    let reading = CopilotSessionLog.parseRemotePresence(
+      succeeded: true,
+      output: "graphcode-status: live copilot=permission.requested")
+    #expect(reading.presence == .awaitingInput)
+    #expect(reading.confidence == .scanned)
+  }
+
+  @Test
+  func aRemoteCopilotTurnStartReadsBusy() {
+    let reading = CopilotSessionLog.parseRemotePresence(
+      succeeded: true,
+      output: "graphcode-status: live copilot=assistant.turn_start")
+    #expect(reading.presence == .busy)
+    #expect(reading.confidence == .scanned)
+  }
+
+  @Test
+  func aRemoteCopilotWithNoEventFallsToHeuristic() {
+    let reading = CopilotSessionLog.parseRemotePresence(
+      succeeded: true,
+      output: "graphcode-status: live copilot=")
+    #expect(reading.presence == .idle)
+    #expect(reading.confidence == .heuristic)
+  }
+
+  @Test
+  func aRemoteCopilotWithNoDirFallsToHeuristic() {
+    let reading = CopilotSessionLog.parseRemotePresence(
+      succeeded: true,
+      output: "graphcode-status: live")
+    #expect(reading.presence == .idle)
+    #expect(reading.confidence == .heuristic)
+  }
+
+  @Test
+  func anUnreachableRemoteCopilotReadsUnknown() {
+    let reading = CopilotSessionLog.parseRemotePresence(
+      succeeded: false, output: "")
+    #expect(reading.presence == .unknown)
+  }
+
+  @Test
+  func anAbsentRemoteCopilotSessionReadsAbsent() {
+    let reading = CopilotSessionLog.parseRemotePresence(
+      succeeded: true,
+      output: "graphcode-status: absent")
+    #expect(reading.presence == .absent)
+  }
 }
