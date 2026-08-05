@@ -74,6 +74,27 @@ struct ProjectPersistenceTests {
   }
 
   @Test
+  func stalePresenceIsStrippedOnLoad() {
+    let persistence = makePersistence()
+    let project = ProjectRef(path: "/tmp/presence-test", name: "presence-test")
+    var node = LoopNode(
+      title: "Worker",
+      loopType: .goalBased,
+      goal: GoalSpec(summary: "ship it"),
+      presence: PresenceReading(presence: .busy, confidence: .reported),
+      state: .running)
+    node.activity = "editing Foo.swift"
+    let graph = LoopGraph(project: project, nodes: [node])
+
+    persistence.saveGraph(graph)
+    let loaded = persistence.loadGraph(path: project.path)
+
+    #expect(loaded?.nodes.first?.presence == nil)
+    #expect(loaded?.nodes.first?.activity == nil)
+    #expect(loaded?.nodes.first?.state == .running)
+  }
+
+  @Test
   func recentProjectsAreSortedMostRecentlyOpenedFirst() {
     let persistence = makePersistence()
     let older = ProjectRef(path: "/tmp/older", name: "older", lastOpenedAt: Date())
