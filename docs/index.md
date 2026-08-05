@@ -297,9 +297,10 @@ always loads in today's.
 ### What runs today
 
 Claude Code is the most complete backend. Copilot CLI and Codex loops launch, run, fan
-out on their own provider, message, and keep memory like Claude ones; hook-reported
-presence and usage stay Claude Code-only, and the picker refuses pairings a backend
-can't host. Current rough edges live in the README's
+out on their own provider, message, and keep memory like Claude ones. Copilot presence
+is read from its event log (local and remote), so a Copilot loop waiting for input
+shows as "NEEDS YOU"; usage stays Claude Code-only. The picker refuses pairings a
+backend can't host. Current rough edges live in the README's
 [Known limitations](https://github.com/scgopi/GraphCode#known-limitations).
 
 ---
