@@ -178,6 +178,42 @@ running → succeeded / failed / stalled / stopped* — and **stopped** is delib
 A self-improving loop is a simple sentence: **try → get judged → remember → try again
 smarter → stop honestly.** GraphCode gives each verb a mechanism.
 
+<div style="max-width:640px;margin:2rem auto;">
+<svg viewBox="0 0 640 320" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Self-improving cycle: Make hands off to Review, Review records to Memory, Memory feeds back to Make. A guarded back-edge closes the cycle.">
+  <rect width="640" height="320" rx="16" fill="#161b22"/>
+  <text x="320" y="32" text-anchor="middle" fill="#8b949e" font-family="-apple-system,sans-serif" font-size="13" letter-spacing="0.5">How a loop gets better</text>
+  <!-- edges -->
+  <defs>
+    <marker id="ah" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8" fill="#58a6ff"/></marker>
+    <marker id="ah-g" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8" fill="#3fb950"/></marker>
+  </defs>
+  <!-- MAKE → REVIEW -->
+  <line x1="210" y1="150" x2="330" y2="150" stroke="#58a6ff" stroke-width="2.5" marker-end="url(#ah)"/>
+  <text x="270" y="138" text-anchor="middle" fill="#58a6ff" font-family="-apple-system,sans-serif" font-size="11">hand-off</text>
+  <!-- REVIEW → RECORD -->
+  <line x1="468" y1="180" x2="468" y2="240" stroke="#58a6ff" stroke-width="2.5" marker-end="url(#ah)"/>
+  <text x="498" y="215" fill="#58a6ff" font-family="-apple-system,sans-serif" font-size="11">record</text>
+  <!-- RECORD → MAKE (guarded back-edge) -->
+  <path d="M340,270 Q168,310 168,200" stroke="#3fb950" stroke-width="2.5" stroke-dasharray="8,5" marker-end="url(#ah-g)" fill="none"/>
+  <text x="210" y="298" fill="#3fb950" font-family="-apple-system,sans-serif" font-size="11">guarded ↩</text>
+  <!-- nodes -->
+  <circle cx="168" cy="150" r="42" fill="#5eead4"/>
+  <text x="168" y="155" text-anchor="middle" fill="#0f2e29" font-family='SFMono-Regular,Menlo,monospace' font-weight="700" font-size="16">MAKE</text>
+  <circle cx="468" cy="150" r="42" fill="#a5b4fc"/>
+  <text x="468" y="147" text-anchor="middle" fill="#272b52" font-family='SFMono-Regular,Menlo,monospace' font-weight="700" font-size="14">REVIEW</text>
+  <text x="468" y="163" text-anchor="middle" fill="#272b52" font-family="-apple-system,sans-serif" font-size="10">judge</text>
+  <circle cx="468" cy="270" r="30" fill="#fcd34d"/>
+  <text x="468" y="274" text-anchor="middle" fill="#4d3a06" font-family='SFMono-Regular,Menlo,monospace' font-weight="700" font-size="12">RECORD</text>
+  <circle cx="280" cy="270" r="30" fill="#f0abfc" opacity="0.95"/>
+  <text x="280" y="267" text-anchor="middle" fill="#3d1a4e" font-family='SFMono-Regular,Menlo,monospace' font-weight="700" font-size="11">MEA-</text>
+  <text x="280" y="280" text-anchor="middle" fill="#3d1a4e" font-family='SFMono-Regular,Menlo,monospace' font-weight="700" font-size="11">SURE</text>
+  <!-- MEASURE → RECORD -->
+  <line x1="310" y1="270" x2="430" y2="270" stroke="#58a6ff" stroke-width="2.5" marker-end="url(#ah)"/>
+  <text x="370" y="260" text-anchor="middle" fill="#58a6ff" font-family="-apple-system,sans-serif" font-size="11">log metric</text>
+  <text x="320" y="310" text-anchor="middle" fill="#6e7681" font-family="-apple-system,sans-serif" font-size="12">So pass two starts where pass one stopped.</text>
+</svg>
+</div>
+
 ### The shape: a bounded cycle
 
 Draw a maker and a reviewer, hand-off forward, and a **guarded back-edge** closing the
@@ -212,6 +248,42 @@ A relaunched session opens by reading a short digest of it: recent entries in fu
 older ones elided. Round two starts *smarter*, not from scratch. And a loop created by
 another loop is born with its first entry already written — the exact command for
 reporting results back to its parent, so nothing is guessed.
+
+<div style="max-width:580px;margin:2rem auto;">
+<svg viewBox="0 0 580 200" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Two writers feed the memory log: the daemon records facts, the agent records lessons. A relaunched session reads the digest.">
+  <rect width="580" height="200" rx="16" fill="#161b22"/>
+  <text x="290" y="28" text-anchor="middle" fill="#8b949e" font-family="-apple-system,sans-serif" font-size="13" letter-spacing="0.5">What it learns goes into its own log</text>
+  <defs>
+    <marker id="ah2" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8" fill="#58a6ff"/></marker>
+    <marker id="ah2-g" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8" fill="#3fb950"/></marker>
+  </defs>
+  <!-- Daemon node -->
+  <circle cx="80" cy="80" r="30" fill="#5eead4"/>
+  <text x="80" y="76" text-anchor="middle" fill="#0f2e29" font-family='SFMono-Regular,Menlo,monospace' font-weight="700" font-size="11">DAE-</text>
+  <text x="80" y="89" text-anchor="middle" fill="#0f2e29" font-family='SFMono-Regular,Menlo,monospace' font-weight="700" font-size="11">MON</text>
+  <!-- Agent node -->
+  <circle cx="80" cy="155" r="30" fill="#a5b4fc"/>
+  <text x="80" y="159" text-anchor="middle" fill="#272b52" font-family='SFMono-Regular,Menlo,monospace' font-weight="700" font-size="12">AGENT</text>
+  <!-- Memory log -->
+  <rect x="210" y="60" width="160" height="110" rx="10" fill="#0d1117" stroke="#30363d" stroke-width="1.5"/>
+  <text x="290" y="82" text-anchor="middle" fill="#e6edf3" font-family='SFMono-Regular,Menlo,monospace' font-weight="600" font-size="13">memory log</text>
+  <text x="230" y="104" fill="#8b949e" font-family='SFMono-Regular,Menlo,monospace' font-size="10">pass started</text>
+  <text x="230" y="120" fill="#8b949e" font-family='SFMono-Regular,Menlo,monospace' font-size="10">metric: 41 → 22</text>
+  <text x="230" y="136" fill="#8b949e" font-family='SFMono-Regular,Menlo,monospace' font-size="10">memo: X is dead</text>
+  <text x="230" y="152" fill="#8b949e" font-family='SFMono-Regular,Menlo,monospace' font-size="10">pass resolved ✓</text>
+  <!-- Daemon → log -->
+  <line x1="115" y1="80" x2="200" y2="90" stroke="#58a6ff" stroke-width="2" marker-end="url(#ah2)"/>
+  <text x="158" y="76" text-anchor="middle" fill="#58a6ff" font-family="-apple-system,sans-serif" font-size="10">facts</text>
+  <!-- Agent → log -->
+  <line x1="115" y1="150" x2="200" y2="140" stroke="#58a6ff" stroke-width="2" marker-end="url(#ah2)"/>
+  <text x="158" y="156" text-anchor="middle" fill="#58a6ff" font-family="-apple-system,sans-serif" font-size="10">lessons</text>
+  <!-- log → next session -->
+  <rect x="430" y="85" width="120" height="60" rx="10" fill="#0d1117" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="490" y="111" text-anchor="middle" fill="#3fb950" font-family='SFMono-Regular,Menlo,monospace' font-weight="600" font-size="12">next pass</text>
+  <text x="490" y="128" text-anchor="middle" fill="#6e7681" font-family="-apple-system,sans-serif" font-size="10">reads digest</text>
+  <line x1="378" y1="115" x2="422" y2="115" stroke="#3fb950" stroke-width="2" marker-end="url(#ah2-g)"/>
+</svg>
+</div>
 
 ### Measured by: the loop's own fitness function
 
