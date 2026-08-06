@@ -31,6 +31,14 @@ extension GhosttyTerminalNSView {
     guard lastOcclusion != visible else { return }
     lastOcclusion = visible
     ghostty_surface_set_occlusion(surface, visible)
+    if visible && isActive {
+      // libghostty's setVisible(true) only starts the display link when
+      // self.focused is also true. If focus was lost during the occlusion
+      // period (SwiftUI resigns it routinely), the link stays stopped and
+      // the surface appears frozen despite being visible. Re-asserting
+      // focus here restarts the link on de-occlusion.
+      focusIfKeyboardIsOnAHiddenSurface()
+    }
   }
 
   /// Tells libghostty which display this surface is on.
