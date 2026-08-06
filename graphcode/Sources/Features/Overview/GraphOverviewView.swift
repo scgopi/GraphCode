@@ -152,9 +152,7 @@ struct GraphOverviewView: View {
     }
     var t = CanvasTransform.fitting(content, in: viewport)
     if let startNode {
-      t.offset = CGSize(
-        width: (viewport.width / 2 - startNode.x) * t.scale,
-        height: (viewport.height / 2 - startNode.y) * t.scale)
+      t.offset.height = (viewport.height / 2 - startNode.y) * t.scale
     }
     transform = t
   }

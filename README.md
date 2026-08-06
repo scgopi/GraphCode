@@ -61,6 +61,10 @@ nothing hands off to hang from, and every chain flowing right from there. A card
 painted by the state it is in, not by its kind — what you read off the canvas is which
 loops are running, which are done, and which are waiting on you.
 
+The **Graph** view (the pinned sidebar row above every folder) shows all projects on one
+canvas — every folder's lane hung off a single START node, so the whole workspace reads
+as one graph with one beginning.
+
 ## Install
 
 Requires **macOS 15+ on Apple Silicon** (arm64), with **Claude Code on your `PATH`** —
@@ -175,11 +179,11 @@ Design docs live in `docs/` and are kept local (gitignored) for now.
 - **Apple Silicon only.** GhosttyKit is built for the native architecture; there is no
   x86_64 slice, so a universal build won't link.
 - **Claude Code is the most complete backend.** Copilot CLI and Codex loops launch, run,
-  fan out, and receive message edges like Claude ones. Copilot presence is read from its
-  event log (local and remote), so a Copilot loop waiting for input shows as "NEEDS YOU";
-  usage stays Claude Code-only. The picker refuses pairings a backend can't host
-  (time-based needs the session to re-trigger itself; composites need verified
-  sub-agents).
+  fan out, resume after a reboot, and receive message edges like Claude ones. Copilot
+  presence is read from its event log (local and remote), so a Copilot loop waiting for
+  input shows as "NEEDS YOU"; usage stays Claude Code-only. The picker refuses pairings a
+  backend can't host (time-based needs the session to re-trigger itself; composites need
+  verified sub-agents).
 - **A new folder stops at Claude's trust prompt.** An unattended loop started by the daemon
   in a folder Claude hasn't seen waits at *"Do you trust this folder?"* and shows as
   `running` while doing nothing. Attach once and answer it.
