@@ -877,43 +877,47 @@ public enum ZmxSessionLauncher {
     }
     guard ZmxLocator.isInstalled else { return }
 
-    do {
-      let existing = try PTYProcessSession(
-        executable: ZmxLocator.binaryURL.path,
-        arguments: existenceCheckArguments(forNode: node))
-      guard await !existing.waitUntilFinished() else { return }
+    let zmxPath = ZmxLocator.binaryURL.path
+    let checkArgs = existenceCheckArguments(forNode: node)
+    let wd = workingDirectory(forNode: node, projectPath: projectPath)
 
-      // No live zmx session. If a backend session ID is available, resume it rather
-      // than starting a duplicate from scratch. Claude Code's ID comes from a hook
-      // that persists it on SessionStart; Copilot's comes from its session-state
-      // directory, which survives reboots and names each session by its zmx name.
-      let sessionID: String? =
-        SessionIDStore.load(forNodeID: node.id)
-        ?? {
-          guard node.backend == .copilotCLI else { return nil }
-          let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
-          return CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent
-        }()
-      if let sessionID,
-        let resumeArgs = resumeArguments(
-          forNode: node, sessionID: sessionID, projectPath: projectPath)
-      {
-        let resume = try PTYProcessSession(
-          executable: ZmxLocator.binaryURL.path,
-          arguments: resumeArgs,
-          workingDirectory: workingDirectory(forNode: node, projectPath: projectPath))
-        _ = await resume.waitUntilFinished()
-        return
-      }
-
-      guard let arguments = arguments(forNode: node, projectPath: projectPath) else { return }
-      let launch = try PTYProcessSession(
-        executable: ZmxLocator.binaryURL.path,
-        arguments: arguments,
-        workingDirectory: workingDirectory(forNode: node, projectPath: projectPath))
-      _ = await launch.waitUntilFinished()
-    } catch {
+    // Same atomic check-or-create as the remote path (`remoteEnsureInvocation`):
+    // `zmx get` and `zmx run` in one shell, joined by `||`, so the app's own
+    // `zmx attach` cannot slip in between and create the session first. Without
+    // this, a `zmx run` that loses the race types the entire launch command into
+    // the now-live agent's input — the `/bin/zsh -i` leak in the Copilot input bar.
+    let sessionID: String? =
+      SessionIDStore.load(forNodeID: node.id)
+      ?? {
+        guard node.backend == .copilotCLI else { return nil }
+        let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+        return CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent
+      }()
+    if let sessionID,
+      let resumeArgs = resumeArguments(
+        forNode: node, sessionID: sessionID, projectPath: projectPath)
+    {
+      await atomicCheckOrRun(checkArguments: checkArgs, runArguments: resumeArgs,
+                             zmxPath: zmxPath, workingDirectory: wd)
       return
     }
+
+    guard let runArgs = arguments(forNode: node, projectPath: projectPath) else { return }
+    await atomicCheckOrRun(checkArguments: checkArgs, runArguments: runArgs,
+                           zmxPath: zmxPath, workingDirectory: wd)
+  }
+
+  private static func atomicCheckOrRun(
+    checkArguments: [String], runArguments: [String],
+    zmxPath: String, workingDirectory: String?
+  ) async {
+    let check = quotedCommand([zmxPath] + checkArguments)
+    let run = quotedCommand([zmxPath] + runArguments)
+    let script = "\(check) >/dev/null 2>&1 || \(run)"
+    guard let session = try? PTYProcessSession(
+      executable: "/bin/zsh", arguments: ["-c", script],
+      workingDirectory: workingDirectory)
+    else { return }
+    _ = await session.waitUntilFinished()
   }
 }

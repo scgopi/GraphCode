@@ -500,6 +500,17 @@ struct ProjectFeature {
     state.draftPredicate = ""
     state.draftMetric = ""
     state.draftMetricDirection = .maximize
+    state.isMetricExpanded = false
+    state.doneCheckOutcome = nil
+    state.isTestingDoneCheck = false
+    state.draftFirstInstruction = ""
+    state.draftPausesBeforeWritesOnly = false
+    state.draftInterval = .hourly
+    state.draftCustomInterval = ""
+    state.draftTimedTask = ""
+    state.draftStopAfter = ""
+    state.draftSchedule = .daily
+    state.draftScheduleTime = "09:00"
     // The parent's backend when there is one; the human's default otherwise
     // (Settings → Sessions), never a hardcoded one.
     state.draftBackend = backend ?? GraphcodeSettingsStore.load().defaultBackend
