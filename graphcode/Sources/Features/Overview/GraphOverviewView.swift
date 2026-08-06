@@ -142,13 +142,21 @@ struct GraphOverviewView: View {
       height: transform.offset.height + dragOffset.height)
   }
 
-  /// Centres the graph, but only while the canvas is still where it started: once
-  /// someone has panned or zoomed, their view is theirs and nothing here moves it.
-  private func centreIfUntouched(in viewport: CGSize, content: CGSize) {
+  /// Centres the graph on its start node, but only while the canvas is still where it
+  /// started: once someone has panned or zoomed, their view is theirs.
+  private func centreIfUntouched(
+    in viewport: CGSize, content: CGSize, startNode: CGPoint?
+  ) {
     guard transform == CanvasTransform(), viewport != .zero, content != .zero else {
       return
     }
-    transform = .fitting(content, in: viewport)
+    var t = CanvasTransform.fitting(content, in: viewport)
+    if let startNode {
+      t.offset = CGSize(
+        width: (viewport.width / 2 - startNode.x) * t.scale,
+        height: (viewport.height / 2 - startNode.y) * t.scale)
+    }
+    transform = t
   }
 
   /// The drawn graph itself, sized against the pane it's in. Split from `canvas` only to
@@ -168,16 +176,16 @@ struct GraphOverviewView: View {
       // is rather than in the top-left corner with the lanes running off the bottom.
       .onAppear {
         viewport = proxy.size
-        centreIfUntouched(in: proxy.size, content: overview.size)
+        centreIfUntouched(in: proxy.size, content: overview.size, startNode: overview.startNode)
       }
       .onChange(of: proxy.size) { _, size in
         viewport = size
-        centreIfUntouched(in: size, content: overview.size)
+        centreIfUntouched(in: size, content: overview.size, startNode: overview.startNode)
       }
       // Folders arrive from the daemon after this view does, so the first paint has
       // nothing to centre on.
       .onChange(of: overview.size) { _, size in
-        centreIfUntouched(in: viewport, content: size)
+        centreIfUntouched(in: viewport, content: size, startNode: overview.startNode)
       }
     }
   }

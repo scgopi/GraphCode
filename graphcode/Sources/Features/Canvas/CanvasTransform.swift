@@ -16,7 +16,7 @@ import Foundation
 struct CanvasTransform: Equatable {
   /// Far enough out to take in a workspace of several folders, far enough in to read a
   /// nested chip's title. Past 3× the cards are just big; below 0.25× they're texture.
-  static let minScale: CGFloat = 0.25
+  static let minScale: CGFloat = 0.6
   static let maxScale: CGFloat = 3
   /// One press of the zoom buttons (and ⌘=/⌘-). A quarter step is small enough to land
   /// on the scale you wanted and large enough that holding the key gets somewhere.

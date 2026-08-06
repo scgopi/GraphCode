@@ -180,7 +180,13 @@ final class GhosttyTerminalNSView: NSView {
   override func resignFirstResponder() -> Bool {
     guard let surface else { return super.resignFirstResponder() }
     ghostty_surface_set_focus(surface, false)
-    return super.resignFirstResponder()
+    let resigned = super.resignFirstResponder()
+    if resigned && isActive && isVisible {
+      DispatchQueue.main.async { [weak self] in
+        MainActor.assumeIsolated { self?.focusIfKeyboardIsOnAHiddenSurface() }
+      }
+    }
+    return resigned
   }
 
   /// Whether this surface is *the* one the user is typing into — its tab is showing and
