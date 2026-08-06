@@ -500,12 +500,12 @@ public enum ZmxSessionLauncher {
   ///
   /// Used after a reboot: the zmx session is gone, but a persisted session ID lets the
   /// backend pick up where it left off. Falls back to `nil` when resume isn't possible
-  /// (no persisted ID, non-Claude backend, or the executable isn't found).
+  /// (no persisted ID, unsupported backend, or the executable isn't found).
   static func resumeArguments(
     forNode node: LoopNode, sessionID: String, projectPath: String? = nil,
     settings: GraphcodeSettings = GraphcodeSettingsStore.load()
   ) -> [String]? {
-    guard node.backend == .claudeCode else { return nil }
+    guard node.backend == .claudeCode || node.backend == .copilotCLI else { return nil }
     guard let executable = node.backend.executableName else { return nil }
     let remote = projectPath.flatMap { RemoteProjectLocation.parse(projectPath: $0) }
     guard remote == nil else { return nil }
@@ -883,9 +883,18 @@ public enum ZmxSessionLauncher {
         arguments: existenceCheckArguments(forNode: node))
       guard await !existing.waitUntilFinished() else { return }
 
-      // No live zmx session. If a backend session ID was persisted before the last
-      // reboot, resume it rather than starting a duplicate from scratch.
-      if let sessionID = SessionIDStore.load(forNodeID: node.id),
+      // No live zmx session. If a backend session ID is available, resume it rather
+      // than starting a duplicate from scratch. Claude Code's ID comes from a hook
+      // that persists it on SessionStart; Copilot's comes from its session-state
+      // directory, which survives reboots and names each session by its zmx name.
+      let sessionID: String? =
+        SessionIDStore.load(forNodeID: node.id)
+        ?? {
+          guard node.backend == .copilotCLI else { return nil }
+          let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+          return CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent
+        }()
+      if let sessionID,
         let resumeArgs = resumeArguments(
           forNode: node, sessionID: sessionID, projectPath: projectPath)
       {
