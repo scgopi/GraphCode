@@ -70,17 +70,17 @@ public enum PresenceHooks {
 
   /// Captures Claude Code's session ID for `--resume` after a reboot.
   ///
-  /// `$CLAUDE_SESSION_ID` is set by Claude Code in its own process environment, so every
-  /// hook script inherits it. The node UUID is extracted from `$ZMX_SESSION`
+  /// `$CLAUDE_CODE_SESSION_ID` is set by Claude Code in its own process environment, so
+  /// every hook script inherits it. The node UUID is extracted from `$ZMX_SESSION`
   /// (`graphcode-<UUID>`), and the ID is written to the `SessionIDStore` path. Silently
   /// skipped when either variable is absent — a session graphcode didn't start, or a
   /// Claude Code version that doesn't export its session ID.
   static func captureSessionID(supportDir: String) -> String {
     let dir = "\(supportDir)/sessions"
-    return "if [ -n \"$ZMX_SESSION\" ] && [ -n \"$CLAUDE_SESSION_ID\" ]; then "
+    return "if [ -n \"$ZMX_SESSION\" ] && [ -n \"$CLAUDE_CODE_SESSION_ID\" ]; then "
       + "node_id=\"${ZMX_SESSION#graphcode-}\"; "
       + "mkdir -p \(singleQuoted(dir)); "
-      + "printf '%s' \"$CLAUDE_SESSION_ID\" > \(singleQuoted(dir))/\"$node_id\".id; "
+      + "printf '%s' \"$CLAUDE_CODE_SESSION_ID\" > \(singleQuoted(dir))/\"$node_id\".id; "
       + "fi; exit 0"
   }
 
