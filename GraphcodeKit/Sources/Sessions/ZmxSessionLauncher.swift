@@ -329,12 +329,11 @@ public enum ZmxSessionLauncher {
   }
 
   static func kill(_ node: LoopNode, projectPath: String? = nil) async {
-    // Same routing as `send`: a remote session's kill has to reach the remote zmx, or
-    // stopping and deleting remote loops leaves their sessions running forever.
     if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
       await killRemote(node, at: remote)
       return
     }
+    SessionIDStore.remove(forNodeID: node.id)
     guard ZmxLocator.isInstalled else { return }
     guard
       let session = try? PTYProcessSession(
@@ -495,6 +494,35 @@ public enum ZmxSessionLauncher {
           of: executable, arguments: unbriefed, scriptSuffix: remoteHooksSuffix)
     }
     return command
+  }
+
+  /// `zmx run` argv that resumes an existing backend session instead of starting fresh.
+  ///
+  /// Used after a reboot: the zmx session is gone, but a persisted session ID lets the
+  /// backend pick up where it left off. Falls back to `nil` when resume isn't possible
+  /// (no persisted ID, non-Claude backend, or the executable isn't found).
+  static func resumeArguments(
+    forNode node: LoopNode, sessionID: String, projectPath: String? = nil,
+    settings: GraphcodeSettings = GraphcodeSettingsStore.load()
+  ) -> [String]? {
+    guard node.backend == .claudeCode else { return nil }
+    guard let executable = node.backend.executableName else { return nil }
+    let remote = projectPath.flatMap { RemoteProjectLocation.parse(projectPath: $0) }
+    guard remote == nil else { return nil }
+    let tier = node.effectiveModelTier(autoSelecting: settings.autoSelectsModel)
+    let hooksFile = PresenceHooks.write(forBackend: node.backend)
+    let reportingPath = ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil
+    let resumeArgs = node.backend.launchArguments(
+      prompt: nil, tier: tier, settings: settings,
+      workspacePaths: Self.workspacePaths(forNode: node, projectPath: projectPath),
+      hooksFile: hooksFile,
+      sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
+      zmxPath: reportingPath)
+      + ["--resume", sessionID]
+    return [
+      "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
+    ]
+      + Self.loginShellInvocation(of: executable, arguments: resumeArgs)
   }
 
   /// The directories a loop's work legitimately spans: the project, and its worktree when
@@ -843,37 +871,39 @@ public enum ZmxSessionLauncher {
   }
 
   static func start(_ node: LoopNode, projectPath: String? = nil) async {
-    // A remote project's session starts on the remote host — local zmx isn't involved
-    // and doesn't need to be installed for it.
     if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
       await startRemote(node, at: remote)
       return
     }
     guard ZmxLocator.isInstalled else { return }
-    guard let arguments = arguments(forNode: node, projectPath: projectPath) else { return }
 
     do {
-      // Create only. A session that already exists is left strictly alone — it's either
-      // the loop still running (re-sending would corrupt it) or one whose Claude has
-      // exited, which resolved the node and is a deliberate end state, not something to
-      // silently restart behind the human's back.
       let existing = try PTYProcessSession(
         executable: ZmxLocator.binaryURL.path,
         arguments: existenceCheckArguments(forNode: node))
       guard await !existing.waitUntilFinished() else { return }
 
+      // No live zmx session. If a backend session ID was persisted before the last
+      // reboot, resume it rather than starting a duplicate from scratch.
+      if let sessionID = SessionIDStore.load(forNodeID: node.id),
+        let resumeArgs = resumeArguments(
+          forNode: node, sessionID: sessionID, projectPath: projectPath)
+      {
+        let resume = try PTYProcessSession(
+          executable: ZmxLocator.binaryURL.path,
+          arguments: resumeArgs,
+          workingDirectory: workingDirectory(forNode: node, projectPath: projectPath))
+        _ = await resume.waitUntilFinished()
+        return
+      }
+
+      guard let arguments = arguments(forNode: node, projectPath: projectPath) else { return }
       let launch = try PTYProcessSession(
         executable: ZmxLocator.binaryURL.path,
         arguments: arguments,
         workingDirectory: workingDirectory(forNode: node, projectPath: projectPath))
-      // `zmx run -d` returns as soon as it has handed the command to the session daemon,
-      // which then outlives it. Waiting keeps this short-lived launcher process (and its
-      // PTY) alive until then rather than tearing it down mid-spawn.
       _ = await launch.waitUntilFinished()
     } catch {
-      // Nothing useful to do from here: the daemon has no UI, and a node whose session
-      // failed to start still shows its real (unchanged) state in every client. The
-      // human sees an empty terminal when they open it, and reopening retries.
       return
     }
   }

@@ -7,8 +7,11 @@ import Foundation
 /// graphcode.app`, or `make daemon-install` from a loop's own shell — and then inherits
 /// them. Passed on to the backends graphcode starts, they make each *new* session take
 /// itself for a spawned child of that long-dead one: transcript saving off, the wrong
-/// session id, no `/resume` later. The processes are fresh top-level sessions however
-/// graphcode itself was launched, so the variables are dropped before anything forks.
+/// session id. The processes are fresh top-level sessions however graphcode itself was
+/// launched, so the variables are dropped before anything forks.
+///
+/// Session IDs for graphcode's *own* loops are captured separately by `PresenceHooks`
+/// and persisted by `SessionIDStore`, so `--resume` works across reboots.
 public enum AgentEnvironment {
   public static func isInheritedAgentIdentity(_ key: String) -> Bool {
     key.hasPrefix("CLAUDE") || key == "AI_AGENT"
