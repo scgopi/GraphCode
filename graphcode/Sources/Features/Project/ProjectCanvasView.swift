@@ -187,7 +187,7 @@ struct ProjectCanvasView: View {
     guard transform == CanvasTransform(), viewport != .zero, content != .zero else {
       return
     }
-    transform = .centred(content, in: viewport)
+    transform = .fitting(content, in: viewport)
   }
 
   private func canvas(_ derived: Derived) -> some View {
@@ -250,6 +250,7 @@ struct ProjectCanvasView: View {
         }
         .onEnded { _ in pinchBaseScale = nil }
     )
+    .background { CanvasScrollHandler(transform: $transform, viewport: viewport) }
   }
 
   /// Drawn as an overlay rather than as a branch on `canvas` so panning and zooming

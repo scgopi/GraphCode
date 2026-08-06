@@ -96,7 +96,7 @@ struct QuickChatsCanvasView: View {
     guard transform == CanvasTransform(), viewport != .zero, content != .zero else {
       return
     }
-    transform = .centred(content, in: viewport)
+    transform = .fitting(content, in: viewport)
   }
 
   private func canvas(_ placements: [Placement]) -> some View {
@@ -151,6 +151,7 @@ struct QuickChatsCanvasView: View {
         }
         .onEnded { _ in pinchBaseScale = nil }
     )
+    .background { CanvasScrollHandler(transform: $transform, viewport: viewport) }
   }
 
   /// The band the chats sit in — unlabelled, like a project canvas's, since this pane is

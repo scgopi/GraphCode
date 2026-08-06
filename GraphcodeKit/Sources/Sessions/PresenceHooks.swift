@@ -68,13 +68,34 @@ public enum PresenceHooks {
       + "presence=\(presence.rawValue) >/dev/null 2>&1; fi; exit 0"
   }
 
+  /// Captures Claude Code's session ID for `--resume` after a reboot.
+  ///
+  /// `$CLAUDE_SESSION_ID` is set by Claude Code in its own process environment, so every
+  /// hook script inherits it. The node UUID is extracted from `$ZMX_SESSION`
+  /// (`graphcode-<UUID>`), and the ID is written to the `SessionIDStore` path. Silently
+  /// skipped when either variable is absent — a session graphcode didn't start, or a
+  /// Claude Code version that doesn't export its session ID.
+  static func captureSessionID(supportDir: String) -> String {
+    let dir = "\(supportDir)/sessions"
+    return "if [ -n \"$ZMX_SESSION\" ] && [ -n \"$CLAUDE_SESSION_ID\" ]; then "
+      + "node_id=\"${ZMX_SESSION#graphcode-}\"; "
+      + "mkdir -p \(singleQuoted(dir)); "
+      + "printf '%s' \"$CLAUDE_SESSION_ID\" > \(singleQuoted(dir))/\"$node_id\".id; "
+      + "fi; exit 0"
+  }
+
   /// The settings JSON for a backend, or `nil` when it has no hooks to configure.
   /// Serialized rather than interpolated so a support directory containing a quote is a
   /// path, not a syntax error.
   public static func json(forBackend backend: CLISessionBackendKind, zmxPath: String) -> String? {
     guard let events = events(forBackend: backend) else { return nil }
+    let supportDir = SupportDirectory.url.path
     let hooks = events.reduce(into: [String: [Matcher]]()) { result, event in
-      result[event.0] = [Matcher(hooks: [Command(command: report(event.1, zmxPath: zmxPath))])]
+      var commands = [Command(command: report(event.1, zmxPath: zmxPath))]
+      if event.0 == "SessionStart" && backend == .claudeCode {
+        commands.append(Command(command: captureSessionID(supportDir: supportDir)))
+      }
+      result[event.0] = [Matcher(hooks: commands)]
     }
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

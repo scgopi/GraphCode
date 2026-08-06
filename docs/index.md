@@ -111,8 +111,10 @@ only duty is **liveness**: making sure the session exists.
 ### Sessions outlive everything
 
 Each loop's terminal is a [`zmx`](https://zmx.sh) session — a PTY kept alive by a
-session daemon, like tmux. It survives closing the window, quitting the app, and
-restarting GraphCode's own daemon; reattaching restores full scrollback.
+session daemon, like tmux. It survives closing the window, quitting the app,
+restarting GraphCode's own daemon, and even a machine reboot: the backend's session
+ID is persisted on disk, so the daemon resumes the conversation with `--resume`
+rather than starting a duplicate session.
 
 That's what makes unattended and attended the same thing. The daemon starts a loop at
 3 a.m.; you click its node at 9 and you're *in the session that did the work*, live,

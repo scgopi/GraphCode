@@ -148,7 +148,7 @@ struct GraphOverviewView: View {
     guard transform == CanvasTransform(), viewport != .zero, content != .zero else {
       return
     }
-    transform = .centred(content, in: viewport)
+    transform = .fitting(content, in: viewport)
   }
 
   /// The drawn graph itself, sized against the pane it's in. Split from `canvas` only to
@@ -217,6 +217,7 @@ struct GraphOverviewView: View {
           }
           .onEnded { _ in pinchBaseScale = nil }
       )
+      .background { CanvasScrollHandler(transform: $transform, viewport: viewport) }
   }
 
   private func zoomControls(_ overview: GraphOverview) -> some View {

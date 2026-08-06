@@ -46,8 +46,9 @@ Two design choices explain most of the rest:
   daemon only makes sure the session is alive. That's what keeps a running loop something
   you can attach to and correct, rather than a job that already finished somewhere.
 - **Sessions outlive everything.** Each loop's terminal is a [`zmx`](https://zmx.sh)
-  session, so it survives closing the window, quitting the app, and restarting the daemon —
-  reattaching restores full scrollback.
+  session, so it survives closing the window, quitting the app, restarting the daemon,
+  and even a reboot — the backend's session ID is persisted, so relaunching after a
+  reboot resumes the conversation with `--resume` rather than starting a duplicate.
 
 So a working graph might look like: a time-based loop runs `/loop 1h Triage new bug
 reports`, a hand-off edge fires a goal-based fixer loop for anything it finds (done when
