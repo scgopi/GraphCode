@@ -512,11 +512,18 @@ public enum ZmxSessionLauncher {
     let tier = node.effectiveModelTier(autoSelecting: settings.autoSelectsModel)
     let hooksFile = PresenceHooks.write(forBackend: node.backend)
     let reportingPath = ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil
+    // Copilot's `--name` and `--resume` are mutually exclusive: one creates a new
+    // session, the other restores an existing one. A resume session drops `--name`
+    // (by passing nil for sessionName) and uses `--resume` alone; the session's
+    // name can be set afterward with `/rename` if needed.
+    let sessionName: String? =
+      node.backend == .copilotCLI
+      ? nil : SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     let resumeArgs = node.backend.launchArguments(
       prompt: nil, tier: tier, settings: settings,
       workspacePaths: Self.workspacePaths(forNode: node, projectPath: projectPath),
       hooksFile: hooksFile,
-      sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
+      sessionName: sessionName,
       zmxPath: reportingPath)
       + ["--resume", sessionID]
     return [
@@ -920,4 +927,5 @@ public enum ZmxSessionLauncher {
     else { return }
     _ = await session.waitUntilFinished()
   }
+
 }
