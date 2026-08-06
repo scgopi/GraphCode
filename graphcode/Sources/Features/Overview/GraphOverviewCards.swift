@@ -26,6 +26,46 @@ extension GraphOverviewView {
     }
   }
 
+  @ViewBuilder
+  func startNodeLayer(_ overview: GraphOverview) -> some View {
+    if let center = overview.startNode {
+      ForEach(overview.folders) { folder in
+        startConnector(from: center, to: folder.originPosition)
+      }
+      startNodeMarker.position(center)
+    }
+  }
+
+  private var startNodeMarker: some View {
+    ZStack {
+      RoundedRectangle(cornerRadius: 10)
+        .fill(Color.white.opacity(0.06))
+        .overlay {
+          RoundedRectangle(cornerRadius: 10)
+            .stroke(CanvasBand.railTint, lineWidth: 1.5)
+        }
+      Text("START")
+        .font(.system(size: 10, weight: .bold))
+        .tracking(0.5)
+        .foregroundStyle(.white.opacity(0.55))
+    }
+    .frame(width: 52, height: 28)
+    .allowsHitTesting(false)
+  }
+
+  private func startConnector(from origin: CGPoint, to target: CGPoint) -> some View {
+    Path { path in
+      path.move(to: origin)
+      let reach = max((target.x - origin.x) * 0.5, 20)
+      path.addCurve(
+        to: target,
+        control1: CGPoint(x: origin.x + reach, y: origin.y),
+        control2: CGPoint(x: target.x - reach, y: target.y))
+    }
+    .stroke(CanvasBand.railTint, lineWidth: 1.5)
+    .allowsHitTesting(false)
+  }
+
   /// One band per open folder, drawn under everything. The band *is* the folder now —
   /// there is no chip and no tether, because a lane containing a project's loops says
   /// "these belong together" without a line drawn to explain it.

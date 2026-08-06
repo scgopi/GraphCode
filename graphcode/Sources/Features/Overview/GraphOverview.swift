@@ -46,6 +46,9 @@ struct GraphOverview: Equatable {
     let band: CGRect
 
     var id: String { path }
+    var originPosition: CGPoint {
+      CGPoint(x: band.minX + CanvasBand.originLane / 2, y: band.midY)
+    }
   }
 
   /// One loop card. Always a loop the folder's graph owns directly — every card here has
@@ -77,6 +80,7 @@ struct GraphOverview: Equatable {
   var folders: [Folder] = []
   var loops: [Loop] = []
   var links: [Link] = []
+  var startNode: CGPoint?
   /// The canvas's extent, so the view can centre the whole picture instead of guessing.
   var size: CGSize = .zero
 
@@ -89,9 +93,10 @@ struct GraphOverview: Equatable {
 
   enum Metrics {
     static let card = LoopCardView.Metrics.size
+    static let startNodeLane: CGFloat = 60
     /// Every band starts at the same x and is the same width, however few loops are in
     /// it. Ragged lanes read as a collage; aligned ones read as a table of projects.
-    static let bandX: CGFloat = 20
+    static let bandX: CGFloat = startNodeLane + 20
     /// Clear of the attention rail, which floats over the canvas's top-left corner.
     static let laneTop: CGFloat = 62
     static let laneGap: CGFloat = 24
@@ -129,6 +134,12 @@ struct GraphOverview: Equatable {
       loops.append(contentsOf: lane.loops)
       links.append(contentsOf: lane.links)
       laneTop = lane.folder.band.maxY + Metrics.laneGap
+    }
+
+    if !folders.isEmpty {
+      let minY = folders.map(\.band.minY).min()!
+      let maxY = folders.map(\.band.maxY).max()!
+      startNode = CGPoint(x: Metrics.startNodeLane / 2, y: (minY + maxY) / 2)
     }
 
     size = CGSize(

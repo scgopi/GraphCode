@@ -158,6 +158,7 @@ struct GraphOverviewView: View {
     return GeometryReader { proxy in
       ZStack {
         bandsLayer(overview)
+        startNodeLayer(overview)
         linksLayer(overview)
         loopsLayer(overview, reasons: derived.attentionReasons, now: now)
       }
