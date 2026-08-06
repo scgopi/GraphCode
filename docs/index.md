@@ -120,6 +120,13 @@ That's what makes unattended and attended the same thing. The daemon starts a lo
 3 a.m.; you click its node at 9 and you're *in the session that did the work*, live,
 history above you, process still running.
 
+### The Graph view
+
+The **Graph** row at the top of the sidebar shows every project on one canvas — each
+folder's loops in its own lane, all hanging off a single **START** node. It's the
+overview you read to know what the whole workspace is doing without clicking into each
+project separately.
+
 ### Projects: local, cloned, or remote
 
 From the sidebar's ⊕ menu a project can be a **local folder**, a **repository cloned
