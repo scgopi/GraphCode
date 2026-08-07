@@ -29,7 +29,9 @@ extension GraphOverviewView {
   @ViewBuilder
   func startNodeLayer(_ overview: GraphOverview) -> some View {
     if let center = overview.startNode {
-      ForEach(overview.folders) { folder in
+      // Tethered lanes only — a folder with nothing in it has no origin dot for the
+      // connector to land on, and a line into an empty band reads as a mistake.
+      ForEach(overview.tetheredFolders) { folder in
         startConnector(from: center, to: folder.originPosition)
       }
       startNodeMarker.position(center)

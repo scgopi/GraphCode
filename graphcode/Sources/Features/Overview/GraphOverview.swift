@@ -86,6 +86,11 @@ struct GraphOverview: Equatable {
 
   var isEmpty: Bool { folders.isEmpty && loops.isEmpty }
 
+  /// The lanes the start node tethers to — only those with an entry port to land on.
+  /// An empty folder draws no origin dot, so a connector to it points at nothing; the
+  /// same goes for a cycle-only lane, whose deliberate mark is a chip, not a port.
+  var tetheredFolders: [Folder] { folders.filter { !$0.entryPorts.isEmpty } }
+
   /// Loops drawn — the same number the sidebar lists, since both count a composite once.
   var loopCount: Int { loops.count }
 
