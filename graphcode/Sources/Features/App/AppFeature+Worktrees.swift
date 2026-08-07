@@ -27,6 +27,36 @@ extension AppFeature {
   }
 }
 
+/// One folder past its notice threshold — what the titlebar's worktree chip shows.
+struct WorktreeNotice: Equatable {
+  let projectPath: String
+  let folderName: String
+  let stats: WorktreeFolderStats
+}
+
+extension AppFeature.State {
+  /// Folders past their own notice threshold, worst accumulation first. The titlebar
+  /// chip shows the first and counts the rest — the same standing the needs-you chip
+  /// has: absent whenever the answer is "nothing to mention".
+  ///
+  /// The policy arrives as a closure because it lives in `~/.graphcode/settings.json`
+  /// (the view passes `SettingsModel`), and a computed property that read the disk
+  /// per body pass would put a file hit on the render path.
+  func worktreeNotices(
+    policyFor: (String) -> WorktreeHygienePolicy
+  ) -> [WorktreeNotice] {
+    projects.compactMap { project -> WorktreeNotice? in
+      guard let stats = worktreeStats[project.id] else { return nil }
+      let policy = policyFor(project.id)
+      guard stats.totalBytes >= policy.noticeSizeBytes || stats.total >= policy.noticeCount
+      else { return nil }
+      return WorktreeNotice(
+        projectPath: project.id, folderName: project.graph.project.name, stats: stats)
+    }
+    .sorted { $0.stats.totalBytes > $1.stats.totalBytes }
+  }
+}
+
 /// Per-folder policy reads, behind a dependency so the resolve-moment path is testable
 /// without a settings file on disk.
 struct WorktreePolicyClient: Sendable {
