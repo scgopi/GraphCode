@@ -102,6 +102,15 @@ final class GhosttyTerminalNSView: NSView {
       }
     }
 
+    // The window is unconditionally dark (`AppView` forces `.preferredColorScheme(.dark)`),
+    // so the surface is told so unconditionally. Left unreported, libghostty assumes
+    // light — and a user whose config pairs themes (`theme = light:…,dark:…`) got the
+    // light variant inside a dark window, which read as the app fighting its own
+    // terminal. Their dark theme still wins over graphcode's colors, as it should.
+    if let surface {
+      ghostty_surface_set_color_scheme(surface, GHOSTTY_COLOR_SCHEME_DARK)
+    }
+
     // Weakly held, so this is registration for later zooms only — nothing to unregister
     // when the terminal closes.
     TerminalFontZoomStore.shared.register(self)
