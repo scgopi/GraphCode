@@ -365,19 +365,25 @@ private func gitFacts(
 
 /// Runs a command and returns its standard output.
 ///
-/// **Both pipes are drained before the process is waited on, and concurrently with each
-/// other.** The order matters and the previous order deadlocked: `waitUntilExit()` came
-/// first, and a child that writes more than the pipe buffer holds (64KB) blocks in
-/// `write` until someone reads — which nobody was going to, because the parent was parked
-/// in `waitUntilExit()` waiting for a child that could never exit. `git worktree list
-/// --porcelain` in a repository with enough worktrees is exactly that much output, and
-/// the symptom is not a slow picker but a `git` that never returns and a task that never
-/// completes.
+/// **Both pipes are drained before the exit status is read, and concurrently with each
+/// other.** The order matters and the previous order deadlocked: waiting came first,
+/// and a child that writes more than the pipe buffer holds (64KB) blocks in `write`
+/// until someone reads — which nobody was going to, because the parent was parked
+/// waiting for a child that could never exit. `git worktree list --porcelain` in a
+/// repository with enough worktrees is exactly that much output, and the symptom is not
+/// a slow picker but a `git` that never returns and a task that never completes.
 ///
 /// Draining them one after the other has the same bug one level down (filling stderr
 /// while the reader is blocked on stdout), hence `async let` rather than two sequential
-/// reads. By the time both have hit EOF the child has closed its descriptors, so the
-/// `waitUntilExit()` that follows is a formality rather than a wait.
+/// reads.
+///
+/// **The exit is awaited through `terminationHandler`, never `waitUntilExit()`.** That
+/// call blocks its thread, and the thread it blocked was sometimes the main one —
+/// worktree inspection runs off a `graphChanged` broadcast, and a missed termination
+/// event parked the whole app (and the hosted test runner) inside a wait for a child
+/// that had already exited. The handler is installed before `run()` so the exit can't
+/// be missed, and it resumes a continuation from Foundation's own background queue —
+/// nothing anywhere blocks.
 @discardableResult
 private func run(_ executable: String, _ arguments: [String]) async throws -> String {
   let process = Process()
@@ -389,6 +395,12 @@ private func run(_ executable: String, _ arguments: [String]) async throws -> St
   process.standardOutput = stdout
   process.standardError = stderr
 
+  let (exited, exitContinuation) = AsyncStream<Int32>.makeStream()
+  process.terminationHandler = { process in
+    exitContinuation.yield(process.terminationStatus)
+    exitContinuation.finish()
+  }
+
   try process.run()
 
   async let outputData = drain(stdout)
@@ -396,12 +408,13 @@ private func run(_ executable: String, _ arguments: [String]) async throws -> St
   let output = String(bytes: await outputData, encoding: .utf8) ?? ""
   let errorOutput = String(bytes: await errorData, encoding: .utf8) ?? ""
 
-  process.waitUntilExit()
+  var status: Int32 = -1
+  for await exitStatus in exited { status = exitStatus }
 
-  guard process.terminationStatus == 0 else {
+  guard status == 0 else {
     throw GitClientError.commandFailed(
       command: (["git"] + arguments).joined(separator: " "),
-      status: process.terminationStatus,
+      status: status,
       output: errorOutput.isEmpty ? output : errorOutput
     )
   }
