@@ -48,6 +48,9 @@ struct WorktreeSweepFeature {
   enum Action {
     case task
     case assessmentsLoaded([WorktreeAssessment])
+    /// One worktree's `du` finishing — sizes arrive row by row after the facts, so a
+    /// big backlog shows its rows in git-time rather than disk-walk-time.
+    case sizeLoaded(id: String, bytes: Int64?)
     case loadFailed(String)
     case rowToggled(String)
     case allSafeToggled
@@ -82,6 +85,31 @@ struct WorktreeSweepFeature {
           state.selection.formIntersection(assessments.map(\.id))
         }
         state.isRemoving = false
+        // The rows are on screen; now walk the disk. Bounded, so 38 worktrees is four
+        // `du`s at a time rather than 38 — and a prunable entry has no directory to ask.
+        let unsized = assessments.filter { $0.facts.sizeBytes == nil && !$0.facts.prunable }
+        guard !unsized.isEmpty else { return .none }
+        return .run { send in
+          await withTaskGroup(of: Void.self) { group in
+            var iterator = unsized.makeIterator()
+            func submit() {
+              guard let assessment = iterator.next() else { return }
+              group.addTask {
+                let bytes = await gitClient.worktreeSizeBytes(assessment.ref.worktreePath)
+                await send(.sizeLoaded(id: assessment.id, bytes: bytes))
+              }
+            }
+            for _ in 0..<4 { submit() }
+            for await _ in group { submit() }
+          }
+        }
+
+      case .sizeLoaded(let id, let bytes):
+        guard var assessments = state.assessments,
+          let index = assessments.firstIndex(where: { $0.id == id })
+        else { return .none }
+        assessments[index].facts.sizeBytes = bytes
+        state.assessments = assessments
         return .none
 
       case .loadFailed(let message):
