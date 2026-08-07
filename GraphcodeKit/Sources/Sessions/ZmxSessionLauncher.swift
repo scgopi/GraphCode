@@ -474,9 +474,11 @@ public enum ZmxSessionLauncher {
     // `zmx` types this command into the session's shell, and a tty in canonical mode
     // discards everything past `MAX_CANON` (1024 bytes on macOS). Overrunning it does not
     // fail loudly: the tail is dropped mid-argument and the shell waits forever at a
-    // continuation prompt for a quote that was eaten. Dropping the briefing is the one
-    // safe thing to give up — the prompt is the human's, and a loop that launches without
-    // its briefing merely can't fan out, where a truncated one does nothing at all.
+    // continuation prompt for a quote that was eaten. Shedding goes in two steps: first
+    // the briefing — a loop without one merely can't fan out — and if the prompt *itself*
+    // is what overruns, it moves to a file and a short pointer is typed instead
+    // (issue #57: a multi-KB goal was eaten mid-word, the shell parked at a continuation
+    // prompt, and the node read `running` while no backend process ever existed).
     guard Self.fitsInATypedCommandLine(command) else {
       // The hooks stay: they are two argv entries against the briefing's several hundred
       // bytes, and a loop that overran the line is exactly the one worth being able to
@@ -487,11 +489,61 @@ public enum ZmxSessionLauncher {
         hooksFile: hooksFile,
         sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
         zmxPath: reportingPath)
+      let unbriefedCommand =
+        [
+          "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
+        ]
+        + Self.loginShellInvocation(
+          of: executable, arguments: unbriefed, scriptSuffix: remoteHooksSuffix)
+      if Self.fitsInATypedCommandLine(unbriefedCommand) { return unbriefedCommand }
+
+      // The file carries the *unflattened* prompt — a file has no newline hazard, so a
+      // pasted multi-line goal survives verbatim where the typed line had to collapse it.
+      let filePrompt =
+        wakePath.map { "Read your loop memory at \($0) before starting. Then: \(prompt)" }
+        ?? prompt
+      guard let projectPath,
+        let promptFile = NodeMemory.writePrompt(
+          filePrompt, projectPath: projectPath, nodeID: node.id)
+      else { return unbriefedCommand }
+      let pointerPath =
+        remote == nil
+        ? promptFile.path
+        : RemoteGraphAccess.promptPath(forProjectPath: projectPath, nodeID: node.id)
+      let promptDirectory =
+        remote == nil
+        ? promptFile.deletingLastPathComponent().path
+        : RemoteGraphAccess.memoryDirectory(forProjectPath: projectPath, nodeID: node.id)
+      let pointered = node.backend.launchArguments(
+        prompt: NodeMemory.promptPointer(toPromptAt: pointerPath), tier: tier,
+        briefingPath: briefingPath, settings: settings,
+        workspacePaths: Self.workspacePaths(forNode: node, projectPath: projectPath)
+          + [promptDirectory],
+        hooksFile: hooksFile,
+        sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
+        zmxPath: reportingPath)
+      let pointeredCommand =
+        [
+          "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
+        ]
+        + Self.loginShellInvocation(
+          of: executable, arguments: pointered, scriptSuffix: remoteHooksSuffix)
+      if Self.fitsInATypedCommandLine(pointeredCommand) { return pointeredCommand }
+      // Deep support-directory paths can push briefing plus pointer past the line even
+      // now; the pointer is the one part that cannot be given up, so the briefing goes.
+      let pointeredUnbriefed = node.backend.launchArguments(
+        prompt: NodeMemory.promptPointer(toPromptAt: pointerPath), tier: tier,
+        settings: settings,
+        workspacePaths: Self.workspacePaths(forNode: node, projectPath: projectPath)
+          + [promptDirectory],
+        hooksFile: hooksFile,
+        sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
+        zmxPath: reportingPath)
       return [
         "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
       ]
         + Self.loginShellInvocation(
-          of: executable, arguments: unbriefed, scriptSuffix: remoteHooksSuffix)
+          of: executable, arguments: pointeredUnbriefed, scriptSuffix: remoteHooksSuffix)
     }
     return command
   }
@@ -519,12 +571,13 @@ public enum ZmxSessionLauncher {
     let sessionName: String? =
       node.backend == .copilotCLI
       ? nil : SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
-    let resumeArgs = node.backend.launchArguments(
-      prompt: nil, tier: tier, settings: settings,
-      workspacePaths: Self.workspacePaths(forNode: node, projectPath: projectPath),
-      hooksFile: hooksFile,
-      sessionName: sessionName,
-      zmxPath: reportingPath)
+    let resumeArgs =
+      node.backend.launchArguments(
+        prompt: nil, tier: tier, settings: settings,
+        workspacePaths: Self.workspacePaths(forNode: node, projectPath: projectPath),
+        hooksFile: hooksFile,
+        sessionName: sessionName,
+        zmxPath: reportingPath)
       + ["--resume", sessionID]
     return [
       "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
@@ -676,6 +729,16 @@ public enum ZmxSessionLauncher {
       if let wake = try? String(contentsOf: wakeURL, encoding: .utf8) {
         files[RemoteGraphAccess.wakePath(forProjectPath: location.projectPath, nodeID: node.id)] =
           wake
+      }
+      // An oversized prompt travels the same way (issue #57): `arguments(forNode:)` has
+      // already written the local copy by the time the ensure dial builds this script.
+      let promptURL = NodeMemory.directory(
+        forProjectPath: location.projectPath, nodeID: node.id
+      ).appendingPathComponent(NodeMemory.promptFileName)
+      if let promptText = try? String(contentsOf: promptURL, encoding: .utf8) {
+        files[
+          RemoteGraphAccess.promptPath(forProjectPath: location.projectPath, nodeID: node.id)] =
+          promptText
       }
     }
     return RemoteGraphAccess.installerScript(files: files)
@@ -904,14 +967,16 @@ public enum ZmxSessionLauncher {
       let resumeArgs = resumeArguments(
         forNode: node, sessionID: sessionID, projectPath: projectPath)
     {
-      await atomicCheckOrRun(checkArguments: checkArgs, runArguments: resumeArgs,
-                             zmxPath: zmxPath, workingDirectory: wd)
+      await atomicCheckOrRun(
+        checkArguments: checkArgs, runArguments: resumeArgs,
+        zmxPath: zmxPath, workingDirectory: wd)
       return
     }
 
     guard let runArgs = arguments(forNode: node, projectPath: projectPath) else { return }
-    await atomicCheckOrRun(checkArguments: checkArgs, runArguments: runArgs,
-                           zmxPath: zmxPath, workingDirectory: wd)
+    await atomicCheckOrRun(
+      checkArguments: checkArgs, runArguments: runArgs,
+      zmxPath: zmxPath, workingDirectory: wd)
   }
 
   private static func atomicCheckOrRun(
@@ -921,9 +986,10 @@ public enum ZmxSessionLauncher {
     let check = quotedCommand([zmxPath] + checkArguments)
     let run = quotedCommand([zmxPath] + runArguments)
     let script = "\(check) >/dev/null 2>&1 || \(run)"
-    guard let session = try? PTYProcessSession(
-      executable: "/bin/zsh", arguments: ["-c", script],
-      workingDirectory: workingDirectory)
+    guard
+      let session = try? PTYProcessSession(
+        executable: "/bin/zsh", arguments: ["-c", script],
+        workingDirectory: workingDirectory)
     else { return }
     _ = await session.waitUntilFinished()
   }
