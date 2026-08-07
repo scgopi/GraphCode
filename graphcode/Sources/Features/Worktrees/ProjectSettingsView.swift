@@ -6,21 +6,38 @@ import SwiftUI
 /// again, which is the outcome to design for, not a cleanup screen they visit monthly.
 ///
 /// Writes through `SettingsModel.shared` the way the app-wide settings scene does, so
-/// every change lands in `~/.graphcode/settings.json` the moment it is made.
+/// every change lands in `~/.graphcode/settings.json` the moment it is made — which is
+/// why the sheet says so and Done only closes.
+///
+/// The policy is three **radio rows**, not a segmented control: segments over a body of
+/// content read as tabs, and this sheet's first field test produced exactly that
+/// misreading — "each tab shows the same numbers" — about what is really one choice
+/// above one shared threshold.
 struct ProjectSettingsView: View {
   let projectPath: String
   let projectName: String
 
   @Environment(\.dismiss) private var dismiss
 
+  /// The threshold fields, text-backed so editing works like a text field: empty is a
+  /// legal state *while typing* (an Int binding snapped every backspace straight back),
+  /// and only a valid number is committed to the policy.
+  @State private var gigabytesText = ""
+  @State private var countText = ""
+
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
-      HStack(alignment: .firstTextBaseline, spacing: 9) {
-        Text("Project Settings")
-          .font(.system(size: 16, weight: .semibold))
-          .foregroundStyle(.white.opacity(0.95))
-        Text(projectName)
-          .font(.system(size: 12))
+      VStack(alignment: .leading, spacing: 3) {
+        HStack(alignment: .firstTextBaseline, spacing: 9) {
+          Text("Project Settings")
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.95))
+          Text(projectName)
+            .font(.system(size: 12))
+            .foregroundStyle(.white.opacity(0.5))
+        }
+        Text("Changes apply as you make them — Done just closes.")
+          .font(.system(size: 11))
           .foregroundStyle(.white.opacity(0.5))
       }
 
@@ -34,13 +51,11 @@ struct ProjectSettingsView: View {
           Text("When a loop resolves and its branch has landed")
             .font(.system(size: 11.5, weight: .semibold))
             .foregroundStyle(.white.opacity(0.85))
-          Picker("", selection: resolveAction) {
+          VStack(alignment: .leading, spacing: 2) {
             ForEach(WorktreeHygienePolicy.ResolveAction.allCases, id: \.self) { action in
-              Text(action.displayName).tag(action)
+              resolveRow(action)
             }
           }
-          .pickerStyle(.segmented)
-          .labelsHidden()
           Text(
             "Only ever the safe tier — landed, clean, pushed, and bound to no loop. "
               + "Anything else waits for you regardless of this setting."
@@ -52,24 +67,30 @@ struct ProjectSettingsView: View {
         Divider().overlay(.white.opacity(0.08))
 
         VStack(alignment: .leading, spacing: 7) {
-          Text("Mention it on the lane when this folder passes")
+          Text("Mention worktrees on the lane when this folder passes")
             .font(.system(size: 11.5, weight: .semibold))
             .foregroundStyle(.white.opacity(0.85))
           HStack(spacing: 9) {
-            TextField("", value: noticeGigabytes, format: .number)
+            TextField("2", text: $gigabytesText)
               .textFieldStyle(.roundedBorder)
               .frame(width: 64)
+              .onChange(of: gigabytesText) { _, text in
+                commitGigabytes(text)
+              }
             Text("GB").font(.system(size: 12)).foregroundStyle(.white.opacity(0.6))
             Text("or").font(.system(size: 12)).foregroundStyle(.white.opacity(0.6))
-            TextField("", value: noticeCount, format: .number)
+            TextField("8", text: $countText)
               .textFieldStyle(.roundedBorder)
               .frame(width: 64)
+              .onChange(of: countText) { _, text in
+                commitCount(text)
+              }
             Text("worktrees").font(.system(size: 12)).foregroundStyle(.white.opacity(0.6))
           }
           Text(
-            "A repo with four worktrees is working as designed. The chip appears when "
-              + "the folder is genuinely accumulating — and it stays a chip: no badge, "
-              + "no modal, no red."
+            "This decides when GraphCode mentions worktrees — the chip on the lane "
+              + "turns amber and the titlebar counts them once the folder passes either "
+              + "line. It removes nothing; removal is the setting above."
           )
           .font(.system(size: 11))
           .foregroundStyle(.white.opacity(0.6))
@@ -92,6 +113,49 @@ struct ProjectSettingsView: View {
     .padding(.bottom, 18)
     .frame(width: 470)
     .background(Theme.sheet)
+    .onAppear {
+      gigabytesText = String(storedGigabytes)
+      countText = String(policy.noticeCount)
+    }
+  }
+
+  /// One choice with its consequence on the same line — what the segmented control
+  /// could not say.
+  private func resolveRow(_ action: WorktreeHygienePolicy.ResolveAction) -> some View {
+    let selected = policy.onResolveLanded == action
+    return Button {
+      update { $0.onResolveLanded = action }
+    } label: {
+      HStack(alignment: .firstTextBaseline, spacing: 8) {
+        ZStack {
+          Circle().strokeBorder(
+            selected ? Color.accentColor : .white.opacity(0.3), lineWidth: 1.5)
+          if selected {
+            Circle().fill(Color.accentColor).frame(width: 7, height: 7)
+          }
+        }
+        .frame(width: 14, height: 14)
+        Text(action.displayName)
+          .font(.system(size: 12, weight: selected ? .semibold : .regular))
+          .foregroundStyle(.white.opacity(selected ? 0.92 : 0.75))
+          .frame(width: 76, alignment: .leading)
+        Text(explanation(for: action))
+          .font(.system(size: 11))
+          .foregroundStyle(.white.opacity(0.55))
+        Spacer(minLength: 0)
+      }
+      .padding(.vertical, 4)
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+  }
+
+  private func explanation(for action: WorktreeHygienePolicy.ResolveAction) -> String {
+    switch action {
+    case .remove: return "Removed automatically, the moment the loop finishes."
+    case .ask: return "The finished loop's card offers Reclaim / Keep."
+    case .keep: return "Nothing happens until you open Worktrees… yourself."
+    }
   }
 
   private var policy: WorktreeHygienePolicy {
@@ -104,25 +168,23 @@ struct ProjectSettingsView: View {
     SettingsModel.shared.settings.worktreePolicies[projectPath] = updated
   }
 
-  private var resolveAction: Binding<WorktreeHygienePolicy.ResolveAction> {
-    Binding(
-      get: { policy.onResolveLanded },
-      set: { action in update { $0.onResolveLanded = action } })
-  }
-
   /// Whole gigabytes are the honest granularity here: the threshold is a "genuinely
   /// accumulating" line, not an accounting figure.
-  private var noticeGigabytes: Binding<Int> {
-    Binding(
-      get: { Int((Double(policy.noticeSizeBytes) / Double(1 << 30)).rounded()) },
-      set: { gigabytes in
-        update { $0.noticeSizeBytes = Int64(max(gigabytes, 1)) * Int64(1 << 30) }
-      })
+  private var storedGigabytes: Int {
+    Int((Double(policy.noticeSizeBytes) / Double(1 << 30)).rounded())
   }
 
-  private var noticeCount: Binding<Int> {
-    Binding(
-      get: { policy.noticeCount },
-      set: { count in update { $0.noticeCount = max(count, 1) } })
+  /// An empty or half-typed field commits nothing — the last valid value stands, and
+  /// the field is free to be empty on the way to the next number.
+  private func commitGigabytes(_ text: String) {
+    guard let gigabytes = Int(text.trimmingCharacters(in: .whitespaces)), gigabytes >= 1
+    else { return }
+    update { $0.noticeSizeBytes = Int64(gigabytes) * Int64(1 << 30) }
+  }
+
+  private func commitCount(_ text: String) {
+    guard let count = Int(text.trimmingCharacters(in: .whitespaces)), count >= 1
+    else { return }
+    update { $0.noticeCount = count }
   }
 }

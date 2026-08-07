@@ -130,8 +130,13 @@ struct AppWorktreesReducer: Reducer {
         return .none
 
       case .worktrees(.settingsDismissed):
+        let path = state.projectSettingsPath
         state.projectSettingsPath = nil
-        return .none
+        // A changed threshold should be visible the moment the sheet closes — the chip
+        // and titlebar notice re-derive from stats, so refresh them rather than leaving
+        // the new line to take effect at the next broadcast.
+        guard let path, Self.tracksWorktrees(path) else { return .none }
+        return reloadStats(path, nodes: nodes(in: state, path))
 
       case .worktrees:
         return .none
