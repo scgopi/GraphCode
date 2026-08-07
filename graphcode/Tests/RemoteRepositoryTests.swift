@@ -203,8 +203,11 @@ struct RemoteRepositoryTests {
   // MARK: - The add form
 
   @Test
-  func theDraftRequiresAHostAndAnAbsolutePath() {
+  func theDraftRequiresAHostAnAbsolutePathAndTheWholeDial() {
     var draft = WelcomeFeature.RemoteDraft()
+    // User and port arrive prefilled with ssh's own defaults — visible, not implied.
+    #expect(!draft.user.isEmpty)
+    #expect(draft.port == "22")
     #expect(!draft.canSubmit)
     draft.server = "build-box"
     draft.remotePath = "~/widget"
@@ -213,6 +216,15 @@ struct RemoteRepositoryTests {
     draft.remotePath = "/home/dev/widget"
     #expect(draft.canSubmit)
     draft.port = "not-a-port"
+    #expect(draft.location == nil)
+    draft.port = "22"
+    // Clearing either half of the dial blocks submission: left empty they fell through
+    // to whatever ssh guessed, and on machines where the remote side differs the dial
+    // silently went to the wrong place.
+    draft.user = ""
+    #expect(draft.location == nil)
+    draft.user = "dev"
+    draft.port = ""
     #expect(draft.location == nil)
   }
 
@@ -241,7 +253,8 @@ struct RemoteRepositoryTests {
     await store.finish()
 
     #expect(store.state.remoteDraft == nil)
-    #expect(await opened.paths == ["ssh://dev@build-box/home/dev/widget"])
+    // The port rides in the identity now — every new remote path carries the full dial.
+    #expect(await opened.paths == ["ssh://dev@build-box:22/home/dev/widget"])
   }
 
   @Test
