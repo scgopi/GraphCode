@@ -12,9 +12,16 @@ struct GitClient: Sendable {
       WorktreeRef
   var listWorktrees: @Sendable (_ repositoryPath: String) async throws -> [WorktreeRef]
   var removeWorktree: @Sendable (_ worktree: WorktreeRef) async throws -> Void
-  /// Reads every linked worktree's hygiene signals — landed, clean, pushed, prunable,
-  /// size — in one call. The primary checkout is never a candidate and is not returned.
+  /// Reads every linked worktree's hygiene signals — landed, clean, pushed, prunable —
+  /// in one call. The primary checkout is never a candidate and is not returned.
+  ///
+  /// **Never sizes.** `du` over a worktree walks its whole tree, and a repository with
+  /// dozens of worktrees turned the sweeper's spinner into a half-hour wait for facts
+  /// git answers in seconds. Sizes come one at a time from `worktreeSizeBytes`, after
+  /// the rows are already on screen.
   var inspectWorktrees: @Sendable (_ repositoryPath: String) async throws -> [WorktreeInspection]
+  /// One worktree's on-disk size, for callers to stream in after the facts.
+  var worktreeSizeBytes: @Sendable (_ worktreePath: String) async -> Int64?
   /// Removes a worktree and deletes its branch. A prunable entry (admin file, no
   /// directory) is pruned instead of removed. The directory must be fully committed —
   /// `worktree remove` without `--force` refuses a dirty tree, which is the safety
@@ -71,16 +78,40 @@ extension GitClient: DependencyKey {
       let blocks = parseWorktreeBlocks(output)
         .filter { $0.branch != nil && resolvedPath($0.path) != repoPath }
       let defaultBranch = await discoverDefaultBranch(repositoryPath)
-      var inspections: [WorktreeInspection] = []
-      for block in blocks {
-        guard let branch = block.branch else { continue }
-        let ref = WorktreeRef(
-          id: branch, repositoryPath: repositoryPath, worktreePath: block.path, branch: branch)
-        let facts = await gitFacts(
-          for: block, defaultBranch: defaultBranch, repositoryPath: repositoryPath)
-        inspections.append(WorktreeInspection(ref: ref, facts: facts))
+      // Concurrent, bounded: serial inspection scaled linearly with the backlog — the
+      // repositories that need the sweeper most were the ones it was slowest on. Six
+      // at a time keeps the process count civil (each inspection is up to three gits).
+      var inspections = [WorktreeInspection?](repeating: nil, count: blocks.count)
+      await withTaskGroup(of: (Int, WorktreeInspection)?.self) { group in
+        var next = 0
+        func submit() {
+          guard next < blocks.count else { return }
+          let index = next
+          let block = blocks[index]
+          next += 1
+          group.addTask {
+            guard let branch = block.branch else { return nil }
+            let ref = WorktreeRef(
+              id: branch, repositoryPath: repositoryPath, worktreePath: block.path,
+              branch: branch)
+            let facts = await gitFacts(
+              for: block, defaultBranch: defaultBranch, repositoryPath: repositoryPath)
+            return (index, WorktreeInspection(ref: ref, facts: facts))
+          }
+        }
+        for _ in 0..<min(6, blocks.count) { submit() }
+        for await result in group {
+          if let (index, inspection) = result { inspections[index] = inspection }
+          submit()
+        }
       }
-      return inspections
+      return inspections.compactMap { $0 }
+    },
+    worktreeSizeBytes: { worktreePath in
+      (try? await run("du", ["-sk", worktreePath]))
+        .flatMap { $0.split(separator: "\t").first }
+        .flatMap { Int64($0.trimmingCharacters(in: .whitespaces)) }
+        .map { $0 * 1024 }
     },
     removeWorktreeAndBranch: { worktree, prunable in
       if prunable {
@@ -354,13 +385,9 @@ private func gitFacts(
     "git", ["-C", block.path, "rev-list", "--count", "@{upstream}..HEAD"])
   let pushed =
     ahead.flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } == 0
-  let size = (try? await run("du", ["-sk", block.path]))
-    .flatMap { $0.split(separator: "\t").first }
-    .flatMap { Int64($0.trimmingCharacters(in: .whitespaces)) }
-    .map { $0 * 1024 }
   return WorktreeGitFacts(
     defaultBranch: defaultBranch, commitsNotLanded: commitsNotLanded,
-    dirtyFileCount: dirtyFileCount, pushed: pushed, prunable: false, sizeBytes: size)
+    dirtyFileCount: dirtyFileCount, pushed: pushed, prunable: false, sizeBytes: nil)
 }
 
 /// Runs a command and returns its standard output.

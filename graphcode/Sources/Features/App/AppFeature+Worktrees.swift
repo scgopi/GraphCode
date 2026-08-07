@@ -216,11 +216,22 @@ struct AppWorktreesReducer: Reducer {
     .run { send in
       guard let inspections = try? await gitClient.inspectWorktrees(path) else { return }
       let assessments = WorktreeSweepFeature.assessments(inspections, nodes: nodes)
-      let stats = WorktreeFolderStats(
-        total: assessments.count,
-        reclaimable: assessments.filter { $0.tier == .safeToRemove }.count,
-        totalBytes: assessments.compactMap(\.facts.sizeBytes).reduce(0, +))
-      await send(.worktrees(.statsLoaded(projectPath: path, stats)))
+      func stats(totalBytes: Int64) -> WorktreeFolderStats {
+        WorktreeFolderStats(
+          total: assessments.count,
+          reclaimable: assessments.filter { $0.tier == .safeToRemove }.count,
+          totalBytes: totalBytes)
+      }
+      // Counts first — they're what the menus and chip text need — then the disk walk
+      // for the byte total that decides the amber threshold. Serial `du` here: this is
+      // a background refresh, and four-wide is reserved for the sweeper a human is
+      // actively looking at.
+      await send(.worktrees(.statsLoaded(projectPath: path, stats(totalBytes: 0))))
+      var totalBytes: Int64 = 0
+      for assessment in assessments where !assessment.facts.prunable {
+        totalBytes += await gitClient.worktreeSizeBytes(assessment.ref.worktreePath) ?? 0
+      }
+      await send(.worktrees(.statsLoaded(projectPath: path, stats(totalBytes: totalBytes))))
     }
   }
 
@@ -242,9 +253,13 @@ struct AppWorktreesReducer: Reducer {
       guard let inspections = try? await gitClient.inspectWorktrees(path),
         let inspection = inspections.first(where: { $0.ref.worktreePath == ref.worktreePath })
       else { return }
+      // One worktree's size is worth the wait here: "312 MB left behind" is half of
+      // what makes the card's offer worth answering.
+      var facts = inspection.facts
+      facts.sizeBytes = await gitClient.worktreeSizeBytes(ref.worktreePath)
       let assessment = WorktreeAssessment(
         ref: inspection.ref,
-        facts: inspection.facts,
+        facts: facts,
         binding: WorktreeAssessment.binding(
           forWorktreePath: ref.worktreePath, in: others),
         loopTitle: title)

@@ -11,7 +11,7 @@ import Testing
 @Suite
 struct WorktreeSweepFeatureTests {
   private func inspection(
-    branch: String, dirty: Int = 0, size: Int64 = 100
+    branch: String, dirty: Int = 0, size: Int64? = 100
   ) -> WorktreeInspection {
     WorktreeInspection(
       ref: WorktreeRef(
@@ -20,6 +20,31 @@ struct WorktreeSweepFeatureTests {
       facts: WorktreeGitFacts(
         defaultBranch: "main", commitsNotLanded: 0, dirtyFileCount: dirty, pushed: true,
         sizeBytes: size))
+  }
+
+  @Test
+  func sizesStreamInAfterTheRowsAppear() async {
+    // The rows show in git-time; the disk walk fills sizes in behind them. This is
+    // what keeps a 38-worktree backlog from spinning the sheet for half an hour.
+    let unsized = inspection(branch: "landed", size: nil)
+    let store = TestStore(
+      initialState: WorktreeSweepFeature.State(
+        projectPath: "/repo", projectName: "repo", nodes: [])
+    ) {
+      WorktreeSweepFeature()
+    } withDependencies: {
+      $0.gitClient.inspectWorktrees = { _ in [unsized] }
+      $0.gitClient.worktreeSizeBytes = { _ in 412 * 1024 * 1024 }
+    }
+
+    await store.send(.task)
+    await store.receive(\.assessmentsLoaded) {
+      $0.assessments = WorktreeSweepFeature.assessments([unsized], nodes: [])
+      $0.selection = [unsized.ref.worktreePath]
+    }
+    await store.receive(\.sizeLoaded) {
+      $0.assessments?[0].facts.sizeBytes = 412 * 1024 * 1024
+    }
   }
 
   @Test
