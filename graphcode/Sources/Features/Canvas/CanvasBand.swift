@@ -1,4 +1,5 @@
 import CoreGraphics
+import GraphcodeKit
 import SwiftUI
 
 /// The band a lane of cards sits in — what replaced the start marker and its tethers.
@@ -65,6 +66,16 @@ enum CanvasBand {
 struct WorktreeChipModel: Equatable {
   let text: String
   let isNotice: Bool
+
+  /// Absent entirely until the folder has a worktree, amber only past the folder's own
+  /// notice threshold — a repo with four worktrees is working as designed. One factory,
+  /// so the overview lane and a folder's own canvas can't disagree on what the chip says.
+  init?(stats: WorktreeFolderStats?, policy: WorktreeHygienePolicy) {
+    guard let stats, stats.total > 0 else { return nil }
+    let count = stats.total == 1 ? "1 worktree" : "\(stats.total) worktrees"
+    text = stats.reclaimable > 0 ? "\(count) · \(stats.reclaimable) reclaimable" : count
+    isNotice = stats.totalBytes >= policy.noticeSizeBytes || stats.total >= policy.noticeCount
+  }
 }
 
 /// One band, drawn behind everything else on the canvas.
@@ -178,20 +189,25 @@ struct CanvasBandView: View {
     .stroke(CanvasBand.railTint, lineWidth: 1.5)
   }
 
+  // A chip with no name still earns the row: the project canvas draws its band
+  // unlabelled — the pane already *is* the folder — but the worktree count is a fact
+  // the band is the only place to say.
   @ViewBuilder
   private var captionRow: some View {
-    if let name {
+    if name != nil || worktreeChip != nil {
       HStack(spacing: 6) {
-        Image(systemName: glyph)
-          .font(.system(size: 10))
-          .foregroundStyle(Theme.folderGlyph.opacity(0.8))
-        Text(name)
-          .font(.system(size: 11.5, weight: .semibold))
-          .foregroundStyle(.white.opacity(0.6))
-        if let caption {
-          Text(caption)
-            .font(.system(size: 10.5, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.5))
+        if let name {
+          Image(systemName: glyph)
+            .font(.system(size: 10))
+            .foregroundStyle(Theme.folderGlyph.opacity(0.8))
+          Text(name)
+            .font(.system(size: 11.5, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.6))
+          if let caption {
+            Text(caption)
+              .font(.system(size: 10.5, design: .monospaced))
+              .foregroundStyle(.white.opacity(0.5))
+          }
         }
         if let worktreeChip {
           chip(worktreeChip)
