@@ -72,10 +72,24 @@ struct AppView: View {
       // the sidebar toggles. `ToolbarSpacer(.flexible)` was tried in that arrangement and
       // contributed no width — the trailing group has to be measured against something.
       ToolbarItem(placement: .principal) {
-        if store.attentionItems.isEmpty {
+        // The worktree notice stands beside the needs-you count on the same terms: a
+        // folder past its own threshold (`WorktreeHygienePolicy`) is the only other
+        // standing fact worth this strip, and it too is absent whenever the answer is
+        // "nothing to mention". Clicking it opens the sweeper scoped to that folder.
+        let notices = worktreeNotices
+        if store.attentionItems.isEmpty && notices.isEmpty {
           Color.clear.frame(width: 1, height: 1)
         } else {
-          NeedsYouChip(count: store.attentionItems.count)
+          HStack(spacing: 6) {
+            if !store.attentionItems.isEmpty {
+              NeedsYouChip(count: store.attentionItems.count)
+            }
+            if let worst = notices.first {
+              WorktreeNoticeChip(notice: worst, extraFolders: notices.count - 1) {
+                store.send(.worktrees(.sweepRequested(projectPath: worst.projectPath)))
+              }
+            }
+          }
         }
       }
       if #available(macOS 26.0, *) {
@@ -192,6 +206,15 @@ struct AppView: View {
     // The sweeper and a folder's settings — same hosting rule, own modifier for the
     // same type-checker reason. See `WorktreeDialogs`.
     .modifier(WorktreeDialogs(store: store))
+  }
+
+  /// Folders past their worktree notice threshold, for the titlebar chip. Policies
+  /// come off `SettingsModel` — the in-memory view of the settings file — for the same
+  /// no-disk-on-render reason `showsActivityStrip` reads it.
+  private var worktreeNotices: [WorktreeNotice] {
+    store.state.worktreeNotices { path in
+      SettingsModel.shared.settings.worktreePolicy(forProjectPath: path)
+    }
   }
 
   /// The open loop's trailing panel, toggled from where macOS puts an inspector toggle.

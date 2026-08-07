@@ -33,6 +33,50 @@ struct NeedsYouChip: View {
   private static let ink = Color(red: 1.0, green: 0.745, blue: 0.361)  // #ffbe5c
 }
 
+/// The titlebar's worktree notice — the needs-you chip's quieter cousin, present only
+/// while some folder is past its own notice threshold (`WorktreeHygienePolicy`).
+///
+/// One chip, not one per folder: it names the worst accumulator and counts the rest,
+/// and clicking it opens the sweeper already scoped to that folder. Amber like the
+/// lane chip because it is the same fact surfacing one level up — but it stays a chip:
+/// no badge, no modal, no red.
+struct WorktreeNoticeChip: View {
+  let notice: WorktreeNotice
+  /// How many *other* folders are also past their threshold.
+  let extraFolders: Int
+  let action: () -> Void
+
+  var body: some View {
+    Button(action: action) {
+      HStack(spacing: 5) {
+        Circle()
+          .fill(Color(red: 1.0, green: 0.624, blue: 0.039))
+          .frame(width: 5, height: 5)
+        Text(label)
+          .font(.system(size: 11, weight: .semibold))
+          .foregroundStyle(Self.ink)
+      }
+      .padding(.vertical, 2)
+      .padding(.horizontal, 8)
+      .background(Self.tint, in: RoundedRectangle(cornerRadius: 5))
+    }
+    .buttonStyle(.plain)
+    .help("Worktrees are accumulating in \(notice.folderName) — click to review")
+  }
+
+  private var label: String {
+    let what =
+      notice.stats.reclaimable > 0
+      ? "\(notice.stats.reclaimable) reclaimable"
+      : (notice.stats.total == 1 ? "1 worktree" : "\(notice.stats.total) worktrees")
+    let more = extraFolders > 0 ? " +\(extraFolders)" : ""
+    return "\(notice.folderName) · \(what)\(more)"
+  }
+
+  private static let tint = Color(red: 1.0, green: 0.624, blue: 0.039).opacity(0.12)
+  private static let ink = Color(red: 1.0, green: 0.804, blue: 0.478).opacity(0.92)
+}
+
 /// The ⌘K affordance, in the titlebar where a search field belongs.
 ///
 /// A shortcut nobody can see is a shortcut nobody uses. This is the discoverable half of

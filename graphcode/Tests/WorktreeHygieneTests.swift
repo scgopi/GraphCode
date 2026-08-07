@@ -146,6 +146,33 @@ struct WorktreeHygieneTests {
   }
 
   @Test
+  func theTitlebarNoticeAppearsOnlyPastAFoldersOwnThreshold() {
+    var state = AppFeature.State(projects: [
+      ProjectFeature.State(
+        graph: LoopGraph(scope: .project(ProjectRef(path: "/calm", name: "calm")))),
+      ProjectFeature.State(
+        graph: LoopGraph(scope: .project(ProjectRef(path: "/busy", name: "busy")))),
+      ProjectFeature.State(
+        graph: LoopGraph(scope: .project(ProjectRef(path: "/heavy", name: "heavy")))),
+    ])
+    // Four worktrees is a repo working as designed; eight is accumulating; a folder
+    // over its byte threshold counts even with few worktrees.
+    state.worktreeStats["/calm"] = WorktreeFolderStats(
+      total: 4, reclaimable: 2, totalBytes: 500)
+    state.worktreeStats["/busy"] = WorktreeFolderStats(
+      total: 8, reclaimable: 5, totalBytes: 1000)
+    state.worktreeStats["/heavy"] = WorktreeFolderStats(
+      total: 2, reclaimable: 0, totalBytes: 5000)
+
+    let notices = state.worktreeNotices { _ in
+      WorktreeHygienePolicy(noticeSizeBytes: 4000, noticeCount: 8)
+    }
+
+    // Worst accumulation first — the chip names the first and counts the rest.
+    #expect(notices.map(\.folderName) == ["heavy", "busy"])
+  }
+
+  @Test
   func policyDecodesFromAnEmptyObjectWithDefaults() throws {
     let policy = try JSONDecoder().decode(
       WorktreeHygienePolicy.self, from: Data("{}".utf8))
