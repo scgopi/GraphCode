@@ -44,6 +44,12 @@ public enum RemoteGraphAccess {
     memoryDirectory(forProjectPath: projectPath, nodeID: nodeID) + "/" + NodeMemory.wakeFileName
   }
 
+  /// Where an oversized prompt lands on the remote host — delivered like the wake
+  /// digest, and for the same reason the briefing is: too long to type (issue #57).
+  public static func promptPath(forProjectPath projectPath: String, nodeID: UUID) -> String {
+    memoryDirectory(forProjectPath: projectPath, nodeID: nodeID) + "/" + NodeMemory.promptFileName
+  }
+
   /// A shell fragment that lands `files` (home-relative path → content) on the remote
   /// host, or `nil` when there's nothing to send. One `python3 -c` with a base64 JSON
   /// manifest rather than heredocs or scp: a single argument survives every quoting

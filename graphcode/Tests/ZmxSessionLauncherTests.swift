@@ -167,6 +167,66 @@ struct ZmxSessionLauncherTests {
   }
 
   @Test
+  func aMultiKBGoalIsDeliveredByFileAndTypedAsAPointer() {
+    // Issue #57: the launch command is typed into a canonical-mode tty, which discards
+    // everything past MAX_CANON (1024 bytes). A multi-KB goal was eaten mid-word, the
+    // shell parked at a continuation prompt, and the node read `running` while no
+    // backend process ever existed. Past the typed-line budget, the prompt must ride in
+    // a file with only a short pointer on the line.
+    let goal = String(
+      repeating: "Resolve the CONFLICT SCOPE in one debate round before moving on. ", count: 40)
+    let node = LoopNode(title: "Debate", loopType: .goalBased, goal: GoalSpec(summary: goal))
+    defer { NodeMemory.remove(projectPath: "/tmp", nodeID: node.id) }
+
+    let arguments = ZmxSessionLauncher.arguments(forNode: node, projectPath: "/tmp") ?? []
+
+    // The whole point: what gets typed survives the tty.
+    #expect(ZmxSessionLauncher.fitsInATypedCommandLine(arguments))
+    // The typed prompt is the pointer, not the goal.
+    let typed = arguments.last ?? ""
+    #expect(!typed.contains("CONFLICT SCOPE"))
+    #expect(typed.contains(NodeMemory.promptFileName))
+    // And the file carries the full goal, nothing dropped mid-string.
+    let file = NodeMemory.directory(forProjectPath: "/tmp", nodeID: node.id)
+      .appendingPathComponent(NodeMemory.promptFileName)
+    let content = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
+    #expect(content.contains(goal))
+  }
+
+  @Test
+  func aPromptWithinTheLineBudgetIsStillTypedDirectly() {
+    // The file is the last resort, not the new default: a short goal keeps today's
+    // behaviour, typed verbatim so nothing has to read a file to know its job.
+    let node = LoopNode(
+      title: "Small", loopType: .goalBased, goal: GoalSpec(summary: "Say hello"))
+    defer { NodeMemory.remove(projectPath: "/tmp", nodeID: node.id) }
+
+    let arguments = ZmxSessionLauncher.arguments(forNode: node, projectPath: "/tmp") ?? []
+
+    #expect(arguments.last?.contains("Say hello") == true)
+    #expect(arguments.last?.contains(NodeMemory.promptFileName) != true)
+    let file = NodeMemory.directory(forProjectPath: "/tmp", nodeID: node.id)
+      .appendingPathComponent(NodeMemory.promptFileName)
+    #expect(!FileManager.default.fileExists(atPath: file.path))
+  }
+
+  @Test
+  func theOversizedPromptFileKeepsItsNewlines() {
+    // The typed line must flatten newlines (zmx submits at `\r`); the file has no such
+    // hazard, so a pasted multi-line brief survives with its structure intact.
+    let brief = "# Debate brief\n\n" + String(repeating: "One point per line.\n", count: 60)
+    let node = LoopNode(title: "Brief", loopType: .timeBased, triggerPrompt: brief)
+    defer { NodeMemory.remove(projectPath: "/tmp", nodeID: node.id) }
+
+    _ = ZmxSessionLauncher.arguments(forNode: node, projectPath: "/tmp")
+
+    let file = NodeMemory.directory(forProjectPath: "/tmp", nodeID: node.id)
+      .appendingPathComponent(NodeMemory.promptFileName)
+    let content = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
+    #expect(content.contains("# Debate brief\n"))
+  }
+
+  @Test
   func aReportedActivityLabelIsCollapsedToOneBoundedLine() {
     // A label is whatever a hook wrote. One that arrives as a paragraph must not reach
     // the graph, the broadcast, and every card's one-line row — so it is cut here, once,

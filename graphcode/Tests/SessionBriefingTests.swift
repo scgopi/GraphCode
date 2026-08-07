@@ -122,16 +122,27 @@ struct SessionBriefingTests {
   }
 
   @Test
-  func anOverlongPromptDropsTheBriefingRatherThanCorruptTheCommand() throws {
-    // A pasted prompt can be long enough on its own to threaten the buffer. The briefing
-    // is the one thing safe to give up: without it a loop merely can't fan out, whereas a
-    // truncated command line hangs the session at a continuation prompt.
+  func anOverlongPromptMovesToAFileRatherThanCorruptTheCommand() throws {
+    // Issue #57. This test used to assert that an overlong prompt merely dropped the
+    // briefing and stayed on the line verbatim — but the unbriefed command it accepted
+    // was itself past the typed-line budget, which is exactly the corruption the budget
+    // exists to prevent: the tty ate the tail mid-word and the shell parked at a
+    // continuation prompt while the node read `running`. Past the budget the prompt now
+    // rides in a file, the typed line carries only a short pointer, and the briefing no
+    // longer needs to be sacrificed to make room.
     let huge = String(repeating: "do the thing ", count: 60)
+    let overlong = node(prompt: huge)
+    defer { NodeMemory.remove(projectPath: Self.project, nodeID: overlong.id) }
     let arguments = try #require(
-      ZmxSessionLauncher.arguments(
-        forNode: node(prompt: huge), projectPath: Self.project))
-    #expect(!arguments.contains("--append-system-prompt-file"))
-    #expect(arguments.last == huge)
+      ZmxSessionLauncher.arguments(forNode: overlong, projectPath: Self.project))
+
+    #expect(ZmxSessionLauncher.fitsInATypedCommandLine(arguments))
+    #expect(arguments.contains("--append-system-prompt-file"))
+    let typed = try #require(arguments.last)
+    #expect(!typed.contains("do the thing"))
+    let path = try #require(
+      typed.components(separatedBy: " ").first { $0.hasSuffix(NodeMemory.promptFileName) })
+    #expect(try String(contentsOfFile: path, encoding: .utf8).contains(huge))
   }
 
   @Test

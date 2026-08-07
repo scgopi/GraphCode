@@ -27,6 +27,7 @@ import Foundation
 public enum NodeMemory {
   public static let logFileName = "LOG.txt"
   public static let wakeFileName = "WAKE.md"
+  public static let promptFileName = "PROMPT.md"
 
   /// How many recent log lines a wake digest carries verbatim (~a few KB). Older
   /// entries are elided with a pointer at the full log — available on demand, out of
@@ -149,6 +150,43 @@ public enum NodeMemory {
     } catch {
       return nil
     }
+  }
+
+  /// Writes a node's full prompt to its `PROMPT.md` and returns where it landed, or
+  /// `nil` when writing failed.
+  ///
+  /// This is the launch path's last-resort delivery for a prompt too long to type: the
+  /// command `zmx` types into a session tops out under `MAX_CANON` (1024 bytes), and a
+  /// multi-KB goal overran it — the tty ate the tail mid-word, the shell parked at a
+  /// continuation prompt, and the node read `running` while no backend process existed
+  /// (issue #57). A file has no length limit, so the goal rides here and the typed line
+  /// carries only `promptPointer`.
+  ///
+  /// It lives beside the wake digest deliberately: same per-node lifecycle (`remove`
+  /// cleans both), same remote delivery channel, and the directory is already what a
+  /// path-verifying backend gets granted.
+  public static func writePrompt(
+    _ text: String, projectPath: String, nodeID: UUID, baseURL: URL = SupportDirectory.url
+  ) -> URL? {
+    let url = directory(forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
+      .appendingPathComponent(promptFileName)
+    do {
+      try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+      try text.write(to: url, atomically: true, encoding: .utf8)
+      return url
+    } catch {
+      return nil
+    }
+  }
+
+  /// What gets typed in the prompt's place. ASCII only, plain words on both sides of
+  /// the path — this string rides the same hostile route as the briefing pointer
+  /// (argv, zmx's typed command line, a canonical-mode tty, sometimes ssh), where an
+  /// em dash next to the path once ate the file extension (`SessionBriefing.pointer`).
+  public static func promptPointer(toPromptAt path: String) -> String {
+    "Your complete instructions are in the file at \(path) - read that file first and "
+      + "carry out everything it says."
   }
 
   /// Removes a node's memory directory — called when the node itself is deleted, the
