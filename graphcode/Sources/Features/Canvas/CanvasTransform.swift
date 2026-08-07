@@ -14,10 +14,16 @@ import Foundation
 /// The model it inverts, for a content point `p` and pane centre `c`:
 /// `screen = c + (p - c) * scale + offset`.
 struct CanvasTransform: Equatable {
-  /// Far enough out to take in a workspace of several folders, far enough in to read a
-  /// nested chip's title. Past 3× the cards are just big; below 0.25× they're texture.
+  /// How far a gesture or a zoom button may take the canvas. Past 3× the cards are just
+  /// big; below 0.6× a card's title stops being readable, which is as far out as zooming
+  /// by hand is worth doing.
   static let minScale: CGFloat = 0.6
   static let maxScale: CGFloat = 3
+  /// How far out *fit-to-content* may go, which is further than a gesture may: a
+  /// workspace several folders tall is a couple of thousand points across and cannot be
+  /// framed at 60%, and a fit that leaves half the graph outside the pane is not a fit.
+  /// Below 0.25× the cards are texture and there is nothing left to frame.
+  static let minFitScale: CGFloat = 0.25
   /// One press of the zoom buttons (and ⌘=/⌘-). A quarter step is small enough to land
   /// on the scale you wanted and large enough that holding the key gets somewhere.
   static let step: CGFloat = 1.25
@@ -61,7 +67,7 @@ struct CanvasTransform: Equatable {
     else { return Self() }
     let raw = min(viewport.width / content.width, viewport.height / content.height)
     // A little margin, so the outermost cards aren't flush against the pane's edges.
-    let scale = min(max(raw * 0.92, minScale), 1)
+    let scale = min(max(raw * 0.92, minFitScale), 1)
     return Self(scale: scale, offset: centringOffset(content, in: viewport, at: scale))
   }
 
