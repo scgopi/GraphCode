@@ -309,8 +309,25 @@ struct ProjectCanvasView: View {
   @ViewBuilder
   private func bandLayer(_ derived: Derived) -> some View {
     if let rect = bandRect(derived) {
-      CanvasBandView(rect: rect, entryPorts: entryPorts(derived))
+      // Still unlabelled — but the worktree chip rides the band when there is anything
+      // to count, because this pane is the folder and disk is a fact about the folder.
+      CanvasBandView(
+        rect: rect,
+        entryPorts: entryPorts(derived),
+        worktreeChip: worktreeChip,
+        onWorktreeChipTapped: { store.send(.worktreeSweepTapped) })
     }
+  }
+
+  /// Absent inside a composite: the chip is about the folder, and a drilled-in canvas
+  /// is about the group.
+  private var worktreeChip: WorktreeChipModel? {
+    let path = store.graph.project.path
+    guard store.openCompositeID == nil, AppWorktreesReducer.tracksWorktrees(path)
+    else { return nil }
+    return WorktreeChipModel(
+      stats: store.worktreeStats,
+      policy: SettingsModel.shared.settings.worktreePolicy(forProjectPath: path))
   }
 
   /// The leading-edge port of everything nothing hands off to — roots and loose loops
@@ -331,7 +348,9 @@ struct ProjectCanvasView: View {
     CanvasBand.rect(
       around: store.canvasGraph.nodes.compactMap { store.nodePositions[$0.id] },
       cardSize: LoopCardView.Metrics.size,
-      captioned: false,
+      // Captioned exactly when the worktree chip rides the band, so the strip it sits
+      // in exists — an unlabelled band otherwise keeps its tighter top.
+      captioned: worktreeChip != nil,
       // Only when there is a dot to keep clear of the cards.
       originLane: entryPorts(derived).isEmpty ? 0 : CanvasBand.originLane)
   }

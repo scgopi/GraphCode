@@ -101,17 +101,11 @@ extension GraphOverviewView {
     }
   }
 
-  /// `6 worktrees · 4 reclaimable` — absent entirely until the folder has a worktree,
-  /// amber only past the folder's own notice threshold. A repo with four worktrees is
-  /// working as designed.
   private func worktreeChip(for folder: GraphOverview.Folder) -> WorktreeChipModel? {
-    guard !folder.isGlobal, let stats = store.worktreeStats[folder.path], stats.total > 0
-    else { return nil }
-    let policy = SettingsModel.shared.settings.worktreePolicy(forProjectPath: folder.path)
-    let count = stats.total == 1 ? "1 worktree" : "\(stats.total) worktrees"
+    guard !folder.isGlobal else { return nil }
     return WorktreeChipModel(
-      text: stats.reclaimable > 0 ? "\(count) · \(stats.reclaimable) reclaimable" : count,
-      isNotice: stats.totalBytes >= policy.noticeSizeBytes || stats.total >= policy.noticeCount)
+      stats: store.worktreeStats[folder.path],
+      policy: SettingsModel.shared.settings.worktreePolicy(forProjectPath: folder.path))
   }
 
   /// One card per loop, all of them clickable — a composite is drawn as the single loop
