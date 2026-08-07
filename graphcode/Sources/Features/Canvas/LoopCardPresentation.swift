@@ -20,6 +20,11 @@ struct LoopCardPresentation: Equatable {
     case none
     case progress(Progress)
     case action(Action)
+    /// The resolve moment: the loop finished, its branch landed, and its worktree can
+    /// go — offered here, on the card that owns it, while the human still remembers
+    /// what it was. A launch-time modal asking about twenty forgotten branches is the
+    /// version people learn to dismiss.
+    case reclaim
   }
 
   struct Progress: Equatable {
@@ -43,11 +48,26 @@ struct LoopCardPresentation: Equatable {
   /// The footer, already ordered: kind, branch, backend when it isn't the default, age.
   let meta: [String]
 
-  init(node: LoopNode, now: Date = Date()) {
+  init(node: LoopNode, now: Date = Date(), reclaimOffer: WorktreeAssessment? = nil) {
     word = node.displayState.displayWord(for: node.loopType)
-    liveLine = Self.liveLine(node)
-    detail = Self.detail(node, now: now)
+    if let reclaimOffer, node.isResolved {
+      liveLine = Self.reclaimLine(reclaimOffer)
+      detail = .reclaim
+    } else {
+      liveLine = Self.liveLine(node)
+      detail = Self.detail(node, now: now)
+    }
     meta = Self.meta(node, now: now)
+  }
+
+  /// `"landed in main · 312 MB left behind"` — what happened, and what staying costs.
+  private static func reclaimLine(_ assessment: WorktreeAssessment) -> String {
+    let landed = "landed in \(assessment.facts.defaultBranch)"
+    guard let bytes = assessment.facts.sizeBytes, bytes > 0 else {
+      return "\(landed) · worktree left behind"
+    }
+    let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    return "\(landed) · \(size) left behind"
   }
 
   // MARK: - Live line

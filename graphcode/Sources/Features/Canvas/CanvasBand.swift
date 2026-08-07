@@ -59,6 +59,14 @@ enum CanvasBand {
   }
 }
 
+/// The lane caption's worktree chip, resolved to plain values: `6 worktrees · 4
+/// reclaimable`. Grey while the folder is under its notice threshold, amber once it
+/// isn't — and it stays a chip either way: no badge, no modal, no red.
+struct WorktreeChipModel: Equatable {
+  let text: String
+  let isNotice: Bool
+}
+
 /// One band, drawn behind everything else on the canvas.
 ///
 /// Hit-testing is off: the band covers the whole lane, so a band that took clicks would
@@ -73,6 +81,10 @@ struct CanvasBandView: View {
   /// that card's leading edge. The rail spans them and a stub reaches each one.
   var entryPorts: [CGPoint] = []
   var onCaptionTapped: (() -> Void)?
+  /// Disk is the same kind of fact about the same folder as the loop count beside it.
+  /// Tapping it opens the sweeper already scoped to this folder.
+  var worktreeChip: WorktreeChipModel?
+  var onWorktreeChipTapped: (() -> Void)?
 
   var body: some View {
     ZStack(alignment: .topLeading) {
@@ -181,11 +193,47 @@ struct CanvasBandView: View {
             .font(.system(size: 10.5, design: .monospaced))
             .foregroundStyle(.white.opacity(0.5))
         }
+        if let worktreeChip {
+          chip(worktreeChip)
+            .onTapGesture { onWorktreeChipTapped?() }
+        }
       }
       .lineLimit(1)
       .fixedSize()
       .contentShape(Rectangle())
       .onTapGesture { onCaptionTapped?() }
+    }
+  }
+
+  private func chip(_ model: WorktreeChipModel) -> some View {
+    HStack(spacing: 5) {
+      if model.isNotice {
+        Circle()
+          .fill(Color(red: 1.0, green: 0.624, blue: 0.039))
+          .frame(width: 5, height: 5)
+      }
+      Text(model.text)
+        .font(.system(size: 10, design: .monospaced))
+        .foregroundStyle(
+          model.isNotice
+            ? Color(red: 1.0, green: 0.804, blue: 0.478).opacity(0.92)
+            : .white.opacity(0.55))
+    }
+    .padding(.vertical, 1)
+    .padding(.horizontal, 7)
+    .background(
+      model.isNotice
+        ? Color(red: 1.0, green: 0.624, blue: 0.039).opacity(0.12)
+        : Color.white.opacity(0.05),
+      in: RoundedRectangle(cornerRadius: 5)
+    )
+    .overlay {
+      RoundedRectangle(cornerRadius: 5)
+        .stroke(
+          model.isNotice
+            ? Color(red: 1.0, green: 0.624, blue: 0.039).opacity(0.28)
+            : Color.white.opacity(0.12),
+          lineWidth: 1)
     }
   }
 }

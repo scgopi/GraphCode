@@ -81,10 +81,37 @@ extension GraphOverviewView {
         // edit it. The overview is for seeing the whole thing, not for rewiring it. The
         // global lane leads nowhere: this view already *is* it.
         onCaptionTapped: folder.isGlobal
-          ? nil : { store.send(.projectHeaderTapped(folder.path)) }
+          ? nil : { store.send(.projectHeaderTapped(folder.path)) },
+        worktreeChip: worktreeChip(for: folder),
+        onWorktreeChipTapped: {
+          store.send(.worktrees(.sweepRequested(projectPath: folder.path)))
+        }
       )
       .help(folder.isGlobal ? "Loops that belong to no folder" : folder.path)
+      // Only the caption row takes hits (the band itself must not swallow canvas pans),
+      // so this is a right-click on the caption — the same menu, same position, as the
+      // sidebar row's, because the band is the folder.
+      .contextMenu {
+        if !folder.isGlobal {
+          FolderHygieneMenuItems(store: store, projectPath: folder.path)
+          Divider()
+          Button("Close Folder") { store.send(.projectCloseTapped(folder.path)) }
+        }
+      }
     }
+  }
+
+  /// `6 worktrees · 4 reclaimable` — absent entirely until the folder has a worktree,
+  /// amber only past the folder's own notice threshold. A repo with four worktrees is
+  /// working as designed.
+  private func worktreeChip(for folder: GraphOverview.Folder) -> WorktreeChipModel? {
+    guard !folder.isGlobal, let stats = store.worktreeStats[folder.path], stats.total > 0
+    else { return nil }
+    let policy = SettingsModel.shared.settings.worktreePolicy(forProjectPath: folder.path)
+    let count = stats.total == 1 ? "1 worktree" : "\(stats.total) worktrees"
+    return WorktreeChipModel(
+      text: stats.reclaimable > 0 ? "\(count) · \(stats.reclaimable) reclaimable" : count,
+      isNotice: stats.totalBytes >= policy.noticeSizeBytes || stats.total >= policy.noticeCount)
   }
 
   /// One card per loop, all of them clickable — a composite is drawn as the single loop
@@ -132,7 +159,18 @@ extension GraphOverviewView {
       // The overview is read-only — rewiring happens on the folder's own canvas, which
       // is where you can see what you are rewiring. Both verbs go there.
       onWireUp: { store.send(.projectHeaderTapped(loop.projectPath)) },
-      onMarkAsEntry: { store.send(.projectHeaderTapped(loop.projectPath)) }
+      onMarkAsEntry: { store.send(.projectHeaderTapped(loop.projectPath)) },
+      // The resolve moment reads the same here as on the folder's own canvas — the
+      // offer lives in that project's scope either way.
+      reclaimOffer: store.projects[id: loop.projectPath]?.worktreeReclaimOffers[node.id],
+      onReclaim: {
+        store.send(
+          .projects(.element(id: loop.projectPath, action: .reclaimWorktreeTapped(node.id))))
+      },
+      onKeep: {
+        store.send(
+          .projects(.element(id: loop.projectPath, action: .keepWorktreeTapped(node.id))))
+      }
     )
     .contentShape(Rectangle())
     .onTapGesture { open(loop) }

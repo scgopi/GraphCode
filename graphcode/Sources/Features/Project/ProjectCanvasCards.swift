@@ -35,7 +35,10 @@ extension ProjectCanvasView {
       onPrimaryAction: { store.send(.nodeTapped(node.id)) },
       // Starts the same edge drag the hover handle does, from this card.
       onWireUp: { dragSourceID = node.id },
-      onMarkAsEntry: { store.send(.markAsEntryTapped(node.id)) }
+      onMarkAsEntry: { store.send(.markAsEntryTapped(node.id)) },
+      reclaimOffer: store.worktreeReclaimOffers[node.id],
+      onReclaim: { store.send(.reclaimWorktreeTapped(node.id)) },
+      onKeep: { store.send(.keepWorktreeTapped(node.id)) }
     )
     .contentShape(Rectangle())
     // A composite has no session of its own to open (`LoopNode.firstInstruction` is nil
