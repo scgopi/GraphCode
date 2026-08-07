@@ -17,9 +17,10 @@ struct RemoteRepositoryFormView: View {
         TextField("Server", text: field(\.server), prompt: Text("build-box.local"))
           .autocorrectionDisabled()
           .font(.system(.body, design: .monospaced))
-        TextField("User", text: field(\.user), prompt: Text("same as local — optional"))
+        TextField("User", text: field(\.user), prompt: Text("your login on the server"))
+          .autocorrectionDisabled()
           .font(.system(.body, design: .monospaced))
-        TextField("Port", text: field(\.port), prompt: Text("22 — optional"))
+        TextField("Port", text: field(\.port), prompt: Text("22"))
           .font(.system(.body, design: .monospaced))
         TextField(
           "Path", text: field(\.remotePath),

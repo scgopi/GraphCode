@@ -30,6 +30,11 @@ struct LoopCardView: View {
   /// The two verbs an unwired loop offers. Nothing else on the card uses them.
   var onWireUp: (() -> Void)?
   var onMarkAsEntry: (() -> Void)?
+  /// The resolve moment's offer, when this folder's policy is "Ask me" — see
+  /// `ProjectFeature.State.worktreeReclaimOffers`.
+  var reclaimOffer: WorktreeAssessment?
+  var onReclaim: (() -> Void)?
+  var onKeep: (() -> Void)?
 
   enum Metrics {
     static let size = CGSize(width: 250, height: 106)
@@ -48,7 +53,7 @@ struct LoopCardView: View {
   private var needsAttention: Bool { reason != nil }
 
   var body: some View {
-    let card = LoopCardPresentation(node: node, now: now)
+    let card = LoopCardPresentation(node: node, now: now, reclaimOffer: reclaimOffer)
     return VStack(alignment: .leading, spacing: 7) {
       titleRow
       if entryRole == .unwired {
@@ -171,6 +176,25 @@ struct LoopCardView: View {
           in: RoundedRectangle(cornerRadius: 5))
       }
       .buttonStyle(.plain)
+    case .reclaim:
+      // Quiet, not amber: the loop finished well, and nothing here is asking for
+      // rescue — just whether a directory that already landed should keep its disk.
+      HStack(spacing: 7) {
+        Button("Reclaim") { onReclaim?() }
+          .buttonStyle(.plain)
+          .font(.system(size: 11, weight: .semibold))
+          .foregroundStyle(.white.opacity(0.82))
+          .padding(.vertical, 3)
+          .padding(.horizontal, 9)
+          .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 5))
+          .overlay {
+            RoundedRectangle(cornerRadius: 5).stroke(.white.opacity(0.14), lineWidth: 1)
+          }
+        Button("Keep") { onKeep?() }
+          .buttonStyle(.plain)
+          .font(.system(size: 11, weight: .semibold))
+          .foregroundStyle(.white.opacity(0.5))
+      }
     }
   }
 

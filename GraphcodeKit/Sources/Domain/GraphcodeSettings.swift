@@ -219,6 +219,14 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// imposing — so it became a setting, defaulted to the behaviour people expected.
   public var autoSelectsModel: Bool
 
+  /// Per-folder worktree hygiene, keyed by the project's canonical path — the same key
+  /// the graph files use. Folders without an entry get `WorktreeHygienePolicy()`.
+  public var worktreePolicies: [String: WorktreeHygienePolicy]
+
+  public func worktreePolicy(forProjectPath path: String) -> WorktreeHygienePolicy {
+    worktreePolicies[path] ?? WorktreeHygienePolicy()
+  }
+
   /// Whether the window carries the activity strip along its bottom edge.
   ///
   /// **Off by default**, and the reason is the strip's own honesty: it is *derived*
@@ -242,7 +250,8 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     copilotPermissions: CopilotPermissions = .allowEverything,
     briefsSessionsAboutTheGraph: Bool = true,
     autoSelectsModel: Bool = false,
-    showsActivityStrip: Bool = false
+    showsActivityStrip: Bool = false,
+    worktreePolicies: [String: WorktreeHygienePolicy] = [:]
   ) {
     self.defaultBackend = defaultBackend.isSpiked ? defaultBackend : .claudeCode
     self.codexApprovals = codexApprovals
@@ -251,6 +260,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     self.briefsSessionsAboutTheGraph = briefsSessionsAboutTheGraph
     self.autoSelectsModel = autoSelectsModel
     self.showsActivityStrip = showsActivityStrip
+    self.worktreePolicies = worktreePolicies
   }
 
   /// Decoding tolerates a file written by an older or newer graphcode: a missing key takes
@@ -279,5 +289,8 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       try container.decodeIfPresent(Bool.self, forKey: .autoSelectsModel) ?? false
     showsActivityStrip =
       try container.decodeIfPresent(Bool.self, forKey: .showsActivityStrip) ?? false
+    worktreePolicies =
+      try container.decodeIfPresent(
+        [String: WorktreeHygienePolicy].self, forKey: .worktreePolicies) ?? [:]
   }
 }

@@ -28,6 +28,18 @@ struct GraphcodeCommands: Commands {
   }
 
   var body: some Commands {
+    // `File ▸ Worktrees…` — the sweeper for the focused folder, same sheet the lane
+    // chip and the context menus open. In File because it is about the folder on disk,
+    // not about any loop.
+    CommandGroup(after: .newItem) {
+      Divider()
+      Button("Worktrees…") {
+        guard let path = focusedFolderPath else { return }
+        store.send(.worktrees(.sweepRequested(projectPath: path)))
+      }
+      .disabled(focusedFolderPath == nil)
+    }
+
     CommandMenu("Loop") {
       Button("Jump to Loop…") { store.send(.jumpPaletteRequested) }
         .keyboardShortcut("k", modifiers: .command)
@@ -87,6 +99,17 @@ struct GraphcodeCommands: Commands {
         .keyboardShortcut("[", modifiers: .command)
         .disabled(!isSplit)
     }
+  }
+
+  /// The folder `File ▸ Worktrees…` acts on: the open loop's, else the selected one —
+  /// and only a local folder, since the global graph and a remote project have nothing
+  /// on this disk to sweep.
+  private var focusedFolderPath: String? {
+    let candidate = store.openLoop?.projectPath ?? store.selectedProjectPath
+    guard let candidate, AppWorktreesReducer.tracksWorktrees(candidate),
+      store.projects[id: candidate] != nil
+    else { return nil }
+    return candidate
   }
 
   private var railTitle: String {

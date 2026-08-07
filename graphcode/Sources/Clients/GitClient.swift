@@ -12,6 +12,15 @@ struct GitClient: Sendable {
       WorktreeRef
   var listWorktrees: @Sendable (_ repositoryPath: String) async throws -> [WorktreeRef]
   var removeWorktree: @Sendable (_ worktree: WorktreeRef) async throws -> Void
+  /// Reads every linked worktree's hygiene signals — landed, clean, pushed, prunable,
+  /// size — in one call. The primary checkout is never a candidate and is not returned.
+  var inspectWorktrees: @Sendable (_ repositoryPath: String) async throws -> [WorktreeInspection]
+  /// Removes a worktree and deletes its branch. A prunable entry (admin file, no
+  /// directory) is pruned instead of removed. The directory must be fully committed —
+  /// `worktree remove` without `--force` refuses a dirty tree, which is the safety
+  /// footnote enforced by git itself.
+  var removeWorktreeAndBranch:
+    @Sendable (_ worktree: WorktreeRef, _ prunable: Bool) async throws -> Void
   /// Streams a `git clone --progress` into `destination`: progress lines while it runs,
   /// `.finished` on success, a thrown `GitClientError` on failure. Streaming is what lets
   /// the form show a live percentage instead of a spinner over a multi-minute network
@@ -24,6 +33,12 @@ struct GitClient: Sendable {
 enum GitCloneEvent: Equatable, Sendable {
   case progress(String)
   case finished
+}
+
+/// One linked worktree with its git facts attached — what the sweeper classifies.
+struct WorktreeInspection: Equatable, Sendable {
+  var ref: WorktreeRef
+  var facts: WorktreeGitFacts
 }
 
 enum GitClientError: Error, Equatable {
@@ -49,6 +64,35 @@ extension GitClient: DependencyKey {
     removeWorktree: { worktree in
       _ = try await run(
         "git", ["-C", worktree.repositoryPath, "worktree", "remove", worktree.worktreePath])
+    },
+    inspectWorktrees: { repositoryPath in
+      let output = try await run("git", ["-C", repositoryPath, "worktree", "list", "--porcelain"])
+      let repoPath = resolvedPath(repositoryPath)
+      let blocks = parseWorktreeBlocks(output)
+        .filter { $0.branch != nil && resolvedPath($0.path) != repoPath }
+      let defaultBranch = await discoverDefaultBranch(repositoryPath)
+      var inspections: [WorktreeInspection] = []
+      for block in blocks {
+        guard let branch = block.branch else { continue }
+        let ref = WorktreeRef(
+          id: branch, repositoryPath: repositoryPath, worktreePath: block.path, branch: branch)
+        let facts = await gitFacts(
+          for: block, defaultBranch: defaultBranch, repositoryPath: repositoryPath)
+        inspections.append(WorktreeInspection(ref: ref, facts: facts))
+      }
+      return inspections
+    },
+    removeWorktreeAndBranch: { worktree, prunable in
+      if prunable {
+        _ = try await run("git", ["-C", worktree.repositoryPath, "worktree", "prune"])
+      } else {
+        _ = try await run(
+          "git", ["-C", worktree.repositoryPath, "worktree", "remove", worktree.worktreePath])
+      }
+      // `-D`, not `-d`: the landed check was `git cherry`, which counts squash merges —
+      // exactly the branches `-d` would refuse. The reflog keeps the tip recoverable.
+      // A branch that is already gone shouldn't fail a removal that succeeded.
+      _ = try? await run("git", ["-C", worktree.repositoryPath, "branch", "-D", worktree.branch])
     },
     clone: { url, destination, branch, depth in
       runClone(url: url, destination: destination, branch: branch, depth: depth)
@@ -223,47 +267,123 @@ extension DependencyValues {
 /// refs/heads/<name>` (bare/detached worktrees, which have no branch line, are
 /// skipped — graphcode's worktree bindings are always on a named branch).
 private func parseWorktreeList(_ output: String, repositoryPath: String) -> [WorktreeRef] {
-  var refs: [WorktreeRef] = []
-  var currentPath: String?
-  var currentBranch: String?
+  parseWorktreeBlocks(output).compactMap { block in
+    guard let branch = block.branch else { return nil }
+    return WorktreeRef(
+      id: branch, repositoryPath: repositoryPath, worktreePath: block.path, branch: branch)
+  }
+}
+
+private struct WorktreeBlock {
+  var path: String
+  var branch: String?
+  var prunable = false
+}
+
+private func parseWorktreeBlocks(_ output: String) -> [WorktreeBlock] {
+  var blocks: [WorktreeBlock] = []
+  var current: WorktreeBlock?
 
   func flush() {
-    if let path = currentPath, let branch = currentBranch {
-      refs.append(
-        WorktreeRef(id: branch, repositoryPath: repositoryPath, worktreePath: path, branch: branch))
-    }
-    currentPath = nil
-    currentBranch = nil
+    if let block = current { blocks.append(block) }
+    current = nil
   }
 
   for line in output.split(separator: "\n", omittingEmptySubsequences: false) {
     if line.isEmpty {
       flush()
     } else if line.hasPrefix("worktree ") {
-      currentPath = String(line.dropFirst("worktree ".count))
+      flush()
+      current = WorktreeBlock(path: String(line.dropFirst("worktree ".count)))
     } else if line.hasPrefix("branch refs/heads/") {
-      currentBranch = String(line.dropFirst("branch refs/heads/".count))
+      current?.branch = String(line.dropFirst("branch refs/heads/".count))
+    } else if line.hasPrefix("prunable") {
+      current?.prunable = true
     }
   }
   flush()
-  return refs
+  return blocks
+}
+
+private func resolvedPath(_ path: String) -> String {
+  URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+}
+
+/// The branch `landed` is measured against: `origin/HEAD` when the remote declares one,
+/// then a local `main`/`master`, then whatever the primary checkout is on.
+private func discoverDefaultBranch(_ repositoryPath: String) async -> String {
+  if let head = try? await run(
+    "git", ["-C", repositoryPath, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+  {
+    let name = head.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let slash = name.firstIndex(of: "/") {
+      return String(name[name.index(after: slash)...])
+    }
+  }
+  for candidate in ["main", "master"]
+  where
+    (try? await run(
+      "git", ["-C", repositoryPath, "rev-parse", "--verify", "--quiet", "refs/heads/\(candidate)"]))
+    != nil
+  {
+    return candidate
+  }
+  let current =
+    (try? await run("git", ["-C", repositoryPath, "symbolic-ref", "--short", "HEAD"])) ?? "main"
+  return current.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+/// Reads one worktree's signals. Every read fails toward the cautious answer — an
+/// unreadable status counts as dirty, a failed cherry as unlanded, a missing upstream
+/// as unpushed — so a git hiccup can only move a worktree *out* of the safe tier.
+private func gitFacts(
+  for block: WorktreeBlock, defaultBranch: String, repositoryPath: String
+) async -> WorktreeGitFacts {
+  if block.prunable {
+    return WorktreeGitFacts(
+      defaultBranch: defaultBranch, commitsNotLanded: 0, dirtyFileCount: 0, pushed: true,
+      prunable: true)
+  }
+  let branch = block.branch ?? ""
+  let cherry =
+    (try? await run("git", ["-C", repositoryPath, "cherry", defaultBranch, branch])) ?? "+"
+  let commitsNotLanded = cherry.split(separator: "\n").filter { $0.hasPrefix("+") }.count
+  let status = try? await run("git", ["-C", block.path, "status", "--porcelain"])
+  let dirtyFileCount = status.map { $0.split(separator: "\n").count } ?? 1
+  let ahead = try? await run(
+    "git", ["-C", block.path, "rev-list", "--count", "@{upstream}..HEAD"])
+  let pushed =
+    ahead.flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } == 0
+  let size = (try? await run("du", ["-sk", block.path]))
+    .flatMap { $0.split(separator: "\t").first }
+    .flatMap { Int64($0.trimmingCharacters(in: .whitespaces)) }
+    .map { $0 * 1024 }
+  return WorktreeGitFacts(
+    defaultBranch: defaultBranch, commitsNotLanded: commitsNotLanded,
+    dirtyFileCount: dirtyFileCount, pushed: pushed, prunable: false, sizeBytes: size)
 }
 
 /// Runs a command and returns its standard output.
 ///
-/// **Both pipes are drained before the process is waited on, and concurrently with each
-/// other.** The order matters and the previous order deadlocked: `waitUntilExit()` came
-/// first, and a child that writes more than the pipe buffer holds (64KB) blocks in
-/// `write` until someone reads — which nobody was going to, because the parent was parked
-/// in `waitUntilExit()` waiting for a child that could never exit. `git worktree list
-/// --porcelain` in a repository with enough worktrees is exactly that much output, and
-/// the symptom is not a slow picker but a `git` that never returns and a task that never
-/// completes.
+/// **Both pipes are drained before the exit status is read, and concurrently with each
+/// other.** The order matters and the previous order deadlocked: waiting came first,
+/// and a child that writes more than the pipe buffer holds (64KB) blocks in `write`
+/// until someone reads — which nobody was going to, because the parent was parked
+/// waiting for a child that could never exit. `git worktree list --porcelain` in a
+/// repository with enough worktrees is exactly that much output, and the symptom is not
+/// a slow picker but a `git` that never returns and a task that never completes.
 ///
 /// Draining them one after the other has the same bug one level down (filling stderr
 /// while the reader is blocked on stdout), hence `async let` rather than two sequential
-/// reads. By the time both have hit EOF the child has closed its descriptors, so the
-/// `waitUntilExit()` that follows is a formality rather than a wait.
+/// reads.
+///
+/// **The exit is awaited through `terminationHandler`, never `waitUntilExit()`.** That
+/// call blocks its thread, and the thread it blocked was sometimes the main one —
+/// worktree inspection runs off a `graphChanged` broadcast, and a missed termination
+/// event parked the whole app (and the hosted test runner) inside a wait for a child
+/// that had already exited. The handler is installed before `run()` so the exit can't
+/// be missed, and it resumes a continuation from Foundation's own background queue —
+/// nothing anywhere blocks.
 @discardableResult
 private func run(_ executable: String, _ arguments: [String]) async throws -> String {
   let process = Process()
@@ -275,6 +395,12 @@ private func run(_ executable: String, _ arguments: [String]) async throws -> St
   process.standardOutput = stdout
   process.standardError = stderr
 
+  let (exited, exitContinuation) = AsyncStream<Int32>.makeStream()
+  process.terminationHandler = { process in
+    exitContinuation.yield(process.terminationStatus)
+    exitContinuation.finish()
+  }
+
   try process.run()
 
   async let outputData = drain(stdout)
@@ -282,12 +408,13 @@ private func run(_ executable: String, _ arguments: [String]) async throws -> St
   let output = String(bytes: await outputData, encoding: .utf8) ?? ""
   let errorOutput = String(bytes: await errorData, encoding: .utf8) ?? ""
 
-  process.waitUntilExit()
+  var status: Int32 = -1
+  for await exitStatus in exited { status = exitStatus }
 
-  guard process.terminationStatus == 0 else {
+  guard status == 0 else {
     throw GitClientError.commandFailed(
       command: (["git"] + arguments).joined(separator: " "),
-      status: process.terminationStatus,
+      status: status,
       output: errorOutput.isEmpty ? output : errorOutput
     )
   }

@@ -119,6 +119,12 @@ struct ProjectFeature {
     /// never steals focus.
     var pendingCreatedNodeID: UUID?
 
+    /// Loops whose worktree can be reclaimed right now — set at the resolve moment when
+    /// the folder's policy is "Ask me" (see `AppWorktreesReducer`), read by the card's
+    /// inline Reclaim/Keep. Keyed by node id; an offer outlives nothing: it drops the
+    /// moment its loop is deleted or answered.
+    var worktreeReclaimOffers: [UUID: WorktreeAssessment] = [:]
+
     var id: String { graph.project.path }
 
     init(graph: LoopGraph) {
@@ -187,6 +193,13 @@ struct ProjectFeature {
     case refreshUsageTapped
     case worktreesLoaded([WorktreeRef])
     case worktreeCreationFailed(String)
+    /// The resolve moment, when this folder's policy is "Ask me" — the card offers
+    /// Reclaim/Keep while the human still remembers what the worktree was.
+    case worktreeReclaimOffered(nodeID: UUID, assessment: WorktreeAssessment)
+    /// Clearing the offer is this scope's job; the removal itself needs `GitClient`
+    /// and happens in `AppWorktreesReducer`, which intercepts the same action.
+    case reclaimWorktreeTapped(UUID)
+    case keepWorktreeTapped(UUID)
   }
 
   @Dependency(\.gitClient) var gitClient
@@ -221,6 +234,11 @@ struct ProjectFeature {
             state.nodePositions[node.id] = position
           }
           state.graph = newGraph
+          // An offer only makes sense while its loop exists, stays resolved, and still
+          // points at the worktree — a restarted or deleted loop takes it with it.
+          state.worktreeReclaimOffers = state.worktreeReclaimOffers.filter { id, _ in
+            newGraph.nodes[id: id].map { $0.isResolved && $0.worktreeBinding != nil } == true
+          }
           // Keep the human's sidebar arrangement across broadcasts: drop ids the graph
           // no longer has, append ones it gained, and touch nothing else.
           let currentIDs = Set(newGraph.nodes.map(\.id))
@@ -337,6 +355,17 @@ struct ProjectFeature {
 
       case .worktreesLoaded(let worktrees):
         state.availableWorktrees = worktrees
+        return .none
+
+      case .worktreeReclaimOffered(let nodeID, let assessment):
+        // Only for a loop that still exists and is still resolved — the assessment ran
+        // against a snapshot, and the graph may have moved since.
+        guard state.graph.nodes[id: nodeID]?.isResolved == true else { return .none }
+        state.worktreeReclaimOffers[nodeID] = assessment
+        return .none
+
+      case .reclaimWorktreeTapped(let nodeID), .keepWorktreeTapped(let nodeID):
+        state.worktreeReclaimOffers[nodeID] = nil
         return .none
 
       case .nodeTapped:

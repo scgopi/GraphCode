@@ -71,6 +71,13 @@ struct AppFeature {
     var pendingChatRename: QuickChat? { chatPendingRename.flatMap { quickChats[id: $0] } }
     var pendingChatDeletion: QuickChat? { chatPendingDeletion.flatMap { quickChats[id: $0] } }
 
+    /// Worktree hygiene — see `AppFeature+Worktrees.swift`. The sweeper sheet, the
+    /// per-folder stats the lane chip and menus read, and the folder whose settings
+    /// sheet is up.
+    var worktreeSweep: WorktreeSweepFeature.State?
+    var worktreeStats: [String: WorktreeFolderStats] = [:]
+    var projectSettingsPath: String?
+
     /// Up on first launch (`.task` checks the persisted flag) and whenever the
     /// sidebar's help button asks for it again.
     var showingOnboarding = false
@@ -206,6 +213,8 @@ struct AppFeature {
     case updateInstallFailureDismissed
     case updateRelaunchTapped
     case updateRelaunchDismissed
+    /// Worktree hygiene, one case for the whole surface — see `AppFeature+Worktrees.swift`.
+    case worktrees(Worktrees)
     /// The Quick Chats section's actions — see `State.quickChats`.
     case newQuickChatTapped
     /// The Quick Chats header row: shows the chats' own canvas, the way a folder row
@@ -247,6 +256,10 @@ struct AppFeature {
     quickChatsReducer
     jumpPaletteReducer
     updatesReducer
+    // Before the main Reduce on purpose: its `.graphChanged` diff needs the previous
+    // graph, which the main reducer replaces. See `AppFeature+Worktrees.swift`.
+    AppWorktreesReducer()
+      .ifLet(\.worktreeSweep, action: \.worktrees.sweep) { WorktreeSweepFeature() }
     Reduce { state, action in
       switch action {
       case .task:
@@ -522,7 +535,7 @@ struct AppFeature {
         guard let path = state.openLoop?.projectPath else { return .none }
         return .send(.projects(.element(id: path, action: .nodeTapped(nodeID))))
 
-      case .openLoop, .welcome, .projects:
+      case .openLoop, .welcome, .projects, .worktrees:
         return .none
       }
     }

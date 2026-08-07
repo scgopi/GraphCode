@@ -189,6 +189,9 @@ struct AppView: View {
     // alerts and an overlay on top of this chain is more than the type-checker will
     // sit through.
     .modifier(UpdateDialogs(store: store))
+    // The sweeper and a folder's settings — same hosting rule, own modifier for the
+    // same type-checker reason. See `WorktreeDialogs`.
+    .modifier(WorktreeDialogs(store: store))
   }
 
   /// The open loop's trailing panel, toggled from where macOS puts an inspector toggle.

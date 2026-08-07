@@ -65,8 +65,13 @@ struct WelcomeFeature {
   /// arrangement the clone form uses, for the same reason.
   struct RemoteDraft: Equatable {
     var server = ""
-    var port = ""
-    var user = ""
+    /// User and port are prefilled, not optional. Left empty they fell through to
+    /// whatever ssh guessed — the local username, port 22 — and on machines where the
+    /// remote side differs the dial silently went to the wrong place and surfaced
+    /// later as an unreachable project. Every new remote identity now carries the
+    /// whole dial explicitly; the prefills are just ssh's own defaults made visible.
+    var port = "22"
+    var user = NSUserName()
     var remotePath = ""
     var isValidating = false
     var failureMessage: String?
@@ -80,12 +85,11 @@ struct WelcomeFeature {
       let path = remotePath.trimmingCharacters(in: .whitespaces)
       let userName = user.trimmingCharacters(in: .whitespaces)
       let portText = port.trimmingCharacters(in: .whitespaces)
-      guard !host.isEmpty, path.hasPrefix("/") else { return nil }
-      let portNumber = portText.isEmpty ? nil : Int(portText)
-      if !portText.isEmpty, portNumber == nil { return nil }
+      guard !host.isEmpty, path.hasPrefix("/"), !userName.isEmpty,
+        let portNumber = Int(portText), (1...65535).contains(portNumber)
+      else { return nil }
       return RemoteProjectLocation(
-        user: userName.isEmpty ? nil : userName, host: host, port: portNumber,
-        remotePath: path)
+        user: userName, host: host, port: portNumber, remotePath: path)
     }
 
     var canSubmit: Bool { location != nil && !isValidating }
