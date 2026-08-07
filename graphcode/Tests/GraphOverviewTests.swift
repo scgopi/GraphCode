@@ -39,6 +39,20 @@ struct GraphOverviewTests {
   }
 
   @Test
+  func theStartNodeOnlyTethersLanesWithAnEntryPort() {
+    let overview = GraphOverview(graphs: [
+      LoopGraph(project: Self.projectA, nodes: [LoopNode(title: "A", checkDescription: "?")]),
+      LoopGraph(project: Self.projectB),
+    ])
+
+    // The empty folder keeps its lane (the band is how the overview says "nothing here
+    // yet") but earns no tether: it draws no origin dot, so a connector to it would
+    // point at nothing.
+    #expect(overview.folders.map(\.path) == [Self.projectA.path, Self.projectB.path])
+    #expect(overview.tetheredFolders.map(\.path) == [Self.projectA.path])
+  }
+
+  @Test
   func aLoopSitsInsideItsOwnFoldersBand() {
     // The band replaced a chip and a tether: "these loops belong to this folder" is now
     // said by containment, so containment is what has to hold.
