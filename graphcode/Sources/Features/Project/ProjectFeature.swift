@@ -125,6 +125,11 @@ struct ProjectFeature {
     /// moment its loop is deleted or answered.
     var worktreeReclaimOffers: [UUID: WorktreeAssessment] = [:]
 
+    /// This folder's worktree stats, mirrored in by `AppWorktreesReducer` when it loads
+    /// them — so the canvas, which only holds a project-scoped store, can put the count
+    /// on its own `Worktrees…` menu item.
+    var worktreeStats: WorktreeFolderStats?
+
     var id: String { graph.project.path }
 
     init(graph: LoopGraph) {
@@ -200,6 +205,10 @@ struct ProjectFeature {
     /// and happens in `AppWorktreesReducer`, which intercepts the same action.
     case reclaimWorktreeTapped(UUID)
     case keepWorktreeTapped(UUID)
+    /// The canvas background's folder menu. Pure signals like `.nodeTapped`: the sheets
+    /// they open are hosted by `AppView`, so `AppWorktreesReducer` intercepts both.
+    case worktreeSweepTapped
+    case projectSettingsTapped
   }
 
   @Dependency(\.gitClient) var gitClient
@@ -366,6 +375,10 @@ struct ProjectFeature {
 
       case .reclaimWorktreeTapped(let nodeID), .keepWorktreeTapped(let nodeID):
         state.worktreeReclaimOffers[nodeID] = nil
+        return .none
+
+      case .worktreeSweepTapped, .projectSettingsTapped:
+        // Handled by `AppWorktreesReducer` — the sheets are hosted app-level.
         return .none
 
       case .nodeTapped:

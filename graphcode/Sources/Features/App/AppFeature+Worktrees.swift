@@ -87,6 +87,9 @@ struct AppWorktreesReducer: Reducer {
 
       case .worktrees(.statsLoaded(let path, let stats)):
         state.worktreeStats[path] = stats
+        // Mirrored into the project's own state, so the canvas — which only holds a
+        // project-scoped store — can put the count on its `Worktrees…` menu item.
+        state.projects[id: path]?.worktreeStats = stats
         return .none
 
       case .worktrees(.statsReloadRequested(let path)):
@@ -105,6 +108,15 @@ struct AppWorktreesReducer: Reducer {
 
       case .daemonEvent(.graphChanged(let graph)):
         return graphChangedEffects(state, next: graph)
+
+      // The project canvas's folder menu — same sheets the sidebar and lane routes
+      // open, reached through project-scoped signal actions because the canvas holds
+      // no app store.
+      case .projects(.element(id: let path, action: .worktreeSweepTapped)):
+        return .send(.worktrees(.sweepRequested(projectPath: path)))
+
+      case .projects(.element(id: let path, action: .projectSettingsTapped)):
+        return .send(.worktrees(.settingsRequested(projectPath: path)))
 
       // The card's Reclaim: the project scope already cleared its offer on this same
       // action; actually removing the worktree needs `GitClient`, which is this level's.

@@ -1,3 +1,4 @@
+import AppKit
 import ComposableArchitecture
 import GraphcodeKit
 import SwiftUI
@@ -228,6 +229,10 @@ struct ProjectCanvasView: View {
       .background(Theme.canvasBackground)
     }
     .contentShape(Rectangle())
+    // The canvas *is* the folder here, so right-clicking its background offers what
+    // right-clicking the folder offers elsewhere. Cards and edges sit deeper in the
+    // hierarchy, so their own menus still win over their areas.
+    .contextMenu { folderMenu }
     .gesture(
       DragGesture()
         .onChanged { value in dragOffset = value.translation }
@@ -251,6 +256,25 @@ struct ProjectCanvasView: View {
         .onEnded { _ in pinchBaseScale = nil }
     )
     .background { CanvasScrollHandler(transform: $transform, viewport: viewport) }
+  }
+
+  /// The folder verbs, mirroring the sidebar row's and the lane caption's hygiene
+  /// items — same sheets, reached through project-scoped signals because this view
+  /// holds no app store. The trailing count answers "is there anything to reclaim"
+  /// without opening anything; with nothing reclaimable the item stays, without one.
+  @ViewBuilder
+  private var folderMenu: some View {
+    let path = store.graph.project.path
+    if AppWorktreesReducer.tracksWorktrees(path) {
+      Button(worktreesMenuTitle) { store.send(.worktreeSweepTapped) }
+      Button("Project Settings…") { store.send(.projectSettingsTapped) }
+      Button("Open in Finder") { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
+    }
+  }
+
+  private var worktreesMenuTitle: String {
+    let reclaimable = store.worktreeStats?.reclaimable ?? 0
+    return reclaimable > 0 ? "Worktrees… \(reclaimable)" : "Worktrees…"
   }
 
   /// Drawn as an overlay rather than as a branch on `canvas` so panning and zooming

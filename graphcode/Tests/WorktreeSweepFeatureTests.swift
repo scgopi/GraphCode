@@ -107,6 +107,30 @@ struct WorktreeSweepFeatureTests {
   }
 
   @Test
+  @MainActor
+  func theCanvasMenuOpensTheSweeperScopedToItsOwnFolder() async {
+    // The project canvas holds no app store, so its menu routes through project-scoped
+    // signal actions — this is the interception that turns them into the shared sheets.
+    let graph = LoopGraph(scope: .project(ProjectRef(path: "/repo", name: "repo")))
+    let store = TestStore(
+      initialState: AppFeature.State(projects: [ProjectFeature.State(graph: graph)])
+    ) {
+      AppFeature()
+    }
+    store.exhaustivity = .off
+
+    await store.send(.projects(.element(id: "/repo", action: .worktreeSweepTapped)))
+    await store.receive(\.worktrees)
+    #expect(store.state.worktreeSweep?.projectPath == "/repo")
+
+    let stats = WorktreeFolderStats(total: 3, reclaimable: 2, totalBytes: 100)
+    await store.send(.worktrees(.statsLoaded(projectPath: "/repo", stats)))
+    // Mirrored into the project's own state — the canvas menu's count reads it there.
+    #expect(store.state.worktreeStats["/repo"] == stats)
+    #expect(store.state.projects[id: "/repo"]?.worktreeStats == stats)
+  }
+
+  @Test
   func togglingTheSafeGroupDeselectsAndReselects() async {
     let first = inspection(branch: "one")
     let second = inspection(branch: "two")
