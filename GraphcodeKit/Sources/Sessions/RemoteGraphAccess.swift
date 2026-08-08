@@ -86,11 +86,13 @@ public enum RemoteGraphAccess {
     # host's sessions (RemoteGraphAccess.swift is the source of truth). It speaks
     # graphcoded's framed-JSON protocol over the unix socket ssh forwards here -- a
     # deliberate subset: the verbs a loop needs to fan out, report back, and remember.
+    import errno
     import json
     import os
     import socket
     import struct
     import sys
+    import time
     import uuid
 
     SESSION_PREFIX = "graphcode-"
@@ -118,13 +120,29 @@ public enum RemoteGraphAccess {
       --metric <cmd>         performance measure; last stdout line must be a number
       --direction <d>        minimize | maximize (default: maximize)
 
+    EXIT CODES
+      0   done
+      1   bad usage, or graphcoded refused the command
+      69  graphcoded unreachable -- nothing was sent, so retrying is safe
+      75  sent but never acknowledged -- it may have been applied. Check `graphcode
+          status` rather than re-running: create, send and memo are not idempotent.
+
     <project-path> is this project's ssh:// path -- your briefing states it exactly.
     The remaining verbs (update, pilot, arm, edge, usage) run from the Mac's own shell."""
 
 
-    def fail(message):
+    # The same exit codes the Swift CLI uses, because a wrapper on either side of the ssh
+    # link has to tell "you typed it wrong" from "graphcoded wasn't there" from "it may
+    # well have been applied" -- only the middle one is safe to retry blindly, since
+    # create/send/memo are not idempotent.
+    EXIT_USAGE = 1
+    EXIT_UNAVAILABLE = 69
+    EXIT_AMBIGUOUS = 75
+
+
+    def fail(message, code=EXIT_USAGE):
         sys.stderr.write("graphcode: %s\n" % message)
-        sys.exit(1)
+        sys.exit(code)
 
 
     def socket_path():
@@ -138,19 +156,42 @@ public enum RemoteGraphAccess {
         return os.path.join(support, "graphcoded.sock")
 
 
+    # Dialling is retried; nothing past the first send is. Nothing has been written when a
+    # dial fails, so a redial cannot duplicate a mutation. It matters more here than it
+    # does on the Mac: this socket is an ssh forward, so it disappears and comes back
+    # whenever the link is re-established, and a fan-out that happened to land in that
+    # window used to fail outright.
+    DIAL_ATTEMPTS = 4
+    DIAL_BACKOFF = (0.05, 0.15, 0.35)
+    RETRYABLE_DIAL_ERRNOS = (errno.ECONNREFUSED, errno.ENOENT, errno.EAGAIN, errno.EINTR)
+
+
     class Daemon:
         def __init__(self):
             path = socket_path()
-            if not os.path.exists(path):
+            problem = None
+            for attempt in range(DIAL_ATTEMPTS):
+                if os.path.exists(path):
+                    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    sock.settimeout(10)
+                    try:
+                        sock.connect(path)
+                        self.sock = sock
+                        return
+                    except OSError as error:
+                        sock.close()
+                        problem = error
+                        if error.errno not in RETRYABLE_DIAL_ERRNOS:
+                            break
+                else:
+                    problem = None
+                if attempt < DIAL_ATTEMPTS - 1:
+                    time.sleep(DIAL_BACKOFF[min(attempt, len(DIAL_BACKOFF) - 1)])
+            if problem is None:
                 fail("graphcoded isn't reachable at %s -- the ssh forward from the Mac "
                      "may be down; it returns when graphcode there next launches a loop "
-                     "on this host." % path)
-            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self.sock.settimeout(10)
-            try:
-                self.sock.connect(path)
-            except OSError as error:
-                fail("couldn't reach graphcoded: %s" % error)
+                     "on this host." % path, EXIT_UNAVAILABLE)
+            fail("couldn't reach graphcoded: %s" % problem, EXIT_UNAVAILABLE)
 
         def send(self, command):
             data = json.dumps(command).encode("utf-8")
@@ -161,7 +202,9 @@ public enum RemoteGraphAccess {
             while len(data) < count:
                 chunk = self.sock.recv(count - len(data))
                 if not chunk:
-                    fail("connection to graphcoded closed")
+                    fail("graphcoded closed the connection before answering. The command "
+                         "may still have been applied -- check with `graphcode status` "
+                         "rather than re-running it.", EXIT_AMBIGUOUS)
                 data += chunk
             return data
 
@@ -172,11 +215,12 @@ public enum RemoteGraphAccess {
                     event = json.loads(self.read_exactly(length).decode("utf-8"))
                 except socket.timeout:
                     fail("timed out waiting for graphcoded to answer. The command may "
-                         "still have been applied -- check with `graphcode status`.")
+                         "still have been applied -- check with `graphcode status`.",
+                         EXIT_AMBIGUOUS)
                 for key in keys:
                     if isinstance(event, dict) and key in event:
                         return key, event[key]
-            fail("graphcoded never acknowledged the command")
+            fail("graphcoded never acknowledged the command", EXIT_AMBIGUOUS)
 
         def open_project(self, path):
             self.send({"openProject": {"path": path}})
@@ -312,11 +356,25 @@ public enum RemoteGraphAccess {
         return draft
 
 
+    HELP_FLAGS = ("--help", "-h")
+
+
+    def wants_help(arguments):
+        # `--help` standing where an argument was expected asks for help, rather than being
+        # the parse error that missing argument would otherwise be. Only ever checked
+        # before a positional is consumed: the trailing words of send/memo are the message
+        # itself, where `--help` is text somebody may well want to transmit.
+        return bool(arguments) and arguments[0] in HELP_FLAGS
+
+
     def main(arguments):
         if not arguments or arguments[0] in ("help", "-h", "--help"):
             print(HELP)
             return
         verb = arguments.pop(0)
+        if wants_help(arguments):
+            print(HELP)
+            return
         if verb == "projects":
             daemon = Daemon()
             daemon.send({"listRecentProjects": {}})
@@ -337,9 +395,15 @@ public enum RemoteGraphAccess {
         if len(arguments) < 2:
             fail("missing node subcommand or project-path")
         subverb = arguments.pop(0)
+        if wants_help(arguments):
+            print(HELP)
+            return
         project = arguments.pop(0)
         if subverb == "create":
             flags = parse_flags(arguments)
+            if "help" in flags:
+                print(HELP)
+                return
             draft = make_draft(flags)
             create = {"createNode": {"_0": draft}}
             if flags.get("into"):

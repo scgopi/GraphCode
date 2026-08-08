@@ -87,4 +87,26 @@ struct DaemonSocketClientTests {
     }
     #expect(received.project.path == "/tmp/wanted")
   }
+
+  /// Dialling is retried; anything after the first write is not. Nothing has been sent when
+  /// a dial fails, so a redial cannot duplicate a mutation — whereas `node create`, `node
+  /// send` and `node memo` are not idempotent, which is why a mid-exchange
+  /// `connectionClosed` must stay off this list however transient it looks.
+  @Test
+  func onlyPreWriteFailuresAreWorthRedialing() {
+    #expect(DaemonSocketClient.isTransient(DaemonSocketClient.ClientError.daemonNotRunning))
+    #expect(
+      DaemonSocketClient.isTransient(
+        DaemonSocketClient.ClientError.connectionFailed(errno: ECONNREFUSED)))
+    #expect(
+      DaemonSocketClient.isTransient(DaemonSocketClient.ClientError.connectionFailed(errno: ENOENT))
+    )
+
+    #expect(
+      !DaemonSocketClient.isTransient(
+        DaemonSocketClient.ClientError.connectionFailed(errno: EACCES))
+    )
+    #expect(!DaemonSocketClient.isTransient(DaemonSocketClient.ClientError.timedOut))
+    #expect(!DaemonSocketClient.isTransient(FramedMessageIO.IOError.connectionClosed))
+  }
 }

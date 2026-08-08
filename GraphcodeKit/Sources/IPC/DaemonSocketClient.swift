@@ -30,7 +30,61 @@ public struct DaemonSocketClient: Sendable {
   /// arrives in milliseconds over a local socket.
   public static let defaultTimeout: TimeInterval = 10
 
-  public init(timeout: TimeInterval = DaemonSocketClient.defaultTimeout) throws {
+  /// How many times `init` dials before giving up.
+  ///
+  /// graphcoded is restarted by launchd and by its own upgrades, so a burst of CLI calls
+  /// that straddles a restart gets `ECONNREFUSED` — or a socket path that has momentarily
+  /// vanished — from a daemon that is about to be perfectly healthy. Redialing is safe in
+  /// a way retrying a *command* is not: nothing has been written yet, so there is no
+  /// half-applied mutation to duplicate. Anything past the first `send` is deliberately
+  /// left to the caller.
+  public static let defaultDialAttempts = 4
+
+  private static let dialBackoff: [TimeInterval] = [0.05, 0.15, 0.35]
+
+  public init(
+    timeout: TimeInterval = DaemonSocketClient.defaultTimeout,
+    dialAttempts: Int = DaemonSocketClient.defaultDialAttempts
+  ) throws {
+    let budget = max(1, dialAttempts)
+    var descriptor: Int32?
+    for attempt in 0..<budget {
+      do {
+        descriptor = try Self.dial()
+        break
+      } catch {
+        guard Self.isTransient(error), attempt < budget - 1 else { throw error }
+        Thread.sleep(forTimeInterval: Self.dialBackoff[min(attempt, Self.dialBackoff.count - 1)])
+      }
+    }
+    guard let connected = descriptor else { throw ClientError.daemonNotRunning }
+    Self.applyReceiveTimeout(timeout, to: connected)
+    fileDescriptor = connected
+  }
+
+  /// Wraps an already-connected descriptor. Exists so the timeout and framing behaviour
+  /// can be exercised over a `socketpair` — the public `init` dials the daemon's fixed
+  /// socket path, which a test can't stand in for without disturbing the real daemon.
+  init(fileDescriptor: Int32, timeout: TimeInterval = DaemonSocketClient.defaultTimeout) {
+    Self.applyReceiveTimeout(timeout, to: fileDescriptor)
+    self.fileDescriptor = fileDescriptor
+  }
+
+  /// Only failures that mean "not accepting connections *yet*". A permissions failure or a
+  /// bad path fails identically however long you wait, and retrying those just delays the
+  /// error the caller needs to see.
+  static func isTransient(_ error: Error) -> Bool {
+    switch error {
+    case ClientError.daemonNotRunning:
+      return true
+    case ClientError.connectionFailed(let code):
+      return code == ECONNREFUSED || code == ENOENT || code == EAGAIN || code == EINTR
+    default:
+      return false
+    }
+  }
+
+  private static func dial() throws -> Int32 {
     let path = DaemonSocketPath.url.path
     guard FileManager.default.fileExists(atPath: path) else {
       throw ClientError.daemonNotRunning
@@ -56,34 +110,26 @@ public struct DaemonSocketClient: Sendable {
       }
     }
     guard connected == 0 else {
+      // Captured before `close`, which is itself a syscall and may overwrite `errno` —
+      // reading it afterwards reported whatever closing did, not why dialling failed.
+      let code = errno
       close(descriptor)
-      throw ClientError.connectionFailed(errno: errno)
+      throw ClientError.connectionFailed(errno: code)
     }
+    return descriptor
+  }
 
-    // `SO_RCVTIMEO` rather than a watchdog thread: it makes the blocking `read(2)` inside
-    // `FramedMessageIO` return `EAGAIN` on its own, which keeps this type synchronous and
-    // needs no cancellation plumbing. Without it a caller waiting on an event the daemon
-    // never sends — because nothing it sent would cause one — blocks forever with no
-    // output at all, which is exactly how `status` used to hang.
+  /// `SO_RCVTIMEO` rather than a watchdog thread: it makes the blocking `read(2)` inside
+  /// `FramedMessageIO` return `EAGAIN` on its own, which keeps this type synchronous and
+  /// needs no cancellation plumbing. Without it a caller waiting on an event the daemon
+  /// never sends — because nothing it sent would cause one — blocks forever with no
+  /// output at all, which is exactly how `status` used to hang.
+  private static func applyReceiveTimeout(_ timeout: TimeInterval, to descriptor: Int32) {
     var interval = timeval(
       tv_sec: Int(timeout),
       tv_usec: Int32((timeout - timeout.rounded(.down)) * 1_000_000))
     setsockopt(
       descriptor, SOL_SOCKET, SO_RCVTIMEO, &interval, socklen_t(MemoryLayout<timeval>.size))
-
-    fileDescriptor = descriptor
-  }
-
-  /// Wraps an already-connected descriptor. Exists so the timeout and framing behaviour
-  /// can be exercised over a `socketpair` — the public `init` dials the daemon's fixed
-  /// socket path, which a test can't stand in for without disturbing the real daemon.
-  init(fileDescriptor: Int32, timeout: TimeInterval = DaemonSocketClient.defaultTimeout) {
-    var interval = timeval(
-      tv_sec: Int(timeout),
-      tv_usec: Int32((timeout - timeout.rounded(.down)) * 1_000_000))
-    setsockopt(
-      fileDescriptor, SOL_SOCKET, SO_RCVTIMEO, &interval, socklen_t(MemoryLayout<timeval>.size))
-    self.fileDescriptor = fileDescriptor
   }
 
   public func send(_ command: DaemonCommand) throws {
