@@ -89,12 +89,38 @@ public enum GraphcodeCommand: Equatable, Sendable {
       --into <path>        spawn into a different project (--kind spawn only); this is
                            how the global graph dispatches work into a project
 
+    EXIT CODES
+      0   done
+      1   bad usage, or graphcoded refused the command
+      69  graphcoded unreachable — nothing was sent, so retrying is safe
+      75  sent but never acknowledged — it may have been applied. Check `graphcode
+          status` rather than re-running: create, send and memo are not idempotent.
+
     Everything talks to graphcoded, not to the app, so these work whether or not a
     window is open.
     """
 
-  // swiftlint:disable:next cyclomatic_complexity
   public static func parse(_ arguments: [String]) throws -> GraphcodeCommand {
+    do {
+      return try parseVerb(arguments)
+    } catch is HelpRequested {
+      return .help
+    }
+  }
+
+  /// Thrown from wherever `--help` turns up in place of the argument that was expected.
+  /// `graphcode node create --help` used to fail with "missing project-path", because the
+  /// only help check was on the first argument and everything after a verb was read
+  /// positionally — so the one moment a caller admits they don't know the arguments was
+  /// the one moment they were required to supply them.
+  private struct HelpRequested: Error {}
+
+  private static func isHelpFlag(_ argument: String) -> Bool {
+    argument == "--help" || argument == "-h"
+  }
+
+  // swiftlint:disable:next cyclomatic_complexity
+  private static func parseVerb(_ arguments: [String]) throws -> GraphcodeCommand {
     var arguments = arguments
     guard !arguments.isEmpty else { return .help }
 
@@ -160,6 +186,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
       let from = try takeUUID(&arguments, name: "from-id")
       let to = try takeUUID(&arguments, name: "to-id")
       let flags = parseFlags(arguments)
+      if flags["help"] != nil { throw HelpRequested() }
       var spec = EdgeSpec()
       if let raw = flags["kind"] {
         guard let kind = EdgeKind(rawValue: raw) else {
@@ -191,6 +218,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
 
   private static func parseDraft(_ arguments: [String]) throws -> NodeDraft {
     let flags = parseFlags(arguments)
+    if flags["help"] != nil { throw HelpRequested() }
     guard let title = flags["title"] else { throw ParseError.missingArgument("--title") }
     guard let rawType = flags["type"] else { throw ParseError.missingArgument("--type") }
 
@@ -260,6 +288,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
   /// daemon can tell "leave alone" (absent) from "clear" (empty string / 0).
   private static func parseUpdate(_ arguments: [String]) throws -> NodeUpdate {
     let flags = parseFlags(arguments)
+    if flags["help"] != nil { throw HelpRequested() }
 
     var pollIntervalSeconds: Double?
     if let raw = flags["poll"] {
@@ -327,7 +356,11 @@ public enum GraphcodeCommand: Equatable, Sendable {
     return flags
   }
 
+  /// Positional arguments only — never the trailing words of `node send`/`node memo`,
+  /// which are joined rather than taken. That is what keeps `--help` meaning help here
+  /// while staying literal text in a message somebody wants to transmit.
   private static func take(_ arguments: inout [String], name: String) throws -> String {
+    if let first = arguments.first, isHelpFlag(first) { throw HelpRequested() }
     guard !arguments.isEmpty, !arguments[0].hasPrefix("--") else {
       throw ParseError.missingArgument(name)
     }

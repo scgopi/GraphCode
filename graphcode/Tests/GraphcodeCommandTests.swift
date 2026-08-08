@@ -342,6 +342,56 @@ struct GraphcodeCommandTests {
     }
   }
 
+  /// Asking a subcommand for help used to fail with "missing project-path" — the one
+  /// moment a caller admits they don't know the arguments was the one moment they had to
+  /// supply them.
+  @Test
+  func askingASubcommandForHelpShowsHelp() throws {
+    #expect(try GraphcodeCommand.parse(["node", "create", "--help"]) == .help)
+    #expect(try GraphcodeCommand.parse(["node", "--help"]) == .help)
+    #expect(try GraphcodeCommand.parse(["status", "--help"]) == .help)
+    #expect(try GraphcodeCommand.parse(["usage", "-h"]) == .help)
+    #expect(try GraphcodeCommand.parse(["edge", "create", "--help"]) == .help)
+    #expect(try GraphcodeCommand.parse(["node", "send", "--help"]) == .help)
+  }
+
+  @Test
+  func helpAmongTheFlagsShowsHelpRatherThanReportingAMissingTitle() throws {
+    #expect(try GraphcodeCommand.parse(["node", "create", "/tmp/p", "--help"]) == .help)
+    #expect(
+      try GraphcodeCommand.parse([
+        "node", "update", "/tmp/p", UUID().uuidString, "--help",
+      ]) == .help)
+  }
+
+  /// The counterweight to the two tests above: everything after a `send`/`memo` id is the
+  /// message, so `--help` there is text somebody wants transmitted, not a request for help.
+  @Test
+  func helpInsideAMessageStaysPartOfTheMessage() throws {
+    let id = UUID()
+    #expect(
+      try GraphcodeCommand.parse(["node", "send", "/tmp/p", id.uuidString, "try", "--help"])
+        == .sendMessage(projectPath: "/tmp/p", nodeID: id, text: "try --help"))
+    #expect(
+      try GraphcodeCommand.parse([
+        "node", "memo", "/tmp/p", id.uuidString, "--help", "is", "broken",
+      ])
+        == .memoNode(projectPath: "/tmp/p", nodeID: id, text: "--help is broken"))
+    // The sharpest version: `--help` as the whole message, with nothing around it to hint
+    // that it was meant literally.
+    #expect(
+      try GraphcodeCommand.parse(["node", "send", "/tmp/p", id.uuidString, "--help"])
+        == .sendMessage(projectPath: "/tmp/p", nodeID: id, text: "--help"))
+  }
+
+  /// A missing argument is still a missing argument — the help check must not swallow it.
+  @Test
+  func aMissingProjectPathIsStillAnErrorWhenNoHelpWasAsked() {
+    #expect(throws: GraphcodeCommand.ParseError.missingArgument("project-path")) {
+      try GraphcodeCommand.parse(["node", "create"])
+    }
+  }
+
   @Test
   func creatingALoopInsideAComposite() throws {
     // The CLI had no way to put a loop inside a composite at all, so the type could be

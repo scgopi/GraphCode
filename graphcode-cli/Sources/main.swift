@@ -10,9 +10,24 @@ import GraphcodeKit
 // Parsing and rendering live in `GraphcodeKit.GraphcodeCommand` so they're unit-testable
 // without spawning this binary; what's left here is the socket round-trip and exit codes.
 
-func fail(_ message: String) -> Never {
+/// Exit codes, so a caller can tell "you typed it wrong" from "graphcoded wasn't there"
+/// from "it may well have been applied" — the distinction that decides whether retrying is
+/// safe. Usage and daemon-reported errors stay on 1: that is what every existing caller
+/// already treats as failure, and moving it would break them to say nothing new.
+enum ExitCode {
+  static let usage: Int32 = 1
+  /// `EX_UNAVAILABLE`. graphcoded could not be reached and nothing was written, so
+  /// retrying the whole command is safe.
+  static let unavailable: Int32 = 69
+  /// `EX_TEMPFAIL`. The command went out but its outcome never came back. It may have been
+  /// applied — `node create`, `node send` and `node memo` are not idempotent, so this is
+  /// the one case a wrapper must not blindly retry.
+  static let ambiguous: Int32 = 75
+}
+
+func fail(_ message: String, code: Int32 = ExitCode.usage) -> Never {
   FileHandle.standardError.write(Data("graphcode: \(message)\n".utf8))
-  exit(1)
+  exit(code)
 }
 
 let command: GraphcodeCommand
@@ -33,9 +48,9 @@ let client: DaemonSocketClient
 do {
   client = try DaemonSocketClient()
 } catch DaemonSocketClient.ClientError.daemonNotRunning {
-  fail("graphcoded isn't running. Start it with `make daemon-install`.")
+  fail("graphcoded isn't running. Start it with `make daemon-install`.", code: ExitCode.unavailable)
 } catch {
-  fail("couldn't reach graphcoded: \(error)")
+  fail("couldn't reach graphcoded: \(error)", code: ExitCode.unavailable)
 }
 defer { client.closeConnection() }
 
@@ -228,7 +243,16 @@ do {
     """
     timed out waiting for graphcoded to answer. The command may still have been applied — \
     check with `graphcode status`.
-    """)
+    """, code: ExitCode.ambiguous)
+} catch FramedMessageIO.IOError.connectionClosed {
+  // graphcoded went away mid-exchange — a restart landing between the write and the
+  // broadcast. Whether it applied the command first is not knowable from here, and the
+  // mutating verbs are not idempotent, so this says "check" rather than "retry".
+  fail(
+    """
+    graphcoded closed the connection before answering. The command may still have been \
+    applied — check with `graphcode status` rather than re-running it.
+    """, code: ExitCode.ambiguous)
 } catch {
   fail("\(error)")
 }

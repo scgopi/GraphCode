@@ -210,17 +210,29 @@ struct SessionBriefingTests {
     // A loop is unattended by construction: nobody is watching the pane when the backend
     // asks whether it may edit a file, so a session on its interactive default sits at
     // that prompt while the graph reports it `running`.
+    // Settings are passed explicitly rather than left to default: `ZmxSessionLauncher`
+    // otherwise falls back to `GraphcodeSettingsStore.load()` and reads whatever this
+    // machine chose in the UI, so the assertion below turned on a toggle no test touched.
+    let defaults = GraphcodeSettings()
+
     let claude = try #require(
-      ZmxSessionLauncher.arguments(forNode: node(), projectPath: Self.project))
+      ZmxSessionLauncher.arguments(
+        forNode: node(), projectPath: Self.project, settings: defaults))
     let mode = try #require(claude.firstIndex(of: "--permission-mode"))
     #expect(claude[mode + 1] == "auto")
 
     let copilot = try #require(
       ZmxSessionLauncher.arguments(
-        forNode: node(backend: .copilotCLI), projectPath: Self.project))
-    // Some permission answer must be present — which one depends on this machine's
-    // settings, since the launcher reads the real store.
+        forNode: node(backend: .copilotCLI), projectPath: Self.project, settings: defaults))
     #expect(copilot.contains("--yolo") || copilot.contains("--allow-all-tools"))
+
+    // Codex answers the same question in its own vocabulary, and a loop left on its `ask`
+    // default waits at the first approval prompt exactly as the other two would.
+    let codex = try #require(
+      ZmxSessionLauncher.arguments(
+        forNode: node(backend: .codex), projectPath: Self.project, settings: defaults))
+    let approval = try #require(codex.firstIndex(of: "--ask-for-approval"))
+    #expect(codex[approval + 1] == "never")
   }
 
   @Test
