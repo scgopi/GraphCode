@@ -80,16 +80,7 @@ struct AppSidebarView: View {
       }
       // Errors used to render only on the Welcome screen, which no longer shows once the
       // sidebar exists — so a failed Add Folder looked like nothing happening at all.
-      .safeAreaInset(edge: .bottom) {
-        if let errorMessage = store.welcome.errorMessage {
-          Text(errorMessage)
-            .font(.caption)
-            .foregroundStyle(.red)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(8)
-            .background(.thinMaterial)
-        }
-      }
+      .safeAreaInset(edge: .bottom) { bottomInset }
       // The sidebar is the system's translucent material — Liquid Glass on macOS 26,
       // the classic sidebar material on 15, both automatic for a `.listStyle(.sidebar)`
       // list in a split view. This replaced a painted recess (a gradient + hairline
@@ -189,6 +180,33 @@ struct AppSidebarView: View {
     // are hosted by `AppView`, so the Quick Chats canvas can raise the same two dialogs
     // while the sidebar row that also offers them isn't the surface being used. Same
     // arrangement as a loop's; see `AppFeature.State.chatPendingRename`.
+  }
+
+  /// The sidebar's foot: the update banner (standing news, waiting to be clicked) over
+  /// the Add Folder error. Its own property because inlined in the `safeAreaInset`
+  /// closure the two `if let`s pushed the expression past the type-checker's budget.
+  @ViewBuilder
+  private var bottomInset: some View {
+    VStack(spacing: 0) {
+      // Hidden while an install is mid-flight (the progress overlay speaks then) or
+      // already staged (the relaunch alert does).
+      if let update = store.offeredUpdate, store.updateInstallProgress == nil,
+        !store.isUpdateReadyToRelaunch
+      {
+        SidebarUpdateBanner(version: update.version) {
+          store.send(.updateBannerTapped)
+        }
+        .padding(8)
+      }
+      if let errorMessage = store.welcome.errorMessage {
+        Text(errorMessage)
+          .font(.caption)
+          .foregroundStyle(.red)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(8)
+          .background(.thinMaterial)
+      }
+    }
   }
 
   private var addFolderMenu: some View {

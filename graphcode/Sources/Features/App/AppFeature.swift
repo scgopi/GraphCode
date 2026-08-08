@@ -202,6 +202,13 @@ struct AppFeature {
     case onboardingDismissed
     /// The app menu's "Check for Updates…" — see `AppFeature+Updates.swift`.
     case checkForUpdatesTapped
+    /// The quiet check run once at launch — unlike the menu item, it never raises an
+    /// "up to date" or "couldn't check" alert; a found update surfaces only as the
+    /// sidebar banner.
+    case checkForUpdatesInBackground
+    case updateFoundInBackground(AvailableUpdate?)
+    /// The sidebar update banner — re-presents the offer alert the banner stands for.
+    case updateBannerTapped
     case updateCheckCompleted(Result<AvailableUpdate?, any Error>)
     case updateDownloadTapped
     case updateReleaseNotesTapped
@@ -285,7 +292,11 @@ struct AppFeature {
           // The global Orchestrator Graph is always resident, so the app joins it every
           // launch rather than restoring it — it isn't a folder anyone opened, and its
           // triggers have been running whether or not this window existed.
-          .run { _ in try? await orchestratorClient.send(.openGlobalGraph) }
+          .run { _ in try? await orchestratorClient.send(.openGlobalGraph) },
+          // Quietly ask whether there's a newer build, so the sidebar banner can offer
+          // it without waiting for someone to open the menu. Silent on failure and on
+          // "up to date" — a launch must never raise an alert about updates.
+          .send(.checkForUpdatesInBackground)
         )
 
       case .daemonEvent(let event):
@@ -458,7 +469,8 @@ struct AppFeature {
 
       // Every update action is handled by `updatesReducer`, in
       // `AppFeature+Updates.swift` — listed here only so this switch stays exhaustive.
-      case .checkForUpdatesTapped, .updateCheckCompleted, .updateDownloadTapped,
+      case .checkForUpdatesTapped, .checkForUpdatesInBackground, .updateFoundInBackground,
+        .updateBannerTapped, .updateCheckCompleted, .updateDownloadTapped,
         .updateReleaseNotesTapped, .updateAlertDismissed, .updateNoticeDismissed,
         .updateInstallTapped, .updateInstallProgressed, .updateInstallFinished,
         .updateInstallFailureDismissed, .updateRelaunchTapped, .updateRelaunchDismissed:

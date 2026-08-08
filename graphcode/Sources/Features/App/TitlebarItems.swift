@@ -86,6 +86,48 @@ struct WorktreeNoticeChip: View {
   private static let ink = Color(red: 1.0, green: 0.804, blue: 0.478).opacity(0.92)
 }
 
+/// The sidebar's bottom-left update banner — quiet standing news that a newer build is
+/// waiting, set by the silent launch check (`AppFeature.checkForUpdatesInBackground`).
+///
+/// Accent blue, not amber: an update is an offer, not something that needs a human the
+/// way the attention surfaces do. Clicking it opens the same offer alert the menu's
+/// "Check for Updates" raises on success — Install / Release Notes / Later.
+struct SidebarUpdateBanner: View {
+  let version: String
+  let action: () -> Void
+
+  var body: some View {
+    Button(action: action) {
+      HStack(spacing: 8) {
+        Image(systemName: "arrow.down.circle.fill")
+          .font(.system(size: 14))
+          .foregroundStyle(Self.accent)
+        VStack(alignment: .leading, spacing: 1) {
+          Text("Update available")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.92))
+          Text("\(version) · click to install")
+            .font(.system(size: 10.5))
+            .foregroundStyle(.white.opacity(0.55))
+            .lineLimit(1)
+        }
+        Spacer(minLength: 0)
+      }
+      .padding(.vertical, 7)
+      .padding(.horizontal, 10)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(Self.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+      .overlay {
+        RoundedRectangle(cornerRadius: 8).stroke(Self.accent.opacity(0.3), lineWidth: 1)
+      }
+    }
+    .buttonStyle(.plain)
+    .help("A newer version of GraphCode is available — click to install")
+  }
+
+  private static let accent = Color(red: 0.039, green: 0.518, blue: 1.0)  // #0A84FF
+}
+
 /// The ⌘K affordance, in the titlebar where a search field belongs.
 ///
 /// A shortcut nobody can see is a shortcut nobody uses. This is the discoverable half of

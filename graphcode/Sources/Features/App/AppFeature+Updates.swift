@@ -64,6 +64,48 @@ extension AppFeature {
           }
         }
 
+      case .checkForUpdatesInBackground:
+        // Same fetch as the menu item, different manners: no notice on either outcome,
+        // and no auto-presented alert on success — the banner is the whole surface. A
+        // check already running (the menu item, another launch tick) owns the result.
+        guard !state.isCheckingForUpdates else { return .none }
+        state.isCheckingForUpdates = true
+        return .run { send in
+          let current = updateClient.currentVersion()
+          let update: AvailableUpdate?
+          do {
+            switch UpdateChannel.channel(
+              for: current, override: updateClient.channelOverride())
+            {
+            case .stable:
+              update = AppUpdate.available(
+                current: current, release: try await updateClient.latestRelease())
+            case .beta:
+              update = AppUpdate.available(
+                current: current, releases: try await updateClient.allReleases())
+            }
+          } catch {
+            // A launch-time check that can't reach GitHub says nothing — no banner,
+            // no alert. The menu item is there for a deliberate retry.
+            update = nil
+          }
+          await send(.updateFoundInBackground(update))
+        }
+
+      case .updateFoundInBackground(let update):
+        state.isCheckingForUpdates = false
+        // Only ever *raise* the banner, never lower it on a transient nil: a flaky
+        // launch check must not clear an offer an earlier check already found.
+        if let update { state.offeredUpdate = update }
+        return .none
+
+      case .updateBannerTapped:
+        // The banner stands for the offer; tapping it opens the same alert the menu's
+        // successful check would — Install / Release Notes / Later, via `UpdateDialogs`.
+        guard state.offeredUpdate != nil else { return .none }
+        state.availableUpdate = state.offeredUpdate
+        return .none
+
       case .updateCheckCompleted(.success(let update)):
         state.isCheckingForUpdates = false
         if let update {
