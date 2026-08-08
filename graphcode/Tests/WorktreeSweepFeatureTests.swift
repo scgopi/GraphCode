@@ -103,7 +103,7 @@ struct WorktreeSweepFeatureTests {
       WorktreeSweepFeature()
     } withDependencies: {
       $0.gitClient.inspectWorktrees = { _ in remaining.value }
-      $0.gitClient.removeWorktreeAndBranch = { ref, _ in
+      $0.gitClient.removeWorktreeAndBranch = { ref, _, _ in
         removed.withValue { $0.append(ref.branch) }
         remaining.withValue { $0.removeAll { $0.ref.worktreePath == ref.worktreePath } }
       }
@@ -153,6 +153,55 @@ struct WorktreeSweepFeatureTests {
     // Mirrored into the project's own state — the canvas menu's count reads it there.
     #expect(store.state.worktreeStats["/repo"] == stats)
     #expect(store.state.projects[id: "/repo"]?.worktreeStats == stats)
+  }
+
+  @Test
+  func removingADirtySelectionConfirmsFirstAndForcesOnlyThatRow() async {
+    let dirty = inspection(branch: "wip", dirty: 2)
+    let clean = inspection(branch: "landed")
+    let forced = LockIsolated<[String: Bool]>([:])
+    let remaining = LockIsolated([dirty, clean])
+    let store = TestStore(
+      initialState: WorktreeSweepFeature.State(
+        projectPath: "/repo", projectName: "repo", nodes: [])
+    ) {
+      WorktreeSweepFeature()
+    } withDependencies: {
+      $0.gitClient.inspectWorktrees = { _ in remaining.value }
+      $0.gitClient.removeWorktreeAndBranch = { ref, _, force in
+        forced.withValue { $0[ref.branch] = force }
+        remaining.withValue { $0.removeAll { $0.ref.worktreePath == ref.worktreePath } }
+      }
+    }
+
+    await store.send(.task)
+    await store.receive(\.assessmentsLoaded) {
+      $0.assessments = WorktreeSweepFeature.assessments([dirty, clean], nodes: [])
+      $0.selection = [clean.ref.worktreePath]
+    }
+    // The dirty row is selectable now — the gate moved from the checkbox to the
+    // confirmation.
+    await store.send(.rowToggled(dirty.ref.worktreePath)) {
+      $0.selection = [clean.ref.worktreePath, dirty.ref.worktreePath]
+    }
+    await store.send(.removeTapped) {
+      $0.isConfirmingRemoval = true
+    }
+    await store.send(.removeConfirmed) {
+      $0.isConfirmingRemoval = false
+      $0.isRemoving = true
+    }
+    await store.receive(\.removalFinished) {
+      $0.selection = []
+    }
+    await store.receive(\.task)
+    await store.receive(\.assessmentsLoaded) {
+      $0.assessments = []
+      $0.isRemoving = false
+    }
+
+    // --force reached exactly the row whose removal discards files.
+    #expect(forced.value == ["wip": true, "landed": false])
   }
 
   @Test

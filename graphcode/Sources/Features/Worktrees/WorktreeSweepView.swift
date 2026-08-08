@@ -45,7 +45,8 @@ struct WorktreeSweepView: View {
       footer
       Text(
         "Branches are deleted too, and stay recoverable from the reflog for 90 days. "
-          + "Only directories whose contents are fully committed are ever removed."
+          + "Removing a worktree with uncommitted files asks first — those files are "
+          + "gone for good."
       )
       .font(.system(size: 11))
       .foregroundStyle(.white.opacity(0.5))
@@ -56,6 +57,30 @@ struct WorktreeSweepView: View {
     .frame(width: 640)
     .background(Theme.sheet)
     .task { await store.send(.task).finish() }
+    .confirmationDialog(
+      "Discard uncommitted files?",
+      isPresented: Binding(
+        get: { store.isConfirmingRemoval },
+        set: { if !$0 { store.send(.removeCancelled) } }
+      ),
+      titleVisibility: .visible
+    ) {
+      Button("Remove Anyway", role: .destructive) { store.send(.removeConfirmed) }
+      Button("Cancel", role: .cancel) { store.send(.removeCancelled) }
+    } message: {
+      Text(discardMessage)
+    }
+  }
+
+  private var discardMessage: String {
+    let dirty = store.selected.filter(\.removalDiscardsFiles)
+    let files = dirty.map(\.facts.dirtyFileCount).reduce(0, +)
+    let what =
+      dirty.count == 1
+      ? "1 selected worktree has" : "\(dirty.count) selected worktrees have"
+    let cost = files == 1 ? "1 uncommitted file" : "\(files) uncommitted files"
+    return
+      "\(what) \(cost). Commits stay recoverable from the reflog; uncommitted work doesn't."
   }
 
   private enum Tint {
@@ -186,9 +211,8 @@ struct WorktreeSweepView: View {
 
   private func rowHelp(_ assessment: WorktreeAssessment) -> String {
     if assessment.tier == .inUse { return "A loop is running in it" }
-    if !assessment.isRemovable {
-      return "Has uncommitted files — commit or discard them first; only fully "
-        + "committed directories are ever removed"
+    if assessment.removalDiscardsFiles {
+      return "Has uncommitted files — removing it discards them, and asks first"
     }
     return assessment.ref.worktreePath
   }

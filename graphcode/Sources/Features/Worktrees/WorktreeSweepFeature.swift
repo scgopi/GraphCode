@@ -22,6 +22,9 @@ struct WorktreeSweepFeature {
     /// never preselected; the in-use tier is not selectable at all.
     var selection: Set<String> = []
     var isRemoving = false
+    /// Up while the "this discards uncommitted files" confirmation is showing — the
+    /// gate between selecting a dirty worktree and actually forcing it away.
+    var isConfirmingRemoval = false
     var failure: String?
 
     var id: String { projectPath }
@@ -55,6 +58,9 @@ struct WorktreeSweepFeature {
     case rowToggled(String)
     case allSafeToggled
     case removeTapped
+    /// The dirty-selection confirmation's two exits.
+    case removeConfirmed
+    case removeCancelled
     case removalFinished(failure: String?)
   }
 
@@ -141,29 +147,21 @@ struct WorktreeSweepFeature {
       case .removeTapped:
         let doomed = state.selected
         guard !doomed.isEmpty, !state.isRemoving else { return .none }
-        state.isRemoving = true
-        state.failure = nil
-        return .run { send in
-          var failures: [String] = []
-          for assessment in doomed {
-            do {
-              try await gitClient.removeWorktreeAndBranch(
-                assessment.ref, assessment.facts.prunable)
-            } catch {
-              // Git's own last word, not a dumped enum — "fatal: … contains modified
-              // or untracked files" explains itself; the case name explains nothing.
-              let reason: String
-              if case GitClientError.commandFailed(_, _, let output) = error {
-                reason = output.trimmingCharacters(in: .whitespacesAndNewlines)
-              } else {
-                reason = error.localizedDescription
-              }
-              failures.append("\(assessment.ref.branch): \(reason)")
-            }
-          }
-          await send(
-            .removalFinished(failure: failures.isEmpty ? nil : failures.joined(separator: "\n")))
+        // Losing uncommitted files is the one cost a checkbox alone must not carry —
+        // the confirmation names it before anything is forced.
+        if doomed.contains(where: \.removalDiscardsFiles) {
+          state.isConfirmingRemoval = true
+          return .none
         }
+        return removalEffect(&state)
+
+      case .removeConfirmed:
+        state.isConfirmingRemoval = false
+        return removalEffect(&state)
+
+      case .removeCancelled:
+        state.isConfirmingRemoval = false
+        return .none
 
       case .removalFinished(let failure):
         state.failure = failure
@@ -172,6 +170,36 @@ struct WorktreeSweepFeature {
         // removal actually left behind.
         return .send(.task)
       }
+    }
+  }
+
+  /// The removal itself, shared by the direct path and the confirmed one. `--force`
+  /// only for rows whose removal discards files — and only ever after the confirmation.
+  private func removalEffect(_ state: inout State) -> Effect<Action> {
+    let doomed = state.selected
+    guard !doomed.isEmpty, !state.isRemoving else { return .none }
+    state.isRemoving = true
+    state.failure = nil
+    return .run { send in
+      var failures: [String] = []
+      for assessment in doomed {
+        do {
+          try await gitClient.removeWorktreeAndBranch(
+            assessment.ref, assessment.facts.prunable, assessment.removalDiscardsFiles)
+        } catch {
+          // Git's own last word, not a dumped enum — "fatal: … contains modified
+          // or untracked files" explains itself; the case name explains nothing.
+          let reason: String
+          if case GitClientError.commandFailed(_, _, let output) = error {
+            reason = output.trimmingCharacters(in: .whitespacesAndNewlines)
+          } else {
+            reason = error.localizedDescription
+          }
+          failures.append("\(assessment.ref.branch): \(reason)")
+        }
+      }
+      await send(
+        .removalFinished(failure: failures.isEmpty ? nil : failures.joined(separator: "\n")))
     }
   }
 
