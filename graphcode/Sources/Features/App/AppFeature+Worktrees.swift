@@ -109,10 +109,30 @@ struct AppWorktreesReducer: Reducer {
         guard let path else { return .none }
         return reloadStats(path, nodes: nodes(in: state, path))
 
-      // A removal changed what is on disk; the chip must not keep claiming the old
-      // count after the sheet closes.
-      case .worktrees(.sweep(.removalFinished)):
-        guard let path = state.worktreeSweep?.projectPath else { return .none }
+      // Remove closes the sheet and the removal happens back here, in the background —
+      // a child effect would die with the sheet's state the moment it nils. The child
+      // reducer ran first: if it raised the discard confirmation, nothing happens yet.
+      case .worktrees(.sweep(.removeTapped)), .worktrees(.sweep(.removeConfirmed)):
+        guard let sweep = state.worktreeSweep, !sweep.isConfirmingRemoval else { return .none }
+        let doomed = sweep.selected
+        guard !doomed.isEmpty else { return .none }
+        let path = sweep.projectPath
+        state.worktreeSweep = nil
+        return .run { send in
+          for assessment in doomed {
+            // Failures are quiet by design now — the sheet is gone. The stats reload
+            // tells the truth either way, and whatever survived is there on reopen.
+            try? await gitClient.removeWorktreeAndBranch(
+              assessment.ref, assessment.facts.prunable, assessment.removalDiscardsFiles)
+          }
+          await send(.worktrees(.statsReloadRequested(projectPath: path)))
+        }
+
+      // Selecting a folder re-reads its worktrees — the one moment a worktree created
+      // outside the app (a terminal's `git worktree add`, a loop's own plumbing) gets
+      // picked up without waiting for a graph broadcast.
+      case .projectHeaderTapped(let path):
+        guard Self.tracksWorktrees(path), Self.isGitRepository(path) else { return .none }
         return reloadStats(path, nodes: nodes(in: state, path))
 
       case .worktrees(.statsLoaded(let path, let stats)):
