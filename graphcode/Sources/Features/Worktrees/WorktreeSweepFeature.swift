@@ -85,9 +85,11 @@ struct WorktreeSweepFeature {
 
       case .assessmentsLoaded(let assessments):
         state.assessments = assessments
-        // Preselect the safe tier only, on the first load.
+        // Preselect the safe tier only, on the first load — and only rows that can
+        // actually be removed (a locked worktree can be safe and still refuse).
         if state.selection.isEmpty {
-          state.selection = Set(assessments.filter { $0.tier == .safeToRemove }.map(\.id))
+          state.selection = Set(
+            assessments.filter { $0.tier == .safeToRemove && $0.isRemovable }.map(\.id))
         } else {
           state.selection.formIntersection(assessments.map(\.id))
         }

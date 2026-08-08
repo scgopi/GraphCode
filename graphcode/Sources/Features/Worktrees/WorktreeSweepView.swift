@@ -44,9 +44,10 @@ struct WorktreeSweepView: View {
       Divider().overlay(.white.opacity(0.08))
       footer
       Text(
-        "Branches are deleted too, and stay recoverable from the reflog for 90 days. "
-          + "Removing a worktree with uncommitted files asks first — those files are "
-          + "gone for good."
+        "Branches are deleted too; each one's last commit is recorded in "
+          + "~/.graphcode/removed-branches.log, so `git branch <name> <sha>` restores "
+          + "it. Removing a worktree with uncommitted files asks first — those files "
+          + "are gone for good."
       )
       .font(.system(size: 11))
       .foregroundStyle(.white.opacity(0.5))
@@ -154,7 +155,7 @@ struct WorktreeSweepView: View {
       checkbox(selected: selected, selectable: assessment.isRemovable)
       VStack(alignment: .leading, spacing: 3) {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-          Text(assessment.ref.branch)
+          Text(rowTitle(assessment))
             .font(.system(size: 12, design: .monospaced))
             .foregroundStyle(.white.opacity(tier == .inUse ? 0.6 : 0.9))
           if let context = rowContext(assessment) {
@@ -198,14 +199,26 @@ struct WorktreeSweepView: View {
 
   private func rowHelp(_ assessment: WorktreeAssessment) -> String {
     if assessment.tier == .inUse { return "A loop is running in it" }
+    if assessment.facts.locked {
+      return "Locked (git worktree lock) — git refuses removal even when forced; "
+        + "unlock it first"
+    }
     if assessment.removalDiscardsFiles {
       return "Has uncommitted files — removing it discards them, and asks first"
     }
     return assessment.ref.worktreePath
   }
 
+  /// A detached worktree has no branch to name, so its folder stands in.
+  private func rowTitle(_ assessment: WorktreeAssessment) -> String {
+    assessment.ref.branch.isEmpty
+      ? (assessment.ref.worktreePath as NSString).lastPathComponent
+      : assessment.ref.branch
+  }
+
   private func rowContext(_ assessment: WorktreeAssessment) -> String? {
     if assessment.facts.prunable { return "directory already gone" }
+    if assessment.ref.branch.isEmpty { return "detached HEAD" }
     return assessment.loopTitle
   }
 

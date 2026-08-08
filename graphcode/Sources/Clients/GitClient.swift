@@ -75,8 +75,11 @@ extension GitClient: DependencyKey {
     inspectWorktrees: { repositoryPath in
       let output = try await run("git", ["-C", repositoryPath, "worktree", "list", "--porcelain"])
       let repoPath = resolvedPath(repositoryPath)
+      // Detached worktrees stay in: they have no branch for a loop to bind, but they
+      // own just as much disk. Their ref carries an empty branch, which is the signal
+      // downstream that there is no ref to delete.
       let blocks = parseWorktreeBlocks(output)
-        .filter { $0.branch != nil && resolvedPath($0.path) != repoPath }
+        .filter { resolvedPath($0.path) != repoPath }
       let defaultBranch = await discoverDefaultBranch(repositoryPath)
       // Concurrent, bounded: serial inspection scaled linearly with the backlog — the
       // repositories that need the sweeper most were the ones it was slowest on. Six
@@ -90,10 +93,9 @@ extension GitClient: DependencyKey {
           let block = blocks[index]
           next += 1
           group.addTask {
-            guard let branch = block.branch else { return nil }
             let ref = WorktreeRef(
-              id: branch, repositoryPath: repositoryPath, worktreePath: block.path,
-              branch: branch)
+              id: block.branch ?? block.path, repositoryPath: repositoryPath,
+              worktreePath: block.path, branch: block.branch ?? "")
             let facts = await gitFacts(
               for: block, defaultBranch: defaultBranch, repositoryPath: repositoryPath)
             return (index, WorktreeInspection(ref: ref, facts: facts))
@@ -114,6 +116,16 @@ extension GitClient: DependencyKey {
         .map { $0 * 1024 }
     },
     removeWorktreeAndBranch: { worktree, prunable, force in
+      // The tip, recorded before anything is deleted: `branch -D` takes the branch's
+      // reflog with it, so this log line is the recovery path the sheet promises —
+      // `git branch <name> <sha>` restores the branch as long as the commits survive.
+      let tip =
+        worktree.branch.isEmpty
+        ? nil
+        : (try? await run(
+          "git", ["-C", worktree.repositoryPath, "rev-parse", "refs/heads/\(worktree.branch)"]))?
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+
       if prunable {
         _ = try await run("git", ["-C", worktree.repositoryPath, "worktree", "prune"])
       } else {
@@ -122,10 +134,15 @@ extension GitClient: DependencyKey {
         arguments.append(worktree.worktreePath)
         _ = try await run("git", arguments)
       }
+      // A detached worktree has no ref to delete; its ref travels with an empty branch.
+      guard !worktree.branch.isEmpty else { return }
       // `-D`, not `-d`: the landed check was `git cherry`, which counts squash merges —
-      // exactly the branches `-d` would refuse. The reflog keeps the tip recoverable.
-      // A branch that is already gone shouldn't fail a removal that succeeded.
+      // exactly the branches `-d` would refuse. A branch that is already gone shouldn't
+      // fail a removal that succeeded.
       _ = try? await run("git", ["-C", worktree.repositoryPath, "branch", "-D", worktree.branch])
+      if let tip, !tip.isEmpty {
+        appendRemovedBranchRecord(branch: worktree.branch, tip: tip, path: worktree.worktreePath)
+      }
     },
     clone: { url, destination, branch, depth in
       runClone(url: url, destination: destination, branch: branch, depth: depth)
@@ -310,7 +327,9 @@ private func parseWorktreeList(_ output: String, repositoryPath: String) -> [Wor
 private struct WorktreeBlock {
   var path: String
   var branch: String?
+  var head: String?
   var prunable = false
+  var locked = false
 }
 
 private func parseWorktreeBlocks(_ output: String) -> [WorktreeBlock] {
@@ -330,8 +349,12 @@ private func parseWorktreeBlocks(_ output: String) -> [WorktreeBlock] {
       current = WorktreeBlock(path: String(line.dropFirst("worktree ".count)))
     } else if line.hasPrefix("branch refs/heads/") {
       current?.branch = String(line.dropFirst("branch refs/heads/".count))
+    } else if line.hasPrefix("HEAD ") {
+      current?.head = String(line.dropFirst("HEAD ".count))
     } else if line.hasPrefix("prunable") {
       current?.prunable = true
+    } else if line.hasPrefix("locked") {
+      current?.locked = true
     }
   }
   flush()
@@ -340,6 +363,25 @@ private func parseWorktreeBlocks(_ output: String) -> [WorktreeBlock] {
 
 private func resolvedPath(_ path: String) -> String {
   URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+}
+
+/// `~/.graphcode/removed-branches.log`: one line per deleted branch — date, name, tip,
+/// worktree path. `branch -D` deletes the branch's reflog with it, so this file is
+/// what makes "recoverable" true rather than folklore.
+private func appendRemovedBranchRecord(branch: String, tip: String, path: String) {
+  let stamp = ISO8601DateFormatter().string(from: Date())
+  let line = "\(stamp) \(branch) \(tip) \(path)\n"
+  guard let data = line.data(using: .utf8) else { return }
+  let url = SupportDirectory.url.appendingPathComponent("removed-branches.log")
+  if FileManager.default.fileExists(atPath: url.path),
+    let handle = try? FileHandle(forWritingTo: url)
+  {
+    defer { try? handle.close() }
+    _ = try? handle.seekToEnd()
+    try? handle.write(contentsOf: data)
+  } else {
+    try? data.write(to: url)
+  }
 }
 
 /// The branch `landed` is measured against: `origin/HEAD` when the remote declares one,
@@ -369,18 +411,27 @@ private func discoverDefaultBranch(_ repositoryPath: String) async -> String {
 /// Reads one worktree's signals. Every read fails toward the cautious answer — an
 /// unreadable status counts as dirty, a failed cherry as unlanded, a missing upstream
 /// as unpushed — so a git hiccup can only move a worktree *out* of the safe tier.
+///
+/// A prunable entry has no directory to ask about, but its branch is still measured:
+/// "nothing on disk to lose" was once assumed for these, and a pruned registration is
+/// exactly the case where deleting the branch would orphan unlanded commits.
 private func gitFacts(
   for block: WorktreeBlock, defaultBranch: String, repositoryPath: String
 ) async -> WorktreeGitFacts {
+  // Cherry against the branch when there is one, the recorded HEAD when detached —
+  // both answer "does anything here exist only in this worktree".
+  let tip = block.branch.map { "refs/heads/\($0)" } ?? block.head
+  let cherry = await tip.asyncFlatMap { tip in
+    try? await run("git", ["-C", repositoryPath, "cherry", defaultBranch, tip])
+  }
+  let commitsNotLanded = (cherry ?? "+").split(separator: "\n")
+    .filter { $0.hasPrefix("+") }.count
+
   if block.prunable {
     return WorktreeGitFacts(
-      defaultBranch: defaultBranch, commitsNotLanded: 0, dirtyFileCount: 0, pushed: true,
-      prunable: true)
+      defaultBranch: defaultBranch, commitsNotLanded: commitsNotLanded, dirtyFileCount: 0,
+      pushed: true, prunable: true, locked: block.locked)
   }
-  let branch = block.branch ?? ""
-  let cherry =
-    (try? await run("git", ["-C", repositoryPath, "cherry", defaultBranch, branch])) ?? "+"
-  let commitsNotLanded = cherry.split(separator: "\n").filter { $0.hasPrefix("+") }.count
   let status = try? await run("git", ["-C", block.path, "status", "--porcelain"])
   let dirtyFileCount = status.map { $0.split(separator: "\n").count } ?? 1
   let ahead = try? await run(
@@ -389,7 +440,17 @@ private func gitFacts(
     ahead.flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } == 0
   return WorktreeGitFacts(
     defaultBranch: defaultBranch, commitsNotLanded: commitsNotLanded,
-    dirtyFileCount: dirtyFileCount, pushed: pushed, prunable: false, sizeBytes: nil)
+    dirtyFileCount: dirtyFileCount, pushed: pushed, prunable: false, locked: block.locked,
+    sizeBytes: nil)
+}
+
+extension Optional {
+  fileprivate func asyncFlatMap<T>(
+    _ transform: (Wrapped) async -> T?
+  ) async -> T? {
+    guard let self else { return nil }
+    return await transform(self)
+  }
 }
 
 /// Runs a command and returns its standard output.
