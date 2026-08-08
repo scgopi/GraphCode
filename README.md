@@ -139,7 +139,7 @@ session itself, so there's no separate approve step in the app.
 |---|---|
 | `graphcode.app` | The UI — project sidebar, graph canvas, and a per-loop terminal workspace with tabs and splits |
 | `graphcoded` | Background daemon (launchd agent). Owns every project's graph, fires hand-off edges, polls goal predicates, and keeps unattended sessions alive whether or not the app is open |
-| `graphcode` | CLI for the same daemon — `graphcode status <project>`, `graphcode node create …`, `graphcode node send …` (type a message into another loop's live session) |
+| `graphcode` | CLI for the same daemon — `graphcode status <project>`, `graphcode node create …`, `graphcode node send …` (type a message into another loop's live session), `graphcode node memo …` (leave a note a relaunched loop reads on its next pass) |
 | `zmx` | Third-party session daemon that keeps each loop's PTY alive ([zmx.sh](https://zmx.sh)) |
 | GhosttyKit | Third-party terminal engine rendering each surface ([ghostty.org](https://ghostty.org)) |
 
