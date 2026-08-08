@@ -150,7 +150,9 @@ struct GraphOverviewView: View {
     guard transform == CanvasTransform(), viewport != .zero, content != .zero else {
       return
     }
-    var t = CanvasTransform.fitting(content, in: viewport)
+    // The default view keeps cards readable (`defaultFitFloor`); ⌘9 is the deliberate
+    // way to see a graph too big for that.
+    var t = CanvasTransform.fitting(content, in: viewport, floor: CanvasTransform.defaultFitFloor)
     if let startNode {
       t.offset.height = (viewport.height / 2 - startNode.y) * t.scale
     }

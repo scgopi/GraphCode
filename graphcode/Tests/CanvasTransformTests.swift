@@ -96,6 +96,23 @@ struct CanvasTransformTests {
   }
 
   @Test
+  func theDefaultFitStopsAtItsReadabilityFloorWhereExplicitFitGoesDeeper() {
+    // A workspace big enough that a true fit would land at wallpaper scale.
+    let content = CGSize(width: 8000, height: 6000)
+
+    // The canvas centring itself on open stops at the readability floor…
+    let opened = CanvasTransform.fitting(
+      content, in: Self.viewport, floor: CanvasTransform.defaultFitFloor)
+    #expect(opened.scale == CanvasTransform.defaultFitFloor)
+
+    // …while ⌘9 — a human explicitly asking to see everything — still goes past it,
+    // which is the whole of #59.
+    let explicit = CanvasTransform.fitting(content, in: Self.viewport)
+    #expect(explicit.scale < CanvasTransform.defaultFitFloor)
+    #expect(explicit.scale >= CanvasTransform.minFitScale)
+  }
+
+  @Test
   func fittingFramesEveryLaneBandIncludingItsCaption() {
     // ⌘9 on a real workspace: three folders, a dozen loops. A band whose caption falls
     // outside the viewport is a lane you can't identify, and the caption is at the very
