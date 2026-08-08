@@ -57,19 +57,6 @@ struct WorktreeSweepView: View {
     .frame(width: 640)
     .background(Theme.sheet)
     .task { await store.send(.task).finish() }
-    .confirmationDialog(
-      "Discard uncommitted files?",
-      isPresented: Binding(
-        get: { store.isConfirmingRemoval },
-        set: { if !$0 { store.send(.removeCancelled) } }
-      ),
-      titleVisibility: .visible
-    ) {
-      Button("Remove Anyway", role: .destructive) { store.send(.removeConfirmed) }
-      Button("Cancel", role: .cancel) { store.send(.removeCancelled) }
-    } message: {
-      Text(discardMessage)
-    }
   }
 
   private var discardMessage: String {
@@ -261,17 +248,35 @@ struct WorktreeSweepView: View {
     .frame(width: 15, height: 15)
   }
 
+  // The discard confirmation lives inline in the footer, not in a system
+  // `confirmationDialog`: a dialog presented inside a sheet re-presents itself every
+  // time the sheet's content changes underneath it, and the size stream changes it
+  // row by row — the dialog "kept relaunching". A swapped footer can't.
+  @ViewBuilder
   private var footer: some View {
-    HStack(spacing: 12) {
-      Text(footerSummary)
-        .font(.system(size: 12))
-        .foregroundStyle(.white.opacity(0.62))
-      Spacer()
-      Button("Cancel") { dismiss() }
-        .keyboardShortcut(.cancelAction)
-      Button("Remove \(store.selected.count)") { store.send(.removeTapped) }
-        .keyboardShortcut(.defaultAction)
-        .disabled(store.selected.isEmpty)
+    if store.isConfirmingRemoval {
+      HStack(spacing: 12) {
+        Text(discardMessage)
+          .font(.system(size: 12))
+          .foregroundStyle(Tint.look)
+          .lineLimit(2)
+        Spacer()
+        Button("Cancel") { store.send(.removeCancelled) }
+          .keyboardShortcut(.cancelAction)
+        Button("Remove Anyway", role: .destructive) { store.send(.removeConfirmed) }
+      }
+    } else {
+      HStack(spacing: 12) {
+        Text(footerSummary)
+          .font(.system(size: 12))
+          .foregroundStyle(.white.opacity(0.62))
+        Spacer()
+        Button("Cancel") { dismiss() }
+          .keyboardShortcut(.cancelAction)
+        Button("Remove \(store.selected.count)") { store.send(.removeTapped) }
+          .keyboardShortcut(.defaultAction)
+          .disabled(store.selected.isEmpty)
+      }
     }
   }
 
