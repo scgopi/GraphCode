@@ -16,11 +16,11 @@ struct WorktreeHygieneTests {
 
   private func facts(
     notLanded: Int = 0, dirty: Int = 0, pushed: Bool = true, prunable: Bool = false,
-    size: Int64? = 100
+    locked: Bool = false, size: Int64? = 100
   ) -> WorktreeGitFacts {
     WorktreeGitFacts(
       defaultBranch: "main", commitsNotLanded: notLanded, dirtyFileCount: dirty,
-      pushed: pushed, prunable: prunable, sizeBytes: size)
+      pushed: pushed, prunable: prunable, locked: locked, sizeBytes: size)
   }
 
   private func node(
@@ -65,15 +65,34 @@ struct WorktreeHygieneTests {
   }
 
   @Test
-  func prunableIsAlwaysSafeAndSaysWhy() {
+  func prunableIsSafeOnlyWhenItsBranchHasLanded() {
     // Admin file with no directory: nothing on disk to lose, even with a stopped loop
     // still pointing at the path it used to be.
-    let assessment = WorktreeAssessment(
+    let landed = WorktreeAssessment(
       ref: ref(), facts: facts(prunable: true, size: nil),
       binding: .stopped(loopTitle: "old"))
+    #expect(landed.tier == .safeToRemove)
+    #expect(landed.summary == "stale admin file · nothing on disk to lose")
 
-    #expect(assessment.tier == .safeToRemove)
-    #expect(assessment.summary == "stale admin file · nothing on disk to lose")
+    // But a pruned registration whose branch holds unlanded commits is exactly the
+    // case where "nothing to lose" would delete the only ref those commits have.
+    let unlanded = WorktreeAssessment(
+      ref: ref(), facts: facts(notLanded: 3, prunable: true, size: nil), binding: .none)
+    #expect(unlanded.tier == .lookBeforeRemoving)
+    #expect(
+      unlanded.summary == "directory gone · 3 commits not in main — only the branch remains")
+  }
+
+  @Test
+  func aLockedWorktreeIsNotRemovable() {
+    // git refuses a locked removal even with --force; a checkbox would offer a
+    // silent failure.
+    let locked = WorktreeAssessment(
+      ref: ref(), facts: facts(locked: true), binding: .none)
+    #expect(!locked.isRemovable)
+    // However clean, a lock needs a human first — never the preselected tier.
+    #expect(locked.tier == .lookBeforeRemoving)
+    #expect(locked.summary.contains("locked"))
   }
 
   @Test

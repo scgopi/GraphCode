@@ -117,7 +117,7 @@ struct WorktreeSweepFeatureTests {
     let store = TestStore(initialState: initial) {
       AppFeature()
     } withDependencies: {
-      $0.gitClient.inspectWorktrees = { _ in [dirty] }
+      $0.gitClient.inspectWorktrees = { _ in [safe, dirty] }
       $0.gitClient.worktreeSizeBytes = { _ in nil }
       $0.gitClient.removeWorktreeAndBranch = { ref, _, _ in
         removed.withValue { $0.append(ref.branch) }
@@ -128,11 +128,48 @@ struct WorktreeSweepFeatureTests {
     await store.send(.worktrees(.sweep(.removeTapped))) {
       $0.worktreeSweep = nil
     }
-    await store.receive(\.worktrees) { _ in }
     await store.finish()
 
     // Only what was selected — the dirty worktree was never touched.
     #expect(removed.value == ["landed"])
+  }
+
+  @Test
+  @MainActor
+  func aWorktreeClaimedByALoopAfterSelectionIsNotRemoved() async {
+    // The sheet's assessment can be minutes old. Removal re-checks the live graphs:
+    // a loop that started in the worktree after selection keeps it alive, whatever
+    // the row claimed when it was ticked.
+    let claimed = inspection(branch: "landed")
+    let free = inspection(branch: "spare")
+    let removed = LockIsolated<[String]>([])
+    let runner = LoopNode(
+      title: "Started late", loopType: .goalBased, worktreeBinding: claimed.ref,
+      state: .running)
+    var initial = AppFeature.State(projects: [
+      ProjectFeature.State(
+        graph: LoopGraph(
+          scope: .project(ProjectRef(path: "/repo", name: "repo")), nodes: [runner]))
+    ])
+    initial.worktreeSweep = openSweep(
+      [claimed, free], selecting: [claimed.ref.worktreePath, free.ref.worktreePath])
+    let store = TestStore(initialState: initial) {
+      AppFeature()
+    } withDependencies: {
+      $0.gitClient.inspectWorktrees = { _ in [claimed, free] }
+      $0.gitClient.worktreeSizeBytes = { _ in nil }
+      $0.gitClient.removeWorktreeAndBranch = { ref, _, _ in
+        removed.withValue { $0.append(ref.branch) }
+      }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.worktrees(.sweep(.removeTapped))) {
+      $0.worktreeSweep = nil
+    }
+    await store.finish()
+
+    #expect(removed.value == ["spare"])
   }
 
   @Test
@@ -174,7 +211,7 @@ struct WorktreeSweepFeatureTests {
     let store = TestStore(initialState: initial) {
       AppFeature()
     } withDependencies: {
-      $0.gitClient.inspectWorktrees = { _ in [] }
+      $0.gitClient.inspectWorktrees = { _ in [dirty, clean] }
       $0.gitClient.worktreeSizeBytes = { _ in nil }
       $0.gitClient.removeWorktreeAndBranch = { ref, _, force in
         forced.withValue { $0[ref.branch] = force }
@@ -191,7 +228,6 @@ struct WorktreeSweepFeatureTests {
     await store.send(.worktrees(.sweep(.removeConfirmed))) {
       $0.worktreeSweep = nil
     }
-    await store.receive(\.worktrees) { _ in }
     await store.finish()
 
     #expect(forced.value == ["wip": true, "landed": false])

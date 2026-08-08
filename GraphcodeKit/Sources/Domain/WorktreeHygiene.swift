@@ -16,8 +16,12 @@ public struct WorktreeGitFacts: Codable, Equatable, Sendable {
   public var dirtyFileCount: Int
   /// Nothing ahead of upstream. A branch with no upstream counts as unpushed, not safe.
   public var pushed: Bool
-  /// Admin file with no directory: zero risk, nothing on disk to lose.
+  /// Admin file with no directory. Zero risk **for the directory** — the branch is a
+  /// separate question, which is why `commitsNotLanded` is measured for prunable
+  /// entries too rather than assumed.
   public var prunable: Bool
+  /// `git worktree lock` — git refuses removal even with `--force`.
+  public var locked: Bool
   public var sizeBytes: Int64?
 
   public var landed: Bool { commitsNotLanded == 0 }
@@ -29,6 +33,7 @@ public struct WorktreeGitFacts: Codable, Equatable, Sendable {
     dirtyFileCount: Int,
     pushed: Bool,
     prunable: Bool = false,
+    locked: Bool = false,
     sizeBytes: Int64? = nil
   ) {
     self.defaultBranch = defaultBranch
@@ -36,6 +41,7 @@ public struct WorktreeGitFacts: Codable, Equatable, Sendable {
     self.dirtyFileCount = dirtyFileCount
     self.pushed = pushed
     self.prunable = prunable
+    self.locked = locked
     self.sizeBytes = sizeBytes
   }
 }
@@ -94,19 +100,27 @@ public struct WorktreeAssessment: Identifiable, Equatable, Sendable {
   }
 
   public var tier: WorktreeTier {
-    if facts.prunable { return .safeToRemove }
+    // A prunable entry with unlanded commits is not "nothing to lose" — the directory
+    // is gone but removing it deletes the branch, and the branch is all that's left.
+    if facts.prunable {
+      return facts.landed ? .safeToRemove : .lookBeforeRemoving
+    }
     if binding.isRunning { return .inUse }
+    // Locked means a human action stands between here and removal (`git worktree
+    // unlock`) — that is "look before removing" by definition, however clean it is.
+    if facts.locked { return .lookBeforeRemoving }
     if facts.landed && facts.clean && facts.pushed, case .none = binding {
       return .safeToRemove
     }
     return .lookBeforeRemoving
   }
 
-  /// Whether the sweeper can act on this row at all. Only a running loop locks its
-  /// worktree — everything else is the human's to remove, including a dirty tree,
-  /// which asks for confirmation first (`git worktree remove` needs `--force` for it,
-  /// and the uncommitted files are gone for good).
-  public var isRemovable: Bool { !binding.isRunning }
+  /// Whether the sweeper can act on this row at all. A running loop locks its
+  /// worktree, and so does `git worktree lock` — git refuses a locked removal even
+  /// with `--force`, so offering the checkbox would be offering a silent failure.
+  /// Everything else is the human's to remove, including a dirty tree, which asks for
+  /// confirmation first.
+  public var isRemovable: Bool { !binding.isRunning && !facts.locked }
 
   /// Whether removing this worktree discards files nothing else has a copy of — the
   /// case the sweeper confirms before forcing.
@@ -114,7 +128,12 @@ public struct WorktreeAssessment: Identifiable, Equatable, Sendable {
 
   /// The mono summary line under the branch name — what you'd lose, in its own words.
   public var summary: String {
-    if facts.prunable { return "stale admin file · nothing on disk to lose" }
+    if facts.prunable {
+      guard !facts.landed else { return "stale admin file · nothing on disk to lose" }
+      let unit = facts.commitsNotLanded == 1 ? "commit" : "commits"
+      return "directory gone · \(facts.commitsNotLanded) \(unit) not in "
+        + "\(facts.defaultBranch) — only the branch remains"
+    }
     if binding.isRunning { return "a loop is running in it" }
     if tier == .safeToRemove {
       return "landed in \(facts.defaultBranch) · clean tree · no loop bound"
@@ -129,6 +148,7 @@ public struct WorktreeAssessment: Identifiable, Equatable, Sendable {
       reasons.append("\(facts.dirtyFileCount) \(unit) uncommitted")
     }
     if !facts.pushed { reasons.append("not pushed") }
+    if facts.locked { reasons.append("locked") }
     if case .stopped = binding {
       reasons =
         reasons.isEmpty
