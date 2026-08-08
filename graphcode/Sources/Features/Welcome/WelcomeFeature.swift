@@ -40,10 +40,14 @@ struct WelcomeFeature {
       return trimmed.isEmpty ? derivedFolderName : trimmed
     }
 
-    /// `<location>/<name>`; nil until both halves are known.
+    /// `<location>/<name>`; nil until both halves are known, and nil when the leaf isn't
+    /// a plain folder name. The name reaches `git clone` as its destination and, on a
+    /// failed clone, `removeItem`; a `..` or `/` in it would place both outside the folder
+    /// the human picked, so the destination stays a single safe component of it.
     var destinationURL: URL? {
       let location = locationPath.trimmingCharacters(in: .whitespaces)
-      guard !location.isEmpty, !effectiveFolderName.isEmpty else { return nil }
+      guard !location.isEmpty, SafeArgument.isSafePathComponent(effectiveFolderName)
+      else { return nil }
       return URL(fileURLWithPath: location)
         .appendingPathComponent(effectiveFolderName).standardizedFileURL
     }
@@ -85,7 +89,8 @@ struct WelcomeFeature {
       let path = remotePath.trimmingCharacters(in: .whitespaces)
       let userName = user.trimmingCharacters(in: .whitespaces)
       let portText = port.trimmingCharacters(in: .whitespaces)
-      guard !host.isEmpty, path.hasPrefix("/"), !userName.isEmpty,
+      guard SafeArgument.isSafeSSHComponent(host), SafeArgument.isSafeSSHComponent(userName),
+        path.hasPrefix("/"),
         let portNumber = Int(portText), (1...65535).contains(portNumber)
       else { return nil }
       return RemoteProjectLocation(

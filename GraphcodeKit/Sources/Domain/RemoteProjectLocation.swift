@@ -38,7 +38,8 @@ public struct RemoteProjectLocation: Equatable, Sendable {
     guard projectPath.hasPrefix("\(scheme)://"),
       let components = URLComponents(string: projectPath),
       components.scheme == scheme,
-      let host = components.host, !host.isEmpty,
+      let host = components.host, SafeArgument.isSafeSSHComponent(host),
+      components.user.map(SafeArgument.isSafeSSHComponent) ?? true,
       !components.path.isEmpty, components.path.hasPrefix("/")
     else { return nil }
     return RemoteProjectLocation(
