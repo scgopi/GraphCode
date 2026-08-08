@@ -94,7 +94,10 @@ struct RemoteSessionResumeTests {
     // `SessionIDStore` reads this Mac's disk, where a remote loop's ID has never been
     // written.
     #expect(
-      remoteCommand.contains("$HOME/.graphcode/sessions/\(node.id.uuidString).id"))
+      remoteCommand.contains(
+        "cat \(PresenceHooks.remoteSessionIDExpression(forNodeID: node.id))"))
+    #expect(remoteCommand.contains("$HOME/.graphcode/sessions"))
+    #expect(remoteCommand.contains(node.id.uuidString))
     #expect(remoteCommand.contains("'--resume'"))
     // As a variable reference, not a literal — this machine cannot know the value.
     #expect(remoteCommand.contains("\"$GRAPHCODE_RESUME_ID\""))
@@ -117,6 +120,52 @@ struct RemoteSessionResumeTests {
     let resume = try #require(remoteCommand.range(of: "--resume"))
     let goal = try #require(remoteCommand.range(of: "tests pass"))
     #expect(resume.lowerBound < goal.lowerBound)
+  }
+
+  @Test
+  func aResumeConsumesTheIDSoADeadOneCannotTrapTheLoop() throws {
+    // An ID whose transcript has expired makes `claude --resume` exit at once, and
+    // nothing clears the remote file: `kill` removes only the local one, and the remote
+    // path returns before reaching it. Left in place, the sweep would retry the same
+    // dead ID every minute and never reach the fresh branch again. Testing the exit
+    // status cannot help — `zmx run -d` returns 0 as soon as the detached session
+    // exists, long before the agent inside it fails — so the file is removed up front.
+    let node = goalNode()
+    let invocation = try #require(
+      ZmxSessionLauncher.remoteEnsureInvocation(forNode: node, at: location))
+    let remoteCommand = try #require(invocation.last)
+
+    let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: node.id)
+    #expect(remoteCommand.contains("rm -f \(idFile)"))
+    let removal = try #require(remoteCommand.range(of: "rm -f"))
+    let resume = try #require(remoteCommand.range(of: "--resume"))
+    #expect(removal.lowerBound < resume.lowerBound)
+  }
+
+  @Test
+  func theReaderAndTheWriterNameTheSameDirectory() {
+    // Divergence here would not fail loudly: every remote resume would fall silently
+    // through to the opening prompt, which is the bug this path exists to end.
+    #expect(
+      PresenceHooks.remoteSessionIDExpression(forNodeID: UUID())
+        .hasPrefix(PresenceHooks.remoteSessionsExpression))
+  }
+
+  @Test
+  func aHealthySweepTickCostsOnlyTheExistenceCheck() throws {
+    // The hooks write and the file delivery sit behind the check, so a minute-by-minute
+    // sweep against a live session doesn't re-send ~20 KB of base64'd shim through a
+    // `python3` for a session that is already running.
+    let node = goalNode()
+    let invocation = try #require(
+      ZmxSessionLauncher.remoteEnsureInvocation(forNode: node, at: location))
+    let remoteCommand = try #require(invocation.last)
+
+    let get = try #require(remoteCommand.range(of: "'get'"))
+    let hooks = try #require(remoteCommand.range(of: ".graphcode/hooks"))
+    let deliver = try #require(remoteCommand.range(of: "b64decode"))
+    #expect(get.lowerBound < hooks.lowerBound)
+    #expect(get.lowerBound < deliver.lowerBound)
   }
 
   @Test

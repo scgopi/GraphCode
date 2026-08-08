@@ -99,11 +99,15 @@ public enum PresenceHooks {
   public static let remoteSessionsExpression = "\"$HOME/.graphcode/sessions\""
 
   /// The remote twin of `SessionIDStore.file(forNodeID:)` — the file the remote
-  /// `SessionStart` hook wrote, as a shell expression the ensure dial can `cat`. The
-  /// name has to match what `captureSessionID` derives from `$ZMX_SESSION`, so both
-  /// come from `SurfaceRef`.
+  /// `SessionStart` hook wrote, as a shell expression the ensure dial can `cat`.
+  ///
+  /// Composed from `remoteSessionsExpression` rather than restated: writer and reader
+  /// drifting apart would not fail loudly, it would make every remote resume fall
+  /// silently through to the opening prompt — the bug this whole path exists to end. The
+  /// file name matches what `captureSessionID` derives from `$ZMX_SESSION` for the same
+  /// reason it takes the prefix from `SurfaceRef`.
   public static func remoteSessionIDExpression(forNodeID nodeID: UUID) -> String {
-    "\"$HOME/.graphcode/sessions/\(nodeID.uuidString).id\""
+    "\(remoteSessionsExpression)/\"\(nodeID.uuidString).id\""
   }
 
   /// The settings JSON for a backend, or `nil` when it has no hooks to configure.

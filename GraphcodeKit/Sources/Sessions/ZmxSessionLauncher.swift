@@ -763,10 +763,17 @@ public enum ZmxSessionLauncher {
       .map { $0 + "; " } ?? ""
     let create = remoteCreateScript(
       forNode: node, freshRun: run, at: location, settings: settings)
+    // Everything the create needs on the host goes *behind* the check, not in front of
+    // it. This used to run per ensure, which was once at load and once per node created;
+    // the liveness sweep dials every minute, and re-sending ~20 KB of base64'd shim
+    // through a `python3 -c` (plus a second one for Copilot's trust seed) at that rate to
+    // refresh files for a session that is already running is pure cost. Create-only also
+    // matches what `PresenceHooks.write` already documents about the local hooks file: an
+    // upgraded graphcode reaches a loop at the loop's next session, not mid-run.
     let script =
       "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { "
-      + trustSeed + hooksWrite + delivery
-      + "\(check) >/dev/null 2>&1 || { \(create); }; }"
+      + "\(check) >/dev/null 2>&1 || { " + trustSeed + hooksWrite + delivery
+      + "\(create); }; }"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
   }
 
@@ -783,6 +790,19 @@ public enum ZmxSessionLauncher {
   /// An empty or missing file falls through to the fresh launch, which is the right
   /// answer for a first launch and for a Codespace *rebuild*: everything outside
   /// `/workspaces` is gone, so the transcript `--resume` would name is gone with it.
+  ///
+  /// **The ID is consumed, not just read.** An ID whose transcript no longer exists —
+  /// Claude Code's own retention expired it, or `~/.claude` was wiped while
+  /// `~/.graphcode` survived — makes `claude --resume` exit immediately, and the session
+  /// dies with it. Nothing would clear the file: `kill` removes the local one
+  /// (`SessionIDStore.remove`) but the remote path returns before reaching it, and
+  /// `zmx kill` doesn't touch the host's copy. Left in place, the liveness sweep would
+  /// retry the same dead ID every minute forever and the fresh-launch branch would
+  /// become unreachable. Testing the exit status instead does not work: `zmx run -d`
+  /// returns 0 the moment the detached session exists, long before the agent inside it
+  /// fails. So the file is removed *before* the attempt — a resume that lands has its
+  /// `SessionStart` hook write it straight back, and one that doesn't costs a single
+  /// wasted launch before the next sweep starts fresh.
   static func remoteCreateScript(
     forNode node: LoopNode, freshRun: String, at location: RemoteProjectLocation,
     settings: GraphcodeSettings
@@ -795,7 +815,8 @@ public enum ZmxSessionLauncher {
     let resume = remoteQuotedCommand(["zmx"] + resumeArgv)
     let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: node.id)
     return "\(remoteResumeIDVariable)=$(cat \(idFile) 2>/dev/null); "
-      + "if [ -n \"$\(remoteResumeIDVariable)\" ]; then \(resume); else \(freshRun); fi"
+      + "if [ -n \"$\(remoteResumeIDVariable)\" ]; then rm -f \(idFile); \(resume); "
+      + "else \(freshRun); fi"
   }
 
   /// The files a remote session needs on its own disk, as one installer fragment
@@ -1027,16 +1048,21 @@ public enum ZmxSessionLauncher {
   }
 
   private static func startRemote(_ node: LoopNode, at location: RemoteProjectLocation) async {
+    // A dial already in flight for this node is doing this job; a second one racing it
+    // is how two `zmx run`s land on one session (`RemoteEnsureGate`).
+    guard await RemoteEnsureGate.shared.begin(node.id) else { return }
     // The forwarded socket is what makes the delivered CLI's dial land on this Mac's
     // daemon — without it the shim's commands have nowhere to go. Kept alive per host,
     // not per launch; see `RemoteSocketForwarder`.
     await RemoteSocketForwarder.shared.ensureForwarding(to: location)
-    guard let ensure = remoteEnsureInvocation(forNode: node, at: location) else { return }
     // Create only, in one round-trip — see `remoteEnsureInvocation` for why the check
     // and the run must share a shell. A failure after the retries is the same posture
     // as the local path: no UI here, the node's state stays honest, opening the loop
     // retries.
-    _ = await runRemoteRetrying(ensure)
+    if let ensure = remoteEnsureInvocation(forNode: node, at: location) {
+      _ = await runRemoteRetrying(ensure)
+    }
+    await RemoteEnsureGate.shared.end(node.id)
   }
 
   static func start(_ node: LoopNode, projectPath: String? = nil) async {

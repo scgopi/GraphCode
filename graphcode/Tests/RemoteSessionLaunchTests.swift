@@ -62,10 +62,14 @@ struct RemoteSessionLaunchTests {
     // Never load-bearing: a failed seed must fall back to today's dialog, not block
     // the launch.
     #expect(remoteCommand.contains("|| true"))
-    // And the seed runs before the create-only pair.
-    let seed = try #require(remoteCommand.range(of: "trustedFolders"))
+    // And the seed runs before the launch it clears the way for — but *behind* the
+    // existence check, which is what keeps the liveness sweep's healthy tick a bare
+    // `zmx get` rather than a `python3` per minute against an already-trusted folder.
     let get = try #require(remoteCommand.range(of: "'get'"))
-    #expect(seed.lowerBound < get.lowerBound)
+    let seed = try #require(remoteCommand.range(of: "trustedFolders"))
+    let run = try #require(remoteCommand.range(of: "'run'"))
+    #expect(get.lowerBound < seed.lowerBound)
+    #expect(seed.lowerBound < run.lowerBound)
   }
 
   @Test
@@ -149,8 +153,10 @@ struct RemoteSessionLaunchTests {
 
   @Test
   func aRemoteEnsureDeliversTheCLIAndBriefingBeforeLaunching() throws {
-    // The delivery fragment must precede the create-only pair: a `zmx run` that fires
-    // has to find every path its argv names already on the host's disk.
+    // The delivery fragment must precede the launch: a `zmx run` that fires has to find
+    // every path its argv names already on the host's disk. It sits *behind* the
+    // existence check, so a session that is already running costs the sweep one `zmx
+    // get` rather than ~20 KB of base64'd shim through a `python3` every minute.
     let node = LoopNode(
       title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"))
     let invocation = try #require(
@@ -163,9 +169,11 @@ struct RemoteSessionLaunchTests {
     // Never load-bearing: a failed delivery degrades to an unbriefed session, not a
     // blocked launch.
     #expect(remoteCommand.contains("|| true"))
-    let deliver = try #require(remoteCommand.range(of: "b64decode"))
     let get = try #require(remoteCommand.range(of: "'get'"))
-    #expect(deliver.lowerBound < get.lowerBound)
+    let deliver = try #require(remoteCommand.range(of: "b64decode"))
+    let run = try #require(remoteCommand.range(of: "'run'"))
+    #expect(get.lowerBound < deliver.lowerBound)
+    #expect(deliver.lowerBound < run.lowerBound)
   }
 
   @Test

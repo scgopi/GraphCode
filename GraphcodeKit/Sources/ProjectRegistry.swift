@@ -129,10 +129,10 @@ public actor ProjectRegistry {
   /// fires and every loop on that host stays dead until the app is relaunched.
   ///
   /// Unlike the presence poll this runs with no client attached, because a loop being
-  /// alive matters when nobody is watching and a reading does not. The cost is one ssh
-  /// per unattended remote loop per minute, multiplexed onto the host's existing
-  /// `ControlMaster` connection — a quarter of what the presence poll already spends per
-  /// loop while the app is open.
+  /// alive matters when nobody is watching and a reading does not. On a healthy tick the
+  /// dial is a bare `zmx get` — `remoteEnsureInvocation` keeps the hooks write and the
+  /// file delivery behind that check precisely so this can be cheap — multiplexed onto
+  /// the host's existing `ControlMaster` connection.
   static let remoteLivenessSweepInterval: Duration = .seconds(60)
 
   private var remoteSweeper: Task<Void, Never>?
@@ -151,8 +151,16 @@ public actor ProjectRegistry {
     }
   }
 
-  /// Sequential across projects for the same reason `pollPresence` is: one burst of ssh
-  /// dials per tick is what the multiplexed connection exists to avoid.
+  /// The registry outlives the daemon in practice, but a `Task` holding only a weak
+  /// `self` would otherwise keep waking every minute after the registry it sweeps for is
+  /// gone — the same reason `GraphStore` cancels its goal pollers here.
+  deinit { remoteSweeper?.cancel() }
+
+  /// `ensureSession` is fire-and-forget by contract (`CLISessionBackend.ensureSession`
+  /// spawns a detached task), so this returns well before the dials it started finish and
+  /// the loop below is an ordering, not a throttle. What bounds the work is
+  /// `RemoteEnsureGate`: one ensure per node at a time, so a slow tick cannot pile a
+  /// second dial onto the same session.
   private func sweepRemoteSessions() async {
     for (path, store) in stores where RemoteProjectLocation.parse(projectPath: path) != nil {
       await store.ensureUnattendedSessionsAlive()
