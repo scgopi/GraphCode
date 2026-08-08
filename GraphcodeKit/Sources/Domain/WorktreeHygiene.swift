@@ -102,6 +102,14 @@ public struct WorktreeAssessment: Identifiable, Equatable, Sendable {
     return .lookBeforeRemoving
   }
 
+  /// Whether the sweeper can act on this row at all. A dirty tree is not removable —
+  /// `git worktree remove` without `--force` refuses it, and forcing would break the
+  /// promise that only fully committed directories are ever removed — so offering the
+  /// checkbox was offering a failure. Commit or discard the files first.
+  public var isRemovable: Bool {
+    !binding.isRunning && (facts.prunable || facts.clean)
+  }
+
   /// The mono summary line under the branch name — what you'd lose, in its own words.
   public var summary: String {
     if facts.prunable { return "stale admin file · nothing on disk to lose" }

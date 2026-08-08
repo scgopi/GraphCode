@@ -137,9 +137,9 @@ struct WorktreeSweepView: View {
 
   private func row(_ assessment: WorktreeAssessment) -> some View {
     let tier = assessment.tier
-    let selected = tier != .inUse && store.selection.contains(assessment.id)
+    let selected = assessment.isRemovable && store.selection.contains(assessment.id)
     return HStack(spacing: 11) {
-      checkbox(selected: selected, selectable: tier != .inUse)
+      checkbox(selected: selected, selectable: assessment.isRemovable)
       VStack(alignment: .leading, spacing: 3) {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
           Text(assessment.ref.branch)
@@ -179,8 +179,18 @@ struct WorktreeSweepView: View {
     }
     .contentShape(Rectangle())
     .onTapGesture {
-      if tier != .inUse { store.send(.rowToggled(assessment.id)) }
+      if assessment.isRemovable { store.send(.rowToggled(assessment.id)) }
     }
+    .help(rowHelp(assessment))
+  }
+
+  private func rowHelp(_ assessment: WorktreeAssessment) -> String {
+    if assessment.tier == .inUse { return "A loop is running in it" }
+    if !assessment.isRemovable {
+      return "Has uncommitted files — commit or discard them first; only fully "
+        + "committed directories are ever removed"
+    }
+    return assessment.ref.worktreePath
   }
 
   private func rowContext(_ assessment: WorktreeAssessment) -> String? {

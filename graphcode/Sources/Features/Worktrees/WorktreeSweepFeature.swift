@@ -31,7 +31,7 @@ struct WorktreeSweepFeature {
     var inUse: [WorktreeAssessment] { tiered(.inUse) }
 
     var selected: [WorktreeAssessment] {
-      (assessments ?? []).filter { $0.tier != .inUse && selection.contains($0.id) }
+      (assessments ?? []).filter { $0.isRemovable && selection.contains($0.id) }
     }
     var selectedBytes: Int64 {
       selected.compactMap(\.facts.sizeBytes).reduce(0, +)
@@ -120,7 +120,7 @@ struct WorktreeSweepFeature {
 
       case .rowToggled(let id):
         guard let assessment = state.assessments?.first(where: { $0.id == id }),
-          assessment.tier != .inUse
+          assessment.isRemovable
         else { return .none }
         if state.selection.contains(id) {
           state.selection.remove(id)
@@ -150,7 +150,15 @@ struct WorktreeSweepFeature {
               try await gitClient.removeWorktreeAndBranch(
                 assessment.ref, assessment.facts.prunable)
             } catch {
-              failures.append("\(assessment.ref.branch): \(String(describing: error))")
+              // Git's own last word, not a dumped enum — "fatal: … contains modified
+              // or untracked files" explains itself; the case name explains nothing.
+              let reason: String
+              if case GitClientError.commandFailed(_, _, let output) = error {
+                reason = output.trimmingCharacters(in: .whitespacesAndNewlines)
+              } else {
+                reason = error.localizedDescription
+              }
+              failures.append("\(assessment.ref.branch): \(reason)")
             }
           }
           await send(
