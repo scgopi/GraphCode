@@ -795,6 +795,10 @@ public enum ZmxSessionLauncher {
   static func deliveryFragment(_ delivery: String, ifSessionMissing check: String) -> String {
     guard !delivery.isEmpty else { return "" }
     let stamp = RemoteProjectLocation.shellQuoted(RemoteGraphAccess.cliShimStamp)
+    // Tilde, unquoted, so the remote shell expands it — the same one constant the
+    // installer expands with `expanduser`. The stamp is written *by* the delivery
+    // (`remoteDeliveryScript`), not after it, so a delivery that failed leaves no stamp
+    // and the next dial tries again.
     let stampFile = RemoteGraphAccess.deliveryStampPath
     // `!` binds to the pipeline, so this reads (session missing) OR (stamp differs). A
     // missing session has to re-deliver whatever the stamp says: the create branch below
@@ -802,8 +806,7 @@ public enum ZmxSessionLauncher {
     // of them rides in this same fragment.
     return "if ! \(check) >/dev/null 2>&1 "
       + "|| [ \"$(cat \(stampFile) 2>/dev/null)\" != \(stamp) ]; then "
-      + delivery
-      + "printf '%s' \(stamp) > \(stampFile) 2>/dev/null; fi; "
+      + delivery + "fi; "
   }
 
   /// What the ensure dial runs when the check found no session: resume the backend
@@ -856,7 +859,15 @@ public enum ZmxSessionLauncher {
   public static func remoteDeliveryScript(
     forNode node: LoopNode?, at location: RemoteProjectLocation, settings: GraphcodeSettings
   ) -> String? {
-    var files = [RemoteGraphAccess.cliInstallPath: RemoteGraphAccess.cliShimSource]
+    // The stamp rides in the manifest rather than being written by the shell after it.
+    // `installerScript` ends in `|| true` — it must never block the launch it precedes —
+    // so a separate `printf` would stamp the host even when nothing was installed, and a
+    // host with no `python3` would be marked current forever with the shim never landing.
+    // One python process writes all of these or none of them.
+    var files = [
+      RemoteGraphAccess.cliInstallPath: RemoteGraphAccess.cliShimSource,
+      RemoteGraphAccess.deliveryStampPath: RemoteGraphAccess.cliShimStamp,
+    ]
     if settings.briefsSessionsAboutTheGraph,
       let text = SessionBriefing.text(projectPath: location.projectPath)
     {

@@ -186,13 +186,42 @@ struct RemoteSessionResumeTests {
     let remoteCommand = try #require(invocation.last)
 
     #expect(remoteCommand.contains(RemoteGraphAccess.cliShimStamp))
-    #expect(remoteCommand.contains(".delivery-stamp"))
+    #expect(remoteCommand.contains("cat \(RemoteGraphAccess.deliveryStampPath)"))
     // Session missing *or* stamp differs — a fresh launch must re-deliver whatever the
     // stamp says, because the argv it is about to run names the briefing, wake digest
     // and prompt files that ride in this same fragment.
     let gate = try #require(remoteCommand.range(of: "if ! "))
     let deliver = try #require(remoteCommand.range(of: "b64decode"))
     #expect(gate.lowerBound < deliver.lowerBound)
+  }
+
+  @Test
+  func aFailedDeliveryLeavesNoStampBehind() throws {
+    // `installerScript` ends in `|| true` — it must never block the launch it precedes —
+    // so stamping in the shell after it would mark a host current even when nothing was
+    // installed. A host with no `python3` would then never receive the shim again, which
+    // is worse than the unconditional delivery the stamp replaced. The stamp rides in
+    // the manifest instead: one python process writes shim and stamp, or neither.
+    let script = try #require(
+      ZmxSessionLauncher.remoteDeliveryScript(
+        forNode: nil,
+        at: location,
+        settings: GraphcodeSettings()))
+
+    // Nothing writes the stamp outside the installer.
+    #expect(!script.contains("printf"))
+
+    // The manifest is the one token that base64-decodes to a JSON object.
+    let files = try #require(
+      script.split(whereSeparator: { $0 == " " || $0 == "'" })
+        .compactMap { Data(base64Encoded: String($0)) }
+        .compactMap { try? JSONSerialization.jsonObject(with: $0) as? [String: String] }
+        .first)
+    #expect(files[RemoteGraphAccess.cliInstallPath] != nil)
+    let stamp = try #require(files[RemoteGraphAccess.deliveryStampPath])
+    #expect(
+      String(data: try #require(Data(base64Encoded: stamp)), encoding: .utf8)
+        == RemoteGraphAccess.cliShimStamp)
   }
 
   @Test

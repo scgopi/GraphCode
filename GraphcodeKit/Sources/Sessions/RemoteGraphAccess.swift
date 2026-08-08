@@ -24,10 +24,13 @@ public enum RemoteGraphAccess {
   /// not on your PATH" line stays true verbatim on both kinds of host.
   public static let cliInstallPath = "~/.graphcode/bin/graphcode"
 
-  /// Where the stamp of the last delivered shim lives, as a `$HOME` expression for the
-  /// remote shell that reads it. Beside the shim, so `installerScript`'s own `makedirs`
-  /// has already created the directory by the time anything writes here.
-  public static let deliveryStampPath = "\"$HOME/.graphcode/bin/.delivery-stamp\""
+  /// Where the stamp of the last delivered shim lives.
+  ///
+  /// One constant in the home-relative form both readers take: the installer expands it
+  /// with `os.path.expanduser`, and the ensure dial's `cat` gets it from the remote
+  /// shell's own tilde expansion. Two spellings of one path is exactly the drift that
+  /// would leave the stamp permanently mismatched and re-deliver on every tick.
+  public static let deliveryStampPath = "~/.graphcode/bin/.delivery-stamp"
 
   /// A content stamp for the shim, so an ensure can tell a host carrying the current CLI
   /// from one still carrying an older graphcode's.
