@@ -67,6 +67,7 @@ struct WorktreeSweepFeature {
   }
 
   @Dependency(\.gitClient) var gitClient
+  @Dependency(\.remoteGitClient) var remoteGitClient
 
   var body: some ReducerOf<Self> {
     Reduce { state, action in
@@ -74,9 +75,14 @@ struct WorktreeSweepFeature {
       case .task:
         let path = state.projectPath
         let nodes = state.nodes
-        return .run { send in
+        return .run { [gitClient, remoteGitClient] send in
           do {
-            let inspections = try await gitClient.inspectWorktrees(path)
+            let inspections: [WorktreeInspection]
+            if let location = RemoteProjectLocation.parse(projectPath: path) {
+              inspections = try await remoteGitClient.inspectWorktrees(location)
+            } else {
+              inspections = try await gitClient.inspectWorktrees(path)
+            }
             await send(.assessmentsLoaded(Self.assessments(inspections, nodes: nodes)))
           } catch {
             await send(.loadFailed(String(describing: error)))
@@ -96,14 +102,22 @@ struct WorktreeSweepFeature {
         // The rows are on screen; now walk the disk. Bounded, so 38 worktrees is four
         // `du`s at a time rather than 38 — and a prunable entry has no directory to ask.
         let unsized = assessments.filter { $0.facts.sizeBytes == nil && !$0.facts.prunable }
+        let path = state.projectPath
         guard !unsized.isEmpty else { return .none }
-        return .run { send in
+        return .run { [gitClient, remoteGitClient] send in
+          let location = RemoteProjectLocation.parse(projectPath: path)
           await withTaskGroup(of: Void.self) { group in
             var iterator = unsized.makeIterator()
             func submit() {
               guard let assessment = iterator.next() else { return }
               group.addTask {
-                let bytes = await gitClient.worktreeSizeBytes(assessment.ref.worktreePath)
+                let bytes: Int64?
+                if let location {
+                  bytes = await remoteGitClient.worktreeSizeBytes(
+                    location, assessment.ref.worktreePath)
+                } else {
+                  bytes = await gitClient.worktreeSizeBytes(assessment.ref.worktreePath)
+                }
                 await send(.sizeLoaded(id: assessment.id, bytes: bytes))
               }
             }

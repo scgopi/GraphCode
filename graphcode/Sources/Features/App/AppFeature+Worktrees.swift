@@ -102,6 +102,7 @@ struct AppWorktreesReducer: Reducer {
   typealias Action = AppFeature.Action
 
   @Dependency(\.gitClient) var gitClient
+  @Dependency(\.remoteGitClient) var remoteGitClient
   @Dependency(\.worktreePolicyClient) var worktreePolicyClient
 
   var body: some Reducer<AppFeature.State, AppFeature.Action> {
@@ -140,8 +141,13 @@ struct AppWorktreesReducer: Reducer {
         guard !doomed.isEmpty else { return .none }
         let path = sweep.projectPath
         state.worktreeSweep = nil
-        return .run { send in
-          let fresh = (try? await gitClient.inspectWorktrees(path)) ?? []
+        return .run { [gitClient, remoteGitClient] send in
+          let fresh: [WorktreeInspection]
+          if let location = RemoteProjectLocation.parse(projectPath: path) {
+            fresh = (try? await remoteGitClient.inspectWorktrees(location)) ?? []
+          } else {
+            fresh = (try? await gitClient.inspectWorktrees(path)) ?? []
+          }
           let freshByPath = Dictionary(
             uniqueKeysWithValues: fresh.map { ($0.ref.worktreePath, $0) })
           let candidates = doomed.compactMap { assessment -> WorktreeRemovalCandidate? in
@@ -161,12 +167,17 @@ struct AppWorktreesReducer: Reducer {
             .compactMap(\.worktreeBinding?.worktreePath))
         let cleared = candidates.filter { !occupied.contains($0.ref.worktreePath) }
         guard !cleared.isEmpty else { return .none }
-        return .run { send in
+        return .run { [gitClient, remoteGitClient] send in
           for candidate in cleared {
             // Failures are quiet by design — the stats reload tells the truth either
             // way, and whatever survived is there on reopen.
-            try? await gitClient.removeWorktreeAndBranch(
-              candidate.ref, candidate.prunable, candidate.force)
+            if let location = RemoteProjectLocation.parse(projectPath: path) {
+              try? await remoteGitClient.removeWorktreeAndBranch(
+                location, candidate.ref, candidate.prunable, candidate.force)
+            } else {
+              try? await gitClient.removeWorktreeAndBranch(
+                candidate.ref, candidate.prunable, candidate.force)
+            }
           }
           await send(.worktrees(.statsReloadRequested(projectPath: path)))
         }
@@ -175,7 +186,10 @@ struct AppWorktreesReducer: Reducer {
       // outside the app (a terminal's `git worktree add`, a loop's own plumbing) gets
       // picked up without waiting for a graph broadcast.
       case .projectHeaderTapped(let path):
-        guard Self.tracksWorktrees(path), Self.isGitRepository(path) else { return .none }
+        // Remote repos are always git repos (validated on add); local ones need the check.
+        let isRemote = RemoteProjectLocation.parse(projectPath: path) != nil
+        guard Self.tracksWorktrees(path), isRemote || Self.isGitRepository(path)
+        else { return .none }
         return reloadStats(path, nodes: allNodes(in: state))
 
       case .worktrees(.statsLoaded(let path, let stats)):
@@ -235,10 +249,9 @@ struct AppWorktreesReducer: Reducer {
     }
   }
 
-  /// The global graph is not a folder and a remote project's worktrees live on another
-  /// machine — neither has anything local to sweep.
+  /// The global graph is not a folder — it has nothing to sweep.
   static func tracksWorktrees(_ path: String) -> Bool {
-    path != LoopGraphScope.globalPath && RemoteProjectLocation.parse(projectPath: path) == nil
+    path != LoopGraphScope.globalPath
   }
 
   /// `.git` is a directory in a primary checkout and a file in a linked worktree —
@@ -268,7 +281,8 @@ struct AppWorktreesReducer: Reducer {
     _ state: AppFeature.State, next graph: LoopGraph
   ) -> Effect<AppFeature.Action> {
     let path = graph.project.path
-    guard Self.tracksWorktrees(path), Self.isGitRepository(path) else { return .none }
+    let isRemote = RemoteProjectLocation.parse(projectPath: path) != nil
+    guard Self.tracksWorktrees(path), isRemote || Self.isGitRepository(path) else { return .none }
     let previous = state.projects[id: path]?.graph
     let changed = Array(graph.nodes)
 
@@ -294,8 +308,16 @@ struct AppWorktreesReducer: Reducer {
   }
 
   private func reloadStats(_ path: String, nodes: [LoopNode]) -> Effect<AppFeature.Action> {
-    .run { send in
-      guard let inspections = try? await gitClient.inspectWorktrees(path) else { return }
+    .run { [gitClient, remoteGitClient] send in
+      let inspections: [WorktreeInspection]
+      let location = RemoteProjectLocation.parse(projectPath: path)
+      if let location {
+        guard let result = try? await remoteGitClient.inspectWorktrees(location) else { return }
+        inspections = result
+      } else {
+        guard let result = try? await gitClient.inspectWorktrees(path) else { return }
+        inspections = result
+      }
       let assessments = WorktreeSweepFeature.assessments(inspections, nodes: nodes)
       func stats(totalBytes: Int64) -> WorktreeFolderStats {
         WorktreeFolderStats(
@@ -310,7 +332,12 @@ struct AppWorktreesReducer: Reducer {
       await send(.worktrees(.statsLoaded(projectPath: path, stats(totalBytes: 0))))
       var totalBytes: Int64 = 0
       for assessment in assessments where !assessment.facts.prunable {
-        totalBytes += await gitClient.worktreeSizeBytes(assessment.ref.worktreePath) ?? 0
+        if let location {
+          totalBytes +=
+            await remoteGitClient.worktreeSizeBytes(location, assessment.ref.worktreePath) ?? 0
+        } else {
+          totalBytes += await gitClient.worktreeSizeBytes(assessment.ref.worktreePath) ?? 0
+        }
       }
       await send(.worktrees(.statsLoaded(projectPath: path, stats(totalBytes: totalBytes))))
     }
@@ -330,14 +357,26 @@ struct AppWorktreesReducer: Reducer {
     let others = nodes.filter { $0.id != node.id }
     let title = node.title
     let nodeID = node.id
-    return .run { send in
-      guard let inspections = try? await gitClient.inspectWorktrees(path),
-        let inspection = inspections.first(where: { $0.ref.worktreePath == ref.worktreePath })
+    return .run { [gitClient, remoteGitClient] send in
+      let inspections: [WorktreeInspection]
+      let location = RemoteProjectLocation.parse(projectPath: path)
+      if let location {
+        guard let result = try? await remoteGitClient.inspectWorktrees(location) else { return }
+        inspections = result
+      } else {
+        guard let result = try? await gitClient.inspectWorktrees(path) else { return }
+        inspections = result
+      }
+      guard let inspection = inspections.first(where: { $0.ref.worktreePath == ref.worktreePath })
       else { return }
       // One worktree's size is worth the wait here: "312 MB left behind" is half of
       // what makes the card's offer worth answering.
       var facts = inspection.facts
-      facts.sizeBytes = await gitClient.worktreeSizeBytes(ref.worktreePath)
+      if let location {
+        facts.sizeBytes = await remoteGitClient.worktreeSizeBytes(location, ref.worktreePath)
+      } else {
+        facts.sizeBytes = await gitClient.worktreeSizeBytes(ref.worktreePath)
+      }
       let assessment = WorktreeAssessment(
         ref: inspection.ref,
         facts: facts,
