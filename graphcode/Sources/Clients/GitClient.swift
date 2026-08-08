@@ -56,7 +56,7 @@ extension GitClient: DependencyKey {
   static let liveValue = GitClient(
     createWorktree: { repositoryPath, worktreePath, branch in
       _ = try await run(
-        "git", ["-C", repositoryPath, "worktree", "add", "-b", branch, worktreePath])
+        "git", ["-C", repositoryPath, "worktree", "add", "-b", branch, "--", worktreePath])
       return WorktreeRef(
         id: branch,
         repositoryPath: repositoryPath,
@@ -70,7 +70,7 @@ extension GitClient: DependencyKey {
     },
     removeWorktree: { worktree in
       _ = try await run(
-        "git", ["-C", worktree.repositoryPath, "worktree", "remove", worktree.worktreePath])
+        "git", ["-C", worktree.repositoryPath, "worktree", "remove", "--", worktree.worktreePath])
     },
     inspectWorktrees: { repositoryPath in
       let output = try await run("git", ["-C", repositoryPath, "worktree", "list", "--porcelain"])
@@ -131,6 +131,7 @@ extension GitClient: DependencyKey {
       } else {
         var arguments = ["-C", worktree.repositoryPath, "worktree", "remove"]
         if force { arguments.append("--force") }
+        arguments.append("--")
         arguments.append(worktree.worktreePath)
         _ = try await run("git", arguments)
       }
@@ -259,7 +260,10 @@ private func cloneProcess(
   var arguments = ["git", "clone", "--progress"]
   if let branch, !branch.isEmpty { arguments += ["--branch", branch] }
   if let depth { arguments += ["--depth", String(depth)] }
-  arguments += [url, destinationPath]
+  // `--` before the positionals so a pasted URL like `--upload-pack=<cmd>` reaches git
+  // as a repository to clone, not an option to obey (git's clone-URL option injection,
+  // CVE-2017-1000117 shape). Documented git syntax: `clone [<options>] [--] <repo> [dir]`.
+  arguments += ["--", url, destinationPath]
 
   let process = Process()
   process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
