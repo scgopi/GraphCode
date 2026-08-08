@@ -28,10 +28,7 @@ struct PTYProcessSessionTests {
   }
 
   /// The full metric pipeline short of `GraphStore`: the evaluator's real login-shell
-  /// PTY invocation, then the parser that reads its last non-empty line. The PTY
-  /// prepends control noise (`^D\b\b`) to the first line, which is allowed to garble a
-  /// single-line result's only line — a metric script's number must survive as long as
-  /// it isn't the very first thing written.
+  /// invocation, then the parser that reads its last non-empty line.
   @Test
   func aMetricScriptsNumberSurvivesTheCapturePath() async {
     let output = await ShellPredicateEvaluator.capture(
@@ -39,5 +36,26 @@ struct PTYProcessSessionTests {
 
     let value = output.flatMap(MetricTrend.value(fromScriptOutput:))
     #expect(value == 7.0)
+  }
+
+  /// The commonest real metric is a bare `echo 42` — one line, nothing else. Under the
+  /// old PTY transport that only line arrived wearing the terminal's `^D\b\b` prelude,
+  /// so `Double()` refused it; a pipe carries no terminal and no prelude.
+  @Test
+  func aSingleLineMetricParsesCleanly() async {
+    let output = await ShellPredicateEvaluator.capture(
+      ShellPredicate(command: "echo 42", workingDirectory: nil))
+
+    #expect(output.flatMap(MetricTrend.value(fromScriptOutput:)) == 42.0)
+  }
+
+  /// A failing predicate must stay "no", and a chatty-but-failing metric must stay
+  /// unmeasured — exit status gates the output, not the other way around.
+  @Test
+  func aFailingCommandsOutputIsNotMistakenForAnAnswer() async {
+    let output = await ShellPredicateEvaluator.capture(
+      ShellPredicate(command: "echo 9; exit 3", workingDirectory: nil))
+
+    #expect(output == nil)
   }
 }
