@@ -101,6 +101,22 @@ struct RemoteSessionLaunchTests {
   }
 
   @Test
+  func aLargeRemoteMessageIsChunkedIntoTheSameRoundTrip() throws {
+    // The remote host's PTY queue is no bigger than ours, so an oversized single write
+    // vanishes there the same way — the chunks ride the one ssh dial, drain beats
+    // between them, and still submit with a single Enter at the end.
+    let node = LoopNode(title: "hi", loopType: .goalBased, goal: GoalSpec(summary: "g"))
+    let message = "REPORT " + String(repeating: "GC-01-ABCDEFGHIJ ", count: 500)  // 8.5 KB
+    let invocation = ZmxSessionLauncher.remoteSendInvocation(message, toNode: node, at: location)
+
+    let remoteCommand = try #require(invocation.last)
+    let sends = remoteCommand.components(separatedBy: "send").count - 1
+    #expect(sends > 2)  // several text chunks plus the Enter
+    #expect(remoteCommand.contains("sleep 0.15"))
+    #expect(remoteCommand.contains("sleep 0.4"))
+  }
+
+  @Test
   func aRemoteKillReachesTheRemoteZmx() throws {
     // Stop and delete route their kill by project path; without this a remote loop's
     // session outlived its node forever — the local zmx had nothing to kill.
@@ -238,7 +254,8 @@ struct RemoteSessionLaunchTests {
     #expect(script.contains("ExitOnForwardFailure=yes"))
     // The remote bind path is anchored to the remote home the pre-dial printed;
     // nothing local knows it.
-    #expect(script.contains("\"$H\"'/.graphcode/graphcoded.sock:/Users/u/.graphcode/graphcoded.sock'"))
+    #expect(
+      script.contains("\"$H\"'/.graphcode/graphcoded.sock:/Users/u/.graphcode/graphcoded.sock'"))
     // Reconnects while its daemon lives, dies with it — an orphan would fight the
     // restarted daemon's forwarder for the bind forever.
     #expect(script.contains("kill -0 $PPID"))
