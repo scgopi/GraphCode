@@ -204,9 +204,10 @@ struct RemoteSessionResumeTests {
     // in `|| true`, so a host with no `python3` would be marked current with nothing
     // installed. Nor does putting it in the manifest: that comprehension is not
     // transactional and iterates `sorted(m.items())`, where `.` sorts before `g`, so
-    // `.shim-stamp` would land *before* `graphcode` and a disk-full host would claim a
-    // shim it never received. Both leave the host permanently un-upgradeable, because
-    // the matching stamp then skips every later delivery.
+    // `.shim-stamp` would land *before* `graphcode` and a host whose shim write fails
+    // (one owned by another uid, under a directory that is writable) would claim a CLI
+    // it never received. Both leave the host permanently un-upgradeable, because the
+    // matching stamp then skips every later delivery.
     let script = try #require(
       ZmxSessionLauncher.remoteDeliveryScript(
         forNode: nil, at: location, settings: GraphcodeSettings()))

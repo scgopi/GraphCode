@@ -95,16 +95,26 @@ public enum RemoteGraphAccess {
   /// content can't collide with a delimiter. Neutered with `|| true` because delivery
   /// must never block the launch it precedes — a session without its briefing is the
   /// old behaviour, which works.
+  ///
   /// `receipt` is a path and content written **after** every manifest entry has landed,
   /// as proof that the whole delivery succeeded.
   ///
   /// It cannot simply be another manifest entry. The comprehension is not transactional
   /// and iterates `sorted(m.items())`, where `.` (0x2E) sorts before `g` (0x67) — so a
   /// receipt at `~/.graphcode/bin/.shim-stamp` would be written *before*
-  /// `~/.graphcode/bin/graphcode`, and a Codespace near its disk quota (the 16-byte
-  /// write succeeds, the 14.6 KB one hits `ENOSPC`) would end up claiming a shim it
-  /// never received — permanently, because the matching stamp then skips every later
-  /// delivery. The trailing statement is skipped outright if anything above it raises.
+  /// `~/.graphcode/bin/graphcode`, and any host whose shim write fails would end up
+  /// claiming a CLI it never received. Permanently, too: the matching stamp then skips
+  /// every later delivery, so the host can never be upgraded again.
+  ///
+  /// The trigger is a shim that can't be overwritten under a directory that can —
+  /// a `graphcode` owned by another uid, a devcontainer feature's own copy, `chattr +i`.
+  /// *Not* a full disk, though that was the first guess: on a genuinely full volume both
+  /// writes fail and nothing is stranded, so it takes the freak case of enough free
+  /// blocks for a 12-byte stamp but not a 14.6 KB shim.
+  ///
+  /// Ordering alone is sufficient — no `with`/`flush` bookkeeping — because a payload
+  /// this size raises at `.write()` rather than at an implicit close, leaving no file
+  /// behind and aborting the comprehension before the trailing statement is reached.
   ///
   /// No `makedirs` for the receipt: it is only reached once the shim it vouches for has
   /// been written, and that write created the directory.
