@@ -587,7 +587,15 @@ public enum ZmxSessionLauncher {
   ///
   /// Used after a reboot: the zmx session is gone, but a persisted session ID lets the
   /// backend pick up where it left off. Falls back to `nil` when resume isn't possible
-  /// (no persisted ID, unsupported backend, or the executable isn't found).
+  /// (unsupported backend, or the executable isn't found).
+  ///
+  /// Remote projects go through here too, and the three things that differ from a local
+  /// resume are the three `arguments(forNode:)` already branches on: no hooks *file* from
+  /// this machine (the ensure dial writes one on the host and names it through
+  /// `scriptSuffix`), no local `zmx` path to report to, and workspace paths as the remote
+  /// host sees them. The `sessionID` a remote caller passes is
+  /// `remoteResumeIDPlaceholder` rather than a literal — the ID lives in a file on the
+  /// other machine, so only a shell there can read it (`remoteEnsureInvocation`).
   static func resumeArguments(
     forNode node: LoopNode, sessionID: String, projectPath: String? = nil,
     settings: GraphcodeSettings = GraphcodeSettingsStore.load()
@@ -595,10 +603,13 @@ public enum ZmxSessionLauncher {
     guard node.backend == .claudeCode || node.backend == .copilotCLI else { return nil }
     guard let executable = node.backend.executableName else { return nil }
     let remote = projectPath.flatMap { RemoteProjectLocation.parse(projectPath: $0) }
-    guard remote == nil else { return nil }
     let tier = node.effectiveModelTier(autoSelecting: settings.autoSelectsModel)
-    let hooksFile = PresenceHooks.write(forBackend: node.backend)
-    let reportingPath = ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil
+    let hooksFile = remote == nil ? PresenceHooks.write(forBackend: node.backend) : nil
+    let reportingPath =
+      remote == nil && ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil
+    let remoteHooksSuffix =
+      remote != nil && node.backend == .claudeCode
+      ? " --settings \"\(PresenceHooks.remotePathExpression)\"" : ""
     // Copilot's `--name` and `--resume` are mutually exclusive: one creates a new
     // session, the other restores an existing one. A resume session drops `--name`
     // (by passing nil for sessionName) and uses `--resume` alone; the session's
@@ -617,8 +628,19 @@ public enum ZmxSessionLauncher {
     return [
       "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
     ]
-      + Self.loginShellInvocation(of: executable, arguments: resumeArgs)
+      + Self.loginShellInvocation(
+        of: executable, arguments: resumeArgs, scriptSuffix: remoteHooksSuffix)
   }
+
+  /// Stands in for a remote session ID that this machine cannot know: the ID was written
+  /// by a hook on the remote host and is read back there, so what travels in the argv is
+  /// a shell variable reference, not a value. `remoteQuotedCommand` is the one place that
+  /// renders it — every other argument is quoted into a literal, and this one must not be.
+  static let remoteResumeIDPlaceholder = "__graphcode_remote_resume_id__"
+
+  /// The shell variable `remoteEnsureInvocation` assigns the captured ID to, and that
+  /// `remoteResumeIDPlaceholder` expands into.
+  static let remoteResumeIDVariable = "GRAPHCODE_RESUME_ID"
 
   /// The directories a loop's work legitimately spans: the project, and its worktree when
   /// it has one. A backend that verifies paths (Copilot) is told about both, because a
@@ -739,11 +761,94 @@ public enum ZmxSessionLauncher {
     let delivery =
       remoteDeliveryScript(forNode: node, at: location, settings: settings)
       .map { $0 + "; " } ?? ""
+    let create = remoteCreateScript(
+      forNode: node, freshRun: run, at: location, settings: settings)
+    // The trust seed and the hooks file are genuinely create-only — a folder-trust
+    // dialog is answered per session start, and Claude Code reads `--settings` once at
+    // startup, so refreshing either mid-run does nothing for the session already
+    // running. This used to run per ensure, which was once at load and once per node
+    // created; the liveness sweep dials every minute, and a `python3` per loop per
+    // minute to rewrite files nothing will re-read is pure cost.
     let script =
       "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { "
-      + trustSeed + hooksWrite + delivery
-      + "\(check) >/dev/null 2>&1 || \(run); }"
+      + deliveryFragment(delivery, ifSessionMissing: check)
+      + "\(check) >/dev/null 2>&1 || { " + trustSeed + hooksWrite
+      + "\(create); }; }"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+  }
+
+  /// The delivery, run when the session is missing **or** the host's shim is out of date.
+  ///
+  /// Delivery cannot follow the trust seed and the hooks file behind the existence check.
+  /// Those are read once at session start; the CLI shim is re-executed for as long as the
+  /// session lives, and it speaks a wire protocol to this daemon
+  /// (`RemoteGraphAccess.cliShimStamp` has the full reasoning). Skipping it for a live
+  /// session means a graphcode upgrade never reaches a remote host whose loops are still
+  /// running — and since those loops are unattended by definition, nothing else would
+  /// heal it either: `GhosttyTerminalView.remoteCommand` delivers unconditionally, but
+  /// only when a human opens the loop.
+  ///
+  /// Nor can it stay unconditional, which is what made it a `python3` and ~20 KB of
+  /// base64 per loop per minute once the sweep existed. The stamp splits the difference:
+  /// a healthy tick costs one extra `zmx get` and a `cat` on the same host, and the
+  /// delivery itself runs only when it has something new to say.
+  static func deliveryFragment(_ delivery: String, ifSessionMissing check: String) -> String {
+    guard !delivery.isEmpty else { return "" }
+    let stamp = RemoteProjectLocation.shellQuoted(RemoteGraphAccess.cliShimStamp)
+    // Tilde, unquoted, so the remote shell expands it — the same one constant the
+    // installer expands with `expanduser`. The stamp is the delivery's own receipt,
+    // written last and only on success, so a delivery that failed anywhere leaves no
+    // stamp and the next dial tries again.
+    let stampFile = RemoteGraphAccess.shimStampPath
+    // `!` binds to the pipeline, so this reads (session missing) OR (stamp differs). A
+    // missing session has to re-deliver whatever the stamp says: the create branch below
+    // launches an argv naming the briefing, wake digest and prompt files, and every one
+    // of them rides in this same fragment.
+    return "if ! \(check) >/dev/null 2>&1 "
+      + "|| [ \"$(cat \(stampFile) 2>/dev/null)\" != \(stamp) ]; then "
+      + delivery + "fi; "
+  }
+
+  /// What the ensure dial runs when the check found no session: resume the backend
+  /// session the last one left behind, or start fresh when there is nothing to resume.
+  ///
+  /// The choice is made *on the remote host*, in the shell that is already there, because
+  /// that is the only side that can answer it. The ID was written by the `SessionStart`
+  /// hook into the remote `~/.graphcode/sessions` (`PresenceHooks.captureSessionID`), and
+  /// `SessionIDStore` — the local path's source — reads this Mac's disk, where a remote
+  /// loop's ID has never existed. Deciding here also keeps the whole ensure one ssh
+  /// round-trip, which is the property `remoteEnsureInvocation` exists to protect.
+  ///
+  /// An empty or missing file falls through to the fresh launch, which is the right
+  /// answer for a first launch and for a Codespace *rebuild*: everything outside
+  /// `/workspaces` is gone, so the transcript `--resume` would name is gone with it.
+  ///
+  /// **The ID is consumed, not just read.** An ID whose transcript no longer exists —
+  /// Claude Code's own retention expired it, or `~/.claude` was wiped while
+  /// `~/.graphcode` survived — makes `claude --resume` exit immediately, and the session
+  /// dies with it. Nothing would clear the file: `kill` removes the local one
+  /// (`SessionIDStore.remove`) but the remote path returns before reaching it, and
+  /// `zmx kill` doesn't touch the host's copy. Left in place, the liveness sweep would
+  /// retry the same dead ID every minute forever and the fresh-launch branch would
+  /// become unreachable. Testing the exit status instead does not work: `zmx run -d`
+  /// returns 0 the moment the detached session exists, long before the agent inside it
+  /// fails. So the file is removed *before* the attempt — a resume that lands has its
+  /// `SessionStart` hook write it straight back, and one that doesn't costs a single
+  /// wasted launch before the next sweep starts fresh.
+  static func remoteCreateScript(
+    forNode node: LoopNode, freshRun: String, at location: RemoteProjectLocation,
+    settings: GraphcodeSettings
+  ) -> String {
+    guard
+      let resumeArgv = resumeArguments(
+        forNode: node, sessionID: remoteResumeIDPlaceholder,
+        projectPath: location.projectPath, settings: settings)
+    else { return freshRun }
+    let resume = remoteQuotedCommand(["zmx"] + resumeArgv)
+    let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: node.id)
+    return "\(remoteResumeIDVariable)=$(cat \(idFile) 2>/dev/null); "
+      + "if [ -n \"$\(remoteResumeIDVariable)\" ]; then rm -f \(idFile); \(resume); "
+      + "else \(freshRun); fi"
   }
 
   /// The files a remote session needs on its own disk, as one installer fragment
@@ -779,7 +884,12 @@ public enum ZmxSessionLauncher {
           promptText
       }
     }
-    return RemoteGraphAccess.installerScript(files: files)
+    // The shim's receipt, written only once every file above has landed — see
+    // `installerScript`. It is what lets a later ensure skip a delivery it doesn't need
+    // without ever claiming a shim the host never received.
+    return RemoteGraphAccess.installerScript(
+      files: files,
+      receipt: (path: RemoteGraphAccess.shimStampPath, content: RemoteGraphAccess.cliShimStamp))
   }
 
   /// `quotedCommand`, except that arguments naming graphcode's own remote files —
@@ -791,7 +901,10 @@ public enum ZmxSessionLauncher {
   /// happens to start with a tilde is never rewritten.
   static func remoteQuotedCommand(_ argv: [String]) -> String {
     argv.map { argument in
-      argument.hasPrefix("~/.graphcode/")
+      if argument == remoteResumeIDPlaceholder {
+        return "\"$\(remoteResumeIDVariable)\""
+      }
+      return argument.hasPrefix("~/.graphcode/")
         ? "~/" + RemoteProjectLocation.shellQuoted(String(argument.dropFirst(2)))
         : RemoteProjectLocation.shellQuoted(argument)
     }.joined(separator: " ")
@@ -972,16 +1085,21 @@ public enum ZmxSessionLauncher {
   }
 
   private static func startRemote(_ node: LoopNode, at location: RemoteProjectLocation) async {
+    // A dial already in flight for this node is doing this job; a second one racing it
+    // is how two `zmx run`s land on one session (`RemoteEnsureGate`).
+    guard let lease = await RemoteEnsureGate.shared.begin(node.id) else { return }
     // The forwarded socket is what makes the delivered CLI's dial land on this Mac's
     // daemon — without it the shim's commands have nowhere to go. Kept alive per host,
     // not per launch; see `RemoteSocketForwarder`.
     await RemoteSocketForwarder.shared.ensureForwarding(to: location)
-    guard let ensure = remoteEnsureInvocation(forNode: node, at: location) else { return }
     // Create only, in one round-trip — see `remoteEnsureInvocation` for why the check
     // and the run must share a shell. A failure after the retries is the same posture
     // as the local path: no UI here, the node's state stays honest, opening the loop
     // retries.
-    _ = await runRemoteRetrying(ensure)
+    if let ensure = remoteEnsureInvocation(forNode: node, at: location) {
+      _ = await runRemoteRetrying(ensure)
+    }
+    await RemoteEnsureGate.shared.end(node.id, token: lease)
   }
 
   static func start(_ node: LoopNode, projectPath: String? = nil) async {

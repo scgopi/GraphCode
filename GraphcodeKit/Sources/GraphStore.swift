@@ -1380,6 +1380,27 @@ public actor GraphStore {
     }
   }
 
+  /// The session half of `ensureUnattendedSessions`, for the repeating remote liveness
+  /// sweep (`ProjectRegistry.startRemoteLivenessSweep`). A remote host can reboot while
+  /// this daemon keeps running, and nothing else notices: the store was loaded long ago,
+  /// so the one call site that restarts loops after a reboot is the *local* machine's.
+  ///
+  /// Two deliberate differences from the load-time version, both because this runs on a
+  /// timer rather than once:
+  ///
+  /// - **No goal pollers.** `armGoalPoller` replaces the existing one, so re-arming every
+  ///   sweep would restart each poller's interval and a goal polled less often than the
+  ///   sweep would never fire at all. The pollers are already running; they are in-memory
+  ///   and a remote reboot doesn't touch them.
+  /// - **Resolved nodes are skipped whatever their loop type.** The load-time version
+  ///   restarts a `.stopped` time-based node, which is defensible once at boot and wrong
+  ///   every minute: a human who stopped a remote loop would watch it come back.
+  public func ensureUnattendedSessionsAlive() {
+    for node in graph.nodes where node.runsUnattended && !node.isResolved {
+      ensureSession(node)
+    }
+  }
+
   // MARK: - Broadcast
 
   private func broadcast() {

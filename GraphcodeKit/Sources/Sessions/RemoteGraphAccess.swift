@@ -24,6 +24,44 @@ public enum RemoteGraphAccess {
   /// not on your PATH" line stays true verbatim on both kinds of host.
   public static let cliInstallPath = "~/.graphcode/bin/graphcode"
 
+  /// Where the receipt for the last installed shim lives.
+  ///
+  /// **Named for the shim alone, and it covers the shim alone.** The briefing, wake
+  /// digest and prompt ride in the same delivery but are *not* what this stamps: they
+  /// change constantly (the wake digest on nearly every ensure), so hashing them would
+  /// fire delivery every tick and defeat the point. They stay correct through the other
+  /// half of the gate — a missing session always re-delivers
+  /// (`ZmxSessionLauncher.deliveryFragment`). Anyone adding a file to the manifest
+  /// should not assume this stamp speaks for it.
+  ///
+  /// One constant in the home-relative form both readers take: the installer expands it
+  /// with `os.path.expanduser`, and the ensure dial's `cat` gets it from the remote
+  /// shell's own tilde expansion. Two spellings of one path is exactly the drift that
+  /// would leave the stamp permanently mismatched and re-deliver on every tick.
+  public static let shimStampPath = "~/.graphcode/bin/.shim-stamp"
+
+  /// A content stamp for the shim, so an ensure can tell a host carrying the current CLI
+  /// from one still carrying an older graphcode's.
+  ///
+  /// This exists because the shim is the one delivered file that is re-executed
+  /// *throughout* a session's life rather than read once at startup: it speaks
+  /// `FramedMessageIO` framing and `DaemonProtocol` JSON to this daemon, so a host left
+  /// on an older copy breaks `graphcode node send` / `memo` / `resolve` for every loop
+  /// already running there — silently, and for as long as those sessions live. Delivery
+  /// therefore cannot simply be create-only like the hooks file.
+  ///
+  /// FNV-1a rather than a digest from CryptoKit: the question is only "same bytes or
+  /// not", and Swift's own `hashValue` is seeded per process, so it would report a change
+  /// on every daemon restart.
+  public static var cliShimStamp: String {
+    var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+    for byte in cliShimSource.utf8 {
+      hash ^= UInt64(byte)
+      hash &*= 0x0000_0100_0000_01b3
+    }
+    return String(hash, radix: 16)
+  }
+
   /// The remote twin of `SessionBriefing.directory(forProjectPath:)`.
   public static func briefingDirectory(forProjectPath projectPath: String) -> String {
     "~/.graphcode/briefings/\(SessionBriefing.slug(for: projectPath))"
@@ -57,7 +95,32 @@ public enum RemoteGraphAccess {
   /// content can't collide with a delimiter. Neutered with `|| true` because delivery
   /// must never block the launch it precedes — a session without its briefing is the
   /// old behaviour, which works.
-  public static func installerScript(files: [String: String]) -> String? {
+  ///
+  /// `receipt` is a path and content written **after** every manifest entry has landed,
+  /// as proof that the whole delivery succeeded.
+  ///
+  /// It cannot simply be another manifest entry. The comprehension is not transactional
+  /// and iterates `sorted(m.items())`, where `.` (0x2E) sorts before `g` (0x67) — so a
+  /// receipt at `~/.graphcode/bin/.shim-stamp` would be written *before*
+  /// `~/.graphcode/bin/graphcode`, and any host whose shim write fails would end up
+  /// claiming a CLI it never received. Permanently, too: the matching stamp then skips
+  /// every later delivery, so the host can never be upgraded again.
+  ///
+  /// The trigger is a shim that can't be overwritten under a directory that can —
+  /// a `graphcode` owned by another uid, a devcontainer feature's own copy, `chattr +i`.
+  /// *Not* a full disk, though that was the first guess: on a genuinely full volume both
+  /// writes fail and nothing is stranded, so it takes the freak case of enough free
+  /// blocks for a 12-byte stamp but not a 14.6 KB shim.
+  ///
+  /// Ordering alone is sufficient — no `with`/`flush` bookkeeping — because a payload
+  /// this size raises at `.write()` rather than at an implicit close, leaving no file
+  /// behind and aborting the comprehension before the trailing statement is reached.
+  ///
+  /// No `makedirs` for the receipt: it is only reached once the shim it vouches for has
+  /// been written, and that write created the directory.
+  public static func installerScript(
+    files: [String: String], receipt: (path: String, content: String)? = nil
+  ) -> String? {
     guard !files.isEmpty else { return nil }
     let manifest = files.mapValues { Data($0.utf8).base64EncodedString() }
     guard let json = try? JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
@@ -68,10 +131,12 @@ public enum RemoteGraphAccess {
       + "[(os.makedirs(os.path.dirname(os.path.expanduser(p)),exist_ok=True), "
       + "open(os.path.expanduser(p),'wb').write(base64.b64decode(c)), "
       + "os.chmod(os.path.expanduser(p),0o755) if p.endswith('/graphcode') else None) "
-      + "for p,c in sorted(m.items())]"
-    return [
-      "python3", "-c", program, json.base64EncodedString(),
-    ].map(RemoteProjectLocation.shellQuoted).joined(separator: " ") + " >/dev/null 2>&1 || true"
+      + "for p,c in sorted(m.items())]; "
+      + "len(sys.argv)>2 and open(os.path.expanduser(sys.argv[2]),'w').write(sys.argv[3])"
+    var argv = ["python3", "-c", program, json.base64EncodedString()]
+    if let receipt { argv += [receipt.path, receipt.content] }
+    return argv.map(RemoteProjectLocation.shellQuoted).joined(separator: " ")
+      + " >/dev/null 2>&1 || true"
   }
 
   /// The remote `graphcode` CLI. It speaks `FramedMessageIO`'s framing and

@@ -118,6 +118,55 @@ public actor ProjectRegistry {
     presencePoller = nil
   }
 
+  // MARK: - Remote liveness
+
+  /// How often a remote project's unattended sessions are checked for existence.
+  ///
+  /// Local loops need no such sweep: their sessions die with the machine, and the machine
+  /// coming back restarts `graphcoded`, which loads the graph and calls
+  /// `ensureUnattendedSessions`. A *remote* host reboots — a Codespace stops on idle and
+  /// starts again — without this daemon restarting at all, so that one call site never
+  /// fires and every loop on that host stays dead until the app is relaunched.
+  ///
+  /// Unlike the presence poll this runs with no client attached, because a loop being
+  /// alive matters when nobody is watching and a reading does not. On a healthy tick the
+  /// dial is a bare `zmx get` — `remoteEnsureInvocation` keeps the hooks write and the
+  /// file delivery behind that check precisely so this can be cheap — multiplexed onto
+  /// the host's existing `ControlMaster` connection.
+  static let remoteLivenessSweepInterval: Duration = .seconds(60)
+
+  private var remoteSweeper: Task<Void, Never>?
+
+  /// Started by the first remote project this daemon loads and left running: a store is
+  /// never removed for being idle, and the sweep costs nothing on a tick where no project
+  /// is remote.
+  private func startRemoteLivenessSweep() {
+    guard remoteSweeper == nil, ensureSession != nil else { return }
+    remoteSweeper = Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(for: Self.remoteLivenessSweepInterval)
+        guard !Task.isCancelled else { return }
+        await self?.sweepRemoteSessions()
+      }
+    }
+  }
+
+  /// The registry outlives the daemon in practice, but a `Task` holding only a weak
+  /// `self` would otherwise keep waking every minute after the registry it sweeps for is
+  /// gone — the same reason `GraphStore` cancels its goal pollers here.
+  deinit { remoteSweeper?.cancel() }
+
+  /// `ensureSession` is fire-and-forget by contract (`CLISessionBackend.ensureSession`
+  /// spawns a detached task), so this returns well before the dials it started finish and
+  /// the loop below is an ordering, not a throttle. What bounds the work is
+  /// `RemoteEnsureGate`: one ensure per node at a time, so a slow tick cannot pile a
+  /// second dial onto the same session.
+  private func sweepRemoteSessions() async {
+    for (path, store) in stores where RemoteProjectLocation.parse(projectPath: path) != nil {
+      await store.ensureUnattendedSessionsAlive()
+    }
+  }
+
   /// Sequential rather than concurrent across projects: each store's poll already spawns
   /// one subprocess per loop, and firing every project's at once would turn a quiet
   /// background tick into a burst of them.
@@ -273,6 +322,9 @@ public actor ProjectRegistry {
     // but not a reboot, so something has to restart it, and this is the moment the
     // persisted graph is first seen. Already-running sessions are left untouched.
     await newStore.ensureUnattendedSessions()
+    // The load-time ensure above is the *local* machine's reboot recovery. A remote host
+    // reboots on its own schedule, so its loops need a repeating check as well.
+    if RemoteProjectLocation.parse(projectPath: path) != nil { startRemoteLivenessSweep() }
     return newStore
   }
 
