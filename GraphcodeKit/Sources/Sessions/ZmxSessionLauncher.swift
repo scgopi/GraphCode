@@ -587,7 +587,15 @@ public enum ZmxSessionLauncher {
   ///
   /// Used after a reboot: the zmx session is gone, but a persisted session ID lets the
   /// backend pick up where it left off. Falls back to `nil` when resume isn't possible
-  /// (no persisted ID, unsupported backend, or the executable isn't found).
+  /// (unsupported backend, or the executable isn't found).
+  ///
+  /// Remote projects go through here too, and the three things that differ from a local
+  /// resume are the three `arguments(forNode:)` already branches on: no hooks *file* from
+  /// this machine (the ensure dial writes one on the host and names it through
+  /// `scriptSuffix`), no local `zmx` path to report to, and workspace paths as the remote
+  /// host sees them. The `sessionID` a remote caller passes is
+  /// `remoteResumeIDPlaceholder` rather than a literal — the ID lives in a file on the
+  /// other machine, so only a shell there can read it (`remoteEnsureInvocation`).
   static func resumeArguments(
     forNode node: LoopNode, sessionID: String, projectPath: String? = nil,
     settings: GraphcodeSettings = GraphcodeSettingsStore.load()
@@ -595,10 +603,13 @@ public enum ZmxSessionLauncher {
     guard node.backend == .claudeCode || node.backend == .copilotCLI else { return nil }
     guard let executable = node.backend.executableName else { return nil }
     let remote = projectPath.flatMap { RemoteProjectLocation.parse(projectPath: $0) }
-    guard remote == nil else { return nil }
     let tier = node.effectiveModelTier(autoSelecting: settings.autoSelectsModel)
-    let hooksFile = PresenceHooks.write(forBackend: node.backend)
-    let reportingPath = ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil
+    let hooksFile = remote == nil ? PresenceHooks.write(forBackend: node.backend) : nil
+    let reportingPath =
+      remote == nil && ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil
+    let remoteHooksSuffix =
+      remote != nil && node.backend == .claudeCode
+      ? " --settings \"\(PresenceHooks.remotePathExpression)\"" : ""
     // Copilot's `--name` and `--resume` are mutually exclusive: one creates a new
     // session, the other restores an existing one. A resume session drops `--name`
     // (by passing nil for sessionName) and uses `--resume` alone; the session's
@@ -617,8 +628,19 @@ public enum ZmxSessionLauncher {
     return [
       "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
     ]
-      + Self.loginShellInvocation(of: executable, arguments: resumeArgs)
+      + Self.loginShellInvocation(
+        of: executable, arguments: resumeArgs, scriptSuffix: remoteHooksSuffix)
   }
+
+  /// Stands in for a remote session ID that this machine cannot know: the ID was written
+  /// by a hook on the remote host and is read back there, so what travels in the argv is
+  /// a shell variable reference, not a value. `remoteQuotedCommand` is the one place that
+  /// renders it — every other argument is quoted into a literal, and this one must not be.
+  static let remoteResumeIDPlaceholder = "__graphcode_remote_resume_id__"
+
+  /// The shell variable `remoteEnsureInvocation` assigns the captured ID to, and that
+  /// `remoteResumeIDPlaceholder` expands into.
+  static let remoteResumeIDVariable = "GRAPHCODE_RESUME_ID"
 
   /// The directories a loop's work legitimately spans: the project, and its worktree when
   /// it has one. A backend that verifies paths (Copilot) is told about both, because a
@@ -739,11 +761,41 @@ public enum ZmxSessionLauncher {
     let delivery =
       remoteDeliveryScript(forNode: node, at: location, settings: settings)
       .map { $0 + "; " } ?? ""
+    let create = remoteCreateScript(
+      forNode: node, freshRun: run, at: location, settings: settings)
     let script =
       "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { "
       + trustSeed + hooksWrite + delivery
-      + "\(check) >/dev/null 2>&1 || \(run); }"
+      + "\(check) >/dev/null 2>&1 || { \(create); }; }"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+  }
+
+  /// What the ensure dial runs when the check found no session: resume the backend
+  /// session the last one left behind, or start fresh when there is nothing to resume.
+  ///
+  /// The choice is made *on the remote host*, in the shell that is already there, because
+  /// that is the only side that can answer it. The ID was written by the `SessionStart`
+  /// hook into the remote `~/.graphcode/sessions` (`PresenceHooks.captureSessionID`), and
+  /// `SessionIDStore` — the local path's source — reads this Mac's disk, where a remote
+  /// loop's ID has never existed. Deciding here also keeps the whole ensure one ssh
+  /// round-trip, which is the property `remoteEnsureInvocation` exists to protect.
+  ///
+  /// An empty or missing file falls through to the fresh launch, which is the right
+  /// answer for a first launch and for a Codespace *rebuild*: everything outside
+  /// `/workspaces` is gone, so the transcript `--resume` would name is gone with it.
+  static func remoteCreateScript(
+    forNode node: LoopNode, freshRun: String, at location: RemoteProjectLocation,
+    settings: GraphcodeSettings
+  ) -> String {
+    guard
+      let resumeArgv = resumeArguments(
+        forNode: node, sessionID: remoteResumeIDPlaceholder,
+        projectPath: location.projectPath, settings: settings)
+    else { return freshRun }
+    let resume = remoteQuotedCommand(["zmx"] + resumeArgv)
+    let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: node.id)
+    return "\(remoteResumeIDVariable)=$(cat \(idFile) 2>/dev/null); "
+      + "if [ -n \"$\(remoteResumeIDVariable)\" ]; then \(resume); else \(freshRun); fi"
   }
 
   /// The files a remote session needs on its own disk, as one installer fragment
@@ -791,7 +843,10 @@ public enum ZmxSessionLauncher {
   /// happens to start with a tilde is never rewritten.
   static func remoteQuotedCommand(_ argv: [String]) -> String {
     argv.map { argument in
-      argument.hasPrefix("~/.graphcode/")
+      if argument == remoteResumeIDPlaceholder {
+        return "\"$\(remoteResumeIDVariable)\""
+      }
+      return argument.hasPrefix("~/.graphcode/")
         ? "~/" + RemoteProjectLocation.shellQuoted(String(argument.dropFirst(2)))
         : RemoteProjectLocation.shellQuoted(argument)
     }.joined(separator: " ")

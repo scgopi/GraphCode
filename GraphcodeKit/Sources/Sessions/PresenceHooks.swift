@@ -75,25 +75,50 @@ public enum PresenceHooks {
   /// (`graphcode-<UUID>`), and the ID is written to the `SessionIDStore` path. Silently
   /// skipped when either variable is absent — a session graphcode didn't start, or a
   /// Claude Code version that doesn't export its session ID.
-  static func captureSessionID(supportDir: String) -> String {
-    let dir = "\(supportDir)/sessions"
-    return "if [ -n \"$ZMX_SESSION\" ] && [ -n \"$CLAUDE_CODE_SESSION_ID\" ]; then "
-      + "node_id=\"${ZMX_SESSION#graphcode-}\"; "
-      + "mkdir -p \(singleQuoted(dir)); "
-      + "printf '%s' \"$CLAUDE_CODE_SESSION_ID\" > \(singleQuoted(dir))/\"$node_id\".id; "
+  ///
+  /// `sessionsDirectory` is shell *text*, not a path, for the same reason
+  /// `remotePathExpression` is one: a hook that runs on another machine has to name that
+  /// machine's home directory, and only a shell there can expand it. A hook file carrying
+  /// this Mac's `/Users/<me>/.graphcode` wrote nothing at all on a Codespace, where
+  /// `/Users` doesn't exist and the agent user can't create it.
+  static func captureSessionID(sessionsDirectory: String) -> String {
+    "if [ -n \"$ZMX_SESSION\" ] && [ -n \"$CLAUDE_CODE_SESSION_ID\" ]; then "
+      + "node_id=\"${ZMX_SESSION#\(SurfaceRef.zmxSessionPrefix)}\"; "
+      + "mkdir -p \(sessionsDirectory); "
+      + "printf '%s' \"$CLAUDE_CODE_SESSION_ID\" > \(sessionsDirectory)/\"$node_id\".id; "
       + "fi; exit 0"
+  }
+
+  /// Where `captureSessionID` writes, as the shell text each side needs: a quoted
+  /// absolute path locally (the `SessionIDStore` directory), a `$HOME` expression
+  /// remotely.
+  static var localSessionsExpression: String {
+    singleQuoted(SupportDirectory.url.appendingPathComponent("sessions", isDirectory: true).path)
+  }
+
+  public static let remoteSessionsExpression = "\"$HOME/.graphcode/sessions\""
+
+  /// The remote twin of `SessionIDStore.file(forNodeID:)` — the file the remote
+  /// `SessionStart` hook wrote, as a shell expression the ensure dial can `cat`. The
+  /// name has to match what `captureSessionID` derives from `$ZMX_SESSION`, so both
+  /// come from `SurfaceRef`.
+  public static func remoteSessionIDExpression(forNodeID nodeID: UUID) -> String {
+    "\"$HOME/.graphcode/sessions/\(nodeID.uuidString).id\""
   }
 
   /// The settings JSON for a backend, or `nil` when it has no hooks to configure.
   /// Serialized rather than interpolated so a support directory containing a quote is a
   /// path, not a syntax error.
-  public static func json(forBackend backend: CLISessionBackendKind, zmxPath: String) -> String? {
+  public static func json(
+    forBackend backend: CLISessionBackendKind, zmxPath: String,
+    sessionsDirectory: String? = nil
+  ) -> String? {
     guard let events = events(forBackend: backend) else { return nil }
-    let supportDir = SupportDirectory.url.path
+    let sessions = sessionsDirectory ?? localSessionsExpression
     let hooks = events.reduce(into: [String: [Matcher]]()) { result, event in
       var commands = [Command(command: report(event.1, zmxPath: zmxPath))]
       if event.0 == "SessionStart" && backend == .claudeCode {
-        commands.append(Command(command: captureSessionID(supportDir: supportDir)))
+        commands.append(Command(command: captureSessionID(sessionsDirectory: sessions)))
       }
       result[event.0] = [Matcher(hooks: commands)]
     }
@@ -135,7 +160,9 @@ public enum PresenceHooks {
   public static let remotePathExpression = "$HOME/.graphcode/hooks/claude-code.json"
 
   /// The shell fragment a remote ensure/attach runs before creating the session: writes
-  /// the same hooks the local launcher writes, on the host where they will run. `zmx` by
+  /// the same hooks the local launcher writes, on the host where they will run — with
+  /// the captured session ID landing in *that* host's `~/.graphcode/sessions`, which is
+  /// where `ZmxSessionLauncher.remoteEnsureInvocation` reads it back to resume. `zmx` by
   /// bare name — the hook's `sh` inherits the agent's `PATH`, which came from the
   /// interactive login shell that found `zmx` in the first place (the same resolution
   /// the connection form validated). Errors are squelched: a host that can't take the
@@ -144,7 +171,11 @@ public enum PresenceHooks {
   /// launch fails visibly in the loop's own terminal, which beats silently running an
   /// unobservable session.
   public static func remoteWriteFragment() -> String? {
-    guard let json = json(forBackend: .claudeCode, zmxPath: "zmx") else { return nil }
+    guard
+      let json = json(
+        forBackend: .claudeCode, zmxPath: "zmx",
+        sessionsDirectory: remoteSessionsExpression)
+    else { return nil }
     // `|| true` so both call sites can chain it with `&&` — a failed write must never
     // block the launch it precedes.
     return "{ mkdir -p \"$HOME/.graphcode/hooks\" && printf '%s' \(singleQuoted(json))"
