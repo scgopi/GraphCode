@@ -14,19 +14,28 @@ import SwiftUI
 /// rolls up twice.
 struct NeedsYouChip: View {
   let count: Int
+  /// The same verb as the canvas rail's Review button and ⇧⌘R: open the loop waiting
+  /// longest, then the next on each press. A count that names loops wanting a human
+  /// and does nothing when clicked reads as broken next to the worktree chip beside
+  /// it, which does.
+  let action: () -> Void
 
   var body: some View {
     // Bare chip: the toolbar's own glass capsule is the container, same as
     // `JumpFieldButton` — a second rounded rect around it doubled the chrome.
-    HStack(spacing: 5) {
-      StateIndicator(state: .awaitingInput, diameter: 6)
-      Text("\(count) need you")
-        .font(.system(size: 11, weight: .semibold))
-        .foregroundStyle(Self.ink)
+    Button(action: action) {
+      HStack(spacing: 5) {
+        StateIndicator(state: .awaitingInput, diameter: 6)
+        Text("\(count) need you")
+          .font(.system(size: 11, weight: .semibold))
+          .foregroundStyle(Self.ink)
+      }
+      .padding(.vertical, 2)
+      .padding(.horizontal, 8)
+      .background(Self.tint, in: RoundedRectangle(cornerRadius: 5))
     }
-    .padding(.vertical, 2)
-    .padding(.horizontal, 8)
-    .background(Self.tint, in: RoundedRectangle(cornerRadius: 5))
+    .buttonStyle(.plain)
+    .help("Review what needs you (⇧⌘R)")
   }
 
   private static let tint = Color(red: 1.0, green: 0.624, blue: 0.039).opacity(0.16)

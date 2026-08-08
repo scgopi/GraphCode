@@ -82,7 +82,9 @@ struct AppView: View {
         } else {
           HStack(spacing: 6) {
             if !store.attentionItems.isEmpty {
-              NeedsYouChip(count: store.attentionItems.count)
+              NeedsYouChip(count: store.attentionItems.count) {
+                store.send(.reviewAttentionTapped)
+              }
             }
             if let worst = notices.first {
               WorktreeNoticeChip(notice: worst, extraFolders: notices.count - 1) {
