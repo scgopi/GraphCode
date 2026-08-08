@@ -796,10 +796,10 @@ public enum ZmxSessionLauncher {
     guard !delivery.isEmpty else { return "" }
     let stamp = RemoteProjectLocation.shellQuoted(RemoteGraphAccess.cliShimStamp)
     // Tilde, unquoted, so the remote shell expands it — the same one constant the
-    // installer expands with `expanduser`. The stamp is written *by* the delivery
-    // (`remoteDeliveryScript`), not after it, so a delivery that failed leaves no stamp
-    // and the next dial tries again.
-    let stampFile = RemoteGraphAccess.deliveryStampPath
+    // installer expands with `expanduser`. The stamp is the delivery's own receipt,
+    // written last and only on success, so a delivery that failed anywhere leaves no
+    // stamp and the next dial tries again.
+    let stampFile = RemoteGraphAccess.shimStampPath
     // `!` binds to the pipeline, so this reads (session missing) OR (stamp differs). A
     // missing session has to re-deliver whatever the stamp says: the create branch below
     // launches an argv naming the briefing, wake digest and prompt files, and every one
@@ -859,15 +859,7 @@ public enum ZmxSessionLauncher {
   public static func remoteDeliveryScript(
     forNode node: LoopNode?, at location: RemoteProjectLocation, settings: GraphcodeSettings
   ) -> String? {
-    // The stamp rides in the manifest rather than being written by the shell after it.
-    // `installerScript` ends in `|| true` — it must never block the launch it precedes —
-    // so a separate `printf` would stamp the host even when nothing was installed, and a
-    // host with no `python3` would be marked current forever with the shim never landing.
-    // One python process writes all of these or none of them.
-    var files = [
-      RemoteGraphAccess.cliInstallPath: RemoteGraphAccess.cliShimSource,
-      RemoteGraphAccess.deliveryStampPath: RemoteGraphAccess.cliShimStamp,
-    ]
+    var files = [RemoteGraphAccess.cliInstallPath: RemoteGraphAccess.cliShimSource]
     if settings.briefsSessionsAboutTheGraph,
       let text = SessionBriefing.text(projectPath: location.projectPath)
     {
@@ -892,7 +884,12 @@ public enum ZmxSessionLauncher {
           promptText
       }
     }
-    return RemoteGraphAccess.installerScript(files: files)
+    // The shim's receipt, written only once every file above has landed — see
+    // `installerScript`. It is what lets a later ensure skip a delivery it doesn't need
+    // without ever claiming a shim the host never received.
+    return RemoteGraphAccess.installerScript(
+      files: files,
+      receipt: (path: RemoteGraphAccess.shimStampPath, content: RemoteGraphAccess.cliShimStamp))
   }
 
   /// `quotedCommand`, except that arguments naming graphcode's own remote files —
@@ -1090,7 +1087,7 @@ public enum ZmxSessionLauncher {
   private static func startRemote(_ node: LoopNode, at location: RemoteProjectLocation) async {
     // A dial already in flight for this node is doing this job; a second one racing it
     // is how two `zmx run`s land on one session (`RemoteEnsureGate`).
-    guard await RemoteEnsureGate.shared.begin(node.id) else { return }
+    guard let lease = await RemoteEnsureGate.shared.begin(node.id) else { return }
     // The forwarded socket is what makes the delivered CLI's dial land on this Mac's
     // daemon — without it the shim's commands have nowhere to go. Kept alive per host,
     // not per launch; see `RemoteSocketForwarder`.
@@ -1102,7 +1099,7 @@ public enum ZmxSessionLauncher {
     if let ensure = remoteEnsureInvocation(forNode: node, at: location) {
       _ = await runRemoteRetrying(ensure)
     }
-    await RemoteEnsureGate.shared.end(node.id)
+    await RemoteEnsureGate.shared.end(node.id, token: lease)
   }
 
   static func start(_ node: LoopNode, projectPath: String? = nil) async {

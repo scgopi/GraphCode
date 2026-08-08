@@ -215,16 +215,14 @@ struct RemoteSessionLaunchTests {
     #expect(paths.contains { $0.hasPrefix("~/.graphcode/briefings/") })
 
     // And with briefing switched off, the shim still ships — the CLI is not a
-    // briefing feature, it's what `node send`'s report-back route relies on. The
-    // delivery stamp ships with it and only with it: written by the same python process
-    // so a delivery that failed leaves no claim that it succeeded.
+    // briefing feature, it's what `node send`'s report-back route relies on. The shim
+    // stamp is deliberately *not* in the manifest: it is the delivery's receipt, written
+    // after every entry has landed rather than sorted in among them.
     let unbriefed = try #require(
       ZmxSessionLauncher.remoteDeliveryScript(
         forNode: nil, at: location,
         settings: GraphcodeSettings(briefsSessionsAboutTheGraph: false)))
-    #expect(
-      deliveredPaths(in: unbriefed).sorted()
-        == ["~/.graphcode/bin/.delivery-stamp", "~/.graphcode/bin/graphcode"])
+    #expect(deliveredPaths(in: unbriefed) == ["~/.graphcode/bin/graphcode"])
   }
 
   /// Decodes the installer fragment's base64 JSON manifest back into the delivered

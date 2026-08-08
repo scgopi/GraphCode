@@ -186,7 +186,7 @@ struct RemoteSessionResumeTests {
     let remoteCommand = try #require(invocation.last)
 
     #expect(remoteCommand.contains(RemoteGraphAccess.cliShimStamp))
-    #expect(remoteCommand.contains("cat \(RemoteGraphAccess.deliveryStampPath)"))
+    #expect(remoteCommand.contains("cat \(RemoteGraphAccess.shimStampPath)"))
     // Session missing *or* stamp differs — a fresh launch must re-deliver whatever the
     // stamp says, because the argv it is about to run names the briefing, wake digest
     // and prompt files that ride in this same fragment.
@@ -197,31 +197,38 @@ struct RemoteSessionResumeTests {
 
   @Test
   func aFailedDeliveryLeavesNoStampBehind() throws {
-    // `installerScript` ends in `|| true` — it must never block the launch it precedes —
-    // so stamping in the shell after it would mark a host current even when nothing was
-    // installed. A host with no `python3` would then never receive the shim again, which
-    // is worse than the unconditional delivery the stamp replaced. The stamp rides in
-    // the manifest instead: one python process writes shim and stamp, or neither.
+    // Two failure modes, one rule: the stamp is a receipt, so it must be written last
+    // and only on success.
+    //
+    // Stamping from the shell after the installer doesn't work — `installerScript` ends
+    // in `|| true`, so a host with no `python3` would be marked current with nothing
+    // installed. Nor does putting it in the manifest: that comprehension is not
+    // transactional and iterates `sorted(m.items())`, where `.` sorts before `g`, so
+    // `.shim-stamp` would land *before* `graphcode` and a disk-full host would claim a
+    // shim it never received. Both leave the host permanently un-upgradeable, because
+    // the matching stamp then skips every later delivery.
     let script = try #require(
       ZmxSessionLauncher.remoteDeliveryScript(
-        forNode: nil,
-        at: location,
-        settings: GraphcodeSettings()))
+        forNode: nil, at: location, settings: GraphcodeSettings()))
 
-    // Nothing writes the stamp outside the installer.
     #expect(!script.contains("printf"))
 
-    // The manifest is the one token that base64-decodes to a JSON object.
+    // Not a manifest entry — the manifest is the one token that base64-decodes to JSON.
     let files = try #require(
       script.split(whereSeparator: { $0 == " " || $0 == "'" })
         .compactMap { Data(base64Encoded: String($0)) }
         .compactMap { try? JSONSerialization.jsonObject(with: $0) as? [String: String] }
         .first)
     #expect(files[RemoteGraphAccess.cliInstallPath] != nil)
-    let stamp = try #require(files[RemoteGraphAccess.deliveryStampPath])
-    #expect(
-      String(data: try #require(Data(base64Encoded: stamp)), encoding: .utf8)
-        == RemoteGraphAccess.cliShimStamp)
+    #expect(files[RemoteGraphAccess.shimStampPath] == nil)
+
+    // Written by a statement that follows the comprehension, so a raise anywhere inside
+    // it skips the receipt entirely.
+    let write = try #require(script.range(of: "open(os.path.expanduser(sys.argv[2])"))
+    let comprehension = try #require(script.range(of: "for p,c in sorted(m.items())]"))
+    #expect(comprehension.upperBound < write.lowerBound)
+    #expect(script.contains(RemoteGraphAccess.shimStampPath))
+    #expect(script.contains(RemoteGraphAccess.cliShimStamp))
   }
 
   @Test
@@ -293,18 +300,18 @@ struct RemoteSessionResumeTests {
   // MARK: - One ensure per node
 
   @Test
-  func aSecondEnsureForTheSameNodeIsRefusedWhileOneIsInFlight() async {
+  func aSecondEnsureForTheSameNodeIsRefusedWhileOneIsInFlight() async throws {
     // Two dials whose checks both miss both run, and the second types the whole launch
     // command into the agent the first one started.
     let gate = RemoteEnsureGate()
     let node = UUID()
 
-    #expect(await gate.begin(node))
-    #expect(await gate.begin(node) == false)
-    #expect(await gate.begin(UUID()))
+    let lease = try #require(await gate.begin(node))
+    #expect(await gate.begin(node) == nil)
+    #expect(await gate.begin(UUID()) != nil)
 
-    await gate.end(node)
-    #expect(await gate.begin(node))
+    await gate.end(node, token: lease)
+    #expect(await gate.begin(node) != nil)
   }
 
   @Test
@@ -319,11 +326,35 @@ struct RemoteSessionResumeTests {
     let node = UUID()
     let start = Date()
 
-    #expect(await gate.begin(node, now: start))
-    #expect(await gate.begin(node, now: start.addingTimeInterval(60)) == false)
+    #expect(await gate.begin(node, now: start) != nil)
+    #expect(await gate.begin(node, now: start.addingTimeInterval(60)) == nil)
     #expect(
       await gate.begin(
-        node, now: start.addingTimeInterval(RemoteEnsureGate.leaseDuration + 1)))
+        node, now: start.addingTimeInterval(RemoteEnsureGate.leaseDuration + 1)) != nil)
+  }
+
+  @Test
+  func aRecoveredWedgeCannotReleaseSomeoneElsesLease() async throws {
+    // The race an unconditional `removeValue` loses: dial A wedges and its lease
+    // expires, dial B takes a fresh one, then A's ssh finally returns. If A's `end`
+    // cleared B's lease, the next sweep tick would start a third dial alongside B — and
+    // with the host having just come back, both would miss on `zmx get` and both would
+    // `zmx run`, which is the composer-bar leak the gate exists to prevent.
+    let gate = RemoteEnsureGate()
+    let node = UUID()
+    let start = Date()
+
+    let wedged = try #require(await gate.begin(node, now: start))
+    let expired = start.addingTimeInterval(RemoteEnsureGate.leaseDuration + 1)
+    let fresh = try #require(await gate.begin(node, now: expired))
+
+    // A returns late and tries to clean up after itself.
+    await gate.end(node, token: wedged)
+
+    // B still holds the gate.
+    #expect(await gate.begin(node, now: expired.addingTimeInterval(60)) == nil)
+    await gate.end(node, token: fresh)
+    #expect(await gate.begin(node, now: expired.addingTimeInterval(61)) != nil)
   }
 
   // MARK: - Noticing the reboot at all

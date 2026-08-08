@@ -32,17 +32,29 @@ actor RemoteEnsureGate {
 
   private var leases: [UUID: Date] = [:]
 
-  /// `false` when a live lease is held for this node, which the caller should treat as
-  /// "already handled" — the dial holding it is doing the same work.
-  func begin(_ nodeID: UUID, now: Date = Date()) -> Bool {
+  /// The moment a lease was taken, which is also proof of *which* lease it is. Returning
+  /// it rather than a bare `true` is what stops a dial from releasing a lease that is no
+  /// longer its own — see `end`.
+  ///
+  /// `nil` when a live lease is held for this node, which the caller should treat as
+  /// "already handled": the dial holding it is doing the same work.
+  func begin(_ nodeID: UUID, now: Date = Date()) -> Date? {
     if let held = leases[nodeID], now.timeIntervalSince(held) < Self.leaseDuration {
-      return false
+      return nil
     }
     leases[nodeID] = now
-    return true
+    return now
   }
 
-  func end(_ nodeID: UUID) {
+  /// Releases the lease only if it is still the one `token` was issued for.
+  ///
+  /// Unconditional removal loses exactly the race the lease exists to survive: dial A
+  /// wedges and its lease expires, dial B takes a fresh one, then A's ssh finally
+  /// returns and clears *B's* lease — leaving B in flight with the gate open, so the
+  /// next sweep tick starts a third dial alongside it. Both would miss on `zmx get`
+  /// (the host has just come back, its sessions are gone) and both would `zmx run`.
+  func end(_ nodeID: UUID, token: Date) {
+    guard leases[nodeID] == token else { return }
     leases.removeValue(forKey: nodeID)
   }
 }
