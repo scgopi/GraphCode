@@ -25,151 +25,50 @@ contributors, the machinery underneath.
 
 ---
 
-## Part 1 — The four loops an AI session can run
+## Part 1 — Four loop types
 
-### The problem
+A **loop** is a CLI agent session (Claude Code, Copilot, Codex) that runs repeatedly instead of once — a live terminal you can attach to mid-run.
 
-An agent in a terminal is powerful but singular: one session, one task, gone when you
-close the window. The obvious fix — cron firing `claude -p` headlessly — throws away
-what made the terminal good: you could watch it, interrupt it, redirect it.
+When you put an agent on repeat, you hand off one of four things: the **check**, the **stop condition**, the **trigger**, or the **prompt itself**. That's the space of loops possible:
 
-GraphCode keeps both. Work is a **graph of loops**: each node is a unit of agentic work
-inside a real CLI session, each edge a relationship between two of them. The sessions
-stay real, attachable terminals the whole time — the automation lives in the graph
-around them, not in taking the terminal away.
-
-### Every loop is an AI session that runs repeatedly
-
-The unit of work in GraphCode is the **loop**: a real CLI agent session — Claude Code,
-Copilot CLI, or Codex — that runs again and again instead of once. Not a script that
-calls a model, not a job that reports back when it's done: a live terminal you can open
-mid-run, with an agent inside that keeps going.
-
-Here's the claim this whole design rests on. When you put an agent on repeat, you are
-handing it something you used to do yourself — and there are only four things you can
-hand off: the **check**, the **stop condition**, the **trigger**, or the **prompt
-itself**. Four hand-offs, four loop types. This isn't a feature list that will grow a
-fifth entry next release; it's the space of loops possible:
-
-| Loop type | You hand off | Runs until | For example |
+| Loop type | You hand off | Runs until | Example |
 |---|---|---|---|
-| **Turn-based** | the check | you end it — each turn pauses for your review | a refactor you eyeball step by step |
-| **Goal-based** | the stop condition | the goal is met (optionally: a shell command exits 0) | "fix the build" — done when `make test` passes |
-| **Time-based** | the trigger | you stop it — cadence lives in the prompt (`/loop 1h …`) | hourly issue triage |
-| **Composite** | the prompt | a sub-graph of loops runs it end to end | a pipeline that plans its own steps |
+| **Turn-based** | the check | you end it — pauses each turn | a refactor you eyeball step by step |
+| **Goal-based** | the stop condition | goal met (optionally: shell exits 0) | "fix the build" — done when `make test` passes |
+| **Time-based** | the trigger | you stop it — cadence in the prompt | `/loop 1h Triage new bug reports` |
+| **Composite** | the prompt | a sub-graph runs end to end | a pipeline that plans its own steps |
 
-The names aren't ours: the taxonomy follows the loop types Anthropic established in
-[*Getting started with loops*](https://x.com/ClaudeDevs/status/2074208949205881033).
-GraphCode's contribution is making each one a node in a graph — which is also why the
-fourth one is called **composite** here rather than proactive: in a graph, that is
-exactly what it is.
-
-#### Turn-based — you stay in the sequence
-
-The session stops after every turn and waits for you. It exists because a person
-belongs in this sequence: your review criterion travels into the loop's opening prompt,
-so you state it once and never retype it. The loop does the work; you keep the
-judgment. Use it for the refactor you want to watch happen, change by change.
-
-#### Goal-based — you hand off "done"
-
-You hand this loop a statement of done (the form refuses an empty one), and optionally
-a shell predicate — a command the daemon polls, where exit 0 means finished. "Fix the
-build" resolves itself the moment `make test` passes, whether you were watching or
-asleep. This is the workhorse type, and the one the self-improving cycle in Part 2 is
-built around.
-
-#### Time-based — you hand off the trigger
-
-You hand this loop its cadence, and the cadence lives *inside the session* — written
-into the prompt with the agent's own `/loop` or `/schedule` skill (`/loop 1h Triage
-new bug reports`). Nothing external fires it; the session re-triggers itself, which is
-why you can attach at any point and see every pass it has ever run in one scrollback.
-
-#### Composite — you hand off the prompt
-
-The whole prompt, that is. A composite node is a sub-graph that plans its own steps and
-runs them end to end — a graph running inside a graph. You describe the outcome; it
-decides the loops.
-
-Pick the type by what you're ready to let go of — the check, the stop condition, the
-trigger, or the prompt itself. A working graph usually mixes them: a time-based triage
-loop hands findings to a goal-based fixer, which hands the fix to a turn-based
-reviewer where you approve each change yourself.
-
-### GraphCode schedules nothing
-
-A time-based loop's recurrence lives *inside* its session, written into the prompt with
-the agent's own `/loop` or `/schedule` skill. GraphCode holds no timers and never fires
-a headless `claude -p`.
-
-An early version did the opposite — a timer per node, output discarded. It worked, and
-it was worthless: nothing to attach to, nothing to steer. Moving the cadence into the
-session makes a running loop an ordinary terminal that happens to be busy. The daemon's
-only duty is **liveness**: making sure the session exists.
+Pick by what you're ready to let go of. A working graph often mixes them: a time-based triage loop hands findings to a goal-based fixer, which hands the fix to a turn-based reviewer.
 
 ### Sessions outlive everything
 
-Each loop's terminal is a [`zmx`](https://zmx.sh) session — a PTY kept alive by a
-session daemon, like tmux. It survives closing the window, quitting the app,
-restarting GraphCode's own daemon, and even a machine reboot: the backend's session
-ID is persisted on disk, so the daemon resumes the conversation with `--resume`
-rather than starting a duplicate session.
+Each loop is a [`zmx`](https://zmx.sh) session — a PTY that survives quitting the app, restarting the daemon, or rebooting. The daemon starts a loop at 3 a.m.; you click its node at 9 and you're *in the session that did the work*, live.
 
-That's what makes unattended and attended the same thing. The daemon starts a loop at
-3 a.m.; you click its node at 9 and you're *in the session that did the work*, live,
-history above you, process still running.
+### Projects
 
-### The Graph view
+From the sidebar's ⊕ menu: a **local folder**, a **cloned repo**, or a **repo over SSH** — remote loops run there, your Mac draws the graph.
 
-The **Graph** row at the top of the sidebar shows every project on one canvas — each
-folder's loops in its own lane, all hanging off a single **START** node. It's the
-overview you read to know what the whole workspace is doing without clicking into each
-project separately.
+### Edges
 
-### Projects: local, cloned, or remote
+Drag between nodes to connect them:
 
-From the sidebar's ⊕ menu a project can be a **local folder**, a **repository cloned
-from a URL**, or a **repo on another machine over SSH** — the loops run there, your Mac
-draws the graph and steers them. The remote case falls out of the session model:
-`zmx attach` becomes `ssh -t host zmx attach`, and everything above it is unchanged.
-
-### Edges: the three ways loops talk
-
-Drag between two nodes and you get an edge:
-
-| Kind | What it does | Blocks its target? |
+| Kind | What it does | Blocks target? |
 |---|---|---|
-| **Hand-off** | fires when the source resolves, unblocking the target | yes |
-| **Message** | injects text into a running peer's live session | no |
-| **Spawn** | instantiates a new node from a template — the one kind that may cross into another project's graph | no |
+| **Hand-off** | fires when source resolves, unblocking target | yes |
+| **Message** | injects text into running peer | no |
+| **Spawn** | instantiates a copy from a template | no |
 
-Each edge carries a condition — always, on success, on failure. An `on failure`
-hand-off is how you build "if the nightly build breaks, wake the fixer."
+Each edge carries a condition — always, on success, on failure. An `on failure` hand-off builds "if the nightly breaks, wake the fixer."
 
-### And loops can just talk
+### Ad-hoc messaging
 
-Edges are standing relationships. For the one-off — a loop deciding mid-run that a peer
-should know something — there's the CLI:
+Loops can message each other mid-run via the CLI:
 
 ```sh
-graphcode node send <project-path> <node-id> the API changed under you, heads up
+graphcode node send <project-path> <node-id> the API changed, heads up
 ```
 
-The message is typed straight into the target's live terminal, attributed to its
-sender. A target that isn't live doesn't lose the message: it's **staged into that
-loop's memory** and read at its next wake, and the sender is told which happened.
-Every session is briefed on this verb, so "tell loop 5 to stop" is something you can
-ask a loop to do.
-
-### A goal knows when it's done
-
-A goal has two halves: the **summary** (the human statement of done, required) and the
-**predicate** (an optional shell command the daemon polls; exit 0 resolves the node).
-The predicate is also written into the session's prompt, so the agent and the daemon
-never work to two definitions of done. A loop moves through a small lifecycle — *idle →
-running → succeeded / failed / stalled / stopped* — and **stopped** is deliberately not
-**failed**: work someone chose to end didn't go wrong.
+A target that isn't live doesn't lose the message — it's **staged** and read at next wake.
 
 ---
 
@@ -223,6 +122,49 @@ passes without improvement, or any mix. The feature that lets a loop repeat is t
 feature that bounds it, so "loop forever, unattended, spending tokens" cannot be said
 by accident.
 
+<div style="max-width:560px;margin:2rem auto;background:#161b22;border-radius:12px;padding:1.5rem;">
+<div style="font-family:SFMono-Regular,Menlo,monospace;font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:1rem;">Edge firing and cycle re-entry</div>
+<svg viewBox="0 0 560 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Animated: guarded edge fires, pulse travels loopback, cycle re-enters">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/></marker>
+  </defs>
+  <!-- Forge node -->
+  <rect x="60" y="70" width="100" height="60" rx="6" fill="#21262d" stroke="#484f58" stroke-width="1.5"/>
+  <text x="110" y="95" text-anchor="middle" font-family="SFMono-Regular,Menlo,monospace" font-size="11" fill="#8b949e">FORGE</text>
+  <text x="110" y="115" text-anchor="middle" font-family="-apple-system,sans-serif" font-size="12" fill="#e6edf3">Make change</text>
+  <!-- Critic node -->
+  <rect x="260" y="70" width="100" height="60" rx="6" fill="#21262d" stroke="#484f58" stroke-width="1.5"/>
+  <text x="310" y="95" text-anchor="middle" font-family="SFMono-Regular,Menlo,monospace" font-size="11" fill="#8b949e">CRITIC</text>
+  <text x="310" y="115" text-anchor="middle" font-family="-apple-system,sans-serif" font-size="12" fill="#e6edf3">Verify change</text>
+  <!-- Guard indicator -->
+  <rect x="440" y="75" width="70" height="50" rx="4" fill="#21262d" stroke="#30363d" stroke-width="1"/>
+  <text x="475" y="95" text-anchor="middle" font-family="SFMono-Regular,Menlo,monospace" font-size="9" fill="#8b949e">GUARD</text>
+  <text x="475" y="112" text-anchor="middle" font-family="SFMono-Regular,Menlo,monospace" font-size="10" fill="#e6edf3">≤5×</text>
+  <!-- Edge: forge → critic -->
+  <line x1="160" y1="100" x2="255" y2="100" stroke="#58a6ff" stroke-width="2" marker-end="url(#arr)"/>
+  <!-- Loopback edge (guarded) -->
+  <path d="M 360 100 Q 410 100 410 50 Q 410 20 310 20 Q 110 20 110 65" fill="none" stroke="#484f58" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <!-- Animated firing pulse -->
+  <circle r="6" fill="#f0883e">
+    <animate attributeName="opacity" values="0;1;1;1;0" dur="4s" repeatCount="indefinite"/>
+    <animateMotion dur="4s" repeatCount="indefinite">
+      <mpath href="#loopPath1"/>
+    </animateMotion>
+  </circle>
+  <path id="loopPath1" d="M 360 100 Q 410 100 410 50 Q 410 20 310 20 Q 110 20 110 65" fill="none" stroke="none"/>
+  <!-- State label -->
+  <text x="110" y="155" text-anchor="middle" font-family="SFMono-Regular,Menlo,monospace" font-size="10" fill="#3fb950">
+    <animate attributeName="opacity" values="0;0;0;1;1" dur="4s" repeatCount="indefinite"/>
+    idle → running
+  </text>
+  <!-- Pass counter -->
+  <text x="310" y="155" text-anchor="middle" font-family="SFMono-Regular,Menlo,monospace" font-size="10" fill="#8b949e">
+    <animate attributeName="fill" values="#8b949e;#8b949e;#f0883e;#8b949e" dur="4s" repeatCount="indefinite"/>
+    pass 2 of 5
+  </text>
+</svg>
+</div>
+
 ### Every pass is announced
 
 When a cycle re-enters, the loop is *told*, right in its terminal:
@@ -249,39 +191,58 @@ older ones elided. Round two starts *smarter*, not from scratch. And a loop crea
 another loop is born with its first entry already written — the exact command for
 reporting results back to its parent, so nothing is guessed.
 
-<div style="max-width:580px;margin:2rem auto;">
-<svg viewBox="0 0 580 200" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Two writers feed the memory log: the daemon records facts, the agent records lessons. A relaunched session reads the digest.">
-  <rect width="580" height="200" rx="16" fill="#161b22"/>
-  <text x="290" y="28" text-anchor="middle" fill="#8b949e" font-family="-apple-system,sans-serif" font-size="13" letter-spacing="0.5">What it learns goes into its own log</text>
+<div style="max-width:560px;margin:2rem auto;background:#161b22;border-radius:12px;padding:1.5rem;">
+<div style="font-family:SFMono-Regular,Menlo,monospace;font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:1rem;">Pass 3 reads what passes 1–2 learned</div>
+<svg viewBox="0 0 520 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Animated: log grows, wake digest briefs next pass">
   <defs>
-    <marker id="ah2" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8" fill="#58a6ff"/></marker>
-    <marker id="ah2-g" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8" fill="#3fb950"/></marker>
+    <marker id="arr2" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/></marker>
+    <marker id="arr2g" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3fb950"/></marker>
   </defs>
-  <!-- Daemon node -->
-  <circle cx="80" cy="80" r="30" fill="#5eead4"/>
-  <text x="80" y="76" text-anchor="middle" fill="#0f2e29" font-family='SFMono-Regular,Menlo,monospace' font-weight="700" font-size="11">DAE-</text>
-  <text x="80" y="89" text-anchor="middle" fill="#0f2e29" font-family='SFMono-Regular,Menlo,monospace' font-weight="700" font-size="11">MON</text>
-  <!-- Agent node -->
-  <circle cx="80" cy="155" r="30" fill="#a5b4fc"/>
-  <text x="80" y="159" text-anchor="middle" fill="#272b52" font-family='SFMono-Regular,Menlo,monospace' font-weight="700" font-size="12">AGENT</text>
   <!-- Memory log -->
-  <rect x="210" y="60" width="160" height="110" rx="10" fill="#0d1117" stroke="#30363d" stroke-width="1.5"/>
-  <text x="290" y="82" text-anchor="middle" fill="#e6edf3" font-family='SFMono-Regular,Menlo,monospace' font-weight="600" font-size="13">memory log</text>
-  <text x="230" y="104" fill="#8b949e" font-family='SFMono-Regular,Menlo,monospace' font-size="10">pass started</text>
-  <text x="230" y="120" fill="#8b949e" font-family='SFMono-Regular,Menlo,monospace' font-size="10">metric: 41 → 22</text>
-  <text x="230" y="136" fill="#8b949e" font-family='SFMono-Regular,Menlo,monospace' font-size="10">memo: X is dead</text>
-  <text x="230" y="152" fill="#8b949e" font-family='SFMono-Regular,Menlo,monospace' font-size="10">pass resolved ✓</text>
-  <!-- Daemon → log -->
-  <line x1="115" y1="80" x2="200" y2="90" stroke="#58a6ff" stroke-width="2" marker-end="url(#ah2)"/>
-  <text x="158" y="76" text-anchor="middle" fill="#58a6ff" font-family="-apple-system,sans-serif" font-size="10">facts</text>
-  <!-- Agent → log -->
-  <line x1="115" y1="150" x2="200" y2="140" stroke="#58a6ff" stroke-width="2" marker-end="url(#ah2)"/>
-  <text x="158" y="156" text-anchor="middle" fill="#58a6ff" font-family="-apple-system,sans-serif" font-size="10">lessons</text>
-  <!-- log → next session -->
-  <rect x="430" y="85" width="120" height="60" rx="10" fill="#0d1117" stroke="#3fb950" stroke-width="1.5"/>
-  <text x="490" y="111" text-anchor="middle" fill="#3fb950" font-family='SFMono-Regular,Menlo,monospace' font-weight="600" font-size="12">next pass</text>
-  <text x="490" y="128" text-anchor="middle" fill="#6e7681" font-family="-apple-system,sans-serif" font-size="10">reads digest</text>
-  <line x1="378" y1="115" x2="422" y2="115" stroke="#3fb950" stroke-width="2" marker-end="url(#ah2-g)"/>
+  <rect x="20" y="20" width="180" height="160" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1.5"/>
+  <text x="40" y="45" font-family="SFMono-Regular,Menlo,monospace" font-size="10" fill="#8b949e">LOG.txt</text>
+  <!-- Log entries appearing over time -->
+  <text x="35" y="70" font-family="SFMono-Regular,Menlo,monospace" font-size="8" fill="#6e7681">14:23  pass 1 started</text>
+  <text x="35" y="85" font-family="SFMono-Regular,Menlo,monospace" font-size="8" fill="#6e7681">14:23  metric: 41</text>
+  <text x="35" y="100" font-family="SFMono-Regular,Menlo,monospace" font-size="8" fill="#8b949e">14:24  tried A, failed</text>
+  <text x="35" y="115" font-family="SFMono-Regular,Menlo,monospace" font-size="8" fill="#8b949e">14:31  pass 2 started</text>
+  <text x="35" y="130" font-family="SFMono-Regular,Menlo,monospace" font-size="8" fill="#8b949e">14:31  metric: 38</text>
+  <text x="35" y="145" font-family="SFMono-Regular,Menlo,monospace" font-size="8" fill="#e6edf3">
+    <animate attributeName="opacity" values="0;0;0;0.9;0.9" dur="5s" repeatCount="indefinite"/>
+    14:42  pass 3 started
+  </text>
+  <text x="35" y="160" font-family="SFMono-Regular,Menlo,monospace" font-size="8" fill="#3fb950">
+    <animate attributeName="opacity" values="0;0;0;0;0.9" dur="5s" repeatCount="indefinite"/>
+    14:42  read wake digest
+  </text>
+  <!-- Arrow to wake digest -->
+  <path d="M 205 100 L 245 100" stroke="#58a6ff" stroke-width="1.5" stroke-dasharray="4 2" marker-end="url(#arr2)">
+    <animate attributeName="opacity" values="0;0;1;1;1" dur="5s" repeatCount="indefinite"/>
+  </path>
+  <!-- Wake digest (budgeted view) -->
+  <rect x="255" y="55" width="120" height="90" rx="6" fill="#0d1117" stroke="#58a6ff" stroke-width="1.5">
+    <animate attributeName="stroke-width" values="1.5;2.5;1.5" dur="5s" repeatCount="indefinite" begin="2s"/>
+  </rect>
+  <text x="275" y="78" font-family="SFMono-Regular,Menlo,monospace" font-size="9" fill="#58a6ff">WAKE.md</text>
+  <text x="275" y="93" font-family="SFMono-Regular,Menlo,monospace" font-size="7" fill="#6e7681">(last 40 lines)</text>
+  <text x="275" y="112" font-family="-apple-system,sans-serif" font-size="8" fill="#8b949e">• A failed</text>
+  <text x="275" y="125" font-family="-apple-system,sans-serif" font-size="8" fill="#8b949e">• metric 41→38</text>
+  <text x="275" y="138" font-family="-apple-system,sans-serif" font-size="8" fill="#3fb950">• try B next</text>
+  <!-- Arrow to session -->
+  <path d="M 380 100 L 420 100" stroke="#3fb950" stroke-width="1.5" marker-end="url(#arr2g)">
+    <animate attributeName="opacity" values="0;0;0;1;1" dur="5s" repeatCount="indefinite"/>
+  </path>
+  <!-- Session node -->
+  <rect x="430" y="65" width="70" height="70" rx="6" fill="#21262d" stroke="#484f58" stroke-width="1.5">
+    <animate attributeName="stroke" values="#484f58;#3fb950;#484f58" dur="5s" repeatCount="indefinite" begin="3s"/>
+  </rect>
+  <text x="465" y="95" text-anchor="middle" font-family="SFMono-Regular,Menlo,monospace" font-size="9" fill="#8b949e">PASS 3</text>
+  <text x="465" y="112" text-anchor="middle" font-family="-apple-system,sans-serif" font-size="9" fill="#3fb950">
+    <animate attributeName="opacity" values="0;0;0;0;1" dur="5s" repeatCount="indefinite"/>
+    knows history
+  </text>
+  <!-- Caption -->
+  <text x="260" y="188" text-anchor="middle" font-family="-apple-system,sans-serif" font-size="10" fill="#6e7681">Session 3 starts where session 2 left off.</text>
 </svg>
 </div>
 
@@ -424,3 +385,6 @@ independent open-source projects [Ghostty](https://ghostty.org) and
 
 Questions, feedback, or just following along — find me on
 [X (@scgopi)](https://x.com/scgopi) or [LinkedIn](https://www.linkedin.com/in/scgopi/).
+
+**Want help designing your graph?** I offer setup and graph engineering for teams
+adopting GraphCode — [reach out](mailto:sravani2201@outlook.com).
