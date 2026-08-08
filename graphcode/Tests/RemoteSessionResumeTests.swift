@@ -152,20 +152,55 @@ struct RemoteSessionResumeTests {
   }
 
   @Test
-  func aHealthySweepTickCostsOnlyTheExistenceCheck() throws {
-    // The hooks write and the file delivery sit behind the check, so a minute-by-minute
-    // sweep against a live session doesn't re-send ~20 KB of base64'd shim through a
-    // `python3` for a session that is already running.
+  func theHooksWriteRunsOnlyWhenASessionIsBeingCreated() throws {
+    // Claude Code reads `--settings` once at startup, so rewriting the hooks file for a
+    // session that is already running does nothing — and at one dial a minute it is a
+    // `python3` and a `printf` per loop for a file nothing will re-read.
     let node = goalNode()
     let invocation = try #require(
       ZmxSessionLauncher.remoteEnsureInvocation(forNode: node, at: location))
     let remoteCommand = try #require(invocation.last)
 
-    let get = try #require(remoteCommand.range(of: "'get'"))
-    let hooks = try #require(remoteCommand.range(of: ".graphcode/hooks"))
+    // Anchored on the write itself, not on the path: `.graphcode/hooks` also appears in
+    // the launch argv as `--settings "$HOME/.graphcode/hooks/claude-code.json"`, so this
+    // assertion would pass with the write deleted entirely.
+    let write = try #require(remoteCommand.range(of: "mkdir -p \"$HOME/.graphcode/hooks\""))
+    // And inside the create branch, not merely after the check — textual order alone
+    // would be satisfied by a fragment sitting outside the group.
+    let branch = try #require(remoteCommand.range(of: ">/dev/null 2>&1 || { "))
+    let run = try #require(remoteCommand.range(of: "'run'"))
+    #expect(branch.lowerBound < write.lowerBound)
+    #expect(write.lowerBound < run.lowerBound)
+  }
+
+  @Test
+  func theShimIsRedeliveredWhenTheHostsCopyIsStaleEvenIfTheSessionIsLive() throws {
+    // The one delivered file that cannot follow the hooks behind the check: the agent
+    // re-executes the shim for as long as the session lives, and it speaks a wire
+    // protocol to this daemon. A graphcode upgrade that never reaches a host whose loops
+    // are still running breaks `graphcode node send`/`memo`/`resolve` for all of them —
+    // and an unattended loop has no human to open it and heal the delivery.
+    let node = goalNode()
+    let invocation = try #require(
+      ZmxSessionLauncher.remoteEnsureInvocation(forNode: node, at: location))
+    let remoteCommand = try #require(invocation.last)
+
+    #expect(remoteCommand.contains(RemoteGraphAccess.cliShimStamp))
+    #expect(remoteCommand.contains(".delivery-stamp"))
+    // Session missing *or* stamp differs — a fresh launch must re-deliver whatever the
+    // stamp says, because the argv it is about to run names the briefing, wake digest
+    // and prompt files that ride in this same fragment.
+    let gate = try #require(remoteCommand.range(of: "if ! "))
     let deliver = try #require(remoteCommand.range(of: "b64decode"))
-    #expect(get.lowerBound < hooks.lowerBound)
-    #expect(get.lowerBound < deliver.lowerBound)
+    #expect(gate.lowerBound < deliver.lowerBound)
+  }
+
+  @Test
+  func theShimStampIsStableAcrossProcesses() {
+    // Swift's own `hashValue` is seeded per process, which would report the shim as
+    // changed on every daemon restart and re-deliver it forever.
+    #expect(RemoteGraphAccess.cliShimStamp == RemoteGraphAccess.cliShimStamp)
+    #expect(!RemoteGraphAccess.cliShimStamp.isEmpty)
   }
 
   @Test
@@ -224,6 +259,42 @@ struct RemoteSessionResumeTests {
       ZmxSessionLauncher.resumeArguments(
         forNode: goalNode(.codex), sessionID: "abc-123", projectPath: location.projectPath)
         == nil)
+  }
+
+  // MARK: - One ensure per node
+
+  @Test
+  func aSecondEnsureForTheSameNodeIsRefusedWhileOneIsInFlight() async {
+    // Two dials whose checks both miss both run, and the second types the whole launch
+    // command into the agent the first one started.
+    let gate = RemoteEnsureGate()
+    let node = UUID()
+
+    #expect(await gate.begin(node))
+    #expect(await gate.begin(node) == false)
+    #expect(await gate.begin(UUID()))
+
+    await gate.end(node)
+    #expect(await gate.begin(node))
+  }
+
+  @Test
+  func aWedgedDialCannotSilenceItsNodeForever() async {
+    // The reason this is a lease and not a `Set`. `runRemoteRetrying` →
+    // `PTYProcessSession.waitCollectingOutput` ends only when the child's
+    // `terminationHandler` finishes the stream, and there is no timeout in the chain —
+    // ssh blocked on a wedged `ControlMaster` socket never returns, so `end` is never
+    // reached. A flag would leave that node refused for the daemon's lifetime, which is
+    // a worse failure than the double-launch it prevents.
+    let gate = RemoteEnsureGate()
+    let node = UUID()
+    let start = Date()
+
+    #expect(await gate.begin(node, now: start))
+    #expect(await gate.begin(node, now: start.addingTimeInterval(60)) == false)
+    #expect(
+      await gate.begin(
+        node, now: start.addingTimeInterval(RemoteEnsureGate.leaseDuration + 1)))
   }
 
   // MARK: - Noticing the reboot at all

@@ -24,6 +24,33 @@ public enum RemoteGraphAccess {
   /// not on your PATH" line stays true verbatim on both kinds of host.
   public static let cliInstallPath = "~/.graphcode/bin/graphcode"
 
+  /// Where the stamp of the last delivered shim lives, as a `$HOME` expression for the
+  /// remote shell that reads it. Beside the shim, so `installerScript`'s own `makedirs`
+  /// has already created the directory by the time anything writes here.
+  public static let deliveryStampPath = "\"$HOME/.graphcode/bin/.delivery-stamp\""
+
+  /// A content stamp for the shim, so an ensure can tell a host carrying the current CLI
+  /// from one still carrying an older graphcode's.
+  ///
+  /// This exists because the shim is the one delivered file that is re-executed
+  /// *throughout* a session's life rather than read once at startup: it speaks
+  /// `FramedMessageIO` framing and `DaemonProtocol` JSON to this daemon, so a host left
+  /// on an older copy breaks `graphcode node send` / `memo` / `resolve` for every loop
+  /// already running there — silently, and for as long as those sessions live. Delivery
+  /// therefore cannot simply be create-only like the hooks file.
+  ///
+  /// FNV-1a rather than a digest from CryptoKit: the question is only "same bytes or
+  /// not", and Swift's own `hashValue` is seeded per process, so it would report a change
+  /// on every daemon restart.
+  public static var cliShimStamp: String {
+    var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+    for byte in cliShimSource.utf8 {
+      hash ^= UInt64(byte)
+      hash &*= 0x0000_0100_0000_01b3
+    }
+    return String(hash, radix: 16)
+  }
+
   /// The remote twin of `SessionBriefing.directory(forProjectPath:)`.
   public static func briefingDirectory(forProjectPath projectPath: String) -> String {
     "~/.graphcode/briefings/\(SessionBriefing.slug(for: projectPath))"

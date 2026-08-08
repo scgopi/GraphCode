@@ -763,18 +763,47 @@ public enum ZmxSessionLauncher {
       .map { $0 + "; " } ?? ""
     let create = remoteCreateScript(
       forNode: node, freshRun: run, at: location, settings: settings)
-    // Everything the create needs on the host goes *behind* the check, not in front of
-    // it. This used to run per ensure, which was once at load and once per node created;
-    // the liveness sweep dials every minute, and re-sending ~20 KB of base64'd shim
-    // through a `python3 -c` (plus a second one for Copilot's trust seed) at that rate to
-    // refresh files for a session that is already running is pure cost. Create-only also
-    // matches what `PresenceHooks.write` already documents about the local hooks file: an
-    // upgraded graphcode reaches a loop at the loop's next session, not mid-run.
+    // The trust seed and the hooks file are genuinely create-only — a folder-trust
+    // dialog is answered per session start, and Claude Code reads `--settings` once at
+    // startup, so refreshing either mid-run does nothing for the session already
+    // running. This used to run per ensure, which was once at load and once per node
+    // created; the liveness sweep dials every minute, and a `python3` per loop per
+    // minute to rewrite files nothing will re-read is pure cost.
     let script =
       "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { "
-      + "\(check) >/dev/null 2>&1 || { " + trustSeed + hooksWrite + delivery
+      + deliveryFragment(delivery, ifSessionMissing: check)
+      + "\(check) >/dev/null 2>&1 || { " + trustSeed + hooksWrite
       + "\(create); }; }"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+  }
+
+  /// The delivery, run when the session is missing **or** the host's shim is out of date.
+  ///
+  /// Delivery cannot follow the trust seed and the hooks file behind the existence check.
+  /// Those are read once at session start; the CLI shim is re-executed for as long as the
+  /// session lives, and it speaks a wire protocol to this daemon
+  /// (`RemoteGraphAccess.cliShimStamp` has the full reasoning). Skipping it for a live
+  /// session means a graphcode upgrade never reaches a remote host whose loops are still
+  /// running — and since those loops are unattended by definition, nothing else would
+  /// heal it either: `GhosttyTerminalView.remoteCommand` delivers unconditionally, but
+  /// only when a human opens the loop.
+  ///
+  /// Nor can it stay unconditional, which is what made it a `python3` and ~20 KB of
+  /// base64 per loop per minute once the sweep existed. The stamp splits the difference:
+  /// a healthy tick costs one extra `zmx get` and a `cat` on the same host, and the
+  /// delivery itself runs only when it has something new to say.
+  static func deliveryFragment(_ delivery: String, ifSessionMissing check: String) -> String {
+    guard !delivery.isEmpty else { return "" }
+    let stamp = RemoteProjectLocation.shellQuoted(RemoteGraphAccess.cliShimStamp)
+    let stampFile = RemoteGraphAccess.deliveryStampPath
+    // `!` binds to the pipeline, so this reads (session missing) OR (stamp differs). A
+    // missing session has to re-deliver whatever the stamp says: the create branch below
+    // launches an argv naming the briefing, wake digest and prompt files, and every one
+    // of them rides in this same fragment.
+    return "if ! \(check) >/dev/null 2>&1 "
+      + "|| [ \"$(cat \(stampFile) 2>/dev/null)\" != \(stamp) ]; then "
+      + delivery
+      + "printf '%s' \(stamp) > \(stampFile) 2>/dev/null; fi; "
   }
 
   /// What the ensure dial runs when the check found no session: resume the backend
