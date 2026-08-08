@@ -6,5 +6,6 @@ description: Graphs of live, steerable Claude Code sessions on macOS
 # render only when their value is present, so an empty value ships nothing at all.
 # Cloudflare › Web Analytics › add graphcode.app › copy the beacon token.
 cloudflare_analytics_token:
-# The username in your Buttondown account URL.
-buttondown_username: scgopi
+# The username in your Buttondown account URL. Fill in only once the account exists —
+# the embed endpoint 404s for an unregistered username and the subscriber is lost.
+buttondown_username:
