@@ -21,9 +21,20 @@ struct ProjectSettingsView: View {
 
   /// The threshold fields, text-backed so editing works like a text field: empty is a
   /// legal state *while typing* (an Int binding snapped every backspace straight back),
-  /// and only a valid number is committed to the policy.
-  @State private var gigabytesText = ""
-  @State private var countText = ""
+  /// and only a valid number is committed to the policy. Seeded in `init`, not
+  /// `onAppear`: the sheet keeps its SwiftUI identity between presentations, and
+  /// seeded-on-appear state showed one folder's numbers over another folder's name.
+  @State private var gigabytesText: String
+  @State private var countText: String
+
+  init(projectPath: String, projectName: String) {
+    self.projectPath = projectPath
+    self.projectName = projectName
+    let policy = SettingsModel.shared.settings.worktreePolicy(forProjectPath: projectPath)
+    _gigabytesText = State(
+      initialValue: String(Int((Double(policy.noticeSizeBytes) / Double(1 << 30)).rounded())))
+    _countText = State(initialValue: String(policy.noticeCount))
+  }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
@@ -62,6 +73,7 @@ struct ProjectSettingsView: View {
           )
           .font(.system(size: 11))
           .foregroundStyle(.white.opacity(0.6))
+          .fixedSize(horizontal: false, vertical: true)
         }
 
         Divider().overlay(.white.opacity(0.08))
@@ -113,10 +125,6 @@ struct ProjectSettingsView: View {
     .padding(.bottom, 18)
     .frame(width: 470)
     .background(Theme.sheet)
-    .onAppear {
-      gigabytesText = String(storedGigabytes)
-      countText = String(policy.noticeCount)
-    }
   }
 
   /// One choice with its consequence on the same line — what the segmented control
@@ -142,6 +150,7 @@ struct ProjectSettingsView: View {
         Text(explanation(for: action))
           .font(.system(size: 11))
           .foregroundStyle(.white.opacity(0.55))
+          .fixedSize(horizontal: false, vertical: true)
         Spacer(minLength: 0)
       }
       .padding(.vertical, 4)
@@ -166,12 +175,6 @@ struct ProjectSettingsView: View {
     var updated = policy
     transform(&updated)
     SettingsModel.shared.settings.worktreePolicies[projectPath] = updated
-  }
-
-  /// Whole gigabytes are the honest granularity here: the threshold is a "genuinely
-  /// accumulating" line, not an accounting figure.
-  private var storedGigabytes: Int {
-    Int((Double(policy.noticeSizeBytes) / Double(1 << 30)).rounded())
   }
 
   /// An empty or half-typed field commits nothing — the last valid value stands, and

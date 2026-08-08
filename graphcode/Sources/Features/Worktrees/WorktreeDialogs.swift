@@ -28,7 +28,11 @@ struct WorktreeDialogs: ViewModifier {
           ProjectSettingsView(
             projectPath: path,
             projectName: store.projects[id: path]?.graph.project.name
-              ?? (path as NSString).lastPathComponent)
+              ?? (path as NSString).lastPathComponent
+          )
+          // Fresh identity per folder — a reused sheet showed one folder's thresholds
+          // over another folder's name.
+          .id(path)
         }
       }
   }
