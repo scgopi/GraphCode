@@ -87,8 +87,29 @@ public final class PTYProcessSession: @unchecked Sendable {
       }
     }
 
-    process.terminationHandler = { [weak self] process in
-      self?.masterHandle.readabilityHandler = nil
+    process.terminationHandler = { process in
+      // Detach the async reader first so the drain below is the only consumer left.
+      masterHandle.readabilityHandler = nil
+      // Termination is observed on a different queue than readability, so a process
+      // that writes and immediately exits usually beats the reader to the finish line —
+      // whatever is still in the PTY buffer was dropped here, and the stream closed
+      // without it. That is how every fast metric script (`echo 7; exit`) read as
+      // "printed no number" while slow `zmx` queries mostly survived: the race, not the
+      // output, decided. Everything the child wrote before exiting is already in the
+      // kernel buffer by the time this handler runs, so a non-blocking drain to
+      // EOF/EAGAIN is complete — and non-blocking matters, because a grandchild that
+      // inherited the slave fd could otherwise wedge this handler forever.
+      let descriptor = masterHandle.fileDescriptor
+      let flags = fcntl(descriptor, F_GETFL)
+      _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK)
+      var buffer = [UInt8](repeating: 0, count: 4096)
+      while true {
+        let count = read(descriptor, &buffer, buffer.count)
+        guard count > 0 else { break }
+        if let text = String(bytes: buffer[0..<count], encoding: .utf8) {
+          continuation.yield(.output(text))
+        }
+      }
       continuation.yield(.terminated(succeeded: process.terminationStatus == 0))
       continuation.finish()
     }

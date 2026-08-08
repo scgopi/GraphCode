@@ -47,17 +47,74 @@ public enum ShellPredicateEvaluator {
       return (result.succeeded, Date().timeIntervalSince(started))
     }
 
+  /// A pipe, deliberately not a PTY. This used to run through `PTYProcessSession`, and
+  /// that transport ate the answer: on macOS a PTY's unread buffer is not guaranteed to
+  /// survive the child's exit, and under a background-QoS launchd daemon the reader
+  /// reliably lost that race — every metric script that printed its number and exited
+  /// logged "not measured", with `metricHistory` empty on every node this machine ever
+  /// ran. (A post-exit drain of the master fd recovered nothing, which is how the
+  /// discard was confirmed; the same code wins the race in a foreground test process,
+  /// so no unit test caught it.) A pipe has none of this: the kernel keeps buffered
+  /// pipe output readable after exit, and nothing here needs a terminal — the command
+  /// is a predicate or metric script, not an interactive session. The pipe also ends
+  /// the PTY's `^D\b\b` prelude garbling single-line output.
   private static func run(_ predicate: ShellPredicate) async -> (succeeded: Bool, output: String)? {
     let trimmed = predicate.command.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return nil }
-    do {
-      let session = try PTYProcessSession(
-        arguments: ["-l", "-c", "exec 2>/dev/null; eval \"$GRAPHCODE_PREDICATE\""],
-        workingDirectory: predicate.workingDirectory,
-        extraEnvironment: ["GRAPHCODE_PREDICATE": trimmed])
-      return await session.waitCollectingOutput()
-    } catch {
+
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    process.arguments = ["-l", "-c", "eval \"$GRAPHCODE_PREDICATE\""]
+    if let workingDirectory = predicate.workingDirectory {
+      process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory)
+    }
+    var environment = ProcessInfo.processInfo.environment
+    for key in environment.keys where AgentEnvironment.isInheritedAgentIdentity(key) {
+      environment.removeValue(forKey: key)
+    }
+    environment["GRAPHCODE_PREDICATE"] = trimmed
+    process.environment = environment
+
+    let stdout = Pipe()
+    process.standardOutput = stdout
+    process.standardError = FileHandle.nullDevice
+    process.standardInput = FileHandle.nullDevice
+
+    // Reader and exit are joined by a group, not sequenced: reading after exit
+    // deadlocks a child that filled the pipe, exiting after read is the general case.
+    // The termination handler is set before `run` so no exit can slip between them.
+    let group = DispatchGroup()
+    let collected = CollectedOutput()
+    group.enter()
+    DispatchQueue.global(qos: .utility).async {
+      collected.data = stdout.fileHandleForReading.readDataToEndOfFile()
+      group.leave()
+    }
+    group.enter()
+    process.terminationHandler = { _ in group.leave() }
+
+    do { try process.run() } catch {
+      process.terminationHandler = nil
+      group.leave()
+      // Unblock the reader: with no child, only closing the write end delivers EOF.
+      try? stdout.fileHandleForWriting.close()
       return nil
     }
+
+    return await withCheckedContinuation { continuation in
+      group.notify(queue: .global(qos: .utility)) {
+        continuation.resume(
+          returning: (
+            succeeded: process.terminationStatus == 0,
+            output: String(data: collected.data, encoding: .utf8) ?? ""
+          ))
+      }
+    }
+  }
+
+  /// Reference box for the reader thread's result; the `DispatchGroup` orders the
+  /// write before the read, it just needs somewhere mutable to live.
+  private final class CollectedOutput: @unchecked Sendable {
+    var data = Data()
   }
 }
