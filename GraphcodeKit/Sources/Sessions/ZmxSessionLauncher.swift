@@ -34,15 +34,42 @@ public enum ZmxSessionLauncher {
   /// Returns false when there's no live session to deliver into, so the caller can
   /// report an undelivered message rather than assume it landed.
   static func sendArguments(_ text: String, toNode node: LoopNode) -> [String] {
-    // Same newline flattening as a launch prompt, and for the same reason: `zmx`
-    // terminates what it types with `\r`, so an embedded newline would truncate the
-    // message at the first line.
-    let singleLine =
-      text
-      .replacingOccurrences(of: "\r\n", with: " ")
-      .replacingOccurrences(of: "\r", with: " ")
-      .replacingOccurrences(of: "\n", with: " ")
-    return ["send", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, singleLine]
+    ["send", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, flattened(text)]
+  }
+
+  /// The most a single `zmx send` may carry. One send is one uninterrupted write into
+  /// the session's PTY, and a PTY's kernel input queue holds 4 KB: measured on macOS
+  /// 26, a 3.7 KB message typed as one write arrives intact and a 7.3 KB one vanishes
+  /// *entirely* — while `zmx send` still exits 0, so every layer above reported the
+  /// message delivered. Half the queue leaves room for whatever the session's TUI has
+  /// not yet drained when the write lands.
+  static let maxSendChunkBytes = 2048
+
+  /// The beat between chunks — what gives the session's TUI time to drain one write
+  /// out of the PTY queue before the next lands on top of it.
+  static let interChunkDelay: Duration = .milliseconds(150)
+
+  /// The flattened message, cut into pieces a single `zmx send` can carry. Cuts fall
+  /// on character boundaries — a UTF-8 sequence split across two PTY writes would
+  /// reassemble in the composer only by luck of scheduling.
+  static func messageChunks(_ text: String, limit: Int = maxSendChunkBytes) -> [String] {
+    let flat = flattened(text)
+    guard flat.utf8.count > limit else { return flat.isEmpty ? [] : [flat] }
+    var chunks: [String] = []
+    var current = ""
+    var currentBytes = 0
+    for character in flat {
+      let size = character.utf8.count
+      if currentBytes + size > limit, !current.isEmpty {
+        chunks.append(current)
+        current = ""
+        currentBytes = 0
+      }
+      current.append(character)
+      currentBytes += size
+    }
+    if !current.isEmpty { chunks.append(current) }
+    return chunks
   }
 
   /// Wraps a backend command in an **interactive login** shell, so it resolves the same
@@ -195,12 +222,20 @@ public enum ZmxSessionLauncher {
     }
     guard ZmxLocator.isInstalled, !text.isEmpty else { return false }
     guard await sessionExists(node) else { return false }
-    guard
-      let session = try? PTYProcessSession(
-        executable: ZmxLocator.binaryURL.path,
-        arguments: sendArguments(text, toNode: node))
-    else { return false }
-    guard await session.waitUntilFinished() else { return false }
+    // Typed in PTY-queue-sized pieces rather than one write — see `maxSendChunkBytes`
+    // for what a single oversized write silently does. The pieces just accumulate in
+    // the composer, exactly as the text and the later `\r` already do; nothing is
+    // submitted until the one Enter below.
+    let sessionName = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    for (index, chunk) in messageChunks(text).enumerated() {
+      if index > 0 { try? await Task.sleep(for: interChunkDelay) }
+      guard
+        let session = try? PTYProcessSession(
+          executable: ZmxLocator.binaryURL.path,
+          arguments: ["send", sessionName, chunk])
+      else { return false }
+      guard await session.waitUntilFinished() else { return false }
+    }
     // Typed is not sent: submit as a second, separate keystroke — see `submitArguments`.
     try? await Task.sleep(for: submitDelay)
     guard
@@ -627,7 +662,10 @@ public enum ZmxSessionLauncher {
   static let maximumTypedCommandBytes = 800
 
   /// Newlines are the one thing quoting can't save us from — see `arguments(forNode:)`.
-  private static func flattened(_ text: String) -> String {
+  /// Messages flatten the same way and for the same reason (`sendArguments`,
+  /// `messageChunks`): `zmx` terminates what it types with `\r`, so an embedded
+  /// newline would truncate at the first line.
+  static func flattened(_ text: String) -> String {
     text
       .replacingOccurrences(of: "\r\n", with: " ")
       .replacingOccurrences(of: "\r", with: " ")
@@ -788,9 +826,15 @@ public enum ZmxSessionLauncher {
   static func remoteSendInvocation(
     _ text: String, toNode node: LoopNode, at location: RemoteProjectLocation
   ) -> [String] {
-    let send = quotedCommand(["zmx"] + sendArguments(text, toNode: node))
+    // Chunked like the local path — the remote host's PTY queue is no bigger than
+    // ours — but chained into the one ssh round-trip, with the same drain beat
+    // between writes.
+    let sessionName = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    let sends = messageChunks(text)
+      .map { quotedCommand(["zmx", "send", sessionName, $0]) }
+      .joined(separator: " && sleep 0.15 && ")
     let submit = quotedCommand(["zmx"] + submitArguments(forNode: node))
-    let script = "\(send) && sleep 0.4 && \(submit)"
+    let script = "\(sends) && sleep 0.4 && \(submit)"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
   }
 

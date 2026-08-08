@@ -249,4 +249,59 @@ struct ZmxSessionLauncherTests {
       ZmxSessionLauncher.activityLabelArguments(forNode: node)
         == ["get", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "activity"])
   }
+
+  // MARK: - Message chunking
+
+  // Why chunks exist at all: one `zmx send` is one uninterrupted PTY write, and a
+  // message bigger than the PTY's 4 KB input queue vanished *entirely* — while every
+  // layer above, `zmx send`'s exit 0 included, reported it delivered. Measured, not
+  // theorized: 3.7 KB in one write arrived byte-exact, 7.3 KB arrived as nothing.
+
+  @Test
+  func aShortMessageIsOneChunkUnchanged() {
+    #expect(ZmxSessionLauncher.messageChunks("task done") == ["task done"])
+    #expect(ZmxSessionLauncher.messageChunks("") == [])
+  }
+
+  @Test
+  func chunksReassembleToExactlyTheFlattenedMessage() {
+    let message = String(repeating: "GC-01-ABCDEFGHIJ ", count: 500)  // 8.5 KB
+    let chunks = ZmxSessionLauncher.messageChunks(message)
+
+    #expect(chunks.count > 1)
+    #expect(chunks.joined() == ZmxSessionLauncher.flattened(message))
+  }
+
+  @Test
+  func noChunkExceedsWhatOnePTYWriteCanCarry() {
+    let message = String(repeating: "x", count: 10_000)
+    for chunk in ZmxSessionLauncher.messageChunks(message) {
+      #expect(chunk.utf8.count <= ZmxSessionLauncher.maxSendChunkBytes)
+    }
+  }
+
+  @Test
+  func aMultibyteCharacterIsNeverSplitAcrossChunks() {
+    // A UTF-8 sequence split across two PTY writes reassembles in the composer only by
+    // luck of scheduling. Repeating a 4-byte character makes every possible cut point
+    // mid-character unless the chunker counts bytes per character.
+    let message = String(repeating: "🐛", count: 1_500)  // 6 KB of 4-byte characters
+    let chunks = ZmxSessionLauncher.messageChunks(message)
+
+    #expect(chunks.count > 1)
+    #expect(chunks.joined() == message)
+    for chunk in chunks {
+      #expect(chunk.utf8.count <= ZmxSessionLauncher.maxSendChunkBytes)
+      #expect(chunk.unicodeScalars.allSatisfy { $0.value == "🐛".unicodeScalars.first!.value })
+    }
+  }
+
+  @Test
+  func chunkingFlattensNewlinesBeforeCutting() {
+    // Flatten-then-cut, not cut-then-flatten: a cut landing between `\r` and `\n`
+    // would turn one newline into two spaces and the reassembled message would not
+    // match what a single small send produces.
+    let chunks = ZmxSessionLauncher.messageChunks("line one\r\nline two")
+    #expect(chunks == ["line one line two"])
+  }
 }
