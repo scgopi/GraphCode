@@ -160,7 +160,7 @@ struct AppWorktreesReducer: Reducer {
           let ref = node.worktreeBinding
         else { return .none }
         return .run { send in
-          try? await gitClient.removeWorktreeAndBranch(ref, false)
+          try? await gitClient.removeWorktreeAndBranch(ref, false, false)
           await send(.worktrees(.statsReloadRequested(projectPath: path)))
         }
 
@@ -271,7 +271,10 @@ struct AppWorktreesReducer: Reducer {
       guard assessment.tier == .safeToRemove else { return }
       switch policy.onResolveLanded {
       case .remove:
-        try? await gitClient.removeWorktreeAndBranch(inspection.ref, inspection.facts.prunable)
+        // Never forced: the automatic path only ever touches the safe tier, which is
+        // clean by definition.
+        try? await gitClient.removeWorktreeAndBranch(
+          inspection.ref, inspection.facts.prunable, false)
         await send(.worktrees(.statsReloadRequested(projectPath: path)))
       case .ask:
         await send(

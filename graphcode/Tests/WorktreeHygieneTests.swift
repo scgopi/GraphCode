@@ -123,18 +123,17 @@ struct WorktreeHygieneTests {
   }
 
   @Test
-  func aDirtyWorktreeIsNeverRemovable() {
-    // `git worktree remove` without --force refuses a dirty tree, and forcing would
-    // break the footnote's promise — so the checkbox must not offer what git will
-    // refuse. Unmerged-but-clean stays removable: the commits survive in the reflog.
+  func onlyARunningLoopLocksItsWorktree() {
+    // Anything not in use is the human's to remove — a dirty tree included, which is
+    // the one whose removal discards files and therefore confirms first.
     let dirty = WorktreeAssessment(ref: ref(), facts: facts(dirty: 2), binding: .none)
-    #expect(dirty.tier == .lookBeforeRemoving)
-    #expect(!dirty.isRemovable)
+    #expect(dirty.isRemovable)
+    #expect(dirty.removalDiscardsFiles)
 
     let unmergedButClean = WorktreeAssessment(
       ref: ref(), facts: facts(notLanded: 3), binding: .none)
-    #expect(unmergedButClean.tier == .lookBeforeRemoving)
     #expect(unmergedButClean.isRemovable)
+    #expect(!unmergedButClean.removalDiscardsFiles)
 
     let running = WorktreeAssessment(
       ref: ref(), facts: facts(), binding: .running(loopTitle: "busy"))
@@ -143,6 +142,7 @@ struct WorktreeHygieneTests {
     let prunable = WorktreeAssessment(
       ref: ref(), facts: facts(prunable: true, size: nil), binding: .none)
     #expect(prunable.isRemovable)
+    #expect(!prunable.removalDiscardsFiles)
   }
 
   @Test

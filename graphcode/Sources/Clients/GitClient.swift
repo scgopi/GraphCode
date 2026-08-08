@@ -23,11 +23,11 @@ struct GitClient: Sendable {
   /// One worktree's on-disk size, for callers to stream in after the facts.
   var worktreeSizeBytes: @Sendable (_ worktreePath: String) async -> Int64?
   /// Removes a worktree and deletes its branch. A prunable entry (admin file, no
-  /// directory) is pruned instead of removed. The directory must be fully committed —
-  /// `worktree remove` without `--force` refuses a dirty tree, which is the safety
-  /// footnote enforced by git itself.
+  /// directory) is pruned instead of removed. `force` is for a dirty tree the human
+  /// explicitly confirmed losing — without it git refuses uncommitted files, which is
+  /// the default's safety.
   var removeWorktreeAndBranch:
-    @Sendable (_ worktree: WorktreeRef, _ prunable: Bool) async throws -> Void
+    @Sendable (_ worktree: WorktreeRef, _ prunable: Bool, _ force: Bool) async throws -> Void
   /// Streams a `git clone --progress` into `destination`: progress lines while it runs,
   /// `.finished` on success, a thrown `GitClientError` on failure. Streaming is what lets
   /// the form show a live percentage instead of a spinner over a multi-minute network
@@ -113,12 +113,14 @@ extension GitClient: DependencyKey {
         .flatMap { Int64($0.trimmingCharacters(in: .whitespaces)) }
         .map { $0 * 1024 }
     },
-    removeWorktreeAndBranch: { worktree, prunable in
+    removeWorktreeAndBranch: { worktree, prunable, force in
       if prunable {
         _ = try await run("git", ["-C", worktree.repositoryPath, "worktree", "prune"])
       } else {
-        _ = try await run(
-          "git", ["-C", worktree.repositoryPath, "worktree", "remove", worktree.worktreePath])
+        var arguments = ["-C", worktree.repositoryPath, "worktree", "remove"]
+        if force { arguments.append("--force") }
+        arguments.append(worktree.worktreePath)
+        _ = try await run("git", arguments)
       }
       // `-D`, not `-d`: the landed check was `git cherry`, which counts squash merges —
       // exactly the branches `-d` would refuse. The reflog keeps the tip recoverable.
