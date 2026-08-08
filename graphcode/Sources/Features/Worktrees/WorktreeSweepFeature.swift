@@ -21,7 +21,6 @@ struct WorktreeSweepFeature {
     /// Selected worktree paths. The safe tier starts fully selected; the look tier is
     /// never preselected; the in-use tier is not selectable at all.
     var selection: Set<String> = []
-    var isRemoving = false
     /// Up while the "this discards uncommitted files" confirmation is showing — the
     /// gate between selecting a dirty worktree and actually forcing it away.
     var isConfirmingRemoval = false
@@ -57,11 +56,14 @@ struct WorktreeSweepFeature {
     case loadFailed(String)
     case rowToggled(String)
     case allSafeToggled
+    /// Remove doesn't remove here: this scope only decides whether the discard
+    /// confirmation must intervene. `AppWorktreesReducer` intercepts the same actions,
+    /// closes the sheet, and runs the removal in the background — the sheet must not
+    /// outlive the click, and a child effect would die with the sheet's state.
     case removeTapped
     /// The dirty-selection confirmation's two exits.
     case removeConfirmed
     case removeCancelled
-    case removalFinished(failure: String?)
   }
 
   @Dependency(\.gitClient) var gitClient
@@ -83,14 +85,12 @@ struct WorktreeSweepFeature {
 
       case .assessmentsLoaded(let assessments):
         state.assessments = assessments
-        // Preselect the safe tier only — and only on the first load, so a refresh after
-        // a removal doesn't quietly re-tick boxes the human just made a decision about.
-        if state.selection.isEmpty && !state.isRemoving {
+        // Preselect the safe tier only, on the first load.
+        if state.selection.isEmpty {
           state.selection = Set(assessments.filter { $0.tier == .safeToRemove }.map(\.id))
         } else {
           state.selection.formIntersection(assessments.map(\.id))
         }
-        state.isRemoving = false
         // The rows are on screen; now walk the disk. Bounded, so 38 worktrees is four
         // `du`s at a time rather than 38 — and a prunable entry has no directory to ask.
         let unsized = assessments.filter { $0.facts.sizeBytes == nil && !$0.facts.prunable }
@@ -120,7 +120,6 @@ struct WorktreeSweepFeature {
 
       case .loadFailed(let message):
         state.assessments = state.assessments ?? []
-        state.isRemoving = false
         state.failure = message
         return .none
 
@@ -145,61 +144,19 @@ struct WorktreeSweepFeature {
         return .none
 
       case .removeTapped:
-        let doomed = state.selected
-        guard !doomed.isEmpty, !state.isRemoving else { return .none }
-        // Losing uncommitted files is the one cost a checkbox alone must not carry —
-        // the confirmation names it before anything is forced.
-        if doomed.contains(where: \.removalDiscardsFiles) {
+        // Losing uncommitted files is the one cost a click alone must not carry —
+        // the confirmation names it before anything is forced. A clean selection
+        // passes straight through to the parent's interception.
+        if state.selected.contains(where: \.removalDiscardsFiles) {
           state.isConfirmingRemoval = true
-          return .none
         }
-        return removalEffect(&state)
+        return .none
 
-      case .removeConfirmed:
-        state.isConfirmingRemoval = false
-        return removalEffect(&state)
-
-      case .removeCancelled:
+      case .removeConfirmed, .removeCancelled:
         state.isConfirmingRemoval = false
         return .none
 
-      case .removalFinished(let failure):
-        state.failure = failure
-        state.selection = []
-        // Re-read rather than locally pruning the list: git is the authority on what a
-        // removal actually left behind.
-        return .send(.task)
       }
-    }
-  }
-
-  /// The removal itself, shared by the direct path and the confirmed one. `--force`
-  /// only for rows whose removal discards files — and only ever after the confirmation.
-  private func removalEffect(_ state: inout State) -> Effect<Action> {
-    let doomed = state.selected
-    guard !doomed.isEmpty, !state.isRemoving else { return .none }
-    state.isRemoving = true
-    state.failure = nil
-    return .run { send in
-      var failures: [String] = []
-      for assessment in doomed {
-        do {
-          try await gitClient.removeWorktreeAndBranch(
-            assessment.ref, assessment.facts.prunable, assessment.removalDiscardsFiles)
-        } catch {
-          // Git's own last word, not a dumped enum — "fatal: … contains modified
-          // or untracked files" explains itself; the case name explains nothing.
-          let reason: String
-          if case GitClientError.commandFailed(_, _, let output) = error {
-            reason = output.trimmingCharacters(in: .whitespacesAndNewlines)
-          } else {
-            reason = error.localizedDescription
-          }
-          failures.append("\(assessment.ref.branch): \(reason)")
-        }
-      }
-      await send(
-        .removalFinished(failure: failures.isEmpty ? nil : failures.joined(separator: "\n")))
     }
   }
 

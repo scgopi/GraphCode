@@ -269,9 +269,9 @@ struct WorktreeSweepView: View {
       Spacer()
       Button("Cancel") { dismiss() }
         .keyboardShortcut(.cancelAction)
-      Button(removeTitle) { store.send(.removeTapped) }
+      Button("Remove \(store.selected.count)") { store.send(.removeTapped) }
         .keyboardShortcut(.defaultAction)
-        .disabled(store.selected.isEmpty || store.isRemoving)
+        .disabled(store.selected.isEmpty)
     }
   }
 
@@ -281,10 +281,6 @@ struct WorktreeSweepView: View {
     let what = count == 1 ? "1 worktree" : "\(count) worktrees"
     guard store.selectedBytes > 0 else { return "Removes \(what)" }
     return "Removes \(what) · frees \(Self.size(store.selectedBytes))"
-  }
-
-  private var removeTitle: String {
-    store.isRemoving ? "Removing…" : "Remove \(store.selected.count)"
   }
 
   /// `412 MB`, the way the Finder would say it.
