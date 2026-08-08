@@ -60,14 +60,26 @@ struct CanvasTransform: Equatable {
       in: viewport)
   }
 
+  /// Where an *automatic* fit stops zooming out — the default a canvas opens at.
+  ///
+  /// Below this the cards are wallpaper, and a Graph view that greets you at 40% reads
+  /// as a regression, not as thoroughness. Deliberately higher than `minFitScale`,
+  /// which remains ⌘9's floor: a human who pressed "fit the whole graph" asked to see
+  /// everything (#59), where a view centring itself asked nothing.
+  static let defaultFitFloor: CGFloat = 0.8
+
   /// The whole graph in view at once. Never magnifies past 1× — "fit" on a two-loop
-  /// workspace should show two ordinary cards, not two billboards.
-  static func fitting(_ content: CGSize, in viewport: CGSize) -> Self {
+  /// workspace should show two ordinary cards, not two billboards. `floor` is how far
+  /// out the fit may go: `minFitScale` for an explicit ⌘9, `defaultFitFloor` for a
+  /// canvas centring itself on open.
+  static func fitting(
+    _ content: CGSize, in viewport: CGSize, floor: CGFloat = minFitScale
+  ) -> Self {
     guard content.width > 0, content.height > 0, viewport.width > 0, viewport.height > 0
     else { return Self() }
     let raw = min(viewport.width / content.width, viewport.height / content.height)
     // A little margin, so the outermost cards aren't flush against the pane's edges.
-    let scale = min(max(raw * 0.92, minFitScale), 1)
+    let scale = min(max(raw * 0.92, floor), 1)
     return Self(scale: scale, offset: centringOffset(content, in: viewport, at: scale))
   }
 

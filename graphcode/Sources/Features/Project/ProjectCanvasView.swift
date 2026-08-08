@@ -184,11 +184,13 @@ struct ProjectCanvasView: View {
 
   /// Centres the graph, but only while the canvas is still where it started: once
   /// someone has panned or zoomed, their view is theirs and nothing here moves it.
+  // Floored at `defaultFitFloor` like the Graph view's own opening fit — an automatic
+  // centring must not greet anyone with wallpaper-sized cards; ⌘9 still goes deeper.
   private func centreIfUntouched(in viewport: CGSize, content: CGSize) {
     guard transform == CanvasTransform(), viewport != .zero, content != .zero else {
       return
     }
-    transform = .fitting(content, in: viewport)
+    transform = .fitting(content, in: viewport, floor: CanvasTransform.defaultFitFloor)
   }
 
   private func canvas(_ derived: Derived) -> some View {
