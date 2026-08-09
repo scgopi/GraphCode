@@ -139,6 +139,88 @@ struct PresencePollingTests {
     #expect(updated?.displayState == .idle)
   }
 
+  // MARK: - The line under the pill
+
+  /// Answers "what is it doing", and counts who was asked — the second half of the cost
+  /// model, since this reading rides the same tick as presence.
+  private actor ActivityProbe {
+    private(set) var asked: [String] = []
+    private var answer = "editing GraphStore.swift"
+
+    func setAnswer(_ text: String) { answer = text }
+
+    func read(_ node: LoopNode) -> String? {
+      asked.append(node.title)
+      return answer
+    }
+  }
+
+  @Test
+  func aWorkingLoopIsAskedWhatItIsWorkingOn() async {
+    // The poll used to refresh presence alone, so a card's live line only ever moved when
+    // a human pressed refresh — every loop said RUNNING over the sentence it was created
+    // with, however long ago that was.
+    let presence = Probe()
+    await presence.answer("A", with: .busy)
+    let activity = ActivityProbe()
+    let store = GraphStore(
+      graph: graph([node("A", .running)]),
+      onReadActivity: { node, _ in await activity.read(node) },
+      onReadPresence: { node, _ in await presence.read(node) })
+    let descriptor = await attach(to: store)
+    defer { close(descriptor) }
+
+    await store.pollPresence()
+
+    #expect(await activity.asked == ["A"])
+    #expect(await store.graph.nodes.first?.activity == "editing GraphStore.swift")
+  }
+
+  @Test
+  func aQuietLoopIsNotAskedAndStopsClaimingToBeMidEdit() async {
+    // A loop that has answered is not editing anything, whatever its label still holds.
+    // Clearing without a probe is both the honest answer and the cheap one — on a remote
+    // project each of these is an ssh round trip.
+    let presence = Probe()
+    await presence.answer("busy", with: .busy)
+    await presence.answer("quiet", with: .idle)
+    let activity = ActivityProbe()
+    var stale = node("quiet", .running)
+    stale.activity = "editing GraphStore.swift"
+    let store = GraphStore(
+      graph: graph([node("busy", .running), stale, node("done", .succeeded)]),
+      onReadActivity: { node, _ in await activity.read(node) },
+      onReadPresence: { node, _ in await presence.read(node) })
+    let descriptor = await attach(to: store)
+    defer { close(descriptor) }
+
+    await store.pollPresence()
+
+    #expect(await activity.asked == ["busy"])
+    #expect(await store.graph.nodes[id: stale.id]?.activity == nil)
+  }
+
+  @Test
+  func aChangedActivityAloneIsWorthTellingSomeoneAbout() async {
+    // Presence settles at busy and stays there while the work moves from file to file.
+    // Keying the notify off presence alone would freeze the line at the first reading.
+    let presence = Probe()
+    await presence.answer("A", with: .busy)
+    let activity = ActivityProbe()
+    let store = GraphStore(
+      graph: graph([node("A", .running)]),
+      onReadActivity: { node, _ in await activity.read(node) },
+      onReadPresence: { node, _ in await presence.read(node) })
+    let descriptor = await attach(to: store)
+    defer { close(descriptor) }
+
+    await store.pollPresence()
+    await activity.setAnswer("running make check")
+    await store.pollPresence()
+
+    #expect(await store.graph.nodes.first?.activity == "running make check")
+  }
+
   @Test
   func theIntervalIsSlowEnoughToBeBackgroundNoise() {
     // Fifteen seconds is the lag a human sees between a loop finishing and its card

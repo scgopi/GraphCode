@@ -45,6 +45,186 @@ struct PresenceReportingTests {
     #expect(command(for: "SessionEnd")?.contains("presence=absent") == true)
   }
 
+  // MARK: - What the session is doing
+
+  /// Every command a given event runs, not just the first: `PreToolUse` reports a presence
+  /// *and* runs the activity reporter, and the two are separate on purpose.
+  private func commands(for event: String, zmxPath: String? = nil) -> [String] {
+    guard let matchers = hooks(.claudeCode, zmxPath: zmxPath)?[event] as? [[String: Any]],
+      let entries = matchers.first?["hooks"] as? [[String: Any]]
+    else { return [] }
+    return entries.compactMap { $0["command"] as? String }
+  }
+
+  /// Runs the generated reporter the way Claude Code runs it — `/bin/sh`, the hook payload
+  /// on stdin — against a `zmx` that records what it was asked to set. The label it wrote,
+  /// or `nil` if it wrote nothing.
+  ///
+  /// Through a real shell rather than by asserting on the script's text: the whole risk in
+  /// this file is that a `sed` expression survives being Swift, being JSON and being shell
+  /// and still doesn't match what a hook actually receives.
+  private func reportedLabel(for payload: String) throws -> String? {
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+      .appendingPathComponent("graphcode-activity-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let recording = directory.appendingPathComponent("set.txt")
+    let fakeZmx = directory.appendingPathComponent("zmx")
+    try "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '\(recording.path)'\n"
+      .write(to: fakeZmx, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o755], ofItemAtPath: fakeZmx.path)
+
+    let script = directory.appendingPathComponent("activity.sh")
+    try PresenceHooks.activityScript(zmxPath: fakeZmx.path)
+      .write(to: script, atomically: true, encoding: .utf8)
+
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = [script.path]
+    process.environment = ["ZMX_SESSION": "graphcode-test", "PATH": "/usr/bin:/bin"]
+    let input = Pipe()
+    process.standardInput = input
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    try process.run()
+    input.fileHandleForWriting.write(Data(payload.utf8))
+    try input.fileHandleForWriting.close()
+    process.waitUntilExit()
+
+    // Never non-zero: `PreToolUse` treats 2 as "block this tool call" and anything else
+    // non-zero as an error to print over the human's own session.
+    #expect(process.terminationStatus == 0)
+    guard let recorded = try? String(contentsOf: recording, encoding: .utf8),
+      let line = recorded.split(separator: "\n").last,
+      let label = line.split(separator: " ").last.map(String.init)
+    else { return nil }
+    return label
+  }
+
+  /// What a card would show for a payload — both halves of the channel, since an encoding
+  /// the reader can't undo is the same bug as no encoding at all.
+  private func activity(for payload: String) throws -> String? {
+    guard let label = try reportedLabel(for: payload) else { return nil }
+    return ZmxSessionLauncher.parseActivityLabel(label)
+  }
+
+  private func payload(tool: String, _ input: String) -> String {
+    """
+    {"session_id":"a","cwd":"/w","hook_event_name":"PreToolUse","tool_name":"\(tool)",\
+    "tool_input":\(input),"tool_use_id":"toolu_1"}
+    """
+  }
+
+  @Test
+  func aToolCallSaysWhatItIsDoingToWhat() throws {
+    // The complaint this answers: eight loops, all of them RUNNING, none of them saying
+    // what they were running.
+    #expect(
+      try activity(for: payload(tool: "Edit", #"{"file_path":"/w/GraphStore.swift"}"#))
+        == "editing GraphStore.swift")
+    #expect(
+      try activity(for: payload(tool: "Read", #"{"file_path":"/w/docs/04-cli-backends.md"}"#))
+        == "reading 04-cli-backends.md")
+    #expect(
+      try activity(for: payload(tool: "Bash", #"{"command":"make check","description":"gate"}"#))
+        == "running make check")
+    #expect(
+      try activity(for: payload(tool: "Grep", #"{"pattern":"refreshActivity"}"#))
+        == "searching for refreshActivity")
+    #expect(
+      try activity(for: payload(tool: "Task", #"{"description":"Find flaky tests"}"#))
+        == "delegating Find flaky tests")
+  }
+
+  @Test
+  func aToolNobodyMappedStillSaysSomething() throws {
+    // A card reading "using WebSearch" is worth more than a card reading nothing, and the
+    // set of tools is not ours to keep up with.
+    #expect(try activity(for: payload(tool: "ExitPlanMode", "{}")) == "using ExitPlanMode")
+    #expect(
+      try activity(for: payload(tool: "mcp__playwright__browser_click", "{}"))
+        == "using browser_click")
+  }
+
+  @Test
+  func aPayloadWithNoToolInItReportsNothing() throws {
+    // `k=` is how `zmx` removes a label, so the card falls back to what the loop was
+    // handed rather than keeping the last sentence forever.
+    #expect(try reportedLabel(for: "{}") == "activity=")
+    #expect(try activity(for: "{}") == nil)
+  }
+
+  @Test
+  func theLabelOnlyEverHoldsCharactersZmxWillKeep() throws {
+    // `zmx` takes `[A-Za-z0-9._-]` in a value and silently truncates at the first space:
+    // `activity=editing Loop.swift` stores `editing`. Everything else is encoded, and
+    // this is the assertion that says so for a deliberately hostile command.
+    let hostile = payload(
+      tool: "Bash", #"{"command":"git log --oneline | grep 'fix: don_t' > /tmp/x"}"#)
+    let label = try #require(try reportedLabel(for: hostile))
+    let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz")
+      .union(CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-="))
+
+    #expect(label.unicodeScalars.allSatisfy(allowed.contains))
+    // And it still reads as a sentence on the other side.
+    #expect(try activity(for: hostile)?.hasPrefix("running git log") == true)
+  }
+
+  @Test
+  func anUnderscoreSurvivesTheRoundTrip() {
+    // The one character the encoding has to escape as well as spaces, or every
+    // `snake_case` filename comes back mangled — `_5F` is a literal underscore.
+    #expect(
+      ZmxSessionLauncher.decodedActivity("editing_20loop_5Fnode.swift") == "editing loop_node.swift"
+    )
+    // A value written before the encoding existed, or by hand, is text.
+    #expect(ZmxSessionLauncher.decodedActivity("thinking") == "thinking")
+    #expect(ZmxSessionLauncher.decodedActivity("a_zz") == "a_zz")
+    // And an escape naming a control character is text too, not a control character on a
+    // card: the writer only ever emits printable ones.
+    #expect(ZmxSessionLauncher.decodedActivity("bell_07here") == "bell_07here")
+  }
+
+  @Test
+  func onlyAToolCallKnowsWhatASessionIsDoing() {
+    // Every other event clears the label in the same write that reports its presence: a
+    // card reading "editing GraphStore.swift" under an IDLE pill is the same stale claim
+    // the presence work took out of the pill.
+    for event in ["SessionStart", "UserPromptSubmit", "Notification", "Stop", "SessionEnd"] {
+      #expect(command(for: event)?.contains("activity=") == true)
+    }
+    #expect(command(for: "PreToolUse")?.contains("activity=") == false)
+  }
+
+  @Test
+  func theReporterRidesBesideThePresenceReportRatherThanInsideIt() throws {
+    // Presence is what the pill, the attention rollup and `MessageBus.deliverability` key
+    // off. It must not stop being reported because the reporter of a nicety went wrong —
+    // hence two commands, and hence the guard that makes a missing file a no-op instead
+    // of a hook error printed over someone's turn.
+    let bodies = commands(for: "PreToolUse")
+
+    #expect(bodies.count == 2)
+    #expect(bodies.first?.contains("presence=busy") == true)
+    #expect(bodies.last?.hasPrefix("if [ -r ") == true)
+    #expect(bodies.last?.contains("activity.sh") == true)
+    #expect(bodies.last?.hasSuffix("exit 0") == true)
+  }
+
+  @Test
+  func aRemoteSessionIsHandedTheReporterTooNotJustTheSettingsThatNameIt() throws {
+    let fragment = try #require(PresenceHooks.remoteWriteFragment())
+
+    // The script itself, written on the host where it will run — a settings file naming a
+    // path that was never created is a silent no-op on every remote loop.
+    #expect(fragment.contains("$HOME/.graphcode/hooks/activity.sh"))
+    #expect(fragment.contains("tool_name"))
+    // And by bare name there, because that host's `zmx` is not at this Mac's path.
+    #expect(fragment.contains("/Users/") == false)
+  }
+
   @Test
   func aSubagentFinishingIsNotTheLoopFinishing() {
     // `SubagentStop` fires while the main agent is still working. Reporting idle there
