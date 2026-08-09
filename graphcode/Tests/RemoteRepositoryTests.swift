@@ -281,18 +281,18 @@ struct RemoteRepositoryTests {
     #expect(store.state.remoteDraft?.failureMessage?.contains("zmx") == true)
   }
 
-  // MARK: - Server parameters
+  // MARK: - Connection info
 
   @Test
   @MainActor
-  func serverParametersFillTheSheetFromTheProjectPath() async {
+  func connectionInfoFillsTheSheetFromTheProjectPath() async {
     let store = TestStore(initialState: WelcomeFeature.State()) {
       WelcomeFeature()
     }
     store.exhaustivity = .off
 
     await store.send(
-      .remoteParametersRequested(projectPath: "ssh://dev@build-box:2222/home/dev/widget"))
+      .remoteConnectionRequested(projectPath: "ssh://dev@build-box:2222/home/dev/widget"))
 
     let draft = store.state.remoteDraft
     #expect(draft?.server == "build-box")
@@ -307,13 +307,13 @@ struct RemoteRepositoryTests {
 
   @Test
   @MainActor
-  func aLocalFolderHasNoServerParametersToShow() async {
+  func aLocalFolderHasNoConnectionInfoToShow() async {
     let store = TestStore(initialState: WelcomeFeature.State()) {
       WelcomeFeature()
     }
     store.exhaustivity = .off
 
-    await store.send(.remoteParametersRequested(projectPath: "/Users/dev/widget"))
+    await store.send(.remoteConnectionRequested(projectPath: "/Users/dev/widget"))
 
     #expect(store.state.remoteDraft == nil)
   }
@@ -332,7 +332,7 @@ struct RemoteRepositoryTests {
     store.exhaustivity = .off
 
     await store.send(
-      .remoteParametersRequested(projectPath: "ssh://dev@build-box:22/home/dev/widget"))
+      .remoteConnectionRequested(projectPath: "ssh://dev@build-box:22/home/dev/widget"))
     await store.send(.remoteSubmitted)
     await store.finish()
 

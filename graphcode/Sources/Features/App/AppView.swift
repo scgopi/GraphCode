@@ -52,7 +52,7 @@ struct AppView: View {
       OnboardingView { store.send(.onboardingDismissed) }
     }
     // On the split view rather than on the sidebar that opens it: the same sheet also
-    // shows an existing remote's parameters, and that menu is reachable from the
+    // shows an existing remote's connection, and that menu is reachable from the
     // overview's lane captions with the sidebar column collapsed.
     .sheet(
       isPresented: Binding(

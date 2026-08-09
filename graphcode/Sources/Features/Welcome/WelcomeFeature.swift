@@ -146,7 +146,7 @@ struct WelcomeFeature {
     case cloneFinished(path: String)
     case cloneFailed(String)
     case addRemoteRepositoryButtonTapped
-    case remoteParametersRequested(projectPath: String)
+    case remoteConnectionRequested(projectPath: String)
     case remoteSubmitted
     case remoteCancelled
     case remoteValidated(projectPath: String)
@@ -289,7 +289,7 @@ struct WelcomeFeature {
         state.remoteDraft = RemoteDraft()
         return .none
 
-      case .remoteParametersRequested(let projectPath):
+      case .remoteConnectionRequested(let projectPath):
         guard let location = RemoteProjectLocation.parse(projectPath: projectPath)
         else { return .none }
         state.remoteDraft = .inspecting(location, projectPath: projectPath)

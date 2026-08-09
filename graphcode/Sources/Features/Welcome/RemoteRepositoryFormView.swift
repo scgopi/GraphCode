@@ -7,7 +7,7 @@ import SwiftUI
 /// repo, zmx being installed there), because each of those failures would otherwise
 /// surface later as a loop that silently does nothing.
 ///
-/// The same sheet doubles as the read-only view of an already-added remote's parameters
+/// The same sheet doubles as the read-only view of an already-added remote's connection
 /// (`RemoteDraft.isInspecting`), so the connection is described in one place and can't
 /// drift between the two.
 struct RemoteRepositoryFormView: View {
@@ -17,7 +17,7 @@ struct RemoteRepositoryFormView: View {
 
   var body: some View {
     VStack(spacing: 12) {
-      Text(isInspecting ? "Server Parameters" : "Add Remote Repository").font(.headline)
+      Text(isInspecting ? "Remote Connection" : "Add Remote Repository").font(.headline)
 
       Form {
         if isInspecting {
