@@ -119,14 +119,6 @@ struct AppSidebarView: View {
       ) {
         CloneRepositoryFormView(store: store.scope(state: \.welcome, action: \.welcome))
       }
-      .sheet(
-        isPresented: Binding(
-          get: { store.welcome.remoteDraft != nil },
-          set: { if !$0 { store.send(.welcome(.remoteCancelled)) } }
-        )
-      ) {
-        RemoteRepositoryFormView(store: store.scope(state: \.welcome, action: \.welcome))
-      }
       .confirmationDialog(
         "Delete this project's loops?",
         isPresented: Binding(

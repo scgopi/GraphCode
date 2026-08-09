@@ -96,6 +96,7 @@ extension GraphOverviewView {
       .contextMenu {
         if !folder.isGlobal {
           FolderHygieneMenuItems(store: store, projectPath: folder.path)
+          RemoteServerMenuItems(store: store, projectPath: folder.path)
           Divider()
           Button("Close Folder") { store.send(.projectCloseTapped(folder.path)) }
         }

@@ -51,6 +51,17 @@ struct AppView: View {
     ) {
       OnboardingView { store.send(.onboardingDismissed) }
     }
+    // On the split view rather than on the sidebar that opens it: the same sheet also
+    // shows an existing remote's parameters, and that menu is reachable from the
+    // overview's lane captions with the sidebar column collapsed.
+    .sheet(
+      isPresented: Binding(
+        get: { store.welcome.remoteDraft != nil },
+        set: { if !$0 { store.send(.welcome(.remoteCancelled)) } }
+      )
+    ) {
+      RemoteRepositoryFormView(store: store.scope(state: \.welcome, action: \.welcome))
+    }
     // The window's own backdrop, and the glass every `Theme` scrim is layered over —
     // this is what makes the whole window translucent rather than only the sidebar.
     // A material here (rather than a color) is what lets the window sample the desktop

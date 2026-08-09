@@ -6,35 +6,51 @@ import SwiftUI
 /// Everything is validated before the project is added (reachability, the path being a
 /// repo, zmx being installed there), because each of those failures would otherwise
 /// surface later as a loop that silently does nothing.
+///
+/// The same sheet doubles as the read-only view of an already-added remote's parameters
+/// (`RemoteDraft.isInspecting`), so the connection is described in one place and can't
+/// drift between the two.
 struct RemoteRepositoryFormView: View {
   @Bindable var store: StoreOf<WelcomeFeature>
 
+  private var isInspecting: Bool { store.remoteDraft?.isInspecting == true }
+
   var body: some View {
     VStack(spacing: 12) {
-      Text("Add Remote Repository").font(.headline)
+      Text(isInspecting ? "Server Parameters" : "Add Remote Repository").font(.headline)
 
       Form {
-        TextField("Server", text: field(\.server), prompt: Text("build-box.local"))
+        if isInspecting {
+          LabeledContent("Server") { value(\.server) }
+          LabeledContent("User") { value(\.user) }
+          LabeledContent("Port") { value(\.port) }
+          LabeledContent("Path") { value(\.remotePath) }
+        } else {
+          TextField("Server", text: field(\.server), prompt: Text("build-box.local"))
+            .autocorrectionDisabled()
+            .font(.system(.body, design: .monospaced))
+          TextField("User", text: field(\.user), prompt: Text("your login on the server"))
+            .autocorrectionDisabled()
+            .font(.system(.body, design: .monospaced))
+          TextField("Port", text: field(\.port), prompt: Text("22"))
+            .font(.system(.body, design: .monospaced))
+          TextField(
+            "Path", text: field(\.remotePath),
+            prompt: Text("/home/you/projects/repo — absolute")
+          )
           .autocorrectionDisabled()
           .font(.system(.body, design: .monospaced))
-        TextField("User", text: field(\.user), prompt: Text("your login on the server"))
-          .autocorrectionDisabled()
-          .font(.system(.body, design: .monospaced))
-        TextField("Port", text: field(\.port), prompt: Text("22"))
-          .font(.system(.body, design: .monospaced))
-        TextField(
-          "Path", text: field(\.remotePath),
-          prompt: Text("/home/you/projects/repo — absolute")
-        )
-        .autocorrectionDisabled()
-        .font(.system(.body, design: .monospaced))
+        }
       }
       .formStyle(.columns)
       .fixedSize(horizontal: false, vertical: true)
 
       Text(
-        "Needs key-based SSH (no password prompts), and zmx installed on the server. "
-          + "Loops run on the server; this Mac steers them."
+        isInspecting
+          ? "Loops for this project run on the server; this Mac steers them. To point at a "
+            + "different server or path, add it as another remote repository."
+          : "Needs key-based SSH (no password prompts), and zmx installed on the server. "
+            + "Loops run on the server; this Mac steers them."
       )
       .font(.caption2)
       .foregroundStyle(.secondary)
@@ -49,18 +65,37 @@ struct RemoteRepositoryFormView: View {
       }
 
       HStack {
-        Button("Cancel") { store.send(.remoteCancelled) }
-        Spacer()
-        if store.remoteDraft?.isValidating == true {
-          ProgressView().controlSize(.small).padding(.trailing, 4)
+        if isInspecting {
+          Spacer()
+          Button("Done") { store.send(.remoteCancelled) }
+            .keyboardShortcut(.defaultAction)
+        } else {
+          Button("Cancel") { store.send(.remoteCancelled) }
+          Spacer()
+          if store.remoteDraft?.isValidating == true {
+            ProgressView().controlSize(.small).padding(.trailing, 4)
+          }
+          Button("Add") { store.send(.remoteSubmitted) }
+            .keyboardShortcut(.defaultAction)
+            .disabled(store.remoteDraft?.canSubmit != true)
         }
-        Button("Add") { store.send(.remoteSubmitted) }
-          .keyboardShortcut(.defaultAction)
-          .disabled(store.remoteDraft?.canSubmit != true)
       }
     }
     .padding(24)
     .frame(width: 460)
+  }
+
+  /// Selectable rather than a disabled `TextField`: the reason to open this sheet is to
+  /// read a value off it, and often to copy it.
+  private func value(
+    _ keyPath: KeyPath<WelcomeFeature.RemoteDraft, String>
+  ) -> some View {
+    let text = store.remoteDraft?[keyPath: keyPath] ?? ""
+    return Text(text.isEmpty ? "—" : text)
+      .font(.system(.body, design: .monospaced))
+      .foregroundStyle(text.isEmpty ? HierarchicalShapeStyle.secondary : .primary)
+      .textSelection(.enabled)
+      .frame(maxWidth: .infinity, alignment: .leading)
   }
 
   private func field(
