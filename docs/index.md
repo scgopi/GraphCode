@@ -1,14 +1,15 @@
 ---
 title: Graph Engineering, Simplified — with GraphCode
-description: Graph engineering for coding agents on macOS — loops and their types, self-improving loops, and the machinery underneath.
+description: Graph engineering for coding agents on macOS — Claude Code, Codex and Copilot CLI loops on one graph: loop types, self-improving loops, and the machinery underneath.
 ---
 
 # Graph Engineering, simplified — with GraphCode
 
 You can run one Claude Code session in a terminal. GraphCode lets you run ten —
-connected, unattended, and still yours to attach to and correct mid-run. That's
-**graph engineering**: your agents' work arranged as a graph you design, instead of a
-pile of terminals you babysit.
+connected, unattended, and still yours to attach to and correct mid-run. And they don't
+all have to be Claude Code: Codex and Copilot CLI loops sit on the same graph, so an edge
+can hand work from one vendor's agent to another's. That's **graph engineering**: your
+agents' work arranged as a graph you design, instead of a pile of terminals you babysit.
 
 Requires **macOS 15+ on Apple Silicon**, with **Claude Code on your `PATH`** —
 GraphCode launches it, it doesn't bundle it.

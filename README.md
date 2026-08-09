@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://graphcode.app/">
-    <img src="docs/assets/banner.png" alt="GraphCode — graphs of live, steerable Claude Code sessions on macOS" width="100%">
+    <img src="docs/assets/banner.png" alt="GraphCode — graphs of live, steerable coding-agent sessions on macOS" width="100%">
   </a>
 </p>
 
@@ -22,6 +22,10 @@ connected, unattended, and still yours to attach to and correct mid-run. Each no
 graph is a unit of work running inside a real CLI coding-agent session; each edge is a
 hand-off, message, or spawn between them. The sessions are real terminals you can attach
 to, watch, and steer — not headless jobs that report back when they're done.
+
+The nodes don't have to be the same agent. Claude Code, Codex and Copilot CLI all host
+loops and all take input mid-session, so an edge can hand work from a Claude Code loop to
+a Codex one on the same graph — one graph, spanning vendors.
 
 **[Graph Engineering, simplified →](https://graphcode.app/)** — the full
 article: the mental model, then the machinery underneath it.
