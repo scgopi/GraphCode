@@ -79,6 +79,24 @@ struct WelcomeFeature {
     var remotePath = ""
     var isValidating = false
     var failureMessage: String?
+    /// Set when the sheet is showing an already-added project's connection instead of
+    /// collecting a new one. Read-only in that mode: a remote project's identity *is*
+    /// its `ssh://` path, so changing a field here would name a different project rather
+    /// than edit this one.
+    var inspectedProjectPath: String?
+
+    var isInspecting: Bool { inspectedProjectPath != nil }
+
+    static func inspecting(
+      _ location: RemoteProjectLocation, projectPath: String
+    ) -> RemoteDraft {
+      RemoteDraft(
+        server: location.host,
+        port: location.port.map(String.init) ?? "22",
+        user: location.user ?? "",
+        remotePath: location.remotePath,
+        inspectedProjectPath: projectPath)
+    }
 
     /// The location the fields currently describe, or `nil` while they don't describe
     /// one — the Add button's enablement. The path must be absolute: `~` means nothing
@@ -97,7 +115,7 @@ struct WelcomeFeature {
         user: userName, host: host, port: portNumber, remotePath: path)
     }
 
-    var canSubmit: Bool { location != nil && !isValidating }
+    var canSubmit: Bool { location != nil && !isValidating && !isInspecting }
   }
 
   @ObservableState
@@ -128,6 +146,7 @@ struct WelcomeFeature {
     case cloneFinished(path: String)
     case cloneFailed(String)
     case addRemoteRepositoryButtonTapped
+    case remoteParametersRequested(projectPath: String)
     case remoteSubmitted
     case remoteCancelled
     case remoteValidated(projectPath: String)
@@ -268,6 +287,12 @@ struct WelcomeFeature {
 
       case .addRemoteRepositoryButtonTapped:
         state.remoteDraft = RemoteDraft()
+        return .none
+
+      case .remoteParametersRequested(let projectPath):
+        guard let location = RemoteProjectLocation.parse(projectPath: projectPath)
+        else { return .none }
+        state.remoteDraft = .inspecting(location, projectPath: projectPath)
         return .none
 
       case .remoteSubmitted:

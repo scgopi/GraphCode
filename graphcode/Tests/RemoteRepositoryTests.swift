@@ -280,6 +280,64 @@ struct RemoteRepositoryTests {
     #expect(store.state.remoteDraft?.isValidating == false)
     #expect(store.state.remoteDraft?.failureMessage?.contains("zmx") == true)
   }
+
+  // MARK: - Server parameters
+
+  @Test
+  @MainActor
+  func serverParametersFillTheSheetFromTheProjectPath() async {
+    let store = TestStore(initialState: WelcomeFeature.State()) {
+      WelcomeFeature()
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .remoteParametersRequested(projectPath: "ssh://dev@build-box:2222/home/dev/widget"))
+
+    let draft = store.state.remoteDraft
+    #expect(draft?.server == "build-box")
+    #expect(draft?.user == "dev")
+    #expect(draft?.port == "2222")
+    #expect(draft?.remotePath == "/home/dev/widget")
+    // Read-only: the ssh:// path *is* the project's identity, so submitting an edited
+    // dial would open a second project rather than change this one.
+    #expect(draft?.isInspecting == true)
+    #expect(draft?.canSubmit == false)
+  }
+
+  @Test
+  @MainActor
+  func aLocalFolderHasNoServerParametersToShow() async {
+    let store = TestStore(initialState: WelcomeFeature.State()) {
+      WelcomeFeature()
+    }
+    store.exhaustivity = .off
+
+    await store.send(.remoteParametersRequested(projectPath: "/Users/dev/widget"))
+
+    #expect(store.state.remoteDraft == nil)
+  }
+
+  @Test
+  @MainActor
+  func inspectingRefusesToSubmit() async {
+    let store = TestStore(initialState: WelcomeFeature.State()) {
+      WelcomeFeature()
+    } withDependencies: {
+      $0.remoteRepositoryClient.validate = { _ in nil }
+      $0.orchestratorClient.send = { _ in
+        Issue.record("inspecting a remote must not re-open it")
+      }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .remoteParametersRequested(projectPath: "ssh://dev@build-box:22/home/dev/widget"))
+    await store.send(.remoteSubmitted)
+    await store.finish()
+
+    #expect(store.state.remoteDraft?.isValidating == false)
+  }
 }
 
 private actor OpenedRemoteProjectsBox {
