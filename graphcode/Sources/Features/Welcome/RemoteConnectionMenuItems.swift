@@ -9,14 +9,16 @@ import SwiftUI
 /// A remote project's connection is only ever visible as the `ssh://` path behind its
 /// display name, which reads as "repo @ host" and hides the user, port, and remote path
 /// entirely. This is where those are answerable without going to a terminal.
-struct RemoteServerMenuItems: View {
+struct RemoteConnectionMenuItems: View {
   let store: StoreOf<AppFeature>
   let projectPath: String
 
   var body: some View {
+    // No ellipsis, unlike the `Project Settings…` above it: nothing is asked of you
+    // here, and that pairing is what says which of the two is read-only.
     if RemoteProjectLocation.parse(projectPath: projectPath) != nil {
-      Button("Server Parameters…") {
-        store.send(.welcome(.remoteParametersRequested(projectPath: projectPath)))
+      Button("Connection Info") {
+        store.send(.welcome(.remoteConnectionRequested(projectPath: projectPath)))
       }
     }
   }
