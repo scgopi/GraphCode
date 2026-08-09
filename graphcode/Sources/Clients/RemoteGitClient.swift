@@ -32,8 +32,9 @@ extension RemoteGitClient: DependencyKey {
       let quoted = RemoteProjectLocation.shellQuoted
       let listCommand = "git -C \(quoted(location.remotePath)) worktree list --porcelain"
       let output = try await runSSH(location, listCommand)
+      let repositoryPath = await canonicalRepositoryPath(location)
       let blocks = parseWorktreeBlocks(output)
-        .filter { $0.path != location.remotePath }
+        .filter { RemoteProjectLocation.normalizedPath($0.path) != repositoryPath }
       let defaultBranch = await discoverDefaultBranch(location)
       var inspections = [WorktreeInspection?](repeating: nil, count: blocks.count)
       await withTaskGroup(of: (Int, WorktreeInspection)?.self) { group in
@@ -209,6 +210,24 @@ private func parseWorktreeBlocks(_ output: String) -> [WorktreeBlock] {
 }
 
 // MARK: - Remote git facts
+
+/// The spelling git itself will print for this repository, asked of the host.
+///
+/// The list has to drop the main working tree, and that comparison is exact. A stored
+/// path can differ from git's own by a trailing slash or a symlinked parent, and when it
+/// does the main repository survives the filter and reaches the sweeper as a worktree —
+/// the one directory holding the whole object store, every nested worktree and every
+/// build output, so it lands as a phantom row the size of the entire repository.
+///
+/// Falls back to the stored path normalized, which still answers the trailing slash when
+/// the host cannot be reached.
+private func canonicalRepositoryPath(_ location: RemoteProjectLocation) async -> String {
+  let quoted = RemoteProjectLocation.shellQuoted
+  let toplevel = try? await runSSH(
+    location, "git -C \(quoted(location.remotePath)) rev-parse --show-toplevel")
+  let path = toplevel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+  return RemoteProjectLocation.normalizedPath(path.isEmpty ? location.remotePath : path)
+}
 
 private func discoverDefaultBranch(_ location: RemoteProjectLocation) async -> String {
   let quoted = RemoteProjectLocation.shellQuoted

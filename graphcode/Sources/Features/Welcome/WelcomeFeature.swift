@@ -102,6 +102,10 @@ struct WelcomeFeature {
     /// one — the Add button's enablement. The path must be absolute: `~` means nothing
     /// until a shell on the *remote* machine expands it, and storing it unexpanded
     /// would bake the ambiguity into the project's identity.
+    ///
+    /// The path is normalized before it becomes that identity. A trailing slash is the
+    /// natural way to type a directory and git never prints one back, which left the two
+    /// spellings to be compared as strings elsewhere.
     var location: RemoteProjectLocation? {
       let host = server.trimmingCharacters(in: .whitespaces)
       let path = remotePath.trimmingCharacters(in: .whitespaces)
@@ -112,7 +116,8 @@ struct WelcomeFeature {
         let portNumber = Int(portText), (1...65535).contains(portNumber)
       else { return nil }
       return RemoteProjectLocation(
-        user: userName, host: host, port: portNumber, remotePath: path)
+        user: userName, host: host, port: portNumber,
+        remotePath: RemoteProjectLocation.normalizedPath(path))
     }
 
     var canSubmit: Bool { location != nil && !isValidating && !isInspecting }
