@@ -51,6 +51,24 @@ public struct RemoteProjectLocation: Equatable, Sendable {
     "\(Self.scheme)://\(authority)\(remotePath)"
   }
 
+  /// An absolute remote path reduced to the one spelling git will print for it, so two
+  /// spellings of one directory can be compared as strings.
+  ///
+  /// Purely textual, and deliberately so: `URL.resolvingSymlinksInPath` — what the local
+  /// twin in `GitClient` uses — would resolve a *server's* path against this Mac's
+  /// filesystem. Symlinks on the far side can only be resolved by asking the far side.
+  public static func normalizedPath(_ path: String) -> String {
+    var segments: [String] = []
+    for segment in path.split(separator: "/", omittingEmptySubsequences: true) {
+      switch segment {
+      case ".": continue
+      case "..": if !segments.isEmpty { segments.removeLast() }
+      default: segments.append(String(segment))
+      }
+    }
+    return "/" + segments.joined(separator: "/")
+  }
+
   /// `user@host` / `user@host:port` — what `ssh` is pointed at (port rides separately
   /// as `-p`, but the authority string carries it for identity and display).
   public var authority: String {

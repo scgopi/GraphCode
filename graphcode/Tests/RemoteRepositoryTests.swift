@@ -281,6 +281,34 @@ struct RemoteRepositoryTests {
     #expect(store.state.remoteDraft?.failureMessage?.contains("zmx") == true)
   }
 
+  // MARK: - Path normalization
+
+  /// The comparison that drops the main working tree from a worktree list is exact, and
+  /// git prints one canonical spelling. A stored path that disagrees by a trailing slash
+  /// survived that filter, and the main repository — the object store, every nested
+  /// worktree, every build output — was then sized and offered as a reclaimable worktree.
+  @Test
+  func aRemotePathReducesToTheSpellingGitPrints() {
+    #expect(RemoteProjectLocation.normalizedPath("/home/dev/widget/") == "/home/dev/widget")
+    #expect(RemoteProjectLocation.normalizedPath("/home/dev/widget///") == "/home/dev/widget")
+    #expect(RemoteProjectLocation.normalizedPath("//home//dev//widget") == "/home/dev/widget")
+    #expect(RemoteProjectLocation.normalizedPath("/home/dev/./widget") == "/home/dev/widget")
+    #expect(RemoteProjectLocation.normalizedPath("/home/dev/loops/../widget") == "/home/dev/widget")
+    // Already canonical, and the degenerate case: both must survive untouched.
+    #expect(RemoteProjectLocation.normalizedPath("/home/dev/widget") == "/home/dev/widget")
+    #expect(RemoteProjectLocation.normalizedPath("/") == "/")
+  }
+
+  @Test
+  func aTrailingSlashNeverReachesTheProjectIdentity() {
+    var draft = WelcomeFeature.RemoteDraft()
+    draft.server = "build-box"
+    draft.user = "dev"
+    draft.remotePath = "/home/dev/widget/"
+    #expect(draft.location?.remotePath == "/home/dev/widget")
+    #expect(draft.location?.projectPath == "ssh://dev@build-box:22/home/dev/widget")
+  }
+
   // MARK: - Connection info
 
   @Test
