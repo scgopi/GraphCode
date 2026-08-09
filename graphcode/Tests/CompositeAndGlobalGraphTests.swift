@@ -100,21 +100,25 @@ struct CompositeAndGlobalGraphTests {
         .subGraphCommand(
           nodeID: compositeID,
           command: .createNode(
-            NodeDraft(title: "N\(i)", loopType: .turnBased, checkDescription: "?",
-                      firstInstruction: "Work"))))
+            NodeDraft(
+              title: "N\(i)", loopType: .turnBased, checkDescription: "?",
+              firstInstruction: "Work"))))
     }
-    #expect(await store.graph.nodes[id: compositeID]?.subGraph?.nodes.count
-            == GraphStore.maxNodesPerGraph)
+    #expect(
+      await store.graph.nodes[id: compositeID]?.subGraph?.nodes.count
+        == GraphStore.maxNodesPerGraph)
 
     await store.handle(
       .subGraphCommand(
         nodeID: compositeID,
         command: .createNode(
-          NodeDraft(title: "One too many", loopType: .turnBased, checkDescription: "?",
-                    firstInstruction: "Work"))))
+          NodeDraft(
+            title: "One too many", loopType: .turnBased, checkDescription: "?",
+            firstInstruction: "Work"))))
 
-    #expect(await store.graph.nodes[id: compositeID]?.subGraph?.nodes.count
-            == GraphStore.maxNodesPerGraph)
+    #expect(
+      await store.graph.nodes[id: compositeID]?.subGraph?.nodes.count
+        == GraphStore.maxNodesPerGraph)
   }
 
   @Test

@@ -73,11 +73,13 @@ public actor RemoteSocketForwarder {
       "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3",
     ]
     if let port = location.port { argv += ["-p", String(port)] }
-    let quoted = argv.map(RemoteProjectLocation.shellQuoted) + [
-      "-R",
-      "\"$H\"" + RemoteProjectLocation.shellQuoted("/.graphcode/graphcoded.sock:" + localSocketPath),
-      RemoteProjectLocation.shellQuoted(location.sshDestination),
-    ]
+    let quoted =
+      argv.map(RemoteProjectLocation.shellQuoted) + [
+        "-R",
+        "\"$H\""
+          + RemoteProjectLocation.shellQuoted("/.graphcode/graphcoded.sock:" + localSocketPath),
+        RemoteProjectLocation.shellQuoted(location.sshDestination),
+      ]
     return quoted.joined(separator: " ")
   }
 }

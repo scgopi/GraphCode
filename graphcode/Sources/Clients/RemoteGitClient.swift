@@ -16,8 +16,9 @@ struct RemoteGitClient: Sendable {
   var inspectWorktrees:
     @Sendable (_ location: RemoteProjectLocation) async throws -> [WorktreeInspection]
   /// One worktree's on-disk size, run as `du -sk` over SSH.
-  var worktreeSizeBytes: @Sendable (_ location: RemoteProjectLocation, _ worktreePath: String) async
-    -> Int64?
+  var worktreeSizeBytes:
+    @Sendable (_ location: RemoteProjectLocation, _ worktreePath: String) async
+      -> Int64?
   /// Removes a worktree and deletes its branch over SSH.
   var removeWorktreeAndBranch:
     @Sendable (

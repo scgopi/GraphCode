@@ -184,11 +184,13 @@ public actor GraphStore {
         draft.backend = graph.nodes[id: creator]?.backend
       }
       guard graph.nodes.count < Self.maxNodesPerGraph else {
-        announceError("this graph already has \(graph.nodes.count) loops (limit \(Self.maxNodesPerGraph))")
+        announceError(
+          "this graph already has \(graph.nodes.count) loops (limit \(Self.maxNodesPerGraph))")
         return
       }
       if draft.loopType == .composite && subGraphDepth >= Self.maxSubGraphDepth {
-        announceError("composites are nested \(subGraphDepth) deep (limit \(Self.maxSubGraphDepth))")
+        announceError(
+          "composites are nested \(subGraphDepth) deep (limit \(Self.maxSubGraphDepth))")
         return
       }
       guard draft.isValid else { return }

@@ -522,7 +522,9 @@ struct ProjectFeature {
       }
     }
   }
+}
 
+extension ProjectFeature {
   /// Resets the draft fields and opens the node form — the shared half of
   /// `.addNodeButtonTapped` and `.addChildNodeTapped`.
   ///
