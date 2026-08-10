@@ -91,21 +91,117 @@ public enum CopilotSessionLog {
     return nil
   }
 
-  /// The last event in a log that says anything about what the session is doing.
-  static func lastStateChange(inLogAt url: URL) -> Presence? {
-    guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+  /// What one `tool.execution_start` record is doing, in the same voice as Claude Code's
+  /// hook script — `editing Foo.swift`, `running make check`.
+  ///
+  /// Copilot's own `description` argument is preferred where it exists, because it is a
+  /// sentence a model wrote to explain the call rather than one assembled here from a
+  /// tool name. An unknown tool falls through to its own name rather than being dropped:
+  /// "using fetch" is worth more than silence, and the tool vocabulary is the backend's
+  /// to change without notice.
+  static func phrase(forTool name: String, arguments: [String: Any]) -> String? {
+    func text(_ key: String) -> String? {
+      guard let raw = arguments[key] as? String else { return nil }
+      let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+      return trimmed.isEmpty ? nil : trimmed
+    }
+    func leaf(_ key: String) -> String? {
+      text(key).map { String($0.split(separator: "/").last ?? Substring($0)) }
+    }
+    let specific: String?
+    switch name {
+    case "bash", "shell":
+      specific = (text("description") ?? text("command")).map { "running \($0)" }
+    case "view", "read":
+      specific = leaf("path").map { "reading \($0)" }
+    case "create", "edit", "str_replace_editor", "write":
+      specific = leaf("path").map { "editing \($0)" }
+    case "grep", "search":
+      specific = text("pattern").map { "searching for \($0)" }
+    case "glob":
+      specific = text("pattern").map { "looking for \($0)" }
+    case "fetch":
+      specific = text("url").map { "reading \($0)" }
+    default:
+      specific = nil
+    }
+    // A recognised tool whose arguments aren't the shape expected falls back rather than
+    // vanishing: the backend can rename an argument without warning, and "using view" is
+    // worth more than a card that goes quiet mid-call.
+    return specific ?? text("description") ?? "using \(name)"
+  }
+
+  /// The tool call this session is inside right now, or `nil` when it is between calls.
+  ///
+  /// Started-but-not-completed rather than simply "the last start": every call writes both
+  /// a `tool.execution_start` and a `tool.execution_complete` carrying the same
+  /// `toolCallId`, so the completions seen while walking backwards are what say which
+  /// starts are already over. Reporting the last start regardless would leave a finished
+  /// command on the card for the whole of the model's next think, which is the stale label
+  /// this feature exists to remove.
+  static func lastActivity(inLogAt url: URL) -> String? {
+    var completed = Set<String>()
+    for line in tailLines(ofLogAt: url).reversed() {
+      guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
+        let event = object as? [String: Any],
+        let type = event["type"] as? String
+      else { continue }
+      let data = event["data"] as? [String: Any] ?? [:]
+      let callID = data["toolCallId"] as? String
+      switch type {
+      case "tool.execution_complete":
+        if let callID { completed.insert(callID) }
+      case "tool.execution_start":
+        guard let name = data["toolName"] as? String else { continue }
+        if let callID, completed.contains(callID) { continue }
+        let phrase = phrase(forTool: name, arguments: data["arguments"] as? [String: Any] ?? [:])
+        return phrase.flatMap(ZmxSessionLauncher.condensedActivity)
+      // A turn that has ended is not inside a tool call, whatever started before it.
+      case "assistant.turn_end", "session.shutdown":
+        return nil
+      default:
+        continue
+      }
+    }
+    return nil
+  }
+
+  /// The tail of a log, as whole lines.
+  ///
+  /// The first line of a mid-file read is a fragment. It is dropped rather than repaired:
+  /// one event's worth of tail is nowhere near the window this reads.
+  static func tailLines(ofLogAt url: URL) -> [Substring] {
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
     defer { try? handle.close() }
-    guard let end = try? handle.seekToEnd() else { return nil }
+    guard let end = try? handle.seekToEnd() else { return [] }
     let start = end > UInt64(tailBytes) ? end - UInt64(tailBytes) : 0
     try? handle.seek(toOffset: start)
-    guard let data = try? handle.readToEnd() else { return nil }
-
-    // The first line of a mid-file read is a fragment. It is dropped rather than repaired:
-    // one event's worth of tail is nowhere near the window this reads.
+    guard let data = try? handle.readToEnd() else { return [] }
     var lines = String(decoding: data, as: UTF8.self).split(separator: "\n")
     if start > 0, !lines.isEmpty { lines.removeFirst() }
+    return lines
+  }
 
-    for line in lines.reversed() {
+  /// What this node's Copilot session is doing, or `nil` when nothing says.
+  ///
+  /// Local only, deliberately. The remote twin of this would have to carry a JSON record
+  /// back through a shell pipeline, where `remotePresence` needs only an event name; that
+  /// is a bigger change than this one and remote Copilot activity stays `nil` — which is
+  /// what every Copilot node reported before this, so no reading gets worse.
+  public static func activity(of node: LoopNode, projectPath: String? = nil) async -> String? {
+    if let projectPath, RemoteProjectLocation.parse(projectPath: projectPath) != nil {
+      return nil
+    }
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    guard ZmxLocator.isInstalled, await ZmxSessionLauncher.sessionExists(node),
+      let directory = directory(forSessionNamed: name)
+    else { return nil }
+    return lastActivity(inLogAt: directory.appendingPathComponent("events.jsonl"))
+  }
+
+  /// The last event in a log that says anything about what the session is doing.
+  static func lastStateChange(inLogAt url: URL) -> Presence? {
+    for line in tailLines(ofLogAt: url).reversed() {
       guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
         let event = (object as? [String: Any])?["type"] as? String,
         let presence = presence(forEvent: event)
