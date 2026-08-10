@@ -186,13 +186,19 @@ public actor ProjectRegistry {
       send(.recentProjectsListed(persistence.loadRecentProjects()), to: fileDescriptor)
 
     case .openProject(let path):
+      guard Self.isOpenable(path) else { break }
       await open(Self.canonicalize(path), for: connectionID, fileDescriptor: fileDescriptor)
 
     case .restoreOpenProjects:
       // Each of these broadcasts a `.graphChanged` exactly as `.openProject` would, so
       // the app reuses its ordinary "graph for a project I don't know yet = project
       // opened" path instead of needing a restore-shaped event of its own.
-      for path in persistence.loadOpenProjects() {
+      //
+      // Only the spelling is re-checked here, not whether the directory is there: these
+      // paths were openable when they were added, and a project on an unmounted volume
+      // has to come back when the volume does. Nothing is deleted from the stored set
+      // either way — `close` is the only thing that removes from it.
+      for path in persistence.loadOpenProjects() where Self.isWellFormedProjectPath(path) {
         await open(path, for: connectionID, fileDescriptor: fileDescriptor)
       }
 
@@ -332,6 +338,43 @@ public actor ProjectRegistry {
   /// is an `ssh://` one — neither is a folder, and running either through
   /// `fileURLWithPath` would mangle it into a relative path under the cwd and route its
   /// commands to a store that doesn't exist.
+  /// Whether a path is even the *shape* of a project — checked before `canonicalize`,
+  /// which is where the damage was done.
+  ///
+  /// `URL(fileURLWithPath:)` resolves a relative path against the process's working
+  /// directory, and an empty one resolves to that directory outright. `graphcoded` runs
+  /// under launchd, whose working directory is `/`, so an empty path arriving from any
+  /// client — `graphcode status "$UNSET"` is all it takes — became the root directory,
+  /// which exists, so it opened, persisted, and came back every launch as a folder
+  /// called "/".
+  ///
+  /// The root is refused even when spelled out. A project is scanned by the worktree
+  /// sweeper and by git; pointed at `/` that is the whole disk.
+  static func isWellFormedProjectPath(_ path: String) -> Bool {
+    if path == LoopGraphScope.globalPath { return true }
+    if RemoteProjectLocation.parse(projectPath: path) != nil { return true }
+    // Absolute, and not the root however it is spelled: `/`, `//`, `/..` and `/a/..` all
+    // reduce to the same directory.
+    guard path.hasPrefix("/") else { return false }
+    return RemoteProjectLocation.normalizedPath(path) != "/"
+  }
+
+  /// Whether a path can be opened as a project right now: well-formed, and a directory
+  /// that is actually there.
+  ///
+  /// The existence half is deliberately not applied when restoring. It is applied here
+  /// because this is the door every client knocks on, and without it a mistyped or
+  /// already-deleted path became a project with a store, a recents entry and a place in
+  /// the restore set — `~/.graphcode/projects` accumulates one JSON per such ghost.
+  static func isOpenable(_ path: String) -> Bool {
+    guard isWellFormedProjectPath(path) else { return false }
+    if path == LoopGraphScope.globalPath { return true }
+    if RemoteProjectLocation.parse(projectPath: path) != nil { return true }
+    var isDirectory: ObjCBool = false
+    let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+    return exists && isDirectory.boolValue
+  }
+
   private static func canonicalize(_ path: String) -> String {
     guard path != LoopGraphScope.globalPath,
       RemoteProjectLocation.parse(projectPath: path) == nil

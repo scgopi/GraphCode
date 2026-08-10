@@ -16,6 +16,16 @@ import Testing
 /// on disk via `ProjectPersistence`.
 @Suite
 struct ProjectRegistryTests {
+  /// The registry refuses a path that names no directory, so the folders these tests open
+  /// have to be there. They were not, and the tests passed anyway — which is exactly how
+  /// `/tmp/x` and a folder called "/" ended up as real projects with real stores.
+  init() throws {
+    for name in ["project-a", "project-b", "project-c", "project-d", "project-e"] {
+      try FileManager.default.createDirectory(
+        atPath: "/tmp/\(name)", withIntermediateDirectories: true)
+    }
+  }
+
   private func makeRegistryAndPersistence() -> (ProjectRegistry, ProjectPersistence) {
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
