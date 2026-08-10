@@ -322,11 +322,14 @@ the text — otherwise every message rendered in the composer and sat there, uns
 
 ### Reported, never estimated
 
-GraphCode can't see inside a running agent. Presence and token usage are read from
-per-session labels the backend's own hooks can set; without hooks the UI says "not
-reported" rather than showing a zero nobody measured. The same honesty rule shapes the
-metric design: numbers a decision rests on come from running the command, not from the
-loop's account of itself.
+GraphCode can't see inside a running agent. Presence, what a session is currently doing,
+and token usage are read from per-session labels the backend's own hooks can set; without
+hooks the UI says "not reported" rather than showing a zero nobody measured. That third
+label is what puts `editing GraphStore.swift` or `running make check` under a card's
+RUNNING pill — the tool call the agent is making, reported by its own `PreToolUse` hook,
+never scraped from the terminal. A card with nothing reported falls back to the goal or
+prompt the loop was handed. The same honesty rule shapes the metric design: numbers a
+decision rests on come from running the command, not from the loop's account of itself.
 
 ### State: one directory, plain JSON
 

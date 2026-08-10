@@ -290,8 +290,10 @@ public actor GraphStore {
       // channel, and a second command on its own timer would triple the subprocess count
       // for the sake of separating three `zmx get`s.
       await refreshUsage()
-      await refreshActivity()
+      // Presence first: `refreshActivity` only asks the sessions that are working, so
+      // asking it against last tick's readings would describe the wrong ones.
       await refreshPresence()
+      await refreshActivity()
     }
 
     // Guarded re-fires need an `until` predicate answered first, which means a
@@ -426,18 +428,32 @@ public actor GraphStore {
     }
   }
 
-  /// Asks each live session what it is doing. Same shape and same honesty as
+  /// Asks each *working* session what it is doing. Same shape and same honesty as
   /// `refreshUsage`: a session reporting nothing keeps `activity == nil`, and the card's
   /// live line falls back to what the loop was handed rather than to a stale line from
   /// twenty minutes ago.
   ///
   /// Unreported is written back too — that is what clears the label when a session ends,
   /// so a finished loop doesn't keep claiming to be editing a file.
-  private func refreshActivity() async {
-    guard let onReadActivity else { return }
+  ///
+  /// **Only sessions `refreshPresence` just found busy are asked.** A loop that has
+  /// answered, stopped or gone is not doing anything, so its last reported activity is a
+  /// sentence about the past whatever the label still holds — clearing it costs nothing
+  /// and probing for it would cost a subprocess per quiet loop per tick, which on a remote
+  /// project is an ssh round trip. The cost of the live line is therefore paid only by the
+  /// loops that have something to say.
+  @discardableResult
+  private func refreshActivity() async -> Bool {
+    guard let onReadActivity else { return false }
+    var changed = false
     for node in graph.nodes {
-      graph.nodes[id: node.id]?.activity = await onReadActivity(node, graph.project.path)
+      let working = !node.isResolved && node.presence?.presence == .busy
+      let reported = working ? await onReadActivity(node, graph.project.path) : nil
+      guard graph.nodes[id: node.id]?.activity != reported else { continue }
+      graph.nodes[id: node.id]?.activity = reported
+      changed = true
     }
+    return changed
   }
 
   /// Asks each session what it is doing, the third reading on the same channel and the
@@ -497,7 +513,13 @@ public actor GraphStore {
   /// write per tick, forever, of the one field that is deliberately never restored.
   public func pollPresence() async {
     guard !connections.isEmpty, onReadPresence != nil else { return }
-    guard await refreshPresence() else { return }
+    // Both, and in this order, because they are one answer to a human: the pill says a
+    // loop is working and the line under it says what at. Reading the second only when
+    // someone presses refresh left every card describing the tool call its session made
+    // whenever that happened to be.
+    var changed = await refreshPresence()
+    if await refreshActivity() { changed = true }
+    guard changed else { return }
     notifyClients()
   }
 

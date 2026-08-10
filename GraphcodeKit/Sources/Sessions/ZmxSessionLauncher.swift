@@ -169,7 +169,44 @@ public enum ZmxSessionLauncher {
       .split(whereSeparator: \.isWhitespace)
       .joined(separator: " ")
     guard !collapsed.isEmpty else { return nil }
-    return String(collapsed.prefix(maxActivityLength))
+    let decoded =
+      decodedActivity(collapsed)
+      .split(whereSeparator: \.isWhitespace)
+      .joined(separator: " ")
+    guard !decoded.isEmpty else { return nil }
+    return String(decoded.prefix(maxActivityLength))
+  }
+
+  /// Turns a label value back into the sentence the hook meant to write: `_20` is a space
+  /// and `_5F` an underscore, per `PresenceHooks.activityScript`, which encodes because a
+  /// `zmx` label value may hold only `[A-Za-z0-9._-]`.
+  ///
+  /// Anything that isn't `_` followed by two hex digits is text, so a value written by a
+  /// graphcode older than the encoding — or by hand — comes back untouched. The one thing
+  /// this cannot tell apart is a filename that genuinely reads `_20`, which the writer
+  /// would have escaped to `_5F20`; a label from anywhere else with that in it decodes to
+  /// a space, and a wrong space in a status line is the smallest failure available here.
+  static func decodedActivity(_ value: String) -> String {
+    var decoded = ""
+    var index = value.startIndex
+    while index < value.endIndex {
+      let character = value[index]
+      let afterEscape = value.index(after: index)
+      // Printable ASCII only. The writer emits two escapes and both are in that range;
+      // anything else claiming to be one is a control character on its way to a label
+      // that is drawn on a card.
+      guard character == "_",
+        let hexEnd = value.index(afterEscape, offsetBy: 2, limitedBy: value.endIndex),
+        let byte = UInt8(value[afterEscape..<hexEnd], radix: 16), (0x20...0x7E).contains(byte)
+      else {
+        decoded.append(character)
+        index = afterEscape
+        continue
+      }
+      decoded.append(Character(UnicodeScalar(byte)))
+      index = hexEnd
+    }
+    return decoded
   }
 
   /// One line of a 250pt card, at 10.5pt mono. Past this a label is not being read, it
