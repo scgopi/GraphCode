@@ -339,11 +339,18 @@ always loads in today's.
 
 ### What runs today
 
-Claude Code is the most complete backend. Copilot CLI and Codex loops launch, run, fan
-out on their own provider, message, and keep memory like Claude ones. Copilot presence
-is read from its event log (local and remote), so a Copilot loop waiting for input
-shows as "NEEDS YOU"; usage stays Claude Code-only. The picker refuses pairings a
-backend can't host. Current rough edges live in the README's
+Claude Code is the most complete backend — the only one that can host a composite, and
+the only one whose presence comes from lifecycle hooks graphcode installs rather than
+from a log the CLI writes anyway. Copilot CLI and Codex loops launch, run, message, and
+keep memory like Claude ones; Copilot takes time-based loops too, because its session can
+re-trigger its own work, and Codex can't, so the picker refuses that pairing rather than
+letting a `/loop …` prompt run once and look like a broken schedule.
+
+All three report **what a loop is doing right now** — the tool call it is still inside,
+not merely that it is busy — each read from what that CLI already writes: Claude Code's
+hooks, Copilot's `events.jsonl`, Codex's rollout file. Remote Copilot and Codex loops are
+the exception, since those logs sit on the far host, so their cards show the goal instead.
+Usage stays Claude Code-only. Current rough edges live in the README's
 [Known limitations](https://github.com/scgopi/GraphCode#known-limitations).
 
 ---
