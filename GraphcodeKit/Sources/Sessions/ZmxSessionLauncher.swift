@@ -213,6 +213,19 @@ public enum ZmxSessionLauncher {
   /// is being truncated somewhere further down where nobody chose the cut.
   static let maxActivityLength = 80
 
+  /// One line, bounded, or `nil` when there is nothing left.
+  ///
+  /// Every activity reading goes through this whatever backend produced it. The hook
+  /// script Claude Code runs caps and flattens its own label before writing it; the
+  /// scanned backends read raw arguments straight out of a log, where a single
+  /// `cat > file <<'EOF'` heredoc is hundreds of characters across dozens of lines —
+  /// measured on a real rollout, not imagined.
+  static func condensedActivity(_ value: String) -> String? {
+    let collapsed = value.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    guard !collapsed.isEmpty else { return nil }
+    return String(collapsed.prefix(maxActivityLength))
+  }
+
   static func usage(of node: LoopNode, projectPath: String? = nil) async -> UsageSample? {
     if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
       guard case .live(let label) = await remoteStatus(of: node, label: "usage", at: remote),

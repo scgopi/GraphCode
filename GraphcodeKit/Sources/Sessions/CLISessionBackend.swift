@@ -111,8 +111,19 @@ extension CLISessionBackend {
       usage: { node, projectPath in
         await ZmxSessionLauncher.usage(of: node, projectPath: projectPath)
       },
+      // Per-backend for the same reason `presence` is, and it was not: the label this
+      // used to read for all three is written by a hook only Claude Code has, so Copilot
+      // and Codex loops reported `nil` forever and their cards kept showing the goal they
+      // were created with. Both write their own logs, and those name every tool call.
       activity: { node, projectPath in
-        await ZmxSessionLauncher.activity(of: node, projectPath: projectPath)
+        switch kind {
+        case .claudeCode:
+          return await ZmxSessionLauncher.activity(of: node, projectPath: projectPath)
+        case .copilotCLI:
+          return await CopilotSessionLog.activity(of: node, projectPath: projectPath)
+        case .codex:
+          return await CodexSessionLog.activity(of: node, projectPath: projectPath)
+        }
       }
     )
   }
