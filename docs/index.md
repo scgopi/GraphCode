@@ -13,7 +13,8 @@ pile of terminals you babysit.
 Requires **macOS 15+ on Apple Silicon**, with **Claude Code on your `PATH`** —
 GraphCode launches it, it doesn't bundle it.
 [All releases →](https://github.com/scgopi/GraphCode/releases) ·
-[Keyboard shortcuts →](shortcuts.html)
+[Keyboard shortcuts →](shortcuts.html) ·
+[Work with me →](#graph-engineering-services)
 
 ![Two projects and their connected loops on one GraphCode canvas — every node a live terminal you can attach to](assets/graph-hero.png?v=2)
 
@@ -361,6 +362,26 @@ backend can't host. Current rough edges live in the README's
    guarded back-edge.
 3. Close the app whenever you like — the loops won't notice.
 
+---
+
+## Graph engineering, with help {#graph-engineering-services}
+
+Most of the work in getting value out of this is not installing it — it is deciding **which
+loops your team actually needs, and what connects them**. That is the part this article is
+about, and it is the part I do for a living.
+
+- **Graph design session — half a day, from $750.** We take one real workflow of yours —
+  a release, a triage rota, a migration — and leave with the graph that runs it: the loop
+  types, the edges, the stop conditions, and the guards that keep a cycle from running away.
+- **Setup and adoption — priced per scope.** Standing the graph up on your machines,
+  including remote hosts, and the handover so your team can change it without me.
+- **Review of a graph you already run — from $400.** Where the cycles leak tokens, which
+  loops should have been one loop, and what should be goal-based that is currently a person.
+
+I built GraphCode and I write everything above, so this is the same person either way.
+
+**[Ask about an engagement →](mailto:sravani2201@outlook.com?subject=Graph%20engineering%20enquiry)**
+
 {% if site.buttondown_username %}
 <form class="gc-subscribe"
       action="https://buttondown.com/api/emails/embed-subscribe/{{ site.buttondown_username }}"
@@ -389,5 +410,5 @@ independent open-source projects [Ghostty](https://ghostty.org) and
 Questions, feedback, or just following along — find me on
 [X (@scgopi)](https://x.com/scgopi) or [LinkedIn](https://www.linkedin.com/in/scgopi/).
 
-**Want help designing your graph?** I offer setup and graph engineering for teams
-adopting GraphCode — [reach out](mailto:sravani2201@outlook.com).
+**Want help designing your graph?** Rates and scope are in
+[Graph engineering, with help](#graph-engineering-services).
