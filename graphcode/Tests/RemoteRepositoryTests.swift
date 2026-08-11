@@ -143,18 +143,23 @@ struct RemoteRepositoryTests {
   }
 
   @Test
-  func anAgentSurfaceReconnectNeverRelaunchesTheAgent() throws {
+  func anAgentSurfaceReconnectRelaunchesOnlyBehindAProvenReboot() throws {
     // The session ending while disconnected is the loop finishing, not a reason to
-    // start a second agent pass: the reconnect line reattaches an existing session
-    // only, and otherwise closes the pane with a notice.
+    // start a second agent pass: an ordinary reconnect reattaches an existing session
+    // only, and otherwise closes the pane with a notice. The one exception is a boot
+    // change (`RemoteBootMarker`) proving the session died with the machine rather
+    // than finished — every relaunch ingredient sits behind that comparison.
     let view = surface(launchesClaudeCode: true, prompt: "fix the build")
     let script = try #require(view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
     let loopBody = try #require(script.range(of: "while :; do").map { script[$0.upperBound...] })
     #expect(loopBody.contains("'get'"))
     #expect(loopBody.contains("attach"))
     #expect(loopBody.contains("ended while disconnected"))
-    #expect(!loopBody.contains("claude"))
-    #expect(!loopBody.contains("GRAPHCODE_TRIGGER_PROMPT"))
+    let rebootCheck = try #require(loopBody.range(of: #"[ "$gc_boot" != "$gc_last" ]"#))
+    #expect(!loopBody[..<rebootCheck.lowerBound].contains("claude"))
+    #expect(!loopBody[..<rebootCheck.lowerBound].contains("GRAPHCODE_TRIGGER_PROMPT"))
+    #expect(loopBody[rebootCheck.upperBound...].contains("claude"))
+    #expect(loopBody[rebootCheck.upperBound...].contains("GRAPHCODE_TRIGGER_PROMPT"))
   }
 
   @Test
