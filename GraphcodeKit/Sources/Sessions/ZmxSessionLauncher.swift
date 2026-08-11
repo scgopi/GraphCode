@@ -650,7 +650,7 @@ public enum ZmxSessionLauncher {
     forNode node: LoopNode, sessionID: String, projectPath: String? = nil,
     settings: GraphcodeSettings = GraphcodeSettingsStore.load()
   ) -> [String]? {
-    guard node.backend == .claudeCode || node.backend == .copilotCLI else { return nil }
+    guard node.backend.supportsResume else { return nil }
     guard let executable = node.backend.executableName else { return nil }
     let remote = projectPath.flatMap { RemoteProjectLocation.parse(projectPath: $0) }
     let tier = node.effectiveModelTier(autoSelecting: settings.autoSelectsModel)
@@ -897,9 +897,23 @@ public enum ZmxSessionLauncher {
     else { return freshRun }
     let resume = remoteQuotedCommand(["zmx"] + resumeArgv)
     let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: node.id)
-    return "\(remoteResumeIDVariable)=$(cat \(idFile) 2>/dev/null); "
+    return resumeOrFreshScript(idFile: idFile, resume: resume, fresh: freshRun)
+  }
+
+  /// The consume-then-attempt shape both resumers share: read the banked ID, remove it
+  /// *before* the attempt, run `resume` with it in `remoteResumeIDVariable` — and
+  /// `fresh` when there was nothing banked. Removal-first is the invariant
+  /// `remoteCreateScript` documents (a dead ID must not starve the fresh branch), and it
+  /// lives here so the daemon's ensure and the app's reboot restore
+  /// (`GhosttyTerminalView`) cannot drift apart on it. `fresh` is optional because the
+  /// app's caller supplies its fresh launch as fall-through code after this fragment
+  /// rather than as an `else`.
+  public static func resumeOrFreshScript(
+    idFile: String, resume: String, fresh: String? = nil
+  ) -> String {
+    "\(remoteResumeIDVariable)=$(cat \(idFile) 2>/dev/null); "
       + "if [ -n \"$\(remoteResumeIDVariable)\" ]; then rm -f \(idFile); \(resume); "
-      + "else \(freshRun); fi"
+      + (fresh.map { "else \($0); " } ?? "") + "fi"
   }
 
   /// The files a remote session needs on its own disk, as one installer fragment

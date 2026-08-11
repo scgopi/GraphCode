@@ -178,12 +178,13 @@ struct RemoteLoopSurvivalTests {
   // MARK: - The reconnect line
 
   private func agentSurface(
-    nodeID: UUID = UUID(), backend: CLISessionBackendKind = .claudeCode
+    nodeID: UUID = UUID(), backend: CLISessionBackendKind = .claudeCode,
+    loopType: LoopType = .turnBased
   ) -> GhosttyTerminalView {
     GhosttyTerminalView(
       surfaceID: nodeID,
       sessionName: SurfaceRef(id: nodeID, launchesClaudeCode: true).zmxSessionName,
-      launchesClaudeCode: true, backend: backend,
+      launchesClaudeCode: true, backend: backend, loopType: loopType,
       initialPrompt: "fix the build", workingDirectory: location.projectPath,
       projectPath: location.projectPath, onProcessExited: { _ in })
   }
@@ -205,19 +206,20 @@ struct RemoteLoopSurvivalTests {
   // MARK: - Reboot restore
 
   @Test
-  func aProvenRebootRestoresTheSessionInsteadOfClosingThePane() throws {
+  func aProvenRebootRestoresATurnBasedSessionInsteadOfClosingThePane() throws {
     // A missing session used to close the pane unconditionally, which read a host
     // reboot as "the loop finished": the session died with the machine, the pane gave
-    // up, and only relaunching the app brought the loop back. The reconnect line now
-    // compares the boot it last attached under (`RemoteBootMarker`) and, when the boot
-    // changed, restores the session in place — resuming the backend session whose ID
-    // the remote hook banked, with the ID consumed first exactly like the daemon's
-    // ensure, so a dead one costs a single fresh launch rather than a trapped loop.
+    // up, and only relaunching the app brought the loop back. For a turn-based loop —
+    // the one kind the daemon never restores — the reconnect line now compares the boot
+    // it last attached under (`RemoteBootMarker`) and, when the boot changed, restores
+    // the session itself: resume from the banked ID, consumed first exactly like the
+    // daemon's ensure.
     let nodeID = UUID()
     let view = agentSurface(nodeID: nodeID)
     let script = try #require(view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
     let loopBody = try #require(script.range(of: "while :; do").map { script[$0.upperBound...] })
     #expect(loopBody.contains("boot_id"))
+    #expect(loopBody.contains("kern.bootsessionuuid"))
     #expect(loopBody.contains(".graphcode/boots/graphcode-\(nodeID.uuidString)"))
     #expect(loopBody.contains(#"[ "$gc_boot" != "$gc_last" ]"#))
     #expect(loopBody.contains("\(nodeID.uuidString).id"))
@@ -226,6 +228,54 @@ struct RemoteLoopSurvivalTests {
     // Same boot — or no boot to compare — still closes with the notice: a session that
     // ended on its own must not be relaunched behind the human's back.
     #expect(loopBody.contains("ended while disconnected"))
+  }
+
+  @Test
+  func aDeadResumeIDFallsThroughToAFreshLaunchInsteadOfClosingThePane() throws {
+    // `claude --resume` against a pruned transcript exits immediately, and `zmx attach`
+    // passes that exit straight to ssh — a non-255 code the outer loop would close the
+    // pane on. Only this attached script can see how long the session lived, so the
+    // restore measures: an attach back in under five seconds is a dead ID and falls
+    // through to the fresh launch; one that lived was a real session whose exit passes
+    // through as ever.
+    let view = agentSurface()
+    let script = try #require(view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
+    let loopBody = try #require(script.range(of: "while :; do").map { script[$0.upperBound...] })
+    #expect(loopBody.contains("gc_t0=$(date +%s)"))
+    #expect(loopBody.contains("-ge 5"))
+    #expect(loopBody.contains("Resume did not take"))
+  }
+
+  @Test
+  func anUnattendedLoopDefersItsRestoreToTheDaemon() throws {
+    // The daemon's liveness sweep already restores an unattended loop's session, with
+    // the resume ID and the ensure gate. The pane joining in raced it: both consumed
+    // the same ID file, and the loser's read came back empty, so the loop restarted
+    // fresh instead of resuming (the bug observed in the field). After a proven reboot
+    // the pane only announces and keeps dialing; the reattach branch joins the session
+    // the moment the sweep has it back. No resume, no ID consumption, no prompt
+    // re-export — nothing for the daemon to race.
+    let view = agentSurface(loopType: .goalBased)
+    let script = try #require(view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
+    let loopBody = try #require(script.range(of: "while :; do").map { script[$0.upperBound...] })
+    #expect(loopBody.contains(#"[ "$gc_boot" != "$gc_last" ]"#))
+    #expect(loopBody.contains("waiting for the loop session"))
+    #expect(!loopBody.contains("--resume"))
+    #expect(!loopBody.contains("rm -f"))
+    #expect(!loopBody.contains("GRAPHCODE_TRIGGER_PROMPT"))
+    #expect(loopBody.contains("ended while disconnected"))
+  }
+
+  @Test
+  func theRestoreDoesNotRefreshTheMarkerUntilASessionIsLive() throws {
+    // The marker updates only when an attach finds a live session. Written during the
+    // restore, a drop mid-restore would make the next redial read "same boot" and
+    // close the pane as "ended while disconnected" on a reboot that was real.
+    let view = agentSurface()
+    let script = try #require(view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
+    let loopBody = try #require(script.range(of: "while :; do").map { script[$0.upperBound...] })
+    let rebootCheck = try #require(loopBody.range(of: #"[ "$gc_boot" != "$gc_last" ]"#))
+    #expect(!loopBody[rebootCheck.upperBound...].contains("mkdir -p \"$HOME/.graphcode/boots\""))
   }
 
   @Test

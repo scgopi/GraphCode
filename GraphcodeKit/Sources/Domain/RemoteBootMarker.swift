@@ -13,14 +13,17 @@ import Foundation
 /// `GhosttyTerminalView.remoteCommand`'s cue to restore it instead — see the restore
 /// branch there.
 ///
-/// The probe reads Linux's per-boot UUID and falls back to macOS's `kern.boottime`. A
-/// host offering neither captures empty, which the reconnect treats as "unknown" and
-/// keeps the pre-marker behaviour; so does a session attached before the marker existed,
-/// whose file is simply absent until the next attach writes one.
+/// The probe reads Linux's per-boot UUID and falls back to macOS's
+/// `kern.bootsessionuuid` — a UUID minted per boot, not `kern.boottime`, which is
+/// derived from the clock and shifts when NTP steps it after a wake, faking a reboot
+/// that never happened. A host offering neither captures empty, which the reconnect
+/// treats as "unknown" and keeps the pre-marker behaviour; so does a session attached
+/// before the marker existed, whose file is simply absent until the next attach writes
+/// one.
 public enum RemoteBootMarker {
   /// Assigns the current boot's identity to `gc_boot`, or empty when unknowable.
   public static let captureFragment =
-    "gc_boot=$({ cat /proc/sys/kernel/random/boot_id || sysctl -n kern.boottime; } 2>/dev/null)"
+    "gc_boot=$({ cat /proc/sys/kernel/random/boot_id || sysctl -n kern.bootsessionuuid; } 2>/dev/null)"
 
   /// Where one session's marker lives, as `$HOME` shell text — the file is on the
   /// session's host, and only a shell there knows that home directory (the

@@ -150,16 +150,8 @@ struct GhosttyTerminalView: NSViewRepresentable {
     settings: GraphcodeSettings = GraphcodeSettingsStore.load(), briefingPath: String? = nil,
     hooksFile: URL? = nil, remoteSettingsPath: String? = nil
   ) -> [String]? {
-    guard let executable = backend.executableName else { return nil }
-    let tier = ModelTier.resolved(
-      pinned: pinnedModelTier, for: loopType, autoSelecting: settings.autoSelectsModel)
-    let model = backend.modelArguments(for: tier).joined(separator: " ")
-    let permissions = backend.permissionArguments(settings).joined(separator: " ")
+    guard var parts = launchPrefix(settings: settings) else { return nil }
     let prompt = initialPrompt == nil ? "" : "\"$\(Self.promptVariable)\""
-
-    var parts = ["exec", executable]
-    if !model.isEmpty { parts.append(model) }
-    if !permissions.isEmpty { parts.append(permissions) }
     // Presence reporting, from the same place the daemon gets it (`PresenceHooks`). It
     // matters most here: a turn-based loop's session only ever starts from this view, so
     // without it the one loop type a human watches most closely would be the one that
@@ -200,7 +192,29 @@ struct GhosttyTerminalView: NSViewRepresentable {
       if backend == .copilotCLI { parts.append("--interactive") }
       parts.append(prompt)
     }
-    return ["/bin/zsh", "-i", "-l", "-c", parts.joined(separator: " ")]
+    return Self.interactiveLoginShell(parts)
+  }
+
+  /// The words every launch of this surface's agent starts from — executable, model,
+  /// permissions — shared by the fresh launch above and the reboot resume
+  /// (`resumeCommand`), so a flag every session needs cannot land in one and not the
+  /// other.
+  func launchPrefix(settings: GraphcodeSettings) -> [String]? {
+    guard let executable = backend.executableName else { return nil }
+    let tier = ModelTier.resolved(
+      pinned: pinnedModelTier, for: loopType, autoSelecting: settings.autoSelectsModel)
+    let model = backend.modelArguments(for: tier).joined(separator: " ")
+    let permissions = backend.permissionArguments(settings).joined(separator: " ")
+    var parts = ["exec", executable]
+    if !model.isEmpty { parts.append(model) }
+    if !permissions.isEmpty { parts.append(permissions) }
+    return parts
+  }
+
+  /// The `-i -l` wrapper `agentCommand`'s doc explains — one place, so the resume and
+  /// fresh launches cannot diverge on how the shell resolves the agent.
+  static func interactiveLoginShell(_ parts: [String]) -> [String] {
+    ["/bin/zsh", "-i", "-l", "-c", parts.joined(separator: " ")]
   }
 
   /// Where the graph briefing for this session landed, or `nil` when it shouldn't get

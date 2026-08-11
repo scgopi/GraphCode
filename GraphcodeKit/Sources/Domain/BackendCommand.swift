@@ -139,6 +139,15 @@ extension CLISessionBackendKind {
     }
   }
 
+  /// Whether the backend can pick a session back up from a persisted ID (`--resume`).
+  /// The one answer both resumers consult — the daemon's ensure
+  /// (`ZmxSessionLauncher.resumeArguments`) and the app's reboot restore
+  /// (`GhosttyTerminalView.resumeCommand`) — so a backend gaining or losing resume
+  /// support changes both paths together rather than one silently drifting.
+  public var supportsResume: Bool {
+    self == .claudeCode || self == .copilotCLI
+  }
+
   /// The argv that makes a backend's session observable — what graphcode adds so that
   /// "is this loop actually working?" has an answer.
   ///
