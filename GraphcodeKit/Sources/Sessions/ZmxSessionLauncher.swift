@@ -689,8 +689,9 @@ public enum ZmxSessionLauncher {
   static let remoteResumeIDPlaceholder = "__graphcode_remote_resume_id__"
 
   /// The shell variable `remoteEnsureInvocation` assigns the captured ID to, and that
-  /// `remoteResumeIDPlaceholder` expands into.
-  static let remoteResumeIDVariable = "GRAPHCODE_RESUME_ID"
+  /// `remoteResumeIDPlaceholder` expands into. Public because the app's reboot-restore
+  /// dial reads the same file into the same variable (`GhosttyTerminalView.remoteCommand`).
+  public static let remoteResumeIDVariable = "GRAPHCODE_RESUME_ID"
 
   /// The directories a loop's work legitimately spans: the project, and its worktree when
   /// it has one. A backend that verifies paths (Copilot) is told about both, because a

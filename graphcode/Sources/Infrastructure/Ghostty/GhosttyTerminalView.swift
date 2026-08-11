@@ -66,7 +66,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// Carries `initialPrompt` into the shell as a variable instead of interpolating it
   /// into the command string, so a prompt containing quotes, `$`, or backticks can't
   /// break out of (or inject into) the command Ghostty runs.
-  private static let promptVariable = "GRAPHCODE_TRIGGER_PROMPT"
+  static let promptVariable = "GRAPHCODE_TRIGGER_PROMPT"
 
   /// Returns a *host* rather than the surface itself, because the surface isn't this
   /// view's to own — `TerminalSurfaceStore` holds it, and this borrows it for as long as
@@ -215,15 +215,6 @@ struct GhosttyTerminalView: NSViewRepresentable {
     return SessionBriefing.write(projectPath: projectPath)
   }
 
-  /// The remote twin of `briefingFile`: the `~/`-relative path the briefing is
-  /// delivered to on the remote host, under the same guards.
-  func remoteBriefingPath(settings: GraphcodeSettings = GraphcodeSettingsStore.load()) -> String? {
-    guard launchesClaudeCode, initialPrompt != nil, settings.briefsSessionsAboutTheGraph,
-      remoteLocation != nil, let projectPath
-    else { return nil }
-    return RemoteGraphAccess.briefingPath(forProjectPath: projectPath)
-  }
-
   /// Where this session's presence hooks landed, or `nil` when it shouldn't get any: a
   /// plain shell has no agent to report, and a remote session runs on a machine this file
   /// was never written to.
@@ -261,74 +252,6 @@ struct GhosttyTerminalView: NSViewRepresentable {
       prompt = "\(SessionBriefing.pointer(toBriefingAt: briefingPath)) \(prompt)"
     }
     return [Self.promptVariable: prompt]
-  }
-
-  /// The argv for a surface whose project is remote: a local `/bin/sh` reconnect loop
-  /// (`SSHReconnectLoop`) around the `ssh -t … zmx attach` dial — both kinds: an agent
-  /// surface attaches (or creates) the loop's session on the remote host, and a plain
-  /// shell opens a remote shell in the repository, which is the shell a remote project's
-  /// extra tabs should give you.
-  ///
-  /// The opening prompt cannot ride in through the local environment the way it does
-  /// locally: sshd does not accept arbitrary client env. It is assigned inside the
-  /// remote command instead, single-quote-escaped, where the session's shell — spawned
-  /// by remote zmx under this very process — inherits it and expands the same
-  /// `"$GRAPHCODE_TRIGGER_PROMPT"` reference the local path uses.
-  ///
-  /// The loop's *reconnect* line is deliberately not the connect line again. For an
-  /// agent surface it reattaches only a session that still exists and otherwise closes
-  /// the pane with a notice: the session ending while disconnected is the loop
-  /// finishing (or being killed), and recreating it would re-export the prompt and
-  /// launch a second agent pass behind the human's back. A plain shell has no such
-  /// side effect, so its reconnect is the same create-or-attach as its connect.
-  func remoteCommand(
-    at location: RemoteProjectLocation, settings: GraphcodeSettings
-  ) -> [String] {
-    RemoteProjectLocation.prepareControlSocketDirectory()
-    let quoted = RemoteProjectLocation.shellQuoted
-    let delivery =
-      ZmxSessionLauncher.remoteDeliveryScript(forNode: nil, at: location, settings: settings)
-      .map { $0 + "; " } ?? ""
-    let briefingPath = remoteBriefingPath(settings: settings)
-    var script = delivery + "cd \(quoted(location.remotePath)) && "
-    let reconnectScript: String
-    let agentLaunch =
-      launchesClaudeCode
-      ? agentCommand(
-        settings: settings, briefingPath: briefingPath,
-        remoteSettingsPath: backend == .claudeCode ? PresenceHooks.remotePathExpression : nil)
-      : nil
-    if let agentLaunch {
-      if backend == .claudeCode, let hooksWrite = PresenceHooks.remoteWriteFragment() {
-        script += hooksWrite + " && "
-      }
-      if let prompt = sessionEnvironment(briefingPath: briefingPath)[Self.promptVariable] {
-        script += "export \(Self.promptVariable)=\(quoted(prompt)) && "
-      }
-      script += ZmxSessionLauncher.quotedCommand(["zmx", "attach", sessionName] + agentLaunch)
-      // `zmx get` exits 0 for a live session and 1 for a missing one — the same
-      // existence probe the daemon's ensure uses. Only that explicit 1 may end the
-      // pane: any other failure (`command not found` while the remote host is still
-      // booting, a broken login shell after wake) says nothing about the session, so
-      // it exits 255 — the one code the outer loop retries — instead of letting a
-      // transient error read as "the loop finished". The get-then-attach race (session
-      // dying in between) recreates a blank shell, accepted because the window is
-      // milliseconds.
-      reconnectScript =
-        "\(ZmxSessionLauncher.quotedCommand(["zmx", "get", sessionName])) >/dev/null 2>&1; "
-        + "gc_rc=$?; if [ \"$gc_rc\" -eq 0 ]; "
-        + "then exec \(ZmxSessionLauncher.quotedCommand(["zmx", "attach", sessionName])); fi; "
-        + "[ \"$gc_rc\" -ne 1 ] && exit 255; "
-        + #"printf '\033[2m── Remote session ended while disconnected. ──\033[0m\r\n'; exit 0"#
-    } else {
-      script += ZmxSessionLauncher.quotedCommand(["zmx", "attach", sessionName])
-      reconnectScript = script
-    }
-    let connect = location.sshCommandLine(
-      remoteCommand: location.remoteLoginShellCommand(script), interactive: true)
-    let reconnect = location.sshCommandLine(
-      remoteCommand: location.remoteLoginShellCommand(reconnectScript), interactive: true)
-    return ["/bin/sh", "-c", SSHReconnectLoop.script(connect: connect, reconnect: reconnect)]
   }
 
   private func command(briefingPath: String?) -> [String] {

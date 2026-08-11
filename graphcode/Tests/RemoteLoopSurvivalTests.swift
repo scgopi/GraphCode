@@ -177,9 +177,13 @@ struct RemoteLoopSurvivalTests {
 
   // MARK: - The reconnect line
 
-  private func agentSurface() -> GhosttyTerminalView {
+  private func agentSurface(
+    nodeID: UUID = UUID(), backend: CLISessionBackendKind = .claudeCode
+  ) -> GhosttyTerminalView {
     GhosttyTerminalView(
-      surfaceID: UUID(), sessionName: "graphcode-s", launchesClaudeCode: true,
+      surfaceID: nodeID,
+      sessionName: SurfaceRef(id: nodeID, launchesClaudeCode: true).zmxSessionName,
+      launchesClaudeCode: true, backend: backend,
       initialPrompt: "fix the build", workingDirectory: location.projectPath,
       projectPath: location.projectPath, onProcessExited: { _ in })
   }
@@ -196,6 +200,64 @@ struct RemoteLoopSurvivalTests {
     #expect(loopBody.contains(#"-ne 1"#))
     #expect(loopBody.contains("exit 255"))
     #expect(loopBody.contains("ended while disconnected"))
+  }
+
+  // MARK: - Reboot restore
+
+  @Test
+  func aProvenRebootRestoresTheSessionInsteadOfClosingThePane() throws {
+    // A missing session used to close the pane unconditionally, which read a host
+    // reboot as "the loop finished": the session died with the machine, the pane gave
+    // up, and only relaunching the app brought the loop back. The reconnect line now
+    // compares the boot it last attached under (`RemoteBootMarker`) and, when the boot
+    // changed, restores the session in place — resuming the backend session whose ID
+    // the remote hook banked, with the ID consumed first exactly like the daemon's
+    // ensure, so a dead one costs a single fresh launch rather than a trapped loop.
+    let nodeID = UUID()
+    let view = agentSurface(nodeID: nodeID)
+    let script = try #require(view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
+    let loopBody = try #require(script.range(of: "while :; do").map { script[$0.upperBound...] })
+    #expect(loopBody.contains("boot_id"))
+    #expect(loopBody.contains(".graphcode/boots/graphcode-\(nodeID.uuidString)"))
+    #expect(loopBody.contains(#"[ "$gc_boot" != "$gc_last" ]"#))
+    #expect(loopBody.contains("\(nodeID.uuidString).id"))
+    #expect(loopBody.contains(#"--resume "$GRAPHCODE_RESUME_ID""#))
+    #expect(loopBody.contains("rm -f"))
+    // Same boot — or no boot to compare — still closes with the notice: a session that
+    // ended on its own must not be relaunched behind the human's back.
+    #expect(loopBody.contains("ended while disconnected"))
+  }
+
+  @Test
+  func everyAttachRecordsTheBootItHappenedUnder() throws {
+    // The connect line writes the marker the reconnect line will later compare, and a
+    // plain reattach refreshes it — a marker left stale across a survived reboot would
+    // make the *next* ordinary session end read as another reboot and resume a
+    // conversation that had finished.
+    let view = agentSurface()
+    let script = try #require(view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
+    let splitAt = try #require(script.range(of: "while :; do"))
+    let connectLine = script[..<splitAt.lowerBound]
+    let loopBody = script[splitAt.upperBound...]
+    #expect(connectLine.contains(".graphcode/boots"))
+    let reattach = try #require(loopBody.range(of: "-eq 0"))
+    let successBranch = loopBody[reattach.upperBound...]
+    let branchEnd = try #require(successBranch.range(of: "fi;"))
+    #expect(successBranch[..<branchEnd.lowerBound].contains(".graphcode/boots"))
+  }
+
+  @Test
+  func copilotRestoreResumesWithoutANameAndCodexCannotResume() {
+    // Copilot's `--name` and `--resume` are mutually exclusive; Codex has no resume at
+    // all, so its restore goes straight to the fresh launch.
+    let copilot = agentSurface(backend: .copilotCLI)
+      .resumeCommand(settings: GraphcodeSettings(), remoteSettingsPath: nil)?
+      .joined(separator: " ")
+    #expect(copilot?.contains(#"--resume "$GRAPHCODE_RESUME_ID""#) == true)
+    #expect(copilot?.contains("--name") == false)
+    let codex = agentSurface(backend: .codex)
+      .resumeCommand(settings: GraphcodeSettings(), remoteSettingsPath: nil)
+    #expect(codex == nil)
   }
 
   // MARK: - Remote presence hooks
@@ -224,9 +286,12 @@ struct RemoteLoopSurvivalTests {
     let script = try #require(view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
     #expect(script.contains("claude-code.json"))
     #expect(script.contains("--settings"))
-    // But only the connect line, which may create the session — the reconnect line
-    // reattaches an existing one and has nothing to configure.
+    // The reconnect line configures nothing on a plain reattach — hooks appear in its
+    // restore branch alone, which recreates the session and so writes them the way the
+    // connect line does, behind the boot comparison that proves recreating is safe.
     let loopBody = try #require(script.range(of: "while :; do").map { script[$0.upperBound...] })
-    #expect(!loopBody.contains("claude-code.json"))
+    let hooksInLoop = try #require(loopBody.range(of: "claude-code.json"))
+    let rebootCheck = try #require(loopBody.range(of: #"[ "$gc_boot" != "$gc_last" ]"#))
+    #expect(rebootCheck.upperBound <= hooksInLoop.lowerBound)
   }
 }
