@@ -183,11 +183,15 @@ Design docs live in `docs/` and are kept local (gitignored) for now.
 - **Apple Silicon only.** GhosttyKit is built for the native architecture; there is no
   x86_64 slice, so a universal build won't link.
 - **Claude Code is the most complete backend.** Copilot CLI and Codex loops launch, run,
-  fan out, resume after a reboot, and receive message edges like Claude ones. Copilot
-  presence is read from its event log (local and remote), so a Copilot loop waiting for
-  input shows as "NEEDS YOU"; usage stays Claude Code-only. The picker refuses pairings a
-  backend can't host (time-based needs the session to re-trigger itself; composites need
-  verified sub-agents).
+  resume after a reboot, and receive message edges like Claude ones, and all three report
+  the tool call a loop is currently inside. Two loop types are narrower: only Claude Code
+  hosts a composite, which needs sub-agents neither other CLI exposes, and Codex can't
+  host a time-based loop, since the cadence lives in the session and Codex has no
+  `/loop` of its own. Presence comes from lifecycle hooks for Claude Code, the event log
+  for Copilot, and the notify hook for Codex, so a loop waiting for input shows as
+  "NEEDS YOU" on all three. Usage stays Claude Code-only, and remote Copilot and Codex
+  loops report no activity, because the log it is read from sits on the far host. The
+  picker refuses pairings a backend can't host.
 - **A new folder stops at Claude's trust prompt.** An unattended loop started by the daemon
   in a folder Claude hasn't seen waits at *"Do you trust this folder?"* and shows as
   `running` while doing nothing. Attach once and answer it.
