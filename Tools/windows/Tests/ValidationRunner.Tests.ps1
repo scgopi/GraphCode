@@ -13,6 +13,7 @@ $expected = @(
   "swift-process",
   "swift-named-pipe",
   "swift-format",
+  "visual-baseline",
   "tdd-evidence",
   "privacy"
 )

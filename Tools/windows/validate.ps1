@@ -8,6 +8,7 @@ param(
     "swift-process",
     "swift-named-pipe",
     "swift-format",
+    "visual-baseline",
     "tdd-evidence",
     "privacy"
   )]
@@ -29,6 +30,7 @@ $tasks = @(
   "swift-process",
   "swift-named-pipe",
   "swift-format",
+  "visual-baseline",
   "tdd-evidence",
   "privacy"
 )
@@ -179,6 +181,11 @@ function Invoke-Task([string] $name) {
         }
       }
     }
+    "visual-baseline" {
+      Invoke-Native "Windows visual baseline contract" {
+        & (Join-Path $repoRoot "Tools\windows\Tests\VisualBaseline.Tests.ps1")
+      }
+    }
     "tdd-evidence" {
       & (Join-Path $repoRoot "Tools\tdd\Tests\TddEvidence.Tests.ps1")
       if ($LASTEXITCODE -ne 0) {
@@ -215,7 +222,8 @@ function Invoke-Task([string] $name) {
         "Visual Studio\\[0-9]{4}\\(Enterprise|BuildTools)"
       )
       foreach ($file in $files) {
-        if ($file.Extension -notin ".md", ".swift", ".c", ".ps1", ".resolved" -and
+        if ($file.Extension -notin
+          ".md", ".swift", ".c", ".ps1", ".resolved", ".json", ".txt" -and
           $file.Name -ne ".gitignore") {
           continue
         }

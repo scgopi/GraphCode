@@ -1,0 +1,5 @@
+GraphCode visual baseline
+shell: fixture-shell
+branch: baseline
+$ graphcode status --fixture
+9 loops · 4 need attention

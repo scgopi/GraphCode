@@ -1,0 +1,4 @@
+GraphCode visual baseline
+event stream: fixed
+14:55 metric sample recorded
+15:00 workspace attached
