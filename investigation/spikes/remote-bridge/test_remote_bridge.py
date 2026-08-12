@@ -1,13 +1,12 @@
 import json
 import os
-import shutil
 import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
-import uuid
 import unittest
 from pathlib import Path
 
@@ -28,9 +27,10 @@ from remote_bridge import (  # noqa: E402
 
 class RemoteBridgeTests(unittest.TestCase):
     def setUp(self):
-        self.test_dir = SPIKE_ROOT / f".test-state-{uuid.uuid4().hex}"
-        self.test_dir.mkdir()
-        self.state_path = self.test_dir / "bridge-state.json"
+        self.test_dir = tempfile.TemporaryDirectory(
+            prefix="graphcode-remote-bridge-"
+        )
+        self.state_path = Path(self.test_dir.name) / "bridge-state.json"
         self.backend = FramedBackend()
         self.backend.start()
         self.bridge = RemoteBridge(
@@ -44,7 +44,7 @@ class RemoteBridgeTests(unittest.TestCase):
     def tearDown(self):
         self.bridge.stop()
         self.backend.stop()
-        shutil.rmtree(self.test_dir, ignore_errors=True)
+        self.test_dir.cleanup()
 
     def raw_request(
         self,

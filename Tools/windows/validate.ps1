@@ -170,6 +170,10 @@ function Invoke-Task([string] $name) {
           -s (Join-Path $repoRoot "investigation\spikes\remote-bridge") `
           -p "test_*.py" -v
       }
+      & (Join-Path $repoRoot "Tools\windows\Tests\RemoteBridgePrivacyRace.Tests.ps1")
+      if ($LASTEXITCODE -ne 0) {
+        throw "Remote bridge privacy race regression failed with exit code $LASTEXITCODE"
+      }
     }
     "swift-format" {
       $formatter = Join-Path $swiftBin "swift-format.exe"
@@ -250,7 +254,15 @@ function Invoke-Task([string] $name) {
           $file.Name -ne ".gitignore") {
           continue
         }
-        $content = Get-Content -LiteralPath $file.FullName -Raw
+        try {
+          $content = Get-Content -LiteralPath $file.FullName -Raw -ErrorAction Stop
+        } catch {
+          if ($_.Exception -is [System.Management.Automation.ItemNotFoundException] -or
+            $_.Exception -is [System.IO.FileNotFoundException]) {
+            continue
+          }
+          throw
+        }
         foreach ($pattern in $forbidden) {
           if ($content -match $pattern) {
             throw "Environment-specific content matched '$pattern' in $($file.FullName)"

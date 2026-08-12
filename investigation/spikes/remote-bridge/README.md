@@ -34,12 +34,14 @@ endpoint, or private network is used.
 - Expired, missing, malformed, oversized, and invalid-token requests are rejected.
 - Stop/restart replaces stale state and a one-shot client rediscovers the new record.
 - Backend failures return a stable sanitized error.
+- Tests keep bridge state in OS temporary storage outside the repository.
+- `RemoteBridgePrivacyRace.Tests.ps1` runs remote tests and privacy validation concurrently.
 
 ## TDD evidence
 
-RED: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v` -> import failed because `remote_bridge` was not implemented
-GREEN: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v` -> 14 tests passed
-REGRESSION: `pwsh Tools/windows/validate.ps1 -Task remote-bridge` -> focused Windows validation passed
+RED: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v` plus concurrent privacy validation -> import failed and privacy raced with deleted `.test-state-*`
+GREEN: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v` plus `pwsh Tools/windows/Tests/RemoteBridgePrivacyRace.Tests.ps1` -> 14 tests and race regression passed
+REGRESSION: `pwsh Tools/windows/validate.ps1 -Task remote-bridge` -> focused Windows validation and concurrent privacy regression passed
 
 ## Required production contract changes
 
