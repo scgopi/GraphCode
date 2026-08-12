@@ -251,6 +251,7 @@ public struct DaemonReplayBuffer: Equatable, Sendable {
   public enum ReplayError: Error, Equatable {
     case invalidCapacity
     case nonMonotonicSequence
+    case replayUnavailable
     case cursorOutsideWindow
   }
 
@@ -277,11 +278,13 @@ public struct DaemonReplayBuffer: Equatable, Sendable {
 
   public func replay(after cursor: UInt64) throws -> [DaemonWireEnvelope] {
     guard capacity > 0 else {
-      if entries.isEmpty { return [] }
-      throw ReplayError.cursorOutsideWindow
+      throw ReplayError.replayUnavailable
     }
-    guard let first = firstSequence, let latest = latestSequence else { return [] }
-    if cursor >= latest { return [] }
+    guard let first = firstSequence, let latest = latestSequence else {
+      throw ReplayError.replayUnavailable
+    }
+    if cursor == latest { return [] }
+    if cursor > latest { throw ReplayError.cursorOutsideWindow }
     guard cursor + 1 >= first else { throw ReplayError.cursorOutsideWindow }
     return entries.filter { ($0.sequence ?? 0) > cursor }
   }

@@ -11,6 +11,7 @@ public enum DaemonWireErrorCode: String, Codable, Sendable {
   case unsupportedVersion
   case expectedHello
   case replayUnavailable
+  case cursorOutsideWindow
   case requestFailed
   case connectionClosed
   case transportFailure
@@ -21,6 +22,7 @@ public enum DaemonConnectionChannelError: Error, Equatable, Sendable {
   case unsupportedVersion
   case malformedEnvelope
   case replayUnavailable
+  case cursorOutsideWindow
 }
 
 /// Replay state is kept separately from a socket. A reconnecting client presents
@@ -44,7 +46,10 @@ public actor DaemonReplayStore {
   }
 
   public func replay(clientID: UUID, after cursor: UInt64) throws -> [DaemonWireEnvelope] {
-    try (buffers[clientID] ?? DaemonReplayBuffer(capacity: capacity)).replay(after: cursor)
+    guard let buffer = buffers[clientID] else {
+      throw DaemonReplayBuffer.ReplayError.replayUnavailable
+    }
+    return try buffer.replay(after: cursor)
   }
 
   public func remove(clientID: UUID) {
@@ -61,8 +66,8 @@ public actor DaemonConnectionChannel {
   public let clientID: UUID
 
   private let replayStore: DaemonReplayStore
+  private let writeGate: DaemonFrameWriteGate
   private var subscription: DaemonWireSubscription?
-  private var activeRequestID: UUID?
 
   public init(
     connection: any DaemonConnection,
@@ -76,14 +81,12 @@ public actor DaemonConnectionChannel {
     self.clientID = clientID ?? connection.id
     self.subscription = subscription
     self.replayStore = replayStore
+    self.writeGate = daemonFrameWriteGates.gate(
+      for: connection.id, connection: connection)
   }
 
   public func setSubscription(_ subscription: DaemonWireSubscription?) {
     self.subscription = subscription
-  }
-
-  public func setActiveRequestID(_ requestID: UUID?) {
-    activeRequestID = requestID
   }
 
   public func sendHelloResponse(selectedVersion: Int) async throws {
@@ -121,7 +124,7 @@ public actor DaemonConnectionChannel {
     case .v2:
       try await sendJSON(
         DaemonWireEnvelope.error(
-          id: requestID ?? activeRequestID, code: code.rawValue, message: message))
+          id: requestID, code: code.rawValue, message: message))
     }
   }
 
@@ -129,9 +132,12 @@ public actor DaemonConnectionChannel {
     guard case .v2 = mode else { return }
     do {
       for envelope in try await replayStore.replay(clientID: clientID, after: cursor) {
+        guard let event = envelope.event, isSubscribed(to: event) else { continue }
         try await sendJSON(envelope)
       }
     } catch DaemonReplayBuffer.ReplayError.cursorOutsideWindow {
+      throw DaemonConnectionChannelError.cursorOutsideWindow
+    } catch DaemonReplayBuffer.ReplayError.replayUnavailable {
       throw DaemonConnectionChannelError.replayUnavailable
     }
   }
@@ -158,6 +164,49 @@ public actor DaemonConnectionChannel {
   }
 
   private func sendJSON<T: Encodable>(_ value: T) async throws {
-    try await connection.sendFrame(try JSONEncoder().encode(value))
+    try await writeGate.send(try JSONEncoder().encode(value))
+  }
+}
+
+/// A task chain keeps complete framed writes non-reentrant. Actor isolation alone
+/// is insufficient here: an `await` inside `sendFrame` lets another channel call
+/// run before the first header/payload pair has finished.
+private actor DaemonFrameWriteGate {
+  private let connection: any DaemonConnection
+  private var tail: Task<Void, Error>?
+
+  init(connection: any DaemonConnection) {
+    self.connection = connection
+  }
+
+  func send(_ data: Data) async throws {
+    let previous = tail
+    let connection = self.connection
+    let operation = Task {
+      if let previous {
+        try await previous.value
+      }
+      try await connection.sendFrame(data)
+    }
+    tail = operation
+    try await operation.value
+  }
+}
+
+private let daemonFrameWriteGates = DaemonFrameWriteGateRegistry()
+
+private final class DaemonFrameWriteGateRegistry: @unchecked Sendable {
+  private let lock = NSLock()
+  private var gates: [UUID: DaemonFrameWriteGate] = [:]
+
+  func gate(for id: UUID, connection: any DaemonConnection) -> DaemonFrameWriteGate {
+    lock.lock()
+    defer { lock.unlock() }
+    if let gate = gates[id] {
+      return gate
+    }
+    let gate = DaemonFrameWriteGate(connection: connection)
+    gates[id] = gate
+    return gate
   }
 }

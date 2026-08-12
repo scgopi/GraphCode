@@ -149,6 +149,7 @@ final class ContractTests: XCTestCase {
   private final class RecordingConnection: @unchecked Sendable, DaemonConnection {
     let id = UUID()
     let endpoint: DaemonEndpoint = .namedPipe("fixture")
+    private let probe = SendProbe()
     private(set) var frames = [Data]()
 
     func receiveFrame() async throws -> Data {
@@ -156,10 +157,31 @@ final class ContractTests: XCTestCase {
     }
 
     func sendFrame(_ data: Data) async throws {
+      await probe.begin()
+      try? await Task.sleep(for: .milliseconds(2))
       frames.append(data)
+      await probe.end()
     }
 
     func close() async throws {}
+
+    var maxConcurrentSends: Int {
+      get async { await probe.maximum }
+    }
+  }
+
+  private actor SendProbe {
+    private var current = 0
+    private(set) var maximum = 0
+
+    func begin() {
+      current += 1
+      maximum = max(maximum, current)
+    }
+
+    func end() {
+      current -= 1
+    }
   }
 
   func testReplayBufferReturnsContiguousEvents() throws {
@@ -185,6 +207,57 @@ final class ContractTests: XCTestCase {
     XCTAssertThrowsError(try buffer.replay(after: 0))
   }
 
+  func testReplayBufferDistinguishesCaughtUpFromCursorBeyondLatest() throws {
+    var buffer = DaemonReplayBuffer(capacity: 2)
+    buffer.append(sequence: 1, event: .errorOccurred("one"))
+    buffer.append(sequence: 2, event: .errorOccurred("two"))
+
+    XCTAssertEqual(try buffer.replay(after: 2), [])
+    XCTAssertThrowsError(try buffer.replay(after: 3)) { error in
+      XCTAssertEqual(
+        error as? DaemonReplayBuffer.ReplayError, .cursorOutsideWindow)
+    }
+  }
+
+  func testUnknownReplayHistoryIsUnavailable() async {
+    let store = DaemonReplayStore(capacity: 2)
+    do {
+      _ = try await store.replay(clientID: UUID(), after: 0)
+      XCTFail("expected unknown replay history to be unavailable")
+    } catch DaemonReplayBuffer.ReplayError.replayUnavailable {
+      // Expected after a daemon restart with no retained client history.
+    } catch {
+      XCTFail("unexpected replay error: \(error)")
+    }
+  }
+
+  func testReplayUsesTheReconnectingChannelsCurrentSubscription() async throws {
+    let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000004")!
+    let store = DaemonReplayStore(capacity: 8)
+    let first = LoopGraph(project: ProjectRef(path: "/work/first", name: "first"))
+    let second = LoopGraph(project: ProjectRef(path: "/work/second", name: "second"))
+    _ = await store.append(clientID: clientID, event: .graphChanged(first))
+    _ = await store.append(clientID: clientID, event: .graphChanged(second))
+
+    let transport = RecordingConnection()
+    let channel = DaemonConnectionChannel(
+      connection: transport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      subscription: DaemonWireSubscription(projectPaths: ["/work/second"]),
+      replayStore: store)
+
+    try await channel.replay(after: 0)
+
+    XCTAssertEqual(transport.frames.count, 1)
+    let replayed = try JSONDecoder().decode(
+      DaemonWireEnvelope.self, from: transport.frames[0])
+    guard case .graphChanged(let graph) = replayed.event else {
+      return XCTFail("expected a graphChanged replay")
+    }
+    XCTAssertEqual(graph.project.path, "/work/second")
+  }
+
   func testV2ChannelSequencesEventsAndCorrelatesResponses() async throws {
     let transport = RecordingConnection()
     let store = DaemonReplayStore(capacity: 8)
@@ -196,21 +269,64 @@ final class ContractTests: XCTestCase {
 
     try await channel.sendEvent(.errorOccurred("event"))
     let requestID = UUID(uuidString: "00000000-0000-0000-0000-000000000003")!
-    await channel.setActiveRequestID(requestID)
-    try await channel.sendError(code: .requestFailed, message: "request failed")
+    try await channel.sendError(
+      requestID: requestID, code: .requestFailed, message: "request failed")
+    try await channel.sendError(code: .transportFailure, message: "broadcast failure")
     try await channel.sendResponse(requestID: requestID, event: .errorOccurred("response"))
 
     let frames = transport.frames
-    XCTAssertEqual(frames.count, 3)
+    XCTAssertEqual(frames.count, 4)
     let event = try JSONDecoder().decode(DaemonWireEnvelope.self, from: frames[0])
     let error = try JSONDecoder().decode(DaemonWireEnvelope.self, from: frames[1])
-    let response = try JSONDecoder().decode(DaemonWireEnvelope.self, from: frames[2])
+    let broadcastError = try JSONDecoder().decode(DaemonWireEnvelope.self, from: frames[2])
+    let response = try JSONDecoder().decode(DaemonWireEnvelope.self, from: frames[3])
     XCTAssertEqual(event.sequence, 1)
     XCTAssertEqual(event.kind, .event)
     XCTAssertEqual(error.requestID, requestID)
     XCTAssertEqual(error.kind, .error)
+    XCTAssertNil(broadcastError.requestID)
     XCTAssertEqual(response.requestID, requestID)
     XCTAssertEqual(response.kind, .response)
+  }
+
+  func testConcurrentChannelSendsNeverEnterTheTransportTogether() async {
+    let transport = RecordingConnection()
+    let channel = DaemonConnectionChannel(
+      connection: transport, mode: .v2(version: 2), replayStore: DaemonReplayStore())
+
+    await withTaskGroup(of: Void.self) { group in
+      for index in 0..<16 {
+        group.addTask {
+          try? await channel.sendEvent(.errorOccurred("event-\(index)"))
+        }
+      }
+    }
+
+    let maximum = await transport.maxConcurrentSends
+    XCTAssertEqual(maximum, 1)
+    XCTAssertEqual(transport.frames.count, 16)
+  }
+
+  func testChannelsSharingAConnectionSerializeCompleteWrites() async {
+    let transport = RecordingConnection()
+    let first = DaemonConnectionChannel(
+      connection: transport, mode: .v2(version: 2), replayStore: DaemonReplayStore())
+    let second = DaemonConnectionChannel(
+      connection: transport, mode: .v2(version: 2), replayStore: DaemonReplayStore())
+
+    await withTaskGroup(of: Void.self) { group in
+      for index in 0..<16 {
+        group.addTask {
+          let channel = index.isMultiple(of: 2) ? first : second
+          try? await channel.sendError(
+            code: .transportFailure, message: "error-\(index)")
+        }
+      }
+    }
+
+    let maximum = await transport.maxConcurrentSends
+    XCTAssertEqual(maximum, 1)
+    XCTAssertEqual(transport.frames.count, 16)
   }
 
   func testRemoteBridgeStateValidatesSecurityFields() throws {

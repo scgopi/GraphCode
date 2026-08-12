@@ -143,7 +143,11 @@ func handleConnection(_ connection: any DaemonConnection) {
           } catch DaemonConnectionChannelError.replayUnavailable {
             try await v2Channel.sendError(
               code: .replayUnavailable,
-              message: "requested events are outside the replay window")
+              message: "requested replay history is unavailable")
+          } catch DaemonConnectionChannelError.cursorOutsideWindow {
+            try await v2Channel.sendError(
+              code: .cursorOutsideWindow,
+              message: "requested cursor is beyond the retained event history")
           }
         }
       }
@@ -171,7 +175,6 @@ func handleConnection(_ connection: any DaemonConnection) {
                 message: "expected a v2 request envelope")
               continue
             }
-            await channel.setActiveRequestID(requestID)
             await registry.handle(command, connectionID: connectionID)
             if let response = await registry.responseEvent(for: command) {
               try await channel.sendResponse(requestID: requestID, event: response)
@@ -181,7 +184,6 @@ func handleConnection(_ connection: any DaemonConnection) {
                 code: .requestFailed,
                 message: "request could not be applied")
             }
-            await channel.setActiveRequestID(nil)
           }
         } catch {
           try await channel.sendError(
