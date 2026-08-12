@@ -8,6 +8,7 @@ The Windows port must have runnable commands before implementation fleets begin.
 |---|---|
 | Windows investigation spikes | `pwsh Tools/windows/validate.ps1 -Task all` |
 | Validation runner contract | `pwsh Tools/windows/Tests/ValidationRunner.Tests.ps1` |
+| TDD evidence contract | `pwsh Tools/tdd/Tests/TddEvidence.Tests.ps1` |
 | Shared Swift package | `swift test --package-path <shared-package>` once extracted |
 | macOS app/daemon/CLI | `make test` |
 | macOS format/lint | `make check` |

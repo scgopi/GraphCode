@@ -92,15 +92,19 @@ terminal renderer based only on VT success.
 ### Consequences
 Headless Windows work can proceed while the UI architecture remains provisional.
 
-## ADR-006: Defer remote SSH parity from native Windows v1
+## ADR-006: Include POSIX remote SSH parity in Windows v1
 
 ### Status
-Accepted.
+Supersedes the earlier deferral decision.
 
 ### Evidence
 Remote support embeds POSIX shell, Unix-domain sockets, chmod/shebang behavior, `/usr/bin/ssh`,
 and reverse Unix socket forwarding throughout several files.
 
 ### Decision
-Ship local projects/sessions first. Preserve remote URI/domain models and design a later
-Windows OpenSSH transport without blocking the local port.
+Windows v1 includes the existing POSIX remote-host workflow. Keep Named Pipes as the local
+daemon transport and bridge them through an authenticated, loopback-only TCP listener used
+only by SSH reverse forwarding. The one-shot remote shim discovers the current endpoint and
+capability through an atomic user-only bridge-state record.
+
+Windows remote hosts, ARM64, and automatic updating remain deferred.

@@ -1,0 +1,18 @@
+name: TDD evidence
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Require RED, GREEN, and REGRESSION evidence
+        shell: pwsh
+        run: ./Tools/tdd/Test-TddEvidence.ps1 -EventPath $env:GITHUB_EVENT_PATH

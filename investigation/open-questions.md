@@ -16,6 +16,10 @@
 5. Event subscription, ordering, and reconnect/replay semantics for multiple clients.
 6. Windows startup choice: Startup shortcut, scheduled task, packaged app startup task, or explicit app-managed child.
 7. Swift runtime redistribution and installer footprint.
+8. Authenticated bridge-state schema, capability rotation, stale cleanup, and endpoint
+   rediscovery after daemon/SSH/remote restart.
+9. Verification that the SSH server's effective reverse-forward listener remains
+   loopback-only regardless of `GatewayPorts`.
 
 ## Must answer before zmx release
 
@@ -27,7 +31,6 @@
 
 ## Deferred from Windows v1
 
-- Remote SSH socket forwarding and the embedded Unix-socket Python CLI shim.
 - WSL-specific project/path integration.
 - ARM64.
 - Full updater/installer automation.

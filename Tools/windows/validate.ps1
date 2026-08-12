@@ -7,6 +7,7 @@ param(
     "swift-process",
     "swift-named-pipe",
     "swift-format",
+    "tdd-evidence",
     "privacy"
   )]
   [string] $Task = "all",
@@ -26,6 +27,7 @@ $tasks = @(
   "swift-process",
   "swift-named-pipe",
   "swift-format",
+  "tdd-evidence",
   "privacy"
 )
 
@@ -159,6 +161,12 @@ function Invoke-Task([string] $name) {
         } finally {
           Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
         }
+      }
+    }
+    "tdd-evidence" {
+      & (Join-Path $repoRoot "Tools\tdd\Tests\TddEvidence.Tests.ps1")
+      if ($LASTEXITCODE -ne 0) {
+        throw "TDD evidence tests failed with exit code $LASTEXITCODE"
       }
     }
     "privacy" {

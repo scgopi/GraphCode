@@ -12,6 +12,7 @@ $expected = @(
   "swift-process",
   "swift-named-pipe",
   "swift-format",
+  "tdd-evidence",
   "privacy"
 )
 foreach ($task in $expected) {

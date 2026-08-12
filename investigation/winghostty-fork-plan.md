@@ -48,13 +48,13 @@ DPI, accessibility, repaint scheduling, and the short-lived `zmx attach` client 
 Create or use:
 
 ```text
-scgopi/winghostty
+coneilen/winghostty
 ```
 
 Configure remotes:
 
 ```text
-origin      scgopi/winghostty
+origin      coneilen/winghostty
 winghostty  amanthanvi/winghostty
 ghostty     ghostty-org/ghostty
 ```
