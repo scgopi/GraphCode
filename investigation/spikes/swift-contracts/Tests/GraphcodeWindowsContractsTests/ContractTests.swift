@@ -316,6 +316,37 @@ final class ContractTests: XCTestCase {
     XCTAssertEqual(DaemonWireProtocol.requestIDIfPresent(in: data), requestID)
   }
 
+  func testWrongKindEnvelopeDoesNotBorrowItsRequestID() throws {
+    let requestID = UUID(uuidString: "00000000-0000-0000-0000-000000000010")!
+    let data = try JSONEncoder().encode(
+      DaemonWireEnvelope.response(id: requestID, event: .errorOccurred("response")))
+
+    XCTAssertNil(DaemonWireProtocol.requestIDIfPresent(in: data))
+  }
+
+  func testUnmarkedInvalidInitialFrameUsesV1ErrorShape() throws {
+    let invalid = Data(#"{"notACommand":{}}"#.utf8)
+    let errorFrame = try DaemonWireProtocol.initialErrorFrame(
+      for: invalid, message: "invalid v1 command")
+
+    XCTAssertFalse(DaemonWireProtocol.isV2ShapedFrame(invalid))
+    XCTAssertEqual(
+      try JSONDecoder().decode(DaemonEvent.self, from: errorFrame),
+      .errorOccurred("invalid v1 command"))
+  }
+
+  func testMarkedInvalidInitialFrameUsesV2ErrorShape() throws {
+    let invalid = Data(#"{"version":2,"kind":"response"}"#.utf8)
+    let errorFrame = try DaemonWireProtocol.initialErrorFrame(
+      for: invalid, message: "invalid v2 envelope")
+    let decoded = try JSONDecoder().decode(DaemonWireEnvelope.self, from: errorFrame)
+
+    XCTAssertTrue(DaemonWireProtocol.isV2ShapedFrame(invalid))
+    XCTAssertEqual(decoded.kind, .error)
+    XCTAssertEqual(decoded.error?.code, DaemonWireErrorCode.unsupportedVersion.rawValue)
+    XCTAssertEqual(decoded.error?.message, "invalid v2 envelope")
+  }
+
   func testV2ChannelSequencesEventsAndCorrelatesResponses() async throws {
     let transport = RecordingConnection()
     let store = DaemonReplayStore(capacity: 8)

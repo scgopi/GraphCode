@@ -107,9 +107,10 @@ public actor ProjectRegistry {
       guard let store = stores[path] else { continue }
       await store.removeConnection(id)
     }
-    connections.removeValue(forKey: id)
+    let channel = connections.removeValue(forKey: id)
     connectionProjectPaths.removeValue(forKey: id)
     if connections.isEmpty { stopPresencePolling() }
+    try? await channel?.close()
   }
 
   // MARK: - Presence polling
@@ -211,7 +212,8 @@ public actor ProjectRegistry {
 
     switch command {
     case .listRecentProjects:
-      await send(.recentProjectsListed(persistence.loadRecentProjects()), to: channel)
+      await send(
+        .recentProjectsListed(persistence.loadRecentProjects()), to: connectionID)
 
     case .openProject(let path):
       guard Self.isOpenable(path, platformPaths: platformPaths) else { break }
@@ -364,9 +366,13 @@ public actor ProjectRegistry {
     let spawnIntoProject: @Sendable (String, NodeDraft) -> Void = { [weak self] target, draft in
       Task { await self?.spawnIntoProject(target, draft: draft) }
     }
+    let onConnectionFailure: @Sendable (UUID) -> Void = { [weak self] connectionID in
+      Task { await self?.removeConnection(connectionID) }
+    }
     let newStore = GraphStore(
       graph: graph,
       onGraphChanged: { updatedGraph in persistence.saveGraph(updatedGraph) },
+      onConnectionFailure: onConnectionFailure,
       onEnsureSession: ensureSession,
       onTerminateSession: terminateSession,
       onEvaluatePredicate: evaluatePredicate,
@@ -463,7 +469,12 @@ public actor ProjectRegistry {
 
   // MARK: - Unicast reply
 
-  private func send(_ event: DaemonEvent, to channel: DaemonConnectionChannel) async {
-    try? await channel.sendEvent(event)
+  private func send(_ event: DaemonEvent, to connectionID: UUID) async {
+    guard let channel = connections[connectionID] else { return }
+    do {
+      try await channel.sendEvent(event)
+    } catch {
+      await removeConnection(connectionID)
+    }
   }
 }

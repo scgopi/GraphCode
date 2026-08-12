@@ -132,6 +132,39 @@ struct OrchestratorClientTests {
     #expect(await received == .errorOccurred("after reconnect"))
   }
 
+  @Test
+  func cancellingAnEventStreamClosesItsReaderBeforeReconnect() async throws {
+    let daemon = try StubDaemon()
+    defer { daemon.stop() }
+    let client = OrchestratorClient.live(socketPath: daemon.socketPath)
+
+    let oldReader = Task {
+      for await _ in client.connect() {}
+    }
+    for _ in 0..<100 where daemon.acceptedConnectionCount == 0 {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(daemon.acceptedConnectionCount == 1)
+
+    oldReader.cancel()
+    for _ in 0..<100 where !daemon.peerHasClosed(at: 0) {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(daemon.peerHasClosed(at: 0))
+    await oldReader.value
+
+    let newReader = Task {
+      await firstEvent(of: client.connect())
+    }
+    for _ in 0..<100 where daemon.acceptedConnectionCount < 2 {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(daemon.acceptedConnectionCount == 2)
+    try daemon.reply(.errorOccurred("after cancellation"), onConnection: 1)
+    #expect(await newReader.value == .errorOccurred("after cancellation"))
+    newReader.cancel()
+  }
+
   private func firstEvent(of events: AsyncStream<DaemonEvent>) async -> DaemonEvent? {
     for await event in events { return event }
     return nil
@@ -206,6 +239,16 @@ private final class StubDaemon: @unchecked Sendable {
 
   var acceptedConnectionCount: Int {
     lock.withLock { acceptedDescriptors.count }
+  }
+
+  func peerHasClosed(at index: Int) -> Bool {
+    guard let descriptor = lock.withLock({
+      acceptedDescriptors.indices.contains(index) ? acceptedDescriptors[index] : nil
+    }), descriptor >= 0
+    else { return true }
+    var byte: UInt8 = 0
+    let result = recv(descriptor, &byte, 1, MSG_PEEK | MSG_DONTWAIT)
+    return result == 0
   }
 
   /// Reads one framed command off an accepted connection, waiting for the accept to land.

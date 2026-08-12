@@ -17,6 +17,23 @@ struct OrchestratorClient: Sendable {
   var send: @Sendable (_ command: DaemonCommand) async throws -> Void
 }
 
+private final class ReaderToken: @unchecked Sendable {
+  private let lock = NSLock()
+  private var readerID: UInt64?
+
+  func set(_ readerID: UInt64) {
+    lock.lock()
+    self.readerID = readerID
+    lock.unlock()
+  }
+
+  var value: UInt64? {
+    lock.lock()
+    defer { lock.unlock() }
+    return readerID
+  }
+}
+
 enum OrchestratorClientError: Error, Equatable {
   case connectFailed(errno: Int32)
 }
@@ -65,6 +82,8 @@ private actor AppDaemonConnection {
   /// Bumped whenever `connection` is dropped, so a late failure handler can tell whether
   /// the attempt it was holding is still the current one.
   private var generation = 0
+  private var nextReaderID: UInt64 = 0
+  private var activeReaderID: UInt64?
 
   init(socketPath: URL) {
     self.socketPath = socketPath
@@ -78,26 +97,49 @@ private actor AppDaemonConnection {
   /// would look connected but never update again.
   nonisolated func events() -> AsyncStream<DaemonEvent> {
     AsyncStream { continuation in
+      let token = ReaderToken()
       let task = Task {
+        let readerID = await beginReader()
+        token.set(readerID)
+        defer {
+          continuation.finish()
+          Task { await endReader(readerID) }
+        }
         while !Task.isCancelled {
           var connectedConnection: (any DaemonConnection)?
           do {
+            guard await isCurrentReader(readerID) else { return }
             let connection = try await ensureConnected()
+            guard await isCurrentReader(readerID) else {
+              try? await connection.close()
+              return
+            }
             connectedConnection = connection
             if await isReconnect() { try await rejoinProjects() }
-            while true {
+            while !Task.isCancelled {
+              guard await isCurrentReader(readerID) else { return }
               let data = try await connection.receiveFrame()
               let event = try JSONDecoder().decode(DaemonEvent.self, from: data)
               continuation.yield(event)
             }
           } catch {
-            if let connectedConnection { await invalidate(connectedConnection) }
+            if let connectedConnection {
+              await readerFailed(readerID, connection: connectedConnection)
+            }
+            guard !Task.isCancelled, await isCurrentReader(readerID) else { return }
             try? await Task.sleep(for: .seconds(1))
           }
         }
-        continuation.finish()
       }
-      continuation.onTermination = { _ in task.cancel() }
+      continuation.onTermination = { _ in
+        task.cancel()
+        Task {
+          while token.value == nil { await Task.yield() }
+          if let readerID = token.value {
+            await endReader(readerID)
+          }
+        }
+      }
     }
   }
 
@@ -108,6 +150,45 @@ private actor AppDaemonConnection {
   private func isReconnect() -> Bool {
     defer { hasConnectedBefore = true }
     return hasConnectedBefore
+  }
+
+  private func beginReader() async -> UInt64 {
+    let readerID = nextReaderID
+    nextReaderID = nextReaderID == UInt64.max ? 0 : nextReaderID + 1
+    let hadReader = activeReaderID != nil
+    activeReaderID = readerID
+    guard hadReader else { return readerID }
+
+    let oldConnection = connection
+    connection = nil
+    generation += 1
+    if let oldConnection, let resolved = try? await oldConnection.value {
+      try? await resolved.close()
+    }
+    return readerID
+  }
+
+  private func isCurrentReader(_ readerID: UInt64) -> Bool {
+    activeReaderID == readerID
+  }
+
+  private func endReader(_ readerID: UInt64) async {
+    guard activeReaderID == readerID else { return }
+    activeReaderID = nil
+    let currentConnection = connection
+    connection = nil
+    generation += 1
+    if let currentConnection, let resolved = try? await currentConnection.value {
+      try? await resolved.close()
+    }
+  }
+
+  private func readerFailed(_ readerID: UInt64, connection: any DaemonConnection) async {
+    guard activeReaderID == readerID else {
+      try? await connection.close()
+      return
+    }
+    await invalidate(connection)
   }
 
   /// Re-announces which projects this client wants, on a socket that replaced one that
@@ -161,16 +242,16 @@ private actor AppDaemonConnection {
   /// Drops the shared connection after an I/O failure, so the next `send` or `events()`
   /// dials again instead of writing into a socket the daemon has gone from.
   ///
-  /// Deliberately does not `close` the descriptor: `events()` can be parked in a blocking
-  /// `read` on it from another thread, and closing under that read frees the number for
-  /// any other socket the process opens next. Costs one stranded descriptor per daemon
-  /// restart, which the process reclaims on exit.
+  /// Closes the failed transport as well as dropping it: `events()` can be parked in a
+  /// blocking `read` on another thread, and closing under that read is what wakes the old
+  /// reader so it cannot race a replacement connection.
   private func invalidate(_ failedConnection: any DaemonConnection) async {
     guard let connection, let currentConnection = try? await connection.value,
       currentConnection.id == failedConnection.id
     else { return }
     self.connection = nil
     generation += 1
+    try? await failedConnection.close()
   }
 
   private func connectWithBackoff() async throws -> any DaemonConnection {
@@ -183,6 +264,7 @@ private actor AppDaemonConnection {
         try? await Task.sleep(for: .milliseconds(200 * (attempt + 1)))
       }
     }
+
     throw lastError
   }
 
@@ -208,6 +290,7 @@ private actor AppDaemonConnection {
               strncpy(pathPointer, cPath, MemoryLayout.size(ofValue: pathField.pointee) - 1)
             }
           }
+
         }
 
         let connectResult = withUnsafePointer(to: &address) { addressPointer -> Int32 in
@@ -223,7 +306,9 @@ private actor AppDaemonConnection {
         }
         continuation.resume(
           returning: UnixSocketConnection(
-            fileDescriptor: fd, endpoint: .unixSocket(URL(fileURLWithPath: path))))
+            fileDescriptor: fd,
+            endpoint: .unixSocket(URL(fileURLWithPath: path)),
+            writeTimeout: 5))
       }
     }
   }

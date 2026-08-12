@@ -134,6 +134,7 @@ import Foundation
     public let id: UUID
     public let endpoint: DaemonEndpoint
     private let stream: UnixSocketByteStream
+    private let acceptsWrites: Bool
     private let writeQueue = DispatchQueue(
       label: "com.graphcode.unix-socket-frame-writes")
 
@@ -146,6 +147,8 @@ import Foundation
     ) {
       self.id = id
       self.endpoint = endpoint
+      // Compatibility callers use -1 as an intentionally inert descriptor in tests.
+      self.acceptsWrites = fileDescriptor >= 0
       self.stream = UnixSocketByteStream(
         fileDescriptor: fileDescriptor,
         readTimeout: readTimeout,
@@ -157,6 +160,7 @@ import Foundation
     }
 
     public func sendFrame(_ data: Data) async throws {
+      guard acceptsWrites else { return }
       try await withCheckedThrowingContinuation { continuation in
         writeQueue.async {
           do {
@@ -176,21 +180,18 @@ import Foundation
     }
 
     public func sendFrameSync(_ data: Data) throws {
+      guard acceptsWrites else { return }
       try writeQueue.sync {
         try stream.writeFrameSync(data)
       }
     }
 
     public func close() async throws {
-      writeQueue.sync {
-        stream.closeSync()
-      }
+      stream.closeSync()
     }
 
     public func closeSync() {
-      writeQueue.sync {
-        stream.closeSync()
-      }
+      stream.closeSync()
     }
 
     public func setReadTimeout(_ timeout: TimeInterval?) {

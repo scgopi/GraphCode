@@ -211,13 +211,27 @@ public enum DaemonWireProtocol {
 
   public static func decodeClientFrame(_ data: Data) throws -> DaemonClientFrame {
     let object = try JSONSerialization.jsonObject(with: data)
-    if let dictionary = object as? [String: Any],
-      dictionary["version"] != nil || dictionary["kind"] != nil
-    {
+    if isV2ShapedFrame(object) {
       let envelope = try JSONDecoder().decode(DaemonWireEnvelope.self, from: data)
       return .v2(try envelope.validated())
     }
     return .v1(try JSONDecoder().decode(DaemonCommand.self, from: data))
+  }
+
+  public static func isV2ShapedFrame(_ data: Data) -> Bool {
+    guard let object = try? JSONSerialization.jsonObject(with: data) else { return false }
+    return isV2ShapedFrame(object)
+  }
+
+  public static func initialErrorFrame(for data: Data, message: String) throws -> Data {
+    if isV2ShapedFrame(data) {
+      return try JSONEncoder().encode(
+        DaemonWireEnvelope.error(
+          id: nil,
+          code: DaemonWireErrorCode.unsupportedVersion.rawValue,
+          message: message))
+    }
+    return try JSONEncoder().encode(DaemonEvent.errorOccurred(message))
   }
 
   /// Extracts a request correlation ID before full envelope validation. This is
@@ -257,6 +271,11 @@ public enum DaemonWireProtocol {
   public enum NegotiationError: Error, Equatable {
     case expectedHello
     case noSupportedVersion
+  }
+
+  private static func isV2ShapedFrame(_ object: Any) -> Bool {
+    guard let dictionary = object as? [String: Any] else { return false }
+    return dictionary["version"] != nil || dictionary["kind"] != nil
   }
 }
 

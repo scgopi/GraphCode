@@ -32,6 +32,7 @@ public actor GraphStore {
   public private(set) var graph: LoopGraph
   private var connections: [UUID: DaemonConnectionChannel] = [:]
   private let onGraphChanged: (@Sendable (LoopGraph) -> Void)?
+  private let onConnectionFailure: (@Sendable (UUID) -> Void)?
   private let onEnsureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let onTerminateSession: (@Sendable (LoopNode, String?) -> Void)?
   private let onEvaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)?
@@ -100,6 +101,7 @@ public actor GraphStore {
   public init(
     graph: LoopGraph = LoopGraph(project: ProjectRef(path: "", name: "Untitled")),
     onGraphChanged: (@Sendable (LoopGraph) -> Void)? = nil,
+    onConnectionFailure: (@Sendable (UUID) -> Void)? = nil,
     onEnsureSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
     onTerminateSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
     onEvaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)? = nil,
@@ -116,6 +118,7 @@ public actor GraphStore {
     self.graph = graph
     self.subGraphDepth = subGraphDepth
     self.onGraphChanged = onGraphChanged
+    self.onConnectionFailure = onConnectionFailure
     self.onEnsureSession = onEnsureSession
     self.onTerminateSession = onTerminateSession
     self.onEvaluatePredicate = onEvaluatePredicate
@@ -1396,8 +1399,12 @@ public actor GraphStore {
     let errors = pendingErrors
     pendingErrors.removeAll()
     for message in errors {
-      for channel in connections.values {
-        try? await channel.sendError(message: message)
+      for (connectionID, channel) in connections {
+        do {
+          try await channel.sendError(message: message)
+        } catch {
+          evictConnection(connectionID)
+        }
       }
     }
   }
@@ -1488,7 +1495,12 @@ public actor GraphStore {
       // The write failed — most likely the client already disconnected. Drop it here
       // rather than waiting for the read loop to notice, so a dead connection can't
       // accumulate failed broadcast attempts.
-      connections.removeValue(forKey: connectionID)
+      evictConnection(connectionID)
     }
+  }
+
+  private func evictConnection(_ connectionID: UUID) {
+    guard connections.removeValue(forKey: connectionID) != nil else { return }
+    onConnectionFailure?(connectionID)
   }
 }

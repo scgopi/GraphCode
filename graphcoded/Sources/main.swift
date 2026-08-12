@@ -91,19 +91,19 @@ func handleConnection(_ connection: any DaemonConnection) {
     var channel: DaemonConnectionChannel?
     FileHandle.standardOutput.write(Data("graphcoded: client connected\n".utf8))
     defer {
-      let channelToClose = channel
+      let hadChannel = channel != nil
       Task {
         await registry.removeConnection(connectionID)
-        if let channelToClose {
-          try? await channelToClose.close()
-        } else {
+        if !hadChannel {
           try? await connection.close()
         }
       }
     }
 
+    var initialFrameData: Data?
     do {
       let firstData = try await connection.receiveFrame()
+      initialFrameData = firstData
       (connection as? UnixSocketConnection)?.setReadTimeout(nil)
       switch try DaemonWireProtocol.decodeClientFrame(firstData) {
       case .v1(let command):
@@ -177,7 +177,7 @@ func handleConnection(_ connection: any DaemonConnection) {
               let requestID = request.requestID, let command = request.command
             else {
               try await channel.sendError(
-                requestID: request.requestID,
+                requestID: DaemonWireProtocol.requestIDIfPresent(in: data),
                 code: .malformedEnvelope,
                 message: "expected a v2 request envelope")
               continue
@@ -212,6 +212,11 @@ func handleConnection(_ connection: any DaemonConnection) {
         try? await connection.close()
       } else if let channel {
         try? await channel.sendError(code: .transportFailure, message: "\(error)")
+      } else if let initialFrameData,
+        let errorFrame = try? DaemonWireProtocol.initialErrorFrame(
+          for: initialFrameData, message: "\(error)")
+      {
+        try? await connection.sendFrame(errorFrame)
       } else {
         try? await connection.sendFrame(
           JSONEncoder().encode(

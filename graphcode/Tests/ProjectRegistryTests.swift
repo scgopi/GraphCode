@@ -254,10 +254,56 @@ struct ProjectRegistryTests {
     #expect(persistence.loadGraph(path: "/tmp/project-e")?.nodes.isEmpty != false)
   }
 
+  @Test
+  func broadcastWriteFailureEvictsTheConnectionAndClosesItsTransport() async throws {
+    let (registry, _) = makeRegistryAndPersistence()
+    let connection = FailingConnection()
+    await registry.addConnection(id: connection.id, connection: connection)
+    await registry.handle(.openProject(path: "/tmp/project-a"), connectionID: connection.id)
+
+    for _ in 0..<100 where !connection.isClosed {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(connection.isClosed)
+    #expect(connection.sendAttempts == 1)
+
+    await registry.handle(.openProject(path: "/tmp/project-a"), connectionID: connection.id)
+    #expect(connection.sendAttempts == 1)
+  }
+
   /// Paths round-trip through `resolvingSymlinksInPath()`, so compare the leaf rather
   /// than assuming `/tmp` survives as written.
   private static func names(_ paths: [String]) -> [String] {
     paths.map { URL(fileURLWithPath: $0).lastPathComponent }
+  }
+}
+
+private final class FailingConnection: @unchecked Sendable, DaemonConnection {
+  let id = UUID()
+  let endpoint: DaemonEndpoint = .namedPipe("failing")
+  private let lock = NSLock()
+  private var closed = false
+  private var attempts = 0
+
+  var isClosed: Bool {
+    lock.withLock { closed }
+  }
+
+  var sendAttempts: Int {
+    lock.withLock { attempts }
+  }
+
+  func receiveFrame() async throws -> Data {
+    throw FramedMessageIO.IOError.connectionClosed
+  }
+
+  func sendFrame(_ data: Data) async throws {
+    lock.withLock { attempts += 1 }
+    throw FramedMessageIO.IOError.writeFailed(errno: 1)
+  }
+
+  func close() async throws {
+    lock.withLock { closed = true }
   }
 }
 
