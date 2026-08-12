@@ -1,0 +1,13 @@
+spikes/**/.build/
+spikes/**/*.exe
+spikes/**/*.lib
+spikes/**/*.exp
+spikes/**/*.obj
+spikes/**/build.log
+spikes/**/run.log
+spikes/**/test.log
+spikes/**/manifest.log
+spikes/**/daemon.log
+spikes/**/ready.txt
+spikes/swift-full/Sources/
+spikes/swift-portable/Sources/
