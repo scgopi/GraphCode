@@ -636,21 +636,36 @@ class RemoteBridge:
         ):
             raise ValueError("overlap_seconds must be finite and nonnegative")
         overlap = min(requested_overlap, self.max_previous_overlap_seconds)
-        now = time.time()
         with self._state_lock:
             current = self._state
             if current is None:
                 raise RemoteBridgeError("bridge state is unavailable")
-            state = self._new_state(current["generation"] + 1)
-            if overlap:
-                state["previous"] = {
-                    "generation": current["generation"],
-                    "capability": current["capability"],
-                    "expires_at": min(current["expires_at"], now + overlap),
-                }
-            self.state_store.write(state)
-            self._state = state
-            return dict(state)
+            with self.state_store.transaction():
+                try:
+                    published = self.state_store.read()
+                except FileNotFoundError as error:
+                    raise RemoteBridgeError(
+                        "bridge state is unavailable"
+                    ) from error
+                if not self.state_store._record_matches(published, current):
+                    raise RemoteBridgeError("bridge state ownership changed")
+                now = time.time()
+                if now >= current["expires_at"]:
+                    raise RemoteBridgeError("bridge state expired")
+                state = self._new_state(current["generation"] + 1)
+                if overlap:
+                    state["previous"] = {
+                        "generation": current["generation"],
+                        "capability": current["capability"],
+                        "expires_at": min(
+                            current["expires_at"],
+                            now + overlap,
+                        ),
+                    }
+                if not self.state_store.write_if_matches(current, state):
+                    raise RemoteBridgeError("bridge state ownership changed")
+                self._state = state
+                return dict(state)
 
     def _serve(self, listener: socket.socket) -> None:
         while not self._stop.is_set():

@@ -41,15 +41,17 @@ endpoint, or private network is used.
 - Stop cleanup compare-and-deletes only its matching daemon/generation/capability record.
 - Concurrent starts allocate and publish under one state transaction; an active owner
   rejects a competing start instead of orphaning a surviving bridge.
+- Rotation re-checks ownership under the state lock, rejects stale/expired bridges, and
+  starts overlap timing only after lock acquisition.
 - Backend failures return a stable sanitized error.
 - Tests keep bridge state in OS temporary storage outside the repository.
 - `RemoteBridgePrivacyRace.Tests.ps1` runs remote tests and privacy validation concurrently.
 
 ## TDD evidence
 
-RED: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v` -> duplicate concurrent starts and invalid overlap configuration were accepted
-GREEN: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v` plus `pwsh Tools/windows/Tests/RemoteBridgePrivacyRace.Tests.ps1` -> 20 tests and race regression passed
-REGRESSION: `pwsh Tools/windows/validate.ps1 -Task remote-bridge` -> focused Windows validation, privacy race, and concurrency/config checks passed
+RED: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v` -> stale rotation reclaimed replacement state and lock wait consumed overlap
+GREEN: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v` plus `pwsh Tools/windows/Tests/RemoteBridgePrivacyRace.Tests.ps1` -> 22 tests and race regression passed
+REGRESSION: `pwsh Tools/windows/validate.ps1 -Task remote-bridge` -> focused Windows validation, privacy race, and rotation ownership/timing checks passed
 
 ## Required production contract changes
 

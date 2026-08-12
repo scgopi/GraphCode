@@ -334,6 +334,67 @@ class RemoteBridgeTests(unittest.TestCase):
             time.time() + 5.1,
         )
 
+    def test_expired_replaced_bridge_cannot_rotate_state(self):
+        old_bridge = self.bridge
+        old_state = BridgeStateStore(self.state_path).read()
+        old_state["expires_at"] = old_state["issued_at"] + 0.01
+        BridgeStateStore(self.state_path).write(old_state)
+        time.sleep(0.02)
+        replacement = RemoteBridge(
+            self.state_path,
+            self.backend.address,
+            ttl_seconds=3.0,
+        )
+        replacement.start()
+        replacement_state = BridgeStateStore(self.state_path).read()
+        self.bridge = replacement
+        try:
+            with self.assertRaises(RemoteBridgeError):
+                old_bridge.rotate(overlap_seconds=0.2)
+            self.assertEqual(
+                BridgeStateStore(self.state_path).read(),
+                replacement_state,
+            )
+        finally:
+            old_bridge.stop()
+
+    def test_rotation_overlap_starts_after_state_lock_release(self):
+        lock_ready = threading.Event()
+        release_lock = threading.Event()
+        rotation_done = threading.Event()
+        rotation_errors = []
+
+        def hold_state_lock():
+            with self.bridge.state_store.transaction():
+                lock_ready.set()
+                release_lock.wait(1)
+
+        def rotate():
+            try:
+                self.bridge.rotate(overlap_seconds=0.15)
+            except BaseException as error:
+                rotation_errors.append(error)
+            finally:
+                rotation_done.set()
+
+        holder = threading.Thread(target=hold_state_lock)
+        holder.start()
+        lock_ready.wait(1)
+        rotation = threading.Thread(target=rotate)
+        rotation.start()
+        time.sleep(0.2)
+        self.assertFalse(rotation_done.is_set())
+        release_lock.set()
+        holder.join(1)
+        rotation.join(1)
+
+        self.assertEqual(rotation_errors, [])
+        state = BridgeStateStore(self.state_path).read()
+        self.assertGreater(
+            state["previous"]["expires_at"] - time.time(),
+            0.05,
+        )
+
     def test_overlap_configuration_must_be_finite_and_nonnegative(self):
         for value in (math.nan, math.inf, -math.inf, -0.1):
             with self.subTest(maximum=value):
