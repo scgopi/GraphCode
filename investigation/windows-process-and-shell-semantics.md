@@ -35,6 +35,11 @@ Conclusions:
 | remote command | Local `ssh.exe` argv plus an explicitly POSIX-quoted remote command |
 | WSL command | Explicit `wsl.exe -- <argv>` mode, never implicit path conversion |
 
+Every Windows `CreateProcessW` command line begins with the quoted, backslash-normalized
+executable path as `argv[0]`, including when `lpApplicationName` is supplied. This preserves
+native executable argument conventions while keeping the noninteractive `cmd.exe` transport
+compatible with paths containing spaces.
+
 ## Required tests
 
 - executable and working-directory paths with spaces

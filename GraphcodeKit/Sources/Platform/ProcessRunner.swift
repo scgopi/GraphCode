@@ -648,6 +648,8 @@ private final class PlatformProcess: @unchecked Sendable {
     }
 
     private static func windowsCommandLine(_ request: ProcessRequest) -> String {
+      let executable = quoteWindowsArgument(
+        request.executable.path.replacingOccurrences(of: "/", with: "\\"))
       guard request.executable.lastPathComponent.lowercased() == "cmd.exe",
         let commandIndex = request.arguments.firstIndex(where: {
           $0.caseInsensitiveCompare("/c") == .orderedSame
@@ -655,12 +657,16 @@ private final class PlatformProcess: @unchecked Sendable {
         }),
         commandIndex + 1 < request.arguments.count
       else {
-        return request.arguments.map(quoteWindowsArgument).joined(separator: " ")
+        return ([executable] + request.arguments.map(quoteWindowsArgument))
+          .joined(separator: " ")
       }
 
       let options = request.arguments[..<commandIndex].joined(separator: " ")
       let command = request.arguments[(commandIndex + 1)...].joined(separator: " ")
-      return "\(options) \(request.arguments[commandIndex]) \"\(command)\""
+      return
+        ([executable, options, request.arguments[commandIndex], "\"\(command)\""]
+        .filter { !$0.isEmpty })
+        .joined(separator: " ")
     }
 
     private static func closeWindowsHandles(_ handles: HANDLE?...) {

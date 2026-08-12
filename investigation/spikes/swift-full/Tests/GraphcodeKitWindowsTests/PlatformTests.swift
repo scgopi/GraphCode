@@ -189,6 +189,31 @@ final class PlatformTests: XCTestCase {
     XCTAssertTrue(output.localizedCaseInsensitiveContains(directory.lastPathComponent))
   }
 
+  func testProcessRunnerPreservesWindowsArgvZeroForDirectExecutable() async throws {
+    #if os(Windows)
+      let powerShell = URL(
+        fileURLWithPath: #"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"#)
+      let result = try await FoundationProcessRunner().run(
+        ProcessRequest(
+          executable: powerShell,
+          arguments: [
+            "-NoLogo",
+            "-NoProfile",
+            "-Command",
+            "[Environment]::GetCommandLineArgs()[0]",
+          ]))
+
+      XCTAssertEqual(result.exitCode, 0)
+      XCTAssertEqual(
+        String(decoding: result.standardOutput, as: UTF8.self)
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+          .replacingOccurrences(of: "/", with: "\\"),
+        powerShell.path.replacingOccurrences(of: "/", with: "\\"))
+    #else
+      throw XCTSkip("Windows argv[0] assertion")
+    #endif
+  }
+
   func testProcessRunnerExecutesCmdAndPowerShellScripts() async throws {
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("graphcode-scripts-\(UUID().uuidString)", isDirectory: true)
