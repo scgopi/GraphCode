@@ -84,6 +84,7 @@ signal(SIGINT) { _ in
 let registry = ProjectRegistry(persistenceDirectory: supportDirectory)
 
 let replayStore = DaemonReplayStore(capacity: 128)
+let replayCleanupTask = replayStore.startCleanup()
 
 func handleConnection(_ connection: any DaemonConnection) {
   Task {
@@ -243,4 +244,6 @@ DispatchQueue.global().async {
   }
 }
 
-dispatchMain()
+withExtendedLifetime(replayCleanupTask) {
+  dispatchMain()
+}

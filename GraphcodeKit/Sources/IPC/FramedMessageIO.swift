@@ -9,7 +9,9 @@ import Foundation
 /// Length-prefixed framing over a bounded byte stream: a four-byte big-endian
 /// length header followed by that many bytes of JSON.
 public enum FramedMessageIO {
-  public static let maxPayloadBytes = Int(DaemonFrameHeader.maxPayloadBytes)
+  public static let v2MaxPayloadBytes = Int(DaemonFrameHeader.maxPayloadBytes)
+  public static let legacyMaxPayloadBytes = Int(DaemonFrameHeader.legacySafetyCeilingBytes)
+  public static let maxPayloadBytes = v2MaxPayloadBytes
 
   public enum IOError: Error, Equatable {
     case connectionClosed
@@ -20,10 +22,18 @@ public enum FramedMessageIO {
   }
 
   #if canImport(Darwin) || canImport(Glibc)
-    public static func writeFrame(_ data: Data, to fileDescriptor: Int32) throws {
+    public static func writeFrame(
+      _ data: Data,
+      to fileDescriptor: Int32,
+      maxPayloadBytes: Int = legacyMaxPayloadBytes
+    ) throws {
+      guard let limit = UInt32(exactly: maxPayloadBytes) else {
+        throw IOError.payloadTooLarge
+      }
       let header: Data
       do {
-        header = try DaemonFrameHeader.encodeLength(data.count)
+        header = try DaemonFrameHeader.encodeLength(
+          data.count, maxPayloadBytes: limit)
       } catch {
         throw IOError.payloadTooLarge
       }
@@ -31,11 +41,18 @@ public enum FramedMessageIO {
       try writeAll(data, to: fileDescriptor)
     }
 
-    public static func readFrame(from fileDescriptor: Int32) throws -> Data {
+    public static func readFrame(
+      from fileDescriptor: Int32,
+      maxPayloadBytes: Int = legacyMaxPayloadBytes
+    ) throws -> Data {
+      guard let limit = UInt32(exactly: maxPayloadBytes) else {
+        throw IOError.payloadTooLarge
+      }
       let header = try readExactly(DaemonFrameHeader.byteCount, from: fileDescriptor)
       let length: Int
       do {
-        length = try DaemonFrameHeader.decodeLength(Array(header))
+        length = try DaemonFrameHeader.decodeLength(
+          Array(header), maxPayloadBytes: limit)
       } catch DaemonFrameHeader.HeaderError.invalidHeader {
         throw IOError.invalidHeader
       } catch {
@@ -48,10 +65,18 @@ public enum FramedMessageIO {
   /// The transport-independent path used by named pipes, TCP, and test streams.
   /// Exact operations make partial reads and writes an adapter concern rather than
   /// allowing a short operation to be mistaken for a complete frame.
-  public static func writeFrame(_ data: Data, to stream: any DaemonByteStream) async throws {
+  public static func writeFrame(
+    _ data: Data,
+    to stream: any DaemonByteStream,
+    maxPayloadBytes: Int = legacyMaxPayloadBytes
+  ) async throws {
+    guard let limit = UInt32(exactly: maxPayloadBytes) else {
+      throw IOError.payloadTooLarge
+    }
     let header: Data
     do {
-      header = try DaemonFrameHeader.encodeLength(data.count)
+      header = try DaemonFrameHeader.encodeLength(
+        data.count, maxPayloadBytes: limit)
     } catch {
       throw IOError.payloadTooLarge
     }
@@ -61,11 +86,18 @@ public enum FramedMessageIO {
     }
   }
 
-  public static func readFrame(from stream: any DaemonByteStream) async throws -> Data {
+  public static func readFrame(
+    from stream: any DaemonByteStream,
+    maxPayloadBytes: Int = legacyMaxPayloadBytes
+  ) async throws -> Data {
+    guard let limit = UInt32(exactly: maxPayloadBytes) else {
+      throw IOError.payloadTooLarge
+    }
     let header = try await stream.readExactly(DaemonFrameHeader.byteCount)
     let length: Int
     do {
-      length = try DaemonFrameHeader.decodeLength(Array(header))
+      length = try DaemonFrameHeader.decodeLength(
+        Array(header), maxPayloadBytes: limit)
     } catch DaemonFrameHeader.HeaderError.invalidHeader {
       throw IOError.invalidHeader
     } catch {

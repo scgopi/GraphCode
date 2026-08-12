@@ -198,6 +198,7 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
     case unsupportedVersion(Int)
     case missingField(String)
     case invalidField(String)
+    case payloadTooLarge
     case unexpectedField
   }
 }
@@ -212,6 +213,9 @@ public enum DaemonWireProtocol {
   public static func decodeClientFrame(_ data: Data) throws -> DaemonClientFrame {
     let object = try JSONSerialization.jsonObject(with: data)
     if isV2ShapedFrame(object) {
+      guard data.count <= FramedMessageIO.v2MaxPayloadBytes else {
+        throw DaemonWireEnvelope.ValidationError.payloadTooLarge
+      }
       let envelope = try JSONDecoder().decode(DaemonWireEnvelope.self, from: data)
       return .v2(try envelope.validated())
     }
@@ -326,10 +330,19 @@ public struct DaemonReplayBuffer: Equatable, Sendable {
 }
 public enum DaemonFrameHeader {
   public static let byteCount = 4
+  /// The v2 envelope cap. Legacy frames use the larger bounded reader ceiling below.
   public static let maxPayloadBytes: UInt32 = 1_048_576
+  /// Allocation ceiling for deployed v1 frames whose payloads exceed the v2 cap.
+  public static let legacySafetyCeilingBytes: UInt32 = 2 * 1_048_576
+  /// The four-byte header itself remains a full UInt32 length field.
+  public static let maxUInt32PayloadBytes = UInt32.max
 
-  public static func encodeLength(_ length: Int) throws -> Data {
-    guard length >= 0, let value = UInt32(exactly: length), value <= maxPayloadBytes else {
+  public static func encodeLength(
+    _ length: Int, maxPayloadBytes: UInt32? = nil
+  ) throws -> Data {
+    guard length >= 0, let value = UInt32(exactly: length),
+      maxPayloadBytes.map({ value <= $0 }) ?? true
+    else {
       throw HeaderError.payloadTooLarge
     }
     return Data([
@@ -340,14 +353,18 @@ public enum DaemonFrameHeader {
     ])
   }
 
-  public static func decodeLength(_ bytes: [UInt8]) throws -> Int {
+  public static func decodeLength(
+    _ bytes: [UInt8], maxPayloadBytes: UInt32? = nil
+  ) throws -> Int {
     guard bytes.count == byteCount else { throw HeaderError.invalidHeader }
     let value =
       (UInt32(bytes[0]) << 24)
       | (UInt32(bytes[1]) << 16)
       | (UInt32(bytes[2]) << 8)
       | UInt32(bytes[3])
-    guard value <= maxPayloadBytes else { throw HeaderError.payloadTooLarge }
+    guard maxPayloadBytes.map({ value <= $0 }) ?? true else {
+      throw HeaderError.payloadTooLarge
+    }
     return Int(value)
   }
 

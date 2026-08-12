@@ -94,6 +94,18 @@ public final class DaemonReplayStore: @unchecked Sendable {
     purgeExpired(now: now)
   }
 
+  public func startCleanup(
+    every interval: Duration = .seconds(60)
+  ) -> Task<Void, Never> {
+    Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(for: interval)
+        guard !Task.isCancelled else { return }
+        self?.pruneExpired()
+      }
+    }
+  }
+
   public var clientCount: Int {
     lock.lock()
     defer { lock.unlock() }
@@ -112,9 +124,7 @@ public final class DaemonReplayStore: @unchecked Sendable {
 
   private func purgeExpired(now: Date) {
     guard retention.isFinite else { return }
-    for (clientID, access) in lastAccess
-      where now.timeIntervalSince(access) >= retention
-    {
+    for (clientID, access) in lastAccess where now.timeIntervalSince(access) >= retention {
       buffers.removeValue(forKey: clientID)
       nextSequences.removeValue(forKey: clientID)
       lastAccess.removeValue(forKey: clientID)
@@ -255,7 +265,11 @@ public actor DaemonConnectionChannel {
   }
 
   private func sendJSON<T: Encodable>(_ value: T) async throws {
-    try await writeGate.send(try JSONEncoder().encode(value))
+    let data = try JSONEncoder().encode(value)
+    if case .v2 = mode, data.count > FramedMessageIO.v2MaxPayloadBytes {
+      throw FramedMessageIO.IOError.payloadTooLarge
+    }
+    try await writeGate.send(data)
   }
 
   private func flushQueuedLiveEvents() async throws {

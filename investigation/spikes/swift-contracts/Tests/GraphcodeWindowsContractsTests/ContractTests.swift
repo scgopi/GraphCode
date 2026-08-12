@@ -76,13 +76,25 @@ final class ContractTests: XCTestCase {
   func testFrameHeaderRejectsOversizedPayload() {
     let header: [UInt8] = [0x7f, 0xff, 0xff, 0xff]
 
-    XCTAssertThrowsError(try DaemonFrameHeader.decodeLength(header))
+    XCTAssertThrowsError(
+      try DaemonFrameHeader.decodeLength(
+        header, maxPayloadBytes: DaemonFrameHeader.legacySafetyCeilingBytes))
   }
 
   func testFrameHeaderRoundTripsAllowedPayload() throws {
     let encoded = try DaemonFrameHeader.encodeLength(64 * 1024)
 
     XCTAssertEqual(try DaemonFrameHeader.decodeLength(Array(encoded)), 64 * 1024)
+  }
+
+  func testFrameHeaderPreservesLegacyUInt32PayloadRange() throws {
+    let length = 2 * 1_048_576
+    let encoded = try DaemonFrameHeader.encodeLength(length)
+
+    XCTAssertEqual(try DaemonFrameHeader.decodeLength(Array(encoded)), length)
+    XCTAssertEqual(
+      try DaemonFrameHeader.decodeLength([0xff, 0xff, 0xff, 0xff]),
+      Int(UInt32.max))
   }
 
   func testFramingRoundTripsThroughAByteStream() async throws {
@@ -98,12 +110,55 @@ final class ContractTests: XCTestCase {
     let writer = MemoryByteStream()
     do {
       try await FramedMessageIO.writeFrame(
-        Data(repeating: 0, count: FramedMessageIO.maxPayloadBytes + 1), to: writer)
+        Data(repeating: 0, count: FramedMessageIO.v2MaxPayloadBytes + 1),
+        to: writer,
+        maxPayloadBytes: FramedMessageIO.v2MaxPayloadBytes)
       XCTFail("expected oversized payload to be rejected")
     } catch FramedMessageIO.IOError.payloadTooLarge {
       XCTAssertTrue(writer.output.isEmpty)
     } catch {
       XCTFail("unexpected framing error: \(error)")
+    }
+  }
+
+  func testLegacyV1CommandAndEventFramesExceedTheV2Cap() async throws {
+    let largeText = String(
+      repeating: "x",
+      count: Int(DaemonFrameHeader.legacySafetyCeilingBytes) - 1_024)
+    let command = DaemonCommand.openProject(path: largeText)
+    let commandData = try JSONEncoder().encode(command)
+    XCTAssertGreaterThan(commandData.count, FramedMessageIO.v2MaxPayloadBytes)
+    XCTAssertLessThanOrEqual(
+      commandData.count, Int(DaemonFrameHeader.legacySafetyCeilingBytes))
+
+    let commandWriter = MemoryByteStream()
+    try await FramedMessageIO.writeFrame(commandData, to: commandWriter)
+    let commandReader = MemoryByteStream(input: commandWriter.output)
+    let decodedCommand = try await FramedMessageIO.readFrame(from: commandReader)
+    XCTAssertEqual(try DaemonWireProtocol.decodeClientFrame(decodedCommand), .v1(command))
+
+    let event = DaemonEvent.errorOccurred(largeText)
+    let eventData = try JSONEncoder().encode(event)
+    XCTAssertGreaterThan(eventData.count, FramedMessageIO.v2MaxPayloadBytes)
+    XCTAssertLessThanOrEqual(
+      eventData.count, Int(DaemonFrameHeader.legacySafetyCeilingBytes))
+    let eventWriter = MemoryByteStream()
+    try await FramedMessageIO.writeFrame(eventData, to: eventWriter)
+    let eventReader = MemoryByteStream(input: eventWriter.output)
+    let decodedEvent = try await FramedMessageIO.readFrame(from: eventReader)
+    XCTAssertEqual(try JSONDecoder().decode(DaemonEvent.self, from: decodedEvent), event)
+  }
+
+  func testOversizedV2EnvelopeIsRejectedAfterEnvelopeIdentification() throws {
+    let largePath = String(repeating: "x", count: FramedMessageIO.v2MaxPayloadBytes)
+    let envelope = DaemonWireEnvelope.request(
+      id: UUID(), command: .openProject(path: largePath))
+    let data = try JSONEncoder().encode(envelope)
+    XCTAssertGreaterThan(data.count, FramedMessageIO.v2MaxPayloadBytes)
+
+    XCTAssertThrowsError(try DaemonWireProtocol.decodeClientFrame(data)) { error in
+      XCTAssertEqual(
+        error as? DaemonWireEnvelope.ValidationError, .payloadTooLarge)
     }
   }
 
@@ -303,6 +358,19 @@ final class ContractTests: XCTestCase {
     XCTAssertEqual(store.clientCount, 2)
 
     store.pruneExpired(at: Date().addingTimeInterval(61))
+    XCTAssertEqual(store.clientCount, 0)
+  }
+
+  func testReplayStoreAutomaticallyExpiresIdleHistory() async throws {
+    let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000011")!
+    let store = DaemonReplayStore(capacity: 2, retention: 0.01)
+    let cleanup = store.startCleanup(every: .milliseconds(5))
+    defer { cleanup.cancel() }
+    _ = store.append(clientID: clientID, event: .errorOccurred("idle"))
+
+    for _ in 0..<100 where store.clientCount != 0 {
+      try await Task.sleep(for: .milliseconds(5))
+    }
     XCTAssertEqual(store.clientCount, 0)
   }
 

@@ -21,8 +21,11 @@ Kinds:
 - `event`: sequence and `DaemonEvent`
 - `error`: optional request ID plus stable code/message
 
-The maximum payload is initially 1 MiB. Transport implementations must handle partial
-reads/writes, deadlines, cancellation, backpressure, and non-reading peers.
+The v2 envelope payload is limited to 1 MiB after the envelope is identified. Legacy v1
+frames retain their UInt32 length header and are accepted through the documented 2 MiB
+legacy safety ceiling, which bounds allocation while preserving the deployed oversized
+fixtures. Transport implementations must handle partial reads/writes, deadlines,
+cancellation, backpressure, and non-reading peers.
 
 ## Subscription and reconnect
 
@@ -37,6 +40,8 @@ reads/writes, deadlines, cancellation, backpressure, and non-reading peers.
 - Replay frames are queued before live events, preserving sequence order across reconnect.
 - Complete framed writes are serialized at the transport boundary, including concurrent app
   sends.
+- Replay stores run periodic expiry cleanup while the daemon is idle; expiry does not
+  require a subsequent append or reconnect attempt.
 - Responses and errors are not replayed. They are correlated to the request that produced
   them, while subscription events remain sequenced.
 - A reconnect never silently treats an unrelated event as command acknowledgement.
