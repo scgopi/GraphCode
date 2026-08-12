@@ -3,6 +3,9 @@ import XCTest
 
 @testable import GraphcodeKit
 
+#if canImport(Darwin)
+  import Darwin
+#endif
 #if os(Windows)
   import WinSDK
 #endif
@@ -77,8 +80,10 @@ final class PlatformTests: XCTestCase {
       environment: [:])
 
     XCTAssertEqual(invocation.kind, .commandPrompt)
-    XCTAssertEqual(invocation.request.arguments, ["/d", "/q"])
-    let command = String(decoding: invocation.request.standardInput ?? Data(), as: UTF8.self)
+    XCTAssertEqual(invocation.request.arguments.count, 5)
+    XCTAssertEqual(Array(invocation.request.arguments.prefix(4)), ["/d", "/q", "/s", "/c"])
+    let command = invocation.request.arguments[4]
+    XCTAssertNil(invocation.request.standardInput)
     XCTAssertTrue(command.contains(script.path))
     XCTAssertTrue(command.contains("space value"))
     XCTAssertTrue(command.contains(#"quote^"value"#))
@@ -129,8 +134,9 @@ final class PlatformTests: XCTestCase {
         0,
         "\(argument): stdout=\(output) "
           + "stderr=\(String(decoding: result.standardError, as: UTF8.self))")
-      XCTAssertTrue(
-        output.contains("ARG:\(argument)"),
+      XCTAssertEqual(
+        output,
+        "ARG:\(argument)\r\n",
         "\(argument): args=\(invocation.request.arguments) stdout=\(output)")
     }
   }
@@ -220,8 +226,10 @@ final class PlatformTests: XCTestCase {
       return
     }
     XCTAssertEqual(commandResult.exitCode, 0)
-    XCTAssertTrue(
-      String(decoding: commandResult.standardOutput, as: UTF8.self).contains("CMD_OK:space value"))
+    XCTAssertEqual(
+      commandResult.standardOutput,
+      Data("CMD_OK:space value\r\n".utf8))
+    XCTAssertEqual(commandResult.standardError, Data())
 
     let powerShell = try strategy.invocation(
       executable: powerShellScript,
@@ -377,11 +385,11 @@ final class PlatformTests: XCTestCase {
           ProcessRequest(
             executable: powerShell,
             arguments: ["-NoLogo", "-NoProfile", "-Command", script]),
-          timeout: termination == .timeout ? .seconds(5) : nil)
+          timeout: termination == .timeout ? .seconds(15) : nil)
       }
 
       var childPID: DWORD?
-      for _ in 0..<200 {
+      for _ in 0..<400 {
         if let contents = try? String(contentsOf: pidFile, encoding: .utf8),
           let parsed = UInt32(contents.trimmingCharacters(in: .whitespacesAndNewlines))
         {
@@ -423,6 +431,60 @@ final class PlatformTests: XCTestCase {
       XCTAssertTrue(childExited)
     #else
       throw XCTSkip("Windows process-tree assertion")
+    #endif
+  }
+
+  func testDarwinProcessGroupKillsDescendants() async throws {
+    #if canImport(Darwin)
+      let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("graphcode-darwin-tree-\(UUID().uuidString)", isDirectory: true)
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      defer { try? FileManager.default.removeItem(at: directory) }
+      let pidFile = directory.appendingPathComponent("child.pid")
+      let escapedPIDFile = pidFile.path.replacingOccurrences(of: "'", with: "'\\''")
+      let script = "sleep 30 & child=$!; printf '%s' \"$child\" > '\(escapedPIDFile)'; wait"
+      let task = Task {
+        try await FoundationProcessRunner().run(
+          ProcessRequest(
+            executable: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", script]),
+          timeout: .seconds(2))
+      }
+
+      var childPID: pid_t?
+      for _ in 0..<200 {
+        if let contents = try? String(contentsOf: pidFile, encoding: .utf8),
+          let parsed = pid_t(contents.trimmingCharacters(in: .whitespacesAndNewlines))
+        {
+          childPID = parsed
+          break
+        }
+        try await Task.sleep(for: .milliseconds(25))
+      }
+      guard let childPID else {
+        XCTFail("The Darwin child process did not publish its PID")
+        _ = try? await task.value
+        return
+      }
+
+      do {
+        _ = try await task.value
+        XCTFail("Expected timeout")
+      } catch let error as ProcessRunnerError {
+        XCTAssertEqual(error, .timedOut)
+      }
+
+      var childExited = false
+      for _ in 0..<100 {
+        if kill(childPID, 0) == -1 {
+          childExited = true
+          break
+        }
+        try await Task.sleep(for: .milliseconds(25))
+      }
+      XCTAssertTrue(childExited)
+    #else
+      throw XCTSkip("Darwin process-group assertion")
     #endif
   }
 

@@ -3,6 +3,7 @@ import Foundation
 #if canImport(Darwin)
   import Darwin
 #endif
+
 #if os(Windows)
   import WinSDK
 #endif
@@ -71,7 +72,7 @@ public typealias WindowsProcessRunner = FoundationProcessRunner
 private final class ProcessExecution: @unchecked Sendable {
   private let request: ProcessRequest
   private let lock = NSLock()
-  private var process: Process?
+  private var process: PlatformProcess?
   private var completion: CheckedContinuation<ProcessResult, Error>?
   private var outcome: Result<ProcessResult, ProcessRunnerError>?
   private let treeController = ProcessTreeController()
@@ -97,28 +98,15 @@ private final class ProcessExecution: @unchecked Sendable {
       completion = continuation
       lock.unlock()
 
-      let process = Process()
-      process.arguments = request.arguments
-      process.currentDirectoryURL = request.workingDirectory
-
       var environment = ProcessInfo.processInfo.environment
       for (key, value) in request.environment {
         environment[key] = value
       }
-      process.environment = environment
-      process.executableURL = Self.resolveExecutable(
+      var launchRequest = request
+      launchRequest.environment = environment
+      launchRequest.executable = Self.resolveExecutable(
         request.executable,
         environment: environment)
-
-      let stdout = Pipe()
-      let stderr = Pipe()
-      process.standardOutput = stdout
-      process.standardError = stderr
-      if request.standardInput != nil {
-        process.standardInput = Pipe()
-      } else {
-        process.standardInput = FileHandle.nullDevice
-      }
 
       lock.lock()
       if outcome != nil {
@@ -130,12 +118,16 @@ private final class ProcessExecution: @unchecked Sendable {
         finish(error: .cancelled)
         return
       }
-      treeController.prepare()
-      self.process = process
+
+      let process: PlatformProcess
       do {
-        try process.run()
+        process = try treeController.launch(launchRequest)
+        self.process = process
         processStarted = true
-        treeController.attach(to: process)
+      } catch let error as ProcessRunnerError {
+        lock.unlock()
+        finish(error: error)
+        return
       } catch {
         lock.unlock()
         finish(error: .launchFailed(String(describing: error)))
@@ -143,42 +135,38 @@ private final class ProcessExecution: @unchecked Sendable {
       }
       lock.unlock()
 
-      if let input = request.standardInput, let inputPipe = process.standardInput as? Pipe {
+      if let input = request.standardInput, let inputPipe = process.standardInput {
         DispatchQueue.global(qos: .utility).async {
-          do {
-            try inputPipe.fileHandleForWriting.write(contentsOf: input)
-            try inputPipe.fileHandleForWriting.close()
-          } catch {
-            try? inputPipe.fileHandleForWriting.close()
-          }
+          inputPipe.write(input)
         }
       }
 
       let group = DispatchGroup()
       let collected = CollectedOutput()
+      let termination = TerminationStatus()
 
       group.enter()
       DispatchQueue.global(qos: .utility).async {
-        collected.stdout = stdout.fileHandleForReading.readDataToEndOfFile()
+        collected.stdout = process.standardOutput.readDataToEndOfFile()
         group.leave()
       }
 
       group.enter()
       DispatchQueue.global(qos: .utility).async {
-        collected.stderr = stderr.fileHandleForReading.readDataToEndOfFile()
+        collected.stderr = process.standardError.readDataToEndOfFile()
         group.leave()
       }
 
       group.enter()
       DispatchQueue.global(qos: .utility).async {
-        process.waitUntilExit()
+        termination.code = process.waitUntilExit()
         group.leave()
       }
 
       group.notify(queue: .global(qos: .utility)) { [weak self] in
         guard let self else { return }
         let result = ProcessResult(
-          exitCode: process.terminationStatus,
+          exitCode: termination.code,
           standardOutput: collected.stdout,
           standardError: collected.stderr)
         self.finish(result: result)
@@ -270,85 +258,49 @@ private final class ProcessExecution: @unchecked Sendable {
     var stdout = Data()
     var stderr = Data()
   }
-}
 
+  private final class TerminationStatus: @unchecked Sendable {
+    var code: Int32 = -1
+  }
+}
 private final class ProcessTreeController: @unchecked Sendable {
   private let lock = NSLock()
+  private var process: PlatformProcess?
   #if os(Windows)
     private var job: HANDLE?
-    private var processHandle: HANDLE?
   #elseif canImport(Darwin)
     private var processGroupID: pid_t?
   #endif
-  private var process: Process?
 
-  func prepare() {
-    #if os(Windows)
-      let job = CreateJobObjectW(nil, nil)
-      guard let job else { return }
-      var limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-      limits.BasicLimitInformation.LimitFlags = DWORD(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
-      let configured = withUnsafeMutablePointer(to: &limits) {
-        SetInformationJobObject(
-          job,
-          JobObjectExtendedLimitInformation,
-          $0,
-          DWORD(MemoryLayout<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>.size))
-      }
-      guard configured else {
-        _ = CloseHandle(job)
-        return
-      }
-      lock.lock()
-      self.job = job
-      lock.unlock()
-    #endif
-  }
-
-  func attach(to process: Process) {
+  func launch(_ request: ProcessRequest) throws -> PlatformProcess {
     lock.lock()
-    self.process = process
+    defer { lock.unlock() }
     #if os(Windows)
-      guard let job else {
-        lock.unlock()
-        return
-      }
-      let handle = OpenProcess(
-        DWORD(PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION),
-        false,
-        DWORD(process.processIdentifier))
-      guard let handle else {
-        lock.unlock()
-        return
-      }
-      guard AssignProcessToJobObject(job, handle) else {
-        _ = CloseHandle(handle)
+      let job = try makeWindowsJob()
+      self.job = job
+      do {
+        let process = try PlatformProcess.launchWindows(request, job: job)
+        self.process = process
+        return process
+      } catch {
         _ = CloseHandle(job)
         self.job = nil
-        lock.unlock()
-        return
+        throw error
       }
-      processHandle = handle
     #elseif canImport(Darwin)
-      let processGroupID = pid_t(process.processIdentifier)
-      if setpgid(processGroupID, processGroupID) == 0 {
-        self.processGroupID = processGroupID
-      }
+      let launched = try PlatformProcess.launchDarwin(request)
+      processGroupID = launched.processID
+      process = launched
+      return launched
+    #else
+      let launched = try PlatformProcess.launchFoundation(request)
+      process = launched
+      return launched
     #endif
-    lock.unlock()
   }
 
   func terminate() {
     lock.lock()
-    let process = self.process
-    #if os(Windows)
-      let job = self.job
-    #elseif canImport(Darwin)
-      let processGroupID = self.processGroupID
-    #else
-    #endif
-    lock.unlock()
-
     #if os(Windows)
       if let job {
         _ = TerminateJobObject(job, 1)
@@ -365,25 +317,558 @@ private final class ProcessTreeController: @unchecked Sendable {
     #else
       process?.terminate()
     #endif
+    lock.unlock()
   }
 
   func close() {
     lock.lock()
+    let process = self.process
+    self.process = nil
     #if os(Windows)
-      let processHandle = self.processHandle
       let job = self.job
-      self.processHandle = nil
       self.job = nil
     #endif
-    lock.unlock()
-
+    process?.close()
     #if os(Windows)
-      if let processHandle {
-        _ = CloseHandle(processHandle)
-      }
       if let job {
         _ = CloseHandle(job)
       }
     #endif
+    lock.unlock()
   }
+
+  #if os(Windows)
+    private func makeWindowsJob() throws -> HANDLE {
+      guard let job = CreateJobObjectW(nil, nil) else {
+        throw ProcessRunnerError.launchFailed("CreateJobObjectW failed")
+      }
+      var limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+      limits.BasicLimitInformation.LimitFlags = DWORD(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+      let configured = withUnsafeMutablePointer(to: &limits) {
+        SetInformationJobObject(
+          job,
+          JobObjectExtendedLimitInformation,
+          $0,
+          DWORD(MemoryLayout<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>.size))
+      }
+      guard configured else {
+        _ = CloseHandle(job)
+        throw ProcessRunnerError.launchFailed("SetInformationJobObject failed")
+      }
+      return job
+    }
+  #endif
+}
+private final class PlatformProcess: @unchecked Sendable {
+  let standardOutput: ProcessPipe
+  let standardError: ProcessPipe
+  let standardInput: ProcessPipe?
+  #if os(Windows)
+    private let processHandle: HANDLE
+  #elseif canImport(Darwin)
+    let processID: pid_t
+  #else
+    private let foundationProcess: Process
+  #endif
+
+  #if os(Windows)
+    private init(
+      standardOutput: ProcessPipe,
+      standardError: ProcessPipe,
+      standardInput: ProcessPipe?,
+      processHandle: HANDLE
+    ) {
+      self.standardOutput = standardOutput
+      self.standardError = standardError
+      self.standardInput = standardInput
+      self.processHandle = processHandle
+    }
+  #elseif canImport(Darwin)
+    private init(
+      standardOutput: ProcessPipe,
+      standardError: ProcessPipe,
+      standardInput: ProcessPipe?,
+      processID: pid_t
+    ) {
+      self.standardOutput = standardOutput
+      self.standardError = standardError
+      self.standardInput = standardInput
+      self.processID = processID
+    }
+  #else
+    private init(
+      standardOutput: ProcessPipe,
+      standardError: ProcessPipe,
+      standardInput: ProcessPipe?,
+      foundationProcess: Process
+    ) {
+      self.standardOutput = standardOutput
+      self.standardError = standardError
+      self.standardInput = standardInput
+      self.foundationProcess = foundationProcess
+    }
+  #endif
+
+  func waitUntilExit() -> Int32 {
+    #if os(Windows)
+      _ = WaitForSingleObject(processHandle, INFINITE)
+      var code: DWORD = 1
+      _ = GetExitCodeProcess(processHandle, &code)
+      return Int32(bitPattern: code)
+    #elseif canImport(Darwin)
+      var status: Int32 = 0
+      while waitpid(processID, &status, 0) == -1, errno == EINTR {}
+      if WIFEXITED(status) {
+        return Int32(WEXITSTATUS(status))
+      }
+      if WIFSIGNALED(status) {
+        return 128 + Int32(WTERMSIG(status))
+      }
+      return 1
+    #else
+      foundationProcess.waitUntilExit()
+      return foundationProcess.terminationStatus
+    #endif
+  }
+
+  func terminate() {
+    #if os(Windows)
+      _ = TerminateProcess(processHandle, 1)
+    #elseif canImport(Darwin)
+      _ = kill(processID, SIGKILL)
+    #else
+      foundationProcess.terminate()
+    #endif
+  }
+
+  func close() {
+    standardOutput.close()
+    standardError.close()
+    standardInput?.close()
+    #if os(Windows)
+      _ = CloseHandle(processHandle)
+    #endif
+  }
+
+  #if os(Windows)
+    static func launchWindows(_ request: ProcessRequest, job: HANDLE) throws -> PlatformProcess {
+      var security = SECURITY_ATTRIBUTES()
+      security.nLength = DWORD(MemoryLayout<SECURITY_ATTRIBUTES>.size)
+      security.bInheritHandle = true
+
+      var stdinRead: HANDLE?
+      var stdinWrite: HANDLE?
+      var stdoutRead: HANDLE?
+      var stdoutWrite: HANDLE?
+      var stderrRead: HANDLE?
+      var stderrWrite: HANDLE?
+      guard CreatePipe(&stdinRead, &stdinWrite, &security, 0),
+        CreatePipe(&stdoutRead, &stdoutWrite, &security, 0),
+        CreatePipe(&stderrRead, &stderrWrite, &security, 0),
+        let stdinRead,
+        let stdinWrite,
+        let stdoutRead,
+        let stdoutWrite,
+        let stderrRead,
+        let stderrWrite
+      else {
+        closeWindowsHandles(stdinRead, stdinWrite, stdoutRead, stdoutWrite, stderrRead, stderrWrite)
+        throw ProcessRunnerError.launchFailed("CreatePipe failed")
+      }
+
+      func closeParentHandles() {
+        _ = CloseHandle(stdinRead)
+        _ = CloseHandle(stdoutWrite)
+        _ = CloseHandle(stderrWrite)
+      }
+
+      guard SetHandleInformation(stdinWrite, DWORD(HANDLE_FLAG_INHERIT), 0),
+        SetHandleInformation(stdoutRead, DWORD(HANDLE_FLAG_INHERIT), 0),
+        SetHandleInformation(stderrRead, DWORD(HANDLE_FLAG_INHERIT), 0)
+      else {
+        closeWindowsHandles(stdinRead, stdinWrite, stdoutRead, stdoutWrite, stderrRead, stderrWrite)
+        throw ProcessRunnerError.launchFailed("SetHandleInformation failed")
+      }
+
+      var startup = STARTUPINFOW()
+      startup.cb = DWORD(MemoryLayout<STARTUPINFOW>.size)
+      startup.dwFlags = DWORD(STARTF_USESTDHANDLES)
+      startup.hStdInput = stdinRead
+      startup.hStdOutput = stdoutWrite
+      startup.hStdError = stderrWrite
+      var processInfo = PROCESS_INFORMATION()
+      var application = wideString(request.executable.path)
+      var commandLine = wideString(windowsCommandLine(request))
+      let workingDirectory = request.workingDirectory.map { wideString($0.path) }
+      var environment = wideEnvironment(request.environment)
+      let flags = DWORD(CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT)
+
+      func createProcess(_ workingDirectory: UnsafeMutablePointer<UInt16>?) -> Bool {
+        application.withUnsafeMutableBufferPointer { application in
+          commandLine.withUnsafeMutableBufferPointer { commandLine in
+            environment.withUnsafeMutableBufferPointer { environment in
+              CreateProcessW(
+                application.baseAddress,
+                commandLine.baseAddress,
+                nil,
+                nil,
+                true,
+                flags,
+                UnsafeMutableRawPointer(environment.baseAddress),
+                workingDirectory,
+                &startup,
+                &processInfo)
+            }
+          }
+        }
+      }
+      let created: Bool
+      if var workingDirectory {
+        created = workingDirectory.withUnsafeMutableBufferPointer {
+          createProcess($0.baseAddress)
+        }
+      } else {
+        created = createProcess(nil)
+      }
+      guard created else {
+        closeParentHandles()
+        _ = CloseHandle(stdinWrite)
+        _ = CloseHandle(stdoutRead)
+        _ = CloseHandle(stderrRead)
+        _ = CloseHandle(processInfo.hThread)
+        _ = CloseHandle(processInfo.hProcess)
+        throw ProcessRunnerError.launchFailed("CreateProcessW failed")
+      }
+
+      guard AssignProcessToJobObject(job, processInfo.hProcess) else {
+        _ = TerminateProcess(processInfo.hProcess, 1)
+        _ = CloseHandle(processInfo.hThread)
+        _ = CloseHandle(processInfo.hProcess)
+        closeParentHandles()
+        _ = CloseHandle(stdinWrite)
+        _ = CloseHandle(stdoutRead)
+        _ = CloseHandle(stderrRead)
+        throw ProcessRunnerError.launchFailed("AssignProcessToJobObject failed")
+      }
+      guard ResumeThread(processInfo.hThread) != DWORD.max else {
+        _ = TerminateProcess(processInfo.hProcess, 1)
+        _ = CloseHandle(processInfo.hThread)
+        _ = CloseHandle(processInfo.hProcess)
+        closeParentHandles()
+        _ = CloseHandle(stdinWrite)
+        _ = CloseHandle(stdoutRead)
+        _ = CloseHandle(stderrRead)
+        throw ProcessRunnerError.launchFailed("ResumeThread failed")
+      }
+
+      _ = CloseHandle(processInfo.hThread)
+      closeParentHandles()
+      let input: ProcessPipe?
+      if request.standardInput == nil {
+        _ = CloseHandle(stdinWrite)
+        input = nil
+      } else {
+        input = ProcessPipe(handle: stdinWrite)
+      }
+      let output = ProcessPipe(handle: stdoutRead)
+      let error = ProcessPipe(handle: stderrRead)
+      return PlatformProcess(
+        standardOutput: output,
+        standardError: error,
+        standardInput: input,
+        processHandle: processInfo.hProcess)
+    }
+
+    private static func wideString(_ value: String) -> [UInt16] {
+      Array(value.utf16) + [0]
+    }
+
+    private static func wideEnvironment(_ environment: [String: String]) -> [UInt16] {
+      environment.keys.sorted().map { "\($0)=\(environment[$0] ?? "")" }
+        .joined(separator: "\0")
+        .utf16
+        + [0, 0]
+    }
+
+    private static func quoteWindowsArgument(_ value: String) -> String {
+      var result = "\""
+      var backslashes = 0
+      for character in value {
+        if character == "\\" {
+          backslashes += 1
+        } else if character == "\"" {
+          result += String(repeating: "\\", count: backslashes * 2 + 1)
+          result.append(character)
+          backslashes = 0
+        } else {
+          result += String(repeating: "\\", count: backslashes)
+          result.append(character)
+          backslashes = 0
+        }
+      }
+      result += String(repeating: "\\", count: backslashes * 2)
+      result.append("\"")
+      return result
+    }
+
+    private static func windowsCommandLine(_ request: ProcessRequest) -> String {
+      guard request.executable.lastPathComponent.lowercased() == "cmd.exe",
+        let commandIndex = request.arguments.firstIndex(where: {
+          $0.caseInsensitiveCompare("/c") == .orderedSame
+            || $0.caseInsensitiveCompare("/k") == .orderedSame
+        }),
+        commandIndex + 1 < request.arguments.count
+      else {
+        return request.arguments.map(quoteWindowsArgument).joined(separator: " ")
+      }
+
+      let options = request.arguments[..<commandIndex].joined(separator: " ")
+      let command = request.arguments[(commandIndex + 1)...].joined(separator: " ")
+      return "\(options) \(request.arguments[commandIndex]) \"\(command)\""
+    }
+
+    private static func closeWindowsHandles(_ handles: HANDLE?...) {
+      for handle in handles {
+        if let handle {
+          _ = CloseHandle(handle)
+        }
+      }
+    }
+  #elseif canImport(Darwin)
+    static func launchDarwin(_ request: ProcessRequest) throws -> PlatformProcess {
+      let inputPipe = request.standardInput.map { _ in Pipe() }
+      let outputPipe = Pipe()
+      let errorPipe = Pipe()
+      let nullInput = inputPipe == nil ? open("/dev/null", O_RDONLY) : -1
+      guard inputPipe != nil || nullInput >= 0 else {
+        throw ProcessRunnerError.launchFailed("Could not open /dev/null")
+      }
+
+      var actions = posix_spawn_file_actions_t()
+      guard posix_spawn_file_actions_init(&actions) == 0 else {
+        if nullInput >= 0 { _ = close(nullInput) }
+        throw ProcessRunnerError.launchFailed("posix_spawn file actions initialization failed")
+      }
+      defer { posix_spawn_file_actions_destroy(&actions) }
+
+      let inputRead = inputPipe?.fileHandleForReading.fileDescriptor ?? nullInput
+      let inputWrite = inputPipe?.fileHandleForWriting.fileDescriptor
+      let outputRead = outputPipe.fileHandleForReading.fileDescriptor
+      let outputWrite = outputPipe.fileHandleForWriting.fileDescriptor
+      let errorRead = errorPipe.fileHandleForReading.fileDescriptor
+      let errorWrite = errorPipe.fileHandleForWriting.fileDescriptor
+      func closePipes() {
+        try? inputPipe?.fileHandleForReading.close()
+        try? inputPipe?.fileHandleForWriting.close()
+        try? outputPipe.fileHandleForReading.close()
+        try? outputPipe.fileHandleForWriting.close()
+        try? errorPipe.fileHandleForReading.close()
+        try? errorPipe.fileHandleForWriting.close()
+        if nullInput >= 0 { _ = close(nullInput) }
+      }
+      guard posix_spawn_file_actions_adddup2(&actions, inputRead, STDIN_FILENO) == 0,
+        posix_spawn_file_actions_adddup2(&actions, outputWrite, STDOUT_FILENO) == 0,
+        posix_spawn_file_actions_adddup2(&actions, errorWrite, STDERR_FILENO) == 0,
+        posix_spawn_file_actions_addclose(&actions, inputRead) == 0,
+        posix_spawn_file_actions_addclose(&actions, outputRead) == 0,
+        posix_spawn_file_actions_addclose(&actions, outputWrite) == 0,
+        posix_spawn_file_actions_addclose(&actions, errorRead) == 0,
+        posix_spawn_file_actions_addclose(&actions, errorWrite) == 0
+      else {
+        closePipes()
+        throw ProcessRunnerError.launchFailed("posix_spawn file action failed")
+      }
+      if let inputWrite {
+        guard posix_spawn_file_actions_addclose(&actions, inputWrite) == 0 else {
+          closePipes()
+          throw ProcessRunnerError.launchFailed("posix_spawn file action failed")
+        }
+      }
+      if let workingDirectory = request.workingDirectory {
+        let changedDirectory = workingDirectory.path.withCString {
+          posix_spawn_file_actions_addchdir_np(&actions, $0)
+        }
+        guard changedDirectory == 0 else {
+          closePipes()
+          throw ProcessRunnerError.launchFailed("posix_spawn working-directory setup failed")
+        }
+      }
+
+      var attributes = posix_spawnattr_t()
+      guard posix_spawnattr_init(&attributes) == 0 else {
+        closePipes()
+        throw ProcessRunnerError.launchFailed("posix_spawn attributes initialization failed")
+      }
+      defer { posix_spawnattr_destroy(&attributes) }
+      let flags = Int16(POSIX_SPAWN_SETPGROUP)
+      guard posix_spawnattr_setflags(&attributes, flags) == 0,
+        posix_spawnattr_setpgroup(&attributes, 0) == 0
+      else {
+        closePipes()
+        throw ProcessRunnerError.launchFailed("posix_spawn process-group setup failed")
+      }
+
+      let arguments = [request.executable.path] + request.arguments
+      let argv = arguments.map { strdupString($0) } + [nil]
+      let environment =
+        request.environment.keys.sorted().map {
+          strdupString("\($0)=\(request.environment[$0] ?? "")")
+        } + [nil]
+      defer {
+        for pointer in argv {
+          if let pointer { free(pointer) }
+        }
+        for pointer in environment {
+          if let pointer { free(pointer) }
+        }
+      }
+
+      var processID: pid_t = 0
+      let result = request.executable.path.withCString { executable in
+        argv.withUnsafeMutableBufferPointer { argv in
+          environment.withUnsafeMutableBufferPointer { environment in
+            posix_spawn(
+              &processID,
+              executable,
+              &actions,
+              &attributes,
+              argv.baseAddress,
+              environment.baseAddress)
+          }
+        }
+      }
+      guard result == 0 else {
+        closePipes()
+        throw ProcessRunnerError.launchFailed(String(cString: strerror(result)))
+      }
+
+      if nullInput >= 0 {
+        _ = close(nullInput)
+      }
+      try? inputPipe?.fileHandleForReading.close()
+      try? outputPipe.fileHandleForWriting.close()
+      try? errorPipe.fileHandleForWriting.close()
+      return PlatformProcess(
+        standardOutput: ProcessPipe(fileHandle: outputPipe.fileHandleForReading),
+        standardError: ProcessPipe(fileHandle: errorPipe.fileHandleForReading),
+        standardInput: inputPipe.map {
+          ProcessPipe(fileHandle: $0.fileHandleForWriting)
+        },
+        processID: processID)
+    }
+  #else
+    static func launchFoundation(_ request: ProcessRequest) throws -> PlatformProcess {
+      let process = Process()
+      process.arguments = request.arguments
+      process.currentDirectoryURL = request.workingDirectory
+      process.environment = request.environment
+      process.executableURL = request.executable
+
+      let outputPipe = Pipe()
+      let errorPipe = Pipe()
+      process.standardOutput = outputPipe
+      process.standardError = errorPipe
+      let inputPipe = request.standardInput == nil ? nil : Pipe()
+      process.standardInput = inputPipe ?? FileHandle.nullDevice
+      do {
+        try process.run()
+      } catch {
+        throw ProcessRunnerError.launchFailed(String(describing: error))
+      }
+      return PlatformProcess(
+        standardOutput: ProcessPipe(fileHandle: outputPipe.fileHandleForReading),
+        standardError: ProcessPipe(fileHandle: errorPipe.fileHandleForReading),
+        standardInput: inputPipe.map {
+          ProcessPipe(fileHandle: $0.fileHandleForWriting)
+        },
+        foundationProcess: process)
+    }
+  #endif
+
+  #if canImport(Darwin)
+    private static func strdupString(_ value: String) -> UnsafeMutablePointer<CChar>? {
+      value.withCString { strdup($0) }
+    }
+  #endif
+}
+private final class ProcessPipe: @unchecked Sendable {
+  #if os(Windows)
+    private let lock = NSLock()
+    private let handle: HANDLE
+    private var closed = false
+
+    init(handle: HANDLE) {
+      self.handle = handle
+    }
+
+    func readDataToEndOfFile() -> Data {
+      var data = Data()
+      var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+      while true {
+        var count: DWORD = 0
+        let succeeded = buffer.withUnsafeMutableBytes { bytes in
+          ReadFile(handle, bytes.baseAddress, DWORD(bytes.count), &count, nil)
+        }
+        if !succeeded || count == 0 {
+          break
+        }
+        data.append(contentsOf: buffer[0..<Int(count)])
+      }
+      close()
+      return data
+    }
+
+    func write(_ data: Data) {
+      data.withUnsafeBytes { bytes in
+        var offset = 0
+        while offset < bytes.count {
+          var written: DWORD = 0
+          let pointer = bytes.baseAddress!.advanced(by: offset)
+          guard WriteFile(handle, pointer, DWORD(bytes.count - offset), &written, nil),
+            written > 0
+          else {
+            break
+          }
+          offset += Int(written)
+        }
+      }
+      close()
+    }
+
+    func close() {
+      lock.lock()
+      guard !closed else {
+        lock.unlock()
+        return
+      }
+      closed = true
+      lock.unlock()
+      _ = CloseHandle(handle)
+    }
+  #else
+    private let fileHandle: FileHandle
+
+    init(fileHandle: FileHandle) {
+      self.fileHandle = fileHandle
+    }
+
+    func readDataToEndOfFile() -> Data {
+      let data = fileHandle.readDataToEndOfFile()
+      close()
+      return data
+    }
+
+    func write(_ data: Data) {
+      do {
+        try fileHandle.write(contentsOf: data)
+      } catch {
+        // The process may have exited before all input was written.
+      }
+      close()
+    }
+
+    func close() {
+      try? fileHandle.close()
+    }
+  #endif
 }

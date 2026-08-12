@@ -27,8 +27,8 @@ Conclusions:
 
 | Input | Windows launch |
 |---|---|
-| `.exe`, extensionless native executable | Direct `Process`/`CreateProcessW` argv |
-| `.cmd`, `.bat` | `cmd.exe /d /q` with a quoted command sent on stdin; this avoids a second `call` parse and preserves hostile metacharacters |
+| `.exe`, extensionless native executable | Direct suspended `CreateProcessW` launch, assigned to a Job Object before resume |
+| `.cmd`, `.bat` | Noninteractive `cmd.exe /d /q /s /c` with a parser-escaped command argument; no stdin banner or prompt |
 | `.ps1` | Prefer `pwsh.exe -NoLogo -NoProfile -File`; optionally fall back to Windows PowerShell |
 | npm shim | Resolve the actual `.cmd`/`.ps1`/`.exe` and apply the matching rule |
 | shell predicate | Explicit configured shell; PowerShell should be the native default |
@@ -45,6 +45,7 @@ Conclusions:
 - cancellation and process-tree termination
 - stdout/stderr draining without deadlock
 - timeout and ambiguous completion behavior
+- native process-group/job containment before the child can spawn descendants
 
 ## Source consequences
 

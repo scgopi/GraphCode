@@ -34,10 +34,9 @@ public struct WindowsShellStrategy: ShellStrategy {
         kind: .commandPrompt,
         request: ProcessRequest(
           executable: commandPrompt,
-          arguments: ["/d", "/q"],
+          arguments: ["/d", "/q", "/s", "/c", command],
           workingDirectory: workingDirectory,
-          environment: environment,
-          standardInput: Data((command + "\r\n").utf8)))
+          environment: environment))
     case "ps1":
       return ShellInvocation(
         kind: .powerShell,
