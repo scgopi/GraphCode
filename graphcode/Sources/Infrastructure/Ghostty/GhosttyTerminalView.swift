@@ -289,7 +289,67 @@ struct GhosttyTerminalView: NSViewRepresentable {
     // `zmx attach <name>` with no trailing command spawns a login shell directly — no
     // wrapper needed for a plain-shell surface.
     var command = [ZmxLocator.binaryURL.path, "attach", sessionName]
-    if launchesClaudeCode { command += agentCommand }
+    guard launchesClaudeCode else { return command }
+    if let resuming = localResumeOrFreshCommand(agentLaunch: agentCommand) {
+      return resuming
+    }
+    command += agentCommand
     return command
+  }
+
+  /// Opening a loop whose session is gone used to start the agent **fresh**, prompt and
+  /// all, because this was the one launch path that could not resume — `agentCommand`
+  /// carries `sessionPrompt`, and only the daemon knew about `SessionIDStore`.
+  ///
+  /// That asymmetry cost a real conversation (2026-08-11). Something killed the zmx
+  /// server — an app update replaces the `zmx` binary and reloads the daemon — and with
+  /// no local liveness sweep nothing brought the sessions back. Opening the loops
+  /// created fresh sessions here, whose `SessionStart` hooks rebanked their IDs over the
+  /// ones holding days of work; the transcripts survived on disk with nothing pointing
+  /// at them. Every reboot afterwards faithfully resumed the near-empty replacements.
+  ///
+  /// So this path resumes too, and the two launchers now make the same choice from the
+  /// same banked ID. The check-then-launch is one `/bin/sh` script rather than an argv
+  /// because the decision has to be made *here*, on the machine, at the moment the pane
+  /// opens: whether a session exists, and whether the resume survived, are both facts
+  /// only the shell holding the terminal can see.
+  ///
+  /// Deliberately *not* consuming the ID up front, which is what the remote path does:
+  /// there, one restorer owns the loop, and here the daemon's ensure may be running the
+  /// same resume concurrently. Two consumers racing on one `rm` is how the loser falls
+  /// through to a fresh launch — the very failure this exists to end. It is dropped only
+  /// once a resume has been *seen* to fail, which is also the check the daemon makes.
+  ///
+  /// `nil` for a backend that cannot resume, or a node with nothing banked: both take
+  /// the ordinary fresh launch.
+  func localResumeOrFreshCommand(agentLaunch: [String]) -> [String]? {
+    let settings = GraphcodeSettingsStore.load()
+    guard let nodeID = SurfaceRef.nodeID(fromZmxSessionName: sessionName),
+      SessionIDStore.load(forNodeID: nodeID) != nil,
+      let resumeLaunch = resumeCommand(
+        settings: settings, hooksFile: presenceHooksFile(), remoteSettingsPath: nil)
+    else { return nil }
+    let zmx = ZmxLocator.binaryURL.path
+    let quoted = RemoteProjectLocation.shellQuoted
+    let idFile = quoted(SessionIDStore.file(forNodeID: nodeID).path)
+    let attach = ZmxSessionLauncher.quotedCommand([zmx, "attach", sessionName])
+    let resume = ZmxSessionLauncher.quotedCommand(
+      [zmx, "attach", sessionName] + resumeLaunch)
+    let fresh = ZmxSessionLauncher.quotedCommand([zmx, "attach", sessionName] + agentLaunch)
+    let exists = ZmxSessionLauncher.quotedCommand([zmx, "get", sessionName])
+    // A live session is joined as it always was — the resume argv would be ignored by
+    // `zmx attach` anyway, and building it costs a settings read nobody needs.
+    let idVariable = ZmxSessionLauncher.remoteResumeIDVariable
+    let settle = ZmxSessionLauncher.resumeSettleSeconds
+    let joined = "\(exists) >/dev/null 2>&1 && exec \(attach); "
+    let read = "\(idVariable)=$(cat \(idFile) 2>/dev/null); "
+    let attempt =
+      "if [ -n \"$\(idVariable)\" ]; then export \(idVariable); gc_t0=$(date +%s); "
+      + resume + "; gc_rc=$?; "
+    let verdict =
+      "[ $(($(date +%s) - gc_t0)) -ge \(settle) ] && exit \"$gc_rc\"; rm -f \(idFile); "
+      + #"printf '\033[1;33m── Resume did not take; starting fresh. ──\033[0m\r\n'; fi; "#
+    let script = joined + read + attempt + verdict + "exec \(fresh)"
+    return ["/bin/sh", "-c", script]
   }
 }

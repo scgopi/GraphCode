@@ -162,10 +162,17 @@ public enum PresenceHooks {
   /// machine's home directory, and only a shell there can expand it. A hook file carrying
   /// this Mac's `/Users/<me>/.graphcode` wrote nothing at all on a Codespace, where
   /// `/Users` doesn't exist and the agent user can't create it.
+  /// The pointer is overwritten every session start, and the `.history` line beside it
+  /// is what makes that recoverable: `<epoch> <session-id> <cwd>`, appended and never
+  /// rewritten. See `SessionIDStore.historyFile` for the failure that motivated it.
+  /// Written before the pointer so a history line can never be missing for an ID the
+  /// pointer already names.
   static func captureSessionID(sessionsDirectory: String) -> String {
     "if [ -n \"$ZMX_SESSION\" ] && [ -n \"$CLAUDE_CODE_SESSION_ID\" ]; then "
       + "node_id=\"${ZMX_SESSION#\(SurfaceRef.zmxSessionPrefix)}\"; "
       + "mkdir -p \(sessionsDirectory); "
+      + "printf '%s %s %s\\n' \"$(date +%s)\" \"$CLAUDE_CODE_SESSION_ID\" \"$PWD\" "
+      + ">> \(sessionsDirectory)/\"$node_id\".history 2>/dev/null; "
       + "printf '%s' \"$CLAUDE_CODE_SESSION_ID\" > \(sessionsDirectory)/\"$node_id\".id; "
       + "fi; exit 0"
   }
