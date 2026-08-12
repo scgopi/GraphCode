@@ -39,6 +39,11 @@ active record prevents a second start from orphaning a surviving bridge. Readers
 re-read the record for every one-shot command. Rotation must re-check daemon instance,
 generation, and capability under the same lock, reject stale/expired ownership, and
 start the overlap clock only after that lock is held.
+The complete start/stop/rotation lifecycle must be serialized, including listener
+publication, state publication, worker publication, and cleanup. A daemon instance ID
+is allocated once per bridge lifetime and remains stable across rotations. The bridge
+must bound active client connections, enforce a cumulative frame-read deadline, track
+active sockets, and close/join them during stop.
 
 The one-shot shim reads the record on every command, so already-running zmx sessions
 discover replacements after daemon restart, SSH reconnect, remote reboot, or shim upgrade.

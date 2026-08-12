@@ -43,14 +43,21 @@ endpoint, or private network is used.
   rejects a competing start instead of orphaning a surviving bridge.
 - Rotation re-checks ownership under the state lock, rejects stale/expired bridges, and
   starts overlap timing only after lock acquisition.
+- Start, stop, and rotation serialize the complete bridge lifecycle, including listener,
+  state, worker publication, and cleanup.
+- Each bridge keeps one daemon instance ID across rotations; connections are bounded,
+  frame reads use a cumulative deadline, and stop closes tracked sockets and joins workers.
 - Backend failures return a stable sanitized error.
 - Tests keep bridge state in OS temporary storage outside the repository.
 - `RemoteBridgePrivacyRace.Tests.ps1` runs remote tests and privacy validation concurrently.
 
 ## TDD evidence
 
-RED: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v` -> stale rotation reclaimed replacement state and lock wait consumed overlap
-GREEN: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v` plus `pwsh Tools/windows/Tests/RemoteBridgePrivacyRace.Tests.ps1` -> 22 tests and race regression passed
+RED: focused lifecycle tests failed before serialization, stable daemon identity, bounded
+workers, cumulative deadlines, and tracked-socket cleanup were implemented.
+GREEN: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v`
+plus `pwsh Tools/windows/Tests/RemoteBridgePrivacyRace.Tests.ps1` -> 26 tests and race
+regression passed
 REGRESSION: `pwsh Tools/windows/validate.ps1 -Task remote-bridge` -> focused Windows validation, privacy race, and rotation ownership/timing checks passed
 
 ## Required production contract changes

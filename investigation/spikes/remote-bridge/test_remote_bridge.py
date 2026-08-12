@@ -37,7 +37,7 @@ class RemoteBridgeTests(unittest.TestCase):
         self.bridge = RemoteBridge(
             self.state_path,
             self.backend.address,
-            ttl_seconds=3.0,
+            ttl_seconds=30.0,
             previous_overlap_seconds=0.4,
         )
         self.bridge.start()
@@ -82,6 +82,77 @@ class RemoteBridgeTests(unittest.TestCase):
         self.assertEqual(self.bridge.listener_address[0], "127.0.0.1")
         if os.name != "nt":
             self.assertEqual(stat.S_IMODE(self.state_path.stat().st_mode) & 0o077, 0)
+
+    def test_slow_drip_connections_are_bounded_by_cumulative_deadline(self):
+        self.bridge.stop()
+        self.bridge = RemoteBridge(
+            self.state_path,
+            self.backend.address,
+            request_timeout=0.15,
+            max_connections=2,
+        )
+        self.bridge.start()
+        state = BridgeStateStore(self.state_path).read()
+        connections = []
+        try:
+            for _ in range(2):
+                connection = socket.create_connection(
+                    (state["host"], state["port"]),
+                    timeout=1.0,
+                )
+                connection.sendall(b"\0")
+                connections.append(connection)
+            deadline = time.time() + 1
+            while self.bridge.active_client_count < 2:
+                if time.time() >= deadline:
+                    self.fail("bounded client workers did not start")
+                time.sleep(0.01)
+
+            rejected = socket.create_connection(
+                (state["host"], state["port"]),
+                timeout=1.0,
+            )
+            rejected.settimeout(1.0)
+            try:
+                self.assertEqual(rejected.recv(1), b"")
+            finally:
+                rejected.close()
+
+            time.sleep(0.08)
+            for connection in connections:
+                try:
+                    connection.sendall(b"\0")
+                except OSError:
+                    pass
+            time.sleep(0.11)
+            self.assertEqual(self.bridge.active_client_count, 0)
+        finally:
+            for connection in connections:
+                connection.close()
+
+    def test_stop_closes_active_client_sockets(self):
+        state = BridgeStateStore(self.state_path).read()
+        connection = socket.create_connection(
+            (state["host"], state["port"]),
+            timeout=1.0,
+        )
+        connection.sendall(b"\0")
+        deadline = time.time() + 1
+        while self.bridge.active_client_count < 1:
+            if time.time() >= deadline:
+                connection.close()
+                self.fail("client worker did not start")
+            time.sleep(0.01)
+
+        self.bridge.stop()
+        connection.settimeout(1.0)
+        try:
+            result = connection.recv(1)
+        except ConnectionResetError:
+            result = b""
+        self.assertEqual(result, b"")
+        self.assertEqual(self.bridge.active_client_count, 0)
+        connection.close()
 
     def test_ttl_must_be_finite(self):
         for ttl_seconds in (math.nan, math.inf, -math.inf):
@@ -191,6 +262,20 @@ class RemoteBridgeTests(unittest.TestCase):
                     response,
                     {"ok": False, "error": "invalid_capability"},
                 )
+
+    def test_rotation_keeps_daemon_identity_while_generation_increments(self):
+        old_state = BridgeStateStore(self.state_path).read()
+
+        new_state = self.bridge.rotate(overlap_seconds=0.2)
+
+        self.assertEqual(
+            new_state["daemon_instance_id"],
+            old_state["daemon_instance_id"],
+        )
+        self.assertEqual(
+            new_state["generation"],
+            old_state["generation"] + 1,
+        )
 
     def test_missing_capability_is_rejected(self):
         state = BridgeStateStore(self.state_path).read()
@@ -363,6 +448,7 @@ class RemoteBridgeTests(unittest.TestCase):
         release_lock = threading.Event()
         rotation_done = threading.Event()
         rotation_errors = []
+        release_at = None
 
         def hold_state_lock():
             with self.bridge.state_store.transaction():
@@ -384,15 +470,17 @@ class RemoteBridgeTests(unittest.TestCase):
         rotation.start()
         time.sleep(0.2)
         self.assertFalse(rotation_done.is_set())
+        release_at = time.time()
         release_lock.set()
         holder.join(1)
         rotation.join(1)
 
         self.assertEqual(rotation_errors, [])
         state = BridgeStateStore(self.state_path).read()
+        self.assertGreaterEqual(state["issued_at"], release_at)
         self.assertGreater(
-            state["previous"]["expires_at"] - time.time(),
-            0.05,
+            state["previous"]["expires_at"] - state["issued_at"],
+            0.1,
         )
 
     def test_overlap_configuration_must_be_finite_and_nonnegative(self):
@@ -480,6 +568,53 @@ class RemoteBridgeTests(unittest.TestCase):
             for bridge in bridges:
                 bridge.stop()
 
+    def test_stop_waits_for_start_publication(self):
+        self.bridge.stop()
+        publication_started = threading.Event()
+        release_publication = threading.Event()
+        stop_done = threading.Event()
+        errors = []
+        store = self.bridge.state_store
+        original_publish = store.write_if_matches
+
+        def delayed_publish(expected, state):
+            publication_started.set()
+            release_publication.wait(1)
+            return original_publish(expected, state)
+
+        store.write_if_matches = delayed_publish
+
+        def start_bridge():
+            try:
+                self.bridge.start()
+            except BaseException as error:
+                errors.append(error)
+
+        def stop_bridge():
+            try:
+                self.bridge.stop()
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                stop_done.set()
+
+        starter = threading.Thread(target=start_bridge)
+        stopper = threading.Thread(target=stop_bridge)
+        starter.start()
+        publication_started.wait(1)
+        stopper.start()
+        time.sleep(0.1)
+        self.assertFalse(stop_done.is_set())
+        release_publication.set()
+        starter.join(1)
+        stopper.join(1)
+
+        self.assertEqual(errors, [])
+        self.assertTrue(stop_done.is_set())
+        self.assertEqual(self.bridge.active_client_count, 0)
+        with self.assertRaises(FileNotFoundError):
+            BridgeStateStore(self.state_path).read()
+
     def test_requested_port_collision_retries_with_ephemeral_port(self):
         self.bridge.stop()
         occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -503,6 +638,13 @@ class RemoteBridgeTests(unittest.TestCase):
             occupied.close()
 
     def test_atomic_replacement_never_exposes_partial_json(self):
+        self.bridge.stop()
+        self.bridge = RemoteBridge(
+            self.state_path,
+            self.backend.address,
+            ttl_seconds=60.0,
+        )
+        self.bridge.start()
         errors = []
         stop_readers = threading.Event()
 

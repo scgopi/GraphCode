@@ -49,10 +49,19 @@ def _json_bytes(value: Dict[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
-def _recv_exact(connection: socket.socket, count: int) -> bytes:
+def _recv_exact(
+    connection: socket.socket,
+    count: int,
+    deadline: Optional[float] = None,
+) -> bytes:
     chunks = []
     remaining = count
     while remaining:
+        if deadline is not None:
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                raise TimeoutError("frame read deadline exceeded")
+            connection.settimeout(timeout)
         chunk = connection.recv(remaining)
         if not chunk:
             raise RemoteBridgeError("connection closed while reading frame")
@@ -61,13 +70,18 @@ def _recv_exact(connection: socket.socket, count: int) -> bytes:
     return b"".join(chunks)
 
 
-def read_frame(connection: socket.socket) -> Dict[str, Any]:
-    header = _recv_exact(connection, 4)
+def read_frame(
+    connection: socket.socket,
+    deadline: Optional[float] = None,
+) -> Dict[str, Any]:
+    header = _recv_exact(connection, 4, deadline)
     size = int.from_bytes(header, "big")
     if size > MAX_FRAME_BYTES:
         raise FrameTooLarge("frame exceeds protocol limit")
     try:
-        value = json.loads(_recv_exact(connection, size).decode("utf-8"))
+        value = json.loads(
+            _recv_exact(connection, size, deadline).decode("utf-8")
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise RemoteBridgeError("invalid framed JSON") from error
     if not isinstance(value, dict):
@@ -476,6 +490,7 @@ class RemoteBridge:
         max_previous_overlap_seconds: float = DEFAULT_MAX_PREVIOUS_OVERLAP_SECONDS,
         collision_retries: int = 3,
         request_timeout: float = 2.0,
+        max_connections: int = 16,
     ):
         if not _is_finite_number(ttl_seconds) or ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
@@ -495,6 +510,14 @@ class RemoteBridge:
             raise ValueError("port must be between 0 and 65535")
         if collision_retries < 0:
             raise ValueError("collision_retries must not be negative")
+        if (
+            not isinstance(max_connections, int)
+            or isinstance(max_connections, bool)
+            or max_connections < 1
+        ):
+            raise ValueError("max_connections must be positive")
+        if not _is_finite_number(request_timeout) or request_timeout <= 0:
+            raise ValueError("request_timeout must be positive")
         if backend_address[0] != LOOPBACK:
             raise ValueError("backend must use the loopback address")
         self.state_store = BridgeStateStore(state_path)
@@ -505,17 +528,28 @@ class RemoteBridge:
         self.max_previous_overlap_seconds = max_previous_overlap_seconds
         self.collision_retries = collision_retries
         self.request_timeout = request_timeout
+        self.max_connections = max_connections
+        self._daemon_instance_id = uuid.uuid4().hex
         self._listener: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self._lifecycle_lock = threading.RLock()
         self._state_lock = threading.Lock()
         self._state: Optional[Dict[str, Any]] = None
+        self._clients_lock = threading.Lock()
+        self._active_clients = set()
+        self._client_threads = set()
 
     @property
     def listener_address(self) -> Tuple[str, int]:
         if self._listener is None:
             raise RemoteBridgeError("bridge is not running")
         return self._listener.getsockname()
+
+    @property
+    def active_client_count(self) -> int:
+        with self._clients_lock:
+            return len(self._active_clients)
 
     def _bind_listener(self) -> socket.socket:
         last_error = None
@@ -545,7 +579,7 @@ class RemoteBridge:
         return {
             "schema_version": SCHEMA_VERSION,
             "protocol_version": PROTOCOL_VERSION,
-            "daemon_instance_id": uuid.uuid4().hex,
+            "daemon_instance_id": self._daemon_instance_id,
             "generation": generation,
             "host": LOOPBACK,
             "port": self.listener_address[1],
@@ -555,6 +589,10 @@ class RemoteBridge:
         }
 
     def start(self) -> None:
+        with self._lifecycle_lock:
+            self._start()
+
+    def _start(self) -> None:
         if self._listener is not None:
             raise RemoteBridgeError("bridge is already running")
         try:
@@ -623,6 +661,10 @@ class RemoteBridge:
         raise RemoteBridgeError("bridge state publication conflicted")
 
     def rotate(self, *, overlap_seconds: Optional[float] = None) -> Dict[str, Any]:
+        with self._lifecycle_lock:
+            return self._rotate(overlap_seconds=overlap_seconds)
+
+    def _rotate(self, *, overlap_seconds: Optional[float] = None) -> Dict[str, Any]:
         if self._listener is None:
             raise RemoteBridgeError("bridge is not running")
         requested_overlap = (
@@ -675,12 +717,36 @@ class RemoteBridge:
                 continue
             except OSError:
                 break
-            threading.Thread(
+            if self._stop.is_set():
+                connection.close()
+                continue
+            worker = threading.Thread(
                 target=self._handle,
                 args=(connection,),
                 name="remote-bridge-client",
                 daemon=True,
-            ).start()
+            )
+            with self._clients_lock:
+                if (
+                    self._stop.is_set()
+                    or len(self._active_clients) >= self.max_connections
+                ):
+                    reject = True
+                else:
+                    reject = False
+                    self._active_clients.add(connection)
+                    self._client_threads.add(worker)
+            if reject:
+                connection.close()
+                continue
+            try:
+                worker.start()
+            except BaseException:
+                with self._clients_lock:
+                    self._client_threads.discard(worker)
+                    self._active_clients.discard(connection)
+                connection.close()
+                raise
 
     def _credentials_valid(
         self,
@@ -718,10 +784,14 @@ class RemoteBridge:
             pass
 
     def _handle(self, connection: socket.socket) -> None:
-        connection.settimeout(self.request_timeout)
         try:
             try:
-                message = read_frame(connection)
+                connection.settimeout(self.request_timeout)
+            except OSError:
+                return
+            frame_deadline = time.monotonic() + self.request_timeout
+            try:
+                message = read_frame(connection, deadline=frame_deadline)
             except FrameTooLarge:
                 self._send_error(connection, "frame_too_large")
                 return
@@ -748,24 +818,51 @@ class RemoteBridge:
                 ) as backend:
                     backend.settimeout(min(self.request_timeout, 1.0))
                     send_frame(backend, {"request": message["request"]})
-                    response = read_frame(backend)
+                    response = read_frame(
+                        backend,
+                        deadline=time.monotonic()
+                        + min(self.request_timeout, 1.0),
+                    )
             except (OSError, RemoteBridgeError, TimeoutError):
                 self._send_error(connection, "backend_unavailable")
                 return
-            send_frame(connection, response)
+            try:
+                send_frame(connection, response)
+            except (OSError, RemoteBridgeError):
+                pass
         finally:
+            with self._clients_lock:
+                self._active_clients.discard(connection)
+                self._client_threads.discard(threading.current_thread())
             connection.close()
 
     def stop(self) -> None:
-        if self._listener is None:
+        with self._lifecycle_lock:
+            self._stop_bridge()
+
+    def _stop_bridge(self) -> None:
+        with self._clients_lock:
+            has_clients = bool(self._active_clients)
+        if self._listener is None and self._thread is None and not has_clients:
             return
         self._stop.set()
         listener = self._listener
         self._listener = None
-        listener.close()
-        if self._thread is not None:
-            self._thread.join(timeout=1)
-            self._thread = None
+        if listener is not None:
+            listener.close()
+        server_thread = self._thread
+        self._thread = None
+        with self._clients_lock:
+            clients = list(self._active_clients)
+            client_threads = list(self._client_threads)
+        for client in clients:
+            client.close()
+        if server_thread is not None:
+            server_thread.join(timeout=1)
+        current_thread = threading.current_thread()
+        for client_thread in client_threads:
+            if client_thread is not current_thread:
+                client_thread.join(timeout=1)
         with self._state_lock:
             state = self._state
             self._state = None
