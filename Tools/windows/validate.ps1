@@ -3,6 +3,7 @@ param(
   [ValidateSet(
     "all",
     "swift-portable",
+    "swift-contracts",
     "swift-paths",
     "swift-process",
     "swift-named-pipe",
@@ -23,6 +24,7 @@ $env:GIT_CONFIG_VALUE_0 = "all"
 
 $tasks = @(
   "swift-portable",
+  "swift-contracts",
   "swift-paths",
   "swift-process",
   "swift-named-pipe",
@@ -119,6 +121,13 @@ function Invoke-Task([string] $name) {
           --package-path (Join-Path $repoRoot "investigation\spikes\swift-portable")
       }
     }
+    "swift-contracts" {
+      & (Join-Path $repoRoot "investigation\spikes\swift-contracts\prepare.ps1")
+      Invoke-Native "Swift platform-contract tests" {
+        & (Join-Path $swiftBin "swift-test.exe") `
+          --package-path (Join-Path $repoRoot "investigation\spikes\swift-contracts")
+      }
+    }
     "swift-paths" {
       Invoke-Native "Swift Windows path spike" {
         & (Join-Path $swiftBin "swift-run.exe") `
@@ -142,8 +151,15 @@ function Invoke-Task([string] $name) {
       if (-not (Test-Path $formatter)) {
         throw "swift-format.exe was not found next to $swift"
       }
-      $sources = git -C $repoRoot ls-files "investigation/spikes/**/*.swift" |
-        ForEach-Object { Join-Path $repoRoot $_ }
+      $sources = Get-ChildItem `
+        (Join-Path $repoRoot "investigation\spikes") `
+        -Recurse -Filter *.swift |
+        Where-Object {
+          $_.FullName -notmatch "[\\/]\.build[\\/]" -and
+          $_.FullName -notmatch
+            "[\\/]swift-(full|portable|contracts)[\\/]Sources[\\/]"
+        } |
+        Select-Object -ExpandProperty FullName
       foreach ($source in $sources) {
         $temporary = Join-Path $env:TEMP "graphcode-format-$([guid]::NewGuid()).swift"
         try {
@@ -221,10 +237,21 @@ try {
     Invoke-Task $name
   }
 } finally {
-  $junctions = @(
-    (Join-Path $repoRoot "investigation\spikes\swift-full\Sources\GraphcodeKit"),
-    (Join-Path $repoRoot "investigation\spikes\swift-portable\Sources\GraphcodePortableDomain")
-  )
+  $junctions = @()
+  if ($selected -contains "swift-portable") {
+    $junctions += Join-Path $repoRoot `
+      "investigation\spikes\swift-portable\Sources\GraphcodePortableDomain"
+  }
+  if ($selected -contains "swift-contracts") {
+    $junctions += @(
+      (Join-Path $repoRoot `
+        "investigation\spikes\swift-contracts\Sources\GraphcodeWindowsContracts\Domain"),
+      (Join-Path $repoRoot `
+        "investigation\spikes\swift-contracts\Sources\GraphcodeWindowsContracts\IPC"),
+      (Join-Path $repoRoot `
+        "investigation\spikes\swift-contracts\Sources\GraphcodeWindowsContracts\Platform")
+    )
+  }
   foreach ($junction in $junctions) {
     if (Test-Path $junction) {
       Remove-Item -LiteralPath $junction -Force

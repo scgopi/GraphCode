@@ -11,3 +11,4 @@ spikes/**/daemon.log
 spikes/**/ready.txt
 spikes/swift-full/Sources/
 spikes/swift-portable/Sources/
+spikes/swift-contracts/Sources/
