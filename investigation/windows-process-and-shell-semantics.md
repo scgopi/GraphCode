@@ -27,7 +27,7 @@ Conclusions:
 
 | Input | Windows launch |
 |---|---|
-| `.exe`, extensionless native executable | Direct suspended `CreateProcessW` launch, assigned to a Job Object before resume |
+| `.exe`, extensionless native executable | Direct suspended `CreateProcessW` launch, assigned to a Job Object before resume; `STARTUPINFOEXW` restricts inheritance to the three stdio handles |
 | `.cmd`, `.bat` | Noninteractive `cmd.exe /d /q /s /c` with a parser-escaped command argument; no stdin banner or prompt |
 | `.ps1` | Prefer `pwsh.exe -NoLogo -NoProfile -File`; optionally fall back to Windows PowerShell |
 | npm shim | Resolve the actual `.cmd`/`.ps1`/`.exe` and apply the matching rule |
@@ -46,6 +46,7 @@ Conclusions:
 - stdout/stderr draining without deadlock
 - timeout and ambiguous completion behavior
 - native process-group/job containment before the child can spawn descendants
+- concurrent Windows launches do not cross-inherit pipe handles
 
 ## Source consequences
 

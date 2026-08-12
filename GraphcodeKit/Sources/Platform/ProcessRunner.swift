@@ -490,18 +490,54 @@ private final class PlatformProcess: @unchecked Sendable {
         throw ProcessRunnerError.launchFailed("SetHandleInformation failed")
       }
 
-      var startup = STARTUPINFOW()
-      startup.cb = DWORD(MemoryLayout<STARTUPINFOW>.size)
-      startup.dwFlags = DWORD(STARTF_USESTDHANDLES)
-      startup.hStdInput = stdinRead
-      startup.hStdOutput = stdoutWrite
-      startup.hStdError = stderrWrite
+      var startup = STARTUPINFOEXW()
+      startup.StartupInfo.cb = DWORD(MemoryLayout<STARTUPINFOEXW>.size)
+      startup.StartupInfo.dwFlags = DWORD(STARTF_USESTDHANDLES)
+      startup.StartupInfo.hStdInput = stdinRead
+      startup.StartupInfo.hStdOutput = stdoutWrite
+      startup.StartupInfo.hStdError = stderrWrite
+      var attributeSize: SIZE_T = 0
+      _ = InitializeProcThreadAttributeList(nil, 1, 0, &attributeSize)
+      guard attributeSize > 0 else {
+        closeWindowsHandles(stdinRead, stdinWrite, stdoutRead, stdoutWrite, stderrRead, stderrWrite)
+        throw ProcessRunnerError.launchFailed("InitializeProcThreadAttributeList sizing failed")
+      }
+      let attributeMemory = UnsafeMutableRawPointer.allocate(
+        byteCount: Int(attributeSize),
+        alignment: MemoryLayout<UInt64>.alignment)
+      let attributeList = OpaquePointer(attributeMemory)
+      guard InitializeProcThreadAttributeList(attributeList, 1, 0, &attributeSize) else {
+        attributeMemory.deallocate()
+        closeWindowsHandles(stdinRead, stdinWrite, stdoutRead, stdoutWrite, stderrRead, stderrWrite)
+        throw ProcessRunnerError.launchFailed("InitializeProcThreadAttributeList failed")
+      }
+      defer {
+        DeleteProcThreadAttributeList(attributeList)
+        attributeMemory.deallocate()
+      }
+      var inheritedHandles = [stdinRead, stdoutWrite, stderrWrite]
+      let handlesConfigured = inheritedHandles.withUnsafeMutableBufferPointer { handles in
+        UpdateProcThreadAttribute(
+          attributeList,
+          0,
+          DWORD_PTR(0x0002_0002),
+          handles.baseAddress,
+          SIZE_T(MemoryLayout<HANDLE>.stride * handles.count),
+          nil,
+          nil)
+      }
+      guard handlesConfigured else {
+        closeWindowsHandles(stdinRead, stdinWrite, stdoutRead, stdoutWrite, stderrRead, stderrWrite)
+        throw ProcessRunnerError.launchFailed("UpdateProcThreadAttribute failed")
+      }
+      startup.lpAttributeList = attributeList
       var processInfo = PROCESS_INFORMATION()
       var application = wideString(request.executable.path)
       var commandLine = wideString(windowsCommandLine(request))
       let workingDirectory = request.workingDirectory.map { wideString($0.path) }
       var environment = wideEnvironment(request.environment)
-      let flags = DWORD(CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT)
+      let flags = DWORD(
+        CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT)
 
       func createProcess(_ workingDirectory: UnsafeMutablePointer<UInt16>?) -> Bool {
         application.withUnsafeMutableBufferPointer { application in
@@ -516,7 +552,7 @@ private final class PlatformProcess: @unchecked Sendable {
                 flags,
                 UnsafeMutableRawPointer(environment.baseAddress),
                 workingDirectory,
-                &startup,
+                &startup.StartupInfo,
                 &processInfo)
             }
           }

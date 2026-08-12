@@ -362,6 +362,102 @@ final class PlatformTests: XCTestCase {
     try await assertProcessTreeTermination(.cancellation)
   }
 
+  func testConcurrentWindowsLaunchesDoNotCrossInheritPipeHandles() async throws {
+    #if os(Windows)
+      let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+          "graphcode-handle-race-\(UUID().uuidString)", isDirectory: true)
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      defer { try? FileManager.default.removeItem(at: directory) }
+
+      let comSpec =
+        ProcessInfo.processInfo.environment["ComSpec"]
+        ?? ProcessInfo.processInfo.environment["COMSPEC"]
+        ?? "cmd.exe"
+
+      for iteration in 0..<16 {
+        let iterationDirectory = directory.appendingPathComponent(
+          "iteration-\(iteration)", isDirectory: true)
+        try FileManager.default.createDirectory(
+          at: iterationDirectory, withIntermediateDirectories: true)
+        let longMarker = iterationDirectory.appendingPathComponent("long.started")
+        let shortMarker = iterationDirectory.appendingPathComponent("short.started")
+        let longScript =
+          "echo started>\"\(longMarker.path)\" & ping -n 30 127.0.0.1 > nul"
+        let shortScript =
+          "echo started>\"\(shortMarker.path)\" & ping -n 30 127.0.0.1 > nul"
+        let longCompletion = ProcessCompletionBox()
+        let shortCompletion = ProcessCompletionBox()
+
+        let barrier = LaunchBarrier(count: 2)
+        let synchronizedRunner = FoundationProcessRunner(beforeStart: {
+          await barrier.wait()
+        })
+        let longTask = Task {
+          do {
+            let result = try await synchronizedRunner.run(
+              ProcessRequest(
+                executable: URL(fileURLWithPath: comSpec),
+                arguments: ["/d", "/c", longScript]))
+            await longCompletion.finish(.succeeded(result))
+          } catch let error as ProcessRunnerError {
+            await longCompletion.finish(.failed(error))
+          } catch {
+            await longCompletion.finish(.unexpected(String(describing: error)))
+          }
+        }
+        let shortTask = Task {
+          do {
+            let result = try await synchronizedRunner.run(
+              ProcessRequest(
+                executable: URL(fileURLWithPath: comSpec),
+                arguments: ["/d", "/c", shortScript]))
+            await shortCompletion.finish(.succeeded(result))
+          } catch let error as ProcessRunnerError {
+            await shortCompletion.finish(.failed(error))
+          } catch {
+            await shortCompletion.finish(.unexpected(String(describing: error)))
+          }
+        }
+
+        var markersPublished = false
+        for _ in 0..<200 {
+          if FileManager.default.fileExists(atPath: longMarker.path),
+            FileManager.default.fileExists(atPath: shortMarker.path)
+          {
+            markersPublished = true
+            break
+          }
+          try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(markersPublished, "Both concurrent processes must start")
+
+        shortTask.cancel()
+        var shortState: ProcessCompletionState?
+        for _ in 0..<200 {
+          shortState = await shortCompletion.current()
+          if shortState != nil { break }
+          try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertEqual(shortState, .failed(.cancelled))
+        let longState = await longCompletion.current()
+        XCTAssertNil(longState)
+        let shortFinalState = await shortCompletion.current()
+        XCTAssertEqual(
+          shortFinalState,
+          .failed(.cancelled),
+          "The cancelled process must finish its pipe readers while its sibling remains alive")
+
+        longTask.cancel()
+        _ = await shortTask.value
+        _ = await longTask.value
+      }
+    #else
+      throw XCTSkip("Windows handle-inheritance assertion")
+    #endif
+  }
+
   private enum TreeTermination: Equatable {
     case timeout
     case cancellation
@@ -581,5 +677,48 @@ private actor LaunchGate {
   func release() {
     releaseContinuation?.resume()
     releaseContinuation = nil
+  }
+}
+
+private actor LaunchBarrier {
+  private let expected: Int
+  private var arrivals = 0
+  private var continuations: [CheckedContinuation<Void, Never>] = []
+
+  init(count: Int) {
+    expected = count
+  }
+
+  func wait() async {
+    arrivals += 1
+    guard arrivals < expected else {
+      let continuations = self.continuations
+      self.continuations.removeAll()
+      for continuation in continuations {
+        continuation.resume()
+      }
+      return
+    }
+    await withCheckedContinuation { continuation in
+      continuations.append(continuation)
+    }
+  }
+}
+
+private enum ProcessCompletionState: Equatable, Sendable {
+  case succeeded(ProcessResult)
+  case failed(ProcessRunnerError)
+  case unexpected(String)
+}
+
+private actor ProcessCompletionBox {
+  private var state: ProcessCompletionState?
+
+  func finish(_ state: ProcessCompletionState) {
+    self.state = state
+  }
+
+  func current() -> ProcessCompletionState? {
+    state
   }
 }
