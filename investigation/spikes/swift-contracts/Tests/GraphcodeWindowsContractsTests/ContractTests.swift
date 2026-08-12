@@ -81,6 +81,13 @@ final class ContractTests: XCTestCase {
         header, maxPayloadBytes: DaemonFrameHeader.legacySafetyCeilingBytes))
   }
 
+  func testLegacySafetyCeilingRejectsUInt32MaximumBeforeAllocation() {
+    XCTAssertThrowsError(
+      try DaemonFrameHeader.decodeLength(
+        [0xff, 0xff, 0xff, 0xff],
+        maxPayloadBytes: DaemonFrameHeader.legacySafetyCeilingBytes))
+  }
+
   func testFrameHeaderRoundTripsAllowedPayload() throws {
     let encoded = try DaemonFrameHeader.encodeLength(64 * 1024)
 
@@ -359,6 +366,39 @@ final class ContractTests: XCTestCase {
 
     store.pruneExpired(at: Date().addingTimeInterval(61))
     XCTAssertEqual(store.clientCount, 0)
+  }
+
+  func testActiveClientsAreNeverEvictedWhenReplayCapacityIsExhausted() throws {
+    let first = UUID(uuidString: "00000000-0000-0000-0000-000000000015")!
+    let second = UUID(uuidString: "00000000-0000-0000-0000-000000000016")!
+    let third = UUID(uuidString: "00000000-0000-0000-0000-000000000017")!
+    let firstConnection = UUID(uuidString: "00000000-0000-0000-0000-000000000018")!
+    let secondConnection = UUID(uuidString: "00000000-0000-0000-0000-000000000019")!
+    let thirdConnection = UUID(uuidString: "00000000-0000-0000-0000-000000000020")!
+    let secondThirdConnection = UUID(uuidString: "00000000-0000-0000-0000-000000000021")!
+    let store = DaemonReplayStore(capacity: 8, maxClients: 2)
+
+    store.register(clientID: first, connectionID: firstConnection, subscription: nil)
+    store.register(clientID: second, connectionID: secondConnection, subscription: nil)
+    _ = store.append(clientID: first, event: .errorOccurred("first"))
+    _ = store.append(clientID: second, event: .errorOccurred("second"))
+
+    store.register(clientID: third, connectionID: thirdConnection, subscription: nil)
+    let firstThirdEvent = store.append(clientID: third, event: .errorOccurred("third-1"))
+    store.register(
+      clientID: third,
+      connectionID: secondThirdConnection,
+      subscription: nil)
+    let secondThirdEvent = store.append(clientID: third, event: .errorOccurred("third-2"))
+
+    XCTAssertEqual(store.clientCount, 2)
+    XCTAssertEqual(firstThirdEvent.sequence, 1)
+    XCTAssertEqual(secondThirdEvent.sequence, 2)
+    XCTAssertNoThrow(try store.replay(clientID: first, after: 0))
+    XCTAssertNoThrow(try store.replay(clientID: second, after: 0))
+    XCTAssertThrowsError(try store.replay(clientID: third, after: 0)) { error in
+      XCTAssertEqual(error as? DaemonReplayBuffer.ReplayError, .replayUnavailable)
+    }
   }
 
   func testReplayStoreAutomaticallyExpiresIdleHistory() async throws {

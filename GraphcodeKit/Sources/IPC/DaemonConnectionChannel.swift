@@ -57,7 +57,7 @@ public final class DaemonReplayStore: @unchecked Sendable {
     guard maxClients > 0 else {
       return .event(sequence: 1, event: event)
     }
-    ensureClient(clientID)
+    _ = ensureClient(clientID)
     let envelope = appendLocked(clientID: clientID, event: event)
     lastAccess[clientID] = now
     return envelope
@@ -73,7 +73,7 @@ public final class DaemonReplayStore: @unchecked Sendable {
     let now = Date()
     purgeExpired(now: now)
     guard maxClients > 0 else { return 1 }
-    ensureClient(clientID)
+    _ = ensureClient(clientID)
     let sequence = nextSequences[clientID, default: 1]
     nextSequences[clientID] = sequence == UInt64.max ? UInt64.max : sequence + 1
     lastAccess[clientID] = now
@@ -92,7 +92,7 @@ public final class DaemonReplayStore: @unchecked Sendable {
     defer { lock.unlock() }
     purgeExpired(now: Date())
     guard maxClients > 0 else { return }
-    ensureClient(clientID)
+    _ = ensureClient(clientID)
     activeConnections[clientID, default: []].insert(connectionID)
     if let subscription {
       subscriptions[clientID] = subscription
@@ -133,6 +133,10 @@ public final class DaemonReplayStore: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     activeConnections[clientID]?.remove(connectionID)
+    if buffers[clientID] == nil, activeConnections[clientID]?.isEmpty != false {
+      removeClient(clientID)
+      return
+    }
     lastAccess[clientID] = Date()
   }
 
@@ -204,10 +208,15 @@ public final class DaemonReplayStore: @unchecked Sendable {
 
   private func evictIfNeeded() {
     guard buffers.count >= maxClients else { return }
-    guard let oldest = lastAccess.min(by: { $0.value < $1.value })?.key else {
+
+    guard
+      let oldest =
+        lastAccess
+        .filter({ activeConnections[$0.key]?.isEmpty != false })
+        .min(by: { $0.value < $1.value })?.key
+    else {
       return
     }
-    buffers.removeValue(forKey: oldest)
     removeClient(oldest)
   }
 
@@ -219,16 +228,23 @@ public final class DaemonReplayStore: @unchecked Sendable {
     }
   }
 
-  private func ensureClient(_ clientID: UUID) {
-    guard buffers[clientID] == nil else { return }
+  @discardableResult
+  private func ensureClient(_ clientID: UUID) -> Bool {
+    if buffers[clientID] != nil { return true }
+    guard maxClients > 0 else { return false }
     evictIfNeeded()
+    guard buffers.count < maxClients else { return false }
     buffers[clientID] = DaemonReplayBuffer(capacity: capacity)
     nextSequences[clientID] = 1
+    return true
   }
 
   private func appendLocked(clientID: UUID, event: DaemonEvent) -> DaemonWireEnvelope {
     let sequence = nextSequences[clientID, default: 1]
     nextSequences[clientID] = sequence == UInt64.max ? UInt64.max : sequence + 1
+    guard buffers[clientID] != nil else {
+      return .event(sequence: sequence, event: event)
+    }
     var buffer = buffers[clientID] ?? DaemonReplayBuffer(capacity: capacity)
     buffer.append(sequence: sequence, event: event)
     buffers[clientID] = buffer

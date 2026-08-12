@@ -88,6 +88,29 @@ struct DaemonSocketClientTests {
     #expect(received.project.path == "/tmp/wanted")
   }
 
+  #if canImport(Darwin)
+    @Test
+    func syncReceiveRejectsUInt32MaximumBeforeAllocatingLegacyPayload() throws {
+      var fds: [Int32] = [0, 0]
+      #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+      defer {
+        close(fds[0])
+        close(fds[1])
+      }
+
+      let header = Data([0xff, 0xff, 0xff, 0xff])
+      let written = header.withUnsafeBytes { rawBuffer in
+        Darwin.write(fds[1], rawBuffer.baseAddress, rawBuffer.count)
+      }
+      #expect(written == header.count)
+
+      let connection = UnixSocketConnection(fileDescriptor: fds[0])
+      #expect(throws: FramedMessageIO.IOError.payloadTooLarge) {
+        _ = try connection.receiveFrameSync()
+      }
+    }
+  #endif
+
   /// Dialling is retried; anything after the first write is not. Nothing has been sent when
   /// a dial fails, so a redial cannot duplicate a mutation — whereas `node create`, `node
   /// send` and `node memo` are not idempotent, which is why a mid-exchange
