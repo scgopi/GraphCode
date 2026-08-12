@@ -74,38 +74,11 @@ GraphCode launches it, it doesn't bundle it.
 brew install --cask scgopi/graphcode/graphcode
 ```
 
-That pulls the same signed release, and puts the `graphcode` CLI on your `PATH` while it's
-there — the long name adds the tap by itself, so `brew tap scgopi/graphcode` first is
-equivalent and makes later commands just `graphcode`. `brew upgrade --cask graphcode` from
-then on. The tap is
-[scgopi/homebrew-graphcode](https://github.com/scgopi/homebrew-graphcode) — its own
-repository, since Homebrew's cask index takes only projects past a notability threshold
-GraphCode hasn't reached yet.
-
-Homebrew 6 warns that a third-party tap is untrusted. It's a gate on taps in general, not
-a finding about this one; `brew trust --tap scgopi/graphcode` settles it, and gets ahead of
-the release that stops making it optional.
-
-Or download the latest
-[`graphcode-macos-arm64.dmg`](https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg)
-(all versions under [Releases](https://github.com/scgopi/GraphCode/releases)), open it,
-and drag **GraphCode** to Applications. Releases are Developer ID signed and notarized, so
-a browser download opens on a double-click.
-
-Either way the app carries `graphcoded`, `graphcode` (the CLI), and `zmx` inside it, and
-puts them in `~/.graphcode/bin` on first launch, along with the launchd agent that keeps
-the daemon running. If you installed from the DMG, add that directory to your `PATH` for
-the CLI; Homebrew links it for you.
-
-<details>
-<summary>Holding a pre-0.0.9 build?</summary>
-
-Builds before 0.0.9 were ad-hoc signed and picked up a quarantine flag that made macOS
-refuse them with a misleading *"graphcode.app is damaged"*.
-`xattr -dr com.apple.quarantine /Applications/graphcode.app` clears it — or just grab the
-current release.
-
-</details>
+Or download the latest release,
+[v0.1.34](https://github.com/scgopi/GraphCode/releases/latest): grab
+[`graphcode-macos-arm64.dmg`](https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg),
+open it, and drag **GraphCode** to Applications. Releases are Developer ID signed and
+notarized.
 
 ## Using it
 
