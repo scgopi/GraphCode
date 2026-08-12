@@ -1,0 +1,33 @@
+name: Windows port validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-port-validation.yml"
+      - "GraphcodeKit/**"
+      - "Tools/windows/**"
+      - "investigation/**"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-spikes:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Swift 6.3.3
+        shell: pwsh
+        run: |
+          winget install --id Swift.Toolchain --exact --version 6.3.3 `
+            --silent --accept-package-agreements --accept-source-agreements
+
+      - name: Verify validation runner contract
+        shell: pwsh
+        run: ./Tools/windows/Tests/ValidationRunner.Tests.ps1
+
+      - name: Run Windows port validation
+        shell: pwsh
+        run: ./Tools/windows/validate.ps1 -Task all
