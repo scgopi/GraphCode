@@ -89,6 +89,15 @@ struct GraphcodeSettingsTests {
       CLISessionBackendKind.copilotCLI.launchArguments(
         prompt: "go", tier: .standard, settings: loose
       ).contains("--yolo"))
+
+    // Autopilot rides on top of YOLO's permissions rather than replacing them (issue
+    // #86) — both flags have to reach the command line, and the default stays plain
+    // `--yolo`.
+    let autopilot = GraphcodeSettings(copilotPermissions: .yoloAutopilot)
+    let args = CLISessionBackendKind.copilotCLI.launchArguments(
+      prompt: "go", tier: .standard, settings: autopilot)
+    #expect(args.contains("--yolo") && args.contains("--autopilot"))
+    #expect(GraphcodeSettings().copilotPermissions == .allowEverything)
   }
 
   @Test

@@ -75,12 +75,18 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     case allowTools
     /// Copilot's `--yolo`: tools, paths, and URLs all approved.
     case allowEverything
+    /// `--yolo` plus `--autopilot`: same permissions, and Copilot keeps prompting itself
+    /// to continue instead of stopping at its first reply (issue #86). An addition, not
+    /// the new default — autopilot changes how far a session runs, which is a choice a
+    /// human should make deliberately.
+    case yoloAutopilot
 
     public var displayName: String {
       switch self {
       case .ask: return "Ask every time"
       case .allowTools: return "Allow tools only"
       case .allowEverything: return "YOLO (recommended)"
+      case .yoloAutopilot: return "YOLO + Autopilot"
       }
     }
 
@@ -95,6 +101,9 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       case .allowEverything:
         return "Copilot's --yolo: tools, paths, and URLs all approved — what an "
           + "unattended loop needs to run without a human at the pane."
+      case .yoloAutopilot:
+        return "Everything YOLO approves, and Copilot continues its own work "
+          + "(--autopilot) instead of stopping at the first reply."
       }
     }
 
@@ -105,6 +114,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       // `--yolo` and `--allow-all` are the same flag; emitted under the name Copilot
       // itself promotes, so what appears in `ps` matches what its docs say.
       case .allowEverything: return ["--yolo"]
+      case .yoloAutopilot: return ["--yolo", "--autopilot"]
       }
     }
 
