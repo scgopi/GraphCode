@@ -83,50 +83,126 @@ signal(SIGINT) { _ in
 
 let registry = ProjectRegistry(persistenceDirectory: supportDirectory)
 
-/// Bridges a blocking socket read onto a background queue so the `Task` awaiting it
-/// never blocks Swift concurrency's cooperative thread pool — the whole connection
-/// handler below is otherwise just async/await hops (this, plus actor calls).
-@Sendable func readFrameAsync(from fileDescriptor: Int32) async throws -> Data {
-  try await withCheckedThrowingContinuation { continuation in
-    DispatchQueue.global().async {
-      do {
-        continuation.resume(returning: try FramedMessageIO.readFrame(from: fileDescriptor))
-      } catch {
-        continuation.resume(throwing: error)
+let replayStore = DaemonReplayStore(capacity: 128)
+
+func handleConnection(_ connection: any DaemonConnection) {
+  Task {
+    let connectionID = connection.id
+    var channel: DaemonConnectionChannel?
+    FileHandle.standardOutput.write(Data("graphcoded: client connected\n".utf8))
+    defer {
+      Task {
+        await registry.removeConnection(connectionID)
+        try? await connection.close()
       }
     }
-  }
-}
 
-func handleConnection(_ fileDescriptor: Int32) {
-  Task {
-    let connectionID = UUID()
-    await registry.addConnection(id: connectionID, fileDescriptor: fileDescriptor)
-    FileHandle.standardOutput.write(Data("graphcoded: client connected\n".utf8))
-    while true {
-      let data: Data
-      do {
-        data = try await readFrameAsync(from: fileDescriptor)
-      } catch {
-        break
-      }
-      do {
-        let command = try JSONDecoder().decode(DaemonCommand.self, from: data)
+    do {
+      let firstData = try await connection.receiveFrame()
+      switch try DaemonWireProtocol.decodeClientFrame(firstData) {
+      case .v1(let command):
+        let v1Channel = DaemonConnectionChannel(connection: connection, mode: .v1)
+        channel = v1Channel
+        await registry.addConnection(id: connectionID, channel: v1Channel)
         await registry.handle(command, connectionID: connectionID)
-      } catch {
-        // A frame that read fine but didn't decode is version skew, not a dead socket:
-        // a newer CLI sent a command this daemon predates. Dropping the connection here
-        // failed *silently* — the client just saw a hang-up — so answer instead and
-        // keep serving the commands this daemon does understand.
-        let event = DaemonEvent.errorOccurred(
-          "unrecognized command — graphcoded may be older than the client that sent it")
-        if let encoded = try? JSONEncoder().encode(event) {
-          try? FramedMessageIO.writeFrame(encoded, to: fileDescriptor)
+
+      case .v2(let hello):
+        guard hello.kind == .hello else {
+          try await connection.sendFrame(
+            JSONEncoder().encode(
+              DaemonWireEnvelope.error(
+                id: nil, code: DaemonWireErrorCode.expectedHello.rawValue,
+                message: "the first v2 frame must be hello")))
+          return
+        }
+        let selectedVersion: Int
+        do {
+          selectedVersion = try DaemonWireProtocol.negotiatedVersion(for: hello)
+        } catch DaemonWireProtocol.NegotiationError.noSupportedVersion {
+          try await connection.sendFrame(
+            JSONEncoder().encode(
+              DaemonWireEnvelope.error(
+                id: nil, code: DaemonWireErrorCode.unsupportedVersion.rawValue,
+                message: "no mutually supported daemon protocol version")))
+          return
+        }
+        let negotiated: DaemonProtocolMode =
+          selectedVersion == 2 ? .v2(version: 2) : .v1
+        let v2Channel = DaemonConnectionChannel(
+          connection: connection,
+          mode: negotiated,
+          clientID: hello.clientID ?? connectionID,
+          subscription: hello.subscription,
+          replayStore: replayStore)
+        channel = v2Channel
+        await registry.addConnection(id: connectionID, channel: v2Channel)
+        try await v2Channel.sendHelloResponse(selectedVersion: selectedVersion)
+        if selectedVersion == 2, let resumeFrom = hello.resumeFrom {
+          do {
+            try await v2Channel.replay(after: resumeFrom)
+          } catch DaemonConnectionChannelError.replayUnavailable {
+            try await v2Channel.sendError(
+              code: .replayUnavailable,
+              message: "requested events are outside the replay window")
+          }
         }
       }
+
+      guard let channel else { return }
+      while true {
+        let data = try await channel.receiveFrame()
+        do {
+          switch try DaemonWireProtocol.decodeClientFrame(data) {
+          case .v1(let command):
+            guard channel.mode == .v1 else {
+              try await channel.sendError(
+                code: .malformedEnvelope,
+                message: "v2 connections must send request envelopes")
+              continue
+            }
+            await registry.handle(command, connectionID: connectionID)
+
+          case .v2(let request):
+            guard case .v2 = channel.mode, request.kind == .request,
+              let requestID = request.requestID, let command = request.command
+            else {
+              try await channel.sendError(
+                code: .malformedEnvelope,
+                message: "expected a v2 request envelope")
+              continue
+            }
+            await channel.setActiveRequestID(requestID)
+            await registry.handle(command, connectionID: connectionID)
+            if let response = await registry.responseEvent(for: command) {
+              try await channel.sendResponse(requestID: requestID, event: response)
+            } else {
+              try await channel.sendError(
+                requestID: requestID,
+                code: .requestFailed,
+                message: "request could not be applied")
+            }
+            await channel.setActiveRequestID(nil)
+          }
+        } catch {
+          try await channel.sendError(
+            code: .malformedEnvelope,
+            message: "\(error)")
+        }
+      }
+    } catch {
+      // Transport/framing failures close the socket. Per-frame envelope failures are
+      // handled inside the loop so one malformed request does not strand a client.
+      if let channel {
+        try? await channel.sendError(code: .transportFailure, message: "\(error)")
+      } else {
+        try? await connection.sendFrame(
+          JSONEncoder().encode(
+            DaemonWireEnvelope.error(
+              id: nil,
+              code: DaemonWireErrorCode.unsupportedVersion.rawValue,
+              message: "unsupported or malformed initial protocol frame: \(error)")))
+      }
     }
-    await registry.removeConnection(connectionID)
-    close(fileDescriptor)
     FileHandle.standardOutput.write(Data("graphcoded: client disconnected\n".utf8))
   }
 }
@@ -135,7 +211,11 @@ DispatchQueue.global().async {
   while true {
     let clientDescriptor = accept(socketDescriptor, nil, nil)
     guard clientDescriptor >= 0 else { continue }
-    handleConnection(clientDescriptor)
+    handleConnection(
+      UnixSocketConnection(
+        fileDescriptor: clientDescriptor,
+        endpoint: .unixSocket(socketURL),
+        writeTimeout: 5))
   }
 }
 

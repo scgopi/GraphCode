@@ -15,7 +15,7 @@ import Foundation
 ///
 /// Lives in `GraphcodeKit`, not `graphcoded/Sources`, even though only the daemon
 /// instantiates it in production: it has no socket/process-lifecycle coupling of its
-/// own (connections are just `[UUID: Int32]` file descriptors handed to it), so it's
+/// own (connections are `DaemonConnection` channels handed to it), so it's
 /// cleanly unit-testable from `graphcodeTests` without spinning up a real daemon
 /// process or socket.
 ///
@@ -30,7 +30,7 @@ import Foundation
 /// lifetime, so it needs to be the one minting it.
 public actor GraphStore {
   public private(set) var graph: LoopGraph
-  private var connections: [UUID: Int32] = [:]
+  private var connections: [UUID: DaemonConnectionChannel] = [:]
   private let onGraphChanged: (@Sendable (LoopGraph) -> Void)?
   private let onEnsureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let onTerminateSession: (@Sendable (LoopNode, String?) -> Void)?
@@ -90,6 +90,7 @@ public actor GraphStore {
   public private(set) var undeliveredMessages:
     [(edgeID: UUID, reason: MessageBus.DeliveryFailure)] =
       []
+  private var pendingErrors: [String] = []
 
   /// `onEnsureSession` is how a time-based node's session gets started without this
   /// actor knowing anything about `zmx` or spawning processes — same injected-closure
@@ -160,10 +161,35 @@ public actor GraphStore {
 
   // MARK: - Connections
 
-  public func addConnection(id: UUID, fileDescriptor: Int32) {
-    connections[id] = fileDescriptor
-    send(.graphChanged(graph), to: id)
+  public func addConnection(
+    id: UUID,
+    connection: any DaemonConnection,
+    mode: DaemonProtocolMode = .v1,
+    clientID: UUID? = nil,
+    subscription: DaemonWireSubscription? = nil,
+    replayStore: DaemonReplayStore = DaemonReplayStore()
+  ) async {
+    let channel = DaemonConnectionChannel(
+      connection: connection, mode: mode, clientID: clientID,
+      subscription: subscription, replayStore: replayStore)
+    await addConnection(id: id, channel: channel)
   }
+
+  public func addConnection(id: UUID, channel: DaemonConnectionChannel) async {
+    connections[id] = channel
+    await send(.graphChanged(graph), to: id)
+  }
+
+  #if canImport(Darwin)
+    /// Compatibility seam for the existing macOS tests and callers. Ownership inside
+    /// the store is still a `DaemonConnectionChannel`; the descriptor is wrapped at the
+    /// transport boundary and never retained as an integer here.
+    public func addConnection(id: UUID, fileDescriptor: Int32) async {
+      await addConnection(
+        id: id,
+        connection: UnixSocketConnection(fileDescriptor: fileDescriptor))
+    }
+  #endif
 
   public func removeConnection(_ id: UUID) {
     connections.removeValue(forKey: id)
@@ -520,7 +546,7 @@ public actor GraphStore {
     var changed = await refreshPresence()
     if await refreshActivity() { changed = true }
     guard changed else { return }
-    notifyClients()
+    await notifyClients()
   }
 
   // MARK: - Renaming
@@ -1269,9 +1295,7 @@ public actor GraphStore {
   }
 
   private func announceError(_ message: String) {
-    for id in connections.keys {
-      send(.errorOccurred(message), to: id)
-    }
+    pendingErrors.append(message)
   }
 
   private func unblockIfStillIdle(_ nodeID: UUID) {
@@ -1359,11 +1383,23 @@ public actor GraphStore {
   /// outside a command — goal polling resolves nodes and fires edges too, and an edge
   /// fired from a poll must not wait for the next unrelated command to be delivered.
   private func drainAndBroadcast() async {
+    await drainPendingErrors()
     await drainPendingMessages()
     await drainPendingCycleReentries()
     await drainPendingHandoffDeliveries()
     await drainPendingNudges()
-    broadcast()
+    await broadcast()
+  }
+
+  private func drainPendingErrors() async {
+    guard !pendingErrors.isEmpty else { return }
+    let errors = pendingErrors
+    pendingErrors.removeAll()
+    for message in errors {
+      for channel in connections.values {
+        try? await channel.sendError(message: message)
+      }
+    }
   }
 
   /// A stalled loop is terminal, and its downstream edges fire as if it failed. Leaving
@@ -1427,9 +1463,9 @@ public actor GraphStore {
 
   // MARK: - Broadcast
 
-  private func broadcast() {
+  private func broadcast() async {
     onGraphChanged?(graph)
-    notifyClients()
+    await notifyClients()
   }
 
   /// The half of `broadcast` that tells clients, without the half that writes to disk.
@@ -1438,21 +1474,21 @@ public actor GraphStore {
   /// disk: persisting it would be a write every tick for bytes nothing reads back. Every
   /// other caller wants `broadcast` — a graph change that isn't saved is a graph change
   /// lost at the next daemon restart.
-  private func notifyClients() {
+  private func notifyClients() async {
     for id in connections.keys {
-      send(.graphChanged(graph), to: id)
+      await send(.graphChanged(graph), to: id)
     }
   }
 
-  private func send(_ event: DaemonEvent, to connectionID: UUID) {
-    guard let fileDescriptor = connections[connectionID] else { return }
-    guard let data = try? JSONEncoder().encode(event) else { return }
-    guard (try? FramedMessageIO.writeFrame(data, to: fileDescriptor)) != nil else {
+  private func send(_ event: DaemonEvent, to connectionID: UUID) async {
+    guard let channel = connections[connectionID] else { return }
+    do {
+      try await channel.sendEvent(event)
+    } catch {
       // The write failed — most likely the client already disconnected. Drop it here
       // rather than waiting for the read loop to notice, so a dead connection can't
       // accumulate failed broadcast attempts.
       connections.removeValue(forKey: connectionID)
-      return
     }
   }
 }

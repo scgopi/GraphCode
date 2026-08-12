@@ -28,8 +28,13 @@ reads/writes, deadlines, cancellation, backpressure, and non-reading peers.
 
 - Responses are correlated only by request ID.
 - Events carry a monotonically increasing connection-visible sequence.
-- Subscription selection and replay-window policy must be added before the Windows shell
-  consumes v2.
+- `hello` may carry a `clientID`, `resumeFrom` cursor, and an optional project-path
+  subscription allow-list. An omitted allow-list subscribes to every joined project.
+- The daemon keeps a bounded replay window per logical `clientID` (128 events by default),
+  independent of a socket. A reconnect replays events strictly after `resumeFrom`; a cursor
+  outside the retained window receives `replayUnavailable` instead of unrelated events.
+- Responses and errors are not replayed. They are correlated to the request that produced
+  them, while subscription events remain sequenced.
 - A reconnect never silently treats an unrelated event as command acknowledgement.
 
 ## Test fixtures

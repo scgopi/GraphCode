@@ -2,73 +2,112 @@ import Foundation
 
 #if canImport(Darwin)
   import Darwin
+#elseif canImport(Glibc)
+  import Glibc
 #endif
 
-/// Length-prefixed framing over a raw socket file descriptor — a 4-byte big-endian
-/// length header followed by that many bytes of JSON. Shared by `graphcoded`'s
-/// connection handlers and the app's `OrchestratorClient` so both sides always agree
-/// on where one message ends and the next begins.
-///
-/// Blocking, on purpose: every call site runs this on a background thread/queue
-/// dedicated to one connection, not the main thread, so blocking `read`/`write` is the
-/// simplest correct thing here — no need for `Network.framework` or a custom
-/// `DispatchIO` setup at this scale (a handful of local connections).
+/// Length-prefixed framing over a bounded byte stream: a four-byte big-endian
+/// length header followed by that many bytes of JSON.
 public enum FramedMessageIO {
+  public static let maxPayloadBytes = Int(DaemonFrameHeader.maxPayloadBytes)
+
   public enum IOError: Error, Equatable {
     case connectionClosed
     case readFailed(errno: Int32)
     case writeFailed(errno: Int32)
+    case invalidHeader
+    case payloadTooLarge
   }
 
-  public static func writeFrame(_ data: Data, to fileDescriptor: Int32) throws {
-    let length = UInt32(data.count)
-    let header: [UInt8] = [
-      UInt8((length >> 24) & 0xff),
-      UInt8((length >> 16) & 0xff),
-      UInt8((length >> 8) & 0xff),
-      UInt8(length & 0xff),
-    ]
-    try writeAll(Data(header), to: fileDescriptor)
-    try writeAll(data, to: fileDescriptor)
+  #if canImport(Darwin) || canImport(Glibc)
+    public static func writeFrame(_ data: Data, to fileDescriptor: Int32) throws {
+      let header: Data
+      do {
+        header = try DaemonFrameHeader.encodeLength(data.count)
+      } catch {
+        throw IOError.payloadTooLarge
+      }
+      try writeAll(header, to: fileDescriptor)
+      try writeAll(data, to: fileDescriptor)
+    }
+
+    public static func readFrame(from fileDescriptor: Int32) throws -> Data {
+      let header = try readExactly(DaemonFrameHeader.byteCount, from: fileDescriptor)
+      let length: Int
+      do {
+        length = try DaemonFrameHeader.decodeLength(Array(header))
+      } catch DaemonFrameHeader.HeaderError.invalidHeader {
+        throw IOError.invalidHeader
+      } catch {
+        throw IOError.payloadTooLarge
+      }
+      return length == 0 ? Data() : try readExactly(length, from: fileDescriptor)
+    }
+  #endif
+
+  /// The transport-independent path used by named pipes, TCP, and test streams.
+  /// Exact operations make partial reads and writes an adapter concern rather than
+  /// allowing a short operation to be mistaken for a complete frame.
+  public static func writeFrame(_ data: Data, to stream: any DaemonByteStream) async throws {
+    let header: Data
+    do {
+      header = try DaemonFrameHeader.encodeLength(data.count)
+    } catch {
+      throw IOError.payloadTooLarge
+    }
+    try await stream.writeAll(header)
+    if !data.isEmpty {
+      try await stream.writeAll(data)
+    }
   }
 
-  public static func readFrame(from fileDescriptor: Int32) throws -> Data {
-    let header = try readExactly(4, from: fileDescriptor)
-    let length =
-      (UInt32(header[header.startIndex]) << 24)
-      | (UInt32(header[header.startIndex + 1]) << 16)
-      | (UInt32(header[header.startIndex + 2]) << 8)
-      | UInt32(header[header.startIndex + 3])
-    return try readExactly(Int(length), from: fileDescriptor)
+  public static func readFrame(from stream: any DaemonByteStream) async throws -> Data {
+    let header = try await stream.readExactly(DaemonFrameHeader.byteCount)
+    let length: Int
+    do {
+      length = try DaemonFrameHeader.decodeLength(Array(header))
+    } catch DaemonFrameHeader.HeaderError.invalidHeader {
+      throw IOError.invalidHeader
+    } catch {
+      throw IOError.payloadTooLarge
+    }
+    return length == 0 ? Data() : try await stream.readExactly(length)
   }
 
-  private static func writeAll(_ data: Data, to fileDescriptor: Int32) throws {
-    try data.withUnsafeBytes { (rawBuffer: UnsafeRawBufferPointer) in
-      var remaining = rawBuffer.count
-      var pointer = rawBuffer.baseAddress!
-      while remaining > 0 {
-        let written = write(fileDescriptor, pointer, remaining)
-        if written <= 0 {
-          throw IOError.writeFailed(errno: errno)
+  #if canImport(Darwin) || canImport(Glibc)
+    private static func writeAll(_ data: Data, to fileDescriptor: Int32) throws {
+      try data.withUnsafeBytes { (rawBuffer: UnsafeRawBufferPointer) in
+        guard let baseAddress = rawBuffer.baseAddress else { return }
+        var remaining = rawBuffer.count
+        var pointer = baseAddress
+        while remaining > 0 {
+          let written = write(fileDescriptor, pointer, remaining)
+          if written < 0, errno == EINTR { continue }
+          if written <= 0 {
+            throw IOError.writeFailed(errno: errno)
+          }
+          remaining -= written
+          pointer = pointer.advanced(by: written)
         }
-        remaining -= written
-        pointer = pointer.advanced(by: written)
       }
     }
-  }
 
-  private static func readExactly(_ count: Int, from fileDescriptor: Int32) throws -> Data {
-    guard count > 0 else { return Data() }
-    var buffer = [UInt8](repeating: 0, count: count)
-    var totalRead = 0
-    while totalRead < count {
-      let bytesRead = buffer.withUnsafeMutableBytes { rawBuffer -> Int in
-        read(fileDescriptor, rawBuffer.baseAddress!.advanced(by: totalRead), count - totalRead)
+    private static func readExactly(_ count: Int, from fileDescriptor: Int32) throws -> Data {
+      guard count > 0 else { return Data() }
+      var buffer = [UInt8](repeating: 0, count: count)
+      var totalRead = 0
+      while totalRead < count {
+        let bytesRead = buffer.withUnsafeMutableBytes { rawBuffer -> Int in
+          read(
+            fileDescriptor, rawBuffer.baseAddress!.advanced(by: totalRead),
+            count - totalRead)
+        }
+        if bytesRead == 0 { throw IOError.connectionClosed }
+        if bytesRead < 0, errno == EINTR { continue }
+        if bytesRead < 0 { throw IOError.readFailed(errno: errno) }
+        totalRead += bytesRead
       }
-      if bytesRead == 0 { throw IOError.connectionClosed }
-      if bytesRead < 0 { throw IOError.readFailed(errno: errno) }
-      totalRead += bytesRead
+      return Data(buffer)
     }
-    return Data(buffer)
-  }
+  #endif
 }

@@ -9,6 +9,18 @@ public struct DaemonWireError: Codable, Equatable, Sendable {
     self.message = message
   }
 }
+
+public struct DaemonWireSubscription: Codable, Equatable, Sendable {
+  /// `nil` means every project visible to the connection. A non-empty list is an
+  /// explicit allow-list, so a reconnect cannot accidentally resume an unrelated
+  /// project's events.
+  public var projectPaths: [String]?
+
+  public init(projectPaths: [String]? = nil) {
+    self.projectPaths = projectPaths
+  }
+}
+
 public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
   public enum Kind: String, Codable, Sendable {
     case hello
@@ -21,6 +33,10 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
   public var version: Int
   public var kind: Kind
   public var supportedVersions: [Int]?
+  public var selectedVersion: Int?
+  public var clientID: UUID?
+  public var resumeFrom: UInt64?
+  public var subscription: DaemonWireSubscription?
   public var requestID: UUID?
   public var sequence: UInt64?
   public var command: DaemonCommand?
@@ -31,6 +47,10 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
     version: Int,
     kind: Kind,
     supportedVersions: [Int]? = nil,
+    selectedVersion: Int? = nil,
+    clientID: UUID? = nil,
+    resumeFrom: UInt64? = nil,
+    subscription: DaemonWireSubscription? = nil,
     requestID: UUID? = nil,
     sequence: UInt64? = nil,
     command: DaemonCommand? = nil,
@@ -40,6 +60,10 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
     self.version = version
     self.kind = kind
     self.supportedVersions = supportedVersions
+    self.selectedVersion = selectedVersion
+    self.clientID = clientID
+    self.resumeFrom = resumeFrom
+    self.subscription = subscription
     self.requestID = requestID
     self.sequence = sequence
     self.command = command
@@ -47,11 +71,27 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
     self.error = error
   }
 
-  public static func hello(supportedVersions: [Int]) -> Self {
+  public static func hello(
+    supportedVersions: [Int],
+    clientID: UUID? = nil,
+    resumeFrom: UInt64? = nil,
+    subscription: DaemonWireSubscription? = nil
+  ) -> Self {
     Self(
       version: DaemonWireProtocol.currentVersion,
       kind: .hello,
-      supportedVersions: supportedVersions)
+      supportedVersions: supportedVersions,
+      clientID: clientID,
+      resumeFrom: resumeFrom,
+      subscription: subscription)
+  }
+
+  public static func helloResponse(selectedVersion: Int) -> Self {
+    Self(
+      version: DaemonWireProtocol.currentVersion,
+      kind: .hello,
+      supportedVersions: DaemonWireProtocol.supportedVersions,
+      selectedVersion: selectedVersion)
   }
 
   public static func request(id: UUID, command: DaemonCommand) -> Self {
@@ -97,30 +137,56 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
       guard let supportedVersions, !supportedVersions.isEmpty else {
         throw ValidationError.missingField("supportedVersions")
       }
+      guard Set(supportedVersions).count == supportedVersions.count else {
+        throw ValidationError.invalidField("supportedVersions")
+      }
+      if let selectedVersion {
+        guard supportedVersions.contains(selectedVersion),
+          DaemonWireProtocol.supportedVersions.contains(selectedVersion)
+        else {
+          throw ValidationError.invalidField("selectedVersion")
+        }
+      }
+      if let subscription, let paths = subscription.projectPaths {
+        guard paths.allSatisfy({ !$0.isEmpty }) else {
+          throw ValidationError.invalidField("subscription")
+        }
+      }
       guard requestID == nil, sequence == nil, command == nil, event == nil, error == nil else {
         throw ValidationError.unexpectedField
       }
     case .request:
       guard requestID != nil else { throw ValidationError.missingField("requestID") }
       guard command != nil else { throw ValidationError.missingField("command") }
-      guard supportedVersions == nil, sequence == nil, event == nil, error == nil else {
+      guard supportedVersions == nil, selectedVersion == nil, clientID == nil, resumeFrom == nil,
+        subscription == nil, sequence == nil, event == nil, error == nil
+      else {
         throw ValidationError.unexpectedField
       }
     case .response:
       guard requestID != nil else { throw ValidationError.missingField("requestID") }
       guard event != nil else { throw ValidationError.missingField("event") }
-      guard supportedVersions == nil, sequence == nil, command == nil, error == nil else {
+      guard supportedVersions == nil, selectedVersion == nil, clientID == nil, resumeFrom == nil,
+        subscription == nil, sequence == nil, command == nil, error == nil
+      else {
         throw ValidationError.unexpectedField
       }
     case .event:
       guard sequence != nil else { throw ValidationError.missingField("sequence") }
       guard event != nil else { throw ValidationError.missingField("event") }
-      guard supportedVersions == nil, requestID == nil, command == nil, error == nil else {
+      guard supportedVersions == nil, selectedVersion == nil, clientID == nil, resumeFrom == nil,
+        subscription == nil, requestID == nil, command == nil, error == nil
+      else {
         throw ValidationError.unexpectedField
       }
     case .error:
       guard error != nil else { throw ValidationError.missingField("error") }
-      guard supportedVersions == nil, sequence == nil, command == nil, event == nil else {
+      guard let error, !error.code.isEmpty, !error.message.isEmpty else {
+        throw ValidationError.invalidField("error")
+      }
+      guard supportedVersions == nil, selectedVersion == nil, clientID == nil, resumeFrom == nil,
+        subscription == nil, sequence == nil, command == nil, event == nil
+      else {
         throw ValidationError.unexpectedField
       }
     }
@@ -131,6 +197,7 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
   public enum ValidationError: Error, Equatable {
     case unsupportedVersion(Int)
     case missingField(String)
+    case invalidField(String)
     case unexpectedField
   }
 }
@@ -164,9 +231,59 @@ public enum DaemonWireProtocol {
     return selected
   }
 
+  public static func negotiatedHelloResponse(for hello: DaemonWireEnvelope) throws
+    -> DaemonWireEnvelope
+  {
+    DaemonWireEnvelope.helloResponse(
+      selectedVersion: try negotiatedVersion(for: hello))
+  }
+
   public enum NegotiationError: Error, Equatable {
     case expectedHello
     case noSupportedVersion
+  }
+}
+
+/// A bounded, monotonic event history used to replay a v2 subscription after a
+/// reconnect. The daemon keeps this per logical client rather than per socket, so
+/// reconnecting does not reset the sequence seen by the client.
+public struct DaemonReplayBuffer: Equatable, Sendable {
+  public enum ReplayError: Error, Equatable {
+    case invalidCapacity
+    case nonMonotonicSequence
+    case cursorOutsideWindow
+  }
+
+  public let capacity: Int
+  private var entries: [DaemonWireEnvelope] = []
+
+  public init(capacity: Int = 128) {
+    self.capacity = max(0, capacity)
+  }
+
+  public var firstSequence: UInt64? { entries.first?.sequence }
+  public var latestSequence: UInt64? { entries.last?.sequence }
+
+  public mutating func append(sequence: UInt64, event: DaemonEvent) {
+    guard capacity > 0 else { return }
+    if let latest = latestSequence, sequence <= latest {
+      return
+    }
+    entries.append(.event(sequence: sequence, event: event))
+    if entries.count > capacity {
+      entries.removeFirst(entries.count - capacity)
+    }
+  }
+
+  public func replay(after cursor: UInt64) throws -> [DaemonWireEnvelope] {
+    guard capacity > 0 else {
+      if entries.isEmpty { return [] }
+      throw ReplayError.cursorOutsideWindow
+    }
+    guard let first = firstSequence, let latest = latestSequence else { return [] }
+    if cursor >= latest { return [] }
+    guard cursor + 1 >= first else { throw ReplayError.cursorOutsideWindow }
+    return entries.filter { ($0.sequence ?? 0) > cursor }
   }
 }
 public enum DaemonFrameHeader {

@@ -25,7 +25,6 @@ let package = Package(
         "Domain/SessionBriefing.swift",
         "IPC/DaemonSocketClient.swift",
         "IPC/DaemonSocketPath.swift",
-        "IPC/FramedMessageIO.swift",
       ],
       sources: [
         "Domain",

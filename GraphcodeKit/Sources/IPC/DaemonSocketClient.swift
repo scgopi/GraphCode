@@ -22,7 +22,7 @@ public struct DaemonSocketClient: Sendable {
     case timedOut
   }
 
-  private let fileDescriptor: Int32
+  private let connection: UnixSocketConnection
 
   /// How long a single read waits before giving up. Generous on purpose: it exists to
   /// turn "hangs forever with no output" into a diagnosable error, not to bound how long
@@ -58,16 +58,14 @@ public struct DaemonSocketClient: Sendable {
       }
     }
     guard let connected = descriptor else { throw ClientError.daemonNotRunning }
-    Self.applyReceiveTimeout(timeout, to: connected)
-    fileDescriptor = connected
+    connection = UnixSocketConnection(fileDescriptor: connected, readTimeout: timeout)
   }
 
   /// Wraps an already-connected descriptor. Exists so the timeout and framing behaviour
   /// can be exercised over a `socketpair` — the public `init` dials the daemon's fixed
   /// socket path, which a test can't stand in for without disturbing the real daemon.
   init(fileDescriptor: Int32, timeout: TimeInterval = DaemonSocketClient.defaultTimeout) {
-    Self.applyReceiveTimeout(timeout, to: fileDescriptor)
-    self.fileDescriptor = fileDescriptor
+    connection = UnixSocketConnection(fileDescriptor: fileDescriptor, readTimeout: timeout)
   }
 
   /// Only failures that mean "not accepting connections *yet*". A permissions failure or a
@@ -124,16 +122,8 @@ public struct DaemonSocketClient: Sendable {
   /// needs no cancellation plumbing. Without it a caller waiting on an event the daemon
   /// never sends — because nothing it sent would cause one — blocks forever with no
   /// output at all, which is exactly how `status` used to hang.
-  private static func applyReceiveTimeout(_ timeout: TimeInterval, to descriptor: Int32) {
-    var interval = timeval(
-      tv_sec: Int(timeout),
-      tv_usec: Int32((timeout - timeout.rounded(.down)) * 1_000_000))
-    setsockopt(
-      descriptor, SOL_SOCKET, SO_RCVTIMEO, &interval, socklen_t(MemoryLayout<timeval>.size))
-  }
-
   public func send(_ command: DaemonCommand) throws {
-    try FramedMessageIO.writeFrame(JSONEncoder().encode(command), to: fileDescriptor)
+    try connection.sendFrameSync(JSONEncoder().encode(command))
   }
 
   /// Reads events until `isSatisfied` accepts one, the connection closes, or the read
@@ -153,7 +143,7 @@ public struct DaemonSocketClient: Sendable {
     for _ in 0..<limit {
       let data: Data
       do {
-        data = try FramedMessageIO.readFrame(from: fileDescriptor)
+        data = try connection.receiveFrameSync()
       } catch FramedMessageIO.IOError.readFailed(let code)
         where code == EAGAIN || code == EWOULDBLOCK
       {
@@ -166,6 +156,6 @@ public struct DaemonSocketClient: Sendable {
   }
 
   public func closeConnection() {
-    close(fileDescriptor)
+    connection.closeSync()
   }
 }

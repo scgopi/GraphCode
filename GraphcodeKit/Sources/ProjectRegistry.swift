@@ -22,7 +22,7 @@ public actor ProjectRegistry {
   private let persistence: ProjectPersistence
   private let platformPaths: any PlatformPaths
   private var stores: [String: GraphStore] = [:]
-  private var connectionFileDescriptors: [UUID: Int32] = [:]
+  private var connections: [UUID: DaemonConnectionChannel] = [:]
   private var connectionProjectPaths: [UUID: Set<String>] = [:]
   private let ensureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let terminateSession: (@Sendable (LoopNode, String?) -> Void)?
@@ -73,19 +73,43 @@ public actor ProjectRegistry {
 
   // MARK: - Connections
 
-  public func addConnection(id: UUID, fileDescriptor: Int32) {
-    connectionFileDescriptors[id] = fileDescriptor
+  public func addConnection(
+    id: UUID,
+    connection: any DaemonConnection,
+    mode: DaemonProtocolMode = .v1,
+    clientID: UUID? = nil,
+    subscription: DaemonWireSubscription? = nil,
+    replayStore: DaemonReplayStore = DaemonReplayStore()
+  ) async {
+    let channel = DaemonConnectionChannel(
+      connection: connection, mode: mode, clientID: clientID,
+      subscription: subscription, replayStore: replayStore)
+    await addConnection(id: id, channel: channel)
+  }
+
+  public func addConnection(id: UUID, channel: DaemonConnectionChannel) async {
+    connections[id] = channel
     startPresencePolling()
   }
+
+  #if canImport(Darwin)
+    /// Compatibility seam for existing macOS callers; the registry stores only the
+    /// channel abstraction after this boundary.
+    public func addConnection(id: UUID, fileDescriptor: Int32) async {
+      await addConnection(
+        id: id,
+        connection: UnixSocketConnection(fileDescriptor: fileDescriptor))
+    }
+  #endif
 
   public func removeConnection(_ id: UUID) async {
     for path in connectionProjectPaths[id] ?? [] {
       guard let store = stores[path] else { continue }
       await store.removeConnection(id)
     }
-    connectionFileDescriptors.removeValue(forKey: id)
+    connections.removeValue(forKey: id)
     connectionProjectPaths.removeValue(forKey: id)
-    if connectionFileDescriptors.isEmpty { stopPresencePolling() }
+    if connections.isEmpty { stopPresencePolling() }
   }
 
   // MARK: - Presence polling
@@ -183,18 +207,18 @@ public actor ProjectRegistry {
   // MARK: - Commands
 
   public func handle(_ command: DaemonCommand, connectionID: UUID) async {
-    guard let fileDescriptor = connectionFileDescriptors[connectionID] else { return }
+    guard let channel = connections[connectionID] else { return }
 
     switch command {
     case .listRecentProjects:
-      send(.recentProjectsListed(persistence.loadRecentProjects()), to: fileDescriptor)
+      await send(.recentProjectsListed(persistence.loadRecentProjects()), to: channel)
 
     case .openProject(let path):
       guard Self.isOpenable(path, platformPaths: platformPaths) else { break }
       await open(
         Self.canonicalize(path, platformPaths: platformPaths),
         for: connectionID,
-        fileDescriptor: fileDescriptor)
+        channel: channel)
 
     case .restoreOpenProjects:
       // Each of these broadcasts a `.graphChanged` exactly as `.openProject` would, so
@@ -210,11 +234,11 @@ public actor ProjectRegistry {
         await open(
           Self.canonicalize(path, platformPaths: platformPaths),
           for: connectionID,
-          fileDescriptor: fileDescriptor)
+          channel: channel)
       }
 
     case .openGlobalGraph:
-      await open(LoopGraphScope.globalPath, for: connectionID, fileDescriptor: fileDescriptor)
+      await open(LoopGraphScope.globalPath, for: connectionID, channel: channel)
 
     case .closeProject(let path):
       await close(Self.canonicalize(path, platformPaths: platformPaths), for: connectionID)
@@ -241,10 +265,35 @@ public actor ProjectRegistry {
     }
   }
 
-  private func open(_ canonicalPath: String, for connectionID: UUID, fileDescriptor: Int32) async {
+  /// Produces a correlated v2 response after the command has been applied. The v1
+  /// protocol continues to use its existing broadcast-only acknowledgement path.
+  public func responseEvent(for command: DaemonCommand) async -> DaemonEvent? {
+    switch command {
+    case .listRecentProjects:
+      return .recentProjectsListed(persistence.loadRecentProjects())
+    case .restoreOpenProjects:
+      return .recentProjectsListed(persistence.loadRecentProjects())
+    case .openProject(let path), .closeProject(let path), .forgetProject(let path):
+      let canonical = Self.canonicalize(path)
+      guard let store = stores[canonical] else { return nil }
+      return .graphChanged(await store.graph)
+    case .deleteProjectGraph:
+      return .recentProjectsListed(persistence.loadRecentProjects())
+    case .openGlobalGraph:
+      guard let store = stores[LoopGraphScope.globalPath] else { return nil }
+      return .graphChanged(await store.graph)
+    case .graphCommand(let path, _):
+      guard let store = stores[Self.canonicalize(path)] else { return nil }
+      return .graphChanged(await store.graph)
+    }
+  }
+
+  private func open(
+    _ canonicalPath: String, for connectionID: UUID, channel: DaemonConnectionChannel
+  ) async {
     let store = await store(forProjectPath: canonicalPath)
     connectionProjectPaths[connectionID, default: []].insert(canonicalPath)
-    await store.addConnection(id: connectionID, fileDescriptor: fileDescriptor)
+    await store.addConnection(id: connectionID, channel: channel)
     // The global graph is always resident and isn't a folder anyone opened, so it stays
     // out of both the recents list and the restore-on-launch set — the app asks for it
     // by name every launch instead.
@@ -281,8 +330,8 @@ public actor ProjectRegistry {
   /// broadcasting, and command routing identical to a project's. What makes it global is
   /// where its `.spawn` edges are allowed to point, not a separate code path.
   public func openGlobalGraph(for connectionID: UUID) async {
-    guard let fileDescriptor = connectionFileDescriptors[connectionID] else { return }
-    await open(LoopGraphScope.globalPath, for: connectionID, fileDescriptor: fileDescriptor)
+    guard let channel = connections[connectionID] else { return }
+    await open(LoopGraphScope.globalPath, for: connectionID, channel: channel)
   }
 
   /// Delivers a cross-graph spawn into its target project.
@@ -414,8 +463,7 @@ public actor ProjectRegistry {
 
   // MARK: - Unicast reply
 
-  private func send(_ event: DaemonEvent, to fileDescriptor: Int32) {
-    guard let data = try? JSONEncoder().encode(event) else { return }
-    try? FramedMessageIO.writeFrame(data, to: fileDescriptor)
+  private func send(_ event: DaemonEvent, to channel: DaemonConnectionChannel) async {
+    try? await channel.sendEvent(event)
   }
 }

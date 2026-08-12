@@ -28,7 +28,7 @@ extension OrchestratorClient: DependencyKey {
   /// `DaemonConnection.connection`. Parameterized on the socket path so tests can point
   /// a client at a socket they own instead of the real daemon's.
   static func live(socketPath: URL) -> OrchestratorClient {
-    let connection = DaemonConnection(socketPath: socketPath)
+    let connection = AppDaemonConnection(socketPath: socketPath)
     return OrchestratorClient(
       connect: { connection.events() },
       send: { command in try await connection.send(command) }
@@ -45,7 +45,7 @@ extension DependencyValues {
 
 /// Owns the one socket connection to `graphcoded`, connecting lazily and retrying with
 /// backoff — the app can launch before the daemon has finished starting up.
-private actor DaemonConnection {
+private actor AppDaemonConnection {
   private let socketPath: URL
 
   /// The one connect attempt, in flight or finished — **not** a bare file descriptor.
@@ -60,7 +60,7 @@ private actor DaemonConnection {
   /// landed on the descriptor nobody read, and the UI never saw an event. Storing the
   /// `Task` means the second caller awaits the first caller's attempt: one socket, one
   /// reader, replies land where they're expected.
-  private var connection: Task<Int32, any Error>?
+  private var connection: Task<any DaemonConnection, any Error>?
 
   /// Bumped whenever `connection` is dropped, so a late failure handler can tell whether
   /// the attempt it was holding is still the current one.
@@ -80,18 +80,18 @@ private actor DaemonConnection {
     AsyncStream { continuation in
       let task = Task {
         while !Task.isCancelled {
-          var connectedDescriptor: Int32?
+          var connectedConnection: (any DaemonConnection)?
           do {
-            let fileDescriptor = try await ensureConnected()
-            connectedDescriptor = fileDescriptor
+            let connection = try await ensureConnected()
+            connectedConnection = connection
             if await isReconnect() { try await rejoinProjects() }
             while true {
-              let data = try await readFrameAsync(from: fileDescriptor)
+              let data = try await connection.receiveFrame()
               let event = try JSONDecoder().decode(DaemonEvent.self, from: data)
               continuation.yield(event)
             }
           } catch {
-            if let connectedDescriptor { await invalidate(connectedDescriptor) }
+            if let connectedConnection { await invalidate(connectedConnection) }
             try? await Task.sleep(for: .seconds(1))
           }
         }
@@ -130,17 +130,17 @@ private actor DaemonConnection {
   }
 
   func send(_ command: DaemonCommand) async throws {
-    let fileDescriptor = try await ensureConnected()
+    let connection = try await ensureConnected()
     let data = try JSONEncoder().encode(command)
     do {
-      try await writeFrameAsync(data, to: fileDescriptor)
+      try await connection.sendFrame(data)
     } catch {
-      await invalidate(fileDescriptor)
+      await invalidate(connection)
       throw error
     }
   }
 
-  private func ensureConnected() async throws -> Int32 {
+  private func ensureConnected() async throws -> any DaemonConnection {
     if let connection { return try await connection.value }
     let attemptGeneration = generation
     let attempt = Task { try await connectWithBackoff() }
@@ -165,15 +165,15 @@ private actor DaemonConnection {
   /// `read` on it from another thread, and closing under that read frees the number for
   /// any other socket the process opens next. Costs one stranded descriptor per daemon
   /// restart, which the process reclaims on exit.
-  private func invalidate(_ fileDescriptor: Int32) async {
-    guard let connection, let currentDescriptor = try? await connection.value,
-      currentDescriptor == fileDescriptor
+  private func invalidate(_ failedConnection: any DaemonConnection) async {
+    guard let connection, let currentConnection = try? await connection.value,
+      currentConnection.id == failedConnection.id
     else { return }
     self.connection = nil
     generation += 1
   }
 
-  private func connectWithBackoff() async throws -> Int32 {
+  private func connectWithBackoff() async throws -> any DaemonConnection {
     var lastError: any Error = OrchestratorClientError.connectFailed(errno: 0)
     for attempt in 0..<10 {
       do {
@@ -187,7 +187,7 @@ private actor DaemonConnection {
   }
 
   @Sendable
-  private func connectAsync() async throws -> Int32 {
+  private func connectAsync() async throws -> any DaemonConnection {
     let path = socketPath.path
     return try await withCheckedThrowingContinuation { continuation in
       DispatchQueue.global().async {
@@ -221,34 +221,9 @@ private actor DaemonConnection {
           continuation.resume(throwing: OrchestratorClientError.connectFailed(errno: capturedErrno))
           return
         }
-        continuation.resume(returning: fd)
-      }
-    }
-  }
-}
-
-@Sendable
-private func readFrameAsync(from fileDescriptor: Int32) async throws -> Data {
-  try await withCheckedThrowingContinuation { continuation in
-    DispatchQueue.global().async {
-      do {
-        continuation.resume(returning: try FramedMessageIO.readFrame(from: fileDescriptor))
-      } catch {
-        continuation.resume(throwing: error)
-      }
-    }
-  }
-}
-
-@Sendable
-private func writeFrameAsync(_ data: Data, to fileDescriptor: Int32) async throws {
-  try await withCheckedThrowingContinuation { continuation in
-    DispatchQueue.global().async {
-      do {
-        try FramedMessageIO.writeFrame(data, to: fileDescriptor)
-        continuation.resume()
-      } catch {
-        continuation.resume(throwing: error)
+        continuation.resume(
+          returning: UnixSocketConnection(
+            fileDescriptor: fd, endpoint: .unixSocket(URL(fileURLWithPath: path))))
       }
     }
   }
