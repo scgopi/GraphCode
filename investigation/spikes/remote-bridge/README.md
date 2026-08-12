@@ -30,6 +30,7 @@ endpoint, or private network is used.
   disabled with `NaN` or infinity.
 - Capabilities must be exactly 64 lowercase ASCII hex characters; malformed input is
   rejected before constant-time comparison.
+- Overlap configuration must be finite and nonnegative before any maximum clamp.
 - State writes use a user-only temporary file, flush and `fsync`, then `os.replace`.
 - The listener is explicitly bound to `127.0.0.1`; Windows uses exclusive-address binding
   when available.
@@ -38,15 +39,17 @@ endpoint, or private network is used.
 - Expired, missing, malformed, oversized, and invalid-token requests are rejected.
 - Stop/restart replaces stale state and a one-shot client rediscovers the new record.
 - Stop cleanup compare-and-deletes only its matching daemon/generation/capability record.
+- Concurrent starts allocate and publish under one state transaction; an active owner
+  rejects a competing start instead of orphaning a surviving bridge.
 - Backend failures return a stable sanitized error.
 - Tests keep bridge state in OS temporary storage outside the repository.
 - `RemoteBridgePrivacyRace.Tests.ps1` runs remote tests and privacy validation concurrently.
 
 ## TDD evidence
 
-RED: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v` -> lifecycle and malformed-capability security tests failed
-GREEN: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v` plus `pwsh Tools/windows/Tests/RemoteBridgePrivacyRace.Tests.ps1` -> 18 tests and race regression passed
-REGRESSION: `pwsh Tools/windows/validate.ps1 -Task remote-bridge` -> focused Windows validation, privacy race, and security checks passed
+RED: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v` -> duplicate concurrent starts and invalid overlap configuration were accepted
+GREEN: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v` plus `pwsh Tools/windows/Tests/RemoteBridgePrivacyRace.Tests.ps1` -> 20 tests and race regression passed
+REGRESSION: `pwsh Tools/windows/validate.ps1 -Task remote-bridge` -> focused Windows validation, privacy race, and concurrency/config checks passed
 
 ## Required production contract changes
 

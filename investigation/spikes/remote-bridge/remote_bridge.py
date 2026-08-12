@@ -200,6 +200,11 @@ class BridgeStateStore:
                     self._lock_depth.value = 0
                     self._release_file_lock(lock_file)
 
+    @contextmanager
+    def transaction(self):
+        with self._protocol_lock():
+            yield
+
     @staticmethod
     def _acquire_file_lock(lock_file) -> None:
         if os.name == "nt":
@@ -327,21 +332,46 @@ class BridgeStateStore:
         except FileNotFoundError:
             pass
 
+    @staticmethod
+    def _record_matches(
+        current: Dict[str, Any],
+        expected: Dict[str, Any],
+    ) -> bool:
+        return (
+            current["daemon_instance_id"] == expected["daemon_instance_id"]
+            and current["generation"] == expected["generation"]
+            and hmac.compare_digest(
+                current["capability"],
+                expected["capability"],
+            )
+        )
+
+    def write_if_matches(
+        self,
+        expected: Optional[Dict[str, Any]],
+        state: Dict[str, Any],
+    ) -> bool:
+        validate_state(state)
+        with self._protocol_lock():
+            try:
+                current = self.read()
+            except FileNotFoundError:
+                current = None
+            if expected is None:
+                if current is not None:
+                    return False
+            elif current is None or not self._record_matches(current, expected):
+                return False
+            self._write_unlocked(state)
+            return True
+
     def remove_if_matches(self, expected: Dict[str, Any]) -> bool:
         with self._protocol_lock():
             try:
                 current = self.read()
             except FileNotFoundError:
                 return False
-            if not (
-                current["daemon_instance_id"]
-                == expected["daemon_instance_id"]
-                and current["generation"] == expected["generation"]
-                and hmac.compare_digest(
-                    current["capability"],
-                    expected["capability"],
-                )
-            ):
+            if not self._record_matches(current, expected):
                 return False
             self.remove()
             return True
@@ -449,6 +479,18 @@ class RemoteBridge:
     ):
         if not _is_finite_number(ttl_seconds) or ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
+        if (
+            not _is_finite_number(previous_overlap_seconds)
+            or previous_overlap_seconds < 0
+        ):
+            raise ValueError("previous_overlap_seconds must be finite and nonnegative")
+        if (
+            not _is_finite_number(max_previous_overlap_seconds)
+            or max_previous_overlap_seconds < 0
+        ):
+            raise ValueError(
+                "max_previous_overlap_seconds must be finite and nonnegative"
+            )
         if not 0 <= port <= 65535:
             raise ValueError("port must be between 0 and 65535")
         if collision_retries < 0:
@@ -515,31 +557,70 @@ class RemoteBridge:
     def start(self) -> None:
         if self._listener is not None:
             raise RemoteBridgeError("bridge is already running")
-        generation = 1
         try:
-            old_state = self.state_store.read()
-            generation = old_state["generation"] + 1
-        except (OSError, ValueError, json.JSONDecodeError, RemoteBridgeError):
-            pass
-        listener = self._bind_listener()
-        self._listener = listener
-        state = self._new_state(generation)
-        try:
-            self.state_store.write(state)
-        except BaseException:
-            listener.close()
-            self._listener = None
-            raise
-        with self._state_lock:
-            self._state = state
-        self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._serve,
-            args=(listener,),
-            name="remote-bridge",
-            daemon=True,
-        )
-        self._thread.start()
+            observed_state = self.state_store.read()
+        except FileNotFoundError:
+            observed_state = None
+        for _ in range(3):
+            listener = None
+            try:
+                with self.state_store.transaction():
+                    try:
+                        current_state = self.state_store.read()
+                    except FileNotFoundError:
+                        current_state = None
+                    records_match = (
+                        current_state is None
+                        and observed_state is None
+                    ) or (
+                        current_state is not None
+                        and observed_state is not None
+                        and self.state_store._record_matches(
+                            current_state,
+                            observed_state,
+                        )
+                    )
+                    if not records_match:
+                        observed_state = current_state
+                        continue
+                    if (
+                        current_state is not None
+                        and current_state["expires_at"] > time.time()
+                    ):
+                        raise RemoteBridgeError("bridge is already running")
+                    generation = (
+                        1
+                        if current_state is None
+                        else current_state["generation"] + 1
+                    )
+                    listener = self._bind_listener()
+                    self._listener = listener
+                    state = self._new_state(generation)
+                    if not self.state_store.write_if_matches(
+                        current_state,
+                        state,
+                    ):
+                        listener.close()
+                        self._listener = None
+                        observed_state = self.state_store.read()
+                        continue
+                    with self._state_lock:
+                        self._state = state
+                self._stop.clear()
+                self._thread = threading.Thread(
+                    target=self._serve,
+                    args=(listener,),
+                    name="remote-bridge",
+                    daemon=True,
+                )
+                self._thread.start()
+                return
+            except BaseException:
+                if listener is not None and self._listener is listener:
+                    listener.close()
+                    self._listener = None
+                raise
+        raise RemoteBridgeError("bridge state publication conflicted")
 
     def rotate(self, *, overlap_seconds: Optional[float] = None) -> Dict[str, Any]:
         if self._listener is None:
@@ -549,10 +630,12 @@ class RemoteBridge:
             if overlap_seconds is None
             else overlap_seconds
         )
-        overlap = min(
-            max(0.0, requested_overlap),
-            self.max_previous_overlap_seconds,
-        )
+        if (
+            not _is_finite_number(requested_overlap)
+            or requested_overlap < 0
+        ):
+            raise ValueError("overlap_seconds must be finite and nonnegative")
+        overlap = min(requested_overlap, self.max_previous_overlap_seconds)
         now = time.time()
         with self._state_lock:
             current = self._state

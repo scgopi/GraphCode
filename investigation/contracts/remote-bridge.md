@@ -34,7 +34,9 @@ with an explicit finite expiry, bounded by the configured overlap maximum. `issu
 and `expires_at` must be finite numeric values, and a configured TTL must be finite and
 positive. State replacement and stop cleanup use the same protocol lock; cleanup
 compare-and-deletes only when daemon instance, generation, and capability still match.
-Readers must re-read the record for every one-shot command.
+Generation allocation and publication are also serialized with compare-and-retry; an
+active record prevents a second start from orphaning a surviving bridge. Readers must
+re-read the record for every one-shot command.
 
 The one-shot shim reads the record on every command, so already-running zmx sessions
 discover replacements after daemon restart, SSH reconnect, remote reboot, or shim upgrade.
@@ -49,6 +51,7 @@ Rotation permits a bounded prior generation to avoid update races.
 - verification of the effective listener despite server `GatewayPorts`
 - collision retry, expiry, stale cleanup, and sanitized diagnostics
 - exact lowercase ASCII capability validation before constant-time comparison
+- finite, nonnegative overlap configuration before clamping
 - no network-exposed or unauthenticated daemon transport
 
 The isolated `investigation/spikes/remote-bridge` proof demonstrates these state,

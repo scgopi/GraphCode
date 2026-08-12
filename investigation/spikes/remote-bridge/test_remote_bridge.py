@@ -334,6 +334,91 @@ class RemoteBridgeTests(unittest.TestCase):
             time.time() + 5.1,
         )
 
+    def test_overlap_configuration_must_be_finite_and_nonnegative(self):
+        for value in (math.nan, math.inf, -math.inf, -0.1):
+            with self.subTest(maximum=value):
+                with self.assertRaises(ValueError):
+                    RemoteBridge(
+                        self.state_path,
+                        self.backend.address,
+                        max_previous_overlap_seconds=value,
+                    )
+            with self.subTest(default=value):
+                with self.assertRaises(ValueError):
+                    RemoteBridge(
+                        self.state_path,
+                        self.backend.address,
+                        previous_overlap_seconds=value,
+                    )
+            with self.subTest(rotation=value):
+                with self.assertRaises(ValueError):
+                    self.bridge.rotate(overlap_seconds=value)
+
+    def test_concurrent_start_and_stop_has_single_owner(self):
+        self.bridge.stop()
+        bridges = [
+            RemoteBridge(self.state_path, self.backend.address),
+            RemoteBridge(self.state_path, self.backend.address),
+        ]
+        read_barrier = threading.Barrier(len(bridges))
+        start_barrier = threading.Barrier(len(bridges) + 1)
+        outcomes = []
+        original_reads = [bridge.state_store.read for bridge in bridges]
+        read_count_lock = threading.Lock()
+        missing_reads = 0
+
+        def synchronized_missing(read):
+            def read_state():
+                nonlocal missing_reads
+                try:
+                    return read()
+                except FileNotFoundError:
+                    with read_count_lock:
+                        wait_for_readers = missing_reads < len(bridges)
+                        if wait_for_readers:
+                            missing_reads += 1
+                    if wait_for_readers:
+                        read_barrier.wait(1)
+                    raise
+
+            return read_state
+
+        for bridge, read in zip(bridges, original_reads):
+            bridge.state_store.read = synchronized_missing(read)
+
+        def start_bridge(bridge):
+            start_barrier.wait(1)
+            try:
+                bridge.start()
+                outcomes.append((bridge, "started"))
+            except RemoteBridgeError:
+                outcomes.append((bridge, "rejected"))
+
+        threads = [
+            threading.Thread(target=start_bridge, args=(bridge,))
+            for bridge in bridges
+        ]
+        for thread in threads:
+            thread.start()
+        start_barrier.wait(1)
+        for thread in threads:
+            thread.join(1)
+
+        started = [bridge for bridge, result in outcomes if result == "started"]
+        rejected = [
+            bridge for bridge, result in outcomes if result == "rejected"
+        ]
+        try:
+            self.assertEqual(len(started), 1)
+            self.assertEqual(len(rejected), 1)
+            self.assertEqual(
+                BridgeStateStore(self.state_path).read()["daemon_instance_id"],
+                started[0]._state["daemon_instance_id"],
+            )
+        finally:
+            for bridge in bridges:
+                bridge.stop()
+
     def test_requested_port_collision_retries_with_ephemeral_port(self):
         self.bridge.stop()
         occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
