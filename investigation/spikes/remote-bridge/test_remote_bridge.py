@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import socket
 import stat
@@ -81,6 +82,56 @@ class RemoteBridgeTests(unittest.TestCase):
         self.assertEqual(self.bridge.listener_address[0], "127.0.0.1")
         if os.name != "nt":
             self.assertEqual(stat.S_IMODE(self.state_path.stat().st_mode) & 0o077, 0)
+
+    def test_ttl_must_be_finite(self):
+        for ttl_seconds in (math.nan, math.inf, -math.inf):
+            with self.subTest(ttl_seconds=ttl_seconds):
+                with self.assertRaises(ValueError):
+                    RemoteBridge(
+                        self.state_path,
+                        self.backend.address,
+                        ttl_seconds=ttl_seconds,
+                    )
+
+    def test_state_timestamps_must_be_finite(self):
+        state = BridgeStateStore(self.state_path).read()
+        for field in ("issued_at", "expires_at"):
+            for value in (math.nan, math.inf, -math.inf):
+                with self.subTest(field=field, value=value):
+                    invalid_path = self.state_path.with_name(
+                        f"invalid-{field}-{str(value)}.json"
+                    )
+                    invalid_state = dict(state)
+                    invalid_state[field] = value
+                    invalid_path.write_text(
+                        json.dumps(invalid_state),
+                        encoding="utf-8",
+                    )
+                    try:
+                        with self.assertRaises(RemoteBridgeError):
+                            BridgeStateStore(invalid_path).read()
+                    finally:
+                        invalid_path.unlink(missing_ok=True)
+        for value in (math.nan, math.inf, -math.inf):
+            with self.subTest(previous_expires_at=value):
+                invalid_path = self.state_path.with_name(
+                    f"invalid-previous-{str(value)}.json"
+                )
+                invalid_state = dict(state)
+                invalid_state["previous"] = {
+                    "generation": state["generation"],
+                    "capability": state["capability"],
+                    "expires_at": value,
+                }
+                invalid_path.write_text(
+                    json.dumps(invalid_state),
+                    encoding="utf-8",
+                )
+                try:
+                    with self.assertRaises(RemoteBridgeError):
+                        BridgeStateStore(invalid_path).read()
+                finally:
+                    invalid_path.unlink(missing_ok=True)
 
     def test_client_reads_state_and_bridges_framed_request_response(self):
         client = RemoteBridgeClient(self.state_path)

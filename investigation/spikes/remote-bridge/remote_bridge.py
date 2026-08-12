@@ -10,6 +10,7 @@ from __future__ import annotations
 import errno
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -88,6 +89,14 @@ def _is_collision(error: OSError) -> bool:
     return error.errno == errno.EADDRINUSE or getattr(error, "winerror", None) == 10048
 
 
+def _is_finite_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
 def _validate_previous(previous: Any) -> None:
     if previous is None:
         return
@@ -99,7 +108,7 @@ def _validate_previous(previous: Any) -> None:
         or previous["generation"] < 1
         or not isinstance(previous.get("capability"), str)
         or re.fullmatch(r"[0-9a-f]{64}", previous["capability"]) is None
-        or not isinstance(previous.get("expires_at"), (int, float))
+        or not _is_finite_number(previous.get("expires_at"))
     ):
         raise RemoteBridgeError("invalid previous generation")
 
@@ -134,8 +143,8 @@ def validate_state(state: Dict[str, Any]) -> Dict[str, Any]:
         or not 1 <= state["port"] <= 65535
         or not isinstance(state["capability"], str)
         or re.fullmatch(r"[0-9a-f]{64}", state["capability"]) is None
-        or not isinstance(state["issued_at"], (int, float))
-        or not isinstance(state["expires_at"], (int, float))
+        or not _is_finite_number(state["issued_at"])
+        or not _is_finite_number(state["expires_at"])
         or state["expires_at"] <= state["issued_at"]
     ):
         raise RemoteBridgeError("invalid bridge state")
@@ -337,7 +346,7 @@ class RemoteBridge:
         collision_retries: int = 3,
         request_timeout: float = 2.0,
     ):
-        if ttl_seconds <= 0:
+        if not _is_finite_number(ttl_seconds) or ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
         if not 0 <= port <= 65535:
             raise ValueError("port must be between 0 and 65535")

@@ -26,6 +26,8 @@ endpoint, or private network is used.
 
 - `schema_version` and `protocol_version` are validated on every state read.
 - Capabilities contain 256 random bits and are never included in diagnostics.
+- TTL and all current/previous-generation timestamps must be finite; expiry cannot be
+  disabled with `NaN` or infinity.
 - State writes use a user-only temporary file, flush and `fsync`, then `os.replace`.
 - The listener is explicitly bound to `127.0.0.1`; Windows uses exclusive-address binding
   when available.
@@ -39,9 +41,9 @@ endpoint, or private network is used.
 
 ## TDD evidence
 
-RED: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v` plus concurrent privacy validation -> import failed and privacy raced with deleted `.test-state-*`
-GREEN: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v` plus `pwsh Tools/windows/Tests/RemoteBridgePrivacyRace.Tests.ps1` -> 14 tests and race regression passed
-REGRESSION: `pwsh Tools/windows/validate.ps1 -Task remote-bridge` -> focused Windows validation and concurrent privacy regression passed
+RED: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v` -> initial import failure, then non-finite TTL/state tests failed
+GREEN: `python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.py -v` plus `pwsh Tools/windows/Tests/RemoteBridgePrivacyRace.Tests.ps1` -> 16 tests and race regression passed
+REGRESSION: `pwsh Tools/windows/validate.ps1 -Task remote-bridge` -> focused Windows validation, privacy race, and finite-expiry checks passed
 
 ## Required production contract changes
 

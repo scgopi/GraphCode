@@ -30,8 +30,9 @@ The record uses `schema_version: 1` and `protocol_version: 1`. `host` is always 
 literal `127.0.0.1`; a client must reject another host. `capability` is at least
 32 random bytes encoded as lowercase hexadecimal. `generation` is monotonically
 increasing for a daemon instance. A rotation may include one `previous` generation
-with an explicit expiry, bounded by the configured overlap maximum. Readers must
-re-read the record for every one-shot command.
+with an explicit finite expiry, bounded by the configured overlap maximum. `issued_at`
+and `expires_at` must be finite numeric values, and a configured TTL must be finite and
+positive. Readers must re-read the record for every one-shot command.
 
 The one-shot shim reads the record on every command, so already-running zmx sessions
 discover replacements after daemon restart, SSH reconnect, remote reboot, or shim upgrade.
