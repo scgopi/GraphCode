@@ -72,4 +72,20 @@ struct ProjectPathValidationTests {
     #expect(!ProjectRegistry.isOpenable("/Volumes/External/wd/widget"))
     #expect(!ProjectRegistry.isWellFormedProjectPath(""))
   }
+
+  @Test
+  func windowsDriveAndUNCPathsUsePlatformValidation() {
+    let paths = WindowsPlatformPaths(
+      homeDirectory: URL(fileURLWithPath: #"C:\Users\Test User"#, isDirectory: true))
+
+    #expect(
+      ProjectRegistry.isWellFormedProjectPath(
+        #"C:\Projects\GraphCode"#, platformPaths: paths))
+    #expect(
+      ProjectRegistry.isWellFormedProjectPath(
+        #"\\server\share\GraphCode"#, platformPaths: paths))
+    #expect(
+      !ProjectRegistry.isWellFormedProjectPath(
+        #"C:\"#, platformPaths: paths))
+  }
 }

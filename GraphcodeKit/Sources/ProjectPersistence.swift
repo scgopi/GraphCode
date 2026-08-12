@@ -31,7 +31,30 @@ public struct ProjectPersistence: Sendable {
   // MARK: - Per-project graph
 
   public func loadGraph(path: String) -> LoopGraph? {
-    guard let data = try? Data(contentsOf: fileURL(forProjectPath: path)) else { return nil }
+    let currentURL = fileURL(forProjectPath: path)
+    if let graph = decodeGraph(at: currentURL) {
+      return graph
+    }
+
+    // Before v1 keys, macOS used the path itself as the filename. Keep this fallback
+    // one-way: a successful read immediately moves the bytes to the safe filename so
+    // future launches no longer depend on the legacy spelling.
+    let legacyURL = legacyFileURL(forProjectPath: path)
+    guard let legacyData = try? Data(contentsOf: legacyURL),
+      (try? JSONDecoder().decode(LoopGraph.self, from: legacyData)) != nil
+    else { return nil }
+    if (try? legacyData.write(to: currentURL, options: .atomic)) != nil {
+      try? FileManager.default.removeItem(at: legacyURL)
+    }
+    return decodeGraph(data: legacyData)
+  }
+
+  private func decodeGraph(at url: URL) -> LoopGraph? {
+    guard let data = try? Data(contentsOf: url) else { return nil }
+    return decodeGraph(data: data)
+  }
+
+  private func decodeGraph(data: Data) -> LoopGraph? {
     guard var graph = try? JSONDecoder().decode(LoopGraph.self, from: data) else { return nil }
     for index in graph.nodes.indices {
       graph.nodes[index].presence = nil
@@ -42,7 +65,9 @@ public struct ProjectPersistence: Sendable {
 
   public func saveGraph(_ graph: LoopGraph) {
     guard let data = try? JSONEncoder().encode(graph) else { return }
-    try? data.write(to: fileURL(forProjectPath: graph.project.path), options: .atomic)
+    let currentURL = fileURL(forProjectPath: graph.project.path)
+    guard (try? data.write(to: currentURL, options: .atomic)) != nil else { return }
+    try? FileManager.default.removeItem(at: legacyFileURL(forProjectPath: graph.project.path))
   }
 
   /// Throws away a project's loops for good — the "Delete Loops…" half of the sidebar's
@@ -51,6 +76,7 @@ public struct ProjectPersistence: Sendable {
   /// written to, deleted from, or otherwise modified.
   public func deleteGraph(path: String) {
     try? FileManager.default.removeItem(at: fileURL(forProjectPath: path))
+    try? FileManager.default.removeItem(at: legacyFileURL(forProjectPath: path))
   }
 
   /// Filenames are versioned hashes of the canonical project path. A path-derived filename
@@ -60,6 +86,11 @@ public struct ProjectPersistence: Sendable {
   private func fileURL(forProjectPath path: String) -> URL {
     let key = platformPaths.persistenceKey(forProjectPath: path)
     return projectsDirectory.appendingPathComponent("\(key).json")
+  }
+
+  private func legacyFileURL(forProjectPath path: String) -> URL {
+    let safeName = path.replacingOccurrences(of: "/", with: "_")
+    return projectsDirectory.appendingPathComponent("\(safeName).json")
   }
 
   // MARK: - Recent projects

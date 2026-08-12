@@ -20,14 +20,21 @@ public enum ProcessRunnerError: Error, Equatable, LocalizedError, Sendable {
   }
 }
 public struct FoundationProcessRunner: ProcessRunner {
-  public init() {}
+  private let beforeStart: (@Sendable () async -> Void)?
+
+  public init() {
+    beforeStart = nil
+  }
+
+  init(beforeStart: @escaping @Sendable () async -> Void) {
+    self.beforeStart = beforeStart
+  }
 
   public func run(_ request: ProcessRequest, timeout: Duration? = nil) async throws -> ProcessResult
   {
     guard !request.executable.path.isEmpty else {
       throw ProcessRunnerError.emptyExecutable
     }
-    try Task.checkCancellation()
 
     let execution = ProcessExecution(request: request)
     let timeoutTask = timeout.map { duration in
@@ -43,7 +50,10 @@ public struct FoundationProcessRunner: ProcessRunner {
     defer { timeoutTask?.cancel() }
 
     return try await withTaskCancellationHandler {
-      try await execution.start()
+      if let beforeStart {
+        await beforeStart()
+      }
+      return try await execution.start()
     } onCancel: {
       execution.cancel()
     }
@@ -56,7 +66,7 @@ private final class ProcessExecution: @unchecked Sendable {
   private let lock = NSLock()
   private var process: Process?
   private var completion: CheckedContinuation<ProcessResult, Error>?
-  private var completed = false
+  private var outcome: Result<ProcessResult, ProcessRunnerError>?
 
   init(request: ProcessRequest) {
     self.request = request
@@ -65,6 +75,16 @@ private final class ProcessExecution: @unchecked Sendable {
   func start() async throws -> ProcessResult {
     try await withCheckedThrowingContinuation { continuation in
       lock.lock()
+      if let outcome {
+        lock.unlock()
+        switch outcome {
+        case .success(let result):
+          continuation.resume(returning: result)
+        case .failure(let error):
+          continuation.resume(throwing: error)
+        }
+        return
+      }
       completion = continuation
       lock.unlock()
 
@@ -92,17 +112,24 @@ private final class ProcessExecution: @unchecked Sendable {
       }
 
       lock.lock()
+      if outcome != nil {
+        lock.unlock()
+        return
+      }
+      if Task.isCancelled {
+        lock.unlock()
+        finish(error: .cancelled)
+        return
+      }
       self.process = process
-      let shouldStart = !completed
-      lock.unlock()
-
-      guard shouldStart else { return }
       do {
         try process.run()
       } catch {
+        lock.unlock()
         finish(error: .launchFailed(String(describing: error)))
         return
       }
+      lock.unlock()
 
       if let input = request.standardInput, let inputPipe = process.standardInput as? Pipe {
         DispatchQueue.global(qos: .utility).async {
@@ -157,11 +184,11 @@ private final class ProcessExecution: @unchecked Sendable {
 
   private func finish(result: ProcessResult) {
     lock.lock()
-    guard !completed else {
+    guard outcome == nil else {
       lock.unlock()
       return
     }
-    completed = true
+    outcome = .success(result)
     let continuation = completion
     completion = nil
     lock.unlock()
@@ -170,17 +197,18 @@ private final class ProcessExecution: @unchecked Sendable {
 
   private func finish(error: ProcessRunnerError) {
     lock.lock()
-    guard !completed else {
+    guard outcome == nil else {
       lock.unlock()
       return
     }
-    completed = true
+    outcome = .failure(error)
     let continuation = completion
     completion = nil
+    let process = process
+    lock.unlock()
     if process?.isRunning == true {
       process?.terminate()
     }
-    lock.unlock()
     continuation?.resume(throwing: error)
   }
 

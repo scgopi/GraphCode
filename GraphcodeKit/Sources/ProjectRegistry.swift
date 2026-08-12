@@ -20,6 +20,7 @@ import Foundation
 /// `.deleteProjectGraph` additionally discards its saved loops.
 public actor ProjectRegistry {
   private let persistence: ProjectPersistence
+  private let platformPaths: any PlatformPaths
   private var stores: [String: GraphStore] = [:]
   private var connectionFileDescriptors: [UUID: Int32] = [:]
   private var connectionProjectPaths: [UUID: Set<String>] = [:]
@@ -41,6 +42,7 @@ public actor ProjectRegistry {
   /// closures, or `nil` to touch no real sessions or subprocesses at all.
   public init(
     persistenceDirectory: URL,
+    platformPaths: any PlatformPaths = CurrentPlatformPaths.value,
     ensureSession: (@Sendable (LoopNode, String?) -> Void)? = CLISessionBackend.ensureSession,
     terminateSession: (@Sendable (LoopNode, String?) -> Void)? =
       CLISessionBackend.terminateSession,
@@ -56,7 +58,9 @@ public actor ProjectRegistry {
     readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)? =
       CLISessionBackend.readPresence
   ) {
-    persistence = ProjectPersistence(baseDirectory: persistenceDirectory)
+    self.platformPaths = platformPaths
+    persistence = ProjectPersistence(
+      baseDirectory: persistenceDirectory, platformPaths: platformPaths)
     self.ensureSession = ensureSession
     self.terminateSession = terminateSession
     self.evaluatePredicate = evaluatePredicate
@@ -186,8 +190,11 @@ public actor ProjectRegistry {
       send(.recentProjectsListed(persistence.loadRecentProjects()), to: fileDescriptor)
 
     case .openProject(let path):
-      guard Self.isOpenable(path) else { break }
-      await open(Self.canonicalize(path), for: connectionID, fileDescriptor: fileDescriptor)
+      guard Self.isOpenable(path, platformPaths: platformPaths) else { break }
+      await open(
+        Self.canonicalize(path, platformPaths: platformPaths),
+        for: connectionID,
+        fileDescriptor: fileDescriptor)
 
     case .restoreOpenProjects:
       // Each of these broadcasts a `.graphChanged` exactly as `.openProject` would, so
@@ -198,23 +205,27 @@ public actor ProjectRegistry {
       // paths were openable when they were added, and a project on an unmounted volume
       // has to come back when the volume does. Nothing is deleted from the stored set
       // either way — `close` is the only thing that removes from it.
-      for path in persistence.loadOpenProjects() where Self.isWellFormedProjectPath(path) {
-        await open(path, for: connectionID, fileDescriptor: fileDescriptor)
+      for path in persistence.loadOpenProjects()
+      where Self.isWellFormedProjectPath(path, platformPaths: platformPaths) {
+        await open(
+          Self.canonicalize(path, platformPaths: platformPaths),
+          for: connectionID,
+          fileDescriptor: fileDescriptor)
       }
 
     case .openGlobalGraph:
       await open(LoopGraphScope.globalPath, for: connectionID, fileDescriptor: fileDescriptor)
 
     case .closeProject(let path):
-      await close(Self.canonicalize(path), for: connectionID)
+      await close(Self.canonicalize(path, platformPaths: platformPaths), for: connectionID)
 
     case .forgetProject(let path):
-      let canonicalPath = Self.canonicalize(path)
+      let canonicalPath = Self.canonicalize(path, platformPaths: platformPaths)
       await close(canonicalPath, for: connectionID)
       persistence.forgetProject(path: canonicalPath)
 
     case .deleteProjectGraph(let path):
-      let canonicalPath = Self.canonicalize(path)
+      let canonicalPath = Self.canonicalize(path, platformPaths: platformPaths)
       await close(canonicalPath, for: connectionID)
       persistence.forgetProject(path: canonicalPath)
       // Drop the in-memory store too, or a later reopen would resurrect the graph we
@@ -223,7 +234,9 @@ public actor ProjectRegistry {
       persistence.deleteGraph(path: canonicalPath)
 
     case .graphCommand(let path, let inner):
-      guard let store = stores[Self.canonicalize(path)] else { return }
+      guard let store = stores[Self.canonicalize(path, platformPaths: platformPaths)] else {
+        return
+      }
       await store.handle(inner)
     }
   }
@@ -283,7 +296,7 @@ public actor ProjectRegistry {
   /// nothing spawns back. Enforced here rather than trusted: a project graph naming the
   /// global path as its spawn target is refused.
   private func spawnIntoProject(_ targetPath: String, draft: NodeDraft) async {
-    let canonicalPath = Self.canonicalize(targetPath)
+    let canonicalPath = Self.canonicalize(targetPath, platformPaths: platformPaths)
     guard canonicalPath != LoopGraphScope.globalPath else { return }
     guard let store = stores[canonicalPath] else { return }
     await store.handle(.createNode(draft))
@@ -350,13 +363,13 @@ public actor ProjectRegistry {
   ///
   /// The root is refused even when spelled out. A project is scanned by the worktree
   /// sweeper and by git; pointed at `/` that is the whole disk.
-  static func isWellFormedProjectPath(_ path: String) -> Bool {
+  static func isWellFormedProjectPath(
+    _ path: String,
+    platformPaths: any PlatformPaths = CurrentPlatformPaths.value
+  ) -> Bool {
     if path == LoopGraphScope.globalPath { return true }
     if RemoteProjectLocation.parse(projectPath: path) != nil { return true }
-    // Absolute, and not the root however it is spelled: `/`, `//`, `/..` and `/a/..` all
-    // reduce to the same directory.
-    guard path.hasPrefix("/") else { return false }
-    return RemoteProjectLocation.normalizedPath(path) != "/"
+    return (try? platformPaths.canonicalProjectPath(path)) != nil
   }
 
   /// Whether a path can be opened as a project right now: well-formed, and a directory
@@ -366,20 +379,30 @@ public actor ProjectRegistry {
   /// because this is the door every client knocks on, and without it a mistyped or
   /// already-deleted path became a project with a store, a recents entry and a place in
   /// the restore set — `~/.graphcode/projects` accumulates one JSON per such ghost.
-  static func isOpenable(_ path: String) -> Bool {
-    guard isWellFormedProjectPath(path) else { return false }
+  static func isOpenable(
+    _ path: String,
+    platformPaths: any PlatformPaths = CurrentPlatformPaths.value
+  ) -> Bool {
+    guard isWellFormedProjectPath(path, platformPaths: platformPaths) else { return false }
     if path == LoopGraphScope.globalPath { return true }
     if RemoteProjectLocation.parse(projectPath: path) != nil { return true }
+    guard let canonicalPath = try? platformPaths.canonicalProjectPath(path) else {
+      return false
+    }
     var isDirectory: ObjCBool = false
-    let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+    let exists = FileManager.default.fileExists(
+      atPath: canonicalPath, isDirectory: &isDirectory)
     return exists && isDirectory.boolValue
   }
 
-  private static func canonicalize(_ path: String) -> String {
+  private static func canonicalize(
+    _ path: String,
+    platformPaths: any PlatformPaths = CurrentPlatformPaths.value
+  ) -> String {
     guard path != LoopGraphScope.globalPath,
       RemoteProjectLocation.parse(projectPath: path) == nil
     else { return path }
-    return URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+    return (try? platformPaths.canonicalProjectPath(path)) ?? path
   }
 
   private static func displayName(for path: String) -> String {

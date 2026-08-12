@@ -1,6 +1,8 @@
 import Foundation
-import GraphcodeKit
+
 import XCTest
+
+@testable import GraphcodeKit
 
 final class PlatformTests: XCTestCase {
   func testSupportDirectoryAcceptsWindowsAbsoluteOverride() {
@@ -57,8 +59,62 @@ final class PlatformTests: XCTestCase {
       environment: [:])
 
     XCTAssertEqual(invocation.kind, .commandPrompt)
-    XCTAssertEqual(invocation.request.arguments.prefix(4), ["/d", "/c", "call", script.path])
-    XCTAssertEqual(invocation.request.arguments.suffix(2), ["space value", #"quote"value"#])
+    XCTAssertEqual(invocation.request.arguments, ["/d", "/q"])
+    let command = String(decoding: invocation.request.standardInput ?? Data(), as: UTF8.self)
+    XCTAssertTrue(command.contains(script.path))
+    XCTAssertTrue(command.contains("space value"))
+    XCTAssertTrue(command.contains(#"quote^"value"#))
+  }
+
+  func testWindowsShellFallsBackToSystemPowerShell() {
+    let systemRoot =
+      ProcessInfo.processInfo.environment["SystemRoot"]
+      ?? ProcessInfo.processInfo.environment["WINDIR"]
+      ?? #"C:\Windows"#
+    let strategy = WindowsShellStrategy(
+      environment: [
+        "ProgramW6432": #"C:\GraphCode\missing-program-files"#,
+        "PATH": #"C:\GraphCode\missing-bin"#,
+        "SystemRoot": systemRoot,
+      ])
+
+    let normalizedPath = strategy.powerShell.path.replacingOccurrences(of: "/", with: "\\")
+    XCTAssertTrue(
+      normalizedPath.localizedCaseInsensitiveContains(
+        #"WindowsPowerShell\v1.0\powershell.exe"#))
+  }
+
+  func testWindowsShellEscapesHostileCmdArguments() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-hostile-cmd-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let script = directory.appendingPathComponent("echo-hostile.cmd")
+    try "@echo off\r\necho ARG:%~1\r\n".write(to: script, atomically: true, encoding: .utf8)
+    let strategy = WindowsShellStrategy(
+      commandPrompt: URL(
+        fileURLWithPath: ProcessInfo.processInfo.environment["ComSpec"]
+          ?? ProcessInfo.processInfo.environment["COMSPEC"]
+          ?? "cmd.exe"))
+    for argument in ["a&b", "a|b", "a<d>", "a(e)", "a^b", "a!b", "a%b"] {
+      let invocation = try strategy.invocation(
+        executable: script,
+        arguments: [argument],
+        workingDirectory: directory,
+        environment: [:])
+
+      let result = try await FoundationProcessRunner().run(invocation.request)
+      let output = String(decoding: result.standardOutput, as: UTF8.self)
+      XCTAssertEqual(
+        result.exitCode,
+        0,
+        "\(argument): stdout=\(output) "
+          + "stderr=\(String(decoding: result.standardError, as: UTF8.self))")
+      XCTAssertTrue(
+        output.contains("ARG:\(argument)"),
+        "\(argument): args=\(invocation.request.arguments) stdout=\(output)")
+    }
   }
 
   func testProcessRunnerCapturesCwdEnvironmentAndOutput() async throws {
@@ -183,6 +239,71 @@ final class PlatformTests: XCTestCase {
     }
   }
 
+  func testProcessRunnerCancellationBeforeLaunchResumesAndDoesNotLaunch() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-cancel-race-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let marker = directory.appendingPathComponent("launched.txt")
+    let gate = LaunchGate()
+    let runner = FoundationProcessRunner(beforeStart: { await gate.wait() })
+    let comSpec =
+      ProcessInfo.processInfo.environment["ComSpec"]
+      ?? ProcessInfo.processInfo.environment["COMSPEC"]
+      ?? "cmd.exe"
+
+    let task = Task {
+      try await runner.run(
+        ProcessRequest(
+          executable: URL(fileURLWithPath: comSpec),
+          arguments: ["/d", "/c", "echo launched > \"\(marker.path)\""]))
+    }
+    await gate.waitUntilEntered()
+    task.cancel()
+    await gate.release()
+
+    do {
+      _ = try await task.value
+      XCTFail("Expected cancellation")
+    } catch let error as ProcessRunnerError {
+      XCTAssertEqual(error, .cancelled)
+    }
+    XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+  }
+
+  func testProcessRunnerTimeoutBeforeLaunchResumesAndDoesNotLaunch() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-timeout-race-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let marker = directory.appendingPathComponent("launched.txt")
+    let gate = LaunchGate()
+    let runner = FoundationProcessRunner(beforeStart: { await gate.wait() })
+    let comSpec =
+      ProcessInfo.processInfo.environment["ComSpec"]
+      ?? ProcessInfo.processInfo.environment["COMSPEC"]
+      ?? "cmd.exe"
+
+    let task = Task {
+      try await runner.run(
+        ProcessRequest(
+          executable: URL(fileURLWithPath: comSpec),
+          arguments: ["/d", "/c", "echo launched > \"\(marker.path)\""]),
+        timeout: .milliseconds(1))
+    }
+    await gate.waitUntilEntered()
+    try await Task.sleep(for: .milliseconds(100))
+    await gate.release()
+
+    do {
+      _ = try await task.value
+      XCTFail("Expected timeout")
+    } catch let error as ProcessRunnerError {
+      XCTAssertEqual(error, .timedOut)
+    }
+    XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+  }
+
   func testProjectPersistenceUsesSafeWindowsKey() throws {
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("graphcode-persistence-\(UUID().uuidString)", isDirectory: true)
@@ -204,5 +325,56 @@ final class PlatformTests: XCTestCase {
         of: #"^v1-[0-9a-f]{64}\.json$"#,
         options: .regularExpression))
     XCTAssertEqual(persistence.loadGraph(path: project.path)?.project.path, project.path)
+  }
+
+  func testProjectPersistenceMigratesAndDeletesLegacyPathFile() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(
+        "graphcode-legacy-persistence-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let persistence = ProjectPersistence(
+      baseDirectory: directory,
+      platformPaths: DarwinPlatformPaths())
+    let project = ProjectRef(path: "/tmp/legacy-windows-test", name: "Legacy")
+    let graph = LoopGraph(project: project, nodes: [LoopNode(title: "Legacy")])
+    let legacyURL =
+      directory
+      .appendingPathComponent("projects", isDirectory: true)
+      .appendingPathComponent("_tmp_legacy-windows-test.json")
+    try JSONEncoder()
+      .encode(graph)
+      .write(to: legacyURL)
+
+    XCTAssertEqual(persistence.loadGraph(path: project.path)?.nodes.first?.title, "Legacy")
+    XCTAssertFalse(FileManager.default.fileExists(atPath: legacyURL.path))
+
+    persistence.deleteGraph(path: project.path)
+    XCTAssertNil(persistence.loadGraph(path: project.path))
+  }
+}
+private actor LaunchGate {
+  private var entered = false
+  private var entryContinuation: CheckedContinuation<Void, Never>?
+  private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+  func wait() async {
+    entered = true
+    entryContinuation?.resume()
+    entryContinuation = nil
+    await withCheckedContinuation { continuation in
+      releaseContinuation = continuation
+    }
+  }
+
+  func waitUntilEntered() async {
+    if entered { return }
+    await withCheckedContinuation { continuation in
+      entryContinuation = continuation
+    }
+  }
+
+  func release() {
+    releaseContinuation?.resume()
+    releaseContinuation = nil
   }
 }

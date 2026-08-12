@@ -22,13 +22,17 @@ public struct WindowsShellStrategy: ShellStrategy {
     let extensionName = executable.pathExtension.lowercased()
     switch extensionName {
     case "cmd", "bat":
+      let command =
+        ([Self.quoteCommandPromptArgument(executable.path)]
+        + arguments.map(Self.quoteCommandPromptArgument)).joined(separator: " ")
       return ShellInvocation(
         kind: .commandPrompt,
         request: ProcessRequest(
           executable: commandPrompt,
-          arguments: ["/d", "/c", "call", executable.path] + arguments,
+          arguments: ["/d", "/q"],
           workingDirectory: workingDirectory,
-          environment: environment))
+          environment: environment,
+          standardInput: Data((command + "\r\n").utf8)))
     case "ps1":
       return ShellInvocation(
         kind: .powerShell,
@@ -83,7 +87,55 @@ public struct WindowsShellStrategy: ShellStrategy {
         return candidate
       }
     }
-    return URL(fileURLWithPath: "pwsh.exe")
+    if let candidate = executableInPath("pwsh.exe", environment: environment) {
+      return candidate
+    }
+    if let systemRoot = environmentValue(["SystemRoot", "WINDIR"], in: environment),
+      !systemRoot.isEmpty
+    {
+      let candidate = URL(fileURLWithPath: systemRoot)
+        .appendingPathComponent("System32", isDirectory: true)
+        .appendingPathComponent("WindowsPowerShell", isDirectory: true)
+        .appendingPathComponent("v1.0", isDirectory: true)
+        .appendingPathComponent("powershell.exe")
+      if FileManager.default.fileExists(atPath: candidate.path) {
+        return candidate
+      }
+    }
+    if let candidate = executableInPath("powershell.exe", environment: environment) {
+      return candidate
+    }
+    return URL(fileURLWithPath: "powershell.exe")
+  }
+
+  private static func executableInPath(
+    _ executable: String,
+    environment: [String: String]
+  ) -> URL? {
+    guard let path = environmentValue(["PATH"], in: environment) else { return nil }
+    for directory in path.split(separator: ";", omittingEmptySubsequences: true) {
+      let candidate = URL(fileURLWithPath: String(directory), isDirectory: true)
+        .appendingPathComponent(executable)
+      if FileManager.default.fileExists(atPath: candidate.path) {
+        return candidate
+      }
+    }
+    return nil
+  }
+
+  private static func quoteCommandPromptArgument(_ value: String) -> String {
+    var quoted = "\""
+    for character in value {
+      if "^&|<>()!%".contains(character) {
+        quoted.append("^")
+      }
+      if character == "\"" {
+        quoted.append("^")
+      }
+      quoted.append(character)
+    }
+    quoted.append("\"")
+    return quoted
   }
 }
 public struct DarwinShellStrategy: ShellStrategy {

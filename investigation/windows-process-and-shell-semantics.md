@@ -28,7 +28,7 @@ Conclusions:
 | Input | Windows launch |
 |---|---|
 | `.exe`, extensionless native executable | Direct `Process`/`CreateProcessW` argv |
-| `.cmd`, `.bat` | `cmd.exe /d /c call <script> <args>` |
+| `.cmd`, `.bat` | `cmd.exe /d /q` with a quoted command sent on stdin; this avoids a second `call` parse and preserves hostile metacharacters |
 | `.ps1` | Prefer `pwsh.exe -NoLogo -NoProfile -File`; optionally fall back to Windows PowerShell |
 | npm shim | Resolve the actual `.cmd`/`.ps1`/`.exe` and apply the matching rule |
 | shell predicate | Explicit configured shell; PowerShell should be the native default |

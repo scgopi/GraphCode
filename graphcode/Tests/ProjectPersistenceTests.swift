@@ -106,5 +106,45 @@ struct ProjectPersistenceTests {
 
     let recents = persistence.loadRecentProjects()
     #expect(recents.map(\.path) == [newer.path, older.path])
+    #expect(recents.map(\.path) == [newer.path, older.path])
+  }
+  @Test
+  func loadingALegacyPathDerivedGraphMigratesItToTheSafeKey() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
+    let persistence = ProjectPersistence(baseDirectory: directory)
+    let project = ProjectRef(path: "/tmp/legacy-project", name: "legacy-project")
+    let graph = LoopGraph(project: project, nodes: [LoopNode(title: "Legacy")])
+    let legacyURL = directory
+      .appendingPathComponent("projects", isDirectory: true)
+      .appendingPathComponent("_tmp_legacy-project.json")
+    try JSONEncoder().encode(graph).write(to: legacyURL)
+
+    #expect(persistence.loadGraph(path: project.path)?.nodes.first?.title == "Legacy")
+    #expect(!FileManager.default.fileExists(atPath: legacyURL.path))
+
+    let files = try FileManager.default.contentsOfDirectory(
+      at: directory.appendingPathComponent("projects", isDirectory: true),
+      includingPropertiesForKeys: nil)
+    #expect(files.count == 1)
+    #expect(files.first?.lastPathComponent.hasPrefix("v1-") == true)
+  }
+
+  @Test
+  func deletingAGraphAlsoRemovesItsLegacyPathDerivedFile() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
+    let persistence = ProjectPersistence(baseDirectory: directory)
+    let path = "/tmp/legacy-delete"
+    let legacyURL = directory
+      .appendingPathComponent("projects", isDirectory: true)
+      .appendingPathComponent("_tmp_legacy-delete.json")
+    let graph = LoopGraph(project: ProjectRef(path: path, name: "legacy-delete"))
+    try JSONEncoder().encode(graph).write(to: legacyURL)
+
+    persistence.deleteGraph(path: path)
+
+    #expect(!FileManager.default.fileExists(atPath: legacyURL.path))
+    #expect(persistence.loadGraph(path: path) == nil)
   }
 }
