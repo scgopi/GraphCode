@@ -134,14 +134,7 @@ struct ProjectFeature {
 
     init(graph: LoopGraph) {
       self.graph = graph
-      var positions: [UUID: CGPoint] = [:]
-      var taken = Set<CGPoint>()
-      for node in graph.nodes {
-        let position = ProjectFeature.nextFreePosition(avoiding: taken)
-        positions[node.id] = position
-        taken.insert(position)
-      }
-      self.nodePositions = positions
+      self.nodePositions = LaneLayout.positions(forCanvas: graph)
       self.sidebarNodeOrder = graph.nodes.map(\.id)
     }
   }
@@ -228,20 +221,12 @@ struct ProjectFeature {
         switch event {
         case .graphChanged(let newGraph):
           state.connectionError = nil
-          // Slots are taken by what's *there*, not by how many there are. Indexing by
-          // count meant deleting a loop freed its position but shifted the counter back,
-          // so the next node landed exactly on top of an existing card — four loops
-          // rendering as one, with the rest hidden underneath.
-          var taken = Set(state.nodePositions.values)
-          // Composites' contents get slots too, or a drilled-in canvas draws every card
-          // at the same unplaced point. Positions are keyed by node id and ids are unique
-          // across the whole tree, so one flat table serves every level.
-          for node in newGraph.nodes.flatMap({ [$0] + ($0.subGraph?.nodes ?? []) })
-          where state.nodePositions[node.id] == nil {
-            let position = Self.nextFreePosition(avoiding: taken)
-            taken.insert(position)
-            state.nodePositions[node.id] = position
-          }
+          // Every card placed again from the graph that just arrived, rather than only the
+          // ones that are new. Slots handed out at arrival time made the canvas a record of
+          // the order loops turned up in: a hand-off drawn between two cards the layout had
+          // no reason to put near each other ran behind whatever sat between them, and
+          // wiring a graph up changed nothing about how it looked. See `LaneLayout`.
+          state.nodePositions = LaneLayout.positions(forCanvas: newGraph)
           state.graph = newGraph
           // An offer only makes sense while its loop exists, stays resolved, and still
           // points at the worktree — a restarted or deleted loop takes it with it.
@@ -444,10 +429,9 @@ struct ProjectFeature {
       case .deleteNodeConfirmed:
         guard let nodeID = state.nodePendingDeletion else { return .none }
         state.nodePendingDeletion = nil
-        // Local canvas layout is this feature's own, so it's cleaned up here rather
-        // than waiting for the daemon's broadcast — otherwise a recreated node could
-        // inherit the dead one's position.
-        state.nodePositions[nodeID] = nil
+        // The card keeps its place until the broadcast lands, at which point the whole
+        // canvas is laid out again without it. Dropping the position here instead would
+        // teleport a card that is still on screen to the canvas origin for a frame.
         let projectPath = state.graph.project.path
         return .run { _ in
           try? await orchestratorClient.send(
@@ -581,31 +565,4 @@ extension ProjectFeature {
     }
   }
 
-  /// Simple grid layout for freshly synced nodes — real layout (force-directed,
-  /// draggable repositioning) is future work; this just needs nodes to not overlap.
-  /// The first grid slot nothing is sitting on.
-  ///
-  /// Deliberately not "the nth slot for the nth node": positions are removed when a loop
-  /// is deleted, so a counter drifts out of step with the grid and starts handing out
-  /// slots that are already occupied. Cards stacked pixel-perfectly on top of each other
-  /// don't look like a layout bug — they look like the graph lost its nodes.
-  ///
-  /// Terminates because the grid is unbounded and `taken` is finite.
-  static func nextFreePosition(avoiding taken: Set<CGPoint>) -> CGPoint {
-    var index = 0
-    while true {
-      let candidate = gridPosition(index)
-      if !taken.contains(candidate) { return candidate }
-      index += 1
-    }
-  }
-
-  /// Simple grid layout for freshly synced nodes — real layout (force-directed,
-  /// draggable repositioning) is future work; this just needs nodes to not overlap.
-  static func gridPosition(_ index: Int) -> CGPoint {
-    let columns = 3
-    let column = index % columns
-    let row = index / columns
-    return CGPoint(x: 160 + CGFloat(column) * 260, y: 140 + CGFloat(row) * 200)
-  }
 }

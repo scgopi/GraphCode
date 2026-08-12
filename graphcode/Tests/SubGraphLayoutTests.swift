@@ -83,9 +83,36 @@ struct SubGraphLayoutTests {
   }
 
   @Test
+  func aCompositesChipsStayInTheRowTheyHangIn() {
+    // The chips say how much room they need and the canvas gives it to them
+    // (`LaneLayout.rowHeight(for:)`); this is the other half of that deal — a full stack
+    // plus its overflow chip has to finish above the next row's card, or the layout has
+    // quietly gone back to drawing loops on top of each other.
+    let many = (0..<12).map { LoopNode(title: "loop-\($0)", checkDescription: "?") }
+    let parent = composite("fan-out", holding: many)
+    let layout = SubGraphLayout(
+      nodes: [parent], positions: [parent.id: Self.cardPosition])
+
+    let lowest = max(
+      layout.placements.map(\.position.y).max() ?? 0,
+      layout.overflows.map(\.position.y).max() ?? 0)
+    let nextRowCardTop =
+      Self.cardPosition.y + SubGraphLayout.rowPitch - LaneLayout.Metrics.card.height / 2
+    #expect(lowest < nextRowCardTop)
+
+    // And the pitch a canvas with a composite on it actually uses is at least that much.
+    let graph = LoopGraph(project: Self.project, nodes: [parent])
+    #expect(LaneLayout.rowHeight(for: graph) >= SubGraphLayout.rowPitch)
+    // A canvas with nothing to expand keeps the Graph view's own rows.
+    let plain = LoopGraph(
+      project: Self.project, nodes: [LoopNode(title: "review", checkDescription: "?")])
+    #expect(LaneLayout.rowHeight(for: plain) == LaneLayout.Metrics.rowHeight)
+  }
+
+  @Test
   func aCompositeTooBigForTheSpaceUnderItsCardSaysWhatItIsHiding() {
-    // The grid's row pitch is fixed, so the room under a card is finite. Drawing all
-    // twelve would collide with the row below; dropping them silently would be worse.
+    // The room under a card is finite whatever the row pitch is. Drawing all twelve would
+    // collide with the row below; dropping them silently would be worse.
     let many = (0..<12).map { LoopNode(title: "loop-\($0)", checkDescription: "?") }
     let parent = composite("fan-out", holding: many)
     let layout = SubGraphLayout(
