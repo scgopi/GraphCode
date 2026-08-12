@@ -75,7 +75,10 @@ let project = Project(
                 // libghostty's keyboard-layout handling (`input.KeymapDarwin`) calls
                 // the Carbon TIS* APIs directly.
                 .sdk(name: "Carbon", type: .framework),
-            ]
+            ],
+            settings: .settings(base: [
+                "SWIFT_EMIT_LOC_STRINGS": "YES"
+            ])
         ),
         .target(
             name: "graphcodeTests",
