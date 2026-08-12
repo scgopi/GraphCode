@@ -138,10 +138,13 @@ public enum SupportDirectory {
   }
 
   private static func isAbsolutePath(_ path: String) -> Bool {
-    if path.hasPrefix("/") || path.hasPrefix("\\") {
+    if path.hasPrefix("/") {
       return true
     }
     #if os(Windows)
+      if path.hasPrefix("\\") {
+        return true
+      }
       guard path.count >= 3 else { return false }
       let characters = Array(path)
       return characters[1] == ":" && (characters[2] == "\\" || characters[2] == "/")

@@ -41,7 +41,8 @@ public struct ProjectPersistence: Sendable {
     // future launches no longer depend on the legacy spelling.
     let legacyURL = legacyFileURL(forProjectPath: path)
     guard let legacyData = try? Data(contentsOf: legacyURL),
-      (try? JSONDecoder().decode(LoopGraph.self, from: legacyData)) != nil
+      let legacyGraph = try? JSONDecoder().decode(LoopGraph.self, from: legacyData),
+      pathsMatch(legacyGraph.project.path, path)
     else { return nil }
     if (try? legacyData.write(to: currentURL, options: .atomic)) != nil {
       try? FileManager.default.removeItem(at: legacyURL)
@@ -67,7 +68,7 @@ public struct ProjectPersistence: Sendable {
     guard let data = try? JSONEncoder().encode(graph) else { return }
     let currentURL = fileURL(forProjectPath: graph.project.path)
     guard (try? data.write(to: currentURL, options: .atomic)) != nil else { return }
-    try? FileManager.default.removeItem(at: legacyFileURL(forProjectPath: graph.project.path))
+    removeLegacyGraphIfMatching(path: graph.project.path)
   }
 
   /// Throws away a project's loops for good — the "Delete Loops…" half of the sidebar's
@@ -76,7 +77,7 @@ public struct ProjectPersistence: Sendable {
   /// written to, deleted from, or otherwise modified.
   public func deleteGraph(path: String) {
     try? FileManager.default.removeItem(at: fileURL(forProjectPath: path))
-    try? FileManager.default.removeItem(at: legacyFileURL(forProjectPath: path))
+    removeLegacyGraphIfMatching(path: path)
   }
 
   /// Filenames are versioned hashes of the canonical project path. A path-derived filename
@@ -91,6 +92,22 @@ public struct ProjectPersistence: Sendable {
   private func legacyFileURL(forProjectPath path: String) -> URL {
     let safeName = path.replacingOccurrences(of: "/", with: "_")
     return projectsDirectory.appendingPathComponent("\(safeName).json")
+  }
+
+  private func removeLegacyGraphIfMatching(path: String) {
+    let legacyURL = legacyFileURL(forProjectPath: path)
+    guard let graph = decodeGraph(at: legacyURL),
+      pathsMatch(graph.project.path, path)
+    else { return }
+    try? FileManager.default.removeItem(at: legacyURL)
+  }
+
+  private func pathsMatch(_ storedPath: String, _ requestedPath: String) -> Bool {
+    if storedPath == requestedPath { return true }
+    guard let storedCanonical = try? platformPaths.canonicalProjectPath(storedPath),
+      let requestedCanonical = try? platformPaths.canonicalProjectPath(requestedPath)
+    else { return false }
+    return storedCanonical == requestedCanonical
   }
 
   // MARK: - Recent projects

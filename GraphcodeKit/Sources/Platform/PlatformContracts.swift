@@ -68,6 +68,13 @@ public protocol ShellStrategy: Sendable {
     environment: [String: String]
   ) throws -> ShellInvocation
 }
+public enum ShellStrategyError: Error, Equatable, LocalizedError, Sendable {
+  case commandContainsLineBreak
+
+  public var errorDescription: String? {
+    "Command paths and arguments cannot contain carriage returns or line feeds."
+  }
+}
 public protocol SessionService: Sendable {
   func ensureSession(_ node: LoopNode, projectPath: String?) async throws
   func terminateSession(_ node: LoopNode, projectPath: String?) async throws

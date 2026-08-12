@@ -1,8 +1,11 @@
 import Foundation
-
 import XCTest
 
 @testable import GraphcodeKit
+
+#if os(Windows)
+  import WinSDK
+#endif
 
 final class PlatformTests: XCTestCase {
   func testSupportDirectoryAcceptsWindowsAbsoluteOverride() {
@@ -32,6 +35,21 @@ final class PlatformTests: XCTestCase {
 
     XCTAssertTrue(canonical.contains(#"C:/Projects/GraphCode Demo"#))
     XCTAssertThrowsError(try paths.canonicalProjectPath(#"C:\"#))
+  }
+
+  func testCanonicalProjectPathRejectsCanonicalizedDriveShareAndRootRelativePaths() {
+    let paths = WindowsPlatformPaths()
+    for path in [
+      #"C:\"#,
+      #"C:\Projects\.."#,
+      #"\\server\share"#,
+      #"\\server\share\folder\.."#,
+      #"\path"#,
+      #"/path"#,
+      #"C:relative"#,
+    ] {
+      XCTAssertThrowsError(try paths.canonicalProjectPath(path), path)
+    }
   }
 
   func testPersistenceKeyIsSafeStableAndDistinct() {
@@ -114,6 +132,30 @@ final class PlatformTests: XCTestCase {
       XCTAssertTrue(
         output.contains("ARG:\(argument)"),
         "\(argument): args=\(invocation.request.arguments) stdout=\(output)")
+    }
+  }
+
+  func testWindowsShellRejectsLineBreakInjection() {
+    let strategy = WindowsShellStrategy()
+    let script = URL(fileURLWithPath: #"C:\Tools\echo.cmd"#)
+
+    XCTAssertThrowsError(
+      try strategy.invocation(
+        executable: script,
+        arguments: ["safe\r\necho injected"],
+        workingDirectory: nil,
+        environment: [:])
+    ) { error in
+      XCTAssertEqual(error as? ShellStrategyError, .commandContainsLineBreak)
+    }
+    XCTAssertThrowsError(
+      try strategy.invocation(
+        executable: URL(fileURLWithPath: "C:\\Tools\\echo\r\n.cmd"),
+        arguments: [],
+        workingDirectory: nil,
+        environment: [:])
+    ) { error in
+      XCTAssertEqual(error as? ShellStrategyError, .commandContainsLineBreak)
     }
   }
 
@@ -304,6 +346,86 @@ final class PlatformTests: XCTestCase {
     XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
   }
 
+  func testProcessRunnerTimeoutKillsChildProcessAndDrainsPipes() async throws {
+    try await assertProcessTreeTermination(.timeout)
+  }
+
+  func testProcessRunnerCancellationKillsChildProcessAndDrainsPipes() async throws {
+    try await assertProcessTreeTermination(.cancellation)
+  }
+
+  private enum TreeTermination: Equatable {
+    case timeout
+    case cancellation
+  }
+
+  private func assertProcessTreeTermination(_ termination: TreeTermination) async throws {
+    #if os(Windows)
+      let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("graphcode-tree-timeout-\(UUID().uuidString)", isDirectory: true)
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      defer { try? FileManager.default.removeItem(at: directory) }
+      let pidFile = directory.appendingPathComponent("child.pid")
+      let powerShell = URL(
+        fileURLWithPath: #"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"#)
+      let script =
+        #"$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/d','/c','ping.exe -t 127.0.0.1 > nul' -PassThru; Set-Content -LiteralPath '$PID_FILE' -Value $child.Id -NoNewline; Start-Sleep -Seconds 30"#
+        .replacingOccurrences(
+          of: "$PID_FILE", with: pidFile.path.replacingOccurrences(of: "'", with: "''"))
+      let task = Task {
+        try await FoundationProcessRunner().run(
+          ProcessRequest(
+            executable: powerShell,
+            arguments: ["-NoLogo", "-NoProfile", "-Command", script]),
+          timeout: termination == .timeout ? .seconds(5) : nil)
+      }
+
+      var childPID: DWORD?
+      for _ in 0..<200 {
+        if let contents = try? String(contentsOf: pidFile, encoding: .utf8),
+          let parsed = UInt32(contents.trimmingCharacters(in: .whitespacesAndNewlines))
+        {
+          childPID = DWORD(parsed)
+          break
+        }
+        try await Task.sleep(for: .milliseconds(25))
+      }
+      guard let childPID else {
+        XCTFail("The child process did not publish its PID")
+        _ = try? await task.value
+        return
+      }
+
+      if termination == .cancellation {
+        task.cancel()
+      }
+      do {
+        _ = try await task.value
+        XCTFail("Expected \(termination)")
+      } catch let error as ProcessRunnerError {
+        XCTAssertEqual(
+          error,
+          termination == .timeout ? .timedOut : .cancelled)
+      }
+
+      var childExited = false
+      for _ in 0..<40 {
+        let handle = OpenProcess(
+          DWORD(PROCESS_QUERY_LIMITED_INFORMATION), false, childPID)
+        if let handle {
+          _ = CloseHandle(handle)
+          try await Task.sleep(for: .milliseconds(25))
+        } else {
+          childExited = true
+          break
+        }
+      }
+      XCTAssertTrue(childExited)
+    #else
+      throw XCTSkip("Windows process-tree assertion")
+    #endif
+  }
+
   func testProjectPersistenceUsesSafeWindowsKey() throws {
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("graphcode-persistence-\(UUID().uuidString)", isDirectory: true)
@@ -350,6 +472,27 @@ final class PlatformTests: XCTestCase {
 
     persistence.deleteGraph(path: project.path)
     XCTAssertNil(persistence.loadGraph(path: project.path))
+  }
+
+  func testProjectPersistenceLeavesCollidingLegacyFileForAnotherGraph() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-legacy-collision-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let persistence = ProjectPersistence(
+      baseDirectory: directory,
+      platformPaths: DarwinPlatformPaths())
+    let requestedPath = "/tmp/a/b_c"
+    let otherPath = "/tmp/a_b/c"
+    let legacyURL =
+      directory
+      .appendingPathComponent("projects", isDirectory: true)
+      .appendingPathComponent("_tmp_a_b_c.json")
+    let otherGraph = LoopGraph(project: ProjectRef(path: otherPath, name: "Other"))
+    try JSONEncoder().encode(otherGraph).write(to: legacyURL)
+
+    XCTAssertNil(persistence.loadGraph(path: requestedPath))
+    persistence.deleteGraph(path: requestedPath)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: legacyURL.path))
   }
 }
 private actor LaunchGate {

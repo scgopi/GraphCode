@@ -22,6 +22,11 @@ public struct WindowsShellStrategy: ShellStrategy {
     let extensionName = executable.pathExtension.lowercased()
     switch extensionName {
     case "cmd", "bat":
+      guard !Self.containsLineBreak(executable.path),
+        arguments.allSatisfy({ !Self.containsLineBreak($0) })
+      else {
+        throw ShellStrategyError.commandContainsLineBreak
+      }
       let command =
         ([Self.quoteCommandPromptArgument(executable.path)]
         + arguments.map(Self.quoteCommandPromptArgument)).joined(separator: " ")
@@ -136,6 +141,10 @@ public struct WindowsShellStrategy: ShellStrategy {
     }
     quoted.append("\"")
     return quoted
+  }
+
+  private static func containsLineBreak(_ value: String) -> Bool {
+    value.contains("\r") || value.contains("\n")
   }
 }
 public struct DarwinShellStrategy: ShellStrategy {

@@ -1,5 +1,12 @@
 import Foundation
 
+#if canImport(Darwin)
+  import Darwin
+#endif
+#if os(Windows)
+  import WinSDK
+#endif
+
 public enum ProcessRunnerError: Error, Equatable, LocalizedError, Sendable {
   case emptyExecutable
   case launchFailed(String)
@@ -67,6 +74,8 @@ private final class ProcessExecution: @unchecked Sendable {
   private var process: Process?
   private var completion: CheckedContinuation<ProcessResult, Error>?
   private var outcome: Result<ProcessResult, ProcessRunnerError>?
+  private let treeController = ProcessTreeController()
+  private var processStarted = false
 
   init(request: ProcessRequest) {
     self.request = request
@@ -121,9 +130,12 @@ private final class ProcessExecution: @unchecked Sendable {
         finish(error: .cancelled)
         return
       }
+      treeController.prepare()
       self.process = process
       do {
         try process.run()
+        processStarted = true
+        treeController.attach(to: process)
       } catch {
         lock.unlock()
         finish(error: .launchFailed(String(describing: error)))
@@ -184,6 +196,14 @@ private final class ProcessExecution: @unchecked Sendable {
 
   private func finish(result: ProcessResult) {
     lock.lock()
+    if case .failure(let error) = outcome {
+      let continuation = completion
+      completion = nil
+      lock.unlock()
+      treeController.close()
+      continuation?.resume(throwing: error)
+      return
+    }
     guard outcome == nil else {
       lock.unlock()
       return
@@ -192,6 +212,7 @@ private final class ProcessExecution: @unchecked Sendable {
     let continuation = completion
     completion = nil
     lock.unlock()
+    treeController.close()
     continuation?.resume(returning: result)
   }
 
@@ -202,14 +223,21 @@ private final class ProcessExecution: @unchecked Sendable {
       return
     }
     outcome = .failure(error)
-    let continuation = completion
-    completion = nil
-    let process = process
-    lock.unlock()
-    if process?.isRunning == true {
-      process?.terminate()
+    let processStarted = processStarted
+    let continuation: CheckedContinuation<ProcessResult, Error>?
+    if processStarted {
+      continuation = nil
+    } else {
+      continuation = completion
+      completion = nil
     }
-    continuation?.resume(throwing: error)
+    lock.unlock()
+    if processStarted {
+      treeController.terminate()
+    } else {
+      treeController.close()
+      continuation?.resume(throwing: error)
+    }
   }
 
   private static func resolveExecutable(
@@ -241,5 +269,121 @@ private final class ProcessExecution: @unchecked Sendable {
   private final class CollectedOutput: @unchecked Sendable {
     var stdout = Data()
     var stderr = Data()
+  }
+}
+
+private final class ProcessTreeController: @unchecked Sendable {
+  private let lock = NSLock()
+  #if os(Windows)
+    private var job: HANDLE?
+    private var processHandle: HANDLE?
+  #elseif canImport(Darwin)
+    private var processGroupID: pid_t?
+  #endif
+  private var process: Process?
+
+  func prepare() {
+    #if os(Windows)
+      let job = CreateJobObjectW(nil, nil)
+      guard let job else { return }
+      var limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+      limits.BasicLimitInformation.LimitFlags = DWORD(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+      let configured = withUnsafeMutablePointer(to: &limits) {
+        SetInformationJobObject(
+          job,
+          JobObjectExtendedLimitInformation,
+          $0,
+          DWORD(MemoryLayout<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>.size))
+      }
+      guard configured else {
+        _ = CloseHandle(job)
+        return
+      }
+      lock.lock()
+      self.job = job
+      lock.unlock()
+    #endif
+  }
+
+  func attach(to process: Process) {
+    lock.lock()
+    self.process = process
+    #if os(Windows)
+      guard let job else {
+        lock.unlock()
+        return
+      }
+      let handle = OpenProcess(
+        DWORD(PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION),
+        false,
+        DWORD(process.processIdentifier))
+      guard let handle else {
+        lock.unlock()
+        return
+      }
+      guard AssignProcessToJobObject(job, handle) else {
+        _ = CloseHandle(handle)
+        _ = CloseHandle(job)
+        self.job = nil
+        lock.unlock()
+        return
+      }
+      processHandle = handle
+    #elseif canImport(Darwin)
+      let processGroupID = pid_t(process.processIdentifier)
+      if setpgid(processGroupID, processGroupID) == 0 {
+        self.processGroupID = processGroupID
+      }
+    #endif
+    lock.unlock()
+  }
+
+  func terminate() {
+    lock.lock()
+    let process = self.process
+    #if os(Windows)
+      let job = self.job
+    #elseif canImport(Darwin)
+      let processGroupID = self.processGroupID
+    #else
+    #endif
+    lock.unlock()
+
+    #if os(Windows)
+      if let job {
+        _ = TerminateJobObject(job, 1)
+      } else {
+        process?.terminate()
+      }
+    #elseif canImport(Darwin)
+      if let processGroupID {
+        _ = kill(-processGroupID, SIGTERM)
+        _ = kill(-processGroupID, SIGKILL)
+      } else {
+        process?.terminate()
+      }
+    #else
+      process?.terminate()
+    #endif
+  }
+
+  func close() {
+    lock.lock()
+    #if os(Windows)
+      let processHandle = self.processHandle
+      let job = self.job
+      self.processHandle = nil
+      self.job = nil
+    #endif
+    lock.unlock()
+
+    #if os(Windows)
+      if let processHandle {
+        _ = CloseHandle(processHandle)
+      }
+      if let job {
+        _ = CloseHandle(job)
+      }
+    #endif
   }
 }

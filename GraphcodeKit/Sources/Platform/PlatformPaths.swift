@@ -98,10 +98,28 @@ private enum PlatformPathAlgorithms {
       throw PlatformPathError.rootPath(path)
     }
 
-    return URL(fileURLWithPath: path)
-      .standardizedFileURL
-      .resolvingSymlinksInPath()
-      .path
+    let canonical: String
+    if windows {
+      let normalized = canonicalWindowsPath(path)
+      guard !isRootPath(normalized, windows: true) else {
+        throw PlatformPathError.rootPath(path)
+      }
+      let urlPath = URL(fileURLWithPath: normalized).standardizedFileURL.path
+      canonical =
+        normalized.hasPrefix("\\\\") && !urlPath.hasPrefix("//")
+        ? "/" + urlPath
+        : urlPath
+    } else {
+      canonical =
+        URL(fileURLWithPath: path)
+        .standardizedFileURL
+        .resolvingSymlinksInPath()
+        .path
+    }
+    guard !windows || !isRootPath(canonical, windows: true) else {
+      throw PlatformPathError.rootPath(path)
+    }
+    return canonical
   }
 
   private static func looksLikeRemotePath(_ path: String) -> Bool {
@@ -111,12 +129,46 @@ private enum PlatformPathAlgorithms {
   }
 
   private static func isWindowsAbsolute(_ path: String) -> Bool {
-    if path.hasPrefix("\\\\") || path.hasPrefix("//") || path.hasPrefix("\\") {
+    if path.hasPrefix("\\\\") || path.hasPrefix("//") {
       return true
     }
     guard path.count >= 3 else { return false }
     let characters = Array(path)
     return characters[1] == ":" && (characters[2] == "\\" || characters[2] == "/")
+  }
+
+  private static func canonicalWindowsPath(_ path: String) -> String {
+    let normalized = path.replacingOccurrences(of: "/", with: "\\")
+    if normalized.hasPrefix("\\\\") {
+      let components = normalized.split(separator: "\\", omittingEmptySubsequences: true)
+      guard components.count >= 2 else { return normalized }
+      let root = components.prefix(2).map(String.init)
+      let tail = collapseWindowsComponents(components.dropFirst(2))
+      return "\\\\" + (root + tail).joined(separator: "\\")
+    }
+
+    let drive = String(normalized.prefix(2))
+    let tail = normalized.dropFirst(2)
+    let components = tail.split(separator: "\\", omittingEmptySubsequences: true)
+    let collapsed = collapseWindowsComponents(components)
+    return drive + "\\" + collapsed.joined(separator: "\\")
+  }
+
+  private static func collapseWindowsComponents(
+    _ components: some Collection<Substring>
+  ) -> [String] {
+    var collapsed: [String] = []
+    for component in components {
+      switch component {
+      case ".":
+        continue
+      case "..":
+        if !collapsed.isEmpty { collapsed.removeLast() }
+      default:
+        collapsed.append(String(component))
+      }
+    }
+    return collapsed
   }
 
   private static func isRootPath(_ path: String, windows: Bool) -> Bool {
