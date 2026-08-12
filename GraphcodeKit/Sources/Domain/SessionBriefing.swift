@@ -63,6 +63,12 @@ public enum SessionBriefing {
       graphcode node create \(projectPath) --title <title> --type goal --goal <what done looks like>
       ```
 
+      A **node is a loop** — the cards on graphcode's canvas are loops, and the CLI calls
+      them nodes. A request to create a "child node", "child loop", "sub-loop", "subagent
+      loop", or a "node" of any kind is a request for this command, whatever the word.
+      Run from inside your session, the CLI already attributes the new loop to you as its
+      creator, so making a child needs nothing beyond the create itself.
+
       ## Choosing the loop type
 
       Choose by **what decides the loop is finished**. This matters more than it looks:
