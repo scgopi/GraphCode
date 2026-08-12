@@ -1,5 +1,10 @@
 import Foundation
 
+public enum GraphStoreCommandResult: Equatable, Sendable {
+  case applied
+  case rejected(message: String)
+}
+
 /// Owns the daemon's one `LoopGraph`, applies commands, automatically fires `.handoff`
 /// edges when a node resolves, keeps time-based nodes' sessions alive, and broadcasts
 /// the updated graph to every connected client. This is the whole of what makes
@@ -32,6 +37,7 @@ public actor GraphStore {
   public private(set) var graph: LoopGraph
   private var connections: [UUID: DaemonConnectionChannel] = [:]
   private let onGraphChanged: (@Sendable (LoopGraph) -> Void)?
+  private let onGraphEvent: (@Sendable (DaemonEvent) -> [UUID: DaemonWireEnvelope])?
   private let onConnectionFailure: (@Sendable (UUID) -> Void)?
   private let onEnsureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let onTerminateSession: (@Sendable (LoopNode, String?) -> Void)?
@@ -101,6 +107,7 @@ public actor GraphStore {
   public init(
     graph: LoopGraph = LoopGraph(project: ProjectRef(path: "", name: "Untitled")),
     onGraphChanged: (@Sendable (LoopGraph) -> Void)? = nil,
+    onGraphEvent: (@Sendable (DaemonEvent) -> [UUID: DaemonWireEnvelope])? = nil,
     onConnectionFailure: (@Sendable (UUID) -> Void)? = nil,
     onEnsureSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
     onTerminateSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
@@ -118,6 +125,7 @@ public actor GraphStore {
     self.graph = graph
     self.subGraphDepth = subGraphDepth
     self.onGraphChanged = onGraphChanged
+    self.onGraphEvent = onGraphEvent
     self.onConnectionFailure = onConnectionFailure
     self.onEnsureSession = onEnsureSession
     self.onTerminateSession = onTerminateSession
@@ -180,7 +188,10 @@ public actor GraphStore {
 
   public func addConnection(id: UUID, channel: DaemonConnectionChannel) async {
     connections[id] = channel
-    await send(.graphChanged(graph), to: id)
+    await channel.join(projectPath: graph.project.path)
+    let event = DaemonEvent.graphChanged(graph)
+    let envelope = onGraphEvent?(event)?[channel.clientID]
+    await send(event, to: id, envelope: envelope)
   }
 
   #if canImport(Darwin)
@@ -194,13 +205,19 @@ public actor GraphStore {
     }
   #endif
 
-  public func removeConnection(_ id: UUID) {
-    connections.removeValue(forKey: id)
+  public func removeConnection(_ id: UUID, leaveReplay: Bool = false) async {
+    guard let channel = connections.removeValue(forKey: id) else { return }
+    if leaveReplay {
+      await channel.leave(projectPath: graph.project.path)
+    }
   }
 
   // MARK: - Commands
 
-  public func handle(_ command: GraphCommand) async {
+  public func handle(
+    _ command: GraphCommand,
+    broadcastErrors: Bool = true
+  ) async -> GraphStoreCommandResult {
     switch command {
     case .createNode(var draft):
       // A child inherits its creator's backend unless one was named: a Copilot loop
@@ -213,16 +230,20 @@ public actor GraphStore {
         draft.backend = graph.nodes[id: creator]?.backend
       }
       guard graph.nodes.count < Self.maxNodesPerGraph else {
-        announceError(
-          "this graph already has \(graph.nodes.count) loops (limit \(Self.maxNodesPerGraph))")
-        return
+        return await reject(
+          "this graph already has \(graph.nodes.count) loops (limit \(Self.maxNodesPerGraph))",
+          broadcastErrors: broadcastErrors)
       }
       if draft.loopType == .composite && subGraphDepth >= Self.maxSubGraphDepth {
-        announceError(
-          "composites are nested \(subGraphDepth) deep (limit \(Self.maxSubGraphDepth))")
-        return
+        return await reject(
+          "composites are nested \(subGraphDepth) deep (limit \(Self.maxSubGraphDepth))",
+          broadcastErrors: broadcastErrors)
       }
-      guard draft.isValid else { return }
+      guard draft.isValid else {
+        return await reject(
+          "node creation refused: draft is invalid",
+          broadcastErrors: broadcastErrors)
+      }
       var node = draft.makeNode()
       // A goal loop is born `.running`, which is right on a project canvas and a lie in a
       // sub-graph: nothing here has a session until the composite is piloted. Unfixed,
@@ -233,7 +254,11 @@ public actor GraphStore {
       // The draft's id is client-chosen now (see `NodeDraft.id`), so a re-sent command
       // must not become a second node — or a crash: `IdentifiedArray.append` traps on a
       // duplicate id, and this protocol is reachable from any client.
-      guard graph.nodes[id: node.id] == nil else { return }
+      guard graph.nodes[id: node.id] == nil else {
+        return await reject(
+          "node creation refused: a node with that id already exists",
+          broadcastErrors: broadcastErrors)
+      }
       graph.nodes.append(node)
       linkToCreator(of: node, declaredBy: draft)
       // A child is handed the report-back route at birth, verbatim. The briefing
@@ -266,11 +291,19 @@ public actor GraphStore {
       // edges of the *same* kind between the same pair still collapse to one.
       guard from != to, graph.nodes[id: from] != nil, graph.nodes[id: to] != nil,
         !graph.edges.contains(where: { $0.from == from && $0.to == to && $0.kind == spec.kind })
-      else { return }
+      else {
+        return await reject(
+          "edge creation refused: invalid endpoints or duplicate edge",
+          broadcastErrors: broadcastErrors)
+      }
       // A guard that bounds nothing would turn a cycle into an unattended infinite loop
       // spending tokens forever. Refused outright rather than silently dropped, so the
       // edge doesn't quietly become a one-shot when the human asked for a loop.
-      if let cycleGuard = spec.cycleGuard, !cycleGuard.isBounded { return }
+      if let cycleGuard = spec.cycleGuard, !cycleGuard.isBounded {
+        return await reject(
+          "edge creation refused: cycle guards must be bounded",
+          broadcastErrors: broadcastErrors)
+      }
       graph.edges.append(LoopEdge(from: from, to: to, spec: spec))
       unblockIfStillIdle(to)
 
@@ -306,7 +339,11 @@ public actor GraphStore {
       await stopNode(nodeID)
 
     case .subGraphCommand(let nodeID, let inner):
-      await runInSubGraph(nodeID, inner)
+      if let error = await runInSubGraph(
+        nodeID, inner, broadcastErrors: broadcastErrors)
+      {
+        return await reject(error, broadcastErrors: broadcastErrors)
+      }
 
     case .pilotComposite(let nodeID):
       await pilotComposite(nodeID)
@@ -330,7 +367,11 @@ public actor GraphStore {
     // before anyone is told what the graph looks like. Cycle re-entries run before
     // hand-off deliveries because a re-entry *queues* one; nudges last, since an
     // update's memory record must exist before its session is told to go look.
-    await drainAndBroadcast()
+    let errors = await drainAndBroadcast(broadcastErrors: broadcastErrors)
+    if let error = errors.first {
+      return .rejected(message: error)
+    }
+    return .applied
   }
 
   // MARK: - Composites
@@ -341,7 +382,11 @@ public actor GraphStore {
   /// rules — rather than a cut-down interpreter. docs/05 is explicit that a composite is
   /// "the orchestrator running a graph inside a graph"; a second implementation would be
   /// a second set of bugs about edge firing.
-  private func runInSubGraph(_ nodeID: UUID, _ command: GraphCommand) async {
+  private func runInSubGraph(
+    _ nodeID: UUID,
+    _ command: GraphCommand,
+    broadcastErrors: Bool
+  ) async -> String? {
     guard let node = graph.nodes[id: nodeID] else {
       // The id may name a composite further down — a composite inside a composite is the
       // shape docs/01 describes, and its contents are not in *this* graph's nodes. Ids
@@ -350,18 +395,18 @@ public actor GraphStore {
       // store repeat the search. Without this, `node create --into <nested-composite>`
       // went nowhere at all.
       if let owner = graph.nodes.first(where: { $0.subGraph?.containsAtAnyDepth(nodeID) == true }) {
-        await runInSubGraph(owner.id, .subGraphCommand(nodeID: nodeID, command: command))
-        return
+        return await runInSubGraph(
+          owner.id,
+          .subGraphCommand(nodeID: nodeID, command: command),
+          broadcastErrors: broadcastErrors)
       }
-      announceError("no loop \(nodeID) in this graph")
-      return
+      return "no loop \(nodeID) in this graph"
     }
     // Said out loud rather than returned silently: this is reachable from `node create
     // --into`, and a command that exits 0 having quietly done nothing is the one answer
     // worse than refusing.
     guard node.loopType == .composite, let subGraph = node.subGraph else {
-      announceError("\(node.title) is not a composite, so it has no sub-graph to run in")
-      return
+      return "\(node.title) is not a composite, so it has no sub-graph to run in"
     }
 
     // Built fresh per command rather than cached: the sub-graph lives on the parent
@@ -384,9 +429,13 @@ public actor GraphStore {
       onAppendMemory: onAppendMemory,
       onRemoveMemory: onRemoveMemory,
       subGraphDepth: subGraphDepth + 1)
-    await child.handle(command)
+    let result = await child.handle(command, broadcastErrors: broadcastErrors)
     graph.nodes[id: nodeID]?.subGraph = await child.graph
     rollUpComposite(nodeID)
+    if case .rejected(let message) = result {
+      return message
+    }
+    return nil
   }
 
   /// A composite's own state *is* its sub-graph's aggregate — the roll-up docs/05 asks
@@ -1301,6 +1350,15 @@ public actor GraphStore {
     pendingErrors.append(message)
   }
 
+  private func reject(
+    _ message: String,
+    broadcastErrors: Bool
+  ) async -> GraphStoreCommandResult {
+    announceError(message)
+    _ = await drainAndBroadcast(broadcastErrors: broadcastErrors)
+    return .rejected(message: message)
+  }
+
   private func unblockIfStillIdle(_ nodeID: UUID) {
     guard graph.nodes[id: nodeID]?.state == .idle || graph.nodes[id: nodeID]?.state == .blocked
     else { return }
@@ -1385,19 +1443,23 @@ public actor GraphStore {
   /// The same settle-then-tell sequence `handle` ends with, for the paths that mutate
   /// outside a command — goal polling resolves nodes and fires edges too, and an edge
   /// fired from a poll must not wait for the next unrelated command to be delivered.
-  private func drainAndBroadcast() async {
-    await drainPendingErrors()
+  private func drainAndBroadcast(broadcastErrors: Bool = true) async -> [String] {
+    let errors = await drainPendingErrors(broadcastErrors: broadcastErrors)
     await drainPendingMessages()
     await drainPendingCycleReentries()
     await drainPendingHandoffDeliveries()
     await drainPendingNudges()
-    await broadcast()
+    if errors.isEmpty {
+      await broadcast()
+    }
+    return errors
   }
 
-  private func drainPendingErrors() async {
-    guard !pendingErrors.isEmpty else { return }
+  private func drainPendingErrors(broadcastErrors: Bool) async -> [String] {
+    guard !pendingErrors.isEmpty else { return [] }
     let errors = pendingErrors
     pendingErrors.removeAll()
+    guard broadcastErrors else { return errors }
     for message in errors {
       for (connectionID, channel) in connections {
         do {
@@ -1407,6 +1469,7 @@ public actor GraphStore {
         }
       }
     }
+    return errors
   }
 
   /// A stalled loop is terminal, and its downstream edges fire as if it failed. Leaving
@@ -1472,7 +1535,9 @@ public actor GraphStore {
 
   private func broadcast() async {
     onGraphChanged?(graph)
-    await notifyClients()
+    let event = DaemonEvent.graphChanged(graph)
+    let envelopes = onGraphEvent?(event) ?? [:]
+    await notifyClients(event, envelopes: envelopes)
   }
 
   /// The half of `broadcast` that tells clients, without the half that writes to disk.
@@ -1481,16 +1546,27 @@ public actor GraphStore {
   /// disk: persisting it would be a write every tick for bytes nothing reads back. Every
   /// other caller wants `broadcast` — a graph change that isn't saved is a graph change
   /// lost at the next daemon restart.
-  private func notifyClients() async {
-    for id in connections.keys {
-      await send(.graphChanged(graph), to: id)
+  private func notifyClients(
+    _ event: DaemonEvent,
+    envelopes: [UUID: DaemonWireEnvelope]
+  ) async {
+    for (id, channel) in connections {
+      await send(event, to: id, envelope: envelopes[channel.clientID])
     }
   }
 
-  private func send(_ event: DaemonEvent, to connectionID: UUID) async {
+  private func send(
+    _ event: DaemonEvent,
+    to connectionID: UUID,
+    envelope: DaemonWireEnvelope? = nil
+  ) async {
     guard let channel = connections[connectionID] else { return }
     do {
-      try await channel.sendEvent(event)
+      if let envelope {
+        try await channel.sendEvent(envelope: envelope)
+      } else {
+        try await channel.sendEvent(event)
+      }
     } catch {
       // The write failed — most likely the client already disconnected. Drop it here
       // rather than waiting for the read loop to notice, so a dead connection can't

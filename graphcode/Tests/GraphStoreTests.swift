@@ -349,6 +349,19 @@ struct GraphStoreTests {
   }
 
   @Test
+  func anInvalidDraftReturnsARejectedCommandResult() async {
+    let store = GraphStore()
+
+    let result = await store.handle(
+      .createNode(NodeDraft(title: "No goal", loopType: .goalBased)))
+
+    #expect(
+      result
+        == .rejected(message: "node creation refused: draft is invalid"))
+    #expect(await store.graph.nodes.isEmpty)
+  }
+
+  @Test
   func anInvalidDraftStartsNoSession() async {
     // Rejecting the node but still launching its session would leave an orphan `claude`
     // with nothing in the graph pointing at it.

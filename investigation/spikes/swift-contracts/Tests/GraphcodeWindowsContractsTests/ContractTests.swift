@@ -374,6 +374,31 @@ final class ContractTests: XCTestCase {
     XCTAssertEqual(store.clientCount, 0)
   }
 
+  func testReplayRetainsCanonicalEventsWhileLogicalClientIsDisconnected() throws {
+    let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000012")!
+    let connectionID = UUID(uuidString: "00000000-0000-0000-0000-000000000013")!
+    let path = "/work/disconnected"
+    let store = DaemonReplayStore(capacity: 8)
+    store.register(clientID: clientID, connectionID: connectionID, subscription: nil)
+    store.join(clientID: clientID, projectPath: path)
+
+    let first = LoopGraph(project: ProjectRef(path: path, name: "disconnected"))
+    let second = LoopGraph(
+      project: ProjectRef(path: path, name: "disconnected"),
+      nodes: [NodeDraft(title: "later", loopType: .composite).makeNode()])
+    let firstEnvelope = try XCTUnwrap(
+      store.append(event: .graphChanged(first), projectPath: path)[clientID])
+    store.disconnect(clientID: clientID, connectionID: connectionID)
+    let secondEnvelope = try XCTUnwrap(
+      store.append(event: .graphChanged(second), projectPath: path)[clientID])
+
+    XCTAssertEqual(firstEnvelope.sequence, 1)
+    XCTAssertEqual(secondEnvelope.sequence, 2)
+    XCTAssertEqual(
+      try store.replay(clientID: clientID, after: 1),
+      [secondEnvelope])
+  }
+
   func testMalformedV2RequestKeepsSafelyExtractableRequestID() throws {
     let requestID = UUID(uuidString: "00000000-0000-0000-0000-000000000009")!
     var malformed = DaemonWireEnvelope.request(id: requestID, command: .listRecentProjects)
@@ -411,8 +436,18 @@ final class ContractTests: XCTestCase {
 
     XCTAssertTrue(DaemonWireProtocol.isV2ShapedFrame(invalid))
     XCTAssertEqual(decoded.kind, .error)
-    XCTAssertEqual(decoded.error?.code, DaemonWireErrorCode.unsupportedVersion.rawValue)
+    XCTAssertEqual(decoded.error?.code, DaemonWireErrorCode.malformedEnvelope.rawValue)
     XCTAssertEqual(decoded.error?.message, "invalid v2 envelope")
+  }
+
+  func testUnsupportedInitialVersionUsesUnsupportedVersionErrorShape() throws {
+    let invalid = Data(#"{"version":3,"kind":"hello"}"#.utf8)
+    let errorFrame = try DaemonWireProtocol.initialErrorFrame(
+      for: invalid, message: "unsupported version")
+    let decoded = try JSONDecoder().decode(DaemonWireEnvelope.self, from: errorFrame)
+
+    XCTAssertEqual(decoded.kind, .error)
+    XCTAssertEqual(decoded.error?.code, DaemonWireErrorCode.unsupportedVersion.rawValue)
   }
 
   func testV2ChannelSequencesEventsAndCorrelatesResponses() async throws {

@@ -102,6 +102,24 @@ struct OrchestratorClientTests {
   }
 
   @Test
+  func cancellingBeforeConnectStopsRetrySleepAndFutureDial() async throws {
+    let socketPath = StubDaemon.temporarySocketPath()
+    let client = OrchestratorClient.live(socketPath: socketPath)
+    let reader = Task {
+      for await _ in client.connect() {}
+    }
+
+    try await Task.sleep(for: .milliseconds(100))
+    reader.cancel()
+    await reader.value
+
+    let daemon = try StubDaemon(socketPath: socketPath)
+    defer { daemon.stop() }
+    try await Task.sleep(for: .milliseconds(500))
+    #expect(daemon.acceptedConnectionCount == 0)
+  }
+
+  @Test
   func reconnectingRejoinsTheProjectsItHadOpen() async throws {
     // Joining is per-connection on the daemon's side, and the app asked to join once, from
     // `AppFeature.task`. So a client that lost its socket dialled again and was attached to
@@ -242,9 +260,10 @@ private final class StubDaemon: @unchecked Sendable {
   }
 
   func peerHasClosed(at index: Int) -> Bool {
-    guard let descriptor = lock.withLock({
-      acceptedDescriptors.indices.contains(index) ? acceptedDescriptors[index] : nil
-    }), descriptor >= 0
+    guard
+      let descriptor = lock.withLock({
+        acceptedDescriptors.indices.contains(index) ? acceptedDescriptors[index] : nil
+      }), descriptor >= 0
     else { return true }
     var byte: UInt8 = 0
     let result = recv(descriptor, &byte, 1, MSG_PEEK | MSG_DONTWAIT)

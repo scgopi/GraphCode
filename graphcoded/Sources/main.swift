@@ -81,9 +81,10 @@ signal(SIGINT) { _ in
   exit(0)
 }
 
-let registry = ProjectRegistry(persistenceDirectory: supportDirectory)
-
 let replayStore = DaemonReplayStore(capacity: 128)
+let registry = ProjectRegistry(
+  persistenceDirectory: supportDirectory,
+  replayStore: replayStore)
 let replayCleanupTask = replayStore.startCleanup()
 
 func handleConnection(_ connection: any DaemonConnection) {
@@ -183,8 +184,19 @@ func handleConnection(_ connection: any DaemonConnection) {
                 message: "expected a v2 request envelope")
               continue
             }
-            await registry.handle(command, connectionID: connectionID)
-            if let response = await registry.responseEvent(for: command) {
+            guard let result = await registry.apply(command, connectionID: connectionID) else {
+              try await channel.sendError(
+                requestID: requestID,
+                code: .connectionClosed,
+                message: "connection is no longer registered")
+              continue
+            }
+            if let error = result.error {
+              try await channel.sendError(
+                requestID: requestID,
+                code: .requestFailed,
+                message: error)
+            } else if let response = result.response {
               try await channel.sendResponse(requestID: requestID, event: response)
             } else {
               try await channel.sendError(

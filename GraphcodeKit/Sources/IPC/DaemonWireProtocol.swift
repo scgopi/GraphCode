@@ -232,7 +232,7 @@ public enum DaemonWireProtocol {
       return try JSONEncoder().encode(
         DaemonWireEnvelope.error(
           id: nil,
-          code: DaemonWireErrorCode.unsupportedVersion.rawValue,
+          code: initialV2ErrorCode(for: data),
           message: message))
     }
     return try JSONEncoder().encode(DaemonEvent.errorOccurred(message))
@@ -280,6 +280,19 @@ public enum DaemonWireProtocol {
   private static func isV2ShapedFrame(_ object: Any) -> Bool {
     guard let dictionary = object as? [String: Any] else { return false }
     return dictionary["version"] != nil || dictionary["kind"] != nil
+  }
+
+  private static func initialV2ErrorCode(for data: Data) -> String {
+    guard let object = try? JSONSerialization.jsonObject(with: data),
+      let dictionary = object as? [String: Any],
+      let rawVersion = dictionary["version"],
+      let version = rawVersion as? Int
+    else {
+      return DaemonWireErrorCode.malformedEnvelope.rawValue
+    }
+    return version == currentVersion
+      ? DaemonWireErrorCode.malformedEnvelope.rawValue
+      : DaemonWireErrorCode.unsupportedVersion.rawValue
   }
 }
 

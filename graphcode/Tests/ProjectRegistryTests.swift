@@ -116,6 +116,24 @@ struct ProjectRegistryTests {
       connectionID: UUID())
   }
 
+  @Test
+  func applyReturnsRejectedCommandWithoutASuccessSnapshot() async {
+    let (registry, persistence) = makeRegistryAndPersistence()
+    let connectionID = UUID()
+    await registry.addConnection(id: connectionID, fileDescriptor: -1)
+    await registry.handle(.openProject(path: "/tmp/project-a"), connectionID: connectionID)
+
+    let result = await registry.apply(
+      .graphCommand(
+        projectPath: "/tmp/project-a",
+        command: .createNode(NodeDraft(title: "No goal", loopType: .goalBased))),
+      connectionID: connectionID)
+
+    #expect(result?.error == "node creation refused: draft is invalid")
+    #expect(result?.response == nil)
+    #expect(persistence.loadGraph(path: "/tmp/project-a")?.nodes.isEmpty != false)
+  }
+
   /// The bug this guards: `.openProject` used to detach a connection from whatever
   /// project it had previously joined before joining the new one, so opening a second
   /// folder silently stopped the first folder's `graphChanged` broadcasts from ever

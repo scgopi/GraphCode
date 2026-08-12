@@ -35,6 +35,9 @@ public final class DaemonReplayStore: @unchecked Sendable {
   private var buffers: [UUID: DaemonReplayBuffer] = [:]
   private var nextSequences: [UUID: UInt64] = [:]
   private var lastAccess: [UUID: Date] = [:]
+  private var subscriptions: [UUID: DaemonWireSubscription] = [:]
+  private var projectPaths: [UUID: Set<String>] = [:]
+  private var activeConnections: [UUID: Set<UUID>] = [:]
 
   public init(
     capacity: Int = 128,
@@ -54,18 +57,90 @@ public final class DaemonReplayStore: @unchecked Sendable {
     guard maxClients > 0 else {
       return .event(sequence: 1, event: event)
     }
-    if buffers[clientID] == nil {
-      evictIfNeeded()
-      buffers[clientID] = DaemonReplayBuffer(capacity: capacity)
-      nextSequences[clientID] = 1
-    }
-    let sequence = nextSequences[clientID, default: 1]
-    nextSequences[clientID] = sequence == UInt64.max ? UInt64.max : sequence + 1
-    var buffer = buffers[clientID] ?? DaemonReplayBuffer(capacity: capacity)
-    buffer.append(sequence: sequence, event: event)
-    buffers[clientID] = buffer
+    ensureClient(clientID)
+    let envelope = appendLocked(clientID: clientID, event: event)
     lastAccess[clientID] = now
-    return .event(sequence: sequence, event: event)
+    return envelope
+  }
+
+  /// Registers a logical client independently of its current socket. Its bounded
+  /// history remains eligible for canonical events while every socket for the client
+  /// is disconnected.
+  public func register(
+    clientID: UUID,
+    connectionID: UUID,
+    subscription: DaemonWireSubscription?
+  ) {
+    lock.lock()
+    defer { lock.unlock() }
+    purgeExpired(now: Date())
+    guard maxClients > 0 else { return }
+    ensureClient(clientID)
+    activeConnections[clientID, default: []].insert(connectionID)
+    if let subscription {
+      subscriptions[clientID] = subscription
+    } else {
+      subscriptions.removeValue(forKey: clientID)
+    }
+    lastAccess[clientID] = Date()
+  }
+
+  public func setSubscription(clientID: UUID, subscription: DaemonWireSubscription?) {
+    lock.lock()
+    defer { lock.unlock() }
+    guard buffers[clientID] != nil else { return }
+    if let subscription {
+      subscriptions[clientID] = subscription
+    } else {
+      subscriptions.removeValue(forKey: clientID)
+    }
+    lastAccess[clientID] = Date()
+  }
+
+  public func join(clientID: UUID, projectPath: String) {
+    lock.lock()
+    defer { lock.unlock() }
+    guard buffers[clientID] != nil else { return }
+    projectPaths[clientID, default: []].insert(projectPath)
+    lastAccess[clientID] = Date()
+  }
+
+  public func leave(clientID: UUID, projectPath: String) {
+    lock.lock()
+    defer { lock.unlock() }
+    projectPaths[clientID]?.remove(projectPath)
+    lastAccess[clientID] = Date()
+  }
+
+  public func disconnect(clientID: UUID, connectionID: UUID) {
+    lock.lock()
+    defer { lock.unlock() }
+    activeConnections[clientID]?.remove(connectionID)
+    lastAccess[clientID] = Date()
+  }
+
+  /// Appends one canonical graph event to every retained logical client that is
+  /// attached to the project, including clients whose sockets are currently gone.
+  /// The returned envelopes let live channels write the exact sequence assigned here.
+  public func append(
+    event: DaemonEvent,
+    projectPath: String
+  ) -> [UUID: DaemonWireEnvelope] {
+    lock.lock()
+    defer { lock.unlock() }
+    let now = Date()
+    purgeExpired(now: now)
+    var envelopes: [UUID: DaemonWireEnvelope] = [:]
+    for clientID in Array(buffers.keys) {
+      guard projectPaths[clientID]?.contains(projectPath) == true,
+        isSubscribed(clientID: clientID, projectPath: projectPath)
+      else { continue }
+      envelopes[clientID] = appendLocked(clientID: clientID, event: event)
+      if activeConnections[clientID]?.isEmpty == false {
+        lastAccess[clientID] = now
+      }
+    }
+    return envelopes
   }
 
   public func replay(clientID: UUID, after cursor: UInt64) throws -> [DaemonWireEnvelope] {
@@ -83,9 +158,7 @@ public final class DaemonReplayStore: @unchecked Sendable {
   public func remove(clientID: UUID) {
     lock.lock()
     defer { lock.unlock() }
-    buffers.removeValue(forKey: clientID)
-    nextSequences.removeValue(forKey: clientID)
-    lastAccess.removeValue(forKey: clientID)
+    removeClient(clientID)
   }
 
   public func pruneExpired(at now: Date = Date()) {
@@ -118,17 +191,45 @@ public final class DaemonReplayStore: @unchecked Sendable {
       return
     }
     buffers.removeValue(forKey: oldest)
-    nextSequences.removeValue(forKey: oldest)
-    lastAccess.removeValue(forKey: oldest)
+    removeClient(oldest)
   }
 
   private func purgeExpired(now: Date) {
     guard retention.isFinite else { return }
     for (clientID, access) in lastAccess where now.timeIntervalSince(access) >= retention {
-      buffers.removeValue(forKey: clientID)
-      nextSequences.removeValue(forKey: clientID)
-      lastAccess.removeValue(forKey: clientID)
+      guard activeConnections[clientID]?.isEmpty != false else { continue }
+      removeClient(clientID)
     }
+  }
+
+  private func ensureClient(_ clientID: UUID) {
+    guard buffers[clientID] == nil else { return }
+    evictIfNeeded()
+    buffers[clientID] = DaemonReplayBuffer(capacity: capacity)
+    nextSequences[clientID] = 1
+  }
+
+  private func appendLocked(clientID: UUID, event: DaemonEvent) -> DaemonWireEnvelope {
+    let sequence = nextSequences[clientID, default: 1]
+    nextSequences[clientID] = sequence == UInt64.max ? UInt64.max : sequence + 1
+    var buffer = buffers[clientID] ?? DaemonReplayBuffer(capacity: capacity)
+    buffer.append(sequence: sequence, event: event)
+    buffers[clientID] = buffer
+    return .event(sequence: sequence, event: event)
+  }
+
+  private func isSubscribed(clientID: UUID, projectPath: String) -> Bool {
+    guard let paths = subscriptions[clientID]?.projectPaths else { return true }
+    return !paths.isEmpty && paths.contains(projectPath)
+  }
+
+  private func removeClient(_ clientID: UUID) {
+    buffers.removeValue(forKey: clientID)
+    nextSequences.removeValue(forKey: clientID)
+    lastAccess.removeValue(forKey: clientID)
+    subscriptions.removeValue(forKey: clientID)
+    projectPaths.removeValue(forKey: clientID)
+    activeConnections.removeValue(forKey: clientID)
   }
 }
 
@@ -138,8 +239,8 @@ public actor DaemonConnectionChannel {
   public let connection: any DaemonConnection
   public let mode: DaemonProtocolMode
   public let clientID: UUID
+  public let replayStore: DaemonReplayStore
 
-  private let replayStore: DaemonReplayStore
   private let writeGate: DaemonFrameWriteGate
   private var subscription: DaemonWireSubscription?
   private var replayInProgress = false
@@ -159,10 +260,29 @@ public actor DaemonConnectionChannel {
     self.replayStore = replayStore
     self.writeGate = daemonFrameWriteGates.gate(
       for: connection.id, connection: connection)
+    if case .v2 = mode {
+      replayStore.register(
+        clientID: self.clientID,
+        connectionID: connection.id,
+        subscription: subscription)
+    }
   }
 
   public func setSubscription(_ subscription: DaemonWireSubscription?) {
     self.subscription = subscription
+    if case .v2 = mode {
+      replayStore.setSubscription(clientID: clientID, subscription: subscription)
+    }
+  }
+
+  public func join(projectPath: String) {
+    guard case .v2 = mode else { return }
+    replayStore.join(clientID: clientID, projectPath: projectPath)
+  }
+
+  public func leave(projectPath: String) {
+    guard case .v2 = mode else { return }
+    replayStore.leave(clientID: clientID, projectPath: projectPath)
   }
 
   public func sendHelloResponse(selectedVersion: Int) async throws {
@@ -182,6 +302,17 @@ public actor DaemonConnectionChannel {
       }
       try await sendJSON(envelope)
     }
+  }
+
+  /// Writes a sequence already assigned by the canonical replay store. This is used
+  /// when a graph changed while another socket for the same logical client was away.
+  public func sendEvent(envelope: DaemonWireEnvelope) async throws {
+    guard case .v2 = mode, let event = envelope.event, isSubscribed(to: event) else { return }
+    if replayInProgress {
+      queuedLiveEvents.append(envelope)
+      return
+    }
+    try await sendJSON(envelope)
   }
 
   public func sendResponse(requestID: UUID, event: DaemonEvent) async throws {
@@ -242,6 +373,9 @@ public actor DaemonConnectionChannel {
   public func close() async throws {
     replayInProgress = false
     queuedLiveEvents.removeAll()
+    if case .v2 = mode {
+      replayStore.disconnect(clientID: clientID, connectionID: connection.id)
+    }
     do {
       try await connection.close()
     } catch {

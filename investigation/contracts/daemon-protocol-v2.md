@@ -37,6 +37,8 @@ cancellation, backpressure, and non-reading peers.
   with bounded client count and expiry, independent of a socket. A reconnect replays events
   strictly after `resumeFrom`; unknown or expired history receives `replayUnavailable`, while
   a cursor beyond the retained latest sequence receives `cursorOutsideWindow`.
+- Canonical subscribed graph events are retained for a logical client while its socket is
+  disconnected, subject to the same bounded capacity and expiry.
 - Replay frames are queued before live events, preserving sequence order across reconnect.
 - Complete framed writes are serialized at the transport boundary, including concurrent app
   sends.
@@ -44,6 +46,8 @@ cancellation, backpressure, and non-reading peers.
   require a subsequent append or reconnect attempt.
 - Responses and errors are not replayed. They are correlated to the request that produced
   them, while subscription events remain sequenced.
+- A rejected graph command returns its correlated error and never a successful response
+  snapshot.
 - A reconnect never silently treats an unrelated event as command acknowledgement.
 
 ## Test fixtures

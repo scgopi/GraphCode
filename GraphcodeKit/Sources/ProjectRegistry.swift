@@ -1,5 +1,15 @@
 import Foundation
 
+public struct ProjectRegistryCommandResult: Equatable, Sendable {
+  public let response: DaemonEvent?
+  public let error: String?
+
+  public init(response: DaemonEvent? = nil, error: String? = nil) {
+    self.response = response
+    self.error = error
+  }
+}
+
 /// Owns every open project's `GraphStore`, keyed by canonicalized folder path — this is
 /// what `graphcoded` instantiates instead of a single bare `GraphStore` from Phase 4 on
 /// (see docs/07-roadmap.md#phase-4--projects). Multi-project routing lives entirely
@@ -21,6 +31,7 @@ import Foundation
 public actor ProjectRegistry {
   private let persistence: ProjectPersistence
   private let platformPaths: any PlatformPaths
+  private let replayStore: DaemonReplayStore
   private var stores: [String: GraphStore] = [:]
   private var connections: [UUID: DaemonConnectionChannel] = [:]
   private var connectionProjectPaths: [UUID: Set<String>] = [:]
@@ -43,6 +54,7 @@ public actor ProjectRegistry {
   public init(
     persistenceDirectory: URL,
     platformPaths: any PlatformPaths = CurrentPlatformPaths.value,
+    replayStore: DaemonReplayStore = DaemonReplayStore(),
     ensureSession: (@Sendable (LoopNode, String?) -> Void)? = CLISessionBackend.ensureSession,
     terminateSession: (@Sendable (LoopNode, String?) -> Void)? =
       CLISessionBackend.terminateSession,
@@ -61,6 +73,7 @@ public actor ProjectRegistry {
     self.platformPaths = platformPaths
     persistence = ProjectPersistence(
       baseDirectory: persistenceDirectory, platformPaths: platformPaths)
+    self.replayStore = replayStore
     self.ensureSession = ensureSession
     self.terminateSession = terminateSession
     self.evaluatePredicate = evaluatePredicate
@@ -79,11 +92,11 @@ public actor ProjectRegistry {
     mode: DaemonProtocolMode = .v1,
     clientID: UUID? = nil,
     subscription: DaemonWireSubscription? = nil,
-    replayStore: DaemonReplayStore = DaemonReplayStore()
+    replayStore: DaemonReplayStore? = nil
   ) async {
     let channel = DaemonConnectionChannel(
       connection: connection, mode: mode, clientID: clientID,
-      subscription: subscription, replayStore: replayStore)
+      subscription: subscription, replayStore: replayStore ?? self.replayStore)
     await addConnection(id: id, channel: channel)
   }
 
@@ -208,19 +221,41 @@ public actor ProjectRegistry {
   // MARK: - Commands
 
   public func handle(_ command: DaemonCommand, connectionID: UUID) async {
-    guard let channel = connections[connectionID] else { return }
+    _ = await apply(command, connectionID: connectionID)
+  }
+
+  /// Applies a command and snapshots its correlated result before returning to the
+  /// daemon read loop. Keeping mutation and response selection together prevents a
+  /// concurrent disconnect or command from turning a rejected mutation into a stale
+  /// successful graph response.
+  public func apply(
+    _ command: DaemonCommand,
+    connectionID: UUID
+  ) async -> ProjectRegistryCommandResult? {
+    guard let channel = connections[connectionID] else { return nil }
+    let broadcastErrors: Bool
+    if case .v2 = channel.mode {
+      broadcastErrors = false
+    } else {
+      broadcastErrors = true
+    }
+    let error: String?
 
     switch command {
     case .listRecentProjects:
       await send(
         .recentProjectsListed(persistence.loadRecentProjects()), to: connectionID)
+      error = nil
 
     case .openProject(let path):
-      guard Self.isOpenable(path, platformPaths: platformPaths) else { break }
+      guard Self.isOpenable(path, platformPaths: platformPaths) else {
+        return ProjectRegistryCommandResult(error: "project path is not openable")
+      }
       await open(
         Self.canonicalize(path, platformPaths: platformPaths),
         for: connectionID,
         channel: channel)
+      error = nil
 
     case .restoreOpenProjects:
       // Each of these broadcasts a `.graphChanged` exactly as `.openProject` would, so
@@ -238,17 +273,21 @@ public actor ProjectRegistry {
           for: connectionID,
           channel: channel)
       }
+      error = nil
 
     case .openGlobalGraph:
       await open(LoopGraphScope.globalPath, for: connectionID, channel: channel)
+      error = nil
 
     case .closeProject(let path):
       await close(Self.canonicalize(path, platformPaths: platformPaths), for: connectionID)
+      error = nil
 
     case .forgetProject(let path):
       let canonicalPath = Self.canonicalize(path, platformPaths: platformPaths)
       await close(canonicalPath, for: connectionID)
       persistence.forgetProject(path: canonicalPath)
+      error = nil
 
     case .deleteProjectGraph(let path):
       let canonicalPath = Self.canonicalize(path, platformPaths: platformPaths)
@@ -258,13 +297,23 @@ public actor ProjectRegistry {
       // just deleted from the one still sitting in `stores`.
       stores.removeValue(forKey: canonicalPath)
       persistence.deleteGraph(path: canonicalPath)
+      error = nil
 
     case .graphCommand(let path, let inner):
       guard let store = stores[Self.canonicalize(path, platformPaths: platformPaths)] else {
-        return
+        return ProjectRegistryCommandResult(error: "project is not open")
       }
-      await store.handle(inner)
+      let result = await store.handle(inner, broadcastErrors: broadcastErrors)
+      if case .rejected(let message) = result {
+        error = message
+      } else {
+        error = nil
+      }
     }
+
+    return ProjectRegistryCommandResult(
+      response: error == nil ? await responseEvent(for: command) : nil,
+      error: error)
   }
 
   /// Produces a correlated v2 response after the command has been applied. The v1
@@ -276,7 +325,7 @@ public actor ProjectRegistry {
     case .restoreOpenProjects:
       return .recentProjectsListed(persistence.loadRecentProjects())
     case .openProject(let path), .closeProject(let path), .forgetProject(let path):
-      let canonical = Self.canonicalize(path)
+      let canonical = Self.canonicalize(path, platformPaths: platformPaths)
       guard let store = stores[canonical] else { return nil }
       return .graphChanged(await store.graph)
     case .deleteProjectGraph:
@@ -285,7 +334,9 @@ public actor ProjectRegistry {
       guard let store = stores[LoopGraphScope.globalPath] else { return nil }
       return .graphChanged(await store.graph)
     case .graphCommand(let path, _):
-      guard let store = stores[Self.canonicalize(path)] else { return nil }
+      guard let store = stores[Self.canonicalize(path, platformPaths: platformPaths)] else {
+        return nil
+      }
       return .graphChanged(await store.graph)
     }
   }
@@ -308,7 +359,7 @@ public actor ProjectRegistry {
 
   private func close(_ canonicalPath: String, for connectionID: UUID) async {
     if let store = stores[canonicalPath] {
-      await store.removeConnection(connectionID)
+      await store.removeConnection(connectionID, leaveReplay: true)
     }
     connectionProjectPaths[connectionID]?.remove(canonicalPath)
     persistence.saveOpenProjects(persistence.loadOpenProjects().filter { $0 != canonicalPath })
@@ -360,6 +411,7 @@ public actor ProjectRegistry {
     let scope = LoopGraphScope(projectPath: path, name: Self.displayName(for: path))
     let graph = persistence.loadGraph(path: path) ?? LoopGraph(scope: scope)
     let persistence = self.persistence
+    let replayStore = self.replayStore
     // A cross-graph spawn arrives here as a plain request; hopping through an unstructured
     // `Task` is what lets this actor re-enter itself to reach a *different* store without
     // deadlocking on its own isolation.
@@ -372,6 +424,11 @@ public actor ProjectRegistry {
     let newStore = GraphStore(
       graph: graph,
       onGraphChanged: { updatedGraph in persistence.saveGraph(updatedGraph) },
+      onGraphEvent: { event in
+        guard case .graphChanged(let updatedGraph) = event else { return [:] }
+        return replayStore.append(
+          event: event, projectPath: updatedGraph.project.path)
+      },
       onConnectionFailure: onConnectionFailure,
       onEnsureSession: ensureSession,
       onTerminateSession: terminateSession,

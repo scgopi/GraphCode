@@ -127,7 +127,11 @@ private actor AppDaemonConnection {
               await readerFailed(readerID, connection: connectedConnection)
             }
             guard !Task.isCancelled, await isCurrentReader(readerID) else { return }
-            try? await Task.sleep(for: .seconds(1))
+            do {
+              try await Task.sleep(for: .seconds(1))
+            } catch {
+              return
+            }
           }
         }
       }
@@ -162,8 +166,11 @@ private actor AppDaemonConnection {
     let oldConnection = connection
     connection = nil
     generation += 1
-    if let oldConnection, let resolved = try? await oldConnection.value {
-      try? await resolved.close()
+    if let oldConnection {
+      oldConnection.cancel()
+      if let resolved = try? await oldConnection.value {
+        try? await resolved.close()
+      }
     }
     return readerID
   }
@@ -178,8 +185,11 @@ private actor AppDaemonConnection {
     let currentConnection = connection
     connection = nil
     generation += 1
-    if let currentConnection, let resolved = try? await currentConnection.value {
-      try? await resolved.close()
+    if let currentConnection {
+      currentConnection.cancel()
+      if let resolved = try? await currentConnection.value {
+        try? await resolved.close()
+      }
     }
   }
 
@@ -251,17 +261,23 @@ private actor AppDaemonConnection {
     else { return }
     self.connection = nil
     generation += 1
+    connection.cancel()
     try? await failedConnection.close()
   }
 
   private func connectWithBackoff() async throws -> any DaemonConnection {
     var lastError: any Error = OrchestratorClientError.connectFailed(errno: 0)
     for attempt in 0..<10 {
+      try Task.checkCancellation()
       do {
         return try await connectAsync()
       } catch {
         lastError = error
-        try? await Task.sleep(for: .milliseconds(200 * (attempt + 1)))
+        do {
+          try await Task.sleep(for: .milliseconds(200 * (attempt + 1)))
+        } catch {
+          throw CancellationError()
+        }
       }
     }
 
