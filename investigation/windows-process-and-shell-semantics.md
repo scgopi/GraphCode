@@ -51,6 +51,7 @@ compatible with paths containing spaces.
 - stdout/stderr draining without deadlock
 - timeout and ambiguous completion behavior
 - native process-group/job containment before the child can spawn descendants
+- Darwin successful-root cleanup terminates background group members before releasing pipes
 - concurrent Windows launches do not cross-inherit pipe handles
 
 ## Source consequences

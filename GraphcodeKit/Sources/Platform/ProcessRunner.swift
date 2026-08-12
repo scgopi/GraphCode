@@ -160,6 +160,7 @@ private final class ProcessExecution: @unchecked Sendable {
       group.enter()
       DispatchQueue.global(qos: .utility).async {
         termination.code = process.waitUntilExit()
+        self.treeController.rootDidExit()
         group.leave()
       }
 
@@ -320,6 +321,16 @@ private final class ProcessTreeController: @unchecked Sendable {
     lock.unlock()
   }
 
+  func rootDidExit() {
+    #if canImport(Darwin)
+      lock.lock()
+      if let processGroupID {
+        Self.terminateDarwinProcessGroup(processGroupID)
+      }
+      lock.unlock()
+    #endif
+  }
+
   func close() {
     lock.lock()
     let process = self.process
@@ -327,6 +338,14 @@ private final class ProcessTreeController: @unchecked Sendable {
     #if os(Windows)
       let job = self.job
       self.job = nil
+    #elseif canImport(Darwin)
+      let processGroupID = self.processGroupID
+      self.processGroupID = nil
+    #endif
+    #if canImport(Darwin)
+      if let processGroupID {
+        Self.terminateDarwinProcessGroup(processGroupID)
+      }
     #endif
     process?.close()
     #if os(Windows)
@@ -336,6 +355,14 @@ private final class ProcessTreeController: @unchecked Sendable {
     #endif
     lock.unlock()
   }
+
+  #if canImport(Darwin)
+    private static func terminateDarwinProcessGroup(_ processGroupID: pid_t) {
+      guard processGroupID > 0 else { return }
+      _ = kill(-processGroupID, SIGTERM)
+      _ = kill(-processGroupID, SIGKILL)
+    }
+  #endif
 
   #if os(Windows)
     private func makeWindowsJob() throws -> HANDLE {

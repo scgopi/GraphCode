@@ -55,6 +55,26 @@ final class PlatformTests: XCTestCase {
     }
   }
 
+  func testDarwinCanonicalProjectPathRejectsSymlinkToFilesystemRoot() throws {
+    #if canImport(Darwin)
+      let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+          "graphcode-darwin-root-link-\(UUID().uuidString)", isDirectory: true)
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      defer { try? FileManager.default.removeItem(at: directory) }
+      let link = directory.appendingPathComponent("root-link", isDirectory: true)
+      try FileManager.default.createSymbolicLink(
+        atPath: link.path,
+        withDestinationPath: "/")
+
+      XCTAssertThrowsError(try DarwinPlatformPaths().canonicalProjectPath(link.path)) { error in
+        XCTAssertEqual(error as? PlatformPathError, .rootPath(link.path))
+      }
+    #else
+      throw XCTSkip("Darwin symlink-root assertion")
+    #endif
+  }
+
   func testPersistenceKeyIsSafeStableAndDistinct() {
     let paths = WindowsPlatformPaths()
     let first = paths.persistenceKey(forProjectPath: #"C:\Projects\GraphCode Demo"#)
@@ -606,6 +626,83 @@ final class PlatformTests: XCTestCase {
       XCTAssertTrue(childExited)
     #else
       throw XCTSkip("Darwin process-group assertion")
+    #endif
+  }
+
+  func testDarwinProcessGroupKillsBackgroundDescendantAfterSuccessfulRootExit() async throws {
+    #if canImport(Darwin)
+      let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+          "graphcode-darwin-success-tree-\(UUID().uuidString)", isDirectory: true)
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      defer { try? FileManager.default.removeItem(at: directory) }
+      let pidFile = directory.appendingPathComponent("child.pid")
+      let escapedPIDFile = pidFile.path.replacingOccurrences(of: "'", with: "'\\''")
+      let script =
+        "sleep 30 & child=$!; printf '%s' \"$child\" > '\(escapedPIDFile)'; exit 0"
+      let completion = ProcessCompletionBox()
+      let task = Task {
+        do {
+          let result = try await FoundationProcessRunner().run(
+            ProcessRequest(
+              executable: URL(fileURLWithPath: "/bin/sh"),
+              arguments: ["-c", script]))
+          await completion.finish(.succeeded(result))
+        } catch let error as ProcessRunnerError {
+          await completion.finish(.failed(error))
+        } catch {
+          await completion.finish(.unexpected(String(describing: error)))
+        }
+      }
+
+      var childPID: pid_t?
+      for _ in 0..<200 {
+        if let contents = try? String(contentsOf: pidFile, encoding: .utf8),
+          let parsed = pid_t(contents.trimmingCharacters(in: .whitespacesAndNewlines))
+        {
+          childPID = parsed
+          break
+        }
+        try await Task.sleep(for: .milliseconds(10))
+      }
+      guard let childPID else {
+        XCTFail("The successful Darwin child did not publish its PID")
+        _ = await task.value
+        return
+      }
+
+      var state: ProcessCompletionState?
+      for _ in 0..<200 {
+        state = await completion.current()
+        if state != nil { break }
+        try await Task.sleep(for: .milliseconds(10))
+      }
+      XCTAssertNotNil(
+        state,
+        "A successful root exit must release after cleaning up its process group")
+      if state == nil {
+        _ = kill(childPID, SIGKILL)
+      }
+      _ = await task.value
+
+      let finalState = await completion.current()
+      guard case .succeeded(let result) = finalState else {
+        XCTFail("Expected successful root completion, got \(String(describing: finalState))")
+        return
+      }
+      XCTAssertEqual(result.exitCode, 0)
+
+      var childExited = false
+      for _ in 0..<100 {
+        if kill(childPID, 0) == -1 {
+          childExited = true
+          break
+        }
+        try await Task.sleep(for: .milliseconds(25))
+      }
+      XCTAssertTrue(childExited)
+    #else
+      throw XCTSkip("Darwin successful-root process-group assertion")
     #endif
   }
 

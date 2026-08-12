@@ -116,7 +116,7 @@ private enum PlatformPathAlgorithms {
         .resolvingSymlinksInPath()
         .path
     }
-    guard !windows || !isRootPath(canonical, windows: true) else {
+    guard !isRootPath(canonical, windows: windows) else {
       throw PlatformPathError.rootPath(path)
     }
     return canonical
