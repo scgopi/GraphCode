@@ -322,7 +322,15 @@ private final class ProcessTreeController: @unchecked Sendable {
   }
 
   func rootDidExit() {
-    #if canImport(Darwin)
+    #if os(Windows)
+      lock.lock()
+      if let job {
+        _ = TerminateJobObject(job, 0)
+        _ = CloseHandle(job)
+        self.job = nil
+      }
+      lock.unlock()
+    #elseif canImport(Darwin)
       lock.lock()
       if let processGroupID {
         Self.terminateDarwinProcessGroup(processGroupID)

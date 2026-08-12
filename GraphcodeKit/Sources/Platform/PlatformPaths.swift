@@ -1,5 +1,9 @@
 import Foundation
 
+#if os(Windows)
+  import WinSDK
+#endif
+
 public enum PlatformPathError: Error, Equatable, LocalizedError, Sendable {
   case emptyPath
   case notAbsolute(String)
@@ -104,9 +108,13 @@ private enum PlatformPathAlgorithms {
       guard !isRootPath(normalized, windows: true) else {
         throw PlatformPathError.rootPath(path)
       }
-      let urlPath = URL(fileURLWithPath: normalized).standardizedFileURL.path
+      let resolved = canonicalWindowsPath(resolveWindowsFinalPath(normalized))
+      guard !isRootPath(resolved, windows: true) else {
+        throw PlatformPathError.rootPath(path)
+      }
+      let urlPath = URL(fileURLWithPath: resolved).standardizedFileURL.path
       canonical =
-        normalized.hasPrefix("\\\\") && !urlPath.hasPrefix("//")
+        resolved.hasPrefix("\\\\") && !urlPath.hasPrefix("//")
         ? "/" + urlPath
         : urlPath
     } else {
@@ -152,6 +160,59 @@ private enum PlatformPathAlgorithms {
     let components = tail.split(separator: "\\", omittingEmptySubsequences: true)
     let collapsed = collapseWindowsComponents(components)
     return drive + "\\" + collapsed.joined(separator: "\\")
+  }
+
+  private static func resolveWindowsFinalPath(_ path: String) -> String {
+    #if os(Windows)
+      var widePath = Array(path.utf16)
+      widePath.append(0)
+      let handle = widePath.withUnsafeBufferPointer {
+        CreateFileW(
+          $0.baseAddress,
+          DWORD(FILE_READ_ATTRIBUTES),
+          DWORD(FILE_SHARE_READ) | DWORD(FILE_SHARE_WRITE) | DWORD(FILE_SHARE_DELETE),
+          nil,
+          DWORD(OPEN_EXISTING),
+          DWORD(FILE_FLAG_BACKUP_SEMANTICS),
+          nil)
+      }
+      guard let handle, handle != INVALID_HANDLE_VALUE else {
+        return path
+      }
+      defer { _ = CloseHandle(handle) }
+
+      var buffer = [WCHAR](repeating: 0, count: 260)
+      while true {
+        let length = buffer.withUnsafeMutableBufferPointer {
+          GetFinalPathNameByHandleW(
+            handle,
+            $0.baseAddress,
+            DWORD($0.count),
+            DWORD(VOLUME_NAME_DOS))
+        }
+        guard length > 0 else { return path }
+        if Int(length) < buffer.count {
+          let resolved = String(
+            decoding: buffer.prefix(Int(length)),
+            as: UTF16.self)
+          return normalizeWindowsFinalPath(resolved)
+        }
+        buffer = [WCHAR](repeating: 0, count: Int(length) + 1)
+      }
+    #else
+      return path
+    #endif
+  }
+
+  private static func normalizeWindowsFinalPath(_ path: String) -> String {
+    let normalized = path.replacingOccurrences(of: "/", with: "\\")
+    if normalized.hasPrefix("\\\\?\\UNC\\") {
+      return "\\\\" + String(normalized.dropFirst(8))
+    }
+    if normalized.hasPrefix("\\\\?\\") {
+      return String(normalized.dropFirst(4))
+    }
+    return normalized
   }
 
   private static func collapseWindowsComponents(

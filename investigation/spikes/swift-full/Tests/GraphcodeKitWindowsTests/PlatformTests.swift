@@ -55,6 +55,40 @@ final class PlatformTests: XCTestCase {
     }
   }
 
+  func testWindowsCanonicalProjectPathRejectsJunctionToDriveRoot() async throws {
+    #if os(Windows)
+      let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+          "graphcode-windows-root-junction-\(UUID().uuidString)", isDirectory: true)
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      defer { try? FileManager.default.removeItem(at: directory) }
+      let junction = directory.appendingPathComponent("root-junction", isDirectory: true)
+      let comSpec =
+        ProcessInfo.processInfo.environment["ComSpec"]
+        ?? ProcessInfo.processInfo.environment["COMSPEC"]
+        ?? "cmd.exe"
+      let command = "mklink /J \"\(junction.path)\" \"C:\\\""
+      let result = try await FoundationProcessRunner().run(
+        ProcessRequest(
+          executable: URL(fileURLWithPath: comSpec),
+          arguments: ["/d", "/c", command]))
+      guard result.exitCode == 0 else {
+        XCTFail(
+          "mklink failed: stdout=\(String(decoding: result.standardOutput, as: UTF8.self)) "
+            + "stderr=\(String(decoding: result.standardError, as: UTF8.self))")
+        return
+      }
+
+      XCTAssertThrowsError(
+        try WindowsPlatformPaths().canonicalProjectPath(junction.path)
+      ) { error in
+        XCTAssertEqual(error as? PlatformPathError, .rootPath(junction.path))
+      }
+    #else
+      throw XCTSkip("Windows reparse-point root assertion")
+    #endif
+  }
+
   func testDarwinCanonicalProjectPathRejectsSymlinkToFilesystemRoot() throws {
     #if canImport(Darwin)
       let directory = FileManager.default.temporaryDirectory
@@ -405,6 +439,95 @@ final class PlatformTests: XCTestCase {
 
   func testProcessRunnerCancellationKillsChildProcessAndDrainsPipes() async throws {
     try await assertProcessTreeTermination(.cancellation)
+  }
+
+  func testWindowsSuccessfulRootExitKillsBackgroundDescendantAndDrainsPipes() async throws {
+    #if os(Windows)
+      let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+          "graphcode-windows-success-tree-\(UUID().uuidString)", isDirectory: true)
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      defer { try? FileManager.default.removeItem(at: directory) }
+      let pidFile = directory.appendingPathComponent("child.pid")
+      let escapedPIDFile = pidFile.path.replacingOccurrences(of: "'", with: "''")
+      let powerShell = URL(
+        fileURLWithPath: #"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"#)
+      let script =
+        #"$startInfo = New-Object System.Diagnostics.ProcessStartInfo; $startInfo.FileName = $env:ComSpec; $startInfo.Arguments = '/d /c echo child-output & ping.exe -t 127.0.0.1'; $startInfo.UseShellExecute = $false; $child = [System.Diagnostics.Process]::Start($startInfo); Set-Content -LiteralPath '$PID_FILE' -Value $child.Id -NoNewline; Start-Sleep -Milliseconds 200; exit 0"#
+        .replacingOccurrences(of: "$PID_FILE", with: escapedPIDFile)
+      let completion = ProcessCompletionBox()
+      let task = Task {
+        do {
+          let result = try await FoundationProcessRunner().run(
+            ProcessRequest(
+              executable: powerShell,
+              arguments: ["-NoLogo", "-NoProfile", "-Command", script]))
+          await completion.finish(.succeeded(result))
+        } catch let error as ProcessRunnerError {
+          await completion.finish(.failed(error))
+        } catch {
+          await completion.finish(.unexpected(String(describing: error)))
+        }
+      }
+
+      var childPID: DWORD?
+      for _ in 0..<200 {
+        if let contents = try? String(contentsOf: pidFile, encoding: .utf8),
+          let parsed = UInt32(contents.trimmingCharacters(in: .whitespacesAndNewlines))
+        {
+          childPID = DWORD(parsed)
+          break
+        }
+        try await Task.sleep(for: .milliseconds(10))
+      }
+      guard let childPID else {
+        XCTFail("The successful Windows child did not publish its PID")
+        task.cancel()
+        _ = await task.value
+        return
+      }
+
+      var state: ProcessCompletionState?
+      for _ in 0..<200 {
+        state = await completion.current()
+        if state != nil { break }
+        try await Task.sleep(for: .milliseconds(10))
+      }
+      XCTAssertNotNil(
+        state,
+        "A successful root exit must terminate its Job Object before draining pipes")
+      if state == nil {
+        task.cancel()
+      }
+      _ = await task.value
+
+      let finalState = await completion.current()
+      guard case .succeeded(let result) = finalState else {
+        XCTFail("Expected successful root completion, got \(String(describing: finalState))")
+        return
+      }
+      XCTAssertEqual(result.exitCode, 0)
+      XCTAssertTrue(
+        String(decoding: result.standardOutput, as: UTF8.self)
+          .contains("child-output"),
+        "The descendant must inherit and drain the root stdout pipe")
+
+      var childExited = false
+      for _ in 0..<100 {
+        let handle = OpenProcess(
+          DWORD(PROCESS_QUERY_LIMITED_INFORMATION), false, childPID)
+        if let handle {
+          _ = CloseHandle(handle)
+          try await Task.sleep(for: .milliseconds(25))
+        } else {
+          childExited = true
+          break
+        }
+      }
+      XCTAssertTrue(childExited)
+    #else
+      throw XCTSkip("Windows successful-root process-tree assertion")
+    #endif
   }
 
   func testConcurrentWindowsLaunchesDoNotCrossInheritPipeHandles() async throws {
