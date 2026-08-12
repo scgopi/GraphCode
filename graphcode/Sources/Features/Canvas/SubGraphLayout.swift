@@ -49,15 +49,32 @@ struct SubGraphLayout: Equatable {
   var isEmpty: Bool { placements.isEmpty }
 
   private enum Metrics {
-    /// Clear of the parent card's bottom edge (cards are ~90pt tall, centred).
-    static let firstOffset: CGFloat = 56
+    /// Clear of the parent card's bottom edge — a card reaches half its height below its
+    /// own centre.
+    static let firstOffset = LaneLayout.Metrics.card.height / 2 + 3
     static let step: CGFloat = 28
     /// Each level of nesting steps right, so depth reads off the left edge.
     static let indent: CGFloat = 14
-    /// The grid's row pitch is 200pt and a card reaches ~45pt below its centre, so this
-    /// many chips is what fits before the next row's card. Past it, `Overflow`.
+    /// How many chips a composite draws before it says `+N more` instead. Not a fit
+    /// against some other view's row pitch anymore — see `SubGraphLayout.rowPitch`, which
+    /// is how the canvas finds out how much room these need.
     static let maxVisible = 4
+    /// A chip is its caption plus 3pt of padding either side, and the deepest one has to
+    /// clear the next row's card by more than nothing.
+    static let chipHeight: CGFloat = 20
+    static let gutter: CGFloat = 10
   }
+
+  /// The row pitch a canvas needs for a composite drawn open under one of its cards.
+  ///
+  /// The dependency used to run the other way: the chips were tuned to fit a 200pt grid,
+  /// with a comment saying so, so the canvas moving to the Graph view's tighter rows would
+  /// have quietly dropped every chip onto the row below. The chips state their own room
+  /// instead, and `LaneLayout.rowHeight(for:)` asks — the deepest slot a chip or a `+N
+  /// more` can take, plus what a card occupies above its own centre.
+  static let rowPitch =
+    Metrics.firstOffset + CGFloat(Metrics.maxVisible - 1) * Metrics.step + Metrics.chipHeight / 2
+    + Metrics.gutter + LaneLayout.Metrics.card.height / 2
 
   init() {}
 

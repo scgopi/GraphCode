@@ -57,6 +57,16 @@ struct SessionBriefingTests {
   }
 
   @Test
+  func theBriefingSaysANodeIsALoop() throws {
+    // Issue #91: a Copilot session asked to create a child "node" did nothing, while
+    // "child loop" worked — the briefing taught the command only under the word "loop".
+    // The vocabulary bridge is the fix, so its absence has to fail a test.
+    let briefing = try #require(SessionBriefing.text(projectPath: Self.project))
+    #expect(briefing.contains("node is a loop"))
+    #expect(briefing.contains("child node"))
+  }
+
+  @Test
   func theBriefingLeadsWithGoalBasedAndWarnsThatTurnBasedDoesNotStart() throws {
     // Not a style preference — a defect this pins. `LoopNode.runsUnattended` is false for
     // turn-based, so a turn-based loop an agent creates launches no process at all: five

@@ -160,7 +160,8 @@ struct ProjectFeatureTests {
 
     await store.send(.daemonEvent(.graphChanged(graph))) {
       $0.graph = graph
-      $0.nodePositions[node.id] = ProjectFeature.gridPosition(0)
+      // One loop, wired to nothing: the first slot of the lane — see `LaneLayout`.
+      $0.nodePositions[node.id] = LaneLayout.Metrics.origin
       $0.sidebarNodeOrder = [node.id]
     }
   }

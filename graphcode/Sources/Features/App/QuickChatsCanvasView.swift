@@ -37,10 +37,8 @@ struct QuickChatsCanvasView: View {
   @State private var pinchBaseScale: CGFloat?
   @State private var viewport: CGSize = .zero
 
-  /// One chat and where its card goes. Derived rather than stored, and laid out with the
-  /// same grid a folder's freshly synced nodes get (`ProjectFeature.gridPosition`), so a
-  /// chat card lands on the same rhythm as a loop card — this is a viewer, not a second
-  /// canvas you arrange by hand.
+  /// One chat and where its card goes. Derived rather than stored — this is a viewer, not
+  /// a second canvas you arrange by hand.
   private struct Placement: Identifiable {
     let chat: QuickChat
     let position: CGPoint
@@ -50,8 +48,20 @@ struct QuickChatsCanvasView: View {
 
   private var placements: [Placement] {
     store.quickChats.enumerated().map { index, chat in
-      Placement(chat: chat, position: ProjectFeature.gridPosition(index))
+      Placement(chat: chat, position: Self.gridPosition(index))
     }
+  }
+
+  /// Rows of three, on the same origin and pitch a folder's cards use (`LaneLayout`), so a
+  /// chat card lands on the rhythm of a loop card. A plain grid rather than that layout
+  /// itself because chats have no edges at all — there is no chain to run rightward and no
+  /// beginning to stack down the left, so laying them out by structure would produce one
+  /// very long column saying nothing.
+  private static func gridPosition(_ index: Int) -> CGPoint {
+    let columns = 3
+    return CGPoint(
+      x: LaneLayout.Metrics.origin.x + CGFloat(index % columns) * LaneLayout.Metrics.columnWidth,
+      y: LaneLayout.Metrics.origin.y + CGFloat(index / columns) * LaneLayout.Metrics.rowHeight)
   }
 
   var body: some View {
