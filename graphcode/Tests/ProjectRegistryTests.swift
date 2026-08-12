@@ -134,6 +134,47 @@ struct ProjectRegistryTests {
     #expect(persistence.loadGraph(path: "/tmp/project-a")?.nodes.isEmpty != false)
   }
 
+  @Test
+  func concurrentApplyResponsesContainTheSnapshotFromTheirOwnCommand() async {
+    let (registry, _) = makeRegistryAndPersistence()
+    let connectionID = UUID()
+    await registry.addConnection(id: connectionID, fileDescriptor: -1)
+    await registry.handle(.openProject(path: "/tmp/project-a"), connectionID: connectionID)
+
+    async let firstResult = registry.apply(
+      .graphCommand(
+        projectPath: "/tmp/project-a",
+        command: .createNode(
+          NodeDraft(
+            title: "First", loopType: .turnBased, checkDescription: "Sound?",
+            firstInstruction: "Work"))),
+      connectionID: connectionID)
+    async let secondResult = registry.apply(
+      .graphCommand(
+        projectPath: "/tmp/project-a",
+        command: .createNode(
+          NodeDraft(
+            title: "Second", loopType: .turnBased, checkDescription: "Clear?",
+            firstInstruction: "Work"))),
+      connectionID: connectionID)
+
+    let results = [await firstResult, await secondResult].compactMap { result -> LoopGraph? in
+      guard let response = result?.response, case .graphChanged(let graph) = response else {
+        Issue.record("expected a correlated graph snapshot for each applied command")
+        return nil
+      }
+      return graph
+    }
+
+    #expect(results.count == 2)
+    #expect(results.contains { $0.nodes.count == 1 && $0.nodes.contains { $0.title == "First" } })
+    #expect(
+      results.contains {
+        $0.nodes.count == 2
+          && Set($0.nodes.map(\.title)) == Set(["First", "Second"])
+      })
+  }
+
   /// The bug this guards: `.openProject` used to detach a connection from whatever
   /// project it had previously joined before joining the new one, so opening a second
   /// folder silently stopped the first folder's `graphChanged` broadcasts from ever

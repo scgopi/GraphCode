@@ -399,6 +399,34 @@ final class ContractTests: XCTestCase {
       [secondEnvelope])
   }
 
+  func testRepeatedConnectionSnapshotsDoNotCreateReplayHistory() async throws {
+    let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000014")!
+    let store = DaemonReplayStore(capacity: 8)
+    let graph = LoopGraph(project: ProjectRef(path: "/work/rejoin", name: "rejoin"))
+
+    let first = RecordingConnection()
+    let firstChannel = DaemonConnectionChannel(
+      connection: first,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+    try await firstChannel.sendConnectionSnapshot(.graphChanged(graph))
+    try await firstChannel.close()
+
+    let second = RecordingConnection()
+    let secondChannel = DaemonConnectionChannel(
+      connection: second,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+    try await secondChannel.sendConnectionSnapshot(.graphChanged(graph))
+    try await secondChannel.close()
+
+    XCTAssertThrowsError(try store.replay(clientID: clientID, after: 0)) { error in
+      XCTAssertEqual(error as? DaemonReplayBuffer.ReplayError, .replayUnavailable)
+    }
+  }
+
   func testMalformedV2RequestKeepsSafelyExtractableRequestID() throws {
     let requestID = UUID(uuidString: "00000000-0000-0000-0000-000000000009")!
     var malformed = DaemonWireEnvelope.request(id: requestID, command: .listRecentProjects)

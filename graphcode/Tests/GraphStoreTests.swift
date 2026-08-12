@@ -355,10 +355,39 @@ struct GraphStoreTests {
     let result = await store.handle(
       .createNode(NodeDraft(title: "No goal", loopType: .goalBased)))
 
-    #expect(
-      result
-        == .rejected(message: "node creation refused: draft is invalid"))
+    guard case .rejected(let message, let snapshot) = result else {
+      Issue.record("expected a rejected command result")
+      return
+    }
+    #expect(message == "node creation refused: draft is invalid")
+    #expect(snapshot.nodes.isEmpty)
     #expect(await store.graph.nodes.isEmpty)
+  }
+
+  @Test
+  func concurrentCommandsReturnTheirOwnPostCommandSnapshots() async {
+    let store = GraphStore()
+    let firstDraft = turnDraft("First", check: "Sound?")
+    let secondDraft = turnDraft("Second", check: "Clear?")
+
+    async let firstResult = store.handle(.createNode(firstDraft))
+    async let secondResult = store.handle(.createNode(secondDraft))
+    let results = [await firstResult, await secondResult]
+    let snapshots = results.compactMap { result -> LoopGraph? in
+      guard case .applied(let graph) = result else {
+        Issue.record("expected both concurrent commands to apply")
+        return nil
+      }
+      return graph
+    }
+
+    #expect(snapshots.count == 2)
+    #expect(snapshots.contains { $0.nodes.count == 1 && $0.nodes.contains { $0.title == "First" } })
+    #expect(
+      snapshots.contains {
+        $0.nodes.count == 2
+          && Set($0.nodes.map(\.title)) == Set(["First", "Second"])
+      })
   }
 
   @Test

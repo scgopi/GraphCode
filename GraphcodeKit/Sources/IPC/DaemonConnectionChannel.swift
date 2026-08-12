@@ -63,6 +63,23 @@ public final class DaemonReplayStore: @unchecked Sendable {
     return envelope
   }
 
+  /// Reserves a sequence for a connection-local snapshot without retaining that
+  /// snapshot in canonical replay history. This keeps the client's sequence space
+  /// monotonic while ensuring a repeated project join cannot manufacture history for
+  /// disconnected logical clients.
+  public func reserveSequence(clientID: UUID) -> UInt64 {
+    lock.lock()
+    defer { lock.unlock() }
+    let now = Date()
+    purgeExpired(now: now)
+    guard maxClients > 0 else { return 1 }
+    ensureClient(clientID)
+    let sequence = nextSequences[clientID, default: 1]
+    nextSequences[clientID] = sequence == UInt64.max ? UInt64.max : sequence + 1
+    lastAccess[clientID] = now
+    return sequence
+  }
+
   /// Registers a logical client independently of its current socket. Its bounded
   /// history remains eligible for canonical events while every socket for the client
   /// is disconnected.
@@ -301,6 +318,20 @@ public actor DaemonConnectionChannel {
         return
       }
       try await sendJSON(envelope)
+    }
+  }
+
+  /// Sends a current-graph snapshot to this socket only. Unlike a graph-change event,
+  /// opening or rejoining a project is not a canonical mutation and must not be
+  /// replayed to other sockets or retained for a disconnected logical client.
+  public func sendConnectionSnapshot(_ event: DaemonEvent) async throws {
+    guard isSubscribed(to: event) else { return }
+    switch mode {
+    case .v1:
+      try await sendJSON(event)
+    case .v2:
+      let sequence = replayStore.reserveSequence(clientID: clientID)
+      try await sendJSON(DaemonWireEnvelope.event(sequence: sequence, event: event))
     }
   }
 

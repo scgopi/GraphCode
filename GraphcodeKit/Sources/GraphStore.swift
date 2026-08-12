@@ -1,8 +1,8 @@
 import Foundation
 
 public enum GraphStoreCommandResult: Equatable, Sendable {
-  case applied
-  case rejected(message: String)
+  case applied(graph: LoopGraph)
+  case rejected(message: String, graph: LoopGraph)
 }
 
 /// Owns the daemon's one `LoopGraph`, applies commands, automatically fires `.handoff`
@@ -36,6 +36,9 @@ public enum GraphStoreCommandResult: Equatable, Sendable {
 public actor GraphStore {
   public private(set) var graph: LoopGraph
   private var connections: [UUID: DaemonConnectionChannel] = [:]
+  private var commandTail: Task<GraphStoreCommandResult, Never>?
+  private var commandTailID: UInt64?
+  private var nextCommandID: UInt64 = 0
   private let onGraphChanged: (@Sendable (LoopGraph) -> Void)?
   private let onGraphEvent: (@Sendable (DaemonEvent) -> [UUID: DaemonWireEnvelope])?
   private let onConnectionFailure: (@Sendable (UUID) -> Void)?
@@ -186,12 +189,18 @@ public actor GraphStore {
     await addConnection(id: id, channel: channel)
   }
 
-  public func addConnection(id: UUID, channel: DaemonConnectionChannel) async {
+  @discardableResult
+  public func addConnection(id: UUID, channel: DaemonConnectionChannel) async -> LoopGraph {
     connections[id] = channel
     await channel.join(projectPath: graph.project.path)
-    let event = DaemonEvent.graphChanged(graph)
-    let envelope = onGraphEvent?(event)?[channel.clientID]
-    await send(event, to: id, envelope: envelope)
+    let snapshot = graph
+    let event = DaemonEvent.graphChanged(snapshot)
+    do {
+      try await channel.sendConnectionSnapshot(event)
+    } catch {
+      evictConnection(id)
+    }
+    return snapshot
   }
 
   #if canImport(Darwin)
@@ -205,16 +214,45 @@ public actor GraphStore {
     }
   #endif
 
-  public func removeConnection(_ id: UUID, leaveReplay: Bool = false) async {
-    guard let channel = connections.removeValue(forKey: id) else { return }
+  @discardableResult
+  public func removeConnection(_ id: UUID, leaveReplay: Bool = false) async -> LoopGraph? {
+    guard let channel = connections.removeValue(forKey: id) else { return graph }
+    let snapshot = graph
     if leaveReplay {
       await channel.leave(projectPath: graph.project.path)
     }
+    return snapshot
   }
 
   // MARK: - Commands
 
   public func handle(
+    _ command: GraphCommand,
+    broadcastErrors: Bool = true
+  ) async -> GraphStoreCommandResult {
+    let previous = commandTail
+    let commandID = nextCommandID
+    nextCommandID = nextCommandID == UInt64.max ? 0 : nextCommandID + 1
+    let operation = Task { [weak self] in
+      _ = await previous?.value
+      guard let self else {
+        return GraphStoreCommandResult.rejected(
+          message: "graph store is unavailable",
+          graph: LoopGraph(project: ProjectRef(path: "", name: "Untitled")))
+      }
+      return await self.applyCommand(command, broadcastErrors: broadcastErrors)
+    }
+    commandTail = operation
+    commandTailID = commandID
+    let result = await operation.value
+    if commandTailID == commandID {
+      commandTail = nil
+      commandTailID = nil
+    }
+    return result
+  }
+
+  private func applyCommand(
     _ command: GraphCommand,
     broadcastErrors: Bool = true
   ) async -> GraphStoreCommandResult {
@@ -369,9 +407,9 @@ public actor GraphStore {
     // update's memory record must exist before its session is told to go look.
     let errors = await drainAndBroadcast(broadcastErrors: broadcastErrors)
     if let error = errors.first {
-      return .rejected(message: error)
+      return .rejected(message: error, graph: graph)
     }
-    return .applied
+    return .applied(graph: graph)
   }
 
   // MARK: - Composites
@@ -432,7 +470,7 @@ public actor GraphStore {
     let result = await child.handle(command, broadcastErrors: broadcastErrors)
     graph.nodes[id: nodeID]?.subGraph = await child.graph
     rollUpComposite(nodeID)
-    if case .rejected(let message) = result {
+    if case .rejected(let message, _) = result {
       return message
     }
     return nil
@@ -598,7 +636,9 @@ public actor GraphStore {
     var changed = await refreshPresence()
     if await refreshActivity() { changed = true }
     guard changed else { return }
-    await notifyClients()
+    let event = DaemonEvent.graphChanged(graph)
+    let envelopes = onGraphEvent?(event) ?? [:]
+    await notifyClients(event, envelopes: envelopes)
   }
 
   // MARK: - Renaming
@@ -856,7 +896,8 @@ public actor GraphStore {
     // set below — a graph whose nodes have all stopped aggregates to `.idle`.
     if node.loopType == .composite, let subGraph = node.subGraph {
       for child in subGraph.nodes where !child.isResolved {
-        await runInSubGraph(node.id, .stopNode(child.id))
+        await runInSubGraph(
+          node.id, .stopNode(child.id), broadcastErrors: false)
       }
     }
 
@@ -1356,7 +1397,7 @@ public actor GraphStore {
   ) async -> GraphStoreCommandResult {
     announceError(message)
     _ = await drainAndBroadcast(broadcastErrors: broadcastErrors)
-    return .rejected(message: message)
+    return .rejected(message: message, graph: graph)
   }
 
   private func unblockIfStillIdle(_ nodeID: UUID) {

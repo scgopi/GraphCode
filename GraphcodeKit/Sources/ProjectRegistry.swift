@@ -239,22 +239,25 @@ public actor ProjectRegistry {
     } else {
       broadcastErrors = true
     }
-    let error: String?
+    var response: DaemonEvent? = nil
+    var error: String? = nil
 
     switch command {
     case .listRecentProjects:
-      await send(
-        .recentProjectsListed(persistence.loadRecentProjects()), to: connectionID)
+      let recentProjects = persistence.loadRecentProjects()
+      await send(.recentProjectsListed(recentProjects), to: connectionID)
+      response = .recentProjectsListed(recentProjects)
       error = nil
 
     case .openProject(let path):
       guard Self.isOpenable(path, platformPaths: platformPaths) else {
         return ProjectRegistryCommandResult(error: "project path is not openable")
       }
-      await open(
+      let snapshot = await open(
         Self.canonicalize(path, platformPaths: platformPaths),
         for: connectionID,
         channel: channel)
+      response = .graphChanged(snapshot)
       error = nil
 
     case .restoreOpenProjects:
@@ -273,30 +276,36 @@ public actor ProjectRegistry {
           for: connectionID,
           channel: channel)
       }
+      response = .recentProjectsListed(persistence.loadRecentProjects())
       error = nil
 
     case .openGlobalGraph:
-      await open(LoopGraphScope.globalPath, for: connectionID, channel: channel)
+      let snapshot = await open(LoopGraphScope.globalPath, for: connectionID, channel: channel)
+      response = .graphChanged(snapshot)
       error = nil
 
     case .closeProject(let path):
-      await close(Self.canonicalize(path, platformPaths: platformPaths), for: connectionID)
+      let snapshot = await close(
+        Self.canonicalize(path, platformPaths: platformPaths),
+        for: connectionID)
+      response = snapshot.map(DaemonEvent.graphChanged)
       error = nil
 
     case .forgetProject(let path):
       let canonicalPath = Self.canonicalize(path, platformPaths: platformPaths)
-      await close(canonicalPath, for: connectionID)
+      _ = await close(canonicalPath, for: connectionID)
       persistence.forgetProject(path: canonicalPath)
       error = nil
 
     case .deleteProjectGraph(let path):
       let canonicalPath = Self.canonicalize(path, platformPaths: platformPaths)
-      await close(canonicalPath, for: connectionID)
+      _ = await close(canonicalPath, for: connectionID)
       persistence.forgetProject(path: canonicalPath)
       // Drop the in-memory store too, or a later reopen would resurrect the graph we
       // just deleted from the one still sitting in `stores`.
       stores.removeValue(forKey: canonicalPath)
       persistence.deleteGraph(path: canonicalPath)
+      response = .recentProjectsListed(persistence.loadRecentProjects())
       error = nil
 
     case .graphCommand(let path, let inner):
@@ -304,16 +313,16 @@ public actor ProjectRegistry {
         return ProjectRegistryCommandResult(error: "project is not open")
       }
       let result = await store.handle(inner, broadcastErrors: broadcastErrors)
-      if case .rejected(let message) = result {
-        error = message
-      } else {
+      switch result {
+      case .applied(let graph):
+        response = .graphChanged(graph)
         error = nil
+      case .rejected(let message, _):
+        error = message
       }
     }
 
-    return ProjectRegistryCommandResult(
-      response: error == nil ? await responseEvent(for: command) : nil,
-      error: error)
+    return ProjectRegistryCommandResult(response: error == nil ? response : nil, error: error)
   }
 
   /// Produces a correlated v2 response after the command has been applied. The v1
@@ -343,26 +352,29 @@ public actor ProjectRegistry {
 
   private func open(
     _ canonicalPath: String, for connectionID: UUID, channel: DaemonConnectionChannel
-  ) async {
+  ) async -> LoopGraph {
     let store = await store(forProjectPath: canonicalPath)
     connectionProjectPaths[connectionID, default: []].insert(canonicalPath)
-    await store.addConnection(id: connectionID, channel: channel)
+    let snapshot = await store.addConnection(id: connectionID, channel: channel)
     // The global graph is always resident and isn't a folder anyone opened, so it stays
     // out of both the recents list and the restore-on-launch set — the app asks for it
     // by name every launch instead.
-    guard canonicalPath != LoopGraphScope.globalPath else { return }
-    let project = await store.graph.project
+    guard canonicalPath != LoopGraphScope.globalPath else { return snapshot }
+    let project = snapshot.project
     persistence.recordOpened(
       ProjectRef(path: project.path, name: project.name, lastOpenedAt: Date()))
     rememberOpen(canonicalPath)
+    return snapshot
   }
 
-  private func close(_ canonicalPath: String, for connectionID: UUID) async {
+  private func close(_ canonicalPath: String, for connectionID: UUID) async -> LoopGraph? {
+    var snapshot: LoopGraph?
     if let store = stores[canonicalPath] {
-      await store.removeConnection(connectionID, leaveReplay: true)
+      snapshot = await store.removeConnection(connectionID, leaveReplay: true)
     }
     connectionProjectPaths[connectionID]?.remove(canonicalPath)
     persistence.saveOpenProjects(persistence.loadOpenProjects().filter { $0 != canonicalPath })
+    return snapshot
   }
 
   /// Append rather than insert-at-front: the sidebar should come back in the order it
