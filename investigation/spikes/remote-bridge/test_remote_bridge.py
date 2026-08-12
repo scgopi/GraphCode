@@ -176,6 +176,22 @@ class RemoteBridgeTests(unittest.TestCase):
 
         self.assertEqual(response, {"ok": False, "error": "invalid_capability"})
 
+    def test_malformed_capabilities_are_rejected(self):
+        state = BridgeStateStore(self.state_path).read()
+
+        for capability in ("g" * 64, "A" * 64, "a" * 63, "é" * 64):
+            with self.subTest(capability=capability):
+                response = self.raw_request(
+                    state,
+                    {"command": "status"},
+                    capability=capability,
+                )
+
+                self.assertEqual(
+                    response,
+                    {"ok": False, "error": "invalid_capability"},
+                )
+
     def test_missing_capability_is_rejected(self):
         state = BridgeStateStore(self.state_path).read()
 
@@ -197,6 +213,42 @@ class RemoteBridgeTests(unittest.TestCase):
             response = read_frame(connection)
 
         self.assertEqual(response, {"ok": False, "error": "invalid_frame"})
+
+    def test_stop_preserves_a_replacement_state_record(self):
+        store = self.bridge.state_store
+        old_state = store.read()
+        replacement = dict(old_state)
+        replacement["daemon_instance_id"] = "replacement-daemon"
+        replacement["generation"] = old_state["generation"] + 1
+        replacement["capability"] = "c" * 64
+        read_started = threading.Event()
+        replacement_done = threading.Event()
+        original_read = store.read
+        read_count = 0
+
+        def interleaving_read():
+            nonlocal read_count
+            state = original_read()
+            if read_count == 0:
+                read_count += 1
+                read_started.set()
+                time.sleep(0.1)
+            return state
+
+        store.read = interleaving_read
+
+        def replace_state():
+            read_started.wait(1)
+            store.write(replacement)
+            replacement_done.set()
+
+        replacement_thread = threading.Thread(target=replace_state)
+        replacement_thread.start()
+        self.bridge.stop()
+        replacement_thread.join(1)
+
+        self.assertTrue(replacement_done.is_set())
+        self.assertEqual(store.read(), replacement)
 
     def test_expired_capability_is_rejected(self):
         self.bridge.stop()

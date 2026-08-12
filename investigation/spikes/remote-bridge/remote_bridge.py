@@ -7,6 +7,7 @@ touching GraphcodeKit or the production remote implementation.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import errno
 import hmac
 import json
@@ -97,6 +98,16 @@ def _is_finite_number(value: Any) -> bool:
     )
 
 
+def _is_capability(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
 def _validate_previous(previous: Any) -> None:
     if previous is None:
         return
@@ -106,8 +117,7 @@ def _validate_previous(previous: Any) -> None:
         not isinstance(previous.get("generation"), int)
         or isinstance(previous.get("generation"), bool)
         or previous["generation"] < 1
-        or not isinstance(previous.get("capability"), str)
-        or re.fullmatch(r"[0-9a-f]{64}", previous["capability"]) is None
+        or not _is_capability(previous.get("capability"))
         or not _is_finite_number(previous.get("expires_at"))
     ):
         raise RemoteBridgeError("invalid previous generation")
@@ -141,8 +151,7 @@ def validate_state(state: Dict[str, Any]) -> Dict[str, Any]:
         or not isinstance(state["port"], int)
         or isinstance(state["port"], bool)
         or not 1 <= state["port"] <= 65535
-        or not isinstance(state["capability"], str)
-        or re.fullmatch(r"[0-9a-f]{64}", state["capability"]) is None
+        or not _is_capability(state["capability"])
         or not _is_finite_number(state["issued_at"])
         or not _is_finite_number(state["expires_at"])
         or state["expires_at"] <= state["issued_at"]
@@ -155,11 +164,76 @@ def validate_state(state: Dict[str, Any]) -> Dict[str, Any]:
 class BridgeStateStore:
     """Atomic, user-readable bridge-state record."""
 
+    _thread_locks_guard = threading.Lock()
+    _thread_locks = {}
+
     def __init__(self, path: Path | str):
         self.path = Path(path)
+        key = os.path.abspath(os.fspath(self.path))
+        with self._thread_locks_guard:
+            self._thread_lock = self._thread_locks.setdefault(
+                key,
+                threading.RLock(),
+            )
+        self._lock_depth = threading.local()
+        self._lock_path = self.path.with_name(f".{self.path.name}.lock")
+
+    @contextmanager
+    def _protocol_lock(self):
+        depth = getattr(self._lock_depth, "value", 0)
+        if depth:
+            self._lock_depth.value = depth + 1
+            try:
+                yield
+            finally:
+                self._lock_depth.value = depth
+            return
+
+        with self._thread_lock:
+            self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._lock_path.open("a+b") as lock_file:
+                self._acquire_file_lock(lock_file)
+                self._lock_depth.value = 1
+                try:
+                    yield
+                finally:
+                    self._lock_depth.value = 0
+                    self._release_file_lock(lock_file)
+
+    @staticmethod
+    def _acquire_file_lock(lock_file) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            return
+        import fcntl
+
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+    @staticmethod
+    def _release_file_lock(lock_file) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            return
+        import fcntl
+
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def write(self, state: Dict[str, Any]) -> None:
         validate_state(state)
+        with self._protocol_lock():
+            self._write_unlocked(state)
+
+    def _write_unlocked(self, state: Dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(
             f".{self.path.name}.{secrets.token_hex(8)}.tmp"
@@ -204,6 +278,10 @@ class BridgeStateStore:
                 pass
 
     def read(self) -> Dict[str, Any]:
+        with self._protocol_lock():
+            return self._read_unlocked()
+
+    def _read_unlocked(self) -> Dict[str, Any]:
         with self._open_for_read() as file:
             state = json.load(file)
         return validate_state(state)
@@ -240,10 +318,33 @@ class BridgeStateStore:
         return os.fdopen(descriptor, "r", encoding="utf-8")
 
     def remove(self) -> None:
+        with self._protocol_lock():
+            self._remove_unlocked()
+
+    def _remove_unlocked(self) -> None:
         try:
             self.path.unlink()
         except FileNotFoundError:
             pass
+
+    def remove_if_matches(self, expected: Dict[str, Any]) -> bool:
+        with self._protocol_lock():
+            try:
+                current = self.read()
+            except FileNotFoundError:
+                return False
+            if not (
+                current["daemon_instance_id"]
+                == expected["daemon_instance_id"]
+                and current["generation"] == expected["generation"]
+                and hmac.compare_digest(
+                    current["capability"],
+                    expected["capability"],
+                )
+            ):
+                return False
+            self.remove()
+            return True
 
 
 class FramedBackend:
@@ -492,7 +593,7 @@ class RemoteBridge:
         if time.time() >= state["expires_at"]:
             return "expired_capability"
         if (
-            isinstance(capability, str)
+            _is_capability(capability)
             and isinstance(generation, int)
             and not isinstance(generation, bool)
             and generation == state["generation"]
@@ -503,7 +604,7 @@ class RemoteBridge:
         if (
             isinstance(previous, dict)
             and time.time() < previous["expires_at"]
-            and isinstance(capability, str)
+            and _is_capability(capability)
             and isinstance(generation, int)
             and not isinstance(generation, bool)
             and generation == previous["generation"]
@@ -570,15 +671,16 @@ class RemoteBridge:
         with self._state_lock:
             state = self._state
             self._state = None
-        if state is not None:
-            try:
-                if (
-                    self.state_store.read()["daemon_instance_id"]
-                    == state["daemon_instance_id"]
+            if state is not None:
+                try:
+                    self.state_store.remove_if_matches(state)
+                except (
+                    OSError,
+                    ValueError,
+                    json.JSONDecodeError,
+                    RemoteBridgeError,
                 ):
-                    self.state_store.remove()
-            except (OSError, ValueError, json.JSONDecodeError, RemoteBridgeError):
-                pass
+                    pass
 
 
 class RemoteBridgeClient:

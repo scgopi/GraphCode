@@ -32,7 +32,9 @@ literal `127.0.0.1`; a client must reject another host. `capability` is at least
 increasing for a daemon instance. A rotation may include one `previous` generation
 with an explicit finite expiry, bounded by the configured overlap maximum. `issued_at`
 and `expires_at` must be finite numeric values, and a configured TTL must be finite and
-positive. Readers must re-read the record for every one-shot command.
+positive. State replacement and stop cleanup use the same protocol lock; cleanup
+compare-and-deletes only when daemon instance, generation, and capability still match.
+Readers must re-read the record for every one-shot command.
 
 The one-shot shim reads the record on every command, so already-running zmx sessions
 discover replacements after daemon restart, SSH reconnect, remote reboot, or shim upgrade.
@@ -46,6 +48,7 @@ Rotation permits a bounded prior generation to avoid update races.
 - explicit remote bind to `127.0.0.1`
 - verification of the effective listener despite server `GatewayPorts`
 - collision retry, expiry, stale cleanup, and sanitized diagnostics
+- exact lowercase ASCII capability validation before constant-time comparison
 - no network-exposed or unauthenticated daemon transport
 
 The isolated `investigation/spikes/remote-bridge` proof demonstrates these state,
