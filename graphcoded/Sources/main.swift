@@ -91,14 +91,20 @@ func handleConnection(_ connection: any DaemonConnection) {
     var channel: DaemonConnectionChannel?
     FileHandle.standardOutput.write(Data("graphcoded: client connected\n".utf8))
     defer {
+      let channelToClose = channel
       Task {
         await registry.removeConnection(connectionID)
-        try? await connection.close()
+        if let channelToClose {
+          try? await channelToClose.close()
+        } else {
+          try? await connection.close()
+        }
       }
     }
 
     do {
       let firstData = try await connection.receiveFrame()
+      (connection as? UnixSocketConnection)?.setReadTimeout(nil)
       switch try DaemonWireProtocol.decodeClientFrame(firstData) {
       case .v1(let command):
         let v1Channel = DaemonConnectionChannel(connection: connection, mode: .v1)
@@ -171,6 +177,7 @@ func handleConnection(_ connection: any DaemonConnection) {
               let requestID = request.requestID, let command = request.command
             else {
               try await channel.sendError(
+                requestID: request.requestID,
                 code: .malformedEnvelope,
                 message: "expected a v2 request envelope")
               continue
@@ -187,6 +194,7 @@ func handleConnection(_ connection: any DaemonConnection) {
           }
         } catch {
           try await channel.sendError(
+            requestID: DaemonWireProtocol.requestIDIfPresent(in: data),
             code: .malformedEnvelope,
             message: "\(error)")
         }
@@ -194,7 +202,15 @@ func handleConnection(_ connection: any DaemonConnection) {
     } catch {
       // Transport/framing failures close the socket. Per-frame envelope failures are
       // handled inside the loop so one malformed request does not strand a client.
-      if let channel {
+      let readDeadlineExpired: Bool
+      if case FramedMessageIO.IOError.readFailed(let code) = error {
+        readDeadlineExpired = code == EAGAIN || code == EWOULDBLOCK
+      } else {
+        readDeadlineExpired = false
+      }
+      if readDeadlineExpired {
+        try? await connection.close()
+      } else if let channel {
         try? await channel.sendError(code: .transportFailure, message: "\(error)")
       } else {
         try? await connection.sendFrame(
@@ -217,6 +233,7 @@ DispatchQueue.global().async {
       UnixSocketConnection(
         fileDescriptor: clientDescriptor,
         endpoint: .unixSocket(socketURL),
+        readTimeout: 5,
         writeTimeout: 5))
   }
 }

@@ -31,8 +31,12 @@ reads/writes, deadlines, cancellation, backpressure, and non-reading peers.
 - `hello` may carry a `clientID`, `resumeFrom` cursor, and an optional project-path
   subscription allow-list. An omitted allow-list subscribes to every joined project.
 - The daemon keeps a bounded replay window per logical `clientID` (128 events by default),
-  independent of a socket. A reconnect replays events strictly after `resumeFrom`; a cursor
-  outside the retained window receives `replayUnavailable` instead of unrelated events.
+  with bounded client count and expiry, independent of a socket. A reconnect replays events
+  strictly after `resumeFrom`; unknown or expired history receives `replayUnavailable`, while
+  a cursor beyond the retained latest sequence receives `cursorOutsideWindow`.
+- Replay frames are queued before live events, preserving sequence order across reconnect.
+- Complete framed writes are serialized at the transport boundary, including concurrent app
+  sends.
 - Responses and errors are not replayed. They are correlated to the request that produced
   them, while subscription events remain sequenced.
 - A reconnect never silently treats an unrelated event as command acknowledgement.

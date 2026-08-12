@@ -56,6 +56,10 @@ import Foundation
       closeSync()
     }
 
+    public func setReadTimeout(_ timeout: TimeInterval?) {
+      Self.applyTimeout(timeout, to: fileDescriptor, option: SO_RCVTIMEO)
+    }
+
     public func closeSync() {
       lock.lock()
       let shouldClose = !isClosed
@@ -70,17 +74,19 @@ import Foundation
       try Self.read(count, from: fileDescriptor)
     }
 
-    fileprivate func writeAllSync(_ data: Data) throws {
-      try Self.write(data, to: fileDescriptor)
+    fileprivate func writeFrameSync(_ data: Data) throws {
+      try FramedMessageIO.writeFrame(data, to: fileDescriptor)
     }
 
     private static func applyTimeout(
       _ timeout: TimeInterval?, to fileDescriptor: Int32, option: Int32
     ) {
-      guard let timeout, timeout >= 0 else { return }
-      var interval = timeval(
-        tv_sec: Int(timeout),
-        tv_usec: Int32((timeout - timeout.rounded(.down)) * 1_000_000))
+      var interval = timeval(tv_sec: 0, tv_usec: 0)
+      if let timeout, timeout.isFinite, timeout >= 0 {
+        interval = timeval(
+          tv_sec: Int(timeout),
+          tv_usec: Int32((timeout - timeout.rounded(.down)) * 1_000_000))
+      }
       _ = setsockopt(
         fileDescriptor, SOL_SOCKET, option, &interval,
         socklen_t(MemoryLayout<timeval>.size))
@@ -128,6 +134,8 @@ import Foundation
     public let id: UUID
     public let endpoint: DaemonEndpoint
     private let stream: UnixSocketByteStream
+    private let writeQueue = DispatchQueue(
+      label: "com.graphcode.unix-socket-frame-writes")
 
     public init(
       id: UUID = UUID(),
@@ -149,7 +157,16 @@ import Foundation
     }
 
     public func sendFrame(_ data: Data) async throws {
-      try await FramedMessageIO.writeFrame(data, to: stream)
+      try await withCheckedThrowingContinuation { continuation in
+        writeQueue.async {
+          do {
+            try self.stream.writeFrameSync(data)
+            continuation.resume()
+          } catch {
+            continuation.resume(throwing: error)
+          }
+        }
+      }
     }
 
     public func receiveFrameSync() throws -> Data {
@@ -159,19 +176,25 @@ import Foundation
     }
 
     public func sendFrameSync(_ data: Data) throws {
-      let header = try DaemonFrameHeader.encodeLength(data.count)
-      try stream.writeAllSync(header)
-      if !data.isEmpty {
-        try stream.writeAllSync(data)
+      try writeQueue.sync {
+        try stream.writeFrameSync(data)
       }
     }
 
     public func close() async throws {
-      try await stream.close()
+      writeQueue.sync {
+        stream.closeSync()
+      }
     }
 
     public func closeSync() {
-      stream.closeSync()
+      writeQueue.sync {
+        stream.closeSync()
+      }
+    }
+
+    public func setReadTimeout(_ timeout: TimeInterval?) {
+      stream.setReadTimeout(timeout)
     }
   }
 

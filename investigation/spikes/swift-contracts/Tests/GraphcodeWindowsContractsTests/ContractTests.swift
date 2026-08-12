@@ -150,7 +150,12 @@ final class ContractTests: XCTestCase {
     let id = UUID()
     let endpoint: DaemonEndpoint = .namedPipe("fixture")
     private let probe = SendProbe()
+    private let sendDelay: Duration
     private(set) var frames = [Data]()
+
+    init(sendDelay: Duration = .milliseconds(2)) {
+      self.sendDelay = sendDelay
+    }
 
     func receiveFrame() async throws -> Data {
       throw FramedMessageIO.IOError.connectionClosed
@@ -158,7 +163,7 @@ final class ContractTests: XCTestCase {
 
     func sendFrame(_ data: Data) async throws {
       await probe.begin()
-      try? await Task.sleep(for: .milliseconds(2))
+      try? await Task.sleep(for: sendDelay)
       frames.append(data)
       await probe.end()
     }
@@ -219,10 +224,10 @@ final class ContractTests: XCTestCase {
     }
   }
 
-  func testUnknownReplayHistoryIsUnavailable() async {
+  func testUnknownReplayHistoryIsUnavailable() {
     let store = DaemonReplayStore(capacity: 2)
     do {
-      _ = try await store.replay(clientID: UUID(), after: 0)
+      _ = try store.replay(clientID: UUID(), after: 0)
       XCTFail("expected unknown replay history to be unavailable")
     } catch DaemonReplayBuffer.ReplayError.replayUnavailable {
       // Expected after a daemon restart with no retained client history.
@@ -236,8 +241,8 @@ final class ContractTests: XCTestCase {
     let store = DaemonReplayStore(capacity: 8)
     let first = LoopGraph(project: ProjectRef(path: "/work/first", name: "first"))
     let second = LoopGraph(project: ProjectRef(path: "/work/second", name: "second"))
-    _ = await store.append(clientID: clientID, event: .graphChanged(first))
-    _ = await store.append(clientID: clientID, event: .graphChanged(second))
+    _ = store.append(clientID: clientID, event: .graphChanged(first))
+    _ = store.append(clientID: clientID, event: .graphChanged(second))
 
     let transport = RecordingConnection()
     let channel = DaemonConnectionChannel(
@@ -256,6 +261,59 @@ final class ContractTests: XCTestCase {
       return XCTFail("expected a graphChanged replay")
     }
     XCTAssertEqual(graph.project.path, "/work/second")
+  }
+
+  func testReplayQueuesLiveEventsAfterReplaySequence() async throws {
+    let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000005")!
+    let store = DaemonReplayStore(capacity: 8)
+    _ = store.append(clientID: clientID, event: .errorOccurred("replay-1"))
+    _ = store.append(clientID: clientID, event: .errorOccurred("replay-2"))
+    let transport = RecordingConnection(sendDelay: .milliseconds(20))
+    let channel = DaemonConnectionChannel(
+      connection: transport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+
+    let replay = Task { try await channel.replay(after: 0) }
+    try await Task.sleep(for: .milliseconds(1))
+    try await channel.sendEvent(.errorOccurred("live-3"))
+    try await replay.value
+
+    let sequences = try transport.frames.map {
+      try JSONDecoder().decode(DaemonWireEnvelope.self, from: $0).sequence
+    }
+    XCTAssertEqual(sequences, [1, 2, 3])
+  }
+
+  func testReplayStoreEvictsAndExpiresClientHistory() throws {
+    let first = UUID(uuidString: "00000000-0000-0000-0000-000000000006")!
+    let second = UUID(uuidString: "00000000-0000-0000-0000-000000000007")!
+    let third = UUID(uuidString: "00000000-0000-0000-0000-000000000008")!
+    let store = DaemonReplayStore(capacity: 2, maxClients: 2, retention: 60)
+
+    _ = store.append(clientID: first, event: .errorOccurred("first"))
+    _ = store.append(clientID: second, event: .errorOccurred("second"))
+    _ = try store.replay(clientID: second, after: 0)
+    _ = store.append(clientID: third, event: .errorOccurred("third"))
+
+    XCTAssertThrowsError(try store.replay(clientID: first, after: 0)) { error in
+      XCTAssertEqual(error as? DaemonReplayBuffer.ReplayError, .replayUnavailable)
+    }
+    XCTAssertEqual(store.clientCount, 2)
+
+    store.pruneExpired(at: Date().addingTimeInterval(61))
+    XCTAssertEqual(store.clientCount, 0)
+  }
+
+  func testMalformedV2RequestKeepsSafelyExtractableRequestID() throws {
+    let requestID = UUID(uuidString: "00000000-0000-0000-0000-000000000009")!
+    var malformed = DaemonWireEnvelope.request(id: requestID, command: .listRecentProjects)
+    malformed.event = .errorOccurred("unexpected")
+    let data = try JSONEncoder().encode(malformed)
+
+    XCTAssertThrowsError(try DaemonWireProtocol.decodeClientFrame(data))
+    XCTAssertEqual(DaemonWireProtocol.requestIDIfPresent(in: data), requestID)
   }
 
   func testV2ChannelSequencesEventsAndCorrelatesResponses() async throws {

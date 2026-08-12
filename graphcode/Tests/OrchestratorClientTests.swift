@@ -16,6 +16,51 @@ import Testing
 /// could never open a project. These tests pin the invariant against a stand-in daemon.
 @Suite
 struct OrchestratorClientTests {
+  #if canImport(Darwin)
+    @Test
+    func concurrentUnixSocketFramesRemainWhole() async throws {
+      var descriptors = [Int32](repeating: 0, count: 2)
+      guard socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0 else {
+        throw OrchestratorClientError.connectFailed(errno: errno)
+      }
+      defer { close(descriptors[1]) }
+
+      let sender = UnixSocketConnection(fileDescriptor: descriptors[0])
+      let payloads = [
+        Data(repeating: 0x41, count: 256 * 1024),
+        Data(repeating: 0x42, count: 256 * 1024),
+      ]
+      let receiver = Task<[Data], Error> {
+        try await withCheckedThrowingContinuation { continuation in
+          DispatchQueue.global().async {
+            do {
+              continuation.resume(
+                returning: [
+                  try FramedMessageIO.readFrame(from: descriptors[1]),
+                  try FramedMessageIO.readFrame(from: descriptors[1]),
+                ])
+            } catch {
+              continuation.resume(throwing: error)
+            }
+          }
+        }
+      }
+
+      try await withThrowingTaskGroup(of: Void.self) { group in
+        for payload in payloads {
+          group.addTask {
+            try await sender.sendFrame(payload)
+          }
+        }
+        try await group.waitForAll()
+      }
+      sender.closeSync()
+
+      let received = try await receiver.value
+      #expect(Set(received) == Set(payloads))
+    }
+  #endif
+
   @Test
   func connectAndSendShareOneSocket() async throws {
     let daemon = try StubDaemon()

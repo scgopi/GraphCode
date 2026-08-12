@@ -220,6 +220,22 @@ public enum DaemonWireProtocol {
     return .v1(try JSONDecoder().decode(DaemonCommand.self, from: data))
   }
 
+  /// Extracts a request correlation ID before full envelope validation. This is
+  /// intentionally conservative: only a version-2 request-shaped JSON object
+  /// with a valid UUID is eligible for correlation.
+  public static func requestIDIfPresent(in data: Data) -> UUID? {
+    guard let object = try? JSONSerialization.jsonObject(with: data),
+      let dictionary = object as? [String: Any],
+      let version = dictionary["version"] as? Int,
+      version == currentVersion,
+      dictionary["kind"] as? String == DaemonWireEnvelope.Kind.request.rawValue,
+      let rawID = dictionary["requestID"] as? String
+    else {
+      return nil
+    }
+    return UUID(uuidString: rawID)
+  }
+
   public static func negotiatedVersion(for hello: DaemonWireEnvelope) throws -> Int {
     let validated = try hello.validated()
     guard validated.kind == .hello, let offered = validated.supportedVersions else {
