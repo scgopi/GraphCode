@@ -11,6 +11,7 @@ The Windows port must have runnable commands before implementation fleets begin.
 | Deterministic visual baseline | `pwsh Tools/windows/validate.ps1 -Task visual-baseline` |
 | TDD evidence contract | `pwsh Tools/tdd/Tests/TddEvidence.Tests.ps1` |
 | Platform/wire contracts | `pwsh Tools/windows/validate.ps1 -Task swift-contracts` |
+| Authenticated remote bridge proof | `pwsh Tools/windows/validate.ps1 -Task remote-bridge` |
 | Shared Swift package | `swift test --package-path <shared-package>` once extracted |
 | macOS app/daemon/CLI | `make test` |
 | macOS format/lint | `make check` |

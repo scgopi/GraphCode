@@ -7,6 +7,7 @@ param(
     "swift-paths",
     "swift-process",
     "swift-named-pipe",
+    "remote-bridge",
     "swift-format",
     "visual-baseline",
     "tdd-evidence",
@@ -29,6 +30,7 @@ $tasks = @(
   "swift-paths",
   "swift-process",
   "swift-named-pipe",
+  "remote-bridge",
   "swift-format",
   "visual-baseline",
   "tdd-evidence",
@@ -111,9 +113,19 @@ function Invoke-Task([string] $name) {
   }
   Write-Host "task=$name"
 
-  $swift = Resolve-SwiftExecutable
-  Initialize-SwiftEnvironment $swift
-  $swiftBin = Split-Path $swift
+  $swiftTasks = @(
+    "swift-portable",
+    "swift-contracts",
+    "swift-paths",
+    "swift-process",
+    "swift-named-pipe",
+    "swift-format"
+  )
+  if ($swiftTasks -contains $name) {
+    $swift = Resolve-SwiftExecutable
+    Initialize-SwiftEnvironment $swift
+    $swiftBin = Split-Path $swift
+  }
 
   switch ($name) {
     "swift-portable" {
@@ -146,6 +158,17 @@ function Invoke-Task([string] $name) {
       Invoke-Native "Swift Named Pipe spike" {
         & (Join-Path $swiftBin "swift-run.exe") `
           --package-path (Join-Path $repoRoot "investigation\spikes\swift-named-pipe")
+      }
+    }
+    "remote-bridge" {
+      $python = Get-Command python.exe -ErrorAction SilentlyContinue
+      if (-not $python) {
+        throw "Python 3 was not found for the remote-bridge fixture"
+      }
+      Invoke-Native "Python remote bridge proof" {
+        & $python.Source -B -m unittest discover `
+          -s (Join-Path $repoRoot "investigation\spikes\remote-bridge") `
+          -p "test_*.py" -v
       }
     }
     "swift-format" {
@@ -223,7 +246,7 @@ function Invoke-Task([string] $name) {
       )
       foreach ($file in $files) {
         if ($file.Extension -notin
-          ".md", ".swift", ".c", ".ps1", ".resolved", ".json", ".txt" -and
+          ".md", ".swift", ".c", ".py", ".ps1", ".resolved", ".json", ".txt" -and
           $file.Name -ne ".gitignore") {
           continue
         }

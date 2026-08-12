@@ -12,6 +12,7 @@ $expected = @(
   "swift-paths",
   "swift-process",
   "swift-named-pipe",
+  "remote-bridge",
   "swift-format",
   "visual-baseline",
   "tdd-evidence",

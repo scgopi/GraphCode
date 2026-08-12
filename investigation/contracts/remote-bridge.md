@@ -26,6 +26,13 @@ An atomically replaced user-only record contains:
 - issued/expiry data
 - protocol version
 
+The record uses `schema_version: 1` and `protocol_version: 1`. `host` is always the
+literal `127.0.0.1`; a client must reject another host. `capability` is at least
+32 random bytes encoded as lowercase hexadecimal. `generation` is monotonically
+increasing for a daemon instance. A rotation may include one `previous` generation
+with an explicit expiry, bounded by the configured overlap maximum. Readers must
+re-read the record for every one-shot command.
+
 The one-shot shim reads the record on every command, so already-running zmx sessions
 discover replacements after daemon restart, SSH reconnect, remote reboot, or shim upgrade.
 Rotation permits a bounded prior generation to avoid update races.
@@ -40,6 +47,11 @@ Rotation permits a bounded prior generation to avoid update races.
 - collision retry, expiry, stale cleanup, and sanitized diagnostics
 - no network-exposed or unauthenticated daemon transport
 
+The isolated `investigation/spikes/remote-bridge` proof demonstrates these state,
+framing, authentication, rotation, expiry, collision, restart, and loopback
+properties with a POSIX-compatible Python shim and a Named Pipe-like framed backend.
+It is not a production implementation.
+
 ## Gates
 
 - invalid, expired, previous-generation, and missing capability tests
@@ -47,3 +59,11 @@ Rotation permits a bounded prior generation to avoid update races.
 - multiple hosts and projects
 - network loss and stale state
 - real remote create/send/memo/status through the tunnel
+
+## Required production changes
+
+Before integration, production must add a current-user Windows ACL for both the state
+record and Named Pipe, overlapped Named Pipe I/O with cancellation/deadlines, and
+strict SSH reverse-forward checks (`StrictHostKeyChecking`, `ExitOnForwardFailure`,
+explicit remote `127.0.0.1`, and effective-listener verification). Production must
+also define ownership-safe stale cleanup and protected-host integration fixtures.
