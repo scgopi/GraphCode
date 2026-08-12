@@ -130,3 +130,19 @@ accidental macOS implementation detail and add unnecessary complexity.
 `graphcoded` can remain Swift, but not “entirely shared except its socket main.” Its
 orchestration can remain shared; transport host, startup, process/shell services, paths,
 and remote forwarding require explicit platform implementations.
+
+## Platform implementation baseline
+
+The first production platform seam now lives in `GraphcodeKit/Sources/Platform`:
+
+- `WindowsPlatformPaths` and `DarwinPlatformPaths` provide canonical local paths,
+  support/bin/hooks/session roots, and versioned SHA-256 persistence keys.
+- `FoundationProcessRunner` preserves direct argv, working directory, environment,
+  standard input/output/error, timeout, and cancellation behavior without mutating the
+  parent process.
+- `WindowsShellStrategy` classifies native executables, `.cmd`/`.bat`, and `.ps1`
+  launches without translating arguments through an incidental shell.
+
+`investigation/spikes/swift-full` compiles these production sources and runs their Windows
+tests. Use `pwsh Tools/windows/validate.ps1 -Task swift-production` for focused
+validation; `-Task all` includes it.

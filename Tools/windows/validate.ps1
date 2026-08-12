@@ -4,6 +4,7 @@ param(
     "all",
     "swift-portable",
     "swift-contracts",
+    "swift-production",
     "swift-paths",
     "swift-process",
     "swift-named-pipe",
@@ -27,6 +28,7 @@ $env:GIT_CONFIG_VALUE_0 = "all"
 $tasks = @(
   "swift-portable",
   "swift-contracts",
+  "swift-production",
   "swift-paths",
   "swift-process",
   "swift-named-pipe",
@@ -142,6 +144,13 @@ function Invoke-Task([string] $name) {
           --package-path (Join-Path $repoRoot "investigation\spikes\swift-contracts")
       }
     }
+    "swift-production" {
+      & (Join-Path $repoRoot "investigation\spikes\swift-full\prepare.ps1")
+      Invoke-Native "Swift production platform tests" {
+        & (Join-Path $swiftBin "swift-test.exe") `
+          --package-path (Join-Path $repoRoot "investigation\spikes\swift-full")
+      }
+    }
     "swift-paths" {
       Invoke-Native "Swift Windows path spike" {
         & (Join-Path $swiftBin "swift-run.exe") `
@@ -189,6 +198,16 @@ function Invoke-Task([string] $name) {
             "[\\/]swift-(full|portable|contracts)[\\/]Sources[\\/]"
         } |
         Select-Object -ExpandProperty FullName
+      $sources += Get-ChildItem `
+        (Join-Path $repoRoot "GraphcodeKit\Sources\Platform") `
+        -Filter *.swift |
+        Select-Object -ExpandProperty FullName
+      $sources += @(
+        (Join-Path $repoRoot "GraphcodeKit\Sources\SupportDirectory.swift"),
+        (Join-Path $repoRoot "GraphcodeKit\Sources\ProjectPersistence.swift"),
+        (Join-Path $repoRoot `
+          "investigation\spikes\swift-full\Tests\GraphcodeKitWindowsTests\PlatformTests.swift")
+      )
       foreach ($source in $sources) {
         $temporary = Join-Path $env:TEMP "graphcode-format-$([guid]::NewGuid()).swift"
         try {
@@ -294,6 +313,12 @@ try {
       (Join-Path $repoRoot `
         "investigation\spikes\swift-contracts\Sources\GraphcodeWindowsContracts\Platform")
     )
+    $junctions += Join-Path $repoRoot `
+      "investigation\spikes\swift-contracts\Sources\GraphcodeWindowsContracts\SupportDirectory.swift"
+  }
+  if ($selected -contains "swift-production") {
+    $junctions += Join-Path $repoRoot `
+      "investigation\spikes\swift-full\Sources\GraphcodeKit"
   }
   foreach ($junction in $junctions) {
     if (Test-Path $junction) {

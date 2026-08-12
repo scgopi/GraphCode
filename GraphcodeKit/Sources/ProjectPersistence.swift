@@ -13,11 +13,17 @@ public struct ProjectPersistence: Sendable {
   private let projectsDirectory: URL
   private let recentProjectsFile: URL
   private let openProjectsFile: URL
+  private let platformPaths: any PlatformPaths
 
   public init(baseDirectory: URL) {
+    self.init(baseDirectory: baseDirectory, platformPaths: CurrentPlatformPaths.value)
+  }
+
+  public init(baseDirectory: URL, platformPaths: any PlatformPaths) {
     projectsDirectory = baseDirectory.appendingPathComponent("projects", isDirectory: true)
     recentProjectsFile = baseDirectory.appendingPathComponent("recent-projects.json")
     openProjectsFile = baseDirectory.appendingPathComponent("open-projects.json")
+    self.platformPaths = platformPaths
     try? FileManager.default.createDirectory(
       at: projectsDirectory, withIntermediateDirectories: true)
   }
@@ -47,12 +53,13 @@ public struct ProjectPersistence: Sendable {
     try? FileManager.default.removeItem(at: fileURL(forProjectPath: path))
   }
 
-  /// Filenames are the canonical path with `/` replaced by `_` — simple, deterministic,
-  /// and legible in a Finder window, which matters more here than collision-resistance
-  /// does for a single-user local tool.
+  /// Filenames are versioned hashes of the canonical project path. A path-derived filename
+  /// must be deterministic across launches, but Windows also rejects `:`, `\`, and several
+  /// other characters that occur in perfectly valid project paths. Hashing keeps names
+  /// short, safe, and collision-resistant without leaking a path into a directory listing.
   private func fileURL(forProjectPath path: String) -> URL {
-    let safeName = path.replacingOccurrences(of: "/", with: "_")
-    return projectsDirectory.appendingPathComponent("\(safeName).json")
+    let key = platformPaths.persistenceKey(forProjectPath: path)
+    return projectsDirectory.appendingPathComponent("\(key).json")
   }
 
   // MARK: - Recent projects

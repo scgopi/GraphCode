@@ -17,5 +17,8 @@ foreach ($entry in $links.GetEnumerator()) {
   }
   New-Item -ItemType Junction -Path $link -Target $entry.Value | Out-Null
 }
+New-Item -ItemType HardLink `
+  -Path (Join-Path $targetRoot "SupportDirectory.swift") `
+  -Target (Join-Path $repo "GraphcodeKit\Sources\SupportDirectory.swift") | Out-Null
 Write-Host "Linked Graphcode contract sources"
 Write-Host "Linked Graphcode contract sources"

@@ -43,16 +43,33 @@ public enum SupportDirectory {
 
   /// `~/.graphcode`, unless `GRAPHCODE_SUPPORT_DIR` says otherwise.
   public static var url: URL {
-    let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-    guard let override = ProcessInfo.processInfo.environment[environmentKey],
-      !override.trimmingCharacters(in: .whitespaces).isEmpty
-    else {
+    url(
+      environment: ProcessInfo.processInfo.environment,
+      homeDirectory: URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true))
+  }
+
+  /// Resolves an injected environment without changing the process environment.
+  ///
+  /// Foundation's `URL(fileURLWithPath:)` only recognizes POSIX absolute paths on
+  /// Darwin. On Windows, drive-letter and UNC paths must be classified before URL
+  /// construction or an override such as `C:\GraphCode` is appended to the user's
+  /// home directory.
+  public static func url(environment: [String: String], homeDirectory: URL) -> URL {
+    let home = homeDirectory
+    guard let value = environment[environmentKey] else {
       return home.appendingPathComponent(".graphcode", isDirectory: true)
     }
-    let expanded = (override as NSString).expandingTildeInPath
-    return expanded.hasPrefix("/")
-      ? URL(fileURLWithPath: expanded, isDirectory: true)
-      : home.appendingPathComponent(expanded, isDirectory: true)
+
+    let override = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !override.isEmpty else {
+      return home.appendingPathComponent(".graphcode", isDirectory: true)
+    }
+
+    let expanded = expandTilde(override, homeDirectory: home)
+    guard isAbsolutePath(expanded) else {
+      return home.appendingPathComponent(expanded, isDirectory: true)
+    }
+    return URL(fileURLWithPath: expanded, isDirectory: true)
   }
 
   /// Where graphcode kept its state before this moved. Read only by the migration below.
@@ -118,5 +135,28 @@ public enum SupportDirectory {
       // to run. The old directory is left untouched for a human to move by hand.
       return false
     }
+  }
+
+  private static func isAbsolutePath(_ path: String) -> Bool {
+    if path.hasPrefix("/") || path.hasPrefix("\\") {
+      return true
+    }
+    #if os(Windows)
+      guard path.count >= 3 else { return false }
+      let characters = Array(path)
+      return characters[1] == ":" && (characters[2] == "\\" || characters[2] == "/")
+    #else
+      return false
+    #endif
+  }
+
+  private static func expandTilde(_ path: String, homeDirectory: URL) -> String {
+    guard path == "~" || path.hasPrefix("~/") || path.hasPrefix("~\\") else {
+      return (path as NSString).expandingTildeInPath
+    }
+    let suffix = String(path.dropFirst()).trimmingCharacters(in: CharacterSet(charactersIn: "/\\"))
+    return suffix.isEmpty
+      ? homeDirectory.path
+      : homeDirectory.appendingPathComponent(suffix, isDirectory: true).path
   }
 }

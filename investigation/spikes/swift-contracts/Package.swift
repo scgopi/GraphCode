@@ -26,6 +26,12 @@ let package = Package(
         "IPC/DaemonSocketClient.swift",
         "IPC/DaemonSocketPath.swift",
         "IPC/FramedMessageIO.swift",
+      ],
+      sources: [
+        "Domain",
+        "IPC",
+        "Platform",
+        "SupportDirectory.swift",
       ]),
     .testTarget(
       name: "GraphcodeWindowsContractsTests",
