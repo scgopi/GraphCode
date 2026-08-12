@@ -1190,6 +1190,7 @@ public enum ZmxSessionLauncher {
         let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
         return CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent
       }()
+    guard let runArgs = arguments(forNode: node, projectPath: projectPath) else { return }
     if let sessionID,
       let resumeArgs = resumeArguments(
         forNode: node, sessionID: sessionID, projectPath: projectPath)
@@ -1197,13 +1198,42 @@ public enum ZmxSessionLauncher {
       await atomicCheckOrRun(
         checkArguments: checkArgs, runArguments: resumeArgs,
         zmxPath: zmxPath, workingDirectory: wd)
-      return
+      // `zmx run -d` reports that the *session* exists, not that what it launched
+      // survived: `claude --resume` against a transcript its retention expired dies
+      // within a second, taking the session with it, and the ensure returns 0 having
+      // achieved nothing. Nothing else notices — the card keeps saying `running` while
+      // the loop is gone, and the next ensure retries the same dead ID, because
+      // (unlike the remote path) the local one never consumed it. So look again, and
+      // only if the session really failed to survive is the ID treated as dead: it is
+      // dropped and the fresh launch runs. A resume that took is left alone, and its
+      // `SessionStart` hook has already rebanked the same ID.
+      guard
+        await sessionDiedImmediately(
+          checkArguments: checkArgs, zmxPath: zmxPath, workingDirectory: wd)
+      else { return }
+      SessionIDStore.remove(forNodeID: node.id)
     }
-
-    guard let runArgs = arguments(forNode: node, projectPath: projectPath) else { return }
     await atomicCheckOrRun(
       checkArguments: checkArgs, runArguments: runArgs,
       zmxPath: zmxPath, workingDirectory: wd)
+  }
+
+  /// How long a resumed session has to still be there before its launch counts as taken.
+  /// Long enough that a dying `claude --resume` is already gone, short enough that a
+  /// genuinely dead ID costs one of these per ensure rather than a wasted minute.
+  /// Public because the app's launch path makes the same judgement with the same number
+  /// (`GhosttyTerminalView.localResumeOrFreshCommand`).
+  public static let resumeSettleSeconds: UInt64 = 5
+
+  private static func sessionDiedImmediately(
+    checkArguments: [String], zmxPath: String, workingDirectory: String?
+  ) async -> Bool {
+    try? await Task.sleep(for: .seconds(resumeSettleSeconds))
+    guard
+      let session = try? PTYProcessSession(
+        executable: zmxPath, arguments: checkArguments, workingDirectory: workingDirectory)
+    else { return false }
+    return await session.waitUntilFinished() == false
   }
 
   private static func atomicCheckOrRun(

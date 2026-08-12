@@ -1,3 +1,4 @@
+import Foundation
 import GraphcodeKit
 
 /// The remote half of `GhosttyTerminalView`: the ssh dial a surface runs when its
@@ -176,12 +177,23 @@ extension GhosttyTerminalView {
   /// under that very process — inherits it. No opening prompt and no briefing: a resumed
   /// conversation already had both. No `--name` for Copilot either — it is mutually
   /// exclusive with `--resume` (see `ZmxSessionLauncher.resumeArguments`).
+  ///
+  /// `hooksFile` is the local twin of `remoteSettingsPath` — the presence hooks this
+  /// machine wrote. A resumed local session needs them for the same reason a fresh one
+  /// does: without them the loop reports IDLE for as long as it runs.
   func resumeCommand(
-    settings: GraphcodeSettings, remoteSettingsPath: String?
+    settings: GraphcodeSettings, hooksFile: URL? = nil, remoteSettingsPath: String?
   ) -> [String]? {
     guard backend.supportsResume, var parts = launchPrefix(settings: settings) else {
       return nil
     }
+    let presence = backend.presenceArguments(
+      hooksFile: hooksFile, sessionName: nil,
+      zmxPath: ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil
+    )
+    .map(PresenceHooks.singleQuoted)
+    .joined(separator: " ")
+    if !presence.isEmpty { parts.append(presence) }
     if let remoteSettingsPath { parts.append("--settings \"\(remoteSettingsPath)\"") }
     parts.append("--resume \"$\(ZmxSessionLauncher.remoteResumeIDVariable)\"")
     return Self.interactiveLoginShell(parts)
