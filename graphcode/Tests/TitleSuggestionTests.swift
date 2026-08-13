@@ -36,10 +36,12 @@ struct TitleSuggestionTests {
   }
 
   @Test
-  func theInstructionAsksForOneOrTwoWordsAndListsTakenNames() {
+  func theInstructionPrefersTwoPreciseWordsAndListsTakenNames() {
     let instruction = TitleSuggestionClient.instruction(
       for: "fix the build", taken: ["Deploy", "Research"])
-    #expect(instruction.contains("one or two words"))
+    #expect(instruction.contains("Prefer two words"))
+    #expect(instruction.contains("single word only when it alone names the task"))
+    #expect(instruction.contains("Never more than two words"))
     #expect(instruction.contains("Deploy, Research"))
     #expect(instruction.contains("fix the build"))
     let bare = TitleSuggestionClient.instruction(for: "fix the build", taken: [])
