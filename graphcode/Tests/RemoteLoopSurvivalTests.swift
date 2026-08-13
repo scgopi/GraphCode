@@ -296,6 +296,78 @@ struct RemoteLoopSurvivalTests {
     #expect(successBranch[..<branchEnd.lowerBound].contains(".graphcode/boots"))
   }
 
+  // MARK: - The connect dial
+
+  @Test
+  func theConnectProbesBeforeItWillCreateAnything() throws {
+    // The connect used to be a bare create-or-attach carrying the goal prompt, which
+    // held only while one surface process survived a whole outage: surfaces are
+    // LRU-retained, and one rebuilt while a remote reboot had the session down — a
+    // screen switch, an app relaunch, reopening the loop — re-ran the goal from
+    // scratch and rebanked a fresh session ID over the one holding the work. Both
+    // dials now open with the same probe.
+    let view = agentSurface()
+    let script = try #require(view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
+    let connectLine = try #require(script.range(of: "while :; do").map { script[..<$0.lowerBound] })
+    #expect(connectLine.contains("'get'"))
+    #expect(connectLine.contains(#"-ne 1"#))
+    #expect(connectLine.contains("exit 255"))
+  }
+
+  @Test
+  func aLiveSessionIsJoinedWithoutTheAgentCommand() throws {
+    // A live session means someone already launched the agent — the daemon's ensure or
+    // an earlier pane. Attaching with the launch argv would be harmless today only
+    // because zmx ignores it; joining plainly makes that not depend on zmx's mercy.
+    let view = agentSurface()
+    let script = try #require(view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
+    let connectLine = try #require(script.range(of: "while :; do").map { script[..<$0.lowerBound] })
+    let live = try #require(connectLine.range(of: "-eq 0"))
+    let branchEnd = try #require(connectLine[live.upperBound...].range(of: "fi;"))
+    let branch = connectLine[live.upperBound..<branchEnd.lowerBound]
+    #expect(branch.contains("exec"))
+    #expect(branch.contains(".graphcode/boots"))
+    #expect(!branch.contains("claude"))
+    #expect(!branch.contains("GRAPHCODE_TRIGGER_PROMPT"))
+  }
+
+  @Test
+  func anUnattendedConnectNeverCarriesThePromptAndWaitsForTheDaemon() throws {
+    // An unattended loop's session is graphcoded's to start — at node creation, at
+    // graph load, and every liveness sweep, under the ensure gate. The pane creating
+    // it here raced that ensure: whichever launched second either re-ran the goal or
+    // typed a launch command into the other's session. The pane now announces and
+    // keeps dialing until the daemon has it.
+    let view = agentSurface(loopType: .goalBased)
+    let script = try #require(view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
+    #expect(!script.contains("GRAPHCODE_TRIGGER_PROMPT"))
+    #expect(!script.contains("--append-system-prompt"))
+    #expect(!script.contains("--resume"))
+    let connectLine = try #require(script.range(of: "while :; do").map { script[..<$0.lowerBound] })
+    #expect(connectLine.contains("waiting for graphcoded"))
+    #expect(connectLine.contains("exit 255"))
+  }
+
+  @Test
+  func aTurnBasedConnectResumesTheBankedConversation() throws {
+    // Opening a remote turn-based loop whose session was gone used to restart the
+    // goal fresh — the resume-on-open the local pane got never reached the remote
+    // dial. The connect's missing branch now runs the same consume-first restore as
+    // the reconnect's proven-reboot branch; only a loop nothing ever banked an ID for
+    // falls through to the prompt-bearing first launch, which records the boot it
+    // was created under.
+    let nodeID = UUID()
+    let view = agentSurface(nodeID: nodeID)
+    let script = try #require(view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
+    let connectLine = try #require(script.range(of: "while :; do").map { script[..<$0.lowerBound] })
+    #expect(connectLine.contains("\(nodeID.uuidString).id"))
+    #expect(connectLine.contains(#"--resume "$GRAPHCODE_RESUME_ID""#))
+    #expect(connectLine.contains("rm -f"))
+    #expect(connectLine.contains("GRAPHCODE_TRIGGER_PROMPT"))
+    let fresh = try #require(connectLine.range(of: "Resume did not take"))
+    #expect(connectLine[fresh.upperBound...].contains(".graphcode/boots"))
+  }
+
   @Test
   func copilotRestoreResumesWithoutANameAndCodexCannotResume() {
     // Copilot's `--name` and `--resume` are mutually exclusive; Codex has no resume at
