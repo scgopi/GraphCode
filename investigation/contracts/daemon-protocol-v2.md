@@ -43,10 +43,16 @@ cancellation, backpressure, and non-reading peers.
 - When retention capacity is full of active clients, an overflow client may receive live
   events without a replay buffer; later promotion preserves its sequence and watermark
   state rather than resetting or duplicating visible sequences.
+- Canonical graph appends retry admission for eligible overflow clients before assigning
+  their event sequence, so an inactive retained client can be evicted and the active
+  client promoted on the production broadcast path.
 - With `maxClients: 0`, active clients still share monotonic append/snapshot sequences and
   watermarks, but retain no replay history; after final disconnect, reconnect starts a new
   sequence window and an older cursor is outside that window.
 - Replay frames are queued before live events, preserving sequence order across reconnect.
+- The live-event queue used while replay is in progress is bounded by both event count and
+  encoded bytes. A slow connection that exceeds either bound is failed and closed rather
+  than allowed to grow daemon memory without limit.
 - Multiple sockets sharing one logical client receive the same broadcast envelope and
   sequence; project membership is reference-counted by socket, so one socket leaving does
   not detach a project still joined by another.
@@ -55,6 +61,8 @@ cancellation, backpressure, and non-reading peers.
   is an exact caught-up replay rather than `replayUnavailable`.
 - Complete framed writes are serialized at the transport boundary, including concurrent app
   sends.
+- Unix transport close waits behind the frame-write queue and rejects later writes, so a
+  descriptor cannot be closed and reused while an earlier header/payload pair is active.
 - Replay stores run periodic expiry cleanup while the daemon is idle; expiry does not
   require a subsequent append or reconnect attempt.
 - Responses and errors are not replayed. They are correlated to the request that produced

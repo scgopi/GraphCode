@@ -23,6 +23,7 @@ public enum DaemonConnectionChannelError: Error, Equatable, Sendable {
   case malformedEnvelope
   case replayUnavailable
   case cursorOutsideWindow
+  case replayQueueOverflow
 }
 
 /// Replay state is kept separately from a socket. A reconnecting client presents
@@ -216,6 +217,11 @@ public final class DaemonReplayStore: @unchecked Sendable {
       guard projectPaths[clientID]?.contains(projectPath) == true,
         isSubscribed(clientID: clientID, projectPath: projectPath)
       else { continue }
+      // A logical client can remain active without a replay buffer while all
+      // retained slots are occupied. Re-run admission on each canonical event so
+      // an inactive buffer freed by this append can promote that client without
+      // resetting its sequence or watermark.
+      _ = ensureClient(clientID)
       envelopes[clientID] = appendLocked(clientID: clientID, event: event)
       if activeConnections[clientID]?.isEmpty == false {
         lastAccess[clientID] = now
@@ -372,10 +378,15 @@ public actor DaemonConnectionChannel {
   public let clientID: UUID
   public let replayStore: DaemonReplayStore
 
+  public static let maxQueuedLiveEventCount = 256
+  public static let maxQueuedLiveEventBytes = 4 * 1024 * 1024
+
   private let writeGate: DaemonFrameWriteGate
   private var subscription: DaemonWireSubscription?
   private var replayInProgress = false
   private var queuedLiveEvents: [DaemonWireEnvelope] = []
+  private var queuedLiveEventBytes = 0
+  private var isClosed = false
 
   public init(
     connection: any DaemonConnection,
@@ -423,6 +434,7 @@ public actor DaemonConnectionChannel {
   }
 
   public func sendEvent(_ event: DaemonEvent) async throws {
+    guard !isClosed else { throw FramedMessageIO.IOError.connectionClosed }
     guard isSubscribed(to: event) else { return }
     switch mode {
     case .v1:
@@ -430,7 +442,7 @@ public actor DaemonConnectionChannel {
     case .v2:
       let envelope = replayStore.append(clientID: clientID, event: event)
       if replayInProgress {
-        queuedLiveEvents.append(envelope)
+        try await enqueueLiveEvent(envelope)
         return
       }
       try await sendJSON(envelope)
@@ -438,7 +450,7 @@ public actor DaemonConnectionChannel {
   }
 
   public func envelopeForEvent(_ event: DaemonEvent) -> DaemonWireEnvelope? {
-    guard case .v2 = mode, isSubscribed(to: event) else { return nil }
+    guard !isClosed, case .v2 = mode, isSubscribed(to: event) else { return nil }
     return replayStore.append(clientID: clientID, event: event)
   }
 
@@ -446,6 +458,7 @@ public actor DaemonConnectionChannel {
   /// opening or rejoining a project is not a canonical mutation and must not be
   /// replayed to other sockets or retained for a disconnected logical client.
   public func sendConnectionSnapshot(_ event: DaemonEvent) async throws {
+    guard !isClosed else { throw FramedMessageIO.IOError.connectionClosed }
     guard isSubscribed(to: event) else { return }
     switch mode {
     case .v1:
@@ -459,9 +472,10 @@ public actor DaemonConnectionChannel {
   /// Writes a sequence already assigned by the canonical replay store. This is used
   /// when a graph changed while another socket for the same logical client was away.
   public func sendEvent(envelope: DaemonWireEnvelope) async throws {
+    guard !isClosed else { throw FramedMessageIO.IOError.connectionClosed }
     guard case .v2 = mode, let event = envelope.event, isSubscribed(to: event) else { return }
     if replayInProgress {
-      queuedLiveEvents.append(envelope)
+      try await enqueueLiveEvent(envelope)
       return
     }
     try await sendJSON(envelope)
@@ -497,28 +511,36 @@ public actor DaemonConnectionChannel {
   }
 
   public func replay(after cursor: UInt64) async throws {
-    guard case .v2 = mode else { return }
+    guard !isClosed, case .v2 = mode else {
+      if isClosed { throw FramedMessageIO.IOError.connectionClosed }
+      return
+    }
     replayInProgress = true
     do {
       let envelopes = try replayStore.replay(clientID: clientID, after: cursor)
       try await writeGate.flush()
       for envelope in envelopes {
+        guard !isClosed else { throw FramedMessageIO.IOError.connectionClosed }
         guard let event = envelope.event, isSubscribed(to: event) else { continue }
         try await sendJSON(envelope)
       }
       try await flushQueuedLiveEvents()
+      guard !isClosed else { throw FramedMessageIO.IOError.connectionClosed }
       replayInProgress = false
     } catch DaemonReplayBuffer.ReplayError.cursorOutsideWindow {
       try? await flushQueuedLiveEvents()
       replayInProgress = false
+      queuedLiveEventBytes = 0
       throw DaemonConnectionChannelError.cursorOutsideWindow
     } catch DaemonReplayBuffer.ReplayError.replayUnavailable {
       try? await flushQueuedLiveEvents()
       replayInProgress = false
+      queuedLiveEventBytes = 0
       throw DaemonConnectionChannelError.replayUnavailable
     } catch {
       replayInProgress = false
       queuedLiveEvents.removeAll()
+      queuedLiveEventBytes = 0
       throw error
     }
   }
@@ -528,8 +550,11 @@ public actor DaemonConnectionChannel {
   }
 
   public func close() async throws {
+    guard !isClosed else { return }
+    isClosed = true
     replayInProgress = false
     queuedLiveEvents.removeAll()
+    queuedLiveEventBytes = 0
     if case .v2 = mode {
       replayStore.disconnect(clientID: clientID, connectionID: connection.id)
     }
@@ -556,6 +581,7 @@ public actor DaemonConnectionChannel {
   }
 
   private func sendJSON<T: Encodable>(_ value: T) async throws {
+    guard !isClosed else { throw FramedMessageIO.IOError.connectionClosed }
     let data = try JSONEncoder().encode(value)
     if case .v2 = mode, data.count > FramedMessageIO.v2MaxPayloadBytes {
       throw FramedMessageIO.IOError.payloadTooLarge
@@ -567,10 +593,29 @@ public actor DaemonConnectionChannel {
     while !queuedLiveEvents.isEmpty {
       let events = queuedLiveEvents
       queuedLiveEvents.removeAll(keepingCapacity: true)
+      queuedLiveEventBytes = 0
       for envelope in events {
+        guard !isClosed else { throw FramedMessageIO.IOError.connectionClosed }
         guard let event = envelope.event, isSubscribed(to: event) else { continue }
         try await sendJSON(envelope)
       }
+    }
+  }
+
+  private func enqueueLiveEvent(_ envelope: DaemonWireEnvelope) async throws {
+    do {
+      let bytes = try JSONEncoder().encode(envelope).count
+      guard queuedLiveEvents.count < Self.maxQueuedLiveEventCount,
+        bytes <= Self.maxQueuedLiveEventBytes,
+        queuedLiveEventBytes <= Self.maxQueuedLiveEventBytes - bytes
+      else {
+        throw DaemonConnectionChannelError.replayQueueOverflow
+      }
+      queuedLiveEvents.append(envelope)
+      queuedLiveEventBytes += bytes
+    } catch DaemonConnectionChannelError.replayQueueOverflow {
+      try? await close()
+      throw DaemonConnectionChannelError.replayQueueOverflow
     }
   }
 }

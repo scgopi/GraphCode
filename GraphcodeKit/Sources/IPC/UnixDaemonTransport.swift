@@ -137,6 +137,8 @@ import Foundation
     private let acceptsWrites: Bool
     private let writeQueue = DispatchQueue(
       label: "com.graphcode.unix-socket-frame-writes")
+    private let stateLock = NSLock()
+    private var isClosed = false
 
     public init(
       id: UUID = UUID(),
@@ -163,6 +165,13 @@ import Foundation
       guard acceptsWrites else { return }
       try await withCheckedThrowingContinuation { continuation in
         writeQueue.async {
+          self.stateLock.lock()
+          let closed = self.isClosed
+          self.stateLock.unlock()
+          guard !closed else {
+            continuation.resume(throwing: FramedMessageIO.IOError.connectionClosed)
+            return
+          }
           do {
             try self.stream.writeFrameSync(data)
             continuation.resume()
@@ -190,6 +199,12 @@ import Foundation
     public func sendFrameSync(_ data: Data) throws {
       guard acceptsWrites else { return }
       try writeQueue.sync {
+        stateLock.lock()
+        let closed = isClosed
+        stateLock.unlock()
+        guard !closed else {
+          throw FramedMessageIO.IOError.connectionClosed
+        }
         try stream.writeFrameSync(data)
       }
     }
@@ -199,7 +214,16 @@ import Foundation
     }
 
     public func closeSync() {
-      stream.closeSync()
+      writeQueue.sync {
+        stateLock.lock()
+        guard !isClosed else {
+          stateLock.unlock()
+          return
+        }
+        isClosed = true
+        stateLock.unlock()
+        stream.closeSync()
+      }
     }
 
     public func setReadTimeout(_ timeout: TimeInterval?) {

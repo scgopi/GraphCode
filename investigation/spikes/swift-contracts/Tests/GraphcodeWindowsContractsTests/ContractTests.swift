@@ -303,6 +303,47 @@ final class ContractTests: XCTestCase {
     }
   }
 
+  private final class SlowReplayConnection: @unchecked Sendable, DaemonConnection {
+    let id = UUID()
+    let endpoint: DaemonEndpoint = .namedPipe("slow-replay")
+    private let state = SlowReplayState()
+
+    func receiveFrame() async throws -> Data {
+      throw FramedMessageIO.IOError.connectionClosed
+    }
+
+    func sendFrame(_ data: Data) async throws {
+      let isClosed = await state.isClosed
+      guard !isClosed else { throw FramedMessageIO.IOError.connectionClosed }
+      try await Task.sleep(for: .milliseconds(5))
+      guard !(await state.isClosed) else {
+        throw FramedMessageIO.IOError.connectionClosed
+      }
+      await state.append(data)
+    }
+
+    func close() async throws {
+      await state.close()
+    }
+
+    var isClosed: Bool {
+      get async { await state.isClosed }
+    }
+  }
+
+  private actor SlowReplayState {
+    private(set) var isClosed = false
+    private(set) var frames = [Data]()
+
+    func append(_ data: Data) {
+      frames.append(data)
+    }
+
+    func close() {
+      isClosed = true
+    }
+  }
+
   private actor SendProbe {
     private var current = 0
     private(set) var maximum = 0
@@ -412,6 +453,41 @@ final class ContractTests: XCTestCase {
       try JSONDecoder().decode(DaemonWireEnvelope.self, from: $0).sequence
     }
     XCTAssertEqual(sequences, [1, 2, 3])
+  }
+
+  func testReplayQueueOverflowClosesSlowConnectionDuringUpdateFlood() async throws {
+    let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000045")!
+    let store = DaemonReplayStore(capacity: 300)
+    for index in 0..<300 {
+      _ = store.append(clientID: clientID, event: .errorOccurred("history-\(index)"))
+    }
+    let transport = SlowReplayConnection()
+    let channel = DaemonConnectionChannel(
+      connection: transport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+    let replayTask = Task {
+      try? await channel.replay(after: 0)
+    }
+    try await Task.sleep(for: .milliseconds(10))
+
+    var overflowed = false
+    for index in 0..<(DaemonConnectionChannel.maxQueuedLiveEventCount + 32) {
+      do {
+        try await channel.sendEvent(.errorOccurred("update-\(index)"))
+      } catch DaemonConnectionChannelError.replayQueueOverflow {
+        overflowed = true
+        break
+      } catch {
+        break
+      }
+    }
+
+    XCTAssertTrue(overflowed)
+    let closed = await transport.isClosed
+    XCTAssertTrue(closed)
+    _ = await replayTask.value
   }
 
   func testReplayStoreEvictsAndExpiresClientHistory() throws {
@@ -525,6 +601,35 @@ final class ContractTests: XCTestCase {
     XCTAssertThrowsError(try store.replay(clientID: first, after: 0)) { error in
       XCTAssertEqual(error as? DaemonReplayBuffer.ReplayError, .replayUnavailable)
     }
+  }
+
+  func testCanonicalAppendPromotesOverflowClientAfterInactiveEviction() throws {
+    let path = "/work/production-overload"
+    let retained = UUID(uuidString: "00000000-0000-0000-0000-000000000041")!
+    let retainedConnection = UUID(uuidString: "00000000-0000-0000-0000-000000000042")!
+    let overflow = UUID(uuidString: "00000000-0000-0000-0000-000000000043")!
+    let overflowConnection = UUID(uuidString: "00000000-0000-0000-0000-000000000044")!
+    let store = DaemonReplayStore(capacity: 8, maxClients: 1)
+    store.register(
+      clientID: retained, connectionID: retainedConnection, subscription: nil)
+    store.join(clientID: retained, connectionID: retainedConnection, projectPath: path)
+    let retainedGraph = LoopGraph(project: ProjectRef(path: path, name: "retained"))
+    let retainedEnvelope = try XCTUnwrap(
+      store.append(event: .graphChanged(retainedGraph), projectPath: path)[retained])
+    XCTAssertEqual(retainedEnvelope.sequence, 1)
+
+    store.register(
+      clientID: overflow, connectionID: overflowConnection, subscription: nil)
+    store.join(clientID: overflow, connectionID: overflowConnection, projectPath: path)
+    store.disconnect(clientID: retained, connectionID: retainedConnection)
+
+    let overflowGraph = LoopGraph(project: ProjectRef(path: path, name: "overflow"))
+    let promoted = try XCTUnwrap(
+      store.append(event: .graphChanged(overflowGraph), projectPath: path)[overflow])
+    XCTAssertEqual(promoted.sequence, 1)
+    XCTAssertEqual(store.clientCount, 1)
+    XCTAssertEqual(try store.replay(clientID: overflow, after: 0), [promoted])
+    XCTAssertThrowsError(try store.replay(clientID: retained, after: 0))
   }
 
   func testZeroCapacityTracksActiveSequencesAndReconnectsWithoutReplay() async throws {

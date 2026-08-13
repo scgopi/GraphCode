@@ -386,6 +386,48 @@ struct ProjectRegistryTests {
     #expect(reconnectTransport.frames.isEmpty)
   }
 
+#if canImport(Darwin)
+  @Test
+  func unixCloseWaitsForActiveFrameBeforeClosingDescriptor() async throws {
+    var pair = [Int32](repeating: -1, count: 2)
+    #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
+    defer { Darwin.close(pair[1]) }
+
+    var sendBuffer: Int32 = 1_024
+    _ = setsockopt(
+      pair[0],
+      SOL_SOCKET,
+      SO_SNDBUF,
+      &sendBuffer,
+      socklen_t(MemoryLayout<Int32>.size))
+    let connection = UnixSocketConnection(
+      fileDescriptor: pair[0], writeTimeout: 5)
+    let payload = Data(repeating: 0x41, count: 2 * 1024 * 1024)
+    let sendTask = Task {
+      try await connection.sendFrame(payload)
+    }
+    try await Task.sleep(for: .milliseconds(50))
+
+    let closeCompletion = CloseCompletionProbe()
+    let closeTask = Task {
+      connection.closeSync()
+      await closeCompletion.mark()
+    }
+    try await Task.sleep(for: .milliseconds(50))
+    let closedBeforeDrain = await closeCompletion.completed
+    #expect(!closedBeforeDrain)
+
+    let received = try await Task.detached {
+      try FramedMessageIO.readFrame(from: pair[1])
+    }.value
+    try await sendTask.value
+    await closeTask.value
+    let closedAfterDrain = await closeCompletion.completed
+    #expect(closedAfterDrain)
+    #expect(received == payload)
+  }
+#endif
+
   /// Paths round-trip through `resolvingSymlinksInPath()`, so compare the leaf rather
   /// than assuming `/tmp` survives as written.
   private static func names(_ paths: [String]) -> [String] {
@@ -436,6 +478,14 @@ private final class RecordingConnection: @unchecked Sendable, DaemonConnection {
   }
 
   func close() async throws {}
+}
+
+private actor CloseCompletionProbe {
+  private(set) var completed = false
+
+  func mark() {
+    completed = true
+  }
 }
 
 @Sendable
