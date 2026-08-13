@@ -1,6 +1,8 @@
 import Foundation
 
 #if os(Windows)
+  import WinSDK
+
   /// Per-user Task Scheduler integration for the Windows daemon. It avoids
   /// elevation and keeps startup state in the user's profile, matching the
   /// current-user named-pipe ACL.
@@ -37,26 +39,119 @@ import Foundation
       }
     }
 
-    public func stopAndUninstall() async throws {
+    public func stop() async throws {
+      guard try await status() == .running else { return }
       let stop = try await run(arguments: ["/End", "/TN", taskName])
-      if stop.exitCode != 0, !output(stop).localizedCaseInsensitiveContains("not running") {
+      guard stop.exitCode == 0 else {
         throw StartupManagerError.commandFailed(
           command: "schtasks /End", output: output(stop))
       }
+    }
+
+    public func waitForDaemonExit(timeout: TimeInterval = 10) async throws {
+      let probe: @Sendable () -> Bool = { [self] in isDaemonProcessRunning() }
+      try await Self.waitForExit(timeout: timeout, isRunning: probe)
+    }
+
+    static func waitForExit(
+      timeout: TimeInterval,
+      isRunning: @escaping @Sendable () -> Bool
+    ) async throws {
+      let deadline = Date().addingTimeInterval(max(0, timeout))
+      while Date() < deadline {
+        if !isRunning() { return }
+        try await Task.sleep(for: .milliseconds(50))
+      }
+      throw StartupManagerError.commandFailed(
+        command: "graphcoded termination", output: "the daemon process is still running")
+    }
+
+    public func uninstall() async throws {
+      let query = try await run(arguments: ["/Query", "/TN", taskName])
+      guard query.exitCode == 0 else { return }
       let delete = try await run(arguments: ["/Delete", "/TN", taskName, "/F"])
-      if delete.exitCode != 0, !output(delete).localizedCaseInsensitiveContains("does not exist") {
+      guard delete.exitCode == 0 else {
         throw StartupManagerError.commandFailed(
           command: "schtasks /Delete", output: output(delete))
       }
     }
 
+    public func stopAndUninstall() async throws {
+      try await stop()
+      try await waitForDaemonExit()
+      try await uninstall()
+    }
+
     public func status() async throws -> StartupStatus {
-      let query = try await run(arguments: ["/Query", "/TN", taskName, "/FO", "LIST"])
-      guard query.exitCode == 0 else {
-        return .notInstalled
+      let query = try await run(arguments: ["/Query", "/TN", taskName])
+      return Self.status(
+        taskQuerySucceeded: query.exitCode == 0,
+        daemonProcessRunning: isDaemonProcessRunning())
+    }
+
+    static func status(taskQuerySucceeded: Bool, daemonProcessRunning: Bool) -> StartupStatus {
+      guard taskQuerySucceeded else { return .notInstalled }
+      return daemonProcessRunning ? .running : .stopped
+    }
+
+    public func isDaemonProcessRunning() -> Bool {
+      let targetName = daemonURL.lastPathComponent.lowercased()
+      guard let currentSID = try? WindowsUserIdentity.currentSID(),
+        let snapshot = CreateToolhelp32Snapshot(DWORD(TH32CS_SNAPPROCESS), 0),
+        snapshot != INVALID_HANDLE_VALUE
+      else {
+        return false
       }
-      let text = output(query).lowercased()
-      return text.contains("running") ? .running : .stopped
+      defer { _ = CloseHandle(snapshot) }
+
+      var entry = PROCESSENTRY32W()
+      entry.dwSize = DWORD(MemoryLayout<PROCESSENTRY32W>.size)
+      guard Process32FirstW(snapshot, &entry) else { return false }
+      repeat {
+        let name = withUnsafeBytes(of: &entry.szExeFile) { bytes in
+          let units = bytes.bindMemory(to: UInt16.self)
+          let end = units.firstIndex(of: 0) ?? units.count
+          return String(decoding: units[..<end], as: UTF16.self).lowercased()
+        }
+        if name == targetName,
+          Self.processBelongsToCurrentUser(entry.th32ProcessID, sid: currentSID)
+        {
+          return true
+        }
+      } while Process32NextW(snapshot, &entry)
+      return false
+    }
+
+    private static func processBelongsToCurrentUser(_ processID: DWORD, sid: String) -> Bool {
+      guard
+        let process = OpenProcess(
+          DWORD(PROCESS_QUERY_LIMITED_INFORMATION), false, processID)
+      else {
+        return false
+      }
+      defer { _ = CloseHandle(process) }
+      var token: HANDLE?
+      guard OpenProcessToken(process, DWORD(TOKEN_QUERY), &token), let token else {
+        return false
+      }
+      defer { _ = CloseHandle(token) }
+      var required: DWORD = 0
+      _ = GetTokenInformation(token, TokenUser, nil, 0, &required)
+      guard required > 0 else { return false }
+      let memory = UnsafeMutableRawPointer.allocate(
+        byteCount: Int(required), alignment: MemoryLayout<UInt64>.alignment)
+      defer { memory.deallocate() }
+      guard GetTokenInformation(token, TokenUser, memory, required, &required) else {
+        return false
+      }
+      let tokenUser = memory.assumingMemoryBound(to: TOKEN_USER.self).pointee
+      var stringSID: LPWSTR?
+      guard ConvertSidToStringSidW(tokenUser.User.Sid, &stringSID), let stringSID else {
+        return false
+      }
+      defer { _ = LocalFree(HLOCAL(stringSID)) }
+      return String(decodingCString: stringSID, as: UTF16.self)
+        .caseInsensitiveCompare(sid) == .orderedSame
     }
 
     private func run(arguments: [String]) async throws -> ProcessResult {

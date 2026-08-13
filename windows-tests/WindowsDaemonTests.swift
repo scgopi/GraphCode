@@ -63,6 +63,28 @@ final class WindowsDaemonTests: XCTestCase {
         DaemonSocketClient.isAmbiguousConnectionClose(WindowsPipeError.timedOut))
     }
 
+    func testWindowsTaskStateIgnoresLocalizedQueryText() {
+      let localizedFixture = "Estado: En ejecución\r\nEstado: Ejecutándose"
+      XCTAssertFalse(localizedFixture.isEmpty)
+      XCTAssertEqual(
+        WindowsStartupManager.status(taskQuerySucceeded: true, daemonProcessRunning: true),
+        .running)
+      XCTAssertEqual(
+        WindowsStartupManager.status(taskQuerySucceeded: true, daemonProcessRunning: false),
+        .stopped)
+      XCTAssertEqual(
+        WindowsStartupManager.status(taskQuerySucceeded: false, daemonProcessRunning: true),
+        .notInstalled)
+    }
+
+    func testWindowsStopWaitsForDelayedProcessTermination() async throws {
+      let started = Date()
+      try await WindowsStartupManager.waitForExit(timeout: 1) {
+        Date().timeIntervalSince(started) < 0.2
+      }
+      XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(started), 0.2)
+    }
+
     func testWriteCancellationRaceClassifiesPossibleDeliveryAsAmbiguous() {
       XCTAssertEqual(
         WindowsPipeError.classifyWriteCancellation(
@@ -299,6 +321,37 @@ final class WindowsDaemonTests: XCTestCase {
           XCTFail("unexpected listener error: \(error)")
         }
       }
+    }
+
+    func testWindowsListenerCloseLosingHandoffNeverReturnsConnection() async throws {
+      let name =
+        try WindowsNamedPipeEndpoint.name()
+        + "-handoff-close-\(UUID().uuidString.lowercased())"
+      let entered = DispatchSemaphore(value: 0)
+      let release = DispatchSemaphore(value: 0)
+      let listener = try WindowsNamedPipeListener(
+        pipeName: name,
+        beforeConnectionReturn: {
+          entered.signal()
+          release.wait()
+        })
+      let pending = Task {
+        try await listener.accept()
+      }
+      let client = try WindowsNamedPipeClient.connect(to: name)
+      XCTAssertEqual(entered.wait(timeout: .now() + 5), .success)
+      try await listener.close()
+      release.signal()
+
+      do {
+        _ = try await pending.value
+        XCTFail("listener returned a connection after close completed")
+      } catch WindowsPipeError.connectionClosed {
+        // Expected: close won the transfer/return handoff.
+      } catch {
+        XCTFail("unexpected listener error: \(error)")
+      }
+      try await client.close()
     }
 
     func testWindowsPostHandshakeDeadlineDoesNotExpireIdleClient() async throws {

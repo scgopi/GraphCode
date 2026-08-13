@@ -231,24 +231,41 @@ public enum DaemonBootstrap {
     do {
       let packageVersion = try packageVersion(for: bundled)
       let status = try awaitBlocking { try await manager.status() }
+      let processRunning = manager.isDaemonProcessRunning()
       let installedCurrent =
         installedPackageVersion(in: destination) == packageVersion
         && helpersInstalled(in: destination)
-      if installedCurrent {
+      if installedCurrent, !processRunning {
         if status == .running {
+          // A stale scheduler state must not suppress a restart.
+          try awaitBlocking {
+            try await manager.installAndStart()
+          }
+          return .installed
+        }
+        if status == .stopped || status == .notInstalled {
+          try awaitBlocking {
+            try await manager.installAndStart()
+          }
+          return .installed
+        }
+      }
+      if installedCurrent, status == .running, processRunning {
           return .upToDate
-        }
-        try awaitBlocking {
-          try await manager.installAndStart()
-        }
-        return .installed
       }
 
-      let wasRunning = status == .running
+      let wasRunning = status == .running || processRunning
       if wasRunning {
+        guard status != .notInstalled else {
+          throw StartupManagerError.commandFailed(
+            command: "graphcoded termination",
+            output: "the daemon process is running without its task")
+        }
         try awaitBlocking {
-          try await manager.stopAndUninstall()
-          try await waitUntilStopped(manager)
+          try await manager.stop()
+          try await manager.waitForDaemonExit()
+          try await waitUntilEndpointUnavailable()
+          try await manager.uninstall()
         }
       }
 
@@ -438,16 +455,35 @@ public enum DaemonBootstrap {
     }
   }
 
-  private static func waitUntilStopped(_ manager: WindowsStartupManager) async throws {
+  private static func waitUntilEndpointUnavailable() async throws {
+    let endpoint = try WindowsNamedPipeEndpoint.name()
     let deadline = Date().addingTimeInterval(10)
     while Date() < deadline {
-      if try await manager.status() != .running {
+      do {
+        let connection = try WindowsNamedPipeClient.connect(
+          to: endpoint, timeoutMilliseconds: 100)
+        try await connection.close()
+      } catch WindowsPipeError.win32(_, let code)
+        where code == UInt32(truncatingIfNeeded: ERROR_FILE_NOT_FOUND)
+          || code == UInt32(truncatingIfNeeded: ERROR_PIPE_NOT_CONNECTED)
+      {
         return
+      } catch WindowsPipeError.connectionClosed {
+        try await Task.sleep(for: .milliseconds(50))
+        continue
+      } catch WindowsPipeError.win32(_, let code)
+        where code == UInt32(truncatingIfNeeded: ERROR_PIPE_BUSY)
+          || code == UInt32(truncatingIfNeeded: ERROR_SEM_TIMEOUT)
+      {
+        try await Task.sleep(for: .milliseconds(50))
+        continue
       }
-      try await Task.sleep(for: .milliseconds(50))
+      catch {
+        throw error
+      }
     }
     throw StartupManagerError.commandFailed(
-      command: "schtasks /End", output: "graphcoded did not stop before replacement")
+      command: "named pipe termination", output: "the daemon endpoint is still available")
   }
 
   private static func awaitBlocking<Result>(

@@ -751,19 +751,23 @@ import Foundation
     private let name: String
     private let sid: String
     private let writeTimeout: TimeInterval
+    private let beforeConnectionReturn: (@Sendable () -> Void)?
     private let lock = NSCondition()
     private var closed = false
     private var pendingHandles: Set<UInt> = []
+    private var transferringHandles: Set<UInt> = []
 
     public init(
       pipeName: String? = nil,
       backlog: Int = 16,
-      writeTimeout: TimeInterval = 5
+      writeTimeout: TimeInterval = 5,
+      beforeConnectionReturn: (@Sendable () -> Void)? = nil
     ) throws {
       _ = backlog
       name = try pipeName ?? WindowsNamedPipeEndpoint.name()
       sid = try WindowsUserIdentity.currentSID()
       self.writeTimeout = max(0.001, writeTimeout)
+      self.beforeConnectionReturn = beforeConnectionReturn
       endpoint = .namedPipe(name)
     }
 
@@ -778,13 +782,14 @@ import Foundation
                 try self.connect(handle)
                 try self.ensureOpen()
                 try self.verifyClient(handle)
-                try self.ensureOpen()
-                self.untrack(handle)
-                continuation.resume(
-                  returning: WindowsNamedPipeConnection(
-                    handle: handle,
-                    pipeName: self.name,
-                    writeTimeout: self.writeTimeout))
+                try self.beginTransfer(handle)
+                self.beforeConnectionReturn?()
+                let connection = WindowsNamedPipeConnection(
+                  handle: handle,
+                  pipeName: self.name,
+                  writeTimeout: self.writeTimeout)
+                try self.finishTransfer(handle)
+                continuation.resume(returning: connection)
               } catch {
                 self.untrack(handle)
                 _ = DisconnectNamedPipe(handle)
@@ -822,7 +827,30 @@ import Foundation
     private func untrack(_ handle: HANDLE) {
       lock.lock()
       pendingHandles.remove(UInt(bitPattern: handle))
+      transferringHandles.remove(UInt(bitPattern: handle))
       lock.unlock()
+    }
+
+    private func beginTransfer(_ handle: HANDLE) throws {
+      lock.lock()
+      defer { lock.unlock() }
+      guard !closed else {
+        throw WindowsPipeError.connectionClosed
+      }
+      let raw = UInt(bitPattern: handle)
+      guard pendingHandles.remove(raw) != nil else {
+        throw WindowsPipeError.connectionClosed
+      }
+      transferringHandles.insert(raw)
+    }
+
+    private func finishTransfer(_ handle: HANDLE) throws {
+      lock.lock()
+      defer { lock.unlock() }
+      let raw = UInt(bitPattern: handle)
+      guard !closed, transferringHandles.remove(raw) != nil else {
+        throw WindowsPipeError.connectionClosed
+      }
     }
 
     private func closePending() {
@@ -832,7 +860,7 @@ import Foundation
         return
       }
       closed = true
-      let handles = pendingHandles
+      let handles = pendingHandles.union(transferringHandles)
       lock.unlock()
       for raw in handles {
         let handle = HANDLE(bitPattern: raw)
