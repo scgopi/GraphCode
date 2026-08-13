@@ -53,19 +53,15 @@ public enum SupportDirectory {
   /// Foundation's `URL(fileURLWithPath:)` only recognizes POSIX absolute paths on
   /// Darwin. On Windows, drive-letter and UNC paths must be classified before URL
   /// construction or an override such as `C:\GraphCode` is appended to the user's
-  /// home directory.
+  /// home directory. The override is trimmed once; Windows environment keys are
+  /// case-insensitive, while Darwin preserves exact-key behavior.
   public static func url(environment: [String: String], homeDirectory: URL) -> URL {
     let home = homeDirectory
     guard let value = overrideValue(in: environment) else {
       return home.appendingPathComponent(".graphcode", isDirectory: true)
     }
 
-    let override = value.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !override.isEmpty else {
-      return home.appendingPathComponent(".graphcode", isDirectory: true)
-    }
-
-    let expanded = expandTilde(override, homeDirectory: home)
+    let expanded = expandTilde(value, homeDirectory: home)
     guard isAbsolutePath(expanded) else {
       return home.appendingPathComponent(expanded, isDirectory: true)
     }
@@ -108,9 +104,7 @@ public enum SupportDirectory {
     // Application Support folder into `~/.graphcode.dev` would empty the real location
     // into a scratch one, which is the opposite of what asking for a separate directory
     // means. Such a directory just starts empty.
-    let overridden =
-      overrideValue(in: environment)?
-      .trimmingCharacters(in: .whitespaces).isEmpty == false
+    let overridden = overrideValue(in: environment) != nil
     let destination = url(environment: environment, homeDirectory: homeDirectory)
     prepare(destination: destination, legacy: overridden ? destination : legacy)
   }
@@ -153,18 +147,24 @@ public enum SupportDirectory {
   }
 
   private static func overrideValue(in environment: [String: String]) -> String? {
+    let rawValue: String?
     #if os(Windows)
       if let exact = environment[environmentKey] {
-        return exact
+        rawValue = exact
+      } else {
+        rawValue = environment
+          .keys
+          .sorted()
+          .first(where: { $0.caseInsensitiveCompare(environmentKey) == .orderedSame })
+          .flatMap { environment[$0] }
       }
-      return environment
-        .keys
-        .sorted()
-        .first(where: { $0.caseInsensitiveCompare(environmentKey) == .orderedSame })
-        .flatMap { environment[$0] }
     #else
-      return environment[environmentKey]
+      rawValue = environment[environmentKey]
     #endif
+
+    guard let rawValue else { return nil }
+    let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    return value.isEmpty ? nil : value
   }
 
   private static func isAbsolutePath(_ path: String) -> Bool {

@@ -206,11 +206,13 @@ private enum PlatformPathAlgorithms {
 
   private static func normalizeWindowsFinalPath(_ path: String) -> String {
     let normalized = path.replacingOccurrences(of: "/", with: "\\")
-    if normalized.hasPrefix("\\\\?\\UNC\\") {
-      return "\\\\" + String(normalized.dropFirst(8))
+    let uncPrefix = "\\\\?\\UNC\\"
+    if normalized.range(of: uncPrefix, options: [.caseInsensitive, .anchored]) != nil {
+      return "\\\\" + String(normalized.dropFirst(uncPrefix.count))
     }
-    if normalized.hasPrefix("\\\\?\\") {
-      return String(normalized.dropFirst(4))
+    let devicePrefix = "\\\\?\\"
+    if normalized.range(of: devicePrefix, options: [.caseInsensitive, .anchored]) != nil {
+      return String(normalized.dropFirst(devicePrefix.count))
     }
     return normalized
   }

@@ -69,6 +69,36 @@ final class PlatformTests: XCTestCase {
     #endif
   }
 
+  func testSupportDirectoryTreatsNewlineOnlyOverrideAsAbsentForMigration() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(
+        "graphcode-support-newline-\(UUID().uuidString)", isDirectory: true)
+    let home = directory.appendingPathComponent("home", isDirectory: true)
+    let destination = home.appendingPathComponent(".graphcode", isDirectory: true)
+    let legacy = directory.appendingPathComponent("legacy", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: home, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(
+      at: legacy, withIntermediateDirectories: true)
+    try Data("legacy".utf8).write(
+      to: legacy.appendingPathComponent("marker", isDirectory: false))
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let environment = [SupportDirectory.environmentKey: " \r\n\t "]
+    XCTAssertEqual(
+      SupportDirectory.url(environment: environment, homeDirectory: home).path,
+      destination.path)
+
+    SupportDirectory.prepare(
+      environment: environment,
+      homeDirectory: home,
+      legacy: legacy)
+    XCTAssertTrue(
+      FileManager.default.fileExists(
+        atPath: destination.appendingPathComponent("marker").path))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path))
+  }
+
   func testCanonicalProjectPathAcceptsDrivePathAndRejectsRoot() throws {
     let paths = WindowsPlatformPaths(
       homeDirectory: URL(fileURLWithPath: #"C:\Users\Test User"#, isDirectory: true))
@@ -103,6 +133,35 @@ final class PlatformTests: XCTestCase {
     ] {
       XCTAssertThrowsError(try paths.canonicalProjectPath(path), path)
     }
+  }
+
+  func testWindowsCanonicalProjectPathNormalizesExtendedUNCDeviceCase() throws {
+    #if os(Windows)
+      let paths = WindowsPlatformPaths()
+      for root in [
+        #"\\?\unc\server\share"#,
+        #"\\?\uNc\server\share\"#,
+        #"\\?\UnC\server\share\."#,
+      ] {
+        XCTAssertThrowsError(try paths.canonicalProjectPath(root), root)
+      }
+
+      for descendant in [
+        #"\\?\unc\server\share\folder\..\project"#,
+        #"\\?\uNc\SERVER\Share\.\project"#,
+      ] {
+        let canonical = try paths.canonicalProjectPath(descendant)
+        let normalized =
+          canonical
+          .replacingOccurrences(of: "\\", with: "/")
+          .lowercased()
+        XCTAssertTrue(
+          normalized.hasSuffix("/server/share/project"),
+          canonical)
+      }
+    #else
+      throw XCTSkip("Windows extended UNC normalization assertion")
+    #endif
   }
 
   func testWindowsCanonicalProjectPathRejectsJunctionToDriveRoot() async throws {
