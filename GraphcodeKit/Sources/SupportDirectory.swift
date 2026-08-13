@@ -56,7 +56,7 @@ public enum SupportDirectory {
   /// home directory.
   public static func url(environment: [String: String], homeDirectory: URL) -> URL {
     let home = homeDirectory
-    guard let value = environment[environmentKey] else {
+    guard let value = overrideValue(in: environment) else {
       return home.appendingPathComponent(".graphcode", isDirectory: true)
     }
 
@@ -90,14 +90,29 @@ public enum SupportDirectory {
   /// safe to run concurrently and repeatedly — hence "move only when the destination is
   /// entirely absent" rather than any kind of merge.
   public static func prepare() {
+    let environment = ProcessInfo.processInfo.environment
+    let homeDirectory = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+    prepare(
+      environment: environment,
+      homeDirectory: homeDirectory,
+      legacy: legacyURL)
+  }
+
+  /// The injectable startup path used by tests and by the process-wide entry point.
+  static func prepare(
+    environment: [String: String],
+    homeDirectory: URL,
+    legacy: URL
+  ) {
     // No migration when someone has named the directory themselves: moving the legacy
     // Application Support folder into `~/.graphcode.dev` would empty the real location
     // into a scratch one, which is the opposite of what asking for a separate directory
     // means. Such a directory just starts empty.
     let overridden =
-      ProcessInfo.processInfo.environment[environmentKey]?
+      overrideValue(in: environment)?
       .trimmingCharacters(in: .whitespaces).isEmpty == false
-    prepare(destination: url, legacy: overridden ? url : legacyURL)
+    let destination = url(environment: environment, homeDirectory: homeDirectory)
+    prepare(destination: destination, legacy: overridden ? destination : legacy)
   }
 
   /// The real work, with both paths injected.
@@ -135,6 +150,21 @@ public enum SupportDirectory {
       // to run. The old directory is left untouched for a human to move by hand.
       return false
     }
+  }
+
+  private static func overrideValue(in environment: [String: String]) -> String? {
+    #if os(Windows)
+      if let exact = environment[environmentKey] {
+        return exact
+      }
+      return environment
+        .keys
+        .sorted()
+        .first(where: { $0.caseInsensitiveCompare(environmentKey) == .orderedSame })
+        .flatMap { environment[$0] }
+    #else
+      return environment[environmentKey]
+    #endif
   }
 
   private static func isAbsolutePath(_ path: String) -> Bool {

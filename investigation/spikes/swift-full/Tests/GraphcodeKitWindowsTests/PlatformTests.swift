@@ -31,6 +31,44 @@ final class PlatformTests: XCTestCase {
       home.appendingPathComponent("graphcode-dev", isDirectory: true).path)
   }
 
+  func testSupportDirectoryResolvesWindowsEnvironmentKeyCaseInsensitively() throws {
+    #if os(Windows)
+      for key in ["graphcode_support_dir", "GrApHcOdE_sUpPoRt_DiR"] {
+        let directory = FileManager.default.temporaryDirectory
+          .appendingPathComponent(
+            "graphcode-support-override-\(UUID().uuidString)", isDirectory: true)
+        let home = directory.appendingPathComponent("home", isDirectory: true)
+        let destination = directory.appendingPathComponent("override", isDirectory: true)
+        let legacy = directory.appendingPathComponent("legacy", isDirectory: true)
+        try FileManager.default.createDirectory(
+          at: legacy, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let environment = [key: destination.path]
+        XCTAssertEqual(
+          SupportDirectory.url(environment: environment, homeDirectory: home).path,
+          destination.path)
+
+        SupportDirectory.prepare(
+          environment: environment,
+          homeDirectory: home,
+          legacy: legacy)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destination.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacy.path))
+      }
+    #else
+      let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+      for key in ["graphcode_support_dir", "GrApHcOdE_sUpPoRt_DiR"] {
+        let ignored = SupportDirectory.url(
+          environment: [key: "graphcode-dev"],
+          homeDirectory: home)
+        XCTAssertEqual(
+          ignored.path,
+          home.appendingPathComponent(".graphcode", isDirectory: true).path)
+      }
+    #endif
+  }
+
   func testCanonicalProjectPathAcceptsDrivePathAndRejectsRoot() throws {
     let paths = WindowsPlatformPaths(
       homeDirectory: URL(fileURLWithPath: #"C:\Users\Test User"#, isDirectory: true))
@@ -50,6 +88,18 @@ final class PlatformTests: XCTestCase {
       #"\path"#,
       #"/path"#,
       #"C:relative"#,
+    ] {
+      XCTAssertThrowsError(try paths.canonicalProjectPath(path), path)
+    }
+  }
+
+  func testWindowsCanonicalProjectPathRejectsExtendedUNCShareRoots() {
+    let paths = WindowsPlatformPaths()
+    for path in [
+      #"\\?\UNC\server\share"#,
+      #"\\?\UNC\server\share\"#,
+      #"\\?\UNC\server\share\."#,
+      #"\\?\UNC\server\share\.\."#,
     ] {
       XCTAssertThrowsError(try paths.canonicalProjectPath(path), path)
     }

@@ -53,7 +53,8 @@ compatible with paths containing spaces.
 - native process-group/job containment before the child can spawn descendants
 - Windows successful-root cleanup terminates and closes the Job Object before pipe draining
 - Darwin successful-root cleanup terminates background group members before releasing pipes
-- Windows junction/symlink final targets are resolved before filesystem-root rejection
+- Windows junction/symlink final targets are resolved before filesystem-root rejection; extended
+  UNC prefixes and trailing dot/separator variants are normalized even when resolution fails
 - concurrent Windows launches do not cross-inherit pipe handles
 
 ## Source consequences

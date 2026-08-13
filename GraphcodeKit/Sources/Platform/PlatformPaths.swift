@@ -146,7 +146,7 @@ private enum PlatformPathAlgorithms {
   }
 
   private static func canonicalWindowsPath(_ path: String) -> String {
-    let normalized = path.replacingOccurrences(of: "/", with: "\\")
+    let normalized = normalizeWindowsFinalPath(path)
     if normalized.hasPrefix("\\\\") {
       let components = normalized.split(separator: "\\", omittingEmptySubsequences: true)
       guard components.count >= 2 else { return normalized }
@@ -238,7 +238,7 @@ private enum PlatformPathAlgorithms {
       return normalized == "/"
     }
 
-    let normalized = path.replacingOccurrences(of: "/", with: "\\")
+    let normalized = canonicalWindowsPath(path)
     if normalized.range(
       of: #"^[A-Za-z]:\\*$"#,
       options: .regularExpression) != nil
