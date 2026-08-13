@@ -12,6 +12,7 @@ import Foundation
     case timedOut
     case invalidFrame
     case serverIdentityRejected
+    case instanceAlreadyRunning
   }
 
   private final class WindowsPipeHandle: @unchecked Sendable {
@@ -43,6 +44,19 @@ import Foundation
         lpSecurityDescriptor: descriptor,
         bInheritHandle: false)
       return (attributes, HLOCAL(descriptor))
+    }
+  }
+
+  private enum WindowsNamedPipeIdentity {
+    static func values(
+      environment: [String: String],
+      homeDirectory: URL
+    ) throws -> (sid: String, supportHash: String) {
+      let sid = try WindowsUserIdentity.currentSID()
+      let support = SupportDirectory.url(environment: environment, homeDirectory: homeDirectory)
+      let supportHash = GraphcodeSHA256.hex(
+        Data(support.standardizedFileURL.path.lowercased().utf8))
+      return (sid, supportHash)
     }
   }
 
@@ -107,11 +121,50 @@ import Foundation
         return override
       }
 
-      let sid = try WindowsUserIdentity.currentSID()
-      let support = SupportDirectory.url(environment: environment, homeDirectory: homeDirectory)
-      let identity = GraphcodeSHA256.hex(
-        Data(support.standardizedFileURL.path.lowercased().utf8))
-      return "\\\\.\\pipe\\graphcode-\(sid)-\(identity.prefix(32))"
+      let identity = try WindowsNamedPipeIdentity.values(
+        environment: environment, homeDirectory: homeDirectory)
+      return "\\\\.\\pipe\\graphcode-\(identity.sid)-\(identity.supportHash.prefix(32))"
+    }
+  }
+
+  /// A current-user, support-directory-scoped lifetime lock for graphcoded.
+  public final class WindowsDaemonInstanceLock: @unchecked Sendable {
+    private let handle: HANDLE
+
+    public init(
+      environment: [String: String] = ProcessInfo.processInfo.environment,
+      homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) throws {
+      let identity = try WindowsNamedPipeIdentity.values(
+        environment: environment, homeDirectory: homeDirectory)
+      let name = Self.name(
+        sid: identity.sid, supportHash: identity.supportHash)
+      let securityResult = try WindowsPipeSecurity.attributes(for: identity.sid)
+      var security = securityResult.0
+      defer { _ = LocalFree(securityResult.1) }
+
+      guard
+        let mutex = withWideString(
+          name,
+          { wideName in CreateMutexW(&security, true, wideName) })
+      else {
+        throw WindowsPipeError.win32(
+          operation: "CreateMutexW", code: GetLastError())
+      }
+      let error = GetLastError()
+      guard error != ERROR_ALREADY_EXISTS else {
+        _ = CloseHandle(mutex)
+        throw WindowsPipeError.instanceAlreadyRunning
+      }
+      handle = mutex
+    }
+
+    deinit {
+      _ = CloseHandle(handle)
+    }
+
+    static func name(sid: String, supportHash: String) -> String {
+      "Local\\graphcode-daemon-\(sid)-\(supportHash.prefix(32))"
     }
   }
 
@@ -246,7 +299,6 @@ import Foundation
         lock.wait()
       }
       lock.unlock()
-      _ = FlushFileBuffers(handle)
       _ = CloseHandle(handle)
     }
 
@@ -274,14 +326,14 @@ import Foundation
       lock.unlock()
     }
 
-    private func cancelPendingIO() {
+    fileprivate func cancelPendingIO() {
       lock.lock()
       let shouldCancel = !closed
       lock.unlock()
       if shouldCancel { _ = CancelIoEx(handle, nil) }
     }
 
-    private func readSynchronously(_ count: Int) throws -> Data {
+    fileprivate func readSynchronously(_ count: Int, by deadline: Date? = nil) throws -> Data {
       try beginOperation()
       defer { endOperation() }
       var output = Data()
@@ -310,7 +362,18 @@ import Foundation
             throw WindowsPipeError.win32(operation: "ReadFile", code: code)
           }
         }
-        try operation.wait()
+        do {
+          let timeout = try remainingTimeout(until: deadline)
+          try operation.wait(timeout: timeout)
+        } catch WindowsPipeError.timedOut {
+          withUnsafeMutablePointer(to: &overlapped) { pending in
+            _ = CancelIoEx(handle, pending)
+          }
+          try? operation.wait()
+          var cancelledBytes: DWORD = 0
+          _ = GetOverlappedResult(handle, &overlapped, &cancelledBytes, false)
+          throw WindowsPipeError.timedOut
+        }
         guard GetOverlappedResult(handle, &overlapped, &transferred, false) else {
           let code = GetLastError()
           if code == ERROR_BROKEN_PIPE || code == ERROR_OPERATION_ABORTED {
@@ -323,6 +386,13 @@ import Foundation
         remaining -= Int(transferred)
       }
       return output
+    }
+
+    private func remainingTimeout(until deadline: Date?) throws -> DWORD {
+      guard let deadline else { return INFINITE }
+      let remaining = deadline.timeIntervalSinceNow
+      guard remaining > 0 else { throw WindowsPipeError.timedOut }
+      return DWORD(min(Double(DWORD.max), max(1, (remaining * 1_000).rounded(.up))))
     }
 
     private func writeSynchronously(_ data: Data) throws {
@@ -393,15 +463,42 @@ import Foundation
     public func receiveFrameWithPostHandshakeDeadline(
       _ timeout: TimeInterval = 5
     ) async throws -> Data {
-      try await withThrowingTaskGroup(of: Data.self) { group in
-        group.addTask { try await self.receiveFrame() }
-        group.addTask {
-          try await Task.sleep(for: .milliseconds(Int(max(0, timeout) * 1_000)))
-          throw WindowsPipeError.timedOut
+      try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { continuation in
+          DispatchQueue.global(qos: .utility).async {
+            do {
+              continuation.resume(
+                returning: try self.receiveFrameWithPostHandshakeDeadlineSynchronously(timeout))
+            } catch {
+              continuation.resume(throwing: error)
+            }
+          }
         }
-        defer { group.cancelAll() }
-        return try await group.next()!
+      } onCancel: {
+        self.stream.cancelPendingIO()
       }
+    }
+
+    private func receiveFrameWithPostHandshakeDeadlineSynchronously(
+      _ timeout: TimeInterval
+    ) throws -> Data {
+      let firstByte = try stream.readSynchronously(1)
+      let deadline = Date().addingTimeInterval(max(0, timeout))
+      var header = firstByte
+      header.append(
+        try stream.readSynchronously(DaemonFrameHeader.byteCount - 1, by: deadline))
+      let length: Int
+      do {
+        length = try DaemonFrameHeader.decodeLength(
+          Array(header), maxPayloadBytes: DaemonFrameHeader.legacySafetyCeilingBytes)
+      } catch DaemonFrameHeader.HeaderError.invalidHeader {
+        throw FramedMessageIO.IOError.invalidHeader
+      } catch {
+        throw FramedMessageIO.IOError.payloadTooLarge
+      }
+      return length == 0
+        ? Data()
+        : try stream.readSynchronously(length, by: deadline)
     }
 
     public func sendFrame(_ data: Data) async throws {
@@ -467,15 +564,13 @@ import Foundation
         try await withCheckedThrowingContinuation { continuation in
           DispatchQueue.global(qos: .utility).async {
             do {
-              try self.ensureOpen()
-              let handle = try makePipe(
-                name: self.name,
-                userSID: self.sid,
-                maxInstances: DWORD(PIPE_UNLIMITED_INSTANCES))
-              self.track(handle)
+              let handle = try self.makeTrackedPipe()
               do {
+                try self.ensureOpen()
                 try self.connect(handle)
+                try self.ensureOpen()
                 try self.verifyClient(handle)
+                try self.ensureOpen()
                 self.untrack(handle)
                 continuation.resume(
                   returning: WindowsNamedPipeConnection(
@@ -501,10 +596,18 @@ import Foundation
       closePending()
     }
 
-    private func track(_ handle: HANDLE) {
+    private func makeTrackedPipe() throws -> HANDLE {
       lock.lock()
+      defer { lock.unlock() }
+      guard !closed else {
+        throw WindowsPipeError.connectionClosed
+      }
+      let handle = try makePipe(
+        name: name,
+        userSID: sid,
+        maxInstances: DWORD(PIPE_UNLIMITED_INSTANCES))
       pendingHandles.insert(UInt(bitPattern: handle))
-      lock.unlock()
+      return handle
     }
 
     private func untrack(_ handle: HANDLE) {
@@ -521,12 +624,10 @@ import Foundation
       }
       closed = true
       let handles = pendingHandles
-      pendingHandles.removeAll()
       lock.unlock()
       for raw in handles {
         let handle = HANDLE(bitPattern: raw)
         _ = CancelIoEx(handle, nil)
-        _ = CloseHandle(handle)
       }
     }
 
@@ -537,6 +638,12 @@ import Foundation
       if isClosed {
         throw WindowsPipeError.connectionClosed
       }
+    }
+
+    private func isOpen() -> Bool {
+      lock.lock()
+      defer { lock.unlock() }
+      return !closed
     }
 
     private func connect(_ handle: HANDLE) throws {
@@ -554,6 +661,9 @@ import Foundation
           throw WindowsPipeError.win32(operation: "ConnectNamedPipe", code: code)
         }
         if code == ERROR_IO_PENDING {
+          if !isOpen() {
+            _ = CancelIoEx(handle, nil)
+          }
           let result = WaitForSingleObject(event, INFINITE)
           guard result == WAIT_OBJECT_0 else {
             throw WindowsPipeError.win32(operation: "WaitForSingleObject", code: GetLastError())

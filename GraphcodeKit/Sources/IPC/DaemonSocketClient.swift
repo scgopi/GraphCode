@@ -26,6 +26,7 @@ public struct DaemonSocketClient: Sendable {
   }
 
   private let connection: any DaemonConnection
+  private let timeout: TimeInterval
 
   /// How long a single read waits before giving up. Generous on purpose: it exists to
   /// turn "hangs forever with no output" into a diagnosable error, not to bound how long
@@ -49,14 +50,20 @@ public struct DaemonSocketClient: Sendable {
     timeout: TimeInterval = DaemonSocketClient.defaultTimeout,
     dialAttempts: Int = DaemonSocketClient.defaultDialAttempts
   ) throws {
+    let requestedTimeout = max(0, timeout)
+    self.timeout = requestedTimeout
     let budget = max(1, dialAttempts)
+    #if os(Windows)
+      let dialDeadline = Date().addingTimeInterval(requestedTimeout)
+    #endif
     #if canImport(Darwin)
       var descriptor: Int32?
     #endif
     for attempt in 0..<budget {
       do {
         #if os(Windows)
-          let pipe = try Self.dial()
+          let remaining = max(0, dialDeadline.timeIntervalSinceNow)
+          let pipe = try Self.dial(timeout: remaining)
           connection = pipe
           return
         #else
@@ -65,7 +72,16 @@ public struct DaemonSocketClient: Sendable {
         #endif
       } catch {
         guard Self.isTransient(error), attempt < budget - 1 else { throw error }
-        Thread.sleep(forTimeInterval: Self.dialBackoff[min(attempt, Self.dialBackoff.count - 1)])
+        #if os(Windows)
+          let remaining = dialDeadline.timeIntervalSinceNow
+          guard remaining > 0 else { throw error }
+          Thread.sleep(
+            forTimeInterval: min(
+              remaining, Self.dialBackoff[min(attempt, Self.dialBackoff.count - 1)]))
+        #else
+          Thread.sleep(
+            forTimeInterval: Self.dialBackoff[min(attempt, Self.dialBackoff.count - 1)])
+        #endif
       }
     }
     #if os(Windows)
@@ -81,6 +97,7 @@ public struct DaemonSocketClient: Sendable {
   /// socket path, which a test can't stand in for without disturbing the real daemon.
   #if canImport(Darwin)
     init(fileDescriptor: Int32, timeout: TimeInterval = DaemonSocketClient.defaultTimeout) {
+      self.timeout = max(0, timeout)
       connection = UnixSocketConnection(fileDescriptor: fileDescriptor, readTimeout: timeout)
     }
   #endif
@@ -107,9 +124,11 @@ public struct DaemonSocketClient: Sendable {
   }
 
   #if os(Windows)
-    private static func dial() throws -> WindowsNamedPipeConnection {
+    private static func dial(timeout: TimeInterval) throws -> WindowsNamedPipeConnection {
       do {
-        return try WindowsNamedPipeClient.connect(to: try WindowsNamedPipeEndpoint.name())
+        return try WindowsNamedPipeClient.connect(
+          to: try WindowsNamedPipeEndpoint.name(),
+          timeoutMilliseconds: timeoutMilliseconds(timeout))
       } catch WindowsPipeError.win32(_, let code) {
         throw ClientError.connectionFailed(errno: Int32(bitPattern: code))
       } catch WindowsPipeError.timedOut {
@@ -119,6 +138,12 @@ public struct DaemonSocketClient: Sendable {
         throw ClientError.connectionFailed(
           errno: Int32(truncatingIfNeeded: ERROR_ACCESS_DENIED))
       }
+    }
+
+    private static func timeoutMilliseconds(_ timeout: TimeInterval) -> UInt32 {
+      guard timeout.isFinite else { return UInt32.max }
+      return UInt32(
+        min(Double(UInt32.max), max(0, (timeout * 1_000).rounded(.up))))
     }
   #else
     private static func dial() throws -> Int32 {
@@ -195,7 +220,7 @@ public struct DaemonSocketClient: Sendable {
         #else
           data = try Self.blocking {
             if let pipe = connection as? WindowsNamedPipeConnection {
-              return try await pipe.receiveFrameWithPostHandshakeDeadline(Self.defaultTimeout)
+              return try await pipe.receiveFrameWithPostHandshakeDeadline(self.timeout)
             }
             return try await connection.receiveFrame()
           }

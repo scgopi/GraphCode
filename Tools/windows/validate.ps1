@@ -100,6 +100,45 @@ function Initialize-SwiftEnvironment([string] $swift) {
   }
 }
 
+function Resolve-SwiftRuntimeDirectory([string] $swift) {
+  if ($swift -match "^(.*\\Swift)\\Toolchains\\([^\\]+)\\usr\\bin\\swift\.exe$") {
+    $swiftRoot = $Matches[1]
+    $toolchainName = $Matches[2]
+    $version = $toolchainName.Split("+")[0]
+    $runtime = Join-Path $swiftRoot "Runtimes\$version\usr\bin"
+    if (Test-Path $runtime) {
+      return $runtime
+    }
+  }
+  throw "Swift runtime DLL directory was not found for $swift"
+}
+
+function Start-CleanRuntimeProcess(
+  [string] $executable,
+  [string[]] $arguments,
+  [string] $supportDirectory
+) {
+  $startInfo = [Diagnostics.ProcessStartInfo]::new()
+  $startInfo.FileName = $executable
+  $startInfo.UseShellExecute = $false
+  $startInfo.CreateNoWindow = $true
+  $startInfo.RedirectStandardOutput = $true
+  $startInfo.RedirectStandardError = $true
+  $startInfo.Environment["PATH"] = Join-Path $env:SystemRoot "System32"
+  $startInfo.Environment["SystemRoot"] = $env:SystemRoot
+  $startInfo.Environment["WINDIR"] = $env:WINDIR
+  $startInfo.Environment["GRAPHCODE_SUPPORT_DIR"] = $supportDirectory
+  foreach ($argument in $arguments) {
+    [void] $startInfo.ArgumentList.Add($argument)
+  }
+  $process = [Diagnostics.Process]::new()
+  $process.StartInfo = $startInfo
+  if (-not $process.Start()) {
+    throw "Failed to start clean-environment process: $executable"
+  }
+  return $process
+}
+
 function Invoke-Native([string] $description, [scriptblock] $command) {
   Write-Host "==> $description"
   & $command
@@ -165,18 +204,82 @@ function Invoke-Task([string] $name) {
       if ($LASTEXITCODE -ne 0) {
         throw "Swift production release bin path lookup failed"
       }
+      $releaseBin = $releaseBin | Select-Object -Last 1
+      $runtimeDirectory = Resolve-SwiftRuntimeDirectory $swift
+      $runtimeDLLs = Get-ChildItem -LiteralPath $runtimeDirectory -Filter *.dll
+      if (-not $runtimeDLLs) {
+        throw "Swift runtime DLL directory is empty: $runtimeDirectory"
+      }
+      foreach ($runtimeDLL in $runtimeDLLs) {
+        Copy-Item -LiteralPath $runtimeDLL.FullName -Destination $releaseBin -Force
+      }
+      Write-Host "Copied $($runtimeDLLs.Count) Swift runtime DLLs to $releaseBin"
       foreach ($product in @("graphcoded.exe", "graphcode.exe")) {
-        $binary = Join-Path ($releaseBin | Select-Object -Last 1) $product
+        $binary = Join-Path $releaseBin $product
         if (-not (Test-Path $binary)) {
           throw "Swift production binary was not produced: $binary"
         }
       }
-      $cli = Join-Path ($releaseBin | Select-Object -Last 1) "graphcode.exe"
+      $cli = Join-Path $releaseBin "graphcode.exe"
       Invoke-Native "Swift production CLI runtime smoke" {
         $output = & $cli --help
         if ($LASTEXITCODE -ne 0 -or ($output -join "`n") -notmatch "graphcode") {
           throw "graphcode.exe --help did not execute successfully"
         }
+      }
+      $smokeSupport = Join-Path $repoRoot ".build\windows-clean-runtime-smoke-$([guid]::NewGuid())"
+      New-Item -ItemType Directory -Force $smokeSupport | Out-Null
+      $daemonProcess = $null
+      $secondDaemonProcess = $null
+      $cliProcess = $null
+      try {
+        $daemonProcess = Start-CleanRuntimeProcess `
+          (Join-Path $releaseBin "graphcoded.exe") @() $smokeSupport
+        Start-Sleep -Milliseconds 1000
+        if ($daemonProcess.HasExited) {
+          throw "graphcoded.exe exited during clean-environment smoke"
+        }
+
+        $secondDaemonProcess = Start-CleanRuntimeProcess `
+          (Join-Path $releaseBin "graphcoded.exe") @() $smokeSupport
+        $secondStdoutTask = $secondDaemonProcess.StandardOutput.ReadToEndAsync()
+        $secondStderrTask = $secondDaemonProcess.StandardError.ReadToEndAsync()
+        if (-not $secondDaemonProcess.WaitForExit(5000)) {
+          $secondDaemonProcess.Kill()
+          $secondDaemonProcess.WaitForExit()
+          throw "second graphcoded.exe did not exit after singleton rejection"
+        }
+        $secondStderr = $secondStderrTask.GetAwaiter().GetResult()
+        if ($secondDaemonProcess.ExitCode -eq 0 -or
+          $secondStderr -notmatch "already running") {
+          throw "second graphcoded.exe did not reject the singleton cleanly: $secondStderr"
+        }
+
+        $cliProcess = Start-CleanRuntimeProcess `
+          (Join-Path $releaseBin "graphcode.exe") @("projects") $smokeSupport
+        $stdoutTask = $cliProcess.StandardOutput.ReadToEndAsync()
+        $stderrTask = $cliProcess.StandardError.ReadToEndAsync()
+        $cliProcess.WaitForExit()
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        if ($cliProcess.ExitCode -ne 0) {
+          throw "clean-environment graphcode.exe failed: $stderr"
+        }
+        Write-Host "Clean-environment daemon/CLI bootstrap smoke passed"
+      } finally {
+        if ($cliProcess -and -not $cliProcess.HasExited) {
+          $cliProcess.Kill()
+          $cliProcess.WaitForExit()
+        }
+        if ($secondDaemonProcess -and -not $secondDaemonProcess.HasExited) {
+          $secondDaemonProcess.Kill()
+          $secondDaemonProcess.WaitForExit()
+        }
+        if ($daemonProcess -and -not $daemonProcess.HasExited) {
+          $daemonProcess.Kill()
+          $daemonProcess.WaitForExit()
+        }
+        Remove-Item -LiteralPath $smokeSupport -Recurse -Force -ErrorAction SilentlyContinue
       }
     }
     "swift-paths" {

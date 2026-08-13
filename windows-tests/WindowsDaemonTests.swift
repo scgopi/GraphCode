@@ -21,6 +21,17 @@ final class WindowsDaemonTests: XCTestCase {
       XCTAssertLessThan(first.utf8.count, 240)
     }
 
+    func testDaemonInstanceLockRejectsSecondOwner() throws {
+      let environment = [
+        SupportDirectory.environmentKey: "graphcode-lock-\(UUID().uuidString)"
+      ]
+      let first = try WindowsDaemonInstanceLock(environment: environment)
+      XCTAssertThrowsError(try WindowsDaemonInstanceLock(environment: environment)) { error in
+        XCTAssertEqual(error as? WindowsPipeError, .instanceAlreadyRunning)
+      }
+      withExtendedLifetime(first) {}
+    }
+
     func testFrameHeaderRemainsBoundedBeforeAllocation() throws {
       XCTAssertThrowsError(
         try DaemonFrameHeader.decodeLength(
@@ -127,6 +138,51 @@ final class WindowsDaemonTests: XCTestCase {
       } catch {
         XCTFail("unexpected listener error: \(error)")
       }
+    }
+
+    func testWindowsListenerCloseRacingAcceptDoesNotLeaveWorkersPending() async throws {
+      for _ in 0..<20 {
+        let name =
+          try WindowsNamedPipeEndpoint.name()
+          + "-race-\(UUID().uuidString.lowercased())"
+        let listener = try WindowsNamedPipeListener(pipeName: name)
+        let pending = Task {
+          try await listener.accept()
+        }
+        try await listener.close()
+
+        do {
+          _ = try await pending.value
+          XCTFail("closed listener unexpectedly accepted a connection")
+        } catch WindowsPipeError.connectionClosed {
+          continue
+        } catch {
+          XCTFail("unexpected listener error: \(error)")
+        }
+      }
+    }
+
+    func testWindowsPostHandshakeDeadlineDoesNotExpireIdleClient() async throws {
+      let name =
+        try WindowsNamedPipeEndpoint.name()
+        + "-idle-\(UUID().uuidString.lowercased())"
+      let listener = try WindowsNamedPipeListener(pipeName: name)
+      defer { Task { try? await listener.close() } }
+
+      let server = Task {
+        let connection = try await listener.accept()
+        defer { Task { try? await connection.close() } }
+        return try await (connection as! WindowsNamedPipeConnection)
+          .receiveFrameWithPostHandshakeDeadline(0.2)
+      }
+      let client = try WindowsNamedPipeClient.connect(to: name)
+      try await Task.sleep(for: .milliseconds(350))
+      let payload = Data("idle-then-frame".utf8)
+      try await client.sendFrame(payload)
+
+      let received = try await server.value
+      XCTAssertEqual(received, payload)
+      try await client.close()
     }
   #endif
 }

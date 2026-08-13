@@ -254,5 +254,16 @@ do {
     applied — check with `graphcode status` rather than re-running it.
     """, code: ExitCode.ambiguous)
 } catch {
+#if os(Windows)
+  if case WindowsPipeError.connectionClosed = error {
+    // The Windows transport uses its own error type for the same ambiguous mid-exchange
+    // close that Unix reports through FramedMessageIO.
+    fail(
+      """
+      graphcoded closed the connection before answering. The command may still have been \
+      applied — check with `graphcode status` rather than re-running it.
+      """, code: ExitCode.ambiguous)
+  }
+#endif
   fail("\(error)")
 }

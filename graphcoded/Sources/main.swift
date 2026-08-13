@@ -3,6 +3,17 @@ import GraphcodeKit
 
 #if os(Windows)
   SupportDirectory.prepare()
+  let instanceLock: WindowsDaemonInstanceLock = {
+    do {
+      return try WindowsDaemonInstanceLock()
+    } catch WindowsPipeError.instanceAlreadyRunning {
+      FileHandle.standardError.write(Data("graphcoded: daemon is already running\n".utf8))
+      exit(1)
+    } catch {
+      FileHandle.standardError.write(Data("graphcoded: \(error)\n".utf8))
+      exit(1)
+    }
+  }()
   let supportDirectory = SupportDirectory.url
   let replayStore = DaemonReplayStore(capacity: 128)
   let registry = ProjectRegistry(
@@ -212,7 +223,7 @@ import GraphcodeKit
 
   FileHandle.standardOutput.write(
     Data("graphcoded: listening on \(String(describing: listener.endpoint))\n".utf8))
-  withExtendedLifetime(replayCleanupTask) {
+  withExtendedLifetime((replayCleanupTask, instanceLock)) {
     dispatchMain()
   }
 #endif
