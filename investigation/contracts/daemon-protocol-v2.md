@@ -65,6 +65,9 @@ cancellation, backpressure, and non-reading peers.
   non-replayable gap, so another socket's snapshot cannot invalidate the first socket's
   resume cursor; disconnecting immediately after the snapshot and resuming from that cursor
   is an exact caught-up replay rather than `replayUnavailable`.
+- Non-replayable snapshot metadata is compacted into bounded ranges within the replay
+  window, and a disconnected socket's subscription record is removed while logical
+  client history remains eligible for retention.
 - Complete framed writes are serialized at the transport boundary, including concurrent app
   sends.
 - Unix transport close waits behind the frame-write queue and rejects later writes, so a
@@ -75,6 +78,12 @@ cancellation, backpressure, and non-reading peers.
   them, while subscription events remain sequenced.
 - A rejected graph command returns its correlated error and never a successful response
   snapshot.
+- Before a v2 graph mutation is applied, the daemon preflights both its correlated response
+  and sequenced event envelope against the 1 MiB cap; an oversized result is rejected
+  without graph or persistence mutation. Legacy v1 commands retain their larger frame
+  compatibility.
+- After the handshake, an idle socket has no global inactivity timeout. Once the first byte
+  of a frame arrives, the remaining header and payload share one cumulative read deadline.
 - A successful mutation with no response payload returns a correlated response envelope
   with `success: true`.
 - A reconnect never silently treats an unrelated event as command acknowledgement.

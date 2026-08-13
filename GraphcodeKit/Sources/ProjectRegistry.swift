@@ -323,7 +323,16 @@ public actor ProjectRegistry {
       guard let store = stores[Self.canonicalize(path, platformPaths: platformPaths)] else {
         return ProjectRegistryCommandResult(error: "project is not open")
       }
-      let result = await store.handle(inner, broadcastErrors: broadcastErrors)
+      let v2PayloadLimit: Int?
+      if case .v2 = channel.mode {
+        v2PayloadLimit = FramedMessageIO.v2MaxPayloadBytes
+      } else {
+        v2PayloadLimit = nil
+      }
+      let result = await store.handle(
+        inner,
+        broadcastErrors: broadcastErrors,
+        v2PayloadLimit: v2PayloadLimit)
       switch result {
       case .applied(let graph):
         response = .graphChanged(graph)

@@ -896,6 +896,77 @@ final class ContractTests: XCTestCase {
     try await reconnectChannel.close()
   }
 
+  func testSnapshotGapsCompactIntoRangesAcrossRepeatedSnapshots() async throws {
+    let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000049")!
+    let store = DaemonReplayStore(capacity: 4)
+    let transport = RecordingConnection()
+    let channel = DaemonConnectionChannel(
+      connection: transport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+    await channel.join(projectPath: "/work/repeated-snapshots")
+
+    for _ in 0..<1_000 {
+      try await channel.sendConnectionSnapshot(.errorOccurred("snapshot"))
+    }
+    let envelope = try XCTUnwrap(
+      store.append(
+        event: .errorOccurred("canonical"),
+        projectPath: "/work/repeated-snapshots")[clientID])
+    try await channel.sendEvent(envelope: envelope)
+    try await channel.close()
+
+    let reconnectTransport = RecordingConnection()
+    let reconnectChannel = DaemonConnectionChannel(
+      connection: reconnectTransport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+    try await reconnectChannel.replay(after: 0)
+
+    let replayed = try reconnectTransport.frames.map {
+      try JSONDecoder().decode(DaemonWireEnvelope.self, from: $0)
+    }
+    XCTAssertEqual(replayed.map(\.sequence), [1_001])
+    try await reconnectChannel.close()
+  }
+
+  func testDisconnectedSocketSubscriptionDoesNotRemainInLogicalClientUnion() async throws {
+    let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000050")!
+    let pathA = "/work/disconnected-a"
+    let pathB = "/work/disconnected-b"
+    let store = DaemonReplayStore(capacity: 8)
+    let first = DaemonConnectionChannel(
+      connection: RecordingConnection(),
+      mode: .v2(version: 2),
+      clientID: clientID,
+      subscription: DaemonWireSubscription(projectPaths: [pathA]),
+      replayStore: store)
+    await first.join(projectPath: pathA)
+    try await first.close()
+    store.join(clientID: clientID, projectPath: pathA)
+
+    let secondTransport = RecordingConnection()
+    let second = DaemonConnectionChannel(
+      connection: secondTransport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      subscription: DaemonWireSubscription(projectPaths: [pathB]),
+      replayStore: store)
+    await second.join(projectPath: pathB)
+
+    XCTAssertNil(
+      store.append(
+        event: .errorOccurred("not-retained"),
+        projectPath: pathA)[clientID])
+    XCTAssertNotNil(
+      store.append(
+        event: .errorOccurred("retained"),
+        projectPath: pathB)[clientID])
+    try await second.close()
+  }
+
   func testSecondSocketSnapshotDoesNotInvalidateFirstSocketResumeCursor() async throws {
     let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000046")!
     let store = DaemonReplayStore(capacity: 8)

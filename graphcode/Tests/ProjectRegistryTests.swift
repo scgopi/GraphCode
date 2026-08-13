@@ -135,6 +135,64 @@ struct ProjectRegistryTests {
   }
 
   @Test
+  func v2RejectsAnOversizedResultBeforePersistingTheMutation() async {
+    let (registry, persistence) = makeRegistryAndPersistence()
+    let transport = RecordingConnection()
+    let channel = DaemonConnectionChannel(
+      connection: transport,
+      mode: .v2(version: 2),
+      clientID: UUID())
+    await registry.addConnection(id: transport.id, channel: channel)
+    await registry.handle(.openProject(path: "/tmp/project-a"), connectionID: transport.id)
+
+    let instruction = String(repeating: "x", count: 30_000)
+    var applied = 0
+    var rejected = false
+    for index in 0..<50 {
+      let result = await registry.apply(
+        .graphCommand(
+          projectPath: "/tmp/project-a",
+          command: .createNode(
+            NodeDraft(
+              title: "Large \(index)",
+              loopType: .turnBased,
+              firstInstruction: instruction))),
+        connectionID: transport.id)
+      if result?.error != nil {
+        rejected = true
+        #expect(result?.response == nil)
+        break
+      }
+      applied += 1
+    }
+
+    #expect(rejected)
+    #expect(applied > 0)
+    #expect(persistence.loadGraph(path: "/tmp/project-a")?.nodes.count == applied)
+  }
+
+  @Test
+  func v1StillAcceptsACommandWhoseEventExceedsTheV2Limit() async {
+    let (registry, persistence) = makeRegistryAndPersistence()
+    let connectionID = UUID()
+    await registry.addConnection(id: connectionID, fileDescriptor: -1)
+    await registry.handle(.openProject(path: "/tmp/project-a"), connectionID: connectionID)
+
+    let result = await registry.apply(
+      .graphCommand(
+        projectPath: "/tmp/project-a",
+        command: .createNode(
+          NodeDraft(
+            title: "Legacy large",
+            loopType: .turnBased,
+            firstInstruction: String(repeating: "x", count: 1_100_000)))),
+      connectionID: connectionID)
+
+    #expect(result?.error == nil)
+    #expect(persistence.loadGraph(path: "/tmp/project-a")?.nodes.count == 1)
+  }
+
+  @Test
   func concurrentApplyResponsesContainTheSnapshotFromTheirOwnCommand() async {
     let (registry, _) = makeRegistryAndPersistence()
     let connectionID = UUID()

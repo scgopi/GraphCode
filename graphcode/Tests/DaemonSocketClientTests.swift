@@ -109,6 +109,80 @@ struct DaemonSocketClientTests {
         _ = try connection.receiveFrameSync()
       }
     }
+
+    @Test
+    func postHandshakeReadKeepsIdleConnectionsAliveUntilAFrameStarts() async throws {
+      var fds: [Int32] = [0, 0]
+      #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+      defer {
+        close(fds[0])
+        close(fds[1])
+      }
+
+      let connection = UnixSocketConnection(fileDescriptor: fds[0])
+      let payload = Data("idle-then-frame".utf8)
+      let reader = Task {
+        try await connection.receiveFrameWithPostHandshakeDeadline(0.2)
+      }
+      try await Task.sleep(for: .milliseconds(350))
+      try FramedMessageIO.writeFrame(payload, to: fds[1])
+
+      let received = try await reader.value
+      #expect(received == payload)
+    }
+
+    @Test
+    func postHandshakeReadTimesOutAfterAStalledHeaderOrPayload() async throws {
+      var headerFds: [Int32] = [0, 0]
+      #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &headerFds) == 0)
+      defer {
+        close(headerFds[0])
+        close(headerFds[1])
+      }
+
+      let headerConnection = UnixSocketConnection(fileDescriptor: headerFds[0])
+      let headerReader = Task {
+        try await headerConnection.receiveFrameWithPostHandshakeDeadline(0.2)
+      }
+      let firstHeaderByte: UInt8 = 0
+      let headerByteCount = withUnsafeBytes(of: firstHeaderByte) { rawBuffer in
+        write(headerFds[1], rawBuffer.baseAddress, rawBuffer.count)
+      }
+      #expect(headerByteCount == 1)
+      do {
+        _ = try await headerReader.value
+        Issue.record("a partial header should time out")
+      } catch FramedMessageIO.IOError.readFailed(let code) {
+        #expect(code == EAGAIN || code == EWOULDBLOCK)
+      }
+
+      var payloadFds: [Int32] = [0, 0]
+      #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &payloadFds) == 0)
+      defer {
+        close(payloadFds[0])
+        close(payloadFds[1])
+      }
+
+      let payloadConnection = UnixSocketConnection(fileDescriptor: payloadFds[0])
+      let payloadReader = Task {
+        try await payloadConnection.receiveFrameWithPostHandshakeDeadline(0.2)
+      }
+      let header = try DaemonFrameHeader.encodeLength(4)
+      try header.withUnsafeBytes { rawBuffer in
+        #expect(write(payloadFds[1], rawBuffer.baseAddress, rawBuffer.count) == rawBuffer.count)
+      }
+      let firstPayloadByte: UInt8 = 0x41
+      let payloadByteCount = withUnsafeBytes(of: firstPayloadByte) { rawBuffer in
+        write(payloadFds[1], rawBuffer.baseAddress, rawBuffer.count)
+      }
+      #expect(payloadByteCount == 1)
+      do {
+        _ = try await payloadReader.value
+        Issue.record("a partial payload should time out")
+      } catch FramedMessageIO.IOError.readFailed(let code) {
+        #expect(code == EAGAIN || code == EWOULDBLOCK)
+      }
+    }
   #endif
 
   /// Dialling is retried; anything after the first write is not. Nothing has been sent when

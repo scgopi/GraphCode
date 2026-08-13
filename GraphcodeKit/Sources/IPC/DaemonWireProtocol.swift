@@ -346,6 +346,15 @@ public struct DaemonReplayBuffer: Equatable, Sendable {
     after cursor: UInt64,
     skipping nonReplayableSequences: Set<UInt64> = []
   ) throws -> [DaemonWireEnvelope] {
+    try replay(
+      after: cursor,
+      skippingRanges: Self.sequenceRanges(from: nonReplayableSequences))
+  }
+
+  public func replay(
+    after cursor: UInt64,
+    skippingRanges: [ClosedRange<UInt64>]
+  ) throws -> [DaemonWireEnvelope] {
     guard capacity > 0 else {
       throw ReplayError.replayUnavailable
     }
@@ -357,19 +366,51 @@ public struct DaemonReplayBuffer: Equatable, Sendable {
     if cursor < first {
       let missingCount = first - (cursor + 1)
       if missingCount > 0 {
-        guard missingCount <= UInt64(nonReplayableSequences.count) else {
+        guard Self.rangesCover(
+          lowerBound: cursor + 1,
+          upperBound: first - 1,
+          ranges: skippingRanges)
+        else {
           throw ReplayError.cursorOutsideWindow
-        }
-        var sequence = cursor + 1
-        while sequence < first {
-          guard nonReplayableSequences.contains(sequence) else {
-            throw ReplayError.cursorOutsideWindow
-          }
-          sequence += 1
         }
       }
     }
     return entries.filter { ($0.sequence ?? 0) > cursor }
+  }
+
+  public static func sequenceRanges(from sequences: Set<UInt64>) -> [ClosedRange<UInt64>] {
+    let sorted = sequences.sorted()
+    guard var start = sorted.first else { return [] }
+    var end = start
+    var ranges: [ClosedRange<UInt64>] = []
+    for sequence in sorted.dropFirst() {
+      if end != UInt64.max, sequence == end + 1 {
+        end = sequence
+      } else {
+        ranges.append(start...end)
+        start = sequence
+        end = sequence
+      }
+    }
+    ranges.append(start...end)
+    return ranges
+  }
+
+  public static func rangesCover(
+    lowerBound: UInt64,
+    upperBound: UInt64,
+    ranges: [ClosedRange<UInt64>]
+  ) -> Bool {
+    guard lowerBound <= upperBound else { return true }
+    var next = lowerBound
+    for range in ranges.sorted(by: { $0.lowerBound < $1.lowerBound }) {
+      guard range.upperBound >= next else { continue }
+      guard range.lowerBound <= next else { return false }
+      if range.upperBound >= upperBound { return true }
+      guard range.upperBound < UInt64.max else { return true }
+      next = range.upperBound + 1
+    }
+    return false
   }
 }
 public enum DaemonFrameHeader {

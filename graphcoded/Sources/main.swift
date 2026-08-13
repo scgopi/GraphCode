@@ -162,7 +162,12 @@ func handleConnection(_ connection: any DaemonConnection) {
 
       guard let channel else { return }
       while true {
-        let data = try await channel.receiveFrame()
+        let data: Data
+        if let unixConnection = connection as? UnixSocketConnection {
+          data = try await unixConnection.receiveFrameWithPostHandshakeDeadline()
+        } else {
+          data = try await channel.receiveFrame()
+        }
         do {
           switch try DaemonWireProtocol.decodeClientFrame(data) {
           case .v1(let command):

@@ -74,6 +74,10 @@ import Foundation
       try Self.read(count, from: fileDescriptor)
     }
 
+    fileprivate func readExactlySync(_ count: Int, by deadline: Date) throws -> Data {
+      try Self.read(count, from: fileDescriptor, by: deadline)
+    }
+
     fileprivate func writeFrameSync(_ data: Data) throws {
       try FramedMessageIO.writeFrame(data, to: fileDescriptor)
     }
@@ -110,10 +114,21 @@ import Foundation
     }
 
     private static func read(_ count: Int, from fileDescriptor: Int32) throws -> Data {
+      try read(count, from: fileDescriptor, by: nil)
+    }
+
+    private static func read(
+      _ count: Int,
+      from fileDescriptor: Int32,
+      by deadline: Date?
+    ) throws -> Data {
       guard count > 0 else { return Data() }
       var buffer = [UInt8](repeating: 0, count: count)
       var total = 0
       while total < count {
+        if let deadline {
+          try waitUntilReadable(fileDescriptor, by: deadline)
+        }
         let result = buffer.withUnsafeMutableBytes { rawBuffer in
           Darwin.read(
             fileDescriptor, rawBuffer.baseAddress!.advanced(by: total), count - total)
@@ -126,6 +141,32 @@ import Foundation
         total += result
       }
       return Data(buffer)
+    }
+
+    private static func waitUntilReadable(
+      _ fileDescriptor: Int32,
+      by deadline: Date
+    ) throws {
+      while true {
+        let remaining = deadline.timeIntervalSinceNow
+        guard remaining > 0 else {
+          throw FramedMessageIO.IOError.readFailed(errno: EAGAIN)
+        }
+        let milliseconds = min(
+          Double(Int32.max),
+          max(1, (remaining * 1_000).rounded(.up)))
+        var descriptor = pollfd(
+          fd: fileDescriptor,
+          events: Int16(POLLIN),
+          revents: 0)
+        let result = poll(&descriptor, 1, Int32(milliseconds))
+        if result > 0 { return }
+        if result == 0 {
+          throw FramedMessageIO.IOError.readFailed(errno: EAGAIN)
+        }
+        if errno == EINTR { continue }
+        throw FramedMessageIO.IOError.readFailed(errno: errno)
+      }
     }
   }
 
@@ -159,6 +200,46 @@ import Foundation
 
     public func receiveFrame() async throws -> Data {
       try await FramedMessageIO.readFrame(from: stream)
+    }
+
+    /// Reads the next frame without timing out an idle connection, then applies one
+    /// cumulative deadline after its first byte arrives. This keeps accepted clients
+    /// parked indefinitely between frames while ensuring a peer that starts a header or
+    /// payload cannot hold a daemon task forever.
+    public func receiveFrameWithPostHandshakeDeadline(
+      _ timeout: TimeInterval = 5
+    ) async throws -> Data {
+      try await withCheckedThrowingContinuation { continuation in
+        DispatchQueue.global().async {
+          do {
+            continuation.resume(
+              returning: try self.receiveFrameWithPostHandshakeDeadlineSync(timeout))
+          } catch {
+            continuation.resume(throwing: error)
+          }
+        }
+      }
+    }
+
+    public func receiveFrameWithPostHandshakeDeadlineSync(
+      _ timeout: TimeInterval = 5
+    ) throws -> Data {
+      let firstByte = try stream.readExactlySync(1)
+      let deadline = Date().addingTimeInterval(max(0, timeout))
+      var header = firstByte
+      header.append(try stream.readExactlySync(DaemonFrameHeader.byteCount - 1, by: deadline))
+      let length: Int
+      do {
+        length = try DaemonFrameHeader.decodeLength(
+          Array(header), maxPayloadBytes: DaemonFrameHeader.legacySafetyCeilingBytes)
+      } catch DaemonFrameHeader.HeaderError.invalidHeader {
+        throw FramedMessageIO.IOError.invalidHeader
+      } catch {
+        throw FramedMessageIO.IOError.payloadTooLarge
+      }
+      return length == 0
+        ? Data()
+        : try stream.readExactlySync(length, by: deadline)
     }
 
     public func sendFrame(_ data: Data) async throws {

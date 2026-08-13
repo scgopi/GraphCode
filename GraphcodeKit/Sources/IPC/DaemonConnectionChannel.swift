@@ -36,7 +36,7 @@ public final class DaemonReplayStore: @unchecked Sendable {
   private var buffers: [UUID: DaemonReplayBuffer] = [:]
   private var nextSequences: [UUID: UInt64] = [:]
   private var watermarks: [UUID: UInt64] = [:]
-  private var nonReplayableSequences: [UUID: Set<UInt64>] = [:]
+  private var nonReplayableRanges: [UUID: [ClosedRange<UInt64>]] = [:]
   private var lastAccess: [UUID: Date] = [:]
   private var subscriptionsByConnection: [UUID: [UUID: DaemonWireSubscription]] = [:]
   private var projectPaths: [UUID: Set<String>] = [:]
@@ -77,7 +77,9 @@ public final class DaemonReplayStore: @unchecked Sendable {
     let sequence = nextSequences[clientID, default: 1]
     nextSequences[clientID] = sequence == UInt64.max ? UInt64.max : sequence + 1
     watermarks[clientID] = sequence
-    nonReplayableSequences[clientID, default: []].insert(sequence)
+    if capacity > 0 {
+      addNonReplayableSequence(sequence, for: clientID)
+    }
     lastAccess[clientID] = now
     return sequence
   }
@@ -188,6 +190,10 @@ public final class DaemonReplayStore: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     activeConnections[clientID]?.remove(connectionID)
+    subscriptionsByConnection[clientID]?.removeValue(forKey: connectionID)
+    if subscriptionsByConnection[clientID]?.isEmpty == true {
+      subscriptionsByConnection.removeValue(forKey: clientID)
+    }
     projectPathsByConnection[clientID]?.removeValue(forKey: connectionID)
     if projectPathsByConnection[clientID]?.isEmpty == true {
       projectPathsByConnection.removeValue(forKey: clientID)
@@ -269,7 +275,7 @@ public final class DaemonReplayStore: @unchecked Sendable {
     }
     return try buffer.replay(
       after: cursor,
-      skipping: nonReplayableSequences[clientID] ?? [])
+      skippingRanges: nonReplayableRanges[clientID] ?? [])
   }
 
   public func remove(clientID: UUID) {
@@ -381,14 +387,10 @@ public final class DaemonReplayStore: @unchecked Sendable {
     for clientID: UUID
   ) -> Bool {
     guard lowerBound <= upperBound else { return true }
-    let gaps = nonReplayableSequences[clientID] ?? []
-    guard upperBound - lowerBound < UInt64(gaps.count) else { return false }
-    var sequence = lowerBound
-    while true {
-      guard gaps.contains(sequence) else { return false }
-      if sequence == upperBound { return true }
-      sequence += 1
-    }
+    return DaemonReplayBuffer.rangesCover(
+      lowerBound: lowerBound,
+      upperBound: upperBound,
+      ranges: nonReplayableRanges[clientID] ?? [])
   }
 
   private func removeClient(_ clientID: UUID) {
@@ -396,11 +398,67 @@ public final class DaemonReplayStore: @unchecked Sendable {
     nextSequences.removeValue(forKey: clientID)
     watermarks.removeValue(forKey: clientID)
     lastAccess.removeValue(forKey: clientID)
-    nonReplayableSequences.removeValue(forKey: clientID)
+    nonReplayableRanges.removeValue(forKey: clientID)
     subscriptionsByConnection.removeValue(forKey: clientID)
     projectPaths.removeValue(forKey: clientID)
     projectPathsByConnection.removeValue(forKey: clientID)
     activeConnections.removeValue(forKey: clientID)
+  }
+
+  private func addNonReplayableSequence(_ sequence: UInt64, for clientID: UUID) {
+    var ranges = nonReplayableRanges[clientID] ?? []
+    guard !ranges.contains(where: { $0.contains(sequence) }) else { return }
+    if let index = ranges.firstIndex(where: {
+      sequence < $0.lowerBound
+        && sequence != UInt64.max
+        && sequence + 1 >= $0.lowerBound
+    }) {
+      let next = ranges[index]
+      ranges[index] = sequence...next.upperBound
+    } else if let index = ranges.firstIndex(where: {
+      $0.upperBound != UInt64.max
+        && $0.upperBound + 1 == sequence
+    }) {
+      let previous = ranges[index]
+      ranges[index] = previous.lowerBound...sequence
+    } else {
+      ranges.append(sequence...sequence)
+      ranges.sort { $0.lowerBound < $1.lowerBound }
+    }
+    mergeNonReplayableRanges(&ranges)
+    nonReplayableRanges[clientID] = compactNonReplayableRanges(ranges)
+  }
+
+  private func mergeNonReplayableRanges(_ ranges: inout [ClosedRange<UInt64>]) {
+    guard !ranges.isEmpty else { return }
+    ranges.sort { $0.lowerBound < $1.lowerBound }
+    var merged: [ClosedRange<UInt64>] = []
+    for range in ranges {
+      guard let last = merged.last else {
+        merged.append(range)
+        continue
+      }
+      if last.upperBound == UInt64.max
+        || (range.lowerBound != 0 && last.upperBound + 1 >= range.lowerBound)
+      {
+        merged[merged.count - 1] =
+          last.lowerBound...max(last.upperBound, range.upperBound)
+      } else {
+        merged.append(range)
+      }
+    }
+    ranges = merged
+  }
+
+  private func compactNonReplayableRanges(_ ranges: [ClosedRange<UInt64>])
+    -> [ClosedRange<UInt64>]
+  {
+    guard capacity > 0 else { return [] }
+    let maxRanges = max(1, capacity)
+    guard ranges.count > maxRanges else { return ranges }
+    // A cursor before the discarded ranges is intentionally no longer resumable: the
+    // retained ranges still prove every skipped sequence in the bounded replay window.
+    return Array(ranges.suffix(maxRanges))
   }
 }
 

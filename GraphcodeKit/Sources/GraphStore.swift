@@ -228,7 +228,8 @@ public actor GraphStore {
 
   public func handle(
     _ command: GraphCommand,
-    broadcastErrors: Bool = true
+    broadcastErrors: Bool = true,
+    v2PayloadLimit: Int? = nil
   ) async -> GraphStoreCommandResult {
     let previous = commandTail
     let commandID = nextCommandID
@@ -240,6 +241,16 @@ public actor GraphStore {
           message: "graph store is unavailable",
           graph: LoopGraph(project: ProjectRef(path: "", name: "Untitled")))
       }
+      if let v2PayloadLimit {
+        let preview = await self.preview(command, broadcastErrors: broadcastErrors)
+        if case .applied(let projectedGraph) = preview,
+          !Self.v2GraphChangeFits(projectedGraph, limit: v2PayloadLimit)
+        {
+          return .rejected(
+            message: "resulting graph response exceeds the v2 payload limit",
+            graph: self.graph)
+        }
+      }
       return await self.applyCommand(command, broadcastErrors: broadcastErrors)
     }
     commandTail = operation
@@ -250,6 +261,29 @@ public actor GraphStore {
       commandTailID = nil
     }
     return result
+  }
+
+  /// Runs a command against a side-effect-free copy so a v2 request can be rejected
+  /// before the real graph, persistence, or broadcast callbacks are touched.
+  private func preview(
+    _ command: GraphCommand,
+    broadcastErrors: Bool
+  ) async -> GraphStoreCommandResult {
+    let shadow = GraphStore(graph: graph, subGraphDepth: subGraphDepth)
+    return await shadow.handle(command, broadcastErrors: broadcastErrors)
+  }
+
+  private static func v2GraphChangeFits(_ graph: LoopGraph, limit: Int) -> Bool {
+    guard limit >= 0 else { return false }
+    let event = DaemonEvent.graphChanged(graph)
+    let response = DaemonWireEnvelope.response(id: UUID(), event: event)
+    let broadcast = DaemonWireEnvelope.event(sequence: UInt64.max, event: event)
+    guard let responseData = try? JSONEncoder().encode(response),
+      let broadcastData = try? JSONEncoder().encode(broadcast)
+    else {
+      return false
+    }
+    return responseData.count <= limit && broadcastData.count <= limit
   }
 
   private func applyCommand(
