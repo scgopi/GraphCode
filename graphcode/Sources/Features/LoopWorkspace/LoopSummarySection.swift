@@ -35,18 +35,33 @@ struct LoopSummarySection: View {
   }
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 12) {
+    VStack(alignment: .leading, spacing: 10) {
       let presentation = presentation
       header(presentation)
       if isFolded {
         foldedLine(presentation)
       } else {
-        nowBlock(presentation)
-        if !presentation.receding.isEmpty || !presentation.passes.isEmpty
-          || presentation.earlierPasses > 0
-        {
-          history(presentation)
+        // History above, now at the foot — the same direction as the terminal beside it,
+        // and the direction the spine's segment travels. Scrolled to the bottom, so the
+        // current beat is what you land on and older work is a scroll up, exactly as
+        // scrollback is.
+        ScrollView(.vertical) {
+          VStack(alignment: .leading, spacing: 10) {
+            if !presentation.receding.isEmpty || !presentation.passes.isEmpty
+              || presentation.earlierPasses > 0
+            {
+              history(presentation)
+            }
+            nowBlock(presentation)
+          }
+          .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .scrollBounceBehavior(.basedOnSize)
+        .defaultScrollAnchor(.bottom)
+        // Flexible, but never squeezed away: the sections under it are fixed-height, so
+        // without a floor a short window would collapse the one section the rail is now
+        // mostly for.
+        .frame(minHeight: 120, maxHeight: .infinity)
       }
       Rectangle().fill(.white.opacity(0.07)).frame(height: 1)
     }
@@ -162,21 +177,26 @@ struct LoopSummarySection: View {
 
   // MARK: - History
 
-  /// The receding beats, the pass line, and the rollups — everything behind the current
-  /// beat, on one spine.
+  /// Everything behind the current beat, oldest at the top, on one spine: the finished
+  /// passes, the line where this pass began, then this pass's beats in the order they
+  /// happened.
   private func history(_ presentation: LoopSummaryPresentation) -> some View {
     VStack(alignment: .leading, spacing: 0) {
-      ForEach(Array(presentation.receding.enumerated()), id: \.element.id) { index, beat in
-        recedingRow(beat, depth: index)
-        if index + 1 == presentation.unseen, index + 1 < presentation.receding.count {
-          sinceYouLooked
-        }
+      if !presentation.passes.isEmpty || presentation.earlierPasses > 0 {
+        rollups(presentation)
       }
       if let label = presentation.passLabel {
         passDivider(label, delta: presentation.passDelta)
       }
-      if !presentation.passes.isEmpty || presentation.earlierPasses > 0 {
-        rollups(presentation)
+      let beats = presentation.receding
+      // The hairline sits before the first beat the human has not seen, which is
+      // `unseen` rows from the end.
+      let firstUnseen = beats.count - presentation.unseen
+      ForEach(Array(beats.enumerated()), id: \.element.id) { index, beat in
+        if index == firstUnseen, presentation.unseen > 0 {
+          sinceYouLooked
+        }
+        recedingRow(beat, age: age(of: index, in: beats.count))
       }
     }
     .padding(.leading, 16)
@@ -194,18 +214,26 @@ struct LoopSummarySection: View {
     isWorking && !presentation.receding.isEmpty
   }
 
+  /// How faded a row is by its position: 0 at the top of the list, 1 for the one just
+  /// above the current beat. A single recent/older split was enough for two rows and is
+  /// not for twelve.
+  private func age(of index: Int, in count: Int) -> Double {
+    guard count > 1 else { return 1 }
+    return Double(index) / Double(count - 1)
+  }
+
   /// A beat that is no longer current: one line, a dot on the spine, dimming with age.
   ///
   /// The dimming is the one place in the rail exempt from the project's tertiary-ink floor
   /// — `.72` down to `.42` on beat body text is deliberate signal about recency, not a
   /// contrast accident, and the design says so explicitly.
-  private func recedingRow(_ beat: SummaryBeat, depth: Int) -> some View {
-    let isRecent = depth == 0
+  private func recedingRow(_ beat: SummaryBeat, age: Double) -> some View {
+    let isRecent = age > 0.999
     return VStack(alignment: .leading, spacing: 3) {
       Text(beat.text)
         .font(.system(size: 11.5))
         .lineSpacing(1.6)
-        .foregroundStyle(.white.opacity(isRecent ? 0.72 : 0.42))
+        .foregroundStyle(.white.opacity(0.42 + 0.30 * age))
         .fixedSize(horizontal: false, vertical: true)
       if isRecent {
         Text(LoopCardPresentation.duration(now.timeIntervalSince(beat.at)) + " ago")
@@ -216,8 +244,12 @@ struct LoopSummarySection: View {
     .padding(.bottom, 8)
     .frame(maxWidth: .infinity, alignment: .leading)
     .overlay(alignment: .topLeading) {
+      // The dot keeps its kind colour at every depth, dimmed rather than greyed. The
+      // claim the six kinds exist to make — that the shape of a pass is legible from the
+      // dots alone, without reading a word — is only true if the older dots still carry
+      // one, and over twelve rows that is where the shape actually shows.
       Circle()
-        .fill(isRecent ? BeatKindAppearance.dot(beat.kind) : .white.opacity(0.28))
+        .fill(BeatKindAppearance.dot(beat.kind).opacity(0.45 + 0.55 * age))
         .frame(width: isRecent ? 7 : 5, height: isRecent ? 7 : 5)
         .overlay { Circle().stroke(Theme.workspaceRail, lineWidth: 2) }
         .offset(x: isRecent ? -15 : -14, y: 4)

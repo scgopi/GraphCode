@@ -109,10 +109,15 @@ public struct SummaryReading: Equatable, Sendable {
 /// in the graph file. Nothing accumulates — that is the difference between this and the
 /// terminal it exists to save you reading.
 public struct LoopSummary: Codable, Equatable, Sendable {
-  /// Newest last. Three is the design's now-block plus two receding rows.
-  public static let maxBeats = 3
+  /// Newest last.
+  ///
+  /// Three — the now block plus two receding rows — was the fixed-height design's answer,
+  /// and it stopped being the right one when the section became scrollable: a rail you can
+  /// scroll has nothing to scroll to at three. Twelve is what a person can page back
+  /// through and still be a fixed cost per node (a beat is a short line and two dates).
+  public static let maxBeats = 12
   /// How many finished passes keep a line of their own before they become a count.
-  public static let maxPassSummaries = 3
+  public static let maxPassSummaries = 6
 
   public var beats: [SummaryBeat]
   public var passes: [PassSummary]
@@ -133,8 +138,12 @@ public struct LoopSummary: Codable, Equatable, Sendable {
   /// The beat the rail shows at full size, and the card shows in one line.
   public var current: SummaryBeat? { beats.last }
 
-  /// The beats behind the current one, newest first — the receding rows.
-  public var receding: [SummaryBeat] { beats.dropLast().reversed() }
+  /// The beats behind the current one, **oldest first** — the rows above it.
+  ///
+  /// Chronological, not newest-first. The rail sits beside a terminal that reads top to
+  /// bottom with the newest line at the foot of it, and a panel that ran the other way
+  /// meant reading the same run in two directions on one screen.
+  public var receding: [SummaryBeat] { Array(beats.dropLast()) }
 
   /// How many beats have landed since `seenBeatID` was the newest one.
   ///

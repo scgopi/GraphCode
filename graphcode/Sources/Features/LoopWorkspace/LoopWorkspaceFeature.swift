@@ -28,6 +28,9 @@ struct LoopWorkspaceFeature {
     /// `@State` because the *toggle* lives in the window toolbar, which `AppView` owns —
     /// and a control and the thing it controls cannot hold the answer separately.
     var isRailVisible = LoopWorkspaceRail.loadVisible()
+    /// How wide the rail is, after any drag on its edge. Persisted like its visibility:
+    /// someone who widened it to read beats did not mean only this session.
+    var railWidth = LoopWorkspaceRail.loadWidth()
     /// Whether the summary section is collapsed to one line. Persisted beside the rail's
     /// own visibility, and for the same reason: both are choices about how much of the
     /// window a person wants back, and neither should have to be remade every launch.
@@ -71,6 +74,9 @@ struct LoopWorkspaceFeature {
     /// and handled up there, the way `.nodeTapped` already is.
     /// ⌥G, and the toolbar's trailing panel toggle.
     case railToggled
+    /// The rail's leading edge was dragged. Sent once, on release — a per-frame action
+    /// would put a reducer run and a `UserDefaults` write behind every pixel.
+    case railWidthChanged(CGFloat)
     /// The summary section's header row.
     case summaryFoldToggled
     /// The amber block's `Answer it` — the question is in the terminal, so this is a
@@ -205,6 +211,11 @@ struct LoopWorkspaceFeature {
       case .railToggled:
         state.isRailVisible.toggle()
         LoopWorkspaceRail.saveVisible(state.isRailVisible)
+        return .none
+
+      case .railWidthChanged(let width):
+        state.railWidth = LoopWorkspaceRail.clamped(width)
+        LoopWorkspaceRail.saveWidth(state.railWidth)
         return .none
 
       case .summaryFoldToggled:

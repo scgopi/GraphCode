@@ -19,6 +19,7 @@ struct LoopWorkspaceView: View {
       if store.isRailVisible && railHasContent {
         LoopWorkspaceRail(
           node: store.node, graph: store.graph, now: now,
+          width: railWidth,
           isSummaryFolded: store.isSummaryFolded,
           seenBeatID: store.seenBeatID,
           onSummaryFoldToggled: { store.send(.summaryFoldToggled) },
@@ -26,6 +27,7 @@ struct LoopWorkspaceView: View {
         ) { targetID in
           store.send(.railTargetTapped(targetID))
         }
+        .overlay(alignment: .leading) { railResizeHandle }
       } else if LoopSummaryPresentation.hasContent(node: store.node) {
         // Hidden is not gone: 26 points keeps the loop's state dot and the word, and the
         // ask still gets through. See `SummaryGutter`.
@@ -43,6 +45,39 @@ struct LoopWorkspaceView: View {
     // into that band, and it puts the folder name level with the window controls while
     // the tab strip keeps the row below to itself.
     .toolbar { folderToolbar }
+  }
+
+  /// The rail's width mid-drag, before it is committed to the reducer on release.
+  @State private var dragWidth: CGFloat?
+
+  private var railWidth: CGFloat { dragWidth ?? store.railWidth }
+
+  /// The rail's leading edge, as a grab handle.
+  ///
+  /// Six points of transparent hit area over the hairline the rail already draws, rather
+  /// than a visible splitter: the seam is the affordance, and a second line beside the
+  /// first would read as a border that had been drawn twice. Dragging left widens, which
+  /// is what the sign flip is for — a right-hand panel grows as the pointer moves away
+  /// from its edge.
+  private var railResizeHandle: some View {
+    Rectangle()
+      .fill(.clear)
+      .frame(width: 6)
+      .contentShape(Rectangle())
+      .onHover { inside in
+        if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+      }
+      .gesture(
+        DragGesture(minimumDistance: 1)
+          .onChanged { value in
+            dragWidth = LoopWorkspaceRail.clamped(store.railWidth - value.translation.width)
+          }
+          .onEnded { value in
+            let settled = LoopWorkspaceRail.clamped(store.railWidth - value.translation.width)
+            dragWidth = nil
+            store.send(.railWidthChanged(settled))
+          }
+      )
   }
 
   /// Whether this loop gives the rail anything to say — see `LoopWorkspaceRail`.

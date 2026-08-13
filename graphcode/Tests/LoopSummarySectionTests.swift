@@ -55,8 +55,9 @@ struct LoopSummarySectionTests {
     #expect(presentation.mode == .working)
     #expect(presentation.text == "Working out why cached tokens double-count")
     #expect(presentation.elapsed == "1m")
-    // Newest first behind it, and the current beat is not repeated among them.
-    #expect(presentation.receding.map(\.text) == ["Found the double count", "Traced totalTokens"])
+    // Chronological, oldest first — the rail reads in the same direction as the terminal
+    // beside it, with the newest at the foot. The current beat is not repeated among them.
+    #expect(presentation.receding.map(\.text) == ["Traced totalTokens", "Found the double count"])
     #expect(presentation.passLabel == "PASS 7")
   }
 
@@ -109,6 +110,18 @@ struct LoopSummarySectionTests {
     // Never left: no hairline at all rather than a section marked all-new.
     let first = LoopSummaryPresentation(node: node(summary: summary), now: now)
     #expect(first.unseen == 0)
+  }
+
+  /// The rail is draggable now that a beat is prose rather than a chip, and the stored
+  /// width has to survive both a hand that overshoots and a defaults file with nothing in
+  /// it — a rail 8 points wide is one nobody can get back.
+  @Test
+  func theRailsWidthIsBoundedWhateverItIsHanded() {
+    #expect(LoopWorkspaceRail.clamped(40) == LoopWorkspaceRail.minimumWidth)
+    #expect(LoopWorkspaceRail.clamped(4000) == LoopWorkspaceRail.maximumWidth)
+    #expect(LoopWorkspaceRail.clamped(300) == 300)
+    #expect(LoopWorkspaceRail.defaultWidth >= LoopWorkspaceRail.minimumWidth)
+    #expect(LoopWorkspaceRail.defaultWidth <= LoopWorkspaceRail.maximumWidth)
   }
 
   /// A rail must never render an empty section — the argument that already keeps blank
