@@ -43,6 +43,9 @@ cancellation, backpressure, and non-reading peers.
 - When retention capacity is full of active clients, an overflow client may receive live
   events without a replay buffer; later promotion preserves its sequence and watermark
   state rather than resetting or duplicating visible sequences.
+- With `maxClients: 0`, active clients still share monotonic append/snapshot sequences and
+  watermarks, but retain no replay history; after final disconnect, reconnect starts a new
+  sequence window and an older cursor is outside that window.
 - Replay frames are queued before live events, preserving sequence order across reconnect.
 - A connection-local join snapshot consumes a visible sequence but records a replay
   watermark, so disconnecting immediately after the snapshot and resuming from that cursor

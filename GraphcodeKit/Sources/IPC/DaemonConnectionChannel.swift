@@ -55,9 +55,6 @@ public final class DaemonReplayStore: @unchecked Sendable {
     defer { lock.unlock() }
     let now = Date()
     purgeExpired(now: now)
-    guard maxClients > 0 else {
-      return .event(sequence: 1, event: event)
-    }
     _ = ensureClient(clientID)
     let envelope = appendLocked(clientID: clientID, event: event)
     lastAccess[clientID] = now
@@ -73,7 +70,6 @@ public final class DaemonReplayStore: @unchecked Sendable {
     defer { lock.unlock() }
     let now = Date()
     purgeExpired(now: now)
-    guard maxClients > 0 else { return 1 }
     _ = ensureClient(clientID)
     let sequence = nextSequences[clientID, default: 1]
     nextSequences[clientID] = sequence == UInt64.max ? UInt64.max : sequence + 1
@@ -93,7 +89,6 @@ public final class DaemonReplayStore: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     purgeExpired(now: Date())
-    guard maxClients > 0 else { return }
     _ = ensureClient(clientID)
     activeConnections[clientID, default: []].insert(connectionID)
     if let subscription {
@@ -107,7 +102,9 @@ public final class DaemonReplayStore: @unchecked Sendable {
   public func setSubscription(clientID: UUID, subscription: DaemonWireSubscription?) {
     lock.lock()
     defer { lock.unlock() }
-    guard buffers[clientID] != nil else { return }
+    guard buffers[clientID] != nil || activeConnections[clientID]?.isEmpty == false else {
+      return
+    }
     if let subscription {
       subscriptions[clientID] = subscription
     } else {
@@ -119,7 +116,9 @@ public final class DaemonReplayStore: @unchecked Sendable {
   public func join(clientID: UUID, projectPath: String) {
     lock.lock()
     defer { lock.unlock() }
-    guard buffers[clientID] != nil else { return }
+    guard buffers[clientID] != nil || activeConnections[clientID]?.isEmpty == false else {
+      return
+    }
     projectPaths[clientID, default: []].insert(projectPath)
     lastAccess[clientID] = Date()
   }
@@ -127,6 +126,9 @@ public final class DaemonReplayStore: @unchecked Sendable {
   public func leave(clientID: UUID, projectPath: String) {
     lock.lock()
     defer { lock.unlock() }
+    guard buffers[clientID] != nil || activeConnections[clientID]?.isEmpty == false else {
+      return
+    }
     projectPaths[clientID]?.remove(projectPath)
     lastAccess[clientID] = Date()
   }
@@ -249,18 +251,31 @@ public final class DaemonReplayStore: @unchecked Sendable {
 
   @discardableResult
   private func ensureClient(_ clientID: UUID) -> Bool {
-    if buffers[clientID] != nil { return true }
-    guard maxClients > 0 else { return false }
+    if buffers[clientID] != nil {
+      ensureSequenceState(clientID)
+      return true
+    }
+    if maxClients == 0 {
+      ensureSequenceState(clientID)
+      return false
+    }
     evictIfNeeded()
-    guard buffers.count < maxClients else { return false }
+    guard buffers.count < maxClients else {
+      ensureSequenceState(clientID)
+      return false
+    }
     buffers[clientID] = DaemonReplayBuffer(capacity: capacity)
+    ensureSequenceState(clientID)
+    return true
+  }
+
+  private func ensureSequenceState(_ clientID: UUID) {
     if nextSequences[clientID] == nil {
       nextSequences[clientID] = 1
     }
     if watermarks[clientID] == nil {
       watermarks[clientID] = 0
     }
-    return true
   }
 
   private func appendLocked(clientID: UUID, event: DaemonEvent) -> DaemonWireEnvelope {

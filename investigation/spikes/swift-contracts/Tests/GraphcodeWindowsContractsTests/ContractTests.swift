@@ -473,6 +473,52 @@ final class ContractTests: XCTestCase {
     }
   }
 
+  func testZeroCapacityTracksActiveSequencesAndReconnectsWithoutReplay() async throws {
+    let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000030")!
+    let store = DaemonReplayStore(capacity: 8, maxClients: 0)
+    let firstTransport = RecordingConnection()
+    let firstChannel = DaemonConnectionChannel(
+      connection: firstTransport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+
+    try await firstChannel.sendEvent(.errorOccurred("one"))
+    try await firstChannel.sendConnectionSnapshot(.errorOccurred("two"))
+    try await firstChannel.sendEvent(.errorOccurred("three"))
+
+    let firstSequences = try firstTransport.frames.map {
+      try JSONDecoder().decode(DaemonWireEnvelope.self, from: $0).sequence
+    }
+    XCTAssertEqual(firstSequences, [1, 2, 3])
+    XCTAssertEqual(store.clientCount, 0)
+    XCTAssertEqual(try store.replay(clientID: clientID, after: 3), [])
+    XCTAssertThrowsError(try store.replay(clientID: clientID, after: 0)) { error in
+      XCTAssertEqual(error as? DaemonReplayBuffer.ReplayError, .replayUnavailable)
+    }
+
+    try await firstChannel.close()
+    let reconnectTransport = RecordingConnection()
+    let reconnectChannel = DaemonConnectionChannel(
+      connection: reconnectTransport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+    do {
+      try await reconnectChannel.replay(after: 3)
+      XCTFail("expected reconnect cursor to be outside the new active window")
+    } catch DaemonConnectionChannelError.cursorOutsideWindow {
+      // Expected: maxClients zero drops the prior active state when disconnected.
+    }
+
+    try await reconnectChannel.sendEvent(.errorOccurred("reconnected"))
+    let reconnectEnvelope = try XCTUnwrap(
+      JSONDecoder().decode(
+        DaemonWireEnvelope.self,
+        from: XCTUnwrap(reconnectTransport.frames.first)))
+    XCTAssertEqual(reconnectEnvelope.sequence, 1)
+  }
+
   func testReplayStoreAutomaticallyExpiresIdleHistory() async throws {
     let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000011")!
     let store = DaemonReplayStore(capacity: 2, retention: 0.01)
