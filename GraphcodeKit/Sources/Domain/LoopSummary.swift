@@ -260,7 +260,11 @@ public struct LoopSummary: Codable, Equatable, Sendable {
     if passes.count > Self.maxPassSummaries {
       passes.removeFirst(passes.count - Self.maxPassSummaries)
     }
-    let newestPass = reading.beats.map(\.pass).max()
+    // A reading with rollups but no beats leaves the ones on screen alone. No reader
+    // produces one — a finished pass implies the beats it was summarised from — but the
+    // alternative reading of "nothing" here is an empty rail, and the whole contract of
+    // this method is that a reader cannot erase more than it can see.
+    guard let newestPass = reading.beats.map(\.pass).max() else { return }
     beats =
       reading.beats
       .filter { $0.pass == newestPass }
