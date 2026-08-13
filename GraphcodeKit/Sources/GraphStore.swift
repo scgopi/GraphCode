@@ -1591,8 +1591,18 @@ public actor GraphStore {
     _ event: DaemonEvent,
     envelopes: [UUID: DaemonWireEnvelope]
   ) async {
+    var fallbackEnvelopes: [UUID: DaemonWireEnvelope] = [:]
+    for channel in connections.values where envelopes[channel.clientID] == nil {
+      guard fallbackEnvelopes[channel.clientID] == nil else { continue }
+      if let envelope = await channel.envelopeForEvent(event) {
+        fallbackEnvelopes[channel.clientID] = envelope
+      }
+    }
     for (id, channel) in connections {
-      await send(event, to: id, envelope: envelopes[channel.clientID])
+      await send(
+        event,
+        to: id,
+        envelope: envelopes[channel.clientID] ?? fallbackEnvelopes[channel.clientID])
     }
   }
 

@@ -519,6 +519,94 @@ final class ContractTests: XCTestCase {
     XCTAssertEqual(reconnectEnvelope.sequence, 1)
   }
 
+  func testZeroCapacityBroadcastSharesOneEnvelopeAcrossLogicalSockets() async throws {
+    let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000031")!
+    let path = "/work/multi-socket"
+    let store = DaemonReplayStore(capacity: 8, maxClients: 0)
+    let firstTransport = RecordingConnection()
+    let secondTransport = RecordingConnection()
+    let firstChannel = DaemonConnectionChannel(
+      connection: firstTransport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+    let secondChannel = DaemonConnectionChannel(
+      connection: secondTransport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+    await firstChannel.join(projectPath: path)
+    await secondChannel.join(projectPath: path)
+
+    let graph = LoopGraph(project: ProjectRef(path: path, name: "multi-socket"))
+    let envelope = try XCTUnwrap(
+      store.append(event: .graphChanged(graph), projectPath: path)[clientID])
+    try await firstChannel.sendEvent(envelope: envelope)
+    try await secondChannel.sendEvent(envelope: envelope)
+
+    let firstFrame = try XCTUnwrap(firstTransport.frames.first)
+    let secondFrame = try XCTUnwrap(secondTransport.frames.first)
+    let firstEnvelope = try JSONDecoder().decode(DaemonWireEnvelope.self, from: firstFrame)
+    let secondEnvelope = try JSONDecoder().decode(DaemonWireEnvelope.self, from: secondFrame)
+    XCTAssertEqual(firstEnvelope.sequence, secondEnvelope.sequence)
+    guard case .graphChanged(let firstGraph) = firstEnvelope.event,
+      case .graphChanged(let secondGraph) = secondEnvelope.event
+    else {
+      return XCTFail("expected graph events on both logical sockets")
+    }
+    XCTAssertEqual(firstGraph.id, secondGraph.id)
+    XCTAssertEqual(firstGraph.project.path, secondGraph.project.path)
+    XCTAssertEqual(firstEnvelope.sequence, 1)
+  }
+
+  func testProjectMembershipSurvivesOneSocketLeaveAndReplaysAfterBothDisconnect() async throws {
+    let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000032")!
+    let firstConnection = UUID(uuidString: "00000000-0000-0000-0000-000000000033")!
+    let secondConnection = UUID(uuidString: "00000000-0000-0000-0000-000000000034")!
+    let path = "/work/multi-join"
+    let store = DaemonReplayStore(capacity: 8, maxClients: 2)
+    store.register(clientID: clientID, connectionID: firstConnection, subscription: nil)
+    store.register(clientID: clientID, connectionID: secondConnection, subscription: nil)
+    store.join(clientID: clientID, connectionID: firstConnection, projectPath: path)
+    store.join(clientID: clientID, connectionID: secondConnection, projectPath: path)
+
+    let firstGraph = LoopGraph(project: ProjectRef(path: path, name: "multi-join"))
+    let firstEnvelope = try XCTUnwrap(
+      store.append(event: .graphChanged(firstGraph), projectPath: path)[clientID])
+    store.leave(clientID: clientID, connectionID: firstConnection, projectPath: path)
+    let secondGraph = LoopGraph(
+      project: ProjectRef(path: path, name: "multi-join"),
+      nodes: [NodeDraft(title: "second", loopType: .composite).makeNode()])
+    let secondEnvelope = try XCTUnwrap(
+      store.append(event: .graphChanged(secondGraph), projectPath: path)[clientID])
+    XCTAssertEqual(firstEnvelope.sequence, 1)
+    XCTAssertEqual(secondEnvelope.sequence, 2)
+
+    store.disconnect(clientID: clientID, connectionID: firstConnection)
+    store.disconnect(clientID: clientID, connectionID: secondConnection)
+    let thirdGraph = LoopGraph(
+      project: ProjectRef(path: path, name: "multi-join"),
+      nodes: [NodeDraft(title: "third", loopType: .composite).makeNode()])
+    let thirdEnvelope = try XCTUnwrap(
+      store.append(event: .graphChanged(thirdGraph), projectPath: path)[clientID])
+    XCTAssertEqual(thirdEnvelope.sequence, 3)
+    XCTAssertEqual(
+      try store.replay(clientID: clientID, after: 2).map(\.sequence),
+      [3])
+
+    let reconnectTransport = RecordingConnection()
+    let reconnectChannel = DaemonConnectionChannel(
+      connection: reconnectTransport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+    try await reconnectChannel.replay(after: 2)
+    let replayed = try JSONDecoder().decode(
+      DaemonWireEnvelope.self,
+      from: XCTUnwrap(reconnectTransport.frames.first))
+    XCTAssertEqual(replayed.sequence, 3)
+  }
+
   func testReplayStoreAutomaticallyExpiresIdleHistory() async throws {
     let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000011")!
     let store = DaemonReplayStore(capacity: 2, retention: 0.01)

@@ -47,6 +47,9 @@ cancellation, backpressure, and non-reading peers.
   watermarks, but retain no replay history; after final disconnect, reconnect starts a new
   sequence window and an older cursor is outside that window.
 - Replay frames are queued before live events, preserving sequence order across reconnect.
+- Multiple sockets sharing one logical client receive the same broadcast envelope and
+  sequence; project membership is reference-counted by socket, so one socket leaving does
+  not detach a project still joined by another.
 - A connection-local join snapshot consumes a visible sequence but records a replay
   watermark, so disconnecting immediately after the snapshot and resuming from that cursor
   is an exact caught-up replay rather than `replayUnavailable`.

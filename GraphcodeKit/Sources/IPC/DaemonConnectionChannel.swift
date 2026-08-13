@@ -38,6 +38,7 @@ public final class DaemonReplayStore: @unchecked Sendable {
   private var lastAccess: [UUID: Date] = [:]
   private var subscriptions: [UUID: DaemonWireSubscription] = [:]
   private var projectPaths: [UUID: Set<String>] = [:]
+  private var projectPathsByConnection: [UUID: [UUID: Set<String>]] = [:]
   private var activeConnections: [UUID: Set<UUID>] = [:]
 
   public init(
@@ -113,6 +114,17 @@ public final class DaemonReplayStore: @unchecked Sendable {
     lastAccess[clientID] = Date()
   }
 
+  public func join(clientID: UUID, connectionID: UUID, projectPath: String) {
+    lock.lock()
+    defer { lock.unlock() }
+    guard buffers[clientID] != nil || activeConnections[clientID]?.isEmpty == false else {
+      return
+    }
+    projectPaths[clientID, default: []].insert(projectPath)
+    projectPathsByConnection[clientID, default: [:]][connectionID, default: []].insert(projectPath)
+    lastAccess[clientID] = Date()
+  }
+
   public func join(clientID: UUID, projectPath: String) {
     lock.lock()
     defer { lock.unlock() }
@@ -123,6 +135,33 @@ public final class DaemonReplayStore: @unchecked Sendable {
     lastAccess[clientID] = Date()
   }
 
+  public func leave(clientID: UUID, connectionID: UUID, projectPath: String) {
+    lock.lock()
+    defer { lock.unlock() }
+    guard buffers[clientID] != nil || activeConnections[clientID]?.isEmpty == false else {
+      return
+    }
+    var pathsByConnection = projectPathsByConnection[clientID] ?? [:]
+    var paths = pathsByConnection[connectionID] ?? []
+    paths.remove(projectPath)
+    if paths.isEmpty {
+      pathsByConnection.removeValue(forKey: connectionID)
+    } else {
+      pathsByConnection[connectionID] = paths
+    }
+    if pathsByConnection.isEmpty {
+      projectPathsByConnection.removeValue(forKey: clientID)
+    } else {
+      projectPathsByConnection[clientID] = pathsByConnection
+    }
+    guard !pathsByConnection.values.contains(where: { $0.contains(projectPath) }) else {
+      lastAccess[clientID] = Date()
+      return
+    }
+    projectPaths[clientID]?.remove(projectPath)
+    lastAccess[clientID] = Date()
+  }
+
   public func leave(clientID: UUID, projectPath: String) {
     lock.lock()
     defer { lock.unlock() }
@@ -130,6 +169,17 @@ public final class DaemonReplayStore: @unchecked Sendable {
       return
     }
     projectPaths[clientID]?.remove(projectPath)
+    if let connectionIDs = projectPathsByConnection[clientID]?.keys {
+      for connectionID in Array(connectionIDs) {
+        projectPathsByConnection[clientID]?[connectionID]?.remove(projectPath)
+        if projectPathsByConnection[clientID]?[connectionID]?.isEmpty == true {
+          projectPathsByConnection[clientID]?.removeValue(forKey: connectionID)
+        }
+      }
+    }
+    if projectPathsByConnection[clientID]?.isEmpty == true {
+      projectPathsByConnection.removeValue(forKey: clientID)
+    }
     lastAccess[clientID] = Date()
   }
 
@@ -137,6 +187,10 @@ public final class DaemonReplayStore: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     activeConnections[clientID]?.remove(connectionID)
+    projectPathsByConnection[clientID]?.removeValue(forKey: connectionID)
+    if projectPathsByConnection[clientID]?.isEmpty == true {
+      projectPathsByConnection.removeValue(forKey: clientID)
+    }
     if buffers[clientID] == nil, activeConnections[clientID]?.isEmpty != false {
       removeClient(clientID)
       return
@@ -144,8 +198,9 @@ public final class DaemonReplayStore: @unchecked Sendable {
     lastAccess[clientID] = Date()
   }
 
-  /// Appends one canonical graph event to every retained logical client that is
-  /// attached to the project, including clients whose sockets are currently gone.
+  /// Appends one canonical graph event to every known logical client attached to the
+  /// project, including active clients without a replay buffer and clients whose sockets
+  /// are currently gone. Multiple sockets for one client share the returned envelope.
   /// The returned envelopes let live channels write the exact sequence assigned here.
   public func append(
     event: DaemonEvent,
@@ -156,7 +211,8 @@ public final class DaemonReplayStore: @unchecked Sendable {
     let now = Date()
     purgeExpired(now: now)
     var envelopes: [UUID: DaemonWireEnvelope] = [:]
-    for clientID in Array(buffers.keys) {
+    let clientIDs = Set(buffers.keys).union(activeConnections.keys)
+    for clientID in clientIDs {
       guard projectPaths[clientID]?.contains(projectPath) == true,
         isSubscribed(clientID: clientID, projectPath: projectPath)
       else { continue }
@@ -303,6 +359,7 @@ public final class DaemonReplayStore: @unchecked Sendable {
     lastAccess.removeValue(forKey: clientID)
     subscriptions.removeValue(forKey: clientID)
     projectPaths.removeValue(forKey: clientID)
+    projectPathsByConnection.removeValue(forKey: clientID)
     activeConnections.removeValue(forKey: clientID)
   }
 }
@@ -351,12 +408,14 @@ public actor DaemonConnectionChannel {
 
   public func join(projectPath: String) {
     guard case .v2 = mode else { return }
-    replayStore.join(clientID: clientID, projectPath: projectPath)
+    replayStore.join(
+      clientID: clientID, connectionID: connection.id, projectPath: projectPath)
   }
 
   public func leave(projectPath: String) {
     guard case .v2 = mode else { return }
-    replayStore.leave(clientID: clientID, projectPath: projectPath)
+    replayStore.leave(
+      clientID: clientID, connectionID: connection.id, projectPath: projectPath)
   }
 
   public func sendHelloResponse(selectedVersion: Int) async throws {
@@ -376,6 +435,11 @@ public actor DaemonConnectionChannel {
       }
       try await sendJSON(envelope)
     }
+  }
+
+  public func envelopeForEvent(_ event: DaemonEvent) -> DaemonWireEnvelope? {
+    guard case .v2 = mode, isSubscribed(to: event) else { return nil }
+    return replayStore.append(clientID: clientID, event: event)
   }
 
   /// Sends a current-graph snapshot to this socket only. Unlike a graph-change event,
