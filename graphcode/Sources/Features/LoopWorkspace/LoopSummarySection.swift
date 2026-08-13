@@ -94,11 +94,15 @@ struct LoopSummarySection: View {
     .help(isFolded ? "Show what this loop is doing" : "Collapse to one line")
   }
 
+  /// `DOING NOW` is a claim, and it is only true while something is producing beats. A
+  /// session that has finished its turn and is sitting at its prompt gets `LAST DID` — the
+  /// same sentence, in the tense it is actually in.
   private func headerTitle(_ presentation: LoopSummaryPresentation) -> String {
     switch presentation.mode {
     case .resolved: return "WHAT IT DID"
     case .asking: return "ASKING YOU"
-    case .starting, .working: return "DOING NOW"
+    case .starting: return "DOING NOW"
+    case .working: return presentation.isLive ? "DOING NOW" : "LAST DID"
     }
   }
 

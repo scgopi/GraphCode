@@ -131,18 +131,35 @@ struct SummaryBeatBuilder {
     return inner.isEmpty ? nil : inner
   }
 
+  /// The opening sentence, or the first two when the opening one is a fragment.
+  ///
+  /// "Clean. Rebuilding Release and reinstalling" is one beat, not two, and stopping at the
+  /// full stop put the word `Clean` alone in the rail with the useful half discarded —
+  /// seen on a real loop. Under three words is the test: a verdict like that is a preamble
+  /// to the sentence that says what is being done, and the pair still fits the ten-word
+  /// budget.
   static func firstSentence(of text: String) -> String {
     let line = text.split(separator: "\n").first.map(String.init) ?? text
-    var sentence = line
-    // `. ` rather than `.`: a sentence about `UsageProbe.swift` must not stop at the
-    // extension, which is the whole evidence the beat is carrying.
-    for terminator in [". ", "! ", "? "] {
-      if let range = sentence.range(of: terminator) {
-        sentence = String(sentence[sentence.startIndex..<range.lowerBound])
-      }
+    let sentences = split(intoSentences: line)
+    guard var sentence = sentences.first else { return "" }
+    if sentence.split(separator: " ").count < 3, sentences.count > 1 {
+      sentence = "\(sentence). \(sentences[1])"
     }
     if sentence.hasSuffix(".") || sentence.hasSuffix(":") { sentence.removeLast() }
     return sentence.trimmingCharacters(in: .whitespaces)
+  }
+
+  /// Sentences, cut on `. ` rather than `.` — a sentence about `UsageProbe.swift` must not
+  /// stop at the extension, which is the whole evidence the beat is carrying.
+  static func split(intoSentences line: String) -> [String] {
+    var sentences: [String] = []
+    var rest = Substring(line)
+    while let range = earliestRange(of: [". ", "! ", "? "], in: rest) {
+      sentences.append(String(rest[rest.startIndex..<range.lowerBound]))
+      rest = rest[range.upperBound...]
+    }
+    sentences.append(String(rest))
+    return sentences.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
   }
 
   /// The rail draws plain text, and agents narrate in markdown.
@@ -164,6 +181,14 @@ struct SummaryBeatBuilder {
       result = String(result.dropFirst()).trimmingCharacters(in: .whitespaces)
     }
     return result.trimmingCharacters(in: .whitespaces)
+  }
+
+  /// The earliest of several terminators, so sentences are cut in the order they appear
+  /// rather than in the order the list happens to be written.
+  static func earliestRange(of terminators: [String], in text: Substring) -> Range<
+    Substring.Index
+  >? {
+    terminators.compactMap { text.range(of: $0) }.min { $0.lowerBound < $1.lowerBound }
   }
 
   static func stripLeadingFiller(_ text: String) -> String {

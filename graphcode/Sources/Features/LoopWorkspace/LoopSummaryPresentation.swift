@@ -34,6 +34,10 @@ struct LoopSummaryPresentation: Equatable {
   /// `PASS 7` plus where the metric got to, or nothing when there is no pass to name.
   let passLabel: String?
   let passDelta: String?
+  /// Whether the session is working this second. What separates `DOING NOW` from
+  /// `LAST DID` — a beat is in the present tense only while something is producing beats,
+  /// and a session parked at its prompt is describing the past.
+  let isLive: Bool
 
   /// Whether the section has anything to say at all. A rail must never render an empty
   /// section — see `LoopWorkspaceRail.hasContent`.
@@ -46,14 +50,24 @@ struct LoopSummaryPresentation: Equatable {
     let current = summary.current
 
     // **Attention is not read off the summary.** `asking` is a beat kind the readers never
-    // produce: whether a loop wants a human is already answered by `state`/`presence`, and
-    // the attention rollup, the card, the sidebar and the titlebar chip all key off that
-    // one answer. A rail that decided for itself would be a second source of truth about
-    // the only thing in the app that must have exactly one.
+    // produce: whether a loop wants a human is already answered by `state`, and the
+    // attention rollup, the card, the sidebar and the titlebar chip all key off that one
+    // answer. A rail that decided for itself would be a second source of truth about the
+    // only thing in the app that must have exactly one.
+    //
+    // **`state`, not `displayState`** — the same split `LoopCardPresentation` makes, and
+    // getting it wrong here was visible immediately. `displayState` turns a *running* loop
+    // into `.awaitingInput` the moment its session's presence says so, and Claude Code
+    // reports that presence for any `Notification`, including simply finishing a turn and
+    // sitting at an empty prompt. So an amber block and an `Answer it` button appeared over
+    // a loop that had asked nothing, under a beat that was not a question. The card has
+    // always taken its *word* from `displayState` and its *affordance* from `state`; the
+    // rail now does the same. A session quietly at its prompt is `waiting` below, not a
+    // question.
     if node.isResolved {
       mode = .resolved
       kind = .done
-    } else if node.displayState.wantsHuman {
+    } else if node.state.wantsHuman {
       mode = .asking
       kind = .asking
     } else if current == nil {
@@ -81,6 +95,7 @@ struct LoopSummaryPresentation: Equatable {
       evidence = current?.evidence
     }
 
+    isLive = node.presence?.presence == .busy && !node.isResolved
     elapsed = current.map { LoopCardPresentation.duration(now.timeIntervalSince($0.at)) }
     receding = summary.receding
     unseen = min(summary.unseenCount(since: seenBeatID), summary.receding.count)

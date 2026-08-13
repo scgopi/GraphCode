@@ -309,6 +309,16 @@ struct SummaryRailTests {
     #expect(
       SummaryBeatBuilder.condense("Tracing total_tokens through the probe")
         == "Tracing total_tokens through the probe")
+    // A one-word verdict is a preamble, not a beat: stopping at the full stop put "Clean"
+    // alone in the rail and threw away the half that said what was happening. Seen on a
+    // real loop.
+    #expect(
+      SummaryBeatBuilder.condense("Clean. Rebuilding Release and reinstalling.")
+        == "Clean. Rebuilding Release and reinstalling")
+    // A full opening sentence still stands alone.
+    #expect(
+      SummaryBeatBuilder.condense("Found the double count. Now fixing it.")
+        == "Found the double count")
     #expect(SummaryBeatBuilder.condense("   ") == nil)
     let long = SummaryBeatBuilder.condense(
       "One two three four five six seven eight nine ten eleven twelve")

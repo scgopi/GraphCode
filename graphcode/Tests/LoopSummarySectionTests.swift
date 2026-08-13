@@ -78,6 +78,30 @@ struct LoopSummarySectionTests {
     #expect(working.mode == .working)
   }
 
+  /// The fault this caught in the field: an amber block and an `Answer it` button over a
+  /// loop that had asked nothing.
+  ///
+  /// `displayState` turns a *running* loop into `.awaitingInput` as soon as its session's
+  /// presence says so, and Claude Code reports that for any `Notification` — including
+  /// finishing a turn and sitting at an empty prompt. `LoopCardPresentation` has always
+  /// taken its word from `displayState` and its affordance from `state`; the rail must
+  /// make the same split or it offers an answer to a question nobody asked.
+  @Test
+  func aSessionQuietAtItsPromptIsNotAskingAnything() {
+    let summary = LoopSummary(beats: [beat(3, "Clean. Rebuilding Release", at: 900)])
+    let quiet = node(summary: summary, state: .running, presence: .awaitingInput)
+
+    // The graph's own state still says running, so nothing is being asked.
+    #expect(quiet.displayState == .awaitingInput)
+    #expect(LoopSummaryPresentation(node: quiet, now: now).mode == .working)
+    // And it is not live, so the section says LAST DID rather than claiming the present.
+    #expect(LoopSummaryPresentation(node: quiet, now: now).isLive == false)
+
+    // A loop the graph really has parked on a human still wears amber.
+    let asking = node(summary: summary, state: .awaitingInput, presence: .awaitingInput)
+    #expect(LoopSummaryPresentation(node: asking, now: now).mode == .asking)
+  }
+
   @Test
   func aResolvedLoopBecomesTheAccountOfItsRun() {
     var resolved = node(
