@@ -210,7 +210,7 @@ import Foundation
     }
 
     public func close() async throws {
-      stream.closeSync()
+      closeSync()
     }
 
     public func closeSync() {

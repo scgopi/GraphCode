@@ -863,6 +863,97 @@ final class ContractTests: XCTestCase {
     XCTAssertTrue(secondTransport.frames.isEmpty)
   }
 
+  func testSecondSocketSnapshotDoesNotInvalidateFirstSocketResumeCursor() async throws {
+    let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000046")!
+    let store = DaemonReplayStore(capacity: 8)
+    let firstTransport = RecordingConnection()
+    let firstChannel = DaemonConnectionChannel(
+      connection: firstTransport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+    try await firstChannel.sendConnectionSnapshot(.errorOccurred("first-snapshot"))
+    let firstSnapshot = try JSONDecoder().decode(
+      DaemonWireEnvelope.self,
+      from: XCTUnwrap(firstTransport.frames.first))
+    let firstCursor = try XCTUnwrap(firstSnapshot.sequence)
+
+    let secondChannel = DaemonConnectionChannel(
+      connection: RecordingConnection(),
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+    try await secondChannel.sendConnectionSnapshot(.errorOccurred("second-snapshot"))
+    try await firstChannel.sendEvent(.errorOccurred("canonical-after-snapshots"))
+    try await firstChannel.close()
+    try await secondChannel.close()
+
+    let reconnectTransport = RecordingConnection()
+    let reconnectChannel = DaemonConnectionChannel(
+      connection: reconnectTransport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+    try await reconnectChannel.replay(after: firstCursor)
+
+    let replayed = try reconnectTransport.frames.map {
+      try JSONDecoder().decode(DaemonWireEnvelope.self, from: $0)
+    }
+    XCTAssertEqual(replayed.map(\.sequence), [3])
+    guard case .errorOccurred("canonical-after-snapshots") = replayed.first?.event else {
+      return XCTFail("expected the canonical event after both snapshots")
+    }
+  }
+
+  func testMultiSocketSubscriptionsUnionCanonicalReplayMembership() async throws {
+    let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000047")!
+    let firstPath = "/work/subscription-first"
+    let secondPath = "/work/subscription-second"
+    let store = DaemonReplayStore(capacity: 8)
+    let firstTransport = RecordingConnection()
+    let firstChannel = DaemonConnectionChannel(
+      connection: firstTransport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      subscription: DaemonWireSubscription(projectPaths: [firstPath]),
+      replayStore: store)
+    await firstChannel.join(projectPath: firstPath)
+
+    let secondChannel = DaemonConnectionChannel(
+      connection: RecordingConnection(),
+      mode: .v2(version: 2),
+      clientID: clientID,
+      subscription: DaemonWireSubscription(projectPaths: [secondPath]),
+      replayStore: store)
+    await secondChannel.join(projectPath: secondPath)
+
+    let graph = LoopGraph(project: ProjectRef(path: firstPath, name: "first"))
+    let envelope = try XCTUnwrap(
+      store.append(event: .graphChanged(graph), projectPath: firstPath)[clientID])
+    try await firstChannel.sendEvent(envelope: envelope)
+    try await firstChannel.close()
+
+    let reconnectTransport = RecordingConnection()
+    let reconnectChannel = DaemonConnectionChannel(
+      connection: reconnectTransport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      subscription: DaemonWireSubscription(projectPaths: [firstPath]),
+      replayStore: store)
+    try await reconnectChannel.replay(after: 0)
+
+    let replayed = try reconnectTransport.frames.map {
+      try JSONDecoder().decode(DaemonWireEnvelope.self, from: $0)
+    }
+    XCTAssertEqual(replayed.map(\.sequence), [1])
+    guard case .graphChanged(let replayedGraph) = replayed.first?.event else {
+      return XCTFail("expected the first socket's subscribed event")
+    }
+    XCTAssertEqual(replayedGraph.project.path, firstPath)
+    try await secondChannel.close()
+    try await reconnectChannel.close()
+  }
+
   func testMalformedV2RequestKeepsSafelyExtractableRequestID() throws {
     let requestID = UUID(uuidString: "00000000-0000-0000-0000-000000000009")!
     var malformed = DaemonWireEnvelope.request(id: requestID, command: .listRecentProjects)

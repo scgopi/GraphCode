@@ -342,7 +342,10 @@ public struct DaemonReplayBuffer: Equatable, Sendable {
     }
   }
 
-  public func replay(after cursor: UInt64) throws -> [DaemonWireEnvelope] {
+  public func replay(
+    after cursor: UInt64,
+    skipping nonReplayableSequences: Set<UInt64> = []
+  ) throws -> [DaemonWireEnvelope] {
     guard capacity > 0 else {
       throw ReplayError.replayUnavailable
     }
@@ -351,7 +354,21 @@ public struct DaemonReplayBuffer: Equatable, Sendable {
     }
     if cursor == latest { return [] }
     if cursor > latest { throw ReplayError.cursorOutsideWindow }
-    guard cursor + 1 >= first else { throw ReplayError.cursorOutsideWindow }
+    if cursor < first {
+      let missingCount = first - (cursor + 1)
+      if missingCount > 0 {
+        guard missingCount < UInt64(nonReplayableSequences.count) else {
+          throw ReplayError.cursorOutsideWindow
+        }
+        var sequence = cursor + 1
+        while sequence < first {
+          guard nonReplayableSequences.contains(sequence) else {
+            throw ReplayError.cursorOutsideWindow
+          }
+          sequence += 1
+        }
+      }
+    }
     return entries.filter { ($0.sequence ?? 0) > cursor }
   }
 }

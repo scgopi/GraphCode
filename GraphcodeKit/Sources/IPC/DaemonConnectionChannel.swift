@@ -36,8 +36,9 @@ public final class DaemonReplayStore: @unchecked Sendable {
   private var buffers: [UUID: DaemonReplayBuffer] = [:]
   private var nextSequences: [UUID: UInt64] = [:]
   private var watermarks: [UUID: UInt64] = [:]
+  private var nonReplayableSequences: [UUID: Set<UInt64>] = [:]
   private var lastAccess: [UUID: Date] = [:]
-  private var subscriptions: [UUID: DaemonWireSubscription] = [:]
+  private var subscriptionsByConnection: [UUID: [UUID: DaemonWireSubscription]] = [:]
   private var projectPaths: [UUID: Set<String>] = [:]
   private var projectPathsByConnection: [UUID: [UUID: Set<String>]] = [:]
   private var activeConnections: [UUID: Set<UUID>] = [:]
@@ -76,6 +77,7 @@ public final class DaemonReplayStore: @unchecked Sendable {
     let sequence = nextSequences[clientID, default: 1]
     nextSequences[clientID] = sequence == UInt64.max ? UInt64.max : sequence + 1
     watermarks[clientID] = sequence
+    nonReplayableSequences[clientID, default: []].insert(sequence)
     lastAccess[clientID] = now
     return sequence
   }
@@ -93,25 +95,23 @@ public final class DaemonReplayStore: @unchecked Sendable {
     purgeExpired(now: Date())
     _ = ensureClient(clientID)
     activeConnections[clientID, default: []].insert(connectionID)
-    if let subscription {
-      subscriptions[clientID] = subscription
-    } else {
-      subscriptions.removeValue(forKey: clientID)
-    }
+    subscriptionsByConnection[clientID, default: [:]][connectionID] =
+      subscription ?? DaemonWireSubscription()
     lastAccess[clientID] = Date()
   }
 
-  public func setSubscription(clientID: UUID, subscription: DaemonWireSubscription?) {
+  public func setSubscription(
+    clientID: UUID,
+    connectionID: UUID,
+    subscription: DaemonWireSubscription?
+  ) {
     lock.lock()
     defer { lock.unlock() }
     guard buffers[clientID] != nil || activeConnections[clientID]?.isEmpty == false else {
       return
     }
-    if let subscription {
-      subscriptions[clientID] = subscription
-    } else {
-      subscriptions.removeValue(forKey: clientID)
-    }
+    subscriptionsByConnection[clientID, default: [:]][connectionID] =
+      subscription ?? DaemonWireSubscription()
     lastAccess[clientID] = Date()
   }
 
@@ -256,7 +256,20 @@ public final class DaemonReplayStore: @unchecked Sendable {
       }
       throw DaemonReplayBuffer.ReplayError.replayUnavailable
     }
-    return try buffer.replay(after: cursor)
+    if let latest = buffer.latestSequence, cursor > latest {
+      guard let watermark = watermarks[clientID], cursor <= watermark,
+        areNonReplayable(
+          from: latest == UInt64.max ? UInt64.max : latest + 1,
+          through: cursor,
+          for: clientID)
+      else {
+        throw DaemonReplayBuffer.ReplayError.cursorOutsideWindow
+      }
+      return []
+    }
+    return try buffer.replay(
+      after: cursor,
+      skipping: nonReplayableSequences[clientID] ?? [])
   }
 
   public func remove(clientID: UUID) {
@@ -354,8 +367,28 @@ public final class DaemonReplayStore: @unchecked Sendable {
   }
 
   private func isSubscribed(clientID: UUID, projectPath: String) -> Bool {
-    guard let paths = subscriptions[clientID]?.projectPaths else { return true }
-    return !paths.isEmpty && paths.contains(projectPath)
+    guard let subscriptions = subscriptionsByConnection[clientID], !subscriptions.isEmpty
+    else { return true }
+    return subscriptions.values.contains { subscription in
+      guard let paths = subscription.projectPaths else { return true }
+      return !paths.isEmpty && paths.contains(projectPath)
+    }
+  }
+
+  private func areNonReplayable(
+    from lowerBound: UInt64,
+    through upperBound: UInt64,
+    for clientID: UUID
+  ) -> Bool {
+    guard lowerBound <= upperBound else { return true }
+    let gaps = nonReplayableSequences[clientID] ?? []
+    guard upperBound - lowerBound < UInt64(gaps.count) else { return false }
+    var sequence = lowerBound
+    while true {
+      guard gaps.contains(sequence) else { return false }
+      if sequence == upperBound { return true }
+      sequence += 1
+    }
   }
 
   private func removeClient(_ clientID: UUID) {
@@ -363,7 +396,8 @@ public final class DaemonReplayStore: @unchecked Sendable {
     nextSequences.removeValue(forKey: clientID)
     watermarks.removeValue(forKey: clientID)
     lastAccess.removeValue(forKey: clientID)
-    subscriptions.removeValue(forKey: clientID)
+    nonReplayableSequences.removeValue(forKey: clientID)
+    subscriptionsByConnection.removeValue(forKey: clientID)
     projectPaths.removeValue(forKey: clientID)
     projectPathsByConnection.removeValue(forKey: clientID)
     activeConnections.removeValue(forKey: clientID)
@@ -413,7 +447,10 @@ public actor DaemonConnectionChannel {
   public func setSubscription(_ subscription: DaemonWireSubscription?) {
     self.subscription = subscription
     if case .v2 = mode {
-      replayStore.setSubscription(clientID: clientID, subscription: subscription)
+      replayStore.setSubscription(
+        clientID: clientID,
+        connectionID: connection.id,
+        subscription: subscription)
     }
   }
 

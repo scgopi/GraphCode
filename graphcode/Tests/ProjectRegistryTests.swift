@@ -388,10 +388,26 @@ struct ProjectRegistryTests {
 
 #if canImport(Darwin)
   @Test
-  func unixCloseWaitsForActiveFrameBeforeClosingDescriptor() async throws {
+  func unixCloseSyncWaitsForActiveFrameBeforeClosingDescriptor() async throws {
+    try await assertUnixCloseWaitsForActiveFrame { connection in
+      connection.closeSync()
+    }
+  }
+
+  @Test
+  func unixAsyncCloseWaitsForActiveFrameBeforeClosingDescriptor() async throws {
+    try await assertUnixCloseWaitsForActiveFrame { connection in
+      try await connection.close()
+    }
+  }
+
+  private func assertUnixCloseWaitsForActiveFrame(
+    _ close: @escaping @Sendable (UnixSocketConnection) async throws -> Void
+  ) async throws {
     var pair = [Int32](repeating: -1, count: 2)
     #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
-    defer { Darwin.close(pair[1]) }
+    let peerDescriptor = pair[1]
+    defer { Darwin.close(peerDescriptor) }
 
     var sendBuffer: Int32 = 1_024
     _ = setsockopt(
@@ -410,7 +426,7 @@ struct ProjectRegistryTests {
 
     let closeCompletion = CloseCompletionProbe()
     let closeTask = Task {
-      connection.closeSync()
+      try await close(connection)
       await closeCompletion.mark()
     }
     try await Task.sleep(for: .milliseconds(50))
@@ -418,10 +434,10 @@ struct ProjectRegistryTests {
     #expect(!closedBeforeDrain)
 
     let received = try await Task.detached {
-      try FramedMessageIO.readFrame(from: pair[1])
+      try FramedMessageIO.readFrame(from: peerDescriptor)
     }.value
     try await sendTask.value
-    await closeTask.value
+    try await closeTask.value
     let closedAfterDrain = await closeCompletion.completed
     #expect(closedAfterDrain)
     #expect(received == payload)
