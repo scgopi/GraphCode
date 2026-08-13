@@ -164,7 +164,8 @@ public enum ClaudeSessionLog {
       return nil
     }
     guard let sessionID = SessionIDStore.load(forNodeID: node.id),
-      let transcript = transcript(forSessionID: sessionID)
+      let transcript = transcript(forSessionID: sessionID),
+      await TranscriptFreshness.shared.hasChanged(transcript, forNode: node.id)
     else { return nil }
     let beats = beats(inTranscriptAt: transcript)
     guard !beats.isEmpty else { return nil }

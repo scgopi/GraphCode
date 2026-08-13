@@ -462,12 +462,19 @@ public actor GraphStore {
     return changed
   }
 
-  /// Asks each *working* session what it has narrated, and folds it into the node's own
+  /// Asks each unresolved session what it has narrated, and folds it into the node's own
   /// bounded store.
   ///
-  /// Same guard as `refreshActivity` and for the same reason: a loop that has answered,
-  /// stopped or gone is not narrating anything, so reading its transcript would spend a
-  /// file read per quiet loop per tick for a reading nothing has changed.
+  /// **Not guarded on `busy`, unlike `refreshActivity`, and that was a real bug.** A
+  /// turn's last beats are written and *then* the session goes idle, so the closing
+  /// narration always landed after the final busy poll and was never read: the terminal
+  /// showed a finished turn while the rail sat on a beat from minutes earlier. Activity
+  /// can be guarded that way because a quiet session genuinely has no current tool call. A
+  /// summary is the account of what happened, and the end of a turn is the part of it a
+  /// human coming back most wants.
+  ///
+  /// What keeps that cheap is `TranscriptFreshness`: a quiet loop costs one `stat` and no
+  /// read at all, because its transcript has not moved since the last poll.
   ///
   /// **Unlike `activity`, a nil reading does not clear the field.** The two say different
   /// things: `activity` is the tool call happening *now*, and a session between calls is
@@ -479,8 +486,7 @@ public actor GraphStore {
   private func refreshSummary() async -> Bool {
     guard let onReadSummary else { return false }
     var changed = false
-    for node in graph.nodes {
-      guard !node.isResolved, node.presence?.presence == .busy else { continue }
+    for node in graph.nodes where !node.isResolved {
       guard let reading = await onReadSummary(node, graph.project.path), !reading.isEmpty
       else { continue }
       let merged = (graph.nodes[id: node.id]?.summary ?? LoopSummary()).merging(reading)

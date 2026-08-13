@@ -187,6 +187,33 @@ struct SummaryStoreTests {
     #expect(deduped == reading)
   }
 
+  /// A quiet loop must cost a `stat` and no read, or dropping the `busy` guard would put
+  /// a tail parse per idle loop on every poll.
+  @Test
+  func aTranscriptIsOnlyReReadAfterItHasBeenWritten() async throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+      .appendingPathComponent("freshness-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let url = root.appendingPathComponent("session.jsonl")
+    try "one\n".write(to: url, atomically: true, encoding: .utf8)
+    let node = UUID()
+
+    // First sight of a file is always a read.
+    #expect(await TranscriptFreshness.shared.hasChanged(url, forNode: node) == true)
+    #expect(await TranscriptFreshness.shared.hasChanged(url, forNode: node) == false)
+
+    // A write moves it, and only the node that has already looked is spared.
+    try "one\ntwo\n".write(to: url, atomically: true, encoding: .utf8)
+    #expect(await TranscriptFreshness.shared.hasChanged(url, forNode: node) == true)
+    #expect(await TranscriptFreshness.shared.hasChanged(url, forNode: UUID()) == true)
+
+    // A file that cannot be read at all is read rather than assumed unchanged: freezing
+    // the rail silently is the worse failure.
+    #expect(
+      await TranscriptFreshness.shared.hasChanged(
+        root.appendingPathComponent("missing.jsonl"), forNode: node) == true)
+  }
+
   @Test
   func aSummaryOnANodeSurvivesASaveAndReload() throws {
     var node = LoopNode(title: "Usage")

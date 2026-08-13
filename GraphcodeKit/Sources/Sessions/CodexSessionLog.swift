@@ -238,7 +238,8 @@ public enum CodexSessionLog {
     guard
       let directory = ZmxSessionLauncher.workingDirectory(
         forNode: node, projectPath: projectPath),
-      let rollout = rollout(forWorkingDirectory: directory)
+      let rollout = rollout(forWorkingDirectory: directory),
+      await TranscriptFreshness.shared.hasChanged(rollout, forNode: node.id)
     else { return nil }
     let beats = beats(inRolloutAt: rollout)
     guard !beats.isEmpty else { return nil }

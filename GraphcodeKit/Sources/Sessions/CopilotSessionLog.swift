@@ -243,7 +243,9 @@ public enum CopilotSessionLog {
     }
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     guard let directory = directory(forSessionNamed: name) else { return nil }
-    let beats = beats(inLogAt: directory.appendingPathComponent("events.jsonl"))
+    let log = directory.appendingPathComponent("events.jsonl")
+    guard await TranscriptFreshness.shared.hasChanged(log, forNode: node.id) else { return nil }
+    let beats = beats(inLogAt: log)
     guard !beats.isEmpty else { return nil }
     return SummaryBeatBuilder.reading(from: beats, deltas: LoopSummaryDeltas.of(node))
   }
