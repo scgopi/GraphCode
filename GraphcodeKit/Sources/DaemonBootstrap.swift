@@ -226,9 +226,9 @@ public enum DaemonBootstrap {
     }
 
     let destination = SupportDirectory.binDirectory
-    let manager = WindowsStartupManager(
-      daemonURL: destination.appendingPathComponent("graphcoded.exe"))
     do {
+      let manager = try WindowsStartupManager(
+        daemonURL: destination.appendingPathComponent("graphcoded.exe"))
       let packageVersion = try packageVersion(for: bundled)
       let status = try awaitBlocking { try await manager.status() }
       let processRunning = manager.isDaemonProcessRunning()

@@ -58,7 +58,16 @@ import Foundation
     }
 
     static func attributes(for sid: String) throws -> (SECURITY_ATTRIBUTES, HLOCAL) {
-      let descriptorText = descriptor(for: sid)
+      try attributes(descriptorText: descriptor(for: sid))
+    }
+
+    static func fileAttributes(for sid: String) throws -> (SECURITY_ATTRIBUTES, HLOCAL) {
+      try attributes(descriptorText: fileDescriptor(for: sid))
+    }
+
+    private static func attributes(
+      descriptorText: String
+    ) throws -> (SECURITY_ATTRIBUTES, HLOCAL) {
       var descriptor: PSECURITY_DESCRIPTOR?
       let success = withWideString(descriptorText) { text in
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -78,18 +87,175 @@ import Foundation
         bInheritHandle: false)
       return (attributes, HLOCAL(descriptor))
     }
+
+    static func validate(path: String, sid: String) throws {
+      var descriptor: PSECURITY_DESCRIPTOR?
+      let result = withWideString(path) { widePath in
+        GetNamedSecurityInfoW(
+          widePath,
+          SE_FILE_OBJECT,
+          SECURITY_INFORMATION(
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION),
+          nil,
+          nil,
+          nil,
+          nil,
+          &descriptor)
+      }
+      guard result == ERROR_SUCCESS, let descriptor else {
+        throw WindowsPipeError.win32(
+          operation: "GetNamedSecurityInfoW", code: result)
+      }
+      defer { _ = LocalFree(HLOCAL(descriptor)) }
+
+      var text: LPWSTR?
+      guard
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+          descriptor,
+          DWORD(SDDL_REVISION_1),
+          SECURITY_INFORMATION(
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION),
+          &text,
+          nil),
+        let text
+      else {
+        throw WindowsPipeError.win32(
+          operation: "ConvertSecurityDescriptorToStringSecurityDescriptorW",
+          code: GetLastError())
+      }
+      defer { _ = LocalFree(HLOCAL(text)) }
+
+      let sddl = String(decodingCString: text, as: UTF16.self)
+      guard
+        ["O:\(sid)", "O:BA", "O:SY"].contains(where: { sddl.hasPrefix($0) }),
+        let daclStart = sddl.range(of: "D:"),
+        String(sddl[daclStart.lowerBound...]) == WindowsPipeSecurity.fileDescriptor(for: sid)
+      else {
+        throw WindowsPipeError.win32(
+          operation: "validate rendezvous security",
+          code: UInt32(truncatingIfNeeded: ERROR_ACCESS_DENIED))
+      }
+    }
+
+    private static func fileDescriptor(for sid: String) -> String {
+      "D:P(A;;FA;;;\(sid))"
+    }
+  }
+
+  private enum WindowsRendezvousSecret {
+    static let fileName = ".graphcode-rendezvous.secret"
+    static let byteCount = 32
+
+    static func loadOrCreate(directory: URL, sid: String) throws -> Data {
+      try FileManager.default.createDirectory(
+        at: directory, withIntermediateDirectories: true)
+      let file = directory.appendingPathComponent(fileName)
+      if FileManager.default.fileExists(atPath: file.path) {
+        if let existing = try? validatedSecret(at: file, sid: sid) {
+          return existing
+        }
+        try rotateInvalidSecret(at: file)
+      }
+      do {
+        return try createSecret(at: file, sid: sid)
+      } catch WindowsPipeError.win32(_, let code)
+        where code == UInt32(truncatingIfNeeded: ERROR_FILE_EXISTS)
+        || code == UInt32(truncatingIfNeeded: ERROR_ALREADY_EXISTS)
+      {
+        return try validatedSecret(at: file, sid: sid)
+      }
+    }
+
+    static func validatedSecret(at file: URL, sid: String) throws -> Data {
+      try WindowsPipeSecurity.validate(path: file.path, sid: sid)
+      let secret = try Data(contentsOf: file)
+      guard secret.count == byteCount, secret.contains(where: { $0 != 0 }) else {
+        throw WindowsPipeError.win32(
+          operation: "validate rendezvous secret",
+          code: UInt32(truncatingIfNeeded: ERROR_INVALID_DATA))
+      }
+      return secret
+    }
+
+    private static func rotateInvalidSecret(at file: URL) throws {
+      let quarantine = file.deletingLastPathComponent().appendingPathComponent(
+        "\(file.lastPathComponent).invalid-\(UUID().uuidString)", isDirectory: false)
+      try FileManager.default.moveItem(at: file, to: quarantine)
+      try? FileManager.default.removeItem(at: quarantine)
+    }
+
+    private static func createSecret(at file: URL, sid: String) throws -> Data {
+      var generator = SystemRandomNumberGenerator()
+      let secret = Data(
+        (0..<byteCount).map { _ in
+          UInt8.random(in: UInt8.min...UInt8.max, using: &generator)
+        })
+      let securityResult = try WindowsPipeSecurity.fileAttributes(for: sid)
+      var security = securityResult.0
+      defer { _ = LocalFree(securityResult.1) }
+
+      let handle = try withWideString(file.path) { widePath in
+        try checkPipeHandle(
+          CreateFileW(
+            widePath,
+            DWORD(GENERIC_READ) | DWORD(bitPattern: GENERIC_WRITE),
+            DWORD(FILE_SHARE_READ),
+            &security,
+            DWORD(CREATE_NEW),
+            DWORD(FILE_ATTRIBUTE_HIDDEN),
+            nil),
+          operation: "CreateFileW rendezvous secret")
+      }
+      defer { _ = CloseHandle(handle) }
+
+      var written: DWORD = 0
+      let success = secret.withUnsafeBytes { bytes in
+        WriteFile(handle, bytes.baseAddress, DWORD(secret.count), &written, nil)
+      }
+      guard success, written == DWORD(secret.count), FlushFileBuffers(handle) else {
+        withWideString(file.path) { widePath in
+          _ = DeleteFileW(widePath)
+        }
+        throw WindowsPipeError.win32(
+          operation: "write rendezvous secret", code: GetLastError())
+      }
+      try WindowsPipeSecurity.validate(path: file.path, sid: sid)
+      return secret
+    }
   }
 
   private enum WindowsNamedPipeIdentity {
     static func values(
       environment: [String: String],
       homeDirectory: URL
-    ) throws -> (sid: String, supportHash: String) {
+    ) throws -> (sid: String, supportHash: String, rendezvousHash: String) {
       let sid = try WindowsUserIdentity.currentSID()
       let support = SupportDirectory.url(environment: environment, homeDirectory: homeDirectory)
       let supportHash = GraphcodeSHA256.hex(
         Data(support.standardizedFileURL.path.lowercased().utf8))
-      return (sid, supportHash)
+      let secret = try WindowsRendezvousSecret.loadOrCreate(directory: support, sid: sid)
+      return (sid, supportHash, GraphcodeSHA256.hex(secret))
+    }
+
+    static func taskName(
+      environment: [String: String],
+      homeDirectory: URL
+    ) throws -> String {
+      let identity = try values(environment: environment, homeDirectory: homeDirectory)
+      return taskName(
+        sid: identity.sid,
+        supportHash: identity.supportHash,
+        rendezvousHash: identity.rendezvousHash)
+    }
+
+    static func taskName(
+      sid: String,
+      supportHash: String,
+      rendezvousHash: String
+    ) -> String {
+      let material = Data("\(sid)|\(supportHash)|\(rendezvousHash)".utf8)
+      let identityHash = GraphcodeSHA256.hex(material)
+      return "GraphCode\\graphcoded-\(identityHash.prefix(32))"
     }
   }
 
@@ -156,7 +322,21 @@ import Foundation
 
       let identity = try WindowsNamedPipeIdentity.values(
         environment: environment, homeDirectory: homeDirectory)
-      return "\\\\.\\pipe\\graphcode-\(identity.sid)-\(identity.supportHash.prefix(32))"
+      return
+        "\\\\.\\pipe\\graphcode-\(identity.sid)-\(identity.supportHash.prefix(24))-\(identity.rendezvousHash.prefix(24))"
+    }
+
+    public static func taskName(
+      environment: [String: String] = ProcessInfo.processInfo.environment,
+      homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) throws -> String {
+      try WindowsNamedPipeIdentity.taskName(
+        environment: environment, homeDirectory: homeDirectory)
+    }
+
+    static func taskName(sid: String, supportHash: String, rendezvousHash: String) -> String {
+      WindowsNamedPipeIdentity.taskName(
+        sid: sid, supportHash: supportHash, rendezvousHash: rendezvousHash)
     }
   }
 
@@ -171,7 +351,9 @@ import Foundation
       let identity = try WindowsNamedPipeIdentity.values(
         environment: environment, homeDirectory: homeDirectory)
       let name = Self.name(
-        sid: identity.sid, supportHash: identity.supportHash)
+        sid: identity.sid,
+        supportHash: identity.supportHash,
+        rendezvousHash: identity.rendezvousHash)
       let securityResult = try WindowsPipeSecurity.attributes(for: identity.sid)
       var security = securityResult.0
       defer { _ = LocalFree(securityResult.1) }
@@ -196,8 +378,8 @@ import Foundation
       _ = CloseHandle(handle)
     }
 
-    static func name(sid: String, supportHash: String) -> String {
-      "Global\\graphcode-daemon-\(sid)-\(supportHash.prefix(32))"
+    static func name(sid: String, supportHash: String, rendezvousHash: String) -> String {
+      "Global\\graphcode-daemon-\(sid)-\(supportHash.prefix(20))-\(rendezvousHash.prefix(20))"
     }
 
     static func securityDescriptor(for sid: String) -> String {

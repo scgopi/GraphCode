@@ -13,11 +13,11 @@ import Foundation
 
     public init(
       daemonURL: URL = SupportDirectory.binDirectory.appendingPathComponent("graphcoded.exe"),
-      taskName: String = "GraphCode\\graphcoded",
+      taskName: String? = nil,
       runner: any ProcessRunner = FoundationProcessRunner()
-    ) {
+    ) throws {
       self.daemonURL = daemonURL
-      self.taskName = taskName
+      self.taskName = try taskName ?? WindowsNamedPipeEndpoint.taskName()
       self.runner = runner
     }
 
@@ -114,12 +114,36 @@ import Foundation
           return String(decoding: units[..<end], as: UTF16.self).lowercased()
         }
         if name == targetName,
+          Self.processImageMatches(
+            entry.th32ProcessID, expectedPath: daemonURL.standardizedFileURL.path),
           Self.processBelongsToCurrentUser(entry.th32ProcessID, sid: currentSID)
         {
           return true
         }
       } while Process32NextW(snapshot, &entry)
       return false
+    }
+
+    private static func processImageMatches(_ processID: DWORD, expectedPath: String) -> Bool {
+      guard
+        let process = OpenProcess(
+          DWORD(PROCESS_QUERY_LIMITED_INFORMATION), false, processID)
+      else {
+        return false
+      }
+      defer { _ = CloseHandle(process) }
+
+      var buffer = [WCHAR](repeating: 0, count: 32_768)
+      var length = DWORD(buffer.count)
+      guard
+        buffer.withUnsafeMutableBufferPointer({
+          QueryFullProcessImageNameW(process, 0, $0.baseAddress, &length)
+        })
+      else {
+        return false
+      }
+      let actualPath = String(decoding: buffer.prefix(Int(length)), as: UTF16.self)
+      return actualPath.caseInsensitiveCompare(expectedPath) == .orderedSame
     }
 
     private static func processBelongsToCurrentUser(_ processID: DWORD, sid: String) -> Bool {

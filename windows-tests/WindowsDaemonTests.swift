@@ -9,12 +9,17 @@ import XCTest
 final class WindowsDaemonTests: XCTestCase {
   #if os(Windows)
     func testEndpointIsPerUserAndSupportDirectory() throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("graphcode-identity-\(UUID().uuidString)", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
       let first = try WindowsNamedPipeEndpoint.name(
-        environment: [SupportDirectory.environmentKey: "graphcode-a"],
-        homeDirectory: URL(fileURLWithPath: #"C:\Users\Test"#, isDirectory: true))
+        environment: [
+          SupportDirectory.environmentKey: root.appendingPathComponent("graphcode-a").path
+        ])
       let second = try WindowsNamedPipeEndpoint.name(
-        environment: [SupportDirectory.environmentKey: "graphcode-b"],
-        homeDirectory: URL(fileURLWithPath: #"C:\Users\Test"#, isDirectory: true))
+        environment: [
+          SupportDirectory.environmentKey: root.appendingPathComponent("graphcode-b").path
+        ])
 
       XCTAssertTrue(first.hasPrefix("\\\\.\\pipe\\graphcode-"))
       XCTAssertNotEqual(first, second)
@@ -22,8 +27,11 @@ final class WindowsDaemonTests: XCTestCase {
     }
 
     func testDaemonInstanceLockRejectsSecondOwner() throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("graphcode-lock-\(UUID().uuidString)", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
       let environment = [
-        SupportDirectory.environmentKey: "graphcode-lock-\(UUID().uuidString)"
+        SupportDirectory.environmentKey: root.path
       ]
       let first = try WindowsDaemonInstanceLock(environment: environment)
       XCTAssertThrowsError(try WindowsDaemonInstanceLock(environment: environment)) { error in
@@ -32,10 +40,37 @@ final class WindowsDaemonTests: XCTestCase {
       withExtendedLifetime(first) {}
     }
 
+    func testRendezvousSecretPersistsRotatesAndScopesTaskIdentity() throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("graphcode-rendezvous-\(UUID().uuidString)", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      let firstDirectory = root.appendingPathComponent("first", isDirectory: true)
+      let secondDirectory = root.appendingPathComponent("second", isDirectory: true)
+      let firstEnvironment = [SupportDirectory.environmentKey: firstDirectory.path]
+      let secondEnvironment = [SupportDirectory.environmentKey: secondDirectory.path]
+
+      let first = try WindowsNamedPipeEndpoint.name(environment: firstEnvironment)
+      XCTAssertEqual(first, try WindowsNamedPipeEndpoint.name(environment: firstEnvironment))
+      let secretFile = firstDirectory.appendingPathComponent(".graphcode-rendezvous.secret")
+      XCTAssertTrue(FileManager.default.fileExists(atPath: secretFile.path))
+      try FileManager.default.removeItem(at: secretFile)
+      try Data("corrupt".utf8).write(to: secretFile)
+      let rotated = try WindowsNamedPipeEndpoint.name(environment: firstEnvironment)
+      XCTAssertNotEqual(first, rotated)
+      XCTAssertNotEqual(
+        try WindowsNamedPipeEndpoint.taskName(environment: firstEnvironment),
+        try WindowsNamedPipeEndpoint.taskName(environment: secondEnvironment))
+      XCTAssertNotEqual(
+        rotated,
+        try WindowsNamedPipeEndpoint.name(environment: secondEnvironment))
+    }
+
     func testDaemonInstanceLockUsesGlobalCurrentUserScopedNameAndDescriptor() {
       let sid = "S-1-5-21-100-200-300-400"
       let name = WindowsDaemonInstanceLock.name(
-        sid: sid, supportHash: "0123456789abcdef0123456789abcdef")
+        sid: sid,
+        supportHash: "0123456789abcdef0123456789abcdef",
+        rendezvousHash: "fedcba9876543210fedcba9876543210")
       XCTAssertTrue(name.hasPrefix("Global\\"))
       XCTAssertFalse(name.hasPrefix("Local\\"))
       XCTAssertEqual(
@@ -43,6 +78,24 @@ final class WindowsDaemonTests: XCTestCase {
         "D:P(A;;GA;;;\(sid))")
       XCTAssertFalse(
         WindowsDaemonInstanceLock.securityDescriptor(for: sid).contains("WD"))
+      XCTAssertNotEqual(
+        WindowsNamedPipeEndpoint.taskName(
+          sid: sid,
+          supportHash: "0123456789abcdef0123456789abcdef",
+          rendezvousHash: "fedcba9876543210fedcba9876543210"),
+        WindowsNamedPipeEndpoint.taskName(
+          sid: "S-1-5-21-900-800-700-600",
+          supportHash: "0123456789abcdef0123456789abcdef",
+          rendezvousHash: "fedcba9876543210fedcba9876543210"))
+      XCTAssertNotEqual(
+        WindowsNamedPipeEndpoint.taskName(
+          sid: sid,
+          supportHash: "0123456789abcdef0123456789abcdef",
+          rendezvousHash: "fedcba9876543210fedcba9876543210"),
+        WindowsNamedPipeEndpoint.taskName(
+          sid: sid,
+          supportHash: "fedcba9876543210fedcba9876543210",
+          rendezvousHash: "0123456789abcdef0123456789abcdef"))
     }
 
     func testFrameHeaderRemainsBoundedBeforeAllocation() throws {
