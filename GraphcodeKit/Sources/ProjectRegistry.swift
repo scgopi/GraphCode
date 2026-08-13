@@ -30,6 +30,7 @@ public actor ProjectRegistry {
   private let captureScript: (@Sendable (ShellPredicate) async -> String?)?
   private let readUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)?
   private let readActivity: (@Sendable (LoopNode, String?) async -> String?)?
+  private let readSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)?
   private let readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)?
   /// Non-nil only while at least one client is attached — see `startPresencePolling`.
   private var presencePoller: Task<Void, Never>?
@@ -53,6 +54,8 @@ public actor ProjectRegistry {
       CLISessionBackend.readUsage,
     readActivity: (@Sendable (LoopNode, String?) async -> String?)? =
       CLISessionBackend.readActivity,
+    readSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)? =
+      CLISessionBackend.readSummary,
     readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)? =
       CLISessionBackend.readPresence
   ) {
@@ -64,6 +67,7 @@ public actor ProjectRegistry {
     self.captureScript = captureScript
     self.readUsage = readUsage
     self.readActivity = readActivity
+    self.readSummary = readSummary
     self.readPresence = readPresence
   }
 
@@ -312,6 +316,7 @@ public actor ProjectRegistry {
       onCaptureScript: captureScript,
       onReadUsage: readUsage,
       onReadActivity: readActivity,
+      onReadSummary: readSummary,
       onReadPresence: readPresence,
       onSpawnIntoProject: spawnIntoProject,
       // The node memory log (`NodeMemory`): episode records in, whole directory out

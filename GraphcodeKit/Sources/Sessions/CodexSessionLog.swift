@@ -190,6 +190,61 @@ public enum CodexSessionLog {
     return nil
   }
 
+  /// Every beat in a rollout's tail, oldest first.
+  ///
+  /// Codex narrates in two places and both are used: `agent_reasoning` carries a bolded
+  /// header over a paragraph — the header *is* an intent beat, which is why
+  /// `SummaryBeatBuilder.condense` prefers it — and `agent_message` is what it says out
+  /// loud when it has something to report. `user_message` is the pass boundary.
+  ///
+  /// Tool calls come through `phrase(forRecord:)` unchanged, so a beat's evidence names
+  /// exactly what the card's live line would have.
+  public static func beats(inRolloutAt url: URL) -> [SummaryBeat] {
+    var builder = SummaryBeatBuilder()
+    for line in SummaryBeatBuilder.tailLines(of: url) {
+      guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
+        let record = object as? [String: Any],
+        let payload = record["payload"] as? [String: Any]
+      else { continue }
+      let at = SummaryBeatBuilder.date(fromTimestamp: record["timestamp"]) ?? Date()
+      switch record["type"] as? String {
+      case "event_msg":
+        switch payload["type"] as? String {
+        case "user_message":
+          builder.noteUserTurn(at: at)
+        case "agent_reasoning", "agent_message":
+          builder.noteNarration(payload["text"] as? String ?? "", at: at)
+        default:
+          continue
+        }
+      case "response_item":
+        guard let phrase = phrase(forRecord: payload) else { continue }
+        builder.noteTool(phrase, at: at)
+      default:
+        continue
+      }
+    }
+    return builder.beats()
+  }
+
+  /// What this node's Codex session has been doing, or `nil` when nothing says. Local
+  /// only, for the reason `activity` is.
+  public static func summary(of node: LoopNode, projectPath: String? = nil) async
+    -> SummaryReading?
+  {
+    if let projectPath, RemoteProjectLocation.parse(projectPath: projectPath) != nil {
+      return nil
+    }
+    guard
+      let directory = ZmxSessionLauncher.workingDirectory(
+        forNode: node, projectPath: projectPath),
+      let rollout = rollout(forWorkingDirectory: directory)
+    else { return nil }
+    let beats = beats(inRolloutAt: rollout)
+    guard !beats.isEmpty else { return nil }
+    return SummaryBeatBuilder.reading(from: beats, deltas: LoopSummaryDeltas.of(node))
+  }
+
   /// What this node's Codex session is doing, or `nil` when nothing says.
   ///
   /// Local only, for the reason `CopilotSessionLog.activity` is: the rollout lives on

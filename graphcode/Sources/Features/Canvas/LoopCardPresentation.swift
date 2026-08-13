@@ -78,9 +78,20 @@ struct LoopCardPresentation: Equatable {
   /// off `metricHistory`, the rest off `LoopNode.activity`, which a backend hook writes
   /// and which is `nil` in every session that has no such hook. The fallback is the
   /// goal, prompt or check the loop was created with — less immediate, and never wrong.
+  /// The newest beat outranks both, when there is one.
+  ///
+  /// A beat is the sentence the session wrote about what it is *trying* to do; `activity`
+  /// is the tool call it happens to be inside. "Working out why cached tokens get counted
+  /// twice" is worth more on a card than "reading UsageProbe.swift", and it is the same
+  /// reading — see `SummaryBeatBuilder`. With the producer off there is no beat and this
+  /// falls through to exactly what shipped before, which is why nothing here is
+  /// conditional on the setting.
   private static func liveLine(_ node: LoopNode) -> String? {
-    guard let reported = collapsed(node.activity) else { return handedLine(node) }
     let passes = node.metricHistory.count
+    if let beat = node.summary?.current?.text, !beat.isEmpty {
+      return passes > 0 ? "pass \(passes) · \(beat)" : beat
+    }
+    guard let reported = collapsed(node.activity) else { return handedLine(node) }
     return passes > 0 ? "pass \(passes) · \(reported)" : reported
   }
 

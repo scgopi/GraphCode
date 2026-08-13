@@ -28,6 +28,16 @@ struct LoopWorkspaceFeature {
     /// `@State` because the *toggle* lives in the window toolbar, which `AppView` owns —
     /// and a control and the thing it controls cannot hold the answer separately.
     var isRailVisible = LoopWorkspaceRail.loadVisible()
+    /// Whether the summary section is collapsed to one line. Persisted beside the rail's
+    /// own visibility, and for the same reason: both are choices about how much of the
+    /// window a person wants back, and neither should have to be remade every launch.
+    var isSummaryFolded = LoopWorkspaceRail.loadSummaryFolded()
+    /// The newest beat that was on screen when this workspace was last left — what the
+    /// rail's `SINCE YOU LOOKED` hairline is drawn against.
+    ///
+    /// Per window rather than on the node: "since *you* looked" is a fact about a person
+    /// at a screen, and the daemon writing it would answer for every window at once.
+    var seenBeatID: String?
     var layout: TerminalLayout
     // The project folder every surface without its own worktree binding should open
     // in — a loop's shells shouldn't land in the app's own launch directory (usually
@@ -61,6 +71,15 @@ struct LoopWorkspaceFeature {
     /// and handled up there, the way `.nodeTapped` already is.
     /// ⌥G, and the toolbar's trailing panel toggle.
     case railToggled
+    /// The summary section's header row.
+    case summaryFoldToggled
+    /// The amber block's `Answer it` — the question is in the terminal, so this is a
+    /// request for the keyboard to go there.
+    case summaryAnswerTapped
+    /// This workspace stopped being the one on screen. The moment everything it was
+    /// showing counts as seen — done on the way *out* so that coming back is what shows
+    /// the hairline, which is the whole point of it.
+    case workspaceLeft
     case stopLoopTapped
     case showInGraphTapped
     case railTargetTapped(UUID)
@@ -186,6 +205,28 @@ struct LoopWorkspaceFeature {
       case .railToggled:
         state.isRailVisible.toggle()
         LoopWorkspaceRail.saveVisible(state.isRailVisible)
+        return .none
+
+      case .summaryFoldToggled:
+        state.isSummaryFolded.toggle()
+        LoopWorkspaceRail.saveSummaryFolded(state.isSummaryFolded)
+        return .none
+
+      case .summaryAnswerTapped:
+        // The agent's own tab, and its own pane within it. A question was asked in that
+        // terminal and answering it means typing there — anything else would be a second
+        // place to answer from, which is the inbox the rail exists instead of.
+        guard
+          let tab = state.layout.tabs.first(where: {
+            $0.surfaces.contains(where: \.launchesClaudeCode)
+          })
+        else { return .none }
+        state.layout.selectedTabID = tab.id
+        guard let surface = tab.surfaces.first(where: \.launchesClaudeCode) else { return .none }
+        return .send(.paneFocused(tabID: tab.id, surfaceID: surface.id))
+
+      case .workspaceLeft:
+        state.seenBeatID = state.node.summary?.current?.id
         return .none
 
       case .stopLoopTapped, .showInGraphTapped, .railTargetTapped:

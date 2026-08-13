@@ -12,11 +12,29 @@ struct LoopWorkspaceRail: View {
   let node: LoopNode
   let graph: LoopGraph
   let now: Date
+  /// Whether the summary section is collapsed to its one truncated line. Per window and
+  /// persisted, beside the rail's own visibility.
+  let isSummaryFolded: Bool
+  /// The newest beat this window had on screen when it was last left — see
+  /// `LoopWorkspaceFeature.seenBeatID`.
+  let seenBeatID: String?
+  let onSummaryFoldToggled: () -> Void
+  let onSummaryAnswerTapped: () -> Void
   let onTargetTapped: (UUID) -> Void
 
   static let width: CGFloat = 212
 
   static let visibleDefaultsKey = "loopWorkspaceRailVisible"
+
+  static let summaryFoldedDefaultsKey = "loopSummarySectionFolded"
+
+  static func loadSummaryFolded() -> Bool {
+    UserDefaults.standard.bool(forKey: summaryFoldedDefaultsKey)
+  }
+
+  static func saveSummaryFolded(_ folded: Bool) {
+    UserDefaults.standard.set(folded, forKey: summaryFoldedDefaultsKey)
+  }
 
   /// **Off** until someone asks for it. It used to default on, which meant every loop
   /// that feeds nothing opened with 212 points of empty panel beside its terminal.
@@ -38,6 +56,9 @@ struct LoopWorkspaceRail: View {
   static func hasContent(node: LoopNode, graph: LoopGraph) -> Bool {
     graph.edges.contains { $0.from == node.id || $0.to == node.id }
       || node.metricHistory.count >= 2
+      // A loop that is narrating has something to say whether or not it is wired to
+      // anything — and that narration is the reason to open the rail at all.
+      || LoopSummaryPresentation.hasContent(node: node)
   }
 
   /// How many loops this one hands off to — what the loop bar's control counts.
@@ -60,6 +81,14 @@ struct LoopWorkspaceRail: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
+      // Above `THIS LOOP` rather than below it: what the loop is doing this second
+      // outranks where it sits in the graph, and a section you have to scroll to is a
+      // section that answers nothing at a glance.
+      if LoopSummaryPresentation.hasContent(node: node) {
+        LoopSummarySection(
+          node: node, now: now, isFolded: isSummaryFolded, seenBeatID: seenBeatID,
+          onToggleFold: onSummaryFoldToggled, onAnswer: onSummaryAnswerTapped)
+      }
       section("THIS LOOP") {
         RailMinimap(node: node, upstream: inbound, downstream: outbound.map(\.target))
       }

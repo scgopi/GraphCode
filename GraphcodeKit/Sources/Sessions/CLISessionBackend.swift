@@ -48,6 +48,11 @@ public struct CLISessionBackend: Sendable {
   /// What the session says it is doing right now, or `nil` when nothing reports it —
   /// see `LoopNode.activity`. `projectPath` routed as `presence`'s is.
   public var activity: @Sendable (LoopNode, String?) async -> String?
+  /// The beats this session has narrated, or `nil` when the backend has no transcript to
+  /// read, the loop is remote, or the human hasn't switched the producer on. Folded into
+  /// `LoopNode.summary` by `GraphStore`, never written straight onto the node — see
+  /// `LoopSummary.merge` for why the store has the last word.
+  public var summary: @Sendable (LoopNode, String?) async -> SummaryReading?
 
   public init(
     kind: CLISessionBackendKind,
@@ -56,7 +61,8 @@ public struct CLISessionBackend: Sendable {
     sendInput: @escaping @Sendable (LoopNode, String, String?) async -> Bool,
     presence: @escaping @Sendable (LoopNode, String?) async -> PresenceReading,
     usage: @escaping @Sendable (LoopNode, String?) async -> UsageSample?,
-    activity: @escaping @Sendable (LoopNode, String?) async -> String? = { _, _ in nil }
+    activity: @escaping @Sendable (LoopNode, String?) async -> String? = { _, _ in nil },
+    summary: @escaping @Sendable (LoopNode, String?) async -> SummaryReading? = { _, _ in nil }
   ) {
     self.kind = kind
     self.launch = launch
@@ -65,6 +71,7 @@ public struct CLISessionBackend: Sendable {
     self.presence = presence
     self.usage = usage
     self.activity = activity
+    self.summary = summary
   }
 }
 
@@ -124,6 +131,32 @@ extension CLISessionBackend {
         case .codex:
           return await CodexSessionLog.activity(of: node, projectPath: projectPath)
         }
+      },
+      // Every backend narrates before it acts, and all three write that narration to disk
+      // — so the summary rail costs three tail reads and no tokens. See
+      // `SummaryBeatBuilder` for why there is no model in this path.
+      //
+      // **Gated here rather than in `GraphStore`.** The setting is about whether graphcode
+      // watches a session this closely at all, which is a property of the reading, not of
+      // the graph; and keeping the store policy-free is what lets its tests inject a
+      // reader without a settings file on disk.
+      summary: { node, projectPath in
+        let settings = GraphcodeSettingsStore.load()
+        guard settings.summarisesLoops else { return nil }
+        let reading: SummaryReading?
+        switch kind {
+        case .claudeCode:
+          reading = await ClaudeSessionLog.summary(of: node, projectPath: projectPath)
+        case .copilotCLI:
+          reading = await CopilotSessionLog.summary(of: node, projectPath: projectPath)
+        case .codex:
+          reading = await CodexSessionLog.summary(of: node, projectPath: projectPath)
+        }
+        // The optional second pass, which is the only part of this that costs anything.
+        // Off, `applied` returns what it was given untouched.
+        guard let reading else { return nil }
+        return await SummaryModelWriter.applied(
+          to: reading, node: node, projectPath: projectPath, settings: settings)
       }
     )
   }
@@ -196,6 +229,12 @@ extension CLISessionBackend {
   public static let readActivity: @Sendable (LoopNode, String?) async -> String? = {
     node, path in
     await backend(for: node).activity(node, path)
+  }
+
+  /// The summary-reading hook `GraphStore` is wired with.
+  public static let readSummary: @Sendable (LoopNode, String?) async -> SummaryReading? = {
+    node, path in
+    await backend(for: node).summary(node, path)
   }
 
   /// The presence-reading hook `GraphStore` is wired with. The last missing link in a

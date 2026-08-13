@@ -199,6 +199,55 @@ public enum CopilotSessionLog {
     return lastActivity(inLogAt: directory.appendingPathComponent("events.jsonl"))
   }
 
+  /// Every beat in an event log's tail, oldest first.
+  ///
+  /// Copilot's `assistant.message` is the narration — the sentence it writes alongside the
+  /// `toolRequests` it is about to make — and `user.message` is the pass boundary. Tool
+  /// calls come through `phrase(forTool:arguments:)` unchanged, which means a beat's
+  /// evidence prefers Copilot's own `description` exactly as the card's live line does.
+  public static func beats(inLogAt url: URL) -> [SummaryBeat] {
+    var builder = SummaryBeatBuilder()
+    for line in SummaryBeatBuilder.tailLines(of: url) {
+      guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
+        let event = object as? [String: Any],
+        let type = event["type"] as? String
+      else { continue }
+      let data = event["data"] as? [String: Any] ?? [:]
+      let at =
+        SummaryBeatBuilder.date(fromTimestamp: event["timestamp"] ?? data["timestamp"]) ?? Date()
+      switch type {
+      case "user.message":
+        builder.noteUserTurn(at: at)
+      case "assistant.message":
+        builder.noteNarration(data["content"] as? String ?? "", at: at)
+      case "tool.execution_start":
+        guard let name = data["toolName"] as? String,
+          let phrase = phrase(
+            forTool: name, arguments: data["arguments"] as? [String: Any] ?? [:])
+        else { continue }
+        builder.noteTool(phrase, at: at)
+      default:
+        continue
+      }
+    }
+    return builder.beats()
+  }
+
+  /// What this node's Copilot session has been doing, or `nil` when nothing says. Local
+  /// only, for the reason `activity` is.
+  public static func summary(of node: LoopNode, projectPath: String? = nil) async
+    -> SummaryReading?
+  {
+    if let projectPath, RemoteProjectLocation.parse(projectPath: projectPath) != nil {
+      return nil
+    }
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    guard let directory = directory(forSessionNamed: name) else { return nil }
+    let beats = beats(inLogAt: directory.appendingPathComponent("events.jsonl"))
+    guard !beats.isEmpty else { return nil }
+    return SummaryBeatBuilder.reading(from: beats, deltas: LoopSummaryDeltas.of(node))
+  }
+
   /// The last event in a log that says anything about what the session is doing.
   static func lastStateChange(inLogAt url: URL) -> Presence? {
     for line in tailLines(ofLogAt: url).reversed() {

@@ -75,6 +75,17 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// line then says what the loop was *handed* instead. That fallback is honest and is
   /// what shipped before this field existed.
   public var activity: String?
+  /// The loop's narration — what it has been trying to do, in beats, bounded.
+  ///
+  /// `activity` is one phrase about one tool call and is replaced every time the call
+  /// changes; this is the story around it, and the two are read off different halves of
+  /// the same session. Kept on the node rather than in a side store because it is exactly
+  /// as small as `metricHistory` (three beats and three pass lines, by construction — see
+  /// `LoopSummary`) and every surface that wants it already has a node.
+  ///
+  /// `nil` until the summary producer is switched on in Settings, which is where it stays
+  /// for anyone who never turns the experiment on.
+  public var summary: LoopSummary?
   /// What the session is doing right now, as last read off its own label store
   /// (`PresenceHooks` writes it, `ZmxSessionLauncher.presence` reads it).
   ///
@@ -123,6 +134,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     pilotState: PilotState = .notPiloted,
     usage: UsageSample? = nil,
     activity: String? = nil,
+    summary: LoopSummary? = nil,
     presence: PresenceReading? = nil,
     metricHistory: [MetricSample] = [],
     createdBy: UUID? = nil,
@@ -144,6 +156,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.pilotState = pilotState
     self.usage = usage
     self.activity = activity
+    self.summary = summary
     self.presence = presence
     self.metricHistory = metricHistory
     self.createdBy = createdBy
@@ -273,6 +286,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     case id, title, loopType, checkDescription, triggerPrompt, goal, backend, modelTier
     case worktreeBinding, subGraph, pilotState, usage, metricHistory, createdBy
     case state, createdAt, activity, presence, firstInstruction, pausesBeforeWritesOnly
+    case summary
   }
 
   /// Hand-written for the same reason `LoopEdge`'s is: `ProjectPersistence.loadGraph`
@@ -299,6 +313,10 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     pilotState = try container.decodeIfPresent(PilotState.self, forKey: .pilotState) ?? .notPiloted
     usage = try container.decodeIfPresent(UsageSample.self, forKey: .usage)
     activity = try container.decodeIfPresent(String.self, forKey: .activity)
+    // Unlike `presence` and `activity`, this survives a reload: pass summaries are the
+    // account of a run, and a resolved loop's is the thing worth reading after the fact.
+    // It is bounded by construction, so a graph file cannot grow on it.
+    summary = try container.decodeIfPresent(LoopSummary.self, forKey: .summary)
     presence = try container.decodeIfPresent(PresenceReading.self, forKey: .presence)
     metricHistory =
       try container.decodeIfPresent([MetricSample].self, forKey: .metricHistory) ?? []

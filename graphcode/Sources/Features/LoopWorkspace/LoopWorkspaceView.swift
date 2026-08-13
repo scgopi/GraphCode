@@ -17,13 +17,24 @@ struct LoopWorkspaceView: View {
       workspace
       // Never drawn empty, whatever the toggle says — see `LoopWorkspaceRail.hasContent`.
       if store.isRailVisible && railHasContent {
-        LoopWorkspaceRail(node: store.node, graph: store.graph, now: now) { targetID in
+        LoopWorkspaceRail(
+          node: store.node, graph: store.graph, now: now,
+          isSummaryFolded: store.isSummaryFolded,
+          seenBeatID: store.seenBeatID,
+          onSummaryFoldToggled: { store.send(.summaryFoldToggled) },
+          onSummaryAnswerTapped: { store.send(.summaryAnswerTapped) }
+        ) { targetID in
           store.send(.railTargetTapped(targetID))
         }
+      } else if LoopSummaryPresentation.hasContent(node: store.node) {
+        // Hidden is not gone: 26 points keeps the loop's state dot and the word, and the
+        // ask still gets through. See `SummaryGutter`.
+        SummaryGutter(node: store.node, now: now) { store.send(.railToggled) }
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .onReceive(CanvasClock.tick) { now = $0 }
+    .onDisappear { store.send(.workspaceLeft) }
     // The folder header goes in the toolbar, not in the `VStack` above, and the pane
     // does *not* claim the titlebar inset. Both were tried: `.ignoresSafeArea(.top)`
     // does slide content up into the band, but whatever lands there is drawn under the

@@ -39,6 +39,9 @@ public actor GraphStore {
   private let onCaptureScript: (@Sendable (ShellPredicate) async -> String?)?
   private let onReadUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)?
   private let onReadActivity: (@Sendable (LoopNode, String?) async -> String?)?
+  /// What a working session has narrated, folded into `LoopNode.summary`. `nil` when
+  /// nothing produces beats — no reader wired, or the human has left the producer off.
+  private let onReadSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)?
   private let onReadPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)?
   /// Cross-graph `.spawn`. `GraphStore` owns exactly one graph and cannot reach another,
   /// so it hands the request up to `ProjectRegistry`, which is the layer that knows every
@@ -106,6 +109,7 @@ public actor GraphStore {
     onCaptureScript: (@Sendable (ShellPredicate) async -> String?)? = nil,
     onReadUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)? = nil,
     onReadActivity: (@Sendable (LoopNode, String?) async -> String?)? = nil,
+    onReadSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)? = nil,
     onReadPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)? = nil,
     onSpawnIntoProject: (@Sendable (String, NodeDraft) -> Void)? = nil,
     onAppendMemory: (@Sendable (UUID, String) -> Void)? = nil,
@@ -122,6 +126,7 @@ public actor GraphStore {
     self.onCaptureScript = onCaptureScript
     self.onReadUsage = onReadUsage
     self.onReadActivity = onReadActivity
+    self.onReadSummary = onReadSummary
     self.onReadPresence = onReadPresence
     self.onSpawnIntoProject = onSpawnIntoProject
     self.onAppendMemory = onAppendMemory
@@ -294,6 +299,7 @@ public actor GraphStore {
       // asking it against last tick's readings would describe the wrong ones.
       await refreshPresence()
       await refreshActivity()
+      await refreshSummary()
     }
 
     // Guarded re-fires need an `until` predicate answered first, which means a
@@ -456,6 +462,35 @@ public actor GraphStore {
     return changed
   }
 
+  /// Asks each *working* session what it has narrated, and folds it into the node's own
+  /// bounded store.
+  ///
+  /// Same guard as `refreshActivity` and for the same reason: a loop that has answered,
+  /// stopped or gone is not narrating anything, so reading its transcript would spend a
+  /// file read per quiet loop per tick for a reading nothing has changed.
+  ///
+  /// **Unlike `activity`, a nil reading does not clear the field.** The two say different
+  /// things: `activity` is the tool call happening *now*, and a session between calls is
+  /// genuinely doing none, so blanking it is the honest answer. A summary is the account
+  /// of a run — the last thing a loop was doing is exactly what a human coming back wants
+  /// on screen, and blanking it the moment the session goes quiet would empty the rail at
+  /// precisely the moment it is most worth reading.
+  @discardableResult
+  private func refreshSummary() async -> Bool {
+    guard let onReadSummary else { return false }
+    var changed = false
+    for node in graph.nodes {
+      guard !node.isResolved, node.presence?.presence == .busy else { continue }
+      guard let reading = await onReadSummary(node, graph.project.path), !reading.isEmpty
+      else { continue }
+      let merged = (graph.nodes[id: node.id]?.summary ?? LoopSummary()).merging(reading)
+      guard graph.nodes[id: node.id]?.summary != merged else { continue }
+      graph.nodes[id: node.id]?.summary = merged
+      changed = true
+    }
+    return changed
+  }
+
   /// Asks each session what it is doing, the third reading on the same channel and the
   /// same trip as the other two.
   ///
@@ -519,6 +554,7 @@ public actor GraphStore {
     // whenever that happened to be.
     var changed = await refreshPresence()
     if await refreshActivity() { changed = true }
+    if await refreshSummary() { changed = true }
     guard changed else { return }
     notifyClients()
   }
