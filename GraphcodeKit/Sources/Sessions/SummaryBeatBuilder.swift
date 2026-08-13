@@ -115,6 +115,7 @@ struct SummaryBeatBuilder {
     guard !text.isEmpty else { return nil }
     if let header = boldHeader(of: text) { text = header }
     text = firstSentence(of: text)
+    text = stripMarkdown(text)
     text = stripLeadingFiller(text)
     guard text.count >= 3 else { return nil }
     return truncate(text, words: 10, characters: 64)
@@ -142,6 +143,27 @@ struct SummaryBeatBuilder {
     }
     if sentence.hasSuffix(".") || sentence.hasSuffix(":") { sentence.removeLast() }
     return sentence.trimmingCharacters(in: .whitespaces)
+  }
+
+  /// The rail draws plain text, and agents narrate in markdown.
+  ///
+  /// Measured on a real transcript rather than guessed at: a line that is *entirely* bold
+  /// is caught by `boldHeader`, but a bold **run** inside a longer sentence is not, and its
+  /// asterisks were reaching the rail. Emphasis and code spans are dropped; the words
+  /// inside them are the beat.
+  ///
+  /// A lone `*` or `_` is left alone: `total_tokens` and a glob are far commoner in this
+  /// vocabulary than single-character emphasis, and stripping them would corrupt the one
+  /// thing a beat has to get right — the name it is citing.
+  static func stripMarkdown(_ text: String) -> String {
+    var result = text
+    for token in ["**", "__", "`"] {
+      result = result.replacingOccurrences(of: token, with: "")
+    }
+    while result.hasPrefix("#") || result.hasPrefix(">") {
+      result = String(result.dropFirst()).trimmingCharacters(in: .whitespaces)
+    }
+    return result.trimmingCharacters(in: .whitespaces)
   }
 
   static func stripLeadingFiller(_ text: String) -> String {
@@ -204,18 +226,27 @@ struct SummaryBeatBuilder {
   /// The target is the first call's, not the last: the beat is named for what it opened
   /// on, and the count says how far it went. A beat with no calls under it has nothing to
   /// cite and says nothing rather than something vague.
+  ///
+  /// **The first call *of the beat's own kind*.** A beat that greps twice and then writes a
+  /// file is an edit, and naming it after the grep put a search string under the word
+  /// EDITING — observed on a real transcript, and it reads as a bug in the rail rather than
+  /// as evidence.
   static func evidence(kind: BeatKind, phrases: [String]) -> String? {
-    guard let first = phrases.first else { return nil }
+    let matching = phrases.filter { BeatKind.inferred(fromPhrase: $0) == kind }
+    let counted = matching.isEmpty ? phrases : matching
+    guard let first = counted.first else { return nil }
     let target = target(ofPhrase: first)
-    guard phrases.count > 1 else { return target }
+    // The count is of the calls being named, not of everything the beat did — `3 edits`
+    // beside a file name has to mean three edits.
+    guard counted.count > 1 else { return target }
     let noun: String
     switch kind {
-    case .reading: noun = phrases.count == 1 ? "file read" : "files read"
+    case .reading: noun = "files read"
     case .editing: noun = "edits"
     case .running: noun = "commands"
     default: noun = "steps"
     }
-    return "\(target) · \(phrases.count) \(noun)"
+    return "\(target) · \(counted.count) \(noun)"
   }
 
   /// The object of a phrase — `"editing UsageProbe.swift"` → `"UsageProbe.swift"`. The

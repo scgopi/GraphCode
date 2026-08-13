@@ -154,6 +154,31 @@ struct SummaryRailTests {
     #expect(beats[1].kind == .found)
   }
 
+  /// A beat that greps twice and then writes a file is an edit, and naming it after the
+  /// grep puts a search string under the word EDITING.
+  @Test
+  func evidenceNamesACallOfTheBeatsOwnKind() throws {
+    let root = try temporaryRoot("claude-evidence")
+    let url = try log(
+      [
+        try claudeUser("fix the double count", at: 0),
+        try claudeAssistant(
+          text: "Rewriting aggregate to skip cached reads.",
+          tools: [
+            ("Grep", ["pattern": "totalTokens"]),
+            ("Grep", ["pattern": "isBillable"]),
+            ("Edit", ["file_path": "/repo/UsageProbe.swift"]),
+            ("Edit", ["file_path": "/repo/UsageSample.swift"]),
+          ], at: 1),
+      ], named: "session.jsonl", in: root)
+
+    let beats = ClaudeSessionLog.beats(inTranscriptAt: url)
+
+    #expect(beats[0].kind == .editing)
+    // The first *edit*, and a count of the edits — not of the greps that led to them.
+    #expect(beats[0].evidence == "UsageProbe.swift · 2 edits")
+  }
+
   @Test
   func claudeToolPhrasesMatchTheHookScriptsVocabulary() {
     #expect(
@@ -273,6 +298,17 @@ struct SummaryRailTests {
     #expect(
       SummaryBeatBuilder.condense("Reading UsageProbe.swift now")
         == "Reading UsageProbe.swift now")
+    // Agents narrate in markdown and the rail draws plain text. A bold run inside a
+    // sentence is not a header, so `boldHeader` never sees it and its asterisks reached
+    // the rail — caught on a real transcript, not imagined.
+    #expect(
+      SummaryBeatBuilder.condense("**No LLM call** — nothing shells out to `claude -p`")
+        == "No LLM call — nothing shells out to claude -p")
+    // A lone underscore is left alone: an identifier is likelier than emphasis, and the
+    // name is the one thing a beat has to get right.
+    #expect(
+      SummaryBeatBuilder.condense("Tracing total_tokens through the probe")
+        == "Tracing total_tokens through the probe")
     #expect(SummaryBeatBuilder.condense("   ") == nil)
     let long = SummaryBeatBuilder.condense(
       "One two three four five six seven eight nine ten eleven twelve")
