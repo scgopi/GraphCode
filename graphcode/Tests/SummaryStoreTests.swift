@@ -97,6 +97,34 @@ struct SummaryStoreTests {
     #expect(summary.currentPass == 4)
   }
 
+  /// The section's only number has to belong to the pass it is printed under.
+  ///
+  /// Keying the metric series by position — sample *n* to pass *n* — holds for a `/loop`
+  /// waking on a timer and breaks the moment a human types twice in one pass: the movement
+  /// shown is real, and the pass it is shown under is not the one it happened in. Matching
+  /// on when the sample was taken cannot be wrong that way.
+  @Test
+  func aMetricMovementBelongsToThePassItHappenedIn() {
+    let samples = [
+      MetricSample(value: 1400, recordedAt: at(1)),
+      MetricSample(value: 1300, recordedAt: at(9)),
+    ]
+    var summary = LoopSummary()
+    summary.merge(
+      SummaryBeatBuilder.reading(
+        from: [
+          beat(1, "Read the probe", at: 2),
+          beat(2, "Trimmed the preamble", at: 10),
+          beat(3, "Working on the next thing", at: 20),
+        ],
+        turns: [at(0), at(8), at(18)], metricSamples: samples))
+
+    // Pass 1 ends before the second sample: nothing moved inside it yet.
+    #expect(summary.passes.first(where: { $0.pass == 1 })?.delta == nil)
+    // Pass 2 is the one the metric moved in.
+    #expect(summary.passes.first(where: { $0.pass == 2 })?.delta == "1.4k → 1.3k")
+  }
+
   /// A reader whose tail window has moved past a pass must not be able to rewrite what the
   /// store already recorded for it.
   @Test

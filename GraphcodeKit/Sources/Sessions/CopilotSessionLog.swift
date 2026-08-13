@@ -211,10 +211,10 @@ public enum CopilotSessionLog {
   }
 
   /// The same read, as the reading the store merges — see `ClaudeSessionLog.reading`.
-  static func reading(inLogAt url: URL, deltas: [Int: String]) -> SummaryReading {
+  static func reading(inLogAt url: URL, metricSamples: [MetricSample]) -> SummaryReading {
     var builder = builder(inLogAt: url)
     return SummaryBeatBuilder.reading(
-      from: builder.beats(), turns: builder.userTurns(), deltas: deltas)
+      from: builder.beats(), turns: builder.userTurns(), metricSamples: metricSamples)
   }
 
   private static func builder(inLogAt url: URL) -> SummaryBeatBuilder {
@@ -257,7 +257,7 @@ public enum CopilotSessionLog {
     guard let directory = directory(forSessionNamed: name) else { return nil }
     let log = directory.appendingPathComponent("events.jsonl")
     guard await TranscriptFreshness.shared.hasChanged(log, forNode: node.id) else { return nil }
-    let reading = reading(inLogAt: log, deltas: LoopSummaryDeltas.of(node))
+    let reading = reading(inLogAt: log, metricSamples: node.metricHistory)
     return reading.isEmpty ? nil : reading
   }
 

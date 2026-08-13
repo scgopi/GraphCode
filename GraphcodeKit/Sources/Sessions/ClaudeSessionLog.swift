@@ -106,10 +106,10 @@ public enum ClaudeSessionLog {
 
   /// The same read, as the reading the store merges — beats, the turns that bound them,
   /// and where the metric got to.
-  static func reading(inTranscriptAt url: URL, deltas: [Int: String]) -> SummaryReading {
+  static func reading(inTranscriptAt url: URL, metricSamples: [MetricSample]) -> SummaryReading {
     var builder = builder(inTranscriptAt: url)
     return SummaryBeatBuilder.reading(
-      from: builder.beats(), turns: builder.userTurns(), deltas: deltas)
+      from: builder.beats(), turns: builder.userTurns(), metricSamples: metricSamples)
   }
 
   private static func builder(inTranscriptAt url: URL) -> SummaryBeatBuilder {
@@ -180,30 +180,22 @@ public enum ClaudeSessionLog {
       let transcript = transcript(forSessionID: sessionID),
       await TranscriptFreshness.shared.hasChanged(transcript, forNode: node.id)
     else { return nil }
-    let reading = reading(inTranscriptAt: transcript, deltas: LoopSummaryDeltas.of(node))
+    let reading = reading(inTranscriptAt: transcript, metricSamples: node.metricHistory)
     return reading.isEmpty ? nil : reading
   }
 }
 
-/// Where the metric got to, per pass — the one number the rail's pass divider carries.
+/// How the one number the rail carries is written.
 ///
-/// Read off `metricHistory` rather than recomputed: that series is what the sparkline and
-/// the plateau rule already use, so a pass line saying `1.4k → 1.3k` and a bar chart
-/// disagreeing is impossible by construction.
+/// Which pass a movement belongs to is `LoopSummary.delta`'s answer, and it is matched on
+/// *when* the sample was taken. Keying the series by position — sample *n* to pass *n* —
+/// was the first version, and it printed a real movement under a pass it did not happen
+/// in as soon as a human typed twice in one pass.
+///
+/// The values themselves come off `metricHistory` unrecomputed: that series is what the
+/// sparkline and the plateau rule already use, so a pass line saying `1.4k → 1.3k` and a
+/// bar chart disagreeing is impossible by construction.
 public enum LoopSummaryDeltas {
-  public static func of(_ node: LoopNode) -> [Int: String] {
-    let samples = node.metricHistory
-    guard samples.count >= 2 else { return [:] }
-    var deltas: [Int: String] = [:]
-    for index in 1..<samples.count {
-      let previous = samples[index - 1].value
-      let current = samples[index].value
-      guard previous != current else { continue }
-      deltas[index + 1] = "\(number(previous)) → \(number(current))"
-    }
-    return deltas
-  }
-
   /// Short enough for a 188pt line: `1.4k`, `0.62`, `312`.
   public static func number(_ value: Double) -> String {
     let magnitude = abs(value)

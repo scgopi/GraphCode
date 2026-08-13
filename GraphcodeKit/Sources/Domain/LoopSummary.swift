@@ -104,19 +104,22 @@ public struct SummaryReading: Equatable, Sendable {
   /// is newer than the last one it counted, which is what makes a pass number survive the
   /// tail window sliding past the turn that opened it.
   public var turns: [Date]
-  /// Where the metric got to, by **absolute** pass — the store's numbering, not this
-  /// reading's, since it is read off `metricHistory` rather than off the transcript.
-  /// Applied when a pass rolls up.
-  public var deltas: [Int: String]
+  /// When each finished pass's last beat landed, by this reading's own pass number. What
+  /// the metric's movement is attributed with — see `LoopSummary.merge`.
+  public var passEndedAt: [Int: Date]
+  /// The loop's metric series, unchanged. The store matches samples to passes by *when*
+  /// they were taken, so nothing here has to know how the passes are numbered.
+  public var metricSamples: [MetricSample]
 
   public init(
     beats: [SummaryBeat], finishedPasses: [PassSummary] = [], turns: [Date] = [],
-    deltas: [Int: String] = [:]
+    passEndedAt: [Int: Date] = [:], metricSamples: [MetricSample] = []
   ) {
     self.beats = beats
     self.finishedPasses = finishedPasses
     self.turns = turns
-    self.deltas = deltas
+    self.passEndedAt = passEndedAt
+    self.metricSamples = metricSamples
   }
 
   public var isEmpty: Bool { beats.isEmpty && finishedPasses.isEmpty }
@@ -249,7 +252,10 @@ public struct LoopSummary: Codable, Equatable, Sendable {
     for summary in reading.finishedPasses.sorted(by: { $0.pass < $1.pass }) {
       let pass = summary.pass + shift
       guard pass > (passes.last?.pass ?? 0) else { continue }
-      passes.append(PassSummary(pass: pass, text: summary.text, delta: reading.deltas[pass]))
+      passes.append(
+        PassSummary(
+          pass: pass, text: summary.text, delta: Self.delta(of: summary.pass, in: reading))
+      )
     }
     if passes.count > Self.maxPassSummaries {
       passes.removeFirst(passes.count - Self.maxPassSummaries)
@@ -264,6 +270,23 @@ public struct LoopSummary: Codable, Equatable, Sendable {
           id: $0.id, at: $0.at, pass: $0.pass + shift, kind: $0.kind, text: $0.text,
           evidence: $0.evidence)
       }
+  }
+
+  /// Where the metric got to over one pass, or nothing — which is most passes.
+  ///
+  /// **Matched by when the samples were taken, not by counting.** The first version keyed
+  /// the series by position, on the assumption that sample *n* belongs to pass *n* — true
+  /// of a `/loop` waking on a timer, and false the moment a human types twice in one pass
+  /// or once between two. It printed the movement of a pass that was not the pass it was
+  /// printed under, which is the one thing the section's only number must not do. A pass
+  /// with no sample inside it, or a metric that did not move, says nothing.
+  static func delta(of pass: Int, in reading: SummaryReading) -> String? {
+    guard let ended = reading.passEndedAt[pass] else { return nil }
+    let previous = reading.passEndedAt[pass - 1]
+    let before = reading.metricSamples.last { $0.recordedAt <= (previous ?? .distantPast) }
+    let after = reading.metricSamples.last { $0.recordedAt <= ended }
+    guard let after, let before, before.value != after.value else { return nil }
+    return "\(LoopSummaryDeltas.number(before.value)) → \(LoopSummaryDeltas.number(after.value))"
   }
 
   /// Same fold, without mutating — what a reader's output becomes when a node has no

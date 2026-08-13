@@ -395,10 +395,12 @@ struct SummaryBeatBuilder {
   /// its last beat is whatever the tail read happened to open on, which is not what that
   /// pass ended up doing. A pass is summarised from the turn that opened it or not at all.
   static func reading(
-    from beats: [SummaryBeat], turns: [Date] = [], deltas: [Int: String] = [:]
+    from beats: [SummaryBeat], turns: [Date] = [], metricSamples: [MetricSample] = []
   ) -> SummaryReading {
     guard let newest = beats.map(\.pass).max() else { return SummaryReading(beats: []) }
     let partial = turns.count < newest ? beats.map(\.pass).min() : nil
+    var endedAt: [Int: Date] = [:]
+    for beat in beats { endedAt[beat.pass] = max(endedAt[beat.pass] ?? beat.at, beat.at) }
     let finished = Dictionary(grouping: beats.filter { $0.pass < newest }, by: \.pass)
       .compactMap { pass, passBeats -> PassSummary? in
         guard pass != partial, let last = passBeats.max(by: { $0.at < $1.at }) else { return nil }
@@ -407,6 +409,6 @@ struct SummaryBeatBuilder {
       .sorted { $0.pass < $1.pass }
     return SummaryReading(
       beats: beats.filter { $0.pass == newest }, finishedPasses: finished, turns: turns,
-      deltas: deltas)
+      passEndedAt: endedAt, metricSamples: metricSamples)
   }
 }

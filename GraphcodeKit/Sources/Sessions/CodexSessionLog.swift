@@ -205,10 +205,10 @@ public enum CodexSessionLog {
   }
 
   /// The same read, as the reading the store merges — see `ClaudeSessionLog.reading`.
-  static func reading(inRolloutAt url: URL, deltas: [Int: String]) -> SummaryReading {
+  static func reading(inRolloutAt url: URL, metricSamples: [MetricSample]) -> SummaryReading {
     var builder = builder(inRolloutAt: url)
     return SummaryBeatBuilder.reading(
-      from: builder.beats(), turns: builder.userTurns(), deltas: deltas)
+      from: builder.beats(), turns: builder.userTurns(), metricSamples: metricSamples)
   }
 
   private static func builder(inRolloutAt url: URL) -> SummaryBeatBuilder {
@@ -253,7 +253,7 @@ public enum CodexSessionLog {
       let rollout = rollout(forWorkingDirectory: directory),
       await TranscriptFreshness.shared.hasChanged(rollout, forNode: node.id)
     else { return nil }
-    let reading = reading(inRolloutAt: rollout, deltas: LoopSummaryDeltas.of(node))
+    let reading = reading(inRolloutAt: rollout, metricSamples: node.metricHistory)
     return reading.isEmpty ? nil : reading
   }
 
