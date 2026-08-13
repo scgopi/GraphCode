@@ -820,10 +820,17 @@ public enum ZmxSessionLauncher {
     // running. This used to run per ensure, which was once at load and once per node
     // created; the liveness sweep dials every minute, and a `python3` per loop per
     // minute to rewrite files nothing will re-read is pure cost.
+    // Copilot has no hooks to bank its own resume ID, so the ensure banks it from the
+    // session-state directory while the session is alive — the `&& { … } || { … }` is
+    // safe only because the bank fragment always exits 0 (`remoteIDBankFragment`); a
+    // fragment that could fail would send an alive tick into the create branch.
+    let bank =
+      node.backend == .copilotCLI
+      ? " && { " + CopilotSessionLog.remoteIDBankFragment(forNodeID: node.id) + "; }" : ""
     let script =
       "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { "
       + deliveryFragment(delivery, ifSessionMissing: check)
-      + "\(check) >/dev/null 2>&1 || { " + trustSeed + hooksWrite
+      + "\(check) >/dev/null 2>&1\(bank) || { " + trustSeed + hooksWrite
       + "\(create); }; }"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
   }

@@ -116,9 +116,18 @@ extension GhosttyTerminalView {
     let log = { (dial: String, event: String) in
       DialLog.fragment(session: self.sessionName, dial: dial, event: event) + "; "
     }
+    // Copilot has no hooks, so joining a live session is also the moment its resume ID
+    // gets banked — the daemon's ensure does the same for unattended loops, but a
+    // turn-based loop's only dial is this one. `[ -s ]`-guarded, so it walks the
+    // session-state directory once per session lifetime.
+    let bank =
+      backend == .copilotCLI
+      ? SurfaceRef.nodeID(fromZmxSessionName: sessionName).map {
+        CopilotSessionLog.remoteIDBankFragment(forNodeID: $0) + "; "
+      } ?? "" : ""
     let reattachOrRetry = { (dial: String) in
       "\(ZmxSessionLauncher.quotedCommand(["zmx", "get", sessionName])) >/dev/null 2>&1; "
-        + "gc_rc=$?; if [ \"$gc_rc\" -eq 0 ]; then \(log(dial, "attach-live"))\(markerWrite); "
+        + "gc_rc=$?; if [ \"$gc_rc\" -eq 0 ]; then \(log(dial, "attach-live"))\(bank)\(markerWrite); "
         + "exec \(ZmxSessionLauncher.quotedCommand(["zmx", "attach", sessionName])); fi; "
         + "[ \"$gc_rc\" -ne 1 ] && exit 255; "
     }

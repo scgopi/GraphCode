@@ -289,6 +289,40 @@ struct RemoteSessionResumeTests {
   }
 
   @Test
+  func aCopilotEnsureBanksTheLiveSessionsResumeID() throws {
+    // Copilot has no hooks, so nothing banked its resume ID on the remote host and a
+    // host reboot restarted every Copilot loop's goal from scratch (the first
+    // dial-logged incident, 2026-08-13: three `reboot wait-daemon` → `ensure fresh`).
+    // The ensure now banks the ID from the session-state directory while the session
+    // is alive, and the whole existing resume machinery takes over on the next reboot.
+    let invocation = try #require(
+      ZmxSessionLauncher.remoteEnsureInvocation(forNode: goalNode(.copilotCLI), at: location))
+    let remoteCommand = try #require(invocation.last)
+    #expect(remoteCommand.contains("session-state"))
+    #expect(remoteCommand.contains("workspace.yaml"))
+    #expect(remoteCommand.contains(".history"))
+    #expect(remoteCommand.contains("[ -s"))
+    #expect(remoteCommand.contains("bank copilot-id"))
+    // The bank rides the alive branch: behind the existence check, before the create —
+    // and it must always exit 0, or an alive tick would fall into the create branch.
+    let check = try #require(remoteCommand.range(of: "'get'"))
+    let bank = try #require(remoteCommand.range(of: "session-state"))
+    let run = try #require(remoteCommand.range(of: "'run'"))
+    #expect(check.upperBound <= bank.lowerBound)
+    #expect(bank.upperBound <= run.lowerBound)
+    #expect(remoteCommand.contains("|| true"))
+  }
+
+  @Test
+  func aClaudeEnsureNeverWalksCopilotState() throws {
+    // Claude banks through its own SessionStart hook; scanning Copilot's directory for
+    // it would be a wasted walk on every claude create.
+    let invocation = try #require(
+      ZmxSessionLauncher.remoteEnsureInvocation(forNode: goalNode(), at: location))
+    #expect(!(try #require(invocation.last)).contains("session-state"))
+  }
+
+  @Test
   func aCodexNodeHasNoResumeToOffer() {
     // Codex has no `--resume` graphcode has spiked, so the remote ensure keeps the
     // single fresh-launch branch rather than inventing a flag.

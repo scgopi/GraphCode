@@ -247,6 +247,36 @@ public enum CopilotSessionLog {
 
   // MARK: - Remote
 
+  /// Banks a live remote Copilot session's resume ID into
+  /// `~/.graphcode/sessions/<node>.id` — the file every restorer already reads — from
+  /// the outside, because Copilot has no hooks to bank it itself the way Claude's
+  /// `SessionStart` does. Without this, a remote host reboot found nothing banked and
+  /// every Copilot loop restarted its goal from scratch (observed 2026-08-13, the
+  /// first dial-logged incident).
+  ///
+  /// The ID is the session-state directory's basename, found by the `--name` graphcode
+  /// launched the session with — the same directory walk `remotePresenceInvocation`
+  /// does, done here in the ensure's *alive* branch. The `[ -s ]` guard keeps the walk
+  /// off the healthy tick once banked: it runs once per session lifetime. History line
+  /// before pointer, same order and format as `PresenceHooks.captureSessionID`, and
+  /// the whole fragment is silenced and `|| true`d so a banking failure can never turn
+  /// an alive tick into the create branch.
+  public static func remoteIDBankFragment(forNodeID nodeID: UUID) -> String {
+    let name = SurfaceRef(id: nodeID, launchesClaudeCode: true).zmxSessionName
+    let sessions = PresenceHooks.remoteSessionsExpression
+    let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: nodeID)
+    let historyFile = "\(sessions)/\"\(nodeID.uuidString).history\""
+    let logged = DialLog.fragment(session: name, dial: "bank", event: "copilot-id")
+    return "{ [ -s \(idFile) ] || { gc_sid=''; "
+      + "for gc_d in $(ls -t \"$HOME/.copilot/session-state/\" 2>/dev/null); do "
+      + "if grep -qx 'name: \(name)' "
+      + "\"$HOME/.copilot/session-state/$gc_d/workspace.yaml\" 2>/dev/null; then "
+      + "gc_sid=\"$gc_d\"; break; fi; done; "
+      + "if [ -n \"$gc_sid\" ]; then mkdir -p \(sessions); "
+      + "printf '%s %s %s\\n' \"$(date +%s)\" \"$gc_sid\" \"$PWD\" >> \(historyFile); "
+      + "printf '%s' \"$gc_sid\" > \(idFile); \(logged); fi; }; } 2>/dev/null || true"
+  }
+
   static func remotePresenceInvocation(
     forNode node: LoopNode, at location: RemoteProjectLocation
   ) -> [String] {
