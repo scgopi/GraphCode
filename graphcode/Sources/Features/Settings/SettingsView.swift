@@ -105,12 +105,8 @@ struct SettingsView: View {
           "Summarise what loops are doing (experimental)",
           isOn: $model.settings.summarisesLoops)
         Text(
-          "Reads each working session's own transcript and puts what it is doing at the "
-            + "top of the loop's rail — and on its card — as a few short lines instead of "
-            + "a terminal to scroll. Costs nothing: the words are the agent's own. Off, "
-            + "nothing is read and nothing changes. Experimental: a summary is a claim "
-            + "about what an agent is trying to do, and it is worth watching on your own "
-            + "loops before trusting it."
+          "What each loop is doing, at the top of its rail, read from the session's own "
+            + "transcript. Costs nothing."
         )
         .font(.caption2)
         .foregroundStyle(.secondary)
@@ -118,17 +114,10 @@ struct SettingsView: View {
 
         Toggle("Let a model write the summaries", isOn: $model.settings.summaryUsesModel)
           .disabled(!model.settings.summarisesLoops)
-        Text(
-          "Sharpens the current line with one short call to your backend's own CLI "
-            + "(claude -p, copilot -p, codex exec) on its fast model, per change, over one "
-            + "sentence — never the transcript. It runs outside the loop's session, so it "
-            + "never lands on that loop's token count, and if it is slow or unavailable "
-            + "the agent's own wording stands. This is the only part of summaries that "
-            + "costs money."
-        )
-        .font(.caption2)
-        .foregroundStyle(.secondary)
-        .fixedSize(horizontal: false, vertical: true)
+        Text("One short call to your backend's CLI per change. The part that costs money.")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
       } footer: {
         Text(
           "A strip along the window's bottom listing passes, hand-offs and state changes "
