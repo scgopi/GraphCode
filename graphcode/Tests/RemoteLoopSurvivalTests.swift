@@ -369,6 +369,20 @@ struct RemoteLoopSurvivalTests {
   }
 
   @Test
+  func aCopilotPaneBanksTheResumeIDOnEveryLiveJoin() throws {
+    // A turn-based Copilot loop never gets an ensure dial, so the pane's attach-live
+    // branch is its one chance to bank — same fragment, same `[ -s ]` guard.
+    let view = agentSurface(backend: .copilotCLI)
+    let script = try #require(view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
+    #expect(script.contains("session-state"))
+    #expect(script.contains("bank copilot-id"))
+    let claude = agentSurface()
+    let claudeScript = try #require(
+      claude.remoteCommand(at: location, settings: GraphcodeSettings()).last)
+    #expect(!claudeScript.contains("session-state"))
+  }
+
+  @Test
   func copilotRestoreResumesWithoutANameAndCodexCannotResume() {
     // Copilot's `--name` and `--resume` are mutually exclusive; Codex has no resume at
     // all, so its restore goes straight to the fresh launch.
