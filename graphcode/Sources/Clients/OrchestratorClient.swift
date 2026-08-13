@@ -84,6 +84,11 @@ private actor AppDaemonConnection {
   private var generation = 0
   private var nextReaderID: UInt64 = 0
   private var activeReaderID: UInt64?
+  /// A replacement socket must be joined exactly once, regardless of whether the reader
+  /// or a concurrent send is first to observe it.
+  private var rejoinConnectionID: UUID?
+  private var restoreTask: Task<Void, any Error>?
+  private var globalJoinTask: Task<Void, any Error>?
 
   init(socketPath: URL) {
     self.socketPath = socketPath
@@ -115,7 +120,7 @@ private actor AppDaemonConnection {
               return
             }
             connectedConnection = connection
-            if await isReconnect() { try await rejoinProjects() }
+            if await isReconnect() { try await rejoinProjects(on: connection) }
             while !Task.isCancelled {
               guard await isCurrentReader(readerID) else { return }
               let data = try await connection.receiveFrame()
@@ -166,6 +171,7 @@ private actor AppDaemonConnection {
     let oldConnection = connection
     connection = nil
     generation += 1
+    clearRejoinState()
     if let oldConnection {
       oldConnection.cancel()
       if let resolved = try? await oldConnection.value {
@@ -185,6 +191,7 @@ private actor AppDaemonConnection {
     let currentConnection = connection
     connection = nil
     generation += 1
+    clearRejoinState()
     if let currentConnection {
       currentConnection.cancel()
       if let resolved = try? await currentConnection.value {
@@ -215,16 +222,24 @@ private actor AppDaemonConnection {
   /// The same two commands the launch path sends: the daemon's own open-projects set is
   /// the right one to restore from, and the global graph is joined by name because it is
   /// deliberately not in that set.
-  private func rejoinProjects() async throws {
-    try await send(.restoreOpenProjects)
-    try await send(.openGlobalGraph)
+  private func rejoinProjects(on connection: any DaemonConnection) async throws {
+    try await ensureRejoined(connection)
   }
 
   func send(_ command: DaemonCommand) async throws {
     let connection = try await ensureConnected()
-    let data = try JSONEncoder().encode(command)
     do {
-      try await connection.sendFrame(data)
+      switch command {
+      case .restoreOpenProjects, .openGlobalGraph:
+        // These are the public join commands used by app startup. Coalesce each with
+        // reconnect rejoin so concurrent startup sends cannot duplicate a join.
+        try await sendJoin(command, on: connection)
+      case .listRecentProjects:
+        try await sendRaw(command, on: connection)
+      case .openProject, .closeProject, .forgetProject, .deleteProjectGraph, .graphCommand:
+        try await ensureRejoined(connection)
+        try await sendRaw(command, on: connection)
+      }
     } catch {
       await invalidate(connection)
       throw error
@@ -249,6 +264,88 @@ private actor AppDaemonConnection {
     }
   }
 
+  /// Coalesces the two commands that establish this client's project/global membership.
+  ///
+  /// The task is keyed by the transport identity rather than the actor's generation so a
+  /// send-created replacement socket and the reader's reconnect path share the same work.
+  private func ensureRejoined(_ connection: any DaemonConnection) async throws {
+    try await sendJoin(.restoreOpenProjects, on: connection)
+    try await sendJoin(.openGlobalGraph, on: connection)
+  }
+
+  private func sendJoin(
+    _ command: DaemonCommand,
+    on connection: any DaemonConnection
+  ) async throws {
+    if rejoinConnectionID != connection.id {
+      clearRejoinState()
+      rejoinConnectionID = connection.id
+    }
+    let existingTask: Task<Void, any Error>?
+    switch command {
+    case .restoreOpenProjects:
+      existingTask = restoreTask
+    case .openGlobalGraph:
+      existingTask = globalJoinTask
+    default:
+      preconditionFailure("only join commands can use sendJoin")
+    }
+    if let existingTask {
+      do {
+        try await existingTask.value
+        return
+      } catch {
+        if rejoinConnectionID == connection.id {
+          clearJoinTask(command)
+        }
+        throw error
+      }
+    }
+
+    let task = Task { () throws -> Void in
+      try await sendRaw(command, on: connection)
+    }
+    switch command {
+    case .restoreOpenProjects:
+      restoreTask = task
+    case .openGlobalGraph:
+      globalJoinTask = task
+    default:
+      preconditionFailure("only join commands can use sendJoin")
+    }
+    do {
+      try await task.value
+    } catch {
+      if rejoinConnectionID == connection.id {
+        clearJoinTask(command)
+      }
+      throw error
+    }
+  }
+
+  private func clearJoinTask(_ command: DaemonCommand) {
+    switch command {
+    case .restoreOpenProjects:
+      restoreTask = nil
+    case .openGlobalGraph:
+      globalJoinTask = nil
+    default:
+      break
+    }
+  }
+
+  private func sendRaw(_ command: DaemonCommand, on connection: any DaemonConnection) async throws {
+    try await connection.sendFrame(try JSONEncoder().encode(command))
+  }
+
+  private func clearRejoinState() {
+    restoreTask?.cancel()
+    globalJoinTask?.cancel()
+    restoreTask = nil
+    globalJoinTask = nil
+    rejoinConnectionID = nil
+  }
+
   /// Drops the shared connection after an I/O failure, so the next `send` or `events()`
   /// dials again instead of writing into a socket the daemon has gone from.
   ///
@@ -261,6 +358,7 @@ private actor AppDaemonConnection {
     else { return }
     self.connection = nil
     generation += 1
+    clearRejoinState()
     connection.cancel()
     try? await failedConnection.close()
   }

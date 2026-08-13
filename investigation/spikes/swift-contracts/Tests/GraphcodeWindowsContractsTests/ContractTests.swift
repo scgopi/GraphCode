@@ -863,6 +863,39 @@ final class ContractTests: XCTestCase {
     XCTAssertTrue(secondTransport.frames.isEmpty)
   }
 
+  func testSnapshotGapEqualToNonReplayableCountStillReplaysCanonicalEvent() async throws {
+    let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000048")!
+    let store = DaemonReplayStore(capacity: 8)
+    let firstTransport = RecordingConnection()
+    let firstChannel = DaemonConnectionChannel(
+      connection: firstTransport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+    await firstChannel.join(projectPath: "/work/snapshot-gap")
+    try await firstChannel.sendConnectionSnapshot(.errorOccurred("snapshot"))
+    let envelope = try XCTUnwrap(
+      store.append(
+        event: .errorOccurred("canonical"),
+        projectPath: "/work/snapshot-gap")[clientID])
+    try await firstChannel.sendEvent(envelope: envelope)
+    try await firstChannel.close()
+
+    let reconnectTransport = RecordingConnection()
+    let reconnectChannel = DaemonConnectionChannel(
+      connection: reconnectTransport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+    try await reconnectChannel.replay(after: 0)
+
+    let replayed = try reconnectTransport.frames.map {
+      try JSONDecoder().decode(DaemonWireEnvelope.self, from: $0)
+    }
+    XCTAssertEqual(replayed.map(\.sequence), [2])
+    try await reconnectChannel.close()
+  }
+
   func testSecondSocketSnapshotDoesNotInvalidateFirstSocketResumeCursor() async throws {
     let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000046")!
     let store = DaemonReplayStore(capacity: 8)

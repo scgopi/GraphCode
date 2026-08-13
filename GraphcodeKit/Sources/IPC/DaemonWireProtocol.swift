@@ -357,7 +357,7 @@ public struct DaemonReplayBuffer: Equatable, Sendable {
     if cursor < first {
       let missingCount = first - (cursor + 1)
       if missingCount > 0 {
-        guard missingCount < UInt64(nonReplayableSequences.count) else {
+        guard missingCount <= UInt64(nonReplayableSequences.count) else {
           throw ReplayError.cursorOutsideWindow
         }
         var sequence = cursor + 1

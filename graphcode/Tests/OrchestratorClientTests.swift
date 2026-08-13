@@ -151,6 +151,33 @@ struct OrchestratorClientTests {
   }
 
   @Test
+  func sendOnReplacementSocketWaitsForExactlyOneRejoin() async throws {
+    let daemon = try StubDaemon()
+    defer { daemon.stop() }
+    let client = OrchestratorClient.live(socketPath: daemon.socketPath)
+
+    let reader = Task {
+      for await _ in client.connect() {}
+    }
+    try await client.send(.listRecentProjects)
+    #expect(await daemon.nextCommand() == .listRecentProjects)
+
+    daemon.closeConnection(at: 0)
+    let sendTask = Task {
+      try await client.send(.openProject(path: "/work/send-before-rejoin"))
+    }
+
+    #expect(await daemon.nextCommand(onConnection: 1) == .restoreOpenProjects)
+    #expect(await daemon.nextCommand(onConnection: 1) == .openGlobalGraph)
+    #expect(await daemon.nextCommand(onConnection: 1) == .openProject(
+      path: "/work/send-before-rejoin"))
+    try await sendTask.value
+
+    reader.cancel()
+    await reader.value
+  }
+
+  @Test
   func cancellingAnEventStreamClosesItsReaderBeforeReconnect() async throws {
     let daemon = try StubDaemon()
     defer { daemon.stop() }

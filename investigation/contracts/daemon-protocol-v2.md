@@ -53,6 +53,8 @@ cancellation, backpressure, and non-reading peers.
   watermarks, but retain no replay history; after final disconnect, reconnect starts a new
   sequence window and an older cursor is outside that window.
 - Replay frames are queued before live events, preserving sequence order across reconnect.
+- Every newly connected app socket completes the restore/global join pair exactly once before
+  an ordinary project-scoped command; concurrent reader and sender paths share that join.
 - The live-event queue used while replay is in progress is bounded by both event count and
   encoded bytes. A slow connection that exceeds either bound is failed and closed rather
   than allowed to grow daemon memory without limit.
