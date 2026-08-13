@@ -53,6 +53,17 @@ final class ContractTests: XCTestCase {
     XCTAssertThrowsError(try invalid.validated())
   }
 
+  func testCorrelatedSuccessResponseAllowsNoPayload() throws {
+    let requestID = UUID(uuidString: "00000000-0000-0000-0000-000000000022")!
+    let success = DaemonWireEnvelope.success(id: requestID)
+
+    XCTAssertEqual(try success.validated(), success)
+    XCTAssertEqual(success.kind, .response)
+    XCTAssertEqual(success.requestID, requestID)
+    XCTAssertNil(success.event)
+    XCTAssertEqual(success.success, true)
+  }
+
   func testVersionOneEnvelopeIsRejected() {
     let invalid = DaemonWireEnvelope(
       version: 1,
@@ -465,6 +476,37 @@ final class ContractTests: XCTestCase {
     XCTAssertThrowsError(try store.replay(clientID: clientID, after: 0)) { error in
       XCTAssertEqual(error as? DaemonReplayBuffer.ReplayError, .replayUnavailable)
     }
+  }
+
+  func testSnapshotCursorCanResumeImmediatelyAfterDisconnect() async throws {
+    let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000023")!
+    let store = DaemonReplayStore(capacity: 8)
+    let graph = LoopGraph(project: ProjectRef(path: "/work/snapshot", name: "snapshot"))
+    _ = store.append(clientID: clientID, event: .errorOccurred("before-snapshot"))
+    let firstTransport = RecordingConnection()
+    let firstChannel = DaemonConnectionChannel(
+      connection: firstTransport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+
+    try await firstChannel.sendConnectionSnapshot(.graphChanged(graph))
+    let snapshot = try XCTUnwrap(
+      try JSONDecoder().decode(
+        DaemonWireEnvelope.self,
+        from: XCTUnwrap(firstTransport.frames.first)))
+    let cursor = try XCTUnwrap(snapshot.sequence)
+    try await firstChannel.close()
+
+    let secondTransport = RecordingConnection()
+    let secondChannel = DaemonConnectionChannel(
+      connection: secondTransport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+    try await secondChannel.replay(after: cursor)
+
+    XCTAssertTrue(secondTransport.frames.isEmpty)
   }
 
   func testMalformedV2RequestKeepsSafelyExtractableRequestID() throws {

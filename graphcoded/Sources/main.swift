@@ -198,6 +198,10 @@ func handleConnection(_ connection: any DaemonConnection) {
                 message: error)
             } else if let response = result.response {
               try await channel.sendResponse(requestID: requestID, event: response)
+            } else if result.succeeded {
+              // Some mutations intentionally have no payload. A correlated success
+              // envelope completes the request without manufacturing an error.
+              try await channel.sendSuccess(requestID: requestID)
             } else {
               try await channel.sendError(
                 requestID: requestID,

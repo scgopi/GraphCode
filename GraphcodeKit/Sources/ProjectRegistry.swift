@@ -3,10 +3,19 @@ import Foundation
 public struct ProjectRegistryCommandResult: Equatable, Sendable {
   public let response: DaemonEvent?
   public let error: String?
+  /// A successful command may intentionally have no response payload (for example,
+  /// `.forgetProject`). The daemon uses this bit to distinguish that outcome from an
+  /// internal routing failure.
+  public let succeeded: Bool
 
-  public init(response: DaemonEvent? = nil, error: String? = nil) {
+  public init(
+    response: DaemonEvent? = nil,
+    error: String? = nil,
+    succeeded: Bool? = nil
+  ) {
     self.response = response
     self.error = error
+    self.succeeded = succeeded ?? error == nil
   }
 }
 

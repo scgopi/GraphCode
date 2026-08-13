@@ -34,6 +34,7 @@ public final class DaemonReplayStore: @unchecked Sendable {
   private let lock = NSLock()
   private var buffers: [UUID: DaemonReplayBuffer] = [:]
   private var nextSequences: [UUID: UInt64] = [:]
+  private var watermarks: [UUID: UInt64] = [:]
   private var lastAccess: [UUID: Date] = [:]
   private var subscriptions: [UUID: DaemonWireSubscription] = [:]
   private var projectPaths: [UUID: Set<String>] = [:]
@@ -76,6 +77,7 @@ public final class DaemonReplayStore: @unchecked Sendable {
     _ = ensureClient(clientID)
     let sequence = nextSequences[clientID, default: 1]
     nextSequences[clientID] = sequence == UInt64.max ? UInt64.max : sequence + 1
+    watermarks[clientID] = sequence
     lastAccess[clientID] = now
     return sequence
   }
@@ -170,9 +172,26 @@ public final class DaemonReplayStore: @unchecked Sendable {
     let now = Date()
     purgeExpired(now: now)
     guard let buffer = buffers[clientID] else {
+      guard let watermark = watermarks[clientID] else {
+        throw DaemonReplayBuffer.ReplayError.replayUnavailable
+      }
+      lastAccess[clientID] = now
+      if cursor == watermark { return [] }
+      if cursor > watermark {
+        throw DaemonReplayBuffer.ReplayError.cursorOutsideWindow
+      }
       throw DaemonReplayBuffer.ReplayError.replayUnavailable
     }
     lastAccess[clientID] = now
+    if cursor == watermarks[clientID] {
+      return []
+    }
+    if buffer.latestSequence == nil {
+      if cursor > (watermarks[clientID] ?? 0) {
+        throw DaemonReplayBuffer.ReplayError.cursorOutsideWindow
+      }
+      throw DaemonReplayBuffer.ReplayError.replayUnavailable
+    }
     return try buffer.replay(after: cursor)
   }
 
@@ -236,12 +255,14 @@ public final class DaemonReplayStore: @unchecked Sendable {
     guard buffers.count < maxClients else { return false }
     buffers[clientID] = DaemonReplayBuffer(capacity: capacity)
     nextSequences[clientID] = 1
+    watermarks[clientID] = 0
     return true
   }
 
   private func appendLocked(clientID: UUID, event: DaemonEvent) -> DaemonWireEnvelope {
     let sequence = nextSequences[clientID, default: 1]
     nextSequences[clientID] = sequence == UInt64.max ? UInt64.max : sequence + 1
+    watermarks[clientID] = sequence
     guard buffers[clientID] != nil else {
       return .event(sequence: sequence, event: event)
     }
@@ -259,6 +280,7 @@ public final class DaemonReplayStore: @unchecked Sendable {
   private func removeClient(_ clientID: UUID) {
     buffers.removeValue(forKey: clientID)
     nextSequences.removeValue(forKey: clientID)
+    watermarks.removeValue(forKey: clientID)
     lastAccess.removeValue(forKey: clientID)
     subscriptions.removeValue(forKey: clientID)
     projectPaths.removeValue(forKey: clientID)
@@ -369,6 +391,11 @@ public actor DaemonConnectionChannel {
     case .v2:
       try await sendJSON(DaemonWireEnvelope.response(id: requestID, event: event))
     }
+  }
+
+  public func sendSuccess(requestID: UUID) async throws {
+    guard case .v2 = mode else { return }
+    try await sendJSON(DaemonWireEnvelope.success(id: requestID))
   }
 
   public func sendError(

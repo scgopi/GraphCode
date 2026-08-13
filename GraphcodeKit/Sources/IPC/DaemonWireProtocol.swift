@@ -42,6 +42,7 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
   public var command: DaemonCommand?
   public var event: DaemonEvent?
   public var error: DaemonWireError?
+  public var success: Bool?
 
   public init(
     version: Int,
@@ -55,7 +56,8 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
     sequence: UInt64? = nil,
     command: DaemonCommand? = nil,
     event: DaemonEvent? = nil,
-    error: DaemonWireError? = nil
+    error: DaemonWireError? = nil,
+    success: Bool? = nil
   ) {
     self.version = version
     self.kind = kind
@@ -69,6 +71,7 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
     self.command = command
     self.event = event
     self.error = error
+    self.success = success
   }
 
   public static func hello(
@@ -108,6 +111,14 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
       kind: .response,
       requestID: id,
       event: event)
+  }
+
+  public static func success(id: UUID) -> Self {
+    Self(
+      version: DaemonWireProtocol.currentVersion,
+      kind: .response,
+      requestID: id,
+      success: true)
   }
 
   public static func event(sequence: UInt64, event: DaemonEvent) -> Self {
@@ -152,20 +163,23 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
           throw ValidationError.invalidField("subscription")
         }
       }
-      guard requestID == nil, sequence == nil, command == nil, event == nil, error == nil else {
+      guard requestID == nil, sequence == nil, command == nil, event == nil, error == nil,
+        success == nil
+      else {
         throw ValidationError.unexpectedField
       }
     case .request:
       guard requestID != nil else { throw ValidationError.missingField("requestID") }
       guard command != nil else { throw ValidationError.missingField("command") }
       guard supportedVersions == nil, selectedVersion == nil, clientID == nil, resumeFrom == nil,
-        subscription == nil, sequence == nil, event == nil, error == nil
+        subscription == nil, sequence == nil, event == nil, error == nil, success == nil
       else {
         throw ValidationError.unexpectedField
       }
     case .response:
       guard requestID != nil else { throw ValidationError.missingField("requestID") }
-      guard event != nil else { throw ValidationError.missingField("event") }
+      guard event != nil || success == true else { throw ValidationError.missingField("event") }
+      guard success != false else { throw ValidationError.invalidField("success") }
       guard supportedVersions == nil, selectedVersion == nil, clientID == nil, resumeFrom == nil,
         subscription == nil, sequence == nil, command == nil, error == nil
       else {
@@ -175,7 +189,7 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
       guard sequence != nil else { throw ValidationError.missingField("sequence") }
       guard event != nil else { throw ValidationError.missingField("event") }
       guard supportedVersions == nil, selectedVersion == nil, clientID == nil, resumeFrom == nil,
-        subscription == nil, requestID == nil, command == nil, error == nil
+        subscription == nil, requestID == nil, command == nil, error == nil, success == nil
       else {
         throw ValidationError.unexpectedField
       }
@@ -185,7 +199,7 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
         throw ValidationError.invalidField("error")
       }
       guard supportedVersions == nil, selectedVersion == nil, clientID == nil, resumeFrom == nil,
-        subscription == nil, sequence == nil, command == nil, event == nil
+        subscription == nil, sequence == nil, command == nil, event == nil, success == nil
       else {
         throw ValidationError.unexpectedField
       }

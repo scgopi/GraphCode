@@ -290,6 +290,22 @@ struct ProjectRegistryTests {
   }
 
   @Test
+  func forgetProjectReturnsCorrelatedNoPayloadSuccess() async {
+    let (registry, _) = makeRegistryAndPersistence()
+    let connectionID = UUID()
+    await registry.addConnection(id: connectionID, fileDescriptor: -1)
+    await registry.handle(.openProject(path: "/tmp/project-d"), connectionID: connectionID)
+
+    let result = await registry.apply(
+      .forgetProject(path: "/tmp/project-d"),
+      connectionID: connectionID)
+
+    #expect(result?.succeeded == true)
+    #expect(result?.response == nil)
+    #expect(result?.error == nil)
+  }
+
+  @Test
   func deletingAProjectsLoopsDiscardsThemForGood() async {
     let (registry, persistence) = makeRegistryAndPersistence()
     let connectionID = UUID()

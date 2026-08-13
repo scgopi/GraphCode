@@ -17,7 +17,8 @@ Kinds:
 
 - `hello`: supported versions
 - `request`: request ID and `DaemonCommand`
-- `response`: request ID and `DaemonEvent`
+- `response`: request ID and either a `DaemonEvent` or explicit `success: true` with no
+  payload
 - `event`: sequence and `DaemonEvent`
 - `error`: optional request ID plus stable code/message
 
@@ -40,6 +41,9 @@ cancellation, backpressure, and non-reading peers.
 - Canonical subscribed graph events are retained for a logical client while its socket is
   disconnected, subject to the same bounded capacity and expiry.
 - Replay frames are queued before live events, preserving sequence order across reconnect.
+- A connection-local join snapshot consumes a visible sequence but records a replay
+  watermark, so disconnecting immediately after the snapshot and resuming from that cursor
+  is an exact caught-up replay rather than `replayUnavailable`.
 - Complete framed writes are serialized at the transport boundary, including concurrent app
   sends.
 - Replay stores run periodic expiry cleanup while the daemon is idle; expiry does not
@@ -48,6 +52,8 @@ cancellation, backpressure, and non-reading peers.
   them, while subscription events remain sequenced.
 - A rejected graph command returns its correlated error and never a successful response
   snapshot.
+- A successful mutation with no response payload returns a correlated response envelope
+  with `success: true`.
 - A reconnect never silently treats an unrelated event as command acknowledgement.
 
 ## Test fixtures

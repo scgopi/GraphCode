@@ -175,8 +175,15 @@ import Foundation
 
     public func receiveFrameSync() throws -> Data {
       let header = try stream.readExactlySync(DaemonFrameHeader.byteCount)
-      let length = try DaemonFrameHeader.decodeLength(
-        Array(header), maxPayloadBytes: DaemonFrameHeader.legacySafetyCeilingBytes)
+      let length: Int
+      do {
+        length = try DaemonFrameHeader.decodeLength(
+          Array(header), maxPayloadBytes: DaemonFrameHeader.legacySafetyCeilingBytes)
+      } catch DaemonFrameHeader.HeaderError.invalidHeader {
+        throw FramedMessageIO.IOError.invalidHeader
+      } catch {
+        throw FramedMessageIO.IOError.payloadTooLarge
+      }
       return length == 0 ? Data() : try stream.readExactlySync(length)
     }
 
