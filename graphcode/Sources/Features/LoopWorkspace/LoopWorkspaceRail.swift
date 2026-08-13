@@ -12,11 +12,57 @@ struct LoopWorkspaceRail: View {
   let node: LoopNode
   let graph: LoopGraph
   let now: Date
+  /// What the rail is this window, after any drag. The section inside it is the reason
+  /// this is a variable at all — a beat is a sentence, and 188 points of content is where
+  /// a sentence starts wrapping to four lines.
+  var width: CGFloat = LoopWorkspaceRail.defaultWidth
+  /// Whether the summary section is collapsed to its one truncated line. Per window and
+  /// persisted, beside the rail's own visibility.
+  let isSummaryFolded: Bool
+  /// The newest beat this window had on screen when it was last left — see
+  /// `LoopWorkspaceFeature.seenBeatID`.
+  let seenBeatID: String?
+  let onSummaryFoldToggled: () -> Void
+  let onSummaryAnswerTapped: () -> Void
   let onTargetTapped: (UUID) -> Void
 
-  static let width: CGFloat = 212
+  /// The handoff's number, and now the floor rather than the fixed size. Below this the
+  /// receding rows stop being one line each.
+  static let minimumWidth: CGFloat = 212
+  /// Half a 1280pt window is already more than a summary needs; past this the terminal —
+  /// the pane someone is actually working in — is the thing being taken from.
+  static let maximumWidth: CGFloat = 520
+  /// Wider than the 212 the design specified, because the section that arrived after it
+  /// carries prose rather than chips and rows of three.
+  static let defaultWidth: CGFloat = 280
 
   static let visibleDefaultsKey = "loopWorkspaceRailVisible"
+
+  static let widthDefaultsKey = "loopWorkspaceRailWidth"
+
+  static func loadWidth() -> CGFloat {
+    let stored = UserDefaults.standard.double(forKey: widthDefaultsKey)
+    guard stored > 0 else { return defaultWidth }
+    return clamped(stored)
+  }
+
+  static func saveWidth(_ width: CGFloat) {
+    UserDefaults.standard.set(Double(clamped(width)), forKey: widthDefaultsKey)
+  }
+
+  static func clamped(_ width: CGFloat) -> CGFloat {
+    min(max(width, minimumWidth), maximumWidth)
+  }
+
+  static let summaryFoldedDefaultsKey = "loopSummarySectionFolded"
+
+  static func loadSummaryFolded() -> Bool {
+    UserDefaults.standard.bool(forKey: summaryFoldedDefaultsKey)
+  }
+
+  static func saveSummaryFolded(_ folded: Bool) {
+    UserDefaults.standard.set(folded, forKey: summaryFoldedDefaultsKey)
+  }
 
   /// **Off** until someone asks for it. It used to default on, which meant every loop
   /// that feeds nothing opened with 212 points of empty panel beside its terminal.
@@ -35,9 +81,16 @@ struct LoopWorkspaceRail: View {
   /// rect between two dashes, and a date; blank chrome is worse than absent chrome, and
   /// a panel that is permanently empty teaches people to stop looking at the panel next
   /// to it (the argument that already keeps the cost rollup out of the sidebar).
-  static func hasContent(node: LoopNode, graph: LoopGraph) -> Bool {
+  static func hasContent(
+    node: LoopNode, graph: LoopGraph,
+    summarising: Bool = LoopSummaryPresentation.isProducing
+  ) -> Bool {
     graph.edges.contains { $0.from == node.id || $0.to == node.id }
       || node.metricHistory.count >= 2
+      // A loop that is narrating has something to say whether or not it is wired to
+      // anything — and that narration is the reason to open the rail at all. With the
+      // producer off it is not narrating, whatever a previous switch-on left on the node.
+      || LoopSummaryPresentation.hasContent(node: node, producing: summarising)
   }
 
   /// How many loops this one hands off to — what the loop bar's control counts.
@@ -60,6 +113,14 @@ struct LoopWorkspaceRail: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
+      // Above `THIS LOOP` rather than below it: what the loop is doing this second
+      // outranks where it sits in the graph, and a section you have to scroll to is a
+      // section that answers nothing at a glance.
+      if LoopSummaryPresentation.hasContent(node: node) {
+        LoopSummarySection(
+          node: node, now: now, isFolded: isSummaryFolded, seenBeatID: seenBeatID,
+          onToggleFold: onSummaryFoldToggled, onAnswer: onSummaryAnswerTapped)
+      }
       section("THIS LOOP") {
         RailMinimap(node: node, upstream: inbound, downstream: outbound.map(\.target))
       }
@@ -79,7 +140,7 @@ struct LoopWorkspaceRail: View {
       footer
     }
     .padding(12)
-    .frame(width: Self.width, alignment: .leading)
+    .frame(width: width, alignment: .leading)
     .frame(maxHeight: .infinity)
     .background(Theme.workspaceRail)
     .overlay(alignment: .leading) {

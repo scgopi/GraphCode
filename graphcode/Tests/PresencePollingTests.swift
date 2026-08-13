@@ -221,6 +221,54 @@ struct PresencePollingTests {
     #expect(await store.graph.nodes.first?.activity == "running make check")
   }
 
+  // MARK: - The rail's own reading
+
+  /// Switching the summary producer off has to empty the nodes it filled.
+  ///
+  /// The reader answers `nil` for a transcript that has not moved and an *empty* reading
+  /// when it will not be narrating at all, and only the second clears. Without the split,
+  /// turning the experiment off left a beat frozen on every card — outranking the live
+  /// activity line it had been standing in for — until each loop was deleted.
+  @Test
+  func turningTheProducerOffEmptiesEveryNodeItFilled() async {
+    let presence = Probe()
+    await presence.answer("A", with: .busy)
+    let beat = SummaryBeat(
+      id: "b-1", at: Date(timeIntervalSince1970: 1), pass: 1, kind: .reading,
+      text: "Reading the probe")
+    let readings = ReadingProbe(
+      SummaryReading(beats: [beat], turns: [Date(timeIntervalSince1970: 0)]))
+    let store = GraphStore(
+      graph: graph([node("A", .running), node("done", .succeeded)]),
+      onReadSummary: { _, _ in await readings.read() },
+      onReadPresence: { node, _ in await presence.read(node) })
+    let descriptor = await attach(to: store)
+    defer { close(descriptor) }
+
+    await store.pollPresence()
+    #expect(await store.graph.nodes.first?.summary?.current?.text == "Reading the probe")
+
+    // A poll with nothing new to say leaves it standing — the end of a turn is exactly
+    // when a rail is worth reading.
+    await readings.setAnswer(nil)
+    await store.pollPresence()
+    #expect(await store.graph.nodes.first?.summary?.current?.text == "Reading the probe")
+
+    await readings.setAnswer(SummaryReading(beats: []))
+    await store.pollPresence()
+    #expect(await store.graph.nodes.first?.summary == nil)
+  }
+
+  private actor ReadingProbe {
+    private var answer: SummaryReading?
+
+    init(_ answer: SummaryReading?) { self.answer = answer }
+
+    func setAnswer(_ reading: SummaryReading?) { answer = reading }
+
+    func read() -> SummaryReading? { answer }
+  }
+
   @Test
   func theIntervalIsSlowEnoughToBeBackgroundNoise() {
     // Fifteen seconds is the lag a human sees between a loop finishing and its card

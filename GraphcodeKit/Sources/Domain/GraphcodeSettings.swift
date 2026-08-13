@@ -246,6 +246,36 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// is a trade worth offering and not worth imposing.
   public var showsActivityStrip: Bool
 
+  /// Whether graphcode narrates what loops are doing — the summary rail's *producer*.
+  ///
+  /// **Off by default, and experimental.** Off, nothing reads a session's transcript, no
+  /// node carries a `summary`, the rail shows no section and the card's live line falls
+  /// back to what the loop was handed, exactly as it did before this existed. On, each
+  /// working loop's transcript tail is read once per poll and folded into
+  /// `LoopNode.summary`.
+  ///
+  /// Deliberately distinct from hiding the rail. Hiding is a view, and this is the
+  /// reading: the design's own division, kept because the two would otherwise be one
+  /// switch that quietly does two things. It is a setting at all — rather than always-on —
+  /// because a beat is a claim about what an agent is *trying* to do, and a wrong one is
+  /// worse than the scrollback it replaces. It stays behind a switch until it has been
+  /// watched on real loops.
+  public var summarisesLoops: Bool
+
+  /// Whether a small model may rewrite the current beat, on top of the free reading.
+  ///
+  /// **Off by default, and meaningless with `summarisesLoops` off.** The rail works
+  /// without this: the beat is the agent's own sentence, taken off its transcript for
+  /// nothing. What a model buys is the last edit — the design's plain past tense, ten
+  /// words, tools turned back into intent — and it is the one part of the feature that
+  /// costs money, so it is the one part behind its own switch.
+  ///
+  /// One `claude -p` / `copilot -p` / `codex exec` per *changed* beat of a *working* loop,
+  /// at the fast tier, over one sentence and one line of evidence. It is its own process,
+  /// so its tokens never land on the loop's own budget line, and every failure path leaves
+  /// the derived beat exactly as it was — see `SummaryModelWriter`.
+  public var summaryUsesModel: Bool
+
   // There is deliberately no window-opacity setting here any more. graphcode used to own
   // one and apply it as `NSWindow.alphaValue`, which fades the whole window — terminal
   // text included — rather than only the background behind it. Ghostty already has
@@ -261,6 +291,8 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     briefsSessionsAboutTheGraph: Bool = true,
     autoSelectsModel: Bool = false,
     showsActivityStrip: Bool = false,
+    summarisesLoops: Bool = false,
+    summaryUsesModel: Bool = false,
     worktreePolicies: [String: WorktreeHygienePolicy] = [:]
   ) {
     self.defaultBackend = defaultBackend.isSpiked ? defaultBackend : .claudeCode
@@ -270,6 +302,8 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     self.briefsSessionsAboutTheGraph = briefsSessionsAboutTheGraph
     self.autoSelectsModel = autoSelectsModel
     self.showsActivityStrip = showsActivityStrip
+    self.summarisesLoops = summarisesLoops
+    self.summaryUsesModel = summaryUsesModel
     self.worktreePolicies = worktreePolicies
   }
 
@@ -299,6 +333,14 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       try container.decodeIfPresent(Bool.self, forKey: .autoSelectsModel) ?? false
     showsActivityStrip =
       try container.decodeIfPresent(Bool.self, forKey: .showsActivityStrip) ?? false
+    // Absent in every file written before the rail existed, which is the same thing as an
+    // experiment nobody has opted into yet.
+    summarisesLoops =
+      try container.decodeIfPresent(Bool.self, forKey: .summarisesLoops) ?? false
+    // Never inferred from `summarisesLoops`: turning the rail on must not start spending
+    // money on a machine whose owner only asked to see what their loops were doing.
+    summaryUsesModel =
+      try container.decodeIfPresent(Bool.self, forKey: .summaryUsesModel) ?? false
     worktreePolicies =
       try container.decodeIfPresent(
         [String: WorktreeHygienePolicy].self, forKey: .worktreePolicies) ?? [:]

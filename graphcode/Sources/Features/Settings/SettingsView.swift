@@ -101,6 +101,23 @@ struct SettingsView: View {
 
       Section {
         Toggle("Show the activity strip", isOn: $model.settings.showsActivityStrip)
+        Toggle(
+          "Summarise what loops are doing (experimental)",
+          isOn: $model.settings.summarisesLoops)
+        Text(
+          "What each loop is doing, at the top of its rail, read from the session's own "
+            + "transcript. Costs nothing."
+        )
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+
+        Toggle("Let a model write the summaries", isOn: $model.settings.summaryUsesModel)
+          .disabled(!model.settings.summarisesLoops)
+        Text("One short call to your backend's CLI per change. The part that costs money.")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
       } footer: {
         Text(
           "A strip along the window's bottom listing passes, hand-offs and state changes "

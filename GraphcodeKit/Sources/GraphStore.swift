@@ -39,6 +39,9 @@ public actor GraphStore {
   private let onCaptureScript: (@Sendable (ShellPredicate) async -> String?)?
   private let onReadUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)?
   private let onReadActivity: (@Sendable (LoopNode, String?) async -> String?)?
+  /// What a working session has narrated, folded into `LoopNode.summary`. `nil` when
+  /// nothing produces beats — no reader wired, or the human has left the producer off.
+  private let onReadSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)?
   private let onReadPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)?
   /// Cross-graph `.spawn`. `GraphStore` owns exactly one graph and cannot reach another,
   /// so it hands the request up to `ProjectRegistry`, which is the layer that knows every
@@ -106,6 +109,7 @@ public actor GraphStore {
     onCaptureScript: (@Sendable (ShellPredicate) async -> String?)? = nil,
     onReadUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)? = nil,
     onReadActivity: (@Sendable (LoopNode, String?) async -> String?)? = nil,
+    onReadSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)? = nil,
     onReadPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)? = nil,
     onSpawnIntoProject: (@Sendable (String, NodeDraft) -> Void)? = nil,
     onAppendMemory: (@Sendable (UUID, String) -> Void)? = nil,
@@ -122,6 +126,7 @@ public actor GraphStore {
     self.onCaptureScript = onCaptureScript
     self.onReadUsage = onReadUsage
     self.onReadActivity = onReadActivity
+    self.onReadSummary = onReadSummary
     self.onReadPresence = onReadPresence
     self.onSpawnIntoProject = onSpawnIntoProject
     self.onAppendMemory = onAppendMemory
@@ -294,6 +299,7 @@ public actor GraphStore {
       // asking it against last tick's readings would describe the wrong ones.
       await refreshPresence()
       await refreshActivity()
+      await refreshSummary()
     }
 
     // Guarded re-fires need an `until` predicate answered first, which means a
@@ -456,6 +462,80 @@ public actor GraphStore {
     return changed
   }
 
+  /// Asks each unresolved session what it has narrated, and folds it into the node's own
+  /// bounded store.
+  ///
+  /// **Not guarded on `busy`, unlike `refreshActivity`, and that was a real bug.** A
+  /// turn's last beats are written and *then* the session goes idle, so the closing
+  /// narration always landed after the final busy poll and was never read: the terminal
+  /// showed a finished turn while the rail sat on a beat from minutes earlier. Activity
+  /// can be guarded that way because a quiet session genuinely has no current tool call. A
+  /// summary is the account of what happened, and the end of a turn is the part of it a
+  /// human coming back most wants.
+  ///
+  /// What keeps that cheap is `TranscriptFreshness`: a quiet loop costs one `stat` and no
+  /// read at all, because its transcript has not moved since the last poll.
+  ///
+  /// **Unlike `activity`, a nil reading does not clear the field.** The two say different
+  /// things: `activity` is the tool call happening *now*, and a session between calls is
+  /// genuinely doing none, so blanking it is the honest answer. A summary is the account
+  /// of a run — the last thing a loop was doing is exactly what a human coming back wants
+  /// on screen, and blanking it the moment the session goes quiet would empty the rail at
+  /// precisely the moment it is most worth reading.
+  ///
+  /// **An *empty* reading is different from no reading, and it is what turns the feature
+  /// off.** `nil` means nothing new was read — a quiet transcript, a remote loop, a
+  /// backend with nothing to say — and the node keeps what it has. An empty one is the
+  /// reader saying it will not be narrating this node at all, which is what
+  /// `CLISessionBackend` answers when the human has switched the producer off, and the
+  /// node's summary goes with it. Without that, switching the experiment off left every
+  /// card showing a beat frozen at the moment it was switched, outranking the live
+  /// activity line it had been standing in for. Resolved loops are swept too, which is why
+  /// this loop is over every node.
+  ///
+  /// **Asked concurrently, unlike the other two readings.** Those are file reads and a
+  /// `stat`, and a queue of them is nothing; this one may have the optional model pass
+  /// behind it, which is a subprocess with a timeout on it. Sequentially that is one
+  /// timeout *per loop* on a tick that presence rides on, so a canvas of six loops could
+  /// stop reporting state for a minute over a caption. One task each bounds the whole
+  /// sweep at a single timeout however many loops there are.
+  @discardableResult
+  private func refreshSummary() async -> Bool {
+    guard let onReadSummary else { return false }
+    let path = graph.project.path
+    // A resolved loop is asked only while it still carries a summary to clear. Its session
+    // is over, so a reading can tell it nothing new — but finding that out costs a
+    // directory walk per backend, and Codex's is over every rollout on the machine.
+    let nodes = graph.nodes.filter { !$0.isResolved || $0.summary != nil }
+    let readings = await withTaskGroup(of: (UUID, SummaryReading?).self) { group in
+      for node in nodes {
+        group.addTask { (node.id, await onReadSummary(node, path)) }
+      }
+      var collected: [UUID: SummaryReading] = [:]
+      for await (id, reading) in group {
+        guard let reading else { continue }
+        collected[id] = reading
+      }
+      return collected
+    }
+    var changed = false
+    for node in nodes {
+      guard let reading = readings[node.id] else { continue }
+      guard !reading.isEmpty else {
+        guard graph.nodes[id: node.id]?.summary != nil else { continue }
+        graph.nodes[id: node.id]?.summary = nil
+        changed = true
+        continue
+      }
+      guard !node.isResolved else { continue }
+      let merged = (graph.nodes[id: node.id]?.summary ?? LoopSummary()).merging(reading)
+      guard graph.nodes[id: node.id]?.summary != merged else { continue }
+      graph.nodes[id: node.id]?.summary = merged
+      changed = true
+    }
+    return changed
+  }
+
   /// Asks each session what it is doing, the third reading on the same channel and the
   /// same trip as the other two.
   ///
@@ -519,6 +599,7 @@ public actor GraphStore {
     // whenever that happened to be.
     var changed = await refreshPresence()
     if await refreshActivity() { changed = true }
+    if await refreshSummary() { changed = true }
     guard changed else { return }
     notifyClients()
   }
@@ -709,6 +790,10 @@ public actor GraphStore {
     graph.edges.removeAll { $0.from == node.id || $0.to == node.id }
     graph.nodes.remove(id: node.id)
     cancelGoalPoller(node.id)
+    // The summary reader keeps one modification date per node so a quiet transcript costs
+    // a `stat` and no read; a deleted loop should not keep one for the life of the daemon.
+    let deletedID = node.id
+    Task { await TranscriptFreshness.shared.forget(deletedID) }
     for targetID in downstream {
       unblockIfStillIdle(targetID)
     }
