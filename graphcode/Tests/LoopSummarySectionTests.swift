@@ -168,11 +168,38 @@ struct LoopSummarySectionTests {
   /// chrome out of the rail entirely.
   @Test
   func aLoopWithNothingToSayDrawsNoSection() {
-    #expect(LoopSummaryPresentation.hasContent(node: node(summary: nil)) == false)
-    #expect(LoopSummaryPresentation.hasContent(node: node(summary: LoopSummary())) == false)
+    #expect(
+      LoopSummaryPresentation.hasContent(node: node(summary: nil), producing: true) == false)
+    #expect(
+      LoopSummaryPresentation.hasContent(node: node(summary: LoopSummary()), producing: true)
+        == false)
     #expect(
       LoopSummaryPresentation.hasContent(
-        node: node(summary: LoopSummary(beats: [beat(1, "Reading", at: 1)]))) == true)
+        node: node(summary: LoopSummary(beats: [beat(1, "Reading", at: 1)])), producing: true)
+        == true)
+  }
+
+  /// Switching the producer off has to empty the rail *now*, not at the next poll.
+  ///
+  /// The daemon clears the node itself, and until that lands — or on a graph file written
+  /// by a build that cleared nothing — the beats are still there. A section drawn from
+  /// them is a reading from a feature the human has switched off, expanded or folded, and
+  /// the gutter that survives hiding the rail is drawn from the same answer.
+  @Test
+  func nothingIsDrawnFromBeatsLeftBehindByAProducerThatIsOff() {
+    let stale = node(summary: LoopSummary(beats: [beat(3, "Reading the probe", at: 1)]))
+
+    #expect(LoopSummaryPresentation.hasContent(node: stale, producing: false) == false)
+    #expect(
+      LoopWorkspaceRail.hasContent(
+        node: stale, graph: LoopGraph(scope: LoopGraphScope(projectPath: "/tmp/p", name: "p")),
+        summarising: false) == false)
+
+    // And the card goes back to the line it had before the experiment was ever switched on.
+    var card = stale
+    card.activity = "reading UsageProbe.swift"
+    #expect(
+      LoopCardPresentation(node: card, summarising: false).liveLine == "reading UsageProbe.swift")
   }
 
   // MARK: - The card
@@ -186,7 +213,8 @@ struct LoopSummarySectionTests {
     ]
 
     #expect(
-      LoopCardPresentation(node: node).liveLine == "pass 2 · Working out the double count")
+      LoopCardPresentation(node: node, summarising: true).liveLine
+        == "pass 2 · Working out the double count")
   }
 
   /// With the producer off there is no summary, and the card says exactly what it said

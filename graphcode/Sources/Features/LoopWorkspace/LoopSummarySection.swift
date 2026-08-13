@@ -34,7 +34,16 @@ struct LoopSummarySection: View {
     node.presence?.presence == .busy && !node.isResolved
   }
 
+  /// The spine only animates when there is something behind the current beat to have
+  /// flowed from, and only while the session is live.
+  private func isFlowing(_ presentation: LoopSummaryPresentation) -> Bool {
+    isWorking && !presentation.receding.isEmpty
+  }
+
   var body: some View {
+    // Built once and passed down. `body` runs on every clock tick to keep the elapsed
+    // line honest, and the two branches that used to read `presentation` separately were
+    // rebuilding it — a fold over the beats — a second time for the sake of one `Bool`.
     VStack(alignment: .leading, spacing: 10) {
       let presentation = presentation
       header(presentation)
@@ -230,17 +239,11 @@ struct LoopSummarySection: View {
     }
     .padding(.leading, 16)
     .background(alignment: .leading) {
-      FlowingSpine(isFlowing: isFlowing)
+      FlowingSpine(isFlowing: isFlowing(presentation))
         .frame(width: 1)
         .padding(.leading, 4)
         .padding(.vertical, 3)
     }
-  }
-
-  /// The spine only animates when there is something behind the current beat to have
-  /// flowed from, and only while the session is live.
-  private var isFlowing: Bool {
-    isWorking && !presentation.receding.isEmpty
   }
 
   /// How faded a row is by its position: 0 at the top of the list, 1 for the one just

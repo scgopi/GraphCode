@@ -115,7 +115,7 @@ public enum ClaudeSessionLog {
   private static func builder(inTranscriptAt url: URL) -> SummaryBeatBuilder {
     var builder = SummaryBeatBuilder()
     for line in SummaryBeatBuilder.tailLines(of: url) {
-      guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
+      guard let object = try? JSONSerialization.jsonObject(with: line),
         let record = object as? [String: Any],
         record["isSidechain"] as? Bool != true,
         let type = record["type"] as? String

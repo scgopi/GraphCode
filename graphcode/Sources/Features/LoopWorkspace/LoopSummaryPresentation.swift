@@ -47,10 +47,23 @@ struct LoopSummaryPresentation: Equatable {
   /// end marked a row the human had demonstrably already read, every time.
   var unseenRows: Int { max(unseen - 1, 0) }
 
+  /// Whether the producer is switched on, from the app's own live copy of the settings
+  /// file — the same read `AppView` makes for the activity strip, and no disk on the
+  /// render path.
+  ///
+  /// **The view asks as well as the daemon, and that is deliberate.** `GraphStore` clears
+  /// a node's summary when the reader says it is not narrating (see `refreshSummary`), so
+  /// switching the experiment off empties the nodes within a poll. Until that poll lands —
+  /// and on any graph file written by a build that cleared nothing — the beats are still
+  /// on the node, and a rail that drew them would be showing a reading from a feature the
+  /// human has switched off. Two answers to one question, agreeing, at fifteen seconds
+  /// apart at worst.
+  static var isProducing: Bool { SettingsModel.shared.settings.summarisesLoops }
+
   /// Whether the section has anything to say at all. A rail must never render an empty
   /// section — see `LoopWorkspaceRail.hasContent`.
-  static func hasContent(node: LoopNode) -> Bool {
-    node.summary?.isEmpty == false
+  static func hasContent(node: LoopNode, producing: Bool = isProducing) -> Bool {
+    producing && node.summary?.isEmpty == false
   }
 
   init(node: LoopNode, now: Date = Date(), seenBeatID: String? = nil) {

@@ -81,12 +81,16 @@ struct LoopWorkspaceRail: View {
   /// rect between two dashes, and a date; blank chrome is worse than absent chrome, and
   /// a panel that is permanently empty teaches people to stop looking at the panel next
   /// to it (the argument that already keeps the cost rollup out of the sidebar).
-  static func hasContent(node: LoopNode, graph: LoopGraph) -> Bool {
+  static func hasContent(
+    node: LoopNode, graph: LoopGraph,
+    summarising: Bool = LoopSummaryPresentation.isProducing
+  ) -> Bool {
     graph.edges.contains { $0.from == node.id || $0.to == node.id }
       || node.metricHistory.count >= 2
       // A loop that is narrating has something to say whether or not it is wired to
-      // anything — and that narration is the reason to open the rail at all.
-      || LoopSummaryPresentation.hasContent(node: node)
+      // anything — and that narration is the reason to open the rail at all. With the
+      // producer off it is not narrating, whatever a previous switch-on left on the node.
+      || LoopSummaryPresentation.hasContent(node: node, producing: summarising)
   }
 
   /// How many loops this one hands off to — what the loop bar's control counts.

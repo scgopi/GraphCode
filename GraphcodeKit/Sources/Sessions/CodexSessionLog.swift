@@ -214,7 +214,7 @@ public enum CodexSessionLog {
   private static func builder(inRolloutAt url: URL) -> SummaryBeatBuilder {
     var builder = SummaryBeatBuilder()
     for line in SummaryBeatBuilder.tailLines(of: url) {
-      guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
+      guard let object = try? JSONSerialization.jsonObject(with: line),
         let record = object as? [String: Any],
         let payload = record["payload"] as? [String: Any]
       else { continue }

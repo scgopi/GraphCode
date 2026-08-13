@@ -220,7 +220,7 @@ public enum CopilotSessionLog {
   private static func builder(inLogAt url: URL) -> SummaryBeatBuilder {
     var builder = SummaryBeatBuilder()
     for line in SummaryBeatBuilder.tailLines(of: url) {
-      guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
+      guard let object = try? JSONSerialization.jsonObject(with: line),
         let event = object as? [String: Any],
         let type = event["type"] as? String
       else { continue }

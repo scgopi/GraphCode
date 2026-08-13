@@ -503,7 +503,10 @@ public actor GraphStore {
   private func refreshSummary() async -> Bool {
     guard let onReadSummary else { return false }
     let path = graph.project.path
-    let nodes = Array(graph.nodes)
+    // A resolved loop is asked only while it still carries a summary to clear. Its session
+    // is over, so a reading can tell it nothing new — but finding that out costs a
+    // directory walk per backend, and Codex's is over every rollout on the machine.
+    let nodes = graph.nodes.filter { !$0.isResolved || $0.summary != nil }
     let readings = await withTaskGroup(of: (UUID, SummaryReading?).self) { group in
       for node in nodes {
         group.addTask { (node.id, await onReadSummary(node, path)) }
@@ -787,6 +790,10 @@ public actor GraphStore {
     graph.edges.removeAll { $0.from == node.id || $0.to == node.id }
     graph.nodes.remove(id: node.id)
     cancelGoalPoller(node.id)
+    // The summary reader keeps one modification date per node so a quiet transcript costs
+    // a `stat` and no read; a deleted loop should not keep one for the life of the daemon.
+    let deletedID = node.id
+    Task { await TranscriptFreshness.shared.forget(deletedID) }
     for targetID in downstream {
       unblockIfStillIdle(targetID)
     }

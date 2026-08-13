@@ -48,13 +48,16 @@ struct LoopCardPresentation: Equatable {
   /// The footer, already ordered: kind, branch, backend when it isn't the default, age.
   let meta: [String]
 
-  init(node: LoopNode, now: Date = Date(), reclaimOffer: WorktreeAssessment? = nil) {
+  init(
+    node: LoopNode, now: Date = Date(), reclaimOffer: WorktreeAssessment? = nil,
+    summarising: Bool = LoopSummaryPresentation.isProducing
+  ) {
     word = node.displayState.displayWord(for: node.loopType)
     if let reclaimOffer, node.isResolved {
       liveLine = Self.reclaimLine(reclaimOffer)
       detail = .reclaim
     } else {
-      liveLine = Self.liveLine(node)
+      liveLine = Self.liveLine(node, summarising: summarising)
       detail = Self.detail(node, now: now)
     }
     meta = Self.meta(node, now: now)
@@ -83,12 +86,16 @@ struct LoopCardPresentation: Equatable {
   /// A beat is the sentence the session wrote about what it is *trying* to do; `activity`
   /// is the tool call it happens to be inside. "Working out why cached tokens get counted
   /// twice" is worth more on a card than "reading UsageProbe.swift", and it is the same
-  /// reading — see `SummaryBeatBuilder`. With the producer off there is no beat and this
-  /// falls through to exactly what shipped before, which is why nothing here is
-  /// conditional on the setting.
-  private static func liveLine(_ node: LoopNode) -> String? {
+  /// reading — see `SummaryBeatBuilder`.
+  ///
+  /// Gated on the producer being on, and not merely on a beat existing. A node keeps the
+  /// last summary it was given until the daemon's next poll clears it, and a card
+  /// preferring that beat went on saying what a loop was doing days after the human
+  /// switched the reading off — while the live activity line it outranks sat unread
+  /// underneath it. With the producer off this is exactly what shipped before.
+  private static func liveLine(_ node: LoopNode, summarising: Bool) -> String? {
     let passes = node.metricHistory.count
-    if let beat = node.summary?.current?.text, !beat.isEmpty {
+    if summarising, let beat = node.summary?.current?.text, !beat.isEmpty {
       return passes > 0 ? "pass \(passes) · \(beat)" : beat
     }
     guard let reported = collapsed(node.activity) else { return handedLine(node) }

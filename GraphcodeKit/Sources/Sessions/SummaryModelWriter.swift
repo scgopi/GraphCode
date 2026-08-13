@@ -124,6 +124,11 @@ public enum SummaryModelWriter {
       group.cancelAll()
       return first
     }
+    // Cancelling the task that was *waiting* does nothing to the process it was waiting
+    // on. A backend that hangs would otherwise leave a `claude -p` per poll per loop
+    // alive on its own PTY, spending tokens on a caption nobody is going to see — the
+    // one cost this feature promises to keep bounded. A no-op once it has exited.
+    session.terminate()
     guard let outcome, outcome.0, let text = accepted(outcome.1) else { return beat }
     return SummaryBeat(
       id: beat.id, at: beat.at, pass: beat.pass, kind: beat.kind, text: text,

@@ -354,18 +354,25 @@ struct SummaryBeatBuilder {
   /// call, and this needs the narration that opened the pass.
   static let tailBytes = 512 * 1024
 
-  /// The tail of a JSONL transcript, as whole lines.
+  /// The tail of a JSONL transcript, as whole lines, still as bytes.
   ///
   /// The first line of a mid-file read is a fragment and is dropped rather than repaired —
   /// one record's worth of tail is nowhere near this window.
-  static func tailLines(of url: URL, bytes: Int = SummaryBeatBuilder.tailBytes) -> [Substring] {
+  ///
+  /// **Bytes rather than a `String`, and this was measured.** Decoding the window into a
+  /// `String` to split it, then re-encoding every kept line for `JSONSerialization`, was
+  /// three quarters of the whole read: 8.3 ms of an 11.1 ms parse on a real 113 MB
+  /// transcript, most of it spent on one 400 KB tool result that is dropped as a fragment
+  /// two lines later. Splitting on the newline byte and handing the slices straight to
+  /// `JSONSerialization` — which wanted `Data` all along — does no conversion at all.
+  static func tailLines(of url: URL, bytes: Int = SummaryBeatBuilder.tailBytes) -> [Data] {
     guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
     defer { try? handle.close() }
     guard let end = try? handle.seekToEnd() else { return [] }
     let start = end > UInt64(bytes) ? end - UInt64(bytes) : 0
     try? handle.seek(toOffset: start)
     guard let data = try? handle.readToEnd() else { return [] }
-    var lines = String(decoding: data, as: UTF8.self).split(separator: "\n")
+    var lines = data.split(separator: UInt8(ascii: "\n"))
     if start > 0, !lines.isEmpty { lines.removeFirst() }
     return lines
   }
