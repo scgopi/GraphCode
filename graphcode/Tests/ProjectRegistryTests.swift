@@ -346,6 +346,46 @@ struct ProjectRegistryTests {
     #expect(connection.sendAttempts == 1)
   }
 
+  @Test
+  func v2ListRecentProjectsUsesOnlyCorrelatedResponseWithoutReplayEvent() async throws {
+    let (registry, _) = makeRegistryAndPersistence()
+    let transport = RecordingConnection()
+    let replayStore = DaemonReplayStore(capacity: 8)
+    let channel = DaemonConnectionChannel(
+      connection: transport,
+      mode: .v2(version: 2),
+      clientID: UUID(),
+      replayStore: replayStore)
+    await registry.addConnection(id: transport.id, channel: channel)
+
+    let result = await registry.apply(.listRecentProjects, connectionID: transport.id)
+    #expect(result?.error == nil)
+    #expect(result?.response != nil)
+    #expect(transport.frames.isEmpty)
+
+    let requestID = UUID()
+    try await channel.sendResponse(
+      requestID: requestID,
+      event: try #require(result?.response))
+    #expect(transport.frames.count == 1)
+    let response = try JSONDecoder().decode(
+      DaemonWireEnvelope.self,
+      from: try #require(transport.frames.first))
+    #expect(response.kind == .response)
+    #expect(response.requestID == requestID)
+    #expect(response.sequence == nil)
+
+    await registry.removeConnection(transport.id)
+    let reconnectTransport = RecordingConnection()
+    let reconnectChannel = DaemonConnectionChannel(
+      connection: reconnectTransport,
+      mode: .v2(version: 2),
+      clientID: channel.clientID,
+      replayStore: replayStore)
+    try await reconnectChannel.replay(after: 0)
+    #expect(reconnectTransport.frames.isEmpty)
+  }
+
   /// Paths round-trip through `resolvingSymlinksInPath()`, so compare the leaf rather
   /// than assuming `/tmp` survives as written.
   private static func names(_ paths: [String]) -> [String] {
@@ -380,6 +420,22 @@ private final class FailingConnection: @unchecked Sendable, DaemonConnection {
   func close() async throws {
     lock.withLock { closed = true }
   }
+}
+
+private final class RecordingConnection: @unchecked Sendable, DaemonConnection {
+  let id = UUID()
+  let endpoint: DaemonEndpoint = .namedPipe("recording")
+  private(set) var frames = [Data]()
+
+  func receiveFrame() async throws -> Data {
+    throw FramedMessageIO.IOError.connectionClosed
+  }
+
+  func sendFrame(_ data: Data) async throws {
+    frames.append(data)
+  }
+
+  func close() async throws {}
 }
 
 @Sendable

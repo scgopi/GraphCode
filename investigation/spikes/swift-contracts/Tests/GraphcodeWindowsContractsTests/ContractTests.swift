@@ -64,6 +64,60 @@ final class ContractTests: XCTestCase {
     XCTAssertEqual(success.success, true)
   }
 
+  func testV1ListRecentProjectsKeepsLegacyEventShape() async throws {
+    let projects = [
+      ProjectRef(path: "/work/listed", name: "listed")
+    ]
+    let event = DaemonEvent.recentProjectsListed(projects)
+    let transport = RecordingConnection()
+    let channel = DaemonConnectionChannel(connection: transport, mode: .v1)
+
+    try await channel.sendEvent(event)
+
+    let frame = try XCTUnwrap(transport.frames.first)
+    XCTAssertEqual(try JSONDecoder().decode(DaemonEvent.self, from: frame), event)
+    XCTAssertThrowsError(try JSONDecoder().decode(DaemonWireEnvelope.self, from: frame))
+  }
+
+  func testV2ListResponseIsSingleCorrelatedFrameAndNeverReplayed() async throws {
+    let clientID = UUID(uuidString: "00000000-0000-0000-0000-000000000035")!
+    let requestID = UUID(uuidString: "00000000-0000-0000-0000-000000000036")!
+    let event = DaemonEvent.recentProjectsListed([
+      ProjectRef(path: "/work/listed", name: "listed")
+    ])
+    let store = DaemonReplayStore(capacity: 8)
+    let firstTransport = RecordingConnection()
+    let firstChannel = DaemonConnectionChannel(
+      connection: firstTransport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+
+    try await firstChannel.sendResponse(requestID: requestID, event: event)
+
+    XCTAssertEqual(firstTransport.frames.count, 1)
+    let response = try JSONDecoder().decode(
+      DaemonWireEnvelope.self,
+      from: XCTUnwrap(firstTransport.frames.first))
+    XCTAssertEqual(response.kind, .response)
+    XCTAssertEqual(response.requestID, requestID)
+    XCTAssertNil(response.sequence)
+    guard case .recentProjectsListed(let listed) = response.event else {
+      return XCTFail("expected recent-projects response event")
+    }
+    XCTAssertEqual(listed.first?.path, "/work/listed")
+
+    try await firstChannel.close()
+    let reconnectTransport = RecordingConnection()
+    let reconnectChannel = DaemonConnectionChannel(
+      connection: reconnectTransport,
+      mode: .v2(version: 2),
+      clientID: clientID,
+      replayStore: store)
+    try await reconnectChannel.replay(after: 0)
+    XCTAssertTrue(reconnectTransport.frames.isEmpty)
+  }
+
   func testVersionOneEnvelopeIsRejected() {
     let invalid = DaemonWireEnvelope(
       version: 1,

@@ -254,7 +254,9 @@ public actor ProjectRegistry {
     switch command {
     case .listRecentProjects:
       let recentProjects = persistence.loadRecentProjects()
-      await send(.recentProjectsListed(recentProjects), to: connectionID)
+      if case .v1 = channel.mode {
+        await send(.recentProjectsListed(recentProjects), to: connectionID)
+      }
       response = .recentProjectsListed(recentProjects)
       error = nil
 
