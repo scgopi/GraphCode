@@ -26,7 +26,7 @@ struct SummaryGutter: View {
 
   private var wantsHuman: Bool { node.state.wantsHuman }
 
-  var label: String { wantsHuman ? "ASKS YOU" : "SUMMARY" }
+  var label: LocalizedStringKey { wantsHuman ? "ASKS YOU" : "SUMMARY" }
 
   private var tint: Color {
     wantsHuman ? BeatKindAppearance.dot(.asking) : Theme.paneFocusTint
@@ -66,7 +66,9 @@ struct SummaryGutter: View {
 
   private var hoverText: String {
     let presentation = LoopSummaryPresentation(node: node, now: now)
-    guard !presentation.text.isEmpty else { return "Show the summary rail (⌥G)" }
-    return "\(presentation.text) — ⌥G to show the rail"
+    guard !presentation.text.isEmpty else {
+      return String(localized: "Show the summary rail (⌥G)")
+    }
+    return String(localized: "\(presentation.text) — ⌥G to show the rail")
   }
 }

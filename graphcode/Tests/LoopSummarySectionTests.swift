@@ -58,7 +58,7 @@ struct LoopSummarySectionTests {
     // Chronological, oldest first — the rail reads in the same direction as the terminal
     // beside it, with the newest at the foot. The current beat is not repeated among them.
     #expect(presentation.receding.map(\.text) == ["Traced totalTokens", "Found the double count"])
-    #expect(presentation.passLabel == "PASS 7")
+    #expect(presentation.pass == 7)
   }
 
   /// The one rule the rail must not break: attention has exactly one source of truth, and

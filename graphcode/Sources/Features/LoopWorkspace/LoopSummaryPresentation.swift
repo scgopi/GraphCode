@@ -30,8 +30,10 @@ struct LoopSummaryPresentation: Equatable {
   let unseen: Int
   let passes: [PassSummary]
   let earlierPasses: Int
-  /// `PASS 7` plus where the metric got to, or nothing when there is no pass to name.
-  let passLabel: String?
+  /// Which pass the divider names, or nothing when there is no pass to name. A number
+  /// rather than `PASS 7`: the word is the section's to draw, and the section is the layer
+  /// that can be translated.
+  let pass: Int?
   let passDelta: String?
   /// Whether the session is working this second. What separates `DOING NOW` from
   /// `LAST DID` — a beat is in the present tense only while something is producing beats,
@@ -84,17 +86,20 @@ struct LoopSummaryPresentation: Equatable {
       kind = current?.kind ?? .thinking
     }
 
+    // The rail's own words go through the catalog; a beat's never do. The app is shipped
+    // in ten languages and the agent narrates in whichever one it is talking in, so a
+    // translated frame around the session's own sentence is the only coherent answer.
     switch mode {
     case .starting:
-      text = "Getting its bearings"
-      evidence = "first beat lands in a moment"
+      text = String(localized: "Getting its bearings")
+      evidence = String(localized: "first beat lands in a moment")
     case .resolved:
       text = current?.text ?? node.goal?.summary ?? node.title
       evidence = Self.runAccount(node, now: now)
     case .asking:
       // The question itself if the session narrated one, and otherwise the plain fact.
       // Both are better than a beat about the tool call it stopped in the middle of.
-      text = current?.text ?? "Waiting for you"
+      text = current?.text ?? String(localized: "Waiting for you")
       evidence = current?.evidence
     case .working:
       text = current?.text ?? ""
@@ -113,8 +118,7 @@ struct LoopSummaryPresentation: Equatable {
     earlierPasses = summary.earlierPasses
     // The beat's own pass, which `LoopSummary.merge` has already put on the store's
     // absolute numbering; `currentPass` for a section that is all rollups and no beats.
-    let pass = current?.pass ?? (summary.currentPass > 0 ? summary.currentPass : nil)
-    passLabel = pass.map { "PASS \($0)" }
+    pass = current?.pass ?? (summary.currentPass > 0 ? summary.currentPass : nil)
     passDelta = summary.passes.last?.delta
   }
 
@@ -123,7 +127,11 @@ struct LoopSummaryPresentation: Equatable {
   static func runAccount(_ node: LoopNode, now: Date) -> String? {
     var parts: [String] = []
     let passes = node.metricHistory.count
-    if passes > 0 { parts.append("\(passes) \(passes == 1 ? "pass" : "passes")") }
+    if passes > 0 {
+      parts.append(
+        passes == 1
+          ? String(localized: "1 pass") : String(localized: "\(passes) passes"))
+    }
     if let first = node.metricHistory.first?.value, let last = node.metricHistory.last?.value,
       first != last
     {

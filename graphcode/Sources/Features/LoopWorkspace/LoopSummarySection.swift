@@ -97,7 +97,10 @@ struct LoopSummarySection: View {
   /// `DOING NOW` is a claim, and it is only true while something is producing beats. A
   /// session that has finished its turn and is sitting at its prompt gets `LAST DID` — the
   /// same sentence, in the tense it is actually in.
-  private func headerTitle(_ presentation: LoopSummaryPresentation) -> String {
+  ///
+  /// A `LocalizedStringKey` rather than a `String`: `Text` localizes the first and prints
+  /// the second, and the app ships in ten languages.
+  private func headerTitle(_ presentation: LoopSummaryPresentation) -> LocalizedStringKey {
     switch presentation.mode {
     case .resolved: return "WHAT IT DID"
     case .asking: return "ASKING YOU"
@@ -130,7 +133,7 @@ struct LoopSummarySection: View {
         Circle()
           .fill(BeatKindAppearance.dot(presentation.kind))
           .frame(width: 6, height: 6)
-        Text(kindWord(presentation).uppercased())
+        Text(kindWord(presentation))
           .font(.system(size: 9.5, weight: .bold))
           .tracking(0.48)
           .foregroundStyle(BeatKindAppearance.ink(presentation.kind))
@@ -175,8 +178,23 @@ struct LoopSummarySection: View {
     }
   }
 
-  private func kindWord(_ presentation: LoopSummaryPresentation) -> String {
-    presentation.mode == .asking ? "asking you" : presentation.kind.rawValue
+  /// The kind, in the word the dot beside it is colouring.
+  ///
+  /// Spelled out one case at a time rather than uppercasing `BeatKind.rawValue`: the raw
+  /// value is a wire format, and a language whose uppercase is not a mechanical transform
+  /// of its lowercase — or whose word for `running` is not one word — has nowhere to say
+  /// so if the string never reaches the catalog.
+  private func kindWord(_ presentation: LoopSummaryPresentation) -> LocalizedStringKey {
+    if presentation.mode == .asking { return "ASKING YOU" }
+    switch presentation.kind {
+    case .reading: return "READING"
+    case .editing: return "EDITING"
+    case .running: return "RUNNING"
+    case .thinking: return "THINKING"
+    case .found: return "FOUND"
+    case .asking: return "ASKING YOU"
+    case .done: return "DONE"
+    }
   }
 
   // MARK: - History
@@ -189,8 +207,8 @@ struct LoopSummarySection: View {
       if !presentation.passes.isEmpty || presentation.earlierPasses > 0 {
         rollups(presentation)
       }
-      if let label = presentation.passLabel {
-        passDivider(label, delta: presentation.passDelta)
+      if let pass = presentation.pass {
+        passDivider(pass, delta: presentation.passDelta)
       }
       let beats = presentation.receding
       // The hairline sits before the first beat the human has not seen. `unseen` counts
@@ -247,7 +265,7 @@ struct LoopSummarySection: View {
         .foregroundStyle(.white.opacity(0.42 + 0.30 * age))
         .fixedSize(horizontal: false, vertical: true)
       if isRecent {
-        Text(LoopCardPresentation.duration(now.timeIntervalSince(beat.at)) + " ago")
+        Text("\(LoopCardPresentation.duration(now.timeIntervalSince(beat.at))) ago")
           .font(.system(size: 10.5, design: .monospaced))
           .foregroundStyle(.white.opacity(0.5))
       }
@@ -281,9 +299,9 @@ struct LoopSummarySection: View {
   }
 
   /// The only number in the section.
-  private func passDivider(_ label: String, delta: String?) -> some View {
+  private func passDivider(_ pass: Int, delta: String?) -> some View {
     HStack(spacing: 7) {
-      Text(label)
+      Text("PASS \(pass)")
         .font(.system(size: 10.5, weight: .bold, design: .monospaced))
         .foregroundStyle(.white.opacity(0.55))
       Rectangle().fill(.white.opacity(0.08)).frame(height: 1)
@@ -302,6 +320,8 @@ struct LoopSummarySection: View {
     VStack(alignment: .leading, spacing: 4) {
       ForEach(presentation.passes) { pass in
         HStack(alignment: .firstTextBaseline, spacing: 6) {
+          // The one string in the section with no catalog entry, and deliberately: a 26pt
+          // mono column holds `p7` and not a translation of it.
           Text("p\(pass.pass)")
             .font(.system(size: 10.5, design: .monospaced))
             .foregroundStyle(.white.opacity(0.5))
@@ -315,8 +335,8 @@ struct LoopSummarySection: View {
       }
       if presentation.earlierPasses > 0 {
         Text(
-          "\(presentation.earlierPasses) earlier "
-            + (presentation.earlierPasses == 1 ? "pass" : "passes")
+          presentation.earlierPasses == 1
+            ? "1 earlier pass" : "\(presentation.earlierPasses) earlier passes"
         )
         .font(.system(size: 10.5))
         .foregroundStyle(.white.opacity(0.5))
