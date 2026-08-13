@@ -53,8 +53,12 @@ import Foundation
   }
 
   private enum WindowsPipeSecurity {
+    static func descriptor(for sid: String) -> String {
+      "D:P(A;;GA;;;\(sid))"
+    }
+
     static func attributes(for sid: String) throws -> (SECURITY_ATTRIBUTES, HLOCAL) {
-      let descriptorText = "D:P(A;;GA;;;\(sid))"
+      let descriptorText = descriptor(for: sid)
       var descriptor: PSECURITY_DESCRIPTOR?
       let success = withWideString(descriptorText) { text in
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -193,7 +197,11 @@ import Foundation
     }
 
     static func name(sid: String, supportHash: String) -> String {
-      "Local\\graphcode-daemon-\(sid)-\(supportHash.prefix(32))"
+      "Global\\graphcode-daemon-\(sid)-\(supportHash.prefix(32))"
+    }
+
+    static func securityDescriptor(for sid: String) -> String {
+      WindowsPipeSecurity.descriptor(for: sid)
     }
   }
 
@@ -369,6 +377,22 @@ import Foundation
       if shouldCancel { _ = CancelIoEx(handle, nil) }
     }
 
+    fileprivate func hasAvailableBytes() throws -> Bool {
+      try beginOperation()
+      defer { endOperation() }
+
+      var bytesRead: DWORD = 0
+      var bytesAvailable: DWORD = 0
+      guard PeekNamedPipe(handle, nil, 0, &bytesRead, &bytesAvailable, nil) else {
+        let code = GetLastError()
+        if WindowsPipeError.isPeerDisconnectCode(code) {
+          throw WindowsPipeError.connectionClosed
+        }
+        throw WindowsPipeError.win32(operation: "PeekNamedPipe", code: code)
+      }
+      return bytesAvailable > 0
+    }
+
     fileprivate func readSynchronously(_ count: Int, by deadline: Date? = nil) throws -> Data {
       try beginOperation()
       defer { endOperation() }
@@ -523,7 +547,10 @@ import Foundation
       _ timeout: TimeInterval = 5
     ) async throws -> Data {
       try await withTaskCancellationHandler {
-        try await withCheckedThrowingContinuation { continuation in
+        while try !stream.hasAvailableBytes() {
+          try await Task.sleep(for: .milliseconds(10))
+        }
+        return try await withCheckedThrowingContinuation { continuation in
           DispatchQueue.global(qos: .utility).async {
             do {
               continuation.resume(

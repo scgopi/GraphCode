@@ -32,6 +32,19 @@ final class WindowsDaemonTests: XCTestCase {
       withExtendedLifetime(first) {}
     }
 
+    func testDaemonInstanceLockUsesGlobalCurrentUserScopedNameAndDescriptor() {
+      let sid = "S-1-5-21-100-200-300-400"
+      let name = WindowsDaemonInstanceLock.name(
+        sid: sid, supportHash: "0123456789abcdef0123456789abcdef")
+      XCTAssertTrue(name.hasPrefix("Global\\"))
+      XCTAssertFalse(name.hasPrefix("Local\\"))
+      XCTAssertEqual(
+        WindowsDaemonInstanceLock.securityDescriptor(for: sid),
+        "D:P(A;;GA;;;\(sid))")
+      XCTAssertFalse(
+        WindowsDaemonInstanceLock.securityDescriptor(for: sid).contains("WD"))
+    }
+
     func testFrameHeaderRemainsBoundedBeforeAllocation() throws {
       XCTAssertThrowsError(
         try DaemonFrameHeader.decodeLength(
@@ -148,6 +161,57 @@ final class WindowsDaemonTests: XCTestCase {
       try await Task.sleep(for: .milliseconds(250))
       let legitimate = try WindowsNamedPipeClient.connect(to: name)
       let payload = Data("legitimate".utf8)
+      try await legitimate.sendFrame(payload)
+      let response = try await legitimate.receiveFrame()
+      XCTAssertEqual(response, payload)
+      try await legitimate.close()
+      for client in idleClients {
+        try await client.close()
+      }
+      try await server.value
+    }
+
+    func testManyAuthenticatedIdleClientsDoNotExhaustLegitimateService() async throws {
+      let name =
+        try WindowsNamedPipeEndpoint.name()
+        + "-established-idle-\(UUID().uuidString.lowercased())"
+      let listener = try WindowsNamedPipeListener(pipeName: name)
+      defer { Task { try? await listener.close() } }
+
+      let idleCount = 64
+      let hello = try JSONEncoder().encode(
+        DaemonWireEnvelope.hello(supportedVersions: [2], clientID: UUID()))
+      let helloResponse = try JSONEncoder().encode(
+        DaemonWireEnvelope.helloResponse(selectedVersion: 2))
+      let server = Task {
+        for _ in 0...idleCount {
+          let connection = try await listener.accept()
+          Task {
+            defer { Task { try? await connection.close() } }
+            do {
+              let pipe = connection as! WindowsNamedPipeConnection
+              _ = try await pipe.receiveFrameWithFirstByteDeadline()
+              try await connection.sendFrame(helloResponse)
+              let frame = try await pipe.receiveFrameWithPostHandshakeDeadline(1)
+              try await connection.sendFrame(frame)
+            } catch {
+              try? await connection.close()
+            }
+          }
+        }
+      }
+
+      var idleClients: [WindowsNamedPipeConnection] = []
+      for _ in 0..<idleCount {
+        let client = try WindowsNamedPipeClient.connect(to: name)
+        try await client.sendFrame(hello)
+        _ = try await client.receiveFrame()
+        idleClients.append(client)
+      }
+      let legitimate = try WindowsNamedPipeClient.connect(to: name)
+      try await legitimate.sendFrame(hello)
+      _ = try await legitimate.receiveFrame()
+      let payload = Data("legitimate-after-idle-flood".utf8)
       try await legitimate.sendFrame(payload)
       let response = try await legitimate.receiveFrame()
       XCTAssertEqual(response, payload)
