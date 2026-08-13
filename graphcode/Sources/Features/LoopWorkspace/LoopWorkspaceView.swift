@@ -50,6 +50,9 @@ struct LoopWorkspaceView: View {
   /// The rail's width mid-drag, before it is committed to the reducer on release.
   @State private var dragWidth: CGFloat?
 
+  /// Whether the resize cursor is currently pushed — see `railResizeHandle`.
+  @State private var isOverRailEdge = false
+
   private var railWidth: CGFloat { dragWidth ?? store.railWidth }
 
   /// The rail's leading edge, as a grab handle.
@@ -64,8 +67,19 @@ struct LoopWorkspaceView: View {
       .fill(.clear)
       .frame(width: 6)
       .contentShape(Rectangle())
+      // `push`/`pop` is a stack, and the pop only arrives if the pointer leaves the way it
+      // came. Hiding the rail with ⌥G mid-hover, or switching to the canvas, takes the
+      // handle out from under the cursor with no exit — and the resize arrows then follow
+      // the pointer around the whole app until something else pushes over them.
       .onHover { inside in
+        guard inside != isOverRailEdge else { return }
+        isOverRailEdge = inside
         if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+      }
+      .onDisappear {
+        guard isOverRailEdge else { return }
+        isOverRailEdge = false
+        NSCursor.pop()
       }
       .gesture(
         DragGesture(minimumDistance: 1)
