@@ -8,24 +8,38 @@ import Foundation
   /// current-user named-pipe ACL.
   public struct WindowsStartupManager: StartupManager {
     public let daemonURL: URL
+    public let supportDirectory: URL
     public let taskName: String
+    public let launcherURL: URL
     private let runner: any ProcessRunner
 
     public init(
       daemonURL: URL = SupportDirectory.binDirectory.appendingPathComponent("graphcoded.exe"),
       taskName: String? = nil,
+      supportDirectory: URL? = nil,
       runner: any ProcessRunner = FoundationProcessRunner()
     ) throws {
       self.daemonURL = daemonURL
-      self.taskName = try taskName ?? WindowsNamedPipeEndpoint.taskName()
+      self.supportDirectory =
+        supportDirectory
+        ?? SupportDirectory.configuredURL(
+          environment: ProcessInfo.processInfo.environment,
+          homeDirectory: FileManager.default.homeDirectoryForCurrentUser)
+      self.taskName =
+        try taskName
+        ?? WindowsNamedPipeEndpoint.taskName(
+          supportDirectory: self.supportDirectory)
+      self.launcherURL = daemonURL.deletingLastPathComponent()
+        .appendingPathComponent("graphcoded-launcher.cmd")
       self.runner = runner
     }
 
     public func installAndStart() async throws {
+      try writeLauncher()
       let create = try await run(
         arguments: [
           "/Create", "/TN", taskName, "/SC", "ONLOGON", "/TR",
-          "\"\(daemonURL.path)\"", "/F", "/RL", "LIMITED",
+          taskAction, "/F", "/RL", "LIMITED",
         ])
       guard create.exitCode == 0 else {
         throw StartupManagerError.commandFailed(
@@ -179,16 +193,71 @@ import Foundation
     }
 
     private func run(arguments: [String]) async throws -> ProcessResult {
-      let systemRoot =
-        ProcessInfo.processInfo.environment["SystemRoot"]
-        ?? ProcessInfo.processInfo.environment["WINDIR"]
-        ?? "C:\\Windows"
-      let executable = URL(fileURLWithPath: systemRoot)
+      let executable =
+        systemRootURL
         .appendingPathComponent("System32", isDirectory: true)
         .appendingPathComponent("schtasks.exe")
       return try await runner.run(
         ProcessRequest(executable: executable, arguments: arguments),
         timeout: .seconds(30))
+    }
+
+    private var systemRootURL: URL {
+      let systemRoot =
+        ProcessInfo.processInfo.environment["SystemRoot"]
+        ?? ProcessInfo.processInfo.environment["WINDIR"]
+        ?? "C:\\Windows"
+      return URL(fileURLWithPath: systemRoot)
+    }
+
+    private var taskAction: String {
+      let commandPrompt =
+        systemRootURL
+        .appendingPathComponent("System32", isDirectory: true)
+        .appendingPathComponent("cmd.exe")
+        .path
+        .replacingOccurrences(of: "/", with: "\\")
+      let launcher = launcherURL.path.replacingOccurrences(of: "/", with: "\\")
+      return "\"\(commandPrompt)\" /D /S /C \"\"\(launcher)\"\""
+    }
+
+    private func writeLauncher() throws {
+      try FileManager.default.createDirectory(
+        at: launcherURL.deletingLastPathComponent(),
+        withIntermediateDirectories: true)
+      try Self.launcherContents(
+        daemonURL: daemonURL,
+        supportDirectory: supportDirectory
+      ).write(to: launcherURL, atomically: true, encoding: .utf8)
+    }
+
+    func launcherIsCurrent() -> Bool {
+      guard
+        let contents = try? String(contentsOf: launcherURL, encoding: .utf8)
+      else {
+        return false
+      }
+      return contents
+        == Self.launcherContents(
+          daemonURL: daemonURL,
+          supportDirectory: supportDirectory)
+    }
+
+    static func launcherContents(daemonURL: URL, supportDirectory: URL) -> String {
+      let daemonPath = batchLiteral(daemonURL.path.replacingOccurrences(of: "/", with: "\\"))
+      let supportPath = batchLiteral(
+        supportDirectory.path.replacingOccurrences(of: "/", with: "\\"))
+      return """
+        @echo off
+        setlocal DisableDelayedExpansion
+        set "GRAPHCODE_SUPPORT_DIR=\(supportPath)"
+        "\(daemonPath)" %*
+        exit /b %ERRORLEVEL%
+        """.replacingOccurrences(of: "\n", with: "\r\n") + "\r\n"
+    }
+
+    private static func batchLiteral(_ value: String) -> String {
+      value.replacingOccurrences(of: "%", with: "%%")
     }
 
     private func output(_ result: ProcessResult) -> String {

@@ -232,6 +232,7 @@ public enum DaemonBootstrap {
       let packageVersion = try packageVersion(for: bundled)
       let status = try awaitBlocking { try await manager.status() }
       let processRunning = manager.isDaemonProcessRunning()
+      let launcherCurrent = manager.launcherIsCurrent()
       let installedCurrent =
         installedPackageVersion(in: destination) == packageVersion
         && helpersInstalled(in: destination)
@@ -250,8 +251,8 @@ public enum DaemonBootstrap {
           return .installed
         }
       }
-      if installedCurrent, status == .running, processRunning {
-          return .upToDate
+      if installedCurrent, status == .running, processRunning, launcherCurrent {
+        return .upToDate
       }
 
       let wasRunning = status == .running || processRunning

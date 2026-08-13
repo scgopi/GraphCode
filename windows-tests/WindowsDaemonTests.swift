@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+
 @testable import GraphcodeKit
 
 #if os(Windows)
@@ -65,6 +66,78 @@ final class WindowsDaemonTests: XCTestCase {
         try WindowsNamedPipeEndpoint.name(environment: secondEnvironment))
     }
 
+    func testSupportAliasesShareResolvedIdentity() async throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("graphcode-junction-\(UUID().uuidString)", isDirectory: true)
+      let target = root.appendingPathComponent("target", isDirectory: true)
+      let alias = root.appendingPathComponent("alias", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+
+      let systemRoot =
+        ProcessInfo.processInfo.environment["SystemRoot"]
+        ?? ProcessInfo.processInfo.environment["WINDIR"]
+        ?? "C:\\Windows"
+      let commandPrompt = URL(
+        fileURLWithPath: ProcessInfo.processInfo.environment["ComSpec"]
+          ?? ProcessInfo.processInfo.environment["COMSPEC"]
+          ?? URL(fileURLWithPath: systemRoot)
+          .appendingPathComponent("System32", isDirectory: true)
+          .appendingPathComponent("cmd.exe").path)
+      guard FileManager.default.fileExists(atPath: commandPrompt.path) else {
+        throw XCTSkip("cmd.exe is unavailable in this Windows environment")
+      }
+      let result = try await FoundationProcessRunner().run(
+        ProcessRequest(
+          executable: commandPrompt,
+          arguments: [
+            "/D", "/S", "/C",
+            "mklink /J \"\(alias.path)\" \"\(target.path)\"",
+          ]))
+      guard result.exitCode == 0 else {
+        throw XCTSkip("junction creation is unavailable in this Windows environment")
+      }
+
+      let directEnvironment = [SupportDirectory.environmentKey: target.path]
+      let aliasEnvironment = [SupportDirectory.environmentKey: alias.path]
+      XCTAssertEqual(
+        SupportDirectory.url(environment: directEnvironment, homeDirectory: root),
+        SupportDirectory.url(environment: aliasEnvironment, homeDirectory: root))
+      XCTAssertEqual(
+        try WindowsNamedPipeEndpoint.name(environment: directEnvironment),
+        try WindowsNamedPipeEndpoint.name(environment: aliasEnvironment))
+      XCTAssertEqual(
+        try WindowsNamedPipeEndpoint.taskName(environment: directEnvironment),
+        try WindowsNamedPipeEndpoint.taskName(environment: aliasEnvironment))
+      let lock = try WindowsDaemonInstanceLock(environment: directEnvironment)
+      XCTAssertThrowsError(try WindowsDaemonInstanceLock(environment: aliasEnvironment)) { error in
+        XCTAssertEqual(error as? WindowsPipeError, .instanceAlreadyRunning)
+      }
+      withExtendedLifetime(lock) {}
+    }
+
+    func testRendezvousRotationCannotAllowSecondDaemon() throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+          "graphcode-running-rotation-\(UUID().uuidString)", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      let environment = [SupportDirectory.environmentKey: root.path]
+      let lock = try WindowsDaemonInstanceLock(environment: environment)
+      let firstPipe = try WindowsNamedPipeEndpoint.name(environment: environment)
+      let taskName = try WindowsNamedPipeEndpoint.taskName(environment: environment)
+      let secret = root.appendingPathComponent(".graphcode-rendezvous.secret")
+      try FileManager.default.removeItem(at: secret)
+      try Data("invalid-secret".utf8).write(to: secret)
+
+      let secondPipe = try WindowsNamedPipeEndpoint.name(environment: environment)
+      XCTAssertNotEqual(firstPipe, secondPipe)
+      XCTAssertEqual(taskName, try WindowsNamedPipeEndpoint.taskName(environment: environment))
+      XCTAssertThrowsError(try WindowsDaemonInstanceLock(environment: environment)) { error in
+        XCTAssertEqual(error as? WindowsPipeError, .instanceAlreadyRunning)
+      }
+      withExtendedLifetime(lock) {}
+    }
+
     func testDaemonInstanceLockUsesGlobalCurrentUserScopedNameAndDescriptor() {
       let sid = "S-1-5-21-100-200-300-400"
       let name = WindowsDaemonInstanceLock.name(
@@ -87,15 +160,72 @@ final class WindowsDaemonTests: XCTestCase {
           sid: "S-1-5-21-900-800-700-600",
           supportHash: "0123456789abcdef0123456789abcdef",
           rendezvousHash: "fedcba9876543210fedcba9876543210"))
-      XCTAssertNotEqual(
+      XCTAssertEqual(
         WindowsNamedPipeEndpoint.taskName(
           sid: sid,
           supportHash: "0123456789abcdef0123456789abcdef",
           rendezvousHash: "fedcba9876543210fedcba9876543210"),
         WindowsNamedPipeEndpoint.taskName(
           sid: sid,
-          supportHash: "fedcba9876543210fedcba9876543210",
+          supportHash: "0123456789abcdef0123456789abcdef",
           rendezvousHash: "0123456789abcdef0123456789abcdef"))
+      XCTAssertEqual(
+        WindowsDaemonInstanceLock.name(
+          sid: sid,
+          supportHash: "0123456789abcdef0123456789abcdef",
+          rendezvousHash: "fedcba9876543210fedcba9876543210"),
+        WindowsDaemonInstanceLock.name(
+          sid: sid,
+          supportHash: "0123456789abcdef0123456789abcdef",
+          rendezvousHash: "0123456789abcdef0123456789abcdef"))
+    }
+
+    func testWindowsScheduledTaskLauncherPreservesCustomSupportDirectory() async throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("graphcode-task-env-\(UUID().uuidString)", isDirectory: true)
+      let support = root.appendingPathComponent("custom support", isDirectory: true)
+      let bin = support.appendingPathComponent("bin", isDirectory: true)
+      let daemon = bin.appendingPathComponent("probe.cmd")
+      let marker = root.appendingPathComponent("support-dir.txt")
+      defer { try? FileManager.default.removeItem(at: root) }
+      try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+      let markerPath = marker.path.replacingOccurrences(of: "/", with: "\\")
+      try """
+      @echo off
+      >"\(markerPath)" echo %GRAPHCODE_SUPPORT_DIR%
+      """.replacingOccurrences(of: "\n", with: "\r\n")
+        .write(to: daemon, atomically: true, encoding: .utf8)
+
+      let recorder = RecordingProcessRunner()
+      let manager = try WindowsStartupManager(
+        daemonURL: daemon,
+        supportDirectory: support,
+        runner: recorder)
+      try await manager.installAndStart()
+      XCTAssertTrue(FileManager.default.fileExists(atPath: manager.launcherURL.path))
+      XCTAssertTrue(manager.launcherIsCurrent())
+      let requests = await recorder.requests
+      XCTAssertEqual(requests.count, 2)
+      let createCommand = requests[0].arguments.joined(separator: " ")
+        .replacingOccurrences(of: "/", with: "\\")
+        .lowercased()
+      XCTAssertTrue(
+        createCommand.contains(
+          manager.launcherURL.path.replacingOccurrences(of: "/", with: "\\").lowercased()))
+
+      let shell = WindowsShellStrategy()
+      let invocation = try shell.invocation(
+        executable: manager.launcherURL,
+        arguments: [],
+        workingDirectory: nil,
+        environment: [:])
+      let result = try await FoundationProcessRunner().run(invocation.request)
+      XCTAssertEqual(result.exitCode, 0)
+      XCTAssertEqual(
+        try String(contentsOf: marker, encoding: .utf8)
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+          .replacingOccurrences(of: "\\", with: "/"),
+        support.path.replacingOccurrences(of: "\\", with: "/"))
     }
 
     func testFrameHeaderRemainsBoundedBeforeAllocation() throws {
@@ -542,3 +672,14 @@ final class WindowsDaemonTests: XCTestCase {
     }
   #endif
 }
+
+#if os(Windows)
+  private actor RecordingProcessRunner: ProcessRunner {
+    var requests: [ProcessRequest] = []
+
+    func run(_ request: ProcessRequest, timeout: Duration?) async throws -> ProcessResult {
+      requests.append(request)
+      return ProcessResult(exitCode: 0, standardOutput: Data(), standardError: Data())
+    }
+  }
+#endif

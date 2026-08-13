@@ -225,27 +225,65 @@ import Foundation
   }
 
   private enum WindowsNamedPipeIdentity {
+    static func stableValues(
+      environment: [String: String],
+      homeDirectory: URL
+    ) throws -> (sid: String, supportHash: String) {
+      let sid = try WindowsUserIdentity.currentSID()
+      let configuredSupport = SupportDirectory.configuredURL(
+        environment: environment, homeDirectory: homeDirectory)
+      try FileManager.default.createDirectory(
+        at: configuredSupport, withIntermediateDirectories: true)
+      let support = SupportDirectory.url(
+        environment: environment, homeDirectory: homeDirectory)
+      let supportHash = GraphcodeSHA256.hex(
+        Data(support.standardizedFileURL.path.lowercased().utf8))
+      return (sid, supportHash)
+    }
+
     static func values(
       environment: [String: String],
       homeDirectory: URL
     ) throws -> (sid: String, supportHash: String, rendezvousHash: String) {
-      let sid = try WindowsUserIdentity.currentSID()
-      let support = SupportDirectory.url(environment: environment, homeDirectory: homeDirectory)
-      let supportHash = GraphcodeSHA256.hex(
-        Data(support.standardizedFileURL.path.lowercased().utf8))
-      let secret = try WindowsRendezvousSecret.loadOrCreate(directory: support, sid: sid)
-      return (sid, supportHash, GraphcodeSHA256.hex(secret))
+      let stable = try stableValues(
+        environment: environment, homeDirectory: homeDirectory)
+      let configuredSupport = SupportDirectory.configuredURL(
+        environment: environment, homeDirectory: homeDirectory)
+      let secret = try WindowsRendezvousSecret.loadOrCreate(
+        directory: configuredSupport, sid: stable.sid)
+      return (stable.sid, stable.supportHash, GraphcodeSHA256.hex(secret))
     }
 
     static func taskName(
       environment: [String: String],
       homeDirectory: URL
     ) throws -> String {
-      let identity = try values(environment: environment, homeDirectory: homeDirectory)
+      let identity = try stableValues(
+        environment: environment, homeDirectory: homeDirectory)
       return taskName(
         sid: identity.sid,
-        supportHash: identity.supportHash,
-        rendezvousHash: identity.rendezvousHash)
+        supportHash: identity.supportHash)
+    }
+
+    static func taskName(supportDirectory: URL) throws -> String {
+      let sid = try WindowsUserIdentity.currentSID()
+      try FileManager.default.createDirectory(
+        at: supportDirectory, withIntermediateDirectories: true)
+      let resolvedSupport = SupportDirectory.url(
+        environment: [SupportDirectory.environmentKey: supportDirectory.path],
+        homeDirectory: supportDirectory.deletingLastPathComponent())
+      let supportHash = GraphcodeSHA256.hex(
+        Data(resolvedSupport.standardizedFileURL.path.lowercased().utf8))
+      return taskName(sid: sid, supportHash: supportHash)
+    }
+
+    static func taskName(
+      sid: String,
+      supportHash: String
+    ) -> String {
+      let material = Data("\(sid)|\(supportHash)".utf8)
+      let identityHash = GraphcodeSHA256.hex(material)
+      return "GraphCode\\graphcoded-\(identityHash.prefix(32))"
     }
 
     static func taskName(
@@ -253,9 +291,7 @@ import Foundation
       supportHash: String,
       rendezvousHash: String
     ) -> String {
-      let material = Data("\(sid)|\(supportHash)|\(rendezvousHash)".utf8)
-      let identityHash = GraphcodeSHA256.hex(material)
-      return "GraphCode\\graphcoded-\(identityHash.prefix(32))"
+      taskName(sid: sid, supportHash: supportHash)
     }
   }
 
@@ -338,6 +374,10 @@ import Foundation
       WindowsNamedPipeIdentity.taskName(
         sid: sid, supportHash: supportHash, rendezvousHash: rendezvousHash)
     }
+
+    static func taskName(supportDirectory: URL) throws -> String {
+      try WindowsNamedPipeIdentity.taskName(supportDirectory: supportDirectory)
+    }
   }
 
   /// A current-user, support-directory-scoped lifetime lock for graphcoded.
@@ -348,12 +388,11 @@ import Foundation
       environment: [String: String] = ProcessInfo.processInfo.environment,
       homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) throws {
-      let identity = try WindowsNamedPipeIdentity.values(
+      let identity = try WindowsNamedPipeIdentity.stableValues(
         environment: environment, homeDirectory: homeDirectory)
       let name = Self.name(
         sid: identity.sid,
-        supportHash: identity.supportHash,
-        rendezvousHash: identity.rendezvousHash)
+        supportHash: identity.supportHash)
       let securityResult = try WindowsPipeSecurity.attributes(for: identity.sid)
       var security = securityResult.0
       defer { _ = LocalFree(securityResult.1) }
@@ -378,8 +417,12 @@ import Foundation
       _ = CloseHandle(handle)
     }
 
+    static func name(sid: String, supportHash: String) -> String {
+      "Global\\graphcode-daemon-\(sid)-\(supportHash.prefix(20))"
+    }
+
     static func name(sid: String, supportHash: String, rendezvousHash: String) -> String {
-      "Global\\graphcode-daemon-\(sid)-\(supportHash.prefix(20))-\(rendezvousHash.prefix(20))"
+      name(sid: sid, supportHash: supportHash)
     }
 
     static func securityDescriptor(for sid: String) -> String {

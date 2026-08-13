@@ -1,5 +1,9 @@
 import Foundation
 
+#if os(Windows)
+  import WinSDK
+#endif
+
 /// The one directory graphcode keeps all of its own state in: `~/.graphcode`.
 ///
 /// Everything lives here — per-project graphs, the recents and open-projects indexes,
@@ -56,6 +60,18 @@ public enum SupportDirectory {
   /// home directory. The override is trimmed once; Windows environment keys are
   /// case-insensitive, while Darwin preserves exact-key behavior.
   public static func url(environment: [String: String], homeDirectory: URL) -> URL {
+    let configured = configuredURL(environment: environment, homeDirectory: homeDirectory)
+    #if os(Windows)
+      return resolvedWindowsURL(configured)
+    #else
+      return configured
+    #endif
+  }
+
+  /// Resolves an injected environment without following an existing Windows
+  /// junction or other reparse point. This is used when a child process must
+  /// retain the caller's configured path in its environment.
+  static func configuredURL(environment: [String: String], homeDirectory: URL) -> URL {
     let home = homeDirectory
     guard let value = overrideValue(in: environment) else {
       return home.appendingPathComponent(".graphcode", isDirectory: true)
@@ -67,6 +83,57 @@ public enum SupportDirectory {
     }
     return URL(fileURLWithPath: expanded, isDirectory: true)
   }
+
+  #if os(Windows)
+    private static func resolvedWindowsURL(_ url: URL) -> URL {
+      var widePath = Array(url.path.utf16)
+      widePath.append(0)
+      let handle = widePath.withUnsafeBufferPointer {
+        CreateFileW(
+          $0.baseAddress,
+          DWORD(FILE_READ_ATTRIBUTES),
+          DWORD(FILE_SHARE_READ) | DWORD(FILE_SHARE_WRITE) | DWORD(FILE_SHARE_DELETE),
+          nil,
+          DWORD(OPEN_EXISTING),
+          DWORD(FILE_FLAG_BACKUP_SEMANTICS),
+          nil)
+      }
+      guard let handle, handle != INVALID_HANDLE_VALUE else {
+        return url
+      }
+      defer { _ = CloseHandle(handle) }
+
+      var buffer = [WCHAR](repeating: 0, count: 260)
+      while true {
+        let length = buffer.withUnsafeMutableBufferPointer {
+          GetFinalPathNameByHandleW(
+            handle,
+            $0.baseAddress,
+            DWORD($0.count),
+            DWORD(VOLUME_NAME_DOS))
+        }
+        guard length > 0 else { return url }
+        if Int(length) < buffer.count {
+          let resolved = String(decoding: buffer.prefix(Int(length)), as: UTF16.self)
+            .replacingOccurrences(of: "/", with: "\\")
+          let uncPrefix = "\\\\?\\UNC\\"
+          if resolved.range(of: uncPrefix, options: [.caseInsensitive, .anchored]) != nil {
+            return URL(
+              fileURLWithPath: "\\\\" + String(resolved.dropFirst(uncPrefix.count)),
+              isDirectory: true)
+          }
+          let devicePrefix = "\\\\?\\"
+          if resolved.range(of: devicePrefix, options: [.caseInsensitive, .anchored]) != nil {
+            return URL(
+              fileURLWithPath: String(resolved.dropFirst(devicePrefix.count)),
+              isDirectory: true)
+          }
+          return URL(fileURLWithPath: resolved, isDirectory: true)
+        }
+        buffer = [WCHAR](repeating: 0, count: Int(length) + 1)
+      }
+    }
+  #endif
 
   /// Where graphcode kept its state before this moved. Read only by the migration below.
   static var legacyURL: URL {
