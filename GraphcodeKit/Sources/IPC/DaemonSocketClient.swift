@@ -25,6 +25,20 @@ public struct DaemonSocketClient: Sendable {
     case timedOut
   }
 
+  public static let ambiguousExitCode: Int32 = 75
+
+  public static func isAmbiguousConnectionClose(_ error: Error) -> Bool {
+    if case FramedMessageIO.IOError.connectionClosed = error {
+      return true
+    }
+    #if os(Windows)
+      if case WindowsPipeError.connectionClosed = error {
+        return true
+      }
+    #endif
+    return false
+  }
+
   private let connection: any DaemonConnection
   private let timeout: TimeInterval
 
@@ -212,6 +226,9 @@ public struct DaemonSocketClient: Sendable {
     matching isSatisfied: (DaemonEvent) -> Bool,
     limit: Int = 64
   ) throws -> DaemonEvent? {
+    #if os(Windows)
+      let responseDeadline = Date().addingTimeInterval(timeout)
+    #endif
     for _ in 0..<limit {
       let data: Data
       do {
@@ -220,7 +237,8 @@ public struct DaemonSocketClient: Sendable {
         #else
           data = try Self.blocking {
             if let pipe = connection as? WindowsNamedPipeConnection {
-              return try await pipe.receiveFrameWithPostHandshakeDeadline(self.timeout)
+              return try await pipe.receiveFrameWithDeadline(
+                max(0, responseDeadline.timeIntervalSinceNow))
             }
             return try await connection.receiveFrame()
           }

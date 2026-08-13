@@ -79,11 +79,14 @@ import Foundation
 
   public enum StartupManagerError: Error, Equatable, LocalizedError, Sendable {
     case commandFailed(command: String, output: String)
+    case missingRuntimeFiles
 
     public var errorDescription: String? {
       switch self {
       case .commandFailed(let command, let output):
         return "\(command) failed: \(output)"
+      case .missingRuntimeFiles:
+        return "The packaged Windows helpers do not include Swift runtime DLLs."
       }
     }
   }

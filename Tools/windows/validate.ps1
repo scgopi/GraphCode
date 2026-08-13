@@ -139,6 +139,35 @@ function Start-CleanRuntimeProcess(
   return $process
 }
 
+function Install-AtomicRuntimePackage([string] $sourceDirectory, [string] $destinationDirectory) {
+  $files = @(
+    Get-ChildItem -LiteralPath $sourceDirectory -File |
+      Where-Object {
+        $_.Name -in @("graphcoded.exe", "graphcode.exe") -or
+        $_.Extension -ieq ".dll"
+      }
+  )
+  if (-not ($files | Where-Object Extension -ieq ".dll")) {
+    throw "Runtime package has no Swift DLLs: $sourceDirectory"
+  }
+  New-Item -ItemType Directory -Force -Path $destinationDirectory | Out-Null
+  $staging = Join-Path $destinationDirectory ".install-$([guid]::NewGuid())"
+  New-Item -ItemType Directory -Force -Path $staging | Out-Null
+  try {
+    foreach ($file in $files) {
+      Copy-Item -LiteralPath $file.FullName `
+        -Destination (Join-Path $staging $file.Name) -Force
+    }
+    foreach ($file in $files) {
+      $target = Join-Path $destinationDirectory $file.Name
+      Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+      Move-Item -LiteralPath (Join-Path $staging $file.Name) -Destination $target
+    }
+  } finally {
+    Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Invoke-Native([string] $description, [scriptblock] $command) {
   Write-Host "==> $description"
   & $command
@@ -220,28 +249,23 @@ function Invoke-Task([string] $name) {
           throw "Swift production binary was not produced: $binary"
         }
       }
-      $cli = Join-Path $releaseBin "graphcode.exe"
-      Invoke-Native "Swift production CLI runtime smoke" {
-        $output = & $cli --help
-        if ($LASTEXITCODE -ne 0 -or ($output -join "`n") -notmatch "graphcode") {
-          throw "graphcode.exe --help did not execute successfully"
-        }
-      }
       $smokeSupport = Join-Path $repoRoot ".build\windows-clean-runtime-smoke-$([guid]::NewGuid())"
       New-Item -ItemType Directory -Force $smokeSupport | Out-Null
+      $installedBin = Join-Path $smokeSupport "bin"
+      Install-AtomicRuntimePackage $releaseBin $installedBin
       $daemonProcess = $null
       $secondDaemonProcess = $null
       $cliProcess = $null
       try {
         $daemonProcess = Start-CleanRuntimeProcess `
-          (Join-Path $releaseBin "graphcoded.exe") @() $smokeSupport
+          (Join-Path $installedBin "graphcoded.exe") @() $smokeSupport
         Start-Sleep -Milliseconds 1000
         if ($daemonProcess.HasExited) {
           throw "graphcoded.exe exited during clean-environment smoke"
         }
 
         $secondDaemonProcess = Start-CleanRuntimeProcess `
-          (Join-Path $releaseBin "graphcoded.exe") @() $smokeSupport
+          (Join-Path $installedBin "graphcoded.exe") @() $smokeSupport
         $secondStdoutTask = $secondDaemonProcess.StandardOutput.ReadToEndAsync()
         $secondStderrTask = $secondDaemonProcess.StandardError.ReadToEndAsync()
         if (-not $secondDaemonProcess.WaitForExit(5000)) {
@@ -256,7 +280,7 @@ function Invoke-Task([string] $name) {
         }
 
         $cliProcess = Start-CleanRuntimeProcess `
-          (Join-Path $releaseBin "graphcode.exe") @("projects") $smokeSupport
+          (Join-Path $installedBin "graphcode.exe") @("projects") $smokeSupport
         $stdoutTask = $cliProcess.StandardOutput.ReadToEndAsync()
         $stderrTask = $cliProcess.StandardError.ReadToEndAsync()
         $cliProcess.WaitForExit()

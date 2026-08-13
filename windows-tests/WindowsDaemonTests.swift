@@ -39,6 +39,64 @@ final class WindowsDaemonTests: XCTestCase {
           maxPayloadBytes: DaemonFrameHeader.legacySafetyCeilingBytes))
     }
 
+    func testPeerDisconnectCodesMapToConnectionClosed() {
+      let codes = [
+        ERROR_BROKEN_PIPE,
+        ERROR_NO_DATA,
+        ERROR_PIPE_NOT_CONNECTED,
+        ERROR_OPERATION_ABORTED,
+        ERROR_CONNECTION_ABORTED,
+        ERROR_NETNAME_DELETED,
+      ]
+      for code in codes {
+        XCTAssertTrue(
+          WindowsPipeError.isPeerDisconnectCode(UInt32(truncatingIfNeeded: code)),
+          "code \(code) was not classified as a peer disconnect")
+      }
+    }
+
+    func testWindowsPeerDisconnectUsesAmbiguousCLIExitCode() {
+      XCTAssertEqual(DaemonSocketClient.ambiguousExitCode, 75)
+      XCTAssertTrue(
+        DaemonSocketClient.isAmbiguousConnectionClose(WindowsPipeError.connectionClosed))
+      XCTAssertFalse(
+        DaemonSocketClient.isAmbiguousConnectionClose(WindowsPipeError.timedOut))
+    }
+
+    func testWindowsBootstrapInstallsRuntimeWithHelpersAtomically() throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("graphcode-bootstrap-\(UUID().uuidString)", isDirectory: true)
+      let bundled = root.appendingPathComponent("bundle", isDirectory: true)
+      let destination = root.appendingPathComponent("support-bin", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      try FileManager.default.createDirectory(at: bundled, withIntermediateDirectories: true)
+      try FileManager.default.createDirectory(
+        at: destination, withIntermediateDirectories: true)
+      let oldDaemon = destination.appendingPathComponent("graphcoded.exe")
+      try Data("old".utf8).write(to: oldDaemon)
+      try Data("daemon".utf8).write(to: bundled.appendingPathComponent("graphcoded.exe"))
+      try Data("cli".utf8).write(to: bundled.appendingPathComponent("graphcode.exe"))
+
+      XCTAssertThrowsError(
+        try DaemonBootstrap.installBundledFiles(from: bundled, to: destination)
+      ) { error in
+        XCTAssertEqual(error as? StartupManagerError, .missingRuntimeFiles)
+      }
+      XCTAssertEqual(try Data(contentsOf: oldDaemon), Data("old".utf8))
+
+      try Data("swift-runtime".utf8).write(to: bundled.appendingPathComponent("swiftCore.dll"))
+      try DaemonBootstrap.installBundledFiles(from: bundled, to: destination)
+      XCTAssertEqual(
+        try Data(contentsOf: destination.appendingPathComponent("graphcoded.exe")),
+        Data("daemon".utf8))
+      XCTAssertEqual(
+        try Data(contentsOf: destination.appendingPathComponent("graphcode.exe")),
+        Data("cli".utf8))
+      XCTAssertEqual(
+        try Data(contentsOf: destination.appendingPathComponent("swiftCore.dll")),
+        Data("swift-runtime".utf8))
+    }
+
     func testWindowsTransportRoundTripsPartialFrameOperations() async throws {
       let name =
         try WindowsNamedPipeEndpoint.name()
@@ -182,6 +240,53 @@ final class WindowsDaemonTests: XCTestCase {
 
       let received = try await server.value
       XCTAssertEqual(received, payload)
+      try await client.close()
+    }
+
+    func testWindowsWholeResponseDeadlineStartsBeforeFirstByte() async throws {
+      let name =
+        try WindowsNamedPipeEndpoint.name()
+        + "-whole-response-\(UUID().uuidString.lowercased())"
+      let listener = try WindowsNamedPipeListener(pipeName: name)
+      defer { Task { try? await listener.close() } }
+
+      let server = Task {
+        let connection = try await listener.accept()
+        defer { Task { try? await connection.close() } }
+        do {
+          _ = try await (connection as! WindowsNamedPipeConnection)
+            .receiveFrameWithDeadline(0.15)
+          XCTFail("delayed response unexpectedly completed")
+        } catch WindowsPipeError.timedOut {
+          return
+        }
+      }
+      let client = try WindowsNamedPipeClient.connect(to: name)
+      try await Task.sleep(for: .milliseconds(250))
+      try await client.close()
+      try await server.value
+    }
+
+    func testWindowsStalledWriteTimesOutAndClosesChannel() async throws {
+      let name =
+        try WindowsNamedPipeEndpoint.name()
+        + "-stalled-write-\(UUID().uuidString.lowercased())"
+      let listener = try WindowsNamedPipeListener(pipeName: name, writeTimeout: 0.1)
+      defer { Task { try? await listener.close() } }
+
+      let server = Task {
+        let connection = try await listener.accept()
+        do {
+          try await connection.sendFrame(
+            Data(repeating: 0x5a, count: Int(DaemonFrameHeader.legacySafetyCeilingBytes)))
+          XCTFail("non-reading peer allowed an unbounded write")
+        } catch WindowsPipeError.timedOut {
+          return
+        }
+        XCTFail("stalled write did not time out")
+      }
+      let client = try WindowsNamedPipeClient.connect(to: name)
+      try await server.value
       try await client.close()
     }
   #endif

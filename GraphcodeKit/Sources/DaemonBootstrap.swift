@@ -207,6 +207,8 @@ public enum DaemonBootstrap {
 #else
 
 /// Windows helper installation and per-user startup registration.
+import WinSDK
+
 public enum DaemonBootstrap {
   public enum Outcome: Equatable {
     case notPackaged
@@ -218,27 +220,13 @@ public enum DaemonBootstrap {
   private static let helpers = ["graphcoded.exe", "graphcode.exe"]
 
   public static func installIfNeeded() -> Outcome {
-    let bundle = Bundle.main
-    guard let resources = bundle.resourceURL else { return .notPackaged }
-    let bundled = resources.appendingPathComponent("bin", isDirectory: true)
-    guard helpers.allSatisfy({
-      FileManager.default.isExecutableFile(atPath: bundled.appendingPathComponent($0).path)
-    }) else {
+    guard let bundled = bundledHelperDirectory(in: .main) else {
       return .notPackaged
     }
 
     do {
       let destination = SupportDirectory.binDirectory
-      try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-      for helper in helpers {
-        let staged = destination.appendingPathComponent("\(helper).new")
-        let target = destination.appendingPathComponent(helper)
-        try? FileManager.default.removeItem(at: staged)
-        try FileManager.default.copyItem(
-          at: bundled.appendingPathComponent(helper), to: staged)
-        try? FileManager.default.removeItem(at: target)
-        try FileManager.default.moveItem(at: staged, to: target)
-      }
+      try installBundledFiles(from: bundled, to: destination)
       let manager = WindowsStartupManager(
         daemonURL: destination.appendingPathComponent("graphcoded.exe"))
       let status = try awaitBlocking { try await manager.status() }
@@ -251,6 +239,73 @@ public enum DaemonBootstrap {
       return .installed
     } catch {
       return .failed("\(error)")
+    }
+  }
+
+  static func bundledHelperDirectory(in bundle: Bundle) -> URL? {
+    guard let resources = bundle.resourceURL else { return nil }
+    let bundled = resources.appendingPathComponent("bin", isDirectory: true)
+    guard helpers.allSatisfy({
+      FileManager.default.isExecutableFile(atPath: bundled.appendingPathComponent($0).path)
+    }) else {
+      return nil
+    }
+    guard !bundledRuntimeFiles(in: bundled).isEmpty else { return nil }
+    return bundled
+  }
+
+  static func bundledRuntimeFiles(in directory: URL) -> [URL] {
+    (try? FileManager.default.contentsOfDirectory(
+      at: directory,
+      includingPropertiesForKeys: [.isRegularFileKey],
+      options: [.skipsHiddenFiles]
+    ))?
+      .filter { $0.pathExtension.caseInsensitiveCompare("dll") == .orderedSame }
+      .sorted { $0.lastPathComponent < $1.lastPathComponent }
+      ?? []
+  }
+
+  /// Stages the complete helper/runtime set before replacing installed files. A failed
+  /// copy never leaves a half-written DLL or executable at the destination.
+  static func installBundledFiles(from bundled: URL, to destination: URL) throws {
+    let fileManager = FileManager.default
+    let runtimeFiles = bundledRuntimeFiles(in: bundled)
+    let files = helpers.map { bundled.appendingPathComponent($0) } + runtimeFiles
+    guard !runtimeFiles.isEmpty else {
+      throw StartupManagerError.missingRuntimeFiles
+    }
+    try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+    let staging = destination.appendingPathComponent(".install-\(UUID().uuidString)")
+    try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+    defer { try? fileManager.removeItem(at: staging) }
+
+    for source in files {
+      let target = staging.appendingPathComponent(source.lastPathComponent)
+      try fileManager.copyItem(at: source, to: target)
+    }
+    for source in files {
+      let name = source.lastPathComponent
+      let staged = staging.appendingPathComponent(name)
+      let target = destination.appendingPathComponent(name)
+      try replaceItem(staged, target)
+    }
+  }
+
+  private static func replaceItem(_ staged: URL, _ target: URL) throws {
+    var sourcePath = Array(staged.path.utf16)
+    sourcePath.append(0)
+    var targetPath = Array(target.path.utf16)
+    targetPath.append(0)
+    let succeeded = sourcePath.withUnsafeBufferPointer { source in
+      targetPath.withUnsafeBufferPointer { target in
+        MoveFileExW(
+          source.baseAddress,
+          target.baseAddress,
+          DWORD(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+      }
+    }
+    guard succeeded else {
+      throw WindowsPipeError.win32(operation: "MoveFileExW", code: GetLastError())
     }
   }
 

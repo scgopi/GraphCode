@@ -13,6 +13,17 @@ import Foundation
     case invalidFrame
     case serverIdentityRejected
     case instanceAlreadyRunning
+
+    static func isPeerDisconnectCode(_ code: UInt32) -> Bool {
+      [
+        UInt32(truncatingIfNeeded: ERROR_BROKEN_PIPE),
+        UInt32(truncatingIfNeeded: ERROR_NO_DATA),
+        UInt32(truncatingIfNeeded: ERROR_PIPE_NOT_CONNECTED),
+        UInt32(truncatingIfNeeded: ERROR_OPERATION_ABORTED),
+        UInt32(truncatingIfNeeded: ERROR_CONNECTION_ABORTED),
+        UInt32(truncatingIfNeeded: ERROR_NETNAME_DELETED),
+      ].contains(code)
+    }
   }
 
   private final class WindowsPipeHandle: @unchecked Sendable {
@@ -239,12 +250,14 @@ import Foundation
   /// a blocked synchronous ReadFile strand surviving daemon shutdown.
   public final class WindowsNamedPipeByteStream: @unchecked Sendable, DaemonByteStream {
     private let handle: HANDLE
+    private let writeTimeout: TimeInterval
     private let lock = NSCondition()
     private var closed = false
     private var activeOperations = 0
 
-    public init(handle: HANDLE) {
+    public init(handle: HANDLE, writeTimeout: TimeInterval = 5) {
       self.handle = handle
+      self.writeTimeout = max(0.001, writeTimeout)
     }
 
     public func readExactly(_ count: Int) async throws -> Data {
@@ -271,7 +284,8 @@ import Foundation
         try await withCheckedThrowingContinuation { continuation in
           DispatchQueue.global(qos: .utility).async {
             do {
-              try self.writeSynchronously(data)
+              try self.writeSynchronously(
+                data, by: Date().addingTimeInterval(self.writeTimeout))
               continuation.resume()
             } catch {
               continuation.resume(throwing: error)
@@ -302,13 +316,17 @@ import Foundation
       _ = CloseHandle(handle)
     }
 
-    fileprivate func writeFrameSynchronously(_ data: Data) throws {
+    fileprivate func writeFrameSynchronously(
+      _ data: Data,
+      timeout: TimeInterval = 5
+    ) throws {
       let header = try DaemonFrameHeader.encodeLength(
         data.count,
         maxPayloadBytes: UInt32(DaemonFrameHeader.legacySafetyCeilingBytes))
-      try writeSynchronously(header)
+      let deadline = Date().addingTimeInterval(max(0.001, timeout))
+      try writeSynchronously(header, by: deadline)
       if !data.isEmpty {
-        try writeSynchronously(data)
+        try writeSynchronously(data, by: deadline)
       }
     }
 
@@ -356,7 +374,7 @@ import Foundation
         if !succeeded {
           let code = GetLastError()
           guard code == ERROR_IO_PENDING else {
-            if code == ERROR_BROKEN_PIPE || code == ERROR_OPERATION_ABORTED {
+            if WindowsPipeError.isPeerDisconnectCode(code) {
               throw WindowsPipeError.connectionClosed
             }
             throw WindowsPipeError.win32(operation: "ReadFile", code: code)
@@ -376,7 +394,7 @@ import Foundation
         }
         guard GetOverlappedResult(handle, &overlapped, &transferred, false) else {
           let code = GetLastError()
-          if code == ERROR_BROKEN_PIPE || code == ERROR_OPERATION_ABORTED {
+          if WindowsPipeError.isPeerDisconnectCode(code) {
             throw WindowsPipeError.connectionClosed
           }
           throw WindowsPipeError.win32(operation: "GetOverlappedResult", code: code)
@@ -395,7 +413,7 @@ import Foundation
       return DWORD(min(Double(DWORD.max), max(1, (remaining * 1_000).rounded(.up))))
     }
 
-    private func writeSynchronously(_ data: Data) throws {
+    private func writeSynchronously(_ data: Data, by deadline: Date? = nil) throws {
       try beginOperation()
       defer { endOperation() }
       var offset = 0
@@ -415,16 +433,26 @@ import Foundation
         if !succeeded {
           let code = GetLastError()
           guard code == ERROR_IO_PENDING else {
-            if code == ERROR_BROKEN_PIPE || code == ERROR_OPERATION_ABORTED {
+            if WindowsPipeError.isPeerDisconnectCode(code) {
               throw WindowsPipeError.connectionClosed
             }
             throw WindowsPipeError.win32(operation: "WriteFile", code: code)
           }
         }
-        try operation.wait()
+        do {
+          try operation.wait(timeout: try remainingTimeout(until: deadline))
+        } catch WindowsPipeError.timedOut {
+          withUnsafeMutablePointer(to: &overlapped) { pending in
+            _ = CancelIoEx(handle, pending)
+          }
+          try? operation.wait()
+          var cancelledBytes: DWORD = 0
+          _ = GetOverlappedResult(handle, &overlapped, &cancelledBytes, false)
+          throw WindowsPipeError.timedOut
+        }
         guard GetOverlappedResult(handle, &overlapped, &transferred, false) else {
           let code = GetLastError()
-          if code == ERROR_BROKEN_PIPE || code == ERROR_OPERATION_ABORTED {
+          if WindowsPipeError.isPeerDisconnectCode(code) {
             throw WindowsPipeError.connectionClosed
           }
           throw WindowsPipeError.win32(operation: "GetOverlappedResult", code: code)
@@ -442,17 +470,20 @@ import Foundation
     private let stream: WindowsNamedPipeByteStream
     private let writes = DispatchQueue(label: "com.graphcode.windows-pipe-writes")
     private let stateLock = NSLock()
+    private let writeTimeout: TimeInterval
     private var closed = false
 
     public init(
       id: Foundation.UUID = Foundation.UUID(),
       handle: HANDLE,
       pipeName: String,
-      readTimeout: TimeInterval? = nil
+      readTimeout: TimeInterval? = nil,
+      writeTimeout: TimeInterval = 5
     ) {
       self.id = id
       endpoint = .namedPipe(pipeName)
-      stream = WindowsNamedPipeByteStream(handle: handle)
+      self.writeTimeout = max(0.001, writeTimeout)
+      stream = WindowsNamedPipeByteStream(handle: handle, writeTimeout: writeTimeout)
       _ = readTimeout
     }
 
@@ -473,10 +504,49 @@ import Foundation
               continuation.resume(throwing: error)
             }
           }
+
         }
       } onCancel: {
         self.stream.cancelPendingIO()
       }
+    }
+
+    /// Reads one complete response under a deadline that begins before the first byte.
+    /// CLI calls use this whole-response budget; daemon protocol reads use the staged
+    /// method above so an idle connected client remains harmless.
+    public func receiveFrameWithDeadline(_ timeout: TimeInterval) async throws -> Data {
+      let deadline = Date().addingTimeInterval(max(0, timeout))
+      return try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { continuation in
+          DispatchQueue.global(qos: .utility).async {
+            do {
+              continuation.resume(
+                returning: try self.receiveFrameWithDeadlineSynchronously(deadline))
+            } catch {
+              continuation.resume(throwing: error)
+            }
+          }
+        }
+      } onCancel: {
+        self.stream.cancelPendingIO()
+      }
+    }
+
+    private func receiveFrameWithDeadlineSynchronously(_ deadline: Date) throws -> Data {
+      let header = try stream.readSynchronously(
+        DaemonFrameHeader.byteCount, by: deadline)
+      let length: Int
+      do {
+        length = try DaemonFrameHeader.decodeLength(
+          Array(header), maxPayloadBytes: DaemonFrameHeader.legacySafetyCeilingBytes)
+      } catch DaemonFrameHeader.HeaderError.invalidHeader {
+        throw FramedMessageIO.IOError.invalidHeader
+      } catch {
+        throw FramedMessageIO.IOError.payloadTooLarge
+      }
+      return length == 0
+        ? Data()
+        : try stream.readSynchronously(length, by: deadline)
     }
 
     private func receiveFrameWithPostHandshakeDeadlineSynchronously(
@@ -506,9 +576,12 @@ import Foundation
         writes.async {
           do {
             try self.ensureOpen()
-            try self.stream.writeFrameSynchronously(data)
+            try self.stream.writeFrameSynchronously(data, timeout: self.writeTimeout)
             continuation.resume()
           } catch {
+            if case WindowsPipeError.timedOut = error {
+              self.closeSynchronously()
+            }
             continuation.resume(throwing: error)
           }
         }
@@ -545,17 +618,20 @@ import Foundation
     public let endpoint: DaemonEndpoint
     private let name: String
     private let sid: String
+    private let writeTimeout: TimeInterval
     private let lock = NSCondition()
     private var closed = false
     private var pendingHandles: Set<UInt> = []
 
     public init(
       pipeName: String? = nil,
-      backlog: Int = 16
+      backlog: Int = 16,
+      writeTimeout: TimeInterval = 5
     ) throws {
       _ = backlog
       name = try pipeName ?? WindowsNamedPipeEndpoint.name()
       sid = try WindowsUserIdentity.currentSID()
+      self.writeTimeout = max(0.001, writeTimeout)
       endpoint = .namedPipe(name)
     }
 
@@ -575,7 +651,8 @@ import Foundation
                 continuation.resume(
                   returning: WindowsNamedPipeConnection(
                     handle: handle,
-                    pipeName: self.name))
+                    pipeName: self.name,
+                    writeTimeout: self.writeTimeout))
               } catch {
                 self.untrack(handle)
                 _ = DisconnectNamedPipe(handle)
@@ -657,7 +734,9 @@ import Foundation
       if !connected {
         let code = GetLastError()
         guard code == ERROR_IO_PENDING || code == ERROR_PIPE_CONNECTED else {
-          if code == ERROR_OPERATION_ABORTED { throw WindowsPipeError.connectionClosed }
+          if WindowsPipeError.isPeerDisconnectCode(code) {
+            throw WindowsPipeError.connectionClosed
+          }
           throw WindowsPipeError.win32(operation: "ConnectNamedPipe", code: code)
         }
         if code == ERROR_IO_PENDING {
@@ -671,7 +750,7 @@ import Foundation
           var transferred: DWORD = 0
           guard GetOverlappedResult(handle, &overlapped, &transferred, false) else {
             let resultCode = GetLastError()
-            if resultCode == ERROR_OPERATION_ABORTED {
+            if WindowsPipeError.isPeerDisconnectCode(resultCode) {
               throw WindowsPipeError.connectionClosed
             }
             throw WindowsPipeError.win32(
