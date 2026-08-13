@@ -118,6 +118,7 @@ function Invoke-Task([string] $name) {
   $swiftTasks = @(
     "swift-portable",
     "swift-contracts",
+    "swift-production",
     "swift-paths",
     "swift-process",
     "swift-named-pipe",
