@@ -44,12 +44,15 @@ extension TitleSuggestionClient: DependencyKey {
   /// every single one.
   private static let takenNamesListed = 100
 
-  /// One or two words, precise, and none of the names any canvas already shows — the
-  /// model is told, and `accept` enforces what telling cannot guarantee.
+  /// As precise as possible, preferring two words — a single word is allowed when it
+  /// alone names the task, never more than two — and none of the names any canvas
+  /// already shows. The model is told, and `accept` enforces what telling cannot
+  /// guarantee.
   static func instruction(for prompt: String, taken: Set<String>) -> String {
     var instruction = """
-      Reply with a precise name for this task — one or two words, no punctuation, \
-      no quotes — and nothing else.
+      Reply with the most precise name you can for this task. Prefer two words; use \
+      a single word only when it alone names the task precisely. Never more than two \
+      words, no punctuation, no quotes — and nothing else.
       """
     let listed = taken.sorted().prefix(takenNamesListed)
     if !listed.isEmpty {
