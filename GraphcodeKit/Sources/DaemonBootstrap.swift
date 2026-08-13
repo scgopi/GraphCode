@@ -218,23 +218,55 @@ public enum DaemonBootstrap {
   }
 
   private static let helpers = ["graphcoded.exe", "graphcode.exe"]
+  private static let versionFile = ".graphcode-package.version"
 
   public static func installIfNeeded() -> Outcome {
     guard let bundled = bundledHelperDirectory(in: .main) else {
       return .notPackaged
     }
 
+    let destination = SupportDirectory.binDirectory
+    let manager = WindowsStartupManager(
+      daemonURL: destination.appendingPathComponent("graphcoded.exe"))
     do {
-      let destination = SupportDirectory.binDirectory
-      try installBundledFiles(from: bundled, to: destination)
-      let manager = WindowsStartupManager(
-        daemonURL: destination.appendingPathComponent("graphcoded.exe"))
+      let packageVersion = try packageVersion(for: bundled)
       let status = try awaitBlocking { try await manager.status() }
-      if status != .running {
-        _ = try awaitBlocking {
-          try await manager.installAndStart()
-          return ()
+      let installedCurrent =
+        installedPackageVersion(in: destination) == packageVersion
+        && helpersInstalled(in: destination)
+      if installedCurrent {
+        if status == .running {
+          return .upToDate
         }
+        try awaitBlocking {
+          try await manager.installAndStart()
+        }
+        return .installed
+      }
+
+      let wasRunning = status == .running
+      if wasRunning {
+        try awaitBlocking {
+          try await manager.stopAndUninstall()
+          try await waitUntilStopped(manager)
+        }
+      }
+
+      let transaction = try stageAndSwitch(
+        from: bundled, to: destination, version: packageVersion)
+      do {
+        try awaitBlocking {
+          try await manager.installAndStart()
+        }
+        transaction.commit()
+      } catch {
+        transaction.rollback()
+        if wasRunning {
+          try? awaitBlocking {
+            try await manager.installAndStart()
+          }
+        }
+        throw error
       }
       return .installed
     } catch {
@@ -265,34 +297,112 @@ public enum DaemonBootstrap {
       ?? []
   }
 
-  /// Stages the complete helper/runtime set before replacing installed files. A failed
-  /// copy never leaves a half-written DLL or executable at the destination.
-  static func installBundledFiles(from bundled: URL, to destination: URL) throws {
+  static func helpersInstalled(in directory: URL) -> Bool {
+    helpers.allSatisfy {
+      FileManager.default.isExecutableFile(
+        atPath: directory.appendingPathComponent($0).path)
+    } && !bundledRuntimeFiles(in: directory).isEmpty
+  }
+
+  static func packageVersion(for directory: URL) throws -> String {
+    if let marker = try? String(
+      contentsOf: directory.appendingPathComponent(versionFile), encoding: .utf8
+    ) {
+      let value = marker.trimmingCharacters(in: .whitespacesAndNewlines)
+      if !value.isEmpty { return value }
+    }
+    let files = helpers.map { directory.appendingPathComponent($0) }
+      + bundledRuntimeFiles(in: directory)
+    var material = Data()
+    for file in files {
+      material.append(contentsOf: Data(file.lastPathComponent.utf8))
+      material.append(0)
+      material.append(try Data(contentsOf: file))
+      material.append(0)
+    }
+    return GraphcodeSHA256.hex(material)
+  }
+
+  static func installedPackageVersion(in directory: URL) -> String? {
+    try? String(
+      contentsOf: directory.appendingPathComponent(versionFile), encoding: .utf8
+    ).trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  /// Stages and switches a complete versioned package. The returned transaction
+  /// keeps the old package until the new daemon has started successfully.
+  static func installBundledFiles(
+    from bundled: URL,
+    to destination: URL,
+    failAfterCopy: Int? = nil
+  ) throws {
+    let version = try packageVersion(for: bundled)
+    let transaction = try stageAndSwitch(
+      from: bundled,
+      to: destination,
+      version: version,
+      failAfterCopy: failAfterCopy)
+    transaction.commit()
+  }
+
+  private static func stageAndSwitch(
+    from bundled: URL,
+    to destination: URL,
+    version: String,
+    failAfterCopy: Int? = nil
+  ) throws -> PackageSwitch {
     let fileManager = FileManager.default
     let runtimeFiles = bundledRuntimeFiles(in: bundled)
     let files = helpers.map { bundled.appendingPathComponent($0) } + runtimeFiles
     guard !runtimeFiles.isEmpty else {
       throw StartupManagerError.missingRuntimeFiles
     }
-    try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
-    let staging = destination.appendingPathComponent(".install-\(UUID().uuidString)")
+    let parent = destination.deletingLastPathComponent()
+    try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+    let packageRoot = parent.appendingPathComponent(".graphcode-packages", isDirectory: true)
+    try fileManager.createDirectory(at: packageRoot, withIntermediateDirectories: true)
+    let staging = packageRoot.appendingPathComponent(
+      "\(version)-\(UUID().uuidString)", isDirectory: true)
     try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
-    defer { try? fileManager.removeItem(at: staging) }
+    defer {
+      if fileManager.fileExists(atPath: staging.path) {
+        try? fileManager.removeItem(at: staging)
+      }
+    }
 
     for source in files {
       let target = staging.appendingPathComponent(source.lastPathComponent)
       try fileManager.copyItem(at: source, to: target)
+      if let failAfterCopy, files.firstIndex(of: source).map({ $0 + 1 }) == failAfterCopy {
+        throw StartupManagerError.commandFailed(
+          command: "copy package", output: "injected mid-package failure")
+      }
     }
-    for source in files {
-      let name = source.lastPathComponent
-      let staged = staging.appendingPathComponent(name)
-      let target = destination.appendingPathComponent(name)
-      try replaceItem(staged, target)
+    try Data(version.utf8).write(
+      to: staging.appendingPathComponent(versionFile), options: .atomic)
+
+    let backup = parent.appendingPathComponent(
+      ".graphcode-rollback-\(UUID().uuidString)", isDirectory: true)
+    if fileManager.fileExists(atPath: destination.path) {
+      try moveItem(destination, to: backup, replaceExisting: false)
     }
+    do {
+      try moveItem(staging, to: destination, replaceExisting: false)
+    } catch {
+      if fileManager.fileExists(atPath: backup.path) {
+        try? moveItem(backup, to: destination, replaceExisting: false)
+      }
+      throw error
+    }
+    return PackageSwitch(destination: destination, backup: backup)
   }
 
-  private static func replaceItem(_ staged: URL, _ target: URL) throws {
-    var sourcePath = Array(staged.path.utf16)
+  private static func moveItem(
+    _ source: URL,
+    to target: URL,
+    replaceExisting: Bool
+  ) throws {
+    var sourcePath = Array(source.path.utf16)
     sourcePath.append(0)
     var targetPath = Array(target.path.utf16)
     targetPath.append(0)
@@ -301,12 +411,43 @@ public enum DaemonBootstrap {
         MoveFileExW(
           source.baseAddress,
           target.baseAddress,
-          DWORD(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+          DWORD(
+            (replaceExisting ? MOVEFILE_REPLACE_EXISTING : 0)
+              | MOVEFILE_WRITE_THROUGH))
       }
     }
+
     guard succeeded else {
       throw WindowsPipeError.win32(operation: "MoveFileExW", code: GetLastError())
     }
+  }
+
+  private struct PackageSwitch {
+    let destination: URL
+    let backup: URL
+
+    func commit() {
+      try? FileManager.default.removeItem(at: backup)
+    }
+
+    func rollback() {
+      try? FileManager.default.removeItem(at: destination)
+      if FileManager.default.fileExists(atPath: backup.path) {
+        try? DaemonBootstrap.moveItem(backup, to: destination, replaceExisting: false)
+      }
+    }
+  }
+
+  private static func waitUntilStopped(_ manager: WindowsStartupManager) async throws {
+    let deadline = Date().addingTimeInterval(10)
+    while Date() < deadline {
+      if try await manager.status() != .running {
+        return
+      }
+      try await Task.sleep(for: .milliseconds(50))
+    }
+    throw StartupManagerError.commandFailed(
+      command: "schtasks /End", output: "graphcoded did not stop before replacement")
   }
 
   private static func awaitBlocking<Result>(

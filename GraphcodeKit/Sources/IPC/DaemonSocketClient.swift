@@ -35,6 +35,9 @@ public struct DaemonSocketClient: Sendable {
       if case WindowsPipeError.connectionClosed = error {
         return true
       }
+      if case WindowsPipeError.writeOutcomeUnknown = error {
+        return true
+      }
     #endif
     return false
   }

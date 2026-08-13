@@ -10,6 +10,7 @@ import Foundation
     case win32(operation: String, code: UInt32)
     case connectionClosed
     case timedOut
+    case writeOutcomeUnknown
     case invalidFrame
     case serverIdentityRejected
     case instanceAlreadyRunning
@@ -23,6 +24,23 @@ import Foundation
         UInt32(truncatingIfNeeded: ERROR_CONNECTION_ABORTED),
         UInt32(truncatingIfNeeded: ERROR_NETNAME_DELETED),
       ].contains(code)
+    }
+
+    static func classifyWriteCancellation(
+      cancelSucceeded: Bool,
+      cancelError: UInt32?,
+      completionSucceeded: Bool,
+      completionCode: UInt32,
+      transferred: UInt32
+    ) -> Self {
+      if completionSucceeded || transferred > 0 {
+        return .writeOutcomeUnknown
+      }
+      if cancelSucceeded, completionCode == UInt32(truncatingIfNeeded: ERROR_OPERATION_ABORTED) {
+        return .timedOut
+      }
+      _ = cancelError
+      return .writeOutcomeUnknown
     }
   }
 
@@ -442,13 +460,23 @@ import Foundation
         do {
           try operation.wait(timeout: try remainingTimeout(until: deadline))
         } catch WindowsPipeError.timedOut {
+          var cancelSucceeded = false
+          var cancelError: UInt32?
           withUnsafeMutablePointer(to: &overlapped) { pending in
-            _ = CancelIoEx(handle, pending)
+            cancelSucceeded = CancelIoEx(handle, pending)
+            cancelError = cancelSucceeded ? nil : GetLastError()
           }
           try? operation.wait()
           var cancelledBytes: DWORD = 0
-          _ = GetOverlappedResult(handle, &overlapped, &cancelledBytes, false)
-          throw WindowsPipeError.timedOut
+          let completed = GetOverlappedResult(
+            handle, &overlapped, &cancelledBytes, false)
+          let completionCode = completed ? 0 : GetLastError()
+          throw WindowsPipeError.classifyWriteCancellation(
+            cancelSucceeded: cancelSucceeded,
+            cancelError: cancelError,
+            completionSucceeded: completed,
+            completionCode: completionCode,
+            transferred: cancelledBytes)
         }
         guard GetOverlappedResult(handle, &overlapped, &transferred, false) else {
           let code = GetLastError()
@@ -509,6 +537,56 @@ import Foundation
       } onCancel: {
         self.stream.cancelPendingIO()
       }
+    }
+
+    /// Reads the initial protocol frame with a bounded wait for its first byte.
+    /// Once a client starts speaking, the remaining header and payload share the
+    /// post-handshake budget used by the daemon's staged reader.
+    public func receiveFrameWithFirstByteDeadline(
+      firstByteTimeout: TimeInterval = 5,
+      postHandshakeTimeout: TimeInterval = 5
+    ) async throws -> Data {
+      try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { continuation in
+          DispatchQueue.global(qos: .utility).async {
+            do {
+              continuation.resume(
+                returning: try self.receiveFrameWithFirstByteDeadlineSynchronously(
+                  firstByteTimeout: firstByteTimeout,
+                  postHandshakeTimeout: postHandshakeTimeout))
+            } catch {
+              continuation.resume(throwing: error)
+            }
+          }
+        }
+      } onCancel: {
+        self.stream.cancelPendingIO()
+      }
+    }
+
+    private func receiveFrameWithFirstByteDeadlineSynchronously(
+      firstByteTimeout: TimeInterval,
+      postHandshakeTimeout: TimeInterval
+    ) throws -> Data {
+      let firstByte = try stream.readSynchronously(
+        1,
+        by: Date().addingTimeInterval(max(0, firstByteTimeout)))
+      let deadline = Date().addingTimeInterval(max(0, postHandshakeTimeout))
+      var header = firstByte
+      header.append(
+        try stream.readSynchronously(DaemonFrameHeader.byteCount - 1, by: deadline))
+      let length: Int
+      do {
+        length = try DaemonFrameHeader.decodeLength(
+          Array(header), maxPayloadBytes: DaemonFrameHeader.legacySafetyCeilingBytes)
+      } catch DaemonFrameHeader.HeaderError.invalidHeader {
+        throw FramedMessageIO.IOError.invalidHeader
+      } catch {
+        throw FramedMessageIO.IOError.payloadTooLarge
+      }
+      return length == 0
+        ? Data()
+        : try stream.readSynchronously(length, by: deadline)
     }
 
     /// Reads one complete response under a deadline that begins before the first byte.
@@ -579,8 +657,11 @@ import Foundation
             try self.stream.writeFrameSynchronously(data, timeout: self.writeTimeout)
             continuation.resume()
           } catch {
-            if case WindowsPipeError.timedOut = error {
+            switch error {
+            case WindowsPipeError.timedOut, WindowsPipeError.writeOutcomeUnknown:
               self.closeSynchronously()
+            default:
+              break
             }
             continuation.resume(throwing: error)
           }
@@ -608,6 +689,57 @@ import Foundation
       let isClosed = closed
       stateLock.unlock()
       if isClosed { throw WindowsPipeError.connectionClosed }
+    }
+  }
+
+  /// Limits the number of accepted connections that are still waiting for their
+  /// initial protocol frame. A same-user client can connect to the pipe, but it
+  /// cannot consume an unbounded daemon worker forever without sending bytes.
+  public final class WindowsPipeHandshakeLimiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private let limit: Int
+    private var active = 0
+
+    public init(limit: Int = 32) {
+      self.limit = max(1, limit)
+    }
+
+    public func tryAcquire() -> Permit? {
+      lock.lock()
+      defer { lock.unlock() }
+      guard active < limit else { return nil }
+      active += 1
+      return Permit(owner: self)
+    }
+
+    private func release() {
+      lock.lock()
+      active = max(0, active - 1)
+      lock.unlock()
+    }
+
+    public final class Permit: @unchecked Sendable {
+      private weak var owner: WindowsPipeHandshakeLimiter?
+      private let lock = NSLock()
+      private var released = false
+
+      fileprivate init(owner: WindowsPipeHandshakeLimiter) {
+        self.owner = owner
+      }
+
+      public func release() {
+        lock.lock()
+        guard !released else {
+          lock.unlock()
+          return
+        }
+        released = true
+        let owner = self.owner
+        lock.unlock()
+        owner?.release()
+      }
+
+      deinit { release() }
     }
   }
 

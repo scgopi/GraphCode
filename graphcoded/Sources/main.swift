@@ -16,6 +16,7 @@ import GraphcodeKit
   }()
   let supportDirectory = SupportDirectory.url
   let replayStore = DaemonReplayStore(capacity: 128)
+  let handshakeLimiter = WindowsPipeHandshakeLimiter(limit: 32)
   let registry = ProjectRegistry(
     persistenceDirectory: supportDirectory,
     replayStore: replayStore,
@@ -50,6 +51,10 @@ import GraphcodeKit
   let shutdown = ShutdownState()
 
   func handleWindowsConnection(_ connection: any DaemonConnection) {
+    guard let handshakePermit = handshakeLimiter.tryAcquire() else {
+      Task { try? await connection.close() }
+      return
+    }
     Task {
       let connectionID = connection.id
       var channel: DaemonConnectionChannel?
@@ -66,7 +71,7 @@ import GraphcodeKit
       do {
         let firstData: Data
         if let pipe = connection as? WindowsNamedPipeConnection {
-          firstData = try await pipe.receiveFrameWithPostHandshakeDeadline()
+          firstData = try await pipe.receiveFrameWithFirstByteDeadline()
         } else {
           firstData = try await connection.receiveFrame()
         }
@@ -76,6 +81,7 @@ import GraphcodeKit
           let v1Channel = DaemonConnectionChannel(connection: connection, mode: .v1)
           channel = v1Channel
           await registry.addConnection(id: connectionID, channel: v1Channel)
+          handshakePermit.release()
           await registry.handle(command, connectionID: connectionID)
 
         case .v2(let hello):
@@ -108,6 +114,7 @@ import GraphcodeKit
           channel = v2Channel
           await registry.addConnection(id: connectionID, channel: v2Channel)
           try await v2Channel.sendHelloResponse(selectedVersion: selectedVersion)
+          handshakePermit.release()
           if selectedVersion == 2, let resumeFrom = hello.resumeFrom {
             do {
               try await v2Channel.replay(after: resumeFrom)

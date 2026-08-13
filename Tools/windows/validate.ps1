@@ -150,21 +150,34 @@ function Install-AtomicRuntimePackage([string] $sourceDirectory, [string] $desti
   if (-not ($files | Where-Object Extension -ieq ".dll")) {
     throw "Runtime package has no Swift DLLs: $sourceDirectory"
   }
-  New-Item -ItemType Directory -Force -Path $destinationDirectory | Out-Null
-  $staging = Join-Path $destinationDirectory ".install-$([guid]::NewGuid())"
+  $parent = Split-Path -Parent $destinationDirectory
+  New-Item -ItemType Directory -Force -Path $parent | Out-Null
+  $packageRoot = Join-Path $parent ".graphcode-packages"
+  New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
+  $staging = Join-Path $packageRoot "$([guid]::NewGuid())"
   New-Item -ItemType Directory -Force -Path $staging | Out-Null
+  $version = Join-Path $staging ".graphcode-package.version"
+  Set-Content -LiteralPath $version -Value ([guid]::NewGuid().ToString()) -NoNewline
+  $backup = Join-Path $parent ".graphcode-rollback-$([guid]::NewGuid())"
   try {
     foreach ($file in $files) {
       Copy-Item -LiteralPath $file.FullName `
         -Destination (Join-Path $staging $file.Name) -Force
     }
-    foreach ($file in $files) {
-      $target = Join-Path $destinationDirectory $file.Name
-      Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
-      Move-Item -LiteralPath (Join-Path $staging $file.Name) -Destination $target
+    if (Test-Path -LiteralPath $destinationDirectory) {
+      Move-Item -LiteralPath $destinationDirectory -Destination $backup
+    }
+    try {
+      Move-Item -LiteralPath $staging -Destination $destinationDirectory
+    } catch {
+      if (Test-Path -LiteralPath $backup) {
+        Move-Item -LiteralPath $backup -Destination $destinationDirectory
+      }
+      throw
     }
   } finally {
     Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
   }
 }
 

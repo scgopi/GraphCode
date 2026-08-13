@@ -63,6 +63,79 @@ final class WindowsDaemonTests: XCTestCase {
         DaemonSocketClient.isAmbiguousConnectionClose(WindowsPipeError.timedOut))
     }
 
+    func testWriteCancellationRaceClassifiesPossibleDeliveryAsAmbiguous() {
+      XCTAssertEqual(
+        WindowsPipeError.classifyWriteCancellation(
+          cancelSucceeded: true,
+          cancelError: nil,
+          completionSucceeded: false,
+          completionCode: UInt32(truncatingIfNeeded: ERROR_OPERATION_ABORTED),
+          transferred: 0),
+        .timedOut)
+      let ambiguous = WindowsPipeError.classifyWriteCancellation(
+        cancelSucceeded: false,
+        cancelError: UInt32(truncatingIfNeeded: ERROR_NOT_FOUND),
+        completionSucceeded: true,
+        completionCode: 0,
+        transferred: 1)
+      XCTAssertEqual(ambiguous, .writeOutcomeUnknown)
+      XCTAssertTrue(DaemonSocketClient.isAmbiguousConnectionClose(ambiguous))
+    }
+
+    func testManyIdlePreHandshakeClientsCannotExhaustWorkerPermits() {
+      let limiter = WindowsPipeHandshakeLimiter(limit: 4)
+      let permits = (0..<4).compactMap { _ in limiter.tryAcquire() }
+      XCTAssertEqual(permits.count, 4)
+      XCTAssertNil(limiter.tryAcquire())
+      permits[0].release()
+      XCTAssertNotNil(limiter.tryAcquire())
+      for permit in permits {
+        permit.release()
+      }
+    }
+
+    func testManyIdlePreHandshakeClientsEventuallyAllowLegitimateClient() async throws {
+      let name =
+        try WindowsNamedPipeEndpoint.name()
+        + "-handshake-limit-\(UUID().uuidString.lowercased())"
+      let listener = try WindowsNamedPipeListener(pipeName: name)
+      defer { Task { try? await listener.close() } }
+      let limiter = WindowsPipeHandshakeLimiter(limit: 4)
+      let server = Task {
+        for _ in 0..<5 {
+          let connection = try await listener.accept()
+          guard let permit = limiter.tryAcquire() else {
+            try? await connection.close()
+            continue
+          }
+          Task {
+            defer { permit.release() }
+            do {
+              let frame = try await (connection as! WindowsNamedPipeConnection)
+                .receiveFrameWithFirstByteDeadline(firstByteTimeout: 0.15)
+              try await connection.sendFrame(frame)
+            } catch {
+              try? await connection.close()
+            }
+          }
+        }
+      }
+      let idleClients = try (0..<4).map { _ in
+        try WindowsNamedPipeClient.connect(to: name)
+      }
+      try await Task.sleep(for: .milliseconds(250))
+      let legitimate = try WindowsNamedPipeClient.connect(to: name)
+      let payload = Data("legitimate".utf8)
+      try await legitimate.sendFrame(payload)
+      let response = try await legitimate.receiveFrame()
+      XCTAssertEqual(response, payload)
+      try await legitimate.close()
+      for client in idleClients {
+        try await client.close()
+      }
+      try await server.value
+    }
+
     func testWindowsBootstrapInstallsRuntimeWithHelpersAtomically() throws {
       let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("graphcode-bootstrap-\(UUID().uuidString)", isDirectory: true)
@@ -95,6 +168,14 @@ final class WindowsDaemonTests: XCTestCase {
       XCTAssertEqual(
         try Data(contentsOf: destination.appendingPathComponent("swiftCore.dll")),
         Data("swift-runtime".utf8))
+
+      try Data("cli-new".utf8).write(to: bundled.appendingPathComponent("graphcode.exe"))
+      XCTAssertThrowsError(
+        try DaemonBootstrap.installBundledFiles(
+          from: bundled, to: destination, failAfterCopy: 2))
+      XCTAssertEqual(
+        try Data(contentsOf: destination.appendingPathComponent("graphcode.exe")),
+        Data("cli".utf8))
     }
 
     func testWindowsTransportRoundTripsPartialFrameOperations() async throws {
