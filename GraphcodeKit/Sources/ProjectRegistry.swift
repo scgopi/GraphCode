@@ -15,7 +15,7 @@ public struct ProjectRegistryCommandResult: Equatable, Sendable {
   ) {
     self.response = response
     self.error = error
-    self.succeeded = succeeded ?? error == nil
+    self.succeeded = succeeded ?? (error == nil)
   }
 }
 

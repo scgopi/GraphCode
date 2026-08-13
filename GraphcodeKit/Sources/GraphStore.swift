@@ -248,7 +248,7 @@ public actor GraphStore {
         {
           return .rejected(
             message: "resulting graph response exceeds the v2 payload limit",
-            graph: self.graph)
+            graph: await self.graph)
         }
       }
       return await self.applyCommand(command, broadcastErrors: broadcastErrors)

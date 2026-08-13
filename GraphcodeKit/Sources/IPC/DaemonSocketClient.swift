@@ -3,6 +3,9 @@ import Foundation
 #if canImport(Darwin)
   import Darwin
 #endif
+#if os(Windows)
+  import WinSDK
+#endif
 
 /// A short-lived client for `graphcoded`'s socket — what the `graphcode` CLI talks
 /// through (docs/03-architecture.md#cli-graphcode).
@@ -22,7 +25,7 @@ public struct DaemonSocketClient: Sendable {
     case timedOut
   }
 
-  private let connection: UnixSocketConnection
+  private let connection: any DaemonConnection
 
   /// How long a single read waits before giving up. Generous on purpose: it exists to
   /// turn "hangs forever with no output" into a diagnosable error, not to bound how long
@@ -47,26 +50,40 @@ public struct DaemonSocketClient: Sendable {
     dialAttempts: Int = DaemonSocketClient.defaultDialAttempts
   ) throws {
     let budget = max(1, dialAttempts)
-    var descriptor: Int32?
+    #if canImport(Darwin)
+      var descriptor: Int32?
+    #endif
     for attempt in 0..<budget {
       do {
-        descriptor = try Self.dial()
-        break
+        #if os(Windows)
+          let pipe = try Self.dial()
+          connection = pipe
+          return
+        #else
+          descriptor = try Self.dial()
+          break
+        #endif
       } catch {
         guard Self.isTransient(error), attempt < budget - 1 else { throw error }
         Thread.sleep(forTimeInterval: Self.dialBackoff[min(attempt, Self.dialBackoff.count - 1)])
       }
     }
-    guard let connected = descriptor else { throw ClientError.daemonNotRunning }
-    connection = UnixSocketConnection(fileDescriptor: connected, readTimeout: timeout)
+    #if os(Windows)
+      throw ClientError.daemonNotRunning
+    #else
+      guard let connected = descriptor else { throw ClientError.daemonNotRunning }
+      connection = UnixSocketConnection(fileDescriptor: connected, readTimeout: timeout)
+    #endif
   }
 
   /// Wraps an already-connected descriptor. Exists so the timeout and framing behaviour
   /// can be exercised over a `socketpair` — the public `init` dials the daemon's fixed
   /// socket path, which a test can't stand in for without disturbing the real daemon.
-  init(fileDescriptor: Int32, timeout: TimeInterval = DaemonSocketClient.defaultTimeout) {
-    connection = UnixSocketConnection(fileDescriptor: fileDescriptor, readTimeout: timeout)
-  }
+  #if canImport(Darwin)
+    init(fileDescriptor: Int32, timeout: TimeInterval = DaemonSocketClient.defaultTimeout) {
+      connection = UnixSocketConnection(fileDescriptor: fileDescriptor, readTimeout: timeout)
+    }
+  #endif
 
   /// Only failures that mean "not accepting connections *yet*". A permissions failure or a
   /// bad path fails identically however long you wait, and retrying those just delays the
@@ -76,46 +93,71 @@ public struct DaemonSocketClient: Sendable {
     case ClientError.daemonNotRunning:
       return true
     case ClientError.connectionFailed(let code):
-      return code == ECONNREFUSED || code == ENOENT || code == EAGAIN || code == EINTR
+      #if os(Windows)
+        return code == Int32(truncatingIfNeeded: ERROR_FILE_NOT_FOUND)
+          || code == Int32(truncatingIfNeeded: ERROR_PIPE_BUSY)
+          || code == Int32(truncatingIfNeeded: ERROR_SEM_TIMEOUT)
+          || code == Int32(truncatingIfNeeded: ERROR_PIPE_NOT_CONNECTED)
+      #else
+        return code == ECONNREFUSED || code == ENOENT || code == EAGAIN || code == EINTR
+      #endif
     default:
       return false
     }
   }
 
-  private static func dial() throws -> Int32 {
-    let path = DaemonSocketPath.url.path
-    guard FileManager.default.fileExists(atPath: path) else {
-      throw ClientError.daemonNotRunning
-    }
-
-    let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
-    guard descriptor >= 0 else { throw ClientError.connectionFailed(errno: errno) }
-
-    var address = sockaddr_un()
-    address.sun_family = sa_family_t(AF_UNIX)
-    address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
-    withUnsafeMutablePointer(to: &address.sun_path) { field in
-      field.withMemoryRebound(
-        to: CChar.self, capacity: MemoryLayout.size(ofValue: field.pointee)
-      ) { pointer in
-        _ = path.withCString { strncpy(pointer, $0, MemoryLayout.size(ofValue: field.pointee) - 1) }
+  #if os(Windows)
+    private static func dial() throws -> WindowsNamedPipeConnection {
+      do {
+        return try WindowsNamedPipeClient.connect(to: try WindowsNamedPipeEndpoint.name())
+      } catch WindowsPipeError.win32(_, let code) {
+        throw ClientError.connectionFailed(errno: Int32(bitPattern: code))
+      } catch WindowsPipeError.timedOut {
+        throw ClientError.connectionFailed(
+          errno: Int32(truncatingIfNeeded: ERROR_SEM_TIMEOUT))
+      } catch WindowsPipeError.serverIdentityRejected {
+        throw ClientError.connectionFailed(
+          errno: Int32(truncatingIfNeeded: ERROR_ACCESS_DENIED))
       }
     }
-
-    let connected = withUnsafePointer(to: &address) { pointer in
-      pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-        connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+  #else
+    private static func dial() throws -> Int32 {
+      let path = DaemonSocketPath.url.path
+      guard FileManager.default.fileExists(atPath: path) else {
+        throw ClientError.daemonNotRunning
       }
+
+      let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+      guard descriptor >= 0 else { throw ClientError.connectionFailed(errno: errno) }
+
+      var address = sockaddr_un()
+      address.sun_family = sa_family_t(AF_UNIX)
+      address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+      withUnsafeMutablePointer(to: &address.sun_path) { field in
+        field.withMemoryRebound(
+          to: CChar.self, capacity: MemoryLayout.size(ofValue: field.pointee)
+        ) { pointer in
+          _ = path.withCString {
+            strncpy(pointer, $0, MemoryLayout.size(ofValue: field.pointee) - 1)
+          }
+        }
+      }
+
+      let connected = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+          connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
+      }
+      guard connected == 0 else {
+        // Captured before `close`, which is itself a syscall and may overwrite `errno` —
+        // reading it afterwards reported whatever closing did, not why dialling failed.
+        let code = errno
+        close(descriptor)
+        throw ClientError.connectionFailed(errno: code)
+      }
+      return descriptor
     }
-    guard connected == 0 else {
-      // Captured before `close`, which is itself a syscall and may overwrite `errno` —
-      // reading it afterwards reported whatever closing did, not why dialling failed.
-      let code = errno
-      close(descriptor)
-      throw ClientError.connectionFailed(errno: code)
-    }
-    return descriptor
-  }
+  #endif
 
   /// `SO_RCVTIMEO` rather than a watchdog thread: it makes the blocking `read(2)` inside
   /// `FramedMessageIO` return `EAGAIN` on its own, which keeps this type synchronous and
@@ -123,7 +165,12 @@ public struct DaemonSocketClient: Sendable {
   /// never sends — because nothing it sent would cause one — blocks forever with no
   /// output at all, which is exactly how `status` used to hang.
   public func send(_ command: DaemonCommand) throws {
-    try connection.sendFrameSync(JSONEncoder().encode(command))
+    let data = try JSONEncoder().encode(command)
+    #if canImport(Darwin)
+      try (connection as! UnixSocketConnection).sendFrameSync(data)
+    #else
+      try Self.blocking { try await connection.sendFrame(data) }
+    #endif
   }
 
   /// Reads events until `isSatisfied` accepts one, the connection closes, or the read
@@ -143,11 +190,30 @@ public struct DaemonSocketClient: Sendable {
     for _ in 0..<limit {
       let data: Data
       do {
-        data = try connection.receiveFrameSync()
-      } catch FramedMessageIO.IOError.readFailed(let code)
-        where code == EAGAIN || code == EWOULDBLOCK
-      {
-        throw ClientError.timedOut
+        #if canImport(Darwin)
+          data = try (connection as! UnixSocketConnection).receiveFrameSync()
+        #else
+          data = try Self.blocking {
+            if let pipe = connection as? WindowsNamedPipeConnection {
+              return try await pipe.receiveFrameWithPostHandshakeDeadline(Self.defaultTimeout)
+            }
+            return try await connection.receiveFrame()
+          }
+        #endif
+      } catch {
+        #if canImport(Darwin)
+          if case FramedMessageIO.IOError.readFailed(let code) = error,
+            code == EAGAIN || code == EWOULDBLOCK
+          {
+            throw ClientError.timedOut
+          }
+        #endif
+        #if os(Windows)
+          if case WindowsPipeError.timedOut = error {
+            throw ClientError.timedOut
+          }
+        #endif
+        throw error
       }
       guard let event = try? JSONDecoder().decode(DaemonEvent.self, from: data) else { continue }
       if isSatisfied(event) { return event }
@@ -156,6 +222,47 @@ public struct DaemonSocketClient: Sendable {
   }
 
   public func closeConnection() {
-    connection.closeSync()
+    #if canImport(Darwin)
+      (connection as? UnixSocketConnection)?.closeSync()
+    #else
+      try? Self.blocking { try await connection.close() }
+    #endif
   }
+
+  #if os(Windows)
+    private static func blocking<Result>(
+      _ operation: @escaping () async throws -> Result
+    ) throws -> Result {
+      let semaphore = DispatchSemaphore(value: 0)
+      let box = BlockingResult<Result>()
+      Task {
+        do {
+          box.store(.success(try await operation()))
+        } catch {
+          box.store(.failure(error))
+        }
+        semaphore.signal()
+      }
+      semaphore.wait()
+      return try box.take()
+    }
+
+    private final class BlockingResult<Value>: @unchecked Sendable {
+      private let lock = NSLock()
+      private var value: Result<Value, Error>?
+
+      func store(_ value: Result<Value, Error>) {
+        lock.lock()
+        self.value = value
+        lock.unlock()
+      }
+
+      func take() throws -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let value else { fatalError("blocking result was not set") }
+        return try value.get()
+      }
+    }
+  #endif
 }

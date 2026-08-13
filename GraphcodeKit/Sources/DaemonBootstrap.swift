@@ -1,5 +1,7 @@
 import Foundation
 
+#if canImport(Darwin)
+
 /// Installs the helpers a shipped `graphcode.app` carries inside itself — `graphcoded` and
 /// `zmx` — and loads the daemon, so dragging the app to `/Applications` is the whole
 /// installation.
@@ -201,3 +203,91 @@ public enum DaemonBootstrap {
     process.waitUntilExit()
   }
 }
+
+#else
+
+/// Windows helper installation and per-user startup registration.
+public enum DaemonBootstrap {
+  public enum Outcome: Equatable {
+    case notPackaged
+    case upToDate
+    case installed
+    case failed(String)
+  }
+
+  private static let helpers = ["graphcoded.exe", "graphcode.exe"]
+
+  public static func installIfNeeded() -> Outcome {
+    let bundle = Bundle.main
+    guard let resources = bundle.resourceURL else { return .notPackaged }
+    let bundled = resources.appendingPathComponent("bin", isDirectory: true)
+    guard helpers.allSatisfy({
+      FileManager.default.isExecutableFile(atPath: bundled.appendingPathComponent($0).path)
+    }) else {
+      return .notPackaged
+    }
+
+    do {
+      let destination = SupportDirectory.binDirectory
+      try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+      for helper in helpers {
+        let staged = destination.appendingPathComponent("\(helper).new")
+        let target = destination.appendingPathComponent(helper)
+        try? FileManager.default.removeItem(at: staged)
+        try FileManager.default.copyItem(
+          at: bundled.appendingPathComponent(helper), to: staged)
+        try? FileManager.default.removeItem(at: target)
+        try FileManager.default.moveItem(at: staged, to: target)
+      }
+      let manager = WindowsStartupManager(
+        daemonURL: destination.appendingPathComponent("graphcoded.exe"))
+      let status = try awaitBlocking { try await manager.status() }
+      if status != .running {
+        _ = try awaitBlocking {
+          try await manager.installAndStart()
+          return ()
+        }
+      }
+      return .installed
+    } catch {
+      return .failed("\(error)")
+    }
+  }
+
+  private static func awaitBlocking<Result>(
+    _ operation: @escaping () async throws -> Result
+  ) throws -> Result {
+    let semaphore = DispatchSemaphore(value: 0)
+    let box = BlockingResult<Result>()
+    Task {
+      do {
+        box.store(.success(try await operation()))
+      } catch {
+        box.store(.failure(error))
+      }
+      semaphore.signal()
+    }
+    semaphore.wait()
+    return try box.take()
+  }
+
+  private final class BlockingResult<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Result<Value, Error>?
+
+    func store(_ value: Result<Value, Error>) {
+      lock.lock()
+      self.value = value
+      lock.unlock()
+    }
+
+    func take() throws -> Value {
+      lock.lock()
+      defer { lock.unlock() }
+      guard let value else { fatalError("blocking result was not set") }
+      return try value.get()
+    }
+  }
+}
+
+#endif

@@ -146,10 +146,37 @@ function Invoke-Task([string] $name) {
       }
     }
     "swift-production" {
-      & (Join-Path $repoRoot "investigation\spikes\swift-full\prepare.ps1")
-      Invoke-Native "Swift production platform tests" {
+      Invoke-Native "Swift production Windows package tests" {
         & (Join-Path $swiftBin "swift-test.exe") `
-          --package-path (Join-Path $repoRoot "investigation\spikes\swift-full")
+          --package-path $repoRoot
+      }
+      foreach ($product in @("graphcoded", "graphcode")) {
+        Invoke-Native "Swift production release build: $product" {
+          & (Join-Path $swiftBin "swift-build.exe") `
+            --package-path $repoRoot `
+            --configuration release `
+            --product $product
+        }
+      }
+      $releaseBin = & (Join-Path $swiftBin "swift-build.exe") `
+        --package-path $repoRoot `
+        --configuration release `
+        --show-bin-path
+      if ($LASTEXITCODE -ne 0) {
+        throw "Swift production release bin path lookup failed"
+      }
+      foreach ($product in @("graphcoded.exe", "graphcode.exe")) {
+        $binary = Join-Path ($releaseBin | Select-Object -Last 1) $product
+        if (-not (Test-Path $binary)) {
+          throw "Swift production binary was not produced: $binary"
+        }
+      }
+      $cli = Join-Path ($releaseBin | Select-Object -Last 1) "graphcode.exe"
+      Invoke-Native "Swift production CLI runtime smoke" {
+        $output = & $cli --help
+        if ($LASTEXITCODE -ne 0 -or ($output -join "`n") -notmatch "graphcode") {
+          throw "graphcode.exe --help did not execute successfully"
+        }
       }
     }
     "swift-paths" {
@@ -206,6 +233,12 @@ function Invoke-Task([string] $name) {
       $sources += @(
         (Join-Path $repoRoot "GraphcodeKit\Sources\SupportDirectory.swift"),
         (Join-Path $repoRoot "GraphcodeKit\Sources\ProjectPersistence.swift"),
+        (Join-Path $repoRoot "GraphcodeKit\Sources\IPC\WindowsNamedPipeTransport.swift"),
+        (Join-Path $repoRoot "GraphcodeKit\Sources\IPC\DaemonConnectionChannel.swift"),
+        (Join-Path $repoRoot "GraphcodeKit\Sources\IPC\DaemonSocketClient.swift"),
+        (Join-Path $repoRoot "GraphcodeKit\Sources\IPC\DaemonSocketPath.swift"),
+        (Join-Path $repoRoot "graphcoded\Sources\main.swift"),
+        (Join-Path $repoRoot "windows-tests\WindowsDaemonTests.swift"),
         (Join-Path $repoRoot `
           "investigation\spikes\swift-full\Tests\GraphcodeKitWindowsTests\PlatformTests.swift")
       )
@@ -244,7 +277,7 @@ function Invoke-Task([string] $name) {
         Where-Object { $_.FullName -notmatch "[\\/]\.build[\\/]" }
       $streams = foreach ($file in $files) {
         Get-Item -LiteralPath $file.FullName -Stream * -ErrorAction SilentlyContinue |
-          Where-Object Stream -ne ':$DATA'
+          Where-Object Stream -notin @(':$DATA', 'sec.endpointdlp')
       }
       if ($streams) {
         throw "Investigation files contain non-default NTFS streams."
@@ -316,10 +349,6 @@ try {
     )
     $junctions += Join-Path $repoRoot `
       "investigation\spikes\swift-contracts\Sources\GraphcodeWindowsContracts\SupportDirectory.swift"
-  }
-  if ($selected -contains "swift-production") {
-    $junctions += Join-Path $repoRoot `
-      "investigation\spikes\swift-full\Sources\GraphcodeKit"
   }
   foreach ($junction in $junctions) {
     if (Test-Path $junction) {

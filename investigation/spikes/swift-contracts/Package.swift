@@ -24,7 +24,6 @@ let package = Package(
         "Domain/RemoteProjectLocation.swift",
         "Domain/SessionBriefing.swift",
         "IPC/DaemonSocketClient.swift",
-        "IPC/DaemonSocketPath.swift",
       ],
       sources: [
         "Domain",

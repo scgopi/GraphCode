@@ -466,7 +466,7 @@ public final class DaemonReplayStore: @unchecked Sendable {
 /// either the deployed v1 event shape or a v2 envelope.
 public actor DaemonConnectionChannel {
   public let connection: any DaemonConnection
-  public let mode: DaemonProtocolMode
+  nonisolated public let mode: DaemonProtocolMode
   public let clientID: UUID
   public let replayStore: DaemonReplayStore
 

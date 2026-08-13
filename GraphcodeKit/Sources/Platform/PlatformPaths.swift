@@ -257,10 +257,12 @@ private enum PlatformPathAlgorithms {
 }
 private enum PlatformPersistenceKey {
   static func make(for path: String) -> String {
-    "v1-" + SHA256.hex(Data(path.utf8))
+    "v1-" + GraphcodeSHA256.hex(Data(path.utf8))
   }
 }
-private enum SHA256 {
+/// Small dependency-free SHA-256 used for stable, privacy-preserving path
+/// identities on every supported platform.
+internal enum GraphcodeSHA256 {
   private static let initial: [UInt32] = [
     0x6a09_e667, 0xbb67_ae85, 0x3c6e_f372, 0xa54f_f53a,
     0x510e_527f, 0x9b05_688c, 0x1f83_d9ab, 0x5be0_cd19,
@@ -288,9 +290,14 @@ private enum SHA256 {
       message.append(0)
     }
     message.append(contentsOf: [
-      UInt8(bitLength >> 56), UInt8(bitLength >> 48), UInt8(bitLength >> 40),
-      UInt8(bitLength >> 32), UInt8(bitLength >> 24), UInt8(bitLength >> 16),
-      UInt8(bitLength >> 8), UInt8(bitLength),
+      UInt8(truncatingIfNeeded: bitLength >> 56),
+      UInt8(truncatingIfNeeded: bitLength >> 48),
+      UInt8(truncatingIfNeeded: bitLength >> 40),
+      UInt8(truncatingIfNeeded: bitLength >> 32),
+      UInt8(truncatingIfNeeded: bitLength >> 24),
+      UInt8(truncatingIfNeeded: bitLength >> 16),
+      UInt8(truncatingIfNeeded: bitLength >> 8),
+      UInt8(truncatingIfNeeded: bitLength),
     ])
 
     var hash = initial
@@ -348,7 +355,10 @@ private enum SHA256 {
       }
     }
 
-    return hash.map { String(format: "%02x", $0) }.joined()
+    return hash.map { word in
+      let hex = String(word, radix: 16)
+      return String(repeating: "0", count: max(0, 8 - hex.count)) + hex
+    }.joined()
   }
 
   private static func rotateRight(_ value: UInt32, by amount: UInt32) -> UInt32 {

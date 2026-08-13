@@ -143,6 +143,7 @@ The first production platform seam now lives in `GraphcodeKit/Sources/Platform`:
 - `WindowsShellStrategy` classifies native executables, `.cmd`/`.bat`, and `.ps1`
   launches without translating arguments through an incidental shell.
 
-`investigation/spikes/swift-full` compiles these production sources and runs their Windows
-tests. Use `pwsh Tools/windows/validate.ps1 -Task swift-production` for focused
-validation; `-Task all` includes it.
+The root `Package.swift` now contains the production Windows `GraphcodeKit`, `graphcoded`,
+and `graphcode` targets plus transport tests. Use
+`pwsh Tools/windows/validate.ps1 -Task swift-production` for focused release-build,
+test, and CLI-runtime validation; `-Task all` includes it.
