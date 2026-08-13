@@ -206,6 +206,18 @@ public enum CopilotSessionLog {
   /// calls come through `phrase(forTool:arguments:)` unchanged, which means a beat's
   /// evidence prefers Copilot's own `description` exactly as the card's live line does.
   public static func beats(inLogAt url: URL) -> [SummaryBeat] {
+    var builder = builder(inLogAt: url)
+    return builder.beats()
+  }
+
+  /// The same read, as the reading the store merges — see `ClaudeSessionLog.reading`.
+  static func reading(inLogAt url: URL, deltas: [Int: String]) -> SummaryReading {
+    var builder = builder(inLogAt: url)
+    return SummaryBeatBuilder.reading(
+      from: builder.beats(), turns: builder.userTurns(), deltas: deltas)
+  }
+
+  private static func builder(inLogAt url: URL) -> SummaryBeatBuilder {
     var builder = SummaryBeatBuilder()
     for line in SummaryBeatBuilder.tailLines(of: url) {
       guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
@@ -230,7 +242,7 @@ public enum CopilotSessionLog {
         continue
       }
     }
-    return builder.beats()
+    return builder
   }
 
   /// What this node's Copilot session has been doing, or `nil` when nothing says. Local
@@ -245,9 +257,8 @@ public enum CopilotSessionLog {
     guard let directory = directory(forSessionNamed: name) else { return nil }
     let log = directory.appendingPathComponent("events.jsonl")
     guard await TranscriptFreshness.shared.hasChanged(log, forNode: node.id) else { return nil }
-    let beats = beats(inLogAt: log)
-    guard !beats.isEmpty else { return nil }
-    return SummaryBeatBuilder.reading(from: beats, deltas: LoopSummaryDeltas.of(node))
+    let reading = reading(inLogAt: log, deltas: LoopSummaryDeltas.of(node))
+    return reading.isEmpty ? nil : reading
   }
 
   /// The last event in a log that says anything about what the session is doing.

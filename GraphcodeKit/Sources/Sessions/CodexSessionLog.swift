@@ -200,6 +200,18 @@ public enum CodexSessionLog {
   /// Tool calls come through `phrase(forRecord:)` unchanged, so a beat's evidence names
   /// exactly what the card's live line would have.
   public static func beats(inRolloutAt url: URL) -> [SummaryBeat] {
+    var builder = builder(inRolloutAt: url)
+    return builder.beats()
+  }
+
+  /// The same read, as the reading the store merges — see `ClaudeSessionLog.reading`.
+  static func reading(inRolloutAt url: URL, deltas: [Int: String]) -> SummaryReading {
+    var builder = builder(inRolloutAt: url)
+    return SummaryBeatBuilder.reading(
+      from: builder.beats(), turns: builder.userTurns(), deltas: deltas)
+  }
+
+  private static func builder(inRolloutAt url: URL) -> SummaryBeatBuilder {
     var builder = SummaryBeatBuilder()
     for line in SummaryBeatBuilder.tailLines(of: url) {
       guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
@@ -224,7 +236,7 @@ public enum CodexSessionLog {
         continue
       }
     }
-    return builder.beats()
+    return builder
   }
 
   /// What this node's Codex session has been doing, or `nil` when nothing says. Local
@@ -241,9 +253,8 @@ public enum CodexSessionLog {
       let rollout = rollout(forWorkingDirectory: directory),
       await TranscriptFreshness.shared.hasChanged(rollout, forNode: node.id)
     else { return nil }
-    let beats = beats(inRolloutAt: rollout)
-    guard !beats.isEmpty else { return nil }
-    return SummaryBeatBuilder.reading(from: beats, deltas: LoopSummaryDeltas.of(node))
+    let reading = reading(inRolloutAt: rollout, deltas: LoopSummaryDeltas.of(node))
+    return reading.isEmpty ? nil : reading
   }
 
   /// What this node's Codex session is doing, or `nil` when nothing says.

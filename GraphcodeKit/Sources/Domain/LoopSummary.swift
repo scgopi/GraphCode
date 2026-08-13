@@ -90,13 +90,33 @@ public struct PassSummary: Codable, Equatable, Sendable, Identifiable {
 /// read, so it can report the current pass in full and the last pass or two in summary,
 /// and it must not be able to erase what the store already knows about passes that have
 /// scrolled out of that window.
+///
+/// **Its pass numbers are window-relative and mean nothing on their own.** A transcript on
+/// this machine reaches a hundred megabytes and the tail read is half of one, so a session
+/// on its forty-first turn shows ten of them — measured, not supposed. The store turns
+/// these into the numbers a person reads; see `LoopSummary.merge`, and `turns` for what it
+/// counts with.
 public struct SummaryReading: Equatable, Sendable {
   public var beats: [SummaryBeat]
   public var finishedPasses: [PassSummary]
+  /// When each user turn the window saw happened, oldest first. The only thing in a
+  /// reading that carries across polls: the store counts a pass when a turn arrives that
+  /// is newer than the last one it counted, which is what makes a pass number survive the
+  /// tail window sliding past the turn that opened it.
+  public var turns: [Date]
+  /// Where the metric got to, by **absolute** pass — the store's numbering, not this
+  /// reading's, since it is read off `metricHistory` rather than off the transcript.
+  /// Applied when a pass rolls up.
+  public var deltas: [Int: String]
 
-  public init(beats: [SummaryBeat], finishedPasses: [PassSummary] = []) {
+  public init(
+    beats: [SummaryBeat], finishedPasses: [PassSummary] = [], turns: [Date] = [],
+    deltas: [Int: String] = [:]
+  ) {
     self.beats = beats
     self.finishedPasses = finishedPasses
+    self.turns = turns
+    self.deltas = deltas
   }
 
   public var isEmpty: Bool { beats.isEmpty && finishedPasses.isEmpty }
@@ -121,19 +141,58 @@ public struct LoopSummary: Codable, Equatable, Sendable {
 
   public var beats: [SummaryBeat]
   public var passes: [PassSummary]
-  /// Passes older than the ones `passes` still names. Kept as a number so `5 earlier
-  /// passes` can be said without keeping five of anything.
-  public var earlierPasses: Int
+  /// Which pass the newest beats belong to, counted from the loop's own start rather than
+  /// from the start of whatever the last tail read happened to reach.
+  ///
+  /// This is the number `PASS 7` prints, and it is here rather than on a beat because it
+  /// is the one fact about a run that a reader cannot see: the transcript it reads half a
+  /// megabyte of has a hundred megabytes behind it. The store counts a pass when
+  /// `merge` is handed a user turn newer than `lastTurnAt`, so a pass that has scrolled
+  /// out of the window is still counted, once.
+  ///
+  /// `0` means nothing has been merged yet. The first merge takes the window's own count,
+  /// which is a floor: a loop graphcode started watching mid-run is on *at least* that
+  /// many passes, and no reading can say more than that.
+  public var currentPass: Int
+  /// The newest user turn already counted into `currentPass`. What keeps a turn seen in
+  /// six consecutive polls from counting six times.
+  public var lastTurnAt: Date?
 
   public init(
-    beats: [SummaryBeat] = [], passes: [PassSummary] = [], earlierPasses: Int = 0
+    beats: [SummaryBeat] = [], passes: [PassSummary] = [], currentPass: Int = 0,
+    lastTurnAt: Date? = nil
   ) {
     self.beats = beats
     self.passes = passes
-    self.earlierPasses = earlierPasses
+    self.currentPass = currentPass
+    self.lastTurnAt = lastTurnAt
   }
 
-  public var isEmpty: Bool { beats.isEmpty && passes.isEmpty && earlierPasses == 0 }
+  /// Hand-written for the reason `LoopNode`'s is: a graph file that fails to decode is a
+  /// graph the app reports as having no loops in it. Every field is optional on the way
+  /// in, so a summary written by a build before this one — or after the next one — still
+  /// loads.
+  private enum CodingKeys: String, CodingKey {
+    case beats, passes, currentPass, lastTurnAt
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    beats = try container.decodeIfPresent([SummaryBeat].self, forKey: .beats) ?? []
+    passes = try container.decodeIfPresent([PassSummary].self, forKey: .passes) ?? []
+    currentPass = try container.decodeIfPresent(Int.self, forKey: .currentPass) ?? 0
+    lastTurnAt = try container.decodeIfPresent(Date.self, forKey: .lastTurnAt)
+  }
+
+  /// Finished passes with no line of their own, so `5 earlier passes` can be said without
+  /// keeping five of anything.
+  ///
+  /// Derived rather than accumulated, now that `currentPass` is absolute: a loop adopted
+  /// on its tenth pass has nine passes behind it whether or not graphcode ever saw them,
+  /// and a counter that only knew about the rows it had dropped would have said none.
+  public var earlierPasses: Int { max(0, currentPass - 1 - passes.count) }
+
+  public var isEmpty: Bool { beats.isEmpty && passes.isEmpty }
 
   /// The beat the rail shows at full size, and the card shows in one line.
   public var current: SummaryBeat? { beats.last }
@@ -163,34 +222,48 @@ public struct LoopSummary: Codable, Equatable, Sendable {
 
   /// Folds a reader's view of a session into the store.
   ///
-  /// Three rules, and they are the whole of the bounding:
+  /// Four rules, and they are the whole of the bounding:
   ///
-  /// 1. **Beats of the newest pass only.** A beat belonging to an older pass has already
+  /// 1. **The store numbers the passes.** A reading's are relative to a window that slides
+  ///    as the transcript grows, so taking them at face value made `PASS 7` count
+  ///    backwards as a session got long. Only a turn newer than `lastTurnAt` advances the
+  ///    count, and everything in the reading is shifted onto that numbering.
+  /// 2. **Beats of the newest pass only.** A beat belonging to an older pass has already
   ///    been rolled up, or is about to be; keeping it would make the section grow with the
   ///    run.
-  /// 2. **A pass rolls up once.** A finished pass the store has never seen becomes one
+  /// 3. **A pass rolls up once.** A finished pass the store has never seen becomes one
   ///    `PassSummary` and the rest of its beats are dropped. A pass it already holds is
   ///    left alone — a reader whose tail window has moved on must not be able to rewrite
   ///    history it can no longer see.
-  /// 3. **Everything past the cap becomes a number.** Oldest summaries go first, and
-  ///    `earlierPasses` counts what went.
+  /// 4. **Everything past the cap becomes a number.** Oldest summaries go first, and
+  ///    `earlierPasses` says how many are no longer named.
   public mutating func merge(_ reading: SummaryReading) {
+    let relativeNewest = max(
+      reading.beats.map(\.pass).max() ?? 0, reading.finishedPasses.map(\.pass).max() ?? 0)
+    guard relativeNewest > 0 else { return }
+    let newTurns = reading.turns.filter { $0 > (lastTurnAt ?? .distantPast) }
+    currentPass = currentPass == 0 ? relativeNewest : currentPass + newTurns.count
+    if let newest = newTurns.last { lastTurnAt = newest }
+    let shift = currentPass - relativeNewest
+
     for summary in reading.finishedPasses.sorted(by: { $0.pass < $1.pass }) {
-      guard !passes.contains(where: { $0.pass == summary.pass }) else { continue }
-      guard summary.pass > (passes.last?.pass ?? 0) || passes.isEmpty else { continue }
-      passes.append(summary)
+      let pass = summary.pass + shift
+      guard pass > (passes.last?.pass ?? 0) else { continue }
+      passes.append(PassSummary(pass: pass, text: summary.text, delta: reading.deltas[pass]))
     }
     if passes.count > Self.maxPassSummaries {
-      let dropped = passes.count - Self.maxPassSummaries
-      passes.removeFirst(dropped)
-      earlierPasses += dropped
+      passes.removeFirst(passes.count - Self.maxPassSummaries)
     }
     let newestPass = reading.beats.map(\.pass).max()
     beats =
-      Array(
-        reading.beats
-          .filter { $0.pass == newestPass }
-          .suffix(Self.maxBeats))
+      reading.beats
+      .filter { $0.pass == newestPass }
+      .suffix(Self.maxBeats)
+      .map {
+        SummaryBeat(
+          id: $0.id, at: $0.at, pass: $0.pass + shift, kind: $0.kind, text: $0.text,
+          evidence: $0.evidence)
+      }
   }
 
   /// Same fold, without mutating — what a reader's output becomes when a node has no

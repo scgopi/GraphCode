@@ -142,7 +142,10 @@ extension CLISessionBackend {
       // reader without a settings file on disk.
       summary: { node, projectPath in
         let settings = GraphcodeSettingsStore.load()
-        guard settings.summarisesLoops else { return nil }
+        // An empty reading rather than `nil`: the store reads that as "this node carries
+        // no summary" and clears one it already has, which is what switching the
+        // experiment off has to mean. `nil` would leave the last beat on every card.
+        guard settings.summarisesLoops else { return SummaryReading(beats: []) }
         let reading: SummaryReading?
         switch kind {
         case .claudeCode:

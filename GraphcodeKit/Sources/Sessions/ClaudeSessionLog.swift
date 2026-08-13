@@ -100,6 +100,19 @@ public enum ClaudeSessionLog {
   /// sub-agent's work as if it were the loop's — five beats deep in a file the human never
   /// asked about, while the loop's own beat says "delegating".
   public static func beats(inTranscriptAt url: URL) -> [SummaryBeat] {
+    var builder = builder(inTranscriptAt: url)
+    return builder.beats()
+  }
+
+  /// The same read, as the reading the store merges — beats, the turns that bound them,
+  /// and where the metric got to.
+  static func reading(inTranscriptAt url: URL, deltas: [Int: String]) -> SummaryReading {
+    var builder = builder(inTranscriptAt: url)
+    return SummaryBeatBuilder.reading(
+      from: builder.beats(), turns: builder.userTurns(), deltas: deltas)
+  }
+
+  private static func builder(inTranscriptAt url: URL) -> SummaryBeatBuilder {
     var builder = SummaryBeatBuilder()
     for line in SummaryBeatBuilder.tailLines(of: url) {
       guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
@@ -132,7 +145,7 @@ public enum ClaudeSessionLog {
         continue
       }
     }
-    return builder.beats()
+    return builder
   }
 
   /// Whether a `user` record is a turn or a tool result wearing the user role.
@@ -167,9 +180,8 @@ public enum ClaudeSessionLog {
       let transcript = transcript(forSessionID: sessionID),
       await TranscriptFreshness.shared.hasChanged(transcript, forNode: node.id)
     else { return nil }
-    let beats = beats(inTranscriptAt: transcript)
-    guard !beats.isEmpty else { return nil }
-    return SummaryBeatBuilder.reading(from: beats, deltas: LoopSummaryDeltas.of(node))
+    let reading = reading(inTranscriptAt: transcript, deltas: LoopSummaryDeltas.of(node))
+    return reading.isEmpty ? nil : reading
   }
 }
 

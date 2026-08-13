@@ -193,14 +193,21 @@ struct LoopSummarySection: View {
         passDivider(label, delta: presentation.passDelta)
       }
       let beats = presentation.receding
-      // The hairline sits before the first beat the human has not seen, which is
-      // `unseen` rows from the end.
-      let firstUnseen = beats.count - presentation.unseen
+      // The hairline sits before the first beat the human has not seen. `unseen` counts
+      // the current beat too — it is a beat, and it is always new when anything is — so
+      // the rows it covers here are one fewer, and a run where only the now block is new
+      // puts the hairline at the foot, immediately above it. Marking a row the human
+      // demonstrably saw is the bug this arithmetic replaced.
+      let unseenRows = presentation.unseenRows
+      let firstUnseen = beats.count - unseenRows
       ForEach(Array(beats.enumerated()), id: \.element.id) { index, beat in
         if index == firstUnseen, presentation.unseen > 0 {
           sinceYouLooked
         }
         recedingRow(beat, age: age(of: index, in: beats.count))
+      }
+      if presentation.unseen > 0, unseenRows == 0 {
+        sinceYouLooked
       }
     }
     .padding(.leading, 16)

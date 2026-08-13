@@ -13,18 +13,21 @@ struct SummaryStoreTests {
 
   private func beat(_ pass: Int, _ text: String, at seconds: Int) -> SummaryBeat {
     SummaryBeat(
-      id: "p\(pass)-\(seconds)", at: Date(timeIntervalSince1970: Double(seconds)), pass: pass,
+      id: "b-\(seconds)", at: Date(timeIntervalSince1970: Double(seconds)), pass: pass,
       kind: .reading, text: text)
   }
 
+  private func at(_ seconds: Int) -> Date { Date(timeIntervalSince1970: Double(seconds)) }
+
   @Test
   func aPassBoundaryCollapsesItsBeatsToOneLineAndDropsTheRest() {
-    let reading = SummaryBeatBuilder.reading(from: [
-      beat(1, "Read the probe", at: 1),
-      beat(1, "Traced totalTokens", at: 2),
-      beat(1, "Trimmed the system preamble", at: 3),
-      beat(2, "Working out why cached tokens double-count", at: 4),
-    ])
+    let reading = SummaryBeatBuilder.reading(
+      from: [
+        beat(1, "Read the probe", at: 1),
+        beat(1, "Traced totalTokens", at: 2),
+        beat(1, "Trimmed the system preamble", at: 3),
+        beat(2, "Working out why cached tokens double-count", at: 5),
+      ], turns: [at(0), at(4)])
 
     #expect(reading.finishedPasses.map(\.text) == ["Trimmed the system preamble"])
     #expect(reading.beats.map(\.text) == ["Working out why cached tokens double-count"])
@@ -33,6 +36,7 @@ struct SummaryStoreTests {
     summary.merge(reading)
     #expect(summary.passes.map(\.pass) == [1])
     #expect(summary.beats.count == 1)
+    #expect(summary.currentPass == 2)
   }
 
   /// The bounding claim the whole design rests on: a six-hour loop and a six-minute one
@@ -41,16 +45,56 @@ struct SummaryStoreTests {
   func theStoreStaysBoundedAcrossAFiveHundredBeatRun() {
     var summary = LoopSummary()
     var beats: [SummaryBeat] = []
+    var turns: [Date] = []
     for index in 0..<500 {
+      if index % 5 == 0 { turns.append(at(index)) }
       beats.append(beat(index / 5 + 1, "beat \(index)", at: index))
-      // Merge each poll's view of the tail, the way `GraphStore.refreshSummary` does.
-      summary.merge(SummaryBeatBuilder.reading(from: Array(beats.suffix(40))))
+      // Merge each poll's view of the tail, the way `GraphStore.refreshSummary` does —
+      // window and all, since the window is what slides past the older turns.
+      let window = Array(beats.suffix(40))
+      summary.merge(
+        SummaryBeatBuilder.reading(
+          from: window,
+          turns: turns.filter { $0 >= window[0].at }))
       #expect(summary.beats.count <= LoopSummary.maxBeats)
       #expect(summary.passes.count <= LoopSummary.maxPassSummaries)
     }
+    #expect(summary.currentPass == 100)
     #expect(summary.earlierPasses > 90)
     // Everything ever seen is still accounted for, as a number rather than as rows.
     #expect(summary.earlierPasses + summary.passes.count == 99)
+  }
+
+  /// The number `PASS 7` prints has to be the loop's own, not the tail read's.
+  ///
+  /// Measured, not supposed: a transcript on this machine reaches a hundred megabytes and
+  /// the tail read is half of one, so a session on its forty-first turn shows ten of them
+  /// — and the count walks *backwards* as the file grows. The store counts a turn once,
+  /// when it first sees one newer than the last it counted, and everything a window says
+  /// is shifted onto that.
+  @Test
+  func passNumbersSurviveTheWindowSlidingPastTheTurnThatOpenedThem() {
+    var summary = LoopSummary()
+    // A window that still reaches the session's start: three turns, three passes.
+    summary.merge(
+      SummaryBeatBuilder.reading(
+        from: [beat(1, "one", at: 1), beat(2, "two", at: 3), beat(3, "three", at: 5)],
+        turns: [at(0), at(2), at(4)]))
+    #expect(summary.currentPass == 3)
+
+    // The same session later. The window has slid: the first two turns are out of it, so
+    // the reader calls the newest pass 2 — and a fourth turn has landed since.
+    summary.merge(
+      SummaryBeatBuilder.reading(
+        from: [beat(1, "three", at: 5), beat(2, "four", at: 7)], turns: [at(4), at(6)]))
+
+    #expect(summary.currentPass == 4)
+    #expect(summary.beats.map(\.pass) == [4])
+    // And a poll that reads the same window again counts nothing twice.
+    summary.merge(
+      SummaryBeatBuilder.reading(
+        from: [beat(1, "three", at: 5), beat(2, "four", at: 7)], turns: [at(4), at(6)]))
+    #expect(summary.currentPass == 4)
   }
 
   /// A reader whose tail window has moved past a pass must not be able to rewrite what the
@@ -59,9 +103,11 @@ struct SummaryStoreTests {
   func aPassRollsUpOnceAndIsNeverRewritten() {
     var summary = LoopSummary()
     summary.merge(
-      SummaryBeatBuilder.reading(from: [beat(1, "First answer", at: 1), beat(2, "now", at: 2)]))
+      SummaryBeatBuilder.reading(
+        from: [beat(1, "First answer", at: 1), beat(2, "now", at: 3)], turns: [at(0), at(2)]))
     summary.merge(
-      SummaryBeatBuilder.reading(from: [beat(1, "Rewritten answer", at: 1), beat(2, "now", at: 2)]))
+      SummaryBeatBuilder.reading(
+        from: [beat(1, "Rewritten answer", at: 1), beat(2, "now", at: 3)], turns: [at(0), at(2)]))
 
     #expect(summary.passes.map(\.text) == ["First answer"])
   }
@@ -70,9 +116,9 @@ struct SummaryStoreTests {
   func unseenCountsAgainstTheWindowsOwnWatermark() {
     var summary = LoopSummary()
     summary.merge(
-      SummaryBeatBuilder.reading(from: [
-        beat(1, "one", at: 1), beat(1, "two", at: 2), beat(1, "three", at: 3),
-      ]))
+      SummaryBeatBuilder.reading(
+        from: [beat(1, "one", at: 1), beat(1, "two", at: 2), beat(1, "three", at: 3)],
+        turns: [at(0)]))
 
     #expect(summary.unseenCount(since: summary.beats.first?.id) == 2)
     #expect(summary.unseenCount(since: summary.beats.last?.id) == 0)
@@ -220,14 +266,31 @@ struct SummaryStoreTests {
     node.summary = LoopSummary(
       beats: [beat(7, "Working out why cached tokens double-count", at: 1)],
       passes: [PassSummary(pass: 6, text: "Trimmed the system preamble", delta: "1.4k → 1.3k")],
-      earlierPasses: 5)
+      currentPass: 7, lastTurnAt: at(1))
 
     let data = try JSONEncoder().encode(node)
     let decoded = try JSONDecoder().decode(LoopNode.self, from: data)
 
     #expect(decoded.summary?.current?.text == "Working out why cached tokens double-count")
     #expect(decoded.summary?.passes.first?.delta == "1.4k → 1.3k")
+    // Where the count picks up from after a relaunch — without it every restart would
+    // renumber the run from whatever the next tail read happened to reach.
+    #expect(decoded.summary?.currentPass == 7)
+    #expect(decoded.summary?.lastTurnAt == at(1))
     #expect(decoded.summary?.earlierPasses == 5)
+  }
+
+  /// A summary written by a build that numbered passes differently must still load: a
+  /// `LoopSummary` that throws takes the whole graph file with it.
+  @Test
+  func aSummaryFromAnOlderBuildStillLoads() throws {
+    let older = Data(
+      """
+      {"beats":[],"passes":[],"earlierPasses":5}
+      """.utf8)
+    let decoded = try JSONDecoder().decode(LoopSummary.self, from: older)
+    #expect(decoded.currentPass == 0)
+    #expect(decoded.earlierPasses == 0)
   }
 
   /// A graph saved before the field existed must still load — `ProjectPersistence` turns

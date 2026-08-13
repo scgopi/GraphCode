@@ -28,12 +28,21 @@ struct SummaryBeatBuilder {
   private var pass = 0
   private var open: Open?
   private var closed: [SummaryBeat] = []
+  private var turns: [Date] = []
 
   /// A user turn — a human typing, or a `/loop` waking the session. Either way it is the
   /// boundary the design rolls passes up at.
+  ///
+  /// The pass it opens is one past whatever came before it *in this window*, and a window
+  /// that starts mid-run has a partial pass in front of its first turn. Counting that
+  /// partial as the same pass as the turn that ends it was the older reading, and it put
+  /// the previous pass's beats on the current pass's rail. These numbers are still only
+  /// relative to the window — `LoopSummary.merge` is what turns them into the number a
+  /// person reads.
   mutating func noteUserTurn(at date: Date) {
     close()
-    pass += 1
+    turns.append(date)
+    pass = max(pass, closed.isEmpty ? 0 : 1) + 1
   }
 
   /// The agent saying what it is about to do. Closes whatever beat was open: this is the
@@ -67,7 +76,7 @@ struct SummaryBeatBuilder {
     let text = open.text ?? Self.sentence(fromPhrase: open.phrases[0])
     closed.append(
       SummaryBeat(
-        id: Self.identifier(pass: open.pass, at: open.at),
+        id: identifier(at: open.at),
         at: open.at,
         pass: open.pass,
         kind: kind,
@@ -84,16 +93,32 @@ struct SummaryBeatBuilder {
     return closed
   }
 
-  /// How many user turns the window saw. `LoopSummary` reads passes off the beats
-  /// themselves; this is here for a reader that wants to know whether it saw the start.
-  var passCount: Int { pass }
+  /// When each user turn in the window happened, oldest first — what `LoopSummary.merge`
+  /// counts absolute passes with.
+  mutating func userTurns() -> [Date] {
+    turns
+  }
 
   // MARK: - Text
 
-  /// Stable across polls: the same record read twice is the same beat. Position in the
-  /// file would not be — the tail window moves as the session grows.
-  static func identifier(pass: Int, at date: Date) -> String {
-    "p\(pass)-\(Int(date.timeIntervalSince1970 * 1000))"
+  /// Stable across polls: the same record read twice is the same beat.
+  ///
+  /// The beat's own instant, and **not** its pass — the pass a window thinks a beat is on
+  /// moves as the tail slides past the turn that opened it, and an id that moved with it
+  /// re-animated every row in the rail and lost the `SINCE YOU LOOKED` watermark every
+  /// time. Position in the file would not be stable either, for the same reason.
+  ///
+  /// Two beats can share a millisecond, so a repeat takes a suffix; that is stable too, as
+  /// long as the window still holds the first of the pair.
+  private mutating func identifier(at date: Date) -> String {
+    let base = "b-\(Int(date.timeIntervalSince1970 * 1000))"
+    var candidate = base
+    var repeats = 1
+    while closed.contains(where: { $0.id == candidate }) {
+      repeats += 1
+      candidate = "\(base)-\(repeats)"
+    }
+    return candidate
   }
 
   /// Openers that carry no intent, so the beat starts at the verb.
@@ -114,6 +139,9 @@ struct SummaryBeatBuilder {
     var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty else { return nil }
     if let header = boldHeader(of: text) { text = header }
+    // Before the sentence is cut, so a link's own dots and slashes cannot be mistaken for
+    // where the sentence ends.
+    text = stripLinks(text)
     text = firstSentence(of: text)
     text = stripMarkdown(text)
     text = stripLeadingFiller(text)
@@ -162,6 +190,21 @@ struct SummaryBeatBuilder {
     return sentences.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
   }
 
+  /// `[@cgopireddy](https://www.threads.com/@cgopireddy)` → `@cgopireddy`.
+  ///
+  /// Read off a real transcript, where the URL reached the rail and took the whole line
+  /// with it: the words a beat gets are the label, and the address is not one of them.
+  /// Each pass shortens the string, so the loop cannot run away on nested brackets.
+  static func stripLinks(_ text: String) -> String {
+    var result = text
+    while let range = result.range(of: #"\[[^\]\n]*\]\([^)\n]*\)"#, options: .regularExpression) {
+      let match = result[range]
+      let label = match.dropFirst().prefix { $0 != "]" }
+      result.replaceSubrange(range, with: label)
+    }
+    return result
+  }
+
   /// The rail draws plain text, and agents narrate in markdown.
   ///
   /// Measured on a real transcript rather than guessed at: a line that is *entirely* bold
@@ -205,14 +248,24 @@ struct SummaryBeatBuilder {
     return ([rebuilt] + words.dropFirst()).joined(separator: " ")
   }
 
+  /// Cut to the budget, and cut **between** words.
+  ///
+  /// A character cut through the middle of one — `Threads/Instagr…` — reads as a rendering
+  /// fault rather than as a summary, which is the impression the whole rail is trying not
+  /// to give. The last space still leaves most of the budget, or the word itself is longer
+  /// than the line and the hard cut is the only answer.
   static func truncate(_ text: String, words limit: Int, characters: Int) -> String {
     var result = text
     let parts = result.split(separator: " ")
     if parts.count > limit { result = parts.prefix(limit).joined(separator: " ") + "…" }
-    if result.count > characters {
-      result = String(result.prefix(characters)).trimmingCharacters(in: .whitespaces) + "…"
+    guard result.count > characters else { return result }
+    var cut = String(result.prefix(characters))
+    if let space = cut.lastIndex(of: " "),
+      cut.distance(from: cut.startIndex, to: space) > characters / 2
+    {
+      cut = String(cut[cut.startIndex..<space])
     }
-    return result
+    return cut.trimmingCharacters(in: .whitespaces) + "…"
   }
 
   /// A tool phrase as a beat of its own — `"editing Foo.swift"` → `"Editing Foo.swift"`.
@@ -337,15 +390,23 @@ struct SummaryBeatBuilder {
   ///
   /// A pass's summary is its **last** beat — what it ended up doing, which is the honest
   /// one-line account of a pass and the only one available without generating a sentence.
-  static func reading(from beats: [SummaryBeat], deltas: [Int: String] = [:]) -> SummaryReading {
+  ///
+  /// The **first** pass in a window that started mid-run is dropped rather than rolled up:
+  /// its last beat is whatever the tail read happened to open on, which is not what that
+  /// pass ended up doing. A pass is summarised from the turn that opened it or not at all.
+  static func reading(
+    from beats: [SummaryBeat], turns: [Date] = [], deltas: [Int: String] = [:]
+  ) -> SummaryReading {
     guard let newest = beats.map(\.pass).max() else { return SummaryReading(beats: []) }
+    let partial = turns.count < newest ? beats.map(\.pass).min() : nil
     let finished = Dictionary(grouping: beats.filter { $0.pass < newest }, by: \.pass)
       .compactMap { pass, passBeats -> PassSummary? in
-        guard let last = passBeats.max(by: { $0.at < $1.at }) else { return nil }
-        return PassSummary(pass: pass, text: last.text, delta: deltas[pass])
+        guard pass != partial, let last = passBeats.max(by: { $0.at < $1.at }) else { return nil }
+        return PassSummary(pass: pass, text: last.text)
       }
       .sorted { $0.pass < $1.pass }
     return SummaryReading(
-      beats: beats.filter { $0.pass == newest }, finishedPasses: finished)
+      beats: beats.filter { $0.pass == newest }, finishedPasses: finished, turns: turns,
+      deltas: deltas)
   }
 }

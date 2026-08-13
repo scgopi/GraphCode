@@ -23,9 +23,12 @@ import Foundation
 ///    and `usage` is read from the session's own label store — so nothing here can land on
 ///    the loop's token count.
 public enum SummaryModelWriter {
-  /// How long a rewrite may take before the derived beat stands. Deliberately short: this
-  /// is a caption on a panel, and a poll that blocks on it stops reporting presence.
-  static let timeout: Duration = .seconds(20)
+  /// How long a rewrite may take before the derived beat stands.
+  ///
+  /// Under `ProjectRegistry.presencePollInterval`, deliberately: a caption that takes
+  /// longer to write than the gap between polls is one the rail will never show in time,
+  /// and the tick it is holding up is the one every state dot in the app rides on.
+  static let timeout: Duration = .seconds(10)
 
   /// The instruction, which is mostly a list of refusals.
   ///

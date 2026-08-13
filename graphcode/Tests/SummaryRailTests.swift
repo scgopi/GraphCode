@@ -324,4 +324,25 @@ struct SummaryRailTests {
       "One two three four five six seven eight nine ten eleven twelve")
     #expect(long == "One two three four five six seven eight nine ten…")
   }
+
+  /// Both of these were read straight off a live loop's rail, not imagined.
+  @Test
+  func aLinksAddressNeverReachesTheRailAndNoWordIsCutInHalf() {
+    // The label is the words; the address is not one of them.
+    #expect(
+      SummaryBeatBuilder.condense(
+        "Posted. Live on [@cgopireddy](https://www.threads.com/@cgopireddy)")
+        == "Posted. Live on @cgopireddy")
+    #expect(
+      SummaryBeatBuilder.stripLinks("see [a](x) and [b](y)") == "see a and b")
+    // A cut through the middle of a word reads as a rendering fault rather than a summary.
+    let cut = SummaryBeatBuilder.truncate(
+      "Blocked on login because the browser has no Threads or Instagram session",
+      words: 20, characters: 64)
+    #expect(cut == "Blocked on login because the browser has no Threads or…")
+    // Unless the word itself is longer than the line, where a hard cut is the only answer.
+    #expect(
+      SummaryBeatBuilder.truncate(String(repeating: "x", count: 40), words: 10, characters: 10)
+        == "xxxxxxxxxx…")
+  }
 }

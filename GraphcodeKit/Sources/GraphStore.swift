@@ -482,13 +482,49 @@ public actor GraphStore {
   /// of a run — the last thing a loop was doing is exactly what a human coming back wants
   /// on screen, and blanking it the moment the session goes quiet would empty the rail at
   /// precisely the moment it is most worth reading.
+  ///
+  /// **An *empty* reading is different from no reading, and it is what turns the feature
+  /// off.** `nil` means nothing new was read — a quiet transcript, a remote loop, a
+  /// backend with nothing to say — and the node keeps what it has. An empty one is the
+  /// reader saying it will not be narrating this node at all, which is what
+  /// `CLISessionBackend` answers when the human has switched the producer off, and the
+  /// node's summary goes with it. Without that, switching the experiment off left every
+  /// card showing a beat frozen at the moment it was switched, outranking the live
+  /// activity line it had been standing in for. Resolved loops are swept too, which is why
+  /// this loop is over every node.
+  ///
+  /// **Asked concurrently, unlike the other two readings.** Those are file reads and a
+  /// `stat`, and a queue of them is nothing; this one may have the optional model pass
+  /// behind it, which is a subprocess with a timeout on it. Sequentially that is one
+  /// timeout *per loop* on a tick that presence rides on, so a canvas of six loops could
+  /// stop reporting state for a minute over a caption. One task each bounds the whole
+  /// sweep at a single timeout however many loops there are.
   @discardableResult
   private func refreshSummary() async -> Bool {
     guard let onReadSummary else { return false }
+    let path = graph.project.path
+    let nodes = Array(graph.nodes)
+    let readings = await withTaskGroup(of: (UUID, SummaryReading?).self) { group in
+      for node in nodes {
+        group.addTask { (node.id, await onReadSummary(node, path)) }
+      }
+      var collected: [UUID: SummaryReading] = [:]
+      for await (id, reading) in group {
+        guard let reading else { continue }
+        collected[id] = reading
+      }
+      return collected
+    }
     var changed = false
-    for node in graph.nodes where !node.isResolved {
-      guard let reading = await onReadSummary(node, graph.project.path), !reading.isEmpty
-      else { continue }
+    for node in nodes {
+      guard let reading = readings[node.id] else { continue }
+      guard !reading.isEmpty else {
+        guard graph.nodes[id: node.id]?.summary != nil else { continue }
+        graph.nodes[id: node.id]?.summary = nil
+        changed = true
+        continue
+      }
+      guard !node.isResolved else { continue }
       let merged = (graph.nodes[id: node.id]?.summary ?? LoopSummary()).merging(reading)
       guard graph.nodes[id: node.id]?.summary != merged else { continue }
       graph.nodes[id: node.id]?.summary = merged

@@ -26,8 +26,7 @@ struct LoopSummaryPresentation: Equatable {
   let elapsed: String?
   /// The receding rows under the now block, newest first.
   let receding: [SummaryBeat]
-  /// How many of `receding` landed since the human last looked — the `SINCE YOU LOOKED`
-  /// hairline sits after this many rows.
+  /// How many beats have landed since the human last looked, the current one included.
   let unseen: Int
   let passes: [PassSummary]
   let earlierPasses: Int
@@ -38,6 +37,13 @@ struct LoopSummaryPresentation: Equatable {
   /// `LAST DID` — a beat is in the present tense only while something is producing beats,
   /// and a session parked at its prompt is describing the past.
   let isLive: Bool
+
+  /// How many **receding rows** the hairline has to fall above.
+  ///
+  /// One fewer than `unseen`, because the current beat is one of the unseen beats and is
+  /// not a row: it is the block under them. Drawing the hairline `unseen` rows from the
+  /// end marked a row the human had demonstrably already read, every time.
+  var unseenRows: Int { max(unseen - 1, 0) }
 
   /// Whether the section has anything to say at all. A rail must never render an empty
   /// section — see `LoopWorkspaceRail.hasContent`.
@@ -98,10 +104,16 @@ struct LoopSummaryPresentation: Equatable {
     isLive = node.presence?.presence == .busy && !node.isResolved
     elapsed = current.map { LoopCardPresentation.duration(now.timeIntervalSince($0.at)) }
     receding = summary.receding
-    unseen = min(summary.unseenCount(since: seenBeatID), summary.receding.count)
+    // Counted against every beat, including the current one, and clamped to the rows the
+    // hairline can actually sit between — the section draws it *above* a receding row, and
+    // the current beat is not one of those. `LoopSummarySection` puts the leftover case —
+    // only the now block is new — at the foot of the list, which is where it belongs.
+    unseen = min(summary.unseenCount(since: seenBeatID), summary.beats.count)
     passes = summary.passes.reversed()
     earlierPasses = summary.earlierPasses
-    let pass = current?.pass ?? summary.passes.last?.pass
+    // The beat's own pass, which `LoopSummary.merge` has already put on the store's
+    // absolute numbering; `currentPass` for a section that is all rollups and no beats.
+    let pass = current?.pass ?? (summary.currentPass > 0 ? summary.currentPass : nil)
     passLabel = pass.map { "PASS \($0)" }
     passDelta = summary.passes.last?.delta
   }

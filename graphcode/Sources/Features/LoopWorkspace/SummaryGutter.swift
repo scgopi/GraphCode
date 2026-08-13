@@ -9,8 +9,14 @@ import SwiftUI
 ///
 /// **Hiding never hides the ask.** When the loop wants a human the gutter turns amber and
 /// names it in one word. The card, the sidebar and the titlebar chip are unaffected either
-/// way — attention was never this section's job to report, which is why the colour here is
-/// read off `displayState` and not off the summary.
+/// way — attention was never this section's job to report, which is why the claim here is
+/// read off the graph's own `state` and not off the summary.
+///
+/// `state`, not `displayState`, for the reason `LoopSummaryPresentation` gives at length:
+/// `displayState` turns a running loop into `.awaitingInput` as soon as its session's
+/// presence says so, and Claude Code says so for any notification — including finishing a
+/// turn at an empty prompt. A gutter that went amber and said `ASKS YOU` at that moment
+/// would be the same false alarm the section beside it was just fixed for.
 struct SummaryGutter: View {
   let node: LoopNode
   let now: Date
@@ -18,9 +24,9 @@ struct SummaryGutter: View {
 
   static let width: CGFloat = 26
 
-  private var wantsHuman: Bool { node.displayState.wantsHuman }
+  private var wantsHuman: Bool { node.state.wantsHuman }
 
-  private var label: String { wantsHuman ? "ASKS YOU" : "SUMMARY" }
+  var label: String { wantsHuman ? "ASKS YOU" : "SUMMARY" }
 
   private var tint: Color {
     wantsHuman ? BeatKindAppearance.dot(.asking) : Theme.paneFocusTint

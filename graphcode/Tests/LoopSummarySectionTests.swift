@@ -100,6 +100,10 @@ struct LoopSummarySectionTests {
     // A loop the graph really has parked on a human still wears amber.
     let asking = node(summary: summary, state: .awaitingInput, presence: .awaitingInput)
     #expect(LoopSummaryPresentation(node: asking, now: now).mode == .asking)
+    // And the gutter the rail collapses to makes the same split, or hiding the rail would
+    // reintroduce the false alarm at 26 points wide.
+    #expect(SummaryGutter(node: quiet, now: now, onTapped: {}).label == "SUMMARY")
+    #expect(SummaryGutter(node: asking, now: now, onTapped: {}).label == "ASKS YOU")
   }
 
   @Test
@@ -130,10 +134,22 @@ struct LoopSummarySectionTests {
     let returning = LoopSummaryPresentation(
       node: node(summary: summary), now: now, seenBeatID: "p7-100")
     #expect(returning.unseen == 2)
+    // Only one of them is a *row*: "newest" is the block under them, not a row above it.
+    // Counting rows off `unseen` drew the hairline above "oldest" — the one beat the
+    // human had demonstrably read.
+    #expect(returning.unseenRows == 1)
+
+    // Back after only the current beat changed: no row is unseen, and the section puts
+    // the hairline at the foot rather than dropping it.
+    let justOne = LoopSummaryPresentation(
+      node: node(summary: summary), now: now, seenBeatID: "p7-200")
+    #expect(justOne.unseen == 1)
+    #expect(justOne.unseenRows == 0)
 
     // Never left: no hairline at all rather than a section marked all-new.
     let first = LoopSummaryPresentation(node: node(summary: summary), now: now)
     #expect(first.unseen == 0)
+    #expect(first.unseenRows == 0)
   }
 
   /// The rail is draggable now that a beat is prose rather than a chip, and the stored
