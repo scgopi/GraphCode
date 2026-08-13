@@ -341,15 +341,20 @@ struct GhosttyTerminalView: NSViewRepresentable {
     // `zmx attach` anyway, and building it costs a settings read nobody needs.
     let idVariable = ZmxSessionLauncher.remoteResumeIDVariable
     let settle = ZmxSessionLauncher.resumeSettleSeconds
-    let joined = "\(exists) >/dev/null 2>&1 && exec \(attach); "
+    let log = { (event: String) in
+      DialLog.fragment(session: self.sessionName, dial: "open", event: event) + "; "
+    }
+    let joined = "\(exists) >/dev/null 2>&1 && { \(log("attach-live"))exec \(attach); }; "
     let read = "\(idVariable)=$(cat \(idFile) 2>/dev/null); "
     let attempt =
-      "if [ -n \"$\(idVariable)\" ]; then export \(idVariable); gc_t0=$(date +%s); "
+      "if [ -n \"$\(idVariable)\" ]; then export \(idVariable); \(log("resume"))"
+      + "gc_t0=$(date +%s); "
       + resume + "; gc_rc=$?; "
     let verdict =
       "[ $(($(date +%s) - gc_t0)) -ge \(settle) ] && exit \"$gc_rc\"; rm -f \(idFile); "
+      + log("resume-dead")
       + #"printf '\033[1;33m── Resume did not take; starting fresh. ──\033[0m\r\n'; fi; "#
-    let script = joined + read + attempt + verdict + "exec \(fresh)"
+    let script = joined + read + attempt + verdict + log("fresh") + "exec \(fresh)"
     return ["/bin/sh", "-c", script]
   }
 }

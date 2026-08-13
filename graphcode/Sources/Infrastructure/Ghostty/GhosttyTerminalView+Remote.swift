@@ -110,43 +110,54 @@ extension GhosttyTerminalView {
     }
     let attachFresh = ZmxSessionLauncher.quotedCommand(
       ["zmx", "attach", sessionName] + agentLaunch)
-    let reattachOrRetry =
+    // Every branch below records itself in the remote host's dial log
+    // (`DialLog.fragment`) before it acts — the banners announce the same decisions,
+    // but they die with the scrollback.
+    let log = { (dial: String, event: String) in
+      DialLog.fragment(session: self.sessionName, dial: dial, event: event) + "; "
+    }
+    let reattachOrRetry = { (dial: String) in
       "\(ZmxSessionLauncher.quotedCommand(["zmx", "get", sessionName])) >/dev/null 2>&1; "
-      + "gc_rc=$?; if [ \"$gc_rc\" -eq 0 ]; then \(markerWrite); "
-      + "exec \(ZmxSessionLauncher.quotedCommand(["zmx", "attach", sessionName])); fi; "
-      + "[ \"$gc_rc\" -ne 1 ] && exit 255; "
+        + "gc_rc=$?; if [ \"$gc_rc\" -eq 0 ]; then \(log(dial, "attach-live"))\(markerWrite); "
+        + "exec \(ZmxSessionLauncher.quotedCommand(["zmx", "attach", sessionName])); fi; "
+        + "[ \"$gc_rc\" -ne 1 ] && exit 255; "
+    }
     let restorePreparation = "if cd \(quoted(location.remotePath)); then " + hooksWrite
     let connectMissing: String
     if loopType == .turnBased {
       connectMissing =
         restoreScript(
           preparation: restorePreparation, promptExport: promptExport,
-          attachFresh: attachFresh, freshPrefix: markerWrite + "; ", settings: settings)
+          attachFresh: attachFresh, freshPrefix: markerWrite + "; ", dial: "connect",
+          settings: settings)
         + "; exit 255"
     } else {
       connectMissing =
-        #"printf '\033[1;33m── Loop session is not running; waiting for graphcoded "#
+        log("connect", "wait-daemon")
+        + #"printf '\033[1;33m── Loop session is not running; waiting for graphcoded "#
         + #"to start it. ──\033[0m\r\n'; exit 255"#
     }
-    let connect = delivery + reattachOrRetry + connectMissing
+    let connect = delivery + reattachOrRetry("connect") + connectMissing
     let rebootBranch: String
     if loopType == .turnBased {
       rebootBranch =
         #"printf '\033[1;33m── Remote machine rebooted; restoring the session. ──\033[0m\r\n'; "#
         + restoreScript(
           preparation: delivery + restorePreparation, promptExport: promptExport,
-          attachFresh: attachFresh, settings: settings) + "; exit 255"
+          attachFresh: attachFresh, dial: "reboot", settings: settings) + "; exit 255"
     } else {
       rebootBranch =
-        #"printf '\033[1;33m── Remote machine rebooted; waiting for the loop session "#
+        log("reboot", "wait-daemon")
+        + #"printf '\033[1;33m── Remote machine rebooted; waiting for the loop session "#
         + #"to be restored. ──\033[0m\r\n'; exit 255"#
     }
     let markerFile = RemoteBootMarker.markerExpression(forSessionName: sessionName)
     let reconnect =
-      reattachOrRetry
+      reattachOrRetry("reconnect")
       + "\(RemoteBootMarker.captureFragment); gc_last=$(cat \(markerFile) 2>/dev/null); "
       + "if [ -n \"$gc_boot\" ] && [ -n \"$gc_last\" ] && [ \"$gc_boot\" != \"$gc_last\" ]; then "
       + rebootBranch + "; fi; "
+      + log("reconnect", "session-ended")
       + #"printf '\033[2m── Remote session ended while disconnected. ──\033[0m\r\n'; exit 0"#
     return (connect, reconnect)
   }
@@ -176,8 +187,11 @@ extension GhosttyTerminalView {
   /// mid-boot, so keep dialing rather than letting it read as "the loop finished".
   private func restoreScript(
     preparation: String, promptExport: String, attachFresh: String, freshPrefix: String = "",
-    settings: GraphcodeSettings
+    dial: String, settings: GraphcodeSettings
   ) -> String {
+    let log = { (event: String) in
+      DialLog.fragment(session: self.sessionName, dial: dial, event: event) + "; "
+    }
     var script = preparation + "{ "
     let nodeID = SurfaceRef.nodeID(fromZmxSessionName: sessionName)
     let resumeLaunch = resumeCommand(
@@ -186,13 +200,15 @@ extension GhosttyTerminalView {
     if let nodeID, let resumeLaunch {
       let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: nodeID)
       let attempt =
-        "export \(ZmxSessionLauncher.remoteResumeIDVariable); gc_t0=$(date +%s); "
+        log("resume")
+        + "export \(ZmxSessionLauncher.remoteResumeIDVariable); gc_t0=$(date +%s); "
         + ZmxSessionLauncher.quotedCommand(["zmx", "attach", sessionName] + resumeLaunch)
         + "; gc_rc=$?; [ $(($(date +%s) - gc_t0)) -ge 5 ] && exit \"$gc_rc\"; "
+        + log("resume-dead")
         + #"printf '\033[1;33m── Resume did not take; starting the session fresh. ──\033[0m\r\n'"#
       script += ZmxSessionLauncher.resumeOrFreshScript(idFile: idFile, resume: attempt) + "; "
     }
-    script += promptExport + freshPrefix + "exec \(attachFresh); }; fi"
+    script += promptExport + freshPrefix + log("fresh") + "exec \(attachFresh); }; fi"
     return script
   }
 
