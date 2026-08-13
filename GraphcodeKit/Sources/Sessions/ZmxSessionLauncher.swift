@@ -890,14 +890,19 @@ public enum ZmxSessionLauncher {
     forNode node: LoopNode, freshRun: String, at location: RemoteProjectLocation,
     settings: GraphcodeSettings
   ) -> String {
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    let log = { (event: String) in
+      DialLog.fragment(session: name, dial: "ensure", event: event) + "; "
+    }
     guard
       let resumeArgv = resumeArguments(
         forNode: node, sessionID: remoteResumeIDPlaceholder,
         projectPath: location.projectPath, settings: settings)
-    else { return freshRun }
+    else { return log("fresh") + freshRun }
     let resume = remoteQuotedCommand(["zmx"] + resumeArgv)
     let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: node.id)
-    return resumeOrFreshScript(idFile: idFile, resume: resume, fresh: freshRun)
+    return resumeOrFreshScript(
+      idFile: idFile, resume: log("resume") + resume, fresh: log("fresh") + freshRun)
   }
 
   /// The consume-then-attempt shape both resumers share: read the banked ID, remove it
@@ -1191,13 +1196,15 @@ public enum ZmxSessionLauncher {
         return CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent
       }()
     guard let runArgs = arguments(forNode: node, projectPath: projectPath) else { return }
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     if let sessionID,
       let resumeArgs = resumeArguments(
         forNode: node, sessionID: sessionID, projectPath: projectPath)
     {
       await atomicCheckOrRun(
         checkArguments: checkArgs, runArguments: resumeArgs,
-        zmxPath: zmxPath, workingDirectory: wd)
+        zmxPath: zmxPath, workingDirectory: wd,
+        logFragment: DialLog.fragment(session: name, dial: "ensure", event: "resume"))
       // `zmx run -d` reports that the *session* exists, not that what it launched
       // survived: `claude --resume` against a transcript its retention expired dies
       // within a second, taking the session with it, and the ensure returns 0 having
@@ -1211,11 +1218,13 @@ public enum ZmxSessionLauncher {
         await sessionDiedImmediately(
           checkArguments: checkArgs, zmxPath: zmxPath, workingDirectory: wd)
       else { return }
+      DialLog.record(session: name, dial: "ensure", event: "resume-dead")
       SessionIDStore.remove(forNodeID: node.id)
     }
     await atomicCheckOrRun(
       checkArguments: checkArgs, runArguments: runArgs,
-      zmxPath: zmxPath, workingDirectory: wd)
+      zmxPath: zmxPath, workingDirectory: wd,
+      logFragment: DialLog.fragment(session: name, dial: "ensure", event: "fresh"))
   }
 
   /// How long a resumed session has to still be there before its launch counts as taken.
@@ -1236,13 +1245,17 @@ public enum ZmxSessionLauncher {
     return await session.waitUntilFinished() == false
   }
 
+  /// `logFragment` rides inside the run branch, so an ensure whose check found the
+  /// session alive records nothing — the dial log holds decisions, not ticks.
   private static func atomicCheckOrRun(
     checkArguments: [String], runArguments: [String],
-    zmxPath: String, workingDirectory: String?
+    zmxPath: String, workingDirectory: String?, logFragment: String? = nil
   ) async {
     let check = quotedCommand([zmxPath] + checkArguments)
     let run = quotedCommand([zmxPath] + runArguments)
-    let script = "\(check) >/dev/null 2>&1 || \(run)"
+    let script =
+      logFragment.map { "\(check) >/dev/null 2>&1 || { \($0); \(run); }" }
+      ?? "\(check) >/dev/null 2>&1 || \(run)"
     guard
       let session = try? PTYProcessSession(
         executable: "/bin/zsh", arguments: ["-c", script],
