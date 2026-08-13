@@ -207,6 +207,9 @@ struct ProjectFeature {
   @Dependency(\.gitClient) var gitClient
   /// Names an untitled loop after creation — see `createNodeConfirmed`.
   @Dependency(\.titleSuggestionClient) var titleSuggestionClient
+  /// Where every project's node names are registered, so a suggested name can be
+  /// checked against all of them — not just this project's.
+  @Dependency(\.loopTitleDirectory) var loopTitleDirectory
 
   @Dependency(\.orchestratorClient) var orchestratorClient
 
@@ -221,6 +224,7 @@ struct ProjectFeature {
         switch event {
         case .graphChanged(let newGraph):
           state.connectionError = nil
+          loopTitleDirectory.register(newGraph.project.path, newGraph)
           // Every card placed again from the graph that just arrived, rather than only the
           // ones that are new. Slots handed out at arrival time made the canvas a record of
           // the order loops turned up in: a hand-off drawn between two cards the layout had
@@ -336,7 +340,8 @@ struct ProjectFeature {
             let basis = [draft.checkDescription, draft.triggerPrompt, draft.goal?.summary]
               .compactMap({ $0 })
               .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
-            let title = await titleSuggestionClient.suggest(draft.effectiveBackend, basis)
+            let title = await titleSuggestionClient.suggest(
+              draft.effectiveBackend, basis, loopTitleDirectory.allTitles())
           else { return }
           try? await orchestratorClient.send(
             .graphCommand(

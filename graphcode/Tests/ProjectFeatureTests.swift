@@ -46,7 +46,7 @@ struct ProjectFeatureTests {
     } withDependencies: {
       $0.gitClient.listWorktrees = { _ in [] }
       $0.orchestratorClient.send = { command in await sent.append(command) }
-      $0.titleSuggestionClient.suggest = { backend, basis in
+      $0.titleSuggestionClient.suggest = { backend, basis, _ in
         #expect(backend == .claudeCode)
         #expect(basis == "Say hello")
         return "Research"
@@ -87,7 +87,7 @@ struct ProjectFeatureTests {
     } withDependencies: {
       $0.gitClient.listWorktrees = { _ in [] }
       $0.orchestratorClient.send = { command in await sent.append(command) }
-      $0.titleSuggestionClient.suggest = { _, _ in
+      $0.titleSuggestionClient.suggest = { _, _, _ in
         #expect(Bool(false), "no suggestion should be requested for a typed title")
         return nil
       }
