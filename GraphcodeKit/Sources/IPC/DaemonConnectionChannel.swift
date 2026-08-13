@@ -254,8 +254,12 @@ public final class DaemonReplayStore: @unchecked Sendable {
     evictIfNeeded()
     guard buffers.count < maxClients else { return false }
     buffers[clientID] = DaemonReplayBuffer(capacity: capacity)
-    nextSequences[clientID] = 1
-    watermarks[clientID] = 0
+    if nextSequences[clientID] == nil {
+      nextSequences[clientID] = 1
+    }
+    if watermarks[clientID] == nil {
+      watermarks[clientID] = 0
+    }
     return true
   }
 

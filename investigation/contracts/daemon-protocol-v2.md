@@ -40,6 +40,9 @@ cancellation, backpressure, and non-reading peers.
   a cursor beyond the retained latest sequence receives `cursorOutsideWindow`.
 - Canonical subscribed graph events are retained for a logical client while its socket is
   disconnected, subject to the same bounded capacity and expiry.
+- When retention capacity is full of active clients, an overflow client may receive live
+  events without a replay buffer; later promotion preserves its sequence and watermark
+  state rather than resetting or duplicating visible sequences.
 - Replay frames are queued before live events, preserving sequence order across reconnect.
 - A connection-local join snapshot consumes a visible sequence but records a replay
   watermark, so disconnecting immediately after the snapshot and resuming from that cursor

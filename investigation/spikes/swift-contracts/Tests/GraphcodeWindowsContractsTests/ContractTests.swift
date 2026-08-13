@@ -220,13 +220,14 @@ final class ContractTests: XCTestCase {
   }
 
   private final class RecordingConnection: @unchecked Sendable, DaemonConnection {
-    let id = UUID()
+    let id: UUID
     let endpoint: DaemonEndpoint = .namedPipe("fixture")
     private let probe = SendProbe()
     private let sendDelay: Duration
     private(set) var frames = [Data]()
 
-    init(sendDelay: Duration = .milliseconds(2)) {
+    init(id: UUID = UUID(), sendDelay: Duration = .milliseconds(2)) {
+      self.id = id
       self.sendDelay = sendDelay
     }
 
@@ -408,6 +409,66 @@ final class ContractTests: XCTestCase {
     XCTAssertNoThrow(try store.replay(clientID: first, after: 0))
     XCTAssertNoThrow(try store.replay(clientID: second, after: 0))
     XCTAssertThrowsError(try store.replay(clientID: third, after: 0)) { error in
+      XCTAssertEqual(error as? DaemonReplayBuffer.ReplayError, .replayUnavailable)
+    }
+  }
+
+  func testOverflowClientPromotionPreservesSequenceWatermarkAndReplay() async throws {
+    let first = UUID(uuidString: "00000000-0000-0000-0000-000000000024")!
+    let second = UUID(uuidString: "00000000-0000-0000-0000-000000000025")!
+    let overflow = UUID(uuidString: "00000000-0000-0000-0000-000000000026")!
+    let firstConnection = UUID(uuidString: "00000000-0000-0000-0000-000000000027")!
+    let secondConnection = UUID(uuidString: "00000000-0000-0000-0000-000000000028")!
+    let overflowConnection = UUID(uuidString: "00000000-0000-0000-0000-000000000029")!
+    let store = DaemonReplayStore(capacity: 8, maxClients: 2)
+
+    store.register(clientID: first, connectionID: firstConnection, subscription: nil)
+    store.register(clientID: second, connectionID: secondConnection, subscription: nil)
+    let overflowTransport = RecordingConnection(id: overflowConnection)
+    let overflowChannel = DaemonConnectionChannel(
+      connection: overflowTransport,
+      mode: .v2(version: 2),
+      clientID: overflow,
+      replayStore: store)
+
+    try await overflowChannel.sendConnectionSnapshot(
+      .graphChanged(LoopGraph(project: ProjectRef(path: "/work/overflow", name: "overflow"))))
+    try await overflowChannel.sendEvent(.errorOccurred("live-before-promotion"))
+    let initialSequences = try overflowTransport.frames.map {
+      try JSONDecoder().decode(DaemonWireEnvelope.self, from: $0).sequence
+    }
+    XCTAssertEqual(initialSequences, [1, 2])
+
+    store.disconnect(clientID: first, connectionID: firstConnection)
+    let canonicalGraph = LoopGraph(
+      project: ProjectRef(path: "/work/overflow", name: "overflow"),
+      nodes: [LoopNode(title: "canonical")])
+    try await overflowChannel.sendEvent(.graphChanged(canonicalGraph))
+    let promotedEnvelope = try XCTUnwrap(
+      JSONDecoder().decode(
+        DaemonWireEnvelope.self,
+        from: XCTUnwrap(overflowTransport.frames.last)))
+    XCTAssertEqual(promotedEnvelope.sequence, 3)
+
+    try await overflowChannel.close()
+    let reconnectTransport = RecordingConnection()
+    let reconnectChannel = DaemonConnectionChannel(
+      connection: reconnectTransport,
+      mode: .v2(version: 2),
+      clientID: overflow,
+      replayStore: store)
+    try await reconnectChannel.replay(after: 2)
+
+    let replayed = try reconnectTransport.frames.map {
+      try JSONDecoder().decode(DaemonWireEnvelope.self, from: $0)
+    }
+    XCTAssertEqual(replayed.map(\.sequence), [3])
+    guard case .graphChanged(let replayedGraph) = replayed.first?.event else {
+      return XCTFail("expected the canonical graph event in replay")
+    }
+    XCTAssertEqual(replayedGraph.project.path, canonicalGraph.project.path)
+    XCTAssertEqual(replayedGraph.nodes.first?.title, "canonical")
+    XCTAssertThrowsError(try store.replay(clientID: first, after: 0)) { error in
       XCTAssertEqual(error as? DaemonReplayBuffer.ReplayError, .replayUnavailable)
     }
   }
