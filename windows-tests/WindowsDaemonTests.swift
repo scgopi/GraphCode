@@ -359,41 +359,59 @@ final class WindowsDaemonTests: XCTestCase {
       let powershell = URL(fileURLWithPath: systemRoot)
         .appendingPathComponent("System32/WindowsPowerShell/v1.0/powershell.exe")
 
-      func driver() throws -> WindowsSSHForwardDriver {
-        let process = Process()
-        process.executableURL = powershell
-        process.arguments = ["-NoLogo", "-NoProfile", "-Command", "Start-Sleep -Seconds 60"]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        let session = WindowsSSHForwardSession(process: process)
-        return WindowsSSHForwardDriver(
-          opener: { _, _ in session },
+      func driver() -> WindowsSSHForwardDriver {
+        WindowsSSHForwardDriver(
+          opener: { _, _ in
+            let process = Process()
+            process.executableURL = powershell
+            process.arguments = [
+              "-NoLogo", "-NoProfile", "-Command", "Start-Sleep -Seconds 60",
+            ]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            return WindowsSSHForwardSession(process: process)
+          },
           verifier: { _, _ in true })
       }
 
       let first = try WindowsRemoteBridge(
         supportDirectory: root,
         pipeName: "\\\\.\\pipe\\graphcode-generation-\(UUID().uuidString)",
+        ttl: 2,
         ssh: driver())
       let firstState = try await first.ensureForwarding(authority: "alice@posix.example")
+      let rotatedState = try await first.rotate(authority: "alice@posix.example")
+      XCTAssertEqual(rotatedState.generation, firstState.generation + 1)
+
+      try await Task.sleep(for: .seconds(2.2))
+      let expiredState = try await first.ensureForwarding(authority: "alice@posix.example")
+      XCTAssertEqual(expiredState.generation, rotatedState.generation + 1)
       await first.shutdown()
 
       let generationURL = WindowsRemoteBridge.generationURL(
         authority: "alice@posix.example", supportDirectory: root)
       XCTAssertTrue(FileManager.default.fileExists(atPath: generationURL.path))
-      XCTAssertEqual(try String(contentsOf: generationURL, encoding: .ascii), "1")
+      XCTAssertEqual(try String(contentsOf: generationURL, encoding: .ascii), "3")
+      XCTAssertFalse(
+        FileManager.default.fileExists(
+          atPath: WindowsRemoteBridge.stateURL(
+            authority: "alice@posix.example", supportDirectory: root
+          ).path))
 
       let second = try WindowsRemoteBridge(
         supportDirectory: root,
         pipeName: "\\\\.\\pipe\\graphcode-generation-restart-\(UUID().uuidString)",
+        ttl: 0.05,
         ssh: driver())
       let secondState = try await second.ensureForwarding(authority: "alice@posix.example")
       await second.shutdown()
 
       XCTAssertEqual(firstState.generation, 1)
-      XCTAssertEqual(secondState.generation, 2)
-      XCTAssertGreaterThan(secondState.generation, firstState.generation)
+      XCTAssertEqual(rotatedState.generation, 2)
+      XCTAssertEqual(expiredState.generation, 3)
+      XCTAssertEqual(secondState.generation, 4)
+      XCTAssertGreaterThan(secondState.generation, expiredState.generation)
     }
 
     func testWindowsProductionRemoteDeliveryUsesSSHAndSecureStateInput() throws {

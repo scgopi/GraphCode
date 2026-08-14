@@ -672,7 +672,7 @@ import Foundation
         Self.teardown(entry)
         _ = try? entry.store.removeIfMatches(entry.state)
         let replacement = try startEntry(
-          authority: authority, store: entry.store, generation: entry.state.generation + 1)
+          authority: authority, store: entry.store, after: entry.state.generation)
         entries[key] = replacement
         return replacement.state.remoteBridgeState()
       }
@@ -680,12 +680,8 @@ import Foundation
       let store = try WindowsRemoteBridgeStateStore(
         url: Self.stateURL(authority: authority, supportDirectory: supportDirectory))
       let previous = try? store.read()
-      let generationStore = try WindowsRemoteBridgeStateStore(
-        url: Self.generationURL(authority: authority, supportDirectory: supportDirectory),
-        lockURL: store.url)
-      let generation = try generationStore.reserveGeneration(after: previous?.generation ?? 0)
       let entry = try startEntry(
-        authority: authority, store: store, generation: generation)
+        authority: authority, store: store, after: previous?.generation ?? 0)
       entries[key] = entry
       return entry.state.remoteBridgeState()
     }
@@ -766,8 +762,12 @@ import Foundation
     private func startEntry(
       authority: WindowsSSHAuthority,
       store: WindowsRemoteBridgeStateStore,
-      generation: UInt64
+      after baseline: UInt64
     ) throws -> Entry {
+      let generationStore = try WindowsRemoteBridgeStateStore(
+        url: Self.generationURL(authority: authority, supportDirectory: supportDirectory),
+        lockURL: store.url)
+      let generation = try generationStore.reserveGeneration(after: baseline)
       var lastError: Error?
       for _ in 0..<4 {
         do {
@@ -847,9 +847,13 @@ import Foundation
       }
       let now = Date().timeIntervalSince1970
       guard current.expiresAt > now else { throw WindowsRemoteBridgeError.stateExpired }
+      let generationStore = try WindowsRemoteBridgeStateStore(
+        url: Self.generationURL(authority: entry.authority, supportDirectory: supportDirectory),
+        lockURL: entry.store.url)
+      let generation = try generationStore.reserveGeneration(after: current.generation)
       let next = RemoteBridgeWireState(
         daemonInstanceID: instanceID,
-        generation: current.generation + 1,
+        generation: generation,
         port: current.port,
         capability: Self.newCapability(),
         issuedAt: now,
