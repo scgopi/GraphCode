@@ -226,7 +226,7 @@ struct RemoteSessionLaunchTests {
   }
 
   @Test
-  func bridgeStateIsDeliveredAndRefreshesWithoutReinstallingTheShim() throws {
+  func windowsClientToMacOSRemoteDeliversBridgeStateToTheShim() throws {
     let state = RemoteBridgeWireState(
       daemonInstanceID: UUID(),
       generation: 4,
@@ -257,11 +257,22 @@ struct RemoteSessionLaunchTests {
   }
 
   @Test
-  func macOSShimSupersedesStaleWindowsBridgeStateWithUnixForwarding() {
+  func windowsClientToMacOSRemoteTriesBridgeBeforeUnixFallback() {
     let shim = RemoteGraphAccess.cliShimSource
-    #expect(shim.contains("sys.platform == \"darwin\""))
-    #expect(shim.contains("os.unlink(state_path)"))
+    #expect(shim.contains("if os.path.exists(state_path):"))
+    #expect(shim.contains("state = read_bridge_state(state_path)"))
+    #expect(shim.contains("if os.name != \"nt\":"))
+    #expect(!shim.contains("sys.platform == \"darwin\" and os.path.exists(state_path)"))
     #expect(shim.contains("socket.AF_UNIX"))
+  }
+
+  @Test
+  func macOSClientToMacOSRemoteSupersedesBridgeBeforeUnixForwarding() {
+    let script = RemoteSocketForwarder.forwardScript(
+      for: location, localSocketPath: "/Users/dev/.graphcode/graphcoded.sock")
+    #expect(script.contains("bridge-state.json"))
+    #expect(script.contains("bridge-state-generation"))
+    #expect(script.contains("graphcoded.sock"))
   }
 
   /// Decodes the installer fragment's base64 JSON manifest back into the delivered

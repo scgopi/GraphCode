@@ -55,7 +55,10 @@ public actor RemoteSocketForwarder {
     -> String
   {
     let prepare = location.sshCommandLine(
-      remoteCommand: "mkdir -p \"$HOME/.graphcode\" && rm -f \"$HOME/.graphcode/graphcoded.sock\""
+      remoteCommand: "mkdir -p \"$HOME/.graphcode\" && rm -f"
+        + " \"$HOME/.graphcode/graphcoded.sock\""
+        + " \"$HOME/.graphcode/bridge-state.json\""
+        + " \"$HOME/.graphcode/bridge-state-generation\""
         + " && printf %s \"$HOME\"")
     let forward = forwardCommandLine(for: location, localSocketPath: localSocketPath)
     return """

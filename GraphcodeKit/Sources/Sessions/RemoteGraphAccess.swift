@@ -182,8 +182,9 @@ public enum RemoteGraphAccess {
   }
 
   /// The remote `graphcode` CLI. It speaks `FramedMessageIO`'s framing and
-  /// `DaemonProtocol`'s JSON over either the authenticated loopback bridge or, when no
-  /// bridge state is present, the Unix socket `RemoteSocketForwarder` puts at the
+  /// `DaemonProtocol`'s JSON over the authenticated loopback bridge whenever valid
+  /// state can be reached. Only an absent, invalid, or unreachable bridge falls back
+  /// to the explicitly available Unix socket `RemoteSocketForwarder` puts at the
   /// canonical `~/.graphcode/graphcoded.sock`. `RemoteCLIShimTests` pins the wire
   /// contract by running this very source against a Swift-decoded socket.
   public static let cliShimSource = #"""
@@ -342,14 +343,7 @@ public enum RemoteGraphAccess {
             problem = None
             for attempt in range(DIAL_ATTEMPTS):
                 state_path = bridge_state_path()
-                if sys.platform == "darwin" and os.path.exists(state_path):
-                    # macOS owns the historical Unix-socket forward. A bridge state
-                    # left by a prior Windows delivery must never shadow that path.
-                    try:
-                        os.unlink(state_path)
-                    except OSError:
-                        pass
-                if sys.platform != "darwin" and os.path.exists(state_path):
+                if os.path.exists(state_path):
                     sock = None
                     try:
                         state = read_bridge_state(state_path)
@@ -372,10 +366,14 @@ public enum RemoteGraphAccess {
                         if sock is not None:
                             sock.close()
                         problem = error
-                        if getattr(error, "errno", None) not in RETRYABLE_DIAL_ERRNOS:
-                            if os.name == "nt":
-                                break
-                if sys.platform == "darwin" or os.name != "nt" or not os.path.exists(state_path):
+                        if os.name == "nt" and getattr(
+                                error, "errno", None) not in RETRYABLE_DIAL_ERRNOS:
+                            break
+                # A Unix socket is a deliberately explicit fallback. Windows hosts
+                # cannot use the macOS forwarding path, so a missing or broken bridge
+                # state remains unavailable there rather than silently using another
+                # transport.
+                if os.name != "nt":
                     path = socket_path()
                     if os.path.exists(path):
                         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
