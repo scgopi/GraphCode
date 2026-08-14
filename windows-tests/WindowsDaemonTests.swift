@@ -122,19 +122,61 @@ final class WindowsDaemonTests: XCTestCase {
           "graphcode-running-rotation-\(UUID().uuidString)", isDirectory: true)
       defer { try? FileManager.default.removeItem(at: root) }
       let environment = [SupportDirectory.environmentKey: root.path]
-      let lock = try WindowsDaemonInstanceLock(environment: environment)
-      let firstPipe = try WindowsNamedPipeEndpoint.name(environment: environment)
-      let taskName = try WindowsNamedPipeEndpoint.taskName(environment: environment)
       let secret = root.appendingPathComponent(".graphcode-rendezvous.secret")
+      let taskName = try WindowsNamedPipeEndpoint.taskName(environment: environment)
+      let firstPipe = try WindowsNamedPipeEndpoint.name(environment: environment)
+      let lock = try WindowsDaemonInstanceLock(environment: environment)
+      XCTAssertTrue(firstPipe.hasPrefix("\\\\.\\pipe\\graphcode-"))
+      XCTAssertTrue(FileManager.default.fileExists(atPath: secret.path))
       try FileManager.default.removeItem(at: secret)
       try Data("invalid-secret".utf8).write(to: secret)
 
-      let secondPipe = try WindowsNamedPipeEndpoint.name(environment: environment)
-      XCTAssertNotEqual(firstPipe, secondPipe)
+      do {
+        _ = try WindowsNamedPipeEndpoint.name(environment: environment)
+        XCTFail("active daemon secret was rotated")
+      } catch {
+        XCTAssertEqual(error as? WindowsPipeError, .rendezvousSecretInUse)
+      }
       XCTAssertEqual(taskName, try WindowsNamedPipeEndpoint.taskName(environment: environment))
       XCTAssertThrowsError(try WindowsDaemonInstanceLock(environment: environment)) { error in
         XCTAssertEqual(error as? WindowsPipeError, .instanceAlreadyRunning)
       }
+      withExtendedLifetime(lock) {}
+    }
+
+    func testRendezvousRotationWhileDaemonRunningKeepsExistingClientConnected() async throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+          "graphcode-running-client-\(UUID().uuidString)", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      let environment = [SupportDirectory.environmentKey: root.path]
+      let pipeName = try WindowsNamedPipeEndpoint.name(environment: environment)
+      let lock = try WindowsDaemonInstanceLock(environment: environment)
+      let listener = try WindowsNamedPipeListener(pipeName: pipeName)
+      defer { Task { try? await listener.close() } }
+      let server = Task {
+        let connection = try await listener.accept()
+        let frame = try await connection.receiveFrame()
+        try await connection.sendFrame(frame)
+        try await connection.close()
+      }
+      let client = try WindowsNamedPipeClient.connect(to: pipeName)
+      let secret = root.appendingPathComponent(".graphcode-rendezvous.secret")
+      try FileManager.default.removeItem(at: secret)
+      try Data("invalid-secret".utf8).write(to: secret)
+
+      do {
+        _ = try WindowsNamedPipeEndpoint.name(environment: environment)
+        XCTFail("active daemon secret was rotated")
+      } catch {
+        XCTAssertEqual(error as? WindowsPipeError, .rendezvousSecretInUse)
+      }
+      let payload = Data("still-connected".utf8)
+      try await client.sendFrame(payload)
+      let received = try await client.receiveFrame()
+      XCTAssertEqual(received, payload)
+      try await client.close()
+      try await server.value
       withExtendedLifetime(lock) {}
     }
 
@@ -445,6 +487,21 @@ final class WindowsDaemonTests: XCTestCase {
       XCTAssertEqual(
         try Data(contentsOf: destination.appendingPathComponent("graphcode.exe")),
         Data("cli".utf8))
+    }
+
+    func testWindowsBootstrapRequiresMatchingEndpointGeneration() {
+      XCTAssertTrue(
+        DaemonBootstrap.endpointGenerationIsCurrent(
+          current: "generation-a", installed: "generation-a"))
+      XCTAssertFalse(
+        DaemonBootstrap.endpointGenerationIsCurrent(
+          current: "generation-b", installed: "generation-a"))
+      XCTAssertFalse(
+        DaemonBootstrap.endpointGenerationIsCurrent(
+          current: nil, installed: "generation-a"))
+      XCTAssertFalse(
+        DaemonBootstrap.endpointGenerationIsCurrent(
+          current: "generation-a", installed: nil))
     }
 
     func testWindowsTransportRoundTripsPartialFrameOperations() async throws {

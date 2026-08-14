@@ -219,6 +219,7 @@ public enum DaemonBootstrap {
 
   private static let helpers = ["graphcoded.exe", "graphcode.exe"]
   private static let versionFile = ".graphcode-package.version"
+  private static let endpointGenerationFile = ".graphcode-endpoint-generation"
 
   public static func installIfNeeded() -> Outcome {
     guard let bundled = bundledHelperDirectory(in: .main) else {
@@ -233,25 +234,27 @@ public enum DaemonBootstrap {
       let status = try awaitBlocking { try await manager.status() }
       let processRunning = manager.isDaemonProcessRunning()
       let launcherCurrent = manager.launcherIsCurrent()
+      let currentEndpointGeneration = try? WindowsNamedPipeEndpoint.generation()
+      let endpointGenerationCurrent = Self.endpointGenerationIsCurrent(
+        current: currentEndpointGeneration,
+        installed: installedEndpointGeneration(in: destination))
       let installedCurrent =
         installedPackageVersion(in: destination) == packageVersion
         && helpersInstalled(in: destination)
       if installedCurrent, !processRunning {
         if status == .running {
           // A stale scheduler state must not suppress a restart.
-          try awaitBlocking {
-            try await manager.installAndStart()
-          }
+          try prepareAndStart(manager, destination: destination)
           return .installed
         }
         if status == .stopped || status == .notInstalled {
-          try awaitBlocking {
-            try await manager.installAndStart()
-          }
+          try prepareAndStart(manager, destination: destination)
           return .installed
         }
       }
-      if installedCurrent, status == .running, processRunning, launcherCurrent {
+      if installedCurrent, status == .running, processRunning, launcherCurrent,
+        endpointGenerationCurrent
+      {
         return .upToDate
       }
 
@@ -270,8 +273,12 @@ public enum DaemonBootstrap {
         }
       }
 
+      let endpointGeneration = try WindowsNamedPipeEndpoint.generation()
       let transaction = try stageAndSwitch(
-        from: bundled, to: destination, version: packageVersion)
+        from: bundled,
+        to: destination,
+        version: packageVersion,
+        endpointGeneration: endpointGeneration)
       do {
         try awaitBlocking {
           try await manager.installAndStart()
@@ -347,6 +354,31 @@ public enum DaemonBootstrap {
     ).trimmingCharacters(in: .whitespacesAndNewlines)
   }
 
+  static func installedEndpointGeneration(in directory: URL) -> String? {
+    try? String(
+      contentsOf: directory.appendingPathComponent(endpointGenerationFile),
+      encoding: .utf8
+    ).trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  static func endpointGenerationIsCurrent(current: String?, installed: String?) -> Bool {
+    guard let current, let installed else { return false }
+    return current == installed
+  }
+
+  private static func prepareAndStart(
+    _ manager: WindowsStartupManager,
+    destination: URL
+  ) throws {
+    let generation = try WindowsNamedPipeEndpoint.generation()
+    try Data(generation.utf8).write(
+      to: destination.appendingPathComponent(endpointGenerationFile),
+      options: .atomic)
+    try awaitBlocking {
+      try await manager.installAndStart()
+    }
+  }
+
   /// Stages and switches a complete versioned package. The returned transaction
   /// keeps the old package until the new daemon has started successfully.
   static func installBundledFiles(
@@ -367,6 +399,7 @@ public enum DaemonBootstrap {
     from bundled: URL,
     to destination: URL,
     version: String,
+    endpointGeneration: String? = nil,
     failAfterCopy: Int? = nil
   ) throws -> PackageSwitch {
     let fileManager = FileManager.default
@@ -398,6 +431,10 @@ public enum DaemonBootstrap {
     }
     try Data(version.utf8).write(
       to: staging.appendingPathComponent(versionFile), options: .atomic)
+    if let endpointGeneration {
+      try Data(endpointGeneration.utf8).write(
+        to: staging.appendingPathComponent(endpointGenerationFile), options: .atomic)
+    }
 
     let backup = parent.appendingPathComponent(
       ".graphcode-rollback-\(UUID().uuidString)", isDirectory: true)
@@ -476,6 +513,9 @@ public enum DaemonBootstrap {
         where code == UInt32(truncatingIfNeeded: ERROR_PIPE_BUSY)
           || code == UInt32(truncatingIfNeeded: ERROR_SEM_TIMEOUT)
       {
+        try await Task.sleep(for: .milliseconds(50))
+        continue
+      } catch WindowsPipeError.rendezvousSecretInUse {
         try await Task.sleep(for: .milliseconds(50))
         continue
       }

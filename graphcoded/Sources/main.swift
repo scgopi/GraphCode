@@ -3,6 +3,20 @@ import GraphcodeKit
 
 #if os(Windows)
   SupportDirectory.prepare()
+  let endpointName: String = {
+    do {
+      return try WindowsNamedPipeEndpoint.name()
+    } catch {
+      FileHandle.standardError.write(Data("graphcoded: \(error)\n".utf8))
+      exit(1)
+    }
+  }()
+  do {
+    try WindowsNamedPipeEndpoint.recordActiveGeneration()
+  } catch {
+    FileHandle.standardError.write(Data("graphcoded: \(error)\n".utf8))
+    exit(1)
+  }
   let instanceLock: WindowsDaemonInstanceLock = {
     do {
       return try WindowsDaemonInstanceLock()
@@ -31,7 +45,7 @@ import GraphcodeKit
   let replayCleanupTask = replayStore.startCleanup()
   let listener: WindowsNamedPipeListener = {
     do {
-      return try WindowsNamedPipeListener()
+      return try WindowsNamedPipeListener(pipeName: endpointName)
     } catch {
       FileHandle.standardError.write(Data("graphcoded: \(error)\n".utf8))
       exit(1)

@@ -14,6 +14,7 @@ import Foundation
     case invalidFrame
     case serverIdentityRejected
     case instanceAlreadyRunning
+    case rendezvousSecretInUse
 
     static func isPeerDisconnectCode(_ code: UInt32) -> Bool {
       [
@@ -144,17 +145,32 @@ import Foundation
 
   private enum WindowsRendezvousSecret {
     static let fileName = ".graphcode-rendezvous.secret"
+    static let activeGenerationFileName = ".graphcode-active-generation"
     static let byteCount = 32
 
-    static func loadOrCreate(directory: URL, sid: String) throws -> Data {
+    static func loadOrCreate(
+      directory: URL,
+      sid: String,
+      stableLockName: String? = nil
+    ) throws -> Data {
       try FileManager.default.createDirectory(
         at: directory, withIntermediateDirectories: true)
       let file = directory.appendingPathComponent(fileName)
       if FileManager.default.fileExists(atPath: file.path) {
         if let existing = try? validatedSecret(at: file, sid: sid) {
+          if let stableLockName, isMutexHeld(named: stableLockName) {
+            guard activeGeneration(in: directory) == GraphcodeSHA256.hex(existing) else {
+              throw WindowsPipeError.rendezvousSecretInUse
+            }
+          }
           return existing
         }
+        if let stableLockName, isMutexHeld(named: stableLockName) {
+          throw WindowsPipeError.rendezvousSecretInUse
+        }
         try rotateInvalidSecret(at: file)
+      } else if let stableLockName, isMutexHeld(named: stableLockName) {
+        throw WindowsPipeError.rendezvousSecretInUse
       }
       do {
         return try createSecret(at: file, sid: sid)
@@ -162,8 +178,39 @@ import Foundation
         where code == UInt32(truncatingIfNeeded: ERROR_FILE_EXISTS)
         || code == UInt32(truncatingIfNeeded: ERROR_ALREADY_EXISTS)
       {
-        return try validatedSecret(at: file, sid: sid)
+        do {
+          return try validatedSecret(at: file, sid: sid)
+        } catch {
+          if let stableLockName, isMutexHeld(named: stableLockName) {
+            throw WindowsPipeError.rendezvousSecretInUse
+          }
+          throw error
+        }
       }
+    }
+
+    private static func isMutexHeld(named name: String) -> Bool {
+      let handle = withWideString(name) {
+        OpenMutexW(DWORD(SYNCHRONIZE), false, $0)
+      }
+      guard let handle else {
+        return GetLastError() != ERROR_FILE_NOT_FOUND
+      }
+      _ = CloseHandle(handle)
+      return true
+    }
+
+    static func activeGeneration(in directory: URL) -> String? {
+      try? String(
+        contentsOf: directory.appendingPathComponent(activeGenerationFileName),
+        encoding: .utf8
+      ).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func recordActiveGeneration(directory: URL, generation: String) throws {
+      try Data(generation.utf8).write(
+        to: directory.appendingPathComponent(activeGenerationFileName),
+        options: .atomic)
     }
 
     static func validatedSecret(at file: URL, sid: String) throws -> Data {
@@ -249,8 +296,12 @@ import Foundation
         environment: environment, homeDirectory: homeDirectory)
       let configuredSupport = SupportDirectory.configuredURL(
         environment: environment, homeDirectory: homeDirectory)
+      let stableLockName = WindowsDaemonInstanceLock.name(
+        sid: stable.sid, supportHash: stable.supportHash)
       let secret = try WindowsRendezvousSecret.loadOrCreate(
-        directory: configuredSupport, sid: stable.sid)
+        directory: configuredSupport,
+        sid: stable.sid,
+        stableLockName: stableLockName)
       return (stable.sid, stable.supportHash, GraphcodeSHA256.hex(secret))
     }
 
@@ -348,11 +399,7 @@ import Foundation
       environment: [String: String] = ProcessInfo.processInfo.environment,
       homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) throws -> String {
-      if let override = environment.first(where: {
-        $0.key.caseInsensitiveCompare(DaemonSocketPath.environmentKey) == .orderedSame
-      })?.value.trimmingCharacters(in: .whitespacesAndNewlines),
-        override.hasPrefix("\\\\.\\pipe\\")
-      {
+      if let override = pipeOverride(in: environment) {
         return override
       }
 
@@ -368,6 +415,46 @@ import Foundation
     ) throws -> String {
       try WindowsNamedPipeIdentity.taskName(
         environment: environment, homeDirectory: homeDirectory)
+    }
+
+    public static func generation(
+      environment: [String: String] = ProcessInfo.processInfo.environment,
+      homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) throws -> String {
+      if pipeOverride(in: environment) != nil {
+        return "override"
+      }
+      return try WindowsNamedPipeIdentity.values(
+        environment: environment, homeDirectory: homeDirectory
+      ).rendezvousHash
+    }
+
+    public static func recordActiveGeneration(
+      environment: [String: String] = ProcessInfo.processInfo.environment,
+      homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) throws {
+      if pipeOverride(in: environment) != nil {
+        return
+      }
+      let support = SupportDirectory.configuredURL(
+        environment: environment, homeDirectory: homeDirectory)
+      let generation = try WindowsNamedPipeIdentity.values(
+        environment: environment, homeDirectory: homeDirectory
+      ).rendezvousHash
+      try WindowsRendezvousSecret.recordActiveGeneration(
+        directory: support, generation: generation)
+    }
+
+    private static func pipeOverride(in environment: [String: String]) -> String? {
+      guard
+        let value = environment.first(where: {
+          $0.key.caseInsensitiveCompare(DaemonSocketPath.environmentKey) == .orderedSame
+        })?.value.trimmingCharacters(in: .whitespacesAndNewlines),
+        value.hasPrefix("\\\\.\\pipe\\")
+      else {
+        return nil
+      }
+      return value
     }
 
     static func taskName(sid: String, supportHash: String, rendezvousHash: String) -> String {
