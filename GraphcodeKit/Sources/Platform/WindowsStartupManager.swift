@@ -11,24 +11,29 @@ import Foundation
     public let supportDirectory: URL
     public let taskName: String
     public let launcherURL: URL
+    private let pipeOverride: String?
     private let runner: any ProcessRunner
 
     public init(
       daemonURL: URL = SupportDirectory.binDirectory.appendingPathComponent("graphcoded.exe"),
       taskName: String? = nil,
       supportDirectory: URL? = nil,
+      environment: [String: String] = ProcessInfo.processInfo.environment,
       runner: any ProcessRunner = FoundationProcessRunner()
     ) throws {
       self.daemonURL = daemonURL
-      self.supportDirectory =
+      let resolvedSupportDirectory =
         supportDirectory
         ?? SupportDirectory.configuredURL(
-          environment: ProcessInfo.processInfo.environment,
+          environment: environment,
           homeDirectory: FileManager.default.homeDirectoryForCurrentUser)
+      self.supportDirectory = resolvedSupportDirectory
+      self.pipeOverride = try WindowsNamedPipeEndpoint.normalizedPipeName(
+        environment: environment)
       self.taskName =
         try taskName
         ?? WindowsNamedPipeEndpoint.taskName(
-          supportDirectory: self.supportDirectory)
+          supportDirectory: resolvedSupportDirectory)
       self.launcherURL = daemonURL.deletingLastPathComponent()
         .appendingPathComponent("graphcoded-launcher.cmd")
       self.runner = runner
@@ -227,7 +232,8 @@ import Foundation
         withIntermediateDirectories: true)
       try Self.launcherContents(
         daemonURL: daemonURL,
-        supportDirectory: supportDirectory
+        supportDirectory: supportDirectory,
+        pipeOverride: pipeOverride
       ).write(to: launcherURL, atomically: true, encoding: .utf8)
     }
 
@@ -240,20 +246,31 @@ import Foundation
       return contents
         == Self.launcherContents(
           daemonURL: daemonURL,
-          supportDirectory: supportDirectory)
+          supportDirectory: supportDirectory,
+          pipeOverride: pipeOverride)
     }
 
-    static func launcherContents(daemonURL: URL, supportDirectory: URL) -> String {
+    static func launcherContents(
+      daemonURL: URL,
+      supportDirectory: URL,
+      pipeOverride: String? = nil
+    ) -> String {
       let daemonPath = batchLiteral(daemonURL.path.replacingOccurrences(of: "/", with: "\\"))
       let supportPath = batchLiteral(
         supportDirectory.path.replacingOccurrences(of: "/", with: "\\"))
-      return """
-        @echo off
-        setlocal DisableDelayedExpansion
-        set "GRAPHCODE_SUPPORT_DIR=\(supportPath)"
-        "\(daemonPath)" %*
-        exit /b %ERRORLEVEL%
-        """.replacingOccurrences(of: "\n", with: "\r\n") + "\r\n"
+      var lines = [
+        "@echo off",
+        "setlocal DisableDelayedExpansion",
+        "set \"GRAPHCODE_SUPPORT_DIR=\(supportPath)\"",
+      ]
+      if let pipeOverride {
+        lines.append("set \"GRAPHCODE_SOCKET=\(batchLiteral(pipeOverride))\"")
+      }
+      lines.append(contentsOf: [
+        "\"\(daemonPath)\" %*",
+        "exit /b %ERRORLEVEL%",
+      ])
+      return lines.joined(separator: "\r\n") + "\r\n"
     }
 
     private static func batchLiteral(_ value: String) -> String {

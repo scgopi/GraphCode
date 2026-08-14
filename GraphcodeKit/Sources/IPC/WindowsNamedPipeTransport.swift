@@ -12,6 +12,7 @@ import Foundation
     case timedOut
     case writeOutcomeUnknown
     case invalidFrame
+    case invalidPipeName
     case serverIdentityRejected
     case instanceAlreadyRunning
     case rendezvousSecretInUse
@@ -399,7 +400,7 @@ import Foundation
       environment: [String: String] = ProcessInfo.processInfo.environment,
       homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) throws -> String {
-      if let override = pipeOverride(in: environment) {
+      if let override = try normalizedPipeName(environment: environment) {
         return override
       }
 
@@ -421,8 +422,8 @@ import Foundation
       environment: [String: String] = ProcessInfo.processInfo.environment,
       homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) throws -> String {
-      if pipeOverride(in: environment) != nil {
-        return "override"
+      if let override = try normalizedPipeName(environment: environment) {
+        return GraphcodeSHA256.hex(Data(override.utf8))
       }
       return try WindowsNamedPipeIdentity.values(
         environment: environment, homeDirectory: homeDirectory
@@ -433,7 +434,7 @@ import Foundation
       environment: [String: String] = ProcessInfo.processInfo.environment,
       homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) throws {
-      if pipeOverride(in: environment) != nil {
+      if try normalizedPipeName(environment: environment) != nil {
         return
       }
       let support = SupportDirectory.configuredURL(
@@ -445,16 +446,47 @@ import Foundation
         directory: support, generation: generation)
     }
 
-    private static func pipeOverride(in environment: [String: String]) -> String? {
-      guard
-        let value = environment.first(where: {
-          $0.key.caseInsensitiveCompare(DaemonSocketPath.environmentKey) == .orderedSame
-        })?.value.trimmingCharacters(in: .whitespacesAndNewlines),
-        value.hasPrefix("\\\\.\\pipe\\")
-      else {
+    /// Returns the canonical Windows pipe override, or `nil` when no override
+    /// was supplied. The canonical form makes equivalent case/whitespace
+    /// spellings share one endpoint generation.
+    public static func normalizedPipeName(
+      environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> String? {
+      let rawValue: String?
+      if let exact = environment[DaemonSocketPath.environmentKey] {
+        rawValue = exact
+      } else {
+        rawValue = environment.keys
+          .sorted()
+          .first(where: {
+            $0.caseInsensitiveCompare(DaemonSocketPath.environmentKey) == .orderedSame
+          })
+          .flatMap { environment[$0] }
+      }
+      guard let rawValue else {
         return nil
       }
-      return value
+      let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+      let prefix = "\\\\.\\pipe\\"
+      guard
+        value.range(of: prefix, options: [.caseInsensitive, .anchored]) != nil
+      else {
+        throw WindowsPipeError.invalidPipeName
+      }
+      let suffix = String(value.dropFirst(prefix.count))
+      guard
+        !suffix.isEmpty,
+        suffix.utf16.count <= 256,
+        suffix.unicodeScalars.allSatisfy({
+          $0.value >= 0x20
+            && $0.value != 0x5C
+            && $0.value != 0x2F
+            && $0.value != 0x22
+        })
+      else {
+        throw WindowsPipeError.invalidPipeName
+      }
+      return prefix + suffix.lowercased()
     }
 
     static func taskName(sid: String, supportHash: String, rendezvousHash: String) -> String {

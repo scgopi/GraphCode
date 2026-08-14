@@ -268,6 +268,159 @@ final class WindowsDaemonTests: XCTestCase {
           .trimmingCharacters(in: .whitespacesAndNewlines)
           .replacingOccurrences(of: "\\", with: "/"),
         support.path.replacingOccurrences(of: "\\", with: "/"))
+      XCTAssertFalse(
+        WindowsStartupManager.launcherContents(
+          daemonURL: daemon,
+          supportDirectory: support
+        )
+        .contains("GRAPHCODE_SOCKET"))
+    }
+
+    func testWindowsScheduledTaskLauncherPersistsCustomPipeAndReconnects() async throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("graphcode-task-pipe-\(UUID().uuidString)", isDirectory: true)
+      let support = root.appendingPathComponent("custom support", isDirectory: true)
+      let bin = support.appendingPathComponent("bin", isDirectory: true)
+      let daemon = bin.appendingPathComponent("probe.cmd")
+      let marker = root.appendingPathComponent("environment.txt")
+      let requestedPipe = "\\\\.\\PIPE\\GraphCode-Custom-\(UUID().uuidString)"
+      let environment = [
+        SupportDirectory.environmentKey: support.path,
+        DaemonSocketPath.environmentKey: requestedPipe,
+      ]
+      defer { try? FileManager.default.removeItem(at: root) }
+      try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+      let markerPath = marker.path.replacingOccurrences(of: "/", with: "\\")
+      try """
+      @echo off
+      >"\(markerPath)" echo %GRAPHCODE_SUPPORT_DIR%
+      >>"\(markerPath)" echo %GRAPHCODE_SOCKET%
+      """.replacingOccurrences(of: "\n", with: "\r\n")
+        .write(to: daemon, atomically: true, encoding: .utf8)
+
+      let normalizedPipe = try XCTUnwrap(
+        WindowsNamedPipeEndpoint.normalizedPipeName(environment: environment))
+      let manager = try WindowsStartupManager(
+        daemonURL: daemon,
+        supportDirectory: support,
+        environment: environment,
+        runner: RecordingProcessRunner())
+      try await manager.installAndStart()
+      XCTAssertTrue(manager.launcherIsCurrent())
+      let launcher = try String(contentsOf: manager.launcherURL, encoding: .utf8)
+      XCTAssertTrue(
+        launcher.contains("set \"GRAPHCODE_SOCKET=\(normalizedPipe)\""))
+
+      let shell = WindowsShellStrategy()
+      let invocation = try shell.invocation(
+        executable: manager.launcherURL,
+        arguments: [],
+        workingDirectory: nil,
+        environment: [:])
+      let result = try await FoundationProcessRunner().run(invocation.request)
+      XCTAssertEqual(result.exitCode, 0)
+      let environmentLines = try String(contentsOf: marker, encoding: .utf8)
+        .split(whereSeparator: \.isNewline)
+        .map(String.init)
+      XCTAssertEqual(environmentLines.count, 2)
+      XCTAssertEqual(
+        environmentLines[0].replacingOccurrences(of: "\\", with: "/").lowercased(),
+        support.path.replacingOccurrences(of: "\\", with: "/").lowercased())
+      XCTAssertEqual(environmentLines[1], normalizedPipe)
+
+      let listener = try WindowsNamedPipeListener(pipeName: normalizedPipe)
+      defer { Task { try? await listener.close() } }
+      let server = Task {
+        let connection = try await listener.accept()
+        let payload = try await connection.receiveFrame()
+        try await connection.sendFrame(payload)
+        try await connection.close()
+        return payload
+      }
+      let client = try WindowsNamedPipeClient.connect(
+        to: try WindowsNamedPipeEndpoint.name(environment: environment))
+      let payload = Data("custom-pipe-reconnect".utf8)
+      try await client.sendFrame(payload)
+      let received = try await client.receiveFrame()
+      XCTAssertEqual(received, payload)
+      try await client.close()
+      let serverPayload = try await server.value
+      XCTAssertEqual(serverPayload, payload)
+    }
+
+    func testWindowsCustomPipeOverrideGenerationRotatesAndRefreshesLauncher() async throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("graphcode-custom-rotation-\(UUID().uuidString)", isDirectory: true)
+      let support = root.appendingPathComponent("support", isDirectory: true)
+      let daemon = support.appendingPathComponent("graphcoded.exe")
+      let firstEnvironment = [
+        SupportDirectory.environmentKey: support.path,
+        DaemonSocketPath.environmentKey: "\\\\.\\pipe\\GraphCode-Rotation-A",
+      ]
+      let secondEnvironment = [
+        SupportDirectory.environmentKey: support.path,
+        DaemonSocketPath.environmentKey: "  \\\\.\\PIPE\\GraphCode-Rotation-B  ",
+      ]
+      defer { try? FileManager.default.removeItem(at: root) }
+
+      let firstPipe = try XCTUnwrap(
+        WindowsNamedPipeEndpoint.normalizedPipeName(environment: firstEnvironment))
+      let secondPipe = try XCTUnwrap(
+        WindowsNamedPipeEndpoint.normalizedPipeName(environment: secondEnvironment))
+      let firstGeneration = try WindowsNamedPipeEndpoint.generation(
+        environment: firstEnvironment)
+      let secondGeneration = try WindowsNamedPipeEndpoint.generation(
+        environment: secondEnvironment)
+      XCTAssertEqual(firstPipe, "\\\\.\\pipe\\graphcode-rotation-a")
+      XCTAssertEqual(secondPipe, "\\\\.\\pipe\\graphcode-rotation-b")
+      XCTAssertEqual(
+        firstGeneration,
+        GraphcodeSHA256.hex(Data(firstPipe.utf8)))
+      XCTAssertEqual(
+        secondGeneration,
+        GraphcodeSHA256.hex(Data(secondPipe.utf8)))
+      XCTAssertNotEqual(firstGeneration, secondGeneration)
+      XCTAssertFalse(
+        DaemonBootstrap.endpointGenerationIsCurrent(
+          current: secondGeneration, installed: firstGeneration))
+
+      let firstManager = try WindowsStartupManager(
+        daemonURL: daemon,
+        supportDirectory: support,
+        environment: firstEnvironment,
+        runner: RecordingProcessRunner())
+      try await firstManager.installAndStart()
+      let secondManager = try WindowsStartupManager(
+        daemonURL: daemon,
+        supportDirectory: support,
+        environment: secondEnvironment,
+        runner: RecordingProcessRunner())
+      XCTAssertEqual(firstManager.taskName, secondManager.taskName)
+      XCTAssertFalse(secondManager.launcherIsCurrent())
+      try await secondManager.installAndStart()
+      XCTAssertTrue(secondManager.launcherIsCurrent())
+    }
+
+    func testWindowsCustomPipeOverrideRejectsInvalidValues() {
+      let invalidValues = [
+        "not-a-named-pipe",
+        "\\\\.\\pipe\\",
+        "\\\\.\\pipe\\contains/slash",
+        "\\\\.\\pipe\\contains\"quote",
+      ]
+      for value in invalidValues {
+        let environment = [DaemonSocketPath.environmentKey: value]
+        XCTAssertThrowsError(
+          try WindowsNamedPipeEndpoint.name(environment: environment)
+        ) { error in
+          XCTAssertEqual(error as? WindowsPipeError, .invalidPipeName)
+        }
+        XCTAssertThrowsError(
+          try WindowsNamedPipeEndpoint.generation(environment: environment)
+        ) { error in
+          XCTAssertEqual(error as? WindowsPipeError, .invalidPipeName)
+        }
+      }
     }
 
     func testFrameHeaderRemainsBoundedBeforeAllocation() throws {
