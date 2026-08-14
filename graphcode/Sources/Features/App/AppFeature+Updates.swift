@@ -147,6 +147,32 @@ extension AppFeature {
         state.availableUpdate = nil
         state.updateInstallProgress = 0
         return .run { send in
+          // The offer can be minutes or days old by the time Install is clicked, and a
+          // release cut in between made the flow absurd: the app installed the stale
+          // offer, relaunched, and immediately raised a fresh update alert for the
+          // version it could have installed the first time. So the channel is checked
+          // again at the moment of consent and whatever is newest *now* is what gets
+          // installed. A failed or empty re-check falls back to the offered release —
+          // the user asked for an install, and the slightly-stale version they were
+          // shown beats an error they weren't.
+          var chosen = update
+          let current = updateClient.currentVersion()
+          let fresher: AvailableUpdate? = await {
+            switch UpdateChannel.channel(
+              for: current, override: updateClient.channelOverride())
+            {
+            case .stable:
+              guard let release = try? await updateClient.latestRelease() else { return nil }
+              return AppUpdate.available(current: current, release: release)
+            case .beta:
+              guard let releases = try? await updateClient.allReleases() else { return nil }
+              return AppUpdate.available(current: current, releases: releases)
+            }
+          }()
+          if let fresher, fresher != chosen {
+            chosen = fresher
+            await send(.updateInstallResolved(fresher))
+          }
           // The client's progress callback is synchronous; the stream carries its
           // reports back into this effect so every send stays inside its lifetime.
           let (progress, reporter) = AsyncStream<Double>.makeStream()
@@ -156,17 +182,21 @@ extension AppFeature {
                 await send(.updateInstallProgressed(fraction))
               }
             }()
-            try await updateInstallClient.install(update.downloadURL) {
+            try await updateInstallClient.install(chosen.downloadURL) {
               reporter.yield($0)
             }
             reporter.finish()
             await pump
-            await send(.updateInstallFinished(.success(update.version)))
+            await send(.updateInstallFinished(.success(chosen.version)))
           } catch {
             reporter.finish()
             await send(.updateInstallFinished(.failure(error)))
           }
         }
+
+      case .updateInstallResolved(let update):
+        state.offeredUpdate = update
+        return .none
 
       case .updateInstallProgressed(let fraction):
         // Progress can land after the install already finished or failed; a bar that
