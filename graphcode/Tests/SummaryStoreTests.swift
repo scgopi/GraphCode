@@ -158,31 +158,28 @@ struct SummaryStoreTests {
 
   // MARK: - The setting
 
-  /// The producer is on for everyone, and *absent* is not *off*.
+  /// The producer is opt-in, and a choice already made is kept.
   ///
-  /// It shipped off behind the word experimental and was watched on real loops through
-  /// three betas; a person opening a loop should now see what it is doing without being
-  /// told there is a switch first. A settings file written before the rail existed —
-  /// every file on every machine that never opened the setting — has no key at all, and
-  /// reading that as "off" would have left the feature switched off for exactly the
-  /// people who never chose either way.
+  /// It was on by default for exactly one release and is experimental again: a beat is a
+  /// claim about what an agent is trying to do, and a feature that makes claims on every
+  /// loop's behalf earns its default rather than being handed one. Absent means nobody
+  /// opted in; `true` in the file means somebody did — including anyone whose 0.1.37
+  /// install wrote the then-default out — and that survives the flip back.
   @Test
-  func theProducerIsOnForAnyoneWhoHasNotTurnedItOff() throws {
-    #expect(GraphcodeSettings().summarisesLoops == true)
+  func theProducerIsOffUntilSomeoneAsksForIt() throws {
+    #expect(GraphcodeSettings().summarisesLoops == false)
 
     let older = Data(
       """
       {"defaultBackend":"claudeCode","showsActivityStrip":true}
       """.utf8)
     let decoded = try JSONDecoder().decode(GraphcodeSettings.self, from: older)
-    #expect(decoded.summarisesLoops == true)
+    #expect(decoded.summarisesLoops == false)
     #expect(decoded.showsActivityStrip == true)
 
-    // And a person who actually switched it off keeps it off — the whole point of
-    // storing the choice rather than inferring it.
-    let refused = try JSONDecoder().decode(
-      GraphcodeSettings.self, from: Data(#"{"summarisesLoops":false}"#.utf8))
-    #expect(refused.summarisesLoops == false)
+    let chosen = try JSONDecoder().decode(
+      GraphcodeSettings.self, from: Data(#"{"summarisesLoops":true}"#.utf8))
+    #expect(chosen.summarisesLoops == true)
   }
 
   // MARK: - The optional model pass

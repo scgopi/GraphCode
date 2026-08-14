@@ -101,7 +101,9 @@ struct SettingsView: View {
 
       Section {
         Toggle("Show the activity strip", isOn: $model.settings.showsActivityStrip)
-        Toggle("Summarise what loops are doing", isOn: $model.settings.summarisesLoops)
+        Toggle(
+          "Summarise what loops are doing (experimental)",
+          isOn: $model.settings.summarisesLoops)
         Text(
           "What each loop is doing, at the top of its rail, read from the session's own "
             + "transcript. Costs nothing."
