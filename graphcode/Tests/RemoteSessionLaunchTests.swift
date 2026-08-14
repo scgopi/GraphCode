@@ -225,6 +225,28 @@ struct RemoteSessionLaunchTests {
     #expect(deliveredPaths(in: unbriefed) == ["~/.graphcode/bin/graphcode"])
   }
 
+  @Test
+  func bridgeStateIsDeliveredAndRefreshesWithoutReinstallingTheShim() throws {
+    let state = RemoteBridgeWireState(
+      daemonInstanceID: UUID(),
+      generation: 4,
+      port: 45_678,
+      capability: String(repeating: "a", count: 64),
+      issuedAt: 1_700_000_000,
+      expiresAt: 1_700_001_000)
+    let delivery = try #require(
+      ZmxSessionLauncher.remoteDeliveryScript(
+        forNode: nil, at: location, settings: GraphcodeSettings(), bridgeState: state))
+    #expect(deliveredPaths(in: delivery).contains("~/.graphcode/bridge-state.json"))
+    let ensure = try #require(
+      ZmxSessionLauncher.remoteEnsureInvocation(
+        forNode: LoopNode(
+          title: "Bridge", loopType: .goalBased, goal: GoalSpec(summary: "bridge")),
+        at: location, settings: GraphcodeSettings(), bridgeState: state))
+    #expect(ensure.joined(separator: " ").contains("bridge-state.json"))
+    #expect(ensure.joined(separator: " ").contains("cat ~/.graphcode/bridge-state.json"))
+  }
+
   /// Decodes the installer fragment's base64 JSON manifest back into the delivered
   /// paths — asserting on what actually lands rather than on encoding details.
   private func deliveredPaths(in script: String) -> [String] {

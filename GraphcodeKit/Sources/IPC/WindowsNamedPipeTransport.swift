@@ -54,7 +54,7 @@ import Foundation
     }
   }
 
-  private enum WindowsPipeSecurity {
+  enum WindowsPipeSecurity {
     static func descriptor(for sid: String) -> String {
       "D:P(A;;GA;;;\(sid))"
     }

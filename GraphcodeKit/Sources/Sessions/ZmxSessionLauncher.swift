@@ -23,6 +23,13 @@ import Foundation
 /// shell-quotes each argument, so `claude` received the literal `$(cat …)` text as its
 /// prompt instead of the prompt itself.
 public enum ZmxSessionLauncher {
+  #if os(Windows)
+    /// One bridge owner serves every remote project in this UI process. The bridge state is
+    /// per authority, so multiple hosts and projects remain isolated without duplicating
+    /// transport setup in the session launcher.
+    private static let windowsRemoteBridge: WindowsRemoteBridge? = try? WindowsRemoteBridge()
+  #endif
+
   /// `zmx kill <name>` is a no-op (with a stderr note) when nothing matches, so this is
   /// safe for a node whose session was never started or has already exited.
   static func killArguments(forNode node: LoopNode) -> [String] {
@@ -786,7 +793,8 @@ public enum ZmxSessionLauncher {
   /// single shell costs.
   static func remoteEnsureInvocation(
     forNode node: LoopNode, at location: RemoteProjectLocation,
-    settings: GraphcodeSettings = GraphcodeSettingsStore.load()
+    settings: GraphcodeSettings = GraphcodeSettingsStore.load(),
+    bridgeState: RemoteBridgeWireState? = nil
   ) -> [String]? {
     guard
       let zmxArguments = arguments(
@@ -810,8 +818,11 @@ public enum ZmxSessionLauncher {
       node.backend == .claudeCode
       ? (PresenceHooks.remoteWriteFragment().map { $0 + "; " } ?? "") : ""
     let delivery =
-      remoteDeliveryScript(forNode: node, at: location, settings: settings)
+      remoteDeliveryScript(
+        forNode: node, at: location, settings: settings, bridgeState: bridgeState
+      )
       .map { $0 + "; " } ?? ""
+    let bridgeStateContent = bridgeState.flatMap(Self.bridgeStateJSON)
     let create = remoteCreateScript(
       forNode: node, freshRun: run, at: location, settings: settings)
     // The trust seed and the hooks file are genuinely create-only — a folder-trust
@@ -822,7 +833,8 @@ public enum ZmxSessionLauncher {
     // minute to rewrite files nothing will re-read is pure cost.
     let script =
       "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { "
-      + deliveryFragment(delivery, ifSessionMissing: check)
+      + deliveryFragment(
+        delivery, ifSessionMissing: check, bridgeStateContent: bridgeStateContent)
       + "\(check) >/dev/null 2>&1 || { " + trustSeed + hooksWrite
       + "\(create); }; }"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
@@ -843,7 +855,9 @@ public enum ZmxSessionLauncher {
   /// base64 per loop per minute once the sweep existed. The stamp splits the difference:
   /// a healthy tick costs one extra `zmx get` and a `cat` on the same host, and the
   /// delivery itself runs only when it has something new to say.
-  static func deliveryFragment(_ delivery: String, ifSessionMissing check: String) -> String {
+  static func deliveryFragment(
+    _ delivery: String, ifSessionMissing check: String, bridgeStateContent: String? = nil
+  ) -> String {
     guard !delivery.isEmpty else { return "" }
     let stamp = RemoteProjectLocation.shellQuoted(RemoteGraphAccess.cliShimStamp)
     // Tilde, unquoted, so the remote shell expands it — the same one constant the
@@ -855,8 +869,14 @@ public enum ZmxSessionLauncher {
     // missing session has to re-deliver whatever the stamp says: the create branch below
     // launches an argv naming the briefing, wake digest and prompt files, and every one
     // of them rides in this same fragment.
+    let bridgeChanged =
+      bridgeStateContent.map {
+        " || [ \"$(cat \(RemoteGraphAccess.bridgeStatePath) 2>/dev/null)\" != "
+          + RemoteProjectLocation.shellQuoted($0) + " ]"
+      } ?? ""
     return "if ! \(check) >/dev/null 2>&1 "
-      + "|| [ \"$(cat \(stampFile) 2>/dev/null)\" != \(stamp) ]; then "
+      + "|| [ \"$(cat \(stampFile) 2>/dev/null)\" != \(stamp) ]"
+      + bridgeChanged + "; then "
       + delivery + "fi; "
   }
 
@@ -922,9 +942,15 @@ public enum ZmxSessionLauncher {
   /// because the app's *attach* delivers too, before any node exists to have memory.
   /// Public for exactly that caller (`GhosttyTerminalView.remoteCommand`).
   public static func remoteDeliveryScript(
-    forNode node: LoopNode?, at location: RemoteProjectLocation, settings: GraphcodeSettings
+    forNode node: LoopNode?, at location: RemoteProjectLocation, settings: GraphcodeSettings,
+    bridgeState: RemoteBridgeWireState? = nil
   ) -> String? {
     var files = [RemoteGraphAccess.cliInstallPath: RemoteGraphAccess.cliShimSource]
+    if let bridgeState, let data = try? JSONEncoder().encode(bridgeState),
+      let content = String(data: data, encoding: .utf8)
+    {
+      files[RemoteGraphAccess.bridgeStatePath] = content
+    }
     if settings.briefsSessionsAboutTheGraph,
       let text = SessionBriefing.text(projectPath: location.projectPath)
     {
@@ -955,6 +981,11 @@ public enum ZmxSessionLauncher {
     return RemoteGraphAccess.installerScript(
       files: files,
       receipt: (path: RemoteGraphAccess.shimStampPath, content: RemoteGraphAccess.cliShimStamp))
+  }
+
+  private static func bridgeStateJSON(_ state: RemoteBridgeWireState) -> String? {
+    guard let data = try? JSONEncoder().encode(state) else { return nil }
+    return String(data: data, encoding: .utf8)
   }
 
   /// `quotedCommand`, except that arguments naming graphcode's own remote files —
@@ -1153,15 +1184,32 @@ public enum ZmxSessionLauncher {
     // A dial already in flight for this node is doing this job; a second one racing it
     // is how two `zmx run`s land on one session (`RemoteEnsureGate`).
     guard let lease = await RemoteEnsureGate.shared.begin(node.id) else { return }
-    // The forwarded socket is what makes the delivered CLI's dial land on this Mac's
-    // daemon — without it the shim's commands have nowhere to go. Kept alive per host,
-    // not per launch; see `RemoteSocketForwarder`.
-    await RemoteSocketForwarder.shared.ensureForwarding(to: location)
+    #if os(Windows)
+      guard
+        let bridge = windowsRemoteBridge,
+        let state = try? await bridge.ensureForwarding(authority: location.authority)
+      else {
+        await RemoteEnsureGate.shared.end(node.id, token: lease)
+        return
+      }
+      let bridgeState = RemoteBridgeWireState(remoteBridgeState: state)
+    #else
+      let bridgeState: RemoteBridgeWireState? = nil
+    #endif
+    // macOS keeps the historical Unix-socket forward alive per host. Windows instead
+    // established its authenticated loopback TCP bridge above; both paths leave the
+    // delivered shim with a local endpoint and keep transport details out of launch
+    // command construction.
+    #if !os(Windows)
+      await RemoteSocketForwarder.shared.ensureForwarding(to: location)
+    #endif
     // Create only, in one round-trip — see `remoteEnsureInvocation` for why the check
     // and the run must share a shell. A failure after the retries is the same posture
     // as the local path: no UI here, the node's state stays honest, opening the loop
     // retries.
-    if let ensure = remoteEnsureInvocation(forNode: node, at: location) {
+    if let ensure = remoteEnsureInvocation(
+      forNode: node, at: location, bridgeState: bridgeState
+    ) {
       _ = await runRemoteRetrying(ensure)
     }
     await RemoteEnsureGate.shared.end(node.id, token: lease)

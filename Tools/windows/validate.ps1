@@ -386,6 +386,7 @@ function Invoke-Task([string] $name) {
         (Join-Path $repoRoot "GraphcodeKit\Sources\SupportDirectory.swift"),
         (Join-Path $repoRoot "GraphcodeKit\Sources\ProjectPersistence.swift"),
         (Join-Path $repoRoot "GraphcodeKit\Sources\IPC\WindowsNamedPipeTransport.swift"),
+        (Join-Path $repoRoot "GraphcodeKit\Sources\IPC\WindowsRemoteBridge.swift"),
         (Join-Path $repoRoot "GraphcodeKit\Sources\IPC\DaemonConnectionChannel.swift"),
         (Join-Path $repoRoot "GraphcodeKit\Sources\IPC\DaemonSocketClient.swift"),
         (Join-Path $repoRoot "GraphcodeKit\Sources\IPC\DaemonSocketPath.swift"),

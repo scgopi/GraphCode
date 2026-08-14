@@ -253,6 +253,70 @@ final class WindowsDaemonTests: XCTestCase {
           rendezvousHash: "0123456789abcdef0123456789abcdef"))
     }
 
+    func testRemoteBridgeWireStateRejectsNonLoopbackAndInvalidCapabilities() throws {
+      let state = RemoteBridgeWireState(
+        daemonInstanceID: UUID(),
+        generation: 1,
+        host: "0.0.0.0",
+        port: 45_678,
+        capability: String(repeating: "a", count: 64),
+        issuedAt: 1_700_000_000,
+        expiresAt: 1_700_001_000)
+      XCTAssertThrowsError(try state.validated(now: 1_700_000_100)) { error in
+        XCTAssertEqual(error as? RemoteBridgeWireState.ValidationError, .invalidHost)
+      }
+
+      let invalid = RemoteBridgeWireState(
+        daemonInstanceID: UUID(),
+        generation: 1,
+        port: 45_678,
+        capability: String(repeating: "A", count: 64),
+        issuedAt: 1_700_000_000,
+        expiresAt: 1_700_001_000)
+      XCTAssertThrowsError(try invalid.validated(now: 1_700_000_100)) { error in
+        XCTAssertEqual(
+          error as? RemoteBridgeWireState.ValidationError, .invalidCapability)
+      }
+    }
+
+    func testRemoteBridgeListenerBindsLoopbackAndUsesAHighEphemeralPort() throws {
+      let listener = try WindowsRemoteBridgeListener(
+        pipeName: "\\\\.\\pipe\\graphcode-test-\(UUID().uuidString)",
+        state: { nil })
+      XCTAssertGreaterThan(listener.port, 0)
+      listener.start()
+      listener.stop()
+    }
+
+    func testRemoteBridgeStateStoreUsesCompareAndMatchCleanup() throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("graphcode-bridge-state-\(UUID().uuidString)", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      let state = RemoteBridgeWireState(
+        daemonInstanceID: UUID(),
+        generation: 1,
+        port: 45_678,
+        capability: String(repeating: "b", count: 64),
+        issuedAt: 1_700_000_000,
+        expiresAt: 1_700_001_000)
+      let next = RemoteBridgeWireState(
+        daemonInstanceID: state.daemonInstanceID,
+        generation: 2,
+        port: state.port,
+        capability: String(repeating: "c", count: 64),
+        issuedAt: 1_700_000_100,
+        expiresAt: 1_700_001_100)
+      let store = try WindowsRemoteBridgeStateStore(
+        url: root.appendingPathComponent("bridge.json"))
+      try store.write(state)
+      XCTAssertEqual(try store.read(), state)
+      XCTAssertFalse(try store.writeIfMatches(nil, next))
+      XCTAssertTrue(try store.writeIfMatches(state, next))
+      XCTAssertFalse(try store.removeIfMatches(state))
+      XCTAssertTrue(try store.removeIfMatches(next))
+      XCTAssertFalse(FileManager.default.fileExists(atPath: store.url.path))
+    }
+
     func testWindowsScheduledTaskLauncherPreservesCustomSupportDirectory() async throws {
       let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("graphcode-task-env-\(UUID().uuidString)", isDirectory: true)
