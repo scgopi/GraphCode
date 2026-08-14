@@ -238,6 +238,10 @@ public enum CopilotSessionLog {
             forTool: name, arguments: data["arguments"] as? [String: Any] ?? [:])
         else { continue }
         builder.noteTool(phrase, at: at)
+      // Copilot marks its turn boundaries outright, which is why its presence reader was
+      // the one that never had to infer them.
+      case "assistant.turn_end":
+        builder.noteTurnEnd()
       default:
         continue
       }

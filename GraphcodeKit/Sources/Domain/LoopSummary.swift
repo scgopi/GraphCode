@@ -54,9 +54,19 @@ public struct SummaryBeat: Codable, Equatable, Sendable, Identifiable {
   public let text: String
   /// `"UsageProbe.swift · 3 files read"` — where the beat came from, one line, mono.
   public let evidence: String?
+  /// Whether the backend said the turn ended here — Claude Code's `stop_reason:
+  /// end_turn`, Copilot's `assistant.turn_end`, Codex's `task_complete`.
+  ///
+  /// The rail used to take that from `presence`, and presence is a *reading* — a hook
+  /// that may not have fired, a label that may be a poll behind. So a session that had
+  /// delivered its answer and gone quiet still wore `DOING NOW` over the word `THINKING`,
+  /// which is the one claim in the section that has to be true. The transcript says it
+  /// outright, in the same record the beat itself came from.
+  public let endsTurn: Bool
 
   public init(
-    id: String, at: Date, pass: Int, kind: BeatKind, text: String, evidence: String? = nil
+    id: String, at: Date, pass: Int, kind: BeatKind, text: String, evidence: String? = nil,
+    endsTurn: Bool = false
   ) {
     self.id = id
     self.at = at
@@ -64,6 +74,30 @@ public struct SummaryBeat: Codable, Equatable, Sendable, Identifiable {
     self.kind = kind
     self.text = text
     self.evidence = evidence
+    self.endsTurn = endsTurn
+  }
+
+  /// The same beat, with the backend's word that the turn stopped here.
+  func endingTurn() -> SummaryBeat {
+    SummaryBeat(
+      id: id, at: at, pass: pass, kind: kind, text: text, evidence: evidence, endsTurn: true)
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id, at, pass, kind, text, evidence, endsTurn
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decode(String.self, forKey: .id)
+    at = try container.decode(Date.self, forKey: .at)
+    pass = try container.decode(Int.self, forKey: .pass)
+    kind = try container.decode(BeatKind.self, forKey: .kind)
+    text = try container.decode(String.self, forKey: .text)
+    evidence = try container.decodeIfPresent(String.self, forKey: .evidence)
+    // Absent in every beat banked before the backends were asked — and "we were never
+    // told the turn ended" is exactly what `false` means.
+    endsTurn = try container.decodeIfPresent(Bool.self, forKey: .endsTurn) ?? false
   }
 }
 

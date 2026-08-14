@@ -23,6 +23,7 @@ struct SummaryBeatBuilder {
     var pass: Int
     var text: String?
     var phrases: [String] = []
+    var endsTurn = false
   }
 
   private var pass = 0
@@ -60,6 +61,22 @@ struct SummaryBeatBuilder {
   /// narration takes the first phrase as its own text: that is the tool call restated, not
   /// a summary invented over it, and it is exactly what `LoopNode.activity` has always put
   /// on the card.
+  /// The backend saying this turn is over: Claude Code's `stop_reason: end_turn`,
+  /// Copilot's `assistant.turn_end`, Codex's `task_complete`.
+  ///
+  /// Marks the beat the record belongs to — the open one, or the last closed one when the
+  /// record that ended the turn carried nothing a beat is made of (Claude stamps
+  /// `end_turn` on a bare thinking block too). Anything narrated afterwards opens a fresh
+  /// beat, which starts un-ended, so this cannot stick to a session that went back to
+  /// work.
+  mutating func noteTurnEnd() {
+    if open != nil {
+      open?.endsTurn = true
+    } else if let last = closed.indices.last {
+      closed[last] = closed[last].endingTurn()
+    }
+  }
+
   mutating func noteTool(_ phrase: String, at date: Date) {
     let clean = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !clean.isEmpty else { return }
@@ -81,7 +98,8 @@ struct SummaryBeatBuilder {
         pass: open.pass,
         kind: kind,
         text: text,
-        evidence: Self.evidence(kind: kind, phrases: open.phrases)))
+        evidence: Self.evidence(kind: kind, phrases: open.phrases),
+        endsTurn: open.endsTurn))
     self.open = nil
   }
 

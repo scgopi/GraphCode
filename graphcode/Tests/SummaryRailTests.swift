@@ -55,16 +55,18 @@ struct SummaryRailTests {
 
   private func claudeAssistant(
     text: String? = nil, tools: [(String, [String: Any])] = [], at seconds: Int,
-    isSidechain: Bool = false
+    isSidechain: Bool = false, stopReason: String? = nil
   ) throws -> String {
     var content: [[String: Any]] = []
     if let text { content.append(["type": "text", "text": text]) }
     for (name, input) in tools {
       content.append(["type": "tool_use", "name": name, "input": input, "id": "t\(name)"])
     }
+    var message: [String: Any] = ["role": "assistant", "content": content]
+    if let stopReason { message["stop_reason"] = stopReason }
     return try line([
       "type": "assistant", "timestamp": stamp(seconds), "isSidechain": isSidechain,
-      "message": ["role": "assistant", "content": content],
+      "message": message,
     ])
   }
 
@@ -177,6 +179,33 @@ struct SummaryRailTests {
     #expect(beats[0].kind == .editing)
     // The first *edit*, and a count of the edits — not of the greps that led to them.
     #expect(beats[0].evidence == "UsageProbe.swift · 2 edits")
+  }
+
+  /// A session that has answered is not still thinking, whatever presence says.
+  ///
+  /// Reported off a live loop: `DOING NOW` over the word `THINKING`, on an agent that had
+  /// delivered its final output minutes earlier. Presence is a reading — a hook that may
+  /// not have fired, a label a poll behind — and the transcript says it outright in the
+  /// same record the beat came from.
+  @Test
+  func theRecordThatEndsATurnSaysSoOnTheBeat() throws {
+    let root = try temporaryRoot("claude-endturn")
+    let url = try log(
+      [
+        try claudeUser("ship it", at: 0),
+        try claudeAssistant(
+          text: "Building the release.", tools: [("Bash", ["command": "make release"])], at: 1,
+          stopReason: "tool_use"),
+        try claudeToolResult("tBash", at: 2),
+        try claudeAssistant(text: "Shipped. 0.1.37-beta1 is live.", at: 3, stopReason: "end_turn"),
+      ], named: "session.jsonl", in: root)
+
+    let beats = ClaudeSessionLog.beats(inTranscriptAt: url)
+
+    #expect(beats.map(\.text) == ["Building the release", "Shipped. 0.1.37-beta1 is live"])
+    // Mid-turn, the model stopped only to make a call.
+    #expect(beats[0].endsTurn == false)
+    #expect(beats[1].endsTurn == true)
   }
 
   @Test

@@ -119,7 +119,13 @@ struct LoopSummaryPresentation: Equatable {
       evidence = current?.evidence
     }
 
-    isLive = node.presence?.presence == .busy && !node.isResolved
+    // **The transcript has the last word on whether the loop is still going.** Presence is
+    // a reading — a hook that may not have fired, a label a poll behind — and a beat whose
+    // own record says the turn ended is not something the session is still doing, whatever
+    // presence claims. Reported on a real session: `DOING NOW` over `THINKING`, on an
+    // agent that had delivered its answer and gone quiet.
+    isLive =
+      node.presence?.presence == .busy && !node.isResolved && current?.endsTurn != true
     elapsed = current.map { LoopCardPresentation.duration(now.timeIntervalSince($0.at)) }
     receding = summary.receding
     // Counted against every beat, including the current one, and clamped to the rows the
@@ -127,7 +133,11 @@ struct LoopSummaryPresentation: Equatable {
     // the current beat is not one of those. `LoopSummarySection` puts the leftover case —
     // only the now block is new — at the foot of the list, which is where it belongs.
     unseen = min(summary.unseenCount(since: seenBeatID), summary.beats.count)
-    passes = summary.passes.reversed()
+    // Oldest first, so the newest finished pass sits directly above the divider for the
+    // pass the loop is on — the same direction as the beats under it and the terminal
+    // beside it. Newest-first meant the rail's own history ran one way and everything
+    // else on the screen ran the other.
+    passes = summary.passes
     earlierPasses = summary.earlierPasses
     // The beat's own pass, which `LoopSummary.merge` has already put on the store's
     // absolute numbering; `currentPass` for a section that is all rollups and no beats.

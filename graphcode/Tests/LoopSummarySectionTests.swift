@@ -13,11 +13,12 @@ import Testing
 @Suite
 struct LoopSummarySectionTests {
   private func beat(
-    _ pass: Int, _ text: String, kind: BeatKind = .reading, at seconds: Int
+    _ pass: Int, _ text: String, kind: BeatKind = .reading, at seconds: Int,
+    endsTurn: Bool = false
   ) -> SummaryBeat {
     SummaryBeat(
       id: "p\(pass)-\(seconds)", at: Date(timeIntervalSince1970: Double(seconds)), pass: pass,
-      kind: kind, text: text)
+      kind: kind, text: text, endsTurn: endsTurn)
   }
 
   private func node(
@@ -76,6 +77,49 @@ struct LoopSummarySectionTests {
 
     let working = LoopSummaryPresentation(node: node(summary: summary), now: now)
     #expect(working.mode == .working)
+  }
+
+  /// The second fault reported from a live loop: `DOING NOW` over `THINKING`, on an agent
+  /// that had delivered its final output.
+  ///
+  /// Presence still said busy — it is a reading, and the hook behind it can be a poll
+  /// late or not have fired at all. The record the beat came from says the turn ended, and
+  /// that outranks it.
+  @Test
+  func aTurnTheTranscriptSaysIsOverIsNotStillHappening() {
+    let answered = LoopSummary(beats: [
+      beat(4, "Running the release build", at: 100),
+      beat(4, "Shipped. 0.1.37-beta1 is live", kind: .thinking, at: 900, endsTurn: true),
+    ])
+    // Presence is `.busy` on this node — the default in `node(…)` — and it loses.
+    let presentation = LoopSummaryPresentation(node: node(summary: answered), now: now)
+
+    #expect(presentation.mode == .working)
+    #expect(presentation.isLive == false)
+
+    // Mid-turn, with the same presence, it is live.
+    let working = LoopSummary(beats: [beat(4, "Running the release build", at: 900)])
+    #expect(LoopSummaryPresentation(node: node(summary: working), now: now).isLive == true)
+  }
+
+  /// Oldest at the top, so the newest finished pass sits against the divider for the pass
+  /// the loop is on — the direction the beats under it and the terminal beside it run.
+  @Test
+  func finishedPassesReadOldestFirst() {
+    let summary = LoopSummary(
+      beats: [beat(7, "Working on it", at: 900)],
+      passes: [
+        PassSummary(pass: 4, text: "four"), PassSummary(pass: 5, text: "five"),
+        PassSummary(pass: 6, text: "six"),
+      ], currentPass: 7)
+
+    let presentation = LoopSummaryPresentation(node: node(summary: summary), now: now)
+
+    #expect(presentation.passes.map(\.pass) == [4, 5, 6])
+    #expect(presentation.pass == 7)
+    // Six named passes is the cap, and everything before them is a number.
+    #expect(LoopSummary.maxPassSummaries == 6)
+    #expect(presentation.earlierPasses == 3)
   }
 
   /// The fault this caught in the field: an amber block and an `Answer it` button over a
