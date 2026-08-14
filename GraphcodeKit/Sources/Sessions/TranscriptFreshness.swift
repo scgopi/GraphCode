@@ -45,8 +45,24 @@ actor TranscriptFreshness {
     return true
   }
 
+  /// The remote twin: the modification time a remote transcript had when this node last
+  /// read it, as the remote `stat` printed it.
+  ///
+  /// A string rather than a `Date` on purpose — it is the other machine's word, sent back
+  /// unparsed on the next request so the remote shell can answer `unchanged` without
+  /// shipping a byte. Parsing it here would be inventing a comparison that only the host
+  /// that wrote it can make.
+  private var remoteStamps: [UUID: String] = [:]
+
+  func remoteStamp(forNode nodeID: UUID) -> String? { remoteStamps[nodeID] }
+
+  func recordRemoteStamp(_ stamp: String, forNode nodeID: UUID) {
+    remoteStamps[nodeID] = stamp
+  }
+
   /// Forgets a node, so a deleted loop doesn't hold a date forever.
   func forget(_ nodeID: UUID) {
     seen[nodeID] = nil
+    remoteStamps[nodeID] = nil
   }
 }

@@ -218,8 +218,13 @@ public enum CopilotSessionLog {
   }
 
   private static func builder(inLogAt url: URL) -> SummaryBeatBuilder {
+    builder(forLines: SummaryBeatBuilder.tailLines(of: url))
+  }
+
+  /// The same read over lines from anywhere — see `ClaudeSessionLog.builder(forLines:)`.
+  static func builder(forLines lines: [Data]) -> SummaryBeatBuilder {
     var builder = SummaryBeatBuilder()
-    for line in SummaryBeatBuilder.tailLines(of: url) {
+    for line in lines {
       guard let object = try? JSONSerialization.jsonObject(with: line),
         let event = object as? [String: Any],
         let type = event["type"] as? String
@@ -249,13 +254,51 @@ public enum CopilotSessionLog {
     return builder
   }
 
-  /// What this node's Copilot session has been doing, or `nil` when nothing says. Local
-  /// only, for the reason `activity` is.
+  /// The remote script's half: the same directory walk `remotePresenceInvocation` does —
+  /// Copilot's session-state directories are named by uuid and identified by the `--name`
+  /// graphcode launched them with — then the event log inside it.
+  ///
+  /// The filter is a keep-list rather than a drop-list, because Copilot's event log is the
+  /// one that carries whole tool *outputs* in a record type of its own: four event types
+  /// make beats and the rest is bytes over a network for nothing.
+  static func remoteSummaryInvocation(
+    forNode node: LoopNode, at location: RemoteProjectLocation, since stamp: String?
+  ) -> [String] {
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    let find =
+      "F=''; for d in $(ls -t \"$HOME/.copilot/session-state/\" 2>/dev/null); do "
+      + "if grep -qx 'name: \(name)' \"$HOME/.copilot/session-state/$d/workspace.yaml\" 2>/dev/null; "
+      + "then F=\"$HOME/.copilot/session-state/$d/events.jsonl\"; break; fi; done"
+    let keep =
+      "grep -aE '\"type\":\"(user\\.message|assistant\\.message|tool\\.execution_start"
+      + "|assistant\\.turn_end)\"'"
+    let script = RemoteTranscriptProbe.script(
+      findingFileWith: find, filter: keep, since: stamp)
+    return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+  }
+
+  static func remoteSummary(
+    of node: LoopNode, at location: RemoteProjectLocation, metricSamples: [MetricSample]
+  ) async -> SummaryReading? {
+    let stamp = await TranscriptFreshness.shared.remoteStamp(forNode: node.id)
+    let reply = await RemoteTranscriptProbe.run(
+      remoteSummaryInvocation(forNode: node, at: location, since: stamp))
+    guard case .lines(let newStamp, let lines) = reply else { return nil }
+    await TranscriptFreshness.shared.recordRemoteStamp(newStamp, forNode: node.id)
+    var builder = builder(forLines: lines)
+    let reading = SummaryBeatBuilder.reading(
+      from: builder.beats(), turns: builder.userTurns(), metricSamples: metricSamples)
+    return reading.isEmpty ? nil : reading
+  }
+
+  /// What this node's Copilot session has been doing, or `nil` when nothing says. A remote
+  /// loop's log is fetched over the same multiplexed ssh connection its presence is —
+  /// see `RemoteTranscriptProbe`.
   public static func summary(of node: LoopNode, projectPath: String? = nil) async
     -> SummaryReading?
   {
-    if let projectPath, RemoteProjectLocation.parse(projectPath: projectPath) != nil {
-      return nil
+    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+      return await remoteSummary(of: node, at: remote, metricSamples: node.metricHistory)
     }
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     guard let directory = directory(forSessionNamed: name) else { return nil }

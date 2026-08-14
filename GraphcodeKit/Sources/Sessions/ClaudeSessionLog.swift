@@ -113,8 +113,14 @@ public enum ClaudeSessionLog {
   }
 
   private static func builder(inTranscriptAt url: URL) -> SummaryBeatBuilder {
+    builder(forLines: SummaryBeatBuilder.tailLines(of: url))
+  }
+
+  /// The same read over lines from anywhere — a local tail, or a remote one an ssh probe
+  /// brought back (`RemoteTranscriptProbe`). Nothing below this line knows which.
+  static func builder(forLines lines: [Data]) -> SummaryBeatBuilder {
     var builder = SummaryBeatBuilder()
-    for line in SummaryBeatBuilder.tailLines(of: url) {
+    for line in lines {
       guard let object = try? JSONSerialization.jsonObject(with: line),
         let record = object as? [String: Any],
         record["isSidechain"] as? Bool != true,
@@ -171,16 +177,53 @@ public enum ClaudeSessionLog {
     }
   }
 
+  /// The remote script's half: find the transcript the way this reader does locally, but
+  /// on the other machine.
+  ///
+  /// The session id is read from the file the remote host banks itself — the same one
+  /// `--resume` uses, written by the hooks graphcode installs there — so the lookup is the
+  /// local one expressed in `sh`, not a second rule about where transcripts live.
+  ///
+  /// The filter drops tool *results*, keyed on `toolUseResult` rather than on the string
+  /// `tool_result`: the second appears in prose the moment an agent talks about its own
+  /// transcript, and dropping that line would drop a beat. Results are most of a
+  /// transcript's bytes and are read by nothing here.
+  static func remoteSummaryInvocation(
+    forNode node: LoopNode, at location: RemoteProjectLocation, since stamp: String?
+  ) -> [String] {
+    let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: node.id)
+    let find =
+      "S=$(cat \(idFile) 2>/dev/null); F=''; "
+      + "[ -n \"$S\" ] && F=$(ls -t \"$HOME\"/.claude/projects/*/\"$S\".jsonl 2>/dev/null | head -1)"
+    let script = RemoteTranscriptProbe.script(
+      findingFileWith: find, filter: "grep -av toolUseResult", since: stamp)
+    return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+  }
+
+  static func remoteSummary(
+    of node: LoopNode, at location: RemoteProjectLocation, metricSamples: [MetricSample]
+  ) async -> SummaryReading? {
+    let stamp = await TranscriptFreshness.shared.remoteStamp(forNode: node.id)
+    let reply = await RemoteTranscriptProbe.run(
+      remoteSummaryInvocation(forNode: node, at: location, since: stamp))
+    guard case .lines(let newStamp, let lines) = reply else { return nil }
+    await TranscriptFreshness.shared.recordRemoteStamp(newStamp, forNode: node.id)
+    var builder = builder(forLines: lines)
+    let reading = SummaryBeatBuilder.reading(
+      from: builder.beats(), turns: builder.userTurns(), metricSamples: metricSamples)
+    return reading.isEmpty ? nil : reading
+  }
+
   /// What this node's Claude Code session has been doing, or `nil` when nothing says.
   ///
-  /// Local only, for the reason `CopilotSessionLog.activity` is: the transcript lives on
-  /// whichever machine ran the agent, and carrying beats back through a remote shell is a
-  /// larger change than this one. Remote loops keep the card line they already had.
+  /// A remote loop's transcript is on the other machine, so the tail is fetched over the
+  /// same multiplexed ssh connection every other reading uses — see
+  /// `RemoteTranscriptProbe` for what that costs and why it is usually nothing.
   public static func summary(of node: LoopNode, projectPath: String? = nil) async
     -> SummaryReading?
   {
-    if let projectPath, RemoteProjectLocation.parse(projectPath: projectPath) != nil {
-      return nil
+    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+      return await remoteSummary(of: node, at: remote, metricSamples: node.metricHistory)
     }
     guard let sessionID = SessionIDStore.load(forNodeID: node.id),
       let transcript = transcript(forSessionID: sessionID),
