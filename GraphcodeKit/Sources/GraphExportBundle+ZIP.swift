@@ -34,7 +34,7 @@ extension GraphExportBundle {
       let readmeContent = readmeMarkdown(for: manifest)
       try readmeContent.write(to: readmeURL, atomically: true, encoding: .utf8)
 
-      try createZipArchive(at: fileURL, from: tmpDir)
+      try Self.createZipArchive(at: fileURL, from: tmpDir)
       return path
     } catch {
       return nil

@@ -234,6 +234,80 @@ do {
     if case .graphChanged(let graph) = event {
       print(GraphcodeCommand.renderUsage(graph))
     }
+
+  case .exportNode(let projectPath, let nodeID, let output, let includeChildren):
+    try client.send(.openProject(path: projectPath))
+    let opened = try client.waitForEvent {
+      if case .graphChanged = $0 { return true } else { return false }
+    }
+    guard case .graphChanged(let graph) = opened else { fail("Could not load graph") }
+
+    let persistence = ProjectPersistence(baseDirectory: SupportDirectory.url)
+    guard let bundle = persistence.createExportBundle(
+      for: [nodeID],
+      from: graph,
+      projectPath: projectPath,
+      includeChildren: includeChildren,
+      createdBy: ProcessInfo.processInfo.environment["USER"]
+    ) else { fail("Could not create export bundle") }
+
+    guard let zipPath = bundle.writeToZip(at: output) else {
+      fail("Could not write ZIP file to \(output)")
+    }
+
+    print("Exported to \(zipPath)")
+    print("Nodes: \(bundle.manifest.contents.nodeIDs.count)")
+    print("Memory logs: \(bundle.memoryByNodeID.count)")
+
+  case .exportGraph(let projectPath, let output):
+    try client.send(.openProject(path: projectPath))
+    let opened = try client.waitForEvent {
+      if case .graphChanged = $0 { return true } else { return false }
+    }
+    guard case .graphChanged(let graph) = opened else { fail("Could not load graph") }
+
+    let persistence = ProjectPersistence(baseDirectory: SupportDirectory.url)
+    let bundle = persistence.createFullGraphExportBundle(
+      for: graph,
+      projectPath: projectPath,
+      createdBy: ProcessInfo.processInfo.environment["USER"]
+    )
+
+    guard let zipPath = bundle.writeToZip(at: output) else {
+      fail("Could not write ZIP file to \(output)")
+    }
+
+    print("Exported full graph to \(zipPath)")
+    print("Nodes: \(bundle.manifest.contents.nodeIDs.count)")
+    print("Edges: \(graph.edges.count)")
+    print("Memory logs: \(bundle.memoryByNodeID.count)")
+
+  case .importNodes(let projectPath, let fromZip, let asChildOf):
+    guard let bundle = GraphExportBundle.readFromZip(at: fromZip) else {
+      fail("Could not read ZIP file: \(fromZip)")
+    }
+
+    try client.send(.openProject(path: projectPath))
+    let opened = try client.waitForEvent {
+      if case .graphChanged = $0 { return true } else { return false }
+    }
+    guard case .graphChanged(let graph) = opened else { fail("Could not load target graph") }
+
+    let persistence = ProjectPersistence(baseDirectory: SupportDirectory.url)
+    guard let result = persistence.importExportBundle(
+      bundle,
+      into: graph,
+      projectPath: projectPath,
+      asChildOf: asChildOf
+    ) else { fail("Could not import bundle") }
+
+    persistence.saveGraph(result.updatedGraph)
+
+    print(result.summary)
+    print("\nID Mapping:")
+    for (oldID, newID) in result.nodeIDMapping.sorted(by: { $0.key < $1.key }) {
+      print("  \(oldID) → \(newID)")
+    }
   }
 } catch DaemonSocketClient.ClientError.timedOut {
   // Reached only if the daemon accepted the command and then never broadcast anything —
