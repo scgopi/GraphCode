@@ -419,12 +419,16 @@ struct ProjectFeature {
         return .none
 
       case .exportNodeRequested(let nodeID):
-        // The canvas graph, not the project's: right-clicked inside a composite, the
-        // card lives in the sub-graph, and that is the slice to package. Memory paths
-        // are keyed by the *project*, which is the same at any depth.
-        guard let node = state.canvasGraph.nodes[id: nodeID] else { return .none }
+        // Whichever graph actually holds the loop: a canvas card drilled into a
+        // composite lives in the sub-graph, while the sidebar names top-level loops
+        // regardless of where the canvas is parked — resolving against the canvas
+        // alone made the sidebar's Export a silent no-op whenever a composite was
+        // open. Memory paths are keyed by the *project*, the same at any depth.
+        let graph =
+          state.canvasGraph.nodes[id: nodeID] != nil ? state.canvasGraph : state.graph
+        guard let node = graph.nodes[id: nodeID] else { return .none }
         return exportBundle(
-          from: state.canvasGraph, projectPath: state.graph.project.path,
+          from: graph, projectPath: state.graph.project.path,
           nodeIDs: [nodeID], suggestedName: node.title)
 
       case .exportGraphRequested:
@@ -434,9 +438,16 @@ struct ProjectFeature {
 
       case .importLoopsRequested(let parentID):
         let projectPath = state.graph.project.path
-        // Inside a composite the import lands in its sub-graph — the same routing every
-        // other command uses to edit one from outside.
-        let compositeID = state.openCompositeID
+        // Route into the open composite only when the named parent actually lives
+        // there (or none was named — a background import targets what you're looking
+        // at). A sidebar right-click can name a top-level loop while the canvas is
+        // inside a composite, and that import belongs at the top level.
+        let compositeID: UUID? =
+          if let parentID {
+            state.canvasGraph.nodes[id: parentID] != nil ? state.openCompositeID : nil
+          } else {
+            state.openCompositeID
+          }
         return .run { _ in
           let request = await MainActor.run { () -> GraphImportRequest? in
             let panel = NSOpenPanel()
