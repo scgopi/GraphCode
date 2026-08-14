@@ -367,6 +367,78 @@ final class WindowsDaemonTests: XCTestCase {
       XCTAssertTrue(try driver.verify(authority: authority, port: 45_678))
     }
 
+    func testSSHForwardArgumentsPutEveryOptionBeforeHostnameOrIPv6Destination() {
+      let hostname = WindowsSSHForwardDriver.forwardingArguments(
+        for: WindowsSSHAuthority(host: "example.test"), port: 45_678)
+      XCTAssertEqual(
+        hostname,
+        [
+          "-o", "StrictHostKeyChecking=yes",
+          "-o", "ExitOnForwardFailure=yes",
+          "-o", "GatewayPorts=no",
+          "-o", "BatchMode=yes",
+          "-o", "ConnectTimeout=10",
+          "-o", "ServerAliveInterval=5",
+          "-o", "ServerAliveCountMax=3",
+          "-N",
+          "-R", "127.0.0.1:45678:127.0.0.1:45678",
+          "example.test",
+        ])
+
+      let ipv6 = WindowsSSHForwardDriver.forwardingArguments(
+        for: WindowsSSHAuthority(user: "alice", host: "::1", port: 2200), port: 45_678)
+      XCTAssertEqual(
+        ipv6,
+        [
+          "-o", "StrictHostKeyChecking=yes",
+          "-o", "ExitOnForwardFailure=yes",
+          "-o", "GatewayPorts=no",
+          "-o", "BatchMode=yes",
+          "-o", "ConnectTimeout=10",
+          "-o", "ServerAliveInterval=5",
+          "-o", "ServerAliveCountMax=3",
+          "-N",
+          "-R", "127.0.0.1:45678:127.0.0.1:45678",
+          "-p", "2200",
+          "alice@[::1]",
+        ])
+    }
+
+    func testSSHVerificationArgumentsPutPythonCommandAfterDestination() {
+      let arguments = WindowsSSHForwardDriver.verificationArguments(
+        for: WindowsSSHAuthority(user: "alice", host: "::1", port: 2200),
+        port: 45_678,
+        python: "print('loopback')")
+      XCTAssertEqual(
+        arguments,
+        [
+          "-o", "StrictHostKeyChecking=yes",
+          "-o", "BatchMode=yes",
+          "-o", "ConnectTimeout=5",
+          "-p", "2200",
+          "alice@[::1]",
+          "python3", "-c", "print('loopback')", "45678",
+        ])
+    }
+
+    func testOpenSSHParsesForwardOptionsBeforeDestinationWithoutRemoteCommand() async throws {
+      guard let executable = SSHExecutableResolver.executableURL() else {
+        throw XCTSkip("Windows OpenSSH is not installed")
+      }
+      let arguments =
+        ["-G"]
+        + WindowsSSHForwardDriver.forwardingArguments(
+          for: WindowsSSHAuthority(user: "alice", host: "::1", port: 2200), port: 45_678)
+      let result = try await FoundationProcessRunner().run(
+        ProcessRequest(executable: executable, arguments: arguments),
+        timeout: .seconds(5))
+      XCTAssertEqual(result.exitCode, 0)
+      let output = String(decoding: result.standardOutput, as: UTF8.self)
+      XCTAssertTrue(output.contains("user alice"))
+      XCTAssertTrue(output.contains("hostname ::1"))
+      XCTAssertTrue(output.contains("port 2200"))
+    }
+
     func testWindowsDaemonProjectRegistryUsesProductionRemoteEnsureCallback() async throws {
       let fakeBridge = RecordingWindowsRemoteBridge()
       let productionBridge = try? WindowsRemoteBridge()

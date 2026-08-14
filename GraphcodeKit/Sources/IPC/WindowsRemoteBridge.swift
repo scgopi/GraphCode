@@ -867,8 +867,20 @@ import Foundation
       authority: WindowsSSHAuthority, port: UInt16
     ) throws -> WindowsSSHForwardSession? {
       guard let executable = sshExecutable() else { return nil }
-      var arguments = commonArguments(for: authority)
-      arguments += [
+      let arguments = forwardingArguments(for: authority, port: port)
+      let process = Process()
+      process.executableURL = executable
+      process.arguments = arguments
+      process.standardOutput = FileHandle.nullDevice
+      process.standardError = FileHandle.nullDevice
+      try process.run()
+      return WindowsSSHForwardSession(process: process)
+    }
+
+    static func forwardingArguments(
+      for authority: WindowsSSHAuthority, port: UInt16
+    ) -> [String] {
+      var arguments = [
         "-o", "StrictHostKeyChecking=yes",
         "-o", "ExitOnForwardFailure=yes",
         "-o", "GatewayPorts=no",
@@ -879,13 +891,8 @@ import Foundation
         "-N",
         "-R", "127.0.0.1:\(port):127.0.0.1:\(port)",
       ]
-      let process = Process()
-      process.executableURL = executable
-      process.arguments = arguments
-      process.standardOutput = FileHandle.nullDevice
-      process.standardError = FileHandle.nullDevice
-      try process.run()
-      return WindowsSSHForwardSession(process: process)
+      arguments += commonArguments(for: authority)
+      return arguments
     }
 
     public static func verifyDefault(
@@ -963,13 +970,8 @@ import Foundation
             sys.exit(1)
         sys.exit(1)
         """
-      var arguments = commonArguments(for: authority)
-      arguments += [
-        "-o", "StrictHostKeyChecking=yes",
-        "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=5",
-        "--", "python3", "-c", python, String(port),
-      ]
+      let arguments = verificationArguments(
+        for: authority, port: port, python: python)
       let request = ProcessRequest(
         executable: executable,
         arguments: arguments)
@@ -988,6 +990,19 @@ import Foundation
       }
       semaphore.wait()
       return (try? result.value().exitCode) == 0
+    }
+
+    static func verificationArguments(
+      for authority: WindowsSSHAuthority, port: UInt16, python: String
+    ) -> [String] {
+      var arguments = [
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=5",
+      ]
+      arguments += commonArguments(for: authority)
+      arguments += ["python3", "-c", python, String(port)]
+      return arguments
     }
 
     static func commonArguments(for authority: WindowsSSHAuthority) -> [String] {
