@@ -189,22 +189,36 @@ struct SummaryStoreTests {
 
   /// Flags checked against each CLI's own `--help`, not assumed — the rule
   /// `BackendCapabilities.isSpiked` exists for.
+  ///
+  /// And the *model* is asked for the way the launcher asks: `ModelTier`'s alias is Claude
+  /// Code's spelling, and pointing it at all three sent `--model haiku` to a Copilot that
+  /// wants a versioned id and `-m haiku` to a Codex that publishes none. Both fail at
+  /// launch, and a failed rewrite is silent by design — the feature would have looked
+  /// switched off on two of three backends.
   @Test
-  func eachBackendIsAskedThroughItsOwnNonInteractiveFlag() {
+  func eachBackendIsAskedThroughItsOwnNonInteractiveFlagAndItsOwnModel() {
     #expect(
       SummaryModelWriter.invocation(forBackend: .claudeCode, prompt: "p")
         == ["claude", "-p", "p", "--model", "haiku"])
+    // Copilot's `--model` takes an explicit versioned id, not Claude Code's short alias.
     #expect(
       SummaryModelWriter.invocation(forBackend: .copilotCLI, prompt: "p")
-        == ["copilot", "-p", "p", "--model", "haiku"])
-    // Codex spells the same flag `-m`, and its non-interactive mode is a subcommand.
+        == ["copilot", "-p", "p", "--model", "claude-haiku-4.5"])
+    // Codex's valid ids aren't visible from its `--help`, so it is given none and its own
+    // default applies — an honest omission rather than a guessed id. Its non-interactive
+    // mode is a subcommand.
     #expect(
-      SummaryModelWriter.invocation(forBackend: .codex, prompt: "p")
-        == ["codex", "exec", "p", "-m", "haiku"])
+      SummaryModelWriter.invocation(forBackend: .codex, prompt: "p") == ["codex", "exec", "p"])
     // The standard tier passes no model flag at all, as everywhere else in the app.
     #expect(
       SummaryModelWriter.invocation(forBackend: .claudeCode, prompt: "p", tier: .standard)
         == ["claude", "-p", "p"])
+    // Whatever the launcher would pass for a session is what the summariser passes.
+    for backend in CLISessionBackendKind.allCases {
+      let invocation = SummaryModelWriter.invocation(forBackend: backend, prompt: "p")
+      let model = backend.modelArguments(for: .fast)
+      #expect(Array(invocation.suffix(model.count)) == model)
+    }
   }
 
   @Test
