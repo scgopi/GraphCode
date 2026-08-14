@@ -121,7 +121,8 @@ public enum SessionTransplant {
   ) -> String? {
     guard let transcript = artifact.files["transcript.jsonl"] else { return nil }
     let freshID = UUID().uuidString.lowercased()
-    let directory = claudeProjectsRoot
+    let directory =
+      claudeProjectsRoot
       .appendingPathComponent(claudeProjectSlug(forWorkingDirectory: projectPath))
     guard
       write(
