@@ -58,16 +58,24 @@ public enum SummaryModelWriter {
   /// The non-interactive invocation for a backend, at the fast tier.
   ///
   /// Every flag here was checked against the installed CLI's own `--help` rather than
-  /// assumed — `claude -p`, `copilot -p/--prompt`, `codex exec`, and `--model`/`-m` on all
-  /// three. `BackendCapabilities.isSpiked` exists because a capability claimed on a hunch
-  /// is how a feature ships broken.
+  /// assumed — `claude -p`, `copilot -p/--prompt`, `codex exec`.
+  /// `BackendCapabilities.isSpiked` exists because a capability claimed on a hunch is how a
+  /// feature ships broken.
+  ///
+  /// **The model argument comes from the backend, not from the tier.** `ModelTier`'s alias
+  /// is Claude Code's spelling — `haiku` — and this passed it to all three, which is the
+  /// exact mistake `BackendCommand.modelArguments(for:)` was written to prevent: Copilot's
+  /// `--model` takes explicit versioned ids (`claude-haiku-4.5`) and Codex's valid ids
+  /// aren't visible from its `--help` at all, so it is given none and its own default
+  /// applies. A wrong id fails at launch, which for this path means every rewrite quietly
+  /// failing and the agent's own sentence standing — the feature would look switched off.
   ///
   /// The prompt is an argv element, never a shell string: it carries the agent's own
   /// sentence, which is arbitrary text from a model.
   public static func invocation(
     forBackend backend: CLISessionBackendKind, prompt: String, tier: ModelTier = .fast
   ) -> [String] {
-    let model = tier.modelAlias.map { ["--model", $0] } ?? []
+    let model = backend.modelArguments(for: tier)
     switch backend {
     case .claudeCode:
       return ["claude", "-p", prompt] + model
@@ -76,8 +84,7 @@ public enum SummaryModelWriter {
       // a summariser that can change the repository it is describing.
       return ["copilot", "-p", prompt] + model
     case .codex:
-      let codexModel = tier.modelAlias.map { ["-m", $0] } ?? []
-      return ["codex", "exec", prompt] + codexModel
+      return ["codex", "exec", prompt] + model
     }
   }
 
