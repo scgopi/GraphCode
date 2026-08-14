@@ -350,6 +350,52 @@ final class WindowsDaemonTests: XCTestCase {
           ).path))
     }
 
+    func testWindowsRemoteBridgeGenerationSurvivesShutdownAndRestart() async throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+          "graphcode-bridge-generation-\(UUID().uuidString)", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      let systemRoot = ProcessInfo.processInfo.environment["SystemRoot"] ?? "C:\\Windows"
+      let powershell = URL(fileURLWithPath: systemRoot)
+        .appendingPathComponent("System32/WindowsPowerShell/v1.0/powershell.exe")
+
+      func driver() throws -> WindowsSSHForwardDriver {
+        let process = Process()
+        process.executableURL = powershell
+        process.arguments = ["-NoLogo", "-NoProfile", "-Command", "Start-Sleep -Seconds 60"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        let session = WindowsSSHForwardSession(process: process)
+        return WindowsSSHForwardDriver(
+          opener: { _, _ in session },
+          verifier: { _, _ in true })
+      }
+
+      let first = try WindowsRemoteBridge(
+        supportDirectory: root,
+        pipeName: "\\\\.\\pipe\\graphcode-generation-\(UUID().uuidString)",
+        ssh: driver())
+      let firstState = try await first.ensureForwarding(authority: "alice@posix.example")
+      await first.shutdown()
+
+      let generationURL = WindowsRemoteBridge.generationURL(
+        authority: "alice@posix.example", supportDirectory: root)
+      XCTAssertTrue(FileManager.default.fileExists(atPath: generationURL.path))
+      XCTAssertEqual(try String(contentsOf: generationURL, encoding: .ascii), "1")
+
+      let second = try WindowsRemoteBridge(
+        supportDirectory: root,
+        pipeName: "\\\\.\\pipe\\graphcode-generation-restart-\(UUID().uuidString)",
+        ssh: driver())
+      let secondState = try await second.ensureForwarding(authority: "alice@posix.example")
+      await second.shutdown()
+
+      XCTAssertEqual(firstState.generation, 1)
+      XCTAssertEqual(secondState.generation, 2)
+      XCTAssertGreaterThan(secondState.generation, firstState.generation)
+    }
+
     func testWindowsProductionRemoteDeliveryUsesSSHAndSecureStateInput() throws {
       let location = RemoteProjectLocation(
         user: "alice", host: "posix.example", port: 2222, remotePath: "/srv/project")
@@ -383,6 +429,48 @@ final class WindowsDaemonTests: XCTestCase {
           forNode: nil, at: location, settings: GraphcodeSettings(), bridgeState: state))
       XCTAssertTrue(delivery.contains("graphcode"))
       XCTAssertFalse(delivery.contains(state.capability))
+    }
+
+    func testRemoteBridgePublicationGateCancelsHungPredecessorForNewerGeneration() async {
+      let gate = WindowsRemoteBridgePublicationGate()
+      let first = Task {
+        await gate.publish(
+          authority: "alice@posix.example",
+          generation: 1,
+          timeout: .milliseconds(50)
+        ) {
+          try? await Task.sleep(for: .seconds(60))
+          return !Task.isCancelled
+        }
+      }
+      try? await Task.sleep(for: .milliseconds(10))
+
+      let started = Date()
+      let second = await gate.publish(
+        authority: "alice@posix.example",
+        generation: 2,
+        timeout: .milliseconds(50)
+      ) {
+        true
+      }
+
+      XCTAssertTrue(second)
+      XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+      _ = await first.value
+    }
+
+    func testRemoteBridgeTransferTimeoutTerminatesHungSSHProcess() async throws {
+      let systemRoot = ProcessInfo.processInfo.environment["SystemRoot"] ?? "C:\\Windows"
+      let powershell = URL(fileURLWithPath: systemRoot)
+        .appendingPathComponent("System32/WindowsPowerShell/v1.0/powershell.exe")
+      let started = Date()
+      let succeeded = await ZmxSessionLauncher.runRemoteRetrying(
+        [powershell.path, "-NoLogo", "-NoProfile", "-Command", "Start-Sleep -Seconds 60"],
+        attempts: 1,
+        timeout: .milliseconds(100))
+
+      XCTAssertFalse(succeeded)
+      XCTAssertLessThan(Date().timeIntervalSince(started), 5)
     }
 
     func testStructuredSSHAuthorityPreservesIPv6UserPortAndVerification() throws {

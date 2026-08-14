@@ -1,5 +1,74 @@
 import Foundation
 
+#if os(Windows)
+  actor WindowsRemoteBridgePublicationGate {
+    static let defaultTimeout: Duration = .seconds(30)
+
+    private struct Pending {
+      let token: UUID
+      let task: Task<Bool, Never>
+    }
+
+    private var pending: [String: Pending] = [:]
+    private var latestGeneration: [String: UInt64] = [:]
+
+    func publish(
+      authority: String,
+      generation: UInt64,
+      timeout: Duration = .seconds(30),
+      operation: @escaping @Sendable () async -> Bool
+    ) async -> Bool {
+      latestGeneration[authority] = max(latestGeneration[authority] ?? 0, generation)
+      let predecessor = pending[authority]?.task
+      let token = UUID()
+      let task = Task { [weak self] () -> Bool in
+        if let predecessor,
+          await Self.waitFor(predecessor, timeout: timeout) == nil
+        {
+          predecessor.cancel()
+        }
+        guard let self else { return false }
+        guard await isLatest(authority: authority, generation: generation) else {
+          await finish(authority: authority, token: token)
+          return true
+        }
+        let result = await operation()
+        await finish(authority: authority, token: token)
+        return result
+      }
+      pending[authority] = Pending(token: token, task: task)
+      return await task.value
+    }
+
+    private static func waitFor(
+      _ task: Task<Bool, Never>, timeout: Duration
+    ) async -> Bool? {
+      await withTaskGroup(of: Bool?.self) { group in
+        group.addTask { await task.value }
+        group.addTask {
+          try? await Task.sleep(for: timeout)
+          return nil
+        }
+        let result = await group.next() ?? nil
+        if result == nil {
+          task.cancel()
+        }
+        group.cancelAll()
+        return result
+      }
+    }
+
+    private func isLatest(authority: String, generation: UInt64) -> Bool {
+      latestGeneration[authority] == generation
+    }
+
+    private func finish(authority: String, token: UUID) {
+      guard pending[authority]?.token == token else { return }
+      pending.removeValue(forKey: authority)
+    }
+  }
+#endif
+
 /// Starts an unattended node's session — time-based or goal-based — detached, so its
 /// loop runs whether or not the app is open. The daemon-side half of
 /// `GraphStore.ensureUnattendedSessions`.
@@ -50,49 +119,6 @@ public enum ZmxSessionLauncher {
 
     private static let windowsRemoteBridgeProvider = WindowsRemoteBridgeProvider(
       bridge: try? WindowsRemoteBridge())
-
-    private actor WindowsRemoteBridgePublicationGate {
-      private struct Pending {
-        let token: UUID
-        let task: Task<Bool, Never>
-      }
-
-      private var pending: [String: Pending] = [:]
-      private var latestGeneration: [String: UInt64] = [:]
-
-      func publish(
-        authority: String, generation: UInt64,
-        operation: @escaping @Sendable () async -> Bool
-      ) async -> Bool {
-        latestGeneration[authority] = max(latestGeneration[authority] ?? 0, generation)
-        let predecessor = pending[authority]?.task
-        let token = UUID()
-        let task = Task { [weak self] () -> Bool in
-          if let predecessor {
-            _ = await predecessor.value
-          }
-          guard let self else { return false }
-          guard await isLatest(authority: authority, generation: generation) else {
-            await finish(authority: authority, token: token)
-            return true
-          }
-          let result = await operation()
-          await finish(authority: authority, token: token)
-          return result
-        }
-        pending[authority] = Pending(token: token, task: task)
-        return await task.value
-      }
-
-      private func isLatest(authority: String, generation: UInt64) -> Bool {
-        latestGeneration[authority] == generation
-      }
-
-      private func finish(authority: String, token: UUID) {
-        guard pending[authority]?.token == token else { return }
-        pending.removeValue(forKey: authority)
-      }
-    }
 
     private static let windowsRemoteBridgePublicationGate =
       WindowsRemoteBridgePublicationGate()
@@ -1242,10 +1268,15 @@ public enum ZmxSessionLauncher {
   /// where a retried *send* could type the same message twice (its caller already has a
   /// staging fallback for the honest failure).
   static func runRemoteRetrying(
-    _ invocation: [String], attempts: Int = 3, standardInput: Data? = nil
+    _ invocation: [String],
+    attempts: Int = 3,
+    standardInput: Data? = nil,
+    timeout: Duration? = nil
   ) async -> Bool {
     RemoteProjectLocation.prepareControlSocketDirectory()
+    guard attempts > 0 else { return false }
     for attempt in 1...attempts {
+      guard !Task.isCancelled else { return false }
       guard
         let session = try? PTYProcessSession(
           executable: invocation[0], arguments: Array(invocation.dropFirst()))
@@ -1253,12 +1284,44 @@ public enum ZmxSessionLauncher {
       if let standardInput {
         session.sendInput(String(decoding: standardInput, as: UTF8.self) + "\n")
       }
-      if await session.waitUntilFinished() {
+      if await waitForRemoteProcess(session, timeout: timeout) {
         return true
       }
-      if attempt < attempts { try? await Task.sleep(for: .seconds(1 << (attempt - 1))) }
+      if attempt < attempts, !Task.isCancelled {
+        try? await Task.sleep(for: .seconds(1 << (attempt - 1)))
+      }
     }
     return false
+  }
+
+  private static func waitForRemoteProcess(
+    _ session: PTYProcessSession, timeout: Duration?
+  ) async -> Bool {
+    let waiter = Task { await session.waitUntilFinished() }
+    return await withTaskCancellationHandler(operation: {
+      guard let timeout else { return await waiter.value }
+      let result = await withTaskGroup(of: Bool?.self) { group in
+        group.addTask { await waiter.value }
+        group.addTask {
+          try? await Task.sleep(for: timeout)
+          return nil
+        }
+        let first = await group.next() ?? nil
+        if first == nil {
+          waiter.cancel()
+          session.terminate()
+        }
+        group.cancelAll()
+        return first
+      }
+      guard let result else {
+        _ = await waiter.value
+        return false
+      }
+      return result
+    }, onCancel: {
+      session.terminate()
+    })
   }
 
   static func remoteKillInvocation(
@@ -1300,9 +1363,14 @@ public enum ZmxSessionLauncher {
         return
       }
       let transferred = await windowsRemoteBridgePublicationGate.publish(
-        authority: authority.key, generation: bridgeState.generation
+        authority: authority.key,
+        generation: bridgeState.generation,
+        timeout: WindowsRemoteBridgePublicationGate.defaultTimeout
       ) {
-        await runRemoteRetrying(transfer.invocation, standardInput: transfer.input)
+        await runRemoteRetrying(
+          transfer.invocation,
+          standardInput: transfer.input,
+          timeout: WindowsRemoteBridgePublicationGate.defaultTimeout)
       }
       guard transferred else {
         await RemoteEnsureGate.shared.end(node.id, token: lease)

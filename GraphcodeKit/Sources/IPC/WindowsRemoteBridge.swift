@@ -48,10 +48,10 @@ import Foundation
     private let processLock: NSLock
     private let namedLock: HANDLE
 
-    public init(url: URL) throws {
+    public init(url: URL, lockURL: URL? = nil) throws {
       self.url = url
       sid = try WindowsUserIdentity.currentSID()
-      let key = url.standardizedFileURL.path.lowercased()
+      let key = (lockURL ?? url).standardizedFileURL.path.lowercased()
       Self.lockGuard.lock()
       processLock =
         Self.locks[key]
@@ -84,6 +84,35 @@ import Foundation
     public func read() throws -> RemoteBridgeWireState {
       try transaction {
         try readUnlocked()
+      }
+    }
+
+    public func readGeneration() throws -> UInt64? {
+      try transaction {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let data = try Data(contentsOf: url)
+        guard
+          let text = String(data: data, encoding: .ascii)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+          let generation = UInt64(text),
+          generation > 0
+        else {
+          throw WindowsRemoteBridgeError.stateUnavailable
+        }
+        return generation
+      }
+    }
+
+    public func reserveGeneration(after baseline: UInt64 = 0) throws -> UInt64 {
+      try transaction {
+        let current = try readGenerationUnlocked() ?? 0
+        let highest = max(current, baseline)
+        guard highest < UInt64.max else {
+          throw WindowsRemoteBridgeError.stateUnavailable
+        }
+        let next = highest + 1
+        try writeBytesUnlocked(Data(String(next).utf8))
+        return next
       }
     }
 
@@ -132,13 +161,34 @@ import Foundation
       throw lastError ?? WindowsRemoteBridgeError.stateUnavailable
     }
 
+    private func readGenerationUnlocked() throws -> UInt64? {
+      guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+      let data = try Data(contentsOf: url)
+      guard
+        let text = String(data: data, encoding: .ascii)?
+          .trimmingCharacters(in: .whitespacesAndNewlines),
+        let generation = UInt64(text),
+        generation > 0
+      else {
+        throw WindowsRemoteBridgeError.stateUnavailable
+      }
+      return generation
+    }
+
     private func writeUnlocked(_ state: RemoteBridgeWireState) throws {
+      let directory = url.deletingLastPathComponent()
+      try FileManager.default.createDirectory(
+        at: directory, withIntermediateDirectories: true)
+      let data = try JSONEncoder().encode(state)
+      try writeBytesUnlocked(data)
+    }
+
+    private func writeBytesUnlocked(_ data: Data) throws {
       let directory = url.deletingLastPathComponent()
       try FileManager.default.createDirectory(
         at: directory, withIntermediateDirectories: true)
       let temporary = directory.appendingPathComponent(
         ".\(url.lastPathComponent).\(UUID().uuidString).tmp")
-      let data = try JSONEncoder().encode(state)
       try writeUserOnlyFile(data, to: temporary)
       defer { try? FileManager.default.removeItem(at: temporary) }
 
@@ -630,7 +680,10 @@ import Foundation
       let store = try WindowsRemoteBridgeStateStore(
         url: Self.stateURL(authority: authority, supportDirectory: supportDirectory))
       let previous = try? store.read()
-      let generation = (previous?.generation ?? 0) + 1
+      let generationStore = try WindowsRemoteBridgeStateStore(
+        url: Self.generationURL(authority: authority, supportDirectory: supportDirectory),
+        lockURL: store.url)
+      let generation = try generationStore.reserveGeneration(after: previous?.generation ?? 0)
       let entry = try startEntry(
         authority: authority, store: store, generation: generation)
       entries[key] = entry
@@ -683,6 +736,13 @@ import Foundation
         supportDirectory: supportDirectory)
     }
 
+    public static func generationURL(authority: String, supportDirectory: URL) -> URL {
+      generationURL(
+        authority: WindowsSSHAuthority(authority: authority)
+          ?? WindowsSSHAuthority(host: authority),
+        supportDirectory: supportDirectory)
+    }
+
     public static func stateURL(
       authority: WindowsSSHAuthority, supportDirectory: URL
     ) -> URL {
@@ -690,6 +750,16 @@ import Foundation
         .appendingPathComponent("remote-bridges", isDirectory: true)
         .appendingPathComponent(
           "\(GraphcodeSHA256.hex(Data(authority.key.utf8))).json",
+          isDirectory: false)
+    }
+
+    public static func generationURL(
+      authority: WindowsSSHAuthority, supportDirectory: URL
+    ) -> URL {
+      supportDirectory
+        .appendingPathComponent("remote-bridges", isDirectory: true)
+        .appendingPathComponent(
+          "\(GraphcodeSHA256.hex(Data(authority.key.utf8))).generation",
           isDirectory: false)
     }
 
