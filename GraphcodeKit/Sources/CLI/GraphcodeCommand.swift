@@ -165,7 +165,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
         if flags["help"] != nil { throw HelpRequested() }
         let output = flags["output"] ?? "\(nodeID.uuidString).zip"
         let includeChildren = flags["children"] != nil
-        return .exportNode(projectPath: path, nodeID: nodeID, output: output, includeChildren: includeChildren)
+        return .exportNode(
+          projectPath: path, nodeID: nodeID, output: output, includeChildren: includeChildren)
 
       case "import":
         let zipPath = try take(&arguments, name: "zip-file")

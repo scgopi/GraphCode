@@ -174,7 +174,7 @@ extension ProjectPersistence {
     var importedEdges: IdentifiedArrayOf<LoopEdge> = []
     for edge in bundle.graphSnapshot.edges {
       guard let newFrom = oldIDToNew[edge.from],
-            let newTo = oldIDToNew[edge.to]
+        let newTo = oldIDToNew[edge.to]
       else { continue }
 
       let freshEdge = LoopEdge(
@@ -198,7 +198,7 @@ extension ProjectPersistence {
 
     // If importing as child, create an edge to the parent
     if let parentID = parentID,
-       let firstImportedNode = importedNodes.first
+      let firstImportedNode = importedNodes.first
     {
       let parentEdge = LoopEdge(
         from: parentID,

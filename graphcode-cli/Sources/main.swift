@@ -243,13 +243,15 @@ do {
     guard case .graphChanged(let graph) = opened else { fail("Could not load graph") }
 
     let persistence = ProjectPersistence(baseDirectory: SupportDirectory.url)
-    guard let bundle = persistence.createExportBundle(
-      for: [nodeID],
-      from: graph,
-      projectPath: projectPath,
-      includeChildren: includeChildren,
-      createdBy: ProcessInfo.processInfo.environment["USER"]
-    ) else { fail("Could not create export bundle") }
+    guard
+      let bundle = persistence.createExportBundle(
+        for: [nodeID],
+        from: graph,
+        projectPath: projectPath,
+        includeChildren: includeChildren,
+        createdBy: ProcessInfo.processInfo.environment["USER"]
+      )
+    else { fail("Could not create export bundle") }
 
     guard let zipPath = bundle.writeToZip(at: output) else {
       fail("Could not write ZIP file to \(output)")
@@ -294,12 +296,14 @@ do {
     guard case .graphChanged(let graph) = opened else { fail("Could not load target graph") }
 
     let persistence = ProjectPersistence(baseDirectory: SupportDirectory.url)
-    guard let result = persistence.importExportBundle(
-      bundle,
-      into: graph,
-      projectPath: projectPath,
-      asChildOf: asChildOf
-    ) else { fail("Could not import bundle") }
+    guard
+      let result = persistence.importExportBundle(
+        bundle,
+        into: graph,
+        projectPath: projectPath,
+        asChildOf: asChildOf
+      )
+    else { fail("Could not import bundle") }
 
     persistence.saveGraph(result.updatedGraph)
 

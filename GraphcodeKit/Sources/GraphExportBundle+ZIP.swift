@@ -6,7 +6,8 @@ extension GraphExportBundle {
   /// Returns the path on success, or nil if writing failed.
   public func writeToZip(at path: String) -> String? {
     let fileURL = URL(fileURLWithPath: path)
-    let tmpDir = fileURL.deletingLastPathComponent().appendingPathComponent(".export-tmp-\(UUID().uuidString)")
+    let tmpDir = fileURL.deletingLastPathComponent().appendingPathComponent(
+      ".export-tmp-\(UUID().uuidString)")
 
     do {
       try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
@@ -23,7 +24,8 @@ extension GraphExportBundle {
       let memoryDir = tmpDir.appendingPathComponent("memory", isDirectory: true)
       for (nodeIDStr, entries) in memoryByNodeID {
         let nodeMemoryDir = memoryDir.appendingPathComponent(nodeIDStr, isDirectory: true)
-        try FileManager.default.createDirectory(at: nodeMemoryDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+          at: nodeMemoryDir, withIntermediateDirectories: true)
 
         let logContent = entries.joined(separator: "\n") + "\n"
         let logURL = nodeMemoryDir.appendingPathComponent(NodeMemory.logFileName)
@@ -44,7 +46,8 @@ extension GraphExportBundle {
   /// Reads a ZIP file and deserializes it into a GraphExportBundle.
   public static func readFromZip(at path: String) -> GraphExportBundle? {
     let fileURL = URL(fileURLWithPath: path)
-    let tmpDir = fileURL.deletingLastPathComponent().appendingPathComponent(".import-tmp-\(UUID().uuidString)")
+    let tmpDir = fileURL.deletingLastPathComponent().appendingPathComponent(
+      ".import-tmp-\(UUID().uuidString)")
 
     do {
       try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
@@ -54,18 +57,23 @@ extension GraphExportBundle {
 
       let manifestURL = tmpDir.appendingPathComponent("manifest.json")
       guard let manifestData = try? Data(contentsOf: manifestURL) else { return nil }
-      guard let manifest = try? JSONDecoder().decode(ExportManifest.self, from: manifestData) else { return nil }
+      guard let manifest = try? JSONDecoder().decode(ExportManifest.self, from: manifestData) else {
+        return nil
+      }
 
       let graphURL = tmpDir.appendingPathComponent("graph-snapshot.json")
       guard let graphData = try? Data(contentsOf: graphURL) else { return nil }
-      guard let graph = try? JSONDecoder().decode(LoopGraph.self, from: graphData) else { return nil }
+      guard let graph = try? JSONDecoder().decode(LoopGraph.self, from: graphData) else {
+        return nil
+      }
 
       var memoryByNodeID: [String: [String]] = [:]
       let memoryDir = tmpDir.appendingPathComponent("memory")
       if FileManager.default.fileExists(atPath: memoryDir.path) {
         if let nodeIDs = try? FileManager.default.contentsOfDirectory(atPath: memoryDir.path) {
           for nodeID in nodeIDs {
-            let logURL = memoryDir.appendingPathComponent(nodeID).appendingPathComponent(NodeMemory.logFileName)
+            let logURL = memoryDir.appendingPathComponent(nodeID).appendingPathComponent(
+              NodeMemory.logFileName)
             if let logContent = try? String(contentsOf: logURL, encoding: .utf8) {
               let entries = logContent.split(whereSeparator: \.isNewline).map(String.init)
               memoryByNodeID[nodeID] = entries
