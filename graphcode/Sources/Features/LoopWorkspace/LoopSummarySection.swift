@@ -193,9 +193,18 @@ struct LoopSummarySection: View {
   /// value is a wire format, and a language whose uppercase is not a mechanical transform
   /// of its lowercase — or whose word for `running` is not one word — has nowhere to say
   /// so if the string never reaches the catalog.
+  /// Past tense once the turn is over. `THINKING` over an agent that had delivered its
+  /// final answer was reported from a real session, and it is the same fault the header's
+  /// `LAST DID` already fixed one line above: a word in the present tense is a claim that
+  /// something is still happening.
   private func kindWord(_ presentation: LoopSummaryPresentation) -> LocalizedStringKey {
     if presentation.mode == .asking { return "ASKING YOU" }
-    switch presentation.kind {
+    let isOver = presentation.mode == .working && !presentation.isLive
+    return isOver ? Self.pastWord(presentation.kind) : Self.presentWord(presentation.kind)
+  }
+
+  private static func presentWord(_ kind: BeatKind) -> LocalizedStringKey {
+    switch kind {
     case .reading: return "READING"
     case .editing: return "EDITING"
     case .running: return "RUNNING"
@@ -206,6 +215,25 @@ struct LoopSummarySection: View {
     }
   }
 
+  private static func pastWord(_ kind: BeatKind) -> LocalizedStringKey {
+    switch kind {
+    case .reading: return "READ"
+    case .editing: return "EDITED"
+    case .running: return "RAN"
+    // A beat with no tool calls under it, on a session that has stopped, *is* the answer.
+    case .thinking: return "ANSWERED"
+    case .found: return "FOUND"
+    case .asking: return "ASKING YOU"
+    case .done: return "DONE"
+    }
+  }
+}
+
+/// The history column and the rollups under it — everything behind the current
+/// beat. An extension for the reason `AppFeature`'s helpers are in one: the type's
+/// own body has a line budget, and a view built from small named pieces spends it
+/// fast.
+extension LoopSummarySection {
   // MARK: - History
 
   /// Everything behind the current beat, oldest at the top, on one spine: the finished
@@ -318,9 +346,19 @@ struct LoopSummarySection: View {
     .padding(.vertical, 5)
   }
 
-  /// One row per finished pass, then a count. Six hours of work stays six rows tall.
+  /// A count, then one row per finished pass — oldest at the top, so the newest sits
+  /// against the divider for the pass the loop is on. Six hours of work stays six rows.
   private func rollups(_ presentation: LoopSummaryPresentation) -> some View {
     VStack(alignment: .leading, spacing: 4) {
+      if presentation.earlierPasses > 0 {
+        Text(
+          presentation.earlierPasses == 1
+            ? "1 earlier pass" : "\(presentation.earlierPasses) earlier passes"
+        )
+        .font(.system(size: 10.5))
+        .foregroundStyle(.white.opacity(0.5))
+        .padding(.leading, 32)
+      }
       ForEach(presentation.passes) { pass in
         HStack(alignment: .firstTextBaseline, spacing: 6) {
           // The one string in the section with no catalog entry, and deliberately: a 26pt
@@ -336,65 +374,6 @@ struct LoopSummarySection: View {
             .fixedSize(horizontal: false, vertical: true)
         }
       }
-      if presentation.earlierPasses > 0 {
-        Text(
-          presentation.earlierPasses == 1
-            ? "1 earlier pass" : "\(presentation.earlierPasses) earlier passes"
-        )
-        .font(.system(size: 10.5))
-        .foregroundStyle(.white.opacity(0.5))
-        .padding(.leading, 32)
-      }
-    }
-  }
-}
-
-/// The 1pt spine behind the receding beats, with a gradient segment travelling *up* it.
-///
-/// **Why an animation exists here at all.** `StateIndicator` documents why the running
-/// dot's pulse was removed: a `repeatForever` animation never settles, and that one was
-/// attached to every card and every sidebar row, so the app could not reach an idle frame
-/// while any loop ran. This is the opposite case on every count that mattered there. There
-/// is exactly **one** of these in a window — the workspace shows one loop — it is drawn
-/// only when the rail is open and unfolded, and `isFlowing` stops it the moment the
-/// session is not busy or there is nothing behind the current beat. A canvas of forty
-/// cards animates nothing.
-///
-/// It earns its place by saying the one thing no static rail can: that beats are still
-/// arriving. A spinner says "something is happening"; this says "the thing you are reading
-/// is moving", which is what a rail of receding text is for.
-private struct FlowingSpine: View {
-  let isFlowing: Bool
-
-  @State private var phase: CGFloat = 0
-
-  var body: some View {
-    GeometryReader { proxy in
-      let height = proxy.size.height
-      Rectangle()
-        .fill(.white.opacity(0.1))
-        .overlay(alignment: .top) {
-          if isFlowing {
-            RoundedRectangle(cornerRadius: 1)
-              .fill(
-                LinearGradient(
-                  colors: [
-                    Theme.paneFocusTint.opacity(0), Theme.paneFocusTint,
-                    Theme.paneFocusTint.opacity(0),
-                  ],
-                  startPoint: .top, endPoint: .bottom)
-              )
-              .frame(width: 2, height: 26)
-              .offset(x: -0.5, y: (height + 26) * (1 - phase) - 26)
-              .onAppear {
-                phase = 0
-                withAnimation(.linear(duration: 2.6).repeatForever(autoreverses: false)) {
-                  phase = 1
-                }
-              }
-          }
-        }
-        .clipped()
     }
   }
 }

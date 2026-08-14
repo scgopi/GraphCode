@@ -127,6 +127,12 @@ public enum ClaudeSessionLog {
         guard isUserTurn(message) else { continue }
         builder.noteUserTurn(at: at)
       case "assistant":
+        // `end_turn` is the model saying it has finished and is handing back; `tool_use`
+        // is it pausing for a call it is about to make. Read after the blocks, so it lands
+        // on the beat this record opened.
+        defer {
+          if message["stop_reason"] as? String == "end_turn" { builder.noteTurnEnd() }
+        }
         for block in message["content"] as? [[String: Any]] ?? [] {
           switch block["type"] as? String {
           case "text":

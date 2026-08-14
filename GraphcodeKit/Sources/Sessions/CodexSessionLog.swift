@@ -226,6 +226,9 @@ public enum CodexSessionLog {
           builder.noteUserTurn(at: at)
         case "agent_reasoning", "agent_message":
           builder.noteNarration(payload["text"] as? String ?? "", at: at)
+        // Codex's own end-of-turn event, the one its `notify` hook fires on.
+        case "task_complete":
+          builder.noteTurnEnd()
         default:
           continue
         }
