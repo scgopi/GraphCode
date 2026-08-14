@@ -36,6 +36,27 @@ extension GraphExportBundle {
         try logContent.write(to: logURL, atomically: true, encoding: .utf8)
       }
 
+      let sessionsDir = tmpDir.appendingPathComponent("sessions", isDirectory: true)
+      for (nodeIDStr, artifact) in sessionsByNodeID {
+        let nodeDir = sessionsDir.appendingPathComponent(nodeIDStr, isDirectory: true)
+        try FileManager.default.createDirectory(at: nodeDir, withIntermediateDirectories: true)
+        let meta: [String: String?] = [
+          "backend": artifact.backend.rawValue,
+          "sessionID": artifact.sessionID,
+          "sourceWorkingDirectory": artifact.sourceWorkingDirectory,
+        ]
+        let metaData = try JSONSerialization.data(
+          withJSONObject: meta.compactMapValues { $0 }, options: [.sortedKeys])
+        try metaData.write(to: nodeDir.appendingPathComponent("meta.json"))
+        for (relativePath, data) in artifact.files {
+          let fileURL = nodeDir.appendingPathComponent("files")
+            .appendingPathComponent(relativePath)
+          try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+          try data.write(to: fileURL)
+        }
+      }
+
       let readmeURL = tmpDir.appendingPathComponent("README.md")
       let readmeContent = readmeMarkdown(for: manifest)
       try readmeContent.write(to: readmeURL, atomically: true, encoding: .utf8)
@@ -71,29 +92,76 @@ extension GraphExportBundle {
         return nil
       }
 
-      var memoryByNodeID: [String: [String]] = [:]
-      let memoryDir = tmpDir.appendingPathComponent("memory")
-      if FileManager.default.fileExists(atPath: memoryDir.path) {
-        if let nodeIDs = try? FileManager.default.contentsOfDirectory(atPath: memoryDir.path) {
-          for nodeID in nodeIDs {
-            let logURL = memoryDir.appendingPathComponent(nodeID).appendingPathComponent(
-              NodeMemory.logFileName)
-            if let logContent = try? String(contentsOf: logURL, encoding: .utf8) {
-              let entries = logContent.split(whereSeparator: \.isNewline).map(String.init)
-              memoryByNodeID[nodeID] = entries
-            }
-          }
-        }
-      }
-
       return GraphExportBundle(
         manifest: manifest,
         graphSnapshot: graph,
-        memoryByNodeID: memoryByNodeID
+        memoryByNodeID: readMemory(in: tmpDir),
+        sessionsByNodeID: readSessions(in: tmpDir)
       )
     } catch {
       return nil
     }
+  }
+
+  private static func readMemory(in tmpDir: URL) -> [String: [String]] {
+    var memoryByNodeID: [String: [String]] = [:]
+    let memoryDir = tmpDir.appendingPathComponent("memory")
+    guard
+      let nodeIDs = try? FileManager.default.contentsOfDirectory(atPath: memoryDir.path)
+    else { return memoryByNodeID }
+    for nodeID in nodeIDs {
+      let logURL = memoryDir.appendingPathComponent(nodeID).appendingPathComponent(
+        NodeMemory.logFileName)
+      if let logContent = try? String(contentsOf: logURL, encoding: .utf8) {
+        memoryByNodeID[nodeID] = logContent.split(whereSeparator: \.isNewline).map(String.init)
+      }
+    }
+    return memoryByNodeID
+  }
+
+  private static func readSessions(in tmpDir: URL) -> [String: SessionTransplant.Artifact] {
+    var sessionsByNodeID: [String: SessionTransplant.Artifact] = [:]
+    let sessionsDir = tmpDir.appendingPathComponent("sessions")
+    guard
+      let nodeIDs = try? FileManager.default.contentsOfDirectory(atPath: sessionsDir.path)
+    else { return sessionsByNodeID }
+    for nodeID in nodeIDs {
+      let nodeDir = sessionsDir.appendingPathComponent(nodeID)
+      guard let metaData = try? Data(contentsOf: nodeDir.appendingPathComponent("meta.json")),
+        let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: String],
+        let backend = meta["backend"].flatMap(CLISessionBackendKind.init(rawValue:)),
+        let sessionID = meta["sessionID"]
+      else { continue }
+      let files = filesUnder(nodeDir.appendingPathComponent("files"))
+      guard !files.isEmpty else { continue }
+      sessionsByNodeID[nodeID] = SessionTransplant.Artifact(
+        backend: backend, sessionID: sessionID,
+        sourceWorkingDirectory: meta["sourceWorkingDirectory"], files: files)
+    }
+    return sessionsByNodeID
+  }
+
+  private static func filesUnder(_ root: URL) -> [String: Data] {
+    // Both sides resolved before the prefix strip: the staging dir lives under
+    // `/var/folders`, the enumerator hands back `/private/var/folders`, and an
+    // unresolved mismatch turned every relative key into an absolute path — which
+    // `restore`'s `files["transcript.jsonl"]` lookup then missed.
+    let rootPrefix = root.resolvingSymlinksInPath().path + "/"
+    var files: [String: Data] = [:]
+    guard
+      let enumerator = FileManager.default.enumerator(
+        at: root, includingPropertiesForKeys: [.isRegularFileKey])
+    else { return files }
+    for case let url as URL in enumerator {
+      guard
+        (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true,
+        let data = try? Data(contentsOf: url)
+      else { continue }
+      let resolved = url.resolvingSymlinksInPath().path
+      guard resolved.hasPrefix(rootPrefix) else { continue }
+      files[String(resolved.dropFirst(rootPrefix.count))] = data
+    }
+    return files
   }
 
   // MARK: - ZIP Helpers
@@ -158,6 +226,7 @@ extension GraphExportBundle {
       "- **manifest.json** — Metadata about what's included",
       "- **graph-snapshot.json** — The LoopGraph with nodes and edges",
       "- **memory/** — Session logs for each node (LOG.txt entries)",
+      "- **sessions/** — Each loop's backend conversation, where its CLI can carry one",
       "",
       "## How to Import",
       "",
@@ -180,12 +249,19 @@ extension GraphExportBundle {
       "- Node configuration (type, prompts, goals, backend, model tier)",
       "- Graph edges and connections (with UUID remapping to avoid collisions)",
       "- Session memory logs (history of what each node has done)",
+      "- The backend conversation itself, per what each CLI supports:",
+      "  - **Claude Code**: full transplant — the imported loop resumes the",
+      "    exported conversation the first time it opens",
+      "  - **Copilot**: session state transplanted for `--resume`; if the target's",
+      "    Copilot refuses it, the loop starts fresh",
+      "  - **Codex**: no resume support in the CLI — the rollout rides along as",
+      "    readable history and the loop starts fresh",
       "- All sub-nodes if composite nodes are included",
       "",
       "## What's Fresh on Import",
       "",
       "- **Node IDs** are remapped to fresh UUIDs",
-      "- **Session IDs** are created new (zmx, Copilot, Codex sessions reset)",
+      "- **Session IDs** are rewritten to fresh ones (the conversation content survives)",
       "- **Fire counts** on edges reset to 0 (connections haven't fired yet in the target)",
       "- **Timestamps** are set to import time",
       "",

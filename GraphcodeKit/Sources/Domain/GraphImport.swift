@@ -22,13 +22,36 @@ public struct GraphImportRequest: Codable, Sendable, Equatable {
   /// When set, the imported subgraph's entry points are wired under this existing
   /// node with `.spawn` edges — "import as children of this loop".
   public var asChildOf: UUID?
+  /// Whether the client already re-identified the snapshot
+  /// (`GraphImportPlanner.reIdentified`). A client that restores session transplants
+  /// has to know each loop's fresh id *before* sending — the banked session id and
+  /// transcript are keyed by it — so it remaps first and the daemon splices verbatim,
+  /// refusing on any id collision instead of remapping a second time. Absent (an
+  /// older client), the daemon re-identifies on arrival as it always did.
+  public var identitiesAreFresh: Bool
 
   public init(
-    snapshot: LoopGraph, memoryByNodeID: [String: [String]] = [:], asChildOf: UUID? = nil
+    snapshot: LoopGraph, memoryByNodeID: [String: [String]] = [:], asChildOf: UUID? = nil,
+    identitiesAreFresh: Bool = false
   ) {
     self.snapshot = snapshot
     self.memoryByNodeID = memoryByNodeID
     self.asChildOf = asChildOf
+    self.identitiesAreFresh = identitiesAreFresh
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case snapshot, memoryByNodeID, asChildOf, identitiesAreFresh
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    snapshot = try container.decode(LoopGraph.self, forKey: .snapshot)
+    memoryByNodeID =
+      try container.decodeIfPresent([String: [String]].self, forKey: .memoryByNodeID) ?? [:]
+    asChildOf = try container.decodeIfPresent(UUID.self, forKey: .asChildOf)
+    identitiesAreFresh =
+      try container.decodeIfPresent(Bool.self, forKey: .identitiesAreFresh) ?? false
   }
 }
 
@@ -51,12 +74,50 @@ public enum GraphImportPlanner {
     public var importedEntryPoints: [UUID]
   }
 
+  /// Client-side re-identification: the same remap `merge` would perform, done ahead
+  /// of sending so the caller can key session transplants and other per-node
+  /// restorations by the ids the loops will actually have. The returned request
+  /// carries `identitiesAreFresh`, telling the daemon to splice verbatim.
+  public static func reIdentified(
+    _ request: GraphImportRequest
+  ) -> (request: GraphImportRequest, idMapping: [String: UUID])? {
+    let snapshot = request.snapshot
+    guard !snapshot.nodes.isEmpty else { return nil }
+
+    var identities: [UUID: UUID] = [:]
+    collectIdentities(of: snapshot, into: &identities)
+
+    var fresh = LoopGraph(id: UUID(), scope: snapshot.scope)
+    for node in snapshot.nodes {
+      guard let newID = identities[node.id] else { continue }
+      fresh.nodes.append(reIdentify(node, as: newID, identities: identities))
+    }
+    for edge in snapshot.edges {
+      guard let from = identities[edge.from], let to = identities[edge.to] else { continue }
+      fresh.edges.append(LoopEdge(from: from, to: to, spec: edge.spec))
+    }
+
+    var idMapping: [String: UUID] = [:]
+    for (old, new) in identities { idMapping[old.uuidString] = new }
+
+    var remappedMemory: [String: [String]] = [:]
+    for (oldID, entries) in request.memoryByNodeID {
+      remappedMemory[idMapping[oldID]?.uuidString ?? oldID] = entries
+    }
+
+    let prepared = GraphImportRequest(
+      snapshot: fresh, memoryByNodeID: remappedMemory, asChildOf: request.asChildOf,
+      identitiesAreFresh: true)
+    return (prepared, idMapping)
+  }
+
   public static func merge(
     _ request: GraphImportRequest, into target: LoopGraph
   ) -> Plan? {
     let snapshot = request.snapshot
     guard !snapshot.nodes.isEmpty else { return nil }
     if let parent = request.asChildOf, target.nodes[id: parent] == nil { return nil }
+    if request.identitiesAreFresh { return spliceVerbatim(request, into: target) }
 
     var identities: [UUID: UUID] = [:]
     collectIdentities(of: snapshot, into: &identities)
@@ -84,6 +145,35 @@ public enum GraphImportPlanner {
 
     var idMapping: [String: UUID] = [:]
     for (old, new) in identities { idMapping[old.uuidString] = new }
+    return Plan(mergedGraph: merged, idMapping: idMapping, importedEntryPoints: entryPoints)
+  }
+
+  /// The already-re-identified path: the client ran `reIdentified`, so the ids are
+  /// fresh and any collision with the target graph means the request is stale or
+  /// replayed — refused, never silently re-remapped, because the client has already
+  /// keyed session state to these exact ids.
+  private static func spliceVerbatim(
+    _ request: GraphImportRequest, into target: LoopGraph
+  ) -> Plan? {
+    let snapshot = request.snapshot
+    for node in snapshot.nodes where target.containsAtAnyDepth(node.id) { return nil }
+
+    var merged = target
+    var idMapping: [String: UUID] = [:]
+    for node in snapshot.nodes {
+      merged.nodes.append(node)
+      idMapping[node.id.uuidString] = node.id
+    }
+    for edge in snapshot.edges {
+      merged.edges.append(edge)
+    }
+    let targeted = Set(snapshot.edges.map(\.to))
+    let entryPoints = snapshot.nodes.map(\.id).filter { !targeted.contains($0) }
+    if let parent = request.asChildOf {
+      for entry in entryPoints {
+        merged.edges.append(LoopEdge(from: parent, to: entry, spec: EdgeSpec(kind: .spawn)))
+      }
+    }
     return Plan(mergedGraph: merged, idMapping: idMapping, importedEntryPoints: entryPoints)
   }
 

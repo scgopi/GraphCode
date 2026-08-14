@@ -78,16 +78,23 @@ public struct GraphExportBundle: Sendable {
   /// Original prompt text, keyed by node ID string (if available).
   public let promptsByNodeID: [String: String]
 
+  /// Each loop's backend conversation, keyed by node ID string — what lets an
+  /// imported loop resume where the exported one left off. See `SessionTransplant`
+  /// for what each backend can carry.
+  public let sessionsByNodeID: [String: SessionTransplant.Artifact]
+
   public init(
     manifest: ExportManifest,
     graphSnapshot: LoopGraph,
     memoryByNodeID: [String: [String]] = [:],
-    promptsByNodeID: [String: String] = [:]
+    promptsByNodeID: [String: String] = [:],
+    sessionsByNodeID: [String: SessionTransplant.Artifact] = [:]
   ) {
     self.manifest = manifest
     self.graphSnapshot = graphSnapshot
     self.memoryByNodeID = memoryByNodeID
     self.promptsByNodeID = promptsByNodeID
+    self.sessionsByNodeID = sessionsByNodeID
   }
 }
 
@@ -97,5 +104,27 @@ extension GraphExportBundle {
   public func importRequest(asChildOf parent: UUID? = nil) -> GraphImportRequest {
     GraphImportRequest(
       snapshot: graphSnapshot, memoryByNodeID: memoryByNodeID, asChildOf: parent)
+  }
+
+  /// The full client half of an import: re-identify the snapshot here (so the fresh
+  /// ids are known before anything is sent), install each carried session under its
+  /// loop's fresh id, and hand back the request the daemon should splice verbatim.
+  ///
+  /// Session installation happens client-side on purpose: transcripts run to
+  /// megabytes and belong on disk, not inside a socket frame — and every path they're
+  /// written to (`~/.claude`, `~/.copilot`, `~/.graphcode/sessions`) is read fresh at
+  /// launch time, so there is no daemon-held copy to race.
+  public func preparedImportRequest(
+    asChildOf parent: UUID? = nil, projectPath: String
+  ) -> GraphImportRequest? {
+    guard
+      let (request, idMapping) = GraphImportPlanner.reIdentified(
+        importRequest(asChildOf: parent))
+    else { return nil }
+    for (oldID, artifact) in sessionsByNodeID {
+      guard let newID = idMapping[oldID] else { continue }
+      SessionTransplant.restore(artifact, forNodeID: newID, projectPath: projectPath)
+    }
+    return request
   }
 }
