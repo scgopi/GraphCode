@@ -271,7 +271,15 @@ struct ProjectCanvasView: View {
       Button(worktreesMenuTitle) { store.send(.worktreeSweepTapped) }
       Button("Project Settings…") { store.send(.projectSettingsTapped) }
       Button("Open in Finder") { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
+      Divider()
     }
+    // The whole-canvas counterparts to a card's Export Loop…/Import Loops Here…:
+    // everything on this canvas as one bundle, and an import that lands beside the
+    // existing loops rather than under one of them.
+    if !store.canvasGraph.nodes.isEmpty {
+      Button("Export All Loops…") { store.send(.exportGraphRequested) }
+    }
+    Button("Import Loops…") { store.send(.importLoopsRequested(asChildOf: nil)) }
   }
 
   private var worktreesMenuTitle: String {

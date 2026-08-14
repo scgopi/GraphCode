@@ -6,14 +6,18 @@ extension GraphExportBundle {
   /// Returns the path on success, or nil if writing failed.
   public func writeToZip(at path: String) -> String? {
     let fileURL = URL(fileURLWithPath: path)
-    let tmpDir = fileURL.deletingLastPathComponent().appendingPathComponent(
-      ".export-tmp-\(UUID().uuidString)")
+    // Staged in the system temp dir, not beside the output: the output's folder is
+    // writable but littering it with a staging directory a crash could orphan is rude,
+    // and `readFromZip` needs the same choice anyway (its input may sit somewhere
+    // read-only, like a mounted DMG).
+    let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "graphcode-export-\(UUID().uuidString)")
 
     do {
       try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
       defer { try? FileManager.default.removeItem(at: tmpDir) }
 
-      let manifestJSON = try JSONEncoder().encode(manifest)
+      let manifestJSON = try Self.manifestEncoder().encode(manifest)
       let manifestURL = tmpDir.appendingPathComponent("manifest.json")
       try manifestJSON.write(to: manifestURL)
 
@@ -46,8 +50,8 @@ extension GraphExportBundle {
   /// Reads a ZIP file and deserializes it into a GraphExportBundle.
   public static func readFromZip(at path: String) -> GraphExportBundle? {
     let fileURL = URL(fileURLWithPath: path)
-    let tmpDir = fileURL.deletingLastPathComponent().appendingPathComponent(
-      ".import-tmp-\(UUID().uuidString)")
+    let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "graphcode-import-\(UUID().uuidString)")
 
     do {
       try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
@@ -57,9 +61,9 @@ extension GraphExportBundle {
 
       let manifestURL = tmpDir.appendingPathComponent("manifest.json")
       guard let manifestData = try? Data(contentsOf: manifestURL) else { return nil }
-      guard let manifest = try? JSONDecoder().decode(ExportManifest.self, from: manifestData) else {
-        return nil
-      }
+      guard
+        let manifest = try? manifestDecoder().decode(ExportManifest.self, from: manifestData)
+      else { return nil }
 
       let graphURL = tmpDir.appendingPathComponent("graph-snapshot.json")
       guard let graphData = try? Data(contentsOf: graphURL) else { return nil }
@@ -94,11 +98,34 @@ extension GraphExportBundle {
 
   // MARK: - ZIP Helpers
 
+  /// The manifest is the bundle's human-inspectable header, so dates ride as ISO-8601
+  /// strings rather than Foundation's reference-date doubles — `2026-08-14T02:31:35Z`
+  /// in a text editor instead of `808367495.09`. The graph snapshot keeps the default
+  /// encoding: it round-trips through these same coders only, and matching the
+  /// daemon's own persistence format costs nothing.
+  private static func manifestEncoder() -> JSONEncoder {
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    return encoder
+  }
+
+  private static func manifestDecoder() -> JSONDecoder {
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    return decoder
+  }
+
   private static func createZipArchive(at destination: URL, from source: URL) throws {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-    process.arguments = ["-c", "-k", "--sequesterRsrc", source.path, destination.path]
+    // `--norsrc`, not `--sequesterRsrc`: sequestering writes AppleDouble copies into a
+    // `__MACOSX/` shadow tree, which doubled the archive's file count with junk every
+    // other platform shows the user. Nothing in a bundle has resource forks worth
+    // keeping.
+    process.arguments = ["-c", "-k", "--norsrc", source.path, destination.path]
 
+    try? FileManager.default.removeItem(at: destination)
     try process.run()
     process.waitUntilExit()
 
@@ -134,15 +161,17 @@ extension GraphExportBundle {
       "",
       "## How to Import",
       "",
+      "In the GraphCode app: right-click any loop card (or the canvas) and choose",
+      "Import Loops…, then pick this zip. Or from the shell:",
+      "",
       "```bash",
-      "graphcode node import /path/to/this/export.zip --project /path/to/target/project",
+      "graphcode node import /path/to/target/project /path/to/this/export.zip",
       "```",
       "",
-      "Or import as a child of an existing node:",
+      "Or import as children of an existing loop:",
       "",
       "```bash",
-      "graphcode node import /path/to/this/export.zip \\",
-      "  --project /path/to/target/project \\",
+      "graphcode node import /path/to/target/project /path/to/this/export.zip \\",
       "  --as-child-of <parent-node-id>",
       "```",
       "",

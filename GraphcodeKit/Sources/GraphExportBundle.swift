@@ -91,24 +91,11 @@ public struct GraphExportBundle: Sendable {
   }
 }
 
-/// Result of an import, tracking what was created/updated.
-public struct ImportResult: Sendable {
-  /// Mapping of imported node IDs (as strings) to new node IDs in the target graph.
-  public let nodeIDMapping: [String: UUID]
-
-  /// The updated graph after import.
-  public let updatedGraph: LoopGraph
-
-  /// Human-readable summary of what was imported.
-  public let summary: String
-
-  public init(
-    nodeIDMapping: [String: UUID],
-    updatedGraph: LoopGraph,
-    summary: String
-  ) {
-    self.nodeIDMapping = nodeIDMapping
-    self.updatedGraph = updatedGraph
-    self.summary = summary
+extension GraphExportBundle {
+  /// The wire request this bundle becomes when a client asks the daemon to import it —
+  /// the daemon performs the merge (see `GraphImportRequest`).
+  public func importRequest(asChildOf parent: UUID? = nil) -> GraphImportRequest {
+    GraphImportRequest(
+      snapshot: graphSnapshot, memoryByNodeID: memoryByNodeID, asChildOf: parent)
   }
 }
