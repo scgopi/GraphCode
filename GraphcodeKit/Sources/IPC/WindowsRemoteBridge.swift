@@ -517,19 +517,19 @@ import Foundation
   }
 
   /// Production Windows remote bridge and per-authority SSH reverse forward owner.
-  public actor WindowsRemoteBridge: RemoteBridge {
+  public actor WindowsRemoteBridge: RemoteBridge, WindowsRemoteBridgeService {
     public static let defaultTTL: TimeInterval = 30 * 60
     public static let defaultPreviousOverlap: TimeInterval = 5
 
     private final class Entry: @unchecked Sendable {
-      let authority: String
+      let authority: WindowsSSHAuthority
       let store: WindowsRemoteBridgeStateStore
       let listener: WindowsRemoteBridgeListener
       var session: WindowsSSHForwardSession?
       var state: RemoteBridgeWireState
 
       init(
-        authority: String,
+        authority: WindowsSSHAuthority,
         store: WindowsRemoteBridgeStateStore,
         listener: WindowsRemoteBridgeListener,
         state: RemoteBridgeWireState
@@ -573,10 +573,20 @@ import Foundation
     }
 
     public func ensureForwarding(authority: String) async throws -> RemoteBridgeState {
-      guard !authority.isEmpty else {
+      guard let authority = WindowsSSHAuthority(authority: authority) else {
         throw WindowsRemoteBridgeError.invalidConfiguration
       }
-      if let entry = entries[authority] {
+      return try await ensureForwarding(authority: authority)
+    }
+
+    public func ensureForwarding(authority: WindowsSSHAuthority) async throws
+      -> RemoteBridgeState
+    {
+      guard !authority.host.isEmpty else {
+        throw WindowsRemoteBridgeError.invalidConfiguration
+      }
+      let key = authority.key
+      if let entry = entries[key] {
         if Date().timeIntervalSince1970 < entry.state.expiresAt {
           if let session = entry.session, session.isRunning {
             if (try? verifySSH(authority: authority, port: entry.state.port, session: session))
@@ -597,7 +607,7 @@ import Foundation
         _ = try? entry.store.removeIfMatches(entry.state)
         let replacement = try startEntry(
           authority: authority, store: entry.store, generation: entry.state.generation + 1)
-        entries[authority] = replacement
+        entries[key] = replacement
         return replacement.state.remoteBridgeState()
       }
 
@@ -607,12 +617,19 @@ import Foundation
       let generation = (previous?.generation ?? 0) + 1
       let entry = try startEntry(
         authority: authority, store: store, generation: generation)
-      entries[authority] = entry
+      entries[key] = entry
       return entry.state.remoteBridgeState()
     }
 
     public func stopForwarding(authority: String) async throws {
-      guard let entry = entries.removeValue(forKey: authority) else {
+      guard let authority = WindowsSSHAuthority(authority: authority) else {
+        throw WindowsRemoteBridgeError.invalidConfiguration
+      }
+      try await stopForwarding(authority: authority)
+    }
+
+    public func stopForwarding(authority: WindowsSSHAuthority) async throws {
+      guard let entry = entries.removeValue(forKey: authority.key) else {
         let store = try WindowsRemoteBridgeStateStore(
           url: Self.stateURL(authority: authority, supportDirectory: supportDirectory))
         if let state = try? store.read() {
@@ -631,22 +648,33 @@ import Foundation
     public func rotate(
       authority: String, overlapSeconds: TimeInterval? = nil
     ) throws -> RemoteBridgeState {
-      guard let entry = entries[authority] else {
+      guard let authority = WindowsSSHAuthority(authority: authority),
+        let entry = entries[authority.key]
+      else {
         throw WindowsRemoteBridgeError.stateUnavailable
       }
       return try rotateEntry(entry, overlapSeconds: overlapSeconds)
     }
 
     public static func stateURL(authority: String, supportDirectory: URL) -> URL {
+      stateURL(
+        authority: WindowsSSHAuthority(authority: authority)
+          ?? WindowsSSHAuthority(host: authority),
+        supportDirectory: supportDirectory)
+    }
+
+    public static func stateURL(
+      authority: WindowsSSHAuthority, supportDirectory: URL
+    ) -> URL {
       supportDirectory
         .appendingPathComponent("remote-bridges", isDirectory: true)
         .appendingPathComponent(
-          "\(GraphcodeSHA256.hex(Data(authority.utf8))).json",
+          "\(GraphcodeSHA256.hex(Data(authority.key.utf8))).json",
           isDirectory: false)
     }
 
     private func startEntry(
-      authority: String,
+      authority: WindowsSSHAuthority,
       store: WindowsRemoteBridgeStateStore,
       generation: UInt64
     ) throws -> Entry {
@@ -698,7 +726,7 @@ import Foundation
     }
 
     private func reconnect(
-      _ entry: Entry, authority: String
+      _ entry: Entry, authority: WindowsSSHAuthority
     ) throws -> WindowsSSHForwardSession? {
       for attempt in 0..<3 {
         do {
@@ -750,7 +778,7 @@ import Foundation
     }
 
     private func verifySSH(
-      authority: String,
+      authority: WindowsSSHAuthority,
       port: UInt16,
       session: WindowsSSHForwardSession
     ) throws -> Bool {
@@ -803,15 +831,18 @@ import Foundation
 
   /// Injectable SSH boundary for controlled local fixtures and production OpenSSH.
   public struct WindowsSSHForwardDriver: @unchecked Sendable {
-    private let opener: @Sendable (String, UInt16) throws -> WindowsSSHForwardSession
-    private let verifier: @Sendable (String, UInt16) throws -> Bool
+    private let opener: @Sendable (WindowsSSHAuthority, UInt16) throws -> WindowsSSHForwardSession
+    private let verifier: @Sendable (WindowsSSHAuthority, UInt16) throws -> Bool
 
     public init(
-      opener: @escaping @Sendable (String, UInt16) throws -> WindowsSSHForwardSession? = {
+      opener:
+        @escaping @Sendable (WindowsSSHAuthority, UInt16)
+        throws -> WindowsSSHForwardSession? = {
+          authority, port in
+          try WindowsSSHForwardDriver.openDefault(authority: authority, port: port)
+        },
+      verifier: @escaping @Sendable (WindowsSSHAuthority, UInt16) throws -> Bool = {
         authority, port in
-        try WindowsSSHForwardDriver.openDefault(authority: authority, port: port)
-      },
-      verifier: @escaping @Sendable (String, UInt16) throws -> Bool = { authority, port in
         try WindowsSSHForwardDriver.verifyDefault(authority: authority, port: port)
       }
     ) {
@@ -824,16 +855,16 @@ import Foundation
       self.verifier = verifier
     }
 
-    func open(authority: String, port: UInt16) throws -> WindowsSSHForwardSession {
+    func open(authority: WindowsSSHAuthority, port: UInt16) throws -> WindowsSSHForwardSession {
       try opener(authority, port)
     }
 
-    func verify(authority: String, port: UInt16) throws -> Bool {
+    func verify(authority: WindowsSSHAuthority, port: UInt16) throws -> Bool {
       try verifier(authority, port)
     }
 
     public static func openDefault(
-      authority: String, port: UInt16
+      authority: WindowsSSHAuthority, port: UInt16
     ) throws -> WindowsSSHForwardSession? {
       guard let executable = sshExecutable() else { return nil }
       var arguments = commonArguments(for: authority)
@@ -857,7 +888,9 @@ import Foundation
       return WindowsSSHForwardSession(process: process)
     }
 
-    public static func verifyDefault(authority: String, port: UInt16) throws -> Bool {
+    public static func verifyDefault(
+      authority: WindowsSSHAuthority, port: UInt16
+    ) throws -> Bool {
       guard let executable = sshExecutable() else { return false }
       let python = """
         import ipaddress
@@ -957,14 +990,13 @@ import Foundation
       return (try? result.value().exitCode) == 0
     }
 
-    private static func commonArguments(for authority: String) -> [String] {
-      if let colon = authority.lastIndex(of: ":"),
-        let port = Int(authority[authority.index(after: colon)...]),
-        authority[..<colon].contains("@") || !authority[..<colon].contains(":")
-      {
-        return ["-p", String(port), String(authority[..<colon])]
+    static func commonArguments(for authority: WindowsSSHAuthority) -> [String] {
+      var arguments: [String] = []
+      if let port = authority.port {
+        arguments += ["-p", String(port)]
       }
-      return [authority]
+      arguments.append(authority.destination)
+      return arguments
     }
 
     private static func sshExecutable() -> URL? {

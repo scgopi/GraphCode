@@ -33,15 +33,7 @@ import GraphcodeKit
   let handshakeLimiter = WindowsPipeHandshakeLimiter(limit: 32)
   let registry = ProjectRegistry(
     persistenceDirectory: supportDirectory,
-    replayStore: replayStore,
-    ensureSession: nil,
-    terminateSession: nil,
-    evaluatePredicate: nil,
-    deliverMessage: nil,
-    captureScript: nil,
-    readUsage: nil,
-    readActivity: nil,
-    readPresence: nil)
+    replayStore: replayStore)
   let replayCleanupTask = replayStore.startCleanup()
   let listener: WindowsNamedPipeListener = {
     do {

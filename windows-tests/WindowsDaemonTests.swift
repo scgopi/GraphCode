@@ -346,6 +346,63 @@ final class WindowsDaemonTests: XCTestCase {
       XCTAssertFalse(delivery.contains(state.capability))
     }
 
+    func testStructuredSSHAuthorityPreservesIPv6UserPortAndVerification() throws {
+      let authority = WindowsSSHAuthority(user: "alice", host: "::1", port: 2200)
+      XCTAssertEqual(authority.destination, "alice@[::1]")
+      XCTAssertEqual(authority.key, "alice@[::1]:2200")
+      XCTAssertEqual(
+        WindowsSSHForwardDriver.commonArguments(for: authority),
+        ["-p", "2200", "alice@[::1]"])
+      XCTAssertEqual(
+        WindowsSSHAuthority(authority: "alice@[::1]:2200"),
+        authority)
+
+      let driver = WindowsSSHForwardDriver(
+        opener: { _, _ in nil },
+        verifier: { received, port in
+          XCTAssertEqual(received, authority)
+          XCTAssertEqual(port, 45_678)
+          return true
+        })
+      XCTAssertTrue(try driver.verify(authority: authority, port: 45_678))
+    }
+
+    func testWindowsDaemonProjectRegistryUsesProductionRemoteEnsureCallback() async throws {
+      let fakeBridge = RecordingWindowsRemoteBridge()
+      let productionBridge = try? WindowsRemoteBridge()
+      ZmxSessionLauncher.setWindowsRemoteBridgeForTesting(fakeBridge)
+      defer { ZmxSessionLauncher.setWindowsRemoteBridgeForTesting(productionBridge) }
+
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("graphcode-daemon-remote-\(UUID().uuidString)", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      let registry = ProjectRegistry(persistenceDirectory: root)
+      let connection = RecordingDaemonConnection()
+      let connectionID = connection.id
+      let projectPath = "ssh://alice@[::1]:2200/work/remote-project"
+      await registry.addConnection(id: connectionID, connection: connection)
+      await registry.handle(.openProject(path: projectPath), connectionID: connectionID)
+      await registry.handle(
+        .graphCommand(
+          projectPath: projectPath,
+          command: .createNode(
+            NodeDraft(
+              title: "Remote",
+              loopType: .goalBased,
+              goal: GoalSpec(summary: "remote ensure"),
+              backend: .claudeCode))),
+        connectionID: connectionID)
+
+      for _ in 0..<50 {
+        if !(await fakeBridge.authorities().isEmpty) { break }
+        try await Task.sleep(for: .milliseconds(20))
+      }
+      let authorities = await fakeBridge.authorities()
+      XCTAssertEqual(
+        authorities,
+        [WindowsSSHAuthority(user: "alice", host: "::1", port: 2200)])
+    }
+
     func testWindowsScheduledTaskLauncherPreservesCustomSupportDirectory() async throws {
       let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("graphcode-task-env-\(UUID().uuidString)", isDirectory: true)
@@ -1126,6 +1183,40 @@ final class WindowsDaemonTests: XCTestCase {
     func run(_ request: ProcessRequest, timeout: Duration?) async throws -> ProcessResult {
       requests.append(request)
       return ProcessResult(exitCode: 0, standardOutput: Data(), standardError: Data())
+    }
+  }
+
+  private actor RecordingWindowsRemoteBridge: WindowsRemoteBridgeService {
+    private var recorded: [WindowsSSHAuthority] = []
+
+    func ensureForwarding(authority: WindowsSSHAuthority) async throws -> RemoteBridgeState {
+      recorded.append(authority)
+      throw ProbeError.reached
+    }
+
+    func authorities() -> [WindowsSSHAuthority] {
+      recorded
+    }
+
+    private enum ProbeError: Error {
+      case reached
+    }
+  }
+
+  private final class RecordingDaemonConnection: @unchecked Sendable, DaemonConnection {
+    let id = Foundation.UUID()
+    let endpoint: DaemonEndpoint = .namedPipe("\\\\.\\pipe\\graphcode-test")
+
+    func receiveFrame() async throws -> Data {
+      throw ConnectionError.closed
+    }
+
+    func sendFrame(_ data: Data) async throws {}
+
+    func close() async throws {}
+
+    private enum ConnectionError: Error {
+      case closed
     }
   }
 #endif

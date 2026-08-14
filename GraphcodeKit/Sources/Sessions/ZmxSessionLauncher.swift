@@ -27,7 +27,35 @@ public enum ZmxSessionLauncher {
     /// One bridge owner serves every remote project in this UI process. The bridge state is
     /// per authority, so multiple hosts and projects remain isolated without duplicating
     /// transport setup in the session launcher.
-    private static let windowsRemoteBridge: WindowsRemoteBridge? = try? WindowsRemoteBridge()
+    private final class WindowsRemoteBridgeProvider: @unchecked Sendable {
+      private let lock = NSLock()
+      private var bridge: (any WindowsRemoteBridgeService)?
+
+      init(bridge: (any WindowsRemoteBridgeService)?) {
+        self.bridge = bridge
+      }
+
+      func get() -> (any WindowsRemoteBridgeService)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return bridge
+      }
+
+      func set(_ bridge: (any WindowsRemoteBridgeService)?) {
+        lock.lock()
+        self.bridge = bridge
+        lock.unlock()
+      }
+    }
+
+    private static let windowsRemoteBridgeProvider = WindowsRemoteBridgeProvider(
+      bridge: try? WindowsRemoteBridge())
+
+    static func setWindowsRemoteBridgeForTesting(
+      _ bridge: (any WindowsRemoteBridgeService)?
+    ) {
+      windowsRemoteBridgeProvider.set(bridge)
+    }
   #endif
 
   /// `zmx kill <name>` is a no-op (with a stderr note) when nothing matches, so this is
@@ -1196,8 +1224,18 @@ public enum ZmxSessionLauncher {
     guard let lease = await RemoteEnsureGate.shared.begin(node.id) else { return }
     #if os(Windows)
       guard
-        let bridge = windowsRemoteBridge,
-        let state = try? await bridge.ensureForwarding(authority: location.authority)
+        location.port == nil
+          || (location.port ?? 0) > 0 && (location.port ?? 0) <= Int(UInt16.max)
+      else {
+        await RemoteEnsureGate.shared.end(node.id, token: lease)
+        return
+      }
+      let authorityPort = location.port.map { UInt16($0) }
+      let authority = WindowsSSHAuthority(
+        user: location.user, host: location.host, port: authorityPort)
+      guard
+        let bridge = windowsRemoteBridgeProvider.get(),
+        let state = try? await bridge.ensureForwarding(authority: authority)
       else {
         await RemoteEnsureGate.shared.end(node.id, token: lease)
         return

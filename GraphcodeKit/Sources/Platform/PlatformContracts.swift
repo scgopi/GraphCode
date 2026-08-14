@@ -146,3 +146,7 @@ public protocol RemoteBridge: Sendable {
   func ensureForwarding(authority: String) async throws -> RemoteBridgeState
   func stopForwarding(authority: String) async throws
 }
+
+protocol WindowsRemoteBridgeService: Sendable {
+  func ensureForwarding(authority: WindowsSSHAuthority) async throws -> RemoteBridgeState
+}
