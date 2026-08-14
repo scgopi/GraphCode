@@ -123,6 +123,40 @@ struct DaemonBootstrapTests {
       (try? PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0))
         != nil)
   }
+
+  @Test
+  func theLaunchAgentNamesTheAppSoMacOSDoesNotNameTheDeveloper() {
+    // Left out, macOS labels the background item with the signing certificate's name and
+    // tells the user "Software from <a person they have never heard of> can run in the
+    // background".
+    let plist = DaemonBootstrap.launchAgentPlist(
+      daemonPath: "/Users/x/.graphcode/bin/graphcoded", supportDirectory: "/Users/x/.graphcode")
+
+    #expect(plist["AssociatedBundleIdentifiers"] as? [String] == ["dev.graphcode.app"])
+  }
+
+  @Test
+  func anAgentFromAnEarlierBuildIsNotMistakenForACurrentOne() throws {
+    // The upgrade path for the naming fix above. Judging the agent by its existence alone
+    // left the old one in place on every machine whose helpers happened not to change.
+    let directory = makeBundleDirectory(helpers: [])
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("agent.plist")
+    let expected = DaemonBootstrap.launchAgentPlist(
+      daemonPath: "/Users/x/.graphcode/bin/graphcoded", supportDirectory: "/Users/x/.graphcode")
+
+    #expect(!DaemonBootstrap.launchAgentIsCurrent(at: url, expected: expected))
+
+    var previous = expected
+    previous["AssociatedBundleIdentifiers"] = nil
+    try PropertyListSerialization.data(fromPropertyList: previous, format: .xml, options: 0)
+      .write(to: url)
+    #expect(!DaemonBootstrap.launchAgentIsCurrent(at: url, expected: expected))
+
+    try PropertyListSerialization.data(fromPropertyList: expected, format: .xml, options: 0)
+      .write(to: url)
+    #expect(DaemonBootstrap.launchAgentIsCurrent(at: url, expected: expected))
+  }
 }
 
 /// Anchors `Bundle(for:)` on the test bundle, which has no embedded helpers.
