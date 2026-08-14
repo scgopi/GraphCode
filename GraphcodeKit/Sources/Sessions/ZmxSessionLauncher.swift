@@ -822,7 +822,6 @@ public enum ZmxSessionLauncher {
         forNode: node, at: location, settings: settings, bridgeState: bridgeState
       )
       .map { $0 + "; " } ?? ""
-    let bridgeStateContent = bridgeState.flatMap(Self.bridgeStateJSON)
     let create = remoteCreateScript(
       forNode: node, freshRun: run, at: location, settings: settings)
     // The trust seed and the hooks file are genuinely create-only — a folder-trust
@@ -834,7 +833,8 @@ public enum ZmxSessionLauncher {
     let script =
       "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { "
       + deliveryFragment(
-        delivery, ifSessionMissing: check, bridgeStateContent: bridgeStateContent)
+        delivery, ifSessionMissing: check,
+        bridgeStateGeneration: bridgeState.map(\.generation))
       + "\(check) >/dev/null 2>&1 || { " + trustSeed + hooksWrite
       + "\(create); }; }"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
@@ -856,7 +856,8 @@ public enum ZmxSessionLauncher {
   /// a healthy tick costs one extra `zmx get` and a `cat` on the same host, and the
   /// delivery itself runs only when it has something new to say.
   static func deliveryFragment(
-    _ delivery: String, ifSessionMissing check: String, bridgeStateContent: String? = nil
+    _ delivery: String, ifSessionMissing check: String,
+    bridgeStateGeneration: UInt64? = nil
   ) -> String {
     guard !delivery.isEmpty else { return "" }
     let stamp = RemoteProjectLocation.shellQuoted(RemoteGraphAccess.cliShimStamp)
@@ -870,9 +871,9 @@ public enum ZmxSessionLauncher {
     // launches an argv naming the briefing, wake digest and prompt files, and every one
     // of them rides in this same fragment.
     let bridgeChanged =
-      bridgeStateContent.map {
-        " || [ \"$(cat \(RemoteGraphAccess.bridgeStatePath) 2>/dev/null)\" != "
-          + RemoteProjectLocation.shellQuoted($0) + " ]"
+      bridgeStateGeneration.map {
+        " || [ \"$(cat \(RemoteGraphAccess.bridgeStateGenerationPath) 2>/dev/null)\" != "
+          + RemoteProjectLocation.shellQuoted(String($0)) + " ]"
       } ?? ""
     return "if ! \(check) >/dev/null 2>&1 "
       + "|| [ \"$(cat \(stampFile) 2>/dev/null)\" != \(stamp) ]"
@@ -945,12 +946,8 @@ public enum ZmxSessionLauncher {
     forNode node: LoopNode?, at location: RemoteProjectLocation, settings: GraphcodeSettings,
     bridgeState: RemoteBridgeWireState? = nil
   ) -> String? {
+    _ = bridgeState
     var files = [RemoteGraphAccess.cliInstallPath: RemoteGraphAccess.cliShimSource]
-    if let bridgeState, let data = try? JSONEncoder().encode(bridgeState),
-      let content = String(data: data, encoding: .utf8)
-    {
-      files[RemoteGraphAccess.bridgeStatePath] = content
-    }
     if settings.briefsSessionsAboutTheGraph,
       let text = SessionBriefing.text(projectPath: location.projectPath)
     {
@@ -983,9 +980,16 @@ public enum ZmxSessionLauncher {
       receipt: (path: RemoteGraphAccess.shimStampPath, content: RemoteGraphAccess.cliShimStamp))
   }
 
-  private static func bridgeStateJSON(_ state: RemoteBridgeWireState) -> String? {
+  public static func remoteBridgeStateTransfer(
+    _ state: RemoteBridgeWireState, at location: RemoteProjectLocation
+  ) -> (invocation: [String], input: Data)? {
     guard let data = try? JSONEncoder().encode(state) else { return nil }
-    return String(data: data, encoding: .utf8)
+    let script = RemoteGraphAccess.bridgeStateInstallerScript(
+      length: data.count, sha256: GraphcodeSHA256.hex(data))
+    return (
+      location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script)),
+      data
+    )
   }
 
   /// `quotedCommand`, except that arguments naming graphcode's own remote files —
@@ -1155,13 +1159,19 @@ public enum ZmxSessionLauncher {
   /// idempotent commands: ensure is create-only and kill is a no-op on a dead session,
   /// where a retried *send* could type the same message twice (its caller already has a
   /// staging fallback for the honest failure).
-  static func runRemoteRetrying(_ invocation: [String], attempts: Int = 3) async -> Bool {
+  static func runRemoteRetrying(
+    _ invocation: [String], attempts: Int = 3, standardInput: Data? = nil
+  ) async -> Bool {
     RemoteProjectLocation.prepareControlSocketDirectory()
     for attempt in 1...attempts {
-      if let session = try? PTYProcessSession(
-        executable: invocation[0], arguments: Array(invocation.dropFirst())),
-        await session.waitUntilFinished()
-      {
+      guard
+        let session = try? PTYProcessSession(
+          executable: invocation[0], arguments: Array(invocation.dropFirst()))
+      else { return false }
+      if let standardInput {
+        session.sendInput(String(decoding: standardInput, as: UTF8.self) + "\n")
+      }
+      if await session.waitUntilFinished() {
         return true
       }
       if attempt < attempts { try? await Task.sleep(for: .seconds(1 << (attempt - 1))) }
@@ -1193,6 +1203,13 @@ public enum ZmxSessionLauncher {
         return
       }
       let bridgeState = RemoteBridgeWireState(remoteBridgeState: state)
+      guard
+        let transfer = remoteBridgeStateTransfer(bridgeState, at: location),
+        await runRemoteRetrying(transfer.invocation, standardInput: transfer.input)
+      else {
+        await RemoteEnsureGate.shared.end(node.id, token: lease)
+        return
+      }
     #else
       let bridgeState: RemoteBridgeWireState? = nil
     #endif

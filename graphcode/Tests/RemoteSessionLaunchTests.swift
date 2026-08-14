@@ -237,14 +237,31 @@ struct RemoteSessionLaunchTests {
     let delivery = try #require(
       ZmxSessionLauncher.remoteDeliveryScript(
         forNode: nil, at: location, settings: GraphcodeSettings(), bridgeState: state))
-    #expect(deliveredPaths(in: delivery).contains("~/.graphcode/bridge-state.json"))
+    #expect(!deliveredPaths(in: delivery).contains("~/.graphcode/bridge-state.json"))
+    let transfer = try #require(
+      ZmxSessionLauncher.remoteBridgeStateTransfer(state, at: location))
+    let transferCommand = transfer.invocation.joined(separator: " ")
+    #expect(transferCommand.contains("bridge-state.json"))
+    #expect(transferCommand.contains("bridge-state-generation"))
+    #expect(!transferCommand.contains(state.capability))
+    #expect(String(data: transfer.input, encoding: .utf8)?.contains(state.capability) == true)
     let ensure = try #require(
       ZmxSessionLauncher.remoteEnsureInvocation(
         forNode: LoopNode(
           title: "Bridge", loopType: .goalBased, goal: GoalSpec(summary: "bridge")),
         at: location, settings: GraphcodeSettings(), bridgeState: state))
-    #expect(ensure.joined(separator: " ").contains("bridge-state.json"))
-    #expect(ensure.joined(separator: " ").contains("cat ~/.graphcode/bridge-state.json"))
+    let ensureCommand = ensure.joined(separator: " ")
+    #expect(ensureCommand.contains("bridge-state-generation"))
+    #expect(ensureCommand.contains("4"))
+    #expect(!ensureCommand.contains(state.capability))
+  }
+
+  @Test
+  func macOSShimSupersedesStaleWindowsBridgeStateWithUnixForwarding() {
+    let shim = RemoteGraphAccess.cliShimSource
+    #expect(shim.contains("sys.platform == \"darwin\""))
+    #expect(shim.contains("os.unlink(state_path)"))
+    #expect(shim.contains("socket.AF_UNIX"))
   }
 
   /// Decodes the installer fragment's base64 JSON manifest back into the delivered

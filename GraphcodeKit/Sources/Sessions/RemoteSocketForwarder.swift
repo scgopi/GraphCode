@@ -31,6 +31,10 @@ public actor RemoteSocketForwarder {
   /// is unreachable and why, which is more diagnosable than anything a launcher with
   /// no UI could do from here.
   public func ensureForwarding(to location: RemoteProjectLocation) {
+#if os(Windows)
+    _ = location
+    return
+#else
     let key = location.authority
     if let existing = forwarders[key], existing.isRunning { return }
     let process = Process()
@@ -44,6 +48,7 @@ public actor RemoteSocketForwarder {
       try process.run()
       forwarders[key] = process
     } catch {}
+#endif
   }
 
   static func forwardScript(for location: RemoteProjectLocation, localSocketPath: String)
@@ -68,7 +73,7 @@ public actor RemoteSocketForwarder {
     -> String
   {
     var argv = [
-      "/usr/bin/ssh", "-N",
+      SSHExecutableResolver.executableURL()?.path ?? "ssh", "-N",
       "-o", "ExitOnForwardFailure=yes", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
       "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3",
     ]

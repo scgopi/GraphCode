@@ -213,6 +213,43 @@ class RemoteBridgeTests(unittest.TestCase):
         self.assertEqual(response["backend"], "named-pipe-like")
         self.assertEqual(response["echo"], {"command": "status"})
 
+    def test_authenticated_session_relays_multiple_frames_on_one_connection(self):
+        state = BridgeStateStore(self.state_path).read()
+        with socket.create_connection(
+            (state["host"], state["port"]), timeout=1.0
+        ) as connection:
+            bodies = ({"command": "openProject"}, {"command": "status"})
+            for body in bodies[:1]:
+                send_frame(
+                    connection,
+                    {
+                        "capability": state["capability"],
+                        "generation": state["generation"],
+                        "request": body,
+                    },
+                )
+                response = read_frame(connection)
+                self.assertEqual(response["ok"], True)
+                self.assertEqual(response["echo"], body)
+            self.backend.broadcast({"event": "graphChanged", "revision": 2})
+            self.assertEqual(
+                read_frame(connection),
+                {"event": "graphChanged", "revision": 2},
+            )
+            time.sleep(self.bridge.request_timeout + 0.1)
+            body = bodies[1]
+            send_frame(
+                connection,
+                {
+                    "capability": state["capability"],
+                    "generation": state["generation"],
+                    "request": body,
+                },
+            )
+            response = read_frame(connection)
+            self.assertEqual(response["ok"], True)
+            self.assertEqual(response["echo"], body)
+
     def test_posix_client_fixture_reads_state_and_round_trips(self):
         result = subprocess.run(
             [

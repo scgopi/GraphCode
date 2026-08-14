@@ -28,6 +28,8 @@ public enum RemoteGraphAccess {
   /// bridge. It is deliberately stable per remote home: every project on one
   /// forwarded host uses the same authenticated daemon endpoint.
   public static let bridgeStatePath = "~/.graphcode/bridge-state.json"
+  /// Non-secret generation receipt used to decide whether a remote shim needs refresh.
+  public static let bridgeStateGenerationPath = "~/.graphcode/bridge-state-generation"
 
   /// Where the receipt for the last installed shim lives.
   ///
@@ -152,6 +154,31 @@ public enum RemoteGraphAccess {
     if let receipt { argv += [receipt.path, receipt.content] }
     return argv.map(RemoteProjectLocation.shellQuoted).joined(separator: " ")
       + " >/dev/null 2>&1 || true"
+  }
+
+  /// Installs bridge state through the SSH command's stdin. Only the byte count and
+  /// SHA-256 digest appear in the remote command; the capability-bearing JSON never
+  /// appears in argv, shell history, or a process listing.
+  public static func bridgeStateInstallerScript(length: Int, sha256: String) -> String {
+    let program =
+      "import hashlib,json,os,sys,tempfile; "
+      + "n=int(sys.argv[1]); h=sys.argv[2]; b=sys.stdin.buffer.read(n); "
+      + "(_ for _ in ()).throw(ValueError('invalid bridge state transfer')) "
+      + "if len(b)!=n or hashlib.sha256(b).hexdigest()!=h else None; "
+      + "s=json.loads(b.decode('utf-8')); "
+      + "d=os.path.dirname(os.path.expanduser(sys.argv[3])); os.makedirs(d,exist_ok=True); "
+      + "fd,t=tempfile.mkstemp(dir=d); "
+      + "f=os.fdopen(fd,'wb'); f.write(b); f.flush(); os.fsync(f.fileno()); "
+      + "os.chmod(t,0o600); f.close(); "
+      + "os.replace(t,os.path.expanduser(sys.argv[3])); "
+      + "g=os.path.expanduser(sys.argv[4]); "
+      + "gd=os.path.dirname(g); fd,u=tempfile.mkstemp(dir=gd); "
+      + "f=os.fdopen(fd,'w',encoding='ascii'); f.write(str(s['generation'])); "
+      + "f.flush(); os.fsync(f.fileno()); os.chmod(u,0o600); f.close(); os.replace(u,g)"
+    return [
+      "python3", "-c", program, String(length), sha256,
+      bridgeStatePath, bridgeStateGenerationPath,
+    ].map(RemoteProjectLocation.shellQuoted).joined(separator: " ")
   }
 
   /// The remote `graphcode` CLI. It speaks `FramedMessageIO`'s framing and
@@ -315,7 +342,14 @@ public enum RemoteGraphAccess {
             problem = None
             for attempt in range(DIAL_ATTEMPTS):
                 state_path = bridge_state_path()
-                if os.path.exists(state_path):
+                if sys.platform == "darwin" and os.path.exists(state_path):
+                    # macOS owns the historical Unix-socket forward. A bridge state
+                    # left by a prior Windows delivery must never shadow that path.
+                    try:
+                        os.unlink(state_path)
+                    except OSError:
+                        pass
+                if sys.platform != "darwin" and os.path.exists(state_path):
                     sock = None
                     try:
                         state = read_bridge_state(state_path)
@@ -328,14 +362,20 @@ public enum RemoteGraphAccess {
                         return
                     except (OSError, ValueError) as error:
                         if isinstance(error, ValueError):
-                            fail("bridge state is invalid or expired; retry after the host "
-                                 "reconnects", EXIT_UNAVAILABLE)
+                            if os.name == "nt":
+                                fail("bridge state is invalid or expired; retry after the "
+                                     "host reconnects", EXIT_UNAVAILABLE)
+                            try:
+                                os.unlink(state_path)
+                            except OSError:
+                                pass
                         if sock is not None:
                             sock.close()
                         problem = error
-                        if error.errno not in RETRYABLE_DIAL_ERRNOS:
-                            break
-                else:
+                        if getattr(error, "errno", None) not in RETRYABLE_DIAL_ERRNOS:
+                            if os.name == "nt":
+                                break
+                if sys.platform == "darwin" or os.name != "nt" or not os.path.exists(state_path):
                     path = socket_path()
                     if os.path.exists(path):
                         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -351,7 +391,7 @@ public enum RemoteGraphAccess {
                             problem = error
                             if error.errno not in RETRYABLE_DIAL_ERRNOS:
                                 break
-                    else:
+                    elif not os.path.exists(state_path):
                         problem = None
                 if attempt < DIAL_ATTEMPTS - 1:
                     time.sleep(DIAL_BACKOFF[min(attempt, len(DIAL_BACKOFF) - 1)])

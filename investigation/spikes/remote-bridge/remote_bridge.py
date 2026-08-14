@@ -399,6 +399,7 @@ class FramedBackend:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._connections = []
+        self._connection_locks = {}
         self._lock = threading.Lock()
 
     @property
@@ -435,6 +436,7 @@ class FramedBackend:
                 break
             with self._lock:
                 self._connections.append(connection)
+                self._connection_locks[connection] = threading.Lock()
             threading.Thread(
                 target=self._handle,
                 args=(connection,),
@@ -443,23 +445,43 @@ class FramedBackend:
             ).start()
 
     def _handle(self, connection: socket.socket) -> None:
+        with self._lock:
+            send_lock = self._connection_locks.get(connection, threading.Lock())
         try:
-            request = read_frame(connection)
-            send_frame(
-                connection,
-                {
-                    "ok": True,
-                    "backend": "named-pipe-like",
-                    "echo": request.get("request"),
-                },
-            )
+            while True:
+                request = read_frame(connection)
+                with send_lock:
+                    send_frame(
+                        connection,
+                        {
+                            "ok": True,
+                            "backend": "named-pipe-like",
+                            "echo": request.get("request"),
+                        },
+                    )
         except (OSError, RemoteBridgeError):
             pass
         finally:
             with self._lock:
                 if connection in self._connections:
                     self._connections.remove(connection)
+                self._connection_locks.pop(connection, None)
             connection.close()
+
+    def broadcast(self, value: Dict[str, Any]) -> None:
+        """Send a backend event to every currently connected session."""
+        with self._lock:
+            connections = [
+                (connection, self._connection_locks[connection])
+                for connection in self._connections
+                if connection in self._connection_locks
+            ]
+        for connection, send_lock in connections:
+            try:
+                with send_lock:
+                    send_frame(connection, value)
+            except (OSError, RemoteBridgeError):
+                pass
 
     def stop(self) -> None:
         self._stop.set()
@@ -469,6 +491,7 @@ class FramedBackend:
         with self._lock:
             connections = list(self._connections)
             self._connections.clear()
+            self._connection_locks.clear()
         for connection in connections:
             connection.close()
         if self._thread is not None:
@@ -477,7 +500,7 @@ class FramedBackend:
 
 
 class RemoteBridge:
-    """Authenticate loopback clients, then forward one framed request."""
+    """Authenticate loopback clients, then relay their framed session."""
 
     def __init__(
         self,
@@ -784,56 +807,97 @@ class RemoteBridge:
             pass
 
     def _handle(self, connection: socket.socket) -> None:
+        stop = threading.Event()
+        send_lock = threading.Lock()
         try:
             try:
                 connection.settimeout(self.request_timeout)
             except OSError:
                 return
-            frame_deadline = time.monotonic() + self.request_timeout
-            try:
-                message = read_frame(connection, deadline=frame_deadline)
-            except FrameTooLarge:
-                self._send_error(connection, "frame_too_large")
-                return
-            except (OSError, RemoteBridgeError):
-                self._send_error(connection, "invalid_frame")
-                return
-            if not isinstance(message, dict) or "request" not in message:
-                self._send_error(connection, "invalid_request")
-                return
-            with self._state_lock:
-                state = dict(self._state or {})
-            error = self._credentials_valid(
-                state,
-                message.get("capability"),
-                message.get("generation"),
-            )
-            if error:
-                self._send_error(connection, error)
-                return
-            try:
-                with socket.create_connection(
-                    self.backend_address,
-                    timeout=min(self.request_timeout, 1.0),
-                ) as backend:
-                    backend.settimeout(min(self.request_timeout, 1.0))
-                    send_frame(backend, {"request": message["request"]})
-                    response = read_frame(
-                        backend,
-                        deadline=time.monotonic()
-                        + min(self.request_timeout, 1.0),
-                    )
-            except (OSError, RemoteBridgeError, TimeoutError):
+            with socket.create_connection(
+                self.backend_address,
+                timeout=min(self.request_timeout, 1.0),
+            ) as backend:
+                backend.settimeout(None)
+                authenticated = False
+
+                def relay_backend() -> None:
+                    try:
+                        while not stop.is_set():
+                            response = read_frame(backend)
+                            with send_lock:
+                                send_frame(connection, response)
+                    except (OSError, RemoteBridgeError):
+                        stop.set()
+
+                backend_thread = threading.Thread(
+                    target=relay_backend,
+                    name="remote-bridge-backend-relay",
+                    daemon=True,
+                )
+                backend_thread.start()
+                try:
+                    while not stop.is_set():
+                        frame_deadline = (
+                            None
+                            if authenticated
+                            else time.monotonic() + self.request_timeout
+                        )
+                        try:
+                            message = read_frame(connection, deadline=frame_deadline)
+                        except FrameTooLarge:
+                            with send_lock:
+                                self._send_error(connection, "frame_too_large")
+                            return
+                        except RemoteBridgeError:
+                            with send_lock:
+                                self._send_error(connection, "invalid_frame")
+                            return
+                        except (OSError, TimeoutError):
+                            return
+                        if not isinstance(message, dict) or "request" not in message:
+                            with send_lock:
+                                self._send_error(connection, "invalid_request")
+                            return
+                        with self._state_lock:
+                            state = dict(self._state or {})
+                        error = self._credentials_valid(
+                            state,
+                            message.get("capability"),
+                            message.get("generation"),
+                        )
+                        if error:
+                            with send_lock:
+                                self._send_error(connection, error)
+                            return
+                        send_frame(backend, {"request": message["request"]})
+                        authenticated = True
+                        connection.settimeout(None)
+                finally:
+                    stop.set()
+                    try:
+                        backend.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    backend_thread.join(timeout=1)
+        except (OSError, RemoteBridgeError, TimeoutError):
+            with send_lock:
                 self._send_error(connection, "backend_unavailable")
-                return
-            try:
-                send_frame(connection, response)
-            except (OSError, RemoteBridgeError):
-                pass
+            return
         finally:
             with self._clients_lock:
                 self._active_clients.discard(connection)
                 self._client_threads.discard(threading.current_thread())
+            try:
+                connection.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            try:
+                connection.settimeout(min(self.request_timeout, 1.0))
+                while connection.recv(4096):
+                    pass
+            except (OSError, TimeoutError):
+                pass
             connection.close()
 
     def stop(self) -> None:

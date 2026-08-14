@@ -223,9 +223,9 @@ import Foundation
     }
   }
 
-  /// A framed loopback listener. It forwards one authenticated request at a time to
-  /// the existing Named Pipe client, so the daemon protocol and business logic remain
-  /// in `DaemonWireProtocol`/`ProjectRegistry`.
+  /// A framed loopback listener. It forwards an authenticated session bidirectionally
+  /// to one existing Named Pipe client, so open-project, command, response, and event
+  /// frames retain their daemon connection semantics.
   public final class WindowsRemoteBridgeListener: @unchecked Sendable {
     public let port: UInt16
 
@@ -340,37 +340,7 @@ import Foundation
       }
       do {
         let frame = try readFrame(from: client, timeout: timeout)
-        guard
-          let object = try JSONSerialization.jsonObject(with: frame) as? [String: Any],
-          let capability = object["capability"] as? String,
-          let generationNumber = object["generation"] as? NSNumber,
-          let request = object["request"] as? [String: Any]
-        else {
-          try sendError("invalid_frame", to: client)
-          return
-        }
-        let generationType = String(cString: generationNumber.objCType)
-        let integerTypes = ["i", "s", "l", "q", "I", "S", "L", "Q"]
-        let generation = generationNumber.uint64Value
-        guard integerTypes.contains(generationType),
-          generationNumber.doubleValue > 0,
-          generationNumber.doubleValue == Double(generation)
-        else {
-          try sendError("invalid_capability", to: client)
-          return
-        }
-        guard let current = state() else {
-          try sendError("state_unavailable", to: client)
-          return
-        }
-        let credential = credentialError(
-          current: current, capability: capability, generation: generation)
-        if let credential {
-          try sendError(credential, to: client)
-          return
-        }
-        let requestData = try JSONSerialization.data(
-          withJSONObject: request, options: [.sortedKeys])
+        let requestData = try authenticatedRequest(from: frame)
         let backend = try WindowsNamedPipeClient.connect(
           to: pipeName,
           timeoutMilliseconds: DWORD(max(1, Int(timeout * 1_000))))
@@ -378,21 +348,111 @@ import Foundation
         try blocking {
           try await backend.sendFrame(requestData)
         }
-        let response = try blocking {
-          try await backend.receiveFrameWithDeadline(self.timeout)
+
+        let stop = WindowsRemoteBridgeRelayStop(socket: client)
+        let writeLock = DispatchQueue(label: "com.graphcode.remote-bridge-writes")
+        let finished = DispatchSemaphore(value: 0)
+        let inbound = Task { [weak self] in
+          defer {
+            stop.request()
+            Task { try? await backend.close() }
+            finished.signal()
+          }
+          do {
+            while !stop.isRequested {
+              guard let self else { return }
+              let frame = try readFrame(from: client)
+              let request = try self.authenticatedRequest(from: frame)
+              try await backend.sendFrame(request)
+            }
+          } catch WindowsRemoteBridgeError.invalidCapability {
+            try? self?.sendError(
+              "invalid_capability", to: client, lock: writeLock)
+          } catch WindowsRemoteBridgeError.expiredCapability {
+            try? self?.sendError(
+              "expired_capability", to: client, lock: writeLock)
+          } catch WindowsRemoteBridgeError.frameTooLarge {
+            try? self?.sendError(
+              "frame_too_large", to: client, lock: writeLock)
+          } catch {
+            return
+          }
         }
-        try writeFrame(response, to: client, timeout: timeout)
+        let outbound = Task { [weak self] in
+          defer {
+            stop.request()
+            Task { try? await backend.close() }
+            finished.signal()
+          }
+          do {
+            while !stop.isRequested {
+              let response = try await backend.receiveFrame()
+              guard let self else { return }
+              try writeLock.sync {
+                try writeFrame(response, to: client, timeout: self.timeout)
+              }
+            }
+          } catch {
+            return
+          }
+        }
+        _ = inbound
+        _ = outbound
+        finished.wait()
+        inbound.cancel()
+        outbound.cancel()
+        stop.request()
+        try? blocking {
+          try await backend.close()
+        }
       } catch WindowsRemoteBridgeError.frameTooLarge {
         try? sendError("frame_too_large", to: client)
       } catch WindowsRemoteBridgeError.invalidCapability {
         try? sendError("invalid_capability", to: client)
       } catch WindowsRemoteBridgeError.expiredCapability {
         try? sendError("expired_capability", to: client)
+      } catch WindowsRemoteBridgeError.stateUnavailable {
+        try? sendError("state_unavailable", to: client)
+      } catch WindowsRemoteBridgeError.invalidFrame {
+        try? sendError("invalid_frame", to: client)
       } catch {
         try? sendError(
           error is FramedMessageIO.IOError ? "invalid_frame" : "backend_unavailable",
           to: client)
       }
+    }
+
+    private func authenticatedRequest(from frame: Data) throws -> Data {
+      guard
+        let object = try JSONSerialization.jsonObject(with: frame) as? [String: Any],
+        let capability = object["capability"] as? String,
+        let generationNumber = object["generation"] as? NSNumber,
+        let request = object["request"] as? [String: Any]
+      else {
+        throw WindowsRemoteBridgeError.invalidFrame
+      }
+      let generationType = String(cString: generationNumber.objCType)
+      let integerTypes = ["i", "s", "l", "q", "I", "S", "L", "Q"]
+      let generation = generationNumber.uint64Value
+      guard integerTypes.contains(generationType),
+        generationNumber.doubleValue > 0,
+        generationNumber.doubleValue == Double(generation)
+      else {
+        throw WindowsRemoteBridgeError.invalidCapability
+      }
+      guard let current = state() else {
+        throw WindowsRemoteBridgeError.stateUnavailable
+      }
+      let credential = credentialError(
+        current: current, capability: capability, generation: generation)
+      if let credential {
+        switch credential {
+        case "expired_capability": throw WindowsRemoteBridgeError.expiredCapability
+        default: throw WindowsRemoteBridgeError.invalidCapability
+        }
+      }
+      return try JSONSerialization.data(
+        withJSONObject: request, options: [.sortedKeys])
     }
 
     private func credentialError(
@@ -417,11 +477,42 @@ import Foundation
       return "invalid_capability"
     }
 
-    private func sendError(_ error: String, to socket: SOCKET) throws {
+    private func sendError(
+      _ error: String, to socket: SOCKET, lock: DispatchQueue? = nil
+    ) throws {
       let payload = try JSONSerialization.data(
         withJSONObject: ["ok": false, "error": error],
         options: [.sortedKeys])
-      try writeFrame(payload, to: socket, timeout: timeout)
+      if let lock {
+        try lock.sync {
+          try writeFrame(payload, to: socket, timeout: timeout)
+        }
+      } else {
+        try writeFrame(payload, to: socket, timeout: timeout)
+      }
+    }
+  }
+
+  private final class WindowsRemoteBridgeRelayStop: @unchecked Sendable {
+    private let lock = NSLock()
+    private let socket: SOCKET
+    private var requested = false
+
+    init(socket: SOCKET) {
+      self.socket = socket
+    }
+
+    var isRequested: Bool {
+      lock.lock()
+      defer { lock.unlock() }
+      return requested
+    }
+
+    func request() {
+      lock.lock()
+      requested = true
+      lock.unlock()
+      _ = shutdown(socket, SD_BOTH)
     }
   }
 
@@ -768,15 +859,77 @@ import Foundation
 
     public static func verifyDefault(authority: String, port: UInt16) throws -> Bool {
       guard let executable = sshExecutable() else { return false }
-      let python =
-        "import shutil,socket,subprocess,sys; "
-        + "p=int(sys.argv[1]); "
-        + "s=socket.create_connection(('127.0.0.1',p),2); s.close(); "
-        + "ss=shutil.which('ss'); "
-        + "out=subprocess.run([ss,'-H','-ltn'],capture_output=True,text=True) if ss else None; "
-        + "(not ss or out.returncode != 0 or any(('127.0.0.1:'+str(p)) in line "
-        + "or ('[::1]:'+str(p)) in line or ('::1:'+str(p)) in line "
-        + "for line in out.stdout.splitlines())) or sys.exit(1)"
+      let python = """
+        import ipaddress
+        import shutil
+        import socket
+        import subprocess
+        import sys
+
+        p = int(sys.argv[1])
+        s = socket.create_connection(("127.0.0.1", p), 2)
+        s.close()
+
+        def proc(path, v6):
+            try:
+                rows = open(path, encoding="ascii").read().splitlines()[1:]
+            except OSError:
+                return None
+            for row in rows:
+                fields = row.split()
+                if len(fields) < 4 or fields[3] != "0A":
+                    continue
+                host, raw_port = fields[1].split(":")
+                if int(raw_port, 16) != p:
+                    continue
+                raw = bytes.fromhex(host)
+                if v6:
+                    raw = b"".join(raw[i:i + 4][::-1] for i in range(0, 16, 4))
+                    address = ipaddress.IPv6Address(raw)
+                else:
+                    address = ipaddress.IPv4Address(raw[::-1])
+                return address.is_loopback
+            return False
+
+        proc_seen = False
+        for path, v6 in (("/proc/net/tcp", False), ("/proc/net/tcp6", True)):
+            result = proc(path, v6)
+            if result is not None:
+                proc_seen = True
+                if result:
+                    sys.exit(0)
+
+        def command(name, args):
+            tool = shutil.which(name)
+            if not tool:
+                return None
+            output = subprocess.run([tool] + args, capture_output=True, text=True)
+            if output.returncode != 0:
+                sys.exit(1)
+            return output.stdout.splitlines()
+
+        lines = command("lsof", ["-nP", "-iTCP:" + str(p), "-sTCP:LISTEN"])
+        if lines is not None:
+            sys.exit(0 if any(
+                "127.0.0.1:" + str(p) in line or "[::1]:" + str(p) in line
+                for line in lines
+            ) else 1)
+
+        lines = command("netstat", ["-an"])
+        if lines is not None:
+            sys.exit(0 if any(
+                "LISTEN" in line and (
+                    "127.0.0.1." + str(p) in line
+                    or "127.0.0.1:" + str(p) in line
+                    or "::1." + str(p) in line
+                    or "::1:" + str(p) in line
+                )
+                for line in lines
+            ) else 1)
+        if proc_seen:
+            sys.exit(1)
+        sys.exit(1)
+        """
       var arguments = commonArguments(for: authority)
       arguments += [
         "-o", "StrictHostKeyChecking=yes",
@@ -815,19 +968,7 @@ import Foundation
     }
 
     private static func sshExecutable() -> URL? {
-      let environment = ProcessInfo.processInfo.environment
-      let candidates =
-        environment["PATH"]?
-        .split(separator: ";")
-        .map(String.init)
-        .map { URL(fileURLWithPath: $0).appendingPathComponent("ssh.exe") }
-        ?? []
-      let systemRoot = environment["SystemRoot"] ?? environment["WINDIR"] ?? "C:\\Windows"
-      let system = URL(fileURLWithPath: systemRoot)
-        .appendingPathComponent("System32/OpenSSH/ssh.exe")
-      return (candidates + [system]).first {
-        FileManager.default.isExecutableFile(atPath: $0.path)
-      }
+      SSHExecutableResolver.executableURL()
     }
   }
 
@@ -850,9 +991,9 @@ import Foundation
   }
 
   private func readFrame(
-    from socket: SOCKET, timeout: TimeInterval
+    from socket: SOCKET, timeout: TimeInterval? = nil
   ) throws -> Data {
-    let deadline = Date().addingTimeInterval(timeout)
+    let deadline = timeout.map { Date().addingTimeInterval($0) }
     let header = try readExactly(4, from: socket, deadline: deadline)
     let bytes = [UInt8](header)
     let length = Int(bytes[0]) << 24 | Int(bytes[1]) << 16 | Int(bytes[2]) << 8 | Int(bytes[3])
@@ -880,12 +1021,16 @@ import Foundation
   }
 
   private func readExactly(
-    _ count: Int, from socket: SOCKET, deadline: Date
+    _ count: Int, from socket: SOCKET, deadline: Date? = nil
   ) throws -> Data {
     var result = Data()
     result.reserveCapacity(count)
     while result.count < count {
-      try setSocketTimeout(socket, until: deadline)
+      if let deadline {
+        try setSocketTimeout(socket, until: deadline)
+      } else {
+        try clearSocketTimeout(socket)
+      }
       let requested = count - result.count
       var buffer = [UInt8](repeating: 0, count: requested)
       let received = buffer.withUnsafeMutableBytes {
@@ -923,6 +1068,15 @@ import Foundation
     let option = sending ? SO_SNDTIMEO : SO_RCVTIMEO
     let result = withUnsafePointer(to: &milliseconds) {
       setsockopt(socket, SOL_SOCKET, option, $0, Int32(MemoryLayout<DWORD>.size))
+    }
+    guard result == 0 else { throw WindowsRemoteBridgeError.invalidFrame }
+  }
+
+  private func clearSocketTimeout(_ socket: SOCKET) throws {
+    var milliseconds: DWORD = 0
+    let result = withUnsafePointer(to: &milliseconds) {
+      setsockopt(
+        socket, SOL_SOCKET, SO_RCVTIMEO, $0, Int32(MemoryLayout<DWORD>.size))
     }
     guard result == 0 else { throw WindowsRemoteBridgeError.invalidFrame }
   }

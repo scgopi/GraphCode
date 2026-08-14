@@ -120,7 +120,7 @@ public struct RemoteProjectLocation: Equatable, Sendable {
   /// whichever command comes next. If the socket directory is missing ssh just warns and
   /// dials directly, so this degrades to the old behaviour, never to a failure.
   public func sshInvocation(remoteCommand: String, interactive: Bool = false) -> [String] {
-    var invocation = ["/usr/bin/ssh"]
+    var invocation = [SSHExecutableResolver.executableURL()?.path ?? "ssh"]
     if interactive { invocation.append("-t") }
     invocation += [
       "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",

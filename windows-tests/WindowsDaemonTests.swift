@@ -317,6 +317,35 @@ final class WindowsDaemonTests: XCTestCase {
       XCTAssertFalse(FileManager.default.fileExists(atPath: store.url.path))
     }
 
+    func testWindowsProductionRemoteDeliveryUsesSSHAndSecureStateInput() throws {
+      let location = RemoteProjectLocation(
+        user: "alice", host: "posix.example", port: 2222, remotePath: "/srv/project")
+      let state = RemoteBridgeWireState(
+        daemonInstanceID: UUID(),
+        generation: 7,
+        port: 45_678,
+        capability: String(repeating: "d", count: 64),
+        issuedAt: 1_700_000_000,
+        expiresAt: 1_700_001_000)
+
+      let transfer = try XCTUnwrap(
+        ZmxSessionLauncher.remoteBridgeStateTransfer(state, at: location))
+      let invocation = transfer.invocation.joined(separator: " ")
+      XCTAssertTrue(invocation.contains("ssh"))
+      XCTAssertFalse(invocation.hasPrefix("/usr/bin/ssh"))
+      XCTAssertTrue(invocation.contains("BatchMode"))
+      XCTAssertTrue(invocation.contains("bridge-state.json"))
+      XCTAssertFalse(invocation.contains(state.capability))
+      XCTAssertTrue(
+        String(data: transfer.input, encoding: .utf8)?.contains(state.capability) == true)
+
+      let delivery = try XCTUnwrap(
+        ZmxSessionLauncher.remoteDeliveryScript(
+          forNode: nil, at: location, settings: GraphcodeSettings(), bridgeState: state))
+      XCTAssertTrue(delivery.contains("graphcode"))
+      XCTAssertFalse(delivery.contains(state.capability))
+    }
+
     func testWindowsScheduledTaskLauncherPreservesCustomSupportDirectory() async throws {
       let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("graphcode-task-env-\(UUID().uuidString)", isDirectory: true)
