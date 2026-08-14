@@ -297,7 +297,8 @@ do {
     _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
     try client.send(
       .graphCommand(
-        projectPath: projectPath, command: .importNodes(bundle.importRequest(asChildOf: asChildOf))))
+        projectPath: projectPath, command: .importNodes(bundle.importRequest(asChildOf: asChildOf)))
+    )
     let verdict = try client.waitForEvent { event in
       switch event {
       case .graphChanged, .errorOccurred: return true
