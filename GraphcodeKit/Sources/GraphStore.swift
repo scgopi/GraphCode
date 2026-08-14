@@ -290,6 +290,9 @@ public actor GraphStore {
     case .armComposite(let nodeID):
       armComposite(nodeID)
 
+    case .importNodes(let request):
+      importNodes(request)
+
     case .refreshUsage:
       // The same command polls all three labels: they come off one session, over one
       // channel, and a second command on its own timer would triple the subprocess count
@@ -765,6 +768,42 @@ public actor GraphStore {
     // note names its author, the way a message edge does.
     let sender = senderID.flatMap { $0 == nodeID ? nil : graph.nodes[id: $0]?.title }
     recordMemory(nodeID, "note\(sender.map { " (from \($0))" } ?? ""): \(trimmed)")
+  }
+
+  // MARK: - Import
+
+  /// Splices an export bundle's loops into this graph — the daemon half of
+  /// `graphcode node import` and the canvas's Import Loops…, with the merge itself in
+  /// `GraphImportPlanner` so it stays testable without a store.
+  ///
+  /// Memory restoration goes through `recordMemory` like every other episode record,
+  /// which is what keeps this store unaware of where memory lives on disk. Entries
+  /// arrive already timestamped from their source loop; re-stamping on append is fine
+  /// because the original line, timestamp included, is the entry's text.
+  private func importNodes(_ request: GraphImportRequest) {
+    let arriving = request.snapshot.nodes.count
+    guard graph.nodes.count + arriving <= Self.maxNodesPerGraph else {
+      announceError(
+        "import refused: \(arriving) arriving loops would exceed this graph's limit "
+          + "of \(Self.maxNodesPerGraph) (currently \(graph.nodes.count))")
+      return
+    }
+    if let parent = request.asChildOf, graph.nodes[id: parent] == nil {
+      announceError("import refused: no loop \(parent) in this graph to import under")
+      return
+    }
+    guard let plan = GraphImportPlanner.merge(request, into: graph) else {
+      announceError("import refused: the bundle contains no loops")
+      return
+    }
+    graph = plan.mergedGraph
+    for (oldID, entries) in request.memoryByNodeID {
+      guard let newID = plan.idMapping[oldID] else { continue }
+      for entry in entries {
+        recordMemory(newID, entry)
+      }
+      recordMemory(newID, "imported into \(graph.project.path) with a fresh identity")
+    }
   }
 
   // MARK: - Deletion

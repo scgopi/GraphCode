@@ -286,31 +286,30 @@ do {
 
   case .importNodes(let projectPath, let fromZip, let asChildOf):
     guard let bundle = GraphExportBundle.readFromZip(at: fromZip) else {
-      fail("Could not read ZIP file: \(fromZip)")
+      fail("couldn't read an export bundle from \(fromZip)")
     }
 
+    // The daemon performs the merge — it owns the live graph, and a client that wrote
+    // the graph file itself had its import clobbered by the daemon's next save. Same
+    // verdict pattern as `node send`: an error event means refused, the changed graph
+    // means it landed.
     try client.send(.openProject(path: projectPath))
-    let opened = try client.waitForEvent {
-      if case .graphChanged = $0 { return true } else { return false }
+    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try client.send(
+      .graphCommand(
+        projectPath: projectPath, command: .importNodes(bundle.importRequest(asChildOf: asChildOf))))
+    let verdict = try client.waitForEvent { event in
+      switch event {
+      case .graphChanged, .errorOccurred: return true
+      default: return false
+      }
     }
-    guard case .graphChanged(let graph) = opened else { fail("Could not load target graph") }
-
-    let persistence = ProjectPersistence(baseDirectory: SupportDirectory.url)
-    guard
-      let result = persistence.importExportBundle(
-        bundle,
-        into: graph,
-        projectPath: projectPath,
-        asChildOf: asChildOf
-      )
-    else { fail("Could not import bundle") }
-
-    persistence.saveGraph(result.updatedGraph)
-
-    print(result.summary)
-    print("\nID Mapping:")
-    for (oldID, newID) in result.nodeIDMapping.sorted(by: { $0.key < $1.key }) {
-      print("  \(oldID) → \(newID)")
+    if case .errorOccurred(let message) = verdict { fail(message) }
+    if case .graphChanged(let graph) = verdict {
+      print(
+        "imported \(bundle.graphSnapshot.nodes.count) loop(s) "
+          + "and \(bundle.graphSnapshot.edges.count) edge(s) with fresh identities")
+      print(GraphcodeCommand.render(graph))
     }
   }
 } catch DaemonSocketClient.ClientError.timedOut {

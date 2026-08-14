@@ -1,6 +1,8 @@
+import AppKit
 import ComposableArchitecture
 import Foundation
 import GraphcodeKit
+import UniformTypeIdentifiers
 
 /// One open project's graph canvas — one of possibly several the sidebar shows at once
 /// (multi-project sidebar follow-up to Phase 4, docs/07-roadmap.md#phase-4--projects).
@@ -202,6 +204,14 @@ struct ProjectFeature {
     /// they open are hosted by `AppView`, so `AppWorktreesReducer` intercepts both.
     case worktreeSweepTapped
     case projectSettingsTapped
+    /// Export Loop… on a card: the loop and everything descended from it — child
+    /// loops, sub-loops, session memory — packaged into a zip the save panel names.
+    case exportNodeRequested(UUID)
+    /// Export All Loops… on the canvas background: the whole graph as one bundle.
+    case exportGraphRequested
+    /// Import Loops… — from a card the bundle arrives as that loop's children; from
+    /// the canvas background (`nil`) it arrives beside everything else.
+    case importLoopsRequested(asChildOf: UUID?)
   }
 
   @Dependency(\.gitClient) var gitClient
@@ -408,6 +418,45 @@ struct ProjectFeature {
         state.declaredEntryIDs.insert(nodeID)
         return .none
 
+      case .exportNodeRequested(let nodeID):
+        // The canvas graph, not the project's: right-clicked inside a composite, the
+        // card lives in the sub-graph, and that is the slice to package. Memory paths
+        // are keyed by the *project*, which is the same at any depth.
+        guard let node = state.canvasGraph.nodes[id: nodeID] else { return .none }
+        return exportBundle(
+          from: state.canvasGraph, projectPath: state.graph.project.path,
+          nodeIDs: [nodeID], suggestedName: node.title)
+
+      case .exportGraphRequested:
+        return exportBundle(
+          from: state.canvasGraph, projectPath: state.graph.project.path,
+          nodeIDs: nil, suggestedName: state.graph.project.name)
+
+      case .importLoopsRequested(let parentID):
+        let projectPath = state.graph.project.path
+        // Inside a composite the import lands in its sub-graph — the same routing every
+        // other command uses to edit one from outside.
+        let compositeID = state.openCompositeID
+        return .run { _ in
+          let request = await MainActor.run { () -> GraphImportRequest? in
+            let panel = NSOpenPanel()
+            panel.allowedContentTypes = [.zip]
+            panel.canChooseDirectories = false
+            panel.allowsMultipleSelection = false
+            panel.message = "Choose a GraphCode export bundle"
+            guard panel.runModal() == .OK, let url = panel.url else { return nil }
+            guard let bundle = GraphExportBundle.readFromZip(at: url.path) else { return nil }
+            return bundle.importRequest(asChildOf: parentID)
+          }
+          guard let request else { return }
+          let command = GraphCommand.importNodes(request)
+          try? await orchestratorClient.send(
+            .graphCommand(
+              projectPath: projectPath,
+              command: compositeID.map { .subGraphCommand(nodeID: $0, command: command) }
+                ?? command))
+        }
+
       case .reviewAttentionTapped:
         // Oldest first: the loop that has been waiting longest is the one to answer,
         // and it is the same rule the window's ⌘⇧R follows.
@@ -567,6 +616,40 @@ extension ProjectFeature {
     return .run { _ in
       try? await orchestratorClient.send(
         .graphCommand(projectPath: projectPath, command: command))
+    }
+  }
+
+  /// Save panel → bundle → zip, shared by the card's Export Loop… (`nodeIDs` names the
+  /// loop, descendants ride along) and the background's Export All Loops… (`nil`).
+  ///
+  /// Export is read-only, so unlike import it never goes near the daemon: the graph in
+  /// hand is the daemon's own latest broadcast, and memory logs are read straight off
+  /// disk. The finished zip is revealed in Finder — that reveal *is* the success
+  /// feedback, pointing at the file the user is about to go share.
+  private func exportBundle(
+    from graph: LoopGraph, projectPath: String, nodeIDs: [UUID]?, suggestedName: String
+  ) -> Effect<Action> {
+    .run { _ in
+      await MainActor.run {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.zip]
+        panel.nameFieldStringValue =
+          suggestedName.replacingOccurrences(of: "/", with: "-") + ".zip"
+        panel.message = "Export loops as a shareable bundle"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let persistence = ProjectPersistence(baseDirectory: SupportDirectory.url)
+        let bundle: GraphExportBundle? =
+          if let nodeIDs {
+            persistence.createExportBundle(
+              for: nodeIDs, from: graph, projectPath: projectPath, createdBy: NSUserName())
+          } else {
+            persistence.createFullGraphExportBundle(
+              for: graph, projectPath: projectPath, createdBy: NSUserName())
+          }
+        guard let bundle, bundle.writeToZip(at: url.path) != nil else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+      }
     }
   }
 

@@ -54,9 +54,13 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode node arm <project-path> <node-id>       arm it (needs a pilot first)
       graphcode edge create <project-path> <from-id> <to-id> [--kind <k>] [--condition <c>]
       graphcode usage <project-path>
-      graphcode node export <project-path> <node-id> [--output file.zip] [--children]
+      graphcode node export <project-path> <node-id> [--output file.zip] [--no-children]
+                           packages the loop and everything descended from it — child
+                           loops, sub-loops, session memory — into a shareable zip
       graphcode graph export <project-path> [--output file.zip]
       graphcode node import <project-path> <file.zip> [--as-child-of <parent-id>]
+                           splices a bundle's loops in with fresh identities; name a
+                           parent to hang them under an existing loop
 
     The reserved path graphcode://global addresses the always-resident global graph —
     the app's pinned "Graph" row — which every other verb accepts wherever
@@ -157,29 +161,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
       let path = try take(&arguments, name: "project-path")
       switch verb {
       case "export":
-        let raw = try take(&arguments, name: "node-id")
-        guard let nodeID = UUID(uuidString: raw) else {
-          throw ParseError.invalidValue(argument: "node-id", value: raw)
-        }
-        let flags = parseFlags(arguments)
-        if flags["help"] != nil { throw HelpRequested() }
-        let output = flags["output"] ?? "\(nodeID.uuidString).zip"
-        let includeChildren = flags["children"] != nil
-        return .exportNode(
-          projectPath: path, nodeID: nodeID, output: output, includeChildren: includeChildren)
+        return try parseNodeExport(&arguments, projectPath: path)
 
       case "import":
-        let zipPath = try take(&arguments, name: "zip-file")
-        let flags = parseFlags(arguments)
-        if flags["help"] != nil { throw HelpRequested() }
-        var asChildOf: UUID? = nil
-        if let raw = flags["as-child-of"] {
-          guard let id = UUID(uuidString: raw) else {
-            throw ParseError.invalidValue(argument: "--as-child-of", value: raw)
-          }
-          asChildOf = id
-        }
-        return .importNodes(projectPath: path, fromZip: zipPath, asChildOf: asChildOf)
+        return try parseNodeImport(&arguments, projectPath: path)
 
       case "create":
         var into: UUID?
@@ -487,5 +472,45 @@ extension GraphcodeCommand {
       return "incomplete loop: a turn-based node needs --check, a goal-based one --goal, "
         + "a time-based one --prompt, and the backend must be able to host that type"
     }
+  }
+}
+
+/// The export/import verbs' parsing, split from the enum body the way `render` would
+/// be next: `parseVerb` was over its length budget and the type over its own the day
+/// these verbs landed, and each new verb after this should follow suit rather than
+/// growing either.
+extension GraphcodeCommand {
+  fileprivate static func parseNodeExport(
+    _ arguments: inout [String], projectPath: String
+  ) throws -> GraphcodeCommand {
+    let raw = try take(&arguments, name: "node-id")
+    guard let nodeID = UUID(uuidString: raw) else {
+      throw ParseError.invalidValue(argument: "node-id", value: raw)
+    }
+    let flags = parseFlags(arguments)
+    if flags["help"] != nil { throw HelpRequested() }
+    let output = flags["output"] ?? "\(nodeID.uuidString).zip"
+    // Children ride along by default — an exported coordinator without the loops it
+    // fanned out isn't the workflow the human meant to share. `--children` is still
+    // accepted as a no-op from when it was opt-in.
+    let includeChildren = flags["no-children"] == nil
+    return .exportNode(
+      projectPath: projectPath, nodeID: nodeID, output: output, includeChildren: includeChildren)
+  }
+
+  fileprivate static func parseNodeImport(
+    _ arguments: inout [String], projectPath: String
+  ) throws -> GraphcodeCommand {
+    let zipPath = try take(&arguments, name: "zip-file")
+    let flags = parseFlags(arguments)
+    if flags["help"] != nil { throw HelpRequested() }
+    var asChildOf: UUID?
+    if let raw = flags["as-child-of"] {
+      guard let id = UUID(uuidString: raw) else {
+        throw ParseError.invalidValue(argument: "--as-child-of", value: raw)
+      }
+      asChildOf = id
+    }
+    return .importNodes(projectPath: projectPath, fromZip: zipPath, asChildOf: asChildOf)
   }
 }

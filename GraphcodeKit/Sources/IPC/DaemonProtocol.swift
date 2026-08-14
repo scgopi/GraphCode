@@ -111,6 +111,9 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// polled: it costs a subprocess per session, and nobody needs it except while the
   /// usage panel is open.
   case refreshUsage
+  /// Splice loops read out of an export bundle into this graph — see
+  /// `GraphImportRequest` for why the daemon, not the client, performs the merge.
+  case importNodes(GraphImportRequest)
 }
 
 /// What `graphcoded` pushes back — to the client that sent a command and to every
