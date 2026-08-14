@@ -158,7 +158,7 @@ import Foundation
         at: directory, withIntermediateDirectories: true)
       let file = directory.appendingPathComponent(fileName)
       if FileManager.default.fileExists(atPath: file.path) {
-        if let existing = try? validatedSecret(at: file, sid: sid) {
+        if let existing = try? validatedSecretWithRetry(at: file, sid: sid) {
           if let stableLockName, isMutexHeld(named: stableLockName) {
             guard activeGeneration(in: directory) == GraphcodeSHA256.hex(existing) else {
               throw WindowsPipeError.rendezvousSecretInUse
@@ -225,6 +225,32 @@ import Foundation
       return secret
     }
 
+    private static func validatedSecretWithRetry(at file: URL, sid: String) throws -> Data {
+      var lastError: Error?
+      for attempt in 0..<20 {
+        do {
+          return try validatedSecret(at: file, sid: sid)
+        } catch WindowsPipeError.win32(_, let code)
+          where code == UInt32(truncatingIfNeeded: ERROR_INVALID_DATA)
+          || code == UInt32(truncatingIfNeeded: ERROR_SHARING_VIOLATION)
+          || code == UInt32(truncatingIfNeeded: ERROR_LOCK_VIOLATION)
+        {
+          lastError = WindowsPipeError.win32(
+            operation: "validate rendezvous secret",
+            code: code)
+        } catch {
+          throw error
+        }
+        if attempt < 19 {
+          Thread.sleep(forTimeInterval: 0.005)
+        }
+      }
+      throw lastError
+        ?? WindowsPipeError.win32(
+          operation: "validate rendezvous secret",
+          code: UInt32(truncatingIfNeeded: ERROR_INVALID_DATA))
+    }
+
     private static func rotateInvalidSecret(at file: URL) throws {
       let quarantine = file.deletingLastPathComponent().appendingPathComponent(
         "\(file.lastPathComponent).invalid-\(UUID().uuidString)", isDirectory: false)
@@ -238,34 +264,53 @@ import Foundation
         (0..<byteCount).map { _ in
           UInt8.random(in: UInt8.min...UInt8.max, using: &generator)
         })
+      let temporary = file.deletingLastPathComponent().appendingPathComponent(
+        "\(file.lastPathComponent).\(UUID().uuidString).tmp", isDirectory: false)
       let securityResult = try WindowsPipeSecurity.fileAttributes(for: sid)
       var security = securityResult.0
       defer { _ = LocalFree(securityResult.1) }
+      defer { try? FileManager.default.removeItem(at: temporary) }
 
-      let handle = try withWideString(file.path) { widePath in
-        try checkPipeHandle(
-          CreateFileW(
-            widePath,
-            DWORD(GENERIC_READ) | DWORD(bitPattern: GENERIC_WRITE),
-            DWORD(FILE_SHARE_READ),
-            &security,
-            DWORD(CREATE_NEW),
-            DWORD(FILE_ATTRIBUTE_HIDDEN),
-            nil),
-          operation: "CreateFileW rendezvous secret")
-      }
-      defer { _ = CloseHandle(handle) }
-
-      var written: DWORD = 0
-      let success = secret.withUnsafeBytes { bytes in
-        WriteFile(handle, bytes.baseAddress, DWORD(secret.count), &written, nil)
-      }
-      guard success, written == DWORD(secret.count), FlushFileBuffers(handle) else {
-        withWideString(file.path) { widePath in
-          _ = DeleteFileW(widePath)
+      do {
+        let handle = try withWideString(temporary.path) { widePath in
+          try checkPipeHandle(
+            CreateFileW(
+              widePath,
+              DWORD(GENERIC_READ) | DWORD(bitPattern: GENERIC_WRITE),
+              DWORD(FILE_SHARE_READ),
+              &security,
+              DWORD(CREATE_NEW),
+              DWORD(FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_TEMPORARY),
+              nil),
+            operation: "CreateFileW rendezvous secret temporary")
         }
+        defer { _ = CloseHandle(handle) }
+
+        var written: DWORD = 0
+        let success = secret.withUnsafeBytes { bytes in
+          WriteFile(handle, bytes.baseAddress, DWORD(secret.count), &written, nil)
+        }
+        guard success, written == DWORD(secret.count), FlushFileBuffers(handle) else {
+          withWideString(temporary.path) { widePath in
+            _ = DeleteFileW(widePath)
+          }
+          throw WindowsPipeError.win32(
+            operation: "write rendezvous secret", code: GetLastError())
+        }
+        try WindowsPipeSecurity.validate(path: temporary.path, sid: sid)
+      }
+      let published = withWideString(temporary.path) { source in
+        withWideString(file.path) { destination in
+          MoveFileExW(
+            source,
+            destination,
+            DWORD(MOVEFILE_WRITE_THROUGH))
+        }
+      }
+      guard published else {
         throw WindowsPipeError.win32(
-          operation: "write rendezvous secret", code: GetLastError())
+          operation: "MoveFileExW rendezvous secret",
+          code: GetLastError())
       }
       try WindowsPipeSecurity.validate(path: file.path, sid: sid)
       return secret
@@ -476,7 +521,7 @@ import Foundation
       let suffix = String(value.dropFirst(prefix.count))
       guard
         !suffix.isEmpty,
-        suffix.utf16.count <= 256,
+        value.utf16.count <= 256,
         suffix.unicodeScalars.allSatisfy({
           $0.value >= 0x20
             && $0.value != 0x5C
@@ -1342,6 +1387,14 @@ import Foundation
   /// verification. The server PID is resolved through the pipe itself, then
   /// checked against the current user's token before any protocol bytes flow.
   public enum WindowsNamedPipeClient {
+    static func isRetryableWaitCode(_ code: UInt32) -> Bool {
+      [
+        UInt32(truncatingIfNeeded: ERROR_FILE_NOT_FOUND),
+        UInt32(truncatingIfNeeded: ERROR_PIPE_BUSY),
+        UInt32(truncatingIfNeeded: ERROR_SEM_TIMEOUT),
+      ].contains(code)
+    }
+
     public static func connect(
       to name: String,
       timeoutMilliseconds: DWORD = 2_000
@@ -1358,8 +1411,7 @@ import Foundation
           }
           if !WaitNamedPipeW(wideName, DWORD(min(remainingMilliseconds, 100))) {
             let code = GetLastError()
-            guard code == ERROR_FILE_NOT_FOUND || code == ERROR_PIPE_BUSY,
-              Date() < deadline
+            guard Self.isRetryableWaitCode(code), Date() < deadline
             else {
               throw WindowsPipeError.win32(operation: "WaitNamedPipeW", code: code)
             }
@@ -1382,7 +1434,7 @@ import Foundation
           }
 
           let code = GetLastError()
-          guard code == ERROR_FILE_NOT_FOUND || code == ERROR_PIPE_BUSY,
+          guard Self.isRetryableWaitCode(code),
             Date() < deadline
           else {
             throw WindowsPipeError.win32(operation: "CreateFileW", code: code)

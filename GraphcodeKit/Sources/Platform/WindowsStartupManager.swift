@@ -35,7 +35,7 @@ import Foundation
         ?? WindowsNamedPipeEndpoint.taskName(
           supportDirectory: resolvedSupportDirectory)
       self.launcherURL = daemonURL.deletingLastPathComponent()
-        .appendingPathComponent("graphcoded-launcher.cmd")
+        .appendingPathComponent("graphcoded-launcher.ps1")
       self.runner = runner
     }
 
@@ -216,30 +216,40 @@ import Foundation
     }
 
     private var taskAction: String {
-      let commandPrompt =
+      let powerShell =
         systemRootURL
         .appendingPathComponent("System32", isDirectory: true)
-        .appendingPathComponent("cmd.exe")
+        .appendingPathComponent("WindowsPowerShell", isDirectory: true)
+        .appendingPathComponent("v1.0", isDirectory: true)
+        .appendingPathComponent("powershell.exe")
         .path
         .replacingOccurrences(of: "/", with: "\\")
-      let launcher = launcherURL.path.replacingOccurrences(of: "/", with: "\\")
-      return "\"\(commandPrompt)\" /D /S /C \"\"\(launcher)\"\""
+      let command = Self.encodedPowerShellCommand(
+        Self.launcherContents(
+          daemonURL: daemonURL,
+          supportDirectory: supportDirectory,
+          pipeOverride: pipeOverride))
+      return "\"\(powerShell)\" -NoLogo -NoProfile -NonInteractive "
+        + "-ExecutionPolicy Bypass -EncodedCommand \(command)"
     }
 
     private func writeLauncher() throws {
       try FileManager.default.createDirectory(
         at: launcherURL.deletingLastPathComponent(),
         withIntermediateDirectories: true)
+      let legacyLauncher = launcherURL.deletingLastPathComponent()
+        .appendingPathComponent("graphcoded-launcher.cmd")
+      try? FileManager.default.removeItem(at: legacyLauncher)
       try Self.launcherContents(
         daemonURL: daemonURL,
         supportDirectory: supportDirectory,
         pipeOverride: pipeOverride
-      ).write(to: launcherURL, atomically: true, encoding: .utf8)
+      ).write(to: launcherURL, atomically: true, encoding: .utf16)
     }
 
     func launcherIsCurrent() -> Bool {
       guard
-        let contents = try? String(contentsOf: launcherURL, encoding: .utf8)
+        let contents = try? String(contentsOf: launcherURL, encoding: .utf16)
       else {
         return false
       }
@@ -255,26 +265,32 @@ import Foundation
       supportDirectory: URL,
       pipeOverride: String? = nil
     ) -> String {
-      let daemonPath = batchLiteral(daemonURL.path.replacingOccurrences(of: "/", with: "\\"))
-      let supportPath = batchLiteral(
-        supportDirectory.path.replacingOccurrences(of: "/", with: "\\"))
       var lines = [
-        "@echo off",
-        "setlocal DisableDelayedExpansion",
-        "set \"GRAPHCODE_SUPPORT_DIR=\(supportPath)\"",
+        "$env:GRAPHCODE_SUPPORT_DIR = \(powerShellLiteral(supportDirectory.path))"
       ]
       if let pipeOverride {
-        lines.append("set \"GRAPHCODE_SOCKET=\(batchLiteral(pipeOverride))\"")
+        lines.append(
+          "$env:GRAPHCODE_SOCKET = \(powerShellLiteral(pipeOverride))")
       }
       lines.append(contentsOf: [
-        "\"\(daemonPath)\" %*",
-        "exit /b %ERRORLEVEL%",
+        "& \(powerShellLiteral(daemonURL.path)) @args",
+        "exit $LASTEXITCODE",
       ])
       return lines.joined(separator: "\r\n") + "\r\n"
     }
 
-    private static func batchLiteral(_ value: String) -> String {
-      value.replacingOccurrences(of: "%", with: "%%")
+    static func encodedPowerShellCommand(_ script: String) -> String {
+      var data = Data()
+      data.reserveCapacity(script.utf16.count * 2)
+      for codeUnit in script.utf16 {
+        data.append(UInt8(codeUnit & 0x00FF))
+        data.append(UInt8(codeUnit >> 8))
+      }
+      return data.base64EncodedString()
+    }
+
+    private static func powerShellLiteral(_ value: String) -> String {
+      "'\(value.replacingOccurrences(of: "'", with: "''"))'"
     }
 
     private func output(_ result: ProcessResult) -> String {

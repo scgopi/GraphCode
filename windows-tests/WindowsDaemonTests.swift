@@ -66,6 +66,37 @@ final class WindowsDaemonTests: XCTestCase {
         try WindowsNamedPipeEndpoint.name(environment: secondEnvironment))
     }
 
+    func testRendezvousSecretPublicationRetriesPartialRead() async throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+          "graphcode-rendezvous-partial-\(UUID().uuidString)", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      let environment = [SupportDirectory.environmentKey: root.path]
+      let first = try WindowsNamedPipeEndpoint.name(environment: environment)
+      let secretFile = root.appendingPathComponent(".graphcode-rendezvous.secret")
+      let complete = try Data(contentsOf: secretFile)
+      let partialHandle = try FileHandle(forWritingTo: secretFile)
+      try partialHandle.truncate(atOffset: 0)
+      try partialHandle.write(contentsOf: Data([0x01]))
+      try partialHandle.close()
+
+      let writer = Task.detached {
+        try await Task.sleep(for: .milliseconds(25))
+        let handle = try FileHandle(forWritingTo: secretFile)
+        try handle.truncate(atOffset: 0)
+        try handle.write(contentsOf: complete)
+        try handle.close()
+      }
+      let recovered = try WindowsNamedPipeEndpoint.name(environment: environment)
+      _ = try await writer.value
+      XCTAssertEqual(recovered, first)
+      XCTAssertFalse(
+        (try? FileManager.default.contentsOfDirectory(
+          at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        )
+        .contains { $0.pathExtension == "tmp" }) ?? false)
+    }
+
     func testSupportAliasesShareResolvedIdentity() async throws {
       let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("graphcode-junction-\(UUID().uuidString)", isDirectory: true)
@@ -253,7 +284,8 @@ final class WindowsDaemonTests: XCTestCase {
         .lowercased()
       XCTAssertTrue(
         createCommand.contains(
-          manager.launcherURL.path.replacingOccurrences(of: "/", with: "\\").lowercased()))
+          "powershell.exe"))
+      XCTAssertTrue(createCommand.contains("-encodedcommand"))
 
       let shell = WindowsShellStrategy()
       let invocation = try shell.invocation(
@@ -279,7 +311,7 @@ final class WindowsDaemonTests: XCTestCase {
     func testWindowsScheduledTaskLauncherPersistsCustomPipeAndReconnects() async throws {
       let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("graphcode-task-pipe-\(UUID().uuidString)", isDirectory: true)
-      let support = root.appendingPathComponent("custom support", isDirectory: true)
+      let support = root.appendingPathComponent("custom support-测试", isDirectory: true)
       let bin = support.appendingPathComponent("bin", isDirectory: true)
       let daemon = bin.appendingPathComponent("probe.cmd")
       let marker = root.appendingPathComponent("environment.txt")
@@ -307,9 +339,11 @@ final class WindowsDaemonTests: XCTestCase {
         runner: RecordingProcessRunner())
       try await manager.installAndStart()
       XCTAssertTrue(manager.launcherIsCurrent())
-      let launcher = try String(contentsOf: manager.launcherURL, encoding: .utf8)
+      let launcherData = try Data(contentsOf: manager.launcherURL)
+      XCTAssertEqual(Array(launcherData.prefix(2)), [0xFF, 0xFE])
+      let launcher = try String(contentsOf: manager.launcherURL, encoding: .utf16)
       XCTAssertTrue(
-        launcher.contains("set \"GRAPHCODE_SOCKET=\(normalizedPipe)\""))
+        launcher.contains("$env:GRAPHCODE_SOCKET = '\(normalizedPipe)'"))
 
       let shell = WindowsShellStrategy()
       let invocation = try shell.invocation(
@@ -401,6 +435,21 @@ final class WindowsDaemonTests: XCTestCase {
       XCTAssertTrue(secondManager.launcherIsCurrent())
     }
 
+    func testWindowsNamedPipeWaitTimeoutIsRetryable() {
+      XCTAssertTrue(
+        WindowsNamedPipeClient.isRetryableWaitCode(
+          UInt32(truncatingIfNeeded: ERROR_SEM_TIMEOUT)))
+      XCTAssertTrue(
+        WindowsNamedPipeClient.isRetryableWaitCode(
+          UInt32(truncatingIfNeeded: ERROR_FILE_NOT_FOUND)))
+      XCTAssertTrue(
+        WindowsNamedPipeClient.isRetryableWaitCode(
+          UInt32(truncatingIfNeeded: ERROR_PIPE_BUSY)))
+      XCTAssertFalse(
+        WindowsNamedPipeClient.isRetryableWaitCode(
+          UInt32(truncatingIfNeeded: ERROR_ACCESS_DENIED)))
+    }
+
     func testWindowsCustomPipeOverrideRejectsInvalidValues() {
       let invalidValues = [
         "not-a-named-pipe",
@@ -420,6 +469,20 @@ final class WindowsDaemonTests: XCTestCase {
         ) { error in
           XCTAssertEqual(error as? WindowsPipeError, .invalidPipeName)
         }
+      }
+
+    }
+
+    func testWindowsCustomPipeOverrideValidatesFullPipePathLength() throws {
+      let prefixLength = "\\\\.\\pipe\\".utf16.count
+      let tooLongSuffix = String(repeating: "a", count: 256 - prefixLength + 1)
+      let environment = [
+        DaemonSocketPath.environmentKey: "\\\\.\\pipe\\\(tooLongSuffix)"
+      ]
+      XCTAssertThrowsError(
+        try WindowsNamedPipeEndpoint.name(environment: environment)
+      ) { error in
+        XCTAssertEqual(error as? WindowsPipeError, .invalidPipeName)
       }
     }
 
@@ -632,6 +695,12 @@ final class WindowsDaemonTests: XCTestCase {
       XCTAssertEqual(
         try Data(contentsOf: destination.appendingPathComponent("swiftCore.dll")),
         Data("swift-runtime".utf8))
+      XCTAssertTrue(DaemonBootstrap.helpersInstalled(in: destination))
+      try Data("swiftCore.dll\nmissing.dll\n".utf8).write(
+        to: destination.appendingPathComponent(".graphcode-runtime-files"))
+      XCTAssertFalse(DaemonBootstrap.helpersInstalled(in: destination))
+      try DaemonBootstrap.installBundledFiles(from: bundled, to: destination)
+      XCTAssertTrue(DaemonBootstrap.helpersInstalled(in: destination))
 
       try Data("cli-new".utf8).write(to: bundled.appendingPathComponent("graphcode.exe"))
       XCTAssertThrowsError(

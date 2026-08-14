@@ -220,6 +220,7 @@ public enum DaemonBootstrap {
   private static let helpers = ["graphcoded.exe", "graphcode.exe"]
   private static let versionFile = ".graphcode-package.version"
   private static let endpointGenerationFile = ".graphcode-endpoint-generation"
+  private static let runtimeFilesFile = ".graphcode-runtime-files"
 
   public static func installIfNeeded() -> Outcome {
     guard let bundled = bundledHelperDirectory(in: .main) else {
@@ -228,6 +229,9 @@ public enum DaemonBootstrap {
 
     let destination = SupportDirectory.binDirectory
     do {
+      guard !bundledRuntimeFiles(in: bundled).isEmpty else {
+        throw StartupManagerError.missingRuntimeFiles
+      }
       let manager = try WindowsStartupManager(
         daemonURL: destination.appendingPathComponent("graphcoded.exe"))
       let packageVersion = try packageVersion(for: bundled)
@@ -241,6 +245,9 @@ public enum DaemonBootstrap {
       let installedCurrent =
         installedPackageVersion(in: destination) == packageVersion
         && helpersInstalled(in: destination)
+        && runtimeFilesMatch(
+          in: destination,
+          required: bundledRuntimeFiles(in: bundled))
       if installedCurrent, !processRunning {
         if status == .running {
           // A stale scheduler state must not suppress a restart.
@@ -307,7 +314,6 @@ public enum DaemonBootstrap {
     }) else {
       return nil
     }
-    guard !bundledRuntimeFiles(in: bundled).isEmpty else { return nil }
     return bundled
   }
 
@@ -323,10 +329,37 @@ public enum DaemonBootstrap {
   }
 
   static func helpersInstalled(in directory: URL) -> Bool {
-    helpers.allSatisfy {
-      FileManager.default.isExecutableFile(
+    guard helpers.allSatisfy({
+      FileManager.default.isReadableFile(
         atPath: directory.appendingPathComponent($0).path)
-    } && !bundledRuntimeFiles(in: directory).isEmpty
+    }) else {
+      return false
+    }
+    guard
+      let manifest = try? String(
+        contentsOf: directory.appendingPathComponent(runtimeFilesFile),
+        encoding: .utf8)
+    else {
+      return false
+    }
+    let required = Set(
+      manifest.split(whereSeparator: \.isNewline)
+        .map { $0.lowercased() })
+    let installed = Set(
+      bundledRuntimeFiles(in: directory)
+        .map { $0.lastPathComponent.lowercased() })
+    guard !required.isEmpty, required == installed else {
+      return false
+    }
+    return required.allSatisfy {
+      FileManager.default.isReadableFile(
+        atPath: directory.appendingPathComponent($0).path)
+    }
+  }
+
+  static func runtimeFilesMatch(in directory: URL, required: [URL]) -> Bool {
+    Set(bundledRuntimeFiles(in: directory).map { $0.lastPathComponent.lowercased() })
+      == Set(required.map { $0.lastPathComponent.lowercased() })
   }
 
   static func packageVersion(for directory: URL) throws -> String {
@@ -431,6 +464,9 @@ public enum DaemonBootstrap {
     }
     try Data(version.utf8).write(
       to: staging.appendingPathComponent(versionFile), options: .atomic)
+    let runtimeManifest = runtimeFiles.map(\.lastPathComponent).joined(separator: "\n")
+    try Data((runtimeManifest + "\n").utf8).write(
+      to: staging.appendingPathComponent(runtimeFilesFile), options: .atomic)
     if let endpointGeneration {
       try Data(endpointGeneration.utf8).write(
         to: staging.appendingPathComponent(endpointGenerationFile), options: .atomic)

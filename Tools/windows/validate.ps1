@@ -85,14 +85,19 @@ function Initialize-SwiftEnvironment([string] $swift) {
   $toolBin = Split-Path $swift
   $env:PATH = "$toolBin;$env:PATH"
 
-  if ($swift -match "^(.*\\Swift)\\Toolchains\\([^\\]+)\\usr\\bin\\swift\.exe$") {
+  if ($swift -match "^(.*)\\Toolchains\\([^\\]+)\\usr\\bin\\swift\.exe$") {
     $swiftRoot = $Matches[1]
     $toolchainName = $Matches[2]
     $version = $toolchainName.Split("+")[0]
-    $runtime = Join-Path $swiftRoot "Runtimes\$version\usr\bin"
+    $runtimeCandidates = @(
+      (Join-Path $swiftRoot "Runtimes\$version\usr\bin"),
+      $toolBin
+    )
     $sdk = Join-Path $swiftRoot "Platforms\$version\Windows.platform\Developer\SDKs\Windows.sdk"
-    if (Test-Path $runtime) {
-      $env:PATH = "$runtime;$env:PATH"
+    foreach ($runtime in $runtimeCandidates | Select-Object -Unique) {
+      if (Test-Path $runtime) {
+        $env:PATH = "$runtime;$env:PATH"
+      }
     }
     if (Test-Path $sdk) {
       $env:SDKROOT = $sdk
@@ -101,13 +106,20 @@ function Initialize-SwiftEnvironment([string] $swift) {
 }
 
 function Resolve-SwiftRuntimeDirectory([string] $swift) {
-  if ($swift -match "^(.*\\Swift)\\Toolchains\\([^\\]+)\\usr\\bin\\swift\.exe$") {
+  $toolBin = Split-Path $swift
+  if ($swift -match "^(.*)\\Toolchains\\([^\\]+)\\usr\\bin\\swift\.exe$") {
     $swiftRoot = $Matches[1]
     $toolchainName = $Matches[2]
     $version = $toolchainName.Split("+")[0]
-    $runtime = Join-Path $swiftRoot "Runtimes\$version\usr\bin"
-    if (Test-Path $runtime) {
-      return $runtime
+    $runtimeCandidates = @(
+      (Join-Path $swiftRoot "Runtimes\$version\usr\bin"),
+      $toolBin
+    )
+    foreach ($runtime in $runtimeCandidates | Select-Object -Unique) {
+      if ((Test-Path $runtime) -and
+        (Get-ChildItem -LiteralPath $runtime -Filter *.dll -ErrorAction SilentlyContinue)) {
+        return $runtime
+      }
     }
   }
   throw "Swift runtime DLL directory was not found for $swift"
