@@ -73,10 +73,14 @@ extension ProjectCanvasView {
     Divider()
     // Export packages this loop and everything descended from it — child loops,
     // sub-loops, session memory — into a zip another graph can import; Import splices
-    // a bundle's loops in underneath this one. See `GraphExportBundle`.
-    Button("Export Loop…") { store.send(.exportNodeRequested(node.id)) }
-    Button("Import Loops Here…") { store.send(.importLoopsRequested(asChildOf: node.id)) }
-    Divider()
+    // a bundle's loops in underneath this one. See `GraphExportBundle`. Behind the
+    // experiments switch: a right-click verb that writes files and splices loops into
+    // graphs is one a person should choose, not find.
+    if SettingsModel.shared.settings.sharesLoops {
+      Button("Export Loop…") { store.send(.exportNodeRequested(node.id)) }
+      Button("Import Loops Here…") { store.send(.importLoopsRequested(asChildOf: node.id)) }
+      Divider()
+    }
     Button("Delete Loop…", role: .destructive) {
       store.send(.deleteNodeRequested(node.id))
     }

@@ -15,6 +15,17 @@ import UniformTypeIdentifiers
 struct AppSidebarView: View {
   @Bindable var store: StoreOf<AppFeature>
 
+  /// Whether the loop rows' menus offer Export/Import (`GraphcodeSettings.sharesLoops`).
+  ///
+  /// Captured as a plain value at construction — the default expression runs in
+  /// `AppView.body`, the same safe spot its activity-strip read lives — because
+  /// reading the `@Observable` settings model *inside* `nodeMenu`'s builder
+  /// segfaulted the List's outline diffing at launch (`ForEachState.item(at:offset:)`
+  /// null deref while the coordinator walked row view IDs). The canvas menus get away
+  /// with the in-builder read; the sidebar's outline does not, so the flag arrives
+  /// here as data and the toggle still propagates through `AppView`'s re-render.
+  var sharesLoops: Bool = SettingsModel.shared.settings.sharesLoops
+
   // Several of the stored properties and the selection type below are not `private`
   // because the project/node row machinery lives in `AppSidebarView+Rows.swift`, and
   // Swift scopes `private` to a file — same arrangement as `ProjectCanvasView`'s drag
