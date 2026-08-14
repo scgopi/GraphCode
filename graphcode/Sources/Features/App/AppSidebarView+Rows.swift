@@ -124,6 +124,17 @@ extension AppSidebarView {
     Button("Close") { store.send(.projectCloseTapped(project.id)) }
     Button("Remove from GraphCode") { store.send(.projectRemoveTapped(project.id)) }
     Divider()
+    // The folder-level counterparts to a loop row's Export/Import: everything in this
+    // folder as one bundle, and an import that lands at the folder's top level —
+    // regardless of where its canvas happens to be parked. Behind the same
+    // experiments switch as every other export/import surface.
+    if sharesLoops {
+      if !project.graph.nodes.isEmpty {
+        Button("Export All Loops…") { send(.projectExportRequested, to: project.id) }
+      }
+      Button("Import Loops…") { send(.projectImportRequested, to: project.id) }
+      Divider()
+    }
     Button("Delete Loops…", role: .destructive) { projectPendingLoopDeletion = project }
     Button("Delete \"\(project.graph.project.name)\"…", role: .destructive) {
       projectPendingDelete = project

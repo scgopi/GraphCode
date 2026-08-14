@@ -212,6 +212,15 @@ struct ProjectFeature {
     /// Import Loops… — from a card the bundle arrives as that loop's children; from
     /// the canvas background (`nil`) it arrives beside everything else.
     case importLoopsRequested(asChildOf: UUID?)
+    /// The sidebar folder row's Export All Loops…: always the *whole project's* graph,
+    /// unlike `exportGraphRequested`, which exports whatever canvas is showing — a
+    /// folder row means the folder, whether or not its canvas is parked inside a
+    /// composite.
+    case projectExportRequested
+    /// The sidebar folder row's Import Loops…: lands at the project's top level for
+    /// the same reason — the folder was named, not the composite its canvas happens
+    /// to be drilled into.
+    case projectImportRequested
   }
 
   @Dependency(\.gitClient) var gitClient
@@ -437,7 +446,6 @@ struct ProjectFeature {
           nodeIDs: nil, suggestedName: state.graph.project.name)
 
       case .importLoopsRequested(let parentID):
-        let projectPath = state.graph.project.path
         // Route into the open composite only when the named parent actually lives
         // there (or none was named — a background import targets what you're looking
         // at). A sidebar right-click can name a top-level loop while the canvas is
@@ -448,27 +456,17 @@ struct ProjectFeature {
           } else {
             state.openCompositeID
           }
-        return .run { _ in
-          let request = await MainActor.run { () -> GraphImportRequest? in
-            let panel = NSOpenPanel()
-            panel.allowedContentTypes = [.zip]
-            panel.canChooseDirectories = false
-            panel.allowsMultipleSelection = false
-            panel.message = "Choose a GraphCode export bundle"
-            guard panel.runModal() == .OK, let url = panel.url else { return nil }
-            guard let bundle = GraphExportBundle.readFromZip(at: url.path) else { return nil }
-            // Re-identifies and installs any carried sessions under the fresh ids, so
-            // an imported loop resumes its exported conversation on first open.
-            return bundle.preparedImportRequest(asChildOf: parentID, projectPath: projectPath)
-          }
-          guard let request else { return }
-          let command = GraphCommand.importNodes(request)
-          try? await orchestratorClient.send(
-            .graphCommand(
-              projectPath: projectPath,
-              command: compositeID.map { .subGraphCommand(nodeID: $0, command: command) }
-                ?? command))
-        }
+        return importLoops(
+          projectPath: state.graph.project.path, asChildOf: parentID, into: compositeID)
+
+      case .projectExportRequested:
+        return exportBundle(
+          from: state.graph, projectPath: state.graph.project.path,
+          nodeIDs: nil, suggestedName: state.graph.project.name)
+
+      case .projectImportRequested:
+        return importLoops(
+          projectPath: state.graph.project.path, asChildOf: nil, into: nil)
 
       case .reviewAttentionTapped:
         // Oldest first: the loop that has been waiting longest is the one to answer,
@@ -629,6 +627,37 @@ extension ProjectFeature {
     return .run { _ in
       try? await orchestratorClient.send(
         .graphCommand(projectPath: projectPath, command: command))
+    }
+  }
+
+  /// Open panel → bundle → daemon import, shared by every Import Loops… entry point:
+  /// a card (parent set, lands under it), the canvas background (parent nil, lands in
+  /// whatever graph the canvas shows), and the sidebar folder row (parent and
+  /// composite both nil — the folder was named, so the project's top level is where
+  /// the loops belong).
+  private func importLoops(
+    projectPath: String, asChildOf parentID: UUID?, into compositeID: UUID?
+  ) -> Effect<Action> {
+    .run { _ in
+      let request = await MainActor.run { () -> GraphImportRequest? in
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.zip]
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose a GraphCode export bundle"
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        guard let bundle = GraphExportBundle.readFromZip(at: url.path) else { return nil }
+        // Re-identifies and installs any carried sessions under the fresh ids, so
+        // an imported loop resumes its exported conversation on first open.
+        return bundle.preparedImportRequest(asChildOf: parentID, projectPath: projectPath)
+      }
+      guard let request else { return }
+      let command = GraphCommand.importNodes(request)
+      try? await orchestratorClient.send(
+        .graphCommand(
+          projectPath: projectPath,
+          command: compositeID.map { .subGraphCommand(nodeID: $0, command: command) }
+            ?? command))
     }
   }
 
