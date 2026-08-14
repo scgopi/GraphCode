@@ -158,17 +158,31 @@ struct SummaryStoreTests {
 
   // MARK: - The setting
 
+  /// The producer is on for everyone, and *absent* is not *off*.
+  ///
+  /// It shipped off behind the word experimental and was watched on real loops through
+  /// three betas; a person opening a loop should now see what it is doing without being
+  /// told there is a switch first. A settings file written before the rail existed —
+  /// every file on every machine that never opened the setting — has no key at all, and
+  /// reading that as "off" would have left the feature switched off for exactly the
+  /// people who never chose either way.
   @Test
-  func theProducerIsOffUntilSomeoneAsksForIt() throws {
-    #expect(GraphcodeSettings().summarisesLoops == false)
-    // A settings file written before the rail existed is a machine that never opted in.
+  func theProducerIsOnForAnyoneWhoHasNotTurnedItOff() throws {
+    #expect(GraphcodeSettings().summarisesLoops == true)
+
     let older = Data(
       """
       {"defaultBackend":"claudeCode","showsActivityStrip":true}
       """.utf8)
     let decoded = try JSONDecoder().decode(GraphcodeSettings.self, from: older)
-    #expect(decoded.summarisesLoops == false)
+    #expect(decoded.summarisesLoops == true)
     #expect(decoded.showsActivityStrip == true)
+
+    // And a person who actually switched it off keeps it off — the whole point of
+    // storing the choice rather than inferring it.
+    let refused = try JSONDecoder().decode(
+      GraphcodeSettings.self, from: Data(#"{"summarisesLoops":false}"#.utf8))
+    #expect(refused.summarisesLoops == false)
   }
 
   // MARK: - The optional model pass

@@ -7297,66 +7297,66 @@
         }
       }
     },
-    "Let a model write the summaries": {
+    "Let a model write the summaries (experimental)": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Zusammenfassungen von einem Modell schreiben lassen"
+            "value": "Zusammenfassungen von einem Modell schreiben lassen (experimentell)"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Dejar que un modelo escriba los resúmenes"
+            "value": "Dejar que un modelo escriba los resúmenes (experimental)"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Laisser un modèle rédiger les résumés"
+            "value": "Laisser un modèle rédiger les résumés (expérimental)"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lascia che sia un modello a scrivere i riepiloghi"
+            "value": "Lascia che sia un modello a scrivere i riepiloghi (sperimentale)"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "要約をモデルに書かせる"
+            "value": "要約をモデルに書かせる（実験的）"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "요약을 모델이 작성하도록 하기"
+            "value": "요약을 모델이 작성하도록 하기 (실험적)"
           }
         },
         "pt-BR": {
           "stringUnit": {
             "state": "translated",
-            "value": "Deixar um modelo escrever os resumos"
+            "value": "Deixar um modelo escrever os resumos (experimental)"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Поручить сводки модели"
+            "value": "Поручить сводки модели (эксперимент)"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "让模型撰写摘要"
+            "value": "让模型撰写摘要（实验性）"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "讓模型撰寫摘要"
+            "value": "讓模型撰寫摘要（實驗性）"
           }
         }
       }
@@ -13505,66 +13505,66 @@
         }
       }
     },
-    "Summarise what loops are doing (experimental)": {
+    "Summarise what loops are doing": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Zusammenfassen, was Loops tun (experimentell)"
+            "value": "Zusammenfassen, was Loops tun"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Resumir lo que hacen los bucles (experimental)"
+            "value": "Resumir lo que hacen los bucles"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Résumer ce que font les boucles (expérimental)"
+            "value": "Résumer ce que font les boucles"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "Riassumere cosa stanno facendo i loop (sperimentale)"
+            "value": "Riassumere cosa stanno facendo i loop"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "ループの作業内容を要約する（実験的）"
+            "value": "ループの作業内容を要約する"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "루프가 하는 일 요약 (실험적)"
+            "value": "루프가 하는 일 요약"
           }
         },
         "pt-BR": {
           "stringUnit": {
             "state": "translated",
-            "value": "Resumir o que os loops estão fazendo (experimental)"
+            "value": "Resumir o que os loops estão fazendo"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Кратко описывать, чем заняты циклы (эксперимент)"
+            "value": "Кратко описывать, чем заняты циклы"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "总结循环正在做什么（实验性）"
+            "value": "总结循环正在做什么"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "摘要迴圈正在做什麼（實驗性）"
+            "value": "摘要迴圈正在做什麼"
           }
         }
       }
