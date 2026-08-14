@@ -11,7 +11,9 @@ import Foundation
     public let supportDirectory: URL
     public let taskName: String
     public let launcherURL: URL
+    public let taskDefinitionURL: URL
     private let pipeOverride: String?
+    private let userSID: String
     private let runner: any ProcessRunner
 
     public init(
@@ -30,21 +32,23 @@ import Foundation
       self.supportDirectory = resolvedSupportDirectory
       self.pipeOverride = try WindowsNamedPipeEndpoint.normalizedPipeName(
         environment: environment)
+      self.userSID = try WindowsUserIdentity.currentSID()
       self.taskName =
         try taskName
         ?? WindowsNamedPipeEndpoint.taskName(
           supportDirectory: resolvedSupportDirectory)
       self.launcherURL = daemonURL.deletingLastPathComponent()
         .appendingPathComponent("graphcoded-launcher.ps1")
+      self.taskDefinitionURL = daemonURL.deletingLastPathComponent()
+        .appendingPathComponent("graphcoded-task.xml")
       self.runner = runner
     }
 
     public func installAndStart() async throws {
-      try writeLauncher()
+      try writeTaskFiles()
       let create = try await run(
         arguments: [
-          "/Create", "/TN", taskName, "/SC", "ONLOGON", "/TR",
-          taskAction, "/F", "/RL", "LIMITED",
+          "/Create", "/TN", taskName, "/XML", taskDefinitionURL.path, "/F",
         ])
       guard create.exitCode == 0 else {
         throw StartupManagerError.commandFailed(
@@ -215,22 +219,95 @@ import Foundation
       return URL(fileURLWithPath: systemRoot)
     }
 
-    private var taskAction: String {
-      let powerShell =
-        systemRootURL
+    private var powerShellURL: URL {
+      systemRootURL
         .appendingPathComponent("System32", isDirectory: true)
         .appendingPathComponent("WindowsPowerShell", isDirectory: true)
         .appendingPathComponent("v1.0", isDirectory: true)
         .appendingPathComponent("powershell.exe")
-        .path
-        .replacingOccurrences(of: "/", with: "\\")
-      let command = Self.encodedPowerShellCommand(
-        Self.launcherContents(
-          daemonURL: daemonURL,
-          supportDirectory: supportDirectory,
-          pipeOverride: pipeOverride))
-      return "\"\(powerShell)\" -NoLogo -NoProfile -NonInteractive "
-        + "-ExecutionPolicy Bypass -EncodedCommand \(command)"
+    }
+
+    private func writeTaskFiles() throws {
+      try writeLauncher()
+      try Self.taskDefinitionContents(
+        daemonURL: daemonURL,
+        supportDirectory: supportDirectory,
+        launcherURL: launcherURL,
+        powerShellURL: powerShellURL,
+        userSID: userSID,
+        pipeOverride: pipeOverride
+      ).write(to: taskDefinitionURL, atomically: true, encoding: .utf16)
+    }
+
+    static func taskDefinitionContents(
+      daemonURL: URL,
+      supportDirectory: URL,
+      launcherURL: URL? = nil,
+      powerShellURL: URL = URL(
+        fileURLWithPath:
+          "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
+      userSID: String = "S-1-5-18",
+      pipeOverride: String? = nil
+    ) -> String {
+      _ = pipeOverride
+      let effectiveLauncherURL =
+        launcherURL
+        ?? daemonURL.deletingLastPathComponent()
+        .appendingPathComponent("graphcoded-launcher.ps1")
+      let arguments =
+        "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass "
+        + "-File \"\(windowsPath(effectiveLauncherURL))\""
+      return """
+        <?xml version="1.0" encoding="UTF-16"?>
+        <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+          <RegistrationInfo>
+            <Author>Graphcode</Author>
+            <Description>Graphcode daemon for \(xmlLiteral(userSID))</Description>
+          </RegistrationInfo>
+          <Triggers>
+            <LogonTrigger>
+              <Enabled>true</Enabled>
+              <UserId>\(xmlLiteral(userSID))</UserId>
+            </LogonTrigger>
+          </Triggers>
+          <Principals>
+            <Principal id="Author">
+              <UserId>\(xmlLiteral(userSID))</UserId>
+              <LogonType>InteractiveToken</LogonType>
+              <RunLevel>LeastPrivilege</RunLevel>
+            </Principal>
+          </Principals>
+          <Settings>
+            <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+            <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+            <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+            <AllowHardTerminate>true</AllowHardTerminate>
+            <StartWhenAvailable>true</StartWhenAvailable>
+            <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+            <Priority>7</Priority>
+          </Settings>
+          <Actions Context="Author">
+            <Exec>
+              <Command>\(xmlLiteral(windowsPath(powerShellURL)))</Command>
+              <Arguments>\(xmlLiteral(arguments))</Arguments>
+              <WorkingDirectory>\(xmlLiteral(windowsPath(supportDirectory)))</WorkingDirectory>
+            </Exec>
+          </Actions>
+        </Task>
+        """.replacingOccurrences(of: "\n", with: "\r\n")
+    }
+
+    private static func windowsPath(_ url: URL) -> String {
+      url.path.replacingOccurrences(of: "/", with: "\\")
+    }
+
+    private static func xmlLiteral(_ value: String) -> String {
+      value
+        .replacingOccurrences(of: "&", with: "&amp;")
+        .replacingOccurrences(of: "<", with: "&lt;")
+        .replacingOccurrences(of: ">", with: "&gt;")
+        .replacingOccurrences(of: "\"", with: "&quot;")
+        .replacingOccurrences(of: "'", with: "&apos;")
     }
 
     private func writeLauncher() throws {
@@ -277,16 +354,6 @@ import Foundation
         "exit $LASTEXITCODE",
       ])
       return lines.joined(separator: "\r\n") + "\r\n"
-    }
-
-    static func encodedPowerShellCommand(_ script: String) -> String {
-      var data = Data()
-      data.reserveCapacity(script.utf16.count * 2)
-      for codeUnit in script.utf16 {
-        data.append(UInt8(codeUnit & 0x00FF))
-        data.append(UInt8(codeUnit >> 8))
-      }
-      return data.base64EncodedString()
     }
 
     private static func powerShellLiteral(_ value: String) -> String {

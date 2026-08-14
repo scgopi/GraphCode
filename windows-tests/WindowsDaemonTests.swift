@@ -282,10 +282,16 @@ final class WindowsDaemonTests: XCTestCase {
       let createCommand = requests[0].arguments.joined(separator: " ")
         .replacingOccurrences(of: "/", with: "\\")
         .lowercased()
+      XCTAssertTrue(createCommand.contains("\\xml"))
       XCTAssertTrue(
         createCommand.contains(
-          "powershell.exe"))
-      XCTAssertTrue(createCommand.contains("-encodedcommand"))
+          manager.taskDefinitionURL.path
+            .replacingOccurrences(of: "/", with: "\\")
+            .lowercased()))
+      XCTAssertFalse(createCommand.contains("-encodedcommand"))
+      let taskXML = try String(contentsOf: manager.taskDefinitionURL, encoding: .utf16)
+      XCTAssertTrue(taskXML.contains("<Exec>"))
+      XCTAssertTrue(taskXML.contains("-File"))
 
       let shell = WindowsShellStrategy()
       let invocation = try shell.invocation(
@@ -306,6 +312,74 @@ final class WindowsDaemonTests: XCTestCase {
           supportDirectory: support
         )
         .contains("GRAPHCODE_SOCKET"))
+    }
+
+    func testWindowsScheduledTaskXMLRegistersLongUnicodeSupportAndPipe() async throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+          "graphcode-task-xml-\(String(repeating: "long-", count: 7))测试-\(UUID().uuidString)",
+          isDirectory: true)
+      let support = root.appendingPathComponent(
+        String(repeating: "support-目录-", count: 4),
+        isDirectory: true)
+      let bin = support.appendingPathComponent("bin", isDirectory: true)
+      let daemon = bin.appendingPathComponent("graphcoded.cmd")
+      let requestedPipe =
+        "\\\\.\\PIPE\\GraphCode-Long-\(String(repeating: "x", count: 80))"
+      let environment = [
+        SupportDirectory.environmentKey: support.path,
+        DaemonSocketPath.environmentKey: requestedPipe,
+      ]
+      defer { try? FileManager.default.removeItem(at: root) }
+      try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+      try "@echo off\r\nexit /b 0\r\n"
+        .write(to: daemon, atomically: true, encoding: .utf8)
+
+      let manager = try WindowsStartupManager(
+        daemonURL: daemon,
+        supportDirectory: support,
+        environment: environment,
+        runner: FoundationProcessRunner())
+      var installed = false
+      do {
+        try await manager.installAndStart()
+        installed = true
+        let taskXML = try String(contentsOf: manager.taskDefinitionURL, encoding: .utf16)
+        XCTAssertTrue(taskXML.contains("<Task "))
+        XCTAssertTrue(taskXML.contains("<Command>"))
+        XCTAssertTrue(taskXML.contains("-File"))
+        XCTAssertTrue(
+          taskXML.contains(support.path.replacingOccurrences(of: "/", with: "\\")))
+        let launcher = try String(contentsOf: manager.launcherURL, encoding: .utf16)
+        XCTAssertTrue(
+          launcher.contains(
+            try XCTUnwrap(
+              WindowsNamedPipeEndpoint.normalizedPipeName(environment: environment))))
+        XCTAssertLessThan(
+          manager.taskDefinitionURL.path.utf16.count,
+          260,
+          "the XML file path must remain schedulable")
+
+        let systemRoot =
+          ProcessInfo.processInfo.environment["SystemRoot"]
+          ?? ProcessInfo.processInfo.environment["WINDIR"]
+          ?? "C:\\Windows"
+        let query = try await FoundationProcessRunner().run(
+          ProcessRequest(
+            executable: URL(fileURLWithPath: systemRoot)
+              .appendingPathComponent("System32", isDirectory: true)
+              .appendingPathComponent("schtasks.exe"),
+            arguments: ["/Query", "/TN", manager.taskName, "/FO", "LIST"]))
+        XCTAssertEqual(query.exitCode, 0)
+      } catch {
+        if installed {
+          try? await manager.stopAndUninstall()
+        } else {
+          try? await manager.uninstall()
+        }
+        throw error
+      }
+      try await manager.stopAndUninstall()
     }
 
     func testWindowsScheduledTaskLauncherPersistsCustomPipeAndReconnects() async throws {
