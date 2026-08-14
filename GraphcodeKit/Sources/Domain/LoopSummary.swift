@@ -49,8 +49,10 @@ public struct SummaryBeat: Codable, Equatable, Sendable, Identifiable {
   /// wake-up is a user turn whether a human typed it or `/loop` did.
   public let pass: Int
   public let kind: BeatKind
-  /// Under ten words. The rail's content width is 188pt and a beat needing three lines is
-  /// two beats, or it is describing tools instead of intent.
+  /// Under sixteen words — about three lines at the rail's 188pt content width. The
+  /// budget was ten, and real beats kept losing their payload to the ellipsis
+  /// ("…landed and the beta…"); anything still longer is two beats, or it is
+  /// describing tools instead of intent.
   public let text: String
   /// `"UsageProbe.swift · 3 files read"` — where the beat came from, one line, mono.
   public let evidence: String?

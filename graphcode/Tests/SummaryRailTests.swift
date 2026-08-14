@@ -349,9 +349,35 @@ struct SummaryRailTests {
       SummaryBeatBuilder.condense("Found the double count. Now fixing it.")
         == "Found the double count")
     #expect(SummaryBeatBuilder.condense("   ") == nil)
-    let long = SummaryBeatBuilder.condense(
-      "One two three four five six seven eight nine ten eleven twelve")
-    #expect(long == "One two three four five six seven eight nine ten…")
+    // Twelve words fit whole now — the ten-word budget kept beheading real beats
+    // ("…landed and the beta…"), and three lines of rail beats a dropped payload.
+    #expect(
+      SummaryBeatBuilder.condense(
+        "One two three four five six seven eight nine ten eleven twelve")
+        == "One two three four five six seven eight nine ten eleven twelve")
+  }
+
+  /// When a beat still overruns sixteen words, the cut prefers the end of a clause —
+  /// and never strands a connector against the ellipsis, which is what used to make a
+  /// truncation read as a dropped message rather than a summary.
+  @Test
+  func aTruncatedBeatEndsOnACompleteThought() {
+    #expect(
+      SummaryBeatBuilder.condense(
+        "Checking the release gate and the version bump before notarizing the disk image "
+          + "and then uploading every asset, once the gatekeeper check finishes")
+        == "Checking the release gate and the version bump before notarizing the disk image…")
+  }
+
+  /// A long path in evidence keeps its tail — the filename is the half that says
+  /// anything; the mount point was the half that survived before.
+  @Test
+  func evidencePathsKeepTheirTails() {
+    #expect(
+      SummaryBeatBuilder.target(
+        ofPhrase:
+          "running cat /private/tmp/claude-501/-Volumes-SCG-wd-graphcode/10126320-3ff7/tasks/b2avzh5rp.output"
+      ) == "cat …/tasks/b2avzh5rp.output")
   }
 
   /// Both of these were read straight off a live loop's rail, not imagined.
@@ -364,11 +390,14 @@ struct SummaryRailTests {
         == "Posted. Live on @cgopireddy")
     #expect(
       SummaryBeatBuilder.stripLinks("see [a](x) and [b](y)") == "see a and b")
-    // A cut through the middle of a word reads as a rendering fault rather than a summary.
+    // A cut through the middle of a word reads as a rendering fault rather than a
+    // summary — and one that strands a connector against the ellipsis ("…Threads or…")
+    // reads as a dropped message, so the cut backs off to the last full word that
+    // isn't one.
     let cut = SummaryBeatBuilder.truncate(
       "Blocked on login because the browser has no Threads or Instagram session",
       words: 20, characters: 64)
-    #expect(cut == "Blocked on login because the browser has no Threads or…")
+    #expect(cut == "Blocked on login because the browser has no Threads…")
     // Unless the word itself is longer than the line, where a hard cut is the only answer.
     #expect(
       SummaryBeatBuilder.truncate(String(repeating: "x", count: 40), words: 10, characters: 10)

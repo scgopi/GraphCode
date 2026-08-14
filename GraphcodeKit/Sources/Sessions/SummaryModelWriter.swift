@@ -41,7 +41,7 @@ public enum SummaryModelWriter {
       "Rewrite one line for a status panel. Reply with the line and nothing else.",
       "",
       "Rules:",
-      "- Under ten words. It renders in 188 points; anything longer is cut.",
+      "- Under sixteen words. It renders in 188 points; anything longer is cut.",
       "- Plain past or present tense, no headings, no bullets, no quotes, no trailing stop.",
       "- Say what the agent is trying to do, not which tools it used.",
       "- Use only the facts below. Invent nothing. If they are too thin to improve on,",

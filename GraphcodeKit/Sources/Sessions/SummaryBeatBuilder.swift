@@ -144,7 +144,7 @@ struct SummaryBeatBuilder {
     "now", "okay", "ok", "alright", "right", "great", "perfect", "good", "so", "next",
   ]
 
-  /// A narration turned into a beat: one sentence, under ten words, or nothing.
+  /// A narration turned into a beat: one sentence, under sixteen words, or nothing.
   ///
   /// Codex's reasoning arrives as `**Planning code mode inspection**\n\nI'm preparing to…`
   /// — the bolded header is already a beat and the paragraph under it is already too long,
@@ -164,7 +164,7 @@ struct SummaryBeatBuilder {
     text = stripMarkdown(text)
     text = stripLeadingFiller(text)
     guard text.count >= 3 else { return nil }
-    return truncate(text, words: 10, characters: 64)
+    return truncate(text, words: 16, characters: 118)
   }
 
   /// `**Planning code mode inspection**` → `Planning code mode inspection`, but only when
@@ -266,30 +266,70 @@ struct SummaryBeatBuilder {
     return ([rebuilt] + words.dropFirst()).joined(separator: " ")
   }
 
-  /// Cut to the budget, and cut **between** words.
+  /// Cut to the budget — between words, and preferably where a clause ends.
   ///
-  /// A character cut through the middle of one — `Threads/Instagr…` — reads as a rendering
-  /// fault rather than as a summary, which is the impression the whole rail is trying not
-  /// to give. The last space still leaves most of the budget, or the word itself is longer
-  /// than the line and the hard cut is the only answer.
+  /// A character cut through the middle of a word — `Threads/Instagr…` — reads as a
+  /// rendering fault rather than as a summary, which is the impression the whole rail is
+  /// trying not to give. And a word cut mid-thought — `…landed and the…` — reads as a
+  /// dropped message, the complaint that raised the budget: when a clause closes past
+  /// sixty percent of what survived the cut, the beat ends there instead, so the
+  /// ellipsis only ever admits a *further* thought existed rather than beheading the
+  /// one on screen.
   static func truncate(_ text: String, words limit: Int, characters: Int) -> String {
-    var result = text
-    let parts = result.split(separator: " ")
-    if parts.count > limit { result = parts.prefix(limit).joined(separator: " ") + "…" }
-    guard result.count > characters else { return result }
-    var cut = String(result.prefix(characters))
-    if let space = cut.lastIndex(of: " "),
-      cut.distance(from: cut.startIndex, to: space) > characters / 2
-    {
-      cut = String(cut[cut.startIndex..<space])
+    var cut = text
+    var truncated = false
+    let parts = cut.split(separator: " ")
+    if parts.count > limit {
+      cut = parts.prefix(limit).joined(separator: " ")
+      truncated = true
     }
+    if cut.count > characters {
+      truncated = true
+      cut = String(cut.prefix(characters))
+      if let space = cut.lastIndex(of: " "),
+        cut.distance(from: cut.startIndex, to: space) > characters / 2
+      {
+        cut = String(cut[cut.startIndex..<space])
+      }
+    }
+    guard truncated else { return cut }
+    cut = endingOnAClause(cut)
+    // However the cut landed, a beat must not end on the word that promised more —
+    // "…disk image and…" is the mid-thought impression all of this exists to avoid.
+    var words = cut.split(separator: " ").map(String.init)
+    while let last = words.last,
+      ["and", "but", "so", "then", "or", "while", "with", "—", "the", "a", "an", "to"]
+        .contains(last.lowercased())
+    {
+      words.removeLast()
+    }
+    cut = words.joined(separator: " ")
+    while let last = cut.last, ",;:—".contains(last) { cut.removeLast() }
     return cut.trimmingCharacters(in: .whitespaces) + "…"
+  }
+
+  /// The prefix up to the last clause boundary, when one closes past sixty percent of
+  /// the text — otherwise the text unchanged.
+  private static func endingOnAClause(_ text: String) -> String {
+    let separators = [" — ", "; ", ", ", " and ", " but ", " so ", " then "]
+    var best: String.Index?
+    for separator in separators {
+      var search = text.startIndex..<text.endIndex
+      while let range = text.range(of: separator, range: search) {
+        if best.map({ range.lowerBound > $0 }) ?? true { best = range.lowerBound }
+        search = range.upperBound..<text.endIndex
+      }
+    }
+    guard let boundary = best,
+      text.distance(from: text.startIndex, to: boundary) * 5 > text.count * 3
+    else { return text }
+    return String(text[text.startIndex..<boundary])
   }
 
   /// A tool phrase as a beat of its own — `"editing Foo.swift"` → `"Editing Foo.swift"`.
   static func sentence(fromPhrase phrase: String) -> String {
     truncate(
-      phrase.prefix(1).uppercased() + phrase.dropFirst(), words: 10, characters: 64)
+      phrase.prefix(1).uppercased() + phrase.dropFirst(), words: 16, characters: 118)
   }
 
   // MARK: - Kind and evidence
@@ -361,8 +401,31 @@ struct SummaryBeatBuilder {
     {
       words.removeFirst()
     }
-    let object = words.joined(separator: " ")
-    return truncate(object.trimmingCharacters(in: .whitespaces), words: 6, characters: 34)
+    let object = words.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+    // A path's useful half is its tail: `cat …/tasks/b2avzh5rp.output` names the file
+    // where `cat /private/tmp/claude-501/-Vol…` names the mount point. Long path tokens
+    // are compressed to their trailing components before the ordinary budget applies,
+    // so the command and the filename both survive.
+    guard object.count > 34 else { return object }
+    let compressed = object.split(separator: " ")
+      .map { token in
+        token.count > 20 && token.contains("/") ? pathTail(String(token), characters: 24) : String(token)
+      }
+      .joined(separator: " ")
+    return truncate(compressed, words: 6, characters: 34)
+  }
+
+  /// The trailing components of a path that fit the budget, whole — `…/tasks/x.output` —
+  /// or the raw suffix when even the last component alone is too long.
+  static func pathTail(_ path: String, characters: Int) -> String {
+    guard path.count > characters else { return path }
+    var tail = ""
+    for component in path.split(separator: "/").reversed() {
+      let candidate = "/" + component + tail
+      if candidate.count + 1 > characters { break }
+      tail = candidate
+    }
+    return "…" + (tail.isEmpty ? String(path.suffix(characters - 1)) : tail)
   }
 
   // MARK: - Reading a transcript
