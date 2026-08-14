@@ -212,8 +212,13 @@ public enum CodexSessionLog {
   }
 
   private static func builder(inRolloutAt url: URL) -> SummaryBeatBuilder {
+    builder(forLines: SummaryBeatBuilder.tailLines(of: url))
+  }
+
+  /// The same read over lines from anywhere — see `ClaudeSessionLog.builder(forLines:)`.
+  static func builder(forLines lines: [Data]) -> SummaryBeatBuilder {
     var builder = SummaryBeatBuilder()
-    for line in SummaryBeatBuilder.tailLines(of: url) {
+    for line in lines {
       guard let object = try? JSONSerialization.jsonObject(with: line),
         let record = object as? [String: Any],
         let payload = record["payload"] as? [String: Any]
@@ -242,13 +247,57 @@ public enum CodexSessionLog {
     return builder
   }
 
-  /// What this node's Codex session has been doing, or `nil` when nothing says. Local
-  /// only, for the reason `activity` is.
+  /// The remote script's half: the same match on the directory the session opened in that
+  /// `rollout(forWorkingDirectory:)` makes locally, expressed as a walk over the newest
+  /// rollouts. Codex has no `--name`, so the working directory is the only handle either
+  /// side has on which rollout is whose.
+  ///
+  /// Only the header of each candidate is read — `session_meta` is always the first line,
+  /// which is why the local reader reads 64 KB and stops.
+  static func remoteSummaryInvocation(
+    forNode node: LoopNode, at location: RemoteProjectLocation, workingDirectory: String,
+    since stamp: String?
+  ) -> [String] {
+    let quoted = RemoteProjectLocation.shellQuoted(workingDirectory)
+    let find =
+      "W=\(quoted); F=''; "
+      + "for f in $(ls -t \"$HOME\"/.codex/sessions/*/*/*/rollout-*.jsonl 2>/dev/null | head -40); do "
+      + "if head -c 65536 \"$f\" 2>/dev/null | grep -q \"\\\"cwd\\\":\\\"$W\\\"\"; then F=\"$f\"; break; fi; done"
+    let script = RemoteTranscriptProbe.script(
+      findingFileWith: find,
+      filter: "grep -avE '\"(function_call_output|custom_tool_call_output)\"'", since: stamp)
+    return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+  }
+
+  static func remoteSummary(
+    of node: LoopNode, at location: RemoteProjectLocation, workingDirectory: String,
+    metricSamples: [MetricSample]
+  ) async -> SummaryReading? {
+    let stamp = await TranscriptFreshness.shared.remoteStamp(forNode: node.id)
+    let reply = await RemoteTranscriptProbe.run(
+      remoteSummaryInvocation(
+        forNode: node, at: location, workingDirectory: workingDirectory, since: stamp))
+    guard case .lines(let newStamp, let lines) = reply else { return nil }
+    await TranscriptFreshness.shared.recordRemoteStamp(newStamp, forNode: node.id)
+    var builder = builder(forLines: lines)
+    let reading = SummaryBeatBuilder.reading(
+      from: builder.beats(), turns: builder.userTurns(), metricSamples: metricSamples)
+    return reading.isEmpty ? nil : reading
+  }
+
+  /// What this node's Codex session has been doing, or `nil` when nothing says. A remote
+  /// loop's rollout is fetched over the same multiplexed ssh connection every other
+  /// reading uses — see `RemoteTranscriptProbe`.
   public static func summary(of node: LoopNode, projectPath: String? = nil) async
     -> SummaryReading?
   {
-    if let projectPath, RemoteProjectLocation.parse(projectPath: projectPath) != nil {
-      return nil
+    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+      // The node's own worktree if it has one, and otherwise the folder the project
+      // names on that host. `ZmxSessionLauncher.workingDirectory` is the local answer and
+      // cannot be used here: it checks the path exists, and a remote one never does.
+      let directory = node.worktreeBinding?.worktreePath ?? remote.remotePath
+      return await remoteSummary(
+        of: node, at: remote, workingDirectory: directory, metricSamples: node.metricHistory)
     }
     guard
       let directory = ZmxSessionLauncher.workingDirectory(
