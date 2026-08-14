@@ -156,12 +156,14 @@ extension AppSidebarView {
 
     Divider()
 
-    Button("Export Loop…") { send(.exportNodeRequested(node.id), to: projectPath) }
-    Button("Import Loops Here…") {
-      send(.importLoopsRequested(asChildOf: node.id), to: projectPath)
-    }
+    if sharesLoops {
+      Button("Export Loop…") { send(.exportNodeRequested(node.id), to: projectPath) }
+      Button("Import Loops Here…") {
+        send(.importLoopsRequested(asChildOf: node.id), to: projectPath)
+      }
 
-    Divider()
+      Divider()
+    }
 
     Button("Delete Loop…", role: .destructive) {
       send(.deleteNodeRequested(node.id), to: projectPath)

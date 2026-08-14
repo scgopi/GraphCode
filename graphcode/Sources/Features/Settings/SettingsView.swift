@@ -121,6 +121,18 @@ struct SettingsView: View {
           .font(.caption2)
           .foregroundStyle(.secondary)
           .fixedSize(horizontal: false, vertical: true)
+
+        Toggle(
+          "Export and import loops (experimental)",
+          isOn: $model.settings.sharesLoops)
+        Text(
+          "Right-click a loop — on the canvas or in the sidebar — to package it, its "
+            + "child loops and their session memory into a zip, and to import such a "
+            + "bundle back in. Also enables the CLI's export/import verbs."
+        )
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
       } footer: {
         Text(
           "A strip along the window's bottom listing passes, hand-offs and state changes "

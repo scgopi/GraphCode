@@ -30,6 +30,19 @@ func fail(_ message: String, code: Int32 = ExitCode.usage) -> Never {
   exit(code)
 }
 
+/// Export/import is experimental and off by default; the CLI honours the same switch
+/// the app's menus do (`GraphcodeSettings.sharesLoops`), read from the same file, so a
+/// script can't reach a surface the Settings screen says doesn't exist.
+func requireLoopSharing() {
+  guard !GraphcodeSettingsStore.load().sharesLoops else { return }
+  fail(
+    """
+    export/import is an experiment that's currently off. Turn on "Export and import \
+    loops" in GraphCode's Settings, or set "sharesLoops": true in \
+    \(GraphcodeSettingsStore.url.path).
+    """)
+}
+
 let command: GraphcodeCommand
 do {
   command = try GraphcodeCommand.parse(Array(CommandLine.arguments.dropFirst()))
@@ -42,6 +55,13 @@ do {
 if case .help = command {
   print(GraphcodeCommand.helpText)
   exit(0)
+}
+
+// Before dialling the daemon: a refusal on policy has nothing to ask a daemon about,
+// and should read the same whether or not one is running.
+switch command {
+case .exportNode, .exportGraph, .importNodes: requireLoopSharing()
+default: break
 }
 
 let client: DaemonSocketClient
