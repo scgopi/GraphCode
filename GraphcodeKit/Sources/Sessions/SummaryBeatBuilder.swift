@@ -409,7 +409,8 @@ struct SummaryBeatBuilder {
     guard object.count > 34 else { return object }
     let compressed = object.split(separator: " ")
       .map { token in
-        token.count > 20 && token.contains("/") ? pathTail(String(token), characters: 24) : String(token)
+        token.count > 20 && token.contains("/")
+          ? pathTail(String(token), characters: 24) : String(token)
       }
       .joined(separator: " ")
     return truncate(compressed, words: 6, characters: 34)
