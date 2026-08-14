@@ -317,6 +317,39 @@ final class WindowsDaemonTests: XCTestCase {
       XCTAssertFalse(FileManager.default.fileExists(atPath: store.url.path))
     }
 
+    func testWindowsRemoteBridgeShutdownStopsAndReapsRetainedSSHSession() async throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("graphcode-bridge-shutdown-\(UUID().uuidString)", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      let systemRoot = ProcessInfo.processInfo.environment["SystemRoot"] ?? "C:\\Windows"
+      let powershell = URL(fileURLWithPath: systemRoot)
+        .appendingPathComponent("System32/WindowsPowerShell/v1.0/powershell.exe")
+      let process = Process()
+      process.executableURL = powershell
+      process.arguments = ["-NoLogo", "-NoProfile", "-Command", "Start-Sleep -Seconds 60"]
+      process.standardOutput = FileHandle.nullDevice
+      process.standardError = FileHandle.nullDevice
+      try process.run()
+      let session = WindowsSSHForwardSession(process: process)
+      let driver = WindowsSSHForwardDriver(
+        opener: { _, _ in session },
+        verifier: { _, _ in true })
+      let bridge = try WindowsRemoteBridge(
+        supportDirectory: root,
+        pipeName: "\\\\.\\pipe\\graphcode-shutdown-\(UUID().uuidString)",
+        ssh: driver)
+
+      _ = try await bridge.ensureForwarding(authority: "alice@posix.example")
+      XCTAssertTrue(process.isRunning)
+      await bridge.shutdown()
+      XCTAssertFalse(process.isRunning)
+      XCTAssertFalse(
+        FileManager.default.fileExists(
+          atPath: WindowsRemoteBridge.stateURL(
+            authority: "alice@posix.example", supportDirectory: root
+          ).path))
+    }
+
     func testWindowsProductionRemoteDeliveryUsesSSHAndSecureStateInput() throws {
       let location = RemoteProjectLocation(
         user: "alice", host: "posix.example", port: 2222, remotePath: "/srv/project")
@@ -338,6 +371,12 @@ final class WindowsDaemonTests: XCTestCase {
       XCTAssertFalse(invocation.contains(state.capability))
       XCTAssertTrue(
         String(data: transfer.input, encoding: .utf8)?.contains(state.capability) == true)
+      let installer = RemoteGraphAccess.bridgeStateInstallerScript(
+        length: transfer.input.count,
+        sha256: GraphcodeSHA256.hex(transfer.input))
+      XCTAssertTrue(installer.contains("fcntl.flock"))
+      XCTAssertTrue(installer.contains("current_generation < incoming_generation"))
+      XCTAssertTrue(installer.contains("os.replace"))
 
       let delivery = try XCTUnwrap(
         ZmxSessionLauncher.remoteDeliveryScript(

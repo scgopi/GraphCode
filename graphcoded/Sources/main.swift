@@ -223,15 +223,21 @@ import GraphcodeKit
     shutdown.lock.lock()
     shutdown.stopped = true
     shutdown.lock.unlock()
-    Task { try? await listener.close() }
-    exit(0)
+    Task {
+      await ZmxSessionLauncher.shutdownWindowsRemoteBridge()
+      try? await listener.close()
+      exit(0)
+    }
   }
   signal(SIGTERM) { _ in
     shutdown.lock.lock()
     shutdown.stopped = true
     shutdown.lock.unlock()
-    Task { try? await listener.close() }
-    exit(0)
+    Task {
+      await ZmxSessionLauncher.shutdownWindowsRemoteBridge()
+      try? await listener.close()
+      exit(0)
+    }
   }
 
   FileHandle.standardOutput.write(

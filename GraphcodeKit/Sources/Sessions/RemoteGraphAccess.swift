@@ -160,21 +160,67 @@ public enum RemoteGraphAccess {
   /// SHA-256 digest appear in the remote command; the capability-bearing JSON never
   /// appears in argv, shell history, or a process listing.
   public static func bridgeStateInstallerScript(length: Int, sha256: String) -> String {
-    let program =
-      "import hashlib,json,os,sys,tempfile; "
-      + "n=int(sys.argv[1]); h=sys.argv[2]; b=sys.stdin.buffer.read(n); "
-      + "(_ for _ in ()).throw(ValueError('invalid bridge state transfer')) "
-      + "if len(b)!=n or hashlib.sha256(b).hexdigest()!=h else None; "
-      + "s=json.loads(b.decode('utf-8')); "
-      + "d=os.path.dirname(os.path.expanduser(sys.argv[3])); os.makedirs(d,exist_ok=True); "
-      + "fd,t=tempfile.mkstemp(dir=d); "
-      + "f=os.fdopen(fd,'wb'); f.write(b); f.flush(); os.fsync(f.fileno()); "
-      + "os.chmod(t,0o600); f.close(); "
-      + "os.replace(t,os.path.expanduser(sys.argv[3])); "
-      + "g=os.path.expanduser(sys.argv[4]); "
-      + "gd=os.path.dirname(g); fd,u=tempfile.mkstemp(dir=gd); "
-      + "f=os.fdopen(fd,'w',encoding='ascii'); f.write(str(s['generation'])); "
-      + "f.flush(); os.fsync(f.fileno()); os.chmod(u,0o600); f.close(); os.replace(u,g)"
+    let program = """
+      import fcntl
+      import hashlib
+      import json
+      import os
+      import sys
+      import tempfile
+
+      count = int(sys.argv[1])
+      digest = sys.argv[2]
+      data = sys.stdin.buffer.read(count)
+      if len(data) != count or hashlib.sha256(data).hexdigest() != digest:
+          raise ValueError("invalid bridge state transfer")
+      state = json.loads(data.decode("utf-8"))
+      state_path = os.path.expanduser(sys.argv[3])
+      generation_path = os.path.expanduser(sys.argv[4])
+      directory = os.path.dirname(state_path)
+      os.makedirs(directory, exist_ok=True)
+
+      def atomic_write(path, payload):
+          folder = os.path.dirname(path)
+          fd, temporary = tempfile.mkstemp(dir=folder)
+          try:
+              with os.fdopen(fd, "wb") as output:
+                  output.write(payload)
+                  output.flush()
+                  os.fsync(output.fileno())
+              os.chmod(temporary, 0o600)
+              os.replace(temporary, path)
+          finally:
+              try:
+                  os.unlink(temporary)
+              except FileNotFoundError:
+                  pass
+
+      lock_path = state_path + ".lock"
+      with open(lock_path, "a+", encoding="ascii") as lock:
+          os.chmod(lock_path, 0o600)
+          fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+          try:
+              current = None
+              try:
+                  with open(state_path, "r", encoding="utf-8") as existing:
+                      current = json.load(existing)
+              except (OSError, ValueError):
+                  pass
+              current_generation = (
+                  current.get("generation")
+                  if isinstance(current, dict)
+                  and isinstance(current.get("generation"), int)
+                  and not isinstance(current.get("generation"), bool)
+                  else 0
+              )
+              incoming_generation = state["generation"]
+              if current_generation < incoming_generation:
+                  atomic_write(state_path, data)
+                  current_generation = incoming_generation
+              atomic_write(generation_path, str(current_generation).encode("ascii"))
+          finally:
+              fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    """
     return [
       "python3", "-c", program, String(length), sha256,
       bridgeStatePath, bridgeStateGenerationPath,

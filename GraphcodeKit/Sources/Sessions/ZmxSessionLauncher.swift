@@ -51,10 +51,64 @@ public enum ZmxSessionLauncher {
     private static let windowsRemoteBridgeProvider = WindowsRemoteBridgeProvider(
       bridge: try? WindowsRemoteBridge())
 
+    private actor WindowsRemoteBridgePublicationGate {
+      private struct Pending {
+        let token: UUID
+        let task: Task<Bool, Never>
+      }
+
+      private var pending: [String: Pending] = [:]
+      private var latestGeneration: [String: UInt64] = [:]
+
+      func publish(
+        authority: String, generation: UInt64,
+        operation: @escaping @Sendable () async -> Bool
+      ) async -> Bool {
+        latestGeneration[authority] = max(latestGeneration[authority] ?? 0, generation)
+        let predecessor = pending[authority]?.task
+        let token = UUID()
+        let task = Task { [weak self] () -> Bool in
+          if let predecessor {
+            _ = await predecessor.value
+          }
+          guard let self else { return false }
+          guard await isLatest(authority: authority, generation: generation) else {
+            await finish(authority: authority, token: token)
+            return true
+          }
+          let result = await operation()
+          await finish(authority: authority, token: token)
+          return result
+        }
+        pending[authority] = Pending(token: token, task: task)
+        return await task.value
+      }
+
+      private func isLatest(authority: String, generation: UInt64) -> Bool {
+        latestGeneration[authority] == generation
+      }
+
+      private func finish(authority: String, token: UUID) {
+        guard pending[authority]?.token == token else { return }
+        pending.removeValue(forKey: authority)
+      }
+    }
+
+    private static let windowsRemoteBridgePublicationGate =
+      WindowsRemoteBridgePublicationGate()
+
     static func setWindowsRemoteBridgeForTesting(
       _ bridge: (any WindowsRemoteBridgeService)?
     ) {
       windowsRemoteBridgeProvider.set(bridge)
+    }
+
+    public static func shutdownWindowsRemoteBridge() async {
+      guard let bridge = windowsRemoteBridgeProvider.get() else { return }
+      if let bridge = bridge as? WindowsRemoteBridge {
+        await bridge.shutdown()
+      }
+      windowsRemoteBridgeProvider.set(nil)
     }
   #endif
 
@@ -1241,10 +1295,16 @@ public enum ZmxSessionLauncher {
         return
       }
       let bridgeState = RemoteBridgeWireState(remoteBridgeState: state)
-      guard
-        let transfer = remoteBridgeStateTransfer(bridgeState, at: location),
+      guard let transfer = remoteBridgeStateTransfer(bridgeState, at: location) else {
+        await RemoteEnsureGate.shared.end(node.id, token: lease)
+        return
+      }
+      let transferred = await windowsRemoteBridgePublicationGate.publish(
+        authority: authority.key, generation: bridgeState.generation
+      ) {
         await runRemoteRetrying(transfer.invocation, standardInput: transfer.input)
-      else {
+      }
+      guard transferred else {
         await RemoteEnsureGate.shared.end(node.id, token: lease)
         return
       }

@@ -572,6 +572,22 @@ import Foundation
       self.ssh = ssh
     }
 
+    deinit {
+      for entry in entries.values {
+        Self.teardown(entry)
+        _ = try? entry.store.removeIfMatches(entry.state)
+      }
+    }
+
+    public func shutdown() {
+      let retained = Array(entries.values)
+      entries.removeAll()
+      for entry in retained {
+        Self.teardown(entry)
+        _ = try? entry.store.removeIfMatches(entry.state)
+      }
+    }
+
     public func ensureForwarding(authority: String) async throws -> RemoteBridgeState {
       guard let authority = WindowsSSHAuthority(authority: authority) else {
         throw WindowsRemoteBridgeError.invalidConfiguration
@@ -594,6 +610,7 @@ import Foundation
             {
               return entry.state.remoteBridgeState()
             }
+            session.stopAndWait()
             entry.session = nil
           }
           if let session = try reconnect(entry, authority: authority) {
@@ -602,8 +619,7 @@ import Foundation
           }
           throw WindowsRemoteBridgeError.sshUnavailable
         }
-        entry.session?.stop()
-        entry.listener.stop()
+        Self.teardown(entry)
         _ = try? entry.store.removeIfMatches(entry.state)
         let replacement = try startEntry(
           authority: authority, store: entry.store, generation: entry.state.generation + 1)
@@ -640,9 +656,13 @@ import Foundation
         }
         return
       }
-      entry.session?.stop()
-      entry.listener.stop()
+      Self.teardown(entry)
       _ = try? entry.store.removeIfMatches(entry.state)
+    }
+
+    private static func teardown(_ entry: Entry) {
+      entry.listener.stop()
+      entry.session?.stopAndWait()
     }
 
     public func rotate(
@@ -825,7 +845,13 @@ import Foundation
     public var isRunning: Bool { process.isRunning }
 
     public func stop() {
-      if process.isRunning { process.terminate() }
+      stopAndWait()
+    }
+
+    public func stopAndWait() {
+      guard process.isRunning else { return }
+      process.terminate()
+      process.waitUntilExit()
     }
   }
 

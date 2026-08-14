@@ -59,6 +59,7 @@ public actor RemoteSocketForwarder {
         + " \"$HOME/.graphcode/graphcoded.sock\""
         + " \"$HOME/.graphcode/bridge-state.json\""
         + " \"$HOME/.graphcode/bridge-state-generation\""
+        + " \"$HOME/.graphcode/bridge-state.json.lock\""
         + " && printf %s \"$HOME\"")
     let forward = forwardCommandLine(for: location, localSocketPath: localSocketPath)
     return """

@@ -257,6 +257,60 @@ struct RemoteSessionLaunchTests {
   }
 
   @Test
+  func outOfOrderSameAuthorityStateTransferKeepsTheNewerGeneration() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-bridge-order-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let newer = RemoteBridgeWireState(
+      daemonInstanceID: UUID(),
+      generation: 9,
+      port: 45_678,
+      capability: String(repeating: "9", count: 64),
+      issuedAt: 1_700_000_000,
+      expiresAt: 1_700_001_000)
+    let older = RemoteBridgeWireState(
+      daemonInstanceID: newer.daemonInstanceID,
+      generation: 8,
+      port: 45_678,
+      capability: String(repeating: "8", count: 64),
+      issuedAt: 1_699_999_900,
+      expiresAt: 1_700_000_900)
+
+    func transfer(_ state: RemoteBridgeWireState) throws {
+      let data = try JSONEncoder().encode(state)
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: "/bin/sh")
+      process.arguments = [
+        "-c",
+        RemoteGraphAccess.bridgeStateInstallerScript(
+          length: data.count, sha256: GraphcodeSHA256.hex(data)),
+      ]
+      var environment = ProcessInfo.processInfo.environment
+      environment["HOME"] = root.path
+      process.environment = environment
+      let input = Pipe()
+      process.standardInput = input
+      process.standardOutput = FileHandle.nullDevice
+      process.standardError = FileHandle.nullDevice
+      try process.run()
+      input.fileHandleForWriting.write(data)
+      input.fileHandleForWriting.closeFile()
+      process.waitUntilExit()
+      #expect(process.terminationStatus == 0)
+    }
+
+    try transfer(newer)
+    try transfer(older)
+    let stateURL = root.appendingPathComponent(".graphcode/bridge-state.json")
+    let generationURL = root.appendingPathComponent(
+      ".graphcode/bridge-state-generation")
+    let installed = try JSONDecoder().decode(
+      RemoteBridgeWireState.self, from: Data(contentsOf: stateURL))
+    #expect(installed == newer)
+    #expect(try String(contentsOf: generationURL, encoding: .ascii) == "9")
+  }
+
+  @Test
   func windowsClientToMacOSRemoteTriesBridgeBeforeUnixFallback() {
     let shim = RemoteGraphAccess.cliShimSource
     #expect(shim.contains("if os.path.exists(state_path):"))
