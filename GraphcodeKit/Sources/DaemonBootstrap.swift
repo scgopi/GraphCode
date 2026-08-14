@@ -24,6 +24,7 @@ public enum DaemonBootstrap {
   }
 
   private static let label = "dev.graphcode.graphcoded"
+  private static let appBundleIdentifier = "dev.graphcode.app"
   /// `graphcode` here is the CLI, not the app — a different product that happens to share
   /// the name a human types. Shipping it matters: `~/.graphcode/bin` is what the README
   /// tells people to put on their PATH, and without this a drag-to-Applications install
@@ -79,9 +80,7 @@ public enum DaemonBootstrap {
 
     let expected = stamp(forHelpersIn: bundled)
     let current = try? String(contentsOf: stampURL, encoding: .utf8)
-    if current == expected, FileManager.default.fileExists(atPath: launchAgentURL.path),
-      helpersInstalled()
-    {
+    if current == expected, helpersInstalled(), launchAgentIsCurrent() {
       return .upToDate
     }
 
@@ -168,18 +167,44 @@ public enum DaemonBootstrap {
       "KeepAlive": true,
       "StandardOutPath": "\(supportDirectory)/graphcoded.log",
       "StandardErrorPath": "\(supportDirectory)/graphcoded.err.log",
+      // `graphcoded` is a bare signed executable, not a bundle, so it carries no name of
+      // its own. Without this key macOS has nothing to call the agent and falls back to
+      // the only name it can read — the one on the signing certificate — which is how
+      // Login Items and the "can run in the background" notification came to announce a
+      // stranger's personal name to every user. `launchd.plist(5)` names this key as
+      // exactly what an app installing a legacy plist should set.
+      "AssociatedBundleIdentifiers": [appBundleIdentifier],
     ]
+  }
+
+  static func currentLaunchAgentPlist() -> [String: Any] {
+    launchAgentPlist(
+      daemonPath: SupportDirectory.binDirectory.appendingPathComponent("graphcoded").path,
+      supportDirectory: SupportDirectory.url.path)
+  }
+
+  /// Whether the installed agent is the one this build would write.
+  ///
+  /// The check this replaced only asked whether the file existed, which meant a change to
+  /// the agent itself reached a machine solely as a side effect of its helper binaries
+  /// changing in the same release. Comparing the content makes an agent-only fix — the
+  /// naming key above — land on the next launch, and does the same for the next one.
+  static func launchAgentIsCurrent(
+    at url: URL = launchAgentURL, expected: [String: Any] = currentLaunchAgentPlist()
+  ) -> Bool {
+    guard let data = try? Data(contentsOf: url),
+      let installed = try? PropertyListSerialization.propertyList(from: data, format: nil)
+        as? [String: Any]
+    else { return false }
+    return NSDictionary(dictionary: installed).isEqual(to: expected)
   }
 
   private static func writeLaunchAgent() throws {
     let url = launchAgentURL
     try FileManager.default.createDirectory(
       at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    let plist = launchAgentPlist(
-      daemonPath: SupportDirectory.binDirectory.appendingPathComponent("graphcoded").path,
-      supportDirectory: SupportDirectory.url.path)
     let data = try PropertyListSerialization.data(
-      fromPropertyList: plist, format: .xml, options: 0)
+      fromPropertyList: currentLaunchAgentPlist(), format: .xml, options: 0)
     try data.write(to: url, options: .atomic)
   }
 

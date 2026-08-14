@@ -26,5 +26,17 @@
 
     <key>StandardErrorPath</key>
     <string>__GRAPHCODED_SUPPORT_DIR__/graphcoded.err.log</string>
+
+    <!--
+      graphcoded is a bare signed executable with no name of its own, so without this
+      macOS labels the agent with the only name it can read — the one on the signing
+      certificate — and Login Items and the "can run in the background" notification
+      announce the developer's personal name instead of the app's. Keep in sync with
+      DaemonBootstrap.launchAgentPlist, which writes the same agent for packaged installs.
+    -->
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>dev.graphcode.app</string>
+    </array>
 </dict>
 </plist>
