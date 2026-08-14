@@ -457,7 +457,9 @@ struct ProjectFeature {
             panel.message = "Choose a GraphCode export bundle"
             guard panel.runModal() == .OK, let url = panel.url else { return nil }
             guard let bundle = GraphExportBundle.readFromZip(at: url.path) else { return nil }
-            return bundle.importRequest(asChildOf: parentID)
+            // Re-identifies and installs any carried sessions under the fresh ids, so
+            // an imported loop resumes its exported conversation on first open.
+            return bundle.preparedImportRequest(asChildOf: parentID, projectPath: projectPath)
           }
           guard let request else { return }
           let command = GraphCommand.importNodes(request)

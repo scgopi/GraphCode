@@ -309,16 +309,18 @@ do {
       fail("couldn't read an export bundle from \(fromZip)")
     }
 
-    // The daemon performs the merge — it owns the live graph, and a client that wrote
-    // the graph file itself had its import clobbered by the daemon's next save. Same
-    // verdict pattern as `node send`: an error event means refused, the changed graph
-    // means it landed.
+    // Re-identified here so any carried sessions install under the fresh ids before
+    // the request goes out; the daemon still performs the graph merge — it owns the
+    // live graph, and a client that wrote the graph file itself had its import
+    // clobbered by the daemon's next save. Same verdict pattern as `node send`: an
+    // error event means refused, the changed graph means it landed.
+    guard
+      let request = bundle.preparedImportRequest(asChildOf: asChildOf, projectPath: projectPath)
+    else { fail("the bundle contains no loops") }
     try client.send(.openProject(path: projectPath))
     _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
     try client.send(
-      .graphCommand(
-        projectPath: projectPath, command: .importNodes(bundle.importRequest(asChildOf: asChildOf)))
-    )
+      .graphCommand(projectPath: projectPath, command: .importNodes(request)))
     let verdict = try client.waitForEvent { event in
       switch event {
       case .graphChanged, .errorOccurred: return true
@@ -327,9 +329,12 @@ do {
     }
     if case .errorOccurred(let message) = verdict { fail(message) }
     if case .graphChanged(let graph) = verdict {
+      let resumable = bundle.sessionsByNodeID.values.filter { $0.backend.supportsResume }
       print(
         "imported \(bundle.graphSnapshot.nodes.count) loop(s) "
-          + "and \(bundle.graphSnapshot.edges.count) edge(s) with fresh identities")
+          + "and \(bundle.graphSnapshot.edges.count) edge(s) with fresh identities"
+          + (resumable.isEmpty
+            ? "" : "; \(resumable.count) will resume their exported conversations"))
       print(GraphcodeCommand.render(graph))
     }
   }

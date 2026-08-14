@@ -65,8 +65,23 @@ extension ProjectPersistence {
     return GraphExportBundle(
       manifest: ExportManifest(createdBy: createdBy, contents: contents),
       graphSnapshot: exportGraph,
-      memoryByNodeID: memoryByNodeID
+      memoryByNodeID: memoryByNodeID,
+      sessionsByNodeID: Self.sessionArtifacts(for: exportedNodes, projectPath: projectPath)
     )
+  }
+
+  /// Each exported loop's backend conversation, where one exists and the backend can
+  /// carry it — see `SessionTransplant`.
+  static func sessionArtifacts(
+    for nodes: some Sequence<LoopNode>, projectPath: String
+  ) -> [String: SessionTransplant.Artifact] {
+    var artifacts: [String: SessionTransplant.Artifact] = [:]
+    for node in nodes {
+      if let artifact = SessionTransplant.exportArtifact(forNode: node, projectPath: projectPath) {
+        artifacts[node.id.uuidString] = artifact
+      }
+    }
+    return artifacts
   }
 
   /// Exports an entire graph as a shareable bundle.
@@ -94,7 +109,8 @@ extension ProjectPersistence {
     return GraphExportBundle(
       manifest: ExportManifest(createdBy: createdBy, contents: contents),
       graphSnapshot: graph,
-      memoryByNodeID: memoryByNodeID
+      memoryByNodeID: memoryByNodeID,
+      sessionsByNodeID: Self.sessionArtifacts(for: graph.nodes, projectPath: projectPath)
     )
   }
 
