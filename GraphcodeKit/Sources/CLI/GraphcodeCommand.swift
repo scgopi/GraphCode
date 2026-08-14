@@ -26,6 +26,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
   case pilotComposite(projectPath: String, nodeID: UUID)
   case armComposite(projectPath: String, nodeID: UUID)
   case usage(projectPath: String)
+  case exportNode(projectPath: String, nodeID: UUID, output: String, includeChildren: Bool = false)
+  case exportGraph(projectPath: String, output: String)
+  case importNodes(projectPath: String, fromZip: String, asChildOf: UUID? = nil)
 
   public enum ParseError: Error, Equatable {
     case unknownCommand(String)
@@ -51,6 +54,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode node arm <project-path> <node-id>       arm it (needs a pilot first)
       graphcode edge create <project-path> <from-id> <to-id> [--kind <k>] [--condition <c>]
       graphcode usage <project-path>
+      graphcode node export <project-path> <node-id> [--output file.zip] [--children]
+      graphcode graph export <project-path> [--output file.zip]
+      graphcode node import <project-path> <file.zip> [--as-child-of <parent-id>]
 
     The reserved path graphcode://global addresses the always-resident global graph —
     the app's pinned "Graph" row — which every other verb accepts wherever
@@ -137,10 +143,43 @@ public enum GraphcodeCommand: Equatable, Sendable {
     case "usage":
       return .usage(projectPath: try take(&arguments, name: "project-path"))
 
+    case "graph":
+      let verb = try take(&arguments, name: "graph subcommand")
+      guard verb == "export" else { throw ParseError.unknownCommand("graph \(verb)") }
+      let path = try take(&arguments, name: "project-path")
+      let flags = parseFlags(arguments)
+      if flags["help"] != nil { throw HelpRequested() }
+      let output = flags["output"] ?? "\(path.split(separator: "/").last ?? "graph").zip"
+      return .exportGraph(projectPath: path, output: output)
+
     case "node":
       let verb = try take(&arguments, name: "node subcommand")
       let path = try take(&arguments, name: "project-path")
       switch verb {
+      case "export":
+        let raw = try take(&arguments, name: "node-id")
+        guard let nodeID = UUID(uuidString: raw) else {
+          throw ParseError.invalidValue(argument: "node-id", value: raw)
+        }
+        let flags = parseFlags(arguments)
+        if flags["help"] != nil { throw HelpRequested() }
+        let output = flags["output"] ?? "\(nodeID.uuidString).zip"
+        let includeChildren = flags["children"] != nil
+        return .exportNode(projectPath: path, nodeID: nodeID, output: output, includeChildren: includeChildren)
+
+      case "import":
+        let zipPath = try take(&arguments, name: "zip-file")
+        let flags = parseFlags(arguments)
+        if flags["help"] != nil { throw HelpRequested() }
+        var asChildOf: UUID? = nil
+        if let raw = flags["as-child-of"] {
+          guard let id = UUID(uuidString: raw) else {
+            throw ParseError.invalidValue(argument: "--as-child-of", value: raw)
+          }
+          asChildOf = id
+        }
+        return .importNodes(projectPath: path, fromZip: zipPath, asChildOf: asChildOf)
+
       case "create":
         var into: UUID?
         if let raw = parseFlags(arguments)["into"] {
