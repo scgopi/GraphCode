@@ -248,18 +248,17 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
 
   /// Whether graphcode narrates what loops are doing — the summary rail's *producer*.
   ///
-  /// **On by default.** Each working loop's transcript tail is read once per poll and
-  /// folded into `LoopNode.summary`; switched off, nothing reads a session's transcript,
-  /// no node carries a summary, the rail shows no section and the card's live line falls
-  /// back to what the loop was handed, exactly as it did before this existed.
+  /// **Off by default, and experimental.** Off, nothing reads a session's transcript, no
+  /// node carries a `summary`, the rail shows no section and the card's live line falls
+  /// back to what the loop was handed, exactly as it did before this existed. On, each
+  /// working loop's transcript tail is read once per poll and folded into
+  /// `LoopNode.summary`.
   ///
-  /// It shipped off, behind the word *experimental*, because a beat is a claim about what
-  /// an agent is *trying* to do and a wrong one is worse than the scrollback it replaces.
-  /// It has since been watched on real loops through three betas — the faults that found
-  /// are in the commit log — so the default is the honest one now: a person who opens a
-  /// loop should be able to see what it is doing without first being told there is a
-  /// switch. It reads a file the app already reads and calls no model, so on costs
-  /// nothing, and the switch stays for anyone who wants the reading off entirely.
+  /// It was on by default for exactly one release (0.1.37) and is opt-in again. The
+  /// reading is cheap — a tail of a file the app already reads, no model, no subprocess —
+  /// but a beat is a *claim* about what an agent is trying to do, and a claim that is
+  /// confidently wrong is worse than the scrollback it replaces. A feature that makes
+  /// claims on every loop's behalf earns its default rather than being handed one.
   ///
   /// Deliberately distinct from hiding the rail. Hiding is a view, and this is the
   /// reading: the design's own division, kept because the two would otherwise be one
@@ -295,7 +294,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     briefsSessionsAboutTheGraph: Bool = true,
     autoSelectsModel: Bool = false,
     showsActivityStrip: Bool = false,
-    summarisesLoops: Bool = true,
+    summarisesLoops: Bool = false,
     summaryUsesModel: Bool = false,
     worktreePolicies: [String: WorktreeHygienePolicy] = [:]
   ) {
@@ -337,11 +336,11 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       try container.decodeIfPresent(Bool.self, forKey: .autoSelectsModel) ?? false
     showsActivityStrip =
       try container.decodeIfPresent(Bool.self, forKey: .showsActivityStrip) ?? false
-    // Absent in every file written before the rail existed — and absent is *not* off: a
-    // machine that never saw the switch gets the current default, which is on. A person
-    // who actually turned it off has `false` in their file, and that is preserved.
+    // Absent means nobody has opted in, which is the default again. A person who switched
+    // it on has `true` in their file — including anyone whose 0.1.37 install wrote the
+    // then-default out — and that is preserved.
     summarisesLoops =
-      try container.decodeIfPresent(Bool.self, forKey: .summarisesLoops) ?? true
+      try container.decodeIfPresent(Bool.self, forKey: .summarisesLoops) ?? false
     // Never inferred from `summarisesLoops`: turning the rail on must not start spending
     // money on a machine whose owner only asked to see what their loops were doing.
     summaryUsesModel =

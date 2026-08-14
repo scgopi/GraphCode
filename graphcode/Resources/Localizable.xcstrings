@@ -13505,66 +13505,66 @@
         }
       }
     },
-    "Summarise what loops are doing": {
+    "Summarise what loops are doing (experimental)": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Zusammenfassen, was Loops tun"
+            "value": "Zusammenfassen, was Loops tun (experimentell)"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Resumir lo que hacen los bucles"
+            "value": "Resumir lo que hacen los bucles (experimental)"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Résumer ce que font les boucles"
+            "value": "Résumer ce que font les boucles (expérimental)"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "Riassumere cosa stanno facendo i loop"
+            "value": "Riassumere cosa stanno facendo i loop (sperimentale)"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "ループの作業内容を要約する"
+            "value": "ループの作業内容を要約する（実験的）"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "루프가 하는 일 요약"
+            "value": "루프가 하는 일 요약 (실험적)"
           }
         },
         "pt-BR": {
           "stringUnit": {
             "state": "translated",
-            "value": "Resumir o que os loops estão fazendo"
+            "value": "Resumir o que os loops estão fazendo (experimental)"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Кратко описывать, чем заняты циклы"
+            "value": "Кратко описывать, чем заняты циклы (эксперимент)"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "总结循环正在做什么"
+            "value": "总结循环正在做什么（实验性）"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "摘要迴圈正在做什麼"
+            "value": "摘要迴圈正在做什麼（實驗性）"
           }
         }
       }
