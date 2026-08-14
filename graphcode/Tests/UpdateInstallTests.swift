@@ -34,13 +34,45 @@ struct UpdateInstallTests {
     return (state, update)
   }
 
+  /// A release matching the given offer, for stubbing the re-check Install runs at
+  /// consent time with a "nothing newer" answer.
+  private func recheckRelease(matching offered: AvailableUpdate) throws -> UpdateRelease {
+    try JSONDecoder().decode(
+      UpdateRelease.self,
+      from: Data(
+        """
+        {
+          "tag_name": "\(offered.version)",
+          "html_url": "https://example.com/releases/tag/\(offered.version)",
+          "assets": [
+            {
+              "name": "graphcode-macos-arm64.dmg",
+              "browser_download_url": "\(offered.downloadURL.absoluteString)"
+            }
+          ]
+        }
+        """.utf8))
+  }
+
+  /// The stubs every install test needs now that tapping Install asks the channel
+  /// again before downloading.
+  private func stubRecheck(
+    _ dependencies: inout DependencyValues, returning releases: [UpdateRelease]
+  ) {
+    dependencies.updateClient.currentVersion = { "0.1.16-beta1" }
+    dependencies.updateClient.channelOverride = { nil }
+    dependencies.updateClient.allReleases = { releases }
+  }
+
   @Test
   @MainActor
   func installDownloadsWithProgressAndOffersTheRelaunch() async throws {
     let (state, update) = try offeredState()
+    let recheck = try recheckRelease(matching: update)
     let store = TestStore(initialState: state) {
       AppFeature()
     } withDependencies: {
+      stubRecheck(&$0, returning: [recheck])
       $0.updateInstallClient.install = { dmg, progress in
         #expect(dmg == update.downloadURL)
         progress(0.5)
@@ -99,10 +131,12 @@ struct UpdateInstallTests {
   @MainActor
   func aFailedInstallExplainsItselfAndTheBrowserFallbackStillWorks() async throws {
     let (state, update) = try offeredState()
+    let recheck = try recheckRelease(matching: update)
     let opened = URLsBox()
     let store = TestStore(initialState: state) {
       AppFeature()
     } withDependencies: {
+      stubRecheck(&$0, returning: [recheck])
       $0.updateInstallClient.install = { _, _ in
         throw UpdateInstallFailure.signatureRejected
       }
@@ -138,11 +172,13 @@ struct UpdateInstallTests {
   @Test
   @MainActor
   func aSecondInstallTapWhileOneRunsIsIgnored() async throws {
-    let (state, _) = try offeredState()
+    let (state, update) = try offeredState()
+    let recheck = try recheckRelease(matching: update)
     let installs = CounterBox()
     let store = TestStore(initialState: state) {
       AppFeature()
     } withDependencies: {
+      stubRecheck(&$0, returning: [recheck])
       $0.updateInstallClient.install = { _, _ in
         await installs.bump()
         try await Task.sleep(for: .seconds(100))
@@ -154,5 +190,50 @@ struct UpdateInstallTests {
     await store.send(.updateInstallTapped)
     #expect(await installs.hits == 1)
     await store.skipInFlightEffects()
+  }
+
+  /// The stale-offer race (a release cut while the alert sat open): the app offered
+  /// one version, a newer one shipped before Install was clicked, and installing the
+  /// offer meant relaunching straight into another update alert. Install re-checks at
+  /// consent time and downloads whatever is newest *now*.
+  @Test
+  @MainActor
+  func installReChecksAndTakesAReleaseCutAfterTheOffer() async throws {
+    let (state, offered) = try offeredState()
+    let newer = try JSONDecoder().decode(
+      UpdateRelease.self,
+      from: Data(
+        """
+        {
+          "tag_name": "0.1.16-beta3",
+          "html_url": "https://example.com/releases/tag/0.1.16-beta3",
+          "assets": [
+            {
+              "name": "graphcode-macos-arm64.dmg",
+              "browser_download_url": "https://example.com/0.1.16-beta3/graphcode-macos-arm64.dmg"
+            }
+          ]
+        }
+        """.utf8))
+    let installed = URLsBox()
+    let store = TestStore(initialState: state) {
+      AppFeature()
+    } withDependencies: {
+      stubRecheck(&$0, returning: [newer])
+      $0.updateInstallClient.install = { dmg, _ in await installed.append(dmg) }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.updateAlertDismissed)
+    await store.send(.updateInstallTapped)
+    await store.receive(\.updateInstallResolved)
+    await store.receive(\.updateInstallFinished)
+
+    // The newer DMG was downloaded, and the state names the version actually
+    // installed — the relaunch prompt must not claim the stale one.
+    #expect(await installed.urls.first?.absoluteString.contains("0.1.16-beta3") == true)
+    #expect(store.state.offeredUpdate?.version == "0.1.16-beta3")
+    #expect(store.state.offeredUpdate != offered)
+    #expect(store.state.isUpdateReadyToRelaunch)
   }
 }

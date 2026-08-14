@@ -215,6 +215,10 @@ struct AppFeature {
     case updateAlertDismissed
     case updateNoticeDismissed
     case updateInstallTapped
+    /// Install re-checked the channel at the moment of consent and found a newer
+    /// release than the one the alert offered — the state follows what is actually
+    /// being installed, so the relaunch prompt names the right version.
+    case updateInstallResolved(AvailableUpdate)
     case updateInstallProgressed(Double)
     case updateInstallFinished(Result<String, any Error>)
     case updateInstallFailureDismissed
@@ -472,8 +476,9 @@ struct AppFeature {
       case .checkForUpdatesTapped, .checkForUpdatesInBackground, .updateFoundInBackground,
         .updateBannerTapped, .updateCheckCompleted, .updateDownloadTapped,
         .updateReleaseNotesTapped, .updateAlertDismissed, .updateNoticeDismissed,
-        .updateInstallTapped, .updateInstallProgressed, .updateInstallFinished,
-        .updateInstallFailureDismissed, .updateRelaunchTapped, .updateRelaunchDismissed:
+        .updateInstallTapped, .updateInstallResolved, .updateInstallProgressed,
+        .updateInstallFinished, .updateInstallFailureDismissed, .updateRelaunchTapped,
+        .updateRelaunchDismissed:
         return .none
 
       // Every Quick Chats action is handled by `quickChatsReducer`, in
