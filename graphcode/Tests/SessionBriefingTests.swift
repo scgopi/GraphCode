@@ -100,6 +100,21 @@ struct SessionBriefingTests {
   }
 
   @Test
+  func theBriefingCoversTheRarerVerbsWithoutLosingTheDeleteWarning() throws {
+    // The gap this fills: a session knew how to fan out, message, and memo, but had no
+    // idea the CLI could stop, rewire, or share loops — "export this loop" read as a
+    // command that didn't exist. Delete rides along only with its warning attached:
+    // taught bare, it looks like the way to tidy up, and it erases a loop's memory.
+    let briefing = try #require(SessionBriefing.text(projectPath: Self.project))
+    #expect(briefing.contains("node stop \(Self.project)"))
+    #expect(briefing.contains("irreversible"))
+    #expect(briefing.contains("edge create \(Self.project)"))
+    #expect(briefing.contains("node export \(Self.project)"))
+    #expect(briefing.contains("Export and import loops"))
+    #expect(briefing.contains("graphcode://global"))
+  }
+
+  @Test
   func withoutAProjectPathThereIsNoBriefing() {
     // Every command it describes takes a path, so a briefing without one would describe
     // commands the session cannot run.
