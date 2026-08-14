@@ -137,6 +137,28 @@ public enum SessionBriefing {
       a transcript, and nothing the code or git history already says. Your node id is
       the suffix of `$ZMX_SESSION` after `graphcode-`.
 
+      ## The rest of the CLI
+
+      Rarer verbs, one line each — like everything above, they take the project path:
+
+      - `graphcode node stop \(projectPath) <node-id>` pauses a loop reversibly.
+        `node delete` also erases its edges, session, and memory — irreversible, so
+        reach for stop unless deletion is exactly what was asked for.
+      - `graphcode node update \(projectPath) <node-id> --goal|--prompt|--check|--model …`
+        edits a loop in place; a loop may not change its own `--predicate`. For a
+        composite loop, `node pilot` dry-runs it and `node arm` arms it afterwards.
+      - `graphcode edge create \(projectPath) <from-id> <to-id> --kind handoff|message|spawn`
+        wires loops: `handoff` sequences the target after you finish, `message` sends it
+        your result, `spawn` has your finish create it.
+      - `graphcode node export \(projectPath) <node-id> --output <file.zip>` packages a
+        loop and its descendants for sharing, and `graphcode node import \(projectPath)
+        <file.zip> [--as-child-of <node-id>]` splices a bundle in with fresh identities.
+        Both stay off until "Export and import loops" is enabled in the app's Settings —
+        the command says so when it is not.
+      - `graphcode projects` lists every project, `graphcode usage \(projectPath)` totals
+        a graph's token spend, and the reserved path `graphcode://global` addresses the
+        app-wide global graph wherever a project path is accepted.
+
       If `graphcode` is not on your `PATH`, it is at `\(installedCLIPath)`.
 
       Give each loop a title that says what it is for and a goal that says what done looks
