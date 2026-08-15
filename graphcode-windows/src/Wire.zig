@@ -271,11 +271,11 @@ pub fn commandGraphCreateEdge(
     const quoted_kind = try quoteJson(allocator, kind);
     defer allocator.free(quoted_kind);
     return std.mem.concat(allocator, u8, &.{
-        "{\"graphCommand\":{\"projectPath\":",                                                                              quoted_path,
-        ",\"command\":{\"createEdge\":{\"_0\":",                                                                            quoted_from,
-        ",\"_1\":",                                                                                                         quoted_to,
-        ",\"spec\":{\"kind\":",                                                                                             quoted_kind,
-        ",\"condition\":\"always\",\"payloadTransform\":\"none\",\"cycleGuard\":null,\"spawnTargetProjectPath\":null}}}}}",
+        "{\"graphCommand\":{\"projectPath\":",                                                                                   quoted_path,
+        ",\"command\":{\"createEdge\":{\"from\":",                                                                          quoted_from,
+        ",\"to\":",                                                                                                         quoted_to,
+        ",\"spec\":{\"kind\":",                                                                                                  quoted_kind,
+        ",\"condition\":\"always\",\"payloadTransform\":{\"none\":{}},\"cycleGuard\":null,\"spawnTargetProjectPath\":null}}}}}",
     });
 }
 
@@ -289,9 +289,9 @@ pub fn commandGraphDeleteEdge(
     const quoted_edge = try quoteJson(allocator, edge_id);
     defer allocator.free(quoted_edge);
     return std.mem.concat(allocator, u8, &.{
-        "{\"graphCommand\":{\"projectPath\":", quoted_path,
-        ",\"command\":{\"deleteEdge\":",       quoted_edge,
-        "}}}",
+        "{\"graphCommand\":{\"projectPath\":",   quoted_path,
+        ",\"command\":{\"deleteEdge\":{\"_0\":", quoted_edge,
+        "}}}}",
     });
 }
 

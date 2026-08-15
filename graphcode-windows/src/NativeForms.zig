@@ -19,6 +19,16 @@ const cancel_id = 9002;
 var active_state: bool = false;
 var active_state_storage: DialogState = undefined;
 
+const ModalCommand = enum { submit, cancel, close };
+
+fn applyModalCommand(state: *DialogState, command: ModalCommand) void {
+    switch (command) {
+        .submit => state.result = true,
+        .cancel, .close => state.result = false,
+    }
+    state.closed = true;
+}
+
 pub fn node(
     parent: c.HWND,
     allocator: std.mem.Allocator,
@@ -32,7 +42,7 @@ pub fn node(
     }
     state.values[0] = try allocator.dupe(u8, initial.title);
     state.values[1] = try allocator.dupe(u8, initial.loop_type);
-    if (!(try show(state, "Create or edit node", &.{ "Title", "Loop type" }))) return null;
+    if (!(try show(state, "Create or edit node (turn-based)", &.{"Title"}))) return null;
     return .{
         .title = try allocator.dupe(u8, state.values[0]),
         .loop_type = try allocator.dupe(u8, state.values[1]),
@@ -84,12 +94,14 @@ pub fn settings(
 
 fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !bool {
     registerClass() catch return error.FormClassRegistrationFailed;
-    const wide_title = try std.unicode.utf8ToUtf16LeAlloc(state.allocator, title);
+    const wide_title = try utf8ToWideZ(state.allocator, title);
     defer state.allocator.free(wide_title);
     active_state_storage = state.*;
+    active_state_storage.closed = false;
+    active_state_storage.result = false;
     active_state = true;
     const hwnd = c.CreateWindowExW(
-        c.WS_EX_DLGMODALFRAME,
+        c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT,
         class_name.ptr,
         wide_title.ptr,
         c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU,
@@ -109,9 +121,13 @@ fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !boo
     _ = c.ShowWindow(hwnd, c.SW_SHOW);
     _ = c.SetForegroundWindow(hwnd);
     var message: c.MSG = undefined;
-    while (!state.closed) {
+    while (!active_state_storage.closed) {
         const code = c.GetMessageW(&message, null, 0, 0);
-        if (code <= 0) break;
+        if (code <= 0) {
+            active_state_storage.closed = true;
+            break;
+        }
+        if (c.IsDialogMessageW(hwnd, &message) != 0) continue;
         _ = c.TranslateMessage(&message);
         _ = c.DispatchMessageW(&message);
     }
@@ -141,8 +157,8 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             var label_count: usize = 0;
             switch (value.kind) {
                 .node => {
-                    labels = .{ "Title", "Loop type", "" };
-                    label_count = 2;
+                    labels = .{ "Title (turn-based nodes only)", "", "" };
+                    label_count = 1;
                 },
                 .edge => {
                     labels = .{ "From node ID", "To node ID", "Edge kind" };
@@ -164,19 +180,18 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             const command = @as(u16, @truncate(wparam));
             if (command == ok_id) {
                 readValues(value);
-                value.result = true;
-                value.closed = true;
+                applyModalCommand(value, .submit);
                 _ = c.DestroyWindow(hwnd);
                 return 0;
             }
             if (command == cancel_id) {
-                value.closed = true;
+                applyModalCommand(value, .cancel);
                 _ = c.DestroyWindow(hwnd);
                 return 0;
             }
         },
         c.WM_CLOSE => {
-            value.closed = true;
+            applyModalCommand(value, .close);
             _ = c.DestroyWindow(hwnd);
             return 0;
         },
@@ -188,18 +203,18 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
 
 fn createText(hwnd: c.HWND, state: *DialogState, label: []const u8, index: usize) void {
     const y: i32 = @intCast(15 + index * 48);
-    const wide_label = std.unicode.utf8ToUtf16LeAlloc(state.allocator, label) catch return;
+    const wide_label = utf8ToWideZ(state.allocator, label) catch return;
     defer state.allocator.free(wide_label);
     _ = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr, wide_label.ptr, c.WS_CHILD | c.WS_VISIBLE, 18, y, 420, 18, hwnd, null, c.GetModuleHandleW(null), null);
     const edit = c.CreateWindowExW(c.WS_EX_CLIENTEDGE, std.unicode.utf8ToUtf16LeStringLiteral("EDIT").ptr, null, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.ES_AUTOHSCROLL, 18, y + 18, 420, 24, hwnd, @ptrFromInt(9100 + index), c.GetModuleHandleW(null), null) orelse return;
     state.edits[index] = edit;
-    const wide_value = std.unicode.utf8ToUtf16LeAlloc(state.allocator, state.values[index]) catch return;
+    const wide_value = utf8ToWideZ(state.allocator, state.values[index]) catch return;
     defer state.allocator.free(wide_value);
     _ = c.SetWindowTextW(edit, wide_value.ptr);
 }
 
 fn createButton(hwnd: c.HWND, text: []const u8, id: usize, x: i32, y: i32) void {
-    const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.c_allocator, text) catch return;
+    const wide = utf8ToWideZ(std.heap.c_allocator, text) catch return;
     defer std.heap.c_allocator.free(wide);
     _ = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr, wide.ptr, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_DEFPUSHBUTTON, x, y, 70, 26, hwnd, @ptrFromInt(id), c.GetModuleHandleW(null), null);
 }
@@ -207,7 +222,7 @@ fn createButton(hwnd: c.HWND, text: []const u8, id: usize, x: i32, y: i32) void 
 fn readValues(state: *DialogState) void {
     var buffer: [1024]u16 = undefined;
     const count: usize = switch (state.kind) {
-        .node => 2,
+        .node => 1,
         .edge => 3,
         .settings => 2,
     };
@@ -221,4 +236,27 @@ fn readValues(state: *DialogState) void {
 
 fn freeValues(state: *DialogState) void {
     for (&state.values) |value| if (value.len != 0) state.allocator.free(value);
+}
+
+fn utf8ToWideZ(allocator: std.mem.Allocator, value: []const u8) ![]u16 {
+    const raw = try std.unicode.utf8ToUtf16LeAlloc(allocator, value);
+    defer allocator.free(raw);
+    const result = try allocator.alloc(u16, raw.len + 1);
+    @memcpy(result[0..raw.len], raw);
+    result[raw.len] = 0;
+    return result;
+}
+
+test "modal submit and cancel transitions always terminate the loop" {
+    var state = DialogState{ .allocator = undefined, .kind = .node, .parent = null };
+    applyModalCommand(&state, .submit);
+    try std.testing.expect(state.closed);
+    try std.testing.expect(state.result);
+    state = DialogState{ .allocator = undefined, .kind = .node, .parent = null };
+    applyModalCommand(&state, .cancel);
+    try std.testing.expect(state.closed);
+    try std.testing.expect(!state.result);
+    state = DialogState{ .allocator = undefined, .kind = .node, .parent = null };
+    applyModalCommand(&state, .close);
+    try std.testing.expect(state.closed);
 }

@@ -264,15 +264,41 @@ pub const App = struct {
     }
 
     fn showSettings(self: *App) void {
-        const settings = NativeForms.settings(self.window.hwnd, self.allocator, .{}) catch {
+        const pipe = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_DAEMON_PIPE") catch
+            (self.allocator.dupe(u8, "") catch {
+                self.setStatus("Unable to read daemon settings");
+                return;
+            });
+        const support = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SUPPORT_DIR") catch
+            (self.allocator.dupe(u8, "") catch {
+                self.allocator.free(pipe);
+                self.setStatus("Unable to read daemon settings");
+                return;
+            });
+        const maybe_settings = NativeForms.settings(self.window.hwnd, self.allocator, .{
+            .daemon_pipe = pipe,
+            .support_directory = support,
+        }) catch {
+            self.allocator.free(pipe);
+            self.allocator.free(support);
             self.setStatus("Unable to open settings");
             return;
-        } orelse return;
+        };
+        self.allocator.free(pipe);
+        self.allocator.free(support);
+        const settings = maybe_settings orelse return;
         defer {
             self.allocator.free(settings.daemon_pipe);
             self.allocator.free(settings.support_directory);
         }
-        if (settings.daemon_pipe.len != 0) self.setStatus("Daemon pipe override saved for this session");
+        if (!setEnvironmentVariable(self.allocator, "GRAPHCODE_DAEMON_PIPE", settings.daemon_pipe) or
+            !setEnvironmentVariable(self.allocator, "GRAPHCODE_SUPPORT_DIR", settings.support_directory))
+        {
+            self.setStatus("Unable to apply daemon settings");
+            return;
+        }
+        self.client.reconnect();
+        self.setStatus("Daemon settings applied; reconnecting");
     }
 
     fn openSelectedNode(self: *App) void {
@@ -777,4 +803,20 @@ fn envFlag(name: []const u8) bool {
     const value = std.process.getEnvVarOwned(std.heap.page_allocator, name) catch return false;
     defer std.heap.page_allocator.free(value);
     return std.mem.eql(u8, value, "1");
+}
+
+fn setEnvironmentVariable(allocator: std.mem.Allocator, name: []const u8, value: []const u8) bool {
+    const raw_name = std.unicode.utf8ToUtf16LeAlloc(allocator, name) catch return false;
+    defer allocator.free(raw_name);
+    const wide_name = allocator.alloc(u16, raw_name.len + 1) catch return false;
+    defer allocator.free(wide_name);
+    @memcpy(wide_name[0..raw_name.len], raw_name);
+    wide_name[raw_name.len] = 0;
+    const raw_value = std.unicode.utf8ToUtf16LeAlloc(allocator, value) catch return false;
+    defer allocator.free(raw_value);
+    const wide_value = allocator.alloc(u16, raw_value.len + 1) catch return false;
+    defer allocator.free(wide_value);
+    @memcpy(wide_value[0..raw_value.len], raw_value);
+    wide_value[raw_value.len] = 0;
+    return c.SetEnvironmentVariableW(wide_name.ptr, if (value.len == 0) null else wide_value.ptr) != 0;
 }
