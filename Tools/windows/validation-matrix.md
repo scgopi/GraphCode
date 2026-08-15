@@ -55,7 +55,8 @@ Remote validation uses controlled POSIX hosts and sanitized fixtures:
 - SSH reconnect and stale-state tests;
 - manual or protected CI tier for real remote-host execution. Set
   `GRAPHCODE_REMOTE_E2E_TARGETS` to comma-separated authenticated `user@host:port`
-  values; unavailable configured hosts are explicit skips, never passing tests.
+  values; configured targets are mandatory and failures fail the run. Empty entries
+  are rejected.
 
 Credentials, hostnames, and capability tokens belong in runner secrets and never in the
 repository.
