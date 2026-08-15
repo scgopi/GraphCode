@@ -460,12 +460,13 @@ fn onWindowMessage(
         c.WM_LBUTTONDOWN => {
             const x = mouseX(lparam);
             const y = mouseY(lparam);
+            const graph_bounds = canvasBounds(hwnd);
             if (x < Tokens.sidebar_width) {
                 result.* = 0;
                 return true;
             }
             const hit = if (app.model.graph) |graph|
-                GraphCanvas.hitTest(graph.nodes.items, x, y, &app.canvas)
+                GraphCanvas.hitTest(graph.nodes.items, x, y, &app.canvas, graph_bounds)
             else
                 null;
             if (hit) |index| {
@@ -502,12 +503,12 @@ fn onWindowMessage(
         },
         c.WM_MOUSEWHEEL => {
             const delta: i16 = @bitCast(@as(u16, @truncate((@as(usize, @bitCast(wparam)) >> 16) & 0xffff)));
-            const x = mouseX(lparam);
-            const y = mouseY(lparam);
-            if (x < Tokens.sidebar_width) {
+            var point = c.POINT{ .x = mouseX(lparam), .y = mouseY(lparam) };
+            _ = c.ScreenToClient(hwnd, &point);
+            if (point.x < Tokens.sidebar_width) {
                 app.scrollSidebar(-@divTrunc(@as(i32, delta), 2));
             } else {
-                app.canvas.zoomAt(x, y, delta);
+                app.canvas.zoomAt(point.x, point.y, delta);
             }
             _ = c.InvalidateRect(hwnd, null, 0);
             result.* = 0;
@@ -542,6 +543,38 @@ fn mouseX(value: c.LPARAM) i32 {
 
 fn mouseY(value: c.LPARAM) i32 {
     return @as(i32, @as(i16, @bitCast(@as(u16, @truncate(@as(usize, @bitCast(value)) >> 16)))));
+}
+
+fn wheelDelta(value: c.WPARAM) i16 {
+    return @as(i16, @bitCast(@as(u16, @truncate(@as(usize, @bitCast(value)) >> 16))));
+}
+
+fn canvasBounds(hwnd: c.HWND) c.RECT {
+    var client: c.RECT = undefined;
+    _ = c.GetClientRect(hwnd, &client);
+    return .{
+        .left = Tokens.sidebar_width,
+        .top = Tokens.header_height,
+        .right = client.right,
+        .bottom = @max(Tokens.header_height + 1, client.bottom - Tokens.workspace_height),
+    };
+}
+
+test "wheel delta decodes signed high word without overflow" {
+    try std.testing.expectEqual(@as(i16, -120), wheelDelta(@as(c.WPARAM, 0xFF880000)));
+    try std.testing.expectEqual(@as(i16, 120), wheelDelta(@as(c.WPARAM, 0x00780000)));
+}
+
+test "screen wheel coordinates map through a non-origin window" {
+    const screen = c.POINT{ .x = 1320, .y = 760 };
+    const origin = c.POINT{ .x = 1200, .y = 640 };
+    const client = clientPointFromScreen(screen, origin);
+    try std.testing.expectEqual(@as(i32, 120), client.x);
+    try std.testing.expectEqual(@as(i32, 120), client.y);
+}
+
+fn clientPointFromScreen(point: c.POINT, origin: c.POINT) c.POINT {
+    return .{ .x = point.x - origin.x, .y = point.y - origin.y };
 }
 
 fn smokeContractPassed(self: *const App) bool {

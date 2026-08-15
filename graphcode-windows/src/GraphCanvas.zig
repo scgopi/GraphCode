@@ -45,6 +45,14 @@ pub const CanvasState = struct {
     }
 };
 
+pub const CardTextLayout = struct {
+    title_y: i32,
+    state_y: i32,
+    show_entry: bool,
+    show_activity: bool,
+    show_attention: bool,
+};
+
 pub fn paint(
     hwnd: c.HWND,
     hdc: c.HDC,
@@ -67,6 +75,8 @@ pub fn paint(
         @max(Tokens.header_height + 1, client.bottom - Tokens.workspace_height),
     );
     fill(hdc, graph_bounds, Tokens.canvas_tone);
+    const saved = c.SaveDC(hdc);
+    _ = c.IntersectClipRect(hdc, graph_bounds.left, graph_bounds.top, graph_bounds.right, graph_bounds.bottom);
     drawGrid(hdc, graph_bounds, state);
     if (model.graph) |graph| {
         drawEdges(hdc, graph, state);
@@ -76,6 +86,7 @@ pub fn paint(
     } else {
         drawText(hdc, allocator, "Open a project to view its graph", Tokens.sidebar_width + 32, 120, 18, 0x00B8B8B8);
     }
+    _ = c.RestoreDC(hdc, saved);
 }
 
 fn header(hdc: c.HDC, allocator: std.mem.Allocator, width: i32, status: []const u8) void {
@@ -154,19 +165,17 @@ fn drawNode(
     const bounds = nodeBounds(index, state);
     const x = bounds.left;
     const y = bounds.top;
-    const attention = needsAttention(node);
+    const attention = needsAttention(node, nodes, edges);
     const selected_card = selected == index;
     roundedCard(hdc, bounds, if (selected_card) 0x00345D8C else 0x00262626, selected_card);
     const stripe = stateColor(node.state, attention);
     fill(hdc, rect(x, y, x + scaled(Tokens.loop_card_stripe, state), y + bounds.bottom - y), stripe);
-    const entry = isEntry(nodes, edges, node.id);
-    const title_y: i32 = if (entry) 20 else 14;
-    const state_y: i32 = if (entry) 47 else 43;
-    if (entry) drawText(hdc, allocator, "START", x + 14, y + 5, 9, 0x008A8A8A);
-    drawText(hdc, allocator, node.title, x + 14, y + title_y, 14, 0x00FFFFFF);
-    drawText(hdc, allocator, node.state, x + 14, y + state_y, 11, if (attention) 0x00FFB340 else 0x00B8B8B8);
-    if (node.activity.len != 0) drawText(hdc, allocator, node.activity, x + 14, y + 70, 10, 0x008A8A8A);
-    if (attention) drawText(hdc, allocator, "NEEDS YOU", x + scaled(Tokens.loop_card_width, state) - 88, y + 8, 9, 0x00FFB340);
+    const layout = cardTextLayout(state.zoom, isEntry(nodes, edges, node.id), attention);
+    if (layout.show_entry) drawText(hdc, allocator, "START", x + scaled(14, state), y + layout.title_y - scaled(10, state), scaled(9, state), 0x008A8A8A);
+    drawText(hdc, allocator, node.title, x + scaled(14, state), y + layout.title_y, scaled(14, state), 0x00FFFFFF);
+    drawText(hdc, allocator, node.state, x + scaled(14, state), y + layout.state_y, scaled(11, state), if (attention) 0x00FFB340 else 0x00B8B8B8);
+    if (layout.show_activity and node.activity.len != 0) drawText(hdc, allocator, node.activity, x + scaled(14, state), y + layout.state_y + scaled(22, state), scaled(10, state), 0x008A8A8A);
+    if (layout.show_attention) drawText(hdc, allocator, "NEEDS YOU", bounds.right - scaled(88, state), y + scaled(8, state), scaled(9, state), 0x00FFB340);
 }
 
 fn nodeBounds(index: usize, state: *const CanvasState) c.RECT {
@@ -190,12 +199,22 @@ fn stateColor(state: []const u8, attention: bool) u32 {
     return 0x00909090;
 }
 
-fn needsAttention(node: GraphModel.Node) bool {
-    return std.mem.eql(u8, node.state, "blocked") or
-        std.mem.eql(u8, node.state, "needsYou") or
-        std.mem.eql(u8, node.presence, "needsYou") or
-        std.mem.eql(u8, node.presence, "waiting") or
-        std.mem.eql(u8, node.presence, "needs-you");
+fn needsAttention(node: GraphModel.Node, nodes: []const GraphModel.Node, edges: []const GraphModel.Edge) bool {
+    if (std.mem.eql(u8, node.state, "failed") or std.mem.eql(u8, node.state, "stalled")) return true;
+    if (std.mem.eql(u8, node.state, "running") and std.mem.eql(u8, node.presence, "awaitingInput")) return true;
+    if (!std.mem.eql(u8, node.state, "blocked")) return false;
+    for (edges) |edge| {
+        if (!std.mem.eql(u8, edge.to, node.id) or !std.mem.eql(u8, edge.kind, "handoff") or !edge.fired) continue;
+        for (nodes) |source| {
+            if (std.mem.eql(u8, source.id, edge.from) and
+                (std.mem.eql(u8, source.state, "failed") or std.mem.eql(u8, source.state, "stalled") or
+                    std.mem.eql(u8, source.state, "succeeded")))
+            {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 fn isEntry(nodes: []const GraphModel.Node, edges: []const GraphModel.Edge, node_id: []const u8) bool {
@@ -206,14 +225,37 @@ fn isEntry(nodes: []const GraphModel.Node, edges: []const GraphModel.Edge, node_
     return true;
 }
 
-pub fn hitTest(nodes: []const GraphModel.Node, x: i32, y: i32, state: *const CanvasState) ?usize {
+pub fn hitTest(nodes: []const GraphModel.Node, x: i32, y: i32, state: *const CanvasState, graph_bounds: c.RECT) ?usize {
+    if (x < graph_bounds.left or x >= graph_bounds.right or y < graph_bounds.top or y >= graph_bounds.bottom) return null;
     var index = nodes.len;
     while (index > 0) {
         index -= 1;
         const bounds = nodeBounds(index, state);
         if (x >= bounds.left and x < bounds.right and y >= bounds.top and y < bounds.bottom) return index;
     }
+
     return null;
+}
+
+fn cardTextLayout(zoom: f32, entry: bool, attention: bool) CardTextLayout {
+    if (zoom < 0.75) return .{
+        .title_y = scaledValue(14, zoom),
+        .state_y = scaledValue(40, zoom),
+        .show_entry = false,
+        .show_activity = false,
+        .show_attention = false,
+    };
+    return .{
+        .title_y = scaledValue(if (entry) 20 else 14, zoom),
+        .state_y = scaledValue(if (entry) 47 else 43, zoom),
+        .show_entry = entry,
+        .show_activity = true,
+        .show_attention = attention,
+    };
+}
+
+fn scaledValue(value: i32, zoom: f32) i32 {
+    return @max(1, @as(i32, @intFromFloat(@as(f32, @floatFromInt(value)) * zoom)));
 }
 
 fn rect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {
@@ -298,6 +340,46 @@ test "canvas hit testing follows pan and zoom" {
     const expected = nodeBounds(0, &state);
     const point = hitTest(&[_]GraphModel.Node{
         .{ .id = @constCast("a"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
-    }, expected.left + 2, expected.top + 2, &state);
+    }, expected.left + 2, expected.top + 2, &state, rect(Tokens.sidebar_width, Tokens.header_height, 1200, 700));
     try std.testing.expectEqual(@as(?usize, 0), point);
+}
+
+test "minimum zoom hides overflow-prone card content" {
+    const layout = cardTextLayout(0.55, true, true);
+    try std.testing.expect(!layout.show_entry);
+    try std.testing.expect(!layout.show_activity);
+    try std.testing.expect(!layout.show_attention);
+    try std.testing.expect(layout.state_y < @as(i32, @intFromFloat(106 * 0.55)));
+}
+
+test "attention follows awaiting input and stranded blocked semantics" {
+    const nodes = [_]GraphModel.Node{
+        .{ .id = @constCast("awaiting"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast("running"), .activity = @constCast(""), .presence = @constCast("awaitingInput") },
+        .{ .id = @constCast("failed"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast("failed"), .activity = @constCast(""), .presence = @constCast("idle") },
+        .{ .id = @constCast("blocked"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast("blocked"), .activity = @constCast(""), .presence = @constCast("idle") },
+    };
+    const edges = [_]GraphModel.Edge{
+        .{ .from = @constCast("failed"), .to = @constCast("blocked"), .kind = @constCast("handoff"), .fired = true },
+    };
+    try std.testing.expect(needsAttention(nodes[0], &nodes, &edges));
+    try std.testing.expect(needsAttention(nodes[2], &nodes, &edges));
+    const ordinary_waiting = GraphModel.Node{
+        .id = @constCast("waiting"),
+        .title = @constCast(""),
+        .loop_type = @constCast(""),
+        .state = @constCast("waiting"),
+        .activity = @constCast(""),
+        .presence = @constCast("waiting"),
+    };
+    try std.testing.expect(!needsAttention(ordinary_waiting, &nodes, &edges));
+}
+
+test "hit testing rejects cards outside the graph viewport" {
+    var state = CanvasState{};
+    const nodes = [_]GraphModel.Node{
+        .{ .id = @constCast("a"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
+    };
+    const bounds = rect(Tokens.sidebar_width, Tokens.header_height, 900, 500);
+    try std.testing.expect(hitTest(&nodes, 10, 100, &state, bounds) == null);
+    try std.testing.expect(hitTest(&nodes, 300, 20, &state, bounds) == null);
 }

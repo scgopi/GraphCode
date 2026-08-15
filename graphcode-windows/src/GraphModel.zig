@@ -13,6 +13,8 @@ pub const Node = struct {
 pub const Edge = struct {
     from: []u8,
     to: []u8,
+    kind: []u8 = &.{},
+    fired: bool = false,
 };
 
 pub const Project = struct {
@@ -179,6 +181,8 @@ fn decodeEdges(
         try edges.append(.{
             .from = try duplicateJsonString(allocator, object, "from"),
             .to = try duplicateJsonString(allocator, object, "to"),
+            .kind = try duplicateJsonStringOr(allocator, object, "kind", "handoff"),
+            .fired = jsonBool(object, "fired") orelse false,
         });
         cursor = end + 1;
     }
@@ -258,9 +262,24 @@ fn freeGraph(allocator: std.mem.Allocator, graph: *Graph) void {
     for (graph.edges.items) |edge| {
         allocator.free(edge.from);
         allocator.free(edge.to);
+        allocator.free(edge.kind);
     }
     graph.nodes.deinit();
     graph.edges.deinit();
+}
+
+fn jsonBool(data: []const u8, key: []const u8) ?bool {
+    var needle_buffer: [128]u8 = undefined;
+    if (key.len + 3 > needle_buffer.len) return null;
+    needle_buffer[0] = '"';
+    @memcpy(needle_buffer[1 .. key.len + 1], key);
+    needle_buffer[key.len + 1] = '"';
+    needle_buffer[key.len + 2] = ':';
+    const start = std.mem.indexOf(u8, data, needle_buffer[0 .. key.len + 3]) orelse return null;
+    const value = data[start + key.len + 3 ..];
+    if (std.mem.startsWith(u8, value, "true")) return true;
+    if (std.mem.startsWith(u8, value, "false")) return false;
+    return null;
 }
 
 test "graph snapshots decode escaped project data and presence" {
@@ -326,4 +345,21 @@ test "project identity derives remote and global from Codable paths" {
     try std.testing.expect(!global.isRemote());
     try std.testing.expect(!local.isRemote());
     try std.testing.expect(!local.isGlobal());
+}
+
+test "attention fixture preserves awaiting input and stranded edge metadata" {
+    const allocator = std.testing.allocator;
+    const frame = try std.fs.cwd().readFileAlloc(
+        allocator,
+        "fixtures/daemon-v2-graph-attention.json",
+        64 * 1024,
+    );
+    defer allocator.free(frame);
+    var model = Model.init(allocator);
+    defer model.deinit();
+    try std.testing.expectEqual(Wire.EventKind.graph_changed, try model.updateFromFrame(frame));
+    const graph = model.graph orelse return error.TestExpectedGraph;
+    try std.testing.expectEqualStrings("awaitingInput", graph.nodes.items[0].presence);
+    try std.testing.expectEqualStrings("handoff", graph.edges.items[0].kind);
+    try std.testing.expect(graph.edges.items[0].fired);
 }
