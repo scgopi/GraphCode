@@ -220,19 +220,27 @@ pub const Workspace = struct {
         if (project.len == 0 or std.mem.eql(u8, self.project_key, project)) return;
         const new_project_key = try self.allocator.dupe(u8, project);
         errdefer self.allocator.free(new_project_key);
+        const new_layout_path = try self.layoutPathForProject(project);
+        errdefer self.allocator.free(new_layout_path);
+        var new_layout = try WorkspaceLayout.Layout.init(self.allocator, project);
+        errdefer new_layout.deinit();
+        if (WorkspaceLayout.Layout.load(self.allocator, new_layout_path, project)) |restored| {
+            new_layout.deinit();
+            new_layout = restored;
+        } else |_| {}
+        var old_layout = self.layout;
+        const old_project_key = self.project_key;
+        const old_layout_path = self.layout_path;
+        self.layout = new_layout;
+        self.project_key = new_project_key;
+        self.layout_path = new_layout_path;
         for (self.surfaces, 0..) |_, index| self.destroySurface(index);
         self.clearAllRecreateState();
-        self.layout.deinit();
-        self.layout = try WorkspaceLayout.Layout.init(self.allocator, project);
-        self.allocator.free(self.project_key);
-        self.project_key = new_project_key;
-        const new_layout_path = try self.layoutPathForProject(project);
-        self.allocator.free(self.layout_path);
-        self.layout_path = new_layout_path;
-        if (WorkspaceLayout.Layout.load(self.allocator, self.layout_path, project)) |restored| {
-            self.layout.deinit();
-            self.layout = restored;
-        } else |_| {}
+        old_layout.deinit();
+        self.allocator.free(old_project_key);
+        self.allocator.free(old_layout_path);
+        for (&self.recreate_due_ms) |*due| due.* = 0;
+        for (&self.recreate_delay_ms) |*delay| delay.* = 100;
         self.restorePersistedSurfaces();
     }
 
@@ -415,9 +423,11 @@ pub const Workspace = struct {
     }
 
     fn clearAllRecreateState(self: *Workspace) void {
-        for (&self.recreate_sessions) |*session| {
+        for (&self.recreate_sessions, 0..) |*session, index| {
             if (session.*.len != 0) self.allocator.free(session.*);
             session.* = &.{};
+            self.recreate_due_ms[index] = 0;
+            self.recreate_delay_ms[index] = 100;
         }
         for (&self.restore_errors) |*message| {
             if (message.*.len != 0) self.allocator.free(message.*);
@@ -681,24 +691,38 @@ pub const Workspace = struct {
     }
 
     pub fn topologyHealthy(self: *const Workspace) bool {
-        var live: usize = 0;
+        var pane_count: usize = 0;
+        var occupied: usize = 0;
         for (self.layout.tabs.items) |tab| {
             if (tab.panes.items.len == 0 or tab.focused_pane >= tab.panes.items.len) return false;
             for (tab.panes.items) |pane| {
+                pane_count += 1;
                 var found = false;
-                for (self.surfaces) |slot| {
+                for (&self.surfaces) |slot| {
                     if (std.mem.eql(u8, slot.session_name, pane.id) and
                         (slot.surface != null or slot.attach != null))
                     {
+                        if (found) return false;
                         found = true;
-                        live += 1;
-                        break;
                     }
                 }
                 if (!found) return false;
             }
         }
-        return live > 0;
+        for (&self.surfaces) |slot| {
+            if (slot.surface == null and slot.attach == null) continue;
+            occupied += 1;
+            if (slot.session_name.len == 0) return false;
+            var mapped = false;
+            for (self.layout.tabs.items) |tab| for (tab.panes.items) |pane| {
+                if (std.mem.eql(u8, pane.id, slot.session_name)) {
+                    if (mapped) return false;
+                    mapped = true;
+                }
+            };
+            if (!mapped) return false;
+        }
+        return pane_count > 0 and pane_count == occupied;
     }
 
     pub fn tabCount(self: *const Workspace) usize {

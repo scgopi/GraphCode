@@ -31,6 +31,8 @@ $oldRequireDaemon = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_REQUI
 $oldNonreadingAttach = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_NONREADING_ATTACH")
 $oldLargePaste = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_LARGE_PASTE")
 $oldWorkspaceActions = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_WORKSPACE_ACTIONS")
+$oldWorkspaceLayout = [Environment]::GetEnvironmentVariable("GRAPHCODE_WORKSPACE_LAYOUT")
+$workspaceLayoutBase = Join-Path $shellRoot "graphcode-workspace-$PID.json"
 
 function Invoke-Native([string] $description, [scriptblock] $command) {
   Write-Host "==> $description"
@@ -118,6 +120,7 @@ try {
   $env:GRAPHCODE_ZMX = Join-Path $ZmxRoot "zig-out\bin\zmx.exe"
   $env:GRAPHCODE_GATE_CWD = $repoRoot
   $env:GRAPHCODE_SHELL_WORKSPACE_ACTIONS = "1"
+  $env:GRAPHCODE_WORKSPACE_LAYOUT = $workspaceLayoutBase
   if ($UseStubDaemon) {
     Remove-Item -LiteralPath $stubResult -Force -ErrorAction SilentlyContinue
     $pipeName = "graphcode-shell-stub-$PID"
@@ -278,6 +281,14 @@ finally {
   } else {
     $env:GRAPHCODE_SHELL_WORKSPACE_ACTIONS = $oldWorkspaceActions
   }
+  if ($null -eq $oldWorkspaceLayout) {
+    Remove-Item Env:GRAPHCODE_WORKSPACE_LAYOUT -ErrorAction SilentlyContinue
+  } else {
+    $env:GRAPHCODE_WORKSPACE_LAYOUT = $oldWorkspaceLayout
+  }
+  $layoutStem = [IO.Path]::GetFileNameWithoutExtension($workspaceLayoutBase)
+  Get-ChildItem -LiteralPath $shellRoot -Filter "$layoutStem*.json" -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $stubResult -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $busyResult,$busyError,$inputError -Force -ErrorAction SilentlyContinue
   Assert-NoOrphanShellProcesses
