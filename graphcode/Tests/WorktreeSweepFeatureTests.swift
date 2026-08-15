@@ -11,7 +11,7 @@ import Testing
 @Suite
 struct WorktreeSweepFeatureTests {
   private func inspection(
-    branch: String, dirty: Int = 0, size: Int64? = 100
+    branch: String, dirty: Int = 0, size: Int64? = 100, locked: Bool = false
   ) -> WorktreeInspection {
     WorktreeInspection(
       ref: WorktreeRef(
@@ -19,7 +19,7 @@ struct WorktreeSweepFeatureTests {
         branch: branch),
       facts: WorktreeGitFacts(
         defaultBranch: "main", commitsNotLanded: 0, dirtyFileCount: dirty, pushed: true,
-        sizeBytes: size))
+        locked: locked, sizeBytes: size))
   }
 
   @Test
@@ -256,6 +256,82 @@ struct WorktreeSweepFeatureTests {
     }
     await store.send(.allSafeToggled) {
       $0.selection = [first.ref.worktreePath, second.ref.worktreePath]
+    }
+  }
+}
+
+/// The locked rows' Unlock button: `git worktree unlock` run from the row, so a locked
+/// worktree can be freed and then deleted without dropping to the terminal (issue #92).
+@Suite
+struct WorktreeSweepUnlockTests {
+  private func inspection(branch: String, locked: Bool) -> WorktreeInspection {
+    WorktreeInspection(
+      ref: WorktreeRef(
+        id: branch, repositoryPath: "/repo", worktreePath: "/repo-\(branch)",
+        branch: branch),
+      facts: WorktreeGitFacts(
+        defaultBranch: "main", commitsNotLanded: 0, dirtyFileCount: 0, pushed: true,
+        locked: locked, sizeBytes: 100))
+  }
+
+  @Test
+  func unlockMakesALockedRowRemovableAndSelectsIt() async {
+    // Locked rows can't be selected — git refuses their removal even when forced. The
+    // row's Unlock button clears the lock, and selecting the freed row is what makes
+    // "unlock, then delete" one click from done.
+    let locked = inspection(branch: "held", locked: true)
+    let unlocked = LockIsolated<[String]>([])
+    let store = TestStore(
+      initialState: WorktreeSweepFeature.State(
+        projectPath: "/repo", projectName: "repo", nodes: [])
+    ) {
+      WorktreeSweepFeature()
+    } withDependencies: {
+      $0.gitClient.inspectWorktrees = { _ in [locked] }
+      $0.gitClient.unlockWorktree = { _, path in unlocked.withValue { $0.append(path) } }
+    }
+
+    await store.send(.task)
+    await store.receive(\.assessmentsLoaded) {
+      $0.assessments = WorktreeSweepFeature.assessments([locked], nodes: [])
+    }
+    // Still locked: the click does nothing.
+    await store.send(.rowToggled(locked.ref.worktreePath))
+    await store.send(.unlockTapped(locked.ref.worktreePath)) {
+      $0.unlocking = [locked.ref.worktreePath]
+    }
+    await store.receive(\.unlockSucceeded) {
+      $0.unlocking = []
+      $0.assessments?[0].facts.locked = false
+      $0.selection = [locked.ref.worktreePath]
+    }
+    #expect(unlocked.value == [locked.ref.worktreePath])
+  }
+
+  @Test
+  func aFailedUnlockSurfacesAndLeavesTheRowLocked() async {
+    struct Stuck: Error {}
+    let locked = inspection(branch: "held", locked: true)
+    let store = TestStore(
+      initialState: WorktreeSweepFeature.State(
+        projectPath: "/repo", projectName: "repo", nodes: [])
+    ) {
+      WorktreeSweepFeature()
+    } withDependencies: {
+      $0.gitClient.inspectWorktrees = { _ in [locked] }
+      $0.gitClient.unlockWorktree = { _, _ in throw Stuck() }
+    }
+
+    await store.send(.task)
+    await store.receive(\.assessmentsLoaded) {
+      $0.assessments = WorktreeSweepFeature.assessments([locked], nodes: [])
+    }
+    await store.send(.unlockTapped(locked.ref.worktreePath)) {
+      $0.unlocking = [locked.ref.worktreePath]
+    }
+    await store.receive(\.unlockFailed) {
+      $0.unlocking = []
+      $0.failure = "Stuck()"
     }
   }
 }

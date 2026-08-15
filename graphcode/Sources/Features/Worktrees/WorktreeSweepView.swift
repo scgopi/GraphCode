@@ -170,6 +170,9 @@ struct WorktreeSweepView: View {
       }
       .lineLimit(1)
       Spacer(minLength: 8)
+      if assessment.facts.locked {
+        unlockButton(assessment)
+      }
       if tier == .lookBeforeRemoving && !assessment.facts.prunable {
         Button("Reveal") {
           NSWorkspace.shared.activateFileViewerSelecting([
@@ -197,11 +200,21 @@ struct WorktreeSweepView: View {
     .help(rowHelp(assessment))
   }
 
+  private func unlockButton(_ assessment: WorktreeAssessment) -> some View {
+    Button(store.unlocking.contains(assessment.id) ? "Unlocking…" : "Unlock") {
+      store.send(.unlockTapped(assessment.id))
+    }
+    .buttonStyle(.plain)
+    .font(.system(size: 11.5, weight: .semibold))
+    .foregroundStyle(Color(red: 0.424, green: 0.714, blue: 1.0))
+    .disabled(store.unlocking.contains(assessment.id))
+  }
+
   private func rowHelp(_ assessment: WorktreeAssessment) -> String {
     if assessment.tier == .inUse { return "A loop is running in it" }
     if assessment.facts.locked {
       return "Locked (git worktree lock) — git refuses removal even when forced; "
-        + "unlock it first"
+        + "Unlock clears the lock and selects the row for removal"
     }
     if assessment.removalDiscardsFiles {
       return "Has uncommitted files — removing it discards them, and asks first"

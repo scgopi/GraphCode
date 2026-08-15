@@ -28,6 +28,10 @@ struct GitClient: Sendable {
   /// the default's safety.
   var removeWorktreeAndBranch:
     @Sendable (_ worktree: WorktreeRef, _ prunable: Bool, _ force: Bool) async throws -> Void
+  /// Clears a `git worktree lock` — the one state git refuses to remove even with
+  /// `--force`, so unlocking is what stands between a locked row and the sweeper.
+  var unlockWorktree:
+    @Sendable (_ repositoryPath: String, _ worktreePath: String) async throws -> Void
   /// Streams a `git clone --progress` into `destination`: progress lines while it runs,
   /// `.finished` on success, a thrown `GitClientError` on failure. Streaming is what lets
   /// the form show a live percentage instead of a spinner over a multi-minute network
@@ -144,6 +148,10 @@ extension GitClient: DependencyKey {
       if let tip, !tip.isEmpty {
         appendRemovedBranchRecord(branch: worktree.branch, tip: tip, path: worktree.worktreePath)
       }
+    },
+    unlockWorktree: { repositoryPath, worktreePath in
+      _ = try await run(
+        "git", ["-C", repositoryPath, "worktree", "unlock", "--", worktreePath])
     },
     clone: { url, destination, branch, depth in
       runClone(url: url, destination: destination, branch: branch, depth: depth)

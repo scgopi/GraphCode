@@ -24,6 +24,9 @@ struct RemoteGitClient: Sendable {
     @Sendable (
       _ location: RemoteProjectLocation, _ worktree: WorktreeRef, _ prunable: Bool, _ force: Bool
     ) async throws -> Void
+  /// Clears a `git worktree lock` over SSH.
+  var unlockWorktree:
+    @Sendable (_ location: RemoteProjectLocation, _ worktreePath: String) async throws -> Void
 }
 
 extension RemoteGitClient: DependencyKey {
@@ -94,13 +97,20 @@ extension RemoteGitClient: DependencyKey {
         appendRemovedBranchRecord(
           branch: worktree.branch, tip: tip, path: worktree.worktreePath, host: location.host)
       }
+    },
+    unlockWorktree: { location, worktreePath in
+      let quoted = RemoteProjectLocation.shellQuoted
+      _ = try await runSSH(
+        location,
+        "git -C \(quoted(location.remotePath)) worktree unlock \(quoted(worktreePath))")
     }
   )
 
   static let testValue = RemoteGitClient(
     inspectWorktrees: { _ in [] },
     worktreeSizeBytes: { _, _ in nil },
-    removeWorktreeAndBranch: { _, _, _, _ in }
+    removeWorktreeAndBranch: { _, _, _, _ in },
+    unlockWorktree: { _, _ in }
   )
 }
 
