@@ -31,6 +31,10 @@ pub const Inspection = struct {
     default_branch: []u8,
 };
 
+pub const Binding = struct {
+    path: []const u8,
+};
+
 pub const ReclaimDecision = enum { reclaimable, keep };
 
 pub fn decision(entry: Entry) ReclaimDecision {
@@ -43,7 +47,6 @@ pub fn decision(entry: Entry) ReclaimDecision {
     return .reclaimable;
 }
 
-pub fn inspect(allocator: std.mem.Allocator, project_path: []const u8) !Inspection {
 pub fn selectedEntry(entries: []const Entry, path: []const u8) ?Entry {
     for (entries) |entry| {
         if (std.mem.eql(u8, entry.path, path)) return entry;
@@ -51,7 +54,7 @@ pub fn selectedEntry(entries: []const Entry, path: []const u8) ?Entry {
     return null;
 }
 
-pub fn inspect(allocator: std.mem.Allocator, project_path: []const u8, bindings: []const Binding) !Inspection {
+pub fn inspect(allocator: std.mem.Allocator, project_path: []const u8) !Inspection {
         if (project_path.len == 0) return error.EmptyProjectPath;
         const list = try runGit(allocator, &.{
             "git", "-C", project_path, "worktree", "list", "--porcelain",
@@ -59,11 +62,6 @@ pub fn inspect(allocator: std.mem.Allocator, project_path: []const u8, bindings:
         defer allocator.free(list.output);
         var entries = try parse(allocator, list.output);
         errdefer deinit(allocator, &entries);
-        const default = try runGit(allocator, &.{
-            "git", "-C", project_path, "symbolic-ref", "--short", "HEAD",
-        });
-        defer allocator.free(default.output);
-        const default_branch = try allocator.dupe(u8, std.mem.trim(u8, default.output, " \r\n"));
         const default_branch = try discoverDefault(allocator, project_path, entries.items);
         errdefer allocator.free(default_branch);
         for (entries.items, 0..) |*entry, index| {
@@ -102,6 +100,30 @@ pub fn reclaim(allocator: std.mem.Allocator, entries: []const Entry) !usize {
                 "git", "-C", entry.path, "worktree", "remove", entry.path,
             });
             removed += 1;
+        }
+
+        pub fn reclaimSelected(
+            allocator: std.mem.Allocator,
+            project_path: []const u8,
+            selected: []const []const u8,
+            bindings: []const Binding,
+        ) !usize {
+            var inspection = try inspect(allocator, project_path);
+            defer {
+                deinit(allocator, &inspection.entries);
+                allocator.free(inspection.default_branch);
+            }
+            var removed: usize = 0;
+            for (selected) |path| {
+                for (bindings) |binding| {
+                    if (std.mem.eql(u8, path, binding.path)) return error.GitFailed;
+                }
+                const entry = selectedEntry(inspection.entries.items, path) orelse continue;
+                if (decision(entry) != .reclaimable) continue;
+                _ = try runGit(allocator, &.{ "git", "-C", project_path, "worktree", "remove", path });
+                removed += 1;
+            }
+            return removed;
         }
         return removed;
     }

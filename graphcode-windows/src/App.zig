@@ -394,11 +394,10 @@ pub const App = struct {
     }
 
     fn reclaimWorktrees(self: *App) void {
-        const inspection = self.worktree_inspection orelse {
+        _ = self.worktree_inspection orelse {
             self.setStatus("Inspect worktrees first; nothing selected to reclaim");
             return;
         };
-        const removed = WorktreeStatus.reclaim(self.allocator, inspection.entries.items) catch |err| {
         if (self.selected_worktree_path.len == 0) {
             self.setStatus("Select a worktree row before reclaiming");
             return;
@@ -409,6 +408,7 @@ pub const App = struct {
         if (self.model.graph) |graph| for (graph.nodes.items) |bound| {
             if (bound.worktree_path.len != 0) bindings.append(.{ .path = bound.worktree_path }) catch {};
         };
+        const path = self.currentProject() orelse return;
         const removed = WorktreeStatus.reclaimSelected(self.allocator, path, &selected, bindings.items) catch |err| {
             self.setStatus(switch (err) {
                 error.GitFailed => "Reclaim failed: git refused a selected worktree",
@@ -650,20 +650,9 @@ fn onWindowMessage(
         c.WM_PAINT => {
             var paint: c.PAINTSTRUCT = undefined;
             const hdc = c.BeginPaint(hwnd, &paint);
-            GraphCanvas.paint(
-                hwnd,
-                hdc,
-                &app.model,
-                app.status(),
-                app.allocator,
-                app.sidebar_scroll,
-                &app.canvas,
-            );
             if (app.workspace) |*workspace| workspace.paintChrome(hdc);
             const inspection = if (app.worktree_inspection) |*value| value else null;
-            GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.status(), app.allocator);
->>>>>>> 6540896 (Add             _ = c.EndPaint(hwnd, &paint);
-            GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), app.allocator);
+            GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), app.allocator, &app.canvas);
             _ = c.EndPaint(hwnd, &paint);
             result.* = 0;
             return true;

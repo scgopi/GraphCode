@@ -63,18 +63,12 @@ pub fn paint(
     sidebar_scroll: i32,
     status: []const u8,
     allocator: std.mem.Allocator,
-    sidebar_scroll: i32,
     state: *const CanvasState,
 ) void {
     var client: c.RECT = undefined;
     _ = c.GetClientRect(hwnd, &client);
     fill(hdc, client, Tokens.canvas_tone);
     header(hdc, allocator, client.right, status);
-    Sidebar.draw(hdc, model, status, allocator, client.bottom, sidebar_scroll);
-    attentionRail(hdc, allocator, model, client.right);
-    Sidebar.draw(hdc, model, status, allocator);
-    Sidebar.draw(hdc, model, inspection, selected_worktree_path, status, allocator);
->>>>>>> 6540896 (Add 
     const visible_inspection = if (inspection) |value|
         if (model.graph) |graph|
             if (std.mem.eql(u8, value.project_path, graph.project.path)) value else null
