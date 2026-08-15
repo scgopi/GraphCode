@@ -391,16 +391,6 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
-        c.WM_LBUTTONDOWN => {
-            const x: i32 = @intCast(@as(u16, @truncate(@as(usize, @bitCast(lparam)))));
-            const y: i32 = @intCast(@as(u16, @truncate(@as(usize, @bitCast(lparam >> 16)))));
-            if (app.workspace) |*workspace| {
-                if (workspace.selectTabAt(x, y)) {
-                    result.* = 0;
-                    return true;
-                }
-            }
-        },
         c.WM_TIMER => if (wparam == MainWindow.timer_id) {
             app.smoke_tick += 1;
             app.client.poll();
@@ -534,6 +524,12 @@ fn onWindowMessage(
         c.WM_LBUTTONDOWN => {
             const x = mouseX(lparam);
             const y = mouseY(lparam);
+            if (app.workspace) |*workspace| {
+                if (workspace.selectTabAt(x, y)) {
+                    result.* = 0;
+                    return true;
+                }
+            }
             const graph_bounds = canvasBounds(hwnd);
             if (x < Tokens.sidebar_width) {
                 result.* = 0;
