@@ -844,6 +844,31 @@ public actor GraphStore {
     onRemoveMemory?(node.id)
   }
 
+  /// Ends every session this graph holds a handle on — the whole-graph counterpart of the
+  /// kill in `removeSingleNode`, for when the graph itself is being discarded rather than
+  /// one node (`ProjectRegistry`'s `.deleteProjectGraph`).
+  ///
+  /// Same reasoning one level up: the graph was the only handle on these sessions, so
+  /// throwing it away without this leaves one agent per loop running with nothing left
+  /// pointing at them. A composite's workers are killed from *this* store rather than by
+  /// descending into a child one, matching `pilotComposite`, which starts them from here —
+  /// so both ends route through the same project path. A sub-graph's own
+  /// `project.path` is a synthetic `"<title>-subgraph"` (`NodeDraft.makeNode`) and would
+  /// not reach the zmx daemon that owns the session.
+  public func terminateAllSessions() {
+    for node in graph.nodes { terminateSessionTree(node) }
+  }
+
+  /// A node's session and, for a composite, every session beneath it. Recursive because a
+  /// sub-graph node lives on its parent node rather than in `graph.nodes`, nested
+  /// composites included.
+  private func terminateSessionTree(_ node: LoopNode) {
+    terminateSession(node)
+    if node.loopType == .composite, let subGraph = node.subGraph {
+      for child in subGraph.nodes { terminateSessionTree(child) }
+    }
+  }
+
   /// The fan-out descendants of a node — the loops it created, theirs, and so on,
   /// walked through `LoopNode.createdBy`.
   private func spawnedDescendants(of nodeID: UUID) -> [LoopNode] {

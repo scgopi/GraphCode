@@ -222,9 +222,18 @@ public actor ProjectRegistry {
       await close(canonicalPath, for: connectionID)
       persistence.forgetProject(path: canonicalPath)
       // Drop the in-memory store too, or a later reopen would resurrect the graph we
-      // just deleted from the one still sitting in `stores`.
-      stores.removeValue(forKey: canonicalPath)
+      // just deleted from the one still sitting in `stores`. Held onto rather than
+      // dropped outright, because it is the last thing that knows which sessions this
+      // project had — and the removal and the delete stay back to back with nothing
+      // awaited between them, so no command can arrive mid-deletion and be routed to a
+      // store that is on its way out.
+      let deletedStore = stores.removeValue(forKey: canonicalPath)
       persistence.deleteGraph(path: canonicalPath)
+      // Discarding the loops has to end them. This is the irreversible verb of the three,
+      // and afterwards nothing — no store, no file, no card — points at those sessions,
+      // so any left running runs on unreachable. Deleting a single node already kills its
+      // session for exactly this reason; deleting every loop is the same act, in bulk.
+      await deletedStore?.terminateAllSessions()
 
     case .graphCommand(let path, let inner):
       guard let store = stores[Self.canonicalize(path)] else { return }

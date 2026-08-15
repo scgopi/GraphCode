@@ -1,3 +1,4 @@
+import ComposableArchitecture
 import Foundation
 import GraphcodeKit
 import Testing
@@ -252,6 +253,52 @@ struct ProjectRegistryTests {
     // it would persist the graph we just deleted straight back to disk.
     await registry.handle(.openProject(path: "/tmp/project-e"), connectionID: connectionID)
     #expect(persistence.loadGraph(path: "/tmp/project-e")?.nodes.isEmpty != false)
+  }
+
+  @Test
+  func deletingAProjectsLoopsEndsEverySessionTheyHeld() async throws {
+    // Discarding the loops has to end them: after this there is no store, no file and no
+    // card pointing at those sessions, so any left running runs forever unreachable. A
+    // composite's workers count — their nodes live on the composite rather than in the
+    // graph's own `nodes`, which is exactly how they get missed.
+    let killed = LockIsolated<[String]>([])
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
+    let registry = ProjectRegistry(
+      persistenceDirectory: directory,
+      ensureSession: nil,
+      terminateSession: { node, _ in killed.withValue { $0.append(node.title) } })
+    let persistence = ProjectPersistence(baseDirectory: directory)
+
+    let connectionID = UUID()
+    await registry.addConnection(id: connectionID, fileDescriptor: -1)
+    await registry.handle(.openProject(path: "/tmp/project-c"), connectionID: connectionID)
+    await registry.handle(
+      .graphCommand(
+        projectPath: "/tmp/project-c",
+        command: .createNode(
+          NodeDraft(title: "Poll inbox", loopType: .timeBased, triggerPrompt: "/loop 1h Check"))),
+      connectionID: connectionID)
+    await registry.handle(
+      .graphCommand(
+        projectPath: "/tmp/project-c",
+        command: .createNode(NodeDraft(title: "Triage", loopType: .composite))),
+      connectionID: connectionID)
+    let compositeID = try #require(
+      persistence.loadGraph(path: "/tmp/project-c")?
+        .nodes.first(where: { $0.loopType == .composite })?.id)
+    await registry.handle(
+      .graphCommand(
+        projectPath: "/tmp/project-c",
+        command: .subGraphCommand(
+          nodeID: compositeID,
+          command: .createNode(
+            NodeDraft(title: "Worker", loopType: .timeBased, triggerPrompt: "/loop 1h work")))),
+      connectionID: connectionID)
+
+    await registry.handle(.deleteProjectGraph(path: "/tmp/project-c"), connectionID: connectionID)
+
+    #expect(Set(killed.value) == ["Poll inbox", "Triage", "Worker"])
   }
 
   /// Paths round-trip through `resolvingSymlinksInPath()`, so compare the leaf rather
