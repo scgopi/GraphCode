@@ -212,7 +212,8 @@ fn writeAttachInput(
         app.lastTransportFailure = "no-stdin";
         return;
     };
-    stdin.writeAll(bytes) catch {
+    stdin.writeAll(bytes) catch |err| {
+        std.debug.print("terminal gate stdin write failed: {s}\n", .{@errorName(err)});
         app.transportFailures += 1;
         app.lastTransportFailure = "write";
         return;

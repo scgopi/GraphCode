@@ -40,7 +40,7 @@ $pins = Get-Content -LiteralPath (Join-Path $gateRoot "provider-pins.json") -Raw
   ConvertFrom-Json
 Assert-Contract ($pins.schemaVersion -eq 1) "provider pin schema is not 1"
 Assert-Contract ($pins.winghostty.sha -eq
-  "4777a7493ab05f83df207abb97b16d703a1a7eba") "Winghostty SHA is not exact"
+  "23920a0938e5ed3f66858232f06ab6a38f2e4437") "Winghostty SHA is not exact"
 Assert-Contract ($pins.zmx.sha -eq
   "858727af10cdf43d66cb3733cff58dc90ec4b3dd") "zmx SHA is not exact"
 Assert-Contract ($pins.winghostty.remoteUrl -eq
