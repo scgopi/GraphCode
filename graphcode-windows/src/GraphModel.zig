@@ -551,6 +551,7 @@ test "attention fixture preserves awaiting input and stranded edge metadata" {
     try std.testing.expectEqualStrings("awaitingInput", graph.nodes.items[0].presence);
     try std.testing.expectEqualStrings("handoff", graph.edges.items[0].kind);
     try std.testing.expect(!graph.edges.items[0].fired);
+}
 
 test "attention rollup surfaces awaiting input and failures" {
     var model = Model.init(std.testing.allocator);
