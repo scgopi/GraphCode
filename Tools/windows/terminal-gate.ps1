@@ -81,9 +81,13 @@ try {
       & $zmx get graphcode-terminal-gate-a
       & $zmx get graphcode-terminal-gate-b
     }
-    Invoke-Native "seed persistent VT output" {
-      & $zmx print graphcode-terminal-gate-a "GraphCode persistent VT output A"
-      & $zmx print graphcode-terminal-gate-b "GraphCode persistent VT output B"
+    Assert-HistoryContains "graphcode-terminal-gate-a" `
+      "GraphCode typed output A" "typed A output"
+    Assert-HistoryContains "graphcode-terminal-gate-b" `
+      "GraphCode typed output B" "typed B output"
+    Invoke-Native "seed persistent shell output" {
+      & $zmx send graphcode-terminal-gate-a "echo GraphCode persistent VT output A`r"
+      & $zmx send graphcode-terminal-gate-b "echo GraphCode persistent VT output B`r"
     }
     Assert-HistoryContains "graphcode-terminal-gate-a" `
       "GraphCode persistent VT output A" "first-session A history"
@@ -100,14 +104,18 @@ try {
       "GraphCode persistent VT output A" "restart A history"
     Assert-HistoryContains "graphcode-terminal-gate-b" `
       "GraphCode persistent VT output B" "restart B history"
+    Assert-HistoryContains "graphcode-terminal-gate-a" `
+      "GraphCode typed output A" "restart typed A history"
+    Assert-HistoryContains "graphcode-terminal-gate-b" `
+      "GraphCode typed output B" "restart typed B history"
     Invoke-Native "terminal gate same-session attach smoke" {
       & $app --smoke --same-session
     }
     Invoke-Native "same-session health" {
       & $zmx get graphcode-terminal-gate-shared
     }
-    Invoke-Native "seed shared persistent VT output" {
-      & $zmx print graphcode-terminal-gate-shared "GraphCode shared VT output"
+    Invoke-Native "seed shared persistent shell output" {
+      & $zmx send graphcode-terminal-gate-shared "echo GraphCode shared VT output`r"
     }
     Assert-HistoryContains "graphcode-terminal-gate-shared" `
       "GraphCode shared VT output" "same-session history"
@@ -119,6 +127,10 @@ try {
     if ($Stress) {
       Invoke-Native "terminal gate destroy/recreate stress" {
         & $app --smoke --stress
+      }
+      Invoke-Native "post-stress session health" {
+        & $zmx get graphcode-terminal-gate-a
+        & $zmx get graphcode-terminal-gate-b
       }
     }
     Write-Host "Windows terminal gate smoke/stress: PASS"
@@ -133,3 +145,5 @@ finally {
   Remove-Item Env:GRAPHCODE_ZMX -ErrorAction SilentlyContinue
   Remove-Item Env:GRAPHCODE_GATE_CWD -ErrorAction SilentlyContinue
 }
+
+exit 0

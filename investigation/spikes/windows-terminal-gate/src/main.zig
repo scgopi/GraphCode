@@ -19,6 +19,7 @@ const BOOL = c.BOOL;
 
 const SurfaceSlot = struct {
     surface: ?*c.winghostty_surface = null,
+    last_surface: ?*c.winghostty_surface = null,
     session_name: []const u8 = "",
     attach: ?std.process.Child = null,
     destroying: bool = false,
@@ -28,6 +29,11 @@ const SurfaceSlot = struct {
     ime_events: usize = 0,
     clipboard_events: usize = 0,
     output_events: usize = 0,
+    input_bytes: usize = 0,
+    input_seen: bool = false,
+    output_seen: bool = false,
+    terminal_buffer: [16 * 1024]u8 = undefined,
+    terminal_buffer_len: usize = 0,
 };
 
 const App = struct {
@@ -43,21 +49,26 @@ const App = struct {
     tick: usize = 0,
     recreate_count: usize = 0,
     callbacksAfterDestroy: usize = 0,
+    lastRenderError: c.winghostty_result = c.WINGHOSTTY_OK,
+    renderFailures: usize = 0,
+    transportFailures: usize = 0,
+    lastTransportFailure: []const u8 = "",
+    totalInputBytes: usize = 0,
+    totalOutputEvents: usize = 0,
     sameSession: bool = false,
     active_surface: usize = 0,
+    retired_surfaces: [16]?*c.winghostty_surface = [_]?*c.winghostty_surface{null} ** 16,
+    retired_surface_count: usize = 0,
     ready: bool = false,
 };
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeTerminalGate");
 const window_title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Windows terminal gate");
-const gate_environment = "TERM=xterm-256color";
 // The attach client is deliberately the real provider command: `zmx attach <name>`.
 // std.process.Child maps to CreateProcessW and owns the child handles.
 const wm_gate_tick: UINT = c.WM_APP + 41;
 const timer_id: usize = 41;
 const gwlp_userdata: i32 = -21;
-const swp_nozorder: UINT = 0x0004;
-const swp_noactivate: UINT = 0x0010;
 
 fn appFromWindow(hwnd: HWND) ?*App {
     const value = c.GetWindowLongPtrW(hwnd, gwlp_userdata);
@@ -69,6 +80,15 @@ fn appFromUserData(user_data: ?*anyopaque) ?*App {
     return if (user_data) |value| @ptrCast(@alignCast(value)) else null;
 }
 
+fn recordProviderError(app: *App, result: c.winghostty_result) void {
+    if (result != c.WINGHOSTTY_OK) {
+        app.renderFailures += 1;
+        if (app.lastRenderError == c.WINGHOSTTY_OK) {
+            app.lastRenderError = result;
+        }
+    }
+}
+
 fn slotForSurface(app: *App, surface: *c.winghostty_surface) ?*SurfaceSlot {
     for (&app.surfaces) |*slot| {
         if (slot.surface == surface) return slot;
@@ -76,14 +96,58 @@ fn slotForSurface(app: *App, surface: *c.winghostty_surface) ?*SurfaceSlot {
     return null;
 }
 
-fn onRedraw(user_data: ?*anyopaque, surface: *c.winghostty_surface) callconv(.c) void {
-    const app = appFromUserData(user_data) orelse return;
-    const slot = slotForSurface(app, surface) orelse return;
+fn surfaceIndex(app: *App, surface: *c.winghostty_surface) ?usize {
+    for (&app.surfaces, 0..) |*slot, index| {
+        if (slot.surface == surface) return index;
+    }
+    return null;
+}
+
+fn isRetiredSurface(app: *App, surface: *c.winghostty_surface) bool {
+    for (app.retired_surfaces[0..app.retired_surface_count]) |retired| {
+        if (retired == surface) return true;
+    }
+    return false;
+}
+
+fn callbackSlot(
+    app: *App,
+    surface: *c.winghostty_surface,
+) ?*SurfaceSlot {
+    const slot = slotForSurface(app, surface) orelse {
+        if (isRetiredSurface(app, surface)) app.callbacksAfterDestroy += 1;
+        return null;
+    };
     if (slot.destroyed or slot.destroying) {
         app.callbacksAfterDestroy += 1;
-        return;
+        return null;
     }
+    return slot;
+}
+
+fn rememberRetiredSurface(app: *App, surface: *c.winghostty_surface) void {
+    if (app.retired_surface_count < app.retired_surfaces.len) {
+        app.retired_surfaces[app.retired_surface_count] = surface;
+        app.retired_surface_count += 1;
+    }
+}
+
+fn renderSurface(app: *App, slot: *SurfaceSlot, surface: *c.winghostty_surface) void {
+    const make_current = c.winghostty_surface_make_current(surface);
+    recordProviderError(app, make_current);
+    const render = c.winghostty_surface_render(surface);
+    recordProviderError(app, render);
+    const present = c.winghostty_surface_present(surface);
+    recordProviderError(app, present);
+    const clear_current = c.winghostty_surface_clear_current(surface);
+    recordProviderError(app, clear_current);
     slot.redraws += 1;
+}
+
+fn onRedraw(user_data: ?*anyopaque, surface: *c.winghostty_surface) callconv(.c) void {
+    const app = appFromUserData(user_data) orelse return;
+    const slot = callbackSlot(app, surface) orelse return;
+    renderSurface(app, slot, surface);
 }
 
 fn onFocus(
@@ -92,13 +156,10 @@ fn onFocus(
     focused: u8,
 ) callconv(.c) void {
     const app = appFromUserData(user_data) orelse return;
-    const slot = slotForSurface(app, surface) orelse return;
-    if (slot.destroyed or slot.destroying) {
-        app.callbacksAfterDestroy += 1;
-        return;
-    }
+    const slot = callbackSlot(app, surface) orelse return;
     slot.focus_events += 1;
     if (focused != 0) {
+        app.active_surface = surfaceIndex(app, surface) orelse app.active_surface;
         for (&app.surfaces) |*other| {
             if (other.surface) |other_surface| {
                 if (other_surface != surface) {
@@ -109,6 +170,64 @@ fn onFocus(
     }
 }
 
+fn writeAttachInput(
+    app: *App,
+    surface: *c.winghostty_surface,
+    bytes: []const u8,
+) void {
+    if (bytes.len == 0) return;
+    const slot = callbackSlot(app, surface) orelse return;
+    const child = &(slot.attach orelse {
+        app.transportFailures += 1;
+        app.lastTransportFailure = "no-attach";
+        return;
+    });
+    const stdin = child.stdin orelse {
+        app.transportFailures += 1;
+        app.lastTransportFailure = "no-stdin";
+        return;
+    };
+    stdin.writeAll(bytes) catch {
+        app.transportFailures += 1;
+        app.lastTransportFailure = "write";
+        return;
+    };
+    slot.input_bytes += bytes.len;
+    slot.input_seen = true;
+    app.totalInputBytes += bytes.len;
+}
+
+fn onKey(
+    user_data: ?*anyopaque,
+    surface: *c.winghostty_surface,
+    event: *const c.winghostty_key_event,
+) callconv(.c) void {
+    const app = appFromUserData(user_data) orelse return;
+    if (event.action == c.WINGHOSTTY_KEY_RELEASE) return;
+    const bytes: []const u8 = switch (event.virtual_key) {
+        c.VK_RETURN => "\r",
+        c.VK_BACK => "\x08",
+        c.VK_TAB => "\t",
+        c.VK_ESCAPE => "\x1b",
+        c.VK_UP => "\x1b[A",
+        c.VK_DOWN => "\x1b[B",
+        c.VK_RIGHT => "\x1b[C",
+        c.VK_LEFT => "\x1b[D",
+        else => return,
+    };
+    writeAttachInput(app, surface, bytes);
+}
+
+fn onText(
+    user_data: ?*anyopaque,
+    surface: *c.winghostty_surface,
+    text: [*:0]const u8,
+    length: u32,
+) callconv(.c) void {
+    const app = appFromUserData(user_data) orelse return;
+    writeAttachInput(app, surface, text[0..length]);
+}
+
 fn onImeUpdate(
     user_data: ?*anyopaque,
     surface: *c.winghostty_surface,
@@ -116,16 +235,10 @@ fn onImeUpdate(
     length: u32,
     committed: u8,
 ) callconv(.c) void {
-    _ = text;
-    _ = length;
-    _ = committed;
     const app = appFromUserData(user_data) orelse return;
-    const slot = slotForSurface(app, surface) orelse return;
-    if (slot.destroyed or slot.destroying) {
-        app.callbacksAfterDestroy += 1;
-        return;
-    }
+    const slot = callbackSlot(app, surface) orelse return;
     slot.ime_events += 1;
+    if (committed != 0) writeAttachInput(app, surface, text[0..length]);
 }
 
 fn onClipboardWrite(
@@ -136,15 +249,10 @@ fn onClipboardWrite(
     length: u32,
 ) callconv(.c) void {
     _ = format;
-    _ = text;
-    _ = length;
     const app = appFromUserData(user_data) orelse return;
-    const slot = slotForSurface(app, surface) orelse return;
-    if (slot.destroyed or slot.destroying) {
-        app.callbacksAfterDestroy += 1;
-        return;
-    }
+    const slot = callbackSlot(app, surface) orelse return;
     slot.clipboard_events += 1;
+    writeAttachInput(app, surface, text[0..length]);
 }
 
 fn onExit(
@@ -154,8 +262,8 @@ fn onExit(
 ) callconv(.c) void {
     _ = status;
     const app = appFromUserData(user_data) orelse return;
-    const slot = slotForSurface(app, surface orelse return) orelse return;
-    if (slot.destroyed or slot.destroying) app.callbacksAfterDestroy += 1;
+    const value = surface orelse return;
+    _ = callbackSlot(app, value);
 }
 
 fn noOpTitle(
@@ -239,28 +347,6 @@ fn noOpAccessibilitySelection(
     _ = end;
 }
 
-fn noOpKey(
-    user_data: ?*anyopaque,
-    surface: *c.winghostty_surface,
-    event: *const c.winghostty_key_event,
-) callconv(.c) void {
-    _ = user_data;
-    _ = surface;
-    _ = event;
-}
-
-fn noOpText(
-    user_data: ?*anyopaque,
-    surface: *c.winghostty_surface,
-    text: [*:0]const u8,
-    length: u32,
-) callconv(.c) void {
-    _ = user_data;
-    _ = surface;
-    _ = text;
-    _ = length;
-}
-
 fn noOpImeStart(user_data: ?*anyopaque, surface: *c.winghostty_surface) callconv(.c) void {
     _ = user_data;
     _ = surface;
@@ -305,6 +391,30 @@ fn noOpLink(
     _ = clicked;
 }
 
+fn onPaste(
+    user_data: ?*anyopaque,
+    surface: *c.winghostty_surface,
+    text: [*:0]const u8,
+    length: u32,
+    bracketed: u8,
+) callconv(.c) void {
+    _ = bracketed;
+    const app = appFromUserData(user_data) orelse return;
+    writeAttachInput(app, surface, text[0..length]);
+}
+
+fn onClipboardRead(
+    user_data: ?*anyopaque,
+    surface: *c.winghostty_surface,
+    format: u32,
+    text: [*:0]const u8,
+    length: u32,
+) callconv(.c) void {
+    _ = format;
+    const app = appFromUserData(user_data) orelse return;
+    writeAttachInput(app, surface, text[0..length]);
+}
+
 fn noOpPaste(
     user_data: ?*anyopaque,
     surface: *c.winghostty_surface,
@@ -317,20 +427,6 @@ fn noOpPaste(
     _ = text;
     _ = length;
     _ = bracketed;
-}
-
-fn noOpClipboardRead(
-    user_data: ?*anyopaque,
-    surface: *c.winghostty_surface,
-    format: u32,
-    text: [*:0]const u8,
-    length: u32,
-) callconv(.c) void {
-    _ = user_data;
-    _ = surface;
-    _ = format;
-    _ = text;
-    _ = length;
 }
 
 fn initializeOptions(app: *App, index: usize) c.winghostty_surface_options_v2 {
@@ -356,16 +452,16 @@ fn initializeOptions(app: *App, index: usize) c.winghostty_surface_options_v2 {
     options.callbacks.on_dpi_changed = @ptrCast(&noOpDpi);
     options.callbacks.on_metrics_changed = @ptrCast(&noOpMetrics);
     options.callbacks.on_accessibility_selection = @ptrCast(&noOpAccessibilitySelection);
-    options.input_callbacks.on_key = @ptrCast(&noOpKey);
-    options.input_callbacks.on_text = @ptrCast(&noOpText);
+    options.input_callbacks.on_key = @ptrCast(&onKey);
+    options.input_callbacks.on_text = @ptrCast(&onText);
     options.input_callbacks.on_ime_start = @ptrCast(&noOpImeStart);
     options.input_callbacks.on_ime_update = @ptrCast(&onImeUpdate);
     options.input_callbacks.on_ime_end = @ptrCast(&noOpImeEnd);
     options.input_callbacks.on_mouse = @ptrCast(&noOpMouse);
     options.input_callbacks.on_selection = @ptrCast(&noOpSelection);
     options.input_callbacks.on_link = @ptrCast(&noOpLink);
-    options.input_callbacks.on_paste = @ptrCast(&noOpPaste);
-    options.input_callbacks.on_clipboard_read = @ptrCast(&noOpClipboardRead);
+    options.input_callbacks.on_paste = @ptrCast(&onPaste);
+    options.input_callbacks.on_clipboard_read = @ptrCast(&onClipboardRead);
     options.input_callbacks.on_clipboard_write = @ptrCast(&onClipboardWrite);
     options.input.cell_width = 8;
     options.input.cell_height = 16;
@@ -404,17 +500,108 @@ fn startSession(app: *App, name: []const u8, index: usize) !void {
     var attach_args = [_][]const u8{ app.zmx_path, "attach", name };
     var child = std.process.Child.init(&attach_args, allocator);
     child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Ignore;
     try child.spawn();
     app.surfaces[index].attach = child;
 }
 
-fn stopSessionClient(slot: *SurfaceSlot) void {
+fn waitAttachClient(slot: *SurfaceSlot) void {
     if (slot.attach) |*child| {
         _ = child.kill() catch {};
         _ = child.wait() catch {};
         slot.attach = null;
+    }
+}
+
+fn appendTerminalOutput(slot: *SurfaceSlot, bytes: []const u8) void {
+    if (bytes.len >= slot.terminal_buffer.len) {
+        const tail = bytes[bytes.len - slot.terminal_buffer.len ..];
+        @memcpy(&slot.terminal_buffer, tail);
+        slot.terminal_buffer_len = slot.terminal_buffer.len;
+        return;
+    }
+    if (slot.terminal_buffer_len + bytes.len > slot.terminal_buffer.len) {
+        const overflow =
+            slot.terminal_buffer_len + bytes.len - slot.terminal_buffer.len;
+        std.mem.copyForwards(
+            u8,
+            slot.terminal_buffer[0 .. slot.terminal_buffer_len - overflow],
+            slot.terminal_buffer[overflow..slot.terminal_buffer_len],
+        );
+        slot.terminal_buffer_len -= overflow;
+    }
+    @memcpy(
+        slot.terminal_buffer[slot.terminal_buffer_len..][0..bytes.len],
+        bytes,
+    );
+    slot.terminal_buffer_len += bytes.len;
+}
+
+fn feedTerminalOutput(app: *App, index: usize, bytes: []const u8) void {
+    const slot = &app.surfaces[index];
+    const surface = slot.surface orelse return;
+    appendTerminalOutput(slot, bytes);
+    const text = slot.terminal_buffer[0..slot.terminal_buffer_len];
+    const text_result = c.winghostty_surface_notify_terminal_text(
+        surface,
+        text.ptr,
+        text.len,
+        0,
+        text.len,
+        0,
+        0,
+        text.len,
+    );
+    recordProviderError(app, text_result);
+    const redraw_result = c.winghostty_surface_notify_redraw(surface);
+    recordProviderError(app, redraw_result);
+    slot.output_events += 1;
+    slot.output_seen = true;
+    app.totalOutputEvents += 1;
+}
+
+fn readAttachOutput(app: *App, index: usize) void {
+    const slot = &app.surfaces[index];
+    const child = slot.attach orelse return;
+    const stdout = child.stdout orelse return;
+    var available: c.DWORD = 0;
+    if (c.PeekNamedPipe(
+        @ptrCast(stdout.handle),
+        null,
+        0,
+        null,
+        &available,
+        null,
+    ) == 0) {
+        return;
+    }
+    while (available > 0) {
+        var buffer: [4096]u8 = undefined;
+        var read: c.DWORD = 0;
+        const amount = @min(available, @as(c.DWORD, @intCast(buffer.len)));
+        if (c.ReadFile(
+            @ptrCast(stdout.handle),
+            @ptrCast(&buffer),
+            amount,
+            &read,
+            null,
+        ) == 0 or
+            read == 0)
+        {
+            break;
+        }
+        feedTerminalOutput(app, index, buffer[0..@intCast(read)]);
+        if (c.PeekNamedPipe(
+            @ptrCast(stdout.handle),
+            null,
+            0,
+            null,
+            &available,
+            null,
+        ) == 0) {
+            break;
+        }
     }
 }
 
@@ -430,35 +617,40 @@ fn createSurface(app: *App, index: usize) !void {
         &app.surfaces[index].surface,
     );
     if (result != c.WINGHOSTTY_OK or app.surfaces[index].surface == null) {
-        stopSessionClient(&app.surfaces[index]);
+        waitAttachClient(&app.surfaces[index]);
         return error.WinghosttySurfaceCreateFailed;
     }
-    app.surfaces[index].session_name = name;
-    app.surfaces[index].destroyed = false;
-    app.surfaces[index].destroying = false;
-    app.surfaces[index].redraws = 0;
-    app.surfaces[index].focus_events = 0;
-    app.surfaces[index].ime_events = 0;
-    app.surfaces[index].clipboard_events = 0;
-    app.surfaces[index].output_events = 0;
+    const slot = &app.surfaces[index];
+    slot.last_surface = slot.surface;
+    slot.session_name = name;
+    slot.destroyed = false;
+    slot.destroying = false;
+    slot.redraws = 0;
+    slot.focus_events = 0;
+    slot.ime_events = 0;
+    slot.clipboard_events = 0;
+    slot.output_events = 0;
+    slot.input_bytes = 0;
+    slot.terminal_buffer_len = 0;
 }
 
 // The gate creates two independent complete surfaces through
 // winghostty_host_create_surface_v2: surface A and surface B.
-fn destroySurface(app: *App, index: usize, keep_session: bool) void {
+fn destroySurface(app: *App, index: usize) void {
     const slot = &app.surfaces[index];
+    waitAttachClient(slot);
     if (slot.surface) |surface| {
         slot.destroying = true;
+        rememberRetiredSurface(app, surface);
         _ = c.winghostty_surface_destroy(surface);
         slot.surface = null;
         slot.destroyed = true;
         slot.destroying = false;
     }
-    if (!keep_session) stopSessionClient(slot);
 }
 
 fn recreateSurface(app: *App, index: usize) !void {
-    destroySurface(app, index, true);
+    destroySurface(app, index);
     app.recreate_count += 1;
     return createSurface(app, index);
 }
@@ -478,28 +670,43 @@ fn resizeSurfaces(app: *App, width: i32, height: i32) void {
     }
 }
 
+fn sendTypedCommand(app: *App, index: usize, command: []const u8) void {
+    const surface = app.surfaces[index].surface orelse return;
+    const hwnd = c.winghostty_surface_get_hwnd(surface) orelse return;
+    for (command) |byte| {
+        _ = c.SendMessageW(hwnd, c.WM_CHAR, @intCast(byte), 0);
+    }
+    _ = c.SendMessageW(hwnd, c.WM_KEYDOWN, @intCast(c.VK_RETURN), 0);
+}
+
 fn runInputContracts(app: *App) !void {
     for (&app.surfaces, 0..) |*slot, index| {
         const surface = slot.surface orelse return error.SurfaceMissing;
+        const surface_hwnd =
+            c.winghostty_surface_get_hwnd(surface) orelse return error.SurfaceMissing;
         _ = c.winghostty_surface_set_focus(surface, if (index == app.active_surface) 1 else 0);
         _ = c.winghostty_surface_notify_dpi_changed(surface, if (index == 0) 96 else 144);
-        _ = c.winghostty_surface_notify_terminal_text(
-            surface,
-            if (index == 0) "GraphCode A\r\nsimultaneous output" else "GraphCode B\r\nsimultaneous output",
-            if (index == 0) 35 else 35,
-            0,
-            35,
-            0,
-            35,
-            35,
-        );
         _ = c.winghostty_surface_notify_accessibility_name(
             surface,
             if (index == 0) "GraphCode terminal A" else "GraphCode terminal B",
         );
+        sendTypedCommand(
+            app,
+            index,
+            if (index == 0)
+                "echo GraphCode typed output A"
+            else
+                "echo GraphCode typed output B",
+        );
         _ = c.winghostty_surface_ime_update(surface, "IME", 3, 1);
         _ = c.winghostty_surface_paste_text(surface, "safe paste", 10, 0);
         _ = c.winghostty_surface_write_clipboard(surface, c.WINGHOSTTY_CLIPBOARD_TEXT, "clipboard", 9);
+        _ = c.SendMessageW(
+            surface_hwnd,
+            c.WM_KEYDOWN,
+            @intCast(c.VK_RETURN),
+            0,
+        );
         var copied: [64]u8 = undefined;
         var copied_length: u64 = 0;
         _ = c.winghostty_surface_copy_accessibility_range(
@@ -510,19 +717,20 @@ fn runInputContracts(app: *App) !void {
             copied.len,
             &copied_length,
         );
-        _ = c.winghostty_surface_notify_redraw(surface);
-        slot.output_events += 1;
+        const redraw_result = c.winghostty_surface_notify_redraw(surface);
+        recordProviderError(app, redraw_result);
     }
 }
 
 fn tick(app: *App) void {
     app.tick += 1;
+    readAttachOutput(app, 0);
+    readAttachOutput(app, 1);
     if (app.tick == 1) {
         _ = runInputContracts(app) catch {};
-        app.active_surface = 1;
         if (app.surfaces[1].surface) |surface| {
             _ = c.winghostty_surface_set_focus(surface, 1);
-            _ = c.winghostty_surface_notify_redraw(surface);
+            recordProviderError(app, c.winghostty_surface_notify_redraw(surface));
         }
     }
     if (app.smoke and app.tick == 4) {
@@ -611,8 +819,8 @@ fn createWindow(app: *App) !void {
 }
 
 fn cleanup(app: *App) void {
-    destroySurface(app, 0, false);
-    destroySurface(app, 1, false);
+    destroySurface(app, 0);
+    destroySurface(app, 1);
     if (app.host) |host| {
         _ = c.winghostty_host_deinitialize(host);
         app.host = null;
@@ -633,6 +841,26 @@ fn messageLoop(app: *App) !void {
         _ = c.DispatchMessageW(&message);
     }
     if (app.callbacksAfterDestroy != 0) return error.CallbackAfterDestroy;
+    if (app.smoke and app.lastRenderError != c.WINGHOSTTY_OK) {
+        return error.RendererContractFailed;
+    }
+    if (app.smoke and app.transportFailures != 0) {
+        std.debug.print(
+            "terminal gate transport failure: {s} count={d}\n",
+            .{ app.lastTransportFailure, app.transportFailures },
+        );
+        return error.AttachTransportFailed;
+    }
+    if (app.smoke and
+        (app.totalOutputEvents == 0 or
+            app.totalInputBytes == 0 or
+            !app.surfaces[0].input_seen or
+            !app.surfaces[0].output_seen or
+            !app.surfaces[1].input_seen or
+            !app.surfaces[1].output_seen))
+    {
+        return error.SessionIoContractFailed;
+    }
 }
 
 fn hasArg(args: []const []const u8, value: []const u8) bool {

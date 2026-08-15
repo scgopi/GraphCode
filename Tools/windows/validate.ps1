@@ -203,6 +203,37 @@ function Invoke-Native([string] $description, [scriptblock] $command) {
   }
 }
 
+function Resolve-ZigVersion([string] $version, [string] $environmentName) {
+  $candidates = @()
+  $configured = [Environment]::GetEnvironmentVariable($environmentName)
+  if ($configured) {
+    $candidates += $configured
+  }
+  $command = Get-Command zig.exe -ErrorAction SilentlyContinue
+  if ($command) {
+    $candidates += $command.Source
+  }
+  $worktrees = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $candidates += Get-ChildItem $worktrees -Recurse -Filter zig.exe `
+    -File -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty FullName
+
+  foreach ($candidate in $candidates | Select-Object -Unique) {
+    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+      continue
+    }
+    $resolved = & $candidate version 2>$null
+    if ($LASTEXITCODE -ne 0 -or $resolved -ne $version) {
+      continue
+    }
+    & $candidate env *> $null
+    if ($LASTEXITCODE -eq 0) {
+      return (Resolve-Path -LiteralPath $candidate).Path
+    }
+  }
+  throw "Zig $version is required for the pinned terminal gate; set $environmentName."
+}
+
 function Invoke-Task([string] $name) {
   if ($DryRun) {
     Write-Output "task=$name"
@@ -491,6 +522,32 @@ function Invoke-Task([string] $name) {
       & (Join-Path $repoRoot "Tools\windows\Tests\TerminalGate.Tests.ps1")
       if ($LASTEXITCODE -ne 0) {
         throw "Windows terminal gate contract failed with exit code $LASTEXITCODE"
+      }
+      $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+      $winghosttyRoot = [Environment]::GetEnvironmentVariable(
+        "GRAPHCODE_WINGHOSTTY_ROOT"
+      )
+      if (-not $winghosttyRoot) {
+        $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+      }
+      $zmxRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_ZMX_ROOT")
+      if (-not $zmxRoot) {
+        $zmxRoot = Join-Path $depotRoot "zmx-worktrees\attach"
+      }
+      if (-not (Test-Path -LiteralPath $winghosttyRoot -PathType Container) -or
+        -not (Test-Path -LiteralPath $zmxRoot -PathType Container)) {
+        Write-Host "Windows terminal gate provider worktrees unavailable; smoke skipped."
+        return
+      }
+      $zig0152 = Resolve-ZigVersion "0.15.2" "GRAPHCODE_ZIG0152"
+      $zig0160 = Resolve-ZigVersion "0.16.0" "GRAPHCODE_ZIG0160"
+      Invoke-Native "Pinned Windows terminal gate build and smoke" {
+        & (Join-Path $repoRoot "Tools\windows\terminal-gate.ps1") `
+          -WinghosttyRoot $winghosttyRoot `
+          -ZmxRoot $zmxRoot `
+          -Zig0152 $zig0152 `
+          -Zig0160 $zig0160 `
+          -Stress
       }
     }
   }

@@ -37,30 +37,42 @@ the A session and exercises zmx's shared-attach policy.
 
 ## Gate behavior
 
-The `--smoke` mode focuses both surfaces independently, injects DPI/IME/
-clipboard/accessibility events, destroys and recreates surface A while B stays
-alive, and exits after synchronous teardown. `--stress` repeats the A
-destroy/recreate cycle. Running the smoke process twice proves that the zmx
-sessions survive GraphCode exit and are reattached on restart. The gate never
-calls GraphCode canvas/sidebar code and does not duplicate daemon orchestration;
-the existing Windows daemon remains an independent service.
+The `--smoke` mode focuses both surfaces independently, exercises DPI/IME/
+clipboard/accessibility events, types an `echo` command through Winghostty's
+text/key callbacks, and verifies the resulting output arrives through the
+per-surface `zmx attach` pipes. Attach stdout is accumulated into the
+Winghostty terminal/accessibility text path and requests a real
+`surface_render`/`surface_present` pair; any provider error fails the gate.
 
-The provider owns the full rendering/input/IME/clipboard/per-monitor-DPI/UIA
-implementation. The gate only supplies caller-owned lifecycle, focus policy,
-and terminal-state notifications needed to verify the embedding boundary.
+Surface A is destroyed and recreated while B remains alive. Recreate stops and
+reaps only the attach client, leaving the zmx session daemon persistent.
+`--stress` repeats this cycle. Running the smoke process again verifies typed
+output and VT history survive GraphCode exit and are visible after reattach.
+The gate never calls GraphCode canvas/sidebar code and does not duplicate daemon
+orchestration; the existing Windows daemon remains an independent service.
+
+The provider owns the rendering/input/IME/clipboard/per-monitor-DPI/UIA
+semantics. The gate owns the caller-side renderer lifecycle, focus policy,
+per-surface attach transport, and terminal-state notifications needed to verify
+the embedding boundary.
+
+`Tools\windows\validate.ps1 -Task terminal-gate` runs the contract plus the
+pinned-provider build and smoke when the accepted local provider worktrees are
+available. It reports an explicit skip only when those provider roots are
+absent.
 
 ## TDD and validation evidence
 
 The architecture contract was run RED before the gate files existed, then
 GREEN after the Zig host, provider pins, and smoke harness were added.
-`Tools\windows\Tests\TerminalGate.Tests.ps1` remains the fast contract check.
-The harness seeds VT output with `zmx print`, verifies `zmx history --vt`
-before and after independent and same-session restarts, and runs the
-destroy/recreate stress cycle.
+`Tools\windows\Tests\TerminalGate.Tests.ps1` remains the fast architecture
+contract check. The harness sends shell commands through zmx, verifies
+`zmx history --vt` before and after independent and same-session restarts, and
+runs the destroy/recreate stress cycle.
 
 At the accepted provider SHAs, the Winghostty API lifecycle and input tests
 pass. The renderer stress contract passes twice but intermittently fails on a
-third fresh process with `reentrant callback surfaces remained retained
-(error=259)`; this is a provider-side blocker outside the GraphCode-owned gate.
-GraphCode full Windows validation, formatting, privacy, TDD evidence, and the
-terminal-gate smoke/stress harness pass.
+fresh run with error 259, observed as either reentrant callback retention or
+numeric handle/process-heap growth; this is a provider-side blocker outside
+the GraphCode-owned gate. GraphCode full Windows validation, formatting,
+privacy, TDD evidence, and the terminal-gate smoke/stress harness pass.

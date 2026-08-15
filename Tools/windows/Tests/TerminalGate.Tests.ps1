@@ -67,14 +67,30 @@ foreach ($token in @(
     "winghostty_surface_ime_update",
     "winghostty_surface_write_clipboard",
     "winghostty_surface_copy_accessibility_range",
+    "winghostty_surface_render",
+    "winghostty_surface_present",
+    "lastRenderError",
     "zmx attach",
+    "PeekNamedPipe",
+    "readAttachOutput",
+    "writeAttachInput",
+    "child.stdin",
+    "waitAttachClient",
     "CreateProcessW",
     "recreateSurface",
     "callbacksAfterDestroy",
-    "sameSession"
+    "sameSession",
+    "app.active_surface = surfaceIndex"
   )) {
   Assert-Contract ($source.Contains($token)) "host source is missing: $token"
 }
+Assert-Contract (-not $source.Contains("GraphCode A\r\nsimultaneous output")) `
+  "host still injects synthetic surface A terminal text"
+Assert-Contract (-not $source.Contains("GraphCode B\r\nsimultaneous output")) `
+  "host still injects synthetic surface B terminal text"
+Assert-Contract (
+  $source -match "(?s)app\.active_surface = surfaceIndex.*?for \(&app\.surfaces"
+) "focus callback updates selection after exclusivity"
 Assert-Contract (-not $source.Contains("sidebar")) "product sidebar leaked into the gate"
 Assert-Contract (-not $source.Contains("canvas")) "product canvas leaked into the gate"
 Assert-Contract (
@@ -86,9 +102,21 @@ Assert-Contract ($source.Contains("TranslateMessage")) `
   "top-level window does not own message translation"
 
 $harness = Get-Content -LiteralPath (Join-Path $gateRoot "..\..\..\Tools\windows\terminal-gate.ps1") -Raw
-foreach ($token in @("zmx print", "history", "--vt", "same-session restart")) {
+foreach ($token in @("zmx send", "history", "--vt", "same-session restart", "exit 0")) {
   Assert-Contract ($harness.Contains($token)) `
     "smoke harness is missing persistent-session proof: $token"
 }
 
+$runner = Get-Content -LiteralPath (Join-Path $gateRoot "..\..\..\Tools\windows\validate.ps1") -Raw
+foreach ($token in @(
+    "terminal-gate.ps1",
+    "Pinned Windows terminal gate build and smoke",
+    "GRAPHCODE_WINGHOSTTY_ROOT",
+    "provider worktrees unavailable"
+  )) {
+  Assert-Contract ($runner.Contains($token)) `
+    "validation runner is missing real-provider gate handling: $token"
+}
+
 Write-Output "Windows terminal gate contract: PASS"
+exit 0
