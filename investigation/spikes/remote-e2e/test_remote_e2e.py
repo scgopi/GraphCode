@@ -7,9 +7,10 @@ GRAPHCODE_REMOTE_E2E_TARGETS and are reported as explicit skips when unavailable
 from __future__ import annotations
 
 import os
+import time
 import unittest
 
-from remote_e2e_fixture import LocalRemoteParityFixture, external_targets
+from remote_e2e_fixture import ExternalTarget, LocalRemoteParityFixture, external_targets
 
 
 class RemoteParityTests(unittest.TestCase):
@@ -39,12 +40,16 @@ class RemoteParityTests(unittest.TestCase):
         self.fixture.setup_project("host-a", "alpha")
         self.fixture.create_node("host-a", "alpha", "n1")
         before = self.fixture.generation
+        server_before = self.fixture.server_process.pid
         self.fixture.reconnect()
+        self.assertNotEqual(self.fixture.server_process.pid, server_before)
         self.assertGreater(self.fixture.generation, before)
         self.assertEqual(self.fixture.status("host-a", "alpha")["nodes"], ["n1"])
         boot_before = self.fixture.boot_id
+        server_before = self.fixture.server_process.pid
         self.fixture.reboot()
         self.assertNotEqual(self.fixture.boot_id, boot_before)
+        self.assertNotEqual(self.fixture.server_process.pid, server_before)
         self.assertEqual(self.fixture.status("host-a", "alpha")["nodes"], ["n1"])
         self.assertGreater(self.fixture.generation, before)
 
@@ -54,7 +59,25 @@ class RemoteParityTests(unittest.TestCase):
         old_generation = self.fixture.generation
         self.fixture.rotate()
         self.assertGreater(self.fixture.generation, old_generation)
-        self.assertEqual(self.fixture.unauthorized(self.fixture.old_capability), "invalid_capability")
+        self.assertEqual(
+            self.fixture.unauthorized(
+                self.fixture.old_capability, self.fixture.old_generation
+            ),
+            "invalid_capability",
+        )
+        self.assertEqual(
+            self.fixture.unauthorized(
+                self.fixture.old_capability, self.fixture.generation
+            ),
+            "invalid_capability",
+        )
+        self.assertEqual(
+            self.fixture.unauthorized(
+                self.fixture.capability, self.fixture.old_generation
+            ),
+            "invalid_capability",
+        )
+        time.sleep(0.05)
         self.assertNotIn(self.fixture.capability, self.fixture.last_diagnostic)
         self.assertNotIn("capability", self.fixture.safe_error)
 
@@ -62,7 +85,25 @@ class RemoteParityTests(unittest.TestCase):
         args = self.fixture.ssh_arguments
         self.assertIn("StrictHostKeyChecking=yes", args)
         self.assertIn("ExitOnForwardFailure=yes", args)
-        self.assertIn("127.0.0.1:0:127.0.0.1:0", args)
+        forward = args[args.index("-R") + 1]
+        self.assertRegex(forward, r"^127\.0\.0\.1:\d+:127\.0\.0\.1:\d+$")
+
+    def test_external_target_parser_places_port_before_destination_and_supports_ipv6(self):
+        target = ExternalTarget.parse("dev@[::1]:2222")
+        self.assertEqual(target.argv()[-2:], ["dev@[::1]", "true"])
+        self.assertEqual(target.argv()[target.argv().index("-p") + 1], "2222")
+
+    def test_external_target_configuration_rejects_empty_entries(self):
+        old = os.environ.get("GRAPHCODE_REMOTE_E2E_TARGETS")
+        try:
+            os.environ["GRAPHCODE_REMOTE_E2E_TARGETS"] = ","
+            with self.assertRaises(ValueError):
+                external_targets()
+        finally:
+            if old is None:
+                os.environ.pop("GRAPHCODE_REMOTE_E2E_TARGETS", None)
+            else:
+                os.environ["GRAPHCODE_REMOTE_E2E_TARGETS"] = old
 
     @unittest.skipUnless(
         os.environ.get("GRAPHCODE_REMOTE_E2E_TARGETS"),
@@ -71,7 +112,7 @@ class RemoteParityTests(unittest.TestCase):
     def test_configured_external_targets(self):
         for target in external_targets():
             if not target.authenticated_probe():
-                self.skipTest(f"external POSIX target unavailable: {target.value}")
+                self.fail(f"configured external POSIX target failed: {target}")
 
 
 if __name__ == "__main__":
