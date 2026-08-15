@@ -63,6 +63,16 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     nodes.contains { $0.id == nodeID || ($0.subGraph?.containsAtAnyDepth(nodeID) ?? false) }
   }
 
+  /// Every node in this graph and, recursively, inside any composite's sub-graph.
+  ///
+  /// The enumeration counterpart to `containsAtAnyDepth`, for teardown: a piloted
+  /// composite's workers have real sessions and memory of their own, so anything that
+  /// discards loops wholesale has to be able to visit them without knowing how deep
+  /// the nesting goes.
+  public var nodesAtAnyDepth: [LoopNode] {
+    nodes.flatMap { [$0] + ($0.subGraph?.nodesAtAnyDepth ?? []) }
+  }
+
   /// A structural copy with brand-new identities throughout — same loops, same wiring,
   /// nothing shared with the original.
   ///
