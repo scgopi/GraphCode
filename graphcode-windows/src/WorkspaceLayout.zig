@@ -8,6 +8,21 @@ pub const Pane = struct {
     launches_agent: bool = false,
 };
 
+pub const ClosedPane = struct {
+    id: []u8,
+    launches_agent: bool,
+    tab_id: u64,
+    tab_index: usize,
+    pane_index: usize,
+    split_direction: Direction,
+    focused_pane: usize,
+    selected_tab: usize,
+
+    pub fn deinit(self: *ClosedPane, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+    }
+};
+
 pub const Tab = struct {
     id: u64,
     panes: std.ArrayListUnmanaged(Pane),
@@ -115,12 +130,24 @@ pub const Layout = struct {
         tab.focused_pane += 1;
     }
 
-    pub fn closeFocusedPane(self: *Layout) ![]u8 {
+    pub fn closeFocusedPane(self: *Layout) !ClosedPane {
         const tab = self.selected() orelse return error.NoTabs;
         if (tab.panes.items.len == 0 or tab.focused_pane >= tab.panes.items.len)
             return error.InvalidTopology;
+        const tab_index = self.selected_tab;
+        const pane_index = tab.focused_pane;
         const removed = tab.panes.orderedRemove(tab.focused_pane);
         const id = removed.id;
+        const record = ClosedPane{
+            .id = id,
+            .launches_agent = removed.launches_agent,
+            .tab_id = tab.id,
+            .tab_index = tab_index,
+            .pane_index = pane_index,
+            .split_direction = tab.split_direction,
+            .focused_pane = tab.focused_pane,
+            .selected_tab = self.selected_tab,
+        };
         if (tab.panes.items.len == 0) {
             var closed = self.tabs.orderedRemove(self.selected_tab);
             closed.deinit(self.allocator);
@@ -129,20 +156,35 @@ pub const Layout = struct {
         } else if (tab.focused_pane >= tab.panes.items.len) {
             tab.focused_pane = tab.panes.items.len - 1;
         }
-        return id;
+        return record;
     }
 
-    pub fn restorePane(self: *Layout, pane_id: []const u8) !void {
-        if (self.idExists(pane_id)) return error.DuplicateSurfaceID;
-        if (self.tabs.items.len == 0) {
-            try self.addTab(pane_id, false);
+    pub fn restoreClosedPane(self: *Layout, record: *const ClosedPane) !void {
+        if (self.idExists(record.id)) return error.DuplicateSurfaceID;
+        for (self.tabs.items) |*tab| {
+            if (tab.id != record.tab_id) continue;
+            try tab.panes.insert(self.allocator, record.pane_index, .{
+                .id = try self.allocator.dupe(u8, record.id),
+                .launches_agent = record.launches_agent,
+            });
+            tab.split_direction = record.split_direction;
+            tab.focused_pane = @min(record.focused_pane, tab.panes.items.len - 1);
+            self.selected_tab = @min(record.selected_tab, self.tabs.items.len - 1);
             return;
         }
-        const tab = self.selected() orelse return error.InvalidTab;
-        try tab.panes.append(self.allocator, .{
-            .id = try self.allocator.dupe(u8, pane_id),
+        var panes: std.ArrayListUnmanaged(Pane) = .empty;
+        errdefer panes.deinit(self.allocator);
+        try panes.append(self.allocator, .{
+            .id = try self.allocator.dupe(u8, record.id),
+            .launches_agent = record.launches_agent,
         });
-        tab.focused_pane = tab.panes.items.len - 1;
+        try self.tabs.insert(self.allocator, @min(record.tab_index, self.tabs.items.len), .{
+            .id = record.tab_id,
+            .panes = panes,
+            .split_direction = record.split_direction,
+            .focused_pane = 0,
+        });
+        self.selected_tab = @min(record.selected_tab, self.tabs.items.len - 1);
     }
 
     pub fn replacePaneID(self: *Layout, old_id: []const u8, new_id: []const u8) !void {
@@ -407,4 +449,23 @@ test "validated persistence rejects malformed topology" {
         try std.fs.cwd().writeFile(.{ .sub_path = path, .data = case.json });
         try std.testing.expectError(case.expected, Layout.load(std.testing.allocator, path, "p"));
     }
+}
+
+test "close rollback restores exact tab and pane topology" {
+        var layout = try Layout.default(std.testing.allocator, "p", "first");
+        defer layout.deinit();
+        try layout.splitFocused(.vertical, "second");
+        layout.selected_tab = 0;
+        layout.tabs.items[0].focused_pane = 1;
+        layout.tabs.items[0].panes.items[1].launches_agent = true;
+        const before_direction = layout.tabs.items[0].split_direction;
+        var record = try layout.closeFocusedPane();
+        defer record.deinit(std.testing.allocator);
+        try layout.restoreClosedPane(&record);
+        try std.testing.expectEqual(@as(u64, 1), layout.tabs.items[0].id);
+        try std.testing.expectEqual(before_direction, layout.tabs.items[0].split_direction);
+        try std.testing.expectEqual(@as(usize, 2), layout.tabs.items[0].panes.items.len);
+        try std.testing.expectEqualStrings("second", layout.tabs.items[0].panes.items[1].id);
+        try std.testing.expect(layout.tabs.items[0].panes.items[1].launches_agent);
+        try std.testing.expectEqual(@as(usize, 1), layout.tabs.items[0].focused_pane);
 }

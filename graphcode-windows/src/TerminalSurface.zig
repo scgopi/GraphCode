@@ -246,13 +246,10 @@ pub const Workspace = struct {
         const configured = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_WORKSPACE_LAYOUT") catch
             try self.allocator.dupe(u8, "graphcode-workspace.json");
         defer self.allocator.free(configured);
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(project, &digest, .{});
-        var suffix: [16]u8 = undefined;
-        _ = std.fmt.bufPrint(&suffix, "{x}", .{std.mem.readInt(u64, digest[0..8], .little)}) catch unreachable;
+        const suffix = projectLayoutSuffix(project);
         return std.fmt.allocPrint(self.allocator, "{s}.{s}.json", .{
             configured[0 .. if (std.mem.endsWith(u8, configured, ".json")) configured.len - 5 else configured.len],
-            suffix[0..16],
+            suffix,
         });
 
     }
@@ -277,6 +274,7 @@ pub const Workspace = struct {
             self.surfaces[index] = self.surfaces[replacement_index];
             self.surfaces[replacement_index] = .{};
             self.syncTopology();
+            self.clearRecreateSession(index);
             return;
         }
         self.destroySurface(index);
@@ -284,10 +282,6 @@ pub const Workspace = struct {
         self.recreate_due_ms[index] = 0;
         const session = try self.allocator.dupe(u8, node_id);
         errdefer self.allocator.free(session);
-        if (self.recreate_sessions[index].len != 0) {
-            self.allocator.free(self.recreate_sessions[index]);
-            self.recreate_sessions[index] = &.{};
-        }
         try self.startSession(index, session);
         if (self.layout.tabs.items.len == 0) {
             try self.layout.addTab(node_id, true);
@@ -318,6 +312,7 @@ pub const Workspace = struct {
             self.layout_width,
             self.layout_height,
         );
+        self.clearRecreateSession(index);
     }
 
     pub fn newTab(self: *Workspace) !void {
@@ -402,6 +397,11 @@ pub const Workspace = struct {
         self.restore_errors[index] = &.{};
     }
 
+    fn clearRecreateSession(self: *Workspace, index: usize) void {
+        if (self.recreate_sessions[index].len != 0) self.allocator.free(self.recreate_sessions[index]);
+        self.recreate_sessions[index] = &.{};
+    }
+
     fn closeSurfaceForID(self: *Workspace, id: []const u8) bool {
         for (self.surfaces, 0..) |slot, index| {
             if (std.mem.eql(u8, slot.session_name, id)) {
@@ -463,13 +463,13 @@ pub const Workspace = struct {
     }
 
     pub fn closeFocusedPane(self: *Workspace) !void {
-        const id = try self.layout.closeFocusedPane();
-        defer self.allocator.free(id);
+        var record = try self.layout.closeFocusedPane();
+        defer record.deinit(self.allocator);
         self.persistLayout() catch |err| {
-            self.layout.restorePane(id) catch {};
+            self.layout.restoreClosedPane(&record) catch {};
             return err;
         };
-        _ = self.closeSurfaceForID(id);
+        _ = self.closeSurfaceForID(record.id);
         self.syncTopology();
     }
 
@@ -1044,6 +1044,22 @@ fn nowMilliseconds() i64 {
     return @intCast(std.time.milliTimestamp());
 }
 
+fn projectLayoutSuffix(project: []const u8) [16]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(project, &digest, .{});
+    var suffix: [16]u8 = undefined;
+    const value = std.mem.readInt(u64, digest[0..8], .little);
+    const hex = "0123456789abcdef";
+    for (0..16) |index| {
+        suffix[15 - index] = hex[(value >> @as(u6, @intCast(index * 4))) & 0x0f];
+    }
+    return suffix;
+}
+
+test "project layout suffix is fixed width and deterministic" {
+    try std.testing.expectEqualStrings("763dc256de57db00", &projectLayoutSuffix("leading-zero-182"));
+}
+
 fn workspaceFromUserData(user_data: ?*anyopaque) ?*Workspace {
     return if (user_data) |value| @ptrCast(@alignCast(value)) else null;
 }
@@ -1153,14 +1169,13 @@ fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c
     if (event.action == c.WINGHOSTTY_KEY_RELEASE) return;
     const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
     const shift = (@as(i32, c.GetKeyState(c.VK_SHIFT)) & 0x8000) != 0;
-    if (ctrl and
-        (event.virtual_key == 'T' or event.virtual_key == 'W' or event.virtual_key == 'D' or
-            event.virtual_key == 0xDB or event.virtual_key == 0xDD))
+    if (ctrl and isWorkspaceShortcut(event.virtual_key))
     {
         if (workspace.key_callback) |callback|
             callback(workspace.key_callback_context, event.virtual_key, true, shift);
         return;
     }
+
     const bytes: []const u8 = switch (event.virtual_key) {
         c.VK_RETURN => "\r",
         c.VK_BACK => "\x08",
@@ -1174,6 +1189,17 @@ fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c
     };
     const index = surfaceIndex(workspace, surface) orelse return;
     workspace.enqueueInput(index, bytes);
+}
+
+fn isWorkspaceShortcut(key: usize) bool {
+    return key == 'T' or key == 'W' or key == 'D' or key == 0xDB or key == 0xDD or
+        key == c.VK_PRIOR or key == c.VK_NEXT;
+}
+
+test "child key callback forwards tab navigation virtual keys" {
+    try std.testing.expect(isWorkspaceShortcut(c.VK_PRIOR));
+    try std.testing.expect(isWorkspaceShortcut(c.VK_NEXT));
+    try std.testing.expect(isWorkspaceShortcut('T'));
 }
 
 fn onText(user_data: ?*anyopaque, surface: *c.winghostty_surface, text: [*:0]const u8, length: u32) callconv(.c) void {
