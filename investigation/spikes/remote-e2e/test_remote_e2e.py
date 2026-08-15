@@ -7,19 +7,25 @@ GRAPHCODE_REMOTE_E2E_TARGETS and are reported as explicit skips when unavailable
 from __future__ import annotations
 
 import os
+import socket
 import time
 import unittest
 
 from remote_e2e_fixture import ExternalTarget, LocalRemoteParityFixture, external_targets
+from posix_client import recv_exact as client_recv_exact
+from posix_fixture_server import recv_exact as server_recv_exact
 
 
 class RemoteParityTests(unittest.TestCase):
     def setUp(self):
-        self.fixture = LocalRemoteParityFixture()
-        self.fixture.start()
+        self.fixture = None
+        if self._testMethodName.startswith("test_local"):
+            self.fixture = LocalRemoteParityFixture()
+            self.fixture.start()
 
     def tearDown(self):
-        self.fixture.stop()
+        if self.fixture:
+            self.fixture.stop()
 
     def test_local_setup_fanout_messaging_and_capability_isolation(self):
         project = self.fixture.setup_project("host-a", "alpha")
@@ -35,6 +41,7 @@ class RemoteParityTests(unittest.TestCase):
         self.assertEqual(self.fixture.status("host-b", "beta")["messages"], [])
         self.assertEqual(self.fixture.fanout_events(), ["host-a/alpha:n1", "host-b/beta:n1"])
         self.assertNotIn(self.fixture.capability, self.fixture.last_diagnostic)
+        self.fixture.assert_capability_not_in_process_metadata()
 
     def test_local_reconnect_restart_and_reboot_restore_state(self):
         self.fixture.setup_project("host-a", "alpha")
@@ -104,6 +111,19 @@ class RemoteParityTests(unittest.TestCase):
                 os.environ.pop("GRAPHCODE_REMOTE_E2E_TARGETS", None)
             else:
                 os.environ["GRAPHCODE_REMOTE_E2E_TARGETS"] = old
+
+    def test_fragmented_headers_and_eof_are_handled_by_both_posix_helpers(self):
+        for recv in (client_recv_exact, server_recv_exact):
+            left, right = socket.socketpair()
+            try:
+                left.sendall(b"\x00")
+                left.sendall(b"\x00\x00\x03")
+                self.assertEqual(recv(right, 4), b"\x00\x00\x00\x03")
+                left.close()
+                with self.assertRaises(EOFError):
+                    recv(right, 1)
+            finally:
+                right.close()
 
     @unittest.skipUnless(
         os.environ.get("GRAPHCODE_REMOTE_E2E_TARGETS"),
