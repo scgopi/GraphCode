@@ -55,7 +55,12 @@ pub fn selectedEntry(entries: []const Entry, path: []const u8) ?Entry {
     return null;
 }
 
-pub fn inspect(allocator: std.mem.Allocator, project_path: []const u8) !Inspection {
+pub fn inspect(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    bindings: []const Binding,
+) !Inspection {
+    _ = bindings;
         if (project_path.len == 0) return error.EmptyProjectPath;
         const list = try runGit(allocator, &.{
             "git", "-C", project_path, "worktree", "list", "--porcelain",
@@ -97,11 +102,11 @@ pub fn inspect(allocator: std.mem.Allocator, project_path: []const u8) !Inspecti
         };
     }
 
-    pub fn deinitInspection(allocator: std.mem.Allocator, inspection: *Inspection) void {
-        deinit(allocator, &inspection.entries);
-        allocator.free(inspection.default_branch);
-        allocator.free(inspection.project_path);
-    }
+pub fn deinitInspection(allocator: std.mem.Allocator, inspection: *Inspection) void {
+    deinit(allocator, &inspection.entries);
+    allocator.free(inspection.default_branch);
+    allocator.free(inspection.project_path);
+}
 
 pub fn reclaim(allocator: std.mem.Allocator, entries: []const Entry) !usize {
         var removed: usize = 0;
@@ -121,7 +126,7 @@ pub fn reclaimSelected(
             selected: []const []const u8,
             bindings: []const Binding,
         ) !usize {
-            var inspection = try inspect(allocator, project_path);
+            var inspection = try inspect(allocator, project_path, bindings);
             defer {
                 deinit(allocator, &inspection.entries);
                 allocator.free(inspection.default_branch);
