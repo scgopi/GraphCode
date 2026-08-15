@@ -101,8 +101,10 @@ pub fn reclaim(allocator: std.mem.Allocator, entries: []const Entry) !usize {
             });
             removed += 1;
         }
+        return removed;
+    }
 
-        pub fn reclaimSelected(
+pub fn reclaimSelected(
             allocator: std.mem.Allocator,
             project_path: []const u8,
             selected: []const []const u8,
@@ -125,8 +127,6 @@ pub fn reclaim(allocator: std.mem.Allocator, entries: []const Entry) !usize {
             }
             return removed;
         }
-        return removed;
-    }
 
 const GitResult = struct { output: []u8 };
 
