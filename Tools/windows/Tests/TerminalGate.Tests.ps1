@@ -78,6 +78,7 @@ foreach ($token in @(
     "readAttachOutput",
     "writeAttachInput",
     "child.stdin",
+    "child.cwd",
     "waitAttachClient",
     "CreateProcessW",
     "recreateSurface",
@@ -103,15 +104,23 @@ Assert-Contract ($source.Contains("GetWindowLongPtrW")) `
   "top-level HWND does not own the window state"
 Assert-Contract ($source.Contains("TranslateMessage")) `
   "top-level window does not own message translation"
+Assert-Contract (
+  $source -match "child\.cwd\s*=\s*app\.cwd"
+) "zmx attach child does not inherit the gate working directory"
 
 $harness = Get-Content -LiteralPath (Join-Path $gateRoot "..\..\..\Tools\windows\terminal-gate.ps1") -Raw
 foreach ($token in @(
     "zmx send",
     "history",
     "--vt",
+    "pwd",
     "same-session restart",
     "Assert-PinnedCleanWorktree",
     "status --porcelain",
+    "zmx list",
+    "Get-CimInstance",
+    "GRAPHCODE_TERMINAL_GATE_INJECT_CLEANUP_FAILURE",
+    "cleanup failed",
     "exit 0"
   )) {
   Assert-Contract ($harness.Contains($token)) `

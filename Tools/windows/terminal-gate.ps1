@@ -62,6 +62,53 @@ function Assert-PinnedCleanWorktree(
   Assert-Equal (git -C $root rev-parse HEAD) $expectedSha "$label pin"
 }
 
+function Get-ZmxSessionLines([string] $name) {
+  $escaped = [regex]::Escape($name)
+  $output = @(& $zmx list 2>&1)
+  if ($LASTEXITCODE -ne 0) {
+    return @()
+  }
+  return @(
+    $output |
+      ForEach-Object { $_.ToString() } |
+      Where-Object { $_ -match "(?m)(?:^|\s)name=$escaped(?:\s|$)" }
+  )
+}
+
+function Get-ZmxSessionProcessIds([string] $name) {
+  $ids = [System.Collections.Generic.List[int]]::new()
+  foreach ($line in @(Get-ZmxSessionLines $name)) {
+    if ($line -match "\bpid=(\d+)\b") {
+      $ids.Add([int] $Matches[1])
+    }
+  }
+  $escaped = [regex]::Escape($name)
+  foreach ($process in @(
+      Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+          $_.Name -match "(?i)^zmx(?:\.exe)?$" -and
+          $_.CommandLine -and
+          $_.CommandLine -match $escaped
+        }
+    )) {
+    $ids.Add([int] $process.ProcessId)
+  }
+  return @($ids | Select-Object -Unique)
+}
+
+function Assert-ZmxSessionAbsent([string] $name) {
+  for ($attempt = 0; $attempt -lt 20; $attempt++) {
+    $lines = @(Get-ZmxSessionLines $name)
+    $processIds = @(Get-ZmxSessionProcessIds $name)
+    if ($lines.Count -eq 0 -and $processIds.Count -eq 0) {
+      return
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  $details = @($lines + ($processIds | ForEach-Object { "pid=$_" })) -join "; "
+  throw "cleanup left zmx session '$name' registered or running: $details"
+}
+
 Assert-PinnedCleanWorktree $WinghosttyRoot $pins.winghostty.sha "Winghostty"
 Assert-PinnedCleanWorktree $ZmxRoot $pins.zmx.sha "zmx"
 
@@ -104,6 +151,15 @@ try {
       & $zmx get graphcode-terminal-gate-a
       & $zmx get graphcode-terminal-gate-b
     }
+    Invoke-Native "session shell pwd/cwd" {
+      & $zmx send graphcode-terminal-gate-a "cd`r"
+      & $zmx send graphcode-terminal-gate-b "cd`r"
+    }
+    $expectedCwd = ([System.IO.Path]::GetFullPath($repoRoot)).TrimEnd("\")
+    Assert-HistoryContains "graphcode-terminal-gate-a" `
+      $expectedCwd "session A cwd"
+    Assert-HistoryContains "graphcode-terminal-gate-b" `
+      $expectedCwd "session B cwd"
     Assert-HistoryContains "graphcode-terminal-gate-a" `
       "GraphCode typed output A" "typed A output"
     Assert-HistoryContains "graphcode-terminal-gate-b" `
@@ -159,8 +215,25 @@ try {
     Write-Host "Windows terminal gate smoke/stress: PASS"
   }
   finally {
+    $cleanupFailures = [System.Collections.Generic.List[string]]::new()
     foreach ($name in $names) {
       & $zmx kill $name *> $null
+      if ($LASTEXITCODE -ne 0) {
+        $cleanupFailures.Add("$name kill exited with $LASTEXITCODE")
+      }
+    }
+    foreach ($name in $names) {
+      try {
+        Assert-ZmxSessionAbsent $name
+      } catch {
+        $cleanupFailures.Add($_.Exception.Message)
+      }
+    }
+    if ($env:GRAPHCODE_TERMINAL_GATE_INJECT_CLEANUP_FAILURE -eq "1") {
+      $cleanupFailures.Add("injected cleanup failure")
+    }
+    if ($cleanupFailures.Count -ne 0) {
+      throw "terminal gate cleanup failed: $($cleanupFailures -join '; ')"
     }
   }
 }

@@ -50,6 +50,12 @@ reaps only the attach client, leaving the zmx session daemon persistent.
 output and VT history survive GraphCode exit and are visible after reattach.
 The gate never calls GraphCode canvas/sidebar code and does not duplicate daemon
 orchestration; the existing Windows daemon remains an independent service.
+Each attach child is spawned with `GRAPHCODE_GATE_CWD`; the first-session
+smoke sends the shell's `cd`/pwd query and verifies the repository root.
+Cleanup checks every `zmx kill` exit, confirms the named registrations and
+reported processes disappear, and fails the gate if cleanup is incomplete.
+`GRAPHCODE_TERMINAL_GATE_INJECT_CLEANUP_FAILURE=1` is a failure-injection
+contract used to prove cleanup errors cannot produce a green result.
 
 The provider owns the rendering/input/IME/clipboard/per-monitor-DPI/UIA
 semantics. The gate owns the caller-side renderer lifecycle, focus policy,

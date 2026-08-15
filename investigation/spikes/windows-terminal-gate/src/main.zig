@@ -525,6 +525,7 @@ fn startSession(app: *App, name: []const u8, index: usize) !void {
     _ = try zmxGet(app, name);
     var attach_args = [_][]const u8{ app.zmx_path, "attach", name };
     var child = std.process.Child.init(&attach_args, allocator);
+    child.cwd = app.cwd;
     child.stdin_behavior = .Pipe;
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Ignore;
