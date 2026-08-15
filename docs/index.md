@@ -15,8 +15,6 @@ GraphCode launches it, it doesn't bundle it.
 [All releases →](https://github.com/scgopi/GraphCode/releases) ·
 [Keyboard shortcuts →](shortcuts.html)
 
-![Two projects and their connected loops on one GraphCode canvas — every node a live terminal you can attach to](assets/graph-hero.png?v=2)
-
 <!-- The GIF is the fallback, not the default: same take, but 800x650 and 10fps against
      the video's 1920x1560 at 30fps, and it decodes every frame before anything paints. -->
 <video autoplay muted loop playsinline preload="metadata"
