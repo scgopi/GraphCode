@@ -223,24 +223,24 @@ fn fill(hdc: c.HDC, bounds: c.RECT, color: u32) void {
         _ = c.FillRect(hdc, &bounds, brush);
         _ = c.DeleteObject(brush);
     }
+}
 
-    fn roundedCard(hdc: c.HDC, bounds: c.RECT, color: u32, selected: bool) void {
-        const brush = c.CreateSolidBrush(color);
-        const pen = c.CreatePen(c.PS_SOLID, if (selected) 2 else 1, if (selected) 0x007AB8FF else 0x00383838);
-        if (brush == null or pen == null) {
-            if (brush != null) _ = c.DeleteObject(brush);
-            if (pen != null) _ = c.DeleteObject(pen);
-            fill(hdc, bounds, color);
-            return;
-        }
-        const old_brush = c.SelectObject(hdc, brush);
-        const old_pen = c.SelectObject(hdc, pen);
-        _ = c.RoundRect(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom, 12, 12);
-        _ = c.SelectObject(hdc, old_pen);
-        _ = c.SelectObject(hdc, old_brush);
-        _ = c.DeleteObject(pen);
-        _ = c.DeleteObject(brush);
+fn roundedCard(hdc: c.HDC, bounds: c.RECT, color: u32, selected: bool) void {
+    const brush = c.CreateSolidBrush(color);
+    const pen = c.CreatePen(c.PS_SOLID, if (selected) 2 else 1, if (selected) 0x007AB8FF else 0x00383838);
+    if (brush == null or pen == null) {
+        if (brush != null) _ = c.DeleteObject(brush);
+        if (pen != null) _ = c.DeleteObject(pen);
+        fill(hdc, bounds, color);
+        return;
     }
+    const old_brush = c.SelectObject(hdc, brush);
+    const old_pen = c.SelectObject(hdc, pen);
+    _ = c.RoundRect(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom, 12, 12);
+    _ = c.SelectObject(hdc, old_pen);
+    _ = c.SelectObject(hdc, old_brush);
+    _ = c.DeleteObject(pen);
+    _ = c.DeleteObject(brush);
 }
 
 fn drawText(
