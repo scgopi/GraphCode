@@ -60,6 +60,7 @@ pub fn paint(
     model: *const GraphModel.Model,
     inspection: ?*const WorktreeStatus.Inspection,
     selected_worktree_path: []const u8,
+    sidebar_scroll: i32,
     status: []const u8,
     allocator: std.mem.Allocator,
     sidebar_scroll: i32,
@@ -79,7 +80,7 @@ pub fn paint(
             if (std.mem.eql(u8, value.project_path, graph.project.path)) value else null
         else null
     else null;
-    Sidebar.draw(hdc, model, visible_inspection, selected_worktree_path, status, allocator);
+    Sidebar.draw(hdc, model, visible_inspection, selected_worktree_path, sidebar_scroll, status, allocator);
 
     const graph_bounds = rect(
         Tokens.sidebar_width,

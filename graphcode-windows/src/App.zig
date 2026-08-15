@@ -26,6 +26,7 @@ pub const App = struct {
     canvas: GraphCanvas.CanvasState = .{},
     worktree_inspection: ?WorktreeStatus.Inspection = null,
     selected_worktree_path: []u8 = &.{},
+    sidebar_scroll: i32 = 0,
     workspace: ?TerminalWorkspace.Workspace = null,
     instance_mutex: c.HANDLE = null,
     sync_requested: bool = false,
@@ -452,9 +453,22 @@ pub const App = struct {
                 @as(i32, @intCast(count)), @as(i32, @intCast(count)));
             if (WorktreeStatus.decision(inspection.entries.items[@intCast(next)]) == .reclaimable) {
                 _ = self.selectWorktreeRow(inspection.entries.items[@intCast(next)].path);
+                self.ensureWorktreeVisible(@intCast(next));
                 return;
             }
         }
+    }
+
+    fn ensureWorktreeVisible(self: *App, index: usize) void {
+        var client: c.RECT = undefined;
+        if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
+        const top = Sidebar.worktreeRowTop(self.model.recent_projects.items.len, index) - self.sidebar_scroll;
+        const bottom = top + 34;
+        const viewport_top = Tokens.header_height;
+        const viewport_bottom = client.bottom - Tokens.workspace_height;
+        if (top < viewport_top) self.sidebar_scroll -= viewport_top - top;
+        if (bottom > viewport_bottom) self.sidebar_scroll += bottom - viewport_bottom;
+        if (self.sidebar_scroll < 0) self.sidebar_scroll = 0;
     }
 
     fn handleAction(self: *App, action: InputRouter.Action) void {
@@ -632,6 +646,8 @@ fn onWindowMessage(
             const inspection = if (app.worktree_inspection) |*value| value else null;
             GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.status(), app.allocator);
 >>>>>>> 6540896 (Add             _ = c.EndPaint(hwnd, &paint);
+            GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), app.allocator);
+            _ = c.EndPaint(hwnd, &paint);
             result.* = 0;
             return true;
         },
@@ -823,8 +839,12 @@ fn onWindowMessage(
             const x: i32 = @intCast(@as(u16, @truncate(@as(usize, @bitCast(lparam)))));
             const y: i32 = @intCast(@as(u16, @truncate(@as(usize, @bitCast(lparam)) >> 16)));
             if (app.worktree_inspection) |inspection| {
-                if (Sidebar.hitTestWorktree(x, y, app.model.recent_projects.items.len, inspection.entries.items.len)) |index| {
+                var client: c.RECT = undefined;
+                _ = c.GetClientRect(hwnd, &client);
+                if (Sidebar.hitTestWorktree(x, y, app.model.recent_projects.items.len, inspection.entries.items.len,
+                    app.sidebar_scroll, client.bottom - Tokens.workspace_height)) |index| {
                     _ = app.selectWorktreeRow(inspection.entries.items[index].path);
+                    app.ensureWorktreeVisible(index);
                     _ = c.InvalidateRect(hwnd, null, 0);
                 }
 >>>>>>> 6540896 (Add             }
@@ -864,11 +884,15 @@ fn onWindowMessage(
             } else {
                 app.canvas.zoomAt(point.x, point.y, wheel.delta);
             }
+        c.WM_MOUSEWHEEL => {
+            const delta: i16 = @bitCast(@as(u16, @truncate(@as(usize, @bitCast(wparam)) >> 16)));
+            app.sidebar_scroll = @max(0, app.sidebar_scroll - @divTrunc(@as(i32, delta), 4));
             _ = c.InvalidateRect(hwnd, null, 0);
             result.* = 0;
             return true;
         },
 >>>>>>> 6540896 (Add         c.WM_SETFOCUS => {
+        c.WM_SETFOCUS => {
             if (app.workspace) |*workspace| workspace.focus(workspace.active_surface);
             result.* = 0;
             return true;

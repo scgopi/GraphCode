@@ -136,6 +136,7 @@ pub fn draw(
     model: *const GraphModel.Model,
     inspection: ?*const WorktreeStatus.Inspection,
     selected_worktree_path: []const u8,
+    scroll_offset: i32,
     status: []const u8,
     allocator: std.mem.Allocator,
     client_bottom: i32,
@@ -161,7 +162,7 @@ pub fn draw(
         drawText(hdc, allocator, row.title, x, row.bounds.top + 7, size, color);
     drawText(hdc, allocator, "GRAPH", 18, Tokens.header_height + 20, 16, 0x00FFFFFF);
     drawText(hdc, allocator, "Projects", 18, Tokens.header_height + 54, 14, 0x00B8B8B8);
-    var y: i32 = Tokens.header_height + 78;
+    var y: i32 = Tokens.header_height + 78 - scroll_offset;
     for (model.recent_projects.items) |project| {
         drawText(hdc, allocator, project.name, 24, y, 13, 0x00E6E6E6);
         y += 24;
@@ -186,7 +187,7 @@ pub fn draw(
             y += 24;
         for (value.entries.items, 0..) |entry, index| {
                 const selected = std.mem.eql(u8, entry.path, selected_worktree_path);
-            const row_y = worktreeRowTop(model.recent_projects.items.len, index);
+            const row_y = worktreeRowTop(model.recent_projects.items.len, index) - scroll_offset;
             if (selected and WorktreeStatus.decision(entry) == .reclaimable)
                 fill(hdc, rect(12, row_y - 3, Tokens.sidebar_width - 12, row_y + 25), 0x003A3A44);
             drawText(hdc, allocator, entry.path, 24, row_y, 11, 0x00E6E6E6);
@@ -196,9 +197,11 @@ pub fn draw(
         }
     }
 
+    const section_y = worktreeSectionBottom(model.recent_projects.items.len,
+        if (inspection) |value| value.entries.items.len else 0) - scroll_offset;
     if (model.attentionCount() != 0) {
-        drawText(hdc, allocator, "Needs you", 18, y + 10, 11, 0x00FFCD7A);
-        var attention_y = y + 30;
+        drawText(hdc, allocator, "Needs you", 18, section_y + 10, 11, 0x00FFCD7A);
+        var attention_y = section_y + 30;
         for (model.attention.items[0..@min(model.attention.items.len, 4)]) |node| {
             drawText(hdc, allocator, node.title, 24, attention_y, 11, 0x00E6E6E6);
             attention_y += 19;
@@ -283,9 +286,14 @@ pub fn worktreeRowTop(project_count: usize, index: usize) i32 {
         @as(i32, @intCast(index * 34));
 }
 
-pub fn hitTestWorktree(x: i32, y: i32, project_count: usize, count: usize) ?usize {
+pub fn worktreeSectionBottom(project_count: usize, worktree_count: usize) i32 {
+    return worktreeRowTop(project_count, worktree_count) + 10;
+}
+
+pub fn hitTestWorktree(x: i32, y: i32, project_count: usize, count: usize, scroll_offset: i32, viewport_bottom: i32) ?usize {
     if (x < 12 or x >= Tokens.sidebar_width) return null;
-    const top = worktreeRowTop(project_count, 0);
+    if (y < Tokens.header_height or y >= viewport_bottom) return null;
+    const top = worktreeRowTop(project_count, 0) - scroll_offset;
     if (y < top) return null;
     const index: usize = @intCast(@divTrunc(y - top, 34));
     if (index >= count) return null;
@@ -305,11 +313,12 @@ fn reason(entry: WorktreeStatus.Entry) []const u8 {
 
 test "worktree row hit testing selects only visible rows" {
     const top = worktreeRowTop(2, 0);
-    try std.testing.expectEqual(@as(?usize, 0), hitTestWorktree(24, top + 4, 2, 2));
-    try std.testing.expectEqual(@as(?usize, 1), hitTestWorktree(24, top + 34 + 4, 2, 2));
-    try std.testing.expectEqual(@as(?usize, null), hitTestWorktree(Tokens.sidebar_width + 1, top, 2, 2));
-    try std.testing.expectEqual(@as(?usize, null), hitTestWorktree(24, top + 68, 2, 2));
+    try std.testing.expectEqual(@as(?usize, 0), hitTestWorktree(24, top + 4, 2, 2, 0, 700));
+    try std.testing.expectEqual(@as(?usize, 1), hitTestWorktree(24, top + 34 + 4, 2, 2, 0, 700));
+    try std.testing.expectEqual(@as(?usize, null), hitTestWorktree(Tokens.sidebar_width + 1, top, 2, 2, 0, 700));
+    try std.testing.expectEqual(@as(?usize, null), hitTestWorktree(24, top + 68, 2, 2, 0, 700));
     try std.testing.expectEqual(@as(i32, worktreeRowTop(3, 0) - worktreeRowTop(1, 0)), 48);
+    try std.testing.expectEqual(@as(i32, worktreeSectionBottom(2, 5) + 10), worktreeSectionBottom(2, 5) + 10);
 }
 
 fn rect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {
