@@ -220,9 +220,9 @@ pub fn parse(allocator: std.mem.Allocator, porcelain: []const u8) !std.array_lis
                 branch;
             allocator.free(current.?.branch);
             current.?.branch = try allocator.dupe(u8, short);
-        } else if (current != null and std.mem.eql(u8, line, "locked")) {
+        } else if (current != null and std.mem.startsWith(u8, line, "locked")) {
             current.?.locked = true;
-        } else if (current != null and std.mem.eql(u8, line, "prunable")) {
+        } else if (current != null and std.mem.startsWith(u8, line, "prunable")) {
             current.?.prunable = true;
         }
     }
@@ -356,4 +356,17 @@ test "explicit row selection is independent of graph binding safety" {
     };
     try std.testing.expectEqual(ReclaimDecision.reclaimable, decision(selectedEntry(&entries, "C:\\safe").?));
     try std.testing.expectEqual(ReclaimDecision.keep, decision(selectedEntry(&entries, "C:\\bound").?));
+}
+    const inspect = try command(std.testing.allocator, .inspect, "C:\\work\\Graph Code");
+    defer std.testing.allocator.free(inspect);
+    try std.testing.expectEqualStrings(
+        "git -C \"C:\\work\\Graph Code\" worktree list --porcelain",
+        inspect,
+    );
+    const reclaim = try command(std.testing.allocator, .reclaim, "C:\\work\\Graph Code");
+    defer std.testing.allocator.free(reclaim);
+    try std.testing.expectEqualStrings(
+        "git -C \"C:\\work\\Graph Code\" worktree prune --verbose",
+        reclaim,
+    );
 }

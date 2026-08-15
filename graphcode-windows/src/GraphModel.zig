@@ -235,7 +235,7 @@ pub const Model = struct {
                 continue;
             };
             if (self.activity.items.len > 32) {
-                const removed = self.activity.pop();
+                const removed = self.activity.pop() orelse continue;
                 self.allocator.free(removed.title);
                 self.allocator.free(removed.state);
             }
