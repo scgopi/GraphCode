@@ -19,6 +19,7 @@ pub const App = struct {
     window: MainWindow.Window = .{},
     client: DaemonClient,
     model: GraphModel.Model,
+    canvas: GraphCanvas.CanvasState = .{},
     worktree_inspection: ?WorktreeStatus.Inspection = null,
     selected_worktree_path: []u8 = &.{},
     sidebar_scroll: i32 = 0,
