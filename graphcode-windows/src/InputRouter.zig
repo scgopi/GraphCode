@@ -97,6 +97,8 @@ test "workspace shortcuts route to tabs splits and panes" {
     try std.testing.expectEqual(Action.focus_next_pane, keyAction(0xDD, true, false));
     try std.testing.expectEqual(Action.select_previous_tab, keyAction(0x21, true, false));
     try std.testing.expectEqual(Action.select_next_tab, keyAction(0x22, true, false));
+}
+
 test "attention and worktree shortcuts are distinct from ordinary selection" {
     try std.testing.expectEqual(Action.cycle_attention, keyAction(0x09, true, false));
     try std.testing.expectEqual(Action.inspect_worktrees, keyAction('W', true, false));
