@@ -68,6 +68,7 @@ pub fn paint(
     header(hdc, allocator, client.right, status);
     Sidebar.draw(hdc, model, status, allocator, client.bottom, sidebar_scroll);
     attentionRail(hdc, allocator, model, client.right);
+    Sidebar.draw(hdc, model, status, allocator);
 
     const graph_bounds = rect(
         Tokens.sidebar_width,
@@ -91,6 +92,7 @@ pub fn paint(
         drawText(hdc, allocator, "Open a project to view its graph", Tokens.sidebar_width + 32, 120, 18, 0x00B8B8B8);
     }
     _ = c.RestoreDC(hdc, saved);
+    attentionRail(hdc, allocator, model, client.right);
     activityStrip(
         hdc,
         allocator,

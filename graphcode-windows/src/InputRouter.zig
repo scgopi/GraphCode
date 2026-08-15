@@ -11,6 +11,9 @@ pub const Action = enum {
     create_edge,
     jump_next,
     settings,
+    cycle_attention,
+    inspect_worktrees,
+    reclaim_worktrees,
     focus_terminal_a,
     focus_terminal_b,
     select_next,
@@ -33,6 +36,9 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (ctrl and key == 'E') return .edit_node;
     if (ctrl and key == 'J') return .jump_next;
     if (ctrl and key == ',') return .settings;
+    if (ctrl and key == 0x09) return .cycle_attention;
+    if (ctrl and key == 'W' and shift) return .reclaim_worktrees;
+    if (ctrl and key == 'W') return .inspect_worktrees;
     if (key == 0x31) return .focus_terminal_a;
     if (key == 0x32) return .focus_terminal_b;
     if (key == 0x09) return .select_next;
@@ -57,6 +63,9 @@ pub fn commandText(allocator: std.mem.Allocator, action: Action) ![]u8 {
         .create_edge => allocator.dupe(u8, "Create edge"),
         .jump_next => allocator.dupe(u8, "Jump to next node"),
         .settings => allocator.dupe(u8, "Settings"),
+        .cycle_attention => allocator.dupe(u8, "Review next loop needing you"),
+        .inspect_worktrees => allocator.dupe(u8, "Inspect worktrees"),
+        .reclaim_worktrees => allocator.dupe(u8, "Reclaim selected worktrees"),
         .reconnect => allocator.dupe(u8, "Reconnect"),
         .focus_terminal_a => allocator.dupe(u8, "Focus terminal A"),
         .focus_terminal_b => allocator.dupe(u8, "Focus terminal B"),
@@ -82,4 +91,9 @@ test "workspace shortcuts route to tabs splits and panes" {
     try std.testing.expectEqual(Action.focus_next_pane, keyAction(0xDD, true, false));
     try std.testing.expectEqual(Action.select_previous_tab, keyAction(0x21, true, false));
     try std.testing.expectEqual(Action.select_next_tab, keyAction(0x22, true, false));
+test "attention and worktree shortcuts are distinct from ordinary selection" {
+    try std.testing.expectEqual(Action.cycle_attention, keyAction(0x09, true, false));
+    try std.testing.expectEqual(Action.inspect_worktrees, keyAction('W', true, false));
+    try std.testing.expectEqual(Action.reclaim_worktrees, keyAction('W', true, true));
+    try std.testing.expectEqual(Action.select_next, keyAction(0x09, false, false));
 }

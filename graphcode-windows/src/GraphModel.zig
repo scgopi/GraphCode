@@ -9,6 +9,7 @@ pub const Node = struct {
     state: []u8,
     activity: []u8,
     presence: []u8,
+    worktree_path: []u8 = @constCast(""),
 };
 
 pub const ActivityEvent = struct {
@@ -20,6 +21,8 @@ pub const Edge = struct {
     from: []u8,
     to: []u8,
     kind: []u8 = &.{},
+    condition: []u8 = @constCast("always"),
+    blocks_target: bool = true,
     fired: bool = false,
 };
 
@@ -113,6 +116,31 @@ pub const Model = struct {
         }
     }
 
+    pub fn selectNextAttention(self: *Model) void {
+        if (self.attention.items.len == 0) return;
+        const graph = self.graph orelse return;
+        const current = self.selected_node orelse 0;
+        if (current < graph.nodes.items.len) {
+            for (self.attention.items, 0..) |attention, offset| {
+                if (!std.mem.eql(u8, attention.id, graph.nodes.items[current].id)) continue;
+                const next = self.attention.items[(offset + 1) % self.attention.items.len];
+                for (graph.nodes.items, 0..) |node, index| {
+                    if (std.mem.eql(u8, node.id, next.id)) {
+                        self.selected_node = index;
+                        return;
+                    }
+                }
+            }
+        }
+        const first = self.attention.items[0];
+        for (graph.nodes.items, 0..) |node, index| {
+            if (std.mem.eql(u8, node.id, first.id)) {
+                self.selected_node = index;
+                return;
+            }
+        }
+    }
+
     fn decodeRecentProjects(self: *Model, frame: []const u8) !void {
         self.clearProjects();
         const list = std.mem.indexOf(u8, frame, "\"recentProjectsListed\"") orelse return;
@@ -182,14 +210,19 @@ pub const Model = struct {
                 freeNode(self.allocator, copy);
             };
         }
+        for (graph.nodes.items) |node| {
+            if (!std.mem.eql(u8, node.state, "blocked") or
+                !isStranded(graph, node.id)) continue;
+            const copy = cloneNode(self.allocator, node) catch continue;
+            self.attention.append(copy) catch freeNode(self.allocator, copy);
+        }
     }
 
     fn recordActivity(self: *Model, next: Graph) void {
         const previous = self.graph orelse return;
         for (next.nodes.items) |node| {
             const old = findNode(previous.nodes.items, node.id) orelse continue;
-            if (std.mem.eql(u8, old.state, node.state) and
-                std.mem.eql(u8, old.presence, node.presence)) continue;
+            if (std.mem.eql(u8, old.state, node.state)) continue;
             const title = self.allocator.dupe(u8, node.title) catch continue;
             const state = self.allocator.dupe(u8, node.state) catch {
                 self.allocator.free(title);
@@ -218,7 +251,6 @@ fn findNode(nodes: []const Node, id: []const u8) ?Node {
 fn needsAttention(node: Node) bool {
     return std.mem.eql(u8, node.state, "failed") or
         std.mem.eql(u8, node.state, "stalled") or
-        std.mem.eql(u8, node.state, "blocked") or
         std.mem.eql(u8, node.presence, "awaitingInput");
 }
 
@@ -229,6 +261,24 @@ fn attentionRank(node: Node) u8 {
     return 3;
 }
 
+fn isStranded(graph: *const Graph, node_id: []const u8) bool {
+    var has_blocking_edge = false;
+    for (graph.edges.items) |edge| {
+        if (!std.mem.eql(u8, edge.to, node_id) or !edge.blocks_target or edge.fired) continue;
+        has_blocking_edge = true;
+        const source = findNode(graph.nodes.items, edge.from) orelse return false;
+        if (!isResolved(source.state)) return false;
+    }
+    return has_blocking_edge;
+}
+
+fn isResolved(state: []const u8) bool {
+    return std.mem.eql(u8, state, "succeeded") or
+        std.mem.eql(u8, state, "failed") or
+        std.mem.eql(u8, state, "stalled") or
+        std.mem.eql(u8, state, "stopped");
+}
+
 fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
     return .{
         .id = try allocator.dupe(u8, node.id),
@@ -237,6 +287,7 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
         .state = try allocator.dupe(u8, node.state),
         .activity = try allocator.dupe(u8, node.activity),
         .presence = try allocator.dupe(u8, node.presence),
+        .worktree_path = try allocator.dupe(u8, node.worktree_path),
     };
 }
 
@@ -257,6 +308,7 @@ fn decodeNodes(
             .state = try duplicateJsonStringOr(allocator, object, "state", "idle"),
             .activity = try duplicateJsonStringOr(allocator, object, "activity", ""),
             .presence = try duplicatePresence(allocator, object),
+            .worktree_path = try duplicateWorktreePath(allocator, object),
         });
         cursor = end + 1;
     }
@@ -276,10 +328,23 @@ fn decodeEdges(
             .from = try duplicateJsonString(allocator, object, "from"),
             .to = try duplicateJsonString(allocator, object, "to"),
             .kind = try duplicateJsonStringOr(allocator, object, "kind", "handoff"),
+            .condition = try duplicateJsonStringOr(allocator, object, "condition", "always"),
+            .blocks_target = !std.mem.eql(u8, Wire.jsonString(object, "kind") orelse "", "message"),
             .fired = jsonBool(object, "fired") orelse false,
         });
         cursor = end + 1;
     }
+
+}
+
+fn jsonBool(object: []const u8, key: []const u8) ?bool {
+    const needle = std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":", .{key}) catch return null;
+    defer std.heap.page_allocator.free(needle);
+    const start = std.mem.indexOf(u8, object, needle) orelse return null;
+    const value = object[start + needle.len ..];
+    if (std.mem.startsWith(u8, value, "true")) return true;
+    if (std.mem.startsWith(u8, value, "false")) return false;
+    return null;
 }
 
 fn duplicateJsonString(allocator: std.mem.Allocator, object: []const u8, key: []const u8) ![]u8 {
@@ -305,12 +370,21 @@ fn duplicatePresence(allocator: std.mem.Allocator, object: []const u8) ![]u8 {
     if (Wire.jsonString(object, "presence")) |value| {
         return Wire.decodeJsonString(allocator, value);
     }
+
     const key = std.mem.indexOf(u8, object, "\"presence\"") orelse
         return allocator.dupe(u8, "");
     const open = indexOfByte(object, key, '{') orelse return allocator.dupe(u8, "");
     const close = findClosing(object, open, '{', '}') orelse return allocator.dupe(u8, "");
     const reading = object[open .. close + 1];
     return duplicateJsonStringOr(allocator, reading, "presence", "");
+}
+
+fn duplicateWorktreePath(allocator: std.mem.Allocator, object: []const u8) ![]u8 {
+    const key = std.mem.indexOf(u8, object, "\"worktree\"") orelse
+        return allocator.dupe(u8, "");
+    const open = indexOfByte(object, key, '{') orelse return allocator.dupe(u8, "");
+    const close = findClosing(object, open, '{', '}') orelse return allocator.dupe(u8, "");
+    return duplicateJsonStringOr(allocator, object[open .. close + 1], "worktreePath", "");
 }
 
 fn findClosing(bytes: []const u8, start: usize, open: u8, close: u8) ?usize {
@@ -348,6 +422,7 @@ fn freeNode(allocator: std.mem.Allocator, node: Node) void {
     allocator.free(node.state);
     allocator.free(node.activity);
     allocator.free(node.presence);
+    allocator.free(node.worktree_path);
 }
 
 fn freeGraph(allocator: std.mem.Allocator, graph: *Graph) void {
@@ -357,6 +432,7 @@ fn freeGraph(allocator: std.mem.Allocator, graph: *Graph) void {
         allocator.free(edge.from);
         allocator.free(edge.to);
         allocator.free(edge.kind);
+        allocator.free(edge.condition);
     }
     graph.nodes.deinit();
     graph.edges.deinit();
@@ -483,6 +559,32 @@ test "activity log records state transitions but not initial snapshot" {
     _ = try model.updateFromFrame(second);
     try std.testing.expectEqual(@as(usize, 1), model.activity.items.len);
     try std.testing.expectEqualStrings("Worker", model.activity.items[0].title);
+}
+
+test "presence polling does not evict or create activity history" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const first =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"g","project":{"path":"C:\\work\\graph","name":"Graph","remote":false},"nodes":[{"id":"a","title":"Worker","loopType":"goalBased","state":"running","presence":{"presence":"busy","confidence":"reported"}}],"edges":[]}}}
+    ;
+    const second =
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"g","project":{"path":"C:\\work\\graph","name":"Graph","remote":false},"nodes":[{"id":"a","title":"Worker","loopType":"goalBased","state":"running","presence":{"presence":"awaitingInput","confidence":"reported"}}],"edges":[]}}}
+    ;
+    _ = try model.updateFromFrame(first);
+    _ = try model.updateFromFrame(second);
+    try std.testing.expectEqual(@as(usize, 0), model.activity.items.len);
+}
+
+test "blocked attention requires every blocking upstream to be resolved" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const frame =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"g","project":{"path":"C:\\work\\graph","name":"Graph","remote":false},"nodes":[{"id":"up","title":"Upstream","loopType":"goalBased","state":"failed"},{"id":"blocked","title":"Stranded","loopType":"goalBased","state":"blocked"},{"id":"live","title":"Live","loopType":"goalBased","state":"running"},{"id":"waiting","title":"Still waiting","loopType":"goalBased","state":"blocked"}],"edges":[{"from":"up","to":"blocked","kind":"handoff","fired":false},{"from":"live","to":"waiting","kind":"handoff","fired":false}]}}}
+    ;
+    _ = try model.updateFromFrame(frame);
+    try std.testing.expectEqual(@as(usize, 2), model.attentionCount());
+    try std.testing.expectEqualStrings("Upstream", model.attention.items[0].title);
+    try std.testing.expectEqualStrings("Stranded", model.attention.items[1].title);
 }
 
 test "attention fixture keeps real daemon state and worktree context visible" {

@@ -11,6 +11,7 @@ const Sidebar = @import("Sidebar.zig");
 const TerminalWorkspace = @import("TerminalWorkspace.zig");
 const Tokens = @import("DesignTokens.zig");
 const Wire = @import("Wire.zig");
+const WorktreeStatus = @import("WorktreeStatus.zig");
 const c = @import("Win32.zig").c;
 
 const title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Windows");
@@ -22,6 +23,7 @@ pub const App = struct {
     client: DaemonClient,
     model: GraphModel.Model,
     canvas: GraphCanvas.CanvasState = .{},
+    worktree_inspection: ?WorktreeStatus.Inspection = null,
     workspace: ?TerminalWorkspace.Workspace = null,
     instance_mutex: c.HANDLE = null,
     sync_requested: bool = false,
@@ -66,6 +68,10 @@ pub const App = struct {
         if (self.workspace) |*workspace| workspace.deinit();
         self.client.deinit();
         self.model.deinit();
+        if (self.worktree_inspection) |*inspection| {
+            WorktreeStatus.deinit(self.allocator, &inspection.entries);
+            self.allocator.free(inspection.default_branch);
+        }
         if (self.instance_mutex != null) _ = c.CloseHandle(self.instance_mutex);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
         if (self.pending_project_path.len != 0) self.allocator.free(self.pending_project_path);
@@ -336,6 +342,58 @@ pub const App = struct {
         self.client.sendNodeAction(path, node.id, "messageNode", "GraphCode Windows shell message");
     }
 
+    fn inspectWorktrees(self: *App) void {
+        const path = self.currentProject() orelse {
+            self.setStatus("No project selected for worktree inspection");
+            return;
+        };
+        const inspection = WorktreeStatus.inspect(self.allocator, path) catch |err| {
+            self.setStatus(switch (err) {
+                error.EmptyProjectPath => "Worktree inspection needs a project path",
+                error.GitFailed => "Worktree inspection failed: git returned an error",
+                else => "Worktree inspection failed",
+            });
+            return;
+        };
+        if (self.worktree_inspection) |*old| {
+            WorktreeStatus.deinit(self.allocator, &old.entries);
+            self.allocator.free(old.default_branch);
+        }
+        self.worktree_inspection = inspection;
+        const summary = WorktreeStatus.summarize(inspection.entries.items);
+        const message = std.fmt.allocPrint(
+            self.allocator,
+            "Worktrees: {d} total · {d} reclaimable · {d} blocked",
+            .{ summary.total, summary.reclaimable, summary.blocked },
+        ) catch {
+            self.setStatus("Worktree inspection complete");
+            return;
+        };
+        self.replaceStatus(message);
+    }
+
+    fn reclaimWorktrees(self: *App) void {
+        const inspection = self.worktree_inspection orelse {
+            self.setStatus("Inspect worktrees first; nothing selected to reclaim");
+            return;
+        };
+        const removed = WorktreeStatus.reclaim(self.allocator, inspection.entries.items) catch |err| {
+            self.setStatus(switch (err) {
+                error.GitFailed => "Reclaim failed: git refused a selected worktree",
+                else => "Reclaim failed",
+            });
+            return;
+        };
+        const message = std.fmt.allocPrint(
+            self.allocator, "Reclaimed {d} selected worktrees", .{removed},
+        ) catch {
+            self.setStatus("Reclaim complete");
+            return;
+        };
+        self.replaceStatus(message);
+        self.inspectWorktrees();
+    }
+
     fn handleAction(self: *App, action: InputRouter.Action) void {
         switch (action) {
             .reconnect => {
@@ -354,6 +412,12 @@ pub const App = struct {
                 }
             },
             .settings => self.showSettings(),
+            .cycle_attention => {
+                self.model.selectNextAttention();
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            },
+            .inspect_worktrees => self.inspectWorktrees(),
+            .reclaim_worktrees => self.reclaimWorktrees(),
             .focus_terminal_a => if (self.workspace) |*workspace| workspace.focus(0),
             .focus_terminal_b => if (self.workspace) |*workspace| workspace.focus(1),
             .select_next => {
