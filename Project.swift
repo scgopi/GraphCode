@@ -54,8 +54,8 @@ let project = Project(
                 // (#33). Before that the suffix lived on the tag only, so betas 48/49
                 // of the 0.1.15 line read "0.1.15" and are told by the build number
                 // apart.
-                "CFBundleShortVersionString": "0.1.40-beta1",
-                "CFBundleVersion": "135",
+                "CFBundleShortVersionString": "0.1.40-beta2",
+                "CFBundleVersion": "136",
             ]),
             resources: [
                 "graphcode/Resources/**"
