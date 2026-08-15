@@ -177,31 +177,6 @@ test "sidebar layout clips and hit-tests many projects in a short viewport" {
         const path = try std.fmt.allocPrint(std.testing.allocator, "C:\\work\\project-{d}", .{index});
         const name = try std.fmt.allocPrint(std.testing.allocator, "Project {d}", .{index});
         try model.recent_projects.append(.{ .path = path, .name = name });
-=======
-    if (model.graph) |graph| {
-        drawText(hdc, allocator, "Open", 18, y + 10, 14, 0x00B8B8B8);
-        drawText(hdc, allocator, graph.project.name, 24, y + 36, 13, 0x00FFFFFF);
-        y += 62;
-        drawText(hdc, allocator, "Worktrees", 18, y + 10, 11, 0x007A7A7A);
-        drawText(
-            hdc,
-            allocator,
-            "Inspect live repository hygiene",
-            24,
-            y + 30,
-            11,
-            0x00B8B8B8,
-        );
-        y += 54;
-    }
-    if (model.attentionCount() != 0) {
-        drawText(hdc, allocator, "Needs you", 18, y + 10, 11, 0x00FFCD7A);
-        var attention_y = y + 30;
-        for (model.attention.items[0..@min(model.attention.items.len, 4)]) |node| {
-            drawText(hdc, allocator, node.title, 24, attention_y, 11, 0x00E6E6E6);
-            attention_y += 19;
-        }
-    }
     var rows = try buildRows(&model, std.testing.allocator, 120);
     defer rows.deinit();
     const viewport_bottom = viewportBottom(120);
