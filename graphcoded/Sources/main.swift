@@ -3,6 +3,8 @@ import GraphcodeKit
 
 #if canImport(Darwin)
   import Darwin
+#else
+  import Glibc
 #endif
 
 // graphcoded — the graphcode orchestrator daemon.
@@ -37,14 +39,21 @@ func fail(_ message: String) -> Never {
   exit(1)
 }
 
-let socketDescriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+#if canImport(Darwin)
+  let socketDescriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+#else
+  // Glibc imports SOCK_STREAM as the `__socket_type` enum, not an Int32.
+  let socketDescriptor = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+#endif
 guard socketDescriptor >= 0 else {
   fail("failed to create socket (errno \(errno))")
 }
 
 var address = sockaddr_un()
 address.sun_family = sa_family_t(AF_UNIX)
-address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+#if canImport(Darwin)
+  address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+#endif
 
 let path = socketURL.path
 withUnsafeMutablePointer(to: &address.sun_path) { pathField in

@@ -2,6 +2,8 @@ import Foundation
 
 #if canImport(Darwin)
   import Darwin
+#else
+  import Glibc
 #endif
 
 /// Length-prefixed framing over a raw socket file descriptor — a 4-byte big-endian

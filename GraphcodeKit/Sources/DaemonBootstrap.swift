@@ -1,5 +1,10 @@
 import Foundation
 
+// launchd, quarantine xattrs, `~/Library/LaunchAgents` — this whole mechanism is the
+// macOS app's drag-to-Applications install, and only the app calls it. A Linux install
+// story (systemd user unit or equivalent) would be a sibling, not a port of this.
+#if os(macOS)
+
 /// Installs the helpers a shipped `graphcode.app` carries inside itself — `graphcoded` and
 /// `zmx` — and loads the daemon, so dragging the app to `/Applications` is the whole
 /// installation.
@@ -226,3 +231,5 @@ public enum DaemonBootstrap {
     process.waitUntilExit()
   }
 }
+
+#endif
