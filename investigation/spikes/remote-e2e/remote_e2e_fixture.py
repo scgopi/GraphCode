@@ -159,6 +159,7 @@ class LocalRemoteParityFixture:
         user = subprocess.run(["wsl.exe", "id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
         self.ssh_user = user
         self.client_key = key
+        self.known_hosts = self.directory / "known_hosts"
         config = (
             f"Port {self.ssh_port}\nListenAddress 127.0.0.1\nHostKey {self.wsl_host_key}\n"
             f"AuthorizedKeysFile {self.wsl_authorized}\nStrictModes no\nPasswordAuthentication no\n"
@@ -184,7 +185,8 @@ class LocalRemoteParityFixture:
 
     def _start_tunnel(self):
         args = ["ssh.exe", "-i", str(self.client_key), "-p", str(self.ssh_port),
-                "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+                "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+                "-o", f"UserKnownHostsFile={self.known_hosts}",
                 "-o", "ExitOnForwardFailure=yes", "-N", "-R",
                 f"127.0.0.1:{self.remote_forward_port}:127.0.0.1:{self.bridge.listener_address[1]}",
                 f"{self.ssh_user}@127.0.0.1"]
@@ -215,6 +217,9 @@ class LocalRemoteParityFixture:
                                      f"{self.ssh_user}@127.0.0.1", "true"],
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if result.returncode == 0:
+                scan = subprocess.run(["wsl.exe", "ssh-keyscan", "-p", str(self.ssh_port), "127.0.0.1"],
+                                      capture_output=True, text=True, check=True)
+                self.known_hosts.write_text(scan.stdout)
                 return
             time.sleep(.1)
         raise RuntimeError("fixture sshd did not start")
@@ -224,7 +229,8 @@ class LocalRemoteParityFixture:
         generation = self.generation if generation is None else generation
         result = subprocess.run(
             ["ssh.exe", "-i", str(self.client_key), "-p", str(self.ssh_port),
-             "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+             "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={self.known_hosts}",
+             "-o", "BatchMode=yes",
              f"{self.ssh_user}@127.0.0.1", "python3", self.client_script,
              str(self.remote_forward_port),
              capability, str(generation),
