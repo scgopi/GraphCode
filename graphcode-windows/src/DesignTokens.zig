@@ -16,6 +16,7 @@ pub const loop_card_radius: i32 = 11;
 pub const loop_card_stripe: i32 = 4;
 pub const workspace_rail_width: i32 = 212;
 pub const pane_header_height: i32 = 22;
+pub const tab_bar_height: i32 = 30;
 pub const canvas_grid_cell: i32 = 24;
 
 pub const sidebar_width: i32 = 220;

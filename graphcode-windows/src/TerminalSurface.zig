@@ -1,5 +1,7 @@
 const std = @import("std");
 const c = @import("Win32.zig").c;
+const WorkspaceLayout = @import("WorkspaceLayout.zig");
+const Tokens = @import("DesignTokens.zig");
 
 const columns: usize = 120;
 const rows: usize = 40;
@@ -117,6 +119,8 @@ pub const Workspace = struct {
     input_cancel_requested: bool = false,
     input_queue: InputQueue,
     input_error_message: []const u8 = "",
+    layout: WorkspaceLayout.Layout,
+    layout_path: []u8,
     layout_origin_x: i32 = 0,
     layout_origin_y: i32 = 0,
     layout_width: i32 = 960,
@@ -130,11 +134,23 @@ pub const Workspace = struct {
             .zmx_path = try allocator_.dupe(u8, std.process.getEnvVarOwned(allocator_, "GRAPHCODE_ZMX") catch "zmx.exe"),
             .cwd = try allocator_.dupe(u8, std.process.getEnvVarOwned(allocator_, "GRAPHCODE_GATE_CWD") catch "."),
             .input_queue = .{ .allocator = allocator_ },
+            .layout = WorkspaceLayout.Layout.init(allocator_),
+            .layout_path = try allocator_.dupe(
+                u8,
+                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_LAYOUT")
+                    catch "graphcode-workspace.json",
+            ),
         };
         errdefer {
             allocator_.free(workspace.zmx_path);
             allocator_.free(workspace.cwd);
+            workspace.layout.deinit();
+            allocator_.free(workspace.layout_path);
         }
+        if (WorkspaceLayout.Layout.load(allocator_, workspace.layout_path)) |restored| {
+            workspace.layout.deinit();
+            workspace.layout = restored;
+        } else |_| {}
         if (c.winghostty_host_initialize(&workspace.host) != c.WINGHOSTTY_OK) {
             return error.WinghosttyHostInitializeFailed;
         }
@@ -161,6 +177,8 @@ pub const Workspace = struct {
 
         self.allocator.free(self.zmx_path);
         self.allocator.free(self.cwd);
+        self.layout.deinit();
+        self.allocator.free(self.layout_path);
     }
 
     pub fn rebindProject(self: *Workspace, project_path: []const u8) !bool {
@@ -194,6 +212,12 @@ pub const Workspace = struct {
             self.recreate_sessions[index] = &.{};
         }
         try self.startSession(index, session);
+        if (self.layout.tabs.items.len == 0) {
+            try self.layout.addTab(node_id, true);
+        } else if (index > 0 and self.layout.tabs.items.len == 1) {
+            try self.layout.addTab(node_id, false);
+        }
+        self.persistLayout();
         var options = self.surfaceOptions(index);
         const result = c.winghostty_host_create_surface_v2(
             self.host,
@@ -205,6 +229,7 @@ pub const Workspace = struct {
             self.waitAttach(index);
             return error.WinghosttySurfaceCreateFailed;
         }
+
         self.surfaces[index].session_name = session;
         self.surfaces[index].project_path = try self.allocator.dupe(u8, self.project_path);
         self.surfaces[index].destroyed = false;
@@ -218,6 +243,51 @@ pub const Workspace = struct {
         );
     }
 
+    pub fn newTab(self: *Workspace, surface_id: []const u8) !void {
+        try self.layout.addTab(surface_id, false);
+        self.persistLayout();
+    }
+
+    pub fn splitFocused(self: *Workspace, direction: WorkspaceLayout.Direction, surface_id: []const u8) !void {
+        try self.layout.splitFocused(direction, surface_id);
+        self.persistLayout();
+    }
+
+    pub fn selectTab(self: *Workspace, index: usize) void {
+        self.layout.selectTab(index);
+        self.persistLayout();
+    }
+
+    pub fn selectNextTab(self: *Workspace) void {
+        self.layout.selectRelativeTab(1);
+        self.persistLayout();
+    }
+
+    pub fn selectPreviousTab(self: *Workspace) void {
+        self.layout.selectRelativeTab(-1);
+        self.persistLayout();
+    }
+
+    pub fn focusNextPane(self: *Workspace) void {
+        self.layout.focusPane(1);
+        self.persistLayout();
+    }
+
+    pub fn focusPreviousPane(self: *Workspace) void {
+        self.layout.focusPane(-1);
+        self.persistLayout();
+    }
+
+    pub fn closeFocusedPane(self: *Workspace) !void {
+        const id = try self.layout.closeFocusedPane();
+        self.allocator.free(id);
+        self.persistLayout();
+    }
+
+    pub fn persistLayout(self: *Workspace) void {
+        self.layout.save(self.layout_path) catch {};
+    }
+
     pub fn recreate(self: *Workspace, index: usize) !void {
         const session = if (self.surfaces[index].session_name.len == 0) return else try self.allocator.dupe(u8, self.surfaces[index].session_name);
         defer self.allocator.free(session);
@@ -226,22 +296,59 @@ pub const Workspace = struct {
     }
 
     pub fn resize(self: *Workspace, origin_x: i32, origin_y: i32, width: i32, height: i32) void {
-        const graph_height = @max(1, height);
+        const graph_height = @max(1, height - Tokens.tab_bar_height);
         const half = @max(1, @divTrunc(width, 2));
         self.layout_origin_x = origin_x;
         self.layout_origin_y = origin_y;
         self.layout_width = width;
-        self.layout_height = graph_height;
+        self.layout_height = height;
         for (&self.surfaces, 0..) |*slot, index| {
             if (slot.surface) |surface| {
                 var bounds = c.winghostty_rect{
                     .x = origin_x + if (index == 0) 0 else half,
-                    .y = origin_y,
+                    .y = origin_y + Tokens.tab_bar_height + Tokens.pane_header_height,
                     .width = @intCast(if (index == 0) half else width - half),
-                    .height = @intCast(graph_height),
+                    .height = @intCast(@max(1, graph_height - Tokens.pane_header_height)),
                 };
                 _ = c.winghostty_surface_set_bounds(surface, &bounds);
             }
+
+        }
+    }
+
+    /// Draws only product chrome. Winghostty remains responsible for terminal pixels;
+    /// keeping this separate prevents renderer/provider lifetimes from leaking into the
+    /// tab and pane model.
+    pub fn paintChrome(self: *const Workspace, hdc: c.HDC) void {
+        const tab_bar = c.RECT{
+            .left = self.layout_origin_x,
+            .top = self.layout_origin_y,
+            .right = self.layout_origin_x + self.layout_width,
+            .bottom = self.layout_origin_y + Tokens.tab_bar_height,
+        };
+        fillRect(hdc, tab_bar, Tokens.workspace_rail);
+        for (self.layout.tabs.items, 0..) |tab, index| {
+            const left = self.layout_origin_x + @as(i32, @intCast(index)) * 120;
+            const bounds = c.RECT{
+                .left = left,
+                .top = tab_bar.top + 4,
+                .right = left + 112,
+                .bottom = tab_bar.bottom - 4,
+            };
+            fillRect(hdc, bounds, if (index == self.layout.selected_tab) 0x00345D8C else 0x00262626);
+            drawUtf8(hdc, tabLabel(tab, index), bounds.left + 8, bounds.top + 5, 11, 0x00E6E6E6);
+        }
+        for (self.surfaces, 0..) |slot, index| {
+            if (slot.surface == null) continue;
+            const left = self.layout_origin_x + if (index == 0) 0 else @divTrunc(self.layout_width, 2);
+            drawUtf8(
+                hdc,
+                if (index == self.active_surface) "focused pane" else "pane",
+                left + 8,
+                self.layout_origin_y + Tokens.tab_bar_height + 5,
+                10,
+                if (index == self.active_surface) 0x000A84FF else 0x008A8A8A,
+            );
         }
     }
 
@@ -920,6 +1027,28 @@ test "surface identity cannot leak a session across project paths" {
     };
     try std.testing.expect(surfaceIdentityMatches(&first, "C:\\work\\first", "node-1"));
     try std.testing.expect(!surfaceIdentityMatches(&second, "C:\\work\\first", "node-1"));
+}
+
+fn fillRect(hdc: c.HDC, bounds: c.RECT, color: u32) void {
+    const brush = c.CreateSolidBrush(color);
+    if (brush == null) return;
+    _ = c.FillRect(hdc, &bounds, brush);
+    _ = c.DeleteObject(brush);
+}
+
+fn drawUtf8(hdc: c.HDC, text: []const u8, x: i32, y: i32, size: i32, color: u32) void {
+    const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, text) catch return;
+    defer std.heap.page_allocator.free(wide);
+    _ = c.SetTextColor(hdc, color);
+    _ = c.SetBkMode(hdc, c.TRANSPARENT);
+    var bounds = c.RECT{ .left = x, .top = y, .right = x + 220, .bottom = y + size + 8 };
+    _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &bounds, c.DT_LEFT | c.DT_SINGLELINE);
+}
+
+fn tabLabel(tab: WorkspaceLayout.Tab, index: usize) []const u8 {
+    if (tab.panes.items.len > 1) return "split";
+    if (index == 0) return "agent";
+    return "shell";
 }
 
 fn appendOutput(slot: *Surface, bytes: []const u8) void {

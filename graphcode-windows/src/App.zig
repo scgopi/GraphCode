@@ -237,6 +237,26 @@ pub const App = struct {
                 self.model.selectNext();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
+            .new_tab => if (self.workspace) |*workspace| {
+                const id = std.fmt.allocPrint(self.allocator, "shell-tab-{d}", .{workspace.layout.next_surface_id}) catch return;
+                defer self.allocator.free(id);
+                workspace.newTab(id) catch self.setStatus("Unable to create terminal tab");
+            },
+            .close_tab => if (self.workspace) |*workspace| {
+                workspace.closeFocusedPane() catch self.setStatus("Unable to close terminal pane");
+            },
+            .split_horizontal => if (self.workspace) |*workspace| {
+                const id = std.fmt.allocPrint(self.allocator, "shell-split-{d}", .{workspace.layout.next_surface_id}) catch return;
+                defer self.allocator.free(id);
+                workspace.splitFocused(.horizontal, id) catch self.setStatus("Unable to split terminal");
+            },
+            .split_vertical => if (self.workspace) |*workspace| {
+                const id = std.fmt.allocPrint(self.allocator, "shell-split-{d}", .{workspace.layout.next_surface_id}) catch return;
+                defer self.allocator.free(id);
+                workspace.splitFocused(.vertical, id) catch self.setStatus("Unable to split terminal");
+            },
+            .focus_next_pane => if (self.workspace) |*workspace| workspace.focusNextPane(),
+            .focus_previous_pane => if (self.workspace) |*workspace| workspace.focusPreviousPane(),
             .none => {},
         }
     }
@@ -358,6 +378,7 @@ fn onWindowMessage(
                 app.sidebar_scroll,
                 &app.canvas,
             );
+            if (app.workspace) |*workspace| workspace.paintChrome(hdc);
             _ = c.EndPaint(hwnd, &paint);
             result.* = 0;
             return true;
