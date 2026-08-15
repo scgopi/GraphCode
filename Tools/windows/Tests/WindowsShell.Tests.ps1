@@ -62,6 +62,7 @@ foreach ($path in @(
     "src\DaemonClient.zig",
     "src\GraphModel.zig",
     "src\GraphCanvas.zig",
+    "src\CanvasInput.zig",
     "src\Sidebar.zig",
     "src\TerminalWorkspace.zig",
     "src\TerminalSurface.zig",
@@ -77,6 +78,7 @@ foreach ($path in @(
     "fixtures\daemon-v2-graph-event.json",
     "fixtures\daemon-v2-graph-reordered-edges.json",
     "fixtures\daemon-v2-presence-event.json",
+    "fixtures\daemon-v2-graph-attention.json",
     "fixtures\daemon-v1-list-projects.json",
     "fixtures\daemon-v2-create-node.json",
     "fixtures\daemon-v2-message-node.json",
@@ -193,6 +195,18 @@ Invoke-Native "Graph canvas executable tests" {
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
   if (-not $winghosttyRoot) {
     $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  Invoke-Native "Graph canvas input executable tests" {
+    $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+    $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+    if (-not $winghosttyRoot) {
+      $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+    }
+    $include = Join-Path $winghosttyRoot "include"
+    Push-Location $shellRoot
+    try {
+      & $zig test src\CanvasInput.zig -target x86_64-windows-msvc -lc "-I$include"
+    } finally { Pop-Location }
   }
   $include = Join-Path $winghosttyRoot "include"
   if (-not (Test-Path -LiteralPath $include -PathType Container)) {

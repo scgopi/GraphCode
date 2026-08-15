@@ -361,5 +361,5 @@ test "attention fixture preserves awaiting input and stranded edge metadata" {
     const graph = model.graph orelse return error.TestExpectedGraph;
     try std.testing.expectEqualStrings("awaitingInput", graph.nodes.items[0].presence);
     try std.testing.expectEqualStrings("handoff", graph.edges.items[0].kind);
-    try std.testing.expect(graph.edges.items[0].fired);
+    try std.testing.expect(!graph.edges.items[0].fired);
 }

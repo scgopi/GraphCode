@@ -204,15 +204,23 @@ fn needsAttention(node: GraphModel.Node, nodes: []const GraphModel.Node, edges: 
     if (std.mem.eql(u8, node.state, "running") and std.mem.eql(u8, node.presence, "awaitingInput")) return true;
     if (!std.mem.eql(u8, node.state, "blocked")) return false;
     for (edges) |edge| {
-        if (!std.mem.eql(u8, edge.to, node.id) or !std.mem.eql(u8, edge.kind, "handoff") or !edge.fired) continue;
+        if (!std.mem.eql(u8, edge.to, node.id) or !std.mem.eql(u8, edge.kind, "handoff") or edge.fired) continue;
+        var source_found = false;
         for (nodes) |source| {
-            if (std.mem.eql(u8, source.id, edge.from) and
-                (std.mem.eql(u8, source.state, "failed") or std.mem.eql(u8, source.state, "stalled") or
-                    std.mem.eql(u8, source.state, "succeeded")))
-            {
-                return true;
+            if (std.mem.eql(u8, source.id, edge.from)) {
+                source_found = true;
+                if (!(std.mem.eql(u8, source.state, "failed") or std.mem.eql(u8, source.state, "stalled") or
+                    std.mem.eql(u8, source.state, "succeeded") or std.mem.eql(u8, source.state, "stopped")))
+                {
+                    return false;
+                }
             }
         }
+        if (!source_found) return false;
+        // Continue checking every unfired handoff input; all must be resolved.
+    }
+    for (edges) |edge| {
+        if (std.mem.eql(u8, edge.to, node.id) and std.mem.eql(u8, edge.kind, "handoff") and !edge.fired) return true;
     }
     return false;
 }
@@ -359,10 +367,20 @@ test "attention follows awaiting input and stranded blocked semantics" {
         .{ .id = @constCast("blocked"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast("blocked"), .activity = @constCast(""), .presence = @constCast("idle") },
     };
     const edges = [_]GraphModel.Edge{
-        .{ .from = @constCast("failed"), .to = @constCast("blocked"), .kind = @constCast("handoff"), .fired = true },
+        .{ .from = @constCast("failed"), .to = @constCast("blocked"), .kind = @constCast("handoff"), .fired = false },
     };
     try std.testing.expect(needsAttention(nodes[0], &nodes, &edges));
     try std.testing.expect(needsAttention(nodes[2], &nodes, &edges));
+    const unresolved_nodes = [_]GraphModel.Node{
+        nodes[1],
+        .{ .id = @constCast("running"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast("running"), .activity = @constCast(""), .presence = @constCast("busy") },
+        nodes[2],
+    };
+    const unresolved_edges = [_]GraphModel.Edge{
+        edges[0],
+        .{ .from = @constCast("running"), .to = @constCast("blocked"), .kind = @constCast("handoff"), .fired = false },
+    };
+    try std.testing.expect(!needsAttention(unresolved_nodes[2], &unresolved_nodes, &unresolved_edges));
     const ordinary_waiting = GraphModel.Node{
         .id = @constCast("waiting"),
         .title = @constCast(""),
