@@ -272,3 +272,21 @@ test "graph snapshots decode escaped project data and presence" {
     try std.testing.expectEqualStrings("Node \"A\"", graph.nodes.items[0].title);
     try std.testing.expectEqualStrings("busy", graph.nodes.items[0].presence);
 }
+
+test "stub graph snapshot decodes two actionable nodes" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const frame =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"stub-graph","project":{"path":"graphcode://stub/project","name":"Stub project","remote":false},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"Stub node A","loopType":"turnBased","state":"running","activity":"stub","presence":{"presence":"busy","confidence":"reported"}},{"id":"22222222-2222-4222-8222-222222222222","title":"Stub node B","loopType":"turnBased","state":"idle","activity":"stub","presence":{"presence":"idle","confidence":"reported"}}],"edges":[]}}}
+    ;
+    try std.testing.expectEqual(Wire.EventKind.graph_changed, try model.updateFromFrame(frame));
+    const graph = model.graph orelse return error.TestExpectedGraph;
+    try std.testing.expectEqualStrings("graphcode://stub/project", graph.project.path);
+    try std.testing.expectEqual(@as(usize, 2), graph.nodes.items.len);
+    try std.testing.expectEqualStrings(
+        "11111111-1111-4111-8111-111111111111",
+        graph.nodes.items[0].id,
+    );
+    try std.testing.expectEqualStrings("busy", graph.nodes.items[0].presence);
+    try std.testing.expectEqualStrings("idle", graph.nodes.items[1].presence);
+}

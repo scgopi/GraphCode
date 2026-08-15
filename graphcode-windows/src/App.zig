@@ -20,13 +20,19 @@ pub const App = struct {
     workspace: ?TerminalWorkspace.Workspace = null,
     instance_mutex: c.HANDLE = null,
     sync_requested: bool = false,
+    restore_requested: bool = false,
+    open_project_pending: bool = false,
     last_connection_state: Wire.ConnectionState = .disconnected,
     last_project_opened: []const u8 = "",
+    pending_project_path: []u8 = &.{},
     status_override: []u8 = &.{},
     running: bool = true,
     smoke: bool = false,
     stress: bool = false,
+    require_smoke_contract: bool = false,
+    smoke_failure: bool = false,
     smoke_tick: usize = 0,
+    smoke_action_requested: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) !*App {
         var client = try DaemonClient.init(allocator);
@@ -50,19 +56,22 @@ pub const App = struct {
         self.model.deinit();
         if (self.instance_mutex != null) _ = c.CloseHandle(self.instance_mutex);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
+        if (self.pending_project_path.len != 0) self.allocator.free(self.pending_project_path);
         if (self.status_override.len != 0) self.allocator.free(self.status_override);
         self.allocator.destroy(self);
     }
 
     pub fn run(self: *App) !void {
         try self.window.create(self, &onWindowMessage, title.ptr);
-        self.workspace = TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator) catch blk: {
-            self.setStatus("Winghostty unavailable; terminal workspace disabled");
-            break :blk null;
-        };
+        self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
+        if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_REQUIRE_DAEMON")) |value| {
+            defer self.allocator.free(value);
+            self.require_smoke_contract = std.mem.eql(u8, value, "1");
+        } else |_| {}
         self.client.setCallback(&onDaemonFrame, self);
         self.client.connect();
         try self.window.messageLoop();
+        if (self.smoke_failure) return error.SmokeContractFailed;
     }
 
     pub fn configureArgs(self: *App, args: []const []const u8) void {
@@ -80,10 +89,13 @@ pub const App = struct {
         switch (event) {
             .recent_projects => {
                 if (self.model.graph == null and self.model.recent_projects.items.len != 0) {
-                    self.openProject(self.model.recent_projects.items[0].path);
+                    self.queueProject(self.model.recent_projects.items[0].path);
                 }
             },
-            .graph_changed => self.refreshWorkspace(),
+            .graph_changed => {
+                if (self.model.graph) |graph| self.queueProject(graph.project.path);
+                self.refreshWorkspace();
+            },
             .error_occurred => {
                 if (Wire.copyErrorMessage(self.allocator, frame) catch null) |message| {
                     self.replaceStatus(message);
@@ -113,9 +125,39 @@ pub const App = struct {
     fn openProject(self: *App, path: []const u8) void {
         if (path.len == 0) return;
         self.client.setSubscription(path);
-        self.client.sendOpenProject(path);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
-        self.last_project_opened = self.allocator.dupe(u8, path) catch &.{};
+        self.last_project_opened = self.allocator.dupe(u8, path) catch {
+            self.setStatus("Unable to retain project subscription");
+            return;
+        };
+        self.open_project_pending = true;
+        if (self.client.state == .connected) {
+            self.client.sendOpenProject(path);
+            self.open_project_pending = false;
+        }
+    }
+
+    fn queueProject(self: *App, path: []const u8) void {
+        if (path.len == 0 or
+            std.mem.eql(u8, self.last_project_opened, path) or
+            std.mem.eql(u8, self.pending_project_path, path))
+        {
+            return;
+        }
+        const copy = self.allocator.dupe(u8, path) catch {
+            self.setStatus("Unable to retain pending project subscription");
+            return;
+        };
+        if (self.pending_project_path.len != 0) self.allocator.free(self.pending_project_path);
+        self.pending_project_path = copy;
+    }
+
+    fn flushPendingProject(self: *App) void {
+        if (self.pending_project_path.len == 0 or self.client.state != .connected) return;
+        const path = self.pending_project_path;
+        self.pending_project_path = &.{};
+        self.openProject(path);
+        self.allocator.free(path);
     }
 
     fn currentProject(self: *const App) ?[]const u8 {
@@ -254,18 +296,33 @@ fn onWindowMessage(
         c.WM_TIMER => if (wparam == MainWindow.timer_id) {
             app.smoke_tick += 1;
             app.client.poll();
-            if (app.client.state == .connected and !app.sync_requested) {
-                app.sync_requested = true;
-                app.client.sendListProjects();
-                app.client.sendRestoreOpenProjects();
+            if (app.client.state == .connected) app.flushPendingProject();
+            if (app.client.state == .connected) {
+                if (app.open_project_pending and app.last_project_opened.len != 0) {
+                    app.client.sendOpenProject(app.last_project_opened);
+                    app.open_project_pending = false;
+                } else if (!app.sync_requested) {
+                    app.sync_requested = true;
+                    app.client.sendListProjects();
+                } else if (!app.restore_requested) {
+                    app.restore_requested = true;
+                    app.client.sendRestoreOpenProjects();
+                }
             }
             if (app.client.state != app.last_connection_state) {
                 app.last_connection_state = app.client.state;
-                app.sync_requested = app.client.state != .connected;
+                app.sync_requested = false;
+                app.restore_requested = false;
             }
             if (app.workspace) |*workspace| workspace.poll();
             if (app.smoke and app.smoke_tick == 8) {
                 app.refreshWorkspace();
+            }
+            if (app.smoke and app.smoke_tick == 16 and
+                app.client.state == .connected and !app.smoke_action_requested)
+            {
+                app.smoke_action_requested = true;
+                app.createNode();
             }
             if (app.smoke and app.smoke_tick >= 12 and
                 ((app.stress and app.smoke_tick % 2 == 0) or
@@ -283,6 +340,9 @@ fn onWindowMessage(
                 ((app.stress and app.smoke_tick == 48) or
                     (!app.stress and app.smoke_tick == 28)))
             {
+                if (app.require_smoke_contract and !smokeContractPassed(app)) {
+                    app.smoke_failure = true;
+                }
                 _ = c.DestroyWindow(hwnd);
             }
             _ = c.InvalidateRect(hwnd, null, 0);
@@ -321,4 +381,13 @@ fn onWindowMessage(
         else => {},
     }
     return false;
+}
+
+fn smokeContractPassed(self: *const App) bool {
+    if (self.client.state != .connected) return false;
+    const value = self.model.graph orelse return false;
+    if (value.nodes.items.len < 2) return false;
+    const workspace = self.workspace orelse return false;
+    return workspace.hasSurface(0) and workspace.hasSurface(1) and
+        workspace.hasAttach(0) and workspace.hasAttach(1);
 }

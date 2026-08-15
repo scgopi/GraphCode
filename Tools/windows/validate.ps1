@@ -552,7 +552,9 @@ function Invoke-Task([string] $name) {
       }
     }
     "windows-shell" {
-      & (Join-Path $repoRoot "Tools\windows\Tests\WindowsShell.Tests.ps1")
+      $zig0152 = Resolve-ZigVersion "0.15.2" "GRAPHCODE_ZIG0152"
+      & (Join-Path $repoRoot "Tools\windows\Tests\WindowsShell.Tests.ps1") `
+        -ZigExecutable $zig0152
       if ($LASTEXITCODE -ne 0) {
         throw "Windows shell scaffold contract failed with exit code $LASTEXITCODE"
       }
@@ -571,7 +573,6 @@ function Invoke-Task([string] $name) {
         -not (Test-Path -LiteralPath $zmxRoot -PathType Container)) {
         throw "Windows shell provider worktrees unavailable; real smoke is mandatory."
       }
-      $zig0152 = Resolve-ZigVersion "0.15.2" "GRAPHCODE_ZIG0152"
       $zig0160 = Resolve-ZigVersion "0.16.0" "GRAPHCODE_ZIG0160"
       Invoke-Native "Pinned GraphCode Windows shell build and smoke" {
         & (Join-Path $repoRoot "Tools\windows\windows-shell.ps1") `
@@ -579,6 +580,7 @@ function Invoke-Task([string] $name) {
           -ZmxRoot $zmxRoot `
           -Zig0152 $zig0152 `
           -Zig0160 $zig0160 `
+          -UseStubDaemon `
           -Stress
       }
     }

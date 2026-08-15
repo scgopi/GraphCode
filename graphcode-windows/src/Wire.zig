@@ -103,12 +103,12 @@ pub fn v2Hello(
     subscription_path: []const u8,
 ) ![]u8 {
     const subscription = if (subscription_path.len == 0)
-        try allocator.dupe(u8, "{\"projectPaths\":[]}")
+        try allocator.dupe(u8, "")
     else blk: {
         const quoted_path = try quoteJson(allocator, subscription_path);
         defer allocator.free(quoted_path);
         break :blk try std.mem.concat(allocator, u8, &.{
-            "{\"projectPaths\":[",
+            ",\"subscription\":{\"projectPaths\":[",
             quoted_path,
             "]}",
         });
@@ -122,7 +122,6 @@ pub fn v2Hello(
             client_id,
             "\",\"resumeFrom\":",
             cursor_text,
-            ",\"subscription\":",
             subscription,
             "}",
         });
@@ -130,7 +129,7 @@ pub fn v2Hello(
     return std.mem.concat(allocator, u8, &.{
         "{\"version\":2,\"kind\":\"hello\",\"supportedVersions\":[1,2],\"clientID\":\"",
         client_id,
-        "\",\"subscription\":",
+        "\"",
         subscription,
         "}",
     });
@@ -176,17 +175,22 @@ pub fn commandGraphCreateNode(
     allocator: std.mem.Allocator,
     project_path: []const u8,
     title: []const u8,
+    node_id: []const u8,
 ) ![]u8 {
     const quoted_path = try quoteJson(allocator, project_path);
     defer allocator.free(quoted_path);
     const quoted_title = try quoteJson(allocator, title);
     defer allocator.free(quoted_title);
+    const quoted_id = try quoteJson(allocator, node_id);
+    defer allocator.free(quoted_id);
     return std.mem.concat(allocator, u8, &.{
         "{\"graphCommand\":{\"projectPath\":",
         quoted_path,
-        ",\"command\":{\"createNode\":{\"title\":",
+        ",\"command\":{\"createNode\":{\"_0\":{\"id\":",
+        quoted_id,
+        ",\"title\":",
         quoted_title,
-        ",\"loopType\":\"turnBased\",\"checkDescription\":null,\"triggerPrompt\":null,\"firstInstruction\":null,\"pausesBeforeWritesOnly\":false,\"goal\":null,\"backend\":\"claudeCode\",\"modelTier\":null,\"worktreeBinding\":null,\"subGraph\":null,\"pilotState\":\"notPiloted\",\"usage\":null,\"activity\":null,\"presence\":null,\"metricHistory\":[],\"createdBy\":null,\"state\":\"idle\",\"createdAt\":\"1970-01-01T00:00:00Z\"}}}}}",
+        ",\"loopType\":\"turnBased\",\"checkDescription\":null,\"triggerPrompt\":null,\"firstInstruction\":\"Work on the requested Windows shell task.\",\"pausesBeforeWritesOnly\":false,\"goal\":null,\"backend\":\"claudeCode\",\"modelTier\":null,\"worktree\":null,\"subGraph\":null,\"createdBy\":null}}}}}",
     });
 }
 
@@ -207,22 +211,23 @@ pub fn commandGraphNodeAction(
         return std.mem.concat(allocator, u8, &.{
             "{\"graphCommand\":{\"projectPath\":",
             quoted_path,
-            ",\"command\":{\"messageNode\":[",
+            ",\"command\":{\"messageNode\":{\"_0\":",
             quoted_node,
-            ",",
+            ",\"text\":",
             quoted_text,
-            ",null]}}}",
+            ",\"from\":null}}}}",
         });
     }
-    return std.mem.concat(allocator, u8, &.{
-        "{\"graphCommand\":{\"projectPath\":",
-        quoted_path,
-        ",\"command\":{\"",
-        action,
-        "\":",
-        quoted_node,
-        "}}}",
-    });
+    if (std.mem.eql(u8, action, "stopNode")) {
+        return std.mem.concat(allocator, u8, &.{
+            "{\"graphCommand\":{\"projectPath\":",
+            quoted_path,
+            ",\"command\":{\"stopNode\":{\"_0\":",
+            quoted_node,
+            "}}}}",
+        });
+    }
+    return error.UnsupportedGraphAction;
 }
 
 fn quoteJson(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
@@ -432,4 +437,58 @@ test "frame limits follow protocol mode" {
     try std.testing.expectError(error.PayloadTooLarge, frameLength(payload, .v2));
     const header = try frameLength(payload, .v1);
     try std.testing.expectEqual(@as(u8, 1), header[3]);
+}
+
+test "v2 hello omits subscription for the no-filter case" {
+    const allocator = std.testing.allocator;
+    const hello = try v2Hello(allocator, "00000000-0000-4000-8000-000000000001", null, "");
+    defer allocator.free(hello);
+    try std.testing.expectEqualStrings(
+        "{\"version\":2,\"kind\":\"hello\",\"supportedVersions\":[1,2],\"clientID\":\"00000000-0000-4000-8000-000000000001\"}",
+        hello,
+    );
+    const subscribed = try v2Hello(
+        allocator,
+        "00000000-0000-4000-8000-000000000001",
+        9,
+        "C:\\work\\graph",
+    );
+    defer allocator.free(subscribed);
+    try std.testing.expectEqualStrings(
+        "{\"version\":2,\"kind\":\"hello\",\"supportedVersions\":[1,2],\"clientID\":\"00000000-0000-4000-8000-000000000001\",\"resumeFrom\":9,\"subscription\":{\"projectPaths\":[\"C:\\\\work\\\\graph\"]}}",
+        subscribed,
+    );
+}
+
+test "graph commands match Swift Codable associated-value shapes" {
+    const allocator = std.testing.allocator;
+    const project = "C:\\work\\graph";
+    const node = "11111111-1111-4111-8111-111111111111";
+    const create = try commandGraphCreateNode(
+        allocator,
+        project,
+        "Windows shell node",
+        node,
+    );
+    defer allocator.free(create);
+    try std.testing.expectEqualStrings(
+        "{\"graphCommand\":{\"projectPath\":\"C:\\\\work\\\\graph\",\"command\":{\"createNode\":{\"_0\":{\"id\":\"11111111-1111-4111-8111-111111111111\",\"title\":\"Windows shell node\",\"loopType\":\"turnBased\",\"checkDescription\":null,\"triggerPrompt\":null,\"firstInstruction\":\"Work on the requested Windows shell task.\",\"pausesBeforeWritesOnly\":false,\"goal\":null,\"backend\":\"claudeCode\",\"modelTier\":null,\"worktree\":null,\"subGraph\":null,\"createdBy\":null}}}}}",
+        create,
+    );
+    const message = try commandGraphNodeAction(allocator, project, node, "messageNode", "hello");
+    defer allocator.free(message);
+    try std.testing.expectEqualStrings(
+        "{\"graphCommand\":{\"projectPath\":\"C:\\\\work\\\\graph\",\"command\":{\"messageNode\":{\"_0\":\"11111111-1111-4111-8111-111111111111\",\"text\":\"hello\",\"from\":null}}}}",
+        message,
+    );
+    const stop = try commandGraphNodeAction(allocator, project, node, "stopNode", null);
+    defer allocator.free(stop);
+    try std.testing.expectEqualStrings(
+        "{\"graphCommand\":{\"projectPath\":\"C:\\\\work\\\\graph\",\"command\":{\"stopNode\":{\"_0\":\"11111111-1111-4111-8111-111111111111\"}}}}",
+        stop,
+    );
+    try std.testing.expectError(
+        error.UnsupportedGraphAction,
+        commandGraphNodeAction(allocator, project, node, "deleteNode", null),
+    );
 }

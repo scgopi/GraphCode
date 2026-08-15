@@ -1,7 +1,6 @@
 const std = @import("std");
 const c = @import("Win32.zig").c;
 
-const allocator = std.heap.c_allocator;
 const columns: usize = 120;
 const rows: usize = 40;
 const cell_count: usize = columns * rows;
@@ -36,6 +35,9 @@ pub const Workspace = struct {
     allocator: std.mem.Allocator,
     zmx_path: []u8,
     cwd: []u8,
+    recreate_sessions: [2][]u8 = .{ &.{}, &.{} },
+    recreate_due_ms: [2]i64 = .{ 0, 0 },
+    recreate_delay_ms: [2]i64 = .{ 100, 100 },
     fatal_error: bool = false,
     render_error: c.winghostty_result = c.WINGHOSTTY_OK,
 
@@ -57,8 +59,18 @@ pub const Workspace = struct {
     }
 
     pub fn deinit(self: *Workspace) void {
+        for (self.surfaces) |surface| {
+            if (surface.session_name.len != 0) self.killSession(surface.session_name);
+        }
+        for (self.recreate_sessions) |session| {
+            if (session.len != 0) self.killSession(session);
+        }
         self.destroySurface(0);
         self.destroySurface(1);
+        for (&self.recreate_sessions) |*session| {
+            if (session.*.len != 0) self.allocator.free(session.*);
+            session.* = &.{};
+        }
         if (self.host) |host| {
             _ = c.winghostty_host_deinitialize(host);
             self.host = null;
@@ -70,8 +82,14 @@ pub const Workspace = struct {
     pub fn openNode(self: *Workspace, index: usize, node_id: []const u8) !void {
         if (index >= self.surfaces.len) return error.InvalidSurface;
         self.destroySurface(index);
+        self.resetSessionState(index);
+        self.recreate_due_ms[index] = 0;
         const session = try self.allocator.dupe(u8, node_id);
         errdefer self.allocator.free(session);
+        if (self.recreate_sessions[index].len != 0) {
+            self.allocator.free(self.recreate_sessions[index]);
+            self.recreate_sessions[index] = &.{};
+        }
         try self.startSession(index, session);
         var options = self.surfaceOptions(index);
         const result = c.winghostty_host_create_surface_v2(
@@ -116,6 +134,7 @@ pub const Workspace = struct {
     pub fn poll(self: *Workspace) void {
         self.readAttachOutput(0);
         self.readAttachOutput(1);
+        self.pollRecreates();
     }
 
     pub fn focus(self: *Workspace, index: usize) void {
@@ -137,6 +156,10 @@ pub const Workspace = struct {
         return index < self.surfaces.len and self.surfaces[index].surface != null;
     }
 
+    pub fn hasAttach(self: *const Workspace, index: usize) bool {
+        return index < self.surfaces.len and self.surfaces[index].attach != null;
+    }
+
     pub fn destroySurface(self: *Workspace, index: usize) void {
         if (index >= self.surfaces.len) return;
         const slot = &self.surfaces[index];
@@ -152,6 +175,7 @@ pub const Workspace = struct {
             self.allocator.free(slot.session_name);
             slot.session_name = &.{};
         }
+        self.resetSessionState(index);
     }
 
     fn surfaceOptions(self: *Workspace, index: usize) c.winghostty_surface_options_v2 {
@@ -199,16 +223,8 @@ pub const Workspace = struct {
     }
 
     fn startSession(self: *Workspace, index: usize, session: []const u8) !void {
-        var get_args = [_][]const u8{ self.zmx_path, "get", session };
-        const get_result = try std.process.Child.run(.{
-            .allocator = allocator,
-            .argv = &get_args,
-            .max_output_bytes = 16 * 1024,
-        });
-        allocator.free(get_result.stdout);
-        allocator.free(get_result.stderr);
         var attach_args = [_][]const u8{ self.zmx_path, "attach", session };
-        var child = std.process.Child.init(&attach_args, allocator);
+        var child = std.process.Child.init(&attach_args, self.allocator);
         child.cwd = self.cwd;
         child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
@@ -223,6 +239,17 @@ pub const Workspace = struct {
             _ = child.wait() catch {};
             self.surfaces[index].attach = null;
         }
+    }
+
+    fn killSession(self: *Workspace, session: []const u8) void {
+        var args = [_][]const u8{ self.zmx_path, "kill", "--force", session };
+        var child = std.process.Child.init(&args, self.allocator);
+        child.cwd = self.cwd;
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+        child.spawn() catch return;
+        _ = child.wait() catch {};
     }
 
     fn writeAttachInput(self: *Workspace, index: usize, bytes: []const u8) void {
@@ -243,15 +270,76 @@ pub const Workspace = struct {
         const child = slot.attach orelse return;
         const stdout = child.stdout orelse return;
         var available: c.DWORD = 0;
-        if (c.PeekNamedPipe(@ptrCast(stdout.handle), null, 0, null, &available, null) == 0) return;
-        while (available > 0) {
+        if (c.PeekNamedPipe(@ptrCast(stdout.handle), null, 0, null, &available, null) == 0) {
+            self.handleAttachExit(index);
+            return;
+        }
+        var budget: usize = 64 * 1024;
+        while (available > 0 and budget > 0) {
             var buffer: [4096]u8 = undefined;
             var read: c.DWORD = 0;
-            const amount = @min(available, @as(c.DWORD, @intCast(buffer.len)));
-            if (c.ReadFile(@ptrCast(stdout.handle), &buffer, amount, &read, null) == 0 or read == 0) break;
+            const amount = @min(
+                @min(available, @as(c.DWORD, @intCast(buffer.len))),
+                @as(c.DWORD, @intCast(budget)),
+            );
+            if (c.ReadFile(@ptrCast(stdout.handle), &buffer, amount, &read, null) == 0 or read == 0) {
+                self.handleAttachExit(index);
+                return;
+            }
             self.feedTerminalOutput(index, buffer[0..@intCast(read)]);
-            if (c.PeekNamedPipe(@ptrCast(stdout.handle), null, 0, null, &available, null) == 0) break;
+            budget -= @intCast(read);
+            if (c.PeekNamedPipe(@ptrCast(stdout.handle), null, 0, null, &available, null) == 0) {
+                self.handleAttachExit(index);
+                return;
+            }
         }
+        if (c.GetExitCodeProcess(child.id, &available) != 0 and available != c.STILL_ACTIVE) {
+            self.handleAttachExit(index);
+        }
+    }
+
+    fn handleAttachExit(self: *Workspace, index: usize) void {
+        if (index >= self.surfaces.len) return;
+        const slot = &self.surfaces[index];
+        if (slot.attach == null) return;
+        const session = if (slot.session_name.len == 0)
+            null
+        else
+            self.allocator.dupe(u8, slot.session_name) catch null;
+        self.waitAttach(index);
+        self.destroySurface(index);
+        if (session) |value| {
+            if (self.recreate_sessions[index].len != 0) self.allocator.free(self.recreate_sessions[index]);
+            self.recreate_sessions[index] = value;
+            self.recreate_due_ms[index] = nowMilliseconds() + self.recreate_delay_ms[index];
+            self.recreate_delay_ms[index] = @min(self.recreate_delay_ms[index] * 2, 4_000);
+        }
+    }
+
+    fn pollRecreates(self: *Workspace) void {
+        const now = nowMilliseconds();
+        for (self.recreate_sessions, 0..) |session, index| {
+            if (session.len == 0 or self.surfaces[index].surface != null or now < self.recreate_due_ms[index]) {
+                continue;
+            }
+            self.openNode(index, session) catch {
+                self.recreate_due_ms[index] = now + self.recreate_delay_ms[index];
+                self.recreate_delay_ms[index] = @min(self.recreate_delay_ms[index] * 2, 4_000);
+                continue;
+            };
+            self.recreate_delay_ms[index] = 100;
+        }
+    }
+
+    fn resetSessionState(self: *Workspace, index: usize) void {
+        const slot = &self.surfaces[index];
+        slot.terminal_buffer_len = 0;
+        slot.parser = .normal;
+        slot.csi_value = 0;
+        slot.csi_have_value = false;
+        clearCells(slot);
+        slot.input_bytes = 0;
+        slot.output_events = 0;
     }
 
     fn feedTerminalOutput(self: *Workspace, index: usize, bytes: []const u8) void {
@@ -280,6 +368,10 @@ pub const Workspace = struct {
         slot.output_events += 1;
     }
 };
+
+fn nowMilliseconds() i64 {
+    return @intCast(std.time.milliTimestamp());
+}
 
 fn workspaceFromUserData(user_data: ?*anyopaque) ?*Workspace {
     return if (user_data) |value| @ptrCast(@alignCast(value)) else null;
