@@ -347,6 +347,17 @@ fn jsonBool(object: []const u8, key: []const u8) ?bool {
     return null;
 }
 
+fn jsonNumber(object: []const u8, key: []const u8) ?u32 {
+    const needle = std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":", .{key}) catch return null;
+    defer std.heap.page_allocator.free(needle);
+    const start = std.mem.indexOf(u8, object, needle) orelse return null;
+    const value = std.mem.trimLeft(u8, object[start + needle.len ..], " ");
+    var end: usize = 0;
+    while (end < value.len and value[end] >= '0' and value[end] <= '9') : (end += 1) {}
+    if (end == 0) return null;
+    return std.fmt.parseInt(u32, value[0..end], 10) catch null;
+}
+
 fn duplicateJsonString(allocator: std.mem.Allocator, object: []const u8, key: []const u8) ![]u8 {
     return Wire.decodeJsonString(allocator, Wire.jsonString(object, key) orelse "");
 }
@@ -380,11 +391,19 @@ fn duplicatePresence(allocator: std.mem.Allocator, object: []const u8) ![]u8 {
 }
 
 fn duplicateWorktreePath(allocator: std.mem.Allocator, object: []const u8) ![]u8 {
-    const key = std.mem.indexOf(u8, object, "\"worktree\"") orelse
+    const key = std.mem.indexOf(u8, object, "\"worktreeBinding\"") orelse
         return allocator.dupe(u8, "");
     const open = indexOfByte(object, key, '{') orelse return allocator.dupe(u8, "");
     const close = findClosing(object, open, '{', '}') orelse return allocator.dupe(u8, "");
-    return duplicateJsonStringOr(allocator, object[open .. close + 1], "worktreePath", "");
+    const binding = object[open .. close + 1];
+    return duplicateJsonStringOr(allocator, binding, "path", Wire.jsonString(binding, "worktreePath") orelse "");
+}
+
+fn duplicateWorktreeBranch(allocator: std.mem.Allocator, object: []const u8) ![]u8 {
+    const key = std.mem.indexOf(u8, object, "\"worktreeBinding\"") orelse return allocator.dupe(u8, "");
+    const open = indexOfByte(object, key, '{') orelse return allocator.dupe(u8, "");
+    const close = findClosing(object, open, '{', '}') orelse return allocator.dupe(u8, "");
+    return duplicateJsonStringOr(allocator, object[open .. close + 1], "branch", "");
 }
 
 fn findClosing(bytes: []const u8, start: usize, open: u8, close: u8) ?usize {
@@ -600,3 +619,43 @@ test "attention fixture keeps real daemon state and worktree context visible" {
     try std.testing.expectEqualStrings("Attention fixture", model.graph.?.project.name);
     try std.testing.expectEqual(@as(usize, 2), model.attentionCount());
     try std.testing.expectEqualStrings("Failed check", model.attention.items[0].title);
+    try std.testing.expectEqualStrings("C:\\work\\graph-review", model.graph.?.nodes.items[0].worktree_path);
+    try std.testing.expectEqualStrings("review", model.graph.?.nodes.items[0].worktree_branch);
+}
+
+test "real edge payload uses fireCount and only handoff blocks" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const frame =
+        \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"id":"g","project":{"path":"C:\\work\\graph","name":"Graph"},"nodes":[{"id":"a","title":"A","state":"succeeded"},{"id":"b","title":"B","state":"blocked"},{"id":"c","title":"C","state":"blocked"}],"edges":[{"from":"a","to":"b","kind":"handoff","fireCount":0},{"from":"a","to":"c","kind":"message","fireCount":0}]}}}
+    ;
+    _ = try model.updateFromFrame(frame);
+    try std.testing.expectEqual(@as(usize, 1), model.attentionCount());
+    try std.testing.expectEqualStrings("B", model.attention.items[0].title);
+}
+
+test "fireCount parses complete positive numeric tokens" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const frame =
+        \\{"version":2,"kind":"event","sequence":4,"event":{"graphChanged":{"id":"g","project":{"path":"C:\\work\\graph","name":"Graph"},"nodes":[{"id":"a","title":"A","state":"running"},{"id":"b","title":"B","state":"blocked"}],"edges":[{"from":"a","to":"b","kind":"handoff","fireCount":1},{"from":"a","to":"b","kind":"handoff","fireCount":123}]}}}
+    ;
+    _ = try model.updateFromFrame(frame);
+    try std.testing.expectEqual(@as(u32, 1), model.graph.?.edges.items[0].fire_count);
+    try std.testing.expectEqual(@as(u32, 123), model.graph.?.edges.items[1].fire_count);
+    try std.testing.expectEqual(@as(usize, 0), model.attentionCount());
+}
+
+test "attention cursor is independent from ordinary selection" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const frame =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"g","project":{"path":"C:\\work\\graph","name":"Graph"},"nodes":[{"id":"a","title":"A","state":"failed"},{"id":"b","title":"B","state":"failed"}],"edges":[]}}}
+    ;
+    _ = try model.updateFromFrame(frame);
+    model.selected_node = 1;
+    model.selectNextAttention();
+    try std.testing.expectEqual(@as(usize, 0), model.selected_node.?);
+    model.selectNextAttention();
+    try std.testing.expectEqual(@as(usize, 1), model.selected_node.?);
+}

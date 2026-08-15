@@ -39,10 +39,19 @@ pub fn decision(entry: Entry) ReclaimDecision {
     {
         return .keep;
     }
+
     return .reclaimable;
 }
 
 pub fn inspect(allocator: std.mem.Allocator, project_path: []const u8) !Inspection {
+pub fn selectedEntry(entries: []const Entry, path: []const u8) ?Entry {
+    for (entries) |entry| {
+        if (std.mem.eql(u8, entry.path, path)) return entry;
+    }
+    return null;
+}
+
+pub fn inspect(allocator: std.mem.Allocator, project_path: []const u8, bindings: []const Binding) !Inspection {
         if (project_path.len == 0) return error.EmptyProjectPath;
         const list = try runGit(allocator, &.{
             "git", "-C", project_path, "worktree", "list", "--porcelain",
@@ -55,6 +64,8 @@ pub fn inspect(allocator: std.mem.Allocator, project_path: []const u8) !Inspecti
         });
         defer allocator.free(default.output);
         const default_branch = try allocator.dupe(u8, std.mem.trim(u8, default.output, " \r\n"));
+        const default_branch = try discoverDefault(allocator, project_path, entries.items);
+        errdefer allocator.free(default_branch);
         for (entries.items, 0..) |*entry, index| {
             entry.primary = index == 0;
             if (entry.primary or entry.prunable) continue;
@@ -102,6 +113,42 @@ fn succeedsGit(allocator: std.mem.Allocator, args: []const []const u8) bool {
         allocator.free(result.output);
         return true;
     }
+
+    fn zeroCommitsAhead(allocator: std.mem.Allocator, path: []const u8) bool {
+        const result = runGit(allocator, &.{ "git", "-C", path, "rev-list", "--count", "@{upstream}..HEAD" }) catch return false;
+        defer allocator.free(result.output);
+        return std.mem.eql(u8, std.mem.trim(u8, result.output, " \r\n"), "0");
+    }
+
+    fn landedOnDefault(allocator: std.mem.Allocator, project: []const u8, branch: []const u8, default_branch: []const u8) bool {
+        if (branch.len == 0 or default_branch.len == 0) return false;
+        const result = runGit(allocator, &.{ "git", "-C", project, "cherry", default_branch, branch }) catch return false;
+        defer allocator.free(result.output);
+        var lines = std.mem.splitScalar(u8, result.output, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, std.mem.trim(u8, line, " \r"), "+")) return false;
+        }
+
+        return true;
+    }
+
+fn discoverDefault(allocator: std.mem.Allocator, project: []const u8, entries: []const Entry) ![]u8 {
+    const origin = runGit(allocator, &.{ "git", "-C", project, "symbolic-ref", "--short", "refs/remotes/origin/HEAD" }) catch null;
+    if (origin) |result| {
+        defer allocator.free(result.output);
+        const value = std.mem.trim(u8, result.output, " \r\n");
+        if (value.len != 0) return allocator.dupe(u8, value);
+    }
+    for ([_][]const u8{ "main", "master" }) |candidate| {
+        if (succeedsGit(allocator, &.{ "git", "-C", project, "rev-parse", "--verify", candidate })) {
+            return allocator.dupe(u8, candidate);
+        }
+    }
+    if (entries.len != 0 and entries[0].branch.len != 0) {
+        return allocator.dupe(u8, entries[0].branch);
+    }
+    return error.GitFailed;
+}
 
 fn runGit(allocator: std.mem.Allocator, args: []const []const u8) !GitResult {
         var child = std.process.Child.init(args, allocator);
@@ -299,4 +346,14 @@ test "reclaim classification fails closed for every unsafe signal" {
         if (std.mem.eql(u8, label, "running binding")) candidate.bound_running = true;
         try std.testing.expectEqual(ReclaimDecision.keep, decision(candidate));
     }
+
+}
+
+test "explicit row selection is independent of graph binding safety" {
+    var entries = [_]Entry{
+        .{ .path = @constCast("C:\\safe"), .branch = @constCast("safe"), .pushed = true, .landed = true },
+        .{ .path = @constCast("C:\\bound"), .branch = @constCast("bound"), .pushed = true, .landed = true, .bound_running = true },
+    };
+    try std.testing.expectEqual(ReclaimDecision.reclaimable, decision(selectedEntry(&entries, "C:\\safe").?));
+    try std.testing.expectEqual(ReclaimDecision.keep, decision(selectedEntry(&entries, "C:\\bound").?));
 }

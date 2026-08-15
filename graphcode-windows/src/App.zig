@@ -24,6 +24,7 @@ pub const App = struct {
     model: GraphModel.Model,
     canvas: GraphCanvas.CanvasState = .{},
     worktree_inspection: ?WorktreeStatus.Inspection = null,
+    selected_worktree_path: []u8 = &.{},
     workspace: ?TerminalWorkspace.Workspace = null,
     instance_mutex: c.HANDLE = null,
     sync_requested: bool = false,
@@ -72,6 +73,7 @@ pub const App = struct {
             WorktreeStatus.deinit(self.allocator, &inspection.entries);
             self.allocator.free(inspection.default_branch);
         }
+        if (self.selected_worktree_path.len != 0) self.allocator.free(self.selected_worktree_path);
         if (self.instance_mutex != null) _ = c.CloseHandle(self.instance_mutex);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
         if (self.pending_project_path.len != 0) self.allocator.free(self.pending_project_path);
@@ -378,6 +380,17 @@ pub const App = struct {
             return;
         };
         const removed = WorktreeStatus.reclaim(self.allocator, inspection.entries.items) catch |err| {
+        if (self.selected_worktree_path.len == 0) {
+            self.setStatus("Select a worktree row before reclaiming");
+            return;
+        }
+        var selected = [_][]const u8{self.selected_worktree_path};
+        var bindings = std.array_list.Managed(WorktreeStatus.Binding).init(self.allocator);
+        defer bindings.deinit();
+        if (self.model.graph) |graph| for (graph.nodes.items) |bound| {
+            if (bound.worktree_path.len != 0) bindings.append(.{ .path = bound.worktree_path }) catch {};
+        };
+        const removed = WorktreeStatus.reclaimSelected(self.allocator, path, &selected, bindings.items) catch |err| {
             self.setStatus(switch (err) {
                 error.GitFailed => "Reclaim failed: git refused a selected worktree",
                 else => "Reclaim failed",
@@ -392,6 +405,17 @@ pub const App = struct {
         };
         self.replaceStatus(message);
         self.inspectWorktrees();
+    }
+
+    pub fn selectWorktreeRow(self: *App, path: []const u8) bool {
+        const inspection = self.worktree_inspection orelse return false;
+        for (inspection.entries.items) |entry| {
+            if (!std.mem.eql(u8, entry.path, path)) continue;
+            if (self.selected_worktree_path.len != 0) self.allocator.free(self.selected_worktree_path);
+            self.selected_worktree_path = self.allocator.dupe(u8, path) catch return false;
+            return true;
+        }
+        return false;
     }
 
     fn handleAction(self: *App, action: InputRouter.Action) void {
