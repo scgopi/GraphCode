@@ -294,7 +294,7 @@ pub fn contentBottom(model: *const GraphModel.Model, inspection: ?*const Worktre
     const rows = if (inspection) |value| value.entries.items.len else 0;
     const section = worktreeSectionBottom(model.recent_projects.items.len, rows);
     return if (model.attentionCount() == 0) section else section + 30 +
-        @as(i32, @intCast(@min(model.attentionCount(), 4))) * 19;
+        @as(i32, @intCast(@min(model.attentionCount(), 4) + @min(model.activity.items.len, 4))) * 19;
 }
 
 pub fn maxScroll(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection, viewport_bottom: i32) i32 {
@@ -338,15 +338,70 @@ test "worktree row hit testing selects only visible rows" {
 test "sidebar scroll clamps overflow, shrink, and resize" {
     var model = GraphModel.Model.init(std.testing.allocator);
     defer model.deinit();
+    for (0..3) |index| {
+        try model.recent_projects.append(.{
+            .path = try std.fmt.allocPrint(std.testing.allocator, "project-{d}", .{index}),
+            .name = try std.fmt.allocPrint(std.testing.allocator, "Project {d}", .{index}),
+        });
+    }
+    for (0..4) |_| try model.attention.append(.{
+        .id = try std.testing.allocator.dupe(u8, "attention"),
+        .title = try std.testing.allocator.dupe(u8, "Needs You"),
+        .loop_type = try std.testing.allocator.dupe(u8, "goal"),
+        .state = try std.testing.allocator.dupe(u8, "failed"),
+        .activity = try std.testing.allocator.dupe(u8, "failed"),
+        .presence = try std.testing.allocator.dupe(u8, "idle"),
+        .worktree_path = try std.testing.allocator.dupe(u8, ""),
+        .worktree_branch = try std.testing.allocator.dupe(u8, ""),
+    });
+    for (0..3) |_| try model.activity.append(.{
+        .title = try std.testing.allocator.dupe(u8, "Activity"),
+        .state = try std.testing.allocator.dupe(u8, "succeeded"),
+    });
+    var inspection = WorktreeStatus.Inspection{
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(std.testing.allocator),
+        .default_branch = @constCast("main"),
+        .project_path = @constCast("project-0"),
+    };
+    for (0..5) |_| try inspection.entries.append(.{
+        .path = @constCast("worktree"),
+        .branch = @constCast("branch"),
+    });
+    const short_max = maxScroll(&model, &inspection, 400);
+    const expected_short = Tokens.header_height + 78 + 72 + 62 + 54 + 24 + 170 + 10 + 30 + 7 * 19 - 400;
+    try std.testing.expectEqual(expected_short, short_max);
     var scroll: i32 = 0;
-    const maximum = 120;
-    for ([_]i32{ 40, 40, 40, 40 }) |wheel| scroll = clampScroll(scroll + wheel, maximum);
-    try std.testing.expectEqual(@as(i32, 120), scroll);
-    scroll = clampScroll(scroll, 0);
+    for (0..10) |_| scroll = clampScroll(scroll + 40, short_max);
+    try std.testing.expectEqual(short_max, scroll);
+    while (model.recent_projects.items.len > 1) {
+        const project = model.recent_projects.pop() orelse break;
+        std.testing.allocator.free(project.path);
+        std.testing.allocator.free(project.name);
+    }
+    while (model.attention.items.len > 1) {
+        const node = model.attention.pop() orelse break;
+        std.testing.allocator.free(node.id);
+        std.testing.allocator.free(node.title);
+        std.testing.allocator.free(node.loop_type);
+        std.testing.allocator.free(node.state);
+        std.testing.allocator.free(node.activity);
+        std.testing.allocator.free(node.presence);
+        std.testing.allocator.free(node.worktree_path);
+        std.testing.allocator.free(node.worktree_branch);
+    }
+    while (model.activity.items.len > 1) {
+        const event = model.activity.pop() orelse break;
+        std.testing.allocator.free(event.title);
+        std.testing.allocator.free(event.state);
+    }
+    inspection.entries.shrinkRetainingCapacity(2);
+    const reduced_max = maxScroll(&model, &inspection, 500);
+    const expected_reduced = @max(Tokens.header_height + 78 + 24 + 62 + 54 + 24 + 68 + 10 + 30 + 2 * 19 - 500, 0);
+    try std.testing.expectEqual(expected_reduced, reduced_max);
+    scroll = clampScroll(scroll, reduced_max);
     try std.testing.expectEqual(@as(i32, 0), scroll);
-    scroll = clampScroll(80, 30);
-    try std.testing.expectEqual(@as(i32, 30), scroll);
-    _ = maxScroll(&model, null, 700);
+    try std.testing.expectEqual(@as(i32, 0), clampScroll(-50, reduced_max));
+    inspection.entries.deinit();
 }
 
 fn rect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {
