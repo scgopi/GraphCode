@@ -392,6 +392,7 @@ pub const DaemonClient = struct {
 
     fn attemptConnection(self: *DaemonClient, now: i64) void {
         self.closeHandleOnly();
+        self.prepareV2Negotiation();
         if (endpointName(self.allocator)) |current| {
             if (!std.mem.eql(u8, current, self.pipe_name)) {
                 self.allocator.free(self.pipe_name);
@@ -399,6 +400,7 @@ pub const DaemonClient = struct {
             } else {
                 self.allocator.free(current);
             }
+
         } else |_| {}
         self.publishState(.connecting, "");
         if (!self.openPipe()) {
@@ -407,6 +409,9 @@ pub const DaemonClient = struct {
         }
         self.frame_buffer.reset();
         if (self.fallback_to_v1) {
+            self.frame_buffer.setMode(.v1);
+            self.mode = .v1;
+            self.selected_version = 1;
             self.publishState(.connected, "");
             self.fallback_to_v1 = false;
             self.retry_delay_ms = reconnect_initial_ms;
@@ -433,6 +438,12 @@ pub const DaemonClient = struct {
             self.scheduleRetry(now, "daemon hello write failed");
             return;
         };
+    }
+
+    fn prepareV2Negotiation(self: *DaemonClient) void {
+        self.mode = .v2;
+        self.selected_version = Wire.current_version;
+        self.frame_buffer.setMode(.v2);
     }
 
     fn pumpIncoming(self: *DaemonClient) bool {
@@ -544,6 +555,7 @@ pub const DaemonClient = struct {
                 std.mem.indexOf(u8, frame, "\"selectedVersion\":2") != null)
             {
                 self.mode = .v2;
+                self.frame_buffer.setModePreservingData(.v2);
                 self.selected_version = 2;
                 self.publishState(.connected, "");
                 self.retry_delay_ms = reconnect_initial_ms;
@@ -693,6 +705,45 @@ fn writeAll(handle: c.HANDLE, bytes: []const u8) !void {
 
 test "daemon client startup state fits the default stack" {
     try std.testing.expect(@sizeOf(DaemonClient) < 1024 * 1024);
+}
+
+test "new negotiations reset legacy fallback state to v2 framing" {
+    const allocator = std.testing.allocator;
+    var client = try DaemonClient.init(allocator);
+    defer client.deinit();
+    client.mode = .v1;
+    client.selected_version = 1;
+    client.frame_buffer.setMode(.v1);
+    client.fallback_to_v1 = true;
+    client.prepareV2Negotiation();
+    try std.testing.expectEqual(Wire.ProtocolMode.v2, client.mode);
+    try std.testing.expectEqual(Wire.current_version, client.selected_version);
+    const header = try Wire.frameLength(&[_]u8{0} ** (Wire.v2_max_payload + 1), .v1);
+    try std.testing.expectError(error.PayloadTooLarge, Wire.decodedLength(header, .v2));
+}
+
+test "successful hello switches a coalesced reconnect buffer back to v2" {
+    const allocator = std.testing.allocator;
+    var client = try DaemonClient.init(allocator);
+    defer client.deinit();
+    client.state = .negotiating;
+    client.mode = .v1;
+    client.frame_buffer.setMode(.v1);
+    const hello = "{\"version\":2,\"kind\":\"hello\",\"selectedVersion\":2}";
+    const hello_header = try Wire.frameLength(hello, .v1);
+    const payload = "after-hello";
+    const payload_header = try Wire.frameLength(payload, .v2);
+    try client.frame_buffer.append(&hello_header);
+    try client.frame_buffer.append(hello);
+    try client.frame_buffer.append(&payload_header);
+    try client.frame_buffer.append(payload);
+    const hello_frame = (try client.frame_buffer.next(allocator)).?;
+    defer allocator.free(hello_frame);
+    try std.testing.expect(client.handleFrame(hello_frame));
+    const payload_frame = (try client.frame_buffer.next(allocator)).?;
+    defer allocator.free(payload_frame);
+    try std.testing.expectEqualStrings(payload, payload_frame);
+    try std.testing.expectEqual(Wire.ProtocolMode.v2, client.mode);
 }
 
 fn endpointName(allocator: std.mem.Allocator) ![]u8 {

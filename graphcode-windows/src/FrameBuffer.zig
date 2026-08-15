@@ -30,6 +30,10 @@ pub const FrameBuffer = struct {
         self.reset();
     }
 
+    pub fn setModePreservingData(self: *FrameBuffer, mode: Wire.ProtocolMode) void {
+        self.mode = mode;
+    }
+
     pub fn reset(self: *FrameBuffer) void {
         self.length = 0;
         self.expected_length = null;
@@ -112,4 +116,13 @@ test "frame storage is heap-backed and keeps startup structs small" {
     defer buffer.deinit();
     try std.testing.expectEqual(Wire.legacy_max_payload + 4, buffer.capacity());
     try std.testing.expect(@sizeOf(FrameBuffer) < 1024);
+}
+
+test "switching back to v2 restores the one MiB payload cap" {
+    const allocator = std.testing.allocator;
+    var buffer = try FrameBuffer.init(allocator, .v1);
+    defer buffer.deinit();
+    const oversized = try Wire.frameLength(&[_]u8{0} ** (Wire.v2_max_payload + 1), .v1);
+    buffer.setMode(.v2);
+    try std.testing.expectError(error.PayloadTooLarge, Wire.decodedLength(oversized, .v2));
 }

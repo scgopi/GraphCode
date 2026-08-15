@@ -6,6 +6,67 @@ const rows: usize = 40;
 const cell_count: usize = columns * rows;
 
 const ParserState = enum { normal, escape, csi, osc };
+const input_queue_capacity: usize = 64;
+const input_queue_max_bytes: usize = 1024 * 1024;
+const input_write_timeout_ms: c.DWORD = 50;
+
+pub const InputQueue = struct {
+    pub const max_bytes = input_queue_max_bytes;
+
+    pub const Item = struct {
+        surface: usize,
+        bytes: []u8,
+    };
+
+    allocator: std.mem.Allocator,
+    items: [input_queue_capacity]Item = undefined,
+    head: usize = 0,
+    count: usize = 0,
+    bytes: usize = 0,
+
+    pub fn enqueue(self: *InputQueue, surface: usize, bytes: []u8) !void {
+        if (bytes.len > input_queue_max_bytes) return error.InputTooLarge;
+        if (self.count == input_queue_capacity or self.bytes + bytes.len > input_queue_max_bytes) {
+            return error.InputQueueFull;
+        }
+        const index = (self.head + self.count) % input_queue_capacity;
+        self.items[index] = .{ .surface = surface, .bytes = bytes };
+        self.count += 1;
+        self.bytes += bytes.len;
+    }
+
+    pub fn dequeue(self: *InputQueue) ?Item {
+        if (self.count == 0) return null;
+        const item = self.items[self.head];
+        self.head = (self.head + 1) % input_queue_capacity;
+        self.count -= 1;
+        self.bytes -= item.bytes.len;
+        return item;
+    }
+
+    pub fn clear(self: *InputQueue) void {
+        while (self.dequeue()) |item| self.allocator.free(item.bytes);
+    }
+
+    pub fn removeSurface(self: *InputQueue, surface: usize) void {
+        var kept: [input_queue_capacity]Item = undefined;
+        var kept_count: usize = 0;
+        while (self.dequeue()) |item| {
+            if (item.surface == surface) {
+                self.allocator.free(item.bytes);
+            } else {
+                kept[kept_count] = item;
+                kept_count += 1;
+            }
+        }
+        for (kept[0..kept_count]) |item| {
+            self.items[self.count] = item;
+            self.count += 1;
+            self.bytes += item.bytes.len;
+        }
+        self.head = 0;
+    }
+};
 
 pub const Surface = struct {
     surface: ?*c.winghostty_surface = null,
@@ -40,6 +101,16 @@ pub const Workspace = struct {
     recreate_delay_ms: [2]i64 = .{ 100, 100 },
     fatal_error: bool = false,
     render_error: c.winghostty_result = c.WINGHOSTTY_OK,
+    input_mutex: std.Thread.Mutex = .{},
+    input_condition: std.Thread.Condition = .{},
+    input_worker: ?std.Thread = null,
+    input_stop: bool = false,
+    input_busy: bool = false,
+    input_worker_surface: ?usize = null,
+    input_worker_handle: c.HANDLE = null,
+    input_cancel_requested: bool = false,
+    input_queue: InputQueue,
+    input_error_message: []const u8 = "",
 
     pub fn init(parent: c.HWND, allocator_: std.mem.Allocator) !Workspace {
         var workspace = Workspace{
@@ -47,6 +118,7 @@ pub const Workspace = struct {
             .allocator = allocator_,
             .zmx_path = try allocator_.dupe(u8, std.process.getEnvVarOwned(allocator_, "GRAPHCODE_ZMX") catch "zmx.exe"),
             .cwd = try allocator_.dupe(u8, std.process.getEnvVarOwned(allocator_, "GRAPHCODE_GATE_CWD") catch "."),
+            .input_queue = .{ .allocator = allocator_ },
         };
         errdefer {
             allocator_.free(workspace.zmx_path);
@@ -58,7 +130,12 @@ pub const Workspace = struct {
         return workspace;
     }
 
+    pub fn startInputWorker(self: *Workspace) !void {
+        self.input_worker = try std.Thread.spawn(.{}, inputWorkerMain, .{self});
+    }
+
     pub fn deinit(self: *Workspace) void {
+        self.stopInputWorker();
         self.destroySurface(0);
         self.destroySurface(1);
         for (&self.recreate_sessions) |*session| {
@@ -143,7 +220,15 @@ pub const Workspace = struct {
 
     pub fn send(self: *Workspace, text: []const u8) void {
         if (self.active_surface >= self.surfaces.len) return;
-        self.writeAttachInput(self.active_surface, text);
+        self.enqueueInput(self.active_surface, text);
+    }
+
+    pub fn inputStatus(self: *const Workspace) ?[]const u8 {
+        const workspace: *Workspace = @constCast(self);
+        workspace.input_mutex.lock();
+        defer workspace.input_mutex.unlock();
+        if (workspace.input_error_message.len == 0) return null;
+        return workspace.input_error_message;
     }
 
     pub fn hasSurface(self: *const Workspace, index: usize) bool {
@@ -158,6 +243,8 @@ pub const Workspace = struct {
         if (index >= self.surfaces.len) return;
         const slot = &self.surfaces[index];
         slot.destroying = true;
+        self.cancelSurfaceInput(index);
+        self.waitInputIdle(index);
         self.waitAttach(index);
         if (slot.surface) |surface| {
             _ = c.winghostty_surface_destroy(surface);
@@ -217,17 +304,36 @@ pub const Workspace = struct {
     }
 
     fn startSession(self: *Workspace, index: usize, session: []const u8) !void {
-        var attach_args = [_][]const u8{ self.zmx_path, "attach", session };
-        var child = std.process.Child.init(&attach_args, self.allocator);
+        const nonreading = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_NONREADING_ATTACH") catch null;
+        defer if (nonreading) |value| self.allocator.free(value);
+        var attach_args: [4][]const u8 = undefined;
+        var attach_len: usize = 3;
+        if (nonreading != null and std.mem.eql(u8, nonreading.?, "1")) {
+            attach_args = .{ "pwsh", "-NoProfile", "-Command", "Start-Sleep -Seconds 60" };
+            attach_len = 4;
+        } else {
+            attach_args[0] = self.zmx_path;
+            attach_args[1] = "attach";
+            attach_args[2] = session;
+        }
+        var child = std.process.Child.init(attach_args[0..attach_len], self.allocator);
         child.cwd = self.cwd;
         child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Ignore;
         try child.spawn();
+        if (child.stdin) |stdin| {
+            var mode: c.DWORD = c.PIPE_NOWAIT;
+            _ = c.SetNamedPipeHandleState(stdin.handle, &mode, null, null);
+        }
+        self.input_mutex.lock();
         self.surfaces[index].attach = child;
+        self.input_mutex.unlock();
     }
 
     fn waitAttach(self: *Workspace, index: usize) void {
+        self.cancelSurfaceInput(index);
+        self.waitInputIdle(index);
         if (self.surfaces[index].attach) |*child| {
             _ = child.kill() catch {};
             _ = child.wait() catch {};
@@ -235,16 +341,155 @@ pub const Workspace = struct {
         }
     }
 
-    fn writeAttachInput(self: *Workspace, index: usize, bytes: []const u8) void {
+    fn enqueueInput(self: *Workspace, index: usize, bytes: []const u8) void {
         if (bytes.len == 0) return;
-        const slot = &self.surfaces[index];
-        if (slot.attach) |*child| {
-            const stdin = child.stdin orelse return;
-            stdin.writeAll(bytes) catch {
-                self.fatal_error = true;
+        if (bytes.len > input_queue_max_bytes) {
+            self.setInputError("terminal input queue overflow: paste is too large");
+            return;
+        }
+        const copy = self.allocator.dupe(u8, bytes) catch {
+            self.setInputError("terminal input queue allocation failed");
+            return;
+        };
+        self.input_mutex.lock();
+        if (self.input_stop) {
+            self.input_mutex.unlock();
+            self.allocator.free(copy);
+            return;
+        }
+        self.input_queue.enqueue(index, copy) catch |err| {
+            self.input_mutex.unlock();
+            self.allocator.free(copy);
+            self.setInputError(switch (err) {
+                error.InputTooLarge => "terminal input queue overflow: paste is too large",
+                error.InputQueueFull => "terminal input queue overflow",
+            });
+            return;
+        };
+        self.input_condition.signal();
+        self.input_mutex.unlock();
+    }
+
+    fn stopInputWorker(self: *Workspace) void {
+        self.input_mutex.lock();
+        self.input_stop = true;
+        self.input_condition.broadcast();
+        self.input_mutex.unlock();
+        self.cancelInputIo();
+        if (self.input_worker) |worker| worker.join();
+        self.input_worker = null;
+        self.input_mutex.lock();
+        self.input_queue.clear();
+        self.input_busy = false;
+        self.input_worker_surface = null;
+        self.input_worker_handle = null;
+        self.input_mutex.unlock();
+    }
+
+    fn inputWorkerMain(self: *Workspace) void {
+        while (true) {
+            self.input_mutex.lock();
+            while (self.input_queue.count == 0 and !self.input_stop) {
+                _ = self.input_condition.timedWait(&self.input_mutex, 25 * std.time.ns_per_ms) catch {};
+            }
+            if (self.input_stop) {
+                self.input_mutex.unlock();
+                break;
+            }
+            const item = self.input_queue.dequeue().?;
+            self.input_busy = true;
+            self.input_worker_surface = item.surface;
+            self.input_worker_handle = if (self.surfaces[item.surface].attach) |child|
+                if (child.stdin) |stdin| stdin.handle else null
+            else
+                null;
+            self.input_cancel_requested = false;
+            const handle = self.input_worker_handle;
+            self.input_mutex.unlock();
+
+            const result = if (handle) |value|
+                writeInputBounded(value, item.bytes)
+            else
+                error.InputUnavailable;
+            const cancelled = self.inputCancelled();
+            if (result) |written| {
+                self.input_mutex.lock();
+                if (item.surface < self.surfaces.len) self.surfaces[item.surface].input_bytes += written;
+                self.input_mutex.unlock();
+            } else |err| {
+                if (!cancelled) {
+                    self.setInputError(switch (err) {
+                        error.WriteTimeout => "terminal input write timed out",
+                        error.InputUnavailable => "terminal attach input unavailable",
+                        else => "terminal input write failed",
+                    });
+                }
+            }
+            self.allocator.free(item.bytes);
+            self.input_mutex.lock();
+            self.input_busy = false;
+            self.input_worker_surface = null;
+            self.input_worker_handle = null;
+            self.input_cancel_requested = false;
+            self.input_condition.broadcast();
+            self.input_mutex.unlock();
+        }
+    }
+
+    fn inputCancelled(self: *Workspace) bool {
+        self.input_mutex.lock();
+        defer self.input_mutex.unlock();
+        return self.input_cancel_requested or self.input_stop;
+    }
+
+    fn setInputError(self: *Workspace, message: []const u8) void {
+        self.input_mutex.lock();
+        self.input_error_message = message;
+        self.fatal_error = true;
+        self.input_mutex.unlock();
+    }
+
+    fn cancelInputIo(self: *Workspace) void {
+        var handle: c.HANDLE = null;
+        var thread_handle: std.Thread.Handle = undefined;
+        var have_thread = false;
+        self.input_mutex.lock();
+        self.input_cancel_requested = true;
+        handle = self.input_worker_handle;
+        if (self.input_worker) |worker| {
+            thread_handle = worker.getHandle();
+            have_thread = true;
+        }
+        self.input_mutex.unlock();
+        if (handle != null and handle != c.INVALID_HANDLE_VALUE) {
+            _ = c.CancelIoEx(handle, null);
+        }
+        if (have_thread) _ = c.CancelSynchronousIo(thread_handle);
+    }
+
+    fn cancelSurfaceInput(self: *Workspace, index: usize) void {
+        self.input_mutex.lock();
+        self.input_queue.removeSurface(index);
+        const busy = self.input_busy and self.input_worker_surface == index;
+        self.input_mutex.unlock();
+        if (busy) self.cancelInputIo();
+    }
+
+    fn waitInputIdle(self: *Workspace, index: usize) void {
+        const deadline = nowMilliseconds() + 500;
+        while (true) {
+            self.input_mutex.lock();
+            const busy = self.input_busy and self.input_worker_surface == index;
+            if (!busy) {
+                self.input_mutex.unlock();
                 return;
-            };
-            slot.input_bytes += bytes.len;
+            }
+            _ = self.input_condition.timedWait(&self.input_mutex, 25 * std.time.ns_per_ms) catch {};
+            self.input_mutex.unlock();
+            if (nowMilliseconds() >= deadline) {
+                self.cancelInputIo();
+                return;
+            }
         }
     }
 
@@ -351,6 +596,35 @@ pub const Workspace = struct {
         slot.output_events += 1;
     }
 };
+
+fn writeInputBounded(handle: c.HANDLE, bytes: []const u8) !usize {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const amount: c.DWORD = @intCast(@min(bytes.len - offset, 16 * 1024));
+        var overlapped = std.mem.zeroes(c.OVERLAPPED);
+        overlapped.hEvent = c.CreateEventW(null, 1, 0, null);
+        if (overlapped.hEvent == null) return error.WriteFailed;
+        defer _ = c.CloseHandle(overlapped.hEvent);
+        var written: c.DWORD = 0;
+        if (c.WriteFile(handle, bytes[offset..].ptr, amount, &written, &overlapped) == 0) {
+            if (c.GetLastError() != c.ERROR_IO_PENDING) return error.WriteFailed;
+            const wait_result = c.WaitForSingleObject(overlapped.hEvent, input_write_timeout_ms);
+            if (wait_result == c.WAIT_TIMEOUT) {
+                _ = c.CancelIoEx(handle, &overlapped);
+                _ = c.GetOverlappedResult(handle, &overlapped, &written, 0);
+                return error.WriteTimeout;
+            }
+            if (wait_result != c.WAIT_OBJECT_0 or
+                c.GetOverlappedResult(handle, &overlapped, &written, 0) == 0)
+            {
+                return error.WriteFailed;
+            }
+        }
+        if (written == 0) return error.WriteFailed;
+        offset += written;
+    }
+    return offset;
+}
 
 fn nowMilliseconds() i64 {
     return @intCast(std.time.milliTimestamp());
@@ -472,14 +746,14 @@ fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c
         else => return,
     };
     const index = surfaceIndex(workspace, surface) orelse return;
-    workspace.writeAttachInput(index, bytes);
+    workspace.enqueueInput(index, bytes);
 }
 
 fn onText(user_data: ?*anyopaque, surface: *c.winghostty_surface, text: [*:0]const u8, length: u32) callconv(.c) void {
     const workspace = workspaceFromUserData(user_data) orelse return;
     _ = callbackSlot(workspace, surface) orelse return;
     const index = surfaceIndex(workspace, surface) orelse return;
-    workspace.writeAttachInput(index, text[0..length]);
+    workspace.enqueueInput(index, text[0..length]);
 }
 
 fn onImeStart(user_data: ?*anyopaque, surface: *c.winghostty_surface) callconv(.c) void {
@@ -530,7 +804,7 @@ fn onPaste(user_data: ?*anyopaque, surface: *c.winghostty_surface, text: [*:0]co
     const workspace = workspaceFromUserData(user_data) orelse return;
     _ = callbackSlot(workspace, surface) orelse return;
     const index = surfaceIndex(workspace, surface) orelse return;
-    workspace.writeAttachInput(index, text[0..length]);
+    workspace.enqueueInput(index, text[0..length]);
     _ = bracketed;
 }
 
@@ -665,4 +939,30 @@ fn feedCells(slot: *Surface, bytes: []const u8) void {
             }
         },
     };
+}
+
+test "terminal input queue rejects large paste without waiting" {
+    const allocator = std.testing.allocator;
+    var queue = InputQueue{ .allocator = allocator };
+    defer queue.clear();
+    const paste = try allocator.alloc(u8, InputQueue.max_bytes + 1);
+    try std.testing.expectError(error.InputTooLarge, queue.enqueue(0, paste));
+    allocator.free(paste);
+}
+
+test "terminal input queue reports bounded overflow" {
+    const allocator = std.testing.allocator;
+    var queue = InputQueue{ .allocator = allocator };
+    defer queue.clear();
+    for (0..input_queue_capacity) |index| {
+        const item = try allocator.dupe(u8, "x");
+        try queue.enqueue(index % 2, item);
+    }
+    const overflow = try allocator.dupe(u8, "x");
+    try std.testing.expectError(error.InputQueueFull, queue.enqueue(0, overflow));
+    allocator.free(overflow);
+}
+
+test "bounded input write rejects an invalid attach without blocking" {
+    try std.testing.expectError(error.WriteFailed, writeInputBounded(c.INVALID_HANDLE_VALUE, "paste"));
 }

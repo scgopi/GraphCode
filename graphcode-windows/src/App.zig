@@ -33,6 +33,7 @@ pub const App = struct {
     smoke_failure: bool = false,
     smoke_tick: usize = 0,
     smoke_action_requested: bool = false,
+    smoke_input_requested: bool = false,
     smoke_idle_ticks: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) !*App {
@@ -66,6 +67,7 @@ pub const App = struct {
     pub fn run(self: *App) !void {
         try self.window.create(self, &onWindowMessage, title.ptr);
         self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
+        if (self.workspace) |*workspace| try workspace.startInputWorker();
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_REQUIRE_DAEMON")) |value| {
             defer self.allocator.free(value);
             self.require_smoke_contract = std.mem.eql(u8, value, "1");
@@ -326,7 +328,10 @@ fn onWindowMessage(
                 app.restore_requested = false;
             }
             if (app.client.isIdle()) app.smoke_idle_ticks += 1 else app.smoke_idle_ticks = 0;
-            if (app.workspace) |*workspace| workspace.poll();
+            if (app.workspace) |*workspace| {
+                workspace.poll();
+                if (workspace.inputStatus()) |input_message| app.setStatus(input_message);
+            }
             if (app.smoke and app.smoke_tick == 8) {
                 app.refreshWorkspace();
             }
@@ -335,6 +340,20 @@ fn onWindowMessage(
             {
                 app.smoke_action_requested = true;
                 app.createNode();
+            }
+            if (app.smoke and app.smoke_tick == 16 and !app.smoke_input_requested and
+                envFlag("GRAPHCODE_SHELL_LARGE_PASTE"))
+            {
+                app.smoke_input_requested = true;
+                if (app.workspace) |*workspace| {
+                    const paste = app.allocator.alloc(u8, 1024 * 1024) catch {
+                        app.setStatus("Large paste allocation failed");
+                        return true;
+                    };
+                    @memset(paste, 'x');
+                    workspace.send(paste);
+                    app.allocator.free(paste);
+                }
             }
             if (app.smoke and app.smoke_tick >= 12 and
                 ((app.stress and app.smoke_tick % 2 == 0) or
@@ -405,4 +424,10 @@ fn smokeContractPassed(self: *const App) bool {
     const workspace = self.workspace orelse return false;
     return workspace.hasSurface(0) and workspace.hasSurface(1) and
         workspace.hasAttach(0) and workspace.hasAttach(1);
+}
+
+fn envFlag(name: []const u8) bool {
+    const value = std.process.getEnvVarOwned(std.heap.page_allocator, name) catch return false;
+    defer std.heap.page_allocator.free(value);
+    return std.mem.eql(u8, value, "1");
 }

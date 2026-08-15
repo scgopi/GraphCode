@@ -164,7 +164,22 @@ Invoke-Native "Daemon client startup tests" {
   }
   Push-Location $shellRoot
   try {
-    & $zig test src\DaemonClient.zig -target x86_64-windows-msvc -lc "-I$include"
+    & $zig test src\DaemonClient.zig -target x86_64-windows-msvc -lc -ladvapi32 "-I$include"
+  } finally { Pop-Location }
+}
+Invoke-Native "Terminal input queue tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  if (-not (Test-Path -LiteralPath $include -PathType Container)) {
+    throw "Winghostty headers are required for terminal input tests."
+  }
+  Push-Location $shellRoot
+  try {
+    & $zig test src\TerminalSurface.zig -target x86_64-windows-msvc -lc "-I$include"
   } finally { Pop-Location }
 }
 Invoke-Native "Graph model executable tests" {

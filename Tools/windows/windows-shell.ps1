@@ -18,11 +18,18 @@ $pins = Get-Content (Join-Path $shellRoot "provider-pins.json") -Raw | ConvertFr
 $app = Join-Path $shellRoot "zig-out\bin\graphcode-windows.exe"
 $stubProcess = $null
 $busyStubProcess = $null
+$testSessionIds = @(
+  "11111111-1111-4111-8111-111111111111",
+  "22222222-2222-4222-8222-222222222222"
+)
 $stubResult = Join-Path $shellRoot "stub-result-$PID.json"
 $busyResult = Join-Path $shellRoot "busy-stub-result-$PID.json"
 $busyError = Join-Path $shellRoot "busy-stub-error-$PID.txt"
+$inputError = Join-Path $shellRoot "input-smoke-error-$PID.txt"
 $oldPipe = [Environment]::GetEnvironmentVariable("GRAPHCODE_DAEMON_PIPE")
 $oldRequireDaemon = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_REQUIRE_DAEMON")
+$oldNonreadingAttach = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_NONREADING_ATTACH")
+$oldLargePaste = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_LARGE_PASTE")
 
 function Invoke-Native([string] $description, [scriptblock] $command) {
   Write-Host "==> $description"
@@ -36,6 +43,14 @@ function Assert-Equal([string] $actual, [string] $expected, [string] $label) {
   if ($actual -ne $expected) {
     throw "$label expected $expected but found $actual"
   }
+}
+
+function Test-TestSessionProcess([object] $process) {
+  if (-not $process.CommandLine) { return $false }
+  foreach ($session in $testSessionIds) {
+    if ($process.CommandLine -like "*$session*") { return $true }
+  }
+  return $false
 }
 
 function Assert-PinnedCleanWorktree(
@@ -62,7 +77,9 @@ function Assert-NoOrphanShellProcesses {
       Where-Object {
         $_.Name -match "(?i)^graphcode-windows(?:\.exe)?$" -or
         ($_.Name -match "(?i)^zmx(?:\.exe)?$" -and
-          $_.CommandLine -and $_.CommandLine -match "graphcode-windows")
+          $_.CommandLine -and
+          ($_.CommandLine -match "graphcode-windows" -or
+          (Test-TestSessionProcess $_)))
       }
   )
   if ($processes.Count -ne 0) {
@@ -180,6 +197,23 @@ try {
     if ($busyErrorText -notmatch "(?i)Smoke daemon status: .*daemon") {
       throw "Busy daemon smoke did not post a daemon transport error"
     }
+    $env:GRAPHCODE_DAEMON_PIPE = "\\.\pipe\$pipeName"
+    Remove-Item Env:GRAPHCODE_SHELL_EXPECT_TRANSPORT_ERROR -ErrorAction SilentlyContinue
+    Remove-Item Env:GRAPHCODE_SHELL_NONREADING_ATTACH,Env:GRAPHCODE_SHELL_LARGE_PASTE `
+      -ErrorAction SilentlyContinue
+    $env:GRAPHCODE_SHELL_NONREADING_ATTACH = "1"
+    $env:GRAPHCODE_SHELL_LARGE_PASTE = "1"
+    Remove-Item -LiteralPath $inputError -Force -ErrorAction SilentlyContinue
+    $inputApp = Start-Process -FilePath $app -ArgumentList @("--smoke") -PassThru `
+      -RedirectStandardError $inputError
+    if (-not $inputApp.WaitForExit(8000)) {
+      Stop-Process -Id $inputApp.Id -Force
+      throw "Large paste/non-reading attach smoke blocked the UI beyond the bounded timeout"
+    }
+    if ($inputApp.ExitCode -ne 0) {
+      throw "Large paste/non-reading attach smoke failed with exit code $($inputApp.ExitCode)"
+    }
+    Remove-Item -LiteralPath $inputError -Force -ErrorAction SilentlyContinue
   }
   Write-Host "Windows shell smoke/stress: PASS"
 }
@@ -191,11 +225,18 @@ finally {
     Stop-Process -Id $busyStubProcess.Id -Force
   }
   if ($env:GRAPHCODE_ZMX -and (Test-Path -LiteralPath $env:GRAPHCODE_ZMX)) {
-    foreach ($session in @(
-        "11111111-1111-4111-8111-111111111111",
-        "22222222-2222-4222-8222-222222222222"
-      )) {
+    foreach ($session in $testSessionIds) {
       & $env:GRAPHCODE_ZMX kill --force $session *> $null
+    }
+    $orphanTestDaemons = @(
+      Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+          $_.Name -match "(?i)^zmx(?:\.exe)?$" -and
+          (Test-TestSessionProcess $_)
+        }
+    )
+    foreach ($process in $orphanTestDaemons) {
+      Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
     }
   }
   Remove-Item Env:GRAPHCODE_ZMX -ErrorAction SilentlyContinue
@@ -210,8 +251,18 @@ finally {
   } else {
     $env:GRAPHCODE_SHELL_REQUIRE_DAEMON = $oldRequireDaemon
   }
+  if ($null -eq $oldNonreadingAttach) {
+    Remove-Item Env:GRAPHCODE_SHELL_NONREADING_ATTACH -ErrorAction SilentlyContinue
+  } else {
+    $env:GRAPHCODE_SHELL_NONREADING_ATTACH = $oldNonreadingAttach
+  }
+  if ($null -eq $oldLargePaste) {
+    Remove-Item Env:GRAPHCODE_SHELL_LARGE_PASTE -ErrorAction SilentlyContinue
+  } else {
+    $env:GRAPHCODE_SHELL_LARGE_PASTE = $oldLargePaste
+  }
   Remove-Item -LiteralPath $stubResult -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $busyResult,$busyError -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $busyResult,$busyError,$inputError -Force -ErrorAction SilentlyContinue
   Assert-NoOrphanShellProcesses
 }
 
