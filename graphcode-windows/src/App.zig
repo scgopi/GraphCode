@@ -396,6 +396,7 @@ pub const App = struct {
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .none => {},
+            else => {},
         }
     }
 
