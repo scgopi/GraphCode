@@ -1,3 +1,4 @@
+import ComposableArchitecture
 import Foundation
 import GraphcodeKit
 import Testing
@@ -20,7 +21,9 @@ struct ProjectRegistryTests {
   /// have to be there. They were not, and the tests passed anyway — which is exactly how
   /// `/tmp/x` and a folder called "/" ended up as real projects with real stores.
   init() throws {
-    for name in ["project-a", "project-b", "project-c", "project-d", "project-e"] {
+    for name in [
+      "project-a", "project-b", "project-c", "project-d", "project-e", "project-f", "project-g",
+    ] {
       try FileManager.default.createDirectory(
         atPath: "/tmp/\(name)", withIntermediateDirectories: true)
     }
@@ -252,6 +255,92 @@ struct ProjectRegistryTests {
     // it would persist the graph we just deleted straight back to disk.
     await registry.handle(.openProject(path: "/tmp/project-e"), connectionID: connectionID)
     #expect(persistence.loadGraph(path: "/tmp/project-e")?.nodes.isEmpty != false)
+  }
+
+  @Test
+  func deletingAProjectsLoopsEndsEverySessionFirst() async {
+    // The graph is the only handle on the loops' detached sessions — deleting it with
+    // them alive left every agent in the project running forever, invisible to any UI.
+    // The composite's worker is the deep case: its node lives in a sub-graph, so a walk
+    // of `graph.nodes` alone would miss its session.
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
+    let killed = LockIsolated<Set<UUID>>([])
+    let registry = ProjectRegistry(
+      persistenceDirectory: directory,
+      ensureSession: { _, _ in },
+      terminateSession: { node, _ in _ = killed.withValue { $0.insert(node.id) } })
+    let persistence = ProjectPersistence(baseDirectory: directory)
+    let connectionID = UUID()
+    await registry.addConnection(id: connectionID, fileDescriptor: -1)
+    await registry.handle(.openProject(path: "/tmp/project-f"), connectionID: connectionID)
+    await registry.handle(
+      .graphCommand(
+        projectPath: "/tmp/project-f",
+        command: .createNode(
+          NodeDraft(title: "Watcher", loopType: .timeBased, triggerPrompt: "/loop 1h Check"))),
+      connectionID: connectionID)
+    await registry.handle(
+      .graphCommand(
+        projectPath: "/tmp/project-f",
+        command: .createNode(NodeDraft(title: "Routine", loopType: .composite))),
+      connectionID: connectionID)
+    let saved = persistence.loadGraph(path: "/tmp/project-f")
+    let compositeID = saved?.nodes.first { $0.loopType == .composite }?.id
+    await registry.handle(
+      .graphCommand(
+        projectPath: "/tmp/project-f",
+        command: .subGraphCommand(
+          nodeID: compositeID ?? UUID(),
+          command: .createNode(
+            NodeDraft(title: "Worker", loopType: .timeBased, triggerPrompt: "/loop 1h work")))),
+      connectionID: connectionID)
+    let everyLoop = Set(
+      persistence.loadGraph(path: "/tmp/project-f")?.nodesAtAnyDepth.map(\.id) ?? [])
+    #expect(everyLoop.count == 3)
+
+    await registry.handle(.deleteProjectGraph(path: "/tmp/project-f"), connectionID: connectionID)
+
+    #expect(killed.value == everyLoop)
+  }
+
+  @Test
+  func deletingAClosedProjectsLoopsStillEndsTheirSessions() async {
+    // A graph can be deleted while its project is closed and its loops still running —
+    // a fresh daemon has no resident store for it, so the nodes come off disk. And they
+    // must come off disk *without* loading a real store: `store(forProjectPath:)` runs
+    // `ensureUnattendedSessions` on load, which would start sessions on the way to
+    // killing them.
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
+    let firstRun = ProjectRegistry(
+      persistenceDirectory: directory, ensureSession: { _, _ in }, terminateSession: { _, _ in })
+    let connectionID = UUID()
+    await firstRun.addConnection(id: connectionID, fileDescriptor: -1)
+    await firstRun.handle(.openProject(path: "/tmp/project-g"), connectionID: connectionID)
+    await firstRun.handle(
+      .graphCommand(
+        projectPath: "/tmp/project-g",
+        command: .createNode(
+          NodeDraft(title: "Watcher", loopType: .timeBased, triggerPrompt: "/loop 1h Check"))),
+      connectionID: connectionID)
+    let persistence = ProjectPersistence(baseDirectory: directory)
+    let nodeID = persistence.loadGraph(path: "/tmp/project-g")?.nodes.first?.id
+
+    let killed = LockIsolated<Set<UUID>>([])
+    let started = LockIsolated<Set<UUID>>([])
+    let secondRun = ProjectRegistry(
+      persistenceDirectory: directory,
+      ensureSession: { node, _ in _ = started.withValue { $0.insert(node.id) } },
+      terminateSession: { node, _ in _ = killed.withValue { $0.insert(node.id) } })
+    let freshConnection = UUID()
+    await secondRun.addConnection(id: freshConnection, fileDescriptor: -1)
+    await secondRun.handle(
+      .deleteProjectGraph(path: "/tmp/project-g"), connectionID: freshConnection)
+
+    #expect(killed.value == Set([nodeID].compactMap { $0 }))
+    #expect(started.value.isEmpty)
+    #expect(persistence.loadGraph(path: "/tmp/project-g") == nil)
   }
 
   /// Paths round-trip through `resolvingSymlinksInPath()`, so compare the leaf rather
