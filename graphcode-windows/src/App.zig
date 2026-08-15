@@ -503,15 +503,15 @@ fn onWindowMessage(
             return true;
         },
         c.WM_MOUSEWHEEL => {
-            const message = CanvasInput.decodeWheelMessage(lparam, wparam);
-            const point = CanvasInput.screenToClient(hwnd, message.point) orelse {
+            const wheel = CanvasInput.decodeWheelMessage(lparam, wparam);
+            const point = CanvasInput.screenToClient(hwnd, wheel.point) orelse {
                 result.* = 0;
                 return true;
             };
             if (point.x < Tokens.sidebar_width) {
-                app.scrollSidebar(-@divTrunc(@as(i32, message.delta), 2));
+                app.scrollSidebar(-@divTrunc(@as(i32, wheel.delta), 2));
             } else {
-                app.canvas.zoomAt(point.x, point.y, message.delta);
+                app.canvas.zoomAt(point.x, point.y, wheel.delta);
             }
             _ = c.InvalidateRect(hwnd, null, 0);
             result.* = 0;
