@@ -18,8 +18,14 @@ pub const Edge = struct {
 pub const Project = struct {
     path: []u8,
     name: []u8,
-    remote: bool = false,
-    global: bool = false,
+
+    pub fn isRemote(self: Project) bool {
+        return std.mem.startsWith(u8, self.path, "ssh://");
+    }
+
+    pub fn isGlobal(self: Project) bool {
+        return std.mem.eql(u8, self.path, "graphcode://global");
+    }
 };
 
 pub const Graph = struct {
@@ -98,8 +104,6 @@ pub const Model = struct {
             try self.recent_projects.append(.{
                 .path = try duplicateJsonString(self.allocator, object, "path"),
                 .name = try duplicateJsonString(self.allocator, object, "name"),
-                .remote = std.mem.indexOf(u8, object, "\"remote\":true") != null,
-                .global = std.mem.indexOf(u8, object, "\"isGlobal\":true") != null,
             });
             cursor = object_end + 1;
         }
@@ -114,8 +118,6 @@ pub const Model = struct {
             .project = .{
                 .path = try duplicateJsonString(self.allocator, graph_json, "path"),
                 .name = try duplicateJsonString(self.allocator, graph_json, "name"),
-                .remote = std.mem.indexOf(u8, graph_json, "\"remote\":true") != null,
-                .global = std.mem.indexOf(u8, graph_json, "\"isGlobal\":true") != null,
             },
             .nodes = std.array_list.Managed(Node).init(self.allocator),
             .edges = std.array_list.Managed(Edge).init(self.allocator),
@@ -265,7 +267,7 @@ test "graph snapshots decode escaped project data and presence" {
     var model = Model.init(std.testing.allocator);
     defer model.deinit();
     const frame =
-        \\{"version":2,"kind":"event","sequence":7,"event":{"graphChanged":{"id":"graph","project":{"path":"C:\\work\\graph","name":"Visual \u2603","remote":false},"nodes":[{"id":"node","title":"Node \"A\"","loopType":"turnBased","state":"running","activity":"editing","presence":{"presence":"busy","confidence":"reported"}}],"edges":[]}}}
+        \\{"version":2,"kind":"event","sequence":7,"event":{"graphChanged":{"id":"graph","project":{"path":"C:\\work\\graph","name":"Visual \u2603"},"nodes":[{"id":"node","title":"Node \"A\"","loopType":"turnBased","state":"running","activity":"editing","presence":{"presence":"busy","confidence":"reported"}}],"edges":[]}}}
     ;
     try std.testing.expectEqual(Wire.EventKind.graph_changed, try model.updateFromFrame(frame));
     const graph = model.graph orelse return error.TestExpectedGraph;
@@ -280,7 +282,7 @@ test "stub graph snapshot decodes two actionable nodes" {
     var model = Model.init(std.testing.allocator);
     defer model.deinit();
     const frame =
-        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"stub-graph","project":{"path":"graphcode://stub/project","name":"Stub project","remote":false},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"Stub node A","loopType":"turnBased","state":"running","activity":"stub","presence":{"presence":"busy","confidence":"reported"}},{"id":"22222222-2222-4222-8222-222222222222","title":"Stub node B","loopType":"turnBased","state":"idle","activity":"stub","presence":{"presence":"idle","confidence":"reported"}}],"edges":[]}}}
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"stub-graph","project":{"path":"graphcode://stub/project","name":"Stub project"},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"Stub node A","loopType":"turnBased","state":"running","activity":"stub","presence":{"presence":"busy","confidence":"reported"}},{"id":"22222222-2222-4222-8222-222222222222","title":"Stub node B","loopType":"turnBased","state":"idle","activity":"stub","presence":{"presence":"idle","confidence":"reported"}}],"edges":[]}}}
     ;
     try std.testing.expectEqual(Wire.EventKind.graph_changed, try model.updateFromFrame(frame));
     const graph = model.graph orelse return error.TestExpectedGraph;
@@ -312,4 +314,16 @@ test "reordered graph fixture preserves nonsequential edge IDs" {
     try std.testing.expectEqualStrings("node-q", graph.edges.items[0].to);
     try std.testing.expectEqualStrings("node-z", graph.edges.items[1].from);
     try std.testing.expectEqualStrings("node-a", graph.edges.items[1].to);
+}
+
+test "project identity derives remote and global from Codable paths" {
+    const remote = Project{ .path = @constCast("ssh://build/graph"), .name = @constCast("Remote") };
+    const global = Project{ .path = @constCast("graphcode://global"), .name = @constCast("Graph") };
+    const local = Project{ .path = @constCast("C:\\work\\graph"), .name = @constCast("Local") };
+    try std.testing.expect(remote.isRemote());
+    try std.testing.expect(!remote.isGlobal());
+    try std.testing.expect(global.isGlobal());
+    try std.testing.expect(!global.isRemote());
+    try std.testing.expect(!local.isRemote());
+    try std.testing.expect(!local.isGlobal());
 }

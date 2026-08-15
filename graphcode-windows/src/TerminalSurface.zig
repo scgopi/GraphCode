@@ -72,6 +72,7 @@ pub const Surface = struct {
     surface: ?*c.winghostty_surface = null,
     attach: ?std.process.Child = null,
     session_name: []u8 = &.{},
+    project_path: []u8 = &.{},
     destroying: bool = false,
     destroyed: bool = false,
     input_bytes: usize = 0,
@@ -87,6 +88,11 @@ pub const Surface = struct {
     csi_value: usize = 0,
     csi_have_value: bool = false,
 };
+
+pub fn surfaceIdentityMatches(surface: *const Surface, project_path: []const u8, session: []const u8) bool {
+    return std.mem.eql(u8, surface.project_path, project_path) and
+        std.mem.eql(u8, surface.session_name, session);
+}
 
 pub const Workspace = struct {
     parent: c.HWND,
@@ -115,6 +121,7 @@ pub const Workspace = struct {
     layout_origin_y: i32 = 0,
     layout_width: i32 = 960,
     layout_height: i32 = 250,
+    project_path: []u8 = &.{},
 
     pub fn init(parent: c.HWND, allocator_: std.mem.Allocator) !Workspace {
         var workspace = Workspace{
@@ -146,12 +153,33 @@ pub const Workspace = struct {
             if (session.*.len != 0) self.allocator.free(session.*);
             session.* = &.{};
         }
+        if (self.project_path.len != 0) self.allocator.free(self.project_path);
         if (self.host) |host| {
             _ = c.winghostty_host_deinitialize(host);
             self.host = null;
         }
+
         self.allocator.free(self.zmx_path);
         self.allocator.free(self.cwd);
+    }
+
+    pub fn rebindProject(self: *Workspace, project_path: []const u8) !bool {
+        if (std.mem.eql(u8, self.project_path, project_path)) return false;
+        const copy = try self.allocator.dupe(u8, project_path);
+        errdefer self.allocator.free(copy);
+        self.destroySurface(0);
+        self.destroySurface(1);
+        for (&self.recreate_sessions) |*session| {
+            if (session.*.len != 0) self.allocator.free(session.*);
+            session.* = &.{};
+        }
+        if (self.project_path.len != 0) self.allocator.free(self.project_path);
+        self.project_path = copy;
+        return true;
+    }
+
+    pub fn projectPath(self: *const Workspace) []const u8 {
+        return self.project_path;
     }
 
     pub fn openNode(self: *Workspace, index: usize, node_id: []const u8) !void {
@@ -178,6 +206,7 @@ pub const Workspace = struct {
             return error.WinghosttySurfaceCreateFailed;
         }
         self.surfaces[index].session_name = session;
+        self.surfaces[index].project_path = try self.allocator.dupe(u8, self.project_path);
         self.surfaces[index].destroyed = false;
         self.surfaces[index].destroying = false;
         clearCells(&self.surfaces[index]);
@@ -276,6 +305,10 @@ pub const Workspace = struct {
         if (slot.session_name.len != 0) {
             self.allocator.free(slot.session_name);
             slot.session_name = &.{};
+        }
+        if (slot.project_path.len != 0) {
+            self.allocator.free(slot.project_path);
+            slot.project_path = &.{};
         }
         self.resetSessionState(index);
     }
@@ -874,6 +907,19 @@ fn onClipboardWrite(
 fn surfaceIndex(workspace: *Workspace, surface: *c.winghostty_surface) ?usize {
     for (workspace.surfaces, 0..) |slot, index| if (slot.surface == surface) return index;
     return null;
+}
+
+test "surface identity cannot leak a session across project paths" {
+    const first = Surface{
+        .project_path = @constCast("C:\\work\\first"),
+        .session_name = @constCast("node-1"),
+    };
+    const second = Surface{
+        .project_path = @constCast("C:\\work\\second"),
+        .session_name = @constCast("node-1"),
+    };
+    try std.testing.expect(surfaceIdentityMatches(&first, "C:\\work\\first", "node-1"));
+    try std.testing.expect(!surfaceIdentityMatches(&second, "C:\\work\\first", "node-1"));
 }
 
 fn appendOutput(slot: *Surface, bytes: []const u8) void {

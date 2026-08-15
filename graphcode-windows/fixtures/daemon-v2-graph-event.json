@@ -1,1 +1,1 @@
-{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"00000000-0000-4000-8000-000000000001","project":{"id":"project-local","name":"Windows visual baseline","path":"graphcode://fixtures/windows-visual-baseline","remote":false},"nodes":[],"edges":[]}}}
+{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"00000000-0000-4000-8000-000000000001","project":{"id":"project-local","name":"Windows visual baseline","path":"graphcode://fixtures/windows-visual-baseline"},"nodes":[],"edges":[]}}}

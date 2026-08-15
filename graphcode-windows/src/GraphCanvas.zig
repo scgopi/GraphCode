@@ -10,12 +10,13 @@ pub fn paint(
     model: *const GraphModel.Model,
     status: []const u8,
     allocator: std.mem.Allocator,
+    sidebar_scroll: i32,
 ) void {
     var client: c.RECT = undefined;
     _ = c.GetClientRect(hwnd, &client);
     fill(hdc, client, Tokens.canvas_tone);
     header(hdc, allocator, client.right, status);
-    Sidebar.draw(hdc, model, status, allocator);
+    Sidebar.draw(hdc, model, status, allocator, client.bottom, sidebar_scroll);
 
     const graph_bounds = rect(
         Tokens.sidebar_width,

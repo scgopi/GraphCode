@@ -36,6 +36,7 @@ pub const App = struct {
     smoke_action_requested: bool = false,
     smoke_input_requested: bool = false,
     smoke_idle_ticks: usize = 0,
+    sidebar_scroll: i32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) !*App {
         var client = try DaemonClient.init(allocator);
@@ -107,7 +108,10 @@ pub const App = struct {
                 }
             },
             .graph_changed => {
-                if (self.model.graph) |graph| self.queueProject(graph.project.path);
+                if (self.model.graph) |graph| {
+                    self.rebindWorkspace(graph.project.path);
+                    self.queueProject(graph.project.path);
+                }
                 self.refreshWorkspace();
             },
             .error_occurred => {
@@ -138,6 +142,7 @@ pub const App = struct {
 
     fn openProject(self: *App, path: []const u8) void {
         if (path.len == 0) return;
+        self.rebindWorkspace(path);
         self.client.setSubscription(path);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
         self.last_project_opened = self.allocator.dupe(u8, path) catch {
@@ -149,6 +154,14 @@ pub const App = struct {
             self.client.sendOpenProject(path);
             self.open_project_pending = false;
         }
+    }
+
+    fn rebindWorkspace(self: *App, path: []const u8) void {
+        const workspace = if (self.workspace) |*value| value else return;
+        _ = workspace.rebindProject(path) catch {
+            self.setStatus("Unable to rebind terminal workspace");
+            return;
+        };
     }
 
     fn queueProject(self: *App, path: []const u8) void {
@@ -231,10 +244,13 @@ pub const App = struct {
         if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
         var rows = Sidebar.buildRows(&self.model, self.allocator, client.bottom) catch return;
         defer rows.deinit();
-        Sidebar.layoutRows(rows.items, Tokens.header_height, client.bottom);
+        _ = Sidebar.layoutRows(rows.items, Tokens.header_height, Sidebar.viewportBottom(client.bottom), self.sidebar_scroll);
         const row = Sidebar.hitTest(rows.items, x, y) orelse return;
         switch (row.kind) {
-            .overview => self.client.sendOpenGlobalGraph(),
+            .overview => {
+                self.rebindWorkspace("graphcode://global");
+                self.client.sendOpenGlobalGraph();
+            },
             .quick_chats => self.setStatus("Quick Chats are not provided by the daemon"),
             .project => self.openProject(row.path),
             .loop => {
@@ -243,6 +259,18 @@ pub const App = struct {
             },
             .local_section, .remote_section => {},
         }
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
+    }
+
+    fn scrollSidebar(self: *App, delta: i32) void {
+        var client: c.RECT = undefined;
+        if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
+        var rows = Sidebar.buildRows(&self.model, self.allocator, client.bottom) catch return;
+        defer rows.deinit();
+        const viewport_bottom = Sidebar.viewportBottom(client.bottom);
+        const content_height = Sidebar.layoutRows(rows.items, Tokens.header_height, viewport_bottom, 0);
+        const max_scroll = @max(0, content_height - viewport_bottom);
+        self.sidebar_scroll = @max(0, @min(max_scroll, self.sidebar_scroll + delta));
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
@@ -319,7 +347,7 @@ fn onWindowMessage(
         c.WM_PAINT => {
             var paint: c.PAINTSTRUCT = undefined;
             const hdc = c.BeginPaint(hwnd, &paint);
-            GraphCanvas.paint(hwnd, hdc, &app.model, app.status(), app.allocator);
+            GraphCanvas.paint(hwnd, hdc, &app.model, app.status(), app.allocator, app.sidebar_scroll);
             _ = c.EndPaint(hwnd, &paint);
             result.* = 0;
             return true;
@@ -428,6 +456,12 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
+        c.WM_MOUSEWHEEL => {
+            const delta: i16 = @bitCast(@as(u16, @truncate((@as(usize, @bitCast(wparam)) >> 16) & 0xffff)));
+            app.scrollSidebar(-@divTrunc(@as(i32, delta), 2));
+            result.* = 0;
+            return true;
+        },
         c.WM_SETFOCUS => {
             if (app.workspace) |*workspace| workspace.focus(workspace.active_surface);
             result.* = 0;
@@ -460,11 +494,11 @@ fn smokeContractPassed(self: *const App) bool {
     const layout_width = @max(0, client.right - Tokens.sidebar_width);
     const layout_height = Tokens.workspace_height;
     return workspace.layoutMatches(
-            Tokens.sidebar_width,
-            @max(0, client.bottom - Tokens.workspace_height),
-            layout_width,
-            layout_height,
-        ) and
+        Tokens.sidebar_width,
+        @max(0, client.bottom - Tokens.workspace_height),
+        layout_width,
+        layout_height,
+    ) and
         workspace.hasSurface(0) and workspace.hasSurface(1) and
         workspace.hasAttach(0) and workspace.hasAttach(1);
 }

@@ -18,9 +18,12 @@ pub const Row = struct {
     path: []const u8,
     node_index: ?usize = null,
     depth: u8 = 0,
-    remote: bool = false,
     bounds: c.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
 };
+
+pub fn viewportBottom(client_bottom: i32) i32 {
+    return @max(Tokens.header_height + 1, client_bottom - 24);
+}
 
 pub fn buildRows(
     model: *const GraphModel.Model,
@@ -35,10 +38,10 @@ pub fn buildRows(
     var has_local = false;
     var has_remote = false;
     for (model.recent_projects.items) |project| {
-        if (project.remote) has_remote = true else has_local = true;
+        if (project.isRemote()) has_remote = true else has_local = true;
     }
     if (model.graph) |graph| {
-        if (graph.project.remote) has_remote = true else has_local = true;
+        if (graph.project.isRemote()) has_remote = true else has_local = true;
     }
     if (has_local) try rows.append(.{ .kind = .local_section, .title = "Local Projects", .path = "" });
     try appendProjects(&rows, model, false);
@@ -50,18 +53,18 @@ pub fn buildRows(
 
 fn appendProjects(rows: *std.array_list.Managed(Row), model: *const GraphModel.Model, remote: bool) !void {
     for (model.recent_projects.items) |project| {
-        if (project.remote != remote) continue;
+        if (project.isRemote() != remote) continue;
         try appendProject(rows, model, project);
     }
     if (model.graph) |graph| {
-        if (graph.project.remote == remote and !containsProject(model.recent_projects.items, graph.project.path)) {
+        if (graph.project.isRemote() == remote and !containsProject(model.recent_projects.items, graph.project.path)) {
             try appendProject(rows, model, graph.project);
         }
     }
 }
 
 fn appendProject(rows: *std.array_list.Managed(Row), model: *const GraphModel.Model, project: GraphModel.Project) !void {
-    try rows.append(.{ .kind = .project, .title = project.name, .path = project.path, .remote = project.remote });
+    try rows.append(.{ .kind = .project, .title = project.name, .path = project.path });
     if (model.graph) |graph| {
         if (!std.mem.eql(u8, graph.project.path, project.path)) return;
         for (graph.nodes.items, 0..) |node, index| {
@@ -81,19 +84,24 @@ fn containsProject(projects: []const GraphModel.Project, path: []const u8) bool 
     return false;
 }
 
-pub fn layoutRows(rows: []Row, top: i32, bottom: i32) void {
-    var y = top;
+pub fn layoutRows(rows: []Row, top: i32, bottom: i32, scroll_offset: i32) i32 {
+    var content_y = top;
     for (rows) |*row| {
         const row_height: i32 = if (row.kind == .local_section or row.kind == .remote_section) 30 else 28;
-        row.bounds = rect(0, y, Tokens.sidebar_width, @min(bottom, y + row_height));
-        y += row_height;
+        const y = content_y - scroll_offset;
+        row.bounds = if (y < bottom and y + row_height > top)
+            rect(0, @max(top, y), Tokens.sidebar_width, @min(bottom, y + row_height))
+        else
+            rect(0, 0, 0, 0);
+        content_y += row_height;
     }
+    return content_y;
 }
 
 pub fn hitTest(rows: []const Row, x: i32, y: i32) ?Row {
     if (x < 0 or x >= Tokens.sidebar_width) return null;
     for (rows) |row| {
-        if (y >= row.bounds.top and y < row.bounds.bottom) return row;
+        if (row.bounds.right > row.bounds.left and y >= row.bounds.top and y < row.bounds.bottom) return row;
     }
     return null;
 }
@@ -103,11 +111,13 @@ pub fn draw(
     model: *const GraphModel.Model,
     status: []const u8,
     allocator: std.mem.Allocator,
+    client_bottom: i32,
+    scroll_offset: i32,
 ) void {
     var rows = buildRows(model, allocator, 1200) catch return;
     defer rows.deinit();
-    layoutRows(rows.items, Tokens.header_height, 1200);
-    const sidebar = rect(0, Tokens.header_height, Tokens.sidebar_width, 1200);
+    _ = layoutRows(rows.items, Tokens.header_height, viewportBottom(client_bottom), scroll_offset);
+    const sidebar = rect(0, Tokens.header_height, Tokens.sidebar_width, client_bottom);
     fill(hdc, sidebar, Tokens.workspace_rail);
     for (rows.items) |row| {
         const x: i32 = if (row.kind == .loop) 34 else 18;
@@ -122,7 +132,7 @@ pub fn draw(
         }
         drawText(hdc, allocator, row.title, x, row.bounds.top + 7, size, color);
     }
-    drawText(hdc, allocator, status, 18, 700, 11, 0x00909090);
+    drawText(hdc, allocator, status, 18, @max(Tokens.header_height, client_bottom - 22), 11, 0x00909090);
 }
 
 fn icon(kind: RowKind) []const u8 {
@@ -143,7 +153,7 @@ test "sidebar rows include overview, chats, and daemon projects with loop childr
     defer model.deinit();
     _ = try model.updateFromFrame(frame);
     const graph_frame =
-        \\{"version":2,"kind":"event","sequence":5,"event":{"graphChanged":{"id":"graph","project":{"path":"C:\\work\\local","name":"Local Graph","remote":false},"nodes":[{"id":"node-a","title":"Loop A","loopType":"turnBased","state":"running","activity":"","presence":{"presence":"busy"}}],"edges":[]}}}
+        \\{"version":2,"kind":"event","sequence":5,"event":{"graphChanged":{"id":"graph","project":{"path":"C:\\work\\local","name":"Local Graph"},"nodes":[{"id":"node-a","title":"Loop A","loopType":"turnBased","state":"running","activity":"","presence":{"presence":"busy"}}],"edges":[]}}}
     ;
     _ = try model.updateFromFrame(graph_frame);
     var rows = try buildRows(&model, allocator, 800);
@@ -157,6 +167,27 @@ test "sidebar rows include overview, chats, and daemon projects with loop childr
     try std.testing.expectEqual(RowKind.project, rows.items[6].kind);
     try std.testing.expectEqualStrings("Local Graph", rows.items[3].title);
     try std.testing.expectEqualStrings("Loop A", rows.items[4].title);
+}
+
+test "sidebar layout clips and hit-tests many projects in a short viewport" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    for (0..12) |index| {
+        const path = try std.fmt.allocPrint(std.testing.allocator, "C:\\work\\project-{d}", .{index});
+        const name = try std.fmt.allocPrint(std.testing.allocator, "Project {d}", .{index});
+        try model.recent_projects.append(.{ .path = path, .name = name });
+    }
+    var rows = try buildRows(&model, std.testing.allocator, 120);
+    defer rows.deinit();
+    const viewport_bottom = viewportBottom(120);
+    const content_height = layoutRows(rows.items, Tokens.header_height, viewport_bottom, 0);
+    try std.testing.expect(content_height > viewport_bottom);
+    try std.testing.expect(hitTest(rows.items, 20, viewport_bottom) == null);
+    const max_scroll = content_height - viewport_bottom;
+    _ = layoutRows(rows.items, Tokens.header_height, viewport_bottom, max_scroll);
+    const last = hitTest(rows.items, 20, 90) orelse return error.ExpectedVisibleRow;
+    try std.testing.expectEqual(RowKind.project, last.kind);
+    try std.testing.expectEqualStrings("Project 11", last.title);
 }
 
 fn rect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {
