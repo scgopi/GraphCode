@@ -45,26 +45,12 @@ public final class PTYProcessSession: @unchecked Sendable {
   ) throws {
     var master: Int32 = 0
     var slave: Int32 = 0
-    #if canImport(Darwin)
-      guard openpty(&master, &slave, nil, nil, nil) == 0 else {
-        throw SessionError.failedToOpenPTY
-      }
-    #else
-      // `openpty` lives in libutil on Linux, which the Glibc module doesn't reliably
-      // expose — the POSIX pt* trio is the same operation without the extra library.
-      master = posix_openpt(O_RDWR)
-      guard master >= 0, grantpt(master) == 0, unlockpt(master) == 0,
-        let slaveName = ptsname(master).map({ String(cString: $0) })
-      else {
-        if master >= 0 { close(master) }
-        throw SessionError.failedToOpenPTY
-      }
-      slave = open(slaveName, O_RDWR)
-      guard slave >= 0 else {
-        close(master)
-        throw SessionError.failedToOpenPTY
-      }
-    #endif
+    // Portable as-is: Glibc's module includes pty.h, and glibc ≥ 2.34 ships openpty
+    // in libc proper, so no libutil link is needed on Linux. The POSIX pt* trio is
+    // not an option — stdlib.h's feature-macro guards keep it out of Swift's Glibc.
+    guard openpty(&master, &slave, nil, nil, nil) == 0 else {
+      throw SessionError.failedToOpenPTY
+    }
 
     let masterHandle = FileHandle(fileDescriptor: master, closeOnDealloc: true)
     let slaveHandle = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
