@@ -221,6 +221,18 @@ public actor ProjectRegistry {
       let canonicalPath = Self.canonicalize(path)
       await close(canonicalPath, for: connectionID)
       persistence.forgetProject(path: canonicalPath)
+      // The graph is the only handle on every loop's detached session, so its deletion
+      // has to end them first — dropping it with the sessions alive left every agent in
+      // the project running forever with nothing pointing at it. Read from the resident
+      // store when there is one, else straight from disk: going through
+      // `store(forProjectPath:)` would run its load-time `ensureUnattendedSessions`,
+      // *starting* sessions on the way to killing them. Memory goes with each loop, the
+      // same as single-node deletion.
+      let graph = await stores[canonicalPath]?.graph ?? persistence.loadGraph(path: canonicalPath)
+      for node in graph?.nodesAtAnyDepth ?? [] {
+        terminateSession?(node, canonicalPath)
+        NodeMemory.remove(projectPath: canonicalPath, nodeID: node.id)
+      }
       // Drop the in-memory store too, or a later reopen would resurrect the graph we
       // just deleted from the one still sitting in `stores`.
       stores.removeValue(forKey: canonicalPath)
