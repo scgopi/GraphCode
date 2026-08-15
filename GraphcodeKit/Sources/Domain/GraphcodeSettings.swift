@@ -266,15 +266,16 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   public var summarisesLoops: Bool
 
   /// Whether the export/import surfaces are offered at all — the context-menu items on
-  /// loop cards and sidebar rows, the canvas background's counterparts, and the CLI's
-  /// `node export` / `graph export` / `node import` verbs.
+  /// loop cards, sidebar loop and folder rows, the canvas background's counterparts,
+  /// and the CLI's `node export` / `graph export` / `node import` verbs.
   ///
-  /// **Off by default, and experimental.** Off, none of those surfaces appear and the
-  /// CLI verbs refuse with a pointer here, exactly as if the feature hadn't shipped.
-  /// The bundle format is young enough that a zip made this week may not import next
-  /// month, and a right-click verb that writes files and splices loops into graphs is
-  /// one a person should choose, not find. Nothing else changes: bundles already
-  /// exported remain ordinary zips, importable again the moment this is back on.
+  /// **On by default** since 0.1.40, after one release opt-in. It earns the default the
+  /// summary rail couldn't (`summarisesLoops`): every surface is a menu item that does
+  /// nothing until deliberately clicked — no claims made on a loop's behalf, no tokens
+  /// spent, nothing running unattended. Off, none of those surfaces appear and the CLI
+  /// verbs refuse with a pointer here; bundles already exported remain ordinary zips,
+  /// importable again the moment this is back on. A settings file that explicitly says
+  /// `false` — anyone who tried the experiment and turned it off — is preserved.
   public var sharesLoops: Bool
 
   /// Whether a small model may rewrite the current beat, on top of the free reading.
@@ -306,7 +307,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     briefsSessionsAboutTheGraph: Bool = true,
     autoSelectsModel: Bool = false,
     showsActivityStrip: Bool = false,
-    sharesLoops: Bool = false,
+    sharesLoops: Bool = true,
     summarisesLoops: Bool = false,
     summaryUsesModel: Bool = false,
     worktreePolicies: [String: WorktreeHygienePolicy] = [:]
@@ -350,10 +351,11 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       try container.decodeIfPresent(Bool.self, forKey: .autoSelectsModel) ?? false
     showsActivityStrip =
       try container.decodeIfPresent(Bool.self, forKey: .showsActivityStrip) ?? false
-    // Absent means nobody has opted in — including files written by 0.1.39-beta3/4,
-    // the two releases where export/import shipped ungated.
+    // Absent takes the new default — on. An explicit `false`, written by anyone who
+    // tried the experiment and switched it off, is preserved; flipping a recorded
+    // choice under someone is what the migration comments above never do.
     sharesLoops =
-      try container.decodeIfPresent(Bool.self, forKey: .sharesLoops) ?? false
+      try container.decodeIfPresent(Bool.self, forKey: .sharesLoops) ?? true
     // Absent means nobody has opted in, which is the default again. A person who switched
     // it on has `true` in their file — including anyone whose 0.1.37 install wrote the
     // then-default out — and that is preserved.
