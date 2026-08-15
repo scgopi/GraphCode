@@ -68,6 +68,8 @@ foreach ($path in @(
     "src\TerminalSurface.zig",
     "src\WorkspaceLayout.zig",
     "src\InputRouter.zig",
+    "src\Forms.zig",
+    "src\NativeForms.zig",
     "src\Accessibility.zig",
     "src\DesignTokens.zig",
     "src\Wire.zig",
@@ -152,6 +154,10 @@ $zig = Resolve-TestZig
 Invoke-Native "Wire executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\Wire.zig } finally { Pop-Location }
+}
+Invoke-Native "Forms and navigation executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\Forms.zig } finally { Pop-Location }
 }
 Invoke-Native "Frame buffer executable tests" {
   Push-Location $shellRoot

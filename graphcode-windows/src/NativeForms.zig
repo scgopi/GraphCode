@@ -16,17 +16,23 @@ const Kind = enum { node, edge, settings };
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeNativeForm");
 const ok_id = 9001;
 const cancel_id = 9002;
+var active_state: bool = false;
+var active_state_storage: DialogState = undefined;
 
 pub fn node(
     parent: c.HWND,
     allocator: std.mem.Allocator,
     initial: Forms.NodeDraft,
 ) !?Forms.NodeDraft {
-    var state = DialogState{ .allocator = allocator, .kind = .node, .parent = parent };
+    const state = try allocator.create(DialogState);
+    state.* = .{ .allocator = allocator, .kind = .node, .parent = parent };
+    defer {
+        freeValues(state);
+        allocator.destroy(state);
+    }
     state.values[0] = try allocator.dupe(u8, initial.title);
     state.values[1] = try allocator.dupe(u8, initial.loop_type);
-    defer freeValues(&state);
-    if (!show(&state, "Create or edit node", &.{ "Title", "Loop type" })) return null;
+    if (!(try show(state, "Create or edit node", &.{ "Title", "Loop type" }))) return null;
     return .{
         .title = try allocator.dupe(u8, state.values[0]),
         .loop_type = try allocator.dupe(u8, state.values[1]),
@@ -38,12 +44,16 @@ pub fn edge(
     allocator: std.mem.Allocator,
     initial: Forms.EdgeDraft,
 ) !?Forms.EdgeDraft {
-    var state = DialogState{ .allocator = allocator, .kind = .edge, .parent = parent };
+    const state = try allocator.create(DialogState);
+    state.* = .{ .allocator = allocator, .kind = .edge, .parent = parent };
+    defer {
+        freeValues(state);
+        allocator.destroy(state);
+    }
     state.values[0] = try allocator.dupe(u8, initial.from);
     state.values[1] = try allocator.dupe(u8, initial.to);
     state.values[2] = try allocator.dupe(u8, initial.kind);
-    defer freeValues(&state);
-    if (!show(&state, "Create or edit edge", &.{ "From node ID", "To node ID", "Edge kind" })) return null;
+    if (!(try show(state, "Create or edit edge", &.{ "From node ID", "To node ID", "Edge kind" }))) return null;
     return .{
         .from = try allocator.dupe(u8, state.values[0]),
         .to = try allocator.dupe(u8, state.values[1]),
@@ -56,11 +66,15 @@ pub fn settings(
     allocator: std.mem.Allocator,
     initial: Forms.Settings,
 ) !?Forms.Settings {
-    var state = DialogState{ .allocator = allocator, .kind = .settings, .parent = parent };
+    const state = try allocator.create(DialogState);
+    state.* = .{ .allocator = allocator, .kind = .settings, .parent = parent };
+    defer {
+        freeValues(state);
+        allocator.destroy(state);
+    }
     state.values[0] = try allocator.dupe(u8, initial.daemon_pipe);
     state.values[1] = try allocator.dupe(u8, initial.support_directory);
-    defer freeValues(&state);
-    if (!show(&state, "GraphCode settings", &.{ "Daemon pipe override", "Support directory" })) return null;
+    if (!(try show(state, "GraphCode settings", &.{ "Daemon pipe override", "Support directory" }))) return null;
     return .{
         .daemon_pipe = try allocator.dupe(u8, state.values[0]),
         .support_directory = try allocator.dupe(u8, state.values[1]),
@@ -72,6 +86,8 @@ fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !boo
     registerClass() catch return error.FormClassRegistrationFailed;
     const wide_title = try std.unicode.utf8ToUtf16LeAlloc(state.allocator, title);
     defer state.allocator.free(wide_title);
+    active_state_storage = state.*;
+    active_state = true;
     const hwnd = c.CreateWindowExW(
         c.WS_EX_DLGMODALFRAME,
         class_name.ptr,
@@ -85,7 +101,10 @@ fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !boo
         null,
         c.GetModuleHandleW(null),
         @ptrCast(state),
-    ) orelse return error.FormCreationFailed;
+    ) orelse {
+        active_state = false;
+        return error.FormCreationFailed;
+    };
     _ = c.EnableWindow(state.parent, 0);
     _ = c.ShowWindow(hwnd, c.SW_SHOW);
     _ = c.SetForegroundWindow(hwnd);
@@ -98,6 +117,8 @@ fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !boo
     }
     _ = c.EnableWindow(state.parent, 1);
     _ = c.SetActiveWindow(state.parent);
+    state.* = active_state_storage;
+    active_state = false;
     return state.result;
 }
 
@@ -112,27 +133,31 @@ fn registerClass() !void {
 }
 
 fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
-    var state: ?*DialogState = null;
-    const raw = c.GetWindowLongPtrW(hwnd, c.GWLP_USERDATA);
-    if (raw != 0) state = @ptrFromInt(@as(usize, @bitCast(raw)));
-    if (message == c.WM_NCCREATE) {
-        const create = @as(*const c.CREATESTRUCTW, @ptrFromInt(@as(usize, @bitCast(lparam))));
-        state = @ptrCast(@alignCast(create.lpCreateParams));
-        if (state) |value| _ = c.SetWindowLongPtrW(hwnd, c.GWLP_USERDATA, @intCast(@intFromPtr(value)));
-    }
-    const value = state orelse return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    if (!active_state) return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    const value = &active_state_storage;
     switch (message) {
         c.WM_CREATE => {
-            const labels = switch (value.kind) {
-                .node => [_][]const u8{ "Title", "Loop type" },
-                .edge => [_][]const u8{ "From node ID", "To node ID", "Edge kind" },
-                .settings => [_][]const u8{ "Daemon pipe override", "Support directory" },
-            };
-            for (labels, 0..) |label, index| {
+            var labels: [3][]const u8 = .{ "", "", "" };
+            var label_count: usize = 0;
+            switch (value.kind) {
+                .node => {
+                    labels = .{ "Title", "Loop type", "" };
+                    label_count = 2;
+                },
+                .edge => {
+                    labels = .{ "From node ID", "To node ID", "Edge kind" };
+                    label_count = 3;
+                },
+                .settings => {
+                    labels = .{ "Daemon pipe override", "Support directory", "" };
+                    label_count = 2;
+                },
+            }
+            for (labels[0..label_count], 0..) |label, index| {
                 createText(hwnd, value, label, index);
             }
-            createButton(hwnd, "OK", ok_id, 350, @intCast(35 + labels.len * 48));
-            createButton(hwnd, "Cancel", cancel_id, 265, @intCast(35 + labels.len * 48));
+            createButton(hwnd, "OK", ok_id, 350, @intCast(35 + label_count * 48));
+            createButton(hwnd, "Cancel", cancel_id, 265, @intCast(35 + label_count * 48));
             return 0;
         },
         c.WM_COMMAND => {

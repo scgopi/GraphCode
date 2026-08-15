@@ -205,6 +205,10 @@ pub const App = struct {
 
     fn createNode(self: *App) void {
         const path = self.currentProject() orelse return;
+        if (self.smoke) {
+            self.client.sendCreateNode(path, "Windows shell node");
+            return;
+        }
         const draft = NativeForms.node(self.window.hwnd, self.allocator, .{ .title = "Windows shell node" }) catch {
             self.setStatus("Unable to open node form");
             return;
