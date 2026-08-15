@@ -254,6 +254,8 @@ pub const Workspace = struct {
 
     pub fn projectPath(self: *const Workspace) []const u8 {
         return self.project_path;
+    }
+
     fn layoutPathForProject(self: *Workspace, project: []const u8) ![]u8 {
         const configured = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_WORKSPACE_LAYOUT") catch
             try self.allocator.dupe(u8, "graphcode-workspace.json");
