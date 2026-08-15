@@ -71,6 +71,7 @@ pub const App = struct {
     pub fn run(self: *App) !void {
         try self.window.create(self, &onWindowMessage, title.ptr);
         self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
+        if (self.workspace) |*workspace| workspace.setKeyCallback(self, &onWorkspaceKey);
         if (self.workspace) |*workspace| try workspace.startInputWorker();
         self.layoutWorkspace();
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_REQUIRE_DAEMON")) |value| {
@@ -144,7 +145,9 @@ pub const App = struct {
 
     fn openProject(self: *App, path: []const u8) void {
         if (path.len == 0) return;
-        self.rebindWorkspace(path);
+        if (self.workspace) |*workspace| {
+            workspace.setProject(path) catch self.setStatus("Unable to restore project terminal layout");
+        }
         self.client.setSubscription(path);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
         self.last_project_opened = self.allocator.dupe(u8, path) catch {
@@ -237,24 +240,15 @@ pub const App = struct {
                 self.model.selectNext();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
-            .new_tab => if (self.workspace) |*workspace| {
-                const id = std.fmt.allocPrint(self.allocator, "shell-tab-{d}", .{workspace.layout.next_surface_id}) catch return;
-                defer self.allocator.free(id);
-                workspace.newTab(id) catch self.setStatus("Unable to create terminal tab");
-            },
+            .new_tab => if (self.workspace) |*workspace|
+                workspace.newTab() catch self.setStatus("Unable to create terminal tab"),
             .close_tab => if (self.workspace) |*workspace| {
                 workspace.closeFocusedPane() catch self.setStatus("Unable to close terminal pane");
             },
-            .split_horizontal => if (self.workspace) |*workspace| {
-                const id = std.fmt.allocPrint(self.allocator, "shell-split-{d}", .{workspace.layout.next_surface_id}) catch return;
-                defer self.allocator.free(id);
-                workspace.splitFocused(.horizontal, id) catch self.setStatus("Unable to split terminal");
-            },
-            .split_vertical => if (self.workspace) |*workspace| {
-                const id = std.fmt.allocPrint(self.allocator, "shell-split-{d}", .{workspace.layout.next_surface_id}) catch return;
-                defer self.allocator.free(id);
-                workspace.splitFocused(.vertical, id) catch self.setStatus("Unable to split terminal");
-            },
+            .split_horizontal => if (self.workspace) |*workspace|
+                workspace.splitFocused(.horizontal) catch self.setStatus("Unable to split terminal"),
+            .split_vertical => if (self.workspace) |*workspace|
+                workspace.splitFocused(.vertical) catch self.setStatus("Unable to split terminal"),
             .focus_next_pane => if (self.workspace) |*workspace| workspace.focusNextPane(),
             .focus_previous_pane => if (self.workspace) |*workspace| workspace.focusPreviousPane(),
             .none => {},
@@ -345,6 +339,11 @@ pub const App = struct {
         }
     }
 };
+
+fn onWorkspaceKey(context: ?*anyopaque, key: usize, ctrl: bool, shift: bool) callconv(.c) void {
+    const app: *App = @ptrCast(@alignCast(context.?));
+    app.handleAction(InputRouter.keyAction(key, ctrl, shift));
+}
 
 fn onDaemonFrame(
     context: ?*anyopaque,

@@ -11,6 +11,14 @@ const ParserState = enum { normal, escape, csi, osc };
 const input_queue_capacity: usize = 64;
 const input_queue_max_bytes: usize = 1024 * 1024;
 const input_write_timeout_ms: c.DWORD = 50;
+const max_surfaces: usize = 32;
+
+pub const WorkspaceKeyCallback = *const fn (
+    context: ?*anyopaque,
+    key: usize,
+    ctrl: bool,
+    shift: bool,
+) callconv(.c) void;
 
 pub const InputQueue = struct {
     pub const max_bytes = input_queue_max_bytes;
@@ -99,14 +107,14 @@ pub fn surfaceIdentityMatches(surface: *const Surface, project_path: []const u8,
 pub const Workspace = struct {
     parent: c.HWND,
     host: ?*c.winghostty_host = null,
-    surfaces: [2]Surface = .{ .{}, .{} },
+    surfaces: [max_surfaces]Surface = [_]Surface{.{}} ** max_surfaces,
     active_surface: usize = 0,
     allocator: std.mem.Allocator,
     zmx_path: []u8,
     cwd: []u8,
-    recreate_sessions: [2][]u8 = .{ &.{}, &.{} },
-    recreate_due_ms: [2]i64 = .{ 0, 0 },
-    recreate_delay_ms: [2]i64 = .{ 100, 100 },
+    recreate_sessions: [max_surfaces][]u8 = [_][]u8{&.{}} ** max_surfaces,
+    recreate_due_ms: [max_surfaces]i64 = [_]i64{0} ** max_surfaces,
+    recreate_delay_ms: [max_surfaces]i64 = [_]i64{100} ** max_surfaces,
     fatal_error: bool = false,
     render_error: c.winghostty_result = c.WINGHOSTTY_OK,
     input_mutex: std.Thread.Mutex = .{},
@@ -121,6 +129,9 @@ pub const Workspace = struct {
     input_error_message: []const u8 = "",
     layout: WorkspaceLayout.Layout,
     layout_path: []u8,
+    project_key: []u8,
+    key_callback: ?WorkspaceKeyCallback = null,
+    key_callback_context: ?*anyopaque = null,
     layout_origin_x: i32 = 0,
     layout_origin_y: i32 = 0,
     layout_width: i32 = 960,
@@ -134,11 +145,20 @@ pub const Workspace = struct {
             .zmx_path = try allocator_.dupe(u8, std.process.getEnvVarOwned(allocator_, "GRAPHCODE_ZMX") catch "zmx.exe"),
             .cwd = try allocator_.dupe(u8, std.process.getEnvVarOwned(allocator_, "GRAPHCODE_GATE_CWD") catch "."),
             .input_queue = .{ .allocator = allocator_ },
-            .layout = WorkspaceLayout.Layout.init(allocator_),
+            .layout = try WorkspaceLayout.Layout.init(
+                allocator_,
+                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT")
+                    catch "global",
+            ),
             .layout_path = try allocator_.dupe(
                 u8,
                 std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_LAYOUT")
                     catch "graphcode-workspace.json",
+            ),
+            .project_key = try allocator_.dupe(
+                u8,
+                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT")
+                    catch "global",
             ),
         };
         errdefer {
@@ -146,14 +166,16 @@ pub const Workspace = struct {
             allocator_.free(workspace.cwd);
             workspace.layout.deinit();
             allocator_.free(workspace.layout_path);
+            allocator_.free(workspace.project_key);
         }
-        if (WorkspaceLayout.Layout.load(allocator_, workspace.layout_path)) |restored| {
+        if (WorkspaceLayout.Layout.load(allocator_, workspace.layout_path, workspace.project_key)) |restored| {
             workspace.layout.deinit();
             workspace.layout = restored;
         } else |_| {}
         if (c.winghostty_host_initialize(&workspace.host) != c.WINGHOSTTY_OK) {
             return error.WinghosttyHostInitializeFailed;
         }
+        workspace.restorePersistedSurfaces();
         return workspace;
     }
 
@@ -163,8 +185,7 @@ pub const Workspace = struct {
 
     pub fn deinit(self: *Workspace) void {
         self.stopInputWorker();
-        self.destroySurface(0);
-        self.destroySurface(1);
+        for (self.surfaces, 0..) |_, index| self.destroySurface(index);
         for (&self.recreate_sessions) |*session| {
             if (session.*.len != 0) self.allocator.free(session.*);
             session.* = &.{};
@@ -179,6 +200,32 @@ pub const Workspace = struct {
         self.allocator.free(self.cwd);
         self.layout.deinit();
         self.allocator.free(self.layout_path);
+        self.allocator.free(self.project_key);
+    }
+
+    pub fn setKeyCallback(
+        self: *Workspace,
+        context: ?*anyopaque,
+        callback: ?WorkspaceKeyCallback,
+    ) void {
+        self.key_callback_context = context;
+        self.key_callback = callback;
+    }
+
+    pub fn setProject(self: *Workspace, project: []const u8) !void {
+        if (project.len == 0 or std.mem.eql(u8, self.project_key, project)) return;
+        const new_project_key = try self.allocator.dupe(u8, project);
+        errdefer self.allocator.free(new_project_key);
+        for (self.surfaces, 0..) |_, index| self.destroySurface(index);
+        self.layout.deinit();
+        self.layout = try WorkspaceLayout.Layout.init(self.allocator, project);
+        self.allocator.free(self.project_key);
+        self.project_key = new_project_key;
+        if (WorkspaceLayout.Layout.load(self.allocator, self.layout_path, project)) |restored| {
+            self.layout.deinit();
+            self.layout = restored;
+        } else |_| {}
+        self.restorePersistedSurfaces();
     }
 
     pub fn rebindProject(self: *Workspace, project_path: []const u8) !bool {
@@ -217,7 +264,7 @@ pub const Workspace = struct {
         } else if (index > 0 and self.layout.tabs.items.len == 1) {
             try self.layout.addTab(node_id, false);
         }
-        self.persistLayout();
+        try self.persistLayout();
         var options = self.surfaceOptions(index);
         const result = c.winghostty_host_create_surface_v2(
             self.host,
@@ -243,49 +290,131 @@ pub const Workspace = struct {
         );
     }
 
-    pub fn newTab(self: *Workspace, surface_id: []const u8) !void {
+    pub fn newTab(self: *Workspace) !void {
+        const surface_id = try self.layout.newSurfaceID();
+        defer self.allocator.free(surface_id);
+        const index = try self.createAttachedSurface(surface_id);
+        errdefer self.destroySurface(index);
         try self.layout.addTab(surface_id, false);
-        self.persistLayout();
+        self.persistLayout() catch |err| {
+            _ = self.closeSurfaceForID(surface_id);
+            return err;
+        };
+        self.syncTopology();
     }
 
-    pub fn splitFocused(self: *Workspace, direction: WorkspaceLayout.Direction, surface_id: []const u8) !void {
+    fn createAttachedSurface(self: *Workspace, session: []const u8) !usize {
+        for (self.surfaces, 0..) |slot, index| {
+            if (slot.surface != null or slot.attach != null) continue;
+            const owned_session = try self.allocator.dupe(u8, session);
+            errdefer self.allocator.free(owned_session);
+            try self.startSession(index, owned_session);
+            var options = self.surfaceOptions(index);
+            const result = c.winghostty_host_create_surface_v2(
+                self.host,
+                self.parent,
+                &options,
+                &self.surfaces[index].surface,
+            );
+            if (result != c.WINGHOSTTY_OK or self.surfaces[index].surface == null) {
+                self.waitAttach(index);
+                return error.WinghosttySurfaceCreateFailed;
+            }
+
+            self.surfaces[index].session_name = owned_session;
+            self.surfaces[index].destroyed = false;
+            self.surfaces[index].destroying = false;
+            clearCells(&self.surfaces[index]);
+            self.resize(
+                self.layout_origin_x,
+                self.layout_origin_y,
+                self.layout_width,
+                self.layout_height,
+            );
+            return index;
+        }
+        return error.SurfaceCapacityExceeded;
+    }
+
+    fn restorePersistedSurfaces(self: *Workspace) void {
+        var ids: [max_surfaces][]u8 = undefined;
+        var count: usize = 0;
+        for (self.layout.tabs.items) |tab| for (tab.panes.items) |pane| {
+            if (count == ids.len) break;
+            ids[count] = self.allocator.dupe(u8, pane.id) catch continue;
+            count += 1;
+        };
+        defer for (ids[0..count]) |id| self.allocator.free(id);
+        for (ids[0..count]) |id| {
+            if (self.createAttachedSurface(id)) |_| continue else |_| {
+                _ = self.layout.removePane(id);
+            }
+        }
+        self.persistLayout() catch {};
+        self.syncTopology();
+    }
+
+    fn closeSurfaceForID(self: *Workspace, id: []const u8) bool {
+        for (self.surfaces, 0..) |slot, index| {
+            if (std.mem.eql(u8, slot.session_name, id)) {
+                self.destroySurface(index);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn splitFocused(self: *Workspace, direction: WorkspaceLayout.Direction) !void {
+        const surface_id = try self.layout.newSurfaceID();
+        defer self.allocator.free(surface_id);
+        const index = try self.createAttachedSurface(surface_id);
+        errdefer self.destroySurface(index);
         try self.layout.splitFocused(direction, surface_id);
-        self.persistLayout();
+        self.persistLayout() catch |err| {
+            _ = self.closeSurfaceForID(surface_id);
+            return err;
+        };
+        self.syncTopology();
     }
 
-    pub fn selectTab(self: *Workspace, index: usize) void {
-        self.layout.selectTab(index);
-        self.persistLayout();
+    pub fn selectTab(self: *Workspace, index: usize) !void {
+        try self.layout.selectTab(index);
+        try self.persistLayout();
+        self.syncTopology();
     }
 
     pub fn selectNextTab(self: *Workspace) void {
         self.layout.selectRelativeTab(1);
-        self.persistLayout();
+        self.persistLayout() catch {};
+        self.syncTopology();
     }
 
     pub fn selectPreviousTab(self: *Workspace) void {
         self.layout.selectRelativeTab(-1);
-        self.persistLayout();
+        self.persistLayout() catch {};
+        self.syncTopology();
     }
 
     pub fn focusNextPane(self: *Workspace) void {
-        self.layout.focusPane(1);
-        self.persistLayout();
+        self.layout.focusPane(1) catch {};
+        self.syncFocusedPane();
     }
 
     pub fn focusPreviousPane(self: *Workspace) void {
-        self.layout.focusPane(-1);
-        self.persistLayout();
+        self.layout.focusPane(-1) catch {};
+        self.syncFocusedPane();
     }
 
     pub fn closeFocusedPane(self: *Workspace) !void {
         const id = try self.layout.closeFocusedPane();
-        self.allocator.free(id);
-        self.persistLayout();
+        defer self.allocator.free(id);
+        _ = self.closeSurfaceForID(id);
+        try self.persistLayout();
+        self.syncTopology();
     }
 
-    pub fn persistLayout(self: *Workspace) void {
-        self.layout.save(self.layout_path) catch {};
+    pub fn persistLayout(self: *Workspace) !void {
+        try self.layout.save(self.layout_path);
     }
 
     pub fn recreate(self: *Workspace, index: usize) !void {
@@ -296,24 +425,11 @@ pub const Workspace = struct {
     }
 
     pub fn resize(self: *Workspace, origin_x: i32, origin_y: i32, width: i32, height: i32) void {
-        const graph_height = @max(1, height - Tokens.tab_bar_height);
-        const half = @max(1, @divTrunc(width, 2));
         self.layout_origin_x = origin_x;
         self.layout_origin_y = origin_y;
         self.layout_width = width;
         self.layout_height = height;
-        for (&self.surfaces, 0..) |*slot, index| {
-            if (slot.surface) |surface| {
-                var bounds = c.winghostty_rect{
-                    .x = origin_x + if (index == 0) 0 else half,
-                    .y = origin_y + Tokens.tab_bar_height + Tokens.pane_header_height,
-                    .width = @intCast(if (index == 0) half else width - half),
-                    .height = @intCast(@max(1, graph_height - Tokens.pane_header_height)),
-                };
-                _ = c.winghostty_surface_set_bounds(surface, &bounds);
-            }
-
-        }
+        self.syncTopology();
     }
 
     /// Draws only product chrome. Winghostty remains responsible for terminal pixels;
@@ -353,8 +469,7 @@ pub const Workspace = struct {
     }
 
     pub fn poll(self: *Workspace) void {
-        self.readAttachOutput(0);
-        self.readAttachOutput(1);
+        for (self.surfaces, 0..) |_, index| self.readAttachOutput(index);
         self.pollRecreates();
     }
 
@@ -365,7 +480,55 @@ pub const Workspace = struct {
             if (slot.surface) |surface| {
                 _ = c.winghostty_surface_set_focus(surface, if (index == other_index) 1 else 0);
             }
+
         }
+    }
+
+    fn syncTopology(self: *Workspace) void {
+        const selected = self.layout.selected() orelse return;
+        const pane_count = selected.panes.items.len;
+        const available_height = @max(1, self.layout_height - Tokens.tab_bar_height - Tokens.pane_header_height);
+        const available_width = @max(1, self.layout_width);
+        for (&self.surfaces, 0..) |*slot, index| {
+            const pane_index = self.paneIndex(slot.session_name);
+            if (slot.surface == null) continue;
+            if (pane_index) |position| {
+                const horizontal = selected.split_direction == .horizontal;
+                const first = if (horizontal) @divTrunc(available_width * position, pane_count) else 0;
+                const next = if (horizontal) @divTrunc(available_width * (position + 1), pane_count)
+                    else available_width;
+                const top = if (horizontal) 0 else @divTrunc(available_height * position, pane_count);
+                const bottom = if (horizontal) available_height
+                    else @divTrunc(available_height * (position + 1), pane_count);
+                _ = c.winghostty_surface_set_visible(slot.surface, 1);
+                const bounds = c.winghostty_rect{
+                    .x = self.layout_origin_x + @as(i32, @intCast(first)),
+                    .y = self.layout_origin_y + Tokens.tab_bar_height + Tokens.pane_header_height + @as(i32, @intCast(top)),
+                    .width = @intCast(@max(1, next - first)),
+                    .height = @intCast(@max(1, bottom - top)),
+                };
+                _ = c.winghostty_surface_set_bounds(slot.surface, &bounds);
+                const focused = position == selected.focused_pane;
+                _ = c.winghostty_surface_set_focus(slot.surface, if (focused) 1 else 0);
+                if (focused) self.active_surface = index;
+            } else {
+                _ = c.winghostty_surface_set_visible(slot.surface, 0);
+                _ = c.winghostty_surface_set_focus(slot.surface, 0);
+            }
+        }
+    }
+
+    fn syncFocusedPane(self: *Workspace) void {
+        self.syncTopology();
+        self.persistLayout() catch {};
+    }
+
+    fn paneIndex(self: *const Workspace, id: []const u8) ?usize {
+        const selected = self.layout.selectedConst() orelse return null;
+        for (selected.panes.items, 0..) |pane, index| {
+            if (std.mem.eql(u8, pane.id, id)) return index;
+        }
+        return null;
     }
 
     pub fn send(self: *Workspace, text: []const u8) void {
@@ -909,6 +1072,16 @@ fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c
     const workspace = workspaceFromUserData(user_data) orelse return;
     _ = callbackSlot(workspace, surface) orelse return;
     if (event.action == c.WINGHOSTTY_KEY_RELEASE) return;
+    const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
+    const shift = (@as(i32, c.GetKeyState(c.VK_SHIFT)) & 0x8000) != 0;
+    if (ctrl and
+        (event.virtual_key == 'T' or event.virtual_key == 'W' or event.virtual_key == 'D' or
+            event.virtual_key == 0xDB or event.virtual_key == 0xDD))
+    {
+        if (workspace.key_callback) |callback|
+            callback(workspace.key_callback_context, event.virtual_key, true, shift);
+        return;
+    }
     const bytes: []const u8 = switch (event.virtual_key) {
         c.VK_RETURN => "\r",
         c.VK_BACK => "\x08",
