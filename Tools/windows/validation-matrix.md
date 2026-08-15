@@ -12,6 +12,7 @@ The Windows port must have runnable commands before implementation fleets begin.
 | TDD evidence contract | `pwsh Tools/tdd/Tests/TddEvidence.Tests.ps1` |
 | Platform/wire contracts | `pwsh Tools/windows/validate.ps1 -Task swift-contracts` |
 | Authenticated remote bridge proof | `pwsh Tools/windows/validate.ps1 -Task remote-bridge` |
+| Windows-to-POSIX remote E2E parity | `pwsh Tools/windows/validate.ps1 -Task remote-e2e` |
 | Production Swift platform package | `pwsh Tools/windows/validate.ps1 -Task swift-production` |
 | Shared Swift package | `swift test --package-path <shared-package>` once extracted |
 | macOS app/daemon/CLI | `make test` |
@@ -47,9 +48,14 @@ Windows backend fleet begins:
 Remote validation uses controlled POSIX hosts and sanitized fixtures:
 
 - local bridge unit/security tests;
+- mandatory deterministic local Windows-to-POSIX parity fixture covering setup,
+  fan-out, messaging, reconnect, restart/reboot restoration, multiple hosts,
+  generation monotonicity, and capability non-disclosure;
 - Python shim protocol fixtures;
 - SSH reconnect and stale-state tests;
-- manual or protected CI tier for real remote-host execution.
+- manual or protected CI tier for real remote-host execution. Set
+  `GRAPHCODE_REMOTE_E2E_TARGETS` to comma-separated authenticated `user@host:port`
+  values; unavailable configured hosts are explicit skips, never passing tests.
 
 Credentials, hostnames, and capability tokens belong in runner secrets and never in the
 repository.

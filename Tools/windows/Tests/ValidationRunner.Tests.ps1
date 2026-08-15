@@ -14,6 +14,7 @@ $expected = @(
   "swift-process",
   "swift-named-pipe",
   "remote-bridge",
+  "remote-e2e",
   "swift-format",
   "visual-baseline",
   "tdd-evidence",

@@ -12,6 +12,16 @@ python -B -m unittest discover -s investigation/spikes/remote-bridge -p test_*.p
 pwsh Tools/windows/validate.ps1 -Task remote-bridge
 ```
 
+The executable parity tier is separate:
+
+```text
+pwsh Tools/windows/validate.ps1 -Task remote-e2e
+```
+
+It always runs the deterministic local fixture and only probes external POSIX hosts
+when `GRAPHCODE_REMOTE_E2E_TARGETS` is set. Unavailable configured hosts are explicit
+environment-gated skips.
+
 `remote_client.py` is a one-shot, POSIX-compatible shim. It reads the state record for
 each request and sends one framed JSON request:
 

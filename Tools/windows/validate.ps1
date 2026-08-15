@@ -9,6 +9,7 @@ param(
     "swift-process",
     "swift-named-pipe",
     "remote-bridge",
+    "remote-e2e",
     "swift-format",
     "visual-baseline",
     "tdd-evidence",
@@ -35,6 +36,7 @@ $tasks = @(
   "swift-process",
   "swift-named-pipe",
   "remote-bridge",
+  "remote-e2e",
   "swift-format",
   "visual-baseline",
   "tdd-evidence",
@@ -397,6 +399,16 @@ function Invoke-Task([string] $name) {
       & (Join-Path $repoRoot "Tools\windows\Tests\RemoteBridgePrivacyRace.Tests.ps1")
       if ($LASTEXITCODE -ne 0) {
         throw "Remote bridge privacy race regression failed with exit code $LASTEXITCODE"
+      }
+    }
+    "remote-e2e" {
+      $python = Get-Command python.exe -ErrorAction SilentlyContinue
+      if (-not $python) {
+        throw "Python 3 was not found for the remote E2E fixture"
+      }
+      Invoke-Native "Windows-to-POSIX remote E2E parity" {
+        & $python.Source -B `
+          (Join-Path $repoRoot "investigation\spikes\remote-e2e\test_remote_e2e.py") -v
       }
     }
     "swift-format" {
