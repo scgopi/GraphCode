@@ -611,8 +611,13 @@ try {
       "investigation\spikes\swift-contracts\Sources\GraphcodeWindowsContracts\SupportDirectory.swift"
   }
   foreach ($junction in $junctions) {
-    if (Test-Path $junction) {
-      Remove-Item -LiteralPath $junction -Force
+    if (Test-Path -LiteralPath $junction) {
+      $item = Get-Item -LiteralPath $junction -Force
+      if ($item.PSIsContainer) {
+        [System.IO.Directory]::Delete($item.FullName, $false)
+      } else {
+        [System.IO.File]::Delete($item.FullName)
+      }
     }
   }
 }
