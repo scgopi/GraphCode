@@ -129,6 +129,19 @@ pub const App = struct {
                     self.rebindWorkspace(graph.project.path);
                     self.queueProject(graph.project.path);
                 }
+                    if (self.worktree_inspection) |inspection| {
+                        if (self.model.graph) |graph| {
+                            if (!std.mem.eql(u8, inspection.project_path, graph.project.path)) {
+                                WorktreeStatus.deinitInspection(self.allocator, &self.worktree_inspection.?);
+                                self.worktree_inspection = null;
+                                if (self.selected_worktree_path.len != 0) {
+                                    self.allocator.free(self.selected_worktree_path);
+                                    self.selected_worktree_path = &.{};
+                                }
+                            }
+                        }
+                    }
+                    if (self.model.graph) |graph| self.queueProject(graph.project.path);
                 self.refreshWorkspace();
             },
             .error_occurred => {
@@ -412,6 +425,7 @@ pub const App = struct {
         const inspection = self.worktree_inspection orelse return false;
         for (inspection.entries.items) |entry| {
             if (!std.mem.eql(u8, entry.path, path)) continue;
+            if (WorktreeStatus.decision(entry) != .reclaimable) return false;
             if (self.selected_worktree_path.len != 0) self.allocator.free(self.selected_worktree_path);
             self.selected_worktree_path = self.allocator.dupe(u8, path) catch return false;
             return true;
@@ -431,9 +445,16 @@ pub const App = struct {
                 }
             }
         }
-        const count = @as(i32, @intCast(inspection.entries.items.len));
-        const next = @mod(@as(i32, @intCast(index)) + delta + count, count);
-        _ = self.selectWorktreeRow(inspection.entries.items[@intCast(next)].path);
+        const count = inspection.entries.items.len;
+        var offset: usize = 0;
+        while (offset < count) : (offset += 1) {
+            const next = @mod(@as(i32, @intCast(index)) + delta * @as(i32, @intCast(offset + 1)) +
+                @as(i32, @intCast(count)), @as(i32, @intCast(count)));
+            if (WorktreeStatus.decision(inspection.entries.items[@intCast(next)]) == .reclaimable) {
+                _ = self.selectWorktreeRow(inspection.entries.items[@intCast(next)].path);
+                return;
+            }
+        }
     }
 
     fn handleAction(self: *App, action: InputRouter.Action) void {
@@ -802,7 +823,7 @@ fn onWindowMessage(
             const x: i32 = @intCast(@as(u16, @truncate(@as(usize, @bitCast(lparam)))));
             const y: i32 = @intCast(@as(u16, @truncate(@as(usize, @bitCast(lparam)) >> 16)));
             if (app.worktree_inspection) |inspection| {
-                if (Sidebar.hitTestWorktree(x, y, inspection.entries.items.len, Tokens.header_height, Tokens.sidebar_width)) |index| {
+                if (Sidebar.hitTestWorktree(x, y, app.model.recent_projects.items.len, inspection.entries.items.len)) |index| {
                     _ = app.selectWorktreeRow(inspection.entries.items[index].path);
                     _ = c.InvalidateRect(hwnd, null, 0);
                 }

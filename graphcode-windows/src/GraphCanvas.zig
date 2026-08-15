@@ -74,6 +74,13 @@ pub fn paint(
     Sidebar.draw(hdc, model, status, allocator);
     Sidebar.draw(hdc, model, inspection, selected_worktree_path, status, allocator);
 >>>>>>> 6540896 (Add 
+    const visible_inspection = if (inspection) |value|
+        if (model.graph) |graph|
+            if (std.mem.eql(u8, value.project_path, graph.project.path)) value else null
+        else null
+    else null;
+    Sidebar.draw(hdc, model, visible_inspection, selected_worktree_path, status, allocator);
+
     const graph_bounds = rect(
         Tokens.sidebar_width,
         Tokens.header_height,

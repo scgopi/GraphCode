@@ -184,14 +184,15 @@ pub fn draw(
         if (inspection) |value| {
             drawText(hdc, allocator, "Live rows", 18, y + 10, 11, 0x007A7A7A);
             y += 24;
-            for (value.entries.items) |entry| {
+        for (value.entries.items, 0..) |entry, index| {
                 const selected = std.mem.eql(u8, entry.path, selected_worktree_path);
-                if (selected) fill(hdc, rect(12, y - 3, Tokens.sidebar_width - 12, y + 25), 0x003A3A44);
-                drawText(hdc, allocator, entry.path, 24, y, 11, 0x00E6E6E6);
-                drawText(hdc, allocator, reason(entry), 24, y + 14, 10,
-                    if (WorktreeStatus.decision(entry) == .reclaimable) 0x0078D7A8 else 0x00FFCD7A);
-                y += 34;
-            }
+            const row_y = worktreeRowTop(model.recent_projects.items.len, index);
+            if (selected and WorktreeStatus.decision(entry) == .reclaimable)
+                fill(hdc, rect(12, row_y - 3, Tokens.sidebar_width - 12, row_y + 25), 0x003A3A44);
+            drawText(hdc, allocator, entry.path, 24, row_y, 11, 0x00E6E6E6);
+            drawText(hdc, allocator, reason(entry), 24, row_y + 14, 10,
+                if (WorktreeStatus.decision(entry) == .reclaimable) 0x0078D7A8 else 0x00FFCD7A);
+        }
         }
     }
 
@@ -277,13 +278,14 @@ test "scrolled-off rows produce no paint command" {
     try std.testing.expect(hitTest(rows.items, 20, 7) == null);
 }
 
-pub fn rowTop(index: usize, header_height: i32) i32 {
-    return header_height + 78 + 62 + 54 + 24 + @as(i32, @intCast(index * 34));
+pub fn worktreeRowTop(project_count: usize, index: usize) i32 {
+    return Tokens.header_height + 78 + @as(i32, @intCast(project_count * 24)) + 62 + 54 + 24 +
+        @as(i32, @intCast(index * 34));
 }
 
-pub fn hitTestWorktree(x: i32, y: i32, count: usize, header_height: i32, sidebar_width: i32) ?usize {
-    if (x < 12 or x >= sidebar_width) return null;
-    const top = rowTop(0, header_height);
+pub fn hitTestWorktree(x: i32, y: i32, project_count: usize, count: usize) ?usize {
+    if (x < 12 or x >= Tokens.sidebar_width) return null;
+    const top = worktreeRowTop(project_count, 0);
     if (y < top) return null;
     const index: usize = @intCast(@divTrunc(y - top, 34));
     if (index >= count) return null;
@@ -292,19 +294,22 @@ pub fn hitTestWorktree(x: i32, y: i32, count: usize, header_height: i32, sidebar
 
 fn reason(entry: WorktreeStatus.Entry) []const u8 {
     if (entry.primary) return "primary checkout";
+    if (entry.locked) return "locked";
+    if (entry.prunable) return "prunable/stale";
     if (entry.bound_running) return "bound to active loop";
     if (entry.dirty or entry.untracked or entry.conflicted) return "local changes";
     if (!entry.pushed) return "unpushed commits";
     if (!entry.landed) return "not landed on default";
-    return "safe to reclaim";
+    return if (WorktreeStatus.decision(entry) == .reclaimable) "safe to reclaim" else "unsafe to reclaim";
 }
 
 test "worktree row hit testing selects only visible rows" {
-    const top = rowTop(0, Tokens.header_height);
-    try std.testing.expectEqual(@as(?usize, 0), hitTestWorktree(24, top + 4, 2, Tokens.header_height, Tokens.sidebar_width));
-    try std.testing.expectEqual(@as(?usize, 1), hitTestWorktree(24, top + 34 + 4, 2, Tokens.header_height, Tokens.sidebar_width));
-    try std.testing.expectEqual(@as(?usize, null), hitTestWorktree(Tokens.sidebar_width + 1, top, 2, Tokens.header_height, Tokens.sidebar_width));
-    try std.testing.expectEqual(@as(?usize, null), hitTestWorktree(24, top + 68, 2, Tokens.header_height, Tokens.sidebar_width));
+    const top = worktreeRowTop(2, 0);
+    try std.testing.expectEqual(@as(?usize, 0), hitTestWorktree(24, top + 4, 2, 2));
+    try std.testing.expectEqual(@as(?usize, 1), hitTestWorktree(24, top + 34 + 4, 2, 2));
+    try std.testing.expectEqual(@as(?usize, null), hitTestWorktree(Tokens.sidebar_width + 1, top, 2, 2));
+    try std.testing.expectEqual(@as(?usize, null), hitTestWorktree(24, top + 68, 2, 2));
+    try std.testing.expectEqual(@as(i32, worktreeRowTop(3, 0) - worktreeRowTop(1, 0)), 48);
 }
 
 fn rect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {
