@@ -59,12 +59,6 @@ pub const Workspace = struct {
     }
 
     pub fn deinit(self: *Workspace) void {
-        for (self.surfaces) |surface| {
-            if (surface.session_name.len != 0) self.killSession(surface.session_name);
-        }
-        for (self.recreate_sessions) |session| {
-            if (session.len != 0) self.killSession(session);
-        }
         self.destroySurface(0);
         self.destroySurface(1);
         for (&self.recreate_sessions) |*session| {
@@ -239,17 +233,6 @@ pub const Workspace = struct {
             _ = child.wait() catch {};
             self.surfaces[index].attach = null;
         }
-    }
-
-    fn killSession(self: *Workspace, session: []const u8) void {
-        var args = [_][]const u8{ self.zmx_path, "kill", "--force", session };
-        var child = std.process.Child.init(&args, self.allocator);
-        child.cwd = self.cwd;
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Ignore;
-        child.stderr_behavior = .Ignore;
-        child.spawn() catch return;
-        _ = child.wait() catch {};
     }
 
     fn writeAttachInput(self: *Workspace, index: usize, bytes: []const u8) void {

@@ -33,6 +33,7 @@ pub const App = struct {
     smoke_failure: bool = false,
     smoke_tick: usize = 0,
     smoke_action_requested: bool = false,
+    smoke_idle_ticks: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) !*App {
         var client = try DaemonClient.init(allocator);
@@ -46,6 +47,7 @@ pub const App = struct {
             .model = GraphModel.Model.init(allocator),
         };
         errdefer app.deinit();
+        try app.client.start();
         try app.acquireSingleInstance();
         return app;
     }
@@ -71,7 +73,15 @@ pub const App = struct {
         self.client.setCallback(&onDaemonFrame, self);
         self.client.connect();
         try self.window.messageLoop();
-        if (self.smoke_failure) return error.SmokeContractFailed;
+        if (self.smoke_failure) {
+            if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_EXPECT_TRANSPORT_ERROR")) |value| {
+                defer self.allocator.free(value);
+                if (std.mem.eql(u8, value, "1")) {
+                    std.debug.print("Smoke daemon status: {s}\n", .{self.client.statusText()});
+                }
+            } else |_| {}
+            return error.SmokeContractFailed;
+        }
     }
 
     pub fn configureArgs(self: *App, args: []const []const u8) void {
@@ -131,7 +141,7 @@ pub const App = struct {
             return;
         };
         self.open_project_pending = true;
-        if (self.client.state == .connected) {
+        if (self.client.connectionState() == .connected) {
             self.client.sendOpenProject(path);
             self.open_project_pending = false;
         }
@@ -153,7 +163,7 @@ pub const App = struct {
     }
 
     fn flushPendingProject(self: *App) void {
-        if (self.pending_project_path.len == 0 or self.client.state != .connected) return;
+        if (self.pending_project_path.len == 0 or self.client.connectionState() != .connected) return;
         const path = self.pending_project_path;
         self.pending_project_path = &.{};
         self.openProject(path);
@@ -196,8 +206,7 @@ pub const App = struct {
     fn handleAction(self: *App, action: InputRouter.Action) void {
         switch (action) {
             .reconnect => {
-                self.client.close();
-                self.client.connect();
+                self.client.reconnect();
             },
             .create_node => self.createNode(),
             .open_node => self.openSelectedNode(),
@@ -296,8 +305,9 @@ fn onWindowMessage(
         c.WM_TIMER => if (wparam == MainWindow.timer_id) {
             app.smoke_tick += 1;
             app.client.poll();
-            if (app.client.state == .connected) app.flushPendingProject();
-            if (app.client.state == .connected) {
+            const connection_state = app.client.connectionState();
+            if (connection_state == .connected) app.flushPendingProject();
+            if (app.client.connectionState() == .connected) {
                 if (app.open_project_pending and app.last_project_opened.len != 0) {
                     app.client.sendOpenProject(app.last_project_opened);
                     app.open_project_pending = false;
@@ -309,17 +319,19 @@ fn onWindowMessage(
                     app.client.sendRestoreOpenProjects();
                 }
             }
-            if (app.client.state != app.last_connection_state) {
-                app.last_connection_state = app.client.state;
+            const updated_connection_state = app.client.connectionState();
+            if (updated_connection_state != app.last_connection_state) {
+                app.last_connection_state = updated_connection_state;
                 app.sync_requested = false;
                 app.restore_requested = false;
             }
+            if (app.client.isIdle()) app.smoke_idle_ticks += 1 else app.smoke_idle_ticks = 0;
             if (app.workspace) |*workspace| workspace.poll();
             if (app.smoke and app.smoke_tick == 8) {
                 app.refreshWorkspace();
             }
             if (app.smoke and app.smoke_tick == 16 and
-                app.client.state == .connected and !app.smoke_action_requested)
+                app.client.connectionState() == .connected and !app.smoke_action_requested)
             {
                 app.smoke_action_requested = true;
                 app.createNode();
@@ -336,9 +348,12 @@ fn onWindowMessage(
                     }
                 }
             }
+            const smoke_deadline: usize = if (app.stress) 96 else 52;
             if (app.smoke and
-                ((app.stress and app.smoke_tick == 48) or
-                    (!app.stress and app.smoke_tick == 28)))
+                ((app.stress and app.smoke_tick >= 56) or
+                    (!app.stress and app.smoke_tick >= 32)) and
+                (app.smoke_idle_ticks >= 5 or
+                    app.smoke_tick >= smoke_deadline))
             {
                 if (app.require_smoke_contract and !smokeContractPassed(app)) {
                     app.smoke_failure = true;
@@ -384,7 +399,7 @@ fn onWindowMessage(
 }
 
 fn smokeContractPassed(self: *const App) bool {
-    if (self.client.state != .connected) return false;
+    if (self.client.connectionState() != .connected) return false;
     const value = self.model.graph orelse return false;
     if (value.nodes.items.len < 2) return false;
     const workspace = self.workspace orelse return false;

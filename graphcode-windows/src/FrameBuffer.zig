@@ -2,13 +2,27 @@ const std = @import("std");
 const Wire = @import("Wire.zig");
 
 pub const FrameBuffer = struct {
+    allocator: std.mem.Allocator,
     mode: Wire.ProtocolMode = .v2,
-    bytes: [Wire.legacy_max_payload + 4]u8 = undefined,
+    bytes: []u8,
     length: usize = 0,
     expected_length: ?usize = null,
 
-    pub fn init(mode: Wire.ProtocolMode) FrameBuffer {
-        return .{ .mode = mode };
+    pub fn init(allocator: std.mem.Allocator, mode: Wire.ProtocolMode) !FrameBuffer {
+        return .{
+            .allocator = allocator,
+            .mode = mode,
+            .bytes = try allocator.alloc(u8, Wire.legacy_max_payload + 4),
+        };
+    }
+
+    pub fn deinit(self: *FrameBuffer) void {
+        self.allocator.free(self.bytes);
+        self.bytes = &.{};
+    }
+
+    pub fn capacity(self: *const FrameBuffer) usize {
+        return self.bytes.len;
     }
 
     pub fn setMode(self: *FrameBuffer, mode: Wire.ProtocolMode) void {
@@ -58,7 +72,8 @@ test "incremental frame buffering never requires a complete read" {
     const allocator = std.testing.allocator;
     const payload = "split frame";
     const header = try Wire.frameLength(payload, .v2);
-    var buffer = FrameBuffer.init(.v2);
+    var buffer = try FrameBuffer.init(allocator, .v2);
+    defer buffer.deinit();
     try buffer.append(header[0..2]);
     try std.testing.expect((try buffer.next(allocator)) == null);
     try buffer.append(header[2..]);
@@ -76,7 +91,8 @@ test "incremental frame buffering drains coalesced frames" {
     const second = "two";
     const first_header = try Wire.frameLength(first, .v2);
     const second_header = try Wire.frameLength(second, .v2);
-    var buffer = FrameBuffer.init(.v2);
+    var buffer = try FrameBuffer.init(allocator, .v2);
+    defer buffer.deinit();
     try buffer.append(&first_header);
     try buffer.append(first);
     try buffer.append(&second_header);
@@ -88,4 +104,12 @@ test "incremental frame buffering drains coalesced frames" {
     try std.testing.expectEqualStrings(first, first_frame);
     try std.testing.expectEqualStrings(second, second_frame);
     try std.testing.expect((try buffer.next(allocator)) == null);
+}
+
+test "frame storage is heap-backed and keeps startup structs small" {
+    const allocator = std.testing.allocator;
+    var buffer = try FrameBuffer.init(allocator, .v1);
+    defer buffer.deinit();
+    try std.testing.expectEqual(Wire.legacy_max_payload + 4, buffer.capacity());
+    try std.testing.expect(@sizeOf(FrameBuffer) < 1024);
 }

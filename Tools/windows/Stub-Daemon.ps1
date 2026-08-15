@@ -3,16 +3,19 @@ param(
   [Parameter(Mandatory)]
   [string] $PipeName,
   [Parameter(Mandatory)]
-  [string] $ResultPath
+  [string] $ResultPath,
+  [switch] $NonReading
 )
 
 $ErrorActionPreference = "Stop"
 $utf8 = [Text.Encoding]::UTF8
 $seenRequests = [Collections.Generic.HashSet[string]]::new()
 $seenResponses = [Collections.Generic.HashSet[string]]::new()
+$requestCommands = @{}
 $connectionCount = 0
 $subscriptionSeen = $false
 $graphSent = $false
+$busyObserved = $false
 $seenCommands = [Collections.Generic.List[string]]::new()
 $errorMessage = $null
 
@@ -77,17 +80,22 @@ function Write-Result {
     correlatedRequests = $seenRequests.Count -ge 2 -and
       (@($seenRequests | Where-Object { -not $seenResponses.Contains($_) }).Count -eq 0)
     requestCount = $seenRequests.Count
+    unansweredRequests = @($seenRequests | Where-Object { -not $seenResponses.Contains($_) })
+    unansweredCommands = @($seenRequests | Where-Object {
+        -not $seenResponses.Contains($_)
+      } | ForEach-Object { $requestCommands[$_] })
     commands = @($seenCommands)
     error = $errorMessage
     subscriptionSeen = $subscriptionSeen
     reconnectObserved = $connectionCount -ge 2
     graphSent = $graphSent
+    busyObserved = $busyObserved
   }
   $result | ConvertTo-Json -Compress | Set-Content -LiteralPath $ResultPath -NoNewline
 }
 
 try {
-  while ($connectionCount -lt 4) {
+  while ($connectionCount -lt 32) {
     $server = [IO.Pipes.NamedPipeServerStream]::new(
       $PipeName,
       [IO.Pipes.PipeDirection]::InOut,
@@ -98,6 +106,13 @@ try {
     try {
       $server.WaitForConnection()
       $connectionCount++
+      $graphSentOnConnection = $false
+      if ($NonReading) {
+        $busyObserved = $true
+        Write-Result
+        Start-Sleep -Seconds 10
+        continue
+      }
       while ($server.IsConnected) {
         $header = Read-Exact $server 4
         if ($null -eq $header) { break }
@@ -120,6 +135,7 @@ try {
         }
         [void] $seenRequests.Add([string]$frame.requestID)
         $commandName = $frame.command.PSObject.Properties.Name | Select-Object -First 1
+        $requestCommands[[string]$frame.requestID] = [string]$commandName
         if ($commandName) { $seenCommands.Add([string]$commandName) }
         $response = if ($commandName -eq "listRecentProjects") {
           $recentProjects.Replace("{0}", [string]$frame.requestID)
@@ -128,9 +144,10 @@ try {
         }
         if (-not (Send-Frame $server $response)) { break }
         [void] $seenResponses.Add([string]$frame.requestID)
-        if ($commandName -eq "listRecentProjects" -and -not $graphSent) {
+        if ($commandName -eq "listRecentProjects" -and -not $graphSentOnConnection) {
           if (-not (Send-Frame $server $graphEvent)) { break }
           $graphSent = $true
+          $graphSentOnConnection = $true
         }
         Write-Result
       }

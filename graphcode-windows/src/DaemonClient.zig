@@ -13,8 +13,24 @@ pub const DaemonClient = struct {
     const reconnect_initial_ms: i64 = 100;
     const reconnect_max_ms: i64 = 4_000;
     const negotiation_timeout_ms: i64 = 1_500;
+    const outbound_capacity: usize = 64;
+    const inbound_capacity: usize = 128;
 
     allocator: std.mem.Allocator,
+    mutex: std.Thread.Mutex = .{},
+    condition: std.Thread.Condition = .{},
+    worker: ?std.Thread = null,
+    stop_worker: bool = false,
+    want_connected: bool = false,
+    reconnect_requested: bool = false,
+    retry_now: bool = false,
+    outbound: [outbound_capacity][]u8 = undefined,
+    outbound_head: usize = 0,
+    outbound_count: usize = 0,
+    worker_busy: bool = false,
+    inbound: [inbound_capacity][]u8 = undefined,
+    inbound_head: usize = 0,
+    inbound_count: usize = 0,
     pipe: c.HANDLE = c.INVALID_HANDLE_VALUE,
     pipe_name: []u8 = &.{},
     client_id: [36]u8 = undefined,
@@ -24,10 +40,11 @@ pub const DaemonClient = struct {
     last_error: []const u8 = "",
     resume_from: u64 = 0,
     next_request: u64 = 1,
+    next_draft: u64 = 1,
     pending_request_ids: [64][36]u8 = undefined,
     pending_request_count: usize = 0,
     subscription_path: []const u8 = "",
-    frame_buffer: FrameBuffer = .{},
+    frame_buffer: FrameBuffer,
     retry_at_ms: i64 = 0,
     retry_delay_ms: i64 = reconnect_initial_ms,
     negotiation_deadline_ms: i64 = 0,
@@ -38,18 +55,30 @@ pub const DaemonClient = struct {
     pub fn init(allocator: std.mem.Allocator) !DaemonClient {
         var client = DaemonClient{
             .allocator = allocator,
-            .frame_buffer = FrameBuffer.init(.v2),
+            .frame_buffer = try FrameBuffer.init(allocator, .v2),
         };
+        errdefer client.frame_buffer.deinit();
         makeClientID(&client.client_id);
         client.pipe_name = endpointName(allocator) catch
             try allocator.dupe(u8, "\\\\.\\pipe\\graphcode-daemon-unavailable");
         return client;
     }
 
+    pub fn start(self: *DaemonClient) !void {
+        self.worker = try std.Thread.spawn(.{}, workerMain, .{self});
+    }
+
     pub fn deinit(self: *DaemonClient) void {
-        self.close();
+        self.mutex.lock();
+        self.stop_worker = true;
+        self.want_connected = false;
+        self.condition.broadcast();
+        self.mutex.unlock();
+        if (self.worker) |thread| thread.join();
+        self.clearQueues();
         if (self.pipe_name.len != 0) self.allocator.free(self.pipe_name);
         if (self.subscription_path.len != 0) self.allocator.free(self.subscription_path);
+        self.frame_buffer.deinit();
     }
 
     pub fn setCallback(
@@ -62,85 +91,80 @@ pub const DaemonClient = struct {
     }
 
     pub fn setSubscription(self: *DaemonClient, project_path: []const u8) void {
-        if (std.mem.eql(u8, self.subscription_path, project_path)) return;
         const copy = self.allocator.dupe(u8, project_path) catch {
+            self.mutex.lock();
             self.last_error = "subscription allocation failed";
+            self.mutex.unlock();
             return;
         };
+        self.mutex.lock();
+        if (std.mem.eql(u8, self.subscription_path, project_path)) {
+            self.mutex.unlock();
+            self.allocator.free(copy);
+            return;
+        }
         if (self.subscription_path.len != 0) self.allocator.free(self.subscription_path);
         self.subscription_path = copy;
-        if (self.state == .connected) {
-            self.closeHandleOnly();
-            self.state = .reconnecting;
-            self.connect();
-        }
+        self.reconnect_requested = true;
+        self.retry_now = true;
+        self.condition.signal();
+        self.mutex.unlock();
+        self.publishState(.reconnecting, "");
     }
 
     pub fn connect(self: *DaemonClient) void {
-        if (self.state == .connected or self.state == .connecting or self.state == .negotiating) return;
-        self.state = .connecting;
-        self.last_error = "";
-        self.clearPendingRequests();
-        self.mode = .v2;
-        self.frame_buffer.setMode(.v2);
-        self.selected_version = Wire.current_version;
-        self.fallback_to_v1 = false;
-        self.retry_delay_ms = reconnect_initial_ms;
-        self.retry_at_ms = 0;
-        self.closeHandleOnly();
-        if (endpointName(self.allocator)) |current| {
-            if (!std.mem.eql(u8, current, self.pipe_name)) {
-                self.allocator.free(self.pipe_name);
-                self.pipe_name = current;
-            } else {
-                self.allocator.free(current);
-            }
-        } else |_| {}
+        self.mutex.lock();
+        self.want_connected = true;
+        self.condition.signal();
+        self.mutex.unlock();
     }
 
     pub fn reconnect(self: *DaemonClient) void {
-        if (self.state == .disconnected) {
-            self.connect();
-        } else if (self.state != .connected) {
-            self.retry_at_ms = 0;
-            self.poll();
-        }
+        self.mutex.lock();
+        self.want_connected = true;
+        self.reconnect_requested = true;
+        self.retry_now = true;
+        self.condition.signal();
+        self.mutex.unlock();
     }
 
     pub fn close(self: *DaemonClient) void {
-        self.closeHandleOnly();
-        self.clearPendingRequests();
-        self.state = .disconnected;
+        self.mutex.lock();
+        self.want_connected = false;
+        self.reconnect_requested = false;
+        self.clearOutboundLocked();
+        self.condition.signal();
+        self.mutex.unlock();
     }
 
     pub fn sendListProjects(self: *DaemonClient) void {
         const command = Wire.commandListRecentProjects(self.allocator) catch return;
-        defer self.allocator.free(command);
         self.sendCommand(command);
     }
 
     pub fn sendRestoreOpenProjects(self: *DaemonClient) void {
         const command = Wire.commandRestoreOpenProjects(self.allocator) catch return;
-        defer self.allocator.free(command);
         self.sendCommand(command);
     }
 
     pub fn sendOpenProject(self: *DaemonClient, path: []const u8) void {
         const command = Wire.commandOpenProject(self.allocator, path) catch return;
-        defer self.allocator.free(command);
         self.sendCommand(command);
     }
 
     pub fn sendCreateNode(self: *DaemonClient, project_path: []const u8, title: []const u8) void {
         var node_id: [36]u8 = undefined;
-        makeRequestID(&node_id, self.next_request);
+        self.mutex.lock();
+        const sequence = self.next_draft;
+        self.next_draft +%= 1;
+        self.mutex.unlock();
+        makeRequestID(&node_id, sequence);
         const command = Wire.commandGraphCreateNode(
             self.allocator,
             project_path,
             title,
             &node_id,
         ) catch return;
-        defer self.allocator.free(command);
         self.sendCommand(command);
     }
 
@@ -158,29 +182,50 @@ pub const DaemonClient = struct {
             action,
             text,
         ) catch return;
-        defer self.allocator.free(command);
         self.sendCommand(command);
     }
 
     pub fn poll(self: *DaemonClient) void {
-        const now = nowMilliseconds();
-        switch (self.state) {
-            .connecting, .reconnecting, .unavailable, .protocol_error => {
-                if (now >= self.retry_at_ms) self.attemptConnection(now);
-            },
-            .negotiating, .connected => {
-                if (!self.pumpIncoming()) return;
-                if (self.state == .negotiating and now >= self.negotiation_deadline_ms) {
-                    self.beginLegacyFallback(now);
-                }
-            },
-            .disconnected => {},
+        var count: usize = 0;
+        while (count < inbound_capacity) : (count += 1) {
+            self.mutex.lock();
+            if (self.inbound_count == 0) {
+                self.mutex.unlock();
+                return;
+            }
+            const frame = self.inbound[self.inbound_head];
+            self.inbound_head = (self.inbound_head + 1) % inbound_capacity;
+            self.inbound_count -= 1;
+            self.mutex.unlock();
+            defer self.allocator.free(frame);
+            if (self.callback) |callback| callback(self.callback_context, frame.ptr, frame.len);
         }
     }
 
+    pub fn connectionState(self: *const DaemonClient) Wire.ConnectionState {
+        const client: *DaemonClient = @constCast(self);
+        client.mutex.lock();
+        defer client.mutex.unlock();
+        return client.state;
+    }
+
+    pub fn isIdle(self: *const DaemonClient) bool {
+        const client: *DaemonClient = @constCast(self);
+        client.mutex.lock();
+        defer client.mutex.unlock();
+        return client.state == .connected and
+            client.outbound_count == 0 and
+            client.inbound_count == 0 and
+            client.pending_request_count == 0 and
+            !client.worker_busy;
+    }
+
     pub fn statusText(self: *const DaemonClient) []const u8 {
-        if (self.last_error.len != 0) return self.last_error;
-        return switch (self.state) {
+        const client: *DaemonClient = @constCast(self);
+        client.mutex.lock();
+        defer client.mutex.unlock();
+        if (client.last_error.len != 0) return client.last_error;
+        return switch (client.state) {
             .disconnected => "Disconnected",
             .connecting => "Connecting…",
             .negotiating => "Negotiating daemon protocol…",
@@ -192,39 +237,18 @@ pub const DaemonClient = struct {
     }
 
     fn sendCommand(self: *DaemonClient, command_json: []const u8) void {
-        if (self.state != .connected) {
-            self.last_error = "daemon unavailable; command not sent";
+        self.mutex.lock();
+        if (self.stop_worker or self.outbound_count == outbound_capacity) {
+            self.last_error = "daemon outbound queue is full";
+            self.mutex.unlock();
+            self.allocator.free(command_json);
             return;
         }
-        const frame = if (self.mode == .v2) blk: {
-            var request_id: [36]u8 = undefined;
-            makeRequestID(&request_id, self.next_request);
-            self.next_request +%= 1;
-            if (!self.trackRequest(&request_id)) {
-                self.last_error = "too many outstanding daemon requests";
-                return;
-            }
-            break :blk Wire.v2Request(
-                self.allocator,
-                &request_id,
-                command_json,
-            ) catch {
-                self.last_error = "request encoding failed";
-                return;
-            };
-        } else Wire.v1Command(self.allocator, command_json) catch {
-            self.last_error = "request encoding failed";
-            return;
-        };
-        defer self.allocator.free(frame);
-        self.writeFrame(frame) catch {
-            if (self.mode == .v2) {
-                if (Wire.responseRequestID(frame)) |request_id| {
-                    _ = self.completeRequest(request_id);
-                }
-            }
-            self.markTransportFailure("daemon write failed");
-        };
+        const index = (self.outbound_head + self.outbound_count) % outbound_capacity;
+        self.outbound[index] = @constCast(command_json);
+        self.outbound_count += 1;
+        self.condition.signal();
+        self.mutex.unlock();
     }
 
     fn openPipe(self: *DaemonClient) bool {
@@ -241,12 +265,123 @@ pub const DaemonClient = struct {
         );
         if (handle == c.INVALID_HANDLE_VALUE) {
             if (c.GetLastError() == c.ERROR_PIPE_BUSY) {
-                _ = c.WaitNamedPipeW(wide.ptr, 500);
+                _ = c.WaitNamedPipeW(wide.ptr, 50);
             }
             return false;
         }
         self.pipe = handle;
         return true;
+    }
+
+    fn workerMain(self: *DaemonClient) void {
+        while (true) {
+            self.mutex.lock();
+            const stop = self.stop_worker;
+            const want_connected = self.want_connected;
+            const reconnect_pending = self.reconnect_requested;
+            const retry_immediately = self.retry_now;
+            self.reconnect_requested = false;
+            self.retry_now = false;
+            self.mutex.unlock();
+            if (stop) break;
+
+            if (!want_connected) {
+                if (self.pipe != c.INVALID_HANDLE_VALUE) self.closeHandleOnly();
+                self.clearPendingRequests();
+                if (self.state != .disconnected) self.publishState(.disconnected, "");
+                if (self.waitForWork(50)) break;
+                continue;
+            }
+
+            if (reconnect_pending) {
+                self.closeHandleOnly();
+                self.clearPendingRequests();
+                self.retry_at_ms = nowMilliseconds();
+                self.retry_delay_ms = reconnect_initial_ms;
+                self.publishState(.reconnecting, "");
+            }
+            if (retry_immediately) self.retry_at_ms = 0;
+
+            const now = nowMilliseconds();
+            if (self.pipe == c.INVALID_HANDLE_VALUE and now >= self.retry_at_ms) {
+                self.attemptConnection(now);
+            }
+
+            if (self.pipe != c.INVALID_HANDLE_VALUE) {
+                if (!self.pumpIncoming()) continue;
+                if (self.state == .negotiating and nowMilliseconds() >= self.negotiation_deadline_ms) {
+                    self.beginLegacyFallback(nowMilliseconds());
+                }
+            }
+
+            if (self.pipe != c.INVALID_HANDLE_VALUE and self.state == .connected) {
+                if (self.dequeueOutbound()) |command| {
+                    self.sendCommandOnWorker(command);
+                    self.allocator.free(command);
+                    self.mutex.lock();
+                    self.worker_busy = false;
+                    self.mutex.unlock();
+                }
+            }
+            if (self.waitForWork(25)) break;
+        }
+        if (self.pipe != c.INVALID_HANDLE_VALUE) self.closeHandleOnly();
+        self.clearPendingRequests();
+        self.clearQueues();
+        self.publishState(.disconnected, "");
+    }
+
+    fn waitForWork(self: *DaemonClient, milliseconds: u64) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.stop_worker) return true;
+        if (self.outbound_count == 0 and self.inbound_count == 0) {
+            _ = self.condition.timedWait(&self.mutex, milliseconds * std.time.ns_per_ms) catch {};
+        }
+        return self.stop_worker;
+    }
+
+    fn dequeueOutbound(self: *DaemonClient) ?[]u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.outbound_count == 0) return null;
+        const command = self.outbound[self.outbound_head];
+        self.outbound_head = (self.outbound_head + 1) % outbound_capacity;
+        self.outbound_count -= 1;
+        self.worker_busy = true;
+        return command;
+    }
+
+    fn sendCommandOnWorker(self: *DaemonClient, command_json: []const u8) void {
+        const frame = if (self.mode == .v2) blk: {
+            var request_id: [36]u8 = undefined;
+            makeRequestID(&request_id, self.next_request);
+            self.next_request +%= 1;
+            if (!self.trackRequest(&request_id)) {
+                self.publishState(self.state, "too many outstanding daemon requests");
+                return;
+            }
+            break :blk Wire.v2Request(
+                self.allocator,
+                &request_id,
+                command_json,
+            ) catch {
+                self.publishState(self.state, "request encoding failed");
+                return;
+            };
+        } else Wire.v1Command(self.allocator, command_json) catch {
+            self.publishState(self.state, "request encoding failed");
+            return;
+        };
+        defer self.allocator.free(frame);
+        self.writeFrame(frame) catch {
+            if (self.mode == .v2) {
+                if (Wire.responseRequestID(frame)) |request_id| {
+                    _ = self.completeRequest(request_id);
+                }
+            }
+            self.markTransportFailure("daemon write failed");
+        };
     }
 
     fn writeFrame(self: *DaemonClient, data: []const u8) !void {
@@ -257,25 +392,38 @@ pub const DaemonClient = struct {
 
     fn attemptConnection(self: *DaemonClient, now: i64) void {
         self.closeHandleOnly();
+        if (endpointName(self.allocator)) |current| {
+            if (!std.mem.eql(u8, current, self.pipe_name)) {
+                self.allocator.free(self.pipe_name);
+                self.pipe_name = current;
+            } else {
+                self.allocator.free(current);
+            }
+        } else |_| {}
+        self.publishState(.connecting, "");
         if (!self.openPipe()) {
             self.scheduleRetry(now, "daemon unavailable; retrying");
             return;
         }
         self.frame_buffer.reset();
         if (self.fallback_to_v1) {
-            self.state = .connected;
+            self.publishState(.connected, "");
             self.fallback_to_v1 = false;
             self.retry_delay_ms = reconnect_initial_ms;
-            self.last_error = "";
             return;
         }
-        self.state = .negotiating;
+        self.publishState(.negotiating, "");
         self.negotiation_deadline_ms = now + negotiation_timeout_ms;
+        const subscription = self.subscriptionSnapshot() catch {
+            self.scheduleRetry(now, "daemon subscription allocation failed");
+            return;
+        };
+        defer self.allocator.free(subscription);
         const hello = Wire.v2Hello(
             self.allocator,
             &self.client_id,
             if (self.resume_from == 0) null else self.resume_from,
-            self.subscription_path,
+            subscription,
         ) catch {
             self.scheduleRetry(now, "daemon hello encoding failed");
             return;
@@ -355,28 +503,25 @@ pub const DaemonClient = struct {
     }
 
     fn markTransportFailure(self: *DaemonClient, message: []const u8) void {
-        self.last_error = message;
         self.clearPendingRequests();
         self.closeHandleOnly();
-        self.state = .reconnecting;
+        self.publishState(.reconnecting, message);
         self.retry_at_ms = nowMilliseconds() + self.retry_delay_ms;
         self.retry_delay_ms = @min(self.retry_delay_ms * 2, reconnect_max_ms);
     }
 
     fn markProtocolFailure(self: *DaemonClient, message: []const u8) void {
-        self.last_error = message;
         self.clearPendingRequests();
         self.closeHandleOnly();
-        self.state = .protocol_error;
+        self.publishState(.protocol_error, message);
         self.retry_at_ms = nowMilliseconds() + self.retry_delay_ms;
         self.retry_delay_ms = @min(self.retry_delay_ms * 2, reconnect_max_ms);
     }
 
     fn scheduleRetry(self: *DaemonClient, now: i64, message: []const u8) void {
-        self.last_error = message;
         self.closeHandleOnly();
         self.frame_buffer.reset();
-        self.state = .unavailable;
+        self.publishState(.unavailable, message);
         self.retry_at_ms = now + self.retry_delay_ms;
         self.retry_delay_ms = @min(self.retry_delay_ms * 2, reconnect_max_ms);
     }
@@ -388,7 +533,7 @@ pub const DaemonClient = struct {
         self.mode = .v1;
         self.selected_version = 1;
         self.fallback_to_v1 = true;
-        self.state = .reconnecting;
+        self.publishState(.reconnecting, "");
         self.retry_at_ms = now;
     }
 
@@ -399,11 +544,9 @@ pub const DaemonClient = struct {
                 std.mem.indexOf(u8, frame, "\"selectedVersion\":2") != null)
             {
                 self.mode = .v2;
-                self.frame_buffer.setMode(.v2);
                 self.selected_version = 2;
-                self.state = .connected;
+                self.publishState(.connected, "");
                 self.retry_delay_ms = reconnect_initial_ms;
-                self.last_error = "";
                 return true;
             }
             self.beginLegacyFallback(nowMilliseconds());
@@ -417,12 +560,46 @@ pub const DaemonClient = struct {
                 }
             }
         }
-        if (self.callback) |callback| callback(self.callback_context, frame.ptr, frame.len);
+        self.enqueueInbound(frame);
         if (Wire.jsonNumber(frame, "sequence")) |sequence| self.resume_from = sequence;
         return true;
     }
 
+    fn enqueueInbound(self: *DaemonClient, frame: []const u8) void {
+        const copy = self.allocator.dupe(u8, frame) catch {
+            self.publishState(self.state, "daemon event allocation failed");
+            return;
+        };
+        self.mutex.lock();
+        if (self.inbound_count == inbound_capacity) {
+            self.mutex.unlock();
+            self.allocator.free(copy);
+            self.publishState(self.state, "daemon event queue is full");
+            return;
+        }
+        const index = (self.inbound_head + self.inbound_count) % inbound_capacity;
+        self.inbound[index] = copy;
+        self.inbound_count += 1;
+        self.condition.signal();
+        self.mutex.unlock();
+    }
+
+    fn subscriptionSnapshot(self: *DaemonClient) ![]u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.allocator.dupe(u8, self.subscription_path);
+    }
+
+    fn publishState(self: *DaemonClient, state: Wire.ConnectionState, message: []const u8) void {
+        self.mutex.lock();
+        self.state = state;
+        self.last_error = message;
+        self.mutex.unlock();
+    }
+
     fn trackRequest(self: *DaemonClient, request_id: *const [36]u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         if (self.pending_request_count == self.pending_request_ids.len) return false;
         self.pending_request_ids[self.pending_request_count] = request_id.*;
         self.pending_request_count += 1;
@@ -430,6 +607,8 @@ pub const DaemonClient = struct {
     }
 
     fn completeRequest(self: *DaemonClient, request_id: []const u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         if (request_id.len != 36) return false;
         for (self.pending_request_ids[0..self.pending_request_count], 0..) |pending, index| {
             if (std.mem.eql(u8, &pending, request_id)) {
@@ -444,7 +623,30 @@ pub const DaemonClient = struct {
     }
 
     fn clearPendingRequests(self: *DaemonClient) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         self.pending_request_count = 0;
+    }
+
+    fn clearOutboundLocked(self: *DaemonClient) void {
+        while (self.outbound_count != 0) {
+            const command = self.outbound[self.outbound_head];
+            self.outbound_head = (self.outbound_head + 1) % outbound_capacity;
+            self.outbound_count -= 1;
+            self.allocator.free(command);
+        }
+    }
+
+    fn clearQueues(self: *DaemonClient) void {
+        self.mutex.lock();
+        self.clearOutboundLocked();
+        while (self.inbound_count != 0) {
+            const frame = self.inbound[self.inbound_head];
+            self.inbound_head = (self.inbound_head + 1) % inbound_capacity;
+            self.inbound_count -= 1;
+            self.allocator.free(frame);
+        }
+        self.mutex.unlock();
     }
 
     fn closeHandleOnly(self: *DaemonClient) void {
@@ -471,7 +673,13 @@ fn writeAll(handle: c.HANDLE, bytes: []const u8) !void {
         const amount: c.DWORD = @intCast(@min(bytes.len - offset, std.math.maxInt(c.DWORD)));
         if (c.WriteFile(handle, bytes[offset..].ptr, amount, &written, &overlapped) == 0) {
             if (c.GetLastError() != c.ERROR_IO_PENDING) return error.WriteFailed;
-            if (c.WaitForSingleObject(overlapped.hEvent, c.INFINITE) != c.WAIT_OBJECT_0) {
+            const wait_result = c.WaitForSingleObject(overlapped.hEvent, 50);
+            if (wait_result == c.WAIT_TIMEOUT) {
+                _ = c.CancelIoEx(handle, &overlapped);
+                _ = c.GetOverlappedResult(handle, &overlapped, &written, 1);
+                return error.WriteTimeout;
+            }
+            if (wait_result != c.WAIT_OBJECT_0) {
                 return error.WriteFailed;
             }
             if (c.GetOverlappedResult(handle, &overlapped, &written, 0) == 0) {
@@ -481,6 +689,10 @@ fn writeAll(handle: c.HANDLE, bytes: []const u8) !void {
         if (written == 0) return error.WriteFailed;
         offset += written;
     }
+}
+
+test "daemon client startup state fits the default stack" {
+    try std.testing.expect(@sizeOf(DaemonClient) < 1024 * 1024);
 }
 
 fn endpointName(allocator: std.mem.Allocator) ![]u8 {
