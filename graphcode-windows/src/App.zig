@@ -37,6 +37,8 @@ pub const App = struct {
     smoke_tick: usize = 0,
     smoke_action_requested: bool = false,
     smoke_input_requested: bool = false,
+    smoke_workspace_stage: u8 = 0,
+    smoke_workspace_actions_done: bool = false,
     smoke_idle_ticks: usize = 0,
     sidebar_scroll: i32 = 0,
 
@@ -450,6 +452,45 @@ fn onWindowMessage(
                     app.allocator.free(paste);
                 }
             }
+            if (app.smoke and envFlag("GRAPHCODE_SHELL_WORKSPACE_ACTIONS") and
+                !envFlag("GRAPHCODE_SHELL_EXPECT_TRANSPORT_ERROR"))
+            {
+                if (app.workspace) |*workspace| {
+                    switch (app.smoke_workspace_stage) {
+                        0 => if (app.smoke_tick >= 20) {
+                            workspace.newTab() catch {
+                                app.setStatus("Smoke workspace tab creation failed");
+                                app.smoke_workspace_stage = 255;
+                            };
+                            if (app.smoke_workspace_stage != 255) app.smoke_workspace_stage = 1;
+                        },
+                        1 => if (app.smoke_tick >= 24) {
+                            workspace.splitFocused(.vertical) catch {
+                                app.setStatus("Smoke workspace split failed");
+                                app.smoke_workspace_stage = 255;
+                            };
+                            if (app.smoke_workspace_stage != 255) app.smoke_workspace_stage = 2;
+                        },
+                        2 => if (app.smoke_tick >= 28) {
+                            workspace.focusNextPane();
+                            workspace.selectPreviousTab();
+                            app.smoke_workspace_stage = 3;
+                        },
+                        3 => if (app.smoke_tick >= 32) {
+                            workspace.selectNextTab();
+                            workspace.closeFocusedPane() catch {
+                                app.setStatus("Smoke workspace close failed");
+                                app.smoke_workspace_stage = 255;
+                            };
+                            if (app.smoke_workspace_stage != 255) {
+                                app.smoke_workspace_stage = 4;
+                                app.smoke_workspace_actions_done = true;
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            }
             if (app.smoke and app.smoke_tick >= 12 and
                 ((app.stress and app.smoke_tick % 2 == 0) or
                     (!app.stress and app.smoke_tick == 12)))
@@ -600,12 +641,14 @@ fn smokeContractPassed(self: *const App) bool {
     if (c.GetClientRect(self.window.hwnd, &client) == 0) return false;
     const layout_width = @max(0, client.right - Tokens.sidebar_width);
     const layout_height = Tokens.workspace_height;
-    return workspace.layoutMatches(
-        Tokens.sidebar_width,
-        @max(0, client.bottom - Tokens.workspace_height),
-        layout_width,
-        layout_height,
-    ) and
+    return (!envFlag("GRAPHCODE_SHELL_WORKSPACE_ACTIONS") or
+        (self.smoke_workspace_actions_done and workspace.tabCount() >= 2 and workspace.topologyHealthy())) and
+        workspace.layoutMatches(
+            Tokens.sidebar_width,
+            @max(0, client.bottom - Tokens.workspace_height),
+            layout_width,
+            layout_height,
+        ) and
         workspace.hasSurface(0) and workspace.hasSurface(1) and
         workspace.hasAttach(0) and workspace.hasAttach(1);
 }

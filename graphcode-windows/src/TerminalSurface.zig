@@ -137,6 +137,9 @@ pub const Workspace = struct {
     layout_width: i32 = 960,
     layout_height: i32 = 250,
     project_path: []u8 = &.{},
+    syncing_topology: bool = false,
+    syncing_focus: bool = false,
+    persisting_layout: bool = false,
 
     pub fn init(parent: c.HWND, allocator_: std.mem.Allocator) !Workspace {
         var workspace = Workspace{
@@ -218,6 +221,7 @@ pub const Workspace = struct {
         const new_project_key = try self.allocator.dupe(u8, project);
         errdefer self.allocator.free(new_project_key);
         for (self.surfaces, 0..) |_, index| self.destroySurface(index);
+        self.clearAllRecreateState();
         self.layout.deinit();
         self.layout = try WorkspaceLayout.Layout.init(self.allocator, project);
         self.allocator.free(self.project_key);
@@ -318,11 +322,19 @@ pub const Workspace = struct {
     pub fn newTab(self: *Workspace) !void {
         const surface_id = try self.layout.newSurfaceID();
         defer self.allocator.free(surface_id);
+        const previous_selected = self.layout.selected_tab;
+        const previous_next_id = self.layout.next_tab_id;
         const index = try self.createAttachedSurface(surface_id);
         errdefer self.destroySurface(index);
-        try self.layout.addTab(surface_id, false);
+        self.layout.addTab(surface_id, false) catch |err| {
+            self.destroySurface(index);
+            return err;
+        };
         self.persistLayout() catch |err| {
-            _ = self.closeSurfaceForID(surface_id);
+            _ = self.layout.removePane(surface_id);
+            self.layout.selected_tab = previous_selected;
+            self.layout.next_tab_id = previous_next_id;
+            self.destroySurface(index);
             return err;
         };
         self.syncTopology();
@@ -402,6 +414,26 @@ pub const Workspace = struct {
         self.recreate_sessions[index] = &.{};
     }
 
+    fn clearAllRecreateState(self: *Workspace) void {
+        for (&self.recreate_sessions) |*session| {
+            if (session.*.len != 0) self.allocator.free(session.*);
+            session.* = &.{};
+        }
+        for (&self.restore_errors) |*message| {
+            if (message.*.len != 0) self.allocator.free(message.*);
+            message.* = &.{};
+        }
+    }
+
+    fn cancelRecreateForID(self: *Workspace, id: []const u8) void {
+        for (self.recreate_sessions, 0..) |session, index| {
+            if (std.mem.eql(u8, session, id)) {
+                self.clearRecreateSession(index);
+                self.clearRestoreError(index);
+            }
+        }
+    }
+
     fn closeSurfaceForID(self: *Workspace, id: []const u8) bool {
         for (self.surfaces, 0..) |slot, index| {
             if (std.mem.eql(u8, slot.session_name, id)) {
@@ -415,11 +447,22 @@ pub const Workspace = struct {
     pub fn splitFocused(self: *Workspace, direction: WorkspaceLayout.Direction) !void {
         const surface_id = try self.layout.newSurfaceID();
         defer self.allocator.free(surface_id);
+        const tab = self.layout.selected() orelse return error.NoTabs;
+        const previous_focus = tab.focused_pane;
+        const previous_direction = tab.split_direction;
         const index = try self.createAttachedSurface(surface_id);
         errdefer self.destroySurface(index);
-        try self.layout.splitFocused(direction, surface_id);
+        self.layout.splitFocused(direction, surface_id) catch |err| {
+            self.destroySurface(index);
+            return err;
+        };
         self.persistLayout() catch |err| {
-            _ = self.closeSurfaceForID(surface_id);
+            _ = self.layout.removePane(surface_id);
+            if (self.layout.selected()) |current| {
+                current.focused_pane = previous_focus;
+                current.split_direction = previous_direction;
+            }
+            self.destroySurface(index);
             return err;
         };
         self.syncTopology();
@@ -469,11 +512,15 @@ pub const Workspace = struct {
             self.layout.restoreClosedPane(&record) catch {};
             return err;
         };
+        self.cancelRecreateForID(record.id);
         _ = self.closeSurfaceForID(record.id);
         self.syncTopology();
     }
 
     pub fn persistLayout(self: *Workspace) !void {
+        if (self.persisting_layout) return;
+        self.persisting_layout = true;
+        defer self.persisting_layout = false;
         try self.layout.save(self.layout_path);
     }
 
@@ -535,6 +582,9 @@ pub const Workspace = struct {
 
     pub fn focus(self: *Workspace, index: usize) void {
         if (index >= self.surfaces.len) return;
+        if (self.syncing_focus or self.syncing_topology) return;
+        self.syncing_focus = true;
+        defer self.syncing_focus = false;
         self.active_surface = index;
         for (&self.surfaces, 0..) |*slot, other_index| {
             if (slot.surface) |surface| {
@@ -553,13 +603,16 @@ pub const Workspace = struct {
             if (std.mem.eql(u8, pane.id, id)) {
                 tab.focused_pane = pane_index;
                 self.active_surface = index;
-                self.persistLayout() catch {};
+                if (!self.syncing_topology) self.persistLayout() catch {};
                 return;
             }
         }
     }
 
     fn syncTopology(self: *Workspace) void {
+        if (self.syncing_topology) return;
+        self.syncing_topology = true;
+        defer self.syncing_topology = false;
         const selected = self.layout.selected() orelse return;
         const pane_count = selected.panes.items.len;
         const available_height = @max(1, self.layout_height - Tokens.tab_bar_height - Tokens.pane_header_height);
@@ -625,6 +678,31 @@ pub const Workspace = struct {
 
     pub fn hasAttach(self: *const Workspace, index: usize) bool {
         return index < self.surfaces.len and self.surfaces[index].attach != null;
+    }
+
+    pub fn topologyHealthy(self: *const Workspace) bool {
+        var live: usize = 0;
+        for (self.layout.tabs.items) |tab| {
+            if (tab.panes.items.len == 0 or tab.focused_pane >= tab.panes.items.len) return false;
+            for (tab.panes.items) |pane| {
+                var found = false;
+                for (self.surfaces) |slot| {
+                    if (std.mem.eql(u8, slot.session_name, pane.id) and
+                        (slot.surface != null or slot.attach != null))
+                    {
+                        found = true;
+                        live += 1;
+                        break;
+                    }
+                }
+                if (!found) return false;
+            }
+        }
+        return live > 0;
+    }
+
+    pub fn tabCount(self: *const Workspace) usize {
+        return self.layout.tabs.items.len;
     }
 
     pub fn layoutMatches(self: *const Workspace, origin_x: i32, origin_y: i32, width: i32, height: i32) bool {
@@ -1117,6 +1195,7 @@ fn onFocus(user_data: ?*anyopaque, surface: *c.winghostty_surface, focused: u8) 
     const workspace = workspaceFromUserData(user_data) orelse return;
     _ = callbackSlot(workspace, surface) orelse return;
     if (focused == 0) return;
+    if (workspace.syncing_topology or workspace.syncing_focus) return;
     for (&workspace.surfaces, 0..) |*slot, index| {
         if (slot.surface == surface) {
             workspace.active_surface = index;

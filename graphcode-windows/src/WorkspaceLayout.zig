@@ -469,3 +469,28 @@ test "close rollback restores exact tab and pane topology" {
         try std.testing.expect(layout.tabs.items[0].panes.items[1].launches_agent);
         try std.testing.expectEqual(@as(usize, 1), layout.tabs.items[0].focused_pane);
 }
+
+test "topology mutation rollback leaves no phantom tab or split" {
+    var layout = try Layout.default(std.testing.allocator, "p", "first");
+    defer layout.deinit();
+    const selected = layout.selected_tab;
+    const next_id = layout.next_tab_id;
+    try layout.addTab("second", false);
+    try std.testing.expectEqual(@as(usize, 2), layout.tabs.items.len);
+    _ = layout.removePane("second");
+    layout.selected_tab = selected;
+    layout.next_tab_id = next_id;
+    try std.testing.expectEqual(@as(usize, 1), layout.tabs.items.len);
+    const tab = layout.selected().?;
+    const focus = tab.focused_pane;
+    const direction = tab.split_direction;
+    try layout.splitFocused(.vertical, "split");
+    _ = layout.removePane("split");
+    if (layout.selected()) |restored| {
+        restored.focused_pane = focus;
+        restored.split_direction = direction;
+    }
+    try std.testing.expectEqual(@as(usize, 1), layout.selected().?.panes.items.len);
+    try std.testing.expectEqual(focus, layout.selected().?.focused_pane);
+    try std.testing.expectEqual(direction, layout.selected().?.split_direction);
+}

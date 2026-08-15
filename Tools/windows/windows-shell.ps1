@@ -30,6 +30,7 @@ $oldPipe = [Environment]::GetEnvironmentVariable("GRAPHCODE_DAEMON_PIPE")
 $oldRequireDaemon = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_REQUIRE_DAEMON")
 $oldNonreadingAttach = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_NONREADING_ATTACH")
 $oldLargePaste = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_LARGE_PASTE")
+$oldWorkspaceActions = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_WORKSPACE_ACTIONS")
 
 function Invoke-Native([string] $description, [scriptblock] $command) {
   Write-Host "==> $description"
@@ -116,6 +117,7 @@ try {
   }
   $env:GRAPHCODE_ZMX = Join-Path $ZmxRoot "zig-out\bin\zmx.exe"
   $env:GRAPHCODE_GATE_CWD = $repoRoot
+  $env:GRAPHCODE_SHELL_WORKSPACE_ACTIONS = "1"
   if ($UseStubDaemon) {
     Remove-Item -LiteralPath $stubResult -Force -ErrorAction SilentlyContinue
     $pipeName = "graphcode-shell-stub-$PID"
@@ -270,6 +272,11 @@ finally {
     Remove-Item Env:GRAPHCODE_SHELL_LARGE_PASTE -ErrorAction SilentlyContinue
   } else {
     $env:GRAPHCODE_SHELL_LARGE_PASTE = $oldLargePaste
+  }
+  if ($null -eq $oldWorkspaceActions) {
+    Remove-Item Env:GRAPHCODE_SHELL_WORKSPACE_ACTIONS -ErrorAction SilentlyContinue
+  } else {
+    $env:GRAPHCODE_SHELL_WORKSPACE_ACTIONS = $oldWorkspaceActions
   }
   Remove-Item -LiteralPath $stubResult -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $busyResult,$busyError,$inputError -Force -ErrorAction SilentlyContinue
