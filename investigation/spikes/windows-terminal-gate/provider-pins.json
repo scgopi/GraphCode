@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "winghostty": {
+    "repository": "coneilen/winghostty",
+    "remoteUrl": "https://github.com/coneilen/winghostty.git",
+    "sha": "a3786b20b2f96325b800814f4f0f8dba0c789d8a",
+    "artifact": "zig-out/lib/winghostty-win32-host.lib",
+    "minimumZig": "0.15.2"
+  },
+  "zmx": {
+    "repository": "coneilen/zmx",
+    "remoteUrl": "https://github.com/coneilen/zmx.git",
+    "sha": "858727af10cdf43d66cb3733cff58dc90ec4b3dd",
+    "artifact": "zig-out/bin/zmx.exe",
+    "minimumZig": "0.16.0"
+  },
+  "localFallback": {
+    "enabled": true,
+    "remoteWorkflowBlocked": true,
+    "reason": "Winghostty remote publishing is blocked by workflow scope; consume reviewed local worktrees until a provider URL pin is publishable.",
+    "paths": [
+      "Winghostty-worktrees/host-integration",
+      "zmx-worktrees/attach"
+    ],
+    "upgrade": "Replace -Dwinghostty-dir and GRAPHCODE_ZMX with checked remote artifacts without changing the host contract."
+  }
+}

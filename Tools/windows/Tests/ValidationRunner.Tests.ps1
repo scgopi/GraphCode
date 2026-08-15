@@ -17,7 +17,8 @@ $expected = @(
   "swift-format",
   "visual-baseline",
   "tdd-evidence",
-  "privacy"
+  "privacy",
+  "terminal-gate"
 )
 foreach ($task in $expected) {
   if ($tasks -notcontains $task) {

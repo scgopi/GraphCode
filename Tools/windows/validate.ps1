@@ -12,7 +12,8 @@ param(
     "swift-format",
     "visual-baseline",
     "tdd-evidence",
-    "privacy"
+    "privacy",
+    "terminal-gate"
   )]
   [string] $Task = "all",
   [switch] $List,
@@ -36,7 +37,8 @@ $tasks = @(
   "swift-format",
   "visual-baseline",
   "tdd-evidence",
-  "privacy"
+  "privacy",
+  "terminal-gate"
 )
 
 if ($List) {
@@ -427,7 +429,11 @@ function Invoke-Task([string] $name) {
     }
     "privacy" {
       $files = Get-ChildItem (Join-Path $repoRoot "investigation") -Recurse -File |
-        Where-Object { $_.FullName -notmatch "[\\/]\.build[\\/]" }
+        Where-Object {
+          $_.FullName -notmatch "[\\/]\.build[\\/]" -and
+          $_.FullName -notmatch "[\\/]\.zig-cache[\\/]" -and
+          $_.FullName -notmatch "[\\/]zig-out[\\/]"
+        }
       $streams = foreach ($file in $files) {
         Get-Item -LiteralPath $file.FullName -Stream * -ErrorAction SilentlyContinue |
           Where-Object Stream -notin @(':$DATA', 'sec.endpointdlp')
@@ -439,7 +445,11 @@ function Invoke-Task([string] $name) {
       $generated = Get-ChildItem `
         (Join-Path $repoRoot "investigation\spikes") `
         -Recurse -File |
-        Where-Object { $_.FullName -notmatch "[\\/]\.build[\\/]" } |
+        Where-Object {
+          $_.FullName -notmatch "[\\/]\.build[\\/]" -and
+          $_.FullName -notmatch "[\\/]\.zig-cache[\\/]" -and
+          $_.FullName -notmatch "[\\/]zig-out[\\/]"
+        } |
         Where-Object {
           $_.Extension -in ".exe", ".obj", ".lib", ".exp", ".log" -or
           $_.Name -eq "ready.txt"
@@ -476,6 +486,12 @@ function Invoke-Task([string] $name) {
         }
       }
       Write-Host "Privacy checks passed"
+    }
+    "terminal-gate" {
+      & (Join-Path $repoRoot "Tools\windows\Tests\TerminalGate.Tests.ps1")
+      if ($LASTEXITCODE -ne 0) {
+        throw "Windows terminal gate contract failed with exit code $LASTEXITCODE"
+      }
     }
   }
 }

@@ -15,6 +15,10 @@ xcuserdata/
 # SwiftPM
 .swiftpm/
 
+# Zig build outputs
+.zig-cache/
+zig-out/
+
 # mise
 .mise.local.toml
 
