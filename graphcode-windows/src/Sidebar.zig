@@ -294,7 +294,7 @@ pub fn contentBottom(model: *const GraphModel.Model, inspection: ?*const Worktre
     const rows = if (inspection) |value| value.entries.items.len else 0;
     const section = worktreeSectionBottom(model.recent_projects.items.len, rows);
     return if (model.attentionCount() == 0) section else section + 30 +
-        @as(i32, @intCast(@min(model.attentionCount(), 4) + @min(model.activity.items.len, 4))) * 19;
+        @as(i32, @intCast(@min(model.attentionCount(), 4))) * 19;
 }
 
 pub fn maxScroll(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection, viewport_bottom: i32) i32 {
@@ -368,11 +368,19 @@ test "sidebar scroll clamps overflow, shrink, and resize" {
         .branch = @constCast("branch"),
     });
     const short_max = maxScroll(&model, &inspection, 400);
-    const expected_short = Tokens.header_height + 78 + 72 + 62 + 54 + 24 + 170 + 10 + 30 + 7 * 19 - 400;
+    const expected_short = Tokens.header_height + 78 + 72 + 62 + 54 + 24 + 170 + 10 + 30 + 4 * 19 - 400;
     try std.testing.expectEqual(expected_short, short_max);
+    const activity_only_max = maxScroll(&model, &inspection, 400);
+    try std.testing.expectEqual(short_max, activity_only_max);
     var scroll: i32 = 0;
     for (0..10) |_| scroll = clampScroll(scroll + 40, short_max);
     try std.testing.expectEqual(short_max, scroll);
+    while (model.activity.items.len > 1) {
+        const event = model.activity.pop() orelse break;
+        std.testing.allocator.free(event.title);
+        std.testing.allocator.free(event.state);
+    }
+    try std.testing.expectEqual(short_max, maxScroll(&model, &inspection, 400));
     while (model.recent_projects.items.len > 1) {
         const project = model.recent_projects.pop() orelse break;
         std.testing.allocator.free(project.path);
@@ -389,14 +397,9 @@ test "sidebar scroll clamps overflow, shrink, and resize" {
         std.testing.allocator.free(node.worktree_path);
         std.testing.allocator.free(node.worktree_branch);
     }
-    while (model.activity.items.len > 1) {
-        const event = model.activity.pop() orelse break;
-        std.testing.allocator.free(event.title);
-        std.testing.allocator.free(event.state);
-    }
     inspection.entries.shrinkRetainingCapacity(2);
     const reduced_max = maxScroll(&model, &inspection, 500);
-    const expected_reduced = @max(Tokens.header_height + 78 + 24 + 62 + 54 + 24 + 68 + 10 + 30 + 2 * 19 - 500, 0);
+    const expected_reduced = @max(Tokens.header_height + 78 + 24 + 62 + 54 + 24 + 68 + 10 + 30 + 1 * 19 - 500, 0);
     try std.testing.expectEqual(expected_reduced, reduced_max);
     scroll = clampScroll(scroll, reduced_max);
     try std.testing.expectEqual(@as(i32, 0), scroll);
