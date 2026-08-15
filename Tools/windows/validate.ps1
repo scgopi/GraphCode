@@ -154,6 +154,7 @@ function Start-CleanRuntimeProcess(
   if (-not $process.Start()) {
     throw "Failed to start clean-environment process: $executable"
   }
+  [void] $process.Handle
   return $process
 }
 
@@ -319,17 +320,26 @@ function Invoke-Task([string] $name) {
       $secondDaemonProcess = $null
       $cliProcess = $null
       try {
-        $daemonProcess = Start-CleanRuntimeProcess `
-          (Join-Path $installedBin "graphcoded.exe") @() $smokeSupport
+        $daemonProcess = @(Start-CleanRuntimeProcess `
+          (Join-Path $installedBin "graphcoded.exe") @() $smokeSupport)[-1]
+        if ($null -eq $daemonProcess) {
+          throw "clean-environment daemon process was not returned"
+        }
         Start-Sleep -Milliseconds 1000
         if ($daemonProcess.HasExited) {
           throw "graphcoded.exe exited during clean-environment smoke"
         }
 
-        $secondDaemonProcess = Start-CleanRuntimeProcess `
-          (Join-Path $installedBin "graphcoded.exe") @() $smokeSupport
+        $secondDaemonProcess = @(Start-CleanRuntimeProcess `
+          (Join-Path $installedBin "graphcoded.exe") @() $smokeSupport)[-1]
+        if ($null -eq $secondDaemonProcess) {
+          throw "second clean-environment daemon process was not returned"
+        }
         $secondStdoutTask = $secondDaemonProcess.StandardOutput.ReadToEndAsync()
         $secondStderrTask = $secondDaemonProcess.StandardError.ReadToEndAsync()
+        if ($null -eq $secondStdoutTask -or $null -eq $secondStderrTask) {
+          throw "second clean-environment daemon output tasks were not created"
+        }
         if (-not $secondDaemonProcess.WaitForExit(5000)) {
           $secondDaemonProcess.Kill()
           $secondDaemonProcess.WaitForExit()
@@ -341,10 +351,16 @@ function Invoke-Task([string] $name) {
           throw "second graphcoded.exe did not reject the singleton cleanly: $secondStderr"
         }
 
-        $cliProcess = Start-CleanRuntimeProcess `
-          (Join-Path $installedBin "graphcode.exe") @("projects") $smokeSupport
+        $cliProcess = @(Start-CleanRuntimeProcess `
+          (Join-Path $installedBin "graphcode.exe") @("projects") $smokeSupport)[-1]
+        if ($null -eq $cliProcess) {
+          throw "clean-environment CLI process was not returned"
+        }
         $stdoutTask = $cliProcess.StandardOutput.ReadToEndAsync()
         $stderrTask = $cliProcess.StandardError.ReadToEndAsync()
+        if ($null -eq $stdoutTask -or $null -eq $stderrTask) {
+          throw "clean-environment CLI output tasks were not created"
+        }
         $cliProcess.WaitForExit()
         $stdout = $stdoutTask.GetAwaiter().GetResult()
         $stderr = $stderrTask.GetAwaiter().GetResult()

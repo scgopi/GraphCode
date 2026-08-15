@@ -41,6 +41,9 @@ pub const App = struct {
     smoke_action_requested: bool = false,
     smoke_input_requested: bool = false,
     smoke_idle_ticks: usize = 0,
+    smoke_workspace_actions: []const u8 = "",
+    smoke_workspace_action_index: usize = 0,
+    smoke_workspace_actions_ran: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) !*App {
         var client = try DaemonClient.init(allocator);
@@ -71,17 +74,22 @@ pub const App = struct {
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
         if (self.pending_project_path.len != 0) self.allocator.free(self.pending_project_path);
         if (self.status_override.len != 0) self.allocator.free(self.status_override);
+        if (self.smoke_workspace_actions.len != 0) self.allocator.free(self.smoke_workspace_actions);
         self.allocator.destroy(self);
     }
 
     pub fn run(self: *App) !void {
         try self.window.create(self, &onWindowMessage, title.ptr);
         self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
+        if (self.workspace) |*workspace| workspace.setKeyCallback(self, &onWorkspaceKey);
         if (self.workspace) |*workspace| try workspace.startInputWorker();
         self.layoutWorkspace();
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_REQUIRE_DAEMON")) |value| {
             defer self.allocator.free(value);
             self.require_smoke_contract = std.mem.eql(u8, value, "1");
+        } else |_| {}
+        if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_WORKSPACE_ACTIONS")) |value| {
+            self.smoke_workspace_actions = value;
         } else |_| {}
         self.client.setCallback(&onDaemonFrame, self);
         self.client.connect();
@@ -117,10 +125,12 @@ pub const App = struct {
                 }
             },
             .graph_changed => {
+                if (self.model.graph) |graph| {
+                    self.rebindWorkspace(graph.project.path);
                     self.clampSidebarScroll();
                     if (self.worktree_inspection) |inspection| {
-                        if (self.model.graph) |graph| {
-                            if (!std.mem.eql(u8, inspection.project_path, graph.project.path)) {
+                        if (self.model.graph) |current_graph| {
+                            if (!std.mem.eql(u8, inspection.project_path, current_graph.project.path)) {
                                 WorktreeStatus.deinitInspection(self.allocator, &self.worktree_inspection.?);
                                 self.worktree_inspection = null;
                                 if (self.selected_worktree_path.len != 0) {
@@ -130,9 +140,10 @@ pub const App = struct {
                             }
                         }
                     }
-                    if (self.model.graph) |graph| self.queueProject(graph.project.path);
-                self.clampSidebarScroll();
-                self.refreshWorkspace();
+                    if (self.model.graph) |current_graph| self.queueProject(current_graph.project.path);
+                    self.clampSidebarScroll();
+                    self.refreshWorkspace();
+                }
             },
             .error_occurred => {
                 if (Wire.copyErrorMessage(self.allocator, frame) catch null) |message| {
@@ -153,6 +164,7 @@ pub const App = struct {
                 self.setStatus("Unable to attach terminal A");
             };
         }
+
         if (graph.nodes.items.len > 1 and !workspace.hasSurface(1)) {
             workspace.openNode(1, graph.nodes.items[1].id) catch {
                 self.setStatus("Unable to attach terminal B");
@@ -160,8 +172,23 @@ pub const App = struct {
         }
     }
 
+    fn rebindWorkspace(self: *App, path: []const u8) void {
+        if (self.workspace) |*workspace| {
+            _ = workspace.rebindProject(path) catch {
+                self.setStatus("Unable to rebind workspace project");
+                return;
+            };
+        }
+    }
+
     fn openProject(self: *App, path: []const u8) void {
         if (path.len == 0) return;
+        if (self.workspace) |*workspace| {
+            workspace.setProject(path) catch {
+                self.setStatus("Unable to switch workspace project");
+                return;
+            };
+        }
         self.client.setSubscription(path);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
         self.last_project_opened = self.allocator.dupe(u8, path) catch {
@@ -378,6 +405,13 @@ pub const App = struct {
             .open_node => self.openSelectedNode(),
             .stop_node => self.stopSelectedNode(),
             .send_node => self.sendSelectedNode(),
+            .edit_node => self.openSelectedNode(),
+            .create_edge => self.createNode(),
+            .jump_next => {
+                self.model.selectNext();
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            },
+            .settings => self.setStatus("Settings"),
             .cycle_attention => {
                 self.model.selectNextAttention();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
@@ -392,9 +426,22 @@ pub const App = struct {
                 self.model.selectNext();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
+            .new_tab => if (self.workspace) |*workspace| workspace.newTab() catch self.setStatus("Unable to create tab"),
+            .close_tab => if (self.workspace) |*workspace| workspace.closeFocusedPane() catch self.setStatus("Unable to close tab"),
+            .split_horizontal => if (self.workspace) |*workspace| workspace.splitFocused(.horizontal) catch self.setStatus("Unable to split workspace"),
+            .split_vertical => if (self.workspace) |*workspace| workspace.splitFocused(.vertical) catch self.setStatus("Unable to split workspace"),
+            .focus_next_pane => if (self.workspace) |*workspace| workspace.focusNextPane(),
+            .focus_previous_pane => if (self.workspace) |*workspace| workspace.focusPreviousPane(),
+            .select_previous_tab => if (self.workspace) |*workspace| workspace.selectPreviousTab(),
+            .select_next_tab => if (self.workspace) |*workspace| workspace.selectNextTab(),
             .none => {},
-            else => {},
         }
+
+    }
+
+    fn onWorkspaceKey(context: ?*anyopaque, key: usize, ctrl: bool, shift: bool) callconv(.c) void {
+        const app: *App = @ptrCast(@alignCast(context.?));
+        app.handleAction(InputRouter.keyAction(key, ctrl, shift));
     }
 
     fn layoutWorkspace(self: *App) void {
@@ -513,6 +560,9 @@ fn onWindowMessage(
             if (app.smoke and app.smoke_tick == 8) {
                 app.refreshWorkspace();
             }
+            if (app.smoke and app.smoke_tick >= 12 and !app.smoke_workspace_actions_ran) {
+                runSmokeWorkspaceActions(app);
+            }
             if (app.smoke and app.smoke_tick == 16 and
                 app.client.connectionState() == .connected and !app.smoke_action_requested)
             {
@@ -574,33 +624,75 @@ fn onWindowMessage(
             return true;
         },
         c.WM_LBUTTONDOWN => {
-            const x: i32 = @intCast(@as(u16, @truncate(@as(usize, @bitCast(lparam)))));
-            const y: i32 = @intCast(@as(u16, @truncate(@as(usize, @bitCast(lparam)) >> 16)));
+            const x = mouseX(lparam);
+            const y = mouseY(lparam);
+            var client: c.RECT = undefined;
+            _ = c.GetClientRect(hwnd, &client);
+            const workspace_top = client.bottom - Tokens.workspace_height;
+            if (x >= Tokens.sidebar_width and y >= workspace_top) {
+                if (app.workspace) |*workspace| {
+                    if (workspace.selectTabAt(x, y)) {
+                        result.* = 0;
+                        return true;
+                    }
+                }
+            }
+            if (x >= Tokens.sidebar_width and y < workspace_top) {
+                const bounds = c.RECT{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = client.right, .bottom = workspace_top };
+                if (app.model.graph) |graph| {
+                    if (GraphCanvas.hitTest(graph.nodes.items, x, y, &app.canvas, bounds)) |index| {
+                        app.model.selected_node = index;
+                        _ = c.InvalidateRect(hwnd, null, 0);
+                    } else {
+                        app.canvas.beginPan(x, y);
+                        _ = c.SetCapture(hwnd);
+                    }
+                } else {
+                    app.canvas.beginPan(x, y);
+                    _ = c.SetCapture(hwnd);
+                }
+                result.* = 0;
+                return true;
+            }
             if (app.worktree_inspection) |inspection| {
-                var client: c.RECT = undefined;
-                _ = c.GetClientRect(hwnd, &client);
                 if (Sidebar.hitTestWorktree(x, y, app.model.recent_projects.items.len, inspection.entries.items.len,
-                    app.sidebar_scroll, client.bottom - Tokens.workspace_height)) |index| {
+                    app.sidebar_scroll, workspace_top)) |index| {
                     _ = app.selectWorktreeRow(inspection.entries.items[index].path);
                     app.ensureWorktreeVisible(index);
                     _ = c.InvalidateRect(hwnd, null, 0);
+                    result.* = 0;
+                    return true;
                 }
+            }
+            if (Sidebar.hitTestProject(x, y, &app.model, app.sidebar_scroll, workspace_top)) |index| {
+                app.openProject(app.model.recent_projects.items[index].path);
+                result.* = 0;
+                return true;
+            }
+            result.* = 0;
+            return true;
+        },
+        c.WM_LBUTTONUP => {
+            if (app.canvas.dragging) {
+                app.canvas.endPan();
+                _ = c.ReleaseCapture();
             }
             result.* = 0;
             return true;
         },
         c.WM_MOUSEWHEEL => {
             const delta: i16 = @bitCast(@as(u16, @truncate(@as(usize, @bitCast(wparam)) >> 16)));
-            app.sidebar_scroll = Sidebar.clampScroll(
-                app.sidebar_scroll - @divTrunc(@as(i32, delta), 4),
-                Sidebar.maxScroll(&app.model,
-                    if (app.worktree_inspection) |*value| value else null,
-                    blk: {
-                        var client: c.RECT = undefined;
-                        _ = c.GetClientRect(hwnd, &client);
-                        break :blk client.bottom - Tokens.workspace_height;
-                    }),
-            );
+            const x = mouseX(lparam);
+            const y = mouseY(lparam);
+            var client: c.RECT = undefined;
+            _ = c.GetClientRect(hwnd, &client);
+            const workspace_top = client.bottom - Tokens.workspace_height;
+            if (x < Tokens.sidebar_width) {
+                app.sidebar_scroll = Sidebar.clampScroll(app.sidebar_scroll - @divTrunc(@as(i32, delta), 4),
+                    Sidebar.maxScroll(&app.model, if (app.worktree_inspection) |*value| value else null, workspace_top));
+            } else if (y < workspace_top) {
+                app.canvas.zoomAt(x, y, delta);
+            }
             _ = c.InvalidateRect(hwnd, null, 0);
             result.* = 0;
             return true;
@@ -627,6 +719,35 @@ fn onWindowMessage(
     return false;
 }
 
+fn runSmokeWorkspaceActions(self: *App) void {
+    const script = self.smoke_workspace_actions;
+    if (script.len == 0) return;
+    const workspace = if (self.workspace) |*value| value else return;
+    const default_script = "create,split,select,focus,close,restart";
+    const actions = if (std.mem.eql(u8, script, "1")) default_script else script;
+    var iterator = std.mem.splitScalar(u8, actions, ',');
+    while (iterator.next()) |raw| {
+        const action = std.mem.trim(u8, raw, " \t\r\n");
+        if (std.mem.eql(u8, action, "create") or std.mem.eql(u8, action, "tab") or std.mem.eql(u8, action, "new")) {
+            workspace.newTab() catch self.setStatus("Smoke workspace create failed");
+        } else if (std.mem.eql(u8, action, "split") or std.mem.eql(u8, action, "split-horizontal")) {
+            workspace.splitFocused(.horizontal) catch self.setStatus("Smoke workspace split failed");
+        } else if (std.mem.eql(u8, action, "split-vertical")) {
+            workspace.splitFocused(.vertical) catch self.setStatus("Smoke workspace split failed");
+        } else if (std.mem.eql(u8, action, "select")) {
+            workspace.selectNextTab();
+        } else if (std.mem.eql(u8, action, "focus")) {
+            workspace.focusNextPane();
+        } else if (std.mem.eql(u8, action, "close")) {
+            workspace.closeFocusedPane() catch self.setStatus("Smoke workspace close failed");
+        } else if (std.mem.eql(u8, action, "restart") and workspace.hasSurface(0)) {
+            workspace.recreate(0) catch self.setStatus("Smoke workspace restart failed");
+        }
+    }
+    self.refreshWorkspace();
+    self.smoke_workspace_actions_ran = true;
+}
+
 fn smokeContractPassed(self: *const App) bool {
     if (self.client.connectionState() != .connected) return false;
     const value = self.model.graph orelse return false;
@@ -636,18 +757,32 @@ fn smokeContractPassed(self: *const App) bool {
     if (c.GetClientRect(self.window.hwnd, &client) == 0) return false;
     const layout_width = @max(0, client.right - Tokens.sidebar_width);
     const layout_height = Tokens.workspace_height;
+    const scripted_actions = envFlag("GRAPHCODE_SHELL_WORKSPACE_ACTIONS");
+    const workspace_ready = if (scripted_actions)
+        workspace.tabCount() > 0
+    else
+        workspace.hasSurface(0) and workspace.hasSurface(1) and
+            workspace.hasAttach(0) and workspace.hasAttach(1);
     return workspace.layoutMatches(
             Tokens.sidebar_width,
             @max(0, client.bottom - Tokens.workspace_height),
             layout_width,
             layout_height,
         ) and
-        workspace.hasSurface(0) and workspace.hasSurface(1) and
-        workspace.hasAttach(0) and workspace.hasAttach(1);
+        workspace_ready and
+        (!scripted_actions or self.smoke_workspace_actions_ran);
 }
 
 fn envFlag(name: []const u8) bool {
     const value = std.process.getEnvVarOwned(std.heap.page_allocator, name) catch return false;
     defer std.heap.page_allocator.free(value);
     return std.mem.eql(u8, value, "1");
+}
+
+fn mouseX(lparam: c.LPARAM) i32 {
+    return @intCast(@as(u16, @truncate(@as(usize, @bitCast(lparam)))));
+}
+
+fn mouseY(lparam: c.LPARAM) i32 {
+    return @intCast(@as(u16, @truncate(@as(usize, @bitCast(lparam)) >> 16)));
 }

@@ -108,6 +108,25 @@ pub fn hitTestWorktree(x: i32, y: i32, project_count: usize, count: usize, scrol
     return index;
 }
 
+pub fn hitTestProject(x: i32, y: i32, model: *const GraphModel.Model, scroll_offset: i32, viewport_bottom: i32) ?usize {
+    if (x < 0 or x >= Tokens.sidebar_width or y < Tokens.header_height or y >= viewport_bottom) return null;
+    const top = Tokens.header_height + 78 - scroll_offset;
+    if (y < top) return null;
+    const index: usize = @intCast(@divTrunc(y - top, 24));
+    if (index >= model.recent_projects.items.len) return null;
+    return index;
+}
+
+pub fn hitTestOverviewLoop(x: i32, y: i32, model: *const GraphModel.Model, scroll_offset: i32, viewport_bottom: i32) ?usize {
+    if (x < 0 or x >= Tokens.sidebar_width or y < Tokens.header_height or y >= viewport_bottom) return null;
+    const top = Tokens.header_height + 78 +
+        @as(i32, @intCast(model.recent_projects.items.len * 24)) - scroll_offset;
+    if (model.graph == null or y < top) return null;
+    const index: usize = @intCast(@divTrunc(y - top, 24));
+    if (index >= model.graph.?.nodes.items.len) return null;
+    return index;
+}
+
 fn reason(entry: WorktreeStatus.Entry) []const u8 {
     if (entry.primary) return "primary checkout";
     if (entry.locked) return "locked";
