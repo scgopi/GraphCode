@@ -29,6 +29,7 @@ pub const InspectionError = error{
 pub const Inspection = struct {
     entries: std.array_list.Managed(Entry),
     default_branch: []u8,
+    project_path: []u8,
 };
 
 pub const Binding = struct {
@@ -89,7 +90,17 @@ pub fn inspect(allocator: std.mem.Allocator, project_path: []const u8) !Inspecti
                 entry.branch, default_branch,
             });
         }
-        return .{ .entries = entries, .default_branch = default_branch };
+        return .{
+            .entries = entries,
+            .default_branch = default_branch,
+            .project_path = try allocator.dupe(u8, project_path),
+        };
+    }
+
+    pub fn deinitInspection(allocator: std.mem.Allocator, inspection: *Inspection) void {
+        deinit(allocator, &inspection.entries);
+        allocator.free(inspection.default_branch);
+        allocator.free(inspection.project_path);
     }
 
 pub fn reclaim(allocator: std.mem.Allocator, entries: []const Entry) !usize {
