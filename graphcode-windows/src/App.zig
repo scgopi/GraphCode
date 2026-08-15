@@ -4,6 +4,8 @@ const GraphCanvas = @import("GraphCanvas.zig");
 const CanvasInput = @import("CanvasInput.zig");
 const GraphModel = @import("GraphModel.zig");
 const InputRouter = @import("InputRouter.zig");
+const Forms = @import("Forms.zig");
+const NativeForms = @import("NativeForms.zig");
 const MainWindow = @import("MainWindow.zig");
 const Sidebar = @import("Sidebar.zig");
 const TerminalWorkspace = @import("TerminalWorkspace.zig");
@@ -41,6 +43,7 @@ pub const App = struct {
     smoke_workspace_actions_done: bool = false,
     smoke_idle_ticks: usize = 0,
     sidebar_scroll: i32 = 0,
+    context_node: ?usize = null,
 
     pub fn init(allocator: std.mem.Allocator) !*App {
         var client = try DaemonClient.init(allocator);
@@ -202,7 +205,70 @@ pub const App = struct {
 
     fn createNode(self: *App) void {
         const path = self.currentProject() orelse return;
-        self.client.sendCreateNode(path, "Windows shell node");
+        const draft = NativeForms.node(self.window.hwnd, self.allocator, .{ .title = "Windows shell node" }) catch {
+            self.setStatus("Unable to open node form");
+            return;
+        } orelse return;
+        defer {
+            self.allocator.free(draft.title);
+            self.allocator.free(draft.loop_type);
+        }
+        Forms.validateNode(draft) catch {
+            self.setStatus("Node title and loop type are required");
+            return;
+        };
+        self.client.sendCreateNode(path, draft.title);
+    }
+
+    fn editSelectedNode(self: *App) void {
+        const path = self.currentProject() orelse return;
+        const node = self.model.selected() orelse return;
+        const draft = NativeForms.node(self.window.hwnd, self.allocator, .{
+            .title = node.title,
+            .loop_type = node.loop_type,
+        }) catch {
+            self.setStatus("Unable to open node form");
+            return;
+        } orelse return;
+        defer {
+            self.allocator.free(draft.title);
+            self.allocator.free(draft.loop_type);
+        }
+        Forms.validateNode(draft) catch {
+            self.setStatus("Node title and loop type are required");
+            return;
+        };
+        self.client.sendRenameNode(path, node.id, draft.title);
+    }
+
+    fn createEdge(self: *App) void {
+        const path = self.currentProject() orelse return;
+        const draft = NativeForms.edge(self.window.hwnd, self.allocator, .{ .from = "", .to = "" }) catch {
+            self.setStatus("Unable to open edge form");
+            return;
+        } orelse return;
+        defer {
+            self.allocator.free(draft.from);
+            self.allocator.free(draft.to);
+            self.allocator.free(draft.kind);
+        }
+        Forms.validateEdge(draft) catch {
+            self.setStatus("Edge requires distinct source and target nodes");
+            return;
+        };
+        self.client.sendCreateEdge(path, draft.from, draft.to, draft.kind);
+    }
+
+    fn showSettings(self: *App) void {
+        const settings = NativeForms.settings(self.window.hwnd, self.allocator, .{}) catch {
+            self.setStatus("Unable to open settings");
+            return;
+        } orelse return;
+        defer {
+            self.allocator.free(settings.daemon_pipe);
+            self.allocator.free(settings.support_directory);
+        }
+        if (settings.daemon_pipe.len != 0) self.setStatus("Daemon pipe override saved for this session");
     }
 
     fn openSelectedNode(self: *App) void {
@@ -236,6 +302,15 @@ pub const App = struct {
             .open_node => self.openSelectedNode(),
             .stop_node => self.stopSelectedNode(),
             .send_node => self.sendSelectedNode(),
+            .edit_node => self.editSelectedNode(),
+            .create_edge => self.createEdge(),
+            .jump_next => {
+                if (self.model.graph != null) {
+                    self.model.selectNext();
+                    _ = c.InvalidateRect(self.window.hwnd, null, 0);
+                }
+            },
+            .settings => self.showSettings(),
             .focus_terminal_a => if (self.workspace) |*workspace| workspace.focus(0),
             .focus_terminal_b => if (self.workspace) |*workspace| workspace.focus(1),
             .select_next => {
@@ -549,6 +624,33 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
+        c.WM_RBUTTONUP => {
+            const x: i32 = @intCast(@as(u16, @truncate(@as(usize, @bitCast(lparam)))));
+            const y: i32 = @intCast(@as(u16, @truncate(@as(usize, @bitCast(lparam)) >> 16)));
+            app.context_node = if (app.model.graph) |graph|
+                GraphCanvas.hitTest(graph.nodes.items, x, y, &app.canvas, canvasBounds(hwnd))
+            else
+                null;
+            if (app.context_node) |index| app.model.selected_node = index;
+            showContextMenu(app, hwnd, x, y);
+            result.* = 0;
+            return true;
+        },
+        c.WM_COMMAND => {
+            const command: usize = @as(u16, @truncate(wparam));
+            switch (command) {
+                7001 => app.handleAction(.create_node),
+                7002 => app.handleAction(.edit_node),
+                7003 => app.handleAction(.create_edge),
+                7004 => app.handleAction(.open_node),
+                7005 => app.handleAction(.stop_node),
+                7006 => app.handleAction(.settings),
+                else => {},
+>>>>>>> ffa6cdd (feat(windows): add native graph forms and navigation)
+            }
+            result.* = 0;
+            return true;
+        },
         c.WM_MOUSEMOVE => {
             if (app.canvas.dragging) {
                 const x = mouseX(lparam);
@@ -626,6 +728,24 @@ fn mouseX(value: c.LPARAM) i32 {
 
 fn mouseY(value: c.LPARAM) i32 {
     return @as(i32, @as(i16, @bitCast(@as(u16, @truncate(@as(usize, @bitCast(value)) >> 16)))));
+}
+
+fn showContextMenu(app: *App, hwnd: c.HWND, x: i32, y: i32) void {
+    const menu = c.CreatePopupMenu() orelse return;
+    defer _ = c.DestroyMenu(menu);
+    const node_selected = app.context_node != null;
+    _ = c.AppendMenuW(menu, c.MF_STRING, 7001, std.unicode.utf8ToUtf16LeStringLiteral("Create node").ptr);
+    if (node_selected) {
+        _ = c.AppendMenuW(menu, c.MF_STRING, 7002, std.unicode.utf8ToUtf16LeStringLiteral("Edit node").ptr);
+        _ = c.AppendMenuW(menu, c.MF_STRING, 7004, std.unicode.utf8ToUtf16LeStringLiteral("Open node").ptr);
+        _ = c.AppendMenuW(menu, c.MF_STRING, 7005, std.unicode.utf8ToUtf16LeStringLiteral("Stop node").ptr);
+    }
+    _ = c.AppendMenuW(menu, c.MF_STRING, 7003, std.unicode.utf8ToUtf16LeStringLiteral("Create edge").ptr);
+    _ = c.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+    _ = c.AppendMenuW(menu, c.MF_STRING, 7006, std.unicode.utf8ToUtf16LeStringLiteral("Settings").ptr);
+    var point = c.POINT{ .x = x, .y = y };
+    _ = c.ClientToScreen(hwnd, &point);
+    _ = c.TrackPopupMenu(menu, c.TPM_LEFTALIGN | c.TPM_TOPALIGN, point.x, point.y, 0, hwnd, null);
 }
 
 fn smokeContractPassed(self: *const App) bool {

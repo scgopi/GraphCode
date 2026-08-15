@@ -7,6 +7,10 @@ pub const Action = enum {
     open_node,
     stop_node,
     send_node,
+    edit_node,
+    create_edge,
+    jump_next,
+    settings,
     focus_terminal_a,
     focus_terminal_b,
     select_next,
@@ -26,6 +30,9 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (ctrl and key == 'O') return .open_node;
     if (ctrl and key == 'S') return .stop_node;
     if (ctrl and key == 'M') return .send_node;
+    if (ctrl and key == 'E') return .edit_node;
+    if (ctrl and key == 'J') return .jump_next;
+    if (ctrl and key == ',') return .settings;
     if (key == 0x31) return .focus_terminal_a;
     if (key == 0x32) return .focus_terminal_b;
     if (key == 0x09) return .select_next;
@@ -46,6 +53,10 @@ pub fn commandText(allocator: std.mem.Allocator, action: Action) ![]u8 {
         .open_node => allocator.dupe(u8, "Open node"),
         .stop_node => allocator.dupe(u8, "Stop node"),
         .send_node => allocator.dupe(u8, "Send node"),
+        .edit_node => allocator.dupe(u8, "Edit node"),
+        .create_edge => allocator.dupe(u8, "Create edge"),
+        .jump_next => allocator.dupe(u8, "Jump to next node"),
+        .settings => allocator.dupe(u8, "Settings"),
         .reconnect => allocator.dupe(u8, "Reconnect"),
         .focus_terminal_a => allocator.dupe(u8, "Focus terminal A"),
         .focus_terminal_b => allocator.dupe(u8, "Focus terminal B"),

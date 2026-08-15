@@ -16,6 +16,12 @@ destruction kills only the attach client; zmx owns the session and survives shel
 restarts. The host contract is the accepted two-surface terminal-gate contract,
 not a synthetic terminal proof.
 
+The graph surface also provides native Win32 create/edit forms for nodes and
+edges, a settings dialog, context menus, and keyboard-accessible actions:
+`Ctrl+N` creates a node, `Ctrl+E` edits the selected node, `Ctrl+J` advances
+selection, and `Ctrl+,` opens settings. Mutations are sent as correlated v2
+daemon requests; daemon refusals remain visible as explicit status errors.
+
 ## Build
 
 Use the exact provider pins in `provider-pins.json` and clean local worktrees:

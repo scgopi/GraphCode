@@ -222,6 +222,7 @@ pub fn commandGraphNodeAction(
             ",\"from\":null}}}}",
         });
     }
+
     if (std.mem.eql(u8, action, "stopNode")) {
         return std.mem.concat(allocator, u8, &.{
             "{\"graphCommand\":{\"projectPath\":",
@@ -232,6 +233,66 @@ pub fn commandGraphNodeAction(
         });
     }
     return error.UnsupportedGraphAction;
+}
+
+pub fn commandGraphRenameNode(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    node_id: []const u8,
+    title: []const u8,
+) ![]u8 {
+    const quoted_path = try quoteJson(allocator, project_path);
+    defer allocator.free(quoted_path);
+    const quoted_node = try quoteJson(allocator, node_id);
+    defer allocator.free(quoted_node);
+    const quoted_title = try quoteJson(allocator, title);
+    defer allocator.free(quoted_title);
+    return std.mem.concat(allocator, u8, &.{
+        "{\"graphCommand\":{\"projectPath\":",   quoted_path,
+        ",\"command\":{\"renameNode\":{\"_0\":", quoted_node,
+        ",\"title\":",                           quoted_title,
+        "}}}}",
+    });
+}
+
+pub fn commandGraphCreateEdge(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    from: []const u8,
+    to: []const u8,
+    kind: []const u8,
+) ![]u8 {
+    const quoted_path = try quoteJson(allocator, project_path);
+    defer allocator.free(quoted_path);
+    const quoted_from = try quoteJson(allocator, from);
+    defer allocator.free(quoted_from);
+    const quoted_to = try quoteJson(allocator, to);
+    defer allocator.free(quoted_to);
+    const quoted_kind = try quoteJson(allocator, kind);
+    defer allocator.free(quoted_kind);
+    return std.mem.concat(allocator, u8, &.{
+        "{\"graphCommand\":{\"projectPath\":",                                                                              quoted_path,
+        ",\"command\":{\"createEdge\":{\"_0\":",                                                                            quoted_from,
+        ",\"_1\":",                                                                                                         quoted_to,
+        ",\"spec\":{\"kind\":",                                                                                             quoted_kind,
+        ",\"condition\":\"always\",\"payloadTransform\":\"none\",\"cycleGuard\":null,\"spawnTargetProjectPath\":null}}}}}",
+    });
+}
+
+pub fn commandGraphDeleteEdge(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    edge_id: []const u8,
+) ![]u8 {
+    const quoted_path = try quoteJson(allocator, project_path);
+    defer allocator.free(quoted_path);
+    const quoted_edge = try quoteJson(allocator, edge_id);
+    defer allocator.free(quoted_edge);
+    return std.mem.concat(allocator, u8, &.{
+        "{\"graphCommand\":{\"projectPath\":", quoted_path,
+        ",\"command\":{\"deleteEdge\":",       quoted_edge,
+        "}}}",
+    });
 }
 
 fn quoteJson(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
@@ -495,6 +556,12 @@ test "graph commands match Swift Codable associated-value shapes" {
         error.UnsupportedGraphAction,
         commandGraphNodeAction(allocator, project, node, "deleteNode", null),
     );
+    const rename = try commandGraphRenameNode(allocator, project, node, "Renamed");
+    defer allocator.free(rename);
+    try std.testing.expect(std.mem.indexOf(u8, rename, "\"renameNode\"") != null);
+    const edge = try commandGraphCreateEdge(allocator, project, node, "22222222-2222-4222-8222-222222222222", "handoff");
+    defer allocator.free(edge);
+    try std.testing.expect(std.mem.indexOf(u8, edge, "\"createEdge\"") != null);
 }
 
 test "global overview command uses the daemon command shape" {

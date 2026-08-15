@@ -190,6 +190,28 @@ pub const DaemonClient = struct {
         self.sendCommand(command);
     }
 
+    pub fn sendRenameNode(self: *DaemonClient, project_path: []const u8, node_id: []const u8, title: []const u8) void {
+        const command = Wire.commandGraphRenameNode(self.allocator, project_path, node_id, title) catch {
+            self.publishState(self.connectionState(), "rename node command encoding failed");
+            return;
+        };
+        self.sendCommand(command);
+    }
+
+    pub fn sendCreateEdge(
+        self: *DaemonClient,
+        project_path: []const u8,
+        from: []const u8,
+        to: []const u8,
+        kind: []const u8,
+    ) void {
+        const command = Wire.commandGraphCreateEdge(self.allocator, project_path, from, to, kind) catch {
+            self.publishState(self.connectionState(), "create edge command encoding failed");
+            return;
+        };
+        self.sendCommand(command);
+    }
+
     pub fn poll(self: *DaemonClient) void {
         var count: usize = 0;
         while (count < inbound_capacity) : (count += 1) {
@@ -405,7 +427,6 @@ pub const DaemonClient = struct {
             } else {
                 self.allocator.free(current);
             }
-
         } else |_| {}
         self.publishState(.connecting, "");
         if (!self.openPipe()) {
