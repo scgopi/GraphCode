@@ -10,7 +10,7 @@ session/ConPTY lifetime.
 
 `provider-pins.json` records the accepted provider commits:
 
-- Winghostty `b249cd858f30cc9e5fccb4b10d58b21b36e77226`
+- Winghostty `f5abc059e4ca58b376eb209313aca7784659c679`
 - zmx `858727af10cdf43d66cb3733cff58dc90ec4b3dd`
 
 The Winghostty remote workflow cannot publish from the current workflow scope,
