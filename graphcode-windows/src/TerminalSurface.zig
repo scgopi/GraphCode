@@ -111,6 +111,10 @@ pub const Workspace = struct {
     input_cancel_requested: bool = false,
     input_queue: InputQueue,
     input_error_message: []const u8 = "",
+    layout_origin_x: i32 = 0,
+    layout_origin_y: i32 = 0,
+    layout_width: i32 = 960,
+    layout_height: i32 = 250,
 
     pub fn init(parent: c.HWND, allocator_: std.mem.Allocator) !Workspace {
         var workspace = Workspace{
@@ -177,6 +181,12 @@ pub const Workspace = struct {
         self.surfaces[index].destroyed = false;
         self.surfaces[index].destroying = false;
         clearCells(&self.surfaces[index]);
+        self.resize(
+            self.layout_origin_x,
+            self.layout_origin_y,
+            self.layout_width,
+            self.layout_height,
+        );
     }
 
     pub fn recreate(self: *Workspace, index: usize) !void {
@@ -189,6 +199,10 @@ pub const Workspace = struct {
     pub fn resize(self: *Workspace, origin_x: i32, origin_y: i32, width: i32, height: i32) void {
         const graph_height = @max(1, height);
         const half = @max(1, @divTrunc(width, 2));
+        self.layout_origin_x = origin_x;
+        self.layout_origin_y = origin_y;
+        self.layout_width = width;
+        self.layout_height = graph_height;
         for (&self.surfaces, 0..) |*slot, index| {
             if (slot.surface) |surface| {
                 var bounds = c.winghostty_rect{
@@ -237,6 +251,13 @@ pub const Workspace = struct {
 
     pub fn hasAttach(self: *const Workspace, index: usize) bool {
         return index < self.surfaces.len and self.surfaces[index].attach != null;
+    }
+
+    pub fn layoutMatches(self: *const Workspace, origin_x: i32, origin_y: i32, width: i32, height: i32) bool {
+        return self.layout_origin_x == origin_x and
+            self.layout_origin_y == origin_y and
+            self.layout_width == width and
+            self.layout_height == @max(1, height);
     }
 
     pub fn destroySurface(self: *Workspace, index: usize) void {
@@ -611,7 +632,7 @@ fn writeInputBounded(handle: c.HANDLE, bytes: []const u8) !usize {
             const wait_result = c.WaitForSingleObject(overlapped.hEvent, input_write_timeout_ms);
             if (wait_result == c.WAIT_TIMEOUT) {
                 _ = c.CancelIoEx(handle, &overlapped);
-                _ = c.GetOverlappedResult(handle, &overlapped, &written, 0);
+                waitForCancelledWrite(handle, &overlapped, &written);
                 return error.WriteTimeout;
             }
             if (wait_result != c.WAIT_OBJECT_0 or
@@ -624,6 +645,20 @@ fn writeInputBounded(handle: c.HANDLE, bytes: []const u8) !usize {
         offset += written;
     }
     return offset;
+}
+
+fn waitForCancelledWrite(
+    handle: c.HANDLE,
+    overlapped: *c.OVERLAPPED,
+    written: *c.DWORD,
+) void {
+    if (c.GetOverlappedResult(handle, overlapped, written, 1) != 0) return;
+    const completion_error = c.GetLastError();
+    if (completion_error == c.ERROR_OPERATION_ABORTED or
+        completion_error == c.ERROR_IO_INCOMPLETE)
+    {
+        return;
+    }
 }
 
 fn nowMilliseconds() i64 {

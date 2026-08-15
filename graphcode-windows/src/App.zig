@@ -68,6 +68,7 @@ pub const App = struct {
         try self.window.create(self, &onWindowMessage, title.ptr);
         self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
         if (self.workspace) |*workspace| try workspace.startInputWorker();
+        self.layoutWorkspace();
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_REQUIRE_DAEMON")) |value| {
             defer self.allocator.free(value);
             self.require_smoke_contract = std.mem.eql(u8, value, "1");
@@ -224,6 +225,19 @@ pub const App = struct {
         }
     }
 
+    fn layoutWorkspace(self: *App) void {
+        var client: c.RECT = undefined;
+        if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
+        if (self.workspace) |*workspace| {
+            workspace.resize(
+                Tokens.sidebar_width,
+                @max(0, client.bottom - Tokens.workspace_height),
+                @max(0, client.right - Tokens.sidebar_width),
+                Tokens.workspace_height,
+            );
+        }
+    }
+
     fn status(self: *const App) []const u8 {
         if (self.status_override.len != 0) return self.status_override;
         return self.client.statusText();
@@ -290,17 +304,8 @@ fn onWindowMessage(
             return true;
         },
         c.WM_SIZE => {
-            const bits: usize = @bitCast(lparam);
-            const width: i32 = @intCast(@as(u16, @truncate(bits)));
-            const height: i32 = @intCast(@as(u16, @truncate(bits >> 16)));
-            if (app.workspace) |*workspace| {
-                workspace.resize(
-                    Tokens.sidebar_width,
-                    @max(0, height - Tokens.workspace_height),
-                    @max(0, width - Tokens.sidebar_width),
-                    Tokens.workspace_height,
-                );
-            }
+            _ = lparam;
+            app.layoutWorkspace();
             result.* = 0;
             return true;
         },
@@ -422,7 +427,17 @@ fn smokeContractPassed(self: *const App) bool {
     const value = self.model.graph orelse return false;
     if (value.nodes.items.len < 2) return false;
     const workspace = self.workspace orelse return false;
-    return workspace.hasSurface(0) and workspace.hasSurface(1) and
+    var client: c.RECT = undefined;
+    if (c.GetClientRect(self.window.hwnd, &client) == 0) return false;
+    const layout_width = @max(0, client.right - Tokens.sidebar_width);
+    const layout_height = Tokens.workspace_height;
+    return workspace.layoutMatches(
+            Tokens.sidebar_width,
+            @max(0, client.bottom - Tokens.workspace_height),
+            layout_width,
+            layout_height,
+        ) and
+        workspace.hasSurface(0) and workspace.hasSurface(1) and
         workspace.hasAttach(0) and workspace.hasAttach(1);
 }
 

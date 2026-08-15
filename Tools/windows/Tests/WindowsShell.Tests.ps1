@@ -75,6 +75,7 @@ foreach ($path in @(
     "fixtures\daemon-v2-list-projects.json",
     "fixtures\daemon-v2-subscribe.json",
     "fixtures\daemon-v2-graph-event.json",
+    "fixtures\daemon-v2-graph-reordered-edges.json",
     "fixtures\daemon-v2-presence-event.json",
     "fixtures\daemon-v1-list-projects.json",
     "fixtures\daemon-v2-create-node.json",
@@ -185,6 +186,21 @@ Invoke-Native "Terminal input queue tests" {
 Invoke-Native "Graph model executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\GraphModel.zig } finally { Pop-Location }
+}
+Invoke-Native "Graph canvas executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  if (-not (Test-Path -LiteralPath $include -PathType Container)) {
+    throw "Winghostty headers are required for graph canvas tests."
+  }
+  Push-Location $shellRoot
+  try {
+    & $zig test src\GraphCanvas.zig -target x86_64-windows-msvc -lc "-I$include"
+  } finally { Pop-Location }
 }
 
 Write-Output "Windows shell scaffold contract: PASS"

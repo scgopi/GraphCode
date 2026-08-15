@@ -63,16 +63,31 @@ fn drawEdges(hdc: c.HDC, graph: GraphModel.Graph) void {
     const pen = c.CreatePen(c.PS_SOLID, 2, 0x005D5D5D);
     if (pen == null) return;
     const old = c.SelectObject(hdc, pen);
-    for (graph.edges.items, 0..) |edge, edge_index| {
-        if (edge_index >= graph.nodes.items.len) continue;
-        const x1: i32 = Tokens.sidebar_width + 100 + @as(i32, @intCast(edge_index % 3)) * 260;
-        const y1: i32 = 150 + @as(i32, @intCast(edge_index / 3)) * 140;
-        _ = edge;
-        _ = c.MoveToEx(hdc, x1, y1, null);
-        _ = c.LineTo(hdc, x1 + 120, y1);
+    for (graph.edges.items) |edge| {
+        const from = connectorPosition(graph.nodes.items, edge.from, true) orelse continue;
+        const to = connectorPosition(graph.nodes.items, edge.to, false) orelse continue;
+        _ = c.MoveToEx(hdc, from.x, from.y, null);
+        _ = c.LineTo(hdc, to.x, to.y);
     }
     _ = c.SelectObject(hdc, old);
     _ = c.DeleteObject(pen);
+}
+
+const Connector = struct {
+    x: i32,
+    y: i32,
+};
+
+fn connectorPosition(nodes: []const GraphModel.Node, node_id: []const u8, outgoing: bool) ?Connector {
+    for (nodes, 0..) |node, index| {
+        if (!std.mem.eql(u8, node.id, node_id)) continue;
+        const bounds = nodeBounds(index);
+        return .{
+            .x = if (outgoing) bounds.right else bounds.left,
+            .y = @divTrunc(bounds.top + bounds.bottom, 2),
+        };
+    }
+    return null;
 }
 
 fn drawNode(
@@ -82,16 +97,22 @@ fn drawNode(
     index: usize,
     selected: ?usize,
 ) void {
-    const column = @as(i32, @intCast(index % 3));
-    const row = @as(i32, @intCast(index / 3));
-    const x = Tokens.sidebar_width + 32 + column * 260;
-    const y = Tokens.header_height + 50 + row * 140;
-    const bounds = rect(x, y, x + Tokens.loop_card_width, y + Tokens.loop_card_height);
+    const bounds = nodeBounds(index);
+    const x = bounds.left;
+    const y = bounds.top;
     fill(hdc, bounds, if (selected == index) 0x00345D8C else 0x00262626);
     fill(hdc, rect(x, y, x + Tokens.loop_card_stripe, y + Tokens.loop_card_height), stateColor(node.state));
     drawText(hdc, allocator, node.title, x + 14, y + 16, 14, 0x00FFFFFF);
     drawText(hdc, allocator, node.state, x + 14, y + 43, 11, 0x00B8B8B8);
     if (node.activity.len != 0) drawText(hdc, allocator, node.activity, x + 14, y + 67, 10, 0x008A8A8A);
+}
+
+fn nodeBounds(index: usize) c.RECT {
+    const column = @as(i32, @intCast(index % 3));
+    const row = @as(i32, @intCast(index / 3));
+    const x = Tokens.sidebar_width + 32 + column * 260;
+    const y = Tokens.header_height + 50 + row * 140;
+    return rect(x, y, x + Tokens.loop_card_width, y + Tokens.loop_card_height);
 }
 
 fn stateColor(state: []const u8) u32 {
@@ -129,4 +150,20 @@ fn drawText(
     _ = c.SetBkMode(hdc, c.TRANSPARENT);
     var bounds = rect(x, y, 1200, y + size + 8);
     _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &bounds, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
+}
+
+test "edge connectors resolve reordered node IDs to card positions" {
+    const nodes = [_]GraphModel.Node{
+        .{ .id = @constCast("node-z"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
+        .{ .id = @constCast("node-a"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
+    };
+    const from = connectorPosition(&nodes, "node-a", true) orelse return error.MissingConnector;
+    const to = connectorPosition(&nodes, "node-z", false) orelse return error.MissingConnector;
+    const expected_from = nodeBounds(1);
+    const expected_to = nodeBounds(0);
+    try std.testing.expectEqual(expected_from.right, from.x);
+    try std.testing.expectEqual(@divTrunc(expected_from.top + expected_from.bottom, 2), from.y);
+    try std.testing.expectEqual(expected_to.left, to.x);
+    try std.testing.expectEqual(@divTrunc(expected_to.top + expected_to.bottom, 2), to.y);
+    try std.testing.expect(connectorPosition(&nodes, "missing", true) == null);
 }

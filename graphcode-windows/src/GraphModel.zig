@@ -290,3 +290,23 @@ test "stub graph snapshot decodes two actionable nodes" {
     try std.testing.expectEqualStrings("busy", graph.nodes.items[0].presence);
     try std.testing.expectEqualStrings("idle", graph.nodes.items[1].presence);
 }
+
+test "reordered graph fixture preserves nonsequential edge IDs" {
+    const allocator = std.testing.allocator;
+    const frame = try std.fs.cwd().readFileAlloc(
+        allocator,
+        "fixtures/daemon-v2-graph-reordered-edges.json",
+        64 * 1024,
+    );
+    defer allocator.free(frame);
+    var model = Model.init(allocator);
+    defer model.deinit();
+    try std.testing.expectEqual(Wire.EventKind.graph_changed, try model.updateFromFrame(frame));
+    const graph = model.graph orelse return error.TestExpectedGraph;
+    try std.testing.expectEqualStrings("node-z", graph.nodes.items[0].id);
+    try std.testing.expectEqualStrings("node-a", graph.nodes.items[1].id);
+    try std.testing.expectEqualStrings("node-a", graph.edges.items[0].from);
+    try std.testing.expectEqualStrings("node-q", graph.edges.items[0].to);
+    try std.testing.expectEqualStrings("node-z", graph.edges.items[1].from);
+    try std.testing.expectEqualStrings("node-a", graph.edges.items[1].to);
+}
