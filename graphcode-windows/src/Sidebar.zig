@@ -33,15 +33,19 @@ pub fn buildRows(
     var rows = std.array_list.Managed(Row).init(allocator);
     errdefer rows.deinit();
     try rows.append(.{ .kind = .overview, .title = "Graph Overview", .path = "" });
+    try appendGlobalLoops(&rows, model);
     try rows.append(.{ .kind = .quick_chats, .title = "Quick Chats", .path = "" });
 
     var has_local = false;
     var has_remote = false;
     for (model.recent_projects.items) |project| {
+        if (project.isGlobal()) continue;
         if (project.isRemote()) has_remote = true else has_local = true;
     }
     if (model.graph) |graph| {
-        if (graph.project.isRemote()) has_remote = true else has_local = true;
+        if (!graph.project.isGlobal()) {
+            if (graph.project.isRemote()) has_remote = true else has_local = true;
+        }
     }
     if (has_local) try rows.append(.{ .kind = .local_section, .title = "Local Projects", .path = "" });
     try appendProjects(&rows, model, false);
@@ -53,13 +57,29 @@ pub fn buildRows(
 
 fn appendProjects(rows: *std.array_list.Managed(Row), model: *const GraphModel.Model, remote: bool) !void {
     for (model.recent_projects.items) |project| {
+        if (project.isGlobal()) continue;
         if (project.isRemote() != remote) continue;
         try appendProject(rows, model, project);
     }
     if (model.graph) |graph| {
+        if (graph.project.isGlobal()) return;
         if (graph.project.isRemote() == remote and !containsProject(model.recent_projects.items, graph.project.path)) {
             try appendProject(rows, model, graph.project);
         }
+    }
+}
+
+fn appendGlobalLoops(rows: *std.array_list.Managed(Row), model: *const GraphModel.Model) !void {
+    const graph = model.graph orelse return;
+    if (!graph.project.isGlobal()) return;
+    for (graph.nodes.items, 0..) |node, index| {
+        try rows.append(.{
+            .kind = .loop,
+            .title = node.title,
+            .path = graph.project.path,
+            .node_index = index,
+            .depth = 1,
+        });
     }
 }
 
@@ -106,6 +126,10 @@ pub fn hitTest(rows: []const Row, x: i32, y: i32) ?Row {
     return null;
 }
 
+pub fn isVisible(row: Row) bool {
+    return row.bounds.right > row.bounds.left and row.bounds.bottom > row.bounds.top;
+}
+
 pub fn draw(
     hdc: c.HDC,
     model: *const GraphModel.Model,
@@ -120,6 +144,7 @@ pub fn draw(
     const sidebar = rect(0, Tokens.header_height, Tokens.sidebar_width, client_bottom);
     fill(hdc, sidebar, Tokens.workspace_rail);
     for (rows.items) |row| {
+        if (!isVisible(row)) continue;
         const x: i32 = if (row.kind == .loop) 34 else 18;
         const color: u32 = switch (row.kind) {
             .local_section, .remote_section => 0x00909090,
@@ -188,6 +213,46 @@ test "sidebar layout clips and hit-tests many projects in a short viewport" {
     const last = hitTest(rows.items, 20, 90) orelse return error.ExpectedVisibleRow;
     try std.testing.expectEqual(RowKind.project, last.kind);
     try std.testing.expectEqualStrings("Project 11", last.title);
+}
+
+test "global graph is overview-owned and excluded from project sections" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    try model.recent_projects.append(.{
+        .path = try std.testing.allocator.dupe(u8, "graphcode://global"),
+        .name = try std.testing.allocator.dupe(u8, "Graph"),
+    });
+    try model.recent_projects.append(.{
+        .path = try std.testing.allocator.dupe(u8, "C:\\work\\local"),
+        .name = try std.testing.allocator.dupe(u8, "Local"),
+    });
+    const frame =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"global","project":{"path":"graphcode://global","name":"Graph"},"nodes":[{"id":"global-node","title":"Global Loop","loopType":"turnBased","state":"idle"}],"edges":[]}}}
+    ;
+    _ = try model.updateFromFrame(frame);
+    var rows = try buildRows(&model, std.testing.allocator, 800);
+    defer rows.deinit();
+    try std.testing.expectEqual(RowKind.overview, rows.items[0].kind);
+    try std.testing.expectEqual(RowKind.loop, rows.items[1].kind);
+    try std.testing.expectEqualStrings("Global Loop", rows.items[1].title);
+    try std.testing.expectEqual(RowKind.quick_chats, rows.items[2].kind);
+    for (rows.items) |row| {
+        try std.testing.expect(!(row.kind == .project and std.mem.eql(u8, row.path, "graphcode://global")));
+    }
+}
+
+test "scrolled-off rows produce no paint command" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    try model.recent_projects.append(.{
+        .path = try std.testing.allocator.dupe(u8, "C:\\work\\local"),
+        .name = try std.testing.allocator.dupe(u8, "Local"),
+    });
+    var rows = try buildRows(&model, std.testing.allocator, 120);
+    defer rows.deinit();
+    _ = layoutRows(rows.items, Tokens.header_height, viewportBottom(120), 500);
+    try std.testing.expect(!isVisible(rows.items[0]));
+    try std.testing.expect(hitTest(rows.items, 20, 7) == null);
 }
 
 fn rect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {
