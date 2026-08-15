@@ -10,6 +10,7 @@ pub const Node = struct {
     activity: []u8,
     presence: []u8,
     worktree_path: []u8 = @constCast(""),
+    worktree_branch: []u8 = &.{},
 };
 
 pub const ActivityEvent = struct {
@@ -24,6 +25,7 @@ pub const Edge = struct {
     condition: []u8 = @constCast("always"),
     blocks_target: bool = true,
     fired: bool = false,
+    fire_count: u32 = 0,
 };
 
 pub const Project = struct {
@@ -309,6 +311,7 @@ fn decodeNodes(
             .activity = try duplicateJsonStringOr(allocator, object, "activity", ""),
             .presence = try duplicatePresence(allocator, object),
             .worktree_path = try duplicateWorktreePath(allocator, object),
+            .worktree_branch = try duplicateWorktreeBranch(allocator, object),
         });
         cursor = end + 1;
     }
@@ -331,6 +334,7 @@ fn decodeEdges(
             .condition = try duplicateJsonStringOr(allocator, object, "condition", "always"),
             .blocks_target = !std.mem.eql(u8, Wire.jsonString(object, "kind") orelse "", "message"),
             .fired = jsonBool(object, "fired") orelse false,
+            .fire_count = jsonNumber(object, "fireCount") orelse 0,
         });
         cursor = end + 1;
     }
@@ -442,6 +446,7 @@ fn freeNode(allocator: std.mem.Allocator, node: Node) void {
     allocator.free(node.activity);
     allocator.free(node.presence);
     allocator.free(node.worktree_path);
+    allocator.free(node.worktree_branch);
 }
 
 fn freeGraph(allocator: std.mem.Allocator, graph: *Graph) void {
