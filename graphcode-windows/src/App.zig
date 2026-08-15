@@ -18,6 +18,7 @@ pub const App = struct {
     window: MainWindow.Window = .{},
     client: DaemonClient,
     model: GraphModel.Model,
+    canvas: GraphCanvas.CanvasState = .{},
     workspace: ?TerminalWorkspace.Workspace = null,
     instance_mutex: c.HANDLE = null,
     sync_requested: bool = false,
@@ -347,7 +348,15 @@ fn onWindowMessage(
         c.WM_PAINT => {
             var paint: c.PAINTSTRUCT = undefined;
             const hdc = c.BeginPaint(hwnd, &paint);
-            GraphCanvas.paint(hwnd, hdc, &app.model, app.status(), app.allocator, app.sidebar_scroll);
+            GraphCanvas.paint(
+                hwnd,
+                hdc,
+                &app.model,
+                app.status(),
+                app.allocator,
+                app.sidebar_scroll,
+                &app.canvas,
+            );
             _ = c.EndPaint(hwnd, &paint);
             result.* = 0;
             return true;
@@ -448,17 +457,59 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
+        c.WM_LBUTTONDOWN => {
+            const x = mouseX(lparam);
+            const y = mouseY(lparam);
+            if (x < Tokens.sidebar_width) {
+                result.* = 0;
+                return true;
+            }
+            const hit = if (app.model.graph) |graph|
+                GraphCanvas.hitTest(graph.nodes.items, x, y, &app.canvas)
+            else
+                null;
+            if (hit) |index| {
+                app.model.selected_node = index;
+                _ = c.InvalidateRect(hwnd, null, 0);
+            } else {
+                app.canvas.beginPan(x, y);
+                _ = c.SetCapture(hwnd);
+            }
+            result.* = 0;
+            return true;
+        },
+        c.WM_MOUSEMOVE => {
+            if (app.canvas.dragging) {
+                const x = mouseX(lparam);
+                const y = mouseY(lparam);
+                app.canvas.updatePan(x, y);
+                _ = c.InvalidateRect(hwnd, null, 0);
+            }
+            result.* = 0;
+            return true;
+        },
         c.WM_LBUTTONUP => {
-            const raw_lparam: usize = @bitCast(lparam);
-            const x: i32 = @intCast(@as(i16, @bitCast(@as(u16, @truncate(raw_lparam & 0xffff)))));
-            const y: i32 = @intCast(@as(i16, @bitCast(@as(u16, @truncate((raw_lparam >> 16) & 0xffff)))));
-            app.handleSidebarClick(x, y);
+            const x = mouseX(lparam);
+            const y = mouseY(lparam);
+            if (app.canvas.dragging) {
+                app.canvas.endPan();
+                _ = c.ReleaseCapture();
+            } else if (x < Tokens.sidebar_width) {
+                app.handleSidebarClick(x, y);
+            }
             result.* = 0;
             return true;
         },
         c.WM_MOUSEWHEEL => {
             const delta: i16 = @bitCast(@as(u16, @truncate((@as(usize, @bitCast(wparam)) >> 16) & 0xffff)));
-            app.scrollSidebar(-@divTrunc(@as(i32, delta), 2));
+            const x = mouseX(lparam);
+            const y = mouseY(lparam);
+            if (x < Tokens.sidebar_width) {
+                app.scrollSidebar(-@divTrunc(@as(i32, delta), 2));
+            } else {
+                app.canvas.zoomAt(x, y, delta);
+            }
+            _ = c.InvalidateRect(hwnd, null, 0);
             result.* = 0;
             return true;
         },
@@ -481,7 +532,16 @@ fn onWindowMessage(
         },
         else => {},
     }
+
     return false;
+}
+
+fn mouseX(value: c.LPARAM) i32 {
+    return @as(i32, @as(i16, @bitCast(@as(u16, @truncate(@as(usize, @bitCast(value)))))));
+}
+
+fn mouseY(value: c.LPARAM) i32 {
+    return @as(i32, @as(i16, @bitCast(@as(u16, @truncate(@as(usize, @bitCast(value)) >> 16)))));
 }
 
 fn smokeContractPassed(self: *const App) bool {
