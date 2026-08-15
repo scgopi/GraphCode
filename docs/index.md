@@ -17,7 +17,16 @@ GraphCode launches it, it doesn't bundle it.
 
 ![Two projects and their connected loops on one GraphCode canvas — every node a live terminal you can attach to](assets/graph-hero.png?v=2)
 
-<!-- VIDEO SLOT: demo video goes here when ready -->
+<!-- The GIF is the fallback, not the default: same take, but 800x650 and 10fps against
+     the video's 1920x1560 at 30fps, and it decodes every frame before anything paints. -->
+<video autoplay muted loop playsinline preload="metadata"
+       style="width:100%;border-radius:6px;display:block;margin:1.5rem 0 0.5rem;">
+  <source src="assets/graphcode-demo.mp4" type="video/mp4">
+  <img src="assets/graphcode-demo.gif" style="width:100%;border-radius:6px;"
+       alt="An Issue orchestration loop fans out child loops for six GitHub issues, ending on the graph fan-out view">
+</video>
+
+<p style="margin:0 0 2rem;font-size:0.9em;opacity:0.75;">An <code>Issue orchestration</code> loop on a 15-minute cadence, fanning out a child loop per GitHub issue — then the graph it built.</p>
 
 This article is in three parts: the four loops an AI session can run — the claim the
 rest is built on — the self-improving loop, where the graph starts to learn, and, for
