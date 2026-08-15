@@ -110,7 +110,8 @@ fn drawEdges(hdc: c.HDC, graph: GraphModel.Graph, state: *const CanvasState) voi
     for (graph.edges.items) |edge| {
         const from = connectorPosition(graph.nodes.items, edge.from, true, state) orelse continue;
         const to = connectorPosition(graph.nodes.items, edge.to, false, state) orelse continue;
-        const bend: i32 = @max(@as(i32, 24), @divTrunc(@abs(to.x - from.x), 2));
+        const distance: i32 = if (to.x >= from.x) to.x - from.x else from.x - to.x;
+        const bend: i32 = @max(@as(i32, 24), @divTrunc(distance, 2));
         var points = [_]c.POINT{
             .{ .x = from.x, .y = from.y },
             .{ .x = from.x + bend, .y = from.y },
