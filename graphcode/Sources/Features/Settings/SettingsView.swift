@@ -123,7 +123,7 @@ struct SettingsView: View {
           .fixedSize(horizontal: false, vertical: true)
 
         Toggle(
-          "Export and import loops (experimental)",
+          "Export and import loops",
           isOn: $model.settings.sharesLoops)
         Text(
           "Right-click a loop — on the canvas or in the sidebar — to package it, its "

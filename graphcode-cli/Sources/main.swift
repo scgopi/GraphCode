@@ -30,15 +30,15 @@ func fail(_ message: String, code: Int32 = ExitCode.usage) -> Never {
   exit(code)
 }
 
-/// Export/import is experimental and off by default; the CLI honours the same switch
-/// the app's menus do (`GraphcodeSettings.sharesLoops`), read from the same file, so a
-/// script can't reach a surface the Settings screen says doesn't exist.
+/// Export/import can be switched off; the CLI honours the same switch the app's menus
+/// do (`GraphcodeSettings.sharesLoops`), read from the same file, so a script can't
+/// reach a surface the Settings screen says doesn't exist.
 func requireLoopSharing() {
   guard !GraphcodeSettingsStore.load().sharesLoops else { return }
   fail(
     """
-    export/import is an experiment that's currently off. Turn on "Export and import \
-    loops" in GraphCode's Settings, or set "sharesLoops": true in \
+    export/import is switched off on this machine. Turn on "Export and import loops" \
+    in GraphCode's Settings, or set "sharesLoops": true in \
     \(GraphcodeSettingsStore.url.path).
     """)
 }
