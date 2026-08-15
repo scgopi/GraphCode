@@ -2,7 +2,8 @@ const std = @import("std");
 const DaemonClient = @import("DaemonClient.zig").DaemonClient;
 const GraphCanvas = @import("GraphCanvas.zig");
 const CanvasInput = @import("CanvasInput.zig");
-const GraphModel = @import("GraphModel.zig");
+const Sidebar = @import("Sidebar.zig");
+>>>>>>> 6540896 (Add const GraphModel = @import("GraphModel.zig");
 const InputRouter = @import("InputRouter.zig");
 const Forms = @import("Forms.zig");
 const NativeForms = @import("NativeForms.zig");
@@ -418,6 +419,23 @@ pub const App = struct {
         return false;
     }
 
+    fn moveWorktreeSelection(self: *App, delta: i32) void {
+        const inspection = self.worktree_inspection orelse return;
+        if (inspection.entries.items.len == 0) return;
+        var index: usize = 0;
+        if (self.selected_worktree_path.len != 0) {
+            for (inspection.entries.items, 0..) |entry, i| {
+                if (std.mem.eql(u8, entry.path, self.selected_worktree_path)) {
+                    index = i;
+                    break;
+                }
+            }
+        }
+        const count = @as(i32, @intCast(inspection.entries.items.len));
+        const next = @mod(@as(i32, @intCast(index)) + delta + count, count);
+        _ = self.selectWorktreeRow(inspection.entries.items[@intCast(next)].path);
+    }
+
     fn handleAction(self: *App, action: InputRouter.Action) void {
         switch (action) {
             .reconnect => {
@@ -442,6 +460,8 @@ pub const App = struct {
             },
             .inspect_worktrees => self.inspectWorktrees(),
             .reclaim_worktrees => self.reclaimWorktrees(),
+            .worktree_next => self.moveWorktreeSelection(1),
+            .worktree_previous => self.moveWorktreeSelection(-1),
             .focus_terminal_a => if (self.workspace) |*workspace| workspace.focus(0),
             .focus_terminal_b => if (self.workspace) |*workspace| workspace.focus(1),
             .select_next => {
@@ -588,7 +608,9 @@ fn onWindowMessage(
                 &app.canvas,
             );
             if (app.workspace) |*workspace| workspace.paintChrome(hdc);
-            _ = c.EndPaint(hwnd, &paint);
+            const inspection = if (app.worktree_inspection) |*value| value else null;
+            GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.status(), app.allocator);
+>>>>>>> 6540896 (Add             _ = c.EndPaint(hwnd, &paint);
             result.* = 0;
             return true;
         },
@@ -777,7 +799,14 @@ fn onWindowMessage(
                 7005 => app.handleAction(.stop_node),
                 7006 => app.handleAction(.settings),
                 else => {},
-            }
+            const x: i32 = @intCast(@as(u16, @truncate(@as(usize, @bitCast(lparam)))));
+            const y: i32 = @intCast(@as(u16, @truncate(@as(usize, @bitCast(lparam)) >> 16)));
+            if (app.worktree_inspection) |inspection| {
+                if (Sidebar.hitTestWorktree(x, y, inspection.entries.items.len, Tokens.header_height, Tokens.sidebar_width)) |index| {
+                    _ = app.selectWorktreeRow(inspection.entries.items[index].path);
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                }
+>>>>>>> 6540896 (Add             }
             result.* = 0;
             return true;
         },
@@ -818,7 +847,7 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
-        c.WM_SETFOCUS => {
+>>>>>>> 6540896 (Add         c.WM_SETFOCUS => {
             if (app.workspace) |*workspace| workspace.focus(workspace.active_surface);
             result.* = 0;
             return true;

@@ -1,5 +1,6 @@
 const std = @import("std");
 const GraphModel = @import("GraphModel.zig");
+const WorktreeStatus = @import("WorktreeStatus.zig");
 const Tokens = @import("DesignTokens.zig");
 const c = @import("Win32.zig").c;
 
@@ -133,6 +134,8 @@ pub fn isVisible(row: Row) bool {
 pub fn draw(
     hdc: c.HDC,
     model: *const GraphModel.Model,
+    inspection: ?*const WorktreeStatus.Inspection,
+    selected_worktree_path: []const u8,
     status: []const u8,
     allocator: std.mem.Allocator,
     client_bottom: i32,
@@ -156,7 +159,51 @@ pub fn draw(
             drawText(hdc, allocator, icon(row.kind), 8, row.bounds.top + 7, size, color);
         }
         drawText(hdc, allocator, row.title, x, row.bounds.top + 7, size, color);
+    drawText(hdc, allocator, "GRAPH", 18, Tokens.header_height + 20, 16, 0x00FFFFFF);
+    drawText(hdc, allocator, "Projects", 18, Tokens.header_height + 54, 14, 0x00B8B8B8);
+    var y: i32 = Tokens.header_height + 78;
+    for (model.recent_projects.items) |project| {
+        drawText(hdc, allocator, project.name, 24, y, 13, 0x00E6E6E6);
+        y += 24;
     }
+    if (model.graph) |graph| {
+        drawText(hdc, allocator, "Open", 18, y + 10, 14, 0x00B8B8B8);
+        drawText(hdc, allocator, graph.project.name, 24, y + 36, 13, 0x00FFFFFF);
+        y += 62;
+        drawText(hdc, allocator, "Worktrees", 18, y + 10, 11, 0x007A7A7A);
+        drawText(
+            hdc,
+            allocator,
+            "Inspect live repository hygiene",
+            24,
+            y + 30,
+            11,
+            0x00B8B8B8,
+        );
+        y += 54;
+        if (inspection) |value| {
+            drawText(hdc, allocator, "Live rows", 18, y + 10, 11, 0x007A7A7A);
+            y += 24;
+            for (value.entries.items) |entry| {
+                const selected = std.mem.eql(u8, entry.path, selected_worktree_path);
+                if (selected) fill(hdc, rect(12, y - 3, Tokens.sidebar_width - 12, y + 25), 0x003A3A44);
+                drawText(hdc, allocator, entry.path, 24, y, 11, 0x00E6E6E6);
+                drawText(hdc, allocator, reason(entry), 24, y + 14, 10,
+                    if (WorktreeStatus.decision(entry) == .reclaimable) 0x0078D7A8 else 0x00FFCD7A);
+                y += 34;
+            }
+        }
+    }
+
+    if (model.attentionCount() != 0) {
+        drawText(hdc, allocator, "Needs you", 18, y + 10, 11, 0x00FFCD7A);
+        var attention_y = y + 30;
+        for (model.attention.items[0..@min(model.attention.items.len, 4)]) |node| {
+            drawText(hdc, allocator, node.title, 24, attention_y, 11, 0x00E6E6E6);
+            attention_y += 19;
+        }
+
+>>>>>>> 6540896 (Add     }
     var rows = try buildRows(&model, allocator, 800);
     defer rows.deinit();
     try std.testing.expectEqual(RowKind.overview, rows.items[0].kind);
@@ -228,6 +275,36 @@ test "scrolled-off rows produce no paint command" {
     _ = layoutRows(rows.items, Tokens.header_height, viewportBottom(120), 500);
     try std.testing.expect(!isVisible(rows.items[0]));
     try std.testing.expect(hitTest(rows.items, 20, 7) == null);
+}
+
+pub fn rowTop(index: usize, header_height: i32) i32 {
+    return header_height + 78 + 62 + 54 + 24 + @as(i32, @intCast(index * 34));
+}
+
+pub fn hitTestWorktree(x: i32, y: i32, count: usize, header_height: i32, sidebar_width: i32) ?usize {
+    if (x < 12 or x >= sidebar_width) return null;
+    const top = rowTop(0, header_height);
+    if (y < top) return null;
+    const index: usize = @intCast(@divTrunc(y - top, 34));
+    if (index >= count) return null;
+    return index;
+}
+
+fn reason(entry: WorktreeStatus.Entry) []const u8 {
+    if (entry.primary) return "primary checkout";
+    if (entry.bound_running) return "bound to active loop";
+    if (entry.dirty or entry.untracked or entry.conflicted) return "local changes";
+    if (!entry.pushed) return "unpushed commits";
+    if (!entry.landed) return "not landed on default";
+    return "safe to reclaim";
+}
+
+test "worktree row hit testing selects only visible rows" {
+    const top = rowTop(0, Tokens.header_height);
+    try std.testing.expectEqual(@as(?usize, 0), hitTestWorktree(24, top + 4, 2, Tokens.header_height, Tokens.sidebar_width));
+    try std.testing.expectEqual(@as(?usize, 1), hitTestWorktree(24, top + 34 + 4, 2, Tokens.header_height, Tokens.sidebar_width));
+    try std.testing.expectEqual(@as(?usize, null), hitTestWorktree(Tokens.sidebar_width + 1, top, 2, Tokens.header_height, Tokens.sidebar_width));
+    try std.testing.expectEqual(@as(?usize, null), hitTestWorktree(24, top + 68, 2, Tokens.header_height, Tokens.sidebar_width));
 }
 
 fn rect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {

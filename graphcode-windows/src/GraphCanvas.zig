@@ -2,6 +2,7 @@ const std = @import("std");
 const GraphModel = @import("GraphModel.zig");
 const Tokens = @import("DesignTokens.zig");
 const Sidebar = @import("Sidebar.zig");
+const WorktreeStatus = @import("WorktreeStatus.zig");
 const c = @import("Win32.zig").c;
 
 pub const CanvasState = struct {
@@ -57,6 +58,8 @@ pub fn paint(
     hwnd: c.HWND,
     hdc: c.HDC,
     model: *const GraphModel.Model,
+    inspection: ?*const WorktreeStatus.Inspection,
+    selected_worktree_path: []const u8,
     status: []const u8,
     allocator: std.mem.Allocator,
     sidebar_scroll: i32,
@@ -69,7 +72,8 @@ pub fn paint(
     Sidebar.draw(hdc, model, status, allocator, client.bottom, sidebar_scroll);
     attentionRail(hdc, allocator, model, client.right);
     Sidebar.draw(hdc, model, status, allocator);
-
+    Sidebar.draw(hdc, model, inspection, selected_worktree_path, status, allocator);
+>>>>>>> 6540896 (Add 
     const graph_bounds = rect(
         Tokens.sidebar_width,
         Tokens.header_height,
