@@ -80,7 +80,8 @@ foreach ($path in @(
     "fixtures\daemon-v1-list-projects.json",
     "fixtures\daemon-v2-create-node.json",
     "fixtures\daemon-v2-message-node.json",
-    "fixtures\daemon-v2-stop-node.json"
+    "fixtures\daemon-v2-stop-node.json",
+    "fixtures\sidebar-recent-projects.json"
   )) {
   Assert-Contract (Test-Path -LiteralPath (Join-Path $shellRoot $path)) `
     "required scaffold file is missing: $path"

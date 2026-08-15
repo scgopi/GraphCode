@@ -147,6 +147,11 @@ pub const DaemonClient = struct {
         self.sendCommand(command);
     }
 
+    pub fn sendOpenGlobalGraph(self: *DaemonClient) void {
+        const command = Wire.commandOpenGlobalGraph(self.allocator) catch return;
+        self.sendCommand(command);
+    }
+
     pub fn sendOpenProject(self: *DaemonClient, path: []const u8) void {
         const command = Wire.commandOpenProject(self.allocator, path) catch return;
         self.sendCommand(command);

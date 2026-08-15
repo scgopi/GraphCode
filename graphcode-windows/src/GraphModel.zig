@@ -19,6 +19,7 @@ pub const Project = struct {
     path: []u8,
     name: []u8,
     remote: bool = false,
+    global: bool = false,
 };
 
 pub const Graph = struct {
@@ -98,6 +99,7 @@ pub const Model = struct {
                 .path = try duplicateJsonString(self.allocator, object, "path"),
                 .name = try duplicateJsonString(self.allocator, object, "name"),
                 .remote = std.mem.indexOf(u8, object, "\"remote\":true") != null,
+                .global = std.mem.indexOf(u8, object, "\"isGlobal\":true") != null,
             });
             cursor = object_end + 1;
         }
@@ -113,6 +115,7 @@ pub const Model = struct {
                 .path = try duplicateJsonString(self.allocator, graph_json, "path"),
                 .name = try duplicateJsonString(self.allocator, graph_json, "name"),
                 .remote = std.mem.indexOf(u8, graph_json, "\"remote\":true") != null,
+                .global = std.mem.indexOf(u8, graph_json, "\"isGlobal\":true") != null,
             },
             .nodes = std.array_list.Managed(Node).init(self.allocator),
             .edges = std.array_list.Managed(Edge).init(self.allocator),

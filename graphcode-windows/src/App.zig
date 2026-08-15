@@ -4,6 +4,7 @@ const GraphCanvas = @import("GraphCanvas.zig");
 const GraphModel = @import("GraphModel.zig");
 const InputRouter = @import("InputRouter.zig");
 const MainWindow = @import("MainWindow.zig");
+const Sidebar = @import("Sidebar.zig");
 const TerminalWorkspace = @import("TerminalWorkspace.zig");
 const Tokens = @import("DesignTokens.zig");
 const Wire = @import("Wire.zig");
@@ -225,6 +226,26 @@ pub const App = struct {
         }
     }
 
+    fn handleSidebarClick(self: *App, x: i32, y: i32) void {
+        var client: c.RECT = undefined;
+        if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
+        var rows = Sidebar.buildRows(&self.model, self.allocator, client.bottom) catch return;
+        defer rows.deinit();
+        Sidebar.layoutRows(rows.items, Tokens.header_height, client.bottom);
+        const row = Sidebar.hitTest(rows.items, x, y) orelse return;
+        switch (row.kind) {
+            .overview => self.client.sendOpenGlobalGraph(),
+            .quick_chats => self.setStatus("Quick Chats are not provided by the daemon"),
+            .project => self.openProject(row.path),
+            .loop => {
+                self.model.selected_node = row.node_index;
+                self.openSelectedNode();
+            },
+            .local_section, .remote_section => {},
+        }
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
+    }
+
     fn layoutWorkspace(self: *App) void {
         var client: c.RECT = undefined;
         if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
@@ -304,7 +325,6 @@ fn onWindowMessage(
             return true;
         },
         c.WM_SIZE => {
-            _ = lparam;
             app.layoutWorkspace();
             result.* = 0;
             return true;
@@ -397,6 +417,14 @@ fn onWindowMessage(
             const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
             const shift = (@as(i32, c.GetKeyState(c.VK_SHIFT)) & 0x8000) != 0;
             app.handleAction(InputRouter.keyAction(wparam, ctrl, shift));
+            result.* = 0;
+            return true;
+        },
+        c.WM_LBUTTONUP => {
+            const raw_lparam: usize = @bitCast(lparam);
+            const x: i32 = @intCast(@as(i16, @bitCast(@as(u16, @truncate(raw_lparam & 0xffff)))));
+            const y: i32 = @intCast(@as(i16, @bitCast(@as(u16, @truncate((raw_lparam >> 16) & 0xffff)))));
+            app.handleSidebarClick(x, y);
             result.* = 0;
             return true;
         },

@@ -161,6 +161,10 @@ pub fn commandRestoreOpenProjects(allocator: std.mem.Allocator) ![]u8 {
     return allocator.dupe(u8, "{\"restoreOpenProjects\":{}}");
 }
 
+pub fn commandOpenGlobalGraph(allocator: std.mem.Allocator) ![]u8 {
+    return allocator.dupe(u8, "{\"openGlobalGraph\":{}}");
+}
+
 pub fn commandOpenProject(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const quoted_path = try quoteJson(allocator, path);
     defer allocator.free(quoted_path);
@@ -491,4 +495,10 @@ test "graph commands match Swift Codable associated-value shapes" {
         error.UnsupportedGraphAction,
         commandGraphNodeAction(allocator, project, node, "deleteNode", null),
     );
+}
+
+test "global overview command uses the daemon command shape" {
+    const command = try commandOpenGlobalGraph(std.testing.allocator);
+    defer std.testing.allocator.free(command);
+    try std.testing.expectEqualStrings("{\"openGlobalGraph\":{}}", command);
 }
