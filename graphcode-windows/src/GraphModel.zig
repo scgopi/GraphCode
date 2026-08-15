@@ -457,20 +457,6 @@ fn freeGraph(allocator: std.mem.Allocator, graph: *Graph) void {
     graph.edges.deinit();
 }
 
-fn jsonBool(data: []const u8, key: []const u8) ?bool {
-    var needle_buffer: [128]u8 = undefined;
-    if (key.len + 3 > needle_buffer.len) return null;
-    needle_buffer[0] = '"';
-    @memcpy(needle_buffer[1 .. key.len + 1], key);
-    needle_buffer[key.len + 1] = '"';
-    needle_buffer[key.len + 2] = ':';
-    const start = std.mem.indexOf(u8, data, needle_buffer[0 .. key.len + 3]) orelse return null;
-    const value = data[start + key.len + 3 ..];
-    if (std.mem.startsWith(u8, value, "true")) return true;
-    if (std.mem.startsWith(u8, value, "false")) return false;
-    return null;
-}
-
 test "graph snapshots decode escaped project data and presence" {
     var model = Model.init(std.testing.allocator);
     defer model.deinit();
