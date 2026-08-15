@@ -110,7 +110,7 @@ fn drawEdges(hdc: c.HDC, graph: GraphModel.Graph, state: *const CanvasState) voi
     for (graph.edges.items) |edge| {
         const from = connectorPosition(graph.nodes.items, edge.from, true, state) orelse continue;
         const to = connectorPosition(graph.nodes.items, edge.to, false, state) orelse continue;
-        const bend = @max(24, @divTrunc(@abs(to.x - from.x), 2));
+        const bend: i32 = @max(@as(i32, 24), @divTrunc(@abs(to.x - from.x), 2));
         var points = [_]c.POINT{
             .{ .x = from.x, .y = from.y },
             .{ .x = from.x + bend, .y = from.y },
@@ -159,9 +159,11 @@ fn drawNode(
     const stripe = stateColor(node.state, attention);
     fill(hdc, rect(x, y, x + scaled(Tokens.loop_card_stripe, state), y + bounds.bottom - y), stripe);
     const entry = isEntry(nodes, edges, node.id);
+    const title_y: i32 = if (entry) 20 else 14;
+    const state_y: i32 = if (entry) 47 else 43;
     if (entry) drawText(hdc, allocator, "START", x + 14, y + 5, 9, 0x008A8A8A);
-    drawText(hdc, allocator, node.title, x + 14, y + (if (entry) 20 else 14), 14, 0x00FFFFFF);
-    drawText(hdc, allocator, node.state, x + 14, y + (if (entry) 47 else 43), 11, if (attention) 0x00FFB340 else 0x00B8B8B8);
+    drawText(hdc, allocator, node.title, x + 14, y + title_y, 14, 0x00FFFFFF);
+    drawText(hdc, allocator, node.state, x + 14, y + state_y, 11, if (attention) 0x00FFB340 else 0x00B8B8B8);
     if (node.activity.len != 0) drawText(hdc, allocator, node.activity, x + 14, y + 70, 10, 0x008A8A8A);
     if (attention) drawText(hdc, allocator, "NEEDS YOU", x + scaled(Tokens.loop_card_width, state) - 88, y + 8, 9, 0x00FFB340);
 }
