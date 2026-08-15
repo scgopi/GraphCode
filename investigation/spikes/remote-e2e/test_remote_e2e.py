@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
 import time
 import unittest
 
@@ -96,9 +97,37 @@ class RemoteParityTests(unittest.TestCase):
         self.assertRegex(forward, r"^127\.0\.0\.1:\d+:127\.0\.0\.1:\d+$")
 
     def test_external_target_parser_places_port_before_destination_and_supports_ipv6(self):
-        target = ExternalTarget.parse("dev@[::1]:2222")
-        self.assertEqual(target.argv()[-2:], ["dev@[::1]", "true"])
-        self.assertEqual(target.argv()[target.argv().index("-p") + 1], "2222")
+        valid = (("dev@[::1]:2222", "2222", "dev@[::1]"), ("[2001:db8::1]", None, "[2001:db8::1]"))
+        for value, expected_port, expected_destination in valid:
+            with self.subTest(value=value):
+                target = ExternalTarget.parse(value)
+                self.assertEqual(target.argv()[-2], expected_destination)
+                if expected_port:
+                    self.assertEqual(target.argv()[target.argv().index("-p") + 1], expected_port)
+
+    def test_bracketed_ipv6_parser_rejects_invalid_port_suffixes(self):
+        for value in ("dev@[::1]garbage", "dev@[::1]:", "dev@[::1]:0",
+                      "dev@[::1]:65536", "dev@[::1]:abc"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    ExternalTarget.parse(value)
+
+    def test_start_failure_removes_all_fixture_directories(self):
+        fixture = LocalRemoteParityFixture()
+        windows_directory = fixture.directory
+        wsl_directory = fixture.ssh_home
+        fixture._start_tunnel = lambda: (_ for _ in ()).throw(
+            RuntimeError("forced tunnel failure")
+        )
+        with self.assertRaises(RuntimeError):
+            fixture.start()
+        self.assertFalse(windows_directory.exists())
+        self.assertEqual(
+            subprocess.run(
+                ["wsl.exe", "test", "!", "-e", wsl_directory]
+            ).returncode, 0,
+        )
+        fixture.stop()
 
     def test_external_target_configuration_rejects_empty_entries(self):
         old = os.environ.get("GRAPHCODE_REMOTE_E2E_TARGETS")
