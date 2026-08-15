@@ -121,6 +121,7 @@ pub const App = struct {
         };
         switch (event) {
             .recent_projects => {
+                self.clampSidebarScroll();
                 if (self.model.graph == null and self.model.recent_projects.items.len != 0) {
                     self.queueProject(self.model.recent_projects.items[0].path);
                 }
@@ -130,6 +131,7 @@ pub const App = struct {
                     self.rebindWorkspace(graph.project.path);
                     self.queueProject(graph.project.path);
                 }
+                    self.clampSidebarScroll();
                     if (self.worktree_inspection) |inspection| {
                         if (self.model.graph) |graph| {
                             if (!std.mem.eql(u8, inspection.project_path, graph.project.path)) {
@@ -143,6 +145,7 @@ pub const App = struct {
                         }
                     }
                     if (self.model.graph) |graph| self.queueProject(graph.project.path);
+                self.clampSidebarScroll();
                 self.refreshWorkspace();
             },
             .error_occurred => {
@@ -377,6 +380,7 @@ pub const App = struct {
             self.allocator.free(old.default_branch);
         }
         self.worktree_inspection = inspection;
+        self.clampSidebarScroll();
         const summary = WorktreeStatus.summarize(inspection.entries.items);
         const message = std.fmt.allocPrint(
             self.allocator,
@@ -468,7 +472,20 @@ pub const App = struct {
         const viewport_bottom = client.bottom - Tokens.workspace_height;
         if (top < viewport_top) self.sidebar_scroll -= viewport_top - top;
         if (bottom > viewport_bottom) self.sidebar_scroll += bottom - viewport_bottom;
-        if (self.sidebar_scroll < 0) self.sidebar_scroll = 0;
+        self.clampSidebarScroll();
+    }
+
+    fn clampSidebarScroll(self: *App) void {
+        var client: c.RECT = undefined;
+        if (c.GetClientRect(self.window.hwnd, &client) == 0) {
+            self.sidebar_scroll = 0;
+            return;
+        }
+        const inspection = if (self.worktree_inspection) |*value| value else null;
+        self.sidebar_scroll = Sidebar.clampScroll(
+            self.sidebar_scroll,
+            Sidebar.maxScroll(&self.model, inspection, client.bottom - Tokens.workspace_height),
+        );
     }
 
     fn handleAction(self: *App, action: InputRouter.Action) void {
@@ -653,6 +670,7 @@ fn onWindowMessage(
         },
         c.WM_SIZE => {
             app.layoutWorkspace();
+            app.clampSidebarScroll();
             result.* = 0;
             return true;
         },
@@ -886,7 +904,16 @@ fn onWindowMessage(
             }
         c.WM_MOUSEWHEEL => {
             const delta: i16 = @bitCast(@as(u16, @truncate(@as(usize, @bitCast(wparam)) >> 16)));
-            app.sidebar_scroll = @max(0, app.sidebar_scroll - @divTrunc(@as(i32, delta), 4));
+            app.sidebar_scroll = Sidebar.clampScroll(
+                app.sidebar_scroll - @divTrunc(@as(i32, delta), 4),
+                Sidebar.maxScroll(&app.model,
+                    if (app.worktree_inspection) |*value| value else null,
+                    blk: {
+                        var client: c.RECT = undefined;
+                        _ = c.GetClientRect(hwnd, &client);
+                        break :blk client.bottom - Tokens.workspace_height;
+                    }),
+            );
             _ = c.InvalidateRect(hwnd, null, 0);
             result.* = 0;
             return true;

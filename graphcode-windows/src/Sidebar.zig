@@ -290,6 +290,21 @@ pub fn worktreeSectionBottom(project_count: usize, worktree_count: usize) i32 {
     return worktreeRowTop(project_count, worktree_count) + 10;
 }
 
+pub fn contentBottom(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection) i32 {
+    const rows = if (inspection) |value| value.entries.items.len else 0;
+    const section = worktreeSectionBottom(model.recent_projects.items.len, rows);
+    return if (model.attentionCount() == 0) section else section + 30 +
+        @as(i32, @intCast(@min(model.attentionCount(), 4))) * 19;
+}
+
+pub fn maxScroll(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection, viewport_bottom: i32) i32 {
+    return @max(contentBottom(model, inspection) - viewport_bottom, 0);
+}
+
+pub fn clampScroll(value: i32, maximum: i32) i32 {
+    return @min(@max(value, 0), @max(maximum, 0));
+}
+
 pub fn hitTestWorktree(x: i32, y: i32, project_count: usize, count: usize, scroll_offset: i32, viewport_bottom: i32) ?usize {
     if (x < 12 or x >= Tokens.sidebar_width) return null;
     if (y < Tokens.header_height or y >= viewport_bottom) return null;
@@ -318,7 +333,20 @@ test "worktree row hit testing selects only visible rows" {
     try std.testing.expectEqual(@as(?usize, null), hitTestWorktree(Tokens.sidebar_width + 1, top, 2, 2, 0, 700));
     try std.testing.expectEqual(@as(?usize, null), hitTestWorktree(24, top + 68, 2, 2, 0, 700));
     try std.testing.expectEqual(@as(i32, worktreeRowTop(3, 0) - worktreeRowTop(1, 0)), 48);
-    try std.testing.expectEqual(@as(i32, worktreeSectionBottom(2, 5) + 10), worktreeSectionBottom(2, 5) + 10);
+}
+
+test "sidebar scroll clamps overflow, shrink, and resize" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    var scroll: i32 = 0;
+    const maximum = 120;
+    for ([_]i32{ 40, 40, 40, 40 }) |wheel| scroll = clampScroll(scroll + wheel, maximum);
+    try std.testing.expectEqual(@as(i32, 120), scroll);
+    scroll = clampScroll(scroll, 0);
+    try std.testing.expectEqual(@as(i32, 0), scroll);
+    scroll = clampScroll(80, 30);
+    try std.testing.expectEqual(@as(i32, 30), scroll);
+    _ = maxScroll(&model, null, 700);
 }
 
 fn rect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {
