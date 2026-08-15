@@ -66,6 +66,7 @@ foreach ($path in @(
     "src\Sidebar.zig",
     "src\TerminalWorkspace.zig",
     "src\TerminalSurface.zig",
+    "src\WorkspaceLayout.zig",
     "src\InputRouter.zig",
     "src\Accessibility.zig",
     "src\DesignTokens.zig",
@@ -169,6 +170,14 @@ Invoke-Native "Daemon client startup tests" {
   Push-Location $shellRoot
   try {
     & $zig test src\DaemonClient.zig -target x86_64-windows-msvc -lc -ladvapi32 "-I$include"
+  } finally { Pop-Location }
+}
+Invoke-Native "Workspace layout executable tests" {
+  Push-Location $shellRoot
+  try {
+    & $zig test src\WorkspaceLayout.zig
+    if ($LASTEXITCODE -ne 0) { throw "workspace layout tests failed" }
+    & $zig test src\InputRouter.zig
   } finally { Pop-Location }
 }
 Invoke-Native "Terminal input queue tests" {

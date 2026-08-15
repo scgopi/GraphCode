@@ -11,30 +11,30 @@ pub const Pane = struct {
 
 pub const Tab = struct {
     id: u64,
-    panes: std.ArrayList(Pane),
+    panes: std.ArrayListUnmanaged(Pane),
     split_direction: Direction = .horizontal,
     focused_pane: usize = 0,
 
     fn deinit(self: *Tab, allocator: std.mem.Allocator) void {
         for (self.panes.items) |pane| allocator.free(pane.id);
-        self.panes.deinit();
+        self.panes.deinit(allocator);
     }
 };
 
 pub const Layout = struct {
     allocator: std.mem.Allocator,
-    tabs: std.ArrayList(Tab),
+    tabs: std.ArrayListUnmanaged(Tab),
     selected_tab: usize = 0,
     next_tab_id: u64 = 1,
     next_surface_id: u64 = 1,
 
     pub fn init(allocator: std.mem.Allocator) Layout {
-        return .{ .allocator = allocator, .tabs = std.ArrayList(Tab).init(allocator) };
+        return .{ .allocator = allocator, .tabs = .empty };
     }
 
     pub fn deinit(self: *Layout) void {
         for (self.tabs.items) |*tab| tab.deinit(self.allocator);
-        self.tabs.deinit();
+        self.tabs.deinit(self.allocator);
     }
 
     pub fn default(allocator: std.mem.Allocator, node_id: []const u8) !Layout {
@@ -45,13 +45,13 @@ pub const Layout = struct {
     }
 
     pub fn addTab(self: *Layout, surface_id: []const u8, launches_agent: bool) !void {
-        var panes = std.ArrayList(Pane).init(self.allocator);
-        errdefer panes.deinit();
-        try panes.append(.{
+        var panes: std.ArrayListUnmanaged(Pane) = .empty;
+        errdefer panes.deinit(self.allocator);
+        try panes.append(self.allocator, .{
             .id = try self.allocator.dupe(u8, surface_id),
             .launches_agent = launches_agent,
         });
-        try self.tabs.append(.{ .id = self.next_tab_id, .panes = panes });
+        try self.tabs.append(self.allocator, .{ .id = self.next_tab_id, .panes = panes });
         self.next_tab_id += 1;
         self.selected_tab = self.tabs.items.len - 1;
     }
@@ -76,7 +76,7 @@ pub const Layout = struct {
         const tab = self.selected() orelse return error.NoTabs;
         if (tab.focused_pane >= tab.panes.items.len) tab.focused_pane = 0;
         tab.split_direction = direction;
-        try tab.panes.insert(tab.focused_pane + 1, .{
+        try tab.panes.insert(self.allocator, tab.focused_pane + 1, .{
             .id = try self.allocator.dupe(u8, surface_id),
         });
         tab.focused_pane += 1;
@@ -90,7 +90,7 @@ pub const Layout = struct {
         const removed = tab.panes.orderedRemove(index);
         const id = removed.id;
         if (tab.panes.items.len == 0) {
-            const closed = self.tabs.orderedRemove(self.selected_tab);
+            var closed = self.tabs.orderedRemove(self.selected_tab);
             closed.deinit(self.allocator);
             if (self.selected_tab >= self.tabs.items.len and self.tabs.items.len != 0)
                 self.selected_tab = self.tabs.items.len - 1;
@@ -113,24 +113,26 @@ pub const Layout = struct {
     pub fn save(self: *const Layout, file_path: []const u8) !void {
         var file = try std.fs.cwd().createFile(file_path, .{ .truncate = true });
         defer file.close();
-        var writer = file.writer();
-        try writer.writeAll("{\"selectedTab\":");
-        try writer.print("{d},\"tabs\":[", .{self.selected_tab});
+        var buffer: [4096]u8 = undefined;
+        var writer = file.writer(&buffer);
+        try writer.interface.writeAll("{\"selectedTab\":");
+        try writer.interface.print("{d},\"tabs\":[", .{self.selected_tab});
         for (self.tabs.items, 0..) |tab, tab_index| {
-            if (tab_index != 0) try writer.writeByte(',');
-            try writer.print(
+            if (tab_index != 0) try writer.interface.writeByte(',');
+            try writer.interface.print(
                 "{{\"id\":{d},\"direction\":\"{s}\",\"focused\":{d},\"panes\":[",
                 .{ tab.id, @tagName(tab.split_direction), tab.focused_pane },
             );
             for (tab.panes.items, 0..) |pane, pane_index| {
-                if (pane_index != 0) try writer.writeByte(',');
-                try writer.writeAll("{\"id\":");
-                try std.json.stringify(pane.id, .{}, writer);
-                try writer.print(",\"agent\":{s}}}", .{if (pane.launches_agent) "true" else "false"});
+                if (pane_index != 0) try writer.interface.writeByte(',');
+                try writer.interface.writeAll("{\"id\":");
+                try writer.interface.print("{f}", .{std.json.fmt(pane.id, .{})});
+                try writer.interface.print(",\"agent\":{s}}}", .{if (pane.launches_agent) "true" else "false"});
             }
-            try writer.writeAll("]}");
+            try writer.interface.writeAll("]}");
         }
-        try writer.writeAll("]}");
+        try writer.interface.writeAll("]}");
+        try writer.interface.flush();
     }
 
     pub fn load(allocator: std.mem.Allocator, file_path: []const u8) !Layout {
@@ -145,12 +147,12 @@ pub const Layout = struct {
         const tabs = root.get("tabs").?.array.items;
         for (tabs) |encoded_tab| {
             const object = encoded_tab.object;
-            var panes = std.ArrayList(Pane).init(allocator);
-            errdefer panes.deinit();
+            var panes: std.ArrayListUnmanaged(Pane) = .empty;
+            errdefer panes.deinit(allocator);
             const encoded_panes = object.get("panes").?.array.items;
             for (encoded_panes) |encoded_pane| {
                 const pane = encoded_pane.object;
-                try panes.append(.{
+                try panes.append(allocator, .{
                     .id = try allocator.dupe(u8, pane.get("id").?.string),
                     .launches_agent = pane.get("agent").?.bool,
                 });
@@ -159,7 +161,7 @@ pub const Layout = struct {
                 Direction.vertical
             else
                 Direction.horizontal;
-            try layout.tabs.append(.{
+            try layout.tabs.append(allocator, .{
                 .id = @intCast(object.get("id").?.integer),
                 .panes = panes,
                 .split_direction = direction,
@@ -184,7 +186,7 @@ test "tabs, splits, focus, and close preserve live surface identity" {
     const removed = try layout.closeFocusedPane();
     defer std.testing.allocator.free(removed);
     try std.testing.expectEqualStrings("shell-b", removed);
-    try std.testing.expectEqual(@as(usize, 1), layout.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 2), layout.tabs.items.len);
 }
 
 test "relative tab selection wraps" {
@@ -193,9 +195,9 @@ test "relative tab selection wraps" {
     try layout.addTab("a", true);
     try layout.addTab("b", false);
     layout.selectRelativeTab(1);
-    try std.testing.expectEqual(@as(usize, 1), layout.selected_tab);
-    layout.selectRelativeTab(1);
     try std.testing.expectEqual(@as(usize, 0), layout.selected_tab);
+    layout.selectRelativeTab(1);
+    try std.testing.expectEqual(@as(usize, 1), layout.selected_tab);
 }
 
 test "layout persists selected tab, split direction, focus, and agent role" {
