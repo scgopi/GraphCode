@@ -182,10 +182,13 @@ try {
     $env:GRAPHCODE_SHELL_EXPECT_TRANSPORT_ERROR = "1"
     $busyApp = Start-Process -FilePath $app -ArgumentList @("--smoke") -PassThru `
       -RedirectStandardError $busyError
+    [void] $busyApp.Handle
     if (-not $busyApp.WaitForExit(8000)) {
       Stop-Process -Id $busyApp.Id -Force
       throw "Busy daemon smoke blocked the UI beyond the bounded timeout"
     }
+    $busyApp.WaitForExit()
+    $busyApp.Refresh()
     if ($busyApp.ExitCode -eq 0) {
       throw "Busy daemon smoke did not surface a transport error"
     }
@@ -206,12 +209,19 @@ try {
     Remove-Item -LiteralPath $inputError -Force -ErrorAction SilentlyContinue
     $inputApp = Start-Process -FilePath $app -ArgumentList @("--smoke") -PassThru `
       -RedirectStandardError $inputError
+    [void] $inputApp.Handle
     if (-not $inputApp.WaitForExit(8000)) {
       Stop-Process -Id $inputApp.Id -Force
       throw "Large paste/non-reading attach smoke blocked the UI beyond the bounded timeout"
     }
-    if ($inputApp.ExitCode -ne 0) {
-      throw "Large paste/non-reading attach smoke failed with exit code $($inputApp.ExitCode)"
+    $inputApp.WaitForExit()
+    $inputApp.Refresh()
+    $inputExitCode = $inputApp.ExitCode
+    if ($null -eq $inputExitCode) {
+      throw "Large paste/non-reading attach smoke completed without an observable exit code"
+    }
+    if ($inputExitCode -ne 0) {
+      throw "Large paste/non-reading attach smoke failed with exit code $inputExitCode"
     }
     Remove-Item -LiteralPath $inputError -Force -ErrorAction SilentlyContinue
   }
