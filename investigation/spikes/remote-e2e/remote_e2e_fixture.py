@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import re
 import shutil
 import subprocess
 import sys
@@ -47,7 +48,12 @@ class ExternalTarget:
                 raise ValueError("invalid IPv6 target")
             host = value[1:end]
             suffix = value[end + 1:]
-            port = int(suffix[1:]) if suffix.startswith(":") else None
+            if suffix == "":
+                port = None
+            elif re.fullmatch(r":[0-9]+", suffix):
+                port = int(suffix[1:])
+            else:
+                raise ValueError("invalid IPv6 port suffix")
         elif value.count(":") == 1:
             host, raw_port = value.rsplit(":", 1)
             port = int(raw_port)
@@ -151,7 +157,7 @@ class LocalRemoteParityFixture:
             self._start_tunnel()
         except BaseException:
             try:
-                self._stop_processes()
+                self._cleanup_all()
             except BaseException as cleanup_error:
                 raise RuntimeError(f"fixture startup and cleanup failed: {cleanup_error}") from cleanup_error
             raise
@@ -402,13 +408,19 @@ class LocalRemoteParityFixture:
                         stream.close()
         self.tunnel_process = self.sshd_process = self.server_process = None
 
+    def _cleanup_all(self):
+        self._stop_processes()
+        subprocess.run(["wsl.exe", "rm", "-rf", self.ssh_home], check=True)
+        if subprocess.run(["wsl.exe", "test", "!", "-e", self.ssh_home],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+            raise AssertionError("WSL SSH fixture directory was not removed")
+        if self.directory.exists():
+            shutil.rmtree(self.directory)
+        if self.directory.exists():
+            raise AssertionError("Windows SSH fixture directory was not removed")
+        current = self.default_known_hosts.read_bytes() if self.default_known_hosts.exists() else None
+        if current != self.default_known_hosts_snapshot:
+            raise AssertionError("fixture modified the user's default known_hosts")
+
     def stop(self):
-        try:
-            self._stop_processes()
-        finally:
-            subprocess.run(["wsl.exe", "rm", "-rf", self.ssh_home], check=True)
-            if self.directory.exists():
-                shutil.rmtree(self.directory)
-            current = self.default_known_hosts.read_bytes() if self.default_known_hosts.exists() else None
-            if current != self.default_known_hosts_snapshot:
-                raise AssertionError("fixture modified the user's default known_hosts")
+        self._cleanup_all()
