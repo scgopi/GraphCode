@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-import base64
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -25,13 +25,6 @@ def wsl_path(path):
     result = subprocess.run(["wsl.exe", "wslpath", "-a", windows_path],
                              capture_output=True, text=True, check=True)
     return result.stdout.strip()
-
-
-def free_port():
-    import socket
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 @dataclass(frozen=True)
@@ -65,8 +58,10 @@ class ExternalTarget:
         return cls(user, host, port)
 
     def argv(self):
+        known_hosts = os.environ.get("GRAPHCODE_REMOTE_E2E_KNOWN_HOSTS", "NUL")
         args = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
-                "-o", "ExitOnForwardFailure=yes"]
+                "-o", "ExitOnForwardFailure=yes", "-o",
+                f"UserKnownHostsFile={known_hosts}", "-o", "GlobalKnownHostsFile=none"]
         if self.port is not None:
             args += ["-p", str(self.port)]
         rendered_host = f"[{self.host}]" if ":" in self.host else self.host
@@ -83,6 +78,8 @@ def external_targets():
     raw = os.environ.get("GRAPHCODE_REMOTE_E2E_TARGETS")
     if raw is None:
         return []
+    if not os.environ.get("GRAPHCODE_REMOTE_E2E_KNOWN_HOSTS"):
+        raise ValueError("GRAPHCODE_REMOTE_E2E_KNOWN_HOSTS is required with external targets")
     values = [item.strip() for item in raw.split(",")]
     if not values or any(not item for item in values):
         raise ValueError("GRAPHCODE_REMOTE_E2E_TARGETS must contain non-empty targets")
@@ -103,8 +100,10 @@ class LocalRemoteParityFixture:
         self.wsl_config = f"{self.ssh_home}/sshd_config"
         self.wsl_server_pid = f"{self.ssh_home}/server.pid"
         self.wsl_sshd_pid = f"{self.ssh_home}/sshd.pid"
-        self.ssh_port = free_port()
-        self.remote_forward_port = free_port()
+        self.ssh_port = 45000 + secrets.randbelow(10000)
+        self.remote_forward_port = self.ssh_port + 1
+        self.ssh_host = subprocess.run(["wsl.exe", "hostname", "-I"],
+                                       capture_output=True, text=True, check=True).stdout.split()[0]
         self.bridge = None
         self.server_process = None
         self.sshd_process = None
@@ -113,6 +112,10 @@ class LocalRemoteParityFixture:
         self.old_generation = 0
         self.last_diagnostic = ""
         self.safe_error = "remote bridge authentication failed"
+        self.default_known_hosts = Path(os.environ.get("USERPROFILE", "")) / ".ssh" / "known_hosts"
+        self.default_known_hosts_snapshot = (
+            self.default_known_hosts.read_bytes() if self.default_known_hosts.exists() else None
+        )
 
     @property
     def capability(self):
@@ -136,15 +139,22 @@ class LocalRemoteParityFixture:
         return subprocess.Popen(["wsl.exe", "sh", "-lc", "exec " + " ".join(args)], **kwargs)
 
     def start(self, reboot=False):
-        self._prepare_ssh()
-        self._start_server(reboot)
-        self.bridge = RemoteBridge(self.state_path, ("127.0.0.1", free_port()),
-                                   ttl_seconds=30, previous_overlap_seconds=0)
-        # The POSIX process is intentionally the bridge backend.
-        self.bridge.backend_address = ("127.0.0.1", self.server_port)
-        self.bridge.start()
-        self._start_sshd()
-        self._start_tunnel()
+        try:
+            self._prepare_ssh()
+            self._start_server(reboot)
+            self.bridge = RemoteBridge(self.state_path, ("127.0.0.1", 0),
+                                       ttl_seconds=30, previous_overlap_seconds=0)
+            # The POSIX process is intentionally the bridge backend.
+            self.bridge.backend_address = ("127.0.0.1", self.server_port)
+            self.bridge.start()
+            self._start_sshd()
+            self._start_tunnel()
+        except BaseException:
+            try:
+                self._stop_processes()
+            except BaseException as cleanup_error:
+                raise RuntimeError(f"fixture startup and cleanup failed: {cleanup_error}") from cleanup_error
+            raise
 
     def _prepare_ssh(self):
         key = self.directory / "client_key"
@@ -161,27 +171,50 @@ class LocalRemoteParityFixture:
         self.client_key = key
         self.known_hosts = self.directory / "known_hosts"
         config = (
-            f"Port {self.ssh_port}\nListenAddress 127.0.0.1\nHostKey {self.wsl_host_key}\n"
+            f"Port {self.ssh_port}\nListenAddress 0.0.0.0\nHostKey {self.wsl_host_key}\n"
             f"AuthorizedKeysFile {self.wsl_authorized}\nStrictModes no\nPasswordAuthentication no\n"
             f"PubkeyAuthentication yes\nUsePAM no\nPermitRootLogin no\nAllowUsers {user}\n"
             f"PidFile {self.wsl_sshd_pid}\n"
         )
         subprocess.run(["wsl.exe", "sh", "-lc", f"cat > {self.wsl_config} && chmod 600 {self.wsl_config}"],
                        input=config, text=True, check=True, stdout=subprocess.DEVNULL)
+        self._write_known_hosts()
+
+    def _write_known_hosts(self):
+        public = subprocess.run(["wsl.exe", "ssh-keygen", "-y", "-f", self.wsl_host_key],
+                                capture_output=True, text=True, check=True).stdout.strip()
+        self.known_hosts.write_text(f"[{self.ssh_host}]:{self.ssh_port} {public}\n")
 
     def _start_server(self, reboot):
-        self.server_port = free_port()
+        port_file = f"{self.ssh_home}/server-port"
+        subprocess.run(["wsl.exe", "rm", "-f", port_file], check=True)
         args = ["python3", self.server_script, "--state", self.wsl_state,
-                "--port", str(self.server_port), "--pid-file", self.wsl_server_pid]
+                "--port", "0", "--pid-file", self.wsl_server_pid, "--port-file", port_file]
         if reboot:
             args.append("--reboot")
         self.server_process = self._run_wsl(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self._wait_port(self.server_port)
+        self._wait_file(port_file)
+        self.server_port = int(subprocess.run(["wsl.exe", "cat", port_file],
+                                              capture_output=True, text=True, check=True).stdout)
+        self._wait_server_protocol(self.server_port)
 
     def _start_sshd(self):
-        self.sshd_process = self._run_wsl(["/usr/sbin/sshd", "-D", "-e", "-f", self.wsl_config],
-                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        self._wait_ssh()
+        for _ in range(5):
+            self.sshd_process = self._run_wsl(["/usr/sbin/sshd", "-D", "-e", "-f", self.wsl_config],
+                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                self._wait_ssh()
+                return
+            except RuntimeError as error:
+                if self.sshd_process.poll() is None or "Address already in use" not in str(error):
+                    raise
+                self.sshd_process.wait(timeout=5)
+                self.ssh_port += 1
+                self.remote_forward_port = self.ssh_port + 1
+                self._write_known_hosts()
+                subprocess.run(["wsl.exe", "sed", "-i", f"s/^Port .*/Port {self.ssh_port}/", self.wsl_config],
+                               check=True)
+        raise RuntimeError("could not allocate an OpenSSH fixture port")
 
     def _start_tunnel(self):
         args = ["ssh.exe", "-i", str(self.client_key), "-p", str(self.ssh_port),
@@ -189,22 +222,52 @@ class LocalRemoteParityFixture:
                 "-o", f"UserKnownHostsFile={self.known_hosts}",
                 "-o", "ExitOnForwardFailure=yes", "-N", "-R",
                 f"127.0.0.1:{self.remote_forward_port}:127.0.0.1:{self.bridge.listener_address[1]}",
-                f"{self.ssh_user}@127.0.0.1"]
+                f"{self.ssh_user}@{self.ssh_host}"]
         self.tunnel_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(0.5)
         if self.tunnel_process.poll() is not None:
             raise RuntimeError("OpenSSH reverse tunnel failed")
 
-    def _wait_port(self, port):
+    def _wait_server_protocol(self, port):
         import socket
         deadline = time.time() + 10
         while time.time() < deadline:
             try:
-                with socket.create_connection(("127.0.0.1", port), timeout=.2):
-                    return
+                with socket.create_connection(("127.0.0.1", port), timeout=.2) as sock:
+                    payload = json.dumps({"request": {"command": "boot"}}).encode()
+                    sock.sendall(len(payload).to_bytes(4, "big") + payload)
+                    header = self._recv_exact(sock, 4)
+                    size = int.from_bytes(header, "big")
+                    response = json.loads(self._recv_exact(sock, size))
+                    if response.get("ok") and response.get("boot_id"):
+                        return
             except OSError:
                 time.sleep(.05)
-        raise RuntimeError(f"fixture port {port} did not start")
+            except (EOFError, ValueError, json.JSONDecodeError):
+                time.sleep(.05)
+        raise RuntimeError(f"POSIX fixture protocol did not start on port {port}")
+
+    @staticmethod
+    def _recv_exact(sock, count):
+        data = bytearray()
+        while len(data) < count:
+            chunk = sock.recv(count - len(data))
+            if not chunk:
+                raise EOFError("unexpected EOF")
+            data.extend(chunk)
+        return bytes(data)
+
+    def _wait_file(self, path):
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            result = subprocess.run(["wsl.exe", "test", "-s", path],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if result.returncode == 0:
+                return
+            if self.server_process.poll() is not None:
+                raise RuntimeError("POSIX fixture exited before publishing its port")
+            time.sleep(.05)
+        raise RuntimeError(f"fixture did not publish {path}")
 
     def _wait_ssh(self):
         deadline = time.time() + 10
@@ -213,16 +276,15 @@ class LocalRemoteParityFixture:
                 error = self.sshd_process.stderr.read()
                 raise RuntimeError(f"fixture sshd exited: {error}")
             result = subprocess.run(["ssh.exe", "-i", str(self.client_key), "-p", str(self.ssh_port),
-                                     "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
-                                     f"{self.ssh_user}@127.0.0.1", "true"],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                     "-o", "StrictHostKeyChecking=yes",
+                                     "-o", f"UserKnownHostsFile={self.known_hosts}",
+                                     "-o", "BatchMode=yes", "-o", "ConnectTimeout=1",
+                                     f"{self.ssh_user}@{self.ssh_host}", "true"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
             if result.returncode == 0:
-                scan = subprocess.run(["wsl.exe", "ssh-keyscan", "-p", str(self.ssh_port), "127.0.0.1"],
-                                      capture_output=True, text=True, check=True)
-                self.known_hosts.write_text(scan.stdout)
                 return
             time.sleep(.1)
-        raise RuntimeError("fixture sshd did not start")
+        raise RuntimeError(f"fixture sshd did not start: {result.stderr.strip()}")
 
     def _remote(self, request, capability=None, generation=None):
         capability = self.capability if capability is None else capability
@@ -231,10 +293,10 @@ class LocalRemoteParityFixture:
             ["ssh.exe", "-i", str(self.client_key), "-p", str(self.ssh_port),
              "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={self.known_hosts}",
              "-o", "BatchMode=yes",
-             f"{self.ssh_user}@127.0.0.1", "python3", self.client_script,
-             str(self.remote_forward_port),
-             capability, str(generation),
-             base64.b64encode(json.dumps(request, separators=(",", ":")).encode()).decode()],
+             f"{self.ssh_user}@{self.ssh_host}", "python3", self.client_script,
+             str(self.remote_forward_port)],
+            input=json.dumps({"capability": capability, "generation": generation,
+                              "request": request}, separators=(",", ":")),
             capture_output=True, text=True, check=False, timeout=10,
         )
         if result.returncode:
@@ -245,6 +307,36 @@ class LocalRemoteParityFixture:
 
     def _request(self, command, **fields):
         return self._remote({"command": command, **fields})
+
+    def assert_capability_not_in_process_metadata(self):
+        secret = self.capability
+        if self.tunnel_process:
+            query = (
+                "Get-CimInstance Win32_Process -Filter "
+                f"'ProcessId={self.tunnel_process.pid}' | Select-Object -Expand CommandLine"
+            )
+            command_line = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command", query],
+                capture_output=True, text=True, check=True,
+            ).stdout
+            if secret in command_line:
+                raise AssertionError("capability leaked into Windows process metadata")
+        ps = subprocess.run(
+            ["wsl.exe", "sh", "-lc", "ps -eo args"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        if secret in ps:
+            raise AssertionError("capability leaked into POSIX process metadata")
+        for pid_path in (self.wsl_server_pid, self.wsl_sshd_pid):
+            pid = subprocess.run(["wsl.exe", "cat", pid_path],
+                                 capture_output=True, text=True, check=False).stdout.strip()
+            if pid.isdigit():
+                command_line = subprocess.run(
+                    ["wsl.exe", "cat", f"/proc/{pid}/cmdline"],
+                    capture_output=True, text=True, check=False,
+                ).stdout
+                if secret in command_line:
+                    raise AssertionError("capability leaked into /proc command metadata")
 
     def setup_project(self, host, project): return self._request("setup", host=host, project=project)
     def create_node(self, host, project, node): return self._request("create", host=host, project=project, node=node)
@@ -286,8 +378,20 @@ class LocalRemoteParityFixture:
         for pid_path in (self.wsl_server_pid, self.wsl_sshd_pid):
             result = subprocess.run(["wsl.exe", "cat", pid_path], capture_output=True, text=True, check=False)
             if result.returncode == 0 and result.stdout.strip().isdigit():
-                subprocess.run(["wsl.exe", "kill", "-TERM", result.stdout.strip()],
+                linux_pid = result.stdout.strip()
+                subprocess.run(["wsl.exe", "kill", "-TERM", linux_pid],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                deadline = time.time() + 5
+                while time.time() < deadline:
+                    if subprocess.run(["wsl.exe", "kill", "-0", linux_pid],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+                        break
+                    time.sleep(.05)
+                else:
+                    subprocess.run(["wsl.exe", "kill", "-KILL", linux_pid], check=False)
+                    if subprocess.run(["wsl.exe", "kill", "-0", linux_pid],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+                        raise RuntimeError(f"WSL fixture PID {linux_pid} did not terminate")
         for process in (self.tunnel_process, self.sshd_process, self.server_process):
             if process and process.poll() is None:
                 process.kill()
@@ -302,6 +406,9 @@ class LocalRemoteParityFixture:
         try:
             self._stop_processes()
         finally:
-            subprocess.run(["wsl.exe", "rm", "-rf", self.ssh_home],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-            shutil.rmtree(self.directory, ignore_errors=True)
+            subprocess.run(["wsl.exe", "rm", "-rf", self.ssh_home], check=True)
+            if self.directory.exists():
+                shutil.rmtree(self.directory)
+            current = self.default_known_hosts.read_bytes() if self.default_known_hosts.exists() else None
+            if current != self.default_known_hosts_snapshot:
+                raise AssertionError("fixture modified the user's default known_hosts")

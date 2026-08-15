@@ -11,14 +11,19 @@ import uuid
 from pathlib import Path
 
 
-def frame_read(sock):
-    size = int.from_bytes(sock.recv(4), "big")
-    data = b""
-    while len(data) < size:
-        chunk = sock.recv(size - len(data))
+def recv_exact(sock, count):
+    data = bytearray()
+    while len(data) < count:
+        chunk = sock.recv(count - len(data))
         if not chunk:
-            raise OSError("closed")
-        data += chunk
+            raise EOFError("unexpected EOF while reading frame")
+        data.extend(chunk)
+    return bytes(data)
+
+
+def frame_read(sock):
+    size = int.from_bytes(recv_exact(sock, 4), "big")
+    data = recv_exact(sock, size)
     return json.loads(data)
 
 
@@ -101,10 +106,14 @@ def main():
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--reboot", action="store_true")
     parser.add_argument("--pid-file")
+    parser.add_argument("--port-file")
     args = parser.parse_args()
     if args.pid_file:
         Path(args.pid_file).write_text(str(os.getpid()))
-    Server(args.state, args.port, args.reboot).serve()
+    server = Server(args.state, args.port, args.reboot)
+    if args.port_file:
+        Path(args.port_file).write_text(str(server.listener.getsockname()[1]))
+    server.serve()
 
 
 if __name__ == "__main__":

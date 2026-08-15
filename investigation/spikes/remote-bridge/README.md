@@ -21,6 +21,9 @@ pwsh Tools/windows/validate.ps1 -Task remote-e2e
 It always runs the deterministic local OpenSSH/WSL fixture and only probes external
 POSIX hosts when `GRAPHCODE_REMOTE_E2E_TARGETS` is set. Configured targets are
 mandatory and failures fail the run; the variable must not contain empty entries.
+The fixture derives its host key before connecting and uses a per-run
+`UserKnownHostsFile`; it never reads or modifies the user's default `known_hosts`, so
+there are no default-file entries to clean up.
 
 `remote_client.py` is a one-shot, POSIX-compatible shim. It reads the state record for
 each request and sends one framed JSON request:
