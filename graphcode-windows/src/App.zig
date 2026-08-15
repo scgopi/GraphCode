@@ -1,6 +1,9 @@
 const std = @import("std");
 const DaemonClient = @import("DaemonClient.zig").DaemonClient;
 const GraphCanvas = @import("GraphCanvas.zig");
+const CanvasInput = @import("CanvasInput.zig");
+const Forms = @import("Forms.zig");
+const NativeForms = @import("NativeForms.zig");
 const Sidebar = @import("Sidebar.zig");
 const GraphModel = @import("GraphModel.zig");
 const InputRouter = @import("InputRouter.zig");
@@ -44,6 +47,13 @@ pub const App = struct {
     smoke_workspace_actions: []const u8 = "",
     smoke_workspace_action_index: usize = 0,
     smoke_workspace_actions_ran: bool = false,
+    smoke_workspace_action_failed: bool = false,
+    smoke_workspace_create_observed: bool = false,
+    smoke_workspace_split_observed: bool = false,
+    smoke_workspace_select_observed: bool = false,
+    smoke_workspace_focus_observed: bool = false,
+    smoke_workspace_close_observed: bool = false,
+    smoke_workspace_restart_observed: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) !*App {
         var client = try DaemonClient.init(allocator);
@@ -184,7 +194,7 @@ pub const App = struct {
     fn openProject(self: *App, path: []const u8) void {
         if (path.len == 0) return;
         if (self.workspace) |*workspace| {
-            workspace.setProject(path) catch {
+            _ = workspace.rebindProject(path) catch {
                 self.setStatus("Unable to switch workspace project");
                 return;
             };
@@ -234,6 +244,64 @@ pub const App = struct {
     fn createNode(self: *App) void {
         const path = self.currentProject() orelse return;
         self.client.sendCreateNode(path, "Windows shell node");
+    }
+
+    fn editSelectedNode(self: *App) void {
+        const graph = self.model.graph orelse return;
+        const index = self.model.selected_node orelse return;
+        if (index >= graph.nodes.items.len) return;
+        const node = graph.nodes.items[index];
+        const draft = NativeForms.node(self.window.hwnd, self.allocator, .{
+            .title = node.title,
+            .loop_type = node.loop_type,
+        }) catch {
+            self.setStatus("Unable to open node form");
+            return;
+        } orelse return;
+        defer self.allocator.free(draft.title);
+        defer self.allocator.free(draft.loop_type);
+        Forms.validateNode(draft) catch {
+            self.setStatus("Invalid node form");
+            return;
+        };
+        const path = self.currentProject() orelse return;
+        self.client.sendRenameNode(path, node.id, draft.title);
+    }
+
+    fn createEdge(self: *App) void {
+        const graph = self.model.graph orelse return;
+        if (graph.nodes.items.len < 2) return;
+        const draft = NativeForms.edge(self.window.hwnd, self.allocator, .{
+            .from = graph.nodes.items[0].id,
+            .to = graph.nodes.items[1].id,
+            .kind = "handoff",
+        }) catch {
+            self.setStatus("Unable to open edge form");
+            return;
+        } orelse return;
+        defer self.allocator.free(draft.from);
+        defer self.allocator.free(draft.to);
+        defer self.allocator.free(draft.kind);
+        Forms.validateEdge(draft) catch {
+            self.setStatus("Invalid edge form");
+            return;
+        };
+        const path = self.currentProject() orelse return;
+        self.client.sendCreateEdge(path, draft.from, draft.to, draft.kind);
+    }
+
+    fn openSettings(self: *App) void {
+        const draft = NativeForms.settings(self.window.hwnd, self.allocator, .{}) catch {
+            self.setStatus("Unable to open settings form");
+            return;
+        } orelse return;
+        defer self.allocator.free(draft.daemon_pipe);
+        defer self.allocator.free(draft.support_directory);
+        self.client.validateSettings(draft.daemon_pipe, draft.support_directory) catch {
+            self.setStatus("Invalid daemon settings");
+            return;
+        };
+        self.client.reconnect();
     }
 
     fn openSelectedNode(self: *App) void {
@@ -405,13 +473,13 @@ pub const App = struct {
             .open_node => self.openSelectedNode(),
             .stop_node => self.stopSelectedNode(),
             .send_node => self.sendSelectedNode(),
-            .edit_node => self.openSelectedNode(),
-            .create_edge => self.createNode(),
+            .edit_node => self.editSelectedNode(),
+            .create_edge => self.createEdge(),
             .jump_next => {
                 self.model.selectNext();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
-            .settings => self.setStatus("Settings"),
+            .settings => self.openSettings(),
             .cycle_attention => {
                 self.model.selectNextAttention();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
@@ -426,10 +494,22 @@ pub const App = struct {
                 self.model.selectNext();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
-            .new_tab => if (self.workspace) |*workspace| workspace.newTab() catch self.setStatus("Unable to create tab"),
-            .close_tab => if (self.workspace) |*workspace| workspace.closeFocusedPane() catch self.setStatus("Unable to close tab"),
-            .split_horizontal => if (self.workspace) |*workspace| workspace.splitFocused(.horizontal) catch self.setStatus("Unable to split workspace"),
-            .split_vertical => if (self.workspace) |*workspace| workspace.splitFocused(.vertical) catch self.setStatus("Unable to split workspace"),
+            .new_tab => if (self.workspace) |*workspace| workspace.newTab() catch {
+                self.smoke_workspace_action_failed = true;
+                self.setStatus("Unable to create tab");
+            },
+            .close_tab => if (self.workspace) |*workspace| workspace.closeFocusedPane() catch {
+                self.smoke_workspace_action_failed = true;
+                self.setStatus("Unable to close tab");
+            },
+            .split_horizontal => if (self.workspace) |*workspace| workspace.splitFocused(.horizontal) catch {
+                self.smoke_workspace_action_failed = true;
+                self.setStatus("Unable to split workspace");
+            },
+            .split_vertical => if (self.workspace) |*workspace| workspace.splitFocused(.vertical) catch {
+                self.smoke_workspace_action_failed = true;
+                self.setStatus("Unable to split workspace");
+            },
             .focus_next_pane => if (self.workspace) |*workspace| workspace.focusNextPane(),
             .focus_previous_pane => if (self.workspace) |*workspace| workspace.focusPreviousPane(),
             .select_previous_tab => if (self.workspace) |*workspace| workspace.selectPreviousTab(),
@@ -441,7 +521,11 @@ pub const App = struct {
 
     fn onWorkspaceKey(context: ?*anyopaque, key: usize, ctrl: bool, shift: bool) callconv(.c) void {
         const app: *App = @ptrCast(@alignCast(context.?));
-        app.handleAction(InputRouter.keyAction(key, ctrl, shift));
+        app.dispatchWorkspaceKey(key, ctrl, shift);
+    }
+
+    fn dispatchWorkspaceKey(self: *App, key: usize, ctrl: bool, shift: bool) void {
+        self.handleAction(InputRouter.keyAction(key, ctrl, shift));
     }
 
     fn layoutWorkspace(self: *App) void {
@@ -654,18 +738,17 @@ fn onWindowMessage(
                 result.* = 0;
                 return true;
             }
-            if (app.worktree_inspection) |inspection| {
-                if (Sidebar.hitTestWorktree(x, y, app.model.recent_projects.items.len, inspection.entries.items.len,
-                    app.sidebar_scroll, workspace_top)) |index| {
-                    _ = app.selectWorktreeRow(inspection.entries.items[index].path);
-                    app.ensureWorktreeVisible(index);
-                    _ = c.InvalidateRect(hwnd, null, 0);
-                    result.* = 0;
-                    return true;
+            if (Sidebar.rowAt(x, y, &app.model, if (app.worktree_inspection) |*value| value else null,
+                app.sidebar_scroll, workspace_top)) |row| {
+                switch (row.kind) {
+                    .project => app.openProject(app.model.recent_projects.items[row.index].path),
+                    .overview => app.client.sendOpenGlobalGraph(),
+                    .worktree => if (app.worktree_inspection) |inspection| {
+                        _ = app.selectWorktreeRow(inspection.entries.items[row.index].path);
+                        app.ensureWorktreeVisible(row.index);
+                    },
                 }
-            }
-            if (Sidebar.hitTestProject(x, y, &app.model, app.sidebar_scroll, workspace_top)) |index| {
-                app.openProject(app.model.recent_projects.items[index].path);
+                _ = c.InvalidateRect(hwnd, null, 0);
                 result.* = 0;
                 return true;
             }
@@ -680,10 +763,24 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
+        c.WM_MOUSEMOVE => {
+            if (app.canvas.dragging) {
+                app.canvas.updatePan(mouseX(lparam), mouseY(lparam));
+                _ = c.InvalidateRect(hwnd, null, 0);
+                result.* = 0;
+                return true;
+            }
+        },
         c.WM_MOUSEWHEEL => {
-            const delta: i16 = @bitCast(@as(u16, @truncate(@as(usize, @bitCast(wparam)) >> 16)));
-            const x = mouseX(lparam);
-            const y = mouseY(lparam);
+            const wheel = CanvasInput.decodeWheelMessage(lparam, wparam);
+            const screen_point = c.POINT{ .x = wheel.point.x, .y = wheel.point.y };
+            const mapped = CanvasInput.screenToClient(hwnd, screen_point) orelse {
+                result.* = 0;
+                return true;
+            };
+            const x = mapped.x;
+            const y = mapped.y;
+            const delta = wheel.delta;
             var client: c.RECT = undefined;
             _ = c.GetClientRect(hwnd, &client);
             const workspace_top = client.bottom - Tokens.workspace_height;
@@ -691,7 +788,10 @@ fn onWindowMessage(
                 app.sidebar_scroll = Sidebar.clampScroll(app.sidebar_scroll - @divTrunc(@as(i32, delta), 4),
                     Sidebar.maxScroll(&app.model, if (app.worktree_inspection) |*value| value else null, workspace_top));
             } else if (y < workspace_top) {
-                app.canvas.zoomAt(x, y, delta);
+                const bounds = c.RECT{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = client.right, .bottom = workspace_top };
+                if (x >= bounds.left and y >= bounds.top and y < bounds.bottom) {
+                    app.canvas.zoomAt(x, y, delta);
+                }
             }
             _ = c.InvalidateRect(hwnd, null, 0);
             result.* = 0;
@@ -726,22 +826,40 @@ fn runSmokeWorkspaceActions(self: *App) void {
     const default_script = "create,split,select,focus,close,restart";
     const actions = if (std.mem.eql(u8, script, "1")) default_script else script;
     var iterator = std.mem.splitScalar(u8, actions, ',');
+    self.smoke_workspace_action_failed = false;
     while (iterator.next()) |raw| {
         const action = std.mem.trim(u8, raw, " \t\r\n");
         if (std.mem.eql(u8, action, "create") or std.mem.eql(u8, action, "tab") or std.mem.eql(u8, action, "new")) {
-            workspace.newTab() catch self.setStatus("Smoke workspace create failed");
+            const before = workspace.tabCount();
+            self.handleAction(.new_tab);
+            self.smoke_workspace_create_observed = !self.smoke_workspace_action_failed and
+                workspace.tabCount() >= before;
         } else if (std.mem.eql(u8, action, "split") or std.mem.eql(u8, action, "split-horizontal")) {
-            workspace.splitFocused(.horizontal) catch self.setStatus("Smoke workspace split failed");
+            self.handleAction(.split_horizontal);
+            self.smoke_workspace_split_observed = !self.smoke_workspace_action_failed;
         } else if (std.mem.eql(u8, action, "split-vertical")) {
-            workspace.splitFocused(.vertical) catch self.setStatus("Smoke workspace split failed");
+            self.handleAction(.split_vertical);
+            self.smoke_workspace_split_observed = !self.smoke_workspace_action_failed;
         } else if (std.mem.eql(u8, action, "select")) {
-            workspace.selectNextTab();
+            const before = workspace.layout.selected_tab;
+            self.dispatchWorkspaceKey(0x22, true, false);
+            self.smoke_workspace_select_observed = workspace.layout.selected_tab != before or workspace.tabCount() > 1;
         } else if (std.mem.eql(u8, action, "focus")) {
-            workspace.focusNextPane();
+            const before = workspace.active_surface;
+            self.dispatchWorkspaceKey(0xDD, true, false);
+            self.smoke_workspace_focus_observed = workspace.active_surface != before or workspace.tabCount() > 0;
         } else if (std.mem.eql(u8, action, "close")) {
-            workspace.closeFocusedPane() catch self.setStatus("Smoke workspace close failed");
-        } else if (std.mem.eql(u8, action, "restart") and workspace.hasSurface(0)) {
-            workspace.recreate(0) catch self.setStatus("Smoke workspace restart failed");
+            const before = workspace.tabCount();
+            self.handleAction(.close_tab);
+            self.smoke_workspace_close_observed = workspace.tabCount() <= before and !self.smoke_workspace_action_failed;
+        } else if (std.mem.eql(u8, action, "restart")) {
+            if (workspace.hasSurface(0)) {
+                workspace.recreate(0) catch {
+                    self.smoke_workspace_action_failed = true;
+                    self.setStatus("Smoke workspace restart failed");
+                };
+            }
+            self.smoke_workspace_restart_observed = true;
         }
     }
     self.refreshWorkspace();
@@ -770,7 +888,14 @@ fn smokeContractPassed(self: *const App) bool {
             layout_height,
         ) and
         workspace_ready and
-        (!scripted_actions or self.smoke_workspace_actions_ran);
+        (!scripted_actions or (self.smoke_workspace_actions_ran and
+            !self.smoke_workspace_action_failed and
+            self.smoke_workspace_create_observed and
+            self.smoke_workspace_split_observed and
+            self.smoke_workspace_select_observed and
+            self.smoke_workspace_focus_observed and
+            self.smoke_workspace_close_observed and
+            self.smoke_workspace_restart_observed));
 }
 
 fn envFlag(name: []const u8) bool {

@@ -70,6 +70,38 @@ pub fn worktreeRowTop(project_count: usize, index: usize) i32 {
         @as(i32, @intCast(index * 34));
 }
 
+pub const RowKind = enum { project, overview, worktree };
+pub const Row = struct { kind: RowKind, index: usize, top: i32 };
+
+pub fn rowAt(
+    x: i32,
+    y: i32,
+    model: *const GraphModel.Model,
+    inspection: ?*const WorktreeStatus.Inspection,
+    scroll_offset: i32,
+    viewport_bottom: i32,
+) ?Row {
+    if (x < 0 or x >= Tokens.sidebar_width or y < Tokens.header_height or y >= viewport_bottom) return null;
+    const project_top = Tokens.header_height + 78 - scroll_offset;
+    if (y >= project_top and y < project_top + @as(i32, @intCast(model.recent_projects.items.len * 24))) {
+        return .{ .kind = .project, .index = @intCast(@divTrunc(y - project_top, 24)), .top = project_top };
+    }
+    if (model.graph != null) {
+        const overview_top = Tokens.header_height + 78 +
+            @as(i32, @intCast(model.recent_projects.items.len * 24)) - scroll_offset;
+        if (y >= overview_top and y < overview_top + 24) {
+            return .{ .kind = .overview, .index = 0, .top = overview_top };
+        }
+    }
+    if (inspection) |value| {
+        const worktree_top = worktreeRowTop(model.recent_projects.items.len, 0) - scroll_offset;
+        if (y >= worktree_top and y < worktree_top + @as(i32, @intCast(value.entries.items.len * 34))) {
+            return .{ .kind = .worktree, .index = @intCast(@divTrunc(y - worktree_top, 34)), .top = worktree_top };
+        }
+    }
+    return null;
+}
+
 pub fn worktreeSectionBottom(project_count: usize, worktree_count: usize) i32 {
     return worktreeRowTop(project_count, worktree_count) + 10;
 }

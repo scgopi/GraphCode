@@ -217,7 +217,7 @@ pub const Workspace = struct {
     }
 
     pub fn setProject(self: *Workspace, project: []const u8) !void {
-        if (project.len == 0 or std.mem.eql(u8, self.project_key, project)) return;
+        if (project.len == 0) return;
         const new_project_key = try self.allocator.dupe(u8, project);
         errdefer self.allocator.free(new_project_key);
         const new_layout_path = try self.layoutPathForProject(project);
@@ -245,11 +245,13 @@ pub const Workspace = struct {
     }
 
     pub fn rebindProject(self: *Workspace, project_path: []const u8) !bool {
-        if (std.mem.eql(u8, self.project_key, project_path)) return false;
+        if (project_path.len == 0) return false;
+        const changed = !std.mem.eql(u8, self.project_key, project_path) or
+            !std.mem.eql(u8, self.project_path, project_path);
         try self.setProject(project_path);
         if (self.project_path.len != 0) self.allocator.free(self.project_path);
         self.project_path = try self.allocator.dupe(u8, project_path);
-        return true;
+        return changed;
     }
 
     pub fn projectPath(self: *const Workspace) []const u8 {
