@@ -119,7 +119,7 @@ pub const DaemonClient = struct {
     ) !void {
         _ = self;
         const allocator = std.heap.page_allocator;
-        const support = try supportDirectoryFor(allocator, if (support_directory.len == 0) null else support_directory);
+        const support = try supportDirectoryFor(allocator, support_directory);
         defer allocator.free(support);
         try validateSupportDirectory(allocator, support);
         const endpoint = try endpointNameFor(allocator, pipe_override, support);
@@ -826,6 +826,38 @@ test "settings validation rejects missing directories, invalid secrets, and pipe
     );
 }
 
+test "clearing support override ignores the old environment override" {
+    const allocator = std.testing.allocator;
+    const old_override = std.process.getEnvVarOwned(allocator, "GRAPHCODE_SUPPORT_DIR") catch null;
+    const old_profile = std.process.getEnvVarOwned(allocator, "USERPROFILE") catch null;
+    defer {
+        setTestEnvironment("GRAPHCODE_SUPPORT_DIR", old_override);
+        setTestEnvironment("USERPROFILE", old_profile);
+        if (old_override) |value| allocator.free(value);
+        if (old_profile) |value| allocator.free(value);
+    }
+    setTestEnvironment("GRAPHCODE_SUPPORT_DIR", "C:\\Windows");
+    setTestEnvironment("USERPROFILE", "C:\\graphcode-missing-default");
+
+    var client = try DaemonClient.init(allocator);
+    defer client.deinit();
+    try std.testing.expectError(
+        error.SupportDirectoryMissing,
+        client.validateSettings("", ""),
+    );
+}
+
+fn setTestEnvironment(name: []const u8, value: ?[]const u8) void {
+    const name_wide = utf8ToWide(std.heap.page_allocator, name) catch return;
+    defer std.heap.page_allocator.free(name_wide);
+    const value_wide = if (value) |text|
+        (utf8ToWide(std.heap.page_allocator, text) catch return)
+    else
+        null;
+    defer if (value_wide) |wide| std.heap.page_allocator.free(wide);
+    _ = c.SetEnvironmentVariableW(name_wide.ptr, if (value_wide) |wide| wide.ptr else null);
+}
+
 fn endpointName(allocator: std.mem.Allocator) ![]u8 {
     if (std.process.getEnvVarOwned(allocator, "GRAPHCODE_DAEMON_PIPE")) |override| {
         return override;
@@ -864,38 +896,36 @@ fn endpointNameFor(
 }
 
 fn supportDirectory(allocator: std.mem.Allocator) ![]u8 {
-    return supportDirectoryFor(allocator, null);
+    if (std.process.getEnvVarOwned(allocator, "GRAPHCODE_SUPPORT_DIR")) |value| {
+        defer allocator.free(value);
+        return resolveSupportPath(allocator, value);
+    } else |_| {}
+    return defaultSupportDirectory(allocator);
 }
 
-fn supportDirectoryFor(allocator: std.mem.Allocator, override: ?[]const u8) ![]u8 {
-    if (override) |configured| {
-        if (configured.len == 0) return supportDirectoryFor(allocator, null);
-        const value = try allocator.dupe(u8, configured);
-        if (isAbsoluteWindowsPath(value)) return value;
-        const home = std.process.getEnvVarOwned(allocator, "USERPROFILE") catch
-            return value;
-        defer allocator.free(home);
-        const joined = std.fs.path.join(allocator, &.{ home, value }) catch {
-            return value;
-        };
-        allocator.free(value);
-        return joined;
-    }
-    if (std.process.getEnvVarOwned(allocator, "GRAPHCODE_SUPPORT_DIR")) |value| {
-        if (isAbsoluteWindowsPath(value)) return value;
-        const home = std.process.getEnvVarOwned(allocator, "USERPROFILE") catch
-            return value;
-        defer allocator.free(home);
-        const joined = std.fs.path.join(allocator, &.{ home, value }) catch {
-            return value;
-        };
-        allocator.free(value);
-        return joined;
-    } else |_| {}
+fn supportDirectoryFor(allocator: std.mem.Allocator, submitted: []const u8) ![]u8 {
+    if (submitted.len == 0) return defaultSupportDirectory(allocator);
+    return resolveSupportPath(allocator, submitted);
+}
+
+fn defaultSupportDirectory(allocator: std.mem.Allocator) ![]u8 {
     const home = std.process.getEnvVarOwned(allocator, "USERPROFILE") catch
         return error.UserProfileMissing;
     defer allocator.free(home);
     return std.fs.path.join(allocator, &.{ home, ".graphcode" });
+}
+
+fn resolveSupportPath(allocator: std.mem.Allocator, configured: []const u8) ![]u8 {
+    const value = try allocator.dupe(u8, configured);
+    if (isAbsoluteWindowsPath(value)) return value;
+    const home = std.process.getEnvVarOwned(allocator, "USERPROFILE") catch
+        return value;
+    defer allocator.free(home);
+    const joined = std.fs.path.join(allocator, &.{ home, value }) catch {
+        return value;
+    };
+    allocator.free(value);
+    return joined;
 }
 
 fn isAbsoluteWindowsPath(path: []const u8) bool {
