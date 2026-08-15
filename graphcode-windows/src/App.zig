@@ -290,7 +290,6 @@ pub const App = struct {
         const removed = WorktreeStatus.reclaimSelected(self.allocator, path, &selected, bindings.items) catch |err| {
             self.setStatus(switch (err) {
                 error.GitFailed => "Reclaim failed: git refused a selected worktree",
-                error.EmptySelection => "Select a worktree before reclaiming",
                 else => "Reclaim failed",
             });
             return;
