@@ -892,21 +892,24 @@ fn tick(app: *App) void {
     app.tick += 1;
     readAttachOutput(app, 0);
     readAttachOutput(app, 1);
-    if (app.tick == 1) {
+    if (app.tick == 3) {
         _ = runInputContracts(app) catch {};
         if (app.surfaces[1].surface) |surface| {
             _ = c.winghostty_surface_set_focus(surface, 1);
             recordProviderError(app, c.winghostty_surface_notify_redraw(surface));
         }
     }
-    if (app.smoke and app.tick == 4) {
+    if (app.smoke and app.tick == 6) {
         _ = recreateSurface(app, 0) catch {};
         _ = runInputContracts(app) catch {};
     }
     if (app.stress and app.tick >= 6 and app.tick < 6 + 16 * 2 and app.tick % 2 == 0) {
         _ = recreateSurface(app, 0) catch {};
     }
-    if (app.smoke and app.tick == 16) {
+    if (app.smoke and !app.stress and app.tick == 24) {
+        _ = c.DestroyWindow(app.hwnd);
+    }
+    if (app.smoke and app.stress and app.tick == 40) {
         _ = c.DestroyWindow(app.hwnd);
     }
 }
