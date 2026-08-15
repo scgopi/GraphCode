@@ -842,6 +842,16 @@ public actor GraphStore {
     // memory goes the same way — a log for a loop that no longer exists is litter.
     terminateSession(node)
     onRemoveMemory?(node.id)
+
+    // A composite's workers live in its sub-graph, on this node rather than in
+    // `graph.nodes` — the same blind spot `requestStop` covers when stopping, and the
+    // sessions `pilotComposite` and `spawnInstance` started for them are just as real.
+    // Killed rather than asked, unlike a stop: the nodes cease to exist with their
+    // parent, so there is nothing left for a polite stop request to resolve.
+    for worker in node.subGraph?.nodesAtAnyDepth ?? [] {
+      terminateSession(worker)
+      onRemoveMemory?(worker.id)
+    }
   }
 
   /// The fan-out descendants of a node — the loops it created, theirs, and so on,
