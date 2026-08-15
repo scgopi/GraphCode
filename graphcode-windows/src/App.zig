@@ -284,17 +284,30 @@ pub const App = struct {
             self.setStatus("Unable to open settings");
             return;
         };
-        self.allocator.free(pipe);
-        self.allocator.free(support);
-        const settings = maybe_settings orelse return;
+        const settings = maybe_settings orelse {
+            self.allocator.free(pipe);
+            self.allocator.free(support);
+            return;
+        };
+        defer {
+            self.allocator.free(pipe);
+            self.allocator.free(support);
+        }
         defer {
             self.allocator.free(settings.daemon_pipe);
             self.allocator.free(settings.support_directory);
         }
-        if (!setEnvironmentVariable(self.allocator, "GRAPHCODE_DAEMON_PIPE", settings.daemon_pipe) or
-            !setEnvironmentVariable(self.allocator, "GRAPHCODE_SUPPORT_DIR", settings.support_directory))
-        {
-            self.setStatus("Unable to apply daemon settings");
+        self.client.validateSettings(settings.daemon_pipe, settings.support_directory) catch |err| {
+            self.setStatus(settingsErrorText(err));
+            return;
+        };
+        if (!setEnvironmentVariable(self.allocator, "GRAPHCODE_DAEMON_PIPE", settings.daemon_pipe)) {
+            self.setStatus("Unable to apply daemon pipe setting");
+            return;
+        }
+        if (!setEnvironmentVariable(self.allocator, "GRAPHCODE_SUPPORT_DIR", settings.support_directory)) {
+            _ = setEnvironmentVariable(self.allocator, "GRAPHCODE_DAEMON_PIPE", pipe);
+            self.setStatus("Unable to apply support directory setting");
             return;
         }
         self.client.reconnect();
@@ -676,7 +689,6 @@ fn onWindowMessage(
                 7005 => app.handleAction(.stop_node),
                 7006 => app.handleAction(.settings),
                 else => {},
->>>>>>> ffa6cdd (feat(windows): add native graph forms and navigation)
             }
             result.* = 0;
             return true;
@@ -819,4 +831,14 @@ fn setEnvironmentVariable(allocator: std.mem.Allocator, name: []const u8, value:
     @memcpy(wide_value[0..raw_value.len], raw_value);
     wide_value[raw_value.len] = 0;
     return c.SetEnvironmentVariableW(wide_name.ptr, if (value.len == 0) null else wide_value.ptr) != 0;
+}
+
+fn settingsErrorText(err: anyerror) []const u8 {
+    return switch (err) {
+        error.InvalidDaemonPipe => "Invalid daemon pipe; settings unchanged",
+        error.SupportDirectoryMissing => "Support directory is missing; settings unchanged",
+        error.SupportSecretMissing => "Support directory has no rendezvous secret; settings unchanged",
+        error.SupportSecretInvalid => "Support directory has an invalid rendezvous secret; settings unchanged",
+        else => "Unable to validate daemon settings; settings unchanged",
+    };
 }

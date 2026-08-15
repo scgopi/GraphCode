@@ -272,8 +272,8 @@ pub fn commandGraphCreateEdge(
     defer allocator.free(quoted_kind);
     return std.mem.concat(allocator, u8, &.{
         "{\"graphCommand\":{\"projectPath\":",                                                                                   quoted_path,
-        ",\"command\":{\"createEdge\":{\"from\":",                                                                          quoted_from,
-        ",\"to\":",                                                                                                         quoted_to,
+        ",\"command\":{\"createEdge\":{\"from\":",                                                                               quoted_from,
+        ",\"to\":",                                                                                                              quoted_to,
         ",\"spec\":{\"kind\":",                                                                                                  quoted_kind,
         ",\"condition\":\"always\",\"payloadTransform\":{\"none\":{}},\"cycleGuard\":null,\"spawnTargetProjectPath\":null}}}}}",
     });
@@ -561,7 +561,16 @@ test "graph commands match Swift Codable associated-value shapes" {
     try std.testing.expect(std.mem.indexOf(u8, rename, "\"renameNode\"") != null);
     const edge = try commandGraphCreateEdge(allocator, project, node, "22222222-2222-4222-8222-222222222222", "handoff");
     defer allocator.free(edge);
-    try std.testing.expect(std.mem.indexOf(u8, edge, "\"createEdge\"") != null);
+    try std.testing.expectEqualStrings(
+        "{\"graphCommand\":{\"projectPath\":\"C:\\\\work\\\\graph\",\"command\":{\"createEdge\":{\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"spec\":{\"kind\":\"handoff\",\"condition\":\"always\",\"payloadTransform\":{\"none\":{}},\"cycleGuard\":null,\"spawnTargetProjectPath\":null}}}}}",
+        edge,
+    );
+    const delete = try commandGraphDeleteEdge(allocator, project, "33333333-3333-4333-8333-333333333333");
+    defer allocator.free(delete);
+    try std.testing.expectEqualStrings(
+        "{\"graphCommand\":{\"projectPath\":\"C:\\\\work\\\\graph\",\"command\":{\"deleteEdge\":{\"_0\":\"33333333-3333-4333-8333-333333333333\"}}}}",
+        delete,
+    );
 }
 
 test "global overview command uses the daemon command shape" {

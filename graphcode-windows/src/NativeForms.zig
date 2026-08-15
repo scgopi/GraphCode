@@ -19,12 +19,13 @@ const cancel_id = 9002;
 var active_state: bool = false;
 var active_state_storage: DialogState = undefined;
 
-const ModalCommand = enum { submit, cancel, close };
+const ModalCommand = enum { submit, cancel, close, destroy };
 
 fn applyModalCommand(state: *DialogState, command: ModalCommand) void {
     switch (command) {
         .submit => state.result = true,
         .cancel, .close => state.result = false,
+        .destroy => {},
     }
     state.closed = true;
 }
@@ -121,10 +122,12 @@ fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !boo
     _ = c.ShowWindow(hwnd, c.SW_SHOW);
     _ = c.SetForegroundWindow(hwnd);
     var message: c.MSG = undefined;
+    var quit_code: ?c.WPARAM = null;
     while (!active_state_storage.closed) {
         const code = c.GetMessageW(&message, null, 0, 0);
         if (code <= 0) {
             active_state_storage.closed = true;
+            if (code == 0) quit_code = message.wParam;
             break;
         }
         if (c.IsDialogMessageW(hwnd, &message) != 0) continue;
@@ -135,6 +138,7 @@ fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !boo
     _ = c.SetActiveWindow(state.parent);
     state.* = active_state_storage;
     active_state = false;
+    if (quit_code) |value| c.PostQuitMessage(@intCast(value));
     return state.result;
 }
 
@@ -195,7 +199,10 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             _ = c.DestroyWindow(hwnd);
             return 0;
         },
-        c.WM_DESTROY => return 0,
+        c.WM_DESTROY => {
+            applyModalCommand(value, .destroy);
+            return 0;
+        },
         else => {},
     }
     return c.DefWindowProcW(hwnd, message, wparam, lparam);
@@ -259,4 +266,8 @@ test "modal submit and cancel transitions always terminate the loop" {
     state = DialogState{ .allocator = undefined, .kind = .node, .parent = null };
     applyModalCommand(&state, .close);
     try std.testing.expect(state.closed);
+    state.result = true;
+    applyModalCommand(&state, .destroy);
+    try std.testing.expect(state.closed);
+    try std.testing.expect(state.result);
 }

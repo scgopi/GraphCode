@@ -112,6 +112,39 @@ pub const DaemonClient = struct {
         self.publishState(.reconnecting, "");
     }
 
+    pub fn validateSettings(
+        self: *DaemonClient,
+        pipe_override: []const u8,
+        support_directory: []const u8,
+    ) !void {
+        _ = self;
+        if (pipe_override.len != 0 and
+            (!std.mem.startsWith(u8, pipe_override, "\\\\.\\pipe\\") or pipe_override.len > 240))
+            return error.InvalidDaemonPipe;
+        if (support_directory.len == 0) return;
+        const normalized = try normalizedSupportPath(std.heap.page_allocator, support_directory);
+        defer std.heap.page_allocator.free(normalized);
+        const wide = try utf8ToWide(std.heap.page_allocator, normalized);
+        defer std.heap.page_allocator.free(wide);
+        const attributes = c.GetFileAttributesW(wide.ptr);
+        if (attributes == c.INVALID_FILE_ATTRIBUTES or
+            (attributes & c.FILE_ATTRIBUTE_DIRECTORY) == 0)
+            return error.SupportDirectoryMissing;
+        const secret_path = try std.fs.path.join(
+            std.heap.page_allocator,
+            &.{ normalized, ".graphcode-rendezvous.secret" },
+        );
+        defer std.heap.page_allocator.free(secret_path);
+        const secret = std.fs.cwd().readFileAlloc(
+            std.heap.page_allocator,
+            secret_path,
+            4096,
+        ) catch return error.SupportSecretMissing;
+        defer std.heap.page_allocator.free(secret);
+        if (secret.len != 32 or std.mem.allEqual(u8, secret, 0))
+            return error.SupportSecretInvalid;
+    }
+
     pub fn connect(self: *DaemonClient) void {
         self.mutex.lock();
         self.want_connected = true;
@@ -770,6 +803,23 @@ test "successful hello switches a coalesced reconnect buffer back to v2" {
     defer allocator.free(payload_frame);
     try std.testing.expectEqualStrings(payload, payload_frame);
     try std.testing.expectEqual(Wire.ProtocolMode.v2, client.mode);
+}
+
+test "settings validation rejects missing directories, invalid secrets, and pipe syntax" {
+    var client = try DaemonClient.init(std.testing.allocator);
+    defer client.deinit();
+    try std.testing.expectError(
+        error.InvalidDaemonPipe,
+        client.validateSettings("not-a-pipe", ""),
+    );
+    try std.testing.expectError(
+        error.SupportDirectoryMissing,
+        client.validateSettings("", "C:\\graphcode\\missing-support-directory"),
+    );
+    try std.testing.expectError(
+        error.SupportSecretMissing,
+        client.validateSettings("", "."),
+    );
 }
 
 fn endpointName(allocator: std.mem.Allocator) ![]u8 {

@@ -226,7 +226,12 @@ try {
       throw "Large paste/non-reading attach smoke completed without an observable exit code"
     }
     if ($inputExitCode -ne 0) {
-      throw "Large paste/non-reading attach smoke failed with exit code $inputExitCode"
+      $inputErrorText = if (Test-Path -LiteralPath $inputError) {
+       Get-Content -LiteralPath $inputError -Raw
+      } else {
+       "<no stderr captured>"
+      }
+      throw "Large paste/non-reading attach smoke failed with exit code $inputExitCode`: $inputErrorText"
     }
     Remove-Item -LiteralPath $inputError -Force -ErrorAction SilentlyContinue
   }
