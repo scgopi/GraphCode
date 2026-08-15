@@ -1,0 +1,16 @@
+.{
+    .name = .graphcode_windows,
+    .version = "0.1.0",
+    .fingerprint = 0x27916f97fa58b402,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "fixtures",
+        "provider-pins.json",
+        "package-metadata.json",
+        "README.md",
+    },
+}

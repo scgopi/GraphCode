@@ -13,7 +13,8 @@ param(
     "visual-baseline",
     "tdd-evidence",
     "privacy",
-    "terminal-gate"
+    "terminal-gate",
+    "windows-shell"
   )]
   [string] $Task = "all",
   [switch] $List,
@@ -38,7 +39,8 @@ $tasks = @(
   "visual-baseline",
   "tdd-evidence",
   "privacy",
-  "terminal-gate"
+  "terminal-gate",
+  "windows-shell"
 )
 
 if ($List) {
@@ -231,7 +233,7 @@ function Resolve-ZigVersion([string] $version, [string] $environmentName) {
       return (Resolve-Path -LiteralPath $candidate).Path
     }
   }
-  throw "Zig $version is required for the pinned terminal gate; set $environmentName."
+  throw "Zig $version is required for the pinned Windows provider; set $environmentName."
 }
 
 function Invoke-Task([string] $name) {
@@ -542,6 +544,37 @@ function Invoke-Task([string] $name) {
       $zig0160 = Resolve-ZigVersion "0.16.0" "GRAPHCODE_ZIG0160"
       Invoke-Native "Pinned Windows terminal gate build and smoke" {
         & (Join-Path $repoRoot "Tools\windows\terminal-gate.ps1") `
+          -WinghosttyRoot $winghosttyRoot `
+          -ZmxRoot $zmxRoot `
+          -Zig0152 $zig0152 `
+          -Zig0160 $zig0160 `
+          -Stress
+      }
+    }
+    "windows-shell" {
+      & (Join-Path $repoRoot "Tools\windows\Tests\WindowsShell.Tests.ps1")
+      if ($LASTEXITCODE -ne 0) {
+        throw "Windows shell scaffold contract failed with exit code $LASTEXITCODE"
+      }
+      $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+      $winghosttyRoot = [Environment]::GetEnvironmentVariable(
+        "GRAPHCODE_WINGHOSTTY_ROOT"
+      )
+      if (-not $winghosttyRoot) {
+        $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+      }
+      $zmxRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_ZMX_ROOT")
+      if (-not $zmxRoot) {
+        $zmxRoot = Join-Path $depotRoot "zmx-worktrees\attach"
+      }
+      if (-not (Test-Path -LiteralPath $winghosttyRoot -PathType Container) -or
+        -not (Test-Path -LiteralPath $zmxRoot -PathType Container)) {
+        throw "Windows shell provider worktrees unavailable; real smoke is mandatory."
+      }
+      $zig0152 = Resolve-ZigVersion "0.15.2" "GRAPHCODE_ZIG0152"
+      $zig0160 = Resolve-ZigVersion "0.16.0" "GRAPHCODE_ZIG0160"
+      Invoke-Native "Pinned GraphCode Windows shell build and smoke" {
+        & (Join-Path $repoRoot "Tools\windows\windows-shell.ps1") `
           -WinghosttyRoot $winghosttyRoot `
           -ZmxRoot $zmxRoot `
           -Zig0152 $zig0152 `

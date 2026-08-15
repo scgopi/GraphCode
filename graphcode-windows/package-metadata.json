@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "product": "GraphCode Windows shell",
+  "executable": "graphcode-windows.exe",
+  "platform": "windows-x86_64",
+  "installer": false,
+  "runtime": {
+    "daemon": "graphcoded.exe",
+    "terminal": "zmx.exe",
+    "host": "winghostty-win32-host.lib"
+  },
+  "providerPins": "provider-pins.json",
+  "validation": "Tools/windows/validate.ps1 -Task windows-shell"
+}

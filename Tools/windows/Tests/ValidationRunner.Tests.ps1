@@ -18,7 +18,8 @@ $expected = @(
   "visual-baseline",
   "tdd-evidence",
   "privacy",
-  "terminal-gate"
+  "terminal-gate",
+  "windows-shell"
 )
 foreach ($task in $expected) {
   if ($tasks -notcontains $task) {

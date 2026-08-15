@@ -1,0 +1,71 @@
+name: Windows shell validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-shell.yml"
+      - "graphcode-windows/**"
+      - "Tools/windows/windows-shell.ps1"
+      - "Tools/windows/validate.ps1"
+      - "Tools/windows/Tests/WindowsShell.Tests.ps1"
+      - "Tools/windows/Tests/ValidationRunner.Tests.ps1"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-shell:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install exact Zig toolchains
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $toolRoot = Join-Path $env:GITHUB_WORKSPACE ".ci-tools"
+          New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
+
+          function Install-Zig([string] $version, [string] $sha256) {
+            $archive = Join-Path $toolRoot "zig-$version.zip"
+            $directory = Join-Path $toolRoot "zig-$version"
+            Invoke-WebRequest `
+              -Uri "https://github.com/ziglang/zig/releases/download/$version/zig-x86_64-windows-$version.zip" `
+              -OutFile $archive
+            if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $sha256) {
+              throw "Zig $version archive checksum mismatch"
+            }
+            Expand-Archive -LiteralPath $archive -DestinationPath $toolRoot -Force
+            $expanded = Join-Path $toolRoot "zig-x86_64-windows-$version"
+            Move-Item -LiteralPath $expanded -Destination $directory -Force
+            return (Join-Path $directory "zig.exe")
+          }
+
+          $zig0152 = Install-Zig `
+            "0.15.2" `
+            "3A0ED1E8799A2F8CE2A6E6290A9FF22E6906F8227865911FB7DDEDC3CC14CB0C"
+          $zig0160 = Install-Zig `
+            "0.16.0" `
+            "68659EB5F1E4EB1437A722F1DD889C5A322C9954607F5EDCF337BC3684A75A7E"
+          "GRAPHCODE_ZIG0152=$zig0152" >> $env:GITHUB_ENV
+          "GRAPHCODE_ZIG0160=$zig0160" >> $env:GITHUB_ENV
+
+      - name: Checkout exact Winghostty provider
+        shell: pwsh
+        run: |
+          git clone --no-checkout https://github.com/coneilen/winghostty.git Winghostty-worktrees/host-integration
+          git -C Winghostty-worktrees/host-integration checkout --detach f5abc059e4ca58b376eb209313aca7784659c679
+
+      - name: Checkout exact zmx provider
+        shell: pwsh
+        run: |
+          git clone --no-checkout https://github.com/coneilen/zmx.git zmx-worktrees/attach
+          git -C zmx-worktrees/attach checkout --detach 858727af10cdf43d66cb3733cff58dc90ec4b3dd
+
+      - name: Verify shell contracts and pinned-provider smoke
+        shell: pwsh
+        env:
+          GRAPHCODE_WINGHOSTTY_ROOT: ${{ github.workspace }}\Winghostty-worktrees\host-integration
+          GRAPHCODE_ZMX_ROOT: ${{ github.workspace }}\zmx-worktrees\attach
+        run: ./Tools/windows/validate.ps1 -Task windows-shell

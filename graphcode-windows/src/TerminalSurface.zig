@@ -1,0 +1,593 @@
+const std = @import("std");
+const c = @import("Win32.zig").c;
+
+const allocator = std.heap.c_allocator;
+const columns: usize = 120;
+const rows: usize = 40;
+const cell_count: usize = columns * rows;
+
+const ParserState = enum { normal, escape, csi, osc };
+
+pub const Surface = struct {
+    surface: ?*c.winghostty_surface = null,
+    attach: ?std.process.Child = null,
+    session_name: []u8 = &.{},
+    destroying: bool = false,
+    destroyed: bool = false,
+    input_bytes: usize = 0,
+    output_events: usize = 0,
+    terminal_buffer: [16 * 1024]u8 = undefined,
+    terminal_buffer_len: usize = 0,
+    cells: [cell_count]c.winghostty_terminal_cell = [_]c.winghostty_terminal_cell{
+        .{ .codepoint = 0, .foreground = 0xE6E6E6, .background = 0, .flags = 0 },
+    } ** cell_count,
+    terminal_x: usize = 0,
+    terminal_y: usize = 0,
+    parser: ParserState = .normal,
+    csi_value: usize = 0,
+    csi_have_value: bool = false,
+};
+
+pub const Workspace = struct {
+    parent: c.HWND,
+    host: ?*c.winghostty_host = null,
+    surfaces: [2]Surface = .{ .{}, .{} },
+    active_surface: usize = 0,
+    allocator: std.mem.Allocator,
+    zmx_path: []u8,
+    cwd: []u8,
+    fatal_error: bool = false,
+    render_error: c.winghostty_result = c.WINGHOSTTY_OK,
+
+    pub fn init(parent: c.HWND, allocator_: std.mem.Allocator) !Workspace {
+        var workspace = Workspace{
+            .parent = parent,
+            .allocator = allocator_,
+            .zmx_path = try allocator_.dupe(u8, std.process.getEnvVarOwned(allocator_, "GRAPHCODE_ZMX") catch "zmx.exe"),
+            .cwd = try allocator_.dupe(u8, std.process.getEnvVarOwned(allocator_, "GRAPHCODE_GATE_CWD") catch "."),
+        };
+        errdefer {
+            allocator_.free(workspace.zmx_path);
+            allocator_.free(workspace.cwd);
+        }
+        if (c.winghostty_host_initialize(&workspace.host) != c.WINGHOSTTY_OK) {
+            return error.WinghosttyHostInitializeFailed;
+        }
+        return workspace;
+    }
+
+    pub fn deinit(self: *Workspace) void {
+        self.destroySurface(0);
+        self.destroySurface(1);
+        if (self.host) |host| {
+            _ = c.winghostty_host_deinitialize(host);
+            self.host = null;
+        }
+        self.allocator.free(self.zmx_path);
+        self.allocator.free(self.cwd);
+    }
+
+    pub fn openNode(self: *Workspace, index: usize, node_id: []const u8) !void {
+        if (index >= self.surfaces.len) return error.InvalidSurface;
+        self.destroySurface(index);
+        const session = try self.allocator.dupe(u8, node_id);
+        errdefer self.allocator.free(session);
+        try self.startSession(index, session);
+        var options = self.surfaceOptions(index);
+        const result = c.winghostty_host_create_surface_v2(
+            self.host,
+            self.parent,
+            &options,
+            &self.surfaces[index].surface,
+        );
+        if (result != c.WINGHOSTTY_OK or self.surfaces[index].surface == null) {
+            self.waitAttach(index);
+            return error.WinghosttySurfaceCreateFailed;
+        }
+        self.surfaces[index].session_name = session;
+        self.surfaces[index].destroyed = false;
+        self.surfaces[index].destroying = false;
+        clearCells(&self.surfaces[index]);
+    }
+
+    pub fn recreate(self: *Workspace, index: usize) !void {
+        const session = if (self.surfaces[index].session_name.len == 0) return else try self.allocator.dupe(u8, self.surfaces[index].session_name);
+        defer self.allocator.free(session);
+        self.destroySurface(index);
+        try self.openNode(index, session);
+    }
+
+    pub fn resize(self: *Workspace, origin_x: i32, origin_y: i32, width: i32, height: i32) void {
+        const graph_height = @max(1, height);
+        const half = @max(1, @divTrunc(width, 2));
+        for (&self.surfaces, 0..) |*slot, index| {
+            if (slot.surface) |surface| {
+                var bounds = c.winghostty_rect{
+                    .x = origin_x + if (index == 0) 0 else half,
+                    .y = origin_y,
+                    .width = @intCast(if (index == 0) half else width - half),
+                    .height = @intCast(graph_height),
+                };
+                _ = c.winghostty_surface_set_bounds(surface, &bounds);
+            }
+        }
+    }
+
+    pub fn poll(self: *Workspace) void {
+        self.readAttachOutput(0);
+        self.readAttachOutput(1);
+    }
+
+    pub fn focus(self: *Workspace, index: usize) void {
+        if (index >= self.surfaces.len) return;
+        self.active_surface = index;
+        for (&self.surfaces, 0..) |*slot, other_index| {
+            if (slot.surface) |surface| {
+                _ = c.winghostty_surface_set_focus(surface, if (index == other_index) 1 else 0);
+            }
+        }
+    }
+
+    pub fn send(self: *Workspace, text: []const u8) void {
+        if (self.active_surface >= self.surfaces.len) return;
+        self.writeAttachInput(self.active_surface, text);
+    }
+
+    pub fn hasSurface(self: *const Workspace, index: usize) bool {
+        return index < self.surfaces.len and self.surfaces[index].surface != null;
+    }
+
+    pub fn destroySurface(self: *Workspace, index: usize) void {
+        if (index >= self.surfaces.len) return;
+        const slot = &self.surfaces[index];
+        slot.destroying = true;
+        self.waitAttach(index);
+        if (slot.surface) |surface| {
+            _ = c.winghostty_surface_destroy(surface);
+            slot.surface = null;
+            slot.destroyed = true;
+        }
+        slot.destroying = false;
+        if (slot.session_name.len != 0) {
+            self.allocator.free(slot.session_name);
+            slot.session_name = &.{};
+        }
+    }
+
+    fn surfaceOptions(self: *Workspace, index: usize) c.winghostty_surface_options_v2 {
+        var options: c.winghostty_surface_options_v2 = undefined;
+        c.winghostty_surface_options_v2_init(&options);
+        options.bounds.x = if (index == 0) 0 else 480;
+        options.bounds.y = 0;
+        options.bounds.width = 480;
+        options.bounds.height = 240;
+        options.visible = 1;
+        options.focus = if (index == self.active_surface) 1 else 0;
+        options.theme = c.WINGHOSTTY_THEME_DARK;
+        options.font_scale = 1.0;
+        options.user_data = @ptrCast(self);
+        options.callbacks.on_exit = @ptrCast(&onExit);
+        options.callbacks.on_title = @ptrCast(&onTitle);
+        options.callbacks.on_cwd = @ptrCast(&onCwd);
+        options.callbacks.on_bell = @ptrCast(&onBell);
+        options.callbacks.on_notification = @ptrCast(&onNotification);
+        options.callbacks.on_redraw = @ptrCast(&onRedraw);
+        options.callbacks.on_focus = @ptrCast(&onFocus);
+        options.callbacks.on_fatal_error = @ptrCast(&onFatalError);
+        options.callbacks.on_dpi_changed = @ptrCast(&onDpiChanged);
+        options.callbacks.on_metrics_changed = @ptrCast(&onMetricsChanged);
+        options.callbacks.on_accessibility_selection = @ptrCast(&onAccessibilitySelection);
+        options.input_callbacks.on_key = @ptrCast(&onKey);
+        options.input_callbacks.on_text = @ptrCast(&onText);
+        options.input_callbacks.on_ime_start = @ptrCast(&onImeStart);
+        options.input_callbacks.on_ime_update = @ptrCast(&onImeUpdate);
+        options.input_callbacks.on_ime_end = @ptrCast(&onImeEnd);
+        options.input_callbacks.on_mouse = @ptrCast(&onMouse);
+        options.input_callbacks.on_selection = @ptrCast(&onSelection);
+        options.input_callbacks.on_link = @ptrCast(&onLink);
+        options.input_callbacks.on_paste = @ptrCast(&onPaste);
+        options.input_callbacks.on_clipboard_read = @ptrCast(&onClipboardRead);
+        options.input_callbacks.on_clipboard_write = @ptrCast(&onClipboardWrite);
+        options.input.cell_width = 8;
+        options.input.cell_height = 16;
+        options.input.selection_enabled = 1;
+        options.input.links_enabled = 1;
+        options.input.paste_protection = 1;
+        options.input.bracketed_paste = 1;
+        options.input.keyboard_layout = null;
+        return options;
+    }
+
+    fn startSession(self: *Workspace, index: usize, session: []const u8) !void {
+        var get_args = [_][]const u8{ self.zmx_path, "get", session };
+        const get_result = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &get_args,
+            .max_output_bytes = 16 * 1024,
+        });
+        allocator.free(get_result.stdout);
+        allocator.free(get_result.stderr);
+        var attach_args = [_][]const u8{ self.zmx_path, "attach", session };
+        var child = std.process.Child.init(&attach_args, allocator);
+        child.cwd = self.cwd;
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Ignore;
+        try child.spawn();
+        self.surfaces[index].attach = child;
+    }
+
+    fn waitAttach(self: *Workspace, index: usize) void {
+        if (self.surfaces[index].attach) |*child| {
+            _ = child.kill() catch {};
+            _ = child.wait() catch {};
+            self.surfaces[index].attach = null;
+        }
+    }
+
+    fn writeAttachInput(self: *Workspace, index: usize, bytes: []const u8) void {
+        if (bytes.len == 0) return;
+        const slot = &self.surfaces[index];
+        if (slot.attach) |*child| {
+            const stdin = child.stdin orelse return;
+            stdin.writeAll(bytes) catch {
+                self.fatal_error = true;
+                return;
+            };
+            slot.input_bytes += bytes.len;
+        }
+    }
+
+    fn readAttachOutput(self: *Workspace, index: usize) void {
+        const slot = &self.surfaces[index];
+        const child = slot.attach orelse return;
+        const stdout = child.stdout orelse return;
+        var available: c.DWORD = 0;
+        if (c.PeekNamedPipe(@ptrCast(stdout.handle), null, 0, null, &available, null) == 0) return;
+        while (available > 0) {
+            var buffer: [4096]u8 = undefined;
+            var read: c.DWORD = 0;
+            const amount = @min(available, @as(c.DWORD, @intCast(buffer.len)));
+            if (c.ReadFile(@ptrCast(stdout.handle), &buffer, amount, &read, null) == 0 or read == 0) break;
+            self.feedTerminalOutput(index, buffer[0..@intCast(read)]);
+            if (c.PeekNamedPipe(@ptrCast(stdout.handle), null, 0, null, &available, null) == 0) break;
+        }
+    }
+
+    fn feedTerminalOutput(self: *Workspace, index: usize, bytes: []const u8) void {
+        const slot = &self.surfaces[index];
+        const surface = slot.surface orelse return;
+        appendOutput(slot, bytes);
+        feedCells(slot, bytes);
+        self.render_error = c.winghostty_surface_set_terminal_cells(
+            surface,
+            columns,
+            rows,
+            &slot.cells,
+            cell_count,
+        );
+        _ = c.winghostty_surface_notify_accessibility_text(
+            surface,
+            slot.terminal_buffer[0..slot.terminal_buffer_len].ptr,
+            slot.terminal_buffer_len,
+            0,
+            slot.terminal_buffer_len,
+            0,
+            0,
+            slot.terminal_buffer_len,
+        );
+        _ = c.winghostty_surface_notify_redraw(surface);
+        slot.output_events += 1;
+    }
+};
+
+fn workspaceFromUserData(user_data: ?*anyopaque) ?*Workspace {
+    return if (user_data) |value| @ptrCast(@alignCast(value)) else null;
+}
+
+fn slotForSurface(workspace: *Workspace, surface: *c.winghostty_surface) ?*Surface {
+    for (&workspace.surfaces) |*slot| if (slot.surface == surface) return slot;
+    return null;
+}
+
+fn callbackSlot(workspace: *Workspace, surface: *c.winghostty_surface) ?*Surface {
+    const slot = slotForSurface(workspace, surface) orelse return null;
+    if (slot.destroying or slot.destroyed) return null;
+    return slot;
+}
+
+fn onExit(user_data: ?*anyopaque, surface: ?*c.winghostty_surface, status: i32) callconv(.c) void {
+    const workspace = workspaceFromUserData(user_data) orelse return;
+    if (surface) |value| _ = callbackSlot(workspace, value);
+    _ = status;
+}
+
+fn onTitle(user_data: ?*anyopaque, surface: *c.winghostty_surface, title: [*:0]const u8) callconv(.c) void {
+    _ = user_data;
+    _ = surface;
+    _ = title;
+}
+
+fn onCwd(user_data: ?*anyopaque, surface: *c.winghostty_surface, cwd: [*:0]const u8) callconv(.c) void {
+    _ = user_data;
+    _ = surface;
+    _ = cwd;
+}
+
+fn onBell(user_data: ?*anyopaque, surface: *c.winghostty_surface) callconv(.c) void {
+    _ = user_data;
+    _ = surface;
+}
+
+fn onNotification(user_data: ?*anyopaque, surface: *c.winghostty_surface, notification: [*:0]const u8) callconv(.c) void {
+    _ = user_data;
+    _ = surface;
+    _ = notification;
+}
+
+fn onRedraw(user_data: ?*anyopaque, surface: *c.winghostty_surface) callconv(.c) void {
+    const workspace = workspaceFromUserData(user_data) orelse return;
+    _ = callbackSlot(workspace, surface) orelse return;
+    if (c.winghostty_surface_make_current(surface) != c.WINGHOSTTY_OK) return;
+    _ = c.winghostty_surface_render(surface);
+    _ = c.winghostty_surface_present(surface);
+    _ = c.winghostty_surface_clear_current(surface);
+}
+
+fn onFocus(user_data: ?*anyopaque, surface: *c.winghostty_surface, focused: u8) callconv(.c) void {
+    const workspace = workspaceFromUserData(user_data) orelse return;
+    _ = callbackSlot(workspace, surface) orelse return;
+    if (focused == 0) return;
+    for (&workspace.surfaces, 0..) |*slot, index| {
+        if (slot.surface == surface) workspace.active_surface = index;
+        if (slot.surface) |other| {
+            if (other != surface) {
+                _ = c.winghostty_surface_set_focus(other, 0);
+            }
+        }
+    }
+}
+
+fn onFatalError(
+    user_data: ?*anyopaque,
+    surface: *c.winghostty_surface,
+    result: c.winghostty_result,
+    message: [*:0]const u8,
+) callconv(.c) void {
+    const workspace = workspaceFromUserData(user_data) orelse return;
+    _ = callbackSlot(workspace, surface) orelse return;
+    _ = result;
+    _ = message;
+    workspace.fatal_error = true;
+}
+
+fn onDpiChanged(user_data: ?*anyopaque, surface: *c.winghostty_surface, dpi: u32, scale: f32) callconv(.c) void {
+    _ = user_data;
+    _ = surface;
+    _ = dpi;
+    _ = scale;
+}
+
+fn onMetricsChanged(user_data: ?*anyopaque, surface: *c.winghostty_surface, metrics: *const c.winghostty_cell_metrics) callconv(.c) void {
+    _ = user_data;
+    _ = surface;
+    _ = metrics;
+}
+
+fn onAccessibilitySelection(user_data: ?*anyopaque, surface: *c.winghostty_surface, start: u64, end: u64) callconv(.c) void {
+    _ = user_data;
+    _ = surface;
+    _ = start;
+    _ = end;
+}
+
+fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c.winghostty_key_event) callconv(.c) void {
+    const workspace = workspaceFromUserData(user_data) orelse return;
+    _ = callbackSlot(workspace, surface) orelse return;
+    if (event.action == c.WINGHOSTTY_KEY_RELEASE) return;
+    const bytes: []const u8 = switch (event.virtual_key) {
+        c.VK_RETURN => "\r",
+        c.VK_BACK => "\x08",
+        c.VK_TAB => "\t",
+        c.VK_ESCAPE => "\x1b",
+        c.VK_UP => "\x1b[A",
+        c.VK_DOWN => "\x1b[B",
+        c.VK_LEFT => "\x1b[D",
+        c.VK_RIGHT => "\x1b[C",
+        else => return,
+    };
+    const index = surfaceIndex(workspace, surface) orelse return;
+    workspace.writeAttachInput(index, bytes);
+}
+
+fn onText(user_data: ?*anyopaque, surface: *c.winghostty_surface, text: [*:0]const u8, length: u32) callconv(.c) void {
+    const workspace = workspaceFromUserData(user_data) orelse return;
+    _ = callbackSlot(workspace, surface) orelse return;
+    const index = surfaceIndex(workspace, surface) orelse return;
+    workspace.writeAttachInput(index, text[0..length]);
+}
+
+fn onImeStart(user_data: ?*anyopaque, surface: *c.winghostty_surface) callconv(.c) void {
+    _ = user_data;
+    _ = surface;
+}
+
+fn onImeUpdate(user_data: ?*anyopaque, surface: *c.winghostty_surface, text: [*:0]const u8, length: u32, cursor: u32) callconv(.c) void {
+    _ = user_data;
+    _ = surface;
+    _ = text;
+    _ = length;
+    _ = cursor;
+}
+
+fn onImeEnd(user_data: ?*anyopaque, surface: *c.winghostty_surface) callconv(.c) void {
+    _ = user_data;
+    _ = surface;
+}
+
+fn onMouse(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c.winghostty_mouse_event) callconv(.c) void {
+    _ = user_data;
+    _ = surface;
+    _ = event;
+}
+
+fn onSelection(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c.winghostty_selection_event) callconv(.c) void {
+    _ = user_data;
+    _ = surface;
+    _ = event;
+}
+
+fn onLink(
+    user_data: ?*anyopaque,
+    surface: *c.winghostty_surface,
+    link: [*:0]const u8,
+    hovered: u8,
+    clicked: u8,
+) callconv(.c) void {
+    _ = user_data;
+    _ = surface;
+    _ = link;
+    _ = hovered;
+    _ = clicked;
+}
+
+fn onPaste(user_data: ?*anyopaque, surface: *c.winghostty_surface, text: [*:0]const u8, length: u32, bracketed: u8) callconv(.c) void {
+    const workspace = workspaceFromUserData(user_data) orelse return;
+    _ = callbackSlot(workspace, surface) orelse return;
+    const index = surfaceIndex(workspace, surface) orelse return;
+    workspace.writeAttachInput(index, text[0..length]);
+    _ = bracketed;
+}
+
+fn onClipboardRead(
+    user_data: ?*anyopaque,
+    surface: *c.winghostty_surface,
+    format: u32,
+    text: [*:0]const u8,
+    length: u32,
+) callconv(.c) void {
+    _ = user_data;
+    _ = surface;
+    _ = format;
+    _ = text;
+    _ = length;
+}
+
+fn onClipboardWrite(
+    user_data: ?*anyopaque,
+    surface: *c.winghostty_surface,
+    format: u32,
+    text: [*:0]const u8,
+    length: u32,
+) callconv(.c) void {
+    _ = user_data;
+    _ = surface;
+    _ = format;
+    _ = text;
+    _ = length;
+}
+
+fn surfaceIndex(workspace: *Workspace, surface: *c.winghostty_surface) ?usize {
+    for (workspace.surfaces, 0..) |slot, index| if (slot.surface == surface) return index;
+    return null;
+}
+
+fn appendOutput(slot: *Surface, bytes: []const u8) void {
+    if (bytes.len >= slot.terminal_buffer.len) {
+        @memcpy(&slot.terminal_buffer, bytes[bytes.len - slot.terminal_buffer.len ..]);
+        slot.terminal_buffer_len = slot.terminal_buffer.len;
+        return;
+    }
+    if (slot.terminal_buffer_len + bytes.len > slot.terminal_buffer.len) {
+        const overflow = slot.terminal_buffer_len + bytes.len - slot.terminal_buffer.len;
+        std.mem.copyForwards(u8, slot.terminal_buffer[0 .. slot.terminal_buffer_len - overflow], slot.terminal_buffer[overflow..slot.terminal_buffer_len]);
+        slot.terminal_buffer_len -= overflow;
+    }
+    @memcpy(slot.terminal_buffer[slot.terminal_buffer_len..][0..bytes.len], bytes);
+    slot.terminal_buffer_len += bytes.len;
+}
+
+fn clearCells(slot: *Surface) void {
+    for (&slot.cells) |*cell| cell.* = .{ .codepoint = 0, .foreground = 0xE6E6E6, .background = 0, .flags = 0 };
+    slot.terminal_x = 0;
+    slot.terminal_y = 0;
+}
+
+fn advanceLine(slot: *Surface) void {
+    slot.terminal_x = 0;
+    if (slot.terminal_y + 1 < rows) {
+        slot.terminal_y += 1;
+        return;
+    }
+    std.mem.copyForwards(c.winghostty_terminal_cell, slot.cells[0 .. cell_count - columns], slot.cells[columns..]);
+    for (slot.cells[cell_count - columns ..]) |*cell| cell.* = .{ .codepoint = 0, .foreground = 0xE6E6E6, .background = 0, .flags = 0 };
+}
+
+fn putCodepoint(slot: *Surface, codepoint: u32) void {
+    if (slot.terminal_x >= columns) advanceLine(slot);
+    slot.cells[slot.terminal_y * columns + slot.terminal_x] = .{ .codepoint = codepoint, .foreground = 0xE6E6E6, .background = 0, .flags = 0 };
+    slot.terminal_x += 1;
+}
+
+fn finishCsi(slot: *Surface, final: u8) void {
+    const value = if (slot.csi_have_value) slot.csi_value else 1;
+    switch (final) {
+        'A' => slot.terminal_y -|= value,
+        'B' => slot.terminal_y = @min(rows - 1, slot.terminal_y + value),
+        'C' => slot.terminal_x = @min(columns, slot.terminal_x + value),
+        'D' => slot.terminal_x -|= value,
+        'J' => if (slot.csi_have_value and slot.csi_value == 2) clearCells(slot),
+        'K' => {
+            const start = slot.terminal_y * columns + slot.terminal_x;
+            for (slot.cells[start..][0 .. columns - slot.terminal_x]) |*cell| cell.* = .{ .codepoint = 0, .foreground = 0xE6E6E6, .background = 0, .flags = 0 };
+        },
+        else => {},
+    }
+    slot.csi_value = 0;
+    slot.csi_have_value = false;
+}
+
+fn feedCells(slot: *Surface, bytes: []const u8) void {
+    for (bytes) |byte| switch (slot.parser) {
+        .normal => switch (byte) {
+            0x1B => slot.parser = .escape,
+            '\r' => slot.terminal_x = 0,
+            '\n' => advanceLine(slot),
+            '\x08' => slot.terminal_x -|= 1,
+            '\t' => slot.terminal_x = @min(columns, (slot.terminal_x + 8) & ~@as(usize, 7)),
+            0x20...0x7E => putCodepoint(slot, byte),
+            else => {},
+        },
+        .escape => switch (byte) {
+            '[' => {
+                slot.parser = .csi;
+                slot.csi_value = 0;
+                slot.csi_have_value = false;
+            },
+            ']' => slot.parser = .osc,
+            'c' => {
+                clearCells(slot);
+                slot.parser = .normal;
+            },
+            else => slot.parser = .normal,
+        },
+        .csi => switch (byte) {
+            '0'...'9' => {
+                slot.csi_have_value = true;
+                slot.csi_value = @min(9999, slot.csi_value * 10 + (byte - '0'));
+            },
+            0x40...0x7E => {
+                finishCsi(slot, byte);
+                slot.parser = .normal;
+            },
+            else => {},
+        },
+        .osc => {
+            if (byte == 0x07) {
+                slot.parser = .normal;
+            } else if (byte == 0x1B) {
+                slot.parser = .escape;
+            }
+        },
+    };
+}
