@@ -67,12 +67,16 @@ pub fn paint(
     fill(hdc, client, Tokens.canvas_tone);
     header(hdc, allocator, client.right, status);
     Sidebar.draw(hdc, model, status, allocator, client.bottom, sidebar_scroll);
+    attentionRail(hdc, allocator, model, client.right);
 
     const graph_bounds = rect(
         Tokens.sidebar_width,
         Tokens.header_height,
         client.right,
-        @max(Tokens.header_height + 1, client.bottom - Tokens.workspace_height),
+        @max(
+            Tokens.header_height + 1,
+            client.bottom - Tokens.workspace_height - Tokens.activity_strip_height,
+        ),
     );
     fill(hdc, graph_bounds, Tokens.canvas_tone);
     const saved = c.SaveDC(hdc);
@@ -87,12 +91,53 @@ pub fn paint(
         drawText(hdc, allocator, "Open a project to view its graph", Tokens.sidebar_width + 32, 120, 18, 0x00B8B8B8);
     }
     _ = c.RestoreDC(hdc, saved);
+    activityStrip(
+        hdc,
+        allocator,
+        model,
+        rect(0, client.bottom - Tokens.workspace_height - Tokens.activity_strip_height,
+            client.right, client.bottom - Tokens.workspace_height),
+    );
 }
 
 fn header(hdc: c.HDC, allocator: std.mem.Allocator, width: i32, status: []const u8) void {
     fill(hdc, rect(0, 0, width, Tokens.header_height), Tokens.window_tone);
     drawText(hdc, allocator, "GraphCode Windows", 16, 8, 15, 0x00FFFFFF);
     drawText(hdc, allocator, status, width - 320, 9, 12, 0x00A8A8A8);
+}
+
+fn attentionRail(
+    hdc: c.HDC,
+    allocator: std.mem.Allocator,
+    model: *const GraphModel.Model,
+    width: i32,
+) void {
+    if (model.attentionCount() == 0) return;
+    var count: [32]u8 = undefined;
+    const label = if (model.attentionCount() == 1)
+        "1 loop needs you"
+    else
+        std.fmt.bufPrint(&count, "{d} loops need you", .{model.attentionCount()}) catch "loops need you";
+    fill(hdc, rect(Tokens.sidebar_width + 20, Tokens.header_height + 12, width - 20,
+        Tokens.header_height + 43), 0x002D2418);
+    drawText(hdc, allocator, label, Tokens.sidebar_width + 34, Tokens.header_height + 21, 12, 0x00FFCD7A);
+    drawText(hdc, allocator, "Ctrl+Tab review", Tokens.sidebar_width + 210, Tokens.header_height + 21, 11, 0x00B8B8B8);
+}
+
+fn activityStrip(
+    hdc: c.HDC,
+    allocator: std.mem.Allocator,
+    model: *const GraphModel.Model,
+    bounds: c.RECT,
+) void {
+    fill(hdc, bounds, 0x001D1D21);
+    drawText(hdc, allocator, "ACTIVITY", bounds.left + 16, bounds.top + 10, 10, 0x007A7A7A);
+    var x = bounds.left + 86;
+    for (model.activity.items[0..@min(model.activity.items.len, 4)]) |event| {
+        drawText(hdc, allocator, event.title, x, bounds.top + 9, 11, 0x00D0D0D0);
+        x += 150;
+        if (x > bounds.right - 100) break;
+    }
 }
 
 fn drawGrid(hdc: c.HDC, bounds: c.RECT, state: *const CanvasState) void {

@@ -157,30 +157,6 @@ pub fn draw(
         }
         drawText(hdc, allocator, row.title, x, row.bounds.top + 7, size, color);
     }
-    drawText(hdc, allocator, status, 18, @max(Tokens.header_height, client_bottom - 22), 11, 0x00909090);
-}
-
-fn icon(kind: RowKind) []const u8 {
-    return switch (kind) {
-        .overview => "◉",
-        .quick_chats => "••",
-        .local_section, .remote_section => "",
-        .project => "▰",
-        .loop => "·",
-    };
-}
-
-test "sidebar rows include overview, chats, and daemon projects with loop children" {
-    const allocator = std.testing.allocator;
-    const frame = try std.fs.cwd().readFileAlloc(allocator, "fixtures/sidebar-recent-projects.json", 64 * 1024);
-    defer allocator.free(frame);
-    var model = GraphModel.Model.init(allocator);
-    defer model.deinit();
-    _ = try model.updateFromFrame(frame);
-    const graph_frame =
-        \\{"version":2,"kind":"event","sequence":5,"event":{"graphChanged":{"id":"graph","project":{"path":"C:\\work\\local","name":"Local Graph"},"nodes":[{"id":"node-a","title":"Loop A","loopType":"turnBased","state":"running","activity":"","presence":{"presence":"busy"}}],"edges":[]}}}
-    ;
-    _ = try model.updateFromFrame(graph_frame);
     var rows = try buildRows(&model, allocator, 800);
     defer rows.deinit();
     try std.testing.expectEqual(RowKind.overview, rows.items[0].kind);
@@ -201,6 +177,30 @@ test "sidebar layout clips and hit-tests many projects in a short viewport" {
         const path = try std.fmt.allocPrint(std.testing.allocator, "C:\\work\\project-{d}", .{index});
         const name = try std.fmt.allocPrint(std.testing.allocator, "Project {d}", .{index});
         try model.recent_projects.append(.{ .path = path, .name = name });
+=======
+    if (model.graph) |graph| {
+        drawText(hdc, allocator, "Open", 18, y + 10, 14, 0x00B8B8B8);
+        drawText(hdc, allocator, graph.project.name, 24, y + 36, 13, 0x00FFFFFF);
+        y += 62;
+        drawText(hdc, allocator, "Worktrees", 18, y + 10, 11, 0x007A7A7A);
+        drawText(
+            hdc,
+            allocator,
+            "Inspect live repository hygiene",
+            24,
+            y + 30,
+            11,
+            0x00B8B8B8,
+        );
+        y += 54;
+    }
+    if (model.attentionCount() != 0) {
+        drawText(hdc, allocator, "Needs you", 18, y + 10, 11, 0x00FFCD7A);
+        var attention_y = y + 30;
+        for (model.attention.items[0..@min(model.attention.items.len, 4)]) |node| {
+            drawText(hdc, allocator, node.title, 24, attention_y, 11, 0x00E6E6E6);
+            attention_y += 19;
+        }
     }
     var rows = try buildRows(&model, std.testing.allocator, 120);
     defer rows.deinit();

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Wire = @import("Wire.zig");
+pub const WorktreeSummary = @import("WorktreeStatus.zig").Summary;
 
 pub const Node = struct {
     id: []u8,
@@ -8,6 +9,11 @@ pub const Node = struct {
     state: []u8,
     activity: []u8,
     presence: []u8,
+};
+
+pub const ActivityEvent = struct {
+    title: []u8,
+    state: []u8,
 };
 
 pub const Edge = struct {
@@ -42,17 +48,28 @@ pub const Model = struct {
     graph: ?Graph = null,
     selected_node: ?usize = null,
     last_sequence: u64 = 0,
+    attention: std.array_list.Managed(Node) ,
+    activity: std.array_list.Managed(ActivityEvent),
 
     pub fn init(allocator: std.mem.Allocator) Model {
         return .{
             .allocator = allocator,
             .recent_projects = std.array_list.Managed(Project).init(allocator),
+            .attention = std.array_list.Managed(Node).init(allocator),
+            .activity = std.array_list.Managed(ActivityEvent).init(allocator),
         };
     }
 
     pub fn deinit(self: *Model) void {
         for (self.recent_projects.items) |project| freeProject(self.allocator, project);
         self.recent_projects.deinit();
+        for (self.attention.items) |node| freeNode(self.allocator, node);
+        self.attention.deinit();
+        for (self.activity.items) |event| {
+            self.allocator.free(event.title);
+            self.allocator.free(event.state);
+        }
+        self.activity.deinit();
         if (self.graph) |*graph| freeGraph(self.allocator, graph);
     }
 
@@ -74,6 +91,10 @@ pub const Model = struct {
             },
             else => return Wire.eventKind(frame),
         }
+    }
+
+    pub fn attentionCount(self: *const Model) usize {
+        return self.attention.items.len;
     }
 
     pub fn selected(self: *const Model) ?*const Node {
@@ -140,11 +161,84 @@ pub const Model = struct {
                 }
             }
         }
+        self.recordActivity(graph);
+        self.replaceAttention(&graph);
         if (self.graph) |*old| freeGraph(self.allocator, old);
         self.graph = graph;
         if (graph.nodes.items.len == 0) self.selected_node = null else if (self.selected_node == null) self.selected_node = 0;
     }
+
+    fn replaceAttention(self: *Model, graph: *const Graph) void {
+        for (self.attention.items) |node| freeNode(self.allocator, node);
+        self.attention.clearRetainingCapacity();
+        for (graph.nodes.items) |node| {
+            if (!needsAttention(node)) continue;
+            const copy = cloneNode(self.allocator, node) catch continue;
+            const rank = attentionRank(copy);
+            var index: usize = 0;
+            while (index < self.attention.items.len and
+                attentionRank(self.attention.items[index]) <= rank) : (index += 1) {}
+            self.attention.insert(index, copy) catch {
+                freeNode(self.allocator, copy);
+            };
+        }
+    }
+
+    fn recordActivity(self: *Model, next: Graph) void {
+        const previous = self.graph orelse return;
+        for (next.nodes.items) |node| {
+            const old = findNode(previous.nodes.items, node.id) orelse continue;
+            if (std.mem.eql(u8, old.state, node.state) and
+                std.mem.eql(u8, old.presence, node.presence)) continue;
+            const title = self.allocator.dupe(u8, node.title) catch continue;
+            const state = self.allocator.dupe(u8, node.state) catch {
+                self.allocator.free(title);
+                continue;
+            };
+            const event = ActivityEvent{ .title = title, .state = state };
+            self.activity.insert(0, event) catch {
+                self.allocator.free(event.title);
+                self.allocator.free(event.state);
+                continue;
+            };
+            if (self.activity.items.len > 32) {
+                const removed = self.activity.pop();
+                self.allocator.free(removed.title);
+                self.allocator.free(removed.state);
+            }
+        }
+    }
 };
+
+fn findNode(nodes: []const Node, id: []const u8) ?Node {
+    for (nodes) |node| if (std.mem.eql(u8, node.id, id)) return node;
+    return null;
+}
+
+fn needsAttention(node: Node) bool {
+    return std.mem.eql(u8, node.state, "failed") or
+        std.mem.eql(u8, node.state, "stalled") or
+        std.mem.eql(u8, node.state, "blocked") or
+        std.mem.eql(u8, node.presence, "awaitingInput");
+}
+
+fn attentionRank(node: Node) u8 {
+    if (std.mem.eql(u8, node.state, "failed")) return 0;
+    if (std.mem.eql(u8, node.state, "stalled")) return 1;
+    if (std.mem.eql(u8, node.presence, "awaitingInput")) return 2;
+    return 3;
+}
+
+fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
+    return .{
+        .id = try allocator.dupe(u8, node.id),
+        .title = try allocator.dupe(u8, node.title),
+        .loop_type = try allocator.dupe(u8, node.loop_type),
+        .state = try allocator.dupe(u8, node.state),
+        .activity = try allocator.dupe(u8, node.activity),
+        .presence = try allocator.dupe(u8, node.presence),
+    };
+}
 
 fn decodeNodes(
     allocator: std.mem.Allocator,
@@ -362,4 +456,45 @@ test "attention fixture preserves awaiting input and stranded edge metadata" {
     try std.testing.expectEqualStrings("awaitingInput", graph.nodes.items[0].presence);
     try std.testing.expectEqualStrings("handoff", graph.edges.items[0].kind);
     try std.testing.expect(!graph.edges.items[0].fired);
+
+test "attention rollup surfaces awaiting input and failures" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const frame =
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"g","project":{"path":"C:\\work\\graph","name":"Graph","remote":false},"nodes":[{"id":"a","title":"Question","loopType":"turnBased","state":"running","presence":{"presence":"awaitingInput","confidence":"reported"}},{"id":"b","title":"Broken","loopType":"goalBased","state":"failed","presence":{"presence":"idle","confidence":"reported"}}],"edges":[]}}}
+    ;
+    _ = try model.updateFromFrame(frame);
+    try std.testing.expectEqual(@as(usize, 2), model.attentionCount());
+    try std.testing.expectEqualStrings("Broken", model.attention.items[0].title);
+    try std.testing.expectEqualStrings("Question", model.attention.items[1].title);
 }
+
+test "activity log records state transitions but not initial snapshot" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const first =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"g","project":{"path":"C:\\work\\graph","name":"Graph","remote":false},"nodes":[{"id":"a","title":"Worker","loopType":"goalBased","state":"running","presence":{"presence":"busy","confidence":"reported"}}],"edges":[]}}}
+    ;
+    const second =
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"g","project":{"path":"C:\\work\\graph","name":"Graph","remote":false},"nodes":[{"id":"a","title":"Worker","loopType":"goalBased","state":"succeeded","presence":{"presence":"idle","confidence":"reported"}}],"edges":[]}}}
+    ;
+    _ = try model.updateFromFrame(first);
+    try std.testing.expectEqual(@as(usize, 0), model.activity.items.len);
+    _ = try model.updateFromFrame(second);
+    try std.testing.expectEqual(@as(usize, 1), model.activity.items.len);
+    try std.testing.expectEqualStrings("Worker", model.activity.items[0].title);
+}
+
+test "attention fixture keeps real daemon state and worktree context visible" {
+    const frame = try std.fs.cwd().readFileAlloc(
+        std.testing.allocator,
+        "fixtures/daemon-v2-attention-worktree.json",
+        64 * 1024,
+    );
+    defer std.testing.allocator.free(frame);
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(frame);
+    try std.testing.expectEqualStrings("Attention fixture", model.graph.?.project.name);
+    try std.testing.expectEqual(@as(usize, 2), model.attentionCount());
+    try std.testing.expectEqualStrings("Failed check", model.attention.items[0].title);

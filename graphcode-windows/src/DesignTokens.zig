@@ -22,6 +22,7 @@ pub const canvas_grid_cell: i32 = 24;
 pub const sidebar_width: i32 = 220;
 pub const header_height: i32 = 34;
 pub const workspace_height: i32 = 250;
+pub const activity_strip_height: i32 = 48;
 
 pub fn rgb(color: Color) u32 {
     return color & 0x00FFFFFF;
