@@ -197,8 +197,7 @@ pub fn draw(
         }
     }
 
-    const section_y = worktreeSectionBottom(model.recent_projects.items.len,
-        if (inspection) |value| value.entries.items.len else 0) - scroll_offset;
+    const section_y = sidebarSectionBottom(model, inspection) - scroll_offset;
     if (model.attentionCount() != 0) {
         drawText(hdc, allocator, "Needs you", 18, section_y + 10, 11, 0x00FFCD7A);
         var attention_y = section_y + 30;
@@ -291,10 +290,19 @@ pub fn worktreeSectionBottom(project_count: usize, worktree_count: usize) i32 {
 }
 
 pub fn contentBottom(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection) i32 {
-    const rows = if (inspection) |value| value.entries.items.len else 0;
-    const section = worktreeSectionBottom(model.recent_projects.items.len, rows);
+    const section = sidebarSectionBottom(model, inspection);
     return if (model.attentionCount() == 0) section else section + 30 +
         @as(i32, @intCast(@min(model.attentionCount(), 4))) * 19;
+}
+
+pub fn sidebarSectionBottom(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection) i32 {
+    var bottom = Tokens.header_height + 78 +
+        @as(i32, @intCast(model.recent_projects.items.len * 24));
+    if (model.graph != null) {
+        bottom += 62 + 54;
+        if (inspection) |value| bottom += 24 + @as(i32, @intCast(value.entries.items.len * 34)) + 10;
+    }
+    return bottom;
 }
 
 pub fn maxScroll(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection, viewport_bottom: i32) i32 {
@@ -354,6 +362,14 @@ test "sidebar scroll clamps overflow, shrink, and resize" {
         .worktree_path = try std.testing.allocator.dupe(u8, ""),
         .worktree_branch = try std.testing.allocator.dupe(u8, ""),
     });
+    model.graph = .{
+        .project = .{
+            .path = try std.testing.allocator.dupe(u8, "project-0"),
+            .name = try std.testing.allocator.dupe(u8, "Project 0"),
+        },
+        .nodes = std.array_list.Managed(GraphModel.Node).init(std.testing.allocator),
+        .edges = std.array_list.Managed(GraphModel.Edge).init(std.testing.allocator),
+    };
     for (0..3) |_| try model.activity.append(.{
         .title = try std.testing.allocator.dupe(u8, "Activity"),
         .state = try std.testing.allocator.dupe(u8, "succeeded"),
@@ -405,6 +421,18 @@ test "sidebar scroll clamps overflow, shrink, and resize" {
     try std.testing.expectEqual(@as(i32, 0), scroll);
     try std.testing.expectEqual(@as(i32, 0), clampScroll(-50, reduced_max));
     inspection.entries.deinit();
+}
+
+test "sidebar without graph counts only static rendered content" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    try model.recent_projects.append(.{
+        .path = try std.testing.allocator.dupe(u8, "project"),
+        .name = try std.testing.allocator.dupe(u8, "Project"),
+    });
+    const no_graph_max = maxScroll(&model, null, 100);
+    try std.testing.expectEqual(@as(i32, Tokens.header_height + 78 + 24 - 100), no_graph_max);
+    try std.testing.expectEqual(no_graph_max, clampScroll(80, no_graph_max));
 }
 
 fn rect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {
