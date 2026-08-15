@@ -578,3 +578,48 @@ test "global overview command uses the daemon command shape" {
     defer std.testing.allocator.free(command);
     try std.testing.expectEqualStrings("{\"openGlobalGraph\":{}}", command);
 }
+
+test "v2 edge fixtures exactly match Zig-generated request envelopes" {
+    const allocator = std.testing.allocator;
+    const create_inner = try commandGraphCreateEdge(
+        allocator,
+        "C:\\work\\graph",
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "handoff",
+    );
+    defer allocator.free(create_inner);
+    const create = try v2Request(
+        allocator,
+        "00000000-0000-4000-8000-000000000005",
+        create_inner,
+    );
+    defer allocator.free(create);
+    const expected_create = try std.fs.cwd().readFileAlloc(
+        allocator,
+        "fixtures/daemon-v2-create-edge.json",
+        16 * 1024,
+    );
+    defer allocator.free(expected_create);
+    try std.testing.expectEqualStrings(expected_create, create);
+
+    const delete_inner = try commandGraphDeleteEdge(
+        allocator,
+        "C:\\work\\graph",
+        "33333333-3333-4333-8333-333333333333",
+    );
+    defer allocator.free(delete_inner);
+    const delete = try v2Request(
+        allocator,
+        "00000000-0000-4000-8000-000000000006",
+        delete_inner,
+    );
+    defer allocator.free(delete);
+    const expected_delete = try std.fs.cwd().readFileAlloc(
+        allocator,
+        "fixtures/daemon-v2-delete-edge.json",
+        16 * 1024,
+    );
+    defer allocator.free(expected_delete);
+    try std.testing.expectEqualStrings(expected_delete, delete);
+}

@@ -118,29 +118,33 @@ pub const DaemonClient = struct {
         support_directory: []const u8,
     ) !void {
         _ = self;
-        if (pipe_override.len != 0 and
-            (!std.mem.startsWith(u8, pipe_override, "\\\\.\\pipe\\") or pipe_override.len > 240))
+        const allocator = std.heap.page_allocator;
+        const support = try supportDirectoryFor(allocator, if (support_directory.len == 0) null else support_directory);
+        defer allocator.free(support);
+        try validateSupportDirectory(allocator, support);
+        const endpoint = try endpointNameFor(allocator, pipe_override, support);
+        defer allocator.free(endpoint);
+        if (!std.mem.startsWith(u8, endpoint, "\\\\.\\pipe\\") or endpoint.len > 240)
             return error.InvalidDaemonPipe;
-        if (support_directory.len == 0) return;
-        const normalized = try normalizedSupportPath(std.heap.page_allocator, support_directory);
+    }
+
+    fn validateSupportDirectory(allocator: std.mem.Allocator, support_directory: []const u8) !void {
+        const normalized = try normalizedSupportPath(allocator, support_directory);
         defer std.heap.page_allocator.free(normalized);
-        const wide = try utf8ToWide(std.heap.page_allocator, normalized);
-        defer std.heap.page_allocator.free(wide);
+        const wide = try utf8ToWide(allocator, normalized);
+        defer allocator.free(wide);
         const attributes = c.GetFileAttributesW(wide.ptr);
         if (attributes == c.INVALID_FILE_ATTRIBUTES or
             (attributes & c.FILE_ATTRIBUTE_DIRECTORY) == 0)
             return error.SupportDirectoryMissing;
-        const secret_path = try std.fs.path.join(
-            std.heap.page_allocator,
-            &.{ normalized, ".graphcode-rendezvous.secret" },
-        );
-        defer std.heap.page_allocator.free(secret_path);
+        const secret_path = try std.fs.path.join(allocator, &.{ normalized, ".graphcode-rendezvous.secret" });
+        defer allocator.free(secret_path);
         const secret = std.fs.cwd().readFileAlloc(
-            std.heap.page_allocator,
+            allocator,
             secret_path,
             4096,
         ) catch return error.SupportSecretMissing;
-        defer std.heap.page_allocator.free(secret);
+        defer allocator.free(secret);
         if (secret.len != 32 or std.mem.allEqual(u8, secret, 0))
             return error.SupportSecretInvalid;
     }
@@ -827,10 +831,19 @@ fn endpointName(allocator: std.mem.Allocator) ![]u8 {
         return override;
     } else |_| {}
 
-    const sid = try currentSID(allocator);
-    defer allocator.free(sid);
     const support = try supportDirectory(allocator);
     defer allocator.free(support);
+    return endpointNameFor(allocator, "", support);
+}
+
+fn endpointNameFor(
+    allocator: std.mem.Allocator,
+    pipe_override: []const u8,
+    support: []const u8,
+) ![]u8 {
+    if (pipe_override.len != 0) return allocator.dupe(u8, pipe_override);
+    const sid = try currentSID(allocator);
+    defer allocator.free(sid);
     const support_identity = normalizedSupportPath(allocator, support) catch
         return error.EndpointHashFailed;
     defer allocator.free(support_identity);
@@ -851,6 +864,23 @@ fn endpointName(allocator: std.mem.Allocator) ![]u8 {
 }
 
 fn supportDirectory(allocator: std.mem.Allocator) ![]u8 {
+    return supportDirectoryFor(allocator, null);
+}
+
+fn supportDirectoryFor(allocator: std.mem.Allocator, override: ?[]const u8) ![]u8 {
+    if (override) |configured| {
+        if (configured.len == 0) return supportDirectoryFor(allocator, null);
+        const value = try allocator.dupe(u8, configured);
+        if (isAbsoluteWindowsPath(value)) return value;
+        const home = std.process.getEnvVarOwned(allocator, "USERPROFILE") catch
+            return value;
+        defer allocator.free(home);
+        const joined = std.fs.path.join(allocator, &.{ home, value }) catch {
+            return value;
+        };
+        allocator.free(value);
+        return joined;
+    }
     if (std.process.getEnvVarOwned(allocator, "GRAPHCODE_SUPPORT_DIR")) |value| {
         if (isAbsoluteWindowsPath(value)) return value;
         const home = std.process.getEnvVarOwned(allocator, "USERPROFILE") catch
