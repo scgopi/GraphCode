@@ -33,14 +33,37 @@ function Assert-Equal([string] $actual, [string] $expected, [string] $label) {
 }
 
 function Assert-HistoryContains([string] $name, [string] $marker, [string] $label) {
-  $history = (& $zmx history $name --vt 2>&1 | Out-String)
-  if ($LASTEXITCODE -ne 0 -or $history -notmatch [regex]::Escape($marker)) {
-    throw "$label did not contain the persistent VT marker '$marker'"
+  for ($attempt = 0; $attempt -lt 40; $attempt++) {
+    $history = (& $zmx history $name --vt 2>&1 | Out-String)
+    if ($LASTEXITCODE -eq 0 -and
+      $history -match [regex]::Escape($marker)) {
+      return
+    }
+    Start-Sleep -Milliseconds 250
   }
+  throw "$label did not contain the persistent VT marker '$marker'"
 }
 
-Assert-Equal (git -C $WinghosttyRoot rev-parse HEAD) $pins.winghostty.sha "Winghostty pin"
-Assert-Equal (git -C $ZmxRoot rev-parse HEAD) $pins.zmx.sha "zmx pin"
+function Assert-PinnedCleanWorktree(
+  [string] $root,
+  [string] $expectedSha,
+  [string] $label
+) {
+  if (-not (Test-Path -LiteralPath (Join-Path $root ".git"))) {
+    throw "$label provider root is not a Git worktree: $root"
+  }
+  $status = @(git -C $root status --porcelain --untracked-files=all)
+  if ($LASTEXITCODE -ne 0) {
+    throw "$label provider status failed"
+  }
+  if ($status.Count -ne 0) {
+    throw "$label provider worktree is dirty; use a clean pinned worktree or immutable artifact"
+  }
+  Assert-Equal (git -C $root rev-parse HEAD) $expectedSha "$label pin"
+}
+
+Assert-PinnedCleanWorktree $WinghosttyRoot $pins.winghostty.sha "Winghostty"
+Assert-PinnedCleanWorktree $ZmxRoot $pins.zmx.sha "zmx"
 
 try {
   if (-not $SkipBuild) {

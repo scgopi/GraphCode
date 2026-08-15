@@ -40,7 +40,7 @@ $pins = Get-Content -LiteralPath (Join-Path $gateRoot "provider-pins.json") -Raw
   ConvertFrom-Json
 Assert-Contract ($pins.schemaVersion -eq 1) "provider pin schema is not 1"
 Assert-Contract ($pins.winghostty.sha -eq
-  "a3786b20b2f96325b800814f4f0f8dba0c789d8a") "Winghostty SHA is not exact"
+  "4777a7493ab05f83df207abb97b16d703a1a7eba") "Winghostty SHA is not exact"
 Assert-Contract ($pins.zmx.sha -eq
   "858727af10cdf43d66cb3733cff58dc90ec4b3dd") "zmx SHA is not exact"
 Assert-Contract ($pins.winghostty.remoteUrl -eq
@@ -69,6 +69,9 @@ foreach ($token in @(
     "winghostty_surface_copy_accessibility_range",
     "winghostty_surface_render",
     "winghostty_surface_present",
+    "winghostty_surface_set_terminal_cells",
+    "feedTerminalCells",
+    "terminal_cells",
     "lastRenderError",
     "zmx attach",
     "PeekNamedPipe",
@@ -102,7 +105,15 @@ Assert-Contract ($source.Contains("TranslateMessage")) `
   "top-level window does not own message translation"
 
 $harness = Get-Content -LiteralPath (Join-Path $gateRoot "..\..\..\Tools\windows\terminal-gate.ps1") -Raw
-foreach ($token in @("zmx send", "history", "--vt", "same-session restart", "exit 0")) {
+foreach ($token in @(
+    "zmx send",
+    "history",
+    "--vt",
+    "same-session restart",
+    "Assert-PinnedCleanWorktree",
+    "status --porcelain",
+    "exit 0"
+  )) {
   Assert-Contract ($harness.Contains($token)) `
     "smoke harness is missing persistent-session proof: $token"
 }
@@ -112,7 +123,8 @@ foreach ($token in @(
     "terminal-gate.ps1",
     "Pinned Windows terminal gate build and smoke",
     "GRAPHCODE_WINGHOSTTY_ROOT",
-    "provider worktrees unavailable"
+    "provider worktrees unavailable",
+    "real smoke is mandatory"
   )) {
   Assert-Contract ($runner.Contains($token)) `
     "validation runner is missing real-provider gate handling: $token"

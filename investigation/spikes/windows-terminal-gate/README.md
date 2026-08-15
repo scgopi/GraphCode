@@ -10,7 +10,7 @@ session/ConPTY lifetime.
 
 `provider-pins.json` records the accepted provider commits:
 
-- Winghostty `a3786b20b2f96325b800814f4f0f8dba0c789d8a`
+- Winghostty `4777a7493ab05f83df207abb97b16d703a1a7eba`
 - zmx `858727af10cdf43d66cb3733cff58dc90ec4b3dd`
 
 The Winghostty remote workflow cannot publish from the current workflow scope,
@@ -53,13 +53,15 @@ orchestration; the existing Windows daemon remains an independent service.
 
 The provider owns the rendering/input/IME/clipboard/per-monitor-DPI/UIA
 semantics. The gate owns the caller-side renderer lifecycle, focus policy,
-per-surface attach transport, and terminal-state notifications needed to verify
-the embedding boundary.
+per-surface attach transport, and a parsed VT cell snapshot that it submits
+through `winghostty_surface_set_terminal_cells`; UI Automation text remains a
+separate accessibility snapshot. The provider renderer draws those cells, so
+typed echo and restored history are pixel/cell-observable rather than
+accessibility-only.
 
 `Tools\windows\validate.ps1 -Task terminal-gate` runs the contract plus the
-pinned-provider build and smoke when the accepted local provider worktrees are
-available. It reports an explicit skip only when those provider roots are
-absent.
+pinned-provider build and smoke. Missing or dirty provider roots fail the task;
+there is no green validation result without the real provider smoke.
 
 ## TDD and validation evidence
 
@@ -70,9 +72,7 @@ contract check. The harness sends shell commands through zmx, verifies
 `zmx history --vt` before and after independent and same-session restarts, and
 runs the destroy/recreate stress cycle.
 
-At the accepted provider SHAs, the Winghostty API lifecycle and input tests
-pass. The renderer stress contract passes twice but intermittently fails on a
-fresh run with error 259, observed as either reentrant callback retention or
-numeric handle/process-heap growth; this is a provider-side blocker outside
-the GraphCode-owned gate. GraphCode full Windows validation, formatting,
-privacy, TDD evidence, and the terminal-gate smoke/stress harness pass.
+At the accepted provider SHA, the Winghostty API lifecycle, input, pixel cell
+render, and three-process renderer stress contracts pass. GraphCode full
+Windows validation, formatting, privacy, TDD evidence, and the terminal-gate
+smoke/stress harness are run only with clean pinned provider worktrees.

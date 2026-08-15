@@ -65,5 +65,31 @@ try {
   Remove-Item -LiteralPath $foreignJunction -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+$oldWinghosttyRoot = [Environment]::GetEnvironmentVariable(
+  "GRAPHCODE_WINGHOSTTY_ROOT"
+)
+$oldZmxRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_ZMX_ROOT")
+try {
+  $env:GRAPHCODE_WINGHOSTTY_ROOT = Join-Path $repoRoot `
+    "investigation\spikes\missing-winghostty-provider"
+  $env:GRAPHCODE_ZMX_ROOT = Join-Path $repoRoot `
+    "investigation\spikes\missing-zmx-provider"
+  & $pwsh -NoProfile -File $runner -Task terminal-gate *> $null
+  if ($LASTEXITCODE -eq 0) {
+    throw "terminal-gate passed without its pinned providers"
+  }
+} finally {
+  if ($null -eq $oldWinghosttyRoot) {
+    Remove-Item Env:GRAPHCODE_WINGHOSTTY_ROOT -ErrorAction SilentlyContinue
+  } else {
+    $env:GRAPHCODE_WINGHOSTTY_ROOT = $oldWinghosttyRoot
+  }
+  if ($null -eq $oldZmxRoot) {
+    Remove-Item Env:GRAPHCODE_ZMX_ROOT -ErrorAction SilentlyContinue
+  } else {
+    $env:GRAPHCODE_ZMX_ROOT = $oldZmxRoot
+  }
+}
+
 Write-Host "ValidationRunner.Tests.ps1: PASS"
 exit 0

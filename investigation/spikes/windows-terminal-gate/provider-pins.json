@@ -3,7 +3,7 @@
   "winghostty": {
     "repository": "coneilen/winghostty",
     "remoteUrl": "https://github.com/coneilen/winghostty.git",
-    "sha": "a3786b20b2f96325b800814f4f0f8dba0c789d8a",
+    "sha": "4777a7493ab05f83df207abb97b16d703a1a7eba",
     "artifact": "zig-out/lib/winghostty-win32-host.lib",
     "minimumZig": "0.15.2"
   },
@@ -22,6 +22,6 @@
       "Winghostty-worktrees/host-integration",
       "zmx-worktrees/attach"
     ],
-    "upgrade": "Replace -Dwinghostty-dir and GRAPHCODE_ZMX with checked remote artifacts without changing the host contract."
+    "upgrade": "Replace -Dwinghostty-dir and GRAPHCODE_ZMX with checked remote artifacts without changing the host contract. Local provider roots must be clean at the pinned SHA; an immutable detached artifact and digest may be substituted later."
   }
 }

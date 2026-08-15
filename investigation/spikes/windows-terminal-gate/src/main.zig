@@ -17,6 +17,17 @@ const WPARAM = c.WPARAM;
 const DWORD = c.DWORD;
 const BOOL = c.BOOL;
 
+const terminal_columns: usize = 120;
+const terminal_rows: usize = 40;
+const terminal_cell_count: usize = terminal_columns * terminal_rows;
+
+const TerminalParserState = enum {
+    normal,
+    escape,
+    csi,
+    osc,
+};
+
 const SurfaceSlot = struct {
     surface: ?*c.winghostty_surface = null,
     last_surface: ?*c.winghostty_surface = null,
@@ -34,6 +45,20 @@ const SurfaceSlot = struct {
     output_seen: bool = false,
     terminal_buffer: [16 * 1024]u8 = undefined,
     terminal_buffer_len: usize = 0,
+    terminal_cells: [terminal_cell_count]c.winghostty_terminal_cell = [_]c.winghostty_terminal_cell{
+        .{
+            .codepoint = 0,
+            .foreground = 0xE6E6E6,
+            .background = 0,
+            .flags = 0,
+        },
+    } ** terminal_cell_count,
+    terminal_x: usize = 0,
+    terminal_y: usize = 0,
+    terminal_parser: TerminalParserState = .normal,
+    csi_value: usize = 0,
+    csi_have_value: bool = false,
+    csi_private: bool = false,
 };
 
 const App = struct {
@@ -542,8 +567,17 @@ fn feedTerminalOutput(app: *App, index: usize, bytes: []const u8) void {
     const slot = &app.surfaces[index];
     const surface = slot.surface orelse return;
     appendTerminalOutput(slot, bytes);
+    feedTerminalCells(slot, bytes);
+    const cells_result = c.winghostty_surface_set_terminal_cells(
+        surface,
+        terminal_columns,
+        terminal_rows,
+        &slot.terminal_cells,
+        terminal_cell_count,
+    );
+    recordProviderError(app, cells_result);
     const text = slot.terminal_buffer[0..slot.terminal_buffer_len];
-    const text_result = c.winghostty_surface_notify_terminal_text(
+    const text_result = c.winghostty_surface_notify_accessibility_text(
         surface,
         text.ptr,
         text.len,
@@ -559,6 +593,132 @@ fn feedTerminalOutput(app: *App, index: usize, bytes: []const u8) void {
     slot.output_events += 1;
     slot.output_seen = true;
     app.totalOutputEvents += 1;
+}
+
+fn clearTerminalCells(slot: *SurfaceSlot) void {
+    for (&slot.terminal_cells) |*cell| {
+        cell.* = .{
+            .codepoint = 0,
+            .foreground = 0xE6E6E6,
+            .background = 0,
+            .flags = 0,
+        };
+    }
+    slot.terminal_x = 0;
+    slot.terminal_y = 0;
+}
+
+fn terminalAdvanceLine(slot: *SurfaceSlot) void {
+    slot.terminal_x = 0;
+    if (slot.terminal_y + 1 < terminal_rows) {
+        slot.terminal_y += 1;
+        return;
+    }
+    std.mem.copyForwards(
+        c.winghostty_terminal_cell,
+        slot.terminal_cells[0 .. terminal_cell_count - terminal_columns],
+        slot.terminal_cells[terminal_columns..],
+    );
+    for (slot.terminal_cells[terminal_cell_count - terminal_columns ..]) |*cell| {
+        cell.* = .{
+            .codepoint = 0,
+            .foreground = 0xE6E6E6,
+            .background = 0,
+            .flags = 0,
+        };
+    }
+}
+
+fn putTerminalCodepoint(slot: *SurfaceSlot, codepoint: u32) void {
+    if (slot.terminal_x >= terminal_columns) terminalAdvanceLine(slot);
+    slot.terminal_cells[slot.terminal_y * terminal_columns + slot.terminal_x] = .{
+        .codepoint = codepoint,
+        .foreground = 0xE6E6E6,
+        .background = 0,
+        .flags = 0,
+    };
+    slot.terminal_x += 1;
+}
+
+fn finishCsi(slot: *SurfaceSlot, final: u8) void {
+    const value = if (slot.csi_have_value) slot.csi_value else 1;
+    switch (final) {
+        'A' => slot.terminal_y -|= value,
+        'B' => slot.terminal_y = @min(terminal_rows - 1, slot.terminal_y + value),
+        'C' => slot.terminal_x = @min(terminal_columns, slot.terminal_x + value),
+        'D' => slot.terminal_x -|= value,
+        'G' => slot.terminal_x = @min(terminal_columns, if (slot.csi_have_value) slot.csi_value -| 1 else 0),
+        'd' => slot.terminal_y = @min(terminal_rows - 1, if (slot.csi_have_value) slot.csi_value -| 1 else 0),
+        'H', 'f' => {
+            const row = if (slot.csi_have_value) slot.csi_value else 1;
+            slot.terminal_y = @min(terminal_rows - 1, row -| 1);
+            slot.terminal_x = 0;
+        },
+        'J' => if (slot.csi_have_value and slot.csi_value == 2) clearTerminalCells(slot),
+        'K' => {
+            const start = slot.terminal_y * terminal_columns + slot.terminal_x;
+            for (slot.terminal_cells[start..][0..(terminal_columns - slot.terminal_x)]) |*cell| {
+                cell.* = .{
+                    .codepoint = 0,
+                    .foreground = 0xE6E6E6,
+                    .background = 0,
+                    .flags = 0,
+                };
+            }
+        },
+        else => {},
+    }
+    slot.csi_value = 0;
+    slot.csi_have_value = false;
+    slot.csi_private = false;
+}
+
+fn feedTerminalCells(slot: *SurfaceSlot, bytes: []const u8) void {
+    for (bytes) |byte| {
+        switch (slot.terminal_parser) {
+            .normal => switch (byte) {
+                0x1B => slot.terminal_parser = .escape,
+                '\r' => slot.terminal_x = 0,
+                '\n' => terminalAdvanceLine(slot),
+                '\x08' => slot.terminal_x -|= 1,
+                '\t' => slot.terminal_x = @min(terminal_columns, (slot.terminal_x + 8) & ~@as(usize, 7)),
+                0x20...0x7E => putTerminalCodepoint(slot, byte),
+                else => {},
+            },
+            .escape => switch (byte) {
+                '[' => {
+                    slot.terminal_parser = .csi;
+                    slot.csi_value = 0;
+                    slot.csi_have_value = false;
+                    slot.csi_private = false;
+                },
+                ']' => slot.terminal_parser = .osc,
+                'c' => {
+                    clearTerminalCells(slot);
+                    slot.terminal_parser = .normal;
+                },
+                else => slot.terminal_parser = .normal,
+            },
+            .csi => switch (byte) {
+                '?' => slot.csi_private = true,
+                '0'...'9' => {
+                    slot.csi_have_value = true;
+                    slot.csi_value = @min(9999, slot.csi_value * 10 + (byte - '0'));
+                },
+                ';' => {},
+                0x40...0x7E => {
+                    finishCsi(slot, byte);
+                    slot.terminal_parser = .normal;
+                },
+                else => {},
+            },
+            .osc => if (byte == 0x07) {
+                slot.terminal_parser = .normal;
+            } else if (byte == 0x1B) {
+                slot.terminal_parser = .escape;
+            },
+        }
+    }
 }
 
 fn readAttachOutput(app: *App, index: usize) void {
@@ -632,6 +792,11 @@ fn createSurface(app: *App, index: usize) !void {
     slot.output_events = 0;
     slot.input_bytes = 0;
     slot.terminal_buffer_len = 0;
+    clearTerminalCells(slot);
+    slot.terminal_parser = .normal;
+    slot.csi_value = 0;
+    slot.csi_have_value = false;
+    slot.csi_private = false;
 }
 
 // The gate creates two independent complete surfaces through

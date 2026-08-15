@@ -536,8 +536,7 @@ function Invoke-Task([string] $name) {
       }
       if (-not (Test-Path -LiteralPath $winghosttyRoot -PathType Container) -or
         -not (Test-Path -LiteralPath $zmxRoot -PathType Container)) {
-        Write-Host "Windows terminal gate provider worktrees unavailable; smoke skipped."
-        return
+        throw "Windows terminal gate provider worktrees unavailable; real smoke is mandatory."
       }
       $zig0152 = Resolve-ZigVersion "0.15.2" "GRAPHCODE_ZIG0152"
       $zig0160 = Resolve-ZigVersion "0.16.0" "GRAPHCODE_ZIG0160"
