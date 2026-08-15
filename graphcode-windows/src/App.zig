@@ -251,6 +251,8 @@ pub const App = struct {
                 workspace.splitFocused(.vertical) catch self.setStatus("Unable to split terminal"),
             .focus_next_pane => if (self.workspace) |*workspace| workspace.focusNextPane(),
             .focus_previous_pane => if (self.workspace) |*workspace| workspace.focusPreviousPane(),
+            .select_previous_tab => if (self.workspace) |*workspace| workspace.selectPreviousTab(),
+            .select_next_tab => if (self.workspace) |*workspace| workspace.selectNextTab(),
             .none => {},
         }
     }
@@ -386,6 +388,16 @@ fn onWindowMessage(
             app.layoutWorkspace();
             result.* = 0;
             return true;
+        },
+        c.WM_LBUTTONDOWN => {
+            const x: i32 = @intCast(@as(u16, @truncate(@as(usize, @bitCast(lparam)))));
+            const y: i32 = @intCast(@as(u16, @truncate(@as(usize, @bitCast(lparam >> 16)))));
+            if (app.workspace) |*workspace| {
+                if (workspace.selectTabAt(x, y)) {
+                    result.* = 0;
+                    return true;
+                }
+            }
         },
         c.WM_TIMER => if (wparam == MainWindow.timer_id) {
             app.smoke_tick += 1;

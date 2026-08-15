@@ -132,6 +132,35 @@ pub const Layout = struct {
         return id;
     }
 
+    pub fn restorePane(self: *Layout, pane_id: []const u8) !void {
+        if (self.idExists(pane_id)) return error.DuplicateSurfaceID;
+        if (self.tabs.items.len == 0) {
+            try self.addTab(pane_id, false);
+            return;
+        }
+        const tab = self.selected() orelse return error.InvalidTab;
+        try tab.panes.append(self.allocator, .{
+            .id = try self.allocator.dupe(u8, pane_id),
+        });
+        tab.focused_pane = tab.panes.items.len - 1;
+    }
+
+    pub fn replacePaneID(self: *Layout, old_id: []const u8, new_id: []const u8) !void {
+        if (std.mem.eql(u8, old_id, new_id)) return;
+        if (new_id.len == 0 or new_id.len > 128 or self.idExists(new_id)) return error.DuplicateSurfaceID;
+        for (self.tabs.items) |*tab| {
+            for (tab.panes.items) |*pane| {
+                if (std.mem.eql(u8, pane.id, old_id)) {
+                    const replacement = try self.allocator.dupe(u8, new_id);
+                    self.allocator.free(pane.id);
+                    pane.id = replacement;
+                    return;
+                }
+            }
+        }
+        return error.InvalidSurface;
+    }
+
     pub fn removePane(self: *Layout, id: []const u8) bool {
         for (self.tabs.items, 0..) |*tab, tab_index| {
             for (tab.panes.items, 0..) |pane, pane_index| {
@@ -161,12 +190,13 @@ pub const Layout = struct {
     }
 
     pub fn save(self: *const Layout, file_path: []const u8) !void {
-        if (self.tabs.items.len == 0 or self.selected_tab >= self.tabs.items.len)
+        if (self.tabs.items.len != 0 and self.selected_tab >= self.tabs.items.len)
             return error.InvalidTopology;
-        try self.validateTopology();
+        if (self.tabs.items.len != 0) try self.validateTopology();
         const tmp_path = try std.fmt.allocPrint(self.allocator, "{s}.tmp", .{file_path});
         defer self.allocator.free(tmp_path);
         var file = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true });
+        defer file.close();
         var buffer: [4096]u8 = undefined;
         var writer = file.writer(&buffer);
         try writer.interface.writeAll("{\"schemaVersion\":2,\"project\":");
@@ -189,7 +219,6 @@ pub const Layout = struct {
         }
         try writer.interface.writeAll("]}");
         try writer.interface.flush();
-        file.close();
         try std.fs.cwd().rename(tmp_path, file_path);
     }
 
@@ -250,9 +279,9 @@ pub const Layout = struct {
                 .focused_pane = focused,
             });
         }
-        if (layout.tabs.items.len == 0 or layout.selected_tab >= layout.tabs.items.len)
+        if (layout.selected_tab >= layout.tabs.items.len and layout.tabs.items.len != 0)
             return error.InvalidTopology;
-        try layout.validateTopology();
+        if (layout.tabs.items.len != 0) try layout.validateTopology();
         layout.next_tab_id = 1;
         for (layout.tabs.items) |tab| layout.next_tab_id = @max(layout.next_tab_id, tab.id + 1);
         return layout;

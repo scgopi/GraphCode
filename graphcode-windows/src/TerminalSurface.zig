@@ -27,7 +27,6 @@ pub const InputQueue = struct {
         surface: usize,
         bytes: []u8,
     };
-
     allocator: std.mem.Allocator,
     items: [input_queue_capacity]Item = undefined,
     head: usize = 0,
@@ -115,6 +114,7 @@ pub const Workspace = struct {
     recreate_sessions: [max_surfaces][]u8 = [_][]u8{&.{}} ** max_surfaces,
     recreate_due_ms: [max_surfaces]i64 = [_]i64{0} ** max_surfaces,
     recreate_delay_ms: [max_surfaces]i64 = [_]i64{100} ** max_surfaces,
+    restore_errors: [max_surfaces][]u8 = [_][]u8{&.{}} ** max_surfaces,
     fatal_error: bool = false,
     render_error: c.winghostty_result = c.WINGHOSTTY_OK,
     input_mutex: std.Thread.Mutex = .{},
@@ -150,11 +150,7 @@ pub const Workspace = struct {
                 std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT")
                     catch "global",
             ),
-            .layout_path = try allocator_.dupe(
-                u8,
-                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_LAYOUT")
-                    catch "graphcode-workspace.json",
-            ),
+            .layout_path = &.{},
             .project_key = try allocator_.dupe(
                 u8,
                 std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT")
@@ -168,6 +164,7 @@ pub const Workspace = struct {
             allocator_.free(workspace.layout_path);
             allocator_.free(workspace.project_key);
         }
+        workspace.layout_path = try workspace.layoutPathForProject(workspace.project_key);
         if (WorkspaceLayout.Layout.load(allocator_, workspace.layout_path, workspace.project_key)) |restored| {
             workspace.layout.deinit();
             workspace.layout = restored;
@@ -189,6 +186,10 @@ pub const Workspace = struct {
         for (&self.recreate_sessions) |*session| {
             if (session.*.len != 0) self.allocator.free(session.*);
             session.* = &.{};
+        }
+        for (&self.restore_errors) |*message| {
+            if (message.*.len != 0) self.allocator.free(message.*);
+            message.* = &.{};
         }
         if (self.project_path.len != 0) self.allocator.free(self.project_path);
         if (self.host) |host| {
@@ -221,6 +222,9 @@ pub const Workspace = struct {
         self.layout = try WorkspaceLayout.Layout.init(self.allocator, project);
         self.allocator.free(self.project_key);
         self.project_key = new_project_key;
+        const new_layout_path = try self.layoutPathForProject(project);
+        self.allocator.free(self.layout_path);
+        self.layout_path = new_layout_path;
         if (WorkspaceLayout.Layout.load(self.allocator, self.layout_path, project)) |restored| {
             self.layout.deinit();
             self.layout = restored;
@@ -229,26 +233,52 @@ pub const Workspace = struct {
     }
 
     pub fn rebindProject(self: *Workspace, project_path: []const u8) !bool {
-        if (std.mem.eql(u8, self.project_path, project_path)) return false;
-        const copy = try self.allocator.dupe(u8, project_path);
-        errdefer self.allocator.free(copy);
-        self.destroySurface(0);
-        self.destroySurface(1);
-        for (&self.recreate_sessions) |*session| {
-            if (session.*.len != 0) self.allocator.free(session.*);
-            session.* = &.{};
-        }
+        if (std.mem.eql(u8, self.project_key, project_path)) return false;
+        try self.setProject(project_path);
         if (self.project_path.len != 0) self.allocator.free(self.project_path);
-        self.project_path = copy;
+        self.project_path = try self.allocator.dupe(u8, project_path);
         return true;
     }
 
     pub fn projectPath(self: *const Workspace) []const u8 {
         return self.project_path;
+    fn layoutPathForProject(self: *Workspace, project: []const u8) ![]u8 {
+        const configured = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_WORKSPACE_LAYOUT") catch
+            try self.allocator.dupe(u8, "graphcode-workspace.json");
+        defer self.allocator.free(configured);
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(project, &digest, .{});
+        var suffix: [16]u8 = undefined;
+        _ = std.fmt.bufPrint(&suffix, "{x}", .{std.mem.readInt(u64, digest[0..8], .little)}) catch unreachable;
+        return std.fmt.allocPrint(self.allocator, "{s}.{s}.json", .{
+            configured[0 .. if (std.mem.endsWith(u8, configured, ".json")) configured.len - 5 else configured.len],
+            suffix[0..16],
+        });
+
     }
 
     pub fn openNode(self: *Workspace, index: usize, node_id: []const u8) !void {
         if (index >= self.surfaces.len) return error.InvalidSurface;
+        if (self.surfaces[index].surface != null or self.surfaces[index].attach != null) {
+            const old_id = try self.allocator.dupe(u8, self.surfaces[index].session_name);
+            defer self.allocator.free(old_id);
+            const replacement_index = try self.createAttachedSurface(node_id);
+            errdefer self.destroySurface(replacement_index);
+            self.layout.replacePaneID(old_id, node_id) catch |err| {
+                self.destroySurface(replacement_index);
+                return err;
+            };
+            self.persistLayout() catch |err| {
+                self.layout.replacePaneID(node_id, old_id) catch {};
+                self.destroySurface(replacement_index);
+                return err;
+            };
+            self.destroySurface(index);
+            self.surfaces[index] = self.surfaces[replacement_index];
+            self.surfaces[replacement_index] = .{};
+            self.syncTopology();
+            return;
+        }
         self.destroySurface(index);
         self.resetSessionState(index);
         self.recreate_due_ms[index] = 0;
@@ -346,12 +376,30 @@ pub const Workspace = struct {
         };
         defer for (ids[0..count]) |id| self.allocator.free(id);
         for (ids[0..count]) |id| {
-            if (self.createAttachedSurface(id)) |_| continue else |_| {
-                _ = self.layout.removePane(id);
+            if (self.createAttachedSurface(id)) |index| {
+                self.clearRestoreError(index);
+            } else |err| {
+                self.queueRestoreRetry(id, err);
             }
         }
-        self.persistLayout() catch {};
         self.syncTopology();
+    }
+
+    fn queueRestoreRetry(self: *Workspace, session: []const u8, err: anyerror) void {
+        for (self.surfaces, 0..) |slot, index| {
+            if (slot.surface == null and slot.attach == null and self.recreate_sessions[index].len == 0) {
+                self.recreate_sessions[index] = self.allocator.dupe(u8, session) catch &.{};
+                self.recreate_due_ms[index] = nowMilliseconds() + self.recreate_delay_ms[index];
+                const message = std.fmt.allocPrint(self.allocator, "workspace restore pending: {s}", .{@errorName(err)}) catch return;
+                self.restore_errors[index] = message;
+                return;
+            }
+        }
+    }
+
+    fn clearRestoreError(self: *Workspace, index: usize) void {
+        if (self.restore_errors[index].len != 0) self.allocator.free(self.restore_errors[index]);
+        self.restore_errors[index] = &.{};
     }
 
     fn closeSurfaceForID(self: *Workspace, id: []const u8) bool {
@@ -383,6 +431,15 @@ pub const Workspace = struct {
         self.syncTopology();
     }
 
+    pub fn selectTabAt(self: *Workspace, x: i32, y: i32) bool {
+        if (y < self.layout_origin_y or y >= self.layout_origin_y + Tokens.tab_bar_height) return false;
+        if (x < self.layout_origin_x) return false;
+        const index = @as(usize, @intCast(@divTrunc(x - self.layout_origin_x, 120)));
+        if (index >= self.layout.tabs.items.len) return false;
+        self.selectTab(index) catch return false;
+        return true;
+    }
+
     pub fn selectNextTab(self: *Workspace) void {
         self.layout.selectRelativeTab(1);
         self.persistLayout() catch {};
@@ -408,8 +465,11 @@ pub const Workspace = struct {
     pub fn closeFocusedPane(self: *Workspace) !void {
         const id = try self.layout.closeFocusedPane();
         defer self.allocator.free(id);
+        self.persistLayout() catch |err| {
+            self.layout.restorePane(id) catch {};
+            return err;
+        };
         _ = self.closeSurfaceForID(id);
-        try self.persistLayout();
         self.syncTopology();
     }
 
@@ -481,6 +541,21 @@ pub const Workspace = struct {
                 _ = c.winghostty_surface_set_focus(surface, if (index == other_index) 1 else 0);
             }
 
+        }
+        self.persistFocusedSurface(index);
+    }
+
+    fn persistFocusedSurface(self: *Workspace, index: usize) void {
+        if (index >= self.surfaces.len) return;
+        const id = self.surfaces[index].session_name;
+        const tab = self.layout.selected() orelse return;
+        for (tab.panes.items, 0..) |pane, pane_index| {
+            if (std.mem.eql(u8, pane.id, id)) {
+                tab.focused_pane = pane_index;
+                self.active_surface = index;
+                self.persistLayout() catch {};
+                return;
+            }
         }
     }
 
@@ -879,6 +954,7 @@ pub const Workspace = struct {
                 self.recreate_delay_ms[index] = @min(self.recreate_delay_ms[index] * 2, 4_000);
                 continue;
             };
+            self.clearRestoreError(index);
             self.recreate_delay_ms[index] = 100;
         }
     }
@@ -1026,7 +1102,10 @@ fn onFocus(user_data: ?*anyopaque, surface: *c.winghostty_surface, focused: u8) 
     _ = callbackSlot(workspace, surface) orelse return;
     if (focused == 0) return;
     for (&workspace.surfaces, 0..) |*slot, index| {
-        if (slot.surface == surface) workspace.active_surface = index;
+        if (slot.surface == surface) {
+            workspace.active_surface = index;
+            workspace.persistFocusedSurface(index);
+        }
         if (slot.surface) |other| {
             if (other != surface) {
                 _ = c.winghostty_surface_set_focus(other, 0);

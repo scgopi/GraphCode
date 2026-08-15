@@ -16,6 +16,8 @@ pub const Action = enum {
     split_vertical,
     focus_next_pane,
     focus_previous_pane,
+    select_previous_tab,
+    select_next_tab,
 };
 
 pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
@@ -33,6 +35,8 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (ctrl and key == 'T') return .new_tab;
     if (ctrl and key == 0xDB) return .focus_previous_pane;
     if (ctrl and key == 0xDD) return .focus_next_pane;
+    if (ctrl and key == 0x21) return .select_previous_tab;
+    if (ctrl and key == 0x22) return .select_next_tab;
     return .none;
 }
 
@@ -52,6 +56,8 @@ pub fn commandText(allocator: std.mem.Allocator, action: Action) ![]u8 {
         .split_vertical => allocator.dupe(u8, "Split terminal down"),
         .focus_next_pane => allocator.dupe(u8, "Focus next pane"),
         .focus_previous_pane => allocator.dupe(u8, "Focus previous pane"),
+        .select_previous_tab => allocator.dupe(u8, "Select previous terminal tab"),
+        .select_next_tab => allocator.dupe(u8, "Select next terminal tab"),
         .none => allocator.dupe(u8, ""),
     };
 }
@@ -63,4 +69,6 @@ test "workspace shortcuts route to tabs splits and panes" {
     try std.testing.expectEqual(Action.split_vertical, keyAction('D', true, true));
     try std.testing.expectEqual(Action.focus_previous_pane, keyAction(0xDB, true, false));
     try std.testing.expectEqual(Action.focus_next_pane, keyAction(0xDD, true, false));
+    try std.testing.expectEqual(Action.select_previous_tab, keyAction(0x21, true, false));
+    try std.testing.expectEqual(Action.select_next_tab, keyAction(0x22, true, false));
 }
