@@ -1,0 +1,28 @@
+name: macOS shared Swift regression
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "GraphcodeKit/**"
+      - "graphcode/**"
+      - "graphcoded/**"
+      - "graphcode-cli/**"
+      - "investigation/spikes/swift-portable/**"
+      - "Makefile"
+      - ".github/workflows/macos-shared-regression.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate shared portable Swift package
+        run: swift test --package-path investigation/spikes/swift-portable
+      - name: Validate macOS app, daemon, and CLI
+        run: make test
+      - name: Validate macOS lint and formatting
+        run: make check

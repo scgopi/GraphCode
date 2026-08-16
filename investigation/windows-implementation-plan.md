@@ -220,6 +220,16 @@ two-surface and real zmx attach tests pass.
 - session/crash/performance, GPU, DPI, IME, screen reader, security, path, remote, and
   macOS regression matrices.
 
+The final hardening gate is executable rather than checklist-only. Its mandatory
+local fixtures cover 4 MiB backpressure, 3-second lifetime, crash/restart,
+four concurrent terminals, Unicode clipboard/path handling, and process cleanup
+with explicit 10/15-second ceilings. Environment-only GPU/WGL, physical
+display/DPI, UIA/screen-reader, ACL/login/reboot, authenticated SSH, and real
+provider reconnect tests are isolated behind an explicit target gate and fail
+when selected without a target. The authoritative macOS/shared-Swift workflow is
+`.github/workflows/macos-shared-regression.yml`; Windows validation does not claim
+to execute macOS.
+
 ## Bug filing
 
 For a pre-existing GraphCode bug:

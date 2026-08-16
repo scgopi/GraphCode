@@ -14,6 +14,7 @@ The Windows port must have runnable commands before implementation fleets begin.
 | Authenticated remote bridge proof | `pwsh Tools/windows/validate.ps1 -Task remote-bridge` |
 | Windows-to-POSIX remote E2E parity | `pwsh Tools/windows/validate.ps1 -Task remote-e2e` |
 | Production Swift platform package | `pwsh Tools/windows/validate.ps1 -Task swift-production` |
+| Deterministic release hardening fixtures | `pwsh Tools/windows/validate.ps1 -Task hardening` |
 | Shared Swift package | `swift test --package-path <shared-package>` once extracted |
 | macOS app/daemon/CLI | `make test` |
 | macOS format/lint | `make check` |
@@ -60,3 +61,31 @@ Remote validation uses controlled POSIX hosts and sanitized fixtures:
 
 Credentials, hostnames, and capability tokens belong in runner secrets and never in the
 repository.
+
+## Final hardening executable matrix
+
+The `hardening` task is mandatory and always runs deterministic local fixtures; it
+does not turn into a pass when an environment is unavailable. The current measured
+ceilings are:
+
+| Dimension | Fixture and threshold |
+|---|---|
+| High output/backpressure | 4 MiB lossless output in <=10 seconds |
+| Long duration | 3-second session completes in 2.5-10 seconds |
+| Crash recovery | exit 17 is observed, then a fresh session succeeds |
+| Multi-terminal | four concurrent 512 KiB sessions complete in <=15 seconds |
+| Unicode/hostile paths | UTF-8 clipboard text round-trips through a >=180-character Unicode path |
+| Process cleanup | fixture process count returns to baseline |
+
+GPU/WGL, real ConPTY/zmx reconnect, screen reader/UIA, physical DPI/display,
+authenticated SSH, login/reboot, and installer ACL tests are environment-only.
+They are explicitly gated by `Hardening.Tests.ps1 -Environment` and a runner-owned
+PowerShell harness supplied through `GRAPHCODE_HARDENING_TARGET`; selecting that
+tier without the harness fails. The
+deterministic tier remains mandatory on every pull request. The scheduled full
+workflow runs the pinned provider/package lifecycle gate and cannot substitute a
+skip for a missing provider.
+
+The Windows host cannot execute macOS tests. `.github/workflows/macos-shared-regression.yml`
+is the authoritative macOS matrix (`swift test`, `make test`, `make check`); only
+the portable Swift package is executable locally on Windows.

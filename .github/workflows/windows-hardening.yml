@@ -1,0 +1,93 @@
+name: Windows release hardening
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment_target:
+        description: "Workspace-relative path to the owned environment harness"
+        required: false
+        type: string
+  schedule:
+    - cron: "17 3 * * 1"
+  pull_request:
+    paths:
+      - ".github/workflows/windows-hardening.yml"
+      - "Tools/windows/**"
+      - "investigation/windows-implementation-plan.md"
+      - "Tools/windows/validation-matrix.md"
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic:
+    name: "Deterministic hardening (${{ matrix.os }}, ${{ matrix.powershell }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+        powershell: [pwsh]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Run hardening contract
+        shell: pwsh
+        run: ./Tools/windows/validate.ps1 -Task hardening
+      - name: Verify runner contract
+        shell: pwsh
+        run: ./Tools/windows/Tests/ValidationRunner.Tests.ps1
+
+  full-pinned:
+    name: "Full pinned Windows validation"
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install exact Swift toolchain
+        shell: pwsh
+        run: |
+          winget install --id Swift.Toolchain --exact --version 6.3.3 `
+            --silent --accept-package-agreements --accept-source-agreements
+      - name: Install exact Zig toolchains
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = Join-Path $env:GITHUB_WORKSPACE ".ci-tools"
+          New-Item -ItemType Directory -Force $root | Out-Null
+          function Install-Zig([string] $version, [string] $sha256) {
+            $archive = Join-Path $root "zig-$version.zip"
+            Invoke-WebRequest "https://github.com/ziglang/zig/releases/download/$version/zig-x86_64-windows-$version.zip" -OutFile $archive
+            if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $sha256) { throw "Zig checksum mismatch: $version" }
+            Expand-Archive $archive -DestinationPath $root -Force
+            $expanded = Join-Path $root "zig-x86_64-windows-$version"
+            $destination = Join-Path $root "zig-$version"
+            Move-Item $expanded $destination -Force
+            Join-Path $destination "zig.exe"
+          }
+          "GRAPHCODE_ZIG0152=$(Install-Zig 0.15.2 3A0ED1E8799A2F8CE2A6E6290A9FF22E6906F8227865911FB7DDEDC3CC14CB0C)" >> $env:GITHUB_ENV
+          "GRAPHCODE_ZIG0160=$(Install-Zig 0.16.0 68659EB5F1E4EB1437A722F1DD889C5A322C9954607F5EDCF337BC3684A75A7E)" >> $env:GITHUB_ENV
+      - name: Checkout pinned providers
+        shell: pwsh
+        run: |
+          git clone --no-checkout https://github.com/coneilen/winghostty.git Winghostty-worktrees/host-integration
+          git -C Winghostty-worktrees/host-integration checkout --detach f5abc059e4ca58b376eb209313aca7784659c679
+          git clone --no-checkout https://github.com/coneilen/zmx.git zmx-worktrees/attach
+          git -C zmx-worktrees/attach checkout --detach 858727af10cdf43d66cb3733cff58dc90ec4b3dd
+      - name: Run complete release gate
+        shell: pwsh
+        env:
+          GRAPHCODE_WINGHOSTTY_ROOT: ${{ github.workspace }}\Winghostty-worktrees\host-integration
+          GRAPHCODE_ZMX_ROOT: ${{ github.workspace }}\zmx-worktrees\attach
+        run: ./Tools/windows/validate.ps1 -Task all
+
+  environment:
+    name: "Gated environment hardening"
+    if: github.event_name == 'workflow_dispatch' && inputs.environment_target != ''
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Run explicitly selected environment tier
+        shell: pwsh
+        env:
+          GRAPHCODE_HARDENING_TARGET: ${{ inputs.environment_target }}
+        run: ./Tools/windows/Tests/Hardening.Tests.ps1 -Environment

@@ -20,7 +20,9 @@ $expected = @(
   "tdd-evidence",
   "privacy",
   "terminal-gate",
-  "windows-shell"
+  "windows-shell",
+  "packaging",
+  "hardening"
 )
 foreach ($task in $expected) {
   if ($tasks -notcontains $task) {

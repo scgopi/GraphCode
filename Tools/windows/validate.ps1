@@ -16,7 +16,8 @@ param(
     "privacy",
     "terminal-gate",
     "windows-shell",
-    "packaging"
+    "packaging",
+    "hardening"
   )]
   [string] $Task = "all",
   [switch] $List,
@@ -44,7 +45,8 @@ $tasks = @(
   "privacy",
   "terminal-gate",
   "windows-shell",
-  "packaging"
+  "packaging",
+  "hardening"
 )
 
 if ($List) {
@@ -618,6 +620,12 @@ function Invoke-Task([string] $name) {
       & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Tests.ps1")
       if ($LASTEXITCODE -ne 0) {
         throw "Windows packaging tests failed with exit code $LASTEXITCODE"
+      }
+    }
+    "hardening" {
+      & (Join-Path $repoRoot "Tools\windows\Tests\Hardening.Tests.ps1")
+      if ($LASTEXITCODE -ne 0) {
+        throw "Windows hardening tests failed with exit code $LASTEXITCODE"
       }
     }
   }
