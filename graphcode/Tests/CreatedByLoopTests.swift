@@ -67,7 +67,8 @@ struct CreatedByLoopTests {
     let parentID = try #require(await store.graph.nodes.first?.id)
     await store.handle(.nodeCheckApproved(parentID))
 
-    await store.handle(.messageNode(parentID, text: "task done: report attached", from: nil))
+    await store.handle(
+      .messageNode(parentID, text: "task done: report attached", from: nil, followUp: nil))
 
     let staged = memory.value.filter {
       $0.nodeID == parentID && $0.entry.contains("while you were away")

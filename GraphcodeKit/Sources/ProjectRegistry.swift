@@ -26,6 +26,7 @@ public actor ProjectRegistry {
   private let ensureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let terminateSession: (@Sendable (LoopNode, String?) -> Void)?
   private let evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)?
+  private let checkPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)?
   private let deliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)?
   private let captureScript: (@Sendable (ShellPredicate) async -> String?)?
   private let readUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)?
@@ -47,6 +48,8 @@ public actor ProjectRegistry {
       CLISessionBackend.terminateSession,
     evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)? = ShellPredicateEvaluator
       .evaluate,
+    checkPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)? =
+      ShellPredicateEvaluator.check,
     deliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)? =
       CLISessionBackend.deliverMessage,
     captureScript: (@Sendable (ShellPredicate) async -> String?)? = ShellPredicateEvaluator.capture,
@@ -63,6 +66,7 @@ public actor ProjectRegistry {
     self.ensureSession = ensureSession
     self.terminateSession = terminateSession
     self.evaluatePredicate = evaluatePredicate
+    self.checkPredicate = checkPredicate
     self.deliverMessage = deliverMessage
     self.captureScript = captureScript
     self.readUsage = readUsage
@@ -324,6 +328,7 @@ public actor ProjectRegistry {
       onEnsureSession: ensureSession,
       onTerminateSession: terminateSession,
       onEvaluatePredicate: evaluatePredicate,
+      onCheckPredicate: checkPredicate,
       onDeliverMessage: deliverMessage,
       onCaptureScript: captureScript,
       onReadUsage: readUsage,

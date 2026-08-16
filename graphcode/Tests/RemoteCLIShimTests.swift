@@ -73,7 +73,7 @@ struct RemoteCLIShimTests {
       run.commands.dropFirst().first
         == .graphCommand(
           projectPath: Self.project,
-          command: .messageNode(nodeID, text: "the API changed", from: nil)))
+          command: .messageNode(nodeID, text: "the API changed", from: nil, followUp: nil)))
   }
 
   // MARK: - Harness

@@ -57,6 +57,18 @@ public enum MessageBus {
     + "— and do not start another pass. Stop where you are, say where you got to, and "
     + "stay in the session: the loop is what stops, not you. Do not exit or quit."
 
+  /// The stop request a blown token budget sends (`GraphStore.evaluateGoal`). Same
+  /// instruction as `stopRequest` — only the loop can cancel its own cadence — prefixed
+  /// with the *why*, because "stop" with no reason reads as a human's change of mind
+  /// and this one is arithmetic the loop can verify against its own usage.
+  public static func budgetExhaustedRequest(used: Int, budget: Int) -> String {
+    "[graphcode] Token budget exhausted: this loop has spent \(used) of its "
+      + "\(budget)-token budget. Stop this loop now: turn off any recurring schedule "
+      + "you set up for it — a /loop, a scheduled wakeup, a cron entry — and do not "
+      + "start another pass. Stop where you are, say where you got to, and stay in the "
+      + "session: the loop is what stops, not you. Do not exit or quit."
+  }
+
   /// What actually gets typed into the target. The edge's transform decides the content;
   /// a `.script` transform runs to produce it, which is docs/08's "a script is cheaper
   /// than reasoning through the steps every time" applied to a hand-off.

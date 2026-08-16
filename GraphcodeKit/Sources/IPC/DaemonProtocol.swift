@@ -100,7 +100,12 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// something. `from` is the sending loop when the CLI could attribute it
   /// (`ZMX_SESSION`, the same mechanism as `NodeDraft.createdBy`), so the target sees
   /// who's talking; nil from a human's shell.
-  case messageNode(UUID, text: String, from: UUID?)
+  ///
+  /// `followUp` is `node send --follow-up`: don't interrupt — stage the message to the
+  /// target's memory and type it in when the target next goes idle, rather than
+  /// mid-turn. Optional so frames from clients that predate the flag decode as the
+  /// immediate send they always were.
+  case messageNode(UUID, text: String, from: UUID?, followUp: Bool?)
   /// Removes the node, every edge touching it, and its detached session. Irreversible
   /// — the app confirms before sending this.
   case deleteNode(UUID)

@@ -20,7 +20,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
   case createEdge(projectPath: String, from: UUID, to: UUID, spec: EdgeSpec)
   case stopNode(projectPath: String, nodeID: UUID)
   case deleteNode(projectPath: String, nodeID: UUID)
-  case sendMessage(projectPath: String, nodeID: UUID, text: String)
+  case sendMessage(projectPath: String, nodeID: UUID, text: String, followUp: Bool = false)
   case updateNode(projectPath: String, nodeID: UUID, update: NodeUpdate)
   /// Give a sketch a shape — the CLI half of the canvas's "Promote to…" menu. The
   /// promoter's identity is attributed at execution (`ZMX_SESSION`), not parsed here,
@@ -51,7 +51,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode node stop <project-path> <node-id>
       graphcode node delete <project-path> <node-id>   removes it, its edges, session
                            and memory — irreversible; stop is the reversible verb
-      graphcode node send <project-path> <node-id> <message…>
+      graphcode node send <project-path> <node-id> [--follow-up] <message…>
       graphcode node update <project-path> <node-id> [options]
       graphcode node promote <project-path> <node-id> --type <goal|turn|time> [options]
                            give a sketch a shape, keeping its session, edges and memory
@@ -89,13 +89,28 @@ public enum GraphcodeCommand: Equatable, Sendable {
                            so it can score itself as it works, and sampled by graphcoded
                            once per cycle pass (last stdout line must be a number)
       --direction <d>      minimize | maximize                 (default: maximize)
+      --budget <tokens>    for --type goal: end the loop once its backend reports this
+                           many tokens spent (input + output). Reported, never
+                           estimated — a loop whose backend reports nothing is never
+                           stopped by a budget
+      --skip-unchanged     for --type goal: don't re-run the predicate while HEAD and
+                           the dirty file list are unchanged since its last failure.
+                           Only for predicates that depend on the tree — one that
+                           watches CI or a deploy would never be re-asked
 
     UPDATE OPTIONS (node update; pass only what changes)
       --goal, --predicate, --prompt, --check, --model, --metric, --direction as above
       --poll <seconds>     how often the predicate is polled
       --stall <seconds>    stall bound; 0 clears it
-      A loop may not change its own --predicate: the verifier stays outside the
-      verified. Session-facing changes reach a live session as a [graphcode] notice.
+      --budget <tokens>    token budget; 0 clears it
+      --skip-unchanged <true|false>
+      A loop may not change its own --predicate or --budget: the verifier stays outside
+      the verified. Session-facing changes reach a live session as a [graphcode] notice.
+
+    SEND OPTIONS (node send)
+      --follow-up          first word after the id: don't interrupt — the message is
+                           staged to the loop's memory and typed into its session when
+                           it next goes idle, instead of mid-turn
 
     PROMOTE OPTIONS (node promote; each target asks for its one decision)
       --type goal          with --goal <text> (required); --predicate, --metric,
@@ -204,12 +219,19 @@ public enum GraphcodeCommand: Equatable, Sendable {
           return .promoteNode(
             projectPath: path, nodeID: nodeID, promotion: try parsePromotion(arguments))
         case "send":
+          // `--follow-up` is recognised only as the first word after the id, so it can
+          // still be *sent* by putting it anywhere later in the message.
+          var followUp = false
+          if arguments.first == "--follow-up" {
+            followUp = true
+            arguments.removeFirst()
+          }
           // Everything after the id is the message — joined rather than flagged, so
           // `graphcode node send <path> <id> tests are green, ship it` needs no quoting
           // gymnastics from the agent typing it.
           let text = arguments.joined(separator: " ").trimmingCharacters(in: .whitespaces)
           guard !text.isEmpty else { throw ParseError.missingArgument("message") }
-          return .sendMessage(projectPath: path, nodeID: nodeID, text: text)
+          return .sendMessage(projectPath: path, nodeID: nodeID, text: text, followUp: followUp)
         case "update":
           return .updateNode(projectPath: path, nodeID: nodeID, update: try parseUpdate(arguments))
         case "memo":
@@ -306,6 +328,15 @@ public enum GraphcodeCommand: Equatable, Sendable {
       metricDirection = parsed
     }
 
+    var tokenBudget: Int?
+    if let raw = flags["budget"] {
+      guard let value = Int(raw), value > 0 else {
+        throw ParseError.invalidValue(argument: "--budget", value: raw)
+      }
+      tokenBudget = value
+    }
+    let skipsUnchanged = try parseSkipUnchanged(flags) ?? false
+
     let draft = NodeDraft(
       title: title,
       loopType: loopType,
@@ -319,7 +350,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
       goal: flags["goal"].map {
         GoalSpec(
           summary: $0, predicate: flags["predicate"],
-          metricCommand: flags["metric"], metricDirection: metricDirection)
+          metricCommand: flags["metric"], metricDirection: metricDirection,
+          tokenBudget: tokenBudget, skipsUnchangedWorkspace: skipsUnchanged)
       },
       backend: backend,
       modelTier: modelTier)
@@ -365,6 +397,14 @@ public enum GraphcodeCommand: Equatable, Sendable {
       modelTier = parsed
     }
 
+    var tokenBudget: Int?
+    if let raw = flags["budget"] {
+      guard let value = Int(raw) else {
+        throw ParseError.invalidValue(argument: "--budget", value: raw)
+      }
+      tokenBudget = value
+    }
+
     let update = NodeUpdate(
       goalSummary: flags["goal"],
       goalPredicate: flags["predicate"],
@@ -372,11 +412,24 @@ public enum GraphcodeCommand: Equatable, Sendable {
       stallAfterSeconds: stallAfterSeconds,
       metricCommand: flags["metric"],
       metricDirection: metricDirection,
+      tokenBudget: tokenBudget,
+      skipsUnchangedWorkspace: try parseSkipUnchanged(flags),
       triggerPrompt: flags["prompt"],
       checkDescription: flags["check"],
       modelTier: modelTier)
     guard !update.isEmpty else { throw ParseError.missingArgument("an option to change") }
     return update
+  }
+
+  /// `--skip-unchanged` — bare or `true` opts in, `false` opts back out, absent means
+  /// "leave it alone" (create's caller defaults that to off).
+  private static func parseSkipUnchanged(_ flags: [String: String]) throws -> Bool? {
+    guard let raw = flags["skip-unchanged"] else { return nil }
+    switch raw {
+    case "", "true": return true
+    case "false": return false
+    default: throw ParseError.invalidValue(argument: "--skip-unchanged", value: raw)
+    }
   }
 
   /// The one decision each target type needs — the same vocabulary `node create`
