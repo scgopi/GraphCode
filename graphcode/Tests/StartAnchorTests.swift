@@ -166,4 +166,20 @@ struct StartAnchorTests {
     #expect(mixed.startAnchors == [worker.id])
     #expect(graph(nodes: [sketch], edges: []).startAnchors.isEmpty)
   }
+
+  /// No entry port is not the same as no row: the sidebar lists untargeted sketches
+  /// after the anchored roots, or a fresh sketch simply doesn't exist anywhere but the
+  /// canvas. A sketch something points at lists as that node's child instead.
+  @Test
+  func theSidebarStillRowsAnUntargetedSketch() {
+    let sketch = LoopNode(title: "Poke around", loopType: .sketch)
+    let worker = node("Worker")
+    let mixed = graph(nodes: [sketch, worker], edges: [])
+    #expect(mixed.sidebarRoots == [worker.id, sketch.id])
+    #expect(graph(nodes: [sketch], edges: []).sidebarRoots == [sketch.id])
+
+    let child = graph(
+      nodes: [worker, sketch], edges: [LoopEdge(from: worker.id, to: sketch.id)])
+    #expect(child.sidebarRoots == [worker.id])
+  }
 }
