@@ -15,7 +15,8 @@ param(
     "tdd-evidence",
     "privacy",
     "terminal-gate",
-    "windows-shell"
+    "windows-shell",
+    "packaging"
   )]
   [string] $Task = "all",
   [switch] $List,
@@ -42,7 +43,8 @@ $tasks = @(
   "tdd-evidence",
   "privacy",
   "terminal-gate",
-  "windows-shell"
+  "windows-shell",
+  "packaging"
 )
 
 if ($List) {
@@ -610,6 +612,12 @@ function Invoke-Task([string] $name) {
           -Zig0160 $zig0160 `
           -UseStubDaemon `
           -Stress
+      }
+    }
+    "packaging" {
+      & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Tests.ps1")
+      if ($LASTEXITCODE -ne 0) {
+        throw "Windows packaging tests failed with exit code $LASTEXITCODE"
       }
     }
   }
