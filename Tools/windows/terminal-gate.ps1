@@ -47,9 +47,6 @@ function Assert-HistoryContains([string] $name, [string] $marker, [string] $labe
       $history -match [regex]::Escape($marker)) {
       return
     }
-    if ($attempt -eq 10 -and $marker -like "GraphCode typed output *") {
-      & $zmx send $name "echo $marker`r" *> $null
-    }
     Start-Sleep -Milliseconds 250
   }
   throw "$label did not contain the persistent VT marker '$marker'"
@@ -101,6 +98,25 @@ function Record-TestOwnedSessions {
       [void] $ownedProcessIds.Add($record.Pid)
     }
   }
+
+}
+
+function Write-OwnedResourceMetrics {
+  $metrics = @($ownedProcessIds | ForEach-Object {
+      $p = Get-Process -Id $_ -ErrorAction SilentlyContinue
+      if ($p) {
+        [pscustomobject]@{
+          pid = $_
+          role = if ($p.ProcessName -match "zmx") { "zmx" } else { $p.ProcessName }
+          handles = [int64]$p.HandleCount
+          privateBytes = [int64]$p.PrivateMemorySize64
+        }
+      }
+    })
+  Write-Host ("PRODUCT_RESOURCE_METRICS_JSON=" + (@{
+      sessions = @($ownedSessionNames)
+      processes = $metrics
+    } | ConvertTo-Json -Compress -Depth 5))
 }
 
 function Get-ZmxSessionProcessIds([string] $name) {
@@ -195,6 +211,7 @@ try {
       & $app --smoke
     }
     Record-TestOwnedSessions
+    Write-OwnedResourceMetrics
     Write-Host "terminal gate sessions after attach:"
     & $zmx list | Select-String $sessionPrefix
     Invoke-Native "first-session health" {

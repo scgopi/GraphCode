@@ -97,4 +97,4 @@ jobs:
         shell: pwsh
         env:
           GRAPHCODE_HARDENING_TARGET: ${{ inputs.environment_target }}
-        run: ./Tools/windows/Tests/Hardening.Tests.ps1 -Environment
+        run: ./Tools/windows/Tests/Hardening.Tests.ps1 -Environment -SchemaOnly

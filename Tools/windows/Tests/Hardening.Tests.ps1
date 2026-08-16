@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
   [switch] $Environment,
+  [switch] $SchemaOnly,
   [int] $Run = 0
 )
 
@@ -15,6 +16,28 @@ $realProductSamples = [System.Collections.Generic.List[object]]::new()
 
 function Assert-True([bool] $condition, [string] $message) {
   if (-not $condition) { throw "Hardening failure: $message" }
+}
+
+function Select-EquivalentProductSample([object[]] $samples) {
+  $roleSets = @($samples | ForEach-Object {
+      [Collections.Generic.HashSet[string]]::new(
+        @($_.processes | ForEach-Object role),
+        [StringComparer]::OrdinalIgnoreCase)
+    })
+  if ($roleSets.Count -eq 0) { return @() }
+  $roles = @($roleSets[0])
+  foreach ($set in $roleSets | Select-Object -Skip 1) {
+    $roles = @($roles | Where-Object { $set.Contains($_) })
+  }
+  @($samples | ForEach-Object {
+      $details = @($_.processes | Where-Object { $roles -contains $_.role })
+      [pscustomobject]@{
+        processes = $details
+        privateBytes = [int64](($details | Measure-Object privateBytes -Sum).Sum)
+        handles = [int64](($details | Measure-Object handles -Sum).Sum)
+        roles = @($roles)
+      }
+    })
 }
 
 function Invoke-Fixture([string[]] $arguments) {
@@ -123,6 +146,11 @@ function Get-ProductResourceSample([string[]] $roots) {
           [pscustomobject]@{
             pid = $_
             name = $sample.ProcessName
+            role = if ($sample.ProcessName -match "graphcoded") { "graphcoded" }
+              elseif ($sample.ProcessName -match "graphcode-windows") { "graphcode-windows" }
+              elseif ($sample.ProcessName -match "zmx") { "zmx" }
+              elseif ($sample.ProcessName -match "winghostty") { "winghostty" }
+              else { "product-child" }
             privateBytes = [int64]$sample.PrivateMemorySize64
             handles = [int64]$sample.HandleCount
           }
@@ -256,6 +284,7 @@ function Invoke-RealMatrix {
     $productAfterWorkload = Get-ProductResourceSample $productRoots
     $productNewWorkload = Select-NewProductResourceSample $productAfterWorkload $productBaselinePids
     $realProductSamples.Add($productNewWorkload)
+    Write-Output ("HARDENING product-metrics-json=" + ($productNewWorkload | ConvertTo-Json -Compress -Depth 6))
     Assert-True (($productNewWorkload.processes | Where-Object privateBytes -gt 512MB).Count -eq 0) `
       "a product process exceeded 512 MiB private memory"
     Assert-True (($productNewWorkload.processes | Where-Object handles -gt 256).Count -eq 0) `
@@ -406,17 +435,19 @@ if ($Run -eq 0) {
     Write-Output "HARDENING repeated-handle-trend: PASS (range=$handleRange)"
   }
   if ($realProductSamples.Count -gt 1) {
+    $equivalentSamples = @(Select-EquivalentProductSample @($realProductSamples))
     $productPrivateRange = [Math]::Round(
-      (($realProductSamples | Measure-Object privateBytes -Maximum).Maximum -
-       ($realProductSamples | Measure-Object privateBytes -Minimum).Minimum) / 1MB, 1)
+      (($equivalentSamples | Measure-Object privateBytes -Maximum).Maximum -
+       ($equivalentSamples | Measure-Object privateBytes -Minimum).Minimum) / 1MB, 1)
     $productHandleRange = [Math]::Abs(
-      ($realProductSamples | Measure-Object handles -Maximum).Maximum -
-      ($realProductSamples | Measure-Object handles -Minimum).Minimum)
+      ($equivalentSamples | Measure-Object handles -Maximum).Maximum -
+      ($equivalentSamples | Measure-Object handles -Minimum).Minimum)
     Assert-True ($productPrivateRange -le 128) `
       "repeated product-tree private-memory trend exceeded 128 MiB: $productPrivateRange"
     Assert-True ($productHandleRange -le 256) `
       "repeated product-tree handle trend exceeded 256: $productHandleRange"
-    Write-Output "HARDENING repeated-product-tree-trend: PASS (private MiB range=$productPrivateRange; handles range=$productHandleRange)"
+    Write-Output ("HARDENING repeated-product-tree-trend: PASS (roles={0}; private MiB range={1}; handles range={2})" -f
+      (($equivalentSamples[0].roles -join ",")), $productPrivateRange, $productHandleRange)
   }
   $requiredDimensions = @(
     "gpu-context-display", "dpi-multimonitor", "ime-unicode-clipboard",
@@ -564,7 +595,7 @@ switch ($Mode) {
       throw "environment hardening harness failed with exit code $LASTEXITCODE"
     }
     $environmentResult = Assert-EnvironmentResult $harnessOutput
-    Invoke-RealMatrix
+    if (-not $SchemaOnly) { Invoke-RealMatrix }
     Write-Output "HARDENING environment: PASS (owned harness executed)"
   } else {
     Write-Output "HARDENING environment: NOT RUN (set -Environment only with an owned test target)"

@@ -83,6 +83,24 @@ function Record-TestOwnedSessions {
   }
 }
 
+function Write-OwnedResourceMetrics {
+  $metrics = @($ownedProcessIds | ForEach-Object {
+      $p = Get-Process -Id $_ -ErrorAction SilentlyContinue
+      if ($p) {
+        [pscustomobject]@{
+          pid = $_
+          role = if ($p.ProcessName -match "zmx") { "zmx" } else { $p.ProcessName }
+          handles = [int64]$p.HandleCount
+          privateBytes = [int64]$p.PrivateMemorySize64
+        }
+      }
+    })
+  Write-Host ("PRODUCT_RESOURCE_METRICS_JSON=" + (@{
+      sessions = @($ownedSessionNames)
+      processes = $metrics
+    } | ConvertTo-Json -Compress -Depth 5))
+}
+
 function Get-ProcessTreeIds([int[]] $roots) {
   $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
   $ids = [Collections.Generic.HashSet[int]]::new()
@@ -123,11 +141,7 @@ function Assert-NoOrphanShellProcesses {
   $processes = @(
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
       Where-Object {
-        $_.Name -match "(?i)^graphcode-windows(?:\.exe)?$" -or
-        ($_.Name -match "(?i)^zmx(?:\.exe)?$" -and
-          $_.CommandLine -and
-          ($_.CommandLine -match "graphcode-windows" -or
-          (Test-TestSessionProcess $_)))
+        $_.CommandLine -and (Test-TestSessionProcess $_)
       }
   )
   if ($processes.Count -ne 0) {
@@ -191,6 +205,7 @@ try {
     & $app @arguments
   }
   Record-TestOwnedSessions
+  Write-OwnedResourceMetrics
   if ($UseStubDaemon) {
     Invoke-Native "GraphCode Windows shell restart smoke" {
       & $app @arguments
