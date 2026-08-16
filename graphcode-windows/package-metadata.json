@@ -4,6 +4,11 @@
   "executable": "graphcode-windows.exe",
   "platform": "windows-x86_64",
   "installer": true,
+  "bundle": {
+    "script": "Tools/windows/package.ps1",
+    "artifactPattern": "GraphCode-<version>-windows-x86_64.zip",
+    "unsignedLabel": "UNSIGNED (development artifact; not code signed)"
+  },
   "runtime": {
     "daemon": "graphcoded.exe",
     "terminal": "zmx.exe",
