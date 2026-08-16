@@ -59,8 +59,12 @@ try {
   $manifest.files[0].path = "/absolute.txt"
   $manifest | ConvertTo-Json -Depth 10 | Set-Content $manifestPath
   try { Invoke-Package "Verify" @{ Package = $artifact }; throw "absolute manifest was accepted" } catch { if ($_ -like "*absolute manifest was accepted*") { throw } }
-  $manifest.files[0].path = "bin/graphcode.exe"
-  $manifest.files += $manifest.files[0]
+  $metadataFile = Get-Item (Join-Path $artifact "metadata.json")
+  $manifest.files += [ordered]@{
+    path = "metadata.json"
+    size = $metadataFile.Length
+    sha256 = (Get-FileHash $metadataFile -Algorithm SHA256).Hash.ToLowerInvariant()
+  }
   $manifest | ConvertTo-Json -Depth 10 | Set-Content $manifestPath
   try { Invoke-Package "Verify" @{ Package = $artifact }; throw "duplicate manifest was accepted" } catch { if ($_ -like "*duplicate manifest was accepted*") { throw } }
   $prov = Get-Content (Join-Path $artifact "provider-provenance.json") -Raw | ConvertFrom-Json
