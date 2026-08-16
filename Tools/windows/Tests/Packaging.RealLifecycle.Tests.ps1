@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $script = Join-Path $RepositoryRoot "Tools\windows\package.ps1"
-$testHome = Join-Path $RepositoryRoot ".build\packaging-real-home-$PID"
+$testHome = Join-Path $RepositoryRoot ".build\packaging-real-home-$PID\深い 空間\用户"
 $install = Join-Path $testHome "GraphCode\current"
 $oldHome = $env:USERPROFILE
 $pwsh = (Get-Command pwsh).Source

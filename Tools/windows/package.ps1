@@ -9,8 +9,11 @@ param(
   [string] $Version = "0.0.0-dev",
   [string] $SignCertificate,
   [string] $SignTimestampUrl,
+  [string] $SignToolPath,
   [string] $WinghosttyRoot,
   [string] $ZmxRoot,
+  [string] $Zig0152 = $env:GRAPHCODE_ZIG0152,
+  [string] $Zig0160 = $env:GRAPHCODE_ZIG0160,
   [switch] $KeepUserData,
   [switch] $RemoveUserData,
   [switch] $NoScheduledTask,
@@ -173,11 +176,23 @@ function Read-ProviderProvenance([string] $root) {
     $artifact = Join-Path $root ($p.packagePath -replace "/", "\")
     Require (Test-Path $artifact -PathType Leaf) "$provider provenance artifact is missing"
     Require ((Get-FileHash $artifact -Algorithm SHA256).Hash.ToLowerInvariant() -eq $p.sha256.ToLowerInvariant()) "$provider provenance digest mismatch"
-    $licensePath = Join-Path $root ($p.licensePath -replace "/", "\")
+    $normalizedLicensePath = Normalize-ManifestPath ([string]$p.licensePath)
+    Require ($normalizedLicensePath -eq $p.licensePath) "$provider license path is not normalized"
+    $licensePath = Join-Path $root ($normalizedLicensePath -replace "/", "\")
     Require (Test-Path $licensePath -PathType Leaf) "$provider license file is missing"
     Require ((Get-FileHash $licensePath -Algorithm SHA256).Hash.ToLowerInvariant() -eq $p.licenseSha256.ToLowerInvariant()) "$provider license digest mismatch"
   }
   return $provenance
+}
+function Verify-SignedPackage([string] $root, [object] $metadata) {
+  if ($metadata.signing -ne "signed") { return }
+  Require (Test-Path (Join-Path $root "SIGNATURES.txt")) "signed package has no signature record"
+  $tool = if ($SignToolPath) { $SignToolPath } else { (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source }
+  Require ($tool -and (Test-Path $tool)) "signed package verification requires signtool.exe"
+  foreach ($file in @(Get-ChildItem (Join-Path $root "bin") -Filter *.exe)) {
+    & $tool verify /pa $file.FullName *> $null
+    Require ($LASTEXITCODE -eq 0) "signature verification failed: $($file.Name)"
+  }
 }
 function Build-Package {
   $out = if ($OutputDirectory) { $OutputDirectory } else { Join-Path $repoRoot ".build\windows\packages" }
@@ -199,6 +214,7 @@ function Build-Package {
   $provenancePath = Join-Path $root "provider-provenance.json"
   if ($WinghosttyRoot -or $ZmxRoot) {
     Require ($WinghosttyRoot -and $ZmxRoot) "both provider roots are required"
+    Require ($Zig0152 -and $Zig0160) "pinned Zig 0.15.2 and 0.16.0 executables are required"
     $pins = Get-Content (Join-Path $shellRoot "provider-pins.json") -Raw | ConvertFrom-Json
     foreach ($spec in @(
       @{ name = "winghostty"; root = $WinghosttyRoot; pin = $pins.winghostty; source = $pins.winghostty.artifact; destination = "assets/winghostty-win32-host.lib" },
@@ -206,6 +222,18 @@ function Build-Package {
     )) {
       Require ((git -C $spec.root rev-parse HEAD) -eq $spec.pin.sha) "$($spec.name) provider is not pinned"
       Require (@(git -C $spec.root status --porcelain).Count -eq 0) "$($spec.name) provider worktree is dirty"
+      $zig = if ($spec.name -eq "winghostty") { $Zig0152 } else { $Zig0160 }
+      Require (Test-Path $zig -PathType Leaf) "pinned Zig executable is missing for $($spec.name)"
+      Push-Location $spec.root
+      try {
+        $buildArgs = if ($spec.name -eq "winghostty") {
+          @("build", "-Demit-win32-host=true")
+        } else {
+          @("build", "-Dtarget=x86_64-windows-gnu")
+        }
+        & $zig @buildArgs
+        Require ($LASTEXITCODE -eq 0) "$($spec.name) pinned rebuild failed"
+      } finally { Pop-Location }
       $providerArtifact = Join-Path $spec.root ($spec.source -replace "/", "\")
       Require (Test-Path $providerArtifact -PathType Leaf) "$($spec.name) provider artifact is missing"
       $destination = Join-Path $root ($spec.destination -replace "/", "\")
@@ -257,13 +285,13 @@ $zmxLicense
   Copy-Item (Join-Path $shellRoot "provider-pins.json") (Join-Path $root "provider-pins.json") -Force
   Write-Metadata $root $Version
   if ($SignCertificate) {
-    $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    $signtool = if ($SignToolPath) { (Resolve-Path $SignToolPath).Path } else { (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source }
     Require $signtool "signtool.exe was not found; signed packaging requires Windows SDK"
     Get-ChildItem (Join-Path $root "bin") -Filter *.exe | ForEach-Object {
       $args = @("sign", "/sha1", $SignCertificate)
       if ($SignTimestampUrl) { $args += @("/tr", $SignTimestampUrl, "/td", "sha256") }
       $args += $_.FullName
-      & $signtool.Source @args
+      & $signtool @args
       Require ($LASTEXITCODE -eq 0) "signtool failed for $($_.Name)"
     }
     Set-Content (Join-Path $root "SIGNATURES.txt") -Value "Signed with certificate thumbprint $SignCertificate" -Encoding utf8
@@ -358,15 +386,21 @@ function Remove-DaemonTask {
 function Start-DaemonTask {
   $support = Join-Path $env:USERPROFILE ".graphcode"
   New-Item -ItemType Directory -Force $support | Out-Null
-  $launcher = Join-Path $InstallRoot "graphcoded-launcher.cmd"
-  Set-Content -LiteralPath $launcher -Encoding ascii -Value @(
-    "@echo off"
-    "set `"GRAPHCODE_SUPPORT_DIR=$support`""
-    "`"$InstallRoot\bin\graphcoded.exe`""
-  )
-  $taskCommand = "`"$launcher`""
-  & schtasks.exe /Create /TN "GraphCode daemon" /SC ONLOGON /TR $taskCommand /F *> $null
+  $xmlPath = Join-Path (Split-Path $InstallRoot -Parent) "GraphCode-daemon-task.xml"
+  $xml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>GraphCode daemon</Description></RegistrationInfo>
+  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>
+  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>
+  <Actions Context="Author"><Exec><Command>C:\Windows\System32\cmd.exe</Command><Arguments>/d /s /c "set GRAPHCODE_SUPPORT_DIR=$support&amp;&amp;&quot;$InstallRoot\bin\graphcoded.exe&quot;"</Arguments><WorkingDirectory>$InstallRoot\bin</WorkingDirectory></Exec></Actions>
+</Task>
+"@
+  [IO.File]::WriteAllText($xmlPath, $xml, [Text.Encoding]::Unicode)
+  & schtasks.exe /Create /TN "GraphCode daemon" /XML $xmlPath /F *> $null
   Require ($LASTEXITCODE -eq 0) "scheduled-task registration failed"
+  Remove-Item $xmlPath -Force -ErrorAction SilentlyContinue
   & schtasks.exe /Run /TN "GraphCode daemon" *> $null
   Require ($LASTEXITCODE -eq 0) "scheduled-task start failed"
   $deadline = [DateTime]::UtcNow.AddSeconds(15)
@@ -444,7 +478,7 @@ function Uninstall-Package {
 
 switch ($Command) {
   "Build" { Build-Package }
-  "Verify" { try { $root = Open-Package $Package; Assert-Package $root | Out-Null; Verify-Manifest $root | Out-Null; Read-ProviderProvenance $root | Out-Null; Write-Output "Package verification: PASS" } finally { Close-Package } }
+  "Verify" { try { $root = Open-Package $Package; $metadata = Assert-Package $root; Verify-Manifest $root | Out-Null; Read-ProviderProvenance $root | Out-Null; Verify-SignedPackage $root $metadata; Write-Output "Package verification: PASS" } finally { Close-Package } }
   "Install" { Install-Package $false }
   "Upgrade" { Install-Package $true }
   "Uninstall" { Uninstall-Package }

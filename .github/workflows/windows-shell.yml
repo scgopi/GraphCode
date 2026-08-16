@@ -78,4 +78,7 @@ jobs:
 
       - name: Validate release packaging
         shell: pwsh
+        env:
+          GRAPHCODE_WINGHOSTTY_ROOT: ${{ github.workspace }}\Winghostty-worktrees\host-integration
+          GRAPHCODE_ZMX_ROOT: ${{ github.workspace }}\zmx-worktrees\attach
         run: ./Tools/windows/validate.ps1 -Task packaging
