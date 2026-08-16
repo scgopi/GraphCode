@@ -891,7 +891,7 @@ class RemoteBridge:
             return
         finally:
             try:
-                connection.shutdown(socket.SHUT_RDWR)
+                connection.shutdown(socket.SHUT_WR)
             except OSError:
                 pass
             connection.close()
