@@ -19,7 +19,9 @@ struct SettingsView: View {
   /// nothing is worse than no tab.
   var body: some View {
     sessions
-      .frame(minWidth: 620, maxWidth: .infinity)
+      // Resizable both ways: 620 stays the width the window opens at, but the floor
+      // sits at 480 — the grouped form's captions wrap, so narrow just means taller.
+      .frame(minWidth: 480, idealWidth: 620, maxWidth: .infinity)
       .padding(.vertical, 4)
   }
 
