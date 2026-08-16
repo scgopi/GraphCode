@@ -125,6 +125,13 @@ struct ProjectCanvasView: View {
     .sheet(item: $store.pendingEdge) { _ in
       edgeForm
     }
+    .sheet(
+      isPresented: Binding(
+        get: { store.nodePendingPromotion != nil },
+        set: { if !$0 { store.send(.promotionCancelled) } })
+    ) {
+      SketchPromotionForm(store: store)
+    }
     // The delete confirmation is deliberately *not* here — it's hosted by `AppView`, so
     // it can also present for a deletion started from the sidebar while this canvas
     // isn't the visible detail pane. See `AppFeature.State.pendingLoopDeletion`.

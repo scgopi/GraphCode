@@ -101,6 +101,38 @@ extension ProjectFeature.State {
   /// is visible before it is written.
   var triggerPreview: String { composedTriggerPrompt ?? "" }
 
+  /// What the promotion form currently means — nil while its one required field is
+  /// empty. Computed like `draft`, so there is exactly one definition of it.
+  ///
+  /// A timed promotion asks only for the cadence; the work it repeats is what the
+  /// session is already doing, seeded by the sketch's own note when there is one.
+  var promotion: SketchPromotion? {
+    switch promotionTarget {
+    case .goalBased:
+      let summary = promotionGoal.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !summary.isEmpty else { return nil }
+      return .goal(GoalSpec(summary: summary))
+    case .turnBased:
+      return .turn(pausesBeforeWritesOnly: promotionPausesBeforeWritesOnly)
+    case .timeBased:
+      let note =
+        nodePendingPromotion
+        .flatMap { graph.nodes[id: $0]?.firstInstruction }?
+        .trimmingCharacters(in: .whitespaces) ?? ""
+      let task = note.isEmpty ? "Carry on with what this session has been doing." : note
+      let cadence = promotionInterval.directiveValue(custom: promotionCustomInterval)
+      return .timed(triggerPrompt: "/loop \(cadence) \(task)")
+    case .sketch, .composite:
+      return nil
+    }
+  }
+
+  /// The composed `/loop` line the promotion form shows before it is written.
+  var promotionTriggerPreview: String {
+    guard promotionTarget == .timeBased, case .timed(let prompt)? = promotion else { return "" }
+    return prompt
+  }
+
   /// The `git worktree add` to run before creating the node, if the human asked for a
   /// new branch. The worktree lands next to the repository rather than inside it, so
   /// it never shows up as untracked content in the project the loops are working on.

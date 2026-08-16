@@ -64,6 +64,23 @@ extension ProjectCanvasView {
       Button("Arm Schedule") { store.send(.armCompositeTapped(node.id)) }
         .disabled(!node.pilotState.canArm)
     }
+    if node.loopType == .sketch {
+      // The reason the type is worth having: a sketch that turned out to matter keeps
+      // its session and gains a shape — each target asks for exactly one thing.
+      Menu("Promote to…") {
+        Section("Keep the session, add a shape") {
+          Button("Goal — asks for a done check") {
+            store.send(.promoteNodeRequested(node.id, to: .goalBased))
+          }
+          Button("Turn — asks where to pause") {
+            store.send(.promoteNodeRequested(node.id, to: .turnBased))
+          }
+          Button("Timed — asks for a cadence") {
+            store.send(.promoteNodeRequested(node.id, to: .timeBased))
+          }
+        }
+      }
+    }
     // Available on a resolved loop too: a finished loop is still something you read the
     // graph by, and its name is what you read.
     Button("Rename…") { store.send(.renameNodeRequested(node.id)) }
