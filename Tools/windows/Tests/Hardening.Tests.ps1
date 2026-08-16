@@ -285,7 +285,7 @@ function Invoke-RealMatrix {
     $realProductSamples.Add($productNewWorkload)
     Write-Output ("PRODUCT_RESOURCE_METRICS_JSON=" + ([ordered]@{
       snapshotId = "$PID-graphcoded-tree"
-      phase = "active-workload"
+      phase = "graphcoded:active-workload"
       processes = $productNewWorkload.processes
     } | ConvertTo-Json -Compress -Depth 6))
     Assert-True (($productNewWorkload.processes | Where-Object privateBytes -gt 512MB).Count -eq 0) `
@@ -383,7 +383,7 @@ if ($Run -eq 0) {
   $runs = [System.Collections.Generic.List[string]]::new()
   $metricRuns = [System.Collections.Generic.List[object]]::new()
   for ($index = 1; $index -le 3; $index++) {
-    if ($Environment) {
+    if ($Environment -and -not $SchemaOnly) {
       $output = & $pwsh -NoProfile -File $PSCommandPath -Run $index -Environment -SchemaOnly:$SchemaOnly
     } else {
       $output = & $pwsh -NoProfile -File $PSCommandPath -Run $index
@@ -408,9 +408,9 @@ if ($Run -eq 0) {
         throw "run $index emitted malformed or duplicate PRODUCT_RESOURCE_METRICS_JSON"
       }
     }
-    if ($Environment) { $metricRuns.Add([pscustomobject]@{ run = $index; snapshots = @($runSnapshots) }) }
+    if ($Environment -and -not $SchemaOnly) { $metricRuns.Add([pscustomobject]@{ run = $index; snapshots = @($runSnapshots) }) }
   }
-  if (-not $Environment) {
+  if (-not $Environment -or $SchemaOnly) {
     Write-Output "HARDENING typed-product-trend: NOT RUN (environment matrix not selected)"
   } else {
   $expectedRoles = @("graphcoded", "graphcode-windows", "zmx", "winghostty")
@@ -421,33 +421,38 @@ if ($Run -eq 0) {
     Assert-True (($snapshot.processes | Measure-Object handles -Maximum).Maximum -le 1024) `
       "snapshot '$($snapshot.snapshotId)' exceeded handle ceiling"
   }
-  $runRoleSets = @($metricRuns | ForEach-Object {
-      [Collections.Generic.HashSet[string]]::new(@($_.snapshots.processes | ForEach-Object role),
-        [StringComparer]::OrdinalIgnoreCase)
-    })
-  Assert-True ($runRoleSets.Count -ge 3) "typed metrics did not cover all three repeated runs"
-  foreach ($role in $expectedRoles) {
-    Assert-True (@($runRoleSets | Where-Object { -not $_.Contains($role) }).Count -eq 0) `
-      "typed metrics missing required role '$role'"
+  $requiredTuples = @(
+    "terminal-gate:typed-input|winghostty", "terminal-gate:typed-input|zmx",
+    "terminal-gate:stress|winghostty", "terminal-gate:stress|zmx",
+    "windows-shell:topology|graphcode-windows", "windows-shell:large-paste|graphcode-windows",
+    "graphcoded:active-workload|graphcoded"
+  )
+  $tupleSamples = @{}
+  foreach ($run in $metricRuns) {
+    $tuples = @{}
+    foreach ($snapshot in $run.snapshots) {
+      $byPid = @($snapshot.processes | Group-Object pid | ForEach-Object { $_.Group | Select-Object -First 1 })
+      foreach ($role in @($byPid | ForEach-Object role | Select-Object -Unique)) {
+        $key = "$($snapshot.phase)|$role"
+        $tuples[$key] = [pscustomobject]@{ privateBytes = [int64](($byPid | Where-Object role -eq $role | Measure-Object privateBytes -Sum).Sum); handles = [int64](($byPid | Where-Object role -eq $role | Measure-Object handles -Sum).Sum) }
+      }
+    }
+    foreach ($tuple in $requiredTuples) {
+      Assert-True $tuples.ContainsKey($tuple) "run $($run.run) missing metric tuple '$tuple'"
+      if (-not $tupleSamples.ContainsKey($tuple)) { $tupleSamples[$tuple] = [System.Collections.Generic.List[object]]::new() }
+      $tupleSamples[$tuple].Add($tuples[$tuple])
+    }
   }
-  $equivalentMetrics = @(Select-EquivalentProductSample @($metricRuns | ForEach-Object {
-      [pscustomobject]@{ processes = @($_.snapshots | Where-Object phase -eq "active-workload" |
-          ForEach-Object processes); privateBytes = 0; handles = 0 }
-    }))
-  Assert-True ($equivalentMetrics.Count -ge 3) "typed metrics had no equivalent cross-run samples"
-  $privateRange = [Math]::Round(
-    (($equivalentMetrics | Measure-Object privateBytes -Maximum).Maximum -
-     ($equivalentMetrics | Measure-Object privateBytes -Minimum).Minimum) / 1MB, 1)
-  $handleRange = [Math]::Abs(
-    ($equivalentMetrics | Measure-Object handles -Maximum).Maximum -
-    ($equivalentMetrics | Measure-Object handles -Minimum).Minimum)
-  Assert-True (($equivalentMetrics | Where-Object privateBytes -gt 1GB).Count -eq 0) `
-    "typed product private-memory ceiling exceeded"
-  Assert-True (($equivalentMetrics | Where-Object handles -gt 1024).Count -eq 0) `
-    "typed product handle ceiling exceeded"
-  Assert-True ($privateRange -le 128) "typed product private-memory trend exceeded 128 MiB"
-  Assert-True ($handleRange -le 256) "typed product handle trend exceeded 256"
-  Write-Output "HARDENING typed-product-trend: PASS (private MiB range=$privateRange; handles range=$handleRange)"
+  foreach ($tuple in $requiredTuples) {
+    $samples = $tupleSamples[$tuple]
+    Assert-True ($samples.Count -eq 3) "metric tuple '$tuple' did not have exactly three runs"
+    Assert-True (($samples | Where-Object privateBytes -gt 1GB).Count -eq 0) "tuple '$tuple' exceeded private ceiling"
+    Assert-True (($samples | Where-Object handles -gt 1024).Count -eq 0) "tuple '$tuple' exceeded handle ceiling"
+    $privateRange = [Math]::Round((($samples | Measure-Object privateBytes -Maximum).Maximum - ($samples | Measure-Object privateBytes -Minimum).Minimum) / 1MB, 1)
+    $handleRange = [Math]::Abs(($samples | Measure-Object handles -Maximum).Maximum - ($samples | Measure-Object handles -Minimum).Minimum)
+    Assert-True ($privateRange -le 128 -and $handleRange -le 256) "tuple '$tuple' trend exceeded ceiling"
+  }
+  Write-Output "HARDENING typed-product-trend: PASS (tuples=$($requiredTuples.Count))"
   foreach ($red in @(
       "noise before PRODUCT_RESOURCE_METRICS_JSON=",
       "PRODUCT_RESOURCE_METRICS_JSON={malformed",

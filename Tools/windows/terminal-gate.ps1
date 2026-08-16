@@ -21,6 +21,7 @@ $ownedSessionNames = [System.Collections.Generic.HashSet[string]]::new()
 $ownedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
 $gateProcess = $null
 $resourceRole = "winghostty"
+$metricSequence = 0
 $sessionPrefix = "gc-$([guid]::NewGuid().ToString('N'))"
 $names = @(
   "$sessionPrefix-a",
@@ -103,7 +104,8 @@ function Record-TestOwnedSessions {
 
 }
 
-function Write-OwnedResourceMetrics {
+function Write-OwnedResourceMetrics([string] $phase) {
+  $script:metricSequence++
   $metrics = @($ownedProcessIds | ForEach-Object {
       $p = Get-Process -Id $_ -ErrorAction SilentlyContinue
       if ($p) {
@@ -117,19 +119,19 @@ function Write-OwnedResourceMetrics {
       }
     })
   Write-Host ("PRODUCT_RESOURCE_METRICS_JSON=" + (@{
-      snapshotId = "$PID-$resourceRole"
-      phase = "active-workload"
+      snapshotId = "$sessionPrefix-$resourceRole-$script:metricSequence"
+      phase = $phase
       sessions = @($ownedSessionNames)
       processes = $metrics
     } | ConvertTo-Json -Compress -Depth 5))
 }
 
-function Invoke-GateProcess([string[]] $arguments) {
+function Invoke-GateProcess([string[]] $arguments, [string] $phase) {
   $script:gateProcess = Start-Process -FilePath $app -ArgumentList $arguments -PassThru -WindowStyle Hidden
   [void] $ownedProcessIds.Add($script:gateProcess.Id)
   Start-Sleep -Milliseconds 250
   Record-TestOwnedSessions
-  Write-OwnedResourceMetrics
+  Write-OwnedResourceMetrics $phase
   $script:gateProcess.WaitForExit()
   if ($script:gateProcess.ExitCode -ne 0) {
     throw "terminal gate exited with code $($script:gateProcess.ExitCode)"
@@ -227,10 +229,10 @@ try {
   Write-Host "terminal gate session prefix: $sessionPrefix"
   try {
     Invoke-Native "terminal gate first attach smoke" {
-      Invoke-GateProcess @("--smoke")
+      Invoke-GateProcess @("--smoke") "terminal-gate:typed-input"
     }
     Record-TestOwnedSessions
-    Write-OwnedResourceMetrics
+    Write-OwnedResourceMetrics "terminal-gate:typed-input"
     Write-Host "terminal gate sessions after attach:"
     & $zmx list | Select-String $sessionPrefix
     Invoke-Native "first-session health" {
@@ -259,7 +261,7 @@ try {
     Assert-HistoryContains $names[1] `
       "GraphCode persistent VT output B" "first-session B history"
     Invoke-Native "terminal gate independent restart attach smoke" {
-      Invoke-GateProcess @("--smoke")
+      Invoke-GateProcess @("--smoke") "terminal-gate:reconnect"
     }
     Record-TestOwnedSessions
     Invoke-Native "restart-session health" {
@@ -275,7 +277,7 @@ try {
     Assert-HistoryContains $names[1] `
       "GraphCode typed output B" "restart typed B history"
     Invoke-Native "terminal gate same-session attach smoke" {
-      Invoke-GateProcess @("--smoke", "--same-session")
+      Invoke-GateProcess @("--smoke", "--same-session") "terminal-gate:typed-input"
     }
     Record-TestOwnedSessions
     Invoke-Native "same-session health" {
@@ -287,14 +289,14 @@ try {
     Assert-HistoryContains $names[2] `
       "GraphCode shared VT output" "same-session history"
     Invoke-Native "terminal gate same-session restart smoke" {
-      Invoke-GateProcess @("--smoke", "--same-session")
+      Invoke-GateProcess @("--smoke", "--same-session") "terminal-gate:reconnect"
     }
     Record-TestOwnedSessions
     Assert-HistoryContains $names[2] `
       "GraphCode shared VT output" "same-session restart history"
     if ($Stress) {
       Invoke-Native "terminal gate destroy/recreate stress" {
-        Invoke-GateProcess @("--smoke", "--stress")
+        Invoke-GateProcess @("--smoke", "--stress") "terminal-gate:stress"
       }
       Record-TestOwnedSessions
       Invoke-Native "post-stress session health" {

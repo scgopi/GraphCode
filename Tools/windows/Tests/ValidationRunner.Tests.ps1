@@ -73,6 +73,9 @@ try {
   if ($windowsWorkflow -notmatch "GRAPHCODE_HARDENING_TARGET") {
     throw "RED: full-pinned Windows CI does not provide an owned environment harness"
   }
+  if ($windowsWorkflow -notmatch "(?s)environment:.*Hardening\.Tests\.ps1 -Environment -SchemaOnly") {
+    throw "RED: environment CI does not invoke the exact schema-only hardening contract"
+  }
   $macWorkflow = Get-Content (Join-Path $repoRoot ".github\workflows\macos-shared-regression.yml") -Raw
   if ($macWorkflow -notmatch "brew install mise" -or
       $macWorkflow -notmatch "mise install" -or

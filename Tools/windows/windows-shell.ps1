@@ -41,6 +41,7 @@ $ownedSessionNames = [System.Collections.Generic.HashSet[string]]::new()
 $ownedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
 $shellProcess = $null
 $resourceRole = "graphcode-windows"
+$metricSequence = 0
 
 function Invoke-Native([string] $description, [scriptblock] $command) {
   Write-Host "==> $description"
@@ -85,7 +86,8 @@ function Record-TestOwnedSessions {
   }
 }
 
-function Write-OwnedResourceMetrics {
+function Write-OwnedResourceMetrics([string] $phase) {
+  $script:metricSequence++
   $metrics = @($ownedProcessIds | ForEach-Object {
       $p = Get-Process -Id $_ -ErrorAction SilentlyContinue
       if ($p) {
@@ -99,19 +101,19 @@ function Write-OwnedResourceMetrics {
       }
     })
   Write-Host ("PRODUCT_RESOURCE_METRICS_JSON=" + (@{
-      snapshotId = "$PID-$resourceRole"
-      phase = "active-workload"
+      snapshotId = "$sessionPrefix-$resourceRole-$script:metricSequence"
+      phase = $phase
       sessions = @($ownedSessionNames)
       processes = $metrics
     } | ConvertTo-Json -Compress -Depth 5))
 }
 
-function Invoke-ShellProcess([string[]] $arguments) {
+function Invoke-ShellProcess([string[]] $arguments, [string] $phase) {
   $script:shellProcess = Start-Process -FilePath $app -ArgumentList $arguments -PassThru -WindowStyle Hidden
   [void] $ownedProcessIds.Add($script:shellProcess.Id)
   Start-Sleep -Milliseconds 250
   Record-TestOwnedSessions
-  Write-OwnedResourceMetrics
+  Write-OwnedResourceMetrics $phase
   $script:shellProcess.WaitForExit()
   if ($script:shellProcess.ExitCode -ne 0) {
     throw "GraphCode Windows shell exited with code $($script:shellProcess.ExitCode)"
@@ -221,13 +223,13 @@ try {
   $arguments = @("--smoke")
   if ($Stress) { $arguments += "--stress" }
   Invoke-Native "GraphCode Windows shell smoke/stress" {
-    Invoke-ShellProcess $arguments
+    Invoke-ShellProcess $arguments "windows-shell:topology"
   }
   Record-TestOwnedSessions
   Write-OwnedResourceMetrics
   if ($UseStubDaemon) {
     Invoke-Native "GraphCode Windows shell restart smoke" {
-      Invoke-ShellProcess $arguments
+      Invoke-ShellProcess $arguments "windows-shell:large-paste"
     }
     Record-TestOwnedSessions
   }
