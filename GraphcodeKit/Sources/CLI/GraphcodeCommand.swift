@@ -561,8 +561,11 @@ extension GraphcodeCommand {
     guard let usage = graph.usage else {
       return """
         \(graph.project.name): no usage reported (0/\(coverage.total) loops)
-          Usage is reported by the backend, never estimated — install a hook that runs
-          `zmx set "$ZMX_SESSION" usage=inputTokens=…,outputTokens=…,costUSD=…`
+          Usage is reported by the backend, never estimated. Claude Code loops report it
+          automatically at each turn end (graphcode's own Stop hook); a loop that has
+          not finished a turn since that hook was installed has nothing to report yet.
+          Other backends need a hook running
+          `zmx set "$ZMX_SESSION" usage=input.<tokens>_output.<tokens>`
         """
     }
     var lines = ["\(graph.project.name): \(coverage.reporting)/\(coverage.total) loops reporting"]

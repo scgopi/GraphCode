@@ -35,6 +35,11 @@ public enum PresenceHooks {
     directory.appendingPathComponent("activity.sh")
   }
 
+  /// The `Stop`/`SessionEnd` usage reporter, a file for the same `MAX_CANON` reason.
+  public static var usageScriptFile: URL {
+    directory.appendingPathComponent("usage.sh")
+  }
+
   /// Which of a backend's lifecycle events mean what, in the backend's own event names.
   ///
   /// `nil` for a backend with no hook mechanism at all, which is the honest answer for
@@ -94,6 +99,66 @@ public enum PresenceHooks {
   /// nicety went wrong.
   static func reportActivity(scriptPath: String) -> String {
     "if [ -r \(scriptPath) ]; then /bin/sh \(scriptPath); fi; exit 0"
+  }
+
+  /// The `Stop`/`SessionEnd` body that runs `usageScript`, guarded the same way and for
+  /// the same reasons as `reportActivity` — and kept beside the presence report rather
+  /// than folded in, so token accounting going wrong can never stop presence being
+  /// reported.
+  static func reportUsage(scriptPath: String) -> String {
+    "if [ -r \(scriptPath) ]; then /bin/sh \(scriptPath); fi; exit 0"
+  }
+
+  /// This session's cumulative token spend, summed from its own transcript — the write
+  /// half of `LoopNode.usage`, which shipped with a reader (`ZmxSessionLauncher.usage`),
+  /// a rollup, a cost panel, and — once budgets landed — an *enforcer*, and nothing at
+  /// all that wrote it. `UsageSample`'s docs said "install a hook that runs `zmx set
+  /// usage=inputTokens=…`", and no such hook could even work: a `zmx` label value takes
+  /// only `[A-Za-z0-9._-]`, so the documented format was unstorable. This writes the
+  /// `key.value_key.value` form `UsageSample.parse` reads for exactly that reason.
+  ///
+  /// The transcript is the source because it is the only thing on disk the backend
+  /// itself wrote per turn: every assistant record carries its `usage` block, and the
+  /// literal `"input_tokens":` match cannot collide with the `cache_…_input_tokens`
+  /// keys (their preceding byte is `_`, not `"`), which are summed separately below —
+  /// a budget is spent by what the API metered, cache reads included.
+  ///
+  /// Runs on `Stop` — once per turn, when the spend just changed — never per tool call:
+  /// it reads the whole transcript, and `PreToolUse` frequency would price it wrong.
+  /// Cannot fail and cannot block, same contract as every hook here: every path exits 0.
+  static func usageScript(zmxPath: String) -> String {
+    """
+    # Written by graphcode. Reports this session's token spend, for the usage rollup
+    # and goal budgets.
+    [ -n "$ZMX_SESSION" ] || exit 0
+    payload=$(head -c 4096 | tr '\\n' ' ')
+    transcript=$(printf '%s' "$payload" |
+      sed -n 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
+    [ -r "$transcript" ] || exit 0
+    label=$(awk '
+      function grab(key,    s, t, n) {
+        n = 0
+        s = $0
+        while (match(s, key "[0-9]+")) {
+          t = substr(s, RSTART, RLENGTH)
+          gsub(/[^0-9]/, "", t)
+          n += t
+          s = substr(s, RSTART + RLENGTH)
+        }
+        return n
+      }
+      {
+        input += grab("\\"input_tokens\\":")
+        input += grab("\\"cache_creation_input_tokens\\":")
+        input += grab("\\"cache_read_input_tokens\\":")
+        output += grab("\\"output_tokens\\":")
+      }
+      END { if (input + output > 0) printf "input.%d_output.%d", input, output }
+    ' "$transcript" 2>/dev/null)
+    [ -n "$label" ] || exit 0
+    \(singleQuoted(zmxPath)) set "$ZMX_SESSION" "usage=$label" >/dev/null 2>&1
+    exit 0
+    """
   }
 
   /// What the session is doing, in its own words, derived from the `PreToolUse` payload
@@ -193,6 +258,13 @@ public enum PresenceHooks {
 
   public static let remoteActivityScriptExpression = "\"$HOME/.graphcode/hooks/activity.sh\""
 
+  /// Where `usageScript` lands, in the same two shapes again.
+  static var localUsageScriptExpression: String {
+    singleQuoted(usageScriptFile.path)
+  }
+
+  public static let remoteUsageScriptExpression = "\"$HOME/.graphcode/hooks/usage.sh\""
+
   /// The remote twin of `SessionIDStore.file(forNodeID:)` — the file the remote
   /// `SessionStart` hook wrote, as a shell expression the ensure dial can `cat`.
   ///
@@ -210,11 +282,13 @@ public enum PresenceHooks {
   /// path, not a syntax error.
   public static func json(
     forBackend backend: CLISessionBackendKind, zmxPath: String,
-    sessionsDirectory: String? = nil, activityScriptPath: String? = nil
+    sessionsDirectory: String? = nil, activityScriptPath: String? = nil,
+    usageScriptPath: String? = nil
   ) -> String? {
     guard let events = events(forBackend: backend) else { return nil }
     let sessions = sessionsDirectory ?? localSessionsExpression
     let script = activityScriptPath ?? localActivityScriptExpression
+    let usage = usageScriptPath ?? localUsageScriptExpression
     let hooks = events.reduce(into: [String: [Matcher]]()) { result, event in
       let isToolUse = event.0 == "PreToolUse"
       var commands = [
@@ -225,6 +299,11 @@ public enum PresenceHooks {
       }
       if event.0 == "SessionStart" && backend == .claudeCode {
         commands.append(Command(command: captureSessionID(sessionsDirectory: sessions)))
+      }
+      // Turn end and session end are when the spend just changed and the session can
+      // afford a transcript read — never per tool call.
+      if (event.0 == "Stop" || event.0 == "SessionEnd") && backend == .claudeCode {
+        commands.append(Command(command: reportUsage(scriptPath: usage)))
       }
       result[event.0] = [Matcher(hooks: commands)]
     }
@@ -252,6 +331,8 @@ public enum PresenceHooks {
       // that runs this file checks it is readable first.
       try? activityScript(zmxPath: ZmxLocator.binaryURL.path)
         .write(to: activityScriptFile, atomically: true, encoding: .utf8)
+      try? usageScript(zmxPath: ZmxLocator.binaryURL.path)
+        .write(to: usageScriptFile, atomically: true, encoding: .utf8)
       try json.write(to: url, atomically: true, encoding: .utf8)
       return url
     } catch {
@@ -286,15 +367,18 @@ public enum PresenceHooks {
       let json = json(
         forBackend: .claudeCode, zmxPath: "zmx",
         sessionsDirectory: remoteSessionsExpression,
-        activityScriptPath: remoteActivityScriptExpression)
+        activityScriptPath: remoteActivityScriptExpression,
+        usageScriptPath: remoteUsageScriptExpression)
     else { return nil }
     // `|| true` so both call sites can chain it with `&&` — a failed write must never
-    // block the launch it precedes. The reporter goes first: the settings that name it
-    // are what makes it run, and a host that takes one write and not the other should
+    // block the launch it precedes. The reporters go first: the settings that name them
+    // are what makes them run, and a host that takes one write and not the other should
     // fail towards a hook file pointing at a script that is already there.
     return "{ mkdir -p \"$HOME/.graphcode/hooks\""
       + " && printf '%s' \(singleQuoted(activityScript(zmxPath: "zmx")))"
       + " > \(remoteActivityScriptExpression)"
+      + " && printf '%s' \(singleQuoted(usageScript(zmxPath: "zmx")))"
+      + " > \(remoteUsageScriptExpression)"
       + " && printf '%s' \(singleQuoted(json))"
       + " > \"\(remotePathExpression)\"; } 2>/dev/null || true"
   }
