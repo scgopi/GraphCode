@@ -33,6 +33,28 @@ try {
       [IO.Path]::GetFullPath($_.ExecutablePath) -ieq $expected
     })
   if ($running.Count -ne 1) { throw "upgrade did not restart exactly one installed daemon" }
+  $badReach = Join-Path $testHome "bad-reachability"
+  Expand-Archive $Package -DestinationPath $badReach
+  $badDaemon = Join-Path $badReach "GraphCode\bin\graphcoded.exe"
+  Set-Content $badDaemon "not an executable"
+  $manifestPath = Join-Path $badReach "GraphCode\manifest.json"
+  $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+  $entry = @($manifest.files | Where-Object path -eq "bin/graphcoded.exe")[0]
+  $entry.size = (Get-Item $badDaemon).Length
+  $entry.sha256 = (Get-FileHash $badDaemon -Algorithm SHA256).Hash.ToLowerInvariant()
+  $manifest | ConvertTo-Json -Depth 10 | Set-Content $manifestPath
+  $priorDaemonHash = (Get-FileHash (Join-Path $bin "graphcoded.exe")).Hash
+  & $pwsh -NoProfile -File $script -Command Upgrade `
+    -Package (Join-Path $badReach "GraphCode") -InstallRoot $install
+  if ($LASTEXITCODE -eq 0) { throw "daemon reachability failure was accepted" }
+  $restoredDaemonHash = (Get-FileHash (Join-Path $bin "graphcoded.exe")).Hash
+  $restored = @(Get-CimInstance Win32_Process | Where-Object {
+      $_.Name -ieq "graphcoded.exe" -and $_.ExecutablePath -and
+      [IO.Path]::GetFullPath($_.ExecutablePath) -ieq $expected
+    })
+  if ($priorDaemonHash -ne $restoredDaemonHash -or $restored.Count -ne 1) {
+    throw "daemon reachability failure did not restore and restart the prior installation"
+  }
   $bad = Join-Path $testHome "bad-package"
   Expand-Archive $Package -DestinationPath $bad
   Add-Content (Join-Path $bad "GraphCode\bin\graphcode.exe") corrupt
