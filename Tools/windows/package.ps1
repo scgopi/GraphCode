@@ -10,6 +10,7 @@ param(
   [string] $SignCertificate,
   [string] $SignTimestampUrl,
   [switch] $KeepUserData,
+  [switch] $RemoveUserData,
   [switch] $NoScheduledTask,
   [switch] $Force
 )
@@ -162,6 +163,27 @@ function Set-UserPath([string] $bin, [bool] $add) {
   if ($add) { $parts += $bin }
   [Environment]::SetEnvironmentVariable("Path", ($parts -join ";"), "User")
 }
+function Set-Shortcut([bool] $create) {
+  $shortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\GraphCode.lnk"
+  $fallback = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\GraphCode.cmd"
+  if (-not $create) {
+    Remove-Item -LiteralPath $shortcut -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $fallback -Force -ErrorAction SilentlyContinue
+    return
+  }
+  $directory = Split-Path $shortcut -Parent
+  New-Item -ItemType Directory -Force -Path $directory | Out-Null
+  try {
+    $shell = New-Object -ComObject WScript.Shell
+    $link = $shell.CreateShortcut($shortcut)
+    $link.TargetPath = Join-Path $InstallRoot "bin\graphcode-windows.exe"
+    $link.WorkingDirectory = Join-Path $InstallRoot "bin"
+    $link.Description = "GraphCode Windows shell"
+    $link.Save()
+  } catch {
+    Set-Content -LiteralPath $fallback -Value "@echo off`r`n`"$InstallRoot\bin\graphcode-windows.exe`" %*" -Encoding ascii
+  }
+}
 function Install-Package([bool] $upgrade) {
   $root = Open-Package ($(if ($Package) { $Package } else { Fail "-Package is required" }))
   $metadata = Assert-Package $root
@@ -172,10 +194,12 @@ function Install-Package([bool] $upgrade) {
   $stage = Join-Path $parent ".GraphCode-install-$([guid]::NewGuid())"
   Copy-Tree $root $stage
   $backup = Join-Path $parent ".GraphCode-rollback-$([guid]::NewGuid())"
+  $oldPath = [Environment]::GetEnvironmentVariable("Path", "User")
   try {
     if (Test-Path $InstallRoot) { Move-Item $InstallRoot $backup }
     Move-Item $stage $InstallRoot
     Set-UserPath (Join-Path $InstallRoot "bin") $true
+    Set-Shortcut $true
     if (-not $NoScheduledTask) {
       $taskName = "GraphCode daemon"
       & schtasks.exe /Create /TN $taskName /SC ONLOGON /TR "`"$InstallRoot\bin\graphcoded.exe`"" /F *> $null
@@ -184,6 +208,8 @@ function Install-Package([bool] $upgrade) {
   } catch {
     if (Test-Path $InstallRoot) { Remove-Item $InstallRoot -Recurse -Force }
     if (Test-Path $backup) { Move-Item $backup $InstallRoot }
+    [Environment]::SetEnvironmentVariable("Path", $oldPath, "User")
+    Set-Shortcut $false
     throw
   } finally {
     Remove-Item $stage,$backup -Recurse -Force -ErrorAction SilentlyContinue
@@ -193,9 +219,15 @@ function Install-Package([bool] $upgrade) {
 function Uninstall-Package {
   $bin = Join-Path $InstallRoot "bin"
   Set-UserPath $bin $false
+  Set-Shortcut $false
   & schtasks.exe /Delete /TN "GraphCode daemon" /F *> $null
   if (Test-Path $InstallRoot) { Remove-Item $InstallRoot -Recurse -Force }
-  if (-not $KeepUserData) { Write-Output "User data preserved under $(Split-Path $InstallRoot -Parent)\data" }
+  $data = Join-Path (Split-Path $InstallRoot -Parent) "data"
+  if ($RemoveUserData -and -not $KeepUserData) {
+    Remove-Item $data -Recurse -Force -ErrorAction SilentlyContinue
+  } else {
+    Write-Output "User data preserved under $data"
+  }
 }
 
 switch ($Command) {
@@ -204,5 +236,5 @@ switch ($Command) {
   "Install" { Install-Package $false }
   "Upgrade" { Install-Package $true }
   "Uninstall" { Uninstall-Package }
-  "CleanMachine" { Uninstall-Package; Remove-Item (Join-Path $env:ProgramData "GraphCode") -Recurse -Force -ErrorAction SilentlyContinue }
+  "CleanMachine" { $RemoveUserData = $true; Uninstall-Package; Remove-Item (Join-Path $env:ProgramData "GraphCode") -Recurse -Force -ErrorAction SilentlyContinue }
 }
