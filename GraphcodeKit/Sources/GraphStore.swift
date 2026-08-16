@@ -66,6 +66,11 @@ public actor GraphStore {
   private let onRefinePlaybook: (@Sendable (UUID, String) -> Bool)?
   /// Restores the previous playbook, consuming a snapshot (`NodeMemory.rollbackPlaybook`).
   private let onRollbackPlaybook: (@Sendable (UUID) -> Bool)?
+  /// Whether the daemon-heartbeat experiment is on, read fresh at every gate — creation,
+  /// and every tick — so flipping the Settings toggle applies immediately. `nil` (tests
+  /// that don't care, and any client that never wires it) means off, which is the
+  /// experiment's default.
+  private let onHeartbeatEnabled: (@Sendable () -> Bool)?
   /// How many composites deep this store sits: 0 at the project root, 1 inside the
   /// first composite, and so on — see `runInSubGraph`, which increments it.
   ///
@@ -77,6 +82,12 @@ public actor GraphStore {
   static let maxSubGraphDepth = 6
   static let maxNodesPerGraph = 50
   private var goalPollers: [UUID: Task<Void, Never>] = [:]
+  /// The experiment's timers — one per heartbeat-driven time loop, alive whether the
+  /// Settings toggle is on or off. The *tick* checks the toggle, not the arming: a
+  /// timer that skips its beat costs one closure call a minute, and it means flipping
+  /// the experiment on mid-run starts existing heartbeat loops beating without anyone
+  /// re-arming anything.
+  private var heartbeatTimers: [UUID: Task<Void, Never>] = [:]
   /// Workspace fingerprint at the last *failing* predicate run, per node — what
   /// `GoalSpec.skipsUnchangedWorkspace` compares against. In-memory on purpose: a
   /// daemon restart forgetting these costs one extra predicate run, and persisting a
@@ -97,7 +108,10 @@ public actor GraphStore {
   /// harmless while every store outlived the process; `runInSubGraph` builds one per
   /// command and throws it away, so without this a goal loop inside a composite leaks a
   /// sleeping task every time anything addresses that sub-graph.
-  deinit { for poller in goalPollers.values { poller.cancel() } }
+  deinit {
+    for poller in goalPollers.values { poller.cancel() }
+    for timer in heartbeatTimers.values { timer.cancel() }
+  }
   /// Guarded edges whose re-fire is waiting on an `until` predicate — see
   /// `fireOutgoingEdges`, drained by `handle` before it broadcasts.
   private var pendingCycleReentries: [UUID] = []
@@ -147,6 +161,7 @@ public actor GraphStore {
     onRemoveMemory: (@Sendable (UUID) -> Void)? = nil,
     onRefinePlaybook: (@Sendable (UUID, String) -> Bool)? = nil,
     onRollbackPlaybook: (@Sendable (UUID) -> Bool)? = nil,
+    onHeartbeatEnabled: (@Sendable () -> Bool)? = nil,
     subGraphDepth: Int = 0
   ) {
     self.graph = graph
@@ -167,6 +182,7 @@ public actor GraphStore {
     self.onRemoveMemory = onRemoveMemory
     self.onRefinePlaybook = onRefinePlaybook
     self.onRollbackPlaybook = onRollbackPlaybook
+    self.onHeartbeatEnabled = onHeartbeatEnabled
   }
 
   private func recordMemory(_ nodeID: UUID, _ entry: String) {
@@ -234,6 +250,16 @@ public actor GraphStore {
           "composites are nested \(subGraphDepth) deep (limit \(Self.maxSubGraphDepth))")
         return
       }
+      // The experiment's gate: a heartbeat loop created while the toggle is off would
+      // sit silent looking broken, and refusal-with-a-pointer is the export precedent.
+      if let interval = draft.heartbeatIntervalSeconds, interval > 0,
+        onHeartbeatEnabled?() != true
+      {
+        announceError(
+          "heartbeat loops need the Daemon heartbeat experiment enabled in Settings "
+            + "(daemonHeartbeatEnabled in ~/.graphcode/settings.json)")
+        return
+      }
       guard draft.isValid else { return }
       var node = draft.makeNode()
       // A goal loop is born `.running`, which is right on a project canvas and a lie in a
@@ -270,6 +296,7 @@ public actor GraphStore {
       if node.loopType == .goalBased {
         armGoalPoller(for: node)
       }
+      armHeartbeat(for: node)
 
     case .createEdge(let from, let to, let spec):
       // Duplicates are scoped per kind, not per pair: a `.handoff` and a `.message`
@@ -775,6 +802,21 @@ public actor GraphStore {
         node.triggerPrompt = trimmed
         sessionFacing.append("prompt is now: \(trimmed)")
       }
+      if let interval = update.heartbeatIntervalSeconds {
+        // Setting an interval needs the experiment on; *clearing* one never does —
+        // turning the toggle off must not strand a loop with a cadence nobody can
+        // remove.
+        if interval > 0, onHeartbeatEnabled?() != true {
+          announceError(
+            "update refused: heartbeats need the Daemon heartbeat experiment enabled "
+              + "in Settings")
+          return
+        }
+        node.heartbeatIntervalSeconds = interval > 0 ? interval : nil
+        sessionFacing.append(
+          node.heartbeatIntervalSeconds.map { "the daemon now drives you every \(Int($0))s" }
+            ?? "the daemon heartbeat was removed — own your cadence again")
+      }
 
     case .turnBased:
       if let check = update.checkDescription {
@@ -808,6 +850,10 @@ public actor GraphStore {
     if node.loopType == .goalBased, !node.isResolved {
       cancelGoalPoller(nodeID)
       armGoalPoller(for: node)
+    }
+    if node.loopType == .timeBased, !node.isResolved {
+      cancelHeartbeat(nodeID)
+      armHeartbeat(for: node)
     }
 
     let author = update.updatedBy.flatMap { graph.nodes[id: $0]?.title } ?? "a human"
@@ -1039,6 +1085,7 @@ public actor GraphStore {
     graph.edges.removeAll { $0.from == node.id || $0.to == node.id }
     graph.nodes.remove(id: node.id)
     cancelGoalPoller(node.id)
+    cancelHeartbeat(node.id)
     // The summary reader keeps one modification date per node so a quiet transcript costs
     // a `stat` and no read; a deleted loop should not keep one for the life of the daemon.
     let deletedID = node.id
@@ -1135,6 +1182,9 @@ public actor GraphStore {
     }
     graph.nodes[id: node.id]?.state = .stopped
     cancelGoalPoller(node.id)
+    // The experiment's clean-stop dividend: a heartbeat loop's cadence dies here, with
+    // the timer — no typed request needed for a schedule the agent never owned.
+    cancelHeartbeat(node.id)
     recordMemory(
       node.id,
       asked
@@ -1908,6 +1958,61 @@ public actor GraphStore {
     fireOutgoingEdges(from: nodeID, sourceSucceeded: false)
   }
 
+  // MARK: - Daemon heartbeat (experimental)
+
+  /// Arms the experiment's timer for a heartbeat-driven time loop. The counterpart of
+  /// `armGoalPoller` in shape and in restraint: the timer only ever *asks* whether a
+  /// tick should fire — `deliverHeartbeat` re-checks the Settings toggle, the node, and
+  /// the session on every beat, so the timer itself holds no authority anything else
+  /// would need revoking.
+  private func armHeartbeat(for node: LoopNode) {
+    guard node.loopType == .timeBased, let interval = node.heartbeatIntervalSeconds,
+      interval > 0, onDeliverMessage != nil
+    else { return }
+    heartbeatTimers[node.id]?.cancel()
+    let nodeID = node.id
+    let beat = max(10, interval)
+    heartbeatTimers[nodeID] = Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(for: .seconds(beat))
+        guard !Task.isCancelled else { return }
+        await self?.deliverHeartbeat(nodeID)
+      }
+    }
+  }
+
+  private func cancelHeartbeat(_ nodeID: UUID) {
+    heartbeatTimers.removeValue(forKey: nodeID)?.cancel()
+  }
+
+  /// One tick. Called on the timer in production and directly from tests, the
+  /// `evaluateGoal` pattern.
+  ///
+  /// Missed ticks coalesce by construction: a busy session is *skipped*, never queued —
+  /// the next beat arrives on schedule, and an agent mid-pass hearing "start a pass"
+  /// was the double-driving this experiment must not reintroduce. Skips are silent; a
+  /// heartbeat that logged every beat would turn the memory log into a metronome.
+  public func deliverHeartbeat(_ nodeID: UUID) async {
+    guard onHeartbeatEnabled?() == true else { return }
+    guard let node = graph.nodes[id: nodeID], node.loopType == .timeBased, !node.isResolved,
+      let interval = node.heartbeatIntervalSeconds, interval > 0
+    else {
+      cancelHeartbeat(nodeID)
+      return
+    }
+    guard MessageBus.deliverability(to: node) == nil else { return }
+    let presence: Presence?
+    if let onReadPresence {
+      presence = await onReadPresence(node, graph.project.path).presence
+    } else {
+      presence = node.presence?.presence
+    }
+    guard presence != .busy else { return }
+    let task = node.triggerPrompt ?? ""
+    _ = await deliverToSession(
+      node, "[graphcode] Heartbeat — run one pass of your task now: \(task)")
+  }
+
   // MARK: - Time-based session liveness
 
   /// Makes sure every unattended node in this graph — time-based and goal-based — has
@@ -1931,6 +2036,7 @@ public actor GraphStore {
         guard !node.isResolved else { continue }
         armGoalPoller(for: node)
       }
+      if !node.isResolved { armHeartbeat(for: node) }
       ensureSession(node)
     }
   }

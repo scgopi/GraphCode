@@ -88,6 +88,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
       --predicate <cmd>    optional stop condition for --type goal (exit 0 = met)
       --prompt <text>      required for --type time; put the cadence in it (/loop 1h …).
                            For --type sketch it is the optional starting note
+      --heartbeat <secs>   for --type time, experimental: the daemon delivers the prompt
+                           every interval instead of the prompt carrying /loop. Needs
+                           "Daemon heartbeat" enabled in the app's Settings; the prompt
+                           is then the bare task, no cadence in it
       --backend <name>     claudeCode | copilotCLI | codex — default: run from inside a
                            loop, the creating loop's backend; otherwise claudeCode
       --model <tier>       fast | standard | capable           (default: by loop type)
@@ -109,6 +113,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
       --poll <seconds>     how often the predicate is polled
       --stall <seconds>    stall bound; 0 clears it
       --budget <tokens>    token budget; 0 clears it
+      --heartbeat <secs>   daemon heartbeat interval; 0 returns cadence to the prompt
       --skip-unchanged <true|false>
       A loop may not change its own --predicate or --budget: the verifier stays outside
       the verified. Session-facing changes reach a live session as a [graphcode] notice.
@@ -350,11 +355,20 @@ public enum GraphcodeCommand: Equatable, Sendable {
     }
     let skipsUnchanged = try parseSkipUnchanged(flags) ?? false
 
+    var heartbeat: Double?
+    if let raw = flags["heartbeat"] {
+      guard let value = Double(raw), value > 0 else {
+        throw ParseError.invalidValue(argument: "--heartbeat", value: raw)
+      }
+      heartbeat = value
+    }
+
     let draft = NodeDraft(
       title: title,
       loopType: loopType,
       checkDescription: flags["check"],
       triggerPrompt: flags["prompt"],
+      heartbeatIntervalSeconds: loopType == .timeBased ? heartbeat : nil,
       // A turn-based loop needs something to do. `--prompt` is what a caller already
       // types for a timed loop's opening instruction, so it means the same thing here
       // rather than making them learn a second flag for the same idea.
@@ -417,6 +431,13 @@ public enum GraphcodeCommand: Equatable, Sendable {
       }
       tokenBudget = value
     }
+    var heartbeat: Double?
+    if let raw = flags["heartbeat"] {
+      guard let value = Double(raw) else {
+        throw ParseError.invalidValue(argument: "--heartbeat", value: raw)
+      }
+      heartbeat = value
+    }
 
     let update = NodeUpdate(
       goalSummary: flags["goal"],
@@ -428,6 +449,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
       tokenBudget: tokenBudget,
       skipsUnchangedWorkspace: try parseSkipUnchanged(flags),
       triggerPrompt: flags["prompt"],
+      heartbeatIntervalSeconds: heartbeat,
       checkDescription: flags["check"],
       modelTier: modelTier)
     guard !update.isEmpty else { throw ParseError.missingArgument("an option to change") }

@@ -34,6 +34,10 @@ public struct NodeDraft: Codable, Equatable, Sendable {
   /// composite doesn't run at creation, so this is a statement of intent until it's
   /// piloted and armed.
   public var triggerPrompt: String?
+  /// `.timeBased`, experimental: ask the daemon to drive this loop on its own timer —
+  /// see `LoopNode.heartbeatIntervalSeconds`. Refused at creation unless
+  /// `GraphcodeSettings.daemonHeartbeatEnabled` is on.
+  public var heartbeatIntervalSeconds: Double?
   /// `.turnBased`: what the session should actually do. See `LoopNode.firstInstruction`.
   /// `.sketch`: the optional starting note — blank means the session opens quiet.
   public var firstInstruction: String?
@@ -71,6 +75,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     loopType: LoopType,
     checkDescription: String? = nil,
     triggerPrompt: String? = nil,
+    heartbeatIntervalSeconds: Double? = nil,
     firstInstruction: String? = nil,
     pausesBeforeWritesOnly: Bool = false,
     goal: GoalSpec? = nil,
@@ -85,6 +90,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     self.loopType = loopType
     self.checkDescription = checkDescription
     self.triggerPrompt = triggerPrompt
+    self.heartbeatIntervalSeconds = heartbeatIntervalSeconds
     self.firstInstruction = firstInstruction
     self.pausesBeforeWritesOnly = pausesBeforeWritesOnly
     self.goal = goal
@@ -171,6 +177,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
       loopType: loopType,
       checkDescription: checkDescription,
       triggerPrompt: triggerPrompt,
+      heartbeatIntervalSeconds: heartbeatIntervalSeconds,
       firstInstruction: firstInstruction,
       pausesBeforeWritesOnly: pausesBeforeWritesOnly,
       goal: goal,
@@ -194,6 +201,7 @@ extension NodeDraft {
   private enum CodingKeys: String, CodingKey {
     case id, title, loopType, checkDescription, triggerPrompt, goal, backend, modelTier
     case worktree, subGraph, createdBy, firstInstruction, pausesBeforeWritesOnly
+    case heartbeatIntervalSeconds
   }
 
   /// `id` is `decodeIfPresent` because drafts also arrive over the wire from a CLI that
@@ -207,6 +215,8 @@ extension NodeDraft {
     loopType = try container.decode(LoopType.self, forKey: .loopType)
     checkDescription = try container.decodeIfPresent(String.self, forKey: .checkDescription)
     triggerPrompt = try container.decodeIfPresent(String.self, forKey: .triggerPrompt)
+    heartbeatIntervalSeconds =
+      try container.decodeIfPresent(Double.self, forKey: .heartbeatIntervalSeconds)
     firstInstruction = try container.decodeIfPresent(String.self, forKey: .firstInstruction)
     // Absent from drafts written by a CLI that predates the field. Those loops paused
     // after every turn, which is what `false` means.

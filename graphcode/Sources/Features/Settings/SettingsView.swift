@@ -126,6 +126,18 @@ struct SettingsView: View {
           .fixedSize(horizontal: false, vertical: true)
 
         Toggle(
+          "Daemon heartbeat (experimental)",
+          isOn: $model.settings.daemonHeartbeatEnabled)
+        Text(
+          "Lets the daemon drive a time-based loop on its own timer: create one with "
+            + "--heartbeat <seconds> and it is ticked from outside instead of running "
+            + "/loop on itself. Off, existing heartbeat loops fall silent immediately."
+        )
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+
+        Toggle(
           "Export and import loops",
           isOn: $model.settings.sharesLoops)
         Text(

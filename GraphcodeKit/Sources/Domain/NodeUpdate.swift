@@ -33,6 +33,9 @@ public struct NodeUpdate: Codable, Equatable, Sendable {
   /// `.timeBased`: new opening prompt. Reaches a live session only as a nudge; the
   /// session that already ran its old prompt keeps its cadence until relaunched.
   public var triggerPrompt: String?
+  /// `.timeBased`: new daemon-heartbeat interval (`LoopNode.heartbeatIntervalSeconds`).
+  /// Non-positive clears it, returning the loop to prompt-owned cadence.
+  public var heartbeatIntervalSeconds: Double?
   /// `.turnBased`: new per-turn criterion.
   public var checkDescription: String?
   /// Takes effect at the session's next launch — the daemon never restarts a live
@@ -53,6 +56,7 @@ public struct NodeUpdate: Codable, Equatable, Sendable {
     tokenBudget: Int? = nil,
     skipsUnchangedWorkspace: Bool? = nil,
     triggerPrompt: String? = nil,
+    heartbeatIntervalSeconds: Double? = nil,
     checkDescription: String? = nil,
     modelTier: ModelTier? = nil,
     updatedBy: UUID? = nil
@@ -66,6 +70,7 @@ public struct NodeUpdate: Codable, Equatable, Sendable {
     self.tokenBudget = tokenBudget
     self.skipsUnchangedWorkspace = skipsUnchangedWorkspace
     self.triggerPrompt = triggerPrompt
+    self.heartbeatIntervalSeconds = heartbeatIntervalSeconds
     self.checkDescription = checkDescription
     self.modelTier = modelTier
     self.updatedBy = updatedBy
@@ -76,7 +81,8 @@ public struct NodeUpdate: Codable, Equatable, Sendable {
     goalSummary == nil && goalPredicate == nil && pollIntervalSeconds == nil
       && stallAfterSeconds == nil && metricCommand == nil && metricDirection == nil
       && tokenBudget == nil && skipsUnchangedWorkspace == nil
-      && triggerPrompt == nil && checkDescription == nil && modelTier == nil
+      && triggerPrompt == nil && heartbeatIntervalSeconds == nil
+      && checkDescription == nil && modelTier == nil
   }
 
   /// Whether this update touches what decides the loop is finished. The one edit a loop
