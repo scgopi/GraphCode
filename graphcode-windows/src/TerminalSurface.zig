@@ -700,6 +700,13 @@ pub const Workspace = struct {
         return index < self.surfaces.len and self.surfaces[index].attach != null;
     }
 
+    pub fn firstLiveSurface(self: *const Workspace) ?usize {
+        for (self.surfaces, 0..) |slot, index| {
+            if (slot.surface != null or slot.attach != null) return index;
+        }
+        return null;
+    }
+
     pub fn topologyHealthy(self: *const Workspace) bool {
         var pane_count: usize = 0;
         var occupied: usize = 0;

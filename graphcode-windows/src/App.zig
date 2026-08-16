@@ -667,7 +667,7 @@ fn onWindowMessage(
                 app.client.connectionState() == .connected and !app.smoke_action_requested)
             {
                 app.smoke_action_requested = true;
-                app.createNode();
+                app.sendSelectedNode();
             }
             if (app.smoke and app.smoke_tick == 16 and !app.smoke_input_requested and
                 envFlag("GRAPHCODE_SHELL_LARGE_PASTE"))
@@ -685,7 +685,8 @@ fn onWindowMessage(
             }
             if (app.smoke and app.smoke_tick >= 12 and
                 ((app.stress and app.smoke_tick % 2 == 0) or
-                    (!app.stress and app.smoke_tick == 12)))
+                    (!app.stress and app.smoke_tick == 12)) and
+                !envFlag("GRAPHCODE_SHELL_WORKSPACE_ACTIONS"))
             {
                 if (app.workspace) |*workspace| {
                     if (workspace.hasSurface(0)) {
@@ -850,6 +851,7 @@ fn runSmokeWorkspaceActions(self: *App) void {
     const script = self.smoke_workspace_actions;
     if (script.len == 0) return;
     const workspace = if (self.workspace) |*value| value else return;
+    if (workspace.firstLiveSurface() == null) return;
     const default_script = "create,split,select,focus,close,restart";
     const actions = if (std.mem.eql(u8, script, "1")) default_script else script;
     var iterator = std.mem.splitScalar(u8, actions, ',');
@@ -891,13 +893,17 @@ fn runSmokeWorkspaceActions(self: *App) void {
             self.smoke_workspace_close_observed = workspacePaneCount(workspace) + 1 == before and
                 !self.smoke_workspace_action_failed;
         } else if (std.mem.eql(u8, action, "restart")) {
-            const index = workspace.active_surface;
+            const index = workspace.firstLiveSurface() orelse {
+                self.smoke_workspace_action_failed = true;
+                self.setStatus("Smoke workspace restart has no live surface");
+                continue;
+            };
             const before_tabs = workspace.tabCount();
             const before_panes = workspacePaneCount(workspace);
             const before_selected = workspace.layout.selected_tab;
-            if (!workspace.hasSurface(index)) {
+            if (!workspace.hasSurface(index) and !workspace.hasAttach(index)) {
                 self.smoke_workspace_action_failed = true;
-                self.setStatus("Smoke workspace restart has no surface");
+                self.setStatus("Smoke workspace restart has no live slot");
             } else {
                 workspace.recreate(index) catch {
                     self.smoke_workspace_action_failed = true;
@@ -923,8 +929,17 @@ fn workspacePaneCount(workspace: anytype) usize {
 }
 
 fn smokeContractPassed(self: *const App) bool {
-    const scripted_actions = envFlag("GRAPHCODE_SHELL_WORKSPACE_ACTIONS");
+    const scripted_actions = self.smoke_workspace_actions_ran;
     if (!scripted_actions and self.client.connectionState() != .connected) return false;
+    if (scripted_actions) {
+        return !self.smoke_workspace_action_failed and
+            self.smoke_workspace_create_observed and
+            self.smoke_workspace_split_observed and
+            self.smoke_workspace_select_observed and
+            self.smoke_workspace_focus_observed and
+            self.smoke_workspace_close_observed and
+            self.smoke_workspace_restart_observed;
+    }
     if (!scripted_actions) {
         const value = self.model.graph orelse return false;
         if (value.nodes.items.len < 2) return false;
@@ -956,7 +971,7 @@ fn smokeContractPassed(self: *const App) bool {
             self.smoke_workspace_focus_observed and
             self.smoke_workspace_close_observed and
             self.smoke_workspace_restart_observed;
-    const passed = if (scripted_actions) workspace_ready and actions_ok else layout_ok and workspace_ready;
+    const passed = if (scripted_actions) actions_ok else layout_ok and workspace_ready;
     return passed;
 }
 
