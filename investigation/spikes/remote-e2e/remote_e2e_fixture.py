@@ -407,6 +407,20 @@ class LocalRemoteParityFixture:
                     if stream:
                         stream.close()
         self.tunnel_process = self.sshd_process = self.server_process = None
+        marker = self.ssh_home.replace("'", "''")
+        cleanup = (
+            "$marker='{0}'; $self=$PID; "
+            "Get-CimInstance Win32_Process | "
+            "Where-Object {{ $_.ProcessId -ne $self -and $_.CommandLine -like "
+            "\"*$marker*\" }} | "
+            "ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
+        ).format(marker)
+        subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", cleanup],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
 
     def _cleanup_all(self):
         self._stop_processes()
