@@ -56,6 +56,12 @@ struct ProjectFeature {
     /// Collapsed by default — a metric is off the path for the common goal loop, and a
     /// command field sitting open invites people to fill it in because it is there.
     var isMetricExpanded = false
+    /// The goal's optional token budget (`GoalSpec.tokenBudget`), kept as typed so a
+    /// half-edited number never round-trips into a different one. Parsed at draft
+    /// assembly (`parsedBudget`); anything that isn't a positive integer travels as
+    /// "no budget". Its row collapses for the same reason the metric's does.
+    var draftBudget = ""
+    var isBudgetExpanded = false
     /// What pressing **Test** on the done check found, and whether one is in flight.
     var doneCheckOutcome: DoneCheckOutcome?
     var isTestingDoneCheck = false
@@ -426,18 +432,7 @@ struct ProjectFeature {
         return .none
 
       case .doneCheckTestTapped:
-        let command = state.draftPredicate.trimmingCharacters(in: .whitespaces)
-        guard !command.isEmpty, !state.isTestingDoneCheck else { return .none }
-        state.isTestingDoneCheck = true
-        state.doneCheckOutcome = nil
-        let directory = state.graph.project.path
-        return .run { send in
-          let result = await ShellPredicateEvaluator.probe(
-            ShellPredicate(command: command, workingDirectory: directory))
-          await send(
-            .doneCheckTested(
-              passed: result?.passed ?? false, duration: result?.duration ?? 0))
-        }
+        return runDoneCheckTest(&state)
 
       case .doneCheckTested(let passed, let duration):
         state.isTestingDoneCheck = false
@@ -653,6 +648,23 @@ extension ProjectFeature {
   /// finished is what most work wants, where the old turn-based default made a loop
   /// that sits idle until a human opens it — surprising as the *default* outcome of
   /// Create.
+  /// Runs the form's done check exactly the way `graphcoded` will — same evaluator,
+  /// same shell, same directory (`GoalDraftFields.testButton`).
+  private func runDoneCheckTest(_ state: inout State) -> Effect<Action> {
+    let command = state.draftPredicate.trimmingCharacters(in: .whitespaces)
+    guard !command.isEmpty, !state.isTestingDoneCheck else { return .none }
+    state.isTestingDoneCheck = true
+    state.doneCheckOutcome = nil
+    let directory = state.graph.project.path
+    return .run { send in
+      let result = await ShellPredicateEvaluator.probe(
+        ShellPredicate(command: command, workingDirectory: directory))
+      await send(
+        .doneCheckTested(
+          passed: result?.passed ?? false, duration: result?.duration ?? 0))
+    }
+  }
+
   private func openNodeForm(
     _ state: inout State, backend: CLISessionBackendKind?, parentNodeID: UUID?
   ) -> Effect<Action> {
@@ -666,6 +678,8 @@ extension ProjectFeature {
     state.draftMetric = ""
     state.draftMetricDirection = .maximize
     state.isMetricExpanded = false
+    state.draftBudget = ""
+    state.isBudgetExpanded = false
     state.doneCheckOutcome = nil
     state.isTestingDoneCheck = false
     state.draftFirstInstruction = ""

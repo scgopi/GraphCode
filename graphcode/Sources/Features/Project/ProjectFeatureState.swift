@@ -61,7 +61,8 @@ extension ProjectFeature.State {
           summary: draftGoal,
           predicate: draftPredicate.isEmpty ? nil : draftPredicate,
           metricCommand: draftMetric.isEmpty ? nil : draftMetric,
-          metricDirection: draftMetricDirection)
+          metricDirection: draftMetricDirection,
+          tokenBudget: parsedBudget)
         : nil,
       backend: draftBackend,
       // Only an *existing* worktree can be bound here; a new one has to be created on
@@ -70,6 +71,15 @@ extension ProjectFeature.State {
         if case .existing(let ref) = draftWorktree { return ref }
         return nil
       }())
+  }
+
+  /// The budget field as a number, or nil — a blank field, a typo, or a zero all mean
+  /// "no budget", never a budget of garbage. Mirrors `GoalSpec.effectivePredicate`'s
+  /// reading of an all-whitespace field.
+  var parsedBudget: Int? {
+    guard let value = Int(draftBudget.trimmingCharacters(in: .whitespaces)), value > 0
+    else { return nil }
+    return value
   }
 
   /// What a timed loop's session actually opens with, composed rather than typed.
