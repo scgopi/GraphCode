@@ -332,7 +332,11 @@ pub const App = struct {
             return;
         } orelse return;
         defer self.allocator.free(query);
-        const next = Forms.jumpTo(graph.nodes.items, query, self.model.selected_node) orelse {
+        const trimmed_query = Forms.validateJumpQuery(query) catch {
+            self.setStatus("Enter a jump query");
+            return;
+        };
+        const next = Forms.jumpTo(graph.nodes.items, trimmed_query, self.model.selected_node) orelse {
             self.setStatus("No matching loop");
             return;
         };

@@ -296,3 +296,11 @@ test "modal submit and cancel transitions always terminate the loop" {
     try std.testing.expect(state.closed);
     try std.testing.expect(state.result);
 }
+
+test "jump modal result uses production query validation" {
+    var state = DialogState{ .allocator = undefined, .kind = .jump, .parent = null };
+    state.values[0] = @constCast(" \t\r\n");
+    try std.testing.expectError(error.EmptyJumpQuery, Forms.validateJumpQuery(state.values[0]));
+    state.values[0] = @constCast("Beta");
+    try std.testing.expectEqualStrings("Beta", try Forms.validateJumpQuery(state.values[0]));
+}

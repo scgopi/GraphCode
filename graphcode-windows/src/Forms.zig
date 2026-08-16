@@ -25,7 +25,14 @@ pub const FormError = error{
     SameEndpoint,
     UnsupportedLoopType,
     UnsupportedEdgeKind,
+    EmptyJumpQuery,
 };
+
+pub fn validateJumpQuery(query: []const u8) FormError![]const u8 {
+    const trimmed = std.mem.trim(u8, query, " \t\r\n");
+    if (trimmed.len == 0) return error.EmptyJumpQuery;
+    return trimmed;
+}
 
 pub fn validateNode(draft: NodeDraft) FormError!void {
     if (std.mem.trim(u8, draft.title, " \t\r\n").len == 0) return error.EmptyTitle;
@@ -100,4 +107,14 @@ test "jump navigation wraps and matches title or id case insensitively" {
     };
     try std.testing.expectEqual(@as(?usize, 1), jumpTo(&nodes, "be", 0));
     try std.testing.expectEqual(@as(?usize, 0), jumpTo(&nodes, "NODE-A", 1));
+}
+
+test "jump queries reject empty and whitespace input before navigation" {
+    try std.testing.expectError(error.EmptyJumpQuery, validateJumpQuery(""));
+    try std.testing.expectError(error.EmptyJumpQuery, validateJumpQuery(" \t\r\n "));
+    try std.testing.expectEqualStrings("be", try validateJumpQuery(" \tbe\n"));
+    const nodes = [_]GraphModel.Node{
+        .{ .id = @constCast("node-a"), .title = @constCast("Alpha"), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
+    };
+    try std.testing.expectEqual(@as(?usize, null), jumpTo(&nodes, "missing", 0));
 }
