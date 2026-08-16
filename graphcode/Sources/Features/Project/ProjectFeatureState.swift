@@ -145,8 +145,9 @@ extension ProjectFeature.State {
   static func seconds(fromInterval text: String) -> Double? {
     let trimmed = text.trimmingCharacters(in: .whitespaces).lowercased()
     guard !trimmed.isEmpty else { return nil }
-    let digits = trimmed.hasSuffix("s") || trimmed.hasSuffix("m") || trimmed.hasSuffix("h")
-      || trimmed.hasSuffix("d") ? String(trimmed.dropLast()) : trimmed
+    let digits =
+      trimmed.hasSuffix("s") || trimmed.hasSuffix("m") || trimmed.hasSuffix("h")
+        || trimmed.hasSuffix("d") ? String(trimmed.dropLast()) : trimmed
     guard let value = Double(digits), value > 0 else { return nil }
     switch trimmed.last {
     case "s": return value
