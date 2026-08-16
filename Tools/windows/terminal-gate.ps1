@@ -229,6 +229,19 @@ try {
         $cleanupFailures.Add($_.Exception.Message)
       }
     }
+    $rootMarker = ([IO.Path]::GetFullPath($repoRoot)).TrimEnd("\")
+    $rootSessions = @(& $zmx list 2>$null |
+      Where-Object { $_ -match ("cwd=" + [regex]::Escape($rootMarker) + "(?:\s|$)") } |
+      ForEach-Object {
+        if ($_ -match "^name=([^\s]+)") { $Matches[1] }
+      })
+    foreach ($session in $rootSessions) {
+      & $zmx kill --force $session *> $null
+    }
+    if (@(& $zmx list 2>$null |
+      Where-Object { $_ -match ("cwd=" + [regex]::Escape($rootMarker) + "(?:\s|$)") }).Count -ne 0) {
+      $cleanupFailures.Add("sessions remained for isolated gate cwd $rootMarker")
+    }
     if ($env:GRAPHCODE_TERMINAL_GATE_INJECT_CLEANUP_FAILURE -eq "1") {
       $cleanupFailures.Add("injected cleanup failure")
     }

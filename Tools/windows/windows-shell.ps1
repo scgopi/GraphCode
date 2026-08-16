@@ -248,6 +248,15 @@ finally {
     foreach ($session in $testSessionIds) {
       & $env:GRAPHCODE_ZMX kill --force $session *> $null
     }
+    $rootMarker = ([IO.Path]::GetFullPath($repoRoot)).TrimEnd("\")
+    $rootSessions = @(& $env:GRAPHCODE_ZMX list 2>$null |
+      Where-Object { $_ -match ("cwd=" + [regex]::Escape($rootMarker) + "(?:\s|$)") } |
+      ForEach-Object {
+        if ($_ -match "^name=([^\s]+)") { $Matches[1] }
+      })
+    foreach ($session in $rootSessions) {
+      & $env:GRAPHCODE_ZMX kill --force $session *> $null
+    }
     $orphanTestDaemons = @(
       Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object {
