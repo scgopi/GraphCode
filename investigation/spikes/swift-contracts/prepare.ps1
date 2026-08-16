@@ -5,6 +5,10 @@ $repo = Resolve-Path (Join-Path $spike "..\..\..")
 $targetRoot = Join-Path $spike "Sources\GraphcodeWindowsContracts"
 
 New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
+$supportLink = Join-Path $targetRoot "SupportDirectory.swift"
+if (Test-Path -LiteralPath $supportLink) {
+  Remove-Item -LiteralPath $supportLink -Force
+}
 $links = @{
   Domain = Join-Path $repo "GraphcodeKit\Sources\Domain"
   IPC = Join-Path $repo "GraphcodeKit\Sources\IPC"
@@ -18,7 +22,7 @@ foreach ($entry in $links.GetEnumerator()) {
   New-Item -ItemType Junction -Path $link -Target $entry.Value | Out-Null
 }
 New-Item -ItemType HardLink `
-  -Path (Join-Path $targetRoot "SupportDirectory.swift") `
+  -Path $supportLink `
   -Target (Join-Path $repo "GraphcodeKit\Sources\SupportDirectory.swift") | Out-Null
 Write-Host "Linked Graphcode contract sources"
 Write-Host "Linked Graphcode contract sources"
