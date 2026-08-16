@@ -44,7 +44,20 @@ public struct UsageSample: Codable, Equatable, Sendable {
     return (inputTokens ?? 0) + (outputTokens ?? 0)
   }
 
-  /// Parses a `zmx` usage label: space-separated `key=value` pairs, any subset present.
+  /// Parses a `zmx` usage label, in either of two shapes:
+  ///
+  /// - `key=value` pairs separated by spaces or commas — the original documented form.
+  ///   It turns out a `zmx` label *value* can never actually hold one (`zmx set` takes
+  ///   only `[A-Za-z0-9._-]` in a value, and `=` and `,` are both outside it), but the
+  ///   remote path hands whole label lines through here and the shape costs nothing to
+  ///   keep.
+  /// - `key.value` pairs joined by `_` — `input.559576_output.5397_cost.0.0042` — built
+  ///   from exactly the bytes a label value may contain. This is what
+  ///   `PresenceHooks.usageScript` writes, and the only form that survives `zmx set`;
+  ///   the same charset wall `activityScript` hit is why the activity label is
+  ///   percent-encoded. The value is everything after the *first* `.`, which is what
+  ///   lets a cost keep its decimal point.
+  ///
   /// Unknown keys are ignored rather than rejected, so a backend reporting more than
   /// graphcode understands doesn't lose the fields it does.
   ///
@@ -55,15 +68,25 @@ public struct UsageSample: Codable, Equatable, Sendable {
     for pair in label.split(whereSeparator: { $0 == " " || $0 == "," }) {
       let parts = pair.split(separator: "=", maxSplits: 1)
       guard parts.count == 2 else { continue }
-      let value = String(parts[1]).trimmingCharacters(in: .whitespaces)
-      switch parts[0] {
-      case "inputTokens", "input": sample.inputTokens = Int(value)
-      case "outputTokens", "output": sample.outputTokens = Int(value)
-      case "costUSD", "cost": sample.costUSD = Double(value)
-      default: continue
+      sample.assign(String(parts[0]), String(parts[1]).trimmingCharacters(in: .whitespaces))
+    }
+    if sample.isEmpty, !label.contains("=") {
+      for pair in label.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "_") {
+        let parts = pair.split(separator: ".", maxSplits: 1)
+        guard parts.count == 2 else { continue }
+        sample.assign(String(parts[0]), String(parts[1]))
       }
     }
     return sample.isEmpty ? nil : sample
+  }
+
+  private mutating func assign(_ key: String, _ value: String) {
+    switch key {
+    case "inputTokens", "input": inputTokens = Int(value)
+    case "outputTokens", "output": outputTokens = Int(value)
+    case "costUSD", "cost": costUSD = Double(value)
+    default: break
+    }
   }
 
   public static func + (lhs: UsageSample, rhs: UsageSample) -> UsageSample {
