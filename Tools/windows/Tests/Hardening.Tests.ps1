@@ -389,7 +389,9 @@ if ($Run -eq 0) {
     }
     $runs.Add(($output -join "`n"))
     $metrics = @($output | Where-Object { $_ -is [string] -and $_.StartsWith("PRODUCT_RESOURCE_METRICS_JSON=") })
-    Assert-True ($metrics.Count -gt 0) "run $index emitted no typed product resource metrics"
+    if ($Environment) {
+      Assert-True ($metrics.Count -gt 0) "run $index emitted no typed product resource metrics"
+    }
     $runProcesses = [System.Collections.Generic.List[object]]::new()
     foreach ($line in $metrics) {
       try {
@@ -399,8 +401,11 @@ if ($Run -eq 0) {
         throw "run $index emitted malformed PRODUCT_RESOURCE_METRICS_JSON"
       }
     }
-    $metricRuns.Add([pscustomobject]@{ processes = @($runProcesses) })
+    if ($Environment) { $metricRuns.Add([pscustomobject]@{ processes = @($runProcesses) }) }
   }
+  if (-not $Environment) {
+    Write-Output "HARDENING typed-product-trend: NOT RUN (environment matrix not selected)"
+  } else {
   $expectedRoles = @("graphcoded", "graphcode-windows", "zmx", "winghostty")
   $runRoleSets = @($metricRuns | ForEach-Object {
       [Collections.Generic.HashSet[string]]::new(@($_.processes | ForEach-Object role),
@@ -439,6 +444,7 @@ if ($Run -eq 0) {
       if (@($candidate.processes | ForEach-Object role).Count -lt $expectedRoles.Count) { throw "missing roles" }
     } catch { $rejected = $true }
     Assert-True $rejected "RED typed metrics case was accepted: $red"
+  }
   }
   $requiredDimensions = @(
     "gpu-context-display", "dpi-multimonitor", "ime-unicode-clipboard",
