@@ -504,8 +504,13 @@ struct AppFeature {
         // now its recurrence runs inside an ordinary interactive session (see
         // `LoopNode.triggerPrompt`), so there's a real terminal to attach to — which is
         // the point, since watching and steering a running loop is most of its value.
+        // A blocked node with a *live session* still opens: creation starts an
+        // unattended child's session before a follow-up hand-off edge marks it
+        // blocked, so blocked-but-running is a state people actually meet — and a
+        // terminal that exists must be reachable. What stays gated is the blocked
+        // node with no session, where opening would *start* sequenced work early.
         guard let node = state.projects[id: path]?.graph.nodes[id: nodeID],
-          node.state != .blocked
+          node.state != .blocked || node.presenceShowsLiveSession
         else { return .none }
         let layout = terminalLayoutStore.load(forNode: nodeID) ?? .defaultLayout(forNode: nodeID)
         state.openLoop = LoopWorkspaceFeature.State(

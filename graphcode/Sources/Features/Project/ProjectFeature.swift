@@ -92,6 +92,9 @@ struct ProjectFeature {
     /// hangs off. Creation then also draws a hand-off edge from it — see
     /// `createNodeConfirmed`.
     var draftParentNodeID: UUID?
+    /// Whether the open form makes a custody child (`.newChildLoopTapped`) rather
+    /// than a handed-off one (`.addChildNodeTapped`).
+    var draftParentIsCustodial = false
     /// Worktrees already present in this project's repository, loaded when the form
     /// opens. Empty for a folder that isn't a git repo — the picker then only offers
     /// "None" and "New branch", and creating one simply fails and reports why.
@@ -174,6 +177,12 @@ struct ProjectFeature {
     /// The + handle on a node card: opens the same form, and the created loop gets a
     /// hand-off edge from this node.
     case addChildNodeTapped(UUID)
+    /// The context menus' "New Child Loop…": a *custody* child — `createdBy` set, the
+    /// daemon draws the already-fired link, the loop starts now. Distinct from
+    /// `.addChildNodeTapped` (the + handle), which wires an unfired hand-off that
+    /// sequences the new loop *after* the parent — under a long-running parent that
+    /// meant a loop blocked indefinitely while its session already ran.
+    case newChildLoopTapped(UUID)
     case createNodeConfirmed
     case cancelNewNodeForm
     case nodeTapped(UUID)
@@ -313,90 +322,17 @@ struct ProjectFeature {
         return openNodeForm(
           &state, backend: state.graph.nodes[id: parentID]?.backend, parentNodeID: parentID)
 
+      case .newChildLoopTapped(let parentID):
+        return openNodeForm(
+          &state, backend: state.graph.nodes[id: parentID]?.backend, parentNodeID: parentID,
+          custodial: true)
+
       case .cancelNewNodeForm:
         state.showingNewNodeForm = false
         return .none
 
       case .createNodeConfirmed:
-        let draft = state.draft
-        // `isValid` carries the same rules the daemon enforces, so an incomplete form
-        // simply doesn't submit — the Create button is disabled on it too, and this is
-        // the backstop for the keyboard shortcut path.
-        guard draft.isValid else { return .none }
-        UserDefaults.standard.set(draft.loopType.rawValue, forKey: Self.lastLoopTypeKey)
-        let projectPath = state.graph.project.path
-        // A form opened from a node card's + handle also wires the new loop up: a
-        // default hand-off edge from the parent, created right after the node so the
-        // graph never broadcasts a child floating unconnected.
-        let parentNodeID = state.draftParentNodeID
-        state.draftParentNodeID = nil
-        state.showingNewNodeForm = false
-        // Inside a composite, the same commands are addressed at its sub-graph. This is
-        // the app half of "add loops inside" — the step the dialog's own strip promises.
-        let insideComposite = state.openCompositeID
-        // **Create & open**, honoured: a composite made from the project canvas opens
-        // straight away, which is what its button has always said it would do. Only from
-        // the top level — a composite created inside another would otherwise take the
-        // canvas somewhere the human didn't ask to go.
-        if draft.loopType == .composite, insideComposite == nil {
-          state.openCompositeID = draft.id
-        }
-        // A loop created from the form switches to itself once its broadcast lands —
-        // see `pendingCreatedNodeID`. Not composites: opening their sub-graph canvas
-        // (above) already is the switch. Not inside a composite either: the drilled-in
-        // canvas the human is looking at is where the new card appears, and workspace
-        // opening (`AppFeature`'s `.nodeTapped`) only reaches top-level nodes anyway.
-        if draft.loopType != .composite, insideComposite == nil {
-          state.pendingCreatedNodeID = draft.id
-        }
-
-        // Creating the worktree is the app's job, not the daemon's: `GitClient` lives
-        // here, and a failure needs somewhere to be shown. If it fails, the node is
-        // still created — unbound rather than not at all — since losing the loop over a
-        // branch that already exists would be the more annoying outcome.
-        let request = state.newWorktreeRequest
-        return .run { send in
-          var resolved = draft
-          if let request {
-            do {
-              resolved.worktree = try await gitClient.createWorktree(
-                request.repositoryPath, request.worktreePath, request.branch)
-            } catch {
-              await send(.worktreeCreationFailed(String(describing: error)))
-            }
-          }
-          func addressed(_ command: GraphCommand) -> GraphCommand {
-            insideComposite.map { .subGraphCommand(nodeID: $0, command: command) } ?? command
-          }
-          try? await orchestratorClient.send(
-            .graphCommand(projectPath: projectPath, command: addressed(.createNode(resolved))))
-          if let parentNodeID {
-            try? await orchestratorClient.send(
-              .graphCommand(
-                projectPath: projectPath,
-                command: addressed(
-                  .createEdge(from: parentNodeID, to: draft.id, spec: EdgeSpec()))))
-          }
-
-          // A blank title creates the node as "New Loop" and asks the loop's own
-          // backend for a real one — after creation, so a slow (or absent) CLI never
-          // holds the node itself hostage. The rename can target the node because the
-          // draft's id *is* the node's id (see `NodeDraft.id`); no answer just means
-          // the fallback name stays.
-          guard draft.title.trimmingCharacters(in: .whitespaces).isEmpty,
-            let basis = [
-              draft.checkDescription, draft.triggerPrompt, draft.goal?.summary,
-              draft.firstInstruction,
-            ]
-            .compactMap({ $0 })
-            .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
-            let title = await titleSuggestionClient.suggest(
-              draft.effectiveBackend, basis, loopTitleDirectory.allTitles())
-          else { return }
-          try? await orchestratorClient.send(
-            .graphCommand(
-              projectPath: projectPath, command: addressed(.renameNode(draft.id, title: title))))
-        }
+        return confirmCreateNode(&state)
 
       case .worktreeCreationFailed(let message):
         state.connectionError = "Couldn't create worktree: \(message)"
@@ -669,8 +605,99 @@ extension ProjectFeature {
     }
   }
 
+  /// The Create button's whole handler — in the trailing extension beside
+  /// `openNodeForm` and the rest of the form's helpers, and for the same reason.
+  private func confirmCreateNode(_ state: inout State) -> Effect<Action> {
+    let draft = state.draft
+    // `isValid` carries the same rules the daemon enforces, so an incomplete form
+    // simply doesn't submit — the Create button is disabled on it too, and this is
+    // the backstop for the keyboard shortcut path.
+    guard draft.isValid else { return .none }
+    UserDefaults.standard.set(draft.loopType.rawValue, forKey: Self.lastLoopTypeKey)
+    let projectPath = state.graph.project.path
+    // A form opened from a node card's + handle also wires the new loop up: a
+    // default hand-off edge from the parent, created right after the node so the
+    // graph never broadcasts a child floating unconnected.
+    let parentNodeID = state.draftParentNodeID
+    let custodial = state.draftParentIsCustodial
+    state.draftParentNodeID = nil
+    state.draftParentIsCustodial = false
+    state.showingNewNodeForm = false
+    // Inside a composite, the same commands are addressed at its sub-graph. This is
+    // the app half of "add loops inside" — the step the dialog's own strip promises.
+    let insideComposite = state.openCompositeID
+    // **Create & open**, honoured: a composite made from the project canvas opens
+    // straight away, which is what its button has always said it would do. Only from
+    // the top level — a composite created inside another would otherwise take the
+    // canvas somewhere the human didn't ask to go.
+    if draft.loopType == .composite, insideComposite == nil {
+      state.openCompositeID = draft.id
+    }
+    // A loop created from the form switches to itself once its broadcast lands —
+    // see `pendingCreatedNodeID`. Not composites: opening their sub-graph canvas
+    // (above) already is the switch. Not inside a composite either: the drilled-in
+    // canvas the human is looking at is where the new card appears, and workspace
+    // opening (`AppFeature`'s `.nodeTapped`) only reaches top-level nodes anyway.
+    if draft.loopType != .composite, insideComposite == nil {
+      state.pendingCreatedNodeID = draft.id
+    }
+
+    // Creating the worktree is the app's job, not the daemon's: `GitClient` lives
+    // here, and a failure needs somewhere to be shown. If it fails, the node is
+    // still created — unbound rather than not at all — since losing the loop over a
+    // branch that already exists would be the more annoying outcome.
+    let request = state.newWorktreeRequest
+    return .run { send in
+      var resolved = draft
+      // A custody child carries its parent on the draft; the daemon draws the
+      // fired-at-birth link and writes the report-back memo, exactly as it does
+      // for a CLI-created child. No separate edge command, so nothing blocks.
+      if custodial, let parentNodeID { resolved.createdBy = parentNodeID }
+      if let request {
+        do {
+          resolved.worktree = try await gitClient.createWorktree(
+            request.repositoryPath, request.worktreePath, request.branch)
+        } catch {
+          await send(.worktreeCreationFailed(String(describing: error)))
+        }
+      }
+      func addressed(_ command: GraphCommand) -> GraphCommand {
+        insideComposite.map { .subGraphCommand(nodeID: $0, command: command) } ?? command
+      }
+      try? await orchestratorClient.send(
+        .graphCommand(projectPath: projectPath, command: addressed(.createNode(resolved))))
+      if let parentNodeID, !custodial {
+        try? await orchestratorClient.send(
+          .graphCommand(
+            projectPath: projectPath,
+            command: addressed(
+              .createEdge(from: parentNodeID, to: draft.id, spec: EdgeSpec()))))
+      }
+
+      // A blank title creates the node as "New Loop" and asks the loop's own
+      // backend for a real one — after creation, so a slow (or absent) CLI never
+      // holds the node itself hostage. The rename can target the node because the
+      // draft's id *is* the node's id (see `NodeDraft.id`); no answer just means
+      // the fallback name stays.
+      guard draft.title.trimmingCharacters(in: .whitespaces).isEmpty,
+        let basis = [
+          draft.checkDescription, draft.triggerPrompt, draft.goal?.summary,
+          draft.firstInstruction,
+        ]
+        .compactMap({ $0 })
+        .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
+        let title = await titleSuggestionClient.suggest(
+          draft.effectiveBackend, basis, loopTitleDirectory.allTitles())
+      else { return }
+      try? await orchestratorClient.send(
+        .graphCommand(
+          projectPath: projectPath, command: addressed(.renameNode(draft.id, title: title))))
+    }
+  }
+
   private func openNodeForm(
-    _ state: inout State, backend: CLISessionBackendKind?, parentNodeID: UUID?
+    _ state: inout State, backend: CLISessionBackendKind?, parentNodeID: UUID?,
+    custodial: Bool = false
   ) -> Effect<Action> {
     state.draftID = UUID()
     state.draftLoopType = Self.rememberedLoopType
@@ -702,6 +729,7 @@ extension ProjectFeature {
     state.draftWorktree = .none
     state.draftBranch = ""
     state.draftParentNodeID = parentNodeID
+    state.draftParentIsCustodial = custodial
     state.showingNewNodeForm = true
     let repositoryPath = state.graph.project.path
     return .run { send in

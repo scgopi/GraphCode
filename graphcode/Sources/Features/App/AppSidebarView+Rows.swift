@@ -158,7 +158,7 @@ extension AppSidebarView {
     if !node.isResolved {
       Button("New Child Loop…") {
         store.send(.projectHeaderTapped(projectPath))
-        send(.addChildNodeTapped(node.id), to: projectPath)
+        send(.newChildLoopTapped(node.id), to: projectPath)
       }
     }
 

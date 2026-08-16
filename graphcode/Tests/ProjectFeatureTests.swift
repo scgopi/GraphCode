@@ -274,6 +274,104 @@ struct ProjectFeatureTests {
     // fallback is the same hour a blank custom /loop interval gets.
     #expect(state.draft.heartbeatIntervalSeconds == 3600)
   }
+
+  /// "New Child Loop…" makes a *custody* child: `createdBy` rides the draft (the
+  /// daemon draws the fired-at-birth link) and no separate edge command follows — a
+  /// hand-off from a long-running parent left the child blocked indefinitely while
+  /// its session already ran.
+  @Test
+  @MainActor
+  func newChildLoopCreatesACustodyChildNotAHandoff() async {
+    let parent = LoopNode(
+      title: "Parent", loopType: .goalBased, goal: GoalSpec(summary: "run forever"),
+      state: .running)
+    let sent = SentGraphCommandsBox()
+    let store = TestStore(
+      initialState: ProjectFeature.State(
+        graph: LoopGraph(project: Self.testProject, nodes: [parent]))
+    ) {
+      ProjectFeature()
+    } withDependencies: {
+      $0.gitClient.listWorktrees = { _ in [] }
+      $0.orchestratorClient.send = { command in await sent.append(command) }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.newChildLoopTapped(parent.id))
+    await store.send(.binding(.set(\.draftTitle, "Child")))
+    await store.send(.binding(.set(\.draftGoal, "help out")))
+    await store.send(.createNodeConfirmed)
+    await store.finish()
+
+    let commands = await sent.commands
+    guard case .graphCommand(_, .createNode(let draft)) = commands.first else {
+      return #expect(Bool(false), "expected a createNode command, got \(commands)")
+    }
+    #expect(draft.createdBy == parent.id)
+    #expect(draft.backend == parent.backend)
+    let edgeCommands = commands.filter {
+      if case .graphCommand(_, .createEdge) = $0 { return true } else { return false }
+    }
+    #expect(edgeCommands.isEmpty)
+  }
+
+  /// The + handle keeps its sequencing semantic: an unfired hand-off from the parent,
+  /// and no custody claim on the draft.
+  @Test
+  @MainActor
+  func thePlusHandleStillWiresAHandoff() async {
+    let parent = LoopNode(
+      title: "Parent", loopType: .goalBased, goal: GoalSpec(summary: "finish soon"),
+      state: .running)
+    let sent = SentGraphCommandsBox()
+    let store = TestStore(
+      initialState: ProjectFeature.State(
+        graph: LoopGraph(project: Self.testProject, nodes: [parent]))
+    ) {
+      ProjectFeature()
+    } withDependencies: {
+      $0.gitClient.listWorktrees = { _ in [] }
+      $0.orchestratorClient.send = { command in await sent.append(command) }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.addChildNodeTapped(parent.id))
+    await store.send(.binding(.set(\.draftTitle, "Next")))
+    await store.send(.binding(.set(\.draftGoal, "take over")))
+    await store.send(.createNodeConfirmed)
+    await store.finish()
+
+    let commands = await sent.commands
+    guard case .graphCommand(_, .createNode(let draft)) = commands.first else {
+      return #expect(Bool(false), "expected a createNode command, got \(commands)")
+    }
+    #expect(draft.createdBy == nil)
+    #expect(
+      commands.contains {
+        guard case .graphCommand(_, .createEdge(let from, let to, _)) = $0 else { return false }
+        return from == parent.id && to == draft.id
+      })
+  }
+
+  /// The workspace gate's live-session reading: presence is the only honest signal
+  /// for "there is a terminal to attach to", and "don't know" must not open a blocked
+  /// node — opening is what could start sequenced work early.
+  @Test
+  @MainActor
+  func blockedNodesOpenExactlyWhenPresenceShowsALiveSession() {
+    func node(_ presence: Presence?) -> LoopNode {
+      LoopNode(
+        title: "B", loopType: .timeBased, triggerPrompt: "/loop 1h x",
+        presence: presence.map { PresenceReading(presence: $0, confidence: .reported) },
+        state: .blocked)
+    }
+    #expect(node(.busy).presenceShowsLiveSession)
+    #expect(node(.idle).presenceShowsLiveSession)
+    #expect(node(.awaitingInput).presenceShowsLiveSession)
+    #expect(!node(.absent).presenceShowsLiveSession)
+    #expect(!node(.unknown).presenceShowsLiveSession)
+    #expect(!node(nil).presenceShowsLiveSession)
+  }
 }
 
 private actor SentGraphCommandsBox {
