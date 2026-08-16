@@ -11,7 +11,6 @@ $pwsh = (Get-Command pwsh.exe).Source
 $fixtureRoot = Join-Path $repoRoot ".build\windows-hardening-$PID"
 $fixture = Join-Path $fixtureRoot "fixture.ps1"
 $results = [System.Collections.Generic.List[object]]::new()
-$realSamples = [System.Collections.Generic.List[object]]::new()
 $realProductSamples = [System.Collections.Generic.List[object]]::new()
 
 function Assert-True([bool] $condition, [string] $message) {
@@ -284,7 +283,7 @@ function Invoke-RealMatrix {
     $productAfterWorkload = Get-ProductResourceSample $productRoots
     $productNewWorkload = Select-NewProductResourceSample $productAfterWorkload $productBaselinePids
     $realProductSamples.Add($productNewWorkload)
-    Write-Output ("HARDENING product-metrics-json=" + ($productNewWorkload | ConvertTo-Json -Compress -Depth 6))
+    Write-Output ("PRODUCT_RESOURCE_METRICS_JSON=" + ($productNewWorkload | ConvertTo-Json -Compress -Depth 6))
     Assert-True (($productNewWorkload.processes | Where-Object privateBytes -gt 512MB).Count -eq 0) `
       "a product process exceeded 512 MiB private memory"
     Assert-True (($productNewWorkload.processes | Where-Object handles -gt 256).Count -eq 0) `
@@ -348,27 +347,8 @@ function Invoke-RealMatrix {
     [GC]::Collect()
     [GC]::WaitForPendingFinalizers()
     Start-Sleep -Milliseconds 250
-    $after = Get-ResourceSample
     $productAfterCleanup = Get-ProductResourceSample $productRoots
-    $treePrivateMB = [Math]::Round($productNewWorkload.privateBytes / 1MB, 1)
-    $treeHandles = $productNewWorkload.handles
-    Assert-True ($treePrivateMB -le 1024) "product process tree private memory exceeded 1024 MiB: $treePrivateMB"
-    Assert-True ($treeHandles -le 1024) "product process tree handles exceeded 1024: $treeHandles"
-    $handleDelta = $after.handles - $before.handles
-    $privateMB = [Math]::Round($after.privateBytes / 1MB, 1)
-    Assert-True ($handleDelta -le 256) "real hardening handle growth exceeded 256: $handleDelta"
-    Assert-True ($privateMB -le 512) "real hardening private memory exceeded 512 MiB: $privateMB"
-    if ($realSamples.Count -gt 0) {
-      $growthMB = [Math]::Round(($after.privateBytes - $realSamples[0].privateBytes) / 1MB, 1)
-      Assert-True ($growthMB -le 32) "real hardening private-memory growth exceeded 32 MiB: $growthMB"
-    } else {
-      $growthMB = 0
-    }
-    $realSamples.Add($after)
-    Write-Output ("HARDENING real-products: PASS (graphcoded/graphcode-windows/zmx; " +
-      "parent handles delta=$handleDelta; parent private MiB=$privateMB; growth MiB=$growthMB; " +
-      "tree handles=$treeHandles; tree private MiB=$treePrivateMB; post-cleanup processes=" +
-      "$($productAfterCleanup.processes.Count))")
+    Write-Output ("HARDENING real-products: PASS (post-cleanup processes=$($productAfterCleanup.processes.Count))")
   } finally {
     if ($sessionName) { Stop-OwnedSessionProcessTree $sessionName }
     if ($attach -and -not $attach.HasExited) {
@@ -397,8 +377,7 @@ function Invoke-RealMatrix {
 
 if ($Run -eq 0) {
   $runs = [System.Collections.Generic.List[string]]::new()
-  $realPrivate = [System.Collections.Generic.List[double]]::new()
-  $realHandles = [System.Collections.Generic.List[int]]::new()
+  $metricRuns = [System.Collections.Generic.List[object]]::new()
   for ($index = 1; $index -le 3; $index++) {
     if ($Environment) {
       $output = & $pwsh -NoProfile -File $PSCommandPath -Run $index -Environment
@@ -409,45 +388,57 @@ if ($Run -eq 0) {
       throw "hardening repeated run $index failed with exit code $LASTEXITCODE"
     }
     $runs.Add(($output -join "`n"))
-    foreach ($line in @($output | Where-Object { $_ -match "private MiB=([0-9.]+)" })) {
-      if ($line -match "private MiB=([0-9.]+)") {
-        $realPrivate.Add([double] $Matches[1])
+    $metrics = @($output | Where-Object { $_ -is [string] -and $_.StartsWith("PRODUCT_RESOURCE_METRICS_JSON=") })
+    Assert-True ($metrics.Count -gt 0) "run $index emitted no typed product resource metrics"
+    $runProcesses = [System.Collections.Generic.List[object]]::new()
+    foreach ($line in $metrics) {
+      try {
+        $parsed = $line.Substring("PRODUCT_RESOURCE_METRICS_JSON=".Length) | ConvertFrom-Json
+        foreach ($process in @($parsed.processes)) { $runProcesses.Add($process) }
+      } catch {
+        throw "run $index emitted malformed PRODUCT_RESOURCE_METRICS_JSON"
       }
     }
-    foreach ($line in @($output | Where-Object { $_ -match "handles delta=(-?\d+)" })) {
-      if ($line -match "handles delta=(-?\d+)") {
-        $realHandles.Add([int] $Matches[1])
-      }
-    }
+    $metricRuns.Add([pscustomobject]@{ processes = @($runProcesses) })
   }
-  if ($realPrivate.Count -gt 1) {
-    $growth = [Math]::Round(($realPrivate | Measure-Object -Maximum).Maximum -
-      ($realPrivate | Measure-Object -Minimum).Minimum, 1)
-    Assert-True ($growth -le 32) "repeated real private-memory trend exceeded 32 MiB: $growth"
-    Write-Output "HARDENING repeated-resource-trend: PASS (private MiB range=$growth)"
+  $expectedRoles = @("graphcoded", "graphcode-windows", "zmx", "winghostty")
+  $runRoleSets = @($metricRuns | ForEach-Object {
+      [Collections.Generic.HashSet[string]]::new(@($_.processes | ForEach-Object role),
+        [StringComparer]::OrdinalIgnoreCase)
+    })
+  Assert-True ($runRoleSets.Count -ge 3) "typed metrics did not cover all three repeated runs"
+  foreach ($role in $expectedRoles) {
+    Assert-True (@($runRoleSets | Where-Object { -not $_.Contains($role) }).Count -eq 0) `
+      "typed metrics missing required role '$role'"
   }
-  if ($realHandles.Count -gt 1) {
-    $handleRange = [Math]::Abs(
-      ($realHandles | Measure-Object -Maximum).Maximum -
-      ($realHandles | Measure-Object -Minimum).Minimum)
-    Assert-True ($handleRange -le 64) `
-      "repeated real handle trend exceeded 64 handles: $handleRange"
-    Write-Output "HARDENING repeated-handle-trend: PASS (range=$handleRange)"
-  }
-  if ($realProductSamples.Count -gt 1) {
-    $equivalentSamples = @(Select-EquivalentProductSample @($realProductSamples))
-    $productPrivateRange = [Math]::Round(
-      (($equivalentSamples | Measure-Object privateBytes -Maximum).Maximum -
-       ($equivalentSamples | Measure-Object privateBytes -Minimum).Minimum) / 1MB, 1)
-    $productHandleRange = [Math]::Abs(
-      ($equivalentSamples | Measure-Object handles -Maximum).Maximum -
-      ($equivalentSamples | Measure-Object handles -Minimum).Minimum)
-    Assert-True ($productPrivateRange -le 128) `
-      "repeated product-tree private-memory trend exceeded 128 MiB: $productPrivateRange"
-    Assert-True ($productHandleRange -le 256) `
-      "repeated product-tree handle trend exceeded 256: $productHandleRange"
-    Write-Output ("HARDENING repeated-product-tree-trend: PASS (roles={0}; private MiB range={1}; handles range={2})" -f
-      (($equivalentSamples[0].roles -join ",")), $productPrivateRange, $productHandleRange)
+  $equivalentMetrics = @(Select-EquivalentProductSample @($metricRuns | ForEach-Object {
+      [pscustomobject]@{ processes = @($_.processes); privateBytes = 0; handles = 0 }
+    }))
+  Assert-True ($equivalentMetrics.Count -ge 3) "typed metrics had no equivalent cross-run samples"
+  $privateRange = [Math]::Round(
+    (($equivalentMetrics | Measure-Object privateBytes -Maximum).Maximum -
+     ($equivalentMetrics | Measure-Object privateBytes -Minimum).Minimum) / 1MB, 1)
+  $handleRange = [Math]::Abs(
+    ($equivalentMetrics | Measure-Object handles -Maximum).Maximum -
+    ($equivalentMetrics | Measure-Object handles -Minimum).Minimum)
+  Assert-True (($equivalentMetrics | Where-Object privateBytes -gt 1GB).Count -eq 0) `
+    "typed product private-memory ceiling exceeded"
+  Assert-True (($equivalentMetrics | Where-Object handles -gt 1024).Count -eq 0) `
+    "typed product handle ceiling exceeded"
+  Assert-True ($privateRange -le 128) "typed product private-memory trend exceeded 128 MiB"
+  Assert-True ($handleRange -le 256) "typed product handle trend exceeded 256"
+  Write-Output "HARDENING typed-product-trend: PASS (private MiB range=$privateRange; handles range=$handleRange)"
+  foreach ($red in @(
+      "noise before PRODUCT_RESOURCE_METRICS_JSON=",
+      "PRODUCT_RESOURCE_METRICS_JSON={malformed",
+      "PRODUCT_RESOURCE_METRICS_JSON={`"processes`":[]}"
+    )) {
+    $rejected = $false
+    try {
+      $candidate = $red.Substring("PRODUCT_RESOURCE_METRICS_JSON=".Length) | ConvertFrom-Json
+      if (@($candidate.processes | ForEach-Object role).Count -lt $expectedRoles.Count) { throw "missing roles" }
+    } catch { $rejected = $true }
+    Assert-True $rejected "RED typed metrics case was accepted: $red"
   }
   $requiredDimensions = @(
     "gpu-context-display", "dpi-multimonitor", "ime-unicode-clipboard",

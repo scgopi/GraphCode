@@ -39,6 +39,8 @@ $oldSessionPrefix = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_SESSI
 $workspaceLayoutBase = Join-Path $shellRoot "graphcode-workspace-$PID.json"
 $ownedSessionNames = [System.Collections.Generic.HashSet[string]]::new()
 $ownedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
+$shellProcess = $null
+$resourceRole = "graphcode-windows"
 
 function Invoke-Native([string] $description, [scriptblock] $command) {
   Write-Host "==> $description"
@@ -89,9 +91,23 @@ function Write-OwnedResourceMetrics {
       if ($p) {
         [pscustomobject]@{
           pid = $_
-          role = if ($p.ProcessName -match "zmx") { "zmx" } else { $p.ProcessName }
+          role = if ($p.ProcessName -match "zmx") { "zmx" } elseif ($_.Equals($script:shellProcess.Id)) { $resourceRole } else { $p.ProcessName }
           handles = [int64]$p.HandleCount
           privateBytes = [int64]$p.PrivateMemorySize64
+        }
+
+        function Invoke-ShellProcess([string[]] $arguments) {
+          $script:shellProcess = Start-Process -FilePath $app -ArgumentList $arguments -PassThru -WindowStyle Hidden
+          [void] $ownedProcessIds.Add($script:shellProcess.Id)
+          Start-Sleep -Milliseconds 250
+          Record-TestOwnedSessions
+          Write-OwnedResourceMetrics
+          $script:shellProcess.WaitForExit()
+          if ($script:shellProcess.ExitCode -ne 0) {
+            throw "GraphCode Windows shell exited with code $($script:shellProcess.ExitCode)"
+          }
+          $script:shellProcess.Dispose()
+          $script:shellProcess = $null
         }
       }
     })
@@ -202,13 +218,13 @@ try {
   $arguments = @("--smoke")
   if ($Stress) { $arguments += "--stress" }
   Invoke-Native "GraphCode Windows shell smoke/stress" {
-    & $app @arguments
+    Invoke-ShellProcess $arguments
   }
   Record-TestOwnedSessions
   Write-OwnedResourceMetrics
   if ($UseStubDaemon) {
     Invoke-Native "GraphCode Windows shell restart smoke" {
-      & $app @arguments
+      Invoke-ShellProcess $arguments
     }
     Record-TestOwnedSessions
   }
