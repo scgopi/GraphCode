@@ -258,6 +258,40 @@ do {
     if case .errorOccurred(let message) = memoVerdict { fail(message) }
     print("noted")
 
+  case .refineNode(let projectPath, let nodeID, let text):
+    let refiner = SurfaceRef.nodeID(
+      fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
+    try client.send(.openProject(path: projectPath))
+    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try client.send(
+      .graphCommand(
+        projectPath: projectPath, command: .refineNode(nodeID, text: text, from: refiner)))
+    let refineVerdict = try client.waitForEvent { event in
+      switch event {
+      case .graphChanged, .errorOccurred: return true
+      default: return false
+      }
+    }
+    if case .errorOccurred(let message) = refineVerdict { fail(message) }
+    print("refined — the next wake works from the new playbook")
+
+  case .rollbackRefinement(let projectPath, let nodeID):
+    let requester = SurfaceRef.nodeID(
+      fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
+    try client.send(.openProject(path: projectPath))
+    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try client.send(
+      .graphCommand(
+        projectPath: projectPath, command: .rollbackRefinement(nodeID, from: requester)))
+    let rollbackVerdict = try client.waitForEvent { event in
+      switch event {
+      case .graphChanged, .errorOccurred: return true
+      default: return false
+      }
+    }
+    if case .errorOccurred(let message) = rollbackVerdict { fail(message) }
+    print("rolled back to the previous playbook")
+
   case .pilotComposite(let projectPath, let nodeID):
     try runAndPrintGraph(
       projectPath: projectPath,

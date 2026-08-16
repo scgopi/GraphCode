@@ -344,6 +344,12 @@ public actor ProjectRegistry {
       },
       onRemoveMemory: { nodeID in
         NodeMemory.remove(projectPath: path, nodeID: nodeID)
+      },
+      onRefinePlaybook: { nodeID, text in
+        NodeMemory.refinePlaybook(text, projectPath: path, nodeID: nodeID)
+      },
+      onRollbackPlaybook: { nodeID in
+        NodeMemory.rollbackPlaybook(projectPath: path, nodeID: nodeID)
       })
     stores[path] = newStore
     // Only on first load of this project — a time-based node's session outlives the app

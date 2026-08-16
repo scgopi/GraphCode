@@ -27,6 +27,11 @@ public enum GraphcodeCommand: Equatable, Sendable {
   /// matching how `updateNode` fills `updatedBy`.
   case promoteNode(projectPath: String, nodeID: UUID, promotion: SketchPromotion)
   case memoNode(projectPath: String, nodeID: UUID, text: String)
+  /// Replace the loop's playbook (`NodeMemory.refinePlaybook`) — trailing words, or a
+  /// whole file via `--file` since a playbook is a multi-line document and argv words
+  /// arrive flattened. `--rollback` restores the previous version instead.
+  case refineNode(projectPath: String, nodeID: UUID, text: String)
+  case rollbackRefinement(projectPath: String, nodeID: UUID)
   case pilotComposite(projectPath: String, nodeID: UUID)
   case armComposite(projectPath: String, nodeID: UUID)
   case usage(projectPath: String)
@@ -56,6 +61,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode node promote <project-path> <node-id> --type <goal|turn|time> [options]
                            give a sketch a shape, keeping its session, edges and memory
       graphcode node memo <project-path> <node-id> <note…>
+      graphcode node refine <project-path> <node-id> <playbook…|--file f|--rollback>
       graphcode node pilot <project-path> <node-id>     dry-run a composite
       graphcode node arm <project-path> <node-id>       arm it (needs a pilot first)
       graphcode edge create <project-path> <from-id> <to-id> [--kind <k>] [--condition <c>]
@@ -123,6 +129,11 @@ public enum GraphcodeCommand: Equatable, Sendable {
 
     node memo appends a note to the loop's own memory log — what the next pass reads
     before starting. Record dead ends and decisions, not a transcript.
+
+    node refine replaces the loop's playbook — its own distilled method, carried into
+    every wake ahead of the history. Whole document each time (--file for multi-line);
+    the old version is snapshotted, --rollback restores it. A loop may refine itself;
+    it still may not touch its goal, predicate, or budget.
 
     EDGE OPTIONS
       --kind <k>           handoff | message | spawn           (default: handoff)
@@ -206,7 +217,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
           into = id
         }
         return .createNode(projectPath: path, draft: try parseDraft(arguments), into: into)
-      case "stop", "delete", "pilot", "arm", "send", "update", "memo", "promote":
+      case "stop", "delete", "pilot", "arm", "send", "update", "memo", "promote", "refine":
         let raw = try take(&arguments, name: "node-id")
         guard let nodeID = UUID(uuidString: raw) else {
           throw ParseError.invalidValue(argument: "node-id", value: raw)
@@ -239,6 +250,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
           let text = arguments.joined(separator: " ").trimmingCharacters(in: .whitespaces)
           guard !text.isEmpty else { throw ParseError.missingArgument("note") }
           return .memoNode(projectPath: path, nodeID: nodeID, text: text)
+        case "refine":
+          return try parseRefine(arguments, projectPath: path, nodeID: nodeID)
         default: return .stopNode(projectPath: path, nodeID: nodeID)
         }
       default:
@@ -419,6 +432,31 @@ public enum GraphcodeCommand: Equatable, Sendable {
       modelTier: modelTier)
     guard !update.isEmpty else { throw ParseError.missingArgument("an option to change") }
     return update
+  }
+
+  /// `node refine`'s three spellings: `--rollback` restores the previous playbook,
+  /// `--file <path>` sends a file's contents (a playbook is a multi-line document, and
+  /// joined argv words arrive as one line), and trailing words send exactly what was
+  /// typed. The file is read *here*, on the caller's machine, because the daemon may be
+  /// serving a remote project whose filesystem has no such path.
+  private static func parseRefine(
+    _ arguments: [String], projectPath: String, nodeID: UUID
+  ) throws -> GraphcodeCommand {
+    if arguments.first == "--rollback" {
+      return .rollbackRefinement(projectPath: projectPath, nodeID: nodeID)
+    }
+    if arguments.first == "--file" {
+      guard arguments.count >= 2 else { throw ParseError.missingArgument("file path") }
+      guard let text = try? String(contentsOfFile: arguments[1], encoding: .utf8),
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      else {
+        throw ParseError.invalidValue(argument: "--file", value: arguments[1])
+      }
+      return .refineNode(projectPath: projectPath, nodeID: nodeID, text: text)
+    }
+    let text = arguments.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+    guard !text.isEmpty else { throw ParseError.missingArgument("playbook text") }
+    return .refineNode(projectPath: projectPath, nodeID: nodeID, text: text)
   }
 
   /// `--skip-unchanged` — bare or `true` opts in, `false` opts back out, absent means
