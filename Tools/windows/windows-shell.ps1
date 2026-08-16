@@ -313,10 +313,10 @@ try {
     }
     $inputApp.WaitForExit()
     $inputApp.Refresh()
+    $inputExitCode = $inputApp.ExitCode
     $inputApp.Dispose()
     $shellProcess = $null
     Record-TestOwnedSessions
-    $inputExitCode = $inputApp.ExitCode
     if ($null -eq $inputExitCode) {
       throw "Large paste/non-reading attach smoke completed without an observable exit code"
     }
