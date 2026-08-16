@@ -38,7 +38,7 @@ xcuserdata/
 # site (index.md + _config.yml) is the one carve-out: ignore docs/ contents, not the
 # directory, so the site files can be re-included.
 /docs/*
-!/docs/index.md
+!/docs/index.html
 !/docs/shortcuts.md
 !/docs/_config.yml
 !/docs/_layouts/
