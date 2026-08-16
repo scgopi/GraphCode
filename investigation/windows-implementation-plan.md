@@ -264,3 +264,12 @@ toolchains plus the accepted Winghostty `host-integration` and zmx `attach`
 worktrees. Artifacts are unsigned unless an explicit certificate thumbprint
 and optional timestamp URL are supplied; unsigned status is intentionally
 visible and is not release-signing evidence.
+
+## Release acceptance status
+
+- Windows implementation, UI integration, remote parity, packaging, and hardening are complete.
+- `Tools/windows/validate.ps1 -Task all` passes on the integrated branch.
+- The final commit stack is reviewed, bisectable, and DCO-signed.
+- The unsigned release bundle and a transferable Git bundle are produced with SHA-256 checksums.
+- PR publication is blocked only by the available GitHub OAuth credentials lacking `workflow`
+  scope for the new workflow files.
