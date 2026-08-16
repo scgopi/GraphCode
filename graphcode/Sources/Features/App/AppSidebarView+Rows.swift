@@ -153,6 +153,15 @@ extension AppSidebarView {
   func nodeMenu(for node: LoopNode, in projectPath: String) -> some View {
     Button("Open Terminal") { send(.nodeTapped(node.id), to: projectPath) }
 
+    // Selects the project first: the creation sheet presents from that project's
+    // canvas, and a form opened on a canvas that isn't showing opens nowhere.
+    if !node.isResolved {
+      Button("New Child Loop…") {
+        store.send(.projectHeaderTapped(projectPath))
+        send(.addChildNodeTapped(node.id), to: projectPath)
+      }
+    }
+
     if node.loopType == .composite {
       Button("Pilot Once…") { send(.pilotCompositeTapped(node.id), to: projectPath) }
       Button("Arm Schedule") { send(.armCompositeTapped(node.id), to: projectPath) }
