@@ -54,6 +54,12 @@ extension ProjectCanvasView {
   @ViewBuilder
   private func nodeMenu(for node: LoopNode) -> some View {
     Button("Open Terminal") { store.send(.nodeTapped(node.id)) }
+    // The + handle's verb, findable where every other loop verb lives. Hidden on a
+    // resolved loop: its hand-off edges have already fired, so a child created now
+    // would wait on a parent that can never release it.
+    if !node.isResolved {
+      Button("New Child Loop…") { store.send(.addChildNodeTapped(node.id)) }
+    }
     if node.loopType == .composite {
       // First, because it is the step everything else depends on: a composite with
       // nothing inside can be piloted and armed and still do nothing at all.
