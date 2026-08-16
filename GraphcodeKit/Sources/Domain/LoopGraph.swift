@@ -207,6 +207,20 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     return nodes.map(\.id).filter(anchored.contains)
   }
 
+  /// The sidebar's top-level rows: `startAnchors`, then any sketch nothing points at.
+  ///
+  /// A sketch is deliberately never a canvas entry port — that is what `startAnchors`
+  /// excludes it for — but a row is not a port: a loop the sidebar cannot show is a
+  /// loop that effectively doesn't exist. Untargeted sketches append after the anchored
+  /// roots, the sidebar's echo of the canvas's "sketches sit below the lanes"; a sketch
+  /// something points at already lists as that node's child.
+  public var sidebarRoots: [UUID] {
+    let targeted = Set(edges.map(\.to))
+    let sketches = nodes.filter { $0.loopType == .sketch && !targeted.contains($0.id) }
+      .map(\.id)
+    return startAnchors + sketches
+  }
+
   // MARK: - Coding
 
   private enum CodingKeys: String, CodingKey {

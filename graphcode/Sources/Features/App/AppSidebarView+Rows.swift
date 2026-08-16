@@ -203,7 +203,7 @@ extension AppSidebarView {
 
   /// This project's top-level rows, in the human's arrangement (`sidebarNodeOrder`).
   func orderedRootNodes(in project: ProjectFeature.State) -> [LoopNode] {
-    let roots = project.graph.startAnchors.compactMap { project.graph.nodes[id: $0] }
+    let roots = project.graph.sidebarRoots.compactMap { project.graph.nodes[id: $0] }
     let order = project.sidebarNodeOrder
     return roots.sorted { a, b in
       (order.firstIndex(of: a.id) ?? .max) < (order.firstIndex(of: b.id) ?? .max)
