@@ -60,6 +60,12 @@ public actor GraphStore {
   private let onAppendMemory: (@Sendable (UUID, String) -> Void)?
   /// Tears a deleted node's memory down alongside its session.
   private let onRemoveMemory: (@Sendable (UUID) -> Void)?
+  /// Replaces a node's playbook, snapshotting the old one (`NodeMemory.refinePlaybook`).
+  /// Returns whether the write happened — refinement is the one memory write whose
+  /// failure the author must hear about, since they will work *from* it next wake.
+  private let onRefinePlaybook: (@Sendable (UUID, String) -> Bool)?
+  /// Restores the previous playbook, consuming a snapshot (`NodeMemory.rollbackPlaybook`).
+  private let onRollbackPlaybook: (@Sendable (UUID) -> Bool)?
   /// How many composites deep this store sits: 0 at the project root, 1 inside the
   /// first composite, and so on — see `runInSubGraph`, which increments it.
   ///
@@ -107,6 +113,11 @@ public actor GraphStore {
   /// Best-effort: the same fact is always in the memory log first, so a session that
   /// couldn't be reached reads it at its next wake instead.
   private var pendingNudges: [(nodeID: UUID, text: String)] = []
+  /// Words for a session whose node just *resolved* — the distill-a-skill ask. Its own
+  /// queue because `MessageBus.deliverability` reads the very state resolution wrote,
+  /// so the ordinary nudge drain would drop every one of these; this drain types into
+  /// the PTY directly and lets an exited session fail the send harmlessly.
+  private var pendingResolutionNudges: [(nodeID: UUID, text: String)] = []
   /// Messages the orchestrator declined to deliver, newest last. Surfaced so an
   /// undelivered message is visible rather than silently dropped.
   public private(set) var undeliveredMessages:
@@ -134,6 +145,8 @@ public actor GraphStore {
     onSpawnIntoProject: (@Sendable (String, NodeDraft) -> Void)? = nil,
     onAppendMemory: (@Sendable (UUID, String) -> Void)? = nil,
     onRemoveMemory: (@Sendable (UUID) -> Void)? = nil,
+    onRefinePlaybook: (@Sendable (UUID, String) -> Bool)? = nil,
+    onRollbackPlaybook: (@Sendable (UUID) -> Bool)? = nil,
     subGraphDepth: Int = 0
   ) {
     self.graph = graph
@@ -152,6 +165,8 @@ public actor GraphStore {
     self.onSpawnIntoProject = onSpawnIntoProject
     self.onAppendMemory = onAppendMemory
     self.onRemoveMemory = onRemoveMemory
+    self.onRefinePlaybook = onRefinePlaybook
+    self.onRollbackPlaybook = onRollbackPlaybook
   }
 
   private func recordMemory(_ nodeID: UUID, _ entry: String) {
@@ -296,6 +311,12 @@ public actor GraphStore {
     case .memoNode(let nodeID, let text, let from):
       memoNode(nodeID, text: text, from: from)
 
+    case .refineNode(let nodeID, let text, let from):
+      refineNode(nodeID, text: text, from: from)
+
+    case .rollbackRefinement(let nodeID, let from):
+      rollbackRefinement(nodeID, from: from)
+
     case .deleteNode(let nodeID):
       deleteNode(nodeID)
 
@@ -388,6 +409,8 @@ public actor GraphStore {
       onCaptureScript: onCaptureScript,
       onAppendMemory: onAppendMemory,
       onRemoveMemory: onRemoveMemory,
+      onRefinePlaybook: onRefinePlaybook,
+      onRollbackPlaybook: onRollbackPlaybook,
       subGraphDepth: subGraphDepth + 1)
     await child.handle(command)
     graph.nodes[id: nodeID]?.subGraph = await child.graph
@@ -908,6 +931,55 @@ public actor GraphStore {
     recordMemory(nodeID, "note\(sender.map { " (from \($0))" } ?? ""): \(trimmed)")
   }
 
+  /// Replaces a node's playbook — `graphcode node refine`. Refusals are said out loud
+  /// because the author will *work from* this document next wake: a refinement that
+  /// silently didn't land is a loop following a playbook it believes it replaced.
+  ///
+  /// Note what is deliberately *not* guarded: a loop refining itself. Self-refinement
+  /// is the feature — the verifier-stays-outside rule protects the stop condition
+  /// (goal, predicate, budget), and the playbook is method, not verdict.
+  private func refineNode(_ nodeID: UUID, text: String, from senderID: UUID?) {
+    guard graph.nodes[id: nodeID] != nil else {
+      announceError("playbook not refined: no loop \(nodeID) in this graph")
+      return
+    }
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      announceError("playbook not refined: empty text — to undo, use node refine --rollback")
+      return
+    }
+    guard trimmed.utf8.count <= NodeMemory.maxPlaybookBytes else {
+      announceError(
+        "playbook not refined: \(trimmed.utf8.count) bytes is over the "
+          + "\(NodeMemory.maxPlaybookBytes)-byte bound — a playbook is distilled method, "
+          + "not a transcript; move history to node memo instead")
+      return
+    }
+    guard let onRefinePlaybook, onRefinePlaybook(nodeID, trimmed) else {
+      announceError("playbook not refined: the write failed")
+      return
+    }
+    let sender = senderID.flatMap { $0 == nodeID ? nil : graph.nodes[id: $0]?.title }
+    recordMemory(
+      nodeID,
+      "playbook refined\(sender.map { " by \($0)" } ?? "") (\(trimmed.utf8.count) bytes) "
+        + "— next wake works from the new version")
+  }
+
+  /// Restores the playbook's previous version — the undo half of `refineNode`.
+  private func rollbackRefinement(_ nodeID: UUID, from senderID: UUID?) {
+    guard graph.nodes[id: nodeID] != nil else {
+      announceError("playbook not rolled back: no loop \(nodeID) in this graph")
+      return
+    }
+    guard let onRollbackPlaybook, onRollbackPlaybook(nodeID) else {
+      announceError("playbook not rolled back: no earlier version to restore")
+      return
+    }
+    let sender = senderID.flatMap { $0 == nodeID ? nil : graph.nodes[id: $0]?.title }
+    recordMemory(nodeID, "playbook rolled back\(sender.map { " by \($0)" } ?? "")")
+  }
+
   // MARK: - Import
 
   /// Splices an export bundle's loops into this graph — the daemon half of
@@ -1106,11 +1178,27 @@ public actor GraphStore {
     return false
   }
 
-  private func resolveNode(_ nodeID: UUID, succeeded: Bool) {
-    guard graph.nodes[id: nodeID] != nil else { return }
+  /// `sessionMayStillBeLive` is true only for predicate-driven resolutions: the goal
+  /// poller proved the goal met while the session runs on, which is the one moment an
+  /// agent is both finished and present. The other resolution paths
+  /// (`nodeCheckApproved`, composite roll-up) fire *because* the session ended, so
+  /// there is nobody left to speak to.
+  private func resolveNode(
+    _ nodeID: UUID, succeeded: Bool, sessionMayStillBeLive: Bool = false
+  ) {
+    guard let node = graph.nodes[id: nodeID] else { return }
     graph.nodes[id: nodeID]?.state = succeeded ? .succeeded : .failed
     cancelGoalPoller(nodeID)
     recordMemory(nodeID, "resolved: \(succeeded ? "succeeded" : "failed")")
+    // Skill distillation rides resolution: a goal loop that just succeeded is the one
+    // agent holding a proven method in context. Its own queue rather than
+    // `pendingNudges`, because the state written above is exactly what
+    // `MessageBus.deliverability` reads — a resolved node is "not live" to the graph
+    // while its PTY is still very much there (the `requestStop` ordering lesson).
+    // Success only: a failed loop's method is not a recipe.
+    if succeeded, sessionMayStillBeLive, node.loopType == .goalBased {
+      pendingResolutionNudges.append((nodeID, MessageBus.distillSkillRequest))
+    }
     fireOutgoingEdges(from: nodeID, sourceSucceeded: succeeded)
   }
 
@@ -1492,6 +1580,13 @@ public actor GraphStore {
       else { continue }
       _ = await deliverToSession(target, text)
     }
+    while !pendingResolutionNudges.isEmpty {
+      let (nodeID, text) = pendingResolutionNudges.removeFirst()
+      guard let target = graph.nodes[id: nodeID],
+        target.backend.capabilities.supportsMidSessionInput
+      else { continue }
+      _ = await deliverToSession(target, text)
+    }
   }
 
   /// One loop telling another something, now — `graphcode node send`'s half of the
@@ -1715,7 +1810,7 @@ public actor GraphStore {
     // or its session exited and resolved it) while the predicate was running.
     guard let current = graph.nodes[id: nodeID], !current.isResolved else { return }
     if outcome.passed {
-      resolveNode(nodeID, succeeded: true)
+      resolveNode(nodeID, succeeded: true, sessionMayStillBeLive: true)
       await drainAndBroadcast()
       return
     }

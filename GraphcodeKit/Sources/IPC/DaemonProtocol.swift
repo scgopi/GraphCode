@@ -92,6 +92,17 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// Append a learned note to a node's memory log (`NodeMemory`) — what `graphcode
   /// node memo` rides on. `from` is attributed the same way `messageNode`'s is.
   case memoNode(UUID, text: String, from: UUID?)
+  /// Replace a node's playbook — its refinable supplemental prompt
+  /// (`NodeMemory.refinePlaybook`), what `graphcode node refine` rides on. The
+  /// continual-harness counterpart to `memoNode`: a memo appends one fact to the log,
+  /// a refinement rewrites the *method* the next wake reads. A loop may refine itself
+  /// — that is the point — because the things refinement must never touch (the goal,
+  /// the predicate, the budget, the briefing) live elsewhere and keep their own
+  /// guards. `from` is attributed the same way `memoNode`'s is.
+  case refineNode(UUID, text: String, from: UUID?)
+  /// Restore the playbook's previous version, consuming one snapshot — the undo that
+  /// makes whole-document refinement safe.
+  case rollbackRefinement(UUID, from: UUID?)
   /// Type a message into a node's live session, right now — the ad-hoc counterpart to
   /// a `.message` edge, sharing its transport and its deliverability rules
   /// (`MessageBus`). This is what `graphcode node send` rides on, and its reason to

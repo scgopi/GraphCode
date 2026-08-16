@@ -139,6 +139,30 @@ public enum SessionBriefing {
       a transcript, and nothing the code or git history already says. Your node id is
       the suffix of `$ZMX_SESSION` after `graphcode-`.
 
+      Memos record what happened; your **playbook** records how to do this job. It rides
+      into every wake ahead of the history, so when a pass teaches you a better method —
+      an order of operations, a check worth running first, a tool that works here —
+      rewrite it (whole document, small evidence-backed changes):
+
+      ```sh
+      graphcode node refine \(projectPath) <your-node-id> <playbook text>
+      ```
+
+      `--file <path>` sends a multi-line document; `--rollback` restores the previous
+      version (the old one is always snapshotted). Refine your method freely — your
+      goal, predicate, and budget stay out of reach regardless.
+
+      ## Project skills
+
+      Your playbook is yours; a **skill** is for every loop in this project. Check the
+      project's skill library before working something out from scratch (Claude Code
+      loads `.claude/skills/` automatically). When your work produces a method another
+      loop could reuse — a build recipe, a verification sequence, a workaround with a
+      why — distill it into a skill in your backend's native format: for Claude Code,
+      `.claude/skills/<name>/SKILL.md`, a short markdown recipe with a one-line
+      description. When a goal loop resolves with its session still live, graphcode
+      asks it this once; one-off work should not become a skill.
+
       ## The rest of the CLI
 
       Rarer verbs, one line each — like everything above, they take the project path:
