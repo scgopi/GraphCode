@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $script = Join-Path $RepositoryRoot "Tools\windows\package.ps1"
-$testHome = Join-Path $RepositoryRoot ".build\packaging-real-home-$PID\深い 空間\用户"
+$testHome = Join-Path $RepositoryRoot ".build\packaging-real-home-$PID\深い & (空間)\用户"
 $install = Join-Path $testHome "GraphCode\current"
 $oldHome = $env:USERPROFILE
 $pwsh = (Get-Command pwsh).Source
@@ -23,6 +23,10 @@ try {
   $bin = Join-Path $install "bin"
   $env:PATH = "$bin;$env:SystemRoot\System32"
   $env:GRAPHCODE_SUPPORT_DIR = Join-Path $testHome ".graphcode"
+  $sid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
+  $identityBytes = [Text.Encoding]::UTF8.GetBytes("$sid|$([IO.Path]::GetFullPath($env:GRAPHCODE_SUPPORT_DIR).TrimEnd('\').ToLowerInvariant())")
+  $identityHash = (([Security.Cryptography.SHA256]::Create().ComputeHash($identityBytes) | ForEach-Object { $_.ToString("x2") }) -join "")
+  $taskName = "GraphCode\graphcoded-$($identityHash.Substring(0, 32))"
   & (Join-Path $bin "graphcode.exe") projects
   if ($LASTEXITCODE -ne 0) { throw "scheduled daemon CLI reachability failed" }
   Set-Content (Join-Path $testHome ".graphcode\real-lifecycle.json") preserved -Force
@@ -72,7 +76,7 @@ try {
   if ((Test-Path $install) -or (Test-Path (Join-Path $testHome ".graphcode")) -or $left.Count -ne 0) {
     throw "uninstall left installed state, support data, or daemon process"
   }
-  if (schtasks.exe /Query /TN "GraphCode daemon" 2>$null) {
+  if (schtasks.exe /Query /TN $taskName 2>$null) {
     throw "uninstall left the GraphCode daemon task"
   }
   Write-Output "Real scheduled-task install/upgrade/rollback/uninstall: PASS"

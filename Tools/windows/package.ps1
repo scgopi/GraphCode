@@ -190,9 +190,21 @@ function Verify-SignedPackage([string] $root, [object] $metadata) {
   $tool = if ($SignToolPath) { $SignToolPath } else { (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source }
   Require ($tool -and (Test-Path $tool)) "signed package verification requires signtool.exe"
   foreach ($file in @(Get-ChildItem (Join-Path $root "bin") -Filter *.exe)) {
+    $authenticode = Get-AuthenticodeSignature -FilePath $file.FullName
+    Require ($authenticode.Status -eq "Valid") "clean-machine Authenticode verification failed: $($file.Name)"
     & $tool verify /pa $file.FullName *> $null
     Require ($LASTEXITCODE -eq 0) "signature verification failed: $($file.Name)"
   }
+}
+function Get-TaskIdentity([string] $support) {
+  $sid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
+  $resolved = [IO.Path]::GetFullPath($support).TrimEnd("\").ToLowerInvariant()
+  $bytes = [Text.Encoding]::UTF8.GetBytes("$sid|$resolved")
+  $hash = ([Security.Cryptography.SHA256]::Create().ComputeHash($bytes) | ForEach-Object { $_.ToString("x2") }) -join ""
+  return @{ sid = $sid; name = "GraphCode\graphcoded-$($hash.Substring(0, 32))" }
+}
+function Xml-Escape([string] $value) {
+  return [System.Security.SecurityElement]::Escape($value)
 }
 function Build-Package {
   $out = if ($OutputDirectory) { $OutputDirectory } else { Join-Path $repoRoot ".build\windows\packages" }
@@ -244,8 +256,8 @@ function Build-Package {
     }
     @{
       schemaVersion = 1
-      winghostty = @{ repository = $pins.winghostty.repository; sha = $pins.winghostty.sha; packagePath = "assets/winghostty-win32-host.lib"; sha256 = $wingDigest }
-      zmx = @{ repository = $pins.zmx.repository; sha = $pins.zmx.sha; packagePath = "bin/zmx.exe"; sha256 = $zmxDigest }
+      winghostty = @{ repository = $pins.winghostty.repository; sha = $pins.winghostty.sha; packagePath = "assets/winghostty-win32-host.lib"; sha256 = $wingDigest; trustedSha256 = $wingDigest }
+      zmx = @{ repository = $pins.zmx.repository; sha = $pins.zmx.sha; packagePath = "bin/zmx.exe"; sha256 = $zmxDigest; trustedSha256 = $zmxDigest }
     } | ConvertTo-Json -Depth 5 | Set-Content $provenancePath -Encoding utf8
   } else {
     Fail "trusted pinned Winghostty and zmx roots are required; fixture provenance is not accepted"
@@ -295,6 +307,9 @@ $zmxLicense
       Require ($LASTEXITCODE -eq 0) "signtool failed for $($_.Name)"
     }
     Set-Content (Join-Path $root "SIGNATURES.txt") -Value "Signed with certificate thumbprint $SignCertificate" -Encoding utf8
+    $signedProvenance = Get-Content $provenancePath -Raw | ConvertFrom-Json
+    $signedProvenance.zmx.sha256 = (Get-FileHash (Join-Path $root "bin\zmx.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
+    $signedProvenance | ConvertTo-Json -Depth 8 | Set-Content $provenancePath -Encoding utf8
   }
   $manifest = [ordered]@{ schemaVersion = 1; files = @(Get-Manifest $root) }
   $manifest | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $root "manifest.json") -Encoding utf8
@@ -365,7 +380,9 @@ function Get-InstalledDaemons {
     })
 }
 function Stop-InstalledDaemon {
-  & schtasks.exe /End /TN "GraphCode daemon" *> $null
+  $support = if ($env:GRAPHCODE_SUPPORT_DIR) { $env:GRAPHCODE_SUPPORT_DIR } else { Join-Path $env:USERPROFILE ".graphcode" }
+  $identity = Get-TaskIdentity $support
+  & schtasks.exe /End /TN $identity.name *> $null
   $deadline = [DateTime]::UtcNow.AddSeconds(8)
   while (@(Get-InstalledDaemons).Count -gt 0 -and [DateTime]::UtcNow -lt $deadline) {
     Start-Sleep -Milliseconds 200
@@ -380,28 +397,36 @@ function Stop-InstalledDaemon {
   Require (@(Get-InstalledDaemons).Count -eq 0) "installed graphcoded process did not stop"
 }
 function Remove-DaemonTask {
-  & schtasks.exe /End /TN "GraphCode daemon" *> $null
-  & schtasks.exe /Delete /TN "GraphCode daemon" /F *> $null
+  $support = if ($env:GRAPHCODE_SUPPORT_DIR) { $env:GRAPHCODE_SUPPORT_DIR } else { Join-Path $env:USERPROFILE ".graphcode" }
+  $identity = Get-TaskIdentity $support
+  & schtasks.exe /End /TN $identity.name *> $null
+  & schtasks.exe /Delete /TN $identity.name /F *> $null
 }
 function Start-DaemonTask {
-  $support = Join-Path $env:USERPROFILE ".graphcode"
+  $support = if ($env:GRAPHCODE_SUPPORT_DIR) { $env:GRAPHCODE_SUPPORT_DIR } else { Join-Path $env:USERPROFILE ".graphcode" }
+  $identity = Get-TaskIdentity $support
   New-Item -ItemType Directory -Force $support | Out-Null
   $xmlPath = Join-Path (Split-Path $InstallRoot -Parent) "GraphCode-daemon-task.xml"
+  $taskName = Xml-Escape $identity.name
+  $sid = Xml-Escape $identity.sid
+  $command = Xml-Escape "C:\Windows\System32\cmd.exe"
+  $arguments = Xml-Escape "/d /s /c `"set `"GRAPHCODE_SUPPORT_DIR=$support`"`&`&`"$InstallRoot\bin\graphcoded.exe`"`""
+  $workingDirectory = Xml-Escape (Join-Path $InstallRoot "bin")
   $xml = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>GraphCode daemon</Description></RegistrationInfo>
-  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>
-  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <RegistrationInfo><Description>GraphCode daemon for $sid</Description></RegistrationInfo>
+  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>$sid</UserId></LogonTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>$sid</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
   <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>
-  <Actions Context="Author"><Exec><Command>C:\Windows\System32\cmd.exe</Command><Arguments>/d /s /c "set GRAPHCODE_SUPPORT_DIR=$support&amp;&amp;&quot;$InstallRoot\bin\graphcoded.exe&quot;"</Arguments><WorkingDirectory>$InstallRoot\bin</WorkingDirectory></Exec></Actions>
+  <Actions Context="Author"><Exec><Command>$command</Command><Arguments>$arguments</Arguments><WorkingDirectory>$workingDirectory</WorkingDirectory></Exec></Actions>
 </Task>
 "@
   [IO.File]::WriteAllText($xmlPath, $xml, [Text.Encoding]::Unicode)
-  & schtasks.exe /Create /TN "GraphCode daemon" /XML $xmlPath /F *> $null
+  & schtasks.exe /Create /TN $identity.name /XML $xmlPath /F *> $null
   Require ($LASTEXITCODE -eq 0) "scheduled-task registration failed"
   Remove-Item $xmlPath -Force -ErrorAction SilentlyContinue
-  & schtasks.exe /Run /TN "GraphCode daemon" *> $null
+  & schtasks.exe /Run /TN $identity.name *> $null
   Require ($LASTEXITCODE -eq 0) "scheduled-task start failed"
   $deadline = [DateTime]::UtcNow.AddSeconds(15)
   while ([DateTime]::UtcNow -lt $deadline) {
@@ -421,6 +446,7 @@ function Install-Package([bool] $upgrade) {
     $metadata = Assert-Package $root
     Verify-Manifest $root | Out-Null
     Read-ProviderProvenance $root | Out-Null
+    Verify-SignedPackage $root $metadata
     if ($Version -ne "0.0.0-dev" -and $metadata.version -ne $Version) { Fail "version mismatch: expected $Version, package is $($metadata.version)" }
   $parent = Split-Path $InstallRoot -Parent
   New-Item -ItemType Directory -Force -Path $parent | Out-Null
@@ -466,7 +492,7 @@ function Uninstall-Package {
   $bin = Join-Path $InstallRoot "bin"
   Set-UserPath $bin $false
   Set-Shortcut $false
-  & schtasks.exe /Delete /TN "GraphCode daemon" /F *> $null
+  Remove-DaemonTask
   if (Test-Path $InstallRoot) { Remove-Item $InstallRoot -Recurse -Force }
   $data = Join-Path $env:USERPROFILE ".graphcode"
   if ($RemoveUserData -and -not $KeepUserData) {
