@@ -124,11 +124,16 @@ class RemoteBridgeTests(unittest.TestCase):
                     connection.sendall(b"\0")
                 except OSError:
                     pass
-            time.sleep(0.11)
+            expiry = time.monotonic() + 0.35
+            while self.bridge.active_client_count:
+                if time.monotonic() >= expiry:
+                    self.fail("slow-drip worker exceeded cumulative deadline plus scheduler margin")
+                time.sleep(0.005)
             self.assertEqual(self.bridge.active_client_count, 0)
         finally:
             for connection in connections:
                 connection.close()
+            self.bridge.stop()
 
     def test_stop_closes_active_client_sockets(self):
         state = BridgeStateStore(self.state_path).read()
