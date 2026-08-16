@@ -99,6 +99,8 @@ function Write-OwnedResourceMetrics {
       }
     })
   Write-Host ("PRODUCT_RESOURCE_METRICS_JSON=" + (@{
+      snapshotId = "$PID-$resourceRole"
+      phase = "active-workload"
       sessions = @($ownedSessionNames)
       processes = $metrics
     } | ConvertTo-Json -Compress -Depth 5))

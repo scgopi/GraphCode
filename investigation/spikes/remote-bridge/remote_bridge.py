@@ -574,6 +574,11 @@ class RemoteBridge:
         with self._clients_lock:
             return len(self._active_clients)
 
+    @property
+    def worker_count(self) -> int:
+        with self._clients_lock:
+            return len(self._client_threads)
+
     def _bind_listener(self) -> socket.socket:
         last_error = None
         for attempt in range(self.collision_retries + 1):
@@ -885,20 +890,14 @@ class RemoteBridge:
                 self._send_error(connection, "backend_unavailable")
             return
         finally:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
             with self._clients_lock:
                 self._active_clients.discard(connection)
                 self._client_threads.discard(threading.current_thread())
-            try:
-                connection.shutdown(socket.SHUT_WR)
-            except OSError:
-                pass
-            try:
-                connection.settimeout(min(self.request_timeout, 1.0))
-                while connection.recv(4096):
-                    pass
-            except (OSError, TimeoutError):
-                pass
-            connection.close()
 
     def stop(self) -> None:
         with self._lifecycle_lock:
@@ -924,9 +923,13 @@ class RemoteBridge:
         if server_thread is not None:
             server_thread.join(timeout=1)
         current_thread = threading.current_thread()
+        join_deadline = time.monotonic() + 1.0
         for client_thread in client_threads:
             if client_thread is not current_thread:
-                client_thread.join(timeout=1)
+                remaining = join_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                client_thread.join(timeout=remaining)
         with self._state_lock:
             state = self._state
             self._state = None

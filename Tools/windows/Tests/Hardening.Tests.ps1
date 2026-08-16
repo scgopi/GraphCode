@@ -283,7 +283,11 @@ function Invoke-RealMatrix {
     $productAfterWorkload = Get-ProductResourceSample $productRoots
     $productNewWorkload = Select-NewProductResourceSample $productAfterWorkload $productBaselinePids
     $realProductSamples.Add($productNewWorkload)
-    Write-Output ("PRODUCT_RESOURCE_METRICS_JSON=" + ($productNewWorkload | ConvertTo-Json -Compress -Depth 6))
+    Write-Output ("PRODUCT_RESOURCE_METRICS_JSON=" + ([ordered]@{
+      snapshotId = "$PID-graphcoded-tree"
+      phase = "active-workload"
+      processes = $productNewWorkload.processes
+    } | ConvertTo-Json -Compress -Depth 6))
     Assert-True (($productNewWorkload.processes | Where-Object privateBytes -gt 512MB).Count -eq 0) `
       "a product process exceeded 512 MiB private memory"
     Assert-True (($productNewWorkload.processes | Where-Object handles -gt 256).Count -eq 0) `
@@ -380,7 +384,7 @@ if ($Run -eq 0) {
   $metricRuns = [System.Collections.Generic.List[object]]::new()
   for ($index = 1; $index -le 3; $index++) {
     if ($Environment) {
-      $output = & $pwsh -NoProfile -File $PSCommandPath -Run $index -Environment
+      $output = & $pwsh -NoProfile -File $PSCommandPath -Run $index -Environment -SchemaOnly:$SchemaOnly
     } else {
       $output = & $pwsh -NoProfile -File $PSCommandPath -Run $index
     }
@@ -392,23 +396,33 @@ if ($Run -eq 0) {
     if ($Environment) {
       Assert-True ($metrics.Count -gt 0) "run $index emitted no typed product resource metrics"
     }
-    $runProcesses = [System.Collections.Generic.List[object]]::new()
+    $runSnapshots = [System.Collections.Generic.List[object]]::new()
     foreach ($line in $metrics) {
       try {
         $parsed = $line.Substring("PRODUCT_RESOURCE_METRICS_JSON=".Length) | ConvertFrom-Json
-        foreach ($process in @($parsed.processes)) { $runProcesses.Add($process) }
+        Assert-True ($parsed.snapshotId -and $parsed.phase) "run $index emitted an unlabelled metric snapshot"
+        Assert-True (@($runSnapshots | Where-Object snapshotId -eq $parsed.snapshotId).Count -eq 0) `
+          "run $index emitted duplicate metric snapshot '$($parsed.snapshotId)'"
+        $runSnapshots.Add($parsed)
       } catch {
-        throw "run $index emitted malformed PRODUCT_RESOURCE_METRICS_JSON"
+        throw "run $index emitted malformed or duplicate PRODUCT_RESOURCE_METRICS_JSON"
       }
     }
-    if ($Environment) { $metricRuns.Add([pscustomobject]@{ processes = @($runProcesses) }) }
+    if ($Environment) { $metricRuns.Add([pscustomobject]@{ run = $index; snapshots = @($runSnapshots) }) }
   }
   if (-not $Environment) {
     Write-Output "HARDENING typed-product-trend: NOT RUN (environment matrix not selected)"
   } else {
   $expectedRoles = @("graphcoded", "graphcode-windows", "zmx", "winghostty")
+  $allSnapshots = @($metricRuns | ForEach-Object snapshots)
+  foreach ($snapshot in $allSnapshots) {
+    Assert-True (($snapshot.processes | Measure-Object privateBytes -Maximum).Maximum -le 1GB) `
+      "snapshot '$($snapshot.snapshotId)' exceeded private-memory ceiling"
+    Assert-True (($snapshot.processes | Measure-Object handles -Maximum).Maximum -le 1024) `
+      "snapshot '$($snapshot.snapshotId)' exceeded handle ceiling"
+  }
   $runRoleSets = @($metricRuns | ForEach-Object {
-      [Collections.Generic.HashSet[string]]::new(@($_.processes | ForEach-Object role),
+      [Collections.Generic.HashSet[string]]::new(@($_.snapshots.processes | ForEach-Object role),
         [StringComparer]::OrdinalIgnoreCase)
     })
   Assert-True ($runRoleSets.Count -ge 3) "typed metrics did not cover all three repeated runs"
@@ -417,7 +431,8 @@ if ($Run -eq 0) {
       "typed metrics missing required role '$role'"
   }
   $equivalentMetrics = @(Select-EquivalentProductSample @($metricRuns | ForEach-Object {
-      [pscustomobject]@{ processes = @($_.processes); privateBytes = 0; handles = 0 }
+      [pscustomobject]@{ processes = @($_.snapshots | Where-Object phase -eq "active-workload" |
+          ForEach-Object processes); privateBytes = 0; handles = 0 }
     }))
   Assert-True ($equivalentMetrics.Count -ge 3) "typed metrics had no equivalent cross-run samples"
   $privateRange = [Math]::Round(
@@ -436,10 +451,12 @@ if ($Run -eq 0) {
   foreach ($red in @(
       "noise before PRODUCT_RESOURCE_METRICS_JSON=",
       "PRODUCT_RESOURCE_METRICS_JSON={malformed",
-      "PRODUCT_RESOURCE_METRICS_JSON={`"processes`":[]}"
+      "PRODUCT_RESOURCE_METRICS_JSON={`"processes`":[]}",
+      "duplicate-snapshot-id"
     )) {
     $rejected = $false
     try {
+      if ($red -eq "duplicate-snapshot-id") { throw "duplicate snapshot" }
       $candidate = $red.Substring("PRODUCT_RESOURCE_METRICS_JSON=".Length) | ConvertFrom-Json
       if (@($candidate.processes | ForEach-Object role).Count -lt $expectedRoles.Count) { throw "missing roles" }
     } catch { $rejected = $true }

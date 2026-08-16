@@ -130,6 +130,10 @@ class RemoteBridgeTests(unittest.TestCase):
                     self.fail("slow-drip worker exceeded cumulative deadline plus scheduler margin")
                 time.sleep(0.005)
             self.assertEqual(self.bridge.active_client_count, 0)
+            stop_started = time.monotonic()
+            self.bridge.stop()
+            self.assertLess(time.monotonic() - stop_started, 1.0)
+            self.assertEqual(self.bridge.worker_count, 0)
         finally:
             for connection in connections:
                 connection.close()
