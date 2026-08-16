@@ -48,9 +48,9 @@ public struct UsageSample: Codable, Equatable, Sendable {
   ///
   /// - `key=value` pairs separated by spaces or commas — the original documented form.
   ///   It turns out a `zmx` label *value* can never actually hold one (`zmx set` takes
-  ///   only `[A-Za-z0-9._-]` in a value, and `=` and `,` are both outside it), but the
-  ///   remote path hands whole label lines through here and the shape costs nothing to
-  ///   keep.
+  ///   only `[A-Za-z0-9._-]` in a value, and `=` and `,` are both outside it), so
+  ///   nothing writes it today; kept because parsing is cheap and a future writer with
+  ///   a laxer transport shouldn't find half a parser.
   /// - `key.value` pairs joined by `_` — `input.559576_output.5397_cost.0.0042` — built
   ///   from exactly the bytes a label value may contain. This is what
   ///   `PresenceHooks.usageScript` writes, and the only form that survives `zmx set`;

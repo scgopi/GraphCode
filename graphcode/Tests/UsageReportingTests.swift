@@ -86,6 +86,25 @@ struct UsageReportingTests {
   }
 
   @Test
+  func aMultiBlockTurnCountsItsMessageOnceNotPerRecord() throws {
+    // Claude Code writes one JSONL record per content block, each repeating the same
+    // message-level usage — the double-count a budget-capped review loop caught in the
+    // first version of this script (naive line-sum ran ~2× the metered spend).
+    let transcript = """
+      {"type":"assistant","message":{"id":"msg_01AAA","usage":{"input_tokens":100,\
+      "output_tokens":40}}}
+      {"type":"assistant","message":{"id":"msg_01AAA","usage":{"input_tokens":100,\
+      "output_tokens":40}}}
+      {"type":"assistant","message":{"id":"msg_01AAA","usage":{"input_tokens":100,\
+      "output_tokens":40}}}
+      {"type":"assistant","message":{"id":"msg_01BBB","usage":{"input_tokens":7,\
+      "output_tokens":3}}}
+      """
+    let label = try reportedLabel(payload: stopPayload, transcript: transcript)
+    #expect(label == "usage=input.107_output.43")
+  }
+
+  @Test
   func aMissingTranscriptReportsNothingAndStillExitsZero() throws {
     let payload = """
       {"session_id":"a","hook_event_name":"Stop","transcript_path":"/nonexistent/t.jsonl"}
