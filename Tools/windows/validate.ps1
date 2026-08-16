@@ -349,7 +349,8 @@ function Invoke-Task([string] $name) {
           $secondDaemonProcess.WaitForExit()
           throw "second graphcoded.exe did not exit after singleton rejection"
         }
-        $secondStderr = $secondStderrTask.GetAwaiter().GetResult()
+        $secondDaemonProcess.Refresh()
+        $secondStderr = $secondStderrTask.Result
         if ($secondDaemonProcess.ExitCode -eq 0 -or
           $secondStderr -notmatch "already running") {
           throw "second graphcoded.exe did not reject the singleton cleanly: $secondStderr"
@@ -366,8 +367,9 @@ function Invoke-Task([string] $name) {
           throw "clean-environment CLI output tasks were not created"
         }
         $cliProcess.WaitForExit()
-        $stdout = $stdoutTask.GetAwaiter().GetResult()
-        $stderr = $stderrTask.GetAwaiter().GetResult()
+        $cliProcess.Refresh()
+        $stdout = $stdoutTask.Result
+        $stderr = $stderrTask.Result
         if ($cliProcess.ExitCode -ne 0) {
           throw "clean-environment graphcode.exe failed: $stderr"
         }
