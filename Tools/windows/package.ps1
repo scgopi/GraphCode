@@ -493,7 +493,6 @@ function Uninstall-Package {
   $bin = Join-Path $InstallRoot "bin"
   Set-UserPath $bin $false
   Set-Shortcut $false
-  Remove-DaemonTask
   if (Test-Path $InstallRoot) { Remove-Item $InstallRoot -Recurse -Force }
   $data = Join-Path $env:USERPROFILE ".graphcode"
   if ($RemoveUserData -and -not $KeepUserData) {
