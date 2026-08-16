@@ -244,3 +244,13 @@ reproducible against their public repositories.
 - provider provenance and exact pins are documented;
 - the integration branch contains a reviewed, signed, bisectable commit stack ready for
   one PR to `main`.
+# Packaging status
+
+The production Windows bundle is implemented by `Tools/windows/package.ps1`.
+Before release, build the Swift products and pinned Zig providers into a
+release directory, then run the package build, verification, install/upgrade,
+and uninstall tests. CI must provide the exact Zig 0.15.2 and 0.16.0
+toolchains plus the accepted Winghostty `host-integration` and zmx `attach`
+worktrees. Artifacts are unsigned unless an explicit certificate thumbprint
+and optional timestamp URL are supplied; unsigned status is intentionally
+visible and is not release-signing evidence.

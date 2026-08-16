@@ -3,7 +3,7 @@
   "product": "GraphCode Windows shell",
   "executable": "graphcode-windows.exe",
   "platform": "windows-x86_64",
-  "installer": false,
+  "installer": true,
   "runtime": {
     "daemon": "graphcoded.exe",
     "terminal": "zmx.exe",

@@ -109,7 +109,7 @@ Assert-Contract ($pins.localFallback.enabled) "local provider fallback is undocu
 
 $metadata = Get-Content -LiteralPath (Join-Path $shellRoot "package-metadata.json") -Raw |
   ConvertFrom-Json
-Assert-Contract ($metadata.installer -eq $false) "installer metadata was added"
+Assert-Contract ($metadata.installer -eq $true) "installer metadata is not enabled"
 Assert-Contract ($metadata.executable -eq "graphcode-windows.exe") `
   "package metadata does not identify the shell"
 
