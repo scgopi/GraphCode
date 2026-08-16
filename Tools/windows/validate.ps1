@@ -623,7 +623,11 @@ function Invoke-Task([string] $name) {
       }
     }
     "hardening" {
-      & (Join-Path $repoRoot "Tools\windows\Tests\Hardening.Tests.ps1")
+      if ($env:GRAPHCODE_HARDENING_TARGET) {
+        & (Join-Path $repoRoot "Tools\windows\Tests\Hardening.Tests.ps1") -Environment
+      } else {
+        & (Join-Path $repoRoot "Tools\windows\Tests\Hardening.Tests.ps1")
+      }
       if ($LASTEXITCODE -ne 0) {
         throw "Windows hardening tests failed with exit code $LASTEXITCODE"
       }

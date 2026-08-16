@@ -76,11 +76,13 @@ ceilings are:
 | Multi-terminal | four concurrent 512 KiB sessions complete in <=15 seconds |
 | Unicode/hostile paths | UTF-8 clipboard text round-trips through a >=180-character Unicode path |
 | Process cleanup | fixture process count returns to baseline |
+| Repeatability | three consecutive runs; each reports process delta and all must pass |
 
 GPU/WGL, real ConPTY/zmx reconnect, screen reader/UIA, physical DPI/display,
 authenticated SSH, login/reboot, and installer ACL tests are environment-only.
 They are explicitly gated by `Hardening.Tests.ps1 -Environment` and a runner-owned
-PowerShell harness supplied through `GRAPHCODE_HARDENING_TARGET`; selecting that
+PowerShell harness supplied through `GRAPHCODE_HARDENING_TARGET` (the repository
+fixture is `Tools/windows/Tests/EnvironmentFixture.ps1`); selecting that
 tier without the harness fails. The
 deterministic tier remains mandatory on every pull request. The scheduled full
 workflow runs the pinned provider/package lifecycle gate and cannot substitute a

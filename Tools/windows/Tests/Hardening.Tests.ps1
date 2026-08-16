@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-  [switch] $Environment
+  [switch] $Environment,
+  [int] $Run = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,6 +42,24 @@ function Invoke-Fixture([string[]] $arguments) {
   }
 }
 
+if ($Run -eq 0) {
+  $runs = [System.Collections.Generic.List[string]]::new()
+  for ($index = 1; $index -le 3; $index++) {
+    if ($Environment) {
+      $output = & $pwsh -NoProfile -File $PSCommandPath -Run $index -Environment
+    } else {
+      $output = & $pwsh -NoProfile -File $PSCommandPath -Run $index
+    }
+    if ($LASTEXITCODE -ne 0) {
+      throw "hardening repeated run $index failed with exit code $LASTEXITCODE"
+    }
+    $runs.Add(($output -join "`n"))
+  }
+  $runs | ForEach-Object { Write-Output $_ }
+  Write-Output "HARDENING repeated-runs: PASS (3/3; process deltas reported per run)"
+  exit 0
+}
+
 try {
   New-Item -ItemType Directory -Force $fixtureRoot | Out-Null
   @'
@@ -72,6 +91,7 @@ switch ($Mode) {
 
   $before = @(Get-CimInstance Win32_Process -Filter "Name = 'pwsh.exe'" |
     Where-Object { $_.CommandLine -like "*$([IO.Path]::GetFileName($fixture))*" })
+  $handleBefore = (Get-Process -Id $PID).HandleCount
   $output = Invoke-Fixture @("-Mode", "output", "-Bytes", "4194304")
   Assert-True ($output.Process.ExitCode -eq 0) "high-output fixture failed: $($output.Stderr)"
   Assert-True ([Text.Encoding]::UTF8.GetByteCount($output.Stdout) -eq 4194304) `
@@ -79,8 +99,13 @@ switch ($Mode) {
   Assert-True ($output.Elapsed -le 10) "high-output completion exceeded 10 seconds"
   $after = @(Get-CimInstance Win32_Process -Filter "Name = 'pwsh.exe'" |
     Where-Object { $_.CommandLine -like "*$([IO.Path]::GetFileName($fixture))*" })
+  $handleAfter = (Get-Process -Id $PID).HandleCount
   Assert-True ($after.Count -eq $before.Count) "high-output fixture leaked a process"
-  $results.Add([pscustomobject]@{ name = "high-output"; threshold = "4 MiB <= 10 s"; result = "PASS" })
+  $results.Add([pscustomobject]@{
+      name = "high-output"
+      threshold = "4 MiB <= 10 s; process delta=$($after.Count - $before.Count); handle delta=$($handleAfter - $handleBefore)"
+      result = "PASS"
+    })
 
   $start = [DateTime]::UtcNow
   $sleep = Invoke-Fixture @("-Mode", "sleep", "-Milliseconds", "3000")
@@ -132,7 +157,7 @@ switch ($Mode) {
       throw "Environment hardening was explicitly selected but GRAPHCODE_HARDENING_TARGET is unset"
     }
     $target = Resolve-Path -LiteralPath $env:GRAPHCODE_HARDENING_TARGET -ErrorAction Stop
-    if ($target.Extension -ine ".ps1") {
+    if ([IO.Path]::GetExtension($target.Path) -ine ".ps1") {
       throw "GRAPHCODE_HARDENING_TARGET must be an owned PowerShell harness"
     }
     & $pwsh -NoProfile -File $target.Path
