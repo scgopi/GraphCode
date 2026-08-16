@@ -81,6 +81,8 @@ const App = struct {
     totalInputBytes: usize = 0,
     totalOutputEvents: usize = 0,
     sameSession: bool = false,
+    session_buffers: [3][128]u8 = [_][128]u8{[_]u8{0} ** 128} ** 3,
+    session_lengths: [3]usize = .{ 0, 0, 0 },
     active_surface: usize = 0,
     retired_surfaces: [16]?*c.winghostty_surface = [_]?*c.winghostty_surface{null} ** 16,
     retired_surface_count: usize = 0,
@@ -500,8 +502,8 @@ fn initializeOptions(app: *App, index: usize) c.winghostty_surface_options_v2 {
 }
 
 fn sessionName(app: *App, index: usize) []const u8 {
-    if (app.same_session) return "graphcode-terminal-gate-shared";
-    return if (index == 0) "graphcode-terminal-gate-a" else "graphcode-terminal-gate-b";
+    const slot = if (app.same_session) 2 else index;
+    return app.session_buffers[slot][0..app.session_lengths[slot]];
 }
 
 fn zmxGet(app: *App, name: []const u8) !bool {
@@ -1061,6 +1063,17 @@ pub fn main() !void {
             std.process.getEnvVarOwned(allocator, "GRAPHCODE_ZMX") catch "zmx.exe",
         .cwd = std.process.getEnvVarOwned(allocator, "GRAPHCODE_GATE_CWD") catch ".",
     };
+    const prefix_owned = std.process.getEnvVarOwned(
+        allocator,
+        "GRAPHCODE_TERMINAL_SESSION_PREFIX",
+    ) catch null;
+    const prefix = prefix_owned orelse "graphcode-terminal-gate";
+    defer if (prefix_owned) |value| allocator.free(value);
+    for ([_][]const u8{ "-a", "-b", "-shared" }, 0..) |suffix, index| {
+        const written = std.fmt.bufPrint(&app.session_buffers[index], "{s}{s}", .{ prefix, suffix }) catch
+            return error.SessionNameTooLong;
+        app.session_lengths[index] = written.len;
+    }
 
     try createWindow(app);
     defer cleanup(app);

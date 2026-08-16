@@ -79,6 +79,13 @@ jobs:
           GRAPHCODE_WINGHOSTTY_ROOT: ${{ github.workspace }}\Winghostty-worktrees\host-integration
           GRAPHCODE_ZMX_ROOT: ${{ github.workspace }}\zmx-worktrees\attach
         run: ./Tools/windows/validate.ps1 -Task all
+      - name: Run real hardening matrix after release products
+        shell: pwsh
+        env:
+          GRAPHCODE_WINGHOSTTY_ROOT: ${{ github.workspace }}\Winghostty-worktrees\host-integration
+          GRAPHCODE_ZMX_ROOT: ${{ github.workspace }}\zmx-worktrees\attach
+          GRAPHCODE_HARDENING_TARGET: ${{ github.workspace }}\Tools\windows\Tests\EnvironmentFixture.ps1
+        run: ./Tools/windows/Tests/Hardening.Tests.ps1 -Environment
 
   environment:
     name: "Gated environment hardening"

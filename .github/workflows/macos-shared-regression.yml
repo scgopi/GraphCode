@@ -35,9 +35,13 @@ jobs:
           fetch-depth: 0
       - name: Prepare portable Swift sources
         run: python3 Tools/portable-prepare.py
+      - name: Install pinned mise tools
+        run: |
+          brew install mise
+          mise install
       - name: Validate shared portable Swift package
-        run: swift test --package-path investigation/spikes/swift-portable
+        run: mise exec -- swift test --package-path investigation/spikes/swift-portable
       - name: Validate macOS app, daemon, and CLI
-        run: make test
+        run: mise exec -- make test
       - name: Validate macOS lint and formatting
-        run: make check
+        run: mise exec -- make check

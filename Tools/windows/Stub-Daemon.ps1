@@ -19,7 +19,9 @@ $busyObserved = $false
 $seenCommands = [Collections.Generic.List[string]]::new()
 $errorMessage = $null
 
-$graphEvent = '{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"stub-graph","project":{"path":"graphcode://stub/project","name":"Stub project","remote":false},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"Stub node A","loopType":"turnBased","state":"running","activity":"stub","presence":{"presence":"busy","confidence":"reported"}},{"id":"22222222-2222-4222-8222-222222222222","title":"Stub node B","loopType":"turnBased","state":"idle","activity":"stub","presence":{"presence":"idle","confidence":"reported"}}],"edges":[]}}}'
+$nodeA = if ($env:GRAPHCODE_STUB_NODE_A) { $env:GRAPHCODE_STUB_NODE_A } else { "11111111-1111-4111-8111-111111111111" }
+$nodeB = if ($env:GRAPHCODE_STUB_NODE_B) { $env:GRAPHCODE_STUB_NODE_B } else { "22222222-2222-4222-8222-222222222222" }
+$graphEvent = '{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"stub-graph","project":{"path":"graphcode://stub/project","name":"Stub project","remote":false},"nodes":[{"id":"' + $nodeA + '","title":"Stub node A","loopType":"turnBased","state":"running","activity":"stub","presence":{"presence":"busy","confidence":"reported"}},{"id":"' + $nodeB + '","title":"Stub node B","loopType":"turnBased","state":"idle","activity":"stub","presence":{"presence":"idle","confidence":"reported"}}],"edges":[]}}}'
 $recentProjects = '{"version":2,"kind":"response","requestID":"{0}","event":{"recentProjectsListed":[{"path":"graphcode://stub/project","name":"Stub project","remote":false}]}}'
 $success = '{"version":2,"kind":"response","requestID":"{0}","success":true}'
 $hello = '{"version":2,"kind":"hello","supportedVersions":[1,2],"selectedVersion":2}'

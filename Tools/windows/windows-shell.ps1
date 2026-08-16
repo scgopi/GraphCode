@@ -19,9 +19,10 @@ $app = Join-Path $shellRoot "zig-out\bin\graphcode-windows.exe"
 $stubProcess = $null
 $busyStubProcess = $null
 $testSessionIds = @(
-  "11111111-1111-4111-8111-111111111111",
-  "22222222-2222-4222-8222-222222222222"
+  [guid]::NewGuid().ToString(),
+  [guid]::NewGuid().ToString()
 )
+$sessionPrefix = "gs-$([guid]::NewGuid().ToString('N'))"
 $stubResult = Join-Path $shellRoot "stub-result-$PID.json"
 $busyResult = Join-Path $shellRoot "busy-stub-result-$PID.json"
 $busyError = Join-Path $shellRoot "busy-stub-error-$PID.txt"
@@ -32,8 +33,10 @@ $oldNonreadingAttach = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_NO
 $oldLargePaste = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_LARGE_PASTE")
 $oldWorkspaceActions = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_WORKSPACE_ACTIONS")
 $oldWorkspaceLayout = [Environment]::GetEnvironmentVariable("GRAPHCODE_WORKSPACE_LAYOUT")
+$oldStubNodeA = [Environment]::GetEnvironmentVariable("GRAPHCODE_STUB_NODE_A")
+$oldStubNodeB = [Environment]::GetEnvironmentVariable("GRAPHCODE_STUB_NODE_B")
+$oldSessionPrefix = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_SESSION_PREFIX")
 $workspaceLayoutBase = Join-Path $shellRoot "graphcode-workspace-$PID.json"
-$baselineSessionNames = [System.Collections.Generic.HashSet[string]]::new()
 $ownedSessionNames = [System.Collections.Generic.HashSet[string]]::new()
 $ownedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
 
@@ -56,13 +59,14 @@ function Test-TestSessionProcess([object] $process) {
   foreach ($session in $testSessionIds) {
     if ($process.CommandLine -like "*$session*") { return $true }
   }
+  if ($process.CommandLine -like "*$sessionPrefix*") { return $true }
 
   return $false
 }
 
 function Get-ZmxSessionRecords {
   @(& $env:GRAPHCODE_ZMX list 2>$null | ForEach-Object {
-    if ($_ -match "^name=([^\s]+)\s+pid=(\d+)") {
+    if ($_ -match "name=([^\s]+)\s+pid=(\d+)") {
       [pscustomobject]@{ Name = $Matches[1]; Pid = [int] $Matches[2] }
     }
   })
@@ -70,11 +74,31 @@ function Get-ZmxSessionRecords {
 
 function Record-TestOwnedSessions {
   foreach ($record in @(Get-ZmxSessionRecords)) {
-    if (-not $baselineSessionNames.Contains($record.Name)) {
+    if (($testSessionIds -contains $record.Name) -or
+        $record.Name.StartsWith($sessionPrefix, [StringComparison]::Ordinal)) {
       [void] $ownedSessionNames.Add($record.Name)
       [void] $ownedProcessIds.Add($record.Pid)
     }
+
   }
+}
+
+function Get-ProcessTreeIds([int[]] $roots) {
+  $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+  $ids = [Collections.Generic.HashSet[int]]::new()
+  foreach ($root in $roots) { [void] $ids.Add($root) }
+  $changed = $true
+  while ($changed) {
+    $changed = $false
+    foreach ($process in $all) {
+      if (-not $ids.Contains([int]$process.ProcessId) -and
+          $ids.Contains([int]$process.ParentProcessId)) {
+        [void] $ids.Add([int]$process.ProcessId)
+        $changed = $true
+      }
+    }
+  }
+  return @($ids)
 }
 
 function Assert-PinnedCleanWorktree(
@@ -140,12 +164,12 @@ try {
   }
   $env:GRAPHCODE_ZMX = Join-Path $ZmxRoot "zig-out\bin\zmx.exe"
   $env:GRAPHCODE_GATE_CWD = $repoRoot
-  foreach ($record in @(Get-ZmxSessionRecords)) {
-    [void] $baselineSessionNames.Add($record.Name)
-  }
   $env:GRAPHCODE_SHELL_WORKSPACE_ACTIONS = "1"
   $env:GRAPHCODE_WORKSPACE_LAYOUT = $workspaceLayoutBase
+  $env:GRAPHCODE_SHELL_SESSION_PREFIX = $sessionPrefix
   if ($UseStubDaemon) {
+    $env:GRAPHCODE_STUB_NODE_A = $testSessionIds[0]
+    $env:GRAPHCODE_STUB_NODE_B = $testSessionIds[1]
     Remove-Item -LiteralPath $stubResult -Force -ErrorAction SilentlyContinue
     $pipeName = "graphcode-shell-stub-$PID"
     $stubScript = Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1"
@@ -220,6 +244,7 @@ try {
     }
     $busyApp.WaitForExit()
     $busyApp.Refresh()
+    Record-TestOwnedSessions
     if ($busyApp.ExitCode -eq 0) {
       throw "Busy daemon smoke did not surface a transport error"
     }
@@ -247,6 +272,7 @@ try {
     }
     $inputApp.WaitForExit()
     $inputApp.Refresh()
+    Record-TestOwnedSessions
     $inputExitCode = $inputApp.ExitCode
     if ($null -eq $inputExitCode) {
       throw "Large paste/non-reading attach smoke completed without an observable exit code"
@@ -261,6 +287,7 @@ try {
     }
     Remove-Item -LiteralPath $inputError -Force -ErrorAction SilentlyContinue
   }
+  Record-TestOwnedSessions
   Write-Host "Windows shell smoke/stress: PASS"
 }
 finally {
@@ -271,6 +298,10 @@ finally {
     Stop-Process -Id $busyStubProcess.Id -Force
   }
   if ($env:GRAPHCODE_ZMX -and (Test-Path -LiteralPath $env:GRAPHCODE_ZMX)) {
+    $treeProcessIds = Get-ProcessTreeIds @($ownedProcessIds)
+    foreach ($processId in $treeProcessIds) {
+      [void] $ownedProcessIds.Add($processId)
+    }
     foreach ($session in @($ownedSessionNames)) {
       & $env:GRAPHCODE_ZMX kill --force $session *> $null
     }
@@ -292,6 +323,21 @@ finally {
   }
   Remove-Item Env:GRAPHCODE_ZMX -ErrorAction SilentlyContinue
   Remove-Item Env:GRAPHCODE_GATE_CWD -ErrorAction SilentlyContinue
+  if ($null -eq $oldSessionPrefix) {
+    Remove-Item Env:GRAPHCODE_SHELL_SESSION_PREFIX -ErrorAction SilentlyContinue
+  } else {
+    $env:GRAPHCODE_SHELL_SESSION_PREFIX = $oldSessionPrefix
+  }
+  if ($null -eq $oldStubNodeA) {
+    Remove-Item Env:GRAPHCODE_STUB_NODE_A -ErrorAction SilentlyContinue
+  } else {
+    $env:GRAPHCODE_STUB_NODE_A = $oldStubNodeA
+  }
+  if ($null -eq $oldStubNodeB) {
+    Remove-Item Env:GRAPHCODE_STUB_NODE_B -ErrorAction SilentlyContinue
+  } else {
+    $env:GRAPHCODE_STUB_NODE_B = $oldStubNodeB
+  }
   if ($null -eq $oldPipe) {
     Remove-Item Env:GRAPHCODE_DAEMON_PIPE -ErrorAction SilentlyContinue
   } else {

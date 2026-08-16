@@ -93,7 +93,18 @@ pub const Layout = struct {
             output[13] = '-';
             output[18] = '-';
             output[23] = '-';
-            if (!self.idExists(output[0..])) return self.allocator.dupe(u8, output[0..]);
+            if (!self.idExists(output[0..])) {
+                if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_SESSION_PREFIX")) |prefix| {
+                    defer self.allocator.free(prefix);
+                    return std.fmt.allocPrint(
+                        self.allocator,
+                        "{s}-{s}",
+                        .{ prefix, output[0..] },
+                    );
+                } else |_| {
+                    return self.allocator.dupe(u8, output[0..]);
+                }
+            }
         }
     }
 

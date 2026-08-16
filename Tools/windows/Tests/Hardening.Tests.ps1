@@ -11,6 +11,7 @@ $fixtureRoot = Join-Path $repoRoot ".build\windows-hardening-$PID"
 $fixture = Join-Path $fixtureRoot "fixture.ps1"
 $results = [System.Collections.Generic.List[object]]::new()
 $realSamples = [System.Collections.Generic.List[object]]::new()
+$realProductSamples = [System.Collections.Generic.List[object]]::new()
 
 function Assert-True([bool] $condition, [string] $message) {
   if (-not $condition) { throw "Hardening failure: $message" }
@@ -85,6 +86,120 @@ function Get-ResourceSample {
   }
 }
 
+function Get-ProductResourceSample([string[]] $roots) {
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $matched = [System.Collections.Generic.List[object]]::new()
+    foreach ($process in $processes) {
+      $pathMatch = $false
+      if ($process.ExecutablePath) {
+        foreach ($root in $roots) {
+          if ([IO.Path]::GetFullPath($process.ExecutablePath) -ieq [IO.Path]::GetFullPath($root) -or
+              [IO.Path]::GetFullPath($process.ExecutablePath).StartsWith(
+                ([IO.Path]::GetFullPath((Split-Path $root)) + "\"), [StringComparison]::OrdinalIgnoreCase)) {
+            $pathMatch = $true
+            break
+          }
+        }
+      }
+      if ($pathMatch) { $matched.Add($process) }
+    }
+    $known = [Collections.Generic.HashSet[int]]::new()
+    foreach ($process in @($matched)) { [void] $known.Add([int]$process.ProcessId) }
+    $changed = $true
+    while ($changed) {
+      $changed = $false
+      foreach ($process in $processes) {
+        if (-not $known.Contains([int]$process.ProcessId) -and
+            $known.Contains([int]$process.ParentProcessId)) {
+          [void] $known.Add([int]$process.ProcessId)
+          $matched.Add($process)
+          $changed = $true
+        }
+      }
+    }
+    $details = @($known | ForEach-Object {
+        $sample = Get-Process -Id $_ -ErrorAction SilentlyContinue
+        if ($sample) {
+          [pscustomobject]@{
+            pid = $_
+            name = $sample.ProcessName
+            privateBytes = [int64]$sample.PrivateMemorySize64
+            handles = [int64]$sample.HandleCount
+          }
+        }
+      })
+    [pscustomobject]@{
+      processes = $details
+      privateBytes = [int64](($details | Measure-Object privateBytes -Sum).Sum)
+      handles = [int64](($details | Measure-Object handles -Sum).Sum)
+    }
+}
+
+function Find-Bytes([byte[]] $haystack, [byte[]] $needle, [int] $start = 0) {
+  for ($index = $start; $index -le $haystack.Length - $needle.Length; $index++) {
+    $match = $true
+    for ($offset = 0; $offset -lt $needle.Length; $offset++) {
+      if ($haystack[$index + $offset] -ne $needle[$offset]) {
+        $match = $false
+        break
+      }
+    }
+    if ($match) { return $index }
+  }
+  return -1
+}
+
+function Select-NewProductResourceSample([object] $sample, [int[]] $baselinePids) {
+  $details = @($sample.processes | Where-Object { $baselinePids -notcontains $_.pid })
+  [pscustomobject]@{
+    processes = $details
+    privateBytes = [int64](($details | Measure-Object privateBytes -Sum).Sum)
+    handles = [int64](($details | Measure-Object handles -Sum).Sum)
+  }
+}
+
+function Stop-OwnedSessionProcessTree([string] $sessionName) {
+  $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+  $ids = [Collections.Generic.HashSet[int]]::new()
+  foreach ($process in $all) {
+    if ($process.CommandLine -and
+        $process.CommandLine -match [regex]::Escape($sessionName)) {
+      [void] $ids.Add([int]$process.ProcessId)
+    }
+  }
+  $changed = $true
+  while ($changed) {
+    $changed = $false
+    foreach ($process in $all) {
+      if (-not $ids.Contains([int]$process.ProcessId) -and
+          $ids.Contains([int]$process.ParentProcessId)) {
+        [void] $ids.Add([int]$process.ProcessId)
+        $changed = $true
+      }
+    }
+  }
+  foreach ($id in $ids) {
+    if (Get-Process -Id $id -ErrorAction SilentlyContinue) {
+      Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+    }
+  }
+}
+
+function Read-CapturedBytes([string] $path) {
+  $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+  try {
+    $memory = [IO.MemoryStream]::new()
+    try {
+      $stream.CopyTo($memory)
+      return $memory.ToArray()
+    } finally {
+      $memory.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
 function Invoke-RealMatrix {
   $wing = $env:GRAPHCODE_WINGHOSTTY_ROOT
   $zmxRoot = $env:GRAPHCODE_ZMX_ROOT
@@ -104,6 +219,14 @@ function Invoke-RealMatrix {
   New-Item -ItemType Directory -Force $support | Out-Null
   $oldSupport = $env:GRAPHCODE_SUPPORT_DIR
   $daemon = $null
+  $attach = $null
+  $captureStream = $null
+  $sessionName = $null
+  $productRoots = @($graphcoded, $shell, $zmx, $wing)
+  $productBefore = Get-ProductResourceSample $productRoots
+  $productBaselinePids = @($productBefore.processes | ForEach-Object pid)
+  Write-Output ("HARDENING product-resources-before: processes=$($productBefore.processes.Count); " +
+    "handles=$($productBefore.handles); private MiB=$([Math]::Round($productBefore.privateBytes / 1MB, 1))")
   try {
     $env:GRAPHCODE_SUPPORT_DIR = $support
     $daemon = Start-Process -FilePath $graphcoded -WorkingDirectory `
@@ -130,36 +253,78 @@ function Invoke-RealMatrix {
     & $pwsh -NoProfile -File $shellScript -WinghosttyRoot $wing -ZmxRoot $zmxRoot `
       -Zig0152 $zig0152 -Zig0160 $zig0160 -SkipBuild -Stress -UseStubDaemon
     Assert-True ($LASTEXITCODE -eq 0) "real GraphCode shell matrix failed"
-    $sessionName = "graphcode-hardening-output-$PID"
-    $payloadFile = Join-Path $support "real-output.bin"
-    $markerFile = Join-Path $support "real-output.marker"
-    $escapedPayload = $payloadFile.Replace("'", "''")
-    $escapedMarker = $markerFile.Replace("'", "''")
+    $productAfterWorkload = Get-ProductResourceSample $productRoots
+    $productNewWorkload = Select-NewProductResourceSample $productAfterWorkload $productBaselinePids
+    $realProductSamples.Add($productNewWorkload)
+    Assert-True (($productNewWorkload.processes | Where-Object privateBytes -gt 512MB).Count -eq 0) `
+      "a product process exceeded 512 MiB private memory"
+    Assert-True (($productNewWorkload.processes | Where-Object handles -gt 256).Count -eq 0) `
+      "a product process exceeded 256 handles"
+    $sessionName = "ho-$([guid]::NewGuid().ToString('N'))"
+    $escapedStart = "GRAPHCODE_HARDENING_START_$PID"
+    $escapedEnd = "GRAPHCODE_HARDENING_END_$PID"
+    $writes = (1..64 | ForEach-Object { "[Console]::Write(`$payload);" }) -join " "
+    $command = "Start-Sleep -Milliseconds 3000; `$payload = ('A' * 65536 -join ''); [Console]::Write('$escapedStart'); $writes [Console]::Write('$escapedEnd')"
+    $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    $capture = [Diagnostics.ProcessStartInfo]::new()
+    $capture.FileName = $zmx
+    $capture.UseShellExecute = $false
+    $capture.CreateNoWindow = $true
+    $capture.RedirectStandardOutput = $true
+    $capture.RedirectStandardError = $true
+    $capture.ArgumentList.Add("attach")
+    $capture.ArgumentList.Add($sessionName)
+    $attach = [Diagnostics.Process]::new()
+    $attach.StartInfo = $capture
+    $captureTask = $null
     & $zmx kill --force $sessionName *> $null
-    & $zmx run $sessionName -d powershell.exe -NoProfile -Command `
-      "`$bytes = New-Object byte[] 4194304; [IO.File]::WriteAllBytes('$escapedPayload',`$bytes); [IO.File]::WriteAllText('$escapedMarker','hardening-real-output'); [Console]::Write('hardening-real-output')"
+    $captureStream = [IO.MemoryStream]::new()
+    & $zmx run $sessionName -d cmd.exe /d /c powershell.exe -NoProfile -EncodedCommand $encodedCommand
     Assert-True ($LASTEXITCODE -eq 0) "real zmx output session did not start"
+    Assert-True $attach.Start() "real zmx attach did not start"
+    $captureTask = $attach.StandardOutput.BaseStream.CopyToAsync($captureStream)
     $completed = $false
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     while ([DateTime]::UtcNow -lt $deadline) {
-      $listing = (& $zmx list 2>$null | Out-String)
-      if ($listing -match ("(?s)name=" + [regex]::Escape($sessionName) + ".*?ended=.*?exit_code=0")) {
+      $bytes = $captureStream.ToArray()
+      $startBytes = [Text.Encoding]::ASCII.GetBytes($escapedStart)
+      $endBytes = [Text.Encoding]::ASCII.GetBytes($escapedEnd)
+      $startIndex = Find-Bytes $bytes $startBytes
+      $endIndex = if ($startIndex -ge 0) { Find-Bytes $bytes $endBytes ($startIndex + $startBytes.Length) } else { -1 }
+      if ($startIndex -ge 0 -and $endIndex -ge 0) {
         $completed = $true
         break
       }
       Start-Sleep -Milliseconds 250
     }
+    if (-not $attach.HasExited) { Stop-Process -Id $attach.Id -Force }
+    $captureTask.GetAwaiter().GetResult()
     Assert-True $completed "real zmx output session did not complete"
-    Assert-True ((Get-Item -LiteralPath $payloadFile).Length -eq 4194304) `
-      "real zmx session did not produce exactly 4 MiB"
-    Assert-True ((Get-Content -LiteralPath $markerFile -Raw) -eq "hardening-real-output") `
-      "real zmx session missed output marker"
+    $bytes = $captureStream.ToArray()
+    $startIndex = Find-Bytes $bytes ([Text.Encoding]::ASCII.GetBytes($escapedStart))
+    $endIndex = Find-Bytes $bytes ([Text.Encoding]::ASCII.GetBytes($escapedEnd)) ($startIndex + $escapedStart.Length)
+    $payload = $bytes[($startIndex + $escapedStart.Length)..($endIndex - 1)]
+    Assert-True ($payload.Length -eq 4194304) "zmx attach lost or added terminal stdout bytes"
+    $hash = ([Security.Cryptography.SHA256]::Create().ComputeHash([byte[]]$payload) |
+      ForEach-Object { $_.ToString("x2") }) -join ""
+    $expectedPayload = New-Object byte[] 4194304
+    [Array]::Fill($expectedPayload, 65)
+    $expectedHash = ([Security.Cryptography.SHA256]::Create().ComputeHash(
+        $expectedPayload) |
+      ForEach-Object { $_.ToString("x2") }) -join ""
+    Assert-True ($hash -eq $expectedHash) "zmx attach stdout hash was incomplete"
     & $zmx kill --force $sessionName *> $null
     Assert-True ($LASTEXITCODE -eq 0) "real zmx output session cleanup failed"
+    Stop-OwnedSessionProcessTree $sessionName
     [GC]::Collect()
     [GC]::WaitForPendingFinalizers()
     Start-Sleep -Milliseconds 250
     $after = Get-ResourceSample
+    $productAfterCleanup = Get-ProductResourceSample $productRoots
+    $treePrivateMB = [Math]::Round($productNewWorkload.privateBytes / 1MB, 1)
+    $treeHandles = $productNewWorkload.handles
+    Assert-True ($treePrivateMB -le 1024) "product process tree private memory exceeded 1024 MiB: $treePrivateMB"
+    Assert-True ($treeHandles -le 1024) "product process tree handles exceeded 1024: $treeHandles"
     $handleDelta = $after.handles - $before.handles
     $privateMB = [Math]::Round($after.privateBytes / 1MB, 1)
     Assert-True ($handleDelta -le 256) "real hardening handle growth exceeded 256: $handleDelta"
@@ -171,15 +336,33 @@ function Invoke-RealMatrix {
       $growthMB = 0
     }
     $realSamples.Add($after)
-    Write-Output "HARDENING real-products: PASS (graphcoded/graphcode/shell/zmx; handles delta=$handleDelta; private MiB=$privateMB; growth MiB=$growthMB)"
+    Write-Output ("HARDENING real-products: PASS (graphcoded/graphcode-windows/zmx; " +
+      "parent handles delta=$handleDelta; parent private MiB=$privateMB; growth MiB=$growthMB; " +
+      "tree handles=$treeHandles; tree private MiB=$treePrivateMB; post-cleanup processes=" +
+      "$($productAfterCleanup.processes.Count))")
   } finally {
+    if ($sessionName) { Stop-OwnedSessionProcessTree $sessionName }
+    if ($attach -and -not $attach.HasExited) {
+      Stop-Process -Id $attach.Id -Force -ErrorAction SilentlyContinue
+    }
+    if ($attach) { $attach.Dispose() }
+    if ($captureStream) { $captureStream.Dispose() }
     if ($daemon -and -not $daemon.HasExited) {
       Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue
     }
     if ($daemon) { $daemon.Dispose() }
+    $postCleanup = Get-ProductResourceSample $productRoots
+    $baselineProductPids = @($productBefore.processes | ForEach-Object pid)
+    $unexpectedPids = @($postCleanup.processes | Where-Object {
+        $baselineProductPids -notcontains $_.pid
+      })
+    Assert-True ($unexpectedPids.Count -eq 0) `
+      "new product processes remained after cleanup: $($unexpectedPids.pid -join ',')"
     if ($oldSupport) { $env:GRAPHCODE_SUPPORT_DIR = $oldSupport }
     else { Remove-Item Env:GRAPHCODE_SUPPORT_DIR -ErrorAction SilentlyContinue }
-    Remove-Item -LiteralPath $support -Recurse -Force -ErrorAction SilentlyContinue
+    if ($env:GRAPHCODE_KEEP_HARDENING_ARTIFACTS -ne "1") {
+      Remove-Item -LiteralPath $support -Recurse -Force -ErrorAction SilentlyContinue
+    }
   }
 }
 
@@ -221,6 +404,19 @@ if ($Run -eq 0) {
     Assert-True ($handleRange -le 64) `
       "repeated real handle trend exceeded 64 handles: $handleRange"
     Write-Output "HARDENING repeated-handle-trend: PASS (range=$handleRange)"
+  }
+  if ($realProductSamples.Count -gt 1) {
+    $productPrivateRange = [Math]::Round(
+      (($realProductSamples | Measure-Object privateBytes -Maximum).Maximum -
+       ($realProductSamples | Measure-Object privateBytes -Minimum).Minimum) / 1MB, 1)
+    $productHandleRange = [Math]::Abs(
+      ($realProductSamples | Measure-Object handles -Maximum).Maximum -
+      ($realProductSamples | Measure-Object handles -Minimum).Minimum)
+    Assert-True ($productPrivateRange -le 128) `
+      "repeated product-tree private-memory trend exceeded 128 MiB: $productPrivateRange"
+    Assert-True ($productHandleRange -le 256) `
+      "repeated product-tree handle trend exceeded 256: $productHandleRange"
+    Write-Output "HARDENING repeated-product-tree-trend: PASS (private MiB range=$productPrivateRange; handles range=$productHandleRange)"
   }
   $requiredDimensions = @(
     "gpu-context-display", "dpi-multimonitor", "ime-unicode-clipboard",

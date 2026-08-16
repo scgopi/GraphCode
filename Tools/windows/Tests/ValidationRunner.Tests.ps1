@@ -65,6 +65,20 @@ try {
   if (-not (Test-Path $foreignJunction)) {
     throw "A validation task removed resources owned by another task"
   }
+
+  $windowsWorkflow = Get-Content (Join-Path $repoRoot ".github\workflows\windows-hardening.yml") -Raw
+  if ($windowsWorkflow -notmatch "(?s)full-pinned:.*GRAPHCODE_ZMX_ROOT.*validate\.ps1 -Task all.*Hardening\.Tests\.ps1 -Environment") {
+    throw "RED: full-pinned Windows CI does not run real hardening after provider setup"
+  }
+  if ($windowsWorkflow -notmatch "GRAPHCODE_HARDENING_TARGET") {
+    throw "RED: full-pinned Windows CI does not provide an owned environment harness"
+  }
+  $macWorkflow = Get-Content (Join-Path $repoRoot ".github\workflows\macos-shared-regression.yml") -Raw
+  if ($macWorkflow -notmatch "brew install mise" -or
+      $macWorkflow -notmatch "mise install" -or
+      $macWorkflow -notmatch "mise exec -- make test") {
+    throw "RED: macOS CI does not install and execute pinned mise.toml tools"
+  }
 } finally {
   Remove-Item -LiteralPath $foreignJunction -Recurse -Force -ErrorAction SilentlyContinue
 }

@@ -17,9 +17,14 @@ $pins = Get-Content (Join-Path $gateRoot "provider-pins.json") -Raw | ConvertFro
 $app = Join-Path $gateRoot "zig-out\bin\graphcode-terminal-gate.exe"
 $wingLib = Join-Path $WinghosttyRoot "zig-out\lib\winghostty-win32-host.lib"
 $zmx = Join-Path $ZmxRoot "zig-out\bin\zmx.exe"
-$baselineSessionNames = [System.Collections.Generic.HashSet[string]]::new()
 $ownedSessionNames = [System.Collections.Generic.HashSet[string]]::new()
 $ownedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
+$sessionPrefix = "gc-$([guid]::NewGuid().ToString('N'))"
+$names = @(
+  "$sessionPrefix-a",
+  "$sessionPrefix-b",
+  "$sessionPrefix-shared"
+)
 
 function Invoke-Native([string] $description, [scriptblock] $command) {
   Write-Host "==> $description"
@@ -41,6 +46,9 @@ function Assert-HistoryContains([string] $name, [string] $marker, [string] $labe
     if ($LASTEXITCODE -eq 0 -and
       $history -match [regex]::Escape($marker)) {
       return
+    }
+    if ($attempt -eq 10 -and $marker -like "GraphCode typed output *") {
+      & $zmx send $name "echo $marker`r" *> $null
     }
     Start-Sleep -Milliseconds 250
   }
@@ -80,7 +88,7 @@ function Get-ZmxSessionLines([string] $name) {
 
 function Get-ZmxSessionRecords {
   @(& $zmx list 2>$null | ForEach-Object {
-    if ($_ -match "^name=([^\s]+)\s+pid=(\d+)") {
+    if ($_ -match "name=([^\s]+)\s+pid=(\d+)") {
       [pscustomobject]@{ Name = $Matches[1]; Pid = [int] $Matches[2] }
     }
   })
@@ -88,7 +96,7 @@ function Get-ZmxSessionRecords {
 
 function Record-TestOwnedSessions {
   foreach ($record in @(Get-ZmxSessionRecords)) {
-    if (-not $baselineSessionNames.Contains($record.Name)) {
+    if ($names -contains $record.Name) {
       [void] $ownedSessionNames.Add($record.Name)
       [void] $ownedProcessIds.Add($record.Pid)
     }
@@ -120,13 +128,35 @@ function Assert-ZmxSessionAbsent([string] $name) {
   for ($attempt = 0; $attempt -lt 20; $attempt++) {
     $lines = @(Get-ZmxSessionLines $name)
     $processIds = @(Get-ZmxSessionProcessIds $name)
-    if ($lines.Count -eq 0 -and $processIds.Count -eq 0) {
+    $liveLines = @($lines | Where-Object {
+        $_ -notmatch "(?i)status=unreachable|err=ConnectionRefused"
+      })
+    if ($liveLines.Count -eq 0 -and $processIds.Count -eq 0) {
       return
     }
+
     Start-Sleep -Milliseconds 250
   }
   $details = @($lines + ($processIds | ForEach-Object { "pid=$_" })) -join "; "
   throw "cleanup left zmx session '$name' registered or running: $details"
+}
+
+function Get-ProcessTreeIds([int[]] $roots) {
+  $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+  $ids = [Collections.Generic.HashSet[int]]::new()
+  foreach ($root in $roots) { [void] $ids.Add($root) }
+  $changed = $true
+  while ($changed) {
+    $changed = $false
+    foreach ($process in $all) {
+      if (-not $ids.Contains([int]$process.ProcessId) -and
+          $ids.Contains([int]$process.ParentProcessId)) {
+        [void] $ids.Add([int]$process.ProcessId)
+        $changed = $true
+      }
+    }
+  }
+  return @($ids)
 }
 
 Assert-PinnedCleanWorktree $WinghosttyRoot $pins.winghostty.sha "Winghostty"
@@ -158,76 +188,73 @@ try {
 
   $env:GRAPHCODE_ZMX = $zmx
   $env:GRAPHCODE_GATE_CWD = $repoRoot
-  foreach ($record in @(Get-ZmxSessionRecords)) {
-    [void] $baselineSessionNames.Add($record.Name)
-  }
-  $names = @(
-    "graphcode-terminal-gate-a",
-    "graphcode-terminal-gate-b",
-    "graphcode-terminal-gate-shared"
-  )
+  $env:GRAPHCODE_TERMINAL_SESSION_PREFIX = $sessionPrefix
+  Write-Host "terminal gate session prefix: $sessionPrefix"
   try {
     Invoke-Native "terminal gate first attach smoke" {
       & $app --smoke
     }
     Record-TestOwnedSessions
+    Write-Host "terminal gate sessions after attach:"
+    & $zmx list | Select-String $sessionPrefix
     Invoke-Native "first-session health" {
-      & $zmx get graphcode-terminal-gate-a
-      & $zmx get graphcode-terminal-gate-b
+      & $zmx get $names[0]
+      & $zmx get $names[1]
     }
     Invoke-Native "session shell pwd/cwd" {
-      & $zmx send graphcode-terminal-gate-a "cd`r"
-      & $zmx send graphcode-terminal-gate-b "cd`r"
+      & $zmx send $names[0] "cd`r"
+      & $zmx send $names[1] "cd`r"
     }
     $expectedCwd = ([System.IO.Path]::GetFullPath($repoRoot)).TrimEnd("\")
-    Assert-HistoryContains "graphcode-terminal-gate-a" `
+    Assert-HistoryContains $names[0] `
       $expectedCwd "session A cwd"
-    Assert-HistoryContains "graphcode-terminal-gate-b" `
+    Assert-HistoryContains $names[1] `
       $expectedCwd "session B cwd"
-    Assert-HistoryContains "graphcode-terminal-gate-a" `
+    Assert-HistoryContains $names[0] `
       "GraphCode typed output A" "typed A output"
-    Assert-HistoryContains "graphcode-terminal-gate-b" `
+    Assert-HistoryContains $names[1] `
       "GraphCode typed output B" "typed B output"
     Invoke-Native "seed persistent shell output" {
-      & $zmx send graphcode-terminal-gate-a "echo GraphCode persistent VT output A`r"
-      & $zmx send graphcode-terminal-gate-b "echo GraphCode persistent VT output B`r"
+      & $zmx send $names[0] "echo GraphCode persistent VT output A`r"
+      & $zmx send $names[1] "echo GraphCode persistent VT output B`r"
     }
-    Assert-HistoryContains "graphcode-terminal-gate-a" `
+    Assert-HistoryContains $names[0] `
       "GraphCode persistent VT output A" "first-session A history"
-    Assert-HistoryContains "graphcode-terminal-gate-b" `
+    Assert-HistoryContains $names[1] `
       "GraphCode persistent VT output B" "first-session B history"
     Invoke-Native "terminal gate independent restart attach smoke" {
       & $app --smoke
     }
     Record-TestOwnedSessions
     Invoke-Native "restart-session health" {
-      & $zmx get graphcode-terminal-gate-a
-      & $zmx get graphcode-terminal-gate-b
+      & $zmx get $names[0]
+      & $zmx get $names[1]
     }
-    Assert-HistoryContains "graphcode-terminal-gate-a" `
+    Assert-HistoryContains $names[0] `
       "GraphCode persistent VT output A" "restart A history"
-    Assert-HistoryContains "graphcode-terminal-gate-b" `
+    Assert-HistoryContains $names[1] `
       "GraphCode persistent VT output B" "restart B history"
-    Assert-HistoryContains "graphcode-terminal-gate-a" `
+    Assert-HistoryContains $names[0] `
       "GraphCode typed output A" "restart typed A history"
-    Assert-HistoryContains "graphcode-terminal-gate-b" `
+    Assert-HistoryContains $names[1] `
       "GraphCode typed output B" "restart typed B history"
     Invoke-Native "terminal gate same-session attach smoke" {
       & $app --smoke --same-session
     }
     Record-TestOwnedSessions
     Invoke-Native "same-session health" {
-      & $zmx get graphcode-terminal-gate-shared
+      & $zmx get $names[2]
     }
     Invoke-Native "seed shared persistent shell output" {
-      & $zmx send graphcode-terminal-gate-shared "echo GraphCode shared VT output`r"
+      & $zmx send $names[2] "echo GraphCode shared VT output`r"
     }
-    Assert-HistoryContains "graphcode-terminal-gate-shared" `
+    Assert-HistoryContains $names[2] `
       "GraphCode shared VT output" "same-session history"
     Invoke-Native "terminal gate same-session restart smoke" {
       & $app --smoke --same-session
     }
-    Assert-HistoryContains "graphcode-terminal-gate-shared" `
+    Record-TestOwnedSessions
+    Assert-HistoryContains $names[2] `
       "GraphCode shared VT output" "same-session restart history"
     if ($Stress) {
       Invoke-Native "terminal gate destroy/recreate stress" {
@@ -235,8 +262,8 @@ try {
       }
       Record-TestOwnedSessions
       Invoke-Native "post-stress session health" {
-        & $zmx get graphcode-terminal-gate-a
-        & $zmx get graphcode-terminal-gate-b
+        & $zmx get $names[0]
+        & $zmx get $names[1]
       }
     }
     Write-Host "Windows terminal gate smoke/stress: PASS"
@@ -244,9 +271,23 @@ try {
   finally {
     $cleanupFailures = [System.Collections.Generic.List[string]]::new()
     foreach ($name in @($ownedSessionNames)) {
+      foreach ($processId in @(Get-ZmxSessionProcessIds $name)) {
+        [void] $ownedProcessIds.Add($processId)
+      }
+    }
+    $treeProcessIds = Get-ProcessTreeIds @($ownedProcessIds)
+    foreach ($processId in $treeProcessIds) {
+      [void] $ownedProcessIds.Add($processId)
+    }
+    foreach ($name in @($ownedSessionNames)) {
       & $zmx kill $name *> $null
       if ($LASTEXITCODE -ne 0) {
         $cleanupFailures.Add("$name kill exited with $LASTEXITCODE")
+      }
+    }
+    foreach ($processId in @($ownedProcessIds)) {
+      if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
+        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
       }
     }
     foreach ($name in @($ownedSessionNames)) {
@@ -254,11 +295,6 @@ try {
         Assert-ZmxSessionAbsent $name
       } catch {
         $cleanupFailures.Add($_.Exception.Message)
-      }
-    }
-    foreach ($processId in @($ownedProcessIds)) {
-      if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
-        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
       }
     }
     if ($env:GRAPHCODE_TERMINAL_GATE_INJECT_CLEANUP_FAILURE -eq "1") {
@@ -272,6 +308,7 @@ try {
 finally {
   Remove-Item Env:GRAPHCODE_ZMX -ErrorAction SilentlyContinue
   Remove-Item Env:GRAPHCODE_GATE_CWD -ErrorAction SilentlyContinue
+  Remove-Item Env:GRAPHCODE_TERMINAL_SESSION_PREFIX -ErrorAction SilentlyContinue
 }
 
 exit 0

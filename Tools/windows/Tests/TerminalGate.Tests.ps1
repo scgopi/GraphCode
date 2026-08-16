@@ -119,6 +119,9 @@ foreach ($token in @(
     "status --porcelain",
     "zmx list",
     "Get-CimInstance",
+    "NewGuid",
+    "GRAPHCODE_TERMINAL_SESSION_PREFIX",
+    "ownedSessionNames",
     "GRAPHCODE_TERMINAL_GATE_INJECT_CLEANUP_FAILURE",
     "cleanup failed",
     "exit 0"
