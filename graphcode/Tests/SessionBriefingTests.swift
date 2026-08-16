@@ -28,7 +28,8 @@ struct SessionBriefingTests {
     // mid-quote and the shell sat forever at a `>` continuation prompt. It goes in a file
     // now precisely because it cannot fit on a command line — asserting that keeps anyone
     // from "simplifying" it back onto one.
-    let briefing = try #require(SessionBriefing.text(projectPath: Self.project))
+    let briefing = try #require(
+      SessionBriefing.text(projectPath: Self.project, settings: GraphcodeSettings()))
     #expect(!SessionBriefing.isSafeToType(briefing))
     #expect(briefing.utf8.count > SessionBriefing.safeArgumentBudget)
   }
@@ -47,7 +48,8 @@ struct SessionBriefingTests {
 
   @Test
   func theBriefingNamesTheProjectAndTheCommandThatCreatesALoop() throws {
-    let briefing = try #require(SessionBriefing.text(projectPath: Self.project))
+    let briefing = try #require(
+      SessionBriefing.text(projectPath: Self.project, settings: GraphcodeSettings()))
     // The path has to be in it: every command it describes takes one, and a session that
     // has to guess its own project path will guess wrong.
     #expect(briefing.contains(Self.project))
@@ -61,7 +63,8 @@ struct SessionBriefingTests {
     // Issue #91: a Copilot session asked to create a child "node" did nothing, while
     // "child loop" worked — the briefing taught the command only under the word "loop".
     // The vocabulary bridge is the fix, so its absence has to fail a test.
-    let briefing = try #require(SessionBriefing.text(projectPath: Self.project))
+    let briefing = try #require(
+      SessionBriefing.text(projectPath: Self.project, settings: GraphcodeSettings()))
     #expect(briefing.contains("node is a loop"))
     #expect(briefing.contains("child node"))
   }
@@ -73,7 +76,8 @@ struct SessionBriefingTests {
     // nodes appear in the sidebar and none of them run until a person opens each one.
     // The first cut of this briefing led with `--type turn`, which made "spin up five
     // loops" produce exactly that.
-    let briefing = try #require(SessionBriefing.text(projectPath: Self.project))
+    let briefing = try #require(
+      SessionBriefing.text(projectPath: Self.project, settings: GraphcodeSettings()))
     let goalExample = try #require(briefing.range(of: "--type goal"))
     let turnExample = try #require(briefing.range(of: "--type turn"))
     #expect(goalExample.lowerBound < turnExample.lowerBound)
@@ -85,7 +89,8 @@ struct SessionBriefingTests {
     // graphcode holds no timer: the recurrence is a directive inside the session's own
     // prompt (`LoopNode.triggerPrompt`). A time-based loop created without one runs once
     // and stops, which looks like a broken schedule rather than a missing instruction.
-    let briefing = try #require(SessionBriefing.text(projectPath: Self.project))
+    let briefing = try #require(
+      SessionBriefing.text(projectPath: Self.project, settings: GraphcodeSettings()))
     #expect(briefing.contains("cadence goes inside the prompt"))
     #expect(briefing.contains("/loop 1h"))
   }
@@ -94,7 +99,8 @@ struct SessionBriefingTests {
   func theBriefingSaysWhenNotToSpawnLoops() throws {
     // The restraint matters more than the capability. An agent told only *how* to create
     // loops will create them for every subtask it can name.
-    let briefing = try #require(SessionBriefing.text(projectPath: Self.project))
+    let briefing = try #require(
+      SessionBriefing.text(projectPath: Self.project, settings: GraphcodeSettings()))
     #expect(briefing.contains("Do not create loops for ordinary subtasks"))
     #expect(briefing.contains("Never create a loop whose job is to create more loops"))
   }
@@ -105,7 +111,8 @@ struct SessionBriefingTests {
     // idea the CLI could stop, rewire, or share loops — "export this loop" read as a
     // command that didn't exist. Delete rides along only with its warning attached:
     // taught bare, it looks like the way to tidy up, and it erases a loop's memory.
-    let briefing = try #require(SessionBriefing.text(projectPath: Self.project))
+    let briefing = try #require(
+      SessionBriefing.text(projectPath: Self.project, settings: GraphcodeSettings()))
     #expect(briefing.contains("node stop \(Self.project)"))
     #expect(briefing.contains("irreversible"))
     #expect(briefing.contains("edge create \(Self.project)"))
@@ -358,5 +365,26 @@ struct SessionBriefingTests {
       toBriefingAt: "/Users/x/.graphcode/briefings/p/AGENTS.md")
     #expect(pointer.allSatisfy { $0.isASCII })
     #expect(pointer.contains("/Users/x/.graphcode/briefings/p/AGENTS.md and follow it."))
+  }
+}
+
+/// The briefing teaches whichever cadence model is the current default — an agent
+/// following yesterday's guidance under today's default would create loops the human
+/// just said they no longer want.
+@Suite
+struct BriefingCadenceGuidanceTests {
+  @Test
+  func theTimeLoopBulletFollowsTheHeartbeatExperiment() throws {
+    let off = try #require(
+      SessionBriefing.text(projectPath: "/tmp/p", settings: GraphcodeSettings()))
+    #expect(off.contains("The cadence goes inside the prompt"))
+    #expect(!off.contains("--heartbeat"))
+
+    let on = try #require(
+      SessionBriefing.text(
+        projectPath: "/tmp/p", settings: GraphcodeSettings(daemonHeartbeatEnabled: true)))
+    #expect(on.contains("--heartbeat <seconds>"))
+    #expect(on.contains("The daemon drives it"))
+    #expect(!on.contains("The cadence goes inside the prompt"))
   }
 }

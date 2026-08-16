@@ -118,7 +118,8 @@ struct SkillDistillationTests {
 
   @Test
   func theBriefingTeachesTheSkillLibraryAndTheRefineVerb() throws {
-    let briefing = try #require(SessionBriefing.text(projectPath: "/tmp/distill"))
+    let briefing = try #require(
+      SessionBriefing.text(projectPath: "/tmp/distill", settings: GraphcodeSettings()))
     #expect(briefing.contains(".claude/skills"))
     #expect(briefing.contains("Project skills"))
     #expect(briefing.contains("node refine"))

@@ -196,9 +196,9 @@ struct TimedDraftFields: View {
       if SettingsModel.shared.settings.daemonHeartbeatEnabled {
         DraftField(
           label: "Driven by", qualifier: "experimental",
-          help: "Heartbeat: the daemon wakes the loop each interval and holds the "
-            + "timer; the loop schedules nothing itself, and stopping it stops the "
-            + "timer. Off, the loop runs itself with /loop as always."
+          help: "Heartbeat (the default while the experiment is on): the daemon wakes "
+            + "the loop each interval and holds the timer; stopping the loop stops the "
+            + "timer. Pick /loop to have the loop schedule itself instead."
         ) {
           Picker("", selection: $store.draftUsesHeartbeat) {
             Text("Itself, with /loop").tag(false)

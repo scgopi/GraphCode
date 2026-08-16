@@ -129,9 +129,10 @@ struct SettingsView: View {
           "Daemon heartbeat (experimental)",
           isOn: $model.settings.daemonHeartbeatEnabled)
         Text(
-          "Lets the daemon drive a time-based loop on its own timer: create one with "
-            + "--heartbeat <seconds> and it is ticked from outside instead of running "
-            + "/loop on itself. Off, existing heartbeat loops fall silent immediately."
+          "The daemon drives time-based loops on its own timer. On, new timed loops "
+            + "default to the heartbeat (pick \"Itself, with /loop\" in the form, or "
+            + "omit --heartbeat in the CLI, for the classic model). Off, existing "
+            + "heartbeat loops fall silent immediately; nothing is ever converted."
         )
         .font(.caption2)
         .foregroundStyle(.secondary)

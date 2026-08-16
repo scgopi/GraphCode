@@ -44,8 +44,37 @@ public enum SessionBriefing {
   /// The briefing for a node in `projectPath`'s graph, or `nil` when there's no path to
   /// tell it about — every command the briefing describes takes one, so a briefing
   /// without it would describe commands the session can't run.
-  public static func text(projectPath: String?) -> String? {
+  public static func text(
+    projectPath: String?, settings: GraphcodeSettings = GraphcodeSettingsStore.load()
+  ) -> String? {
     guard let projectPath, !projectPath.isEmpty else { return nil }
+    // The daemon-heartbeat experiment flips the *default* for time-based loops, and
+    // the briefing has to teach whichever model is current — an agent following
+    // yesterday's cadence-in-prompt guidance under today's default would make loops
+    // the human just said they no longer want by default.
+    let timeBullet =
+      settings.daemonHeartbeatEnabled
+      ? """
+      - `--type time --heartbeat <seconds> --prompt <the bare task>` — for work that never
+        finishes because it repeats: watching, polling, monitoring, anything phrased as
+        "every hour", "keep checking", "each morning". Also starts immediately.
+        **The daemon drives it**: a heartbeat is typed into the session each interval, and
+        the prompt is the bare task — no `/loop`, no cron, no self-scheduling. Only when
+        the loop must own its own cadence (self-pacing, a complex schedule), omit
+        `--heartbeat` and write the directive into the prompt (`/loop 1h …`) instead.
+        Do not reach for this for one-off work: "check the build" is a goal, "check the
+        build every hour" is time-based.
+      """
+      : """
+      - `--type time --prompt <prompt carrying its own cadence>` — for work that never
+        finishes because it repeats: watching, polling, monitoring, anything phrased as
+        "every hour", "keep checking", "each morning". Also starts immediately.
+        **The cadence goes inside the prompt**, as a directive the session runs on itself
+        (`/loop 1h Check for new reports`, `/schedule …`) — graphcode holds no timer of its
+        own, so a time-based loop whose prompt carries no cadence just runs once and stops.
+        Do not reach for this for one-off work: "check the build" is a goal, "check the
+        build every hour" is time-based.
+      """
     return """
       # You are a loop in a graphcode graph
 
@@ -79,14 +108,7 @@ public enum SessionBriefing {
         finishes the goal. Add `--predicate <shell command>` only when a command can
         actually decide it (exit 0 means met, e.g. a test run); without one, finishing the
         work is what resolves it.
-      - `--type time --prompt <prompt carrying its own cadence>` — for work that never
-        finishes because it repeats: watching, polling, monitoring, anything phrased as
-        "every hour", "keep checking", "each morning". Also starts immediately.
-        **The cadence goes inside the prompt**, as a directive the session runs on itself
-        (`/loop 1h Check for new reports`, `/schedule …`) — graphcode holds no timer of its
-        own, so a time-based loop whose prompt carries no cadence just runs once and stops.
-        Do not reach for this for one-off work: "check the build" is a goal, "check the
-        build every hour" is time-based.
+      \(timeBullet.trimmingCharacters(in: .whitespacesAndNewlines))
       - `--type turn --check <what a human verifies>` — for work a **human** must review
         each turn before it continues. **A turn-based loop does not start on its own**:
         nothing runs until a person opens its terminal. Create one only when a human really
@@ -100,7 +122,7 @@ public enum SessionBriefing {
       | "spin up five loops and have each say hello" | `goal` ×5 | Nobody needs to approve a greeting, and it ends when it has been said. Turn-based ones would never even run. |
       | "fix each of these five issues" | `goal` ×5, `--predicate` if a test proves it | The work decides when it is done. |
       | "fix these five, I want to review each fix" | `turn` ×5 | You have been told a human stands between turns. |
-      | "watch for new issues every hour and triage them" | `time` ×1 | It recurs; the cadence goes in the prompt. One watcher that fans out beats five identical watchers. |
+      | "watch for new issues every hour and triage them" | `time` ×1 | It recurs. One watcher that fans out beats five identical watchers. |
 
       `graphcode status \(projectPath)` lists the loops that already exist. Check it before
       creating any, so you extend the graph rather than duplicating it.
