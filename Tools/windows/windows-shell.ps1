@@ -96,25 +96,26 @@ function Write-OwnedResourceMetrics {
           privateBytes = [int64]$p.PrivateMemorySize64
         }
 
-        function Invoke-ShellProcess([string[]] $arguments) {
-          $script:shellProcess = Start-Process -FilePath $app -ArgumentList $arguments -PassThru -WindowStyle Hidden
-          [void] $ownedProcessIds.Add($script:shellProcess.Id)
-          Start-Sleep -Milliseconds 250
-          Record-TestOwnedSessions
-          Write-OwnedResourceMetrics
-          $script:shellProcess.WaitForExit()
-          if ($script:shellProcess.ExitCode -ne 0) {
-            throw "GraphCode Windows shell exited with code $($script:shellProcess.ExitCode)"
-          }
-          $script:shellProcess.Dispose()
-          $script:shellProcess = $null
-        }
       }
     })
   Write-Host ("PRODUCT_RESOURCE_METRICS_JSON=" + (@{
       sessions = @($ownedSessionNames)
       processes = $metrics
     } | ConvertTo-Json -Compress -Depth 5))
+}
+
+function Invoke-ShellProcess([string[]] $arguments) {
+  $script:shellProcess = Start-Process -FilePath $app -ArgumentList $arguments -PassThru -WindowStyle Hidden
+  [void] $ownedProcessIds.Add($script:shellProcess.Id)
+  Start-Sleep -Milliseconds 250
+  Record-TestOwnedSessions
+  Write-OwnedResourceMetrics
+  $script:shellProcess.WaitForExit()
+  if ($script:shellProcess.ExitCode -ne 0) {
+    throw "GraphCode Windows shell exited with code $($script:shellProcess.ExitCode)"
+  }
+  $script:shellProcess.Dispose()
+  $script:shellProcess = $null
 }
 
 function Get-ProcessTreeIds([int[]] $roots) {
