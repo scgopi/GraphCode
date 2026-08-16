@@ -292,6 +292,24 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// the derived beat exactly as it was — see `SummaryModelWriter`.
   public var summaryUsesModel: Bool
 
+  /// Whether the daemon may drive time-based loops on its own timer — the experiment
+  /// that tests the *opposite* of this project's founding cadence decision.
+  ///
+  /// **Off by default, and experimental.** Off, recurrence lives where it always has:
+  /// inside the loop's own prompt as a `/loop` directive the agent runs on itself, and
+  /// the daemon holds no timers (`GraphStore`'s header explains the headless-timer
+  /// failure that decision came from). On, a time-based loop created with a heartbeat
+  /// interval is *ticked by the daemon*: a `[graphcode] heartbeat` typed into its
+  /// session each interval, missed ticks coalescing (a busy session is skipped, not
+  /// queued), and stopping the loop cancels the timer instead of asking the session to
+  /// dismantle its own cadence.
+  ///
+  /// Both models coexist deliberately — a heartbeat loop's prompt carries no `/loop`,
+  /// an ordinary time loop's timer never exists — so the experiment can be judged
+  /// side by side. Read fresh at every tick, so flipping this off silences existing
+  /// heartbeat loops immediately without restarting anything.
+  public var daemonHeartbeatEnabled: Bool
+
   // There is deliberately no window-opacity setting here any more. graphcode used to own
   // one and apply it as `NSWindow.alphaValue`, which fades the whole window — terminal
   // text included — rather than only the background behind it. Ghostty already has
@@ -310,6 +328,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     sharesLoops: Bool = true,
     summarisesLoops: Bool = false,
     summaryUsesModel: Bool = false,
+    daemonHeartbeatEnabled: Bool = false,
     worktreePolicies: [String: WorktreeHygienePolicy] = [:]
   ) {
     self.defaultBackend = defaultBackend.isSpiked ? defaultBackend : .claudeCode
@@ -322,6 +341,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     self.sharesLoops = sharesLoops
     self.summarisesLoops = summarisesLoops
     self.summaryUsesModel = summaryUsesModel
+    self.daemonHeartbeatEnabled = daemonHeartbeatEnabled
     self.worktreePolicies = worktreePolicies
   }
 
@@ -365,6 +385,8 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     // money on a machine whose owner only asked to see what their loops were doing.
     summaryUsesModel =
       try container.decodeIfPresent(Bool.self, forKey: .summaryUsesModel) ?? false
+    daemonHeartbeatEnabled =
+      try container.decodeIfPresent(Bool.self, forKey: .daemonHeartbeatEnabled) ?? false
     worktreePolicies =
       try container.decodeIfPresent(
         [String: WorktreeHygienePolicy].self, forKey: .worktreePolicies) ?? [:]

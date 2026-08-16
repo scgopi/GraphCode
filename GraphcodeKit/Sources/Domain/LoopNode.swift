@@ -30,6 +30,14 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// fires headlessly. It also means cron and self-pacing work without graphcode
   /// modelling either, and nothing here inspects or validates the prompt.
   public var triggerPrompt: String?
+  /// `.timeBased`, experimental: the daemon drives this loop instead — a `[graphcode]`
+  /// heartbeat typed into its session every interval (`GraphStore.deliverHeartbeat`),
+  /// active only while `GraphcodeSettings.daemonHeartbeatEnabled` is on. When set,
+  /// `triggerPrompt` is the bare task with no `/loop` directive: exactly one of the two
+  /// cadence models drives a given loop, never both. `nil` — every loop that predates
+  /// the experiment, and every loop whose author didn't opt in — means the prompt owns
+  /// the cadence as it always has.
+  public var heartbeatIntervalSeconds: Double?
   /// `.turnBased`: what the session is actually asked to do.
   ///
   /// Without this the type had no task field at all — a turn-based session opened
@@ -124,6 +132,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     loopType: LoopType = .turnBased,
     checkDescription: String? = nil,
     triggerPrompt: String? = nil,
+    heartbeatIntervalSeconds: Double? = nil,
     firstInstruction: String? = nil,
     pausesBeforeWritesOnly: Bool = false,
     goal: GoalSpec? = nil,
@@ -146,6 +155,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.loopType = loopType
     self.checkDescription = checkDescription
     self.triggerPrompt = triggerPrompt
+    self.heartbeatIntervalSeconds = heartbeatIntervalSeconds
     self.firstInstruction = firstInstruction
     self.pausesBeforeWritesOnly = pausesBeforeWritesOnly
     self.goal = goal
@@ -188,7 +198,16 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
       // quiet and waits — asking nothing up front is what the type is for.
       let note = firstInstruction?.trimmingCharacters(in: .whitespaces) ?? ""
       return note.isEmpty ? nil : note
-    case .timeBased: return triggerPrompt
+    case .timeBased:
+      guard let interval = heartbeatIntervalSeconds, interval > 0, let task = triggerPrompt
+      else { return triggerPrompt }
+      // The heartbeat counterpart of the /loop directive: the session is told who
+      // holds the timer, so it neither schedules its own cadence (double-driving)
+      // nor exits believing one pass was the whole job.
+      return "Every \(Int(interval))s you will receive a [graphcode] heartbeat message. "
+        + "Each one is your cue to run one pass of this task, then wait for the next: "
+        + "\(task) Do not schedule your own /loop, wakeup, or cron for it — the "
+        + "orchestrator holds the timer. Stay in the session between heartbeats."
     case .goalBased: return goal?.sessionPrompt
     case .turnBased:
       return Self.turnBasedPrompt(
@@ -291,7 +310,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     case id, title, loopType, checkDescription, triggerPrompt, goal, backend, modelTier
     case worktreeBinding, subGraph, pilotState, usage, metricHistory, createdBy
     case state, createdAt, activity, presence, firstInstruction, pausesBeforeWritesOnly
-    case summary
+    case summary, heartbeatIntervalSeconds
   }
 
   /// Hand-written for the same reason `LoopEdge`'s is: `ProjectPersistence.loadGraph`
@@ -304,6 +323,8 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     loopType = try container.decodeIfPresent(LoopType.self, forKey: .loopType) ?? .turnBased
     checkDescription = try container.decodeIfPresent(String.self, forKey: .checkDescription)
     triggerPrompt = try container.decodeIfPresent(String.self, forKey: .triggerPrompt)
+    heartbeatIntervalSeconds =
+      try container.decodeIfPresent(Double.self, forKey: .heartbeatIntervalSeconds)
     firstInstruction = try container.decodeIfPresent(String.self, forKey: .firstInstruction)
     // Absent from graphs saved before the field existed. Those loops paused after every
     // turn, which is what `false` says.

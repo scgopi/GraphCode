@@ -350,7 +350,8 @@ public actor ProjectRegistry {
       },
       onRollbackPlaybook: { nodeID in
         NodeMemory.rollbackPlaybook(projectPath: path, nodeID: nodeID)
-      })
+      },
+      onHeartbeatEnabled: { GraphcodeSettingsStore.load().daemonHeartbeatEnabled })
     stores[path] = newStore
     // Only on first load of this project — a time-based node's session outlives the app
     // but not a reboot, so something has to restart it, and this is the moment the
