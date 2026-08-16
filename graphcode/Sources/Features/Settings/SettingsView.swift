@@ -19,10 +19,11 @@ struct SettingsView: View {
   /// nothing is worse than no tab.
   var body: some View {
     sessions
-      // Resizable both ways: 620 stays the width the window opens at, but the floor
+      // Resizable both ways: 560 is the width the window opens at, and the floor
       // sits at 480 — the grouped form's captions wrap, so narrow just means taller.
-      .frame(minWidth: 480, idealWidth: 620, maxWidth: .infinity)
+      .frame(minWidth: 480, idealWidth: 560, maxWidth: .infinity)
       .padding(.vertical, 4)
+      .background(SettingsWindowResizability())
   }
 
   private var sessions: some View {
@@ -177,6 +178,40 @@ struct SettingsView: View {
     .formStyle(.grouped)
   }
 
+}
+
+/// Makes the Settings window actually resizable, because the SwiftUI spelling doesn't.
+///
+/// `.windowResizability(.contentMinSize)` on the `Settings` scene is silently ignored
+/// here: the window materialises with styleMask 32771 — titled + closable +
+/// fullSizeContentView, no `.resizable` bit — measured on macOS 26.5 with the modifier
+/// in place. So the bit is set the AppKit way, from a zero-sized view that rides in the
+/// content's background purely to get its hands on the window.
+///
+/// Setting it once is not enough: SwiftUI re-asserts the scene's styleMask after the
+/// window appears and strips the bit again (also measured). Hence the observation —
+/// whenever the bit goes missing it is re-inserted, one hop later so the mask isn't
+/// mutated from inside its own change notification. Content min/max sizes are left
+/// alone: SwiftUI derives those from the `.frame` above and they are already right —
+/// the mask is the only thing it gets wrong.
+private struct SettingsWindowResizability: NSViewRepresentable {
+  final class HookView: NSView {
+    private var observation: NSKeyValueObservation?
+
+    override func viewDidMoveToWindow() {
+      super.viewDidMoveToWindow()
+      observation = nil
+      guard let window else { return }
+      window.styleMask.insert(.resizable)
+      observation = window.observe(\.styleMask) { window, _ in
+        guard !window.styleMask.contains(.resizable) else { return }
+        DispatchQueue.main.async { window.styleMask.insert(.resizable) }
+      }
+    }
+  }
+
+  func makeNSView(context: Context) -> NSView { HookView() }
+  func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 #Preview {
