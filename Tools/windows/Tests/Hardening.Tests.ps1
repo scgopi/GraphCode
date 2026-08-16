@@ -617,6 +617,11 @@ switch ($Mode) {
     Write-Output "HARDENING environment: PASS (owned harness executed)"
   } else {
     Write-Output "HARDENING environment: NOT RUN (set -Environment only with an owned test target)"
+    Write-Output ("PRODUCT_RESOURCE_METRICS_JSON=" + ([ordered]@{
+      snapshotId = "$PID-deterministic-fixture"
+      phase = "deterministic-fixture"
+      processes = @()
+    } | ConvertTo-Json -Compress))
   }
   Write-Output "Hardening deterministic fixtures: PASS"
 } finally {
