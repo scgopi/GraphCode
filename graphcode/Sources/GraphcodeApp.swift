@@ -71,10 +71,22 @@ struct GraphcodeApp: App {
         }
         .disabled(Self.store.isCheckingForUpdates || Self.store.updateInstallProgress != nil)
       }
-      CommandGroup(after: .help) {
+      // Replacing rather than appending: the default "GraphCode Help" item asks AppKit
+      // for a help book the app doesn't bundle, so it only ever showed "Help isn't
+      // available". The docs site is the help, and ⌘? goes there instead.
+      CommandGroup(replacing: .help) {
+        Link("GraphCode Help", destination: URL(string: "https://graphcode.app")!)
+          .keyboardShortcut("?", modifiers: .command)
+        Link(
+          "Keyboard Shortcuts",
+          destination: URL(string: "https://graphcode.app/shortcuts")!)
         Button("GraphCode Basics") {
           Self.store.send(.onboardingRequested)
         }
+        Divider()
+        Link(
+          "Report an Issue…",
+          destination: URL(string: "https://github.com/scgopi/GraphCode/issues/new")!)
       }
       // The Loop and Terminal menus. Every shortcut in them already worked as an
       // invisible zero-size button; a menu item is the half that tells anyone so.
