@@ -487,6 +487,10 @@ public enum RemoteGraphAccess {
         elif subverb == "delete":
             run_and_print(project, [graph_command(project, {"deleteNode": {"_0": node_id}})])
         else:
+            follow_up = False
+            if subverb == "send" and arguments and arguments[0] == "--follow-up":
+                follow_up = True
+                arguments.pop(0)
             text = " ".join(arguments).strip()
             if not text:
                 fail("missing %s" % ("message" if subverb == "send" else "note"))
@@ -495,8 +499,11 @@ public enum RemoteGraphAccess {
             if sender:
                 payload["from"] = sender
             if subverb == "send":
+                if follow_up:
+                    payload["followUp"] = True
                 run_with_verdict(project, graph_command(project, {"messageNode": payload}),
-                                 "delivered")
+                                 "accepted — typed in when the loop next goes idle"
+                                 if follow_up else "delivered")
             else:
                 run_with_verdict(project, graph_command(project, {"memoNode": payload}),
                                  "noted")

@@ -168,7 +168,7 @@ do {
       projectPath: projectPath,
       [.graphCommand(projectPath: projectPath, command: .deleteNode(nodeID))])
 
-  case .sendMessage(let projectPath, let nodeID, let text):
+  case .sendMessage(let projectPath, let nodeID, let text, let followUp):
     // Attributed the same way `node create` attributes `createdBy`: run from inside a
     // loop, ZMX_SESSION names the sender, and the target sees who's talking.
     let sender = SurfaceRef.nodeID(
@@ -178,7 +178,7 @@ do {
     try client.send(
       .graphCommand(
         projectPath: projectPath,
-        command: .messageNode(nodeID, text: text, from: sender)))
+        command: .messageNode(nodeID, text: text, from: sender, followUp: followUp)))
     // Delivery is judged and attempted before the daemon broadcasts, so the first event
     // back is the verdict: an error means it did not land, the graph means it did.
     let verdict = try client.waitForEvent { event in
@@ -188,7 +188,9 @@ do {
       }
     }
     if case .errorOccurred(let message) = verdict { fail(message) }
-    print("delivered")
+    // A follow-up to a busy loop is accepted, not typed: it's in the loop's memory now
+    // and its session hears it when it next goes idle — "delivered" would overclaim.
+    print(followUp ? "accepted — typed in when the loop next goes idle" : "delivered")
 
   case .updateNode(let projectPath, let nodeID, let update):
     // Attributed like `node create`/`node send`: run from inside a loop, ZMX_SESSION

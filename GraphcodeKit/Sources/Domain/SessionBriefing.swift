@@ -116,7 +116,9 @@ public enum SessionBriefing {
       you", "stop, I already fixed that file". `graphcode status \(projectPath)` shows
       every loop's id. A target that isn't live gets the message staged into its
       memory instead — it reads it at its next wake, and the command tells you which
-      happened. If you were created by another loop, your memory log's first entry is
+      happened. Add `--follow-up` (first word after the id) when the message can wait:
+      the target is not interrupted mid-turn — it hears it when it next goes idle,
+      from its memory otherwise. If you were created by another loop, your memory log's first entry is
       the exact command for reporting results back to it. For recurring communication,
       an edge is still the right tool: a `message` edge fires automatically when you
       finish, a `handoff` sequences the other loop after you. This command is the
@@ -145,8 +147,9 @@ public enum SessionBriefing {
         `node delete` also erases its edges, session, and memory — irreversible, so
         reach for stop unless deletion is exactly what was asked for.
       - `graphcode node update \(projectPath) <node-id> --goal|--prompt|--check|--model …`
-        edits a loop in place; a loop may not change its own `--predicate`. For a
-        composite loop, `node pilot` dry-runs it and `node arm` arms it afterwards.
+        edits a loop in place; a loop may not change its own `--predicate` or
+        `--budget`. For a composite loop, `node pilot` dry-runs it and `node arm` arms
+        it afterwards.
       - `graphcode edge create \(projectPath) <from-id> <to-id> --kind handoff|message|spawn`
         wires loops: `handoff` sequences the target after you finish, `message` sends it
         your result, `spawn` has your finish create it.
