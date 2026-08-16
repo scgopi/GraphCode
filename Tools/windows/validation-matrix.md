@@ -76,7 +76,9 @@ ceilings are:
 | Multi-terminal | four concurrent 512 KiB sessions complete in <=15 seconds |
 | Unicode/hostile paths | UTF-8 clipboard text round-trips through a >=180-character Unicode path |
 | Process cleanup | fixture process count returns to baseline |
-| Repeatability | three consecutive runs; each reports process delta and all must pass |
+| Real product output/session | pinned zmx/ConPTY writes exactly 4 MiB plus a completion marker; session exit code is 0 within 15 seconds |
+| Real resource ceilings | private memory <=512 MiB; per-run handle growth <=256; three-run private-memory range <=32 MiB and handle range <=64 |
+| Repeatability | three consecutive runs; each reports process, handle, and private-memory deltas and all must pass |
 
 GPU/WGL, real ConPTY/zmx reconnect, screen reader/UIA, physical DPI/display,
 authenticated SSH, login/reboot, and installer ACL tests are environment-only.
@@ -87,6 +89,11 @@ tier without the harness fails. The
 deterministic tier remains mandatory on every pull request. The scheduled full
 workflow runs the pinned provider/package lifecycle gate and cannot substitute a
 skip for a missing provider.
+
+The environment harness emits `schemaVersion=1` JSON with one result for every
+mandatory dimension. A skipped dimension must include a non-empty reason.
+Hardening includes RED checks proving missing dimensions and reasonless skips are
+rejected; the deterministic Named Pipe fixture is reported separately.
 
 The Windows host cannot execute macOS tests. `.github/workflows/macos-shared-regression.yml`
 is the authoritative macOS matrix (`swift test`, `make test`, `make check`); only

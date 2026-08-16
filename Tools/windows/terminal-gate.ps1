@@ -17,6 +17,9 @@ $pins = Get-Content (Join-Path $gateRoot "provider-pins.json") -Raw | ConvertFro
 $app = Join-Path $gateRoot "zig-out\bin\graphcode-terminal-gate.exe"
 $wingLib = Join-Path $WinghosttyRoot "zig-out\lib\winghostty-win32-host.lib"
 $zmx = Join-Path $ZmxRoot "zig-out\bin\zmx.exe"
+$baselineSessionNames = [System.Collections.Generic.HashSet[string]]::new()
+$ownedSessionNames = [System.Collections.Generic.HashSet[string]]::new()
+$ownedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
 
 function Invoke-Native([string] $description, [scriptblock] $command) {
   Write-Host "==> $description"
@@ -73,6 +76,23 @@ function Get-ZmxSessionLines([string] $name) {
       ForEach-Object { $_.ToString() } |
       Where-Object { $_ -match "(?m)(?:^|\s)name=$escaped(?:\s|$)" }
   )
+}
+
+function Get-ZmxSessionRecords {
+  @(& $zmx list 2>$null | ForEach-Object {
+    if ($_ -match "^name=([^\s]+)\s+pid=(\d+)") {
+      [pscustomobject]@{ Name = $Matches[1]; Pid = [int] $Matches[2] }
+    }
+  })
+}
+
+function Record-TestOwnedSessions {
+  foreach ($record in @(Get-ZmxSessionRecords)) {
+    if (-not $baselineSessionNames.Contains($record.Name)) {
+      [void] $ownedSessionNames.Add($record.Name)
+      [void] $ownedProcessIds.Add($record.Pid)
+    }
+  }
 }
 
 function Get-ZmxSessionProcessIds([string] $name) {
@@ -138,6 +158,9 @@ try {
 
   $env:GRAPHCODE_ZMX = $zmx
   $env:GRAPHCODE_GATE_CWD = $repoRoot
+  foreach ($record in @(Get-ZmxSessionRecords)) {
+    [void] $baselineSessionNames.Add($record.Name)
+  }
   $names = @(
     "graphcode-terminal-gate-a",
     "graphcode-terminal-gate-b",
@@ -147,6 +170,7 @@ try {
     Invoke-Native "terminal gate first attach smoke" {
       & $app --smoke
     }
+    Record-TestOwnedSessions
     Invoke-Native "first-session health" {
       & $zmx get graphcode-terminal-gate-a
       & $zmx get graphcode-terminal-gate-b
@@ -175,6 +199,7 @@ try {
     Invoke-Native "terminal gate independent restart attach smoke" {
       & $app --smoke
     }
+    Record-TestOwnedSessions
     Invoke-Native "restart-session health" {
       & $zmx get graphcode-terminal-gate-a
       & $zmx get graphcode-terminal-gate-b
@@ -190,6 +215,7 @@ try {
     Invoke-Native "terminal gate same-session attach smoke" {
       & $app --smoke --same-session
     }
+    Record-TestOwnedSessions
     Invoke-Native "same-session health" {
       & $zmx get graphcode-terminal-gate-shared
     }
@@ -207,6 +233,7 @@ try {
       Invoke-Native "terminal gate destroy/recreate stress" {
         & $app --smoke --stress
       }
+      Record-TestOwnedSessions
       Invoke-Native "post-stress session health" {
         & $zmx get graphcode-terminal-gate-a
         & $zmx get graphcode-terminal-gate-b
@@ -216,31 +243,23 @@ try {
   }
   finally {
     $cleanupFailures = [System.Collections.Generic.List[string]]::new()
-    foreach ($name in $names) {
+    foreach ($name in @($ownedSessionNames)) {
       & $zmx kill $name *> $null
       if ($LASTEXITCODE -ne 0) {
         $cleanupFailures.Add("$name kill exited with $LASTEXITCODE")
       }
     }
-    foreach ($name in $names) {
+    foreach ($name in @($ownedSessionNames)) {
       try {
         Assert-ZmxSessionAbsent $name
       } catch {
         $cleanupFailures.Add($_.Exception.Message)
       }
     }
-    $rootMarker = ([IO.Path]::GetFullPath($repoRoot)).TrimEnd("\")
-    $rootSessions = @(& $zmx list 2>$null |
-      Where-Object { $_ -match ("cwd=" + [regex]::Escape($rootMarker) + "(?:\s|$)") } |
-      ForEach-Object {
-        if ($_ -match "^name=([^\s]+)") { $Matches[1] }
-      })
-    foreach ($session in $rootSessions) {
-      & $zmx kill --force $session *> $null
-    }
-    if (@(& $zmx list 2>$null |
-      Where-Object { $_ -match ("cwd=" + [regex]::Escape($rootMarker) + "(?:\s|$)") }).Count -ne 0) {
-      $cleanupFailures.Add("sessions remained for isolated gate cwd $rootMarker")
+    foreach ($processId in @($ownedProcessIds)) {
+      if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
+        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+      }
     }
     if ($env:GRAPHCODE_TERMINAL_GATE_INJECT_CLEANUP_FAILURE -eq "1") {
       $cleanupFailures.Add("injected cleanup failure")

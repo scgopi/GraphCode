@@ -33,6 +33,9 @@ $oldLargePaste = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_LARGE_PA
 $oldWorkspaceActions = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_WORKSPACE_ACTIONS")
 $oldWorkspaceLayout = [Environment]::GetEnvironmentVariable("GRAPHCODE_WORKSPACE_LAYOUT")
 $workspaceLayoutBase = Join-Path $shellRoot "graphcode-workspace-$PID.json"
+$baselineSessionNames = [System.Collections.Generic.HashSet[string]]::new()
+$ownedSessionNames = [System.Collections.Generic.HashSet[string]]::new()
+$ownedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
 
 function Invoke-Native([string] $description, [scriptblock] $command) {
   Write-Host "==> $description"
@@ -53,7 +56,25 @@ function Test-TestSessionProcess([object] $process) {
   foreach ($session in $testSessionIds) {
     if ($process.CommandLine -like "*$session*") { return $true }
   }
+
   return $false
+}
+
+function Get-ZmxSessionRecords {
+  @(& $env:GRAPHCODE_ZMX list 2>$null | ForEach-Object {
+    if ($_ -match "^name=([^\s]+)\s+pid=(\d+)") {
+      [pscustomobject]@{ Name = $Matches[1]; Pid = [int] $Matches[2] }
+    }
+  })
+}
+
+function Record-TestOwnedSessions {
+  foreach ($record in @(Get-ZmxSessionRecords)) {
+    if (-not $baselineSessionNames.Contains($record.Name)) {
+      [void] $ownedSessionNames.Add($record.Name)
+      [void] $ownedProcessIds.Add($record.Pid)
+    }
+  }
 }
 
 function Assert-PinnedCleanWorktree(
@@ -119,6 +140,9 @@ try {
   }
   $env:GRAPHCODE_ZMX = Join-Path $ZmxRoot "zig-out\bin\zmx.exe"
   $env:GRAPHCODE_GATE_CWD = $repoRoot
+  foreach ($record in @(Get-ZmxSessionRecords)) {
+    [void] $baselineSessionNames.Add($record.Name)
+  }
   $env:GRAPHCODE_SHELL_WORKSPACE_ACTIONS = "1"
   $env:GRAPHCODE_WORKSPACE_LAYOUT = $workspaceLayoutBase
   if ($UseStubDaemon) {
@@ -142,10 +166,12 @@ try {
   Invoke-Native "GraphCode Windows shell smoke/stress" {
     & $app @arguments
   }
+  Record-TestOwnedSessions
   if ($UseStubDaemon) {
     Invoke-Native "GraphCode Windows shell restart smoke" {
       & $app @arguments
     }
+    Record-TestOwnedSessions
   }
   if ($UseStubDaemon) {
     if (-not (Test-Path -LiteralPath $stubResult)) {
@@ -245,17 +271,13 @@ finally {
     Stop-Process -Id $busyStubProcess.Id -Force
   }
   if ($env:GRAPHCODE_ZMX -and (Test-Path -LiteralPath $env:GRAPHCODE_ZMX)) {
-    foreach ($session in $testSessionIds) {
+    foreach ($session in @($ownedSessionNames)) {
       & $env:GRAPHCODE_ZMX kill --force $session *> $null
     }
-    $rootMarker = ([IO.Path]::GetFullPath($repoRoot)).TrimEnd("\")
-    $rootSessions = @(& $env:GRAPHCODE_ZMX list 2>$null |
-      Where-Object { $_ -match ("cwd=" + [regex]::Escape($rootMarker) + "(?:\s|$)") } |
-      ForEach-Object {
-        if ($_ -match "^name=([^\s]+)") { $Matches[1] }
-      })
-    foreach ($session in $rootSessions) {
-      & $env:GRAPHCODE_ZMX kill --force $session *> $null
+    foreach ($processId in @($ownedProcessIds)) {
+      if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
+        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+      }
     }
     $orphanTestDaemons = @(
       Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |

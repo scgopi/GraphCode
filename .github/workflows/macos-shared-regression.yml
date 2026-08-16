@@ -9,7 +9,17 @@ on:
       - "graphcoded/**"
       - "graphcode-cli/**"
       - "investigation/spikes/swift-portable/**"
+      - "Project.swift"
+      - "Tuist.swift"
+      - "Tuist/**"
+      - "mise.toml"
       - "Makefile"
+      - ".gitmodules"
+      - "ThirdParty/**"
+      - "**/Package.swift"
+      - "**/Package.resolved"
+      - ".swift-format"
+      - ".swiftlint.yml"
       - ".github/workflows/macos-shared-regression.yml"
 
 permissions:
@@ -20,6 +30,11 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Prepare portable Swift sources
+        run: python3 Tools/portable-prepare.py
       - name: Validate shared portable Swift package
         run: swift test --package-path investigation/spikes/swift-portable
       - name: Validate macOS app, daemon, and CLI
