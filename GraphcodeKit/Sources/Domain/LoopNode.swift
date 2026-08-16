@@ -279,6 +279,16 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// downstream edges are waiting on. This is the presentation of that fact, not a
   /// revision of it.
   ///
+  /// Whether the last presence reading says a session actually exists to attach to.
+  /// `nil` and `.unknown` count as no: opening is what could *start* a session, and a
+  /// gate deciding whether that's safe must not treat "don't know" as "yes".
+  public var presenceShowsLiveSession: Bool {
+    switch presence?.presence {
+    case .busy, .idle, .awaitingInput: return true
+    case .absent, .unknown, nil: return false
+    }
+  }
+
   /// A backend that reports nothing leaves `presence` nil and this returns `state`
   /// untouched, which is exactly the behaviour every surface had before presence existed.
   public var displayState: LoopState {
