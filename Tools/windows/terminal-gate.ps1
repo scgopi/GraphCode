@@ -114,25 +114,26 @@ function Write-OwnedResourceMetrics {
           privateBytes = [int64]$p.PrivateMemorySize64
         }
 
-        function Invoke-GateProcess([string[]] $arguments) {
-          $script:gateProcess = Start-Process -FilePath $app -ArgumentList $arguments -PassThru -WindowStyle Hidden
-          [void] $ownedProcessIds.Add($script:gateProcess.Id)
-          Start-Sleep -Milliseconds 250
-          Record-TestOwnedSessions
-          Write-OwnedResourceMetrics
-          $script:gateProcess.WaitForExit()
-          if ($script:gateProcess.ExitCode -ne 0) {
-            throw "terminal gate exited with code $($script:gateProcess.ExitCode)"
-          }
-          $script:gateProcess.Dispose()
-          $script:gateProcess = $null
-        }
       }
     })
   Write-Host ("PRODUCT_RESOURCE_METRICS_JSON=" + (@{
       sessions = @($ownedSessionNames)
       processes = $metrics
     } | ConvertTo-Json -Compress -Depth 5))
+}
+
+function Invoke-GateProcess([string[]] $arguments) {
+  $script:gateProcess = Start-Process -FilePath $app -ArgumentList $arguments -PassThru -WindowStyle Hidden
+  [void] $ownedProcessIds.Add($script:gateProcess.Id)
+  Start-Sleep -Milliseconds 250
+  Record-TestOwnedSessions
+  Write-OwnedResourceMetrics
+  $script:gateProcess.WaitForExit()
+  if ($script:gateProcess.ExitCode -ne 0) {
+    throw "terminal gate exited with code $($script:gateProcess.ExitCode)"
+  }
+  $script:gateProcess.Dispose()
+  $script:gateProcess = $null
 }
 
 function Get-ZmxSessionProcessIds([string] $name) {
