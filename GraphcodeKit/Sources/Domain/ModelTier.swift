@@ -74,6 +74,7 @@ extension LoopType {
   /// Opt-in rather than the standing behaviour — see `ModelTier.resolved`.
   public var defaultModelTier: ModelTier {
     switch self {
+    case .sketch: return .standard
     case .turnBased: return .capable
     case .goalBased: return .standard
     case .timeBased: return .fast

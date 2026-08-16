@@ -2,6 +2,25 @@ import ComposableArchitecture
 import GraphcodeKit
 import SwiftUI
 
+/// A sketch's one field — the shortest form in the app. `⏎` on an untouched dialog is
+/// a valid, complete action; that is the point of the type. No done check, no cadence,
+/// no name field: the loop names itself from the first exchange, and the starting note
+/// seeds that name when there is one.
+struct SketchDraftFields: View {
+  @Bindable var store: StoreOf<ProjectFeature>
+
+  var body: some View {
+    DraftField(
+      label: "Starting note", qualifier: "optional — leave it blank and it opens quiet",
+      help: "No done check, no cadence — it works with you until you close it."
+    ) {
+      DraftProseField(
+        placeholder: "e.g. where does the usage cap get read from?",
+        text: $store.draftSketchNote)
+    }
+  }
+}
+
 /// A goal loop's fields: what done looks like, optionally how to check it, optionally
 /// how to score it.
 ///
@@ -352,6 +371,10 @@ struct NodeDraftRecap: View {
 
   private var sentence: String {
     switch draft.loopType {
+    case .sketch:
+      return
+        "Opens a session\(location) and waits for you. Nothing is scheduled and nothing "
+        + "resolves on its own — it works with you until you close it."
     case .goalBased:
       let check =
         draft.goal?.effectivePredicate == nil

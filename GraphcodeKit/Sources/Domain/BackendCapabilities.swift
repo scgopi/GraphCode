@@ -161,6 +161,9 @@ extension CLISessionBackendKind {
     // Nothing graphcode can't actually launch may host anything.
     guard isSpiked else { return false }
     switch loopType {
+    case .sketch:
+      // A bare session — the least demanding type. Every launchable backend hosts it.
+      return true
     case .turnBased:
       return true
     case .goalBased:

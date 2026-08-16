@@ -104,6 +104,7 @@ struct LoopCardPresentation: Equatable {
 
   private static func handedLine(_ node: LoopNode) -> String? {
     switch node.loopType {
+    case .sketch: collapsed(node.firstInstruction)
     case .goalBased: collapsed(node.goal?.summary)
     case .timeBased: collapsed(node.triggerPrompt)
     case .turnBased: collapsed(node.checkDescription)

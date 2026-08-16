@@ -35,6 +35,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
   /// piloted and armed.
   public var triggerPrompt: String?
   /// `.turnBased`: what the session should actually do. See `LoopNode.firstInstruction`.
+  /// `.sketch`: the optional starting note — blank means the session opens quiet.
   public var firstInstruction: String?
   /// `.turnBased`: pause only before writes rather than after every turn.
   public var pausesBeforeWritesOnly: Bool
@@ -109,6 +110,10 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     // to something its backend can actually manage.
     guard effectiveBackend.canHost(loopType) else { return false }
     switch loopType {
+    case .sketch:
+      // Valid while completely empty — the whole point of the type. `⏎` on an untouched
+      // dialog is a complete action; the starting note is the one field, and optional.
+      return true
     case .turnBased:
       // The *criterion* stays optional, for the reason it always was: a turn-based
       // loop's hand-off is a human watching it, and that human exists whether or not

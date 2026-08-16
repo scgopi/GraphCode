@@ -27,6 +27,10 @@ extension LoopType {
   /// which keeps its own ink so the colour beside it is what carries identity.
   var accent: Color {
     switch self {
+    // Deliberately colourless: the four committed types keep the saturated slots, and
+    // grey reads as *provisional* — a canvas of half-finished pokes shouldn't compete
+    // with work that matters.
+    case .sketch: Color(red: 0.486, green: 0.529, blue: 0.580)  // grey  #7c8794
     case .goalBased: Color(red: 0.098, green: 0.620, blue: 0.439)  // aqua  #199e70
     case .timeBased: Color(red: 0.788, green: 0.522, blue: 0.000)  // yellow #c98500
     case .turnBased: Color(red: 0.835, green: 0.318, blue: 0.506)  // magenta #d55181
@@ -46,6 +50,7 @@ extension LoopType {
   /// app admitting it had two vocabularies.
   var displayName: String {
     switch self {
+    case .sketch: "Sketch"
     case .goalBased: "Goal"
     case .timeBased: "Timed"
     case .turnBased: "Turn"
@@ -58,6 +63,7 @@ extension LoopType {
   /// waits for a person, and a composite one is a stack of loops rather than a session.
   var glyph: String {
     switch self {
+    case .sketch: "scribble"
     case .goalBased: "target"
     case .timeBased: "clock"
     case .turnBased: "person"
