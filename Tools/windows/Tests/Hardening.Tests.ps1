@@ -587,7 +587,7 @@ switch ($Mode) {
     "multi-terminal fixture did not complete all four sessions"
   $results.Add([pscustomobject]@{ name = "multi-terminal"; threshold = "4 x 512 KiB <= 15 s"; result = "PASS" })
 
-  $longPath = Join-Path $fixtureRoot ("unicode-" + ("深い" * 30) + "\日本語\terminal")
+  $longPath = Join-Path $fixtureRoot ("unicode-" + ("深い" * 45) + "\日本語\terminal")
   New-Item -ItemType Directory -Force $longPath | Out-Null
   $pathFile = Join-Path $longPath "clipboard-😀.txt"
   Set-Content -LiteralPath $pathFile -Value "paste-é-漢字-😀" -Encoding utf8
