@@ -243,7 +243,17 @@ pub const App = struct {
 
     fn createNode(self: *App) void {
         const path = self.currentProject() orelse return;
-        self.client.sendCreateNode(path, "Windows shell node");
+        const draft = NativeForms.node(self.window.hwnd, self.allocator, .{ .title = "" }) catch {
+            self.setStatus("Unable to open node form");
+            return;
+        } orelse return;
+        defer self.allocator.free(draft.title);
+        defer self.allocator.free(draft.loop_type);
+        Forms.validateNode(draft) catch {
+            self.setStatus("Invalid node form");
+            return;
+        };
+        self.client.sendCreateNode(path, draft.title);
     }
 
     fn editSelectedNode(self: *App) void {
@@ -297,11 +307,10 @@ pub const App = struct {
         } orelse return;
         defer self.allocator.free(draft.daemon_pipe);
         defer self.allocator.free(draft.support_directory);
-        self.client.validateSettings(draft.daemon_pipe, draft.support_directory) catch {
+        self.client.applySettings(draft.daemon_pipe, draft.support_directory) catch {
             self.setStatus("Invalid daemon settings");
             return;
         };
-        self.client.reconnect();
     }
 
     fn openSelectedNode(self: *App) void {
@@ -442,7 +451,8 @@ pub const App = struct {
     fn ensureWorktreeVisible(self: *App, index: usize) void {
         var client: c.RECT = undefined;
         if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
-        const top = Sidebar.worktreeRowTop(self.model.recent_projects.items.len, index) - self.sidebar_scroll;
+        const loop_count = if (self.model.graph) |graph| graph.nodes.items.len else 0;
+        const top = Sidebar.worktreeRowTop(self.model.recent_projects.items.len, loop_count, index) - self.sidebar_scroll;
         const bottom = top + 34;
         const viewport_top = Tokens.header_height;
         const viewport_bottom = client.bottom - Tokens.workspace_height;
@@ -476,7 +486,13 @@ pub const App = struct {
             .edit_node => self.editSelectedNode(),
             .create_edge => self.createEdge(),
             .jump_next => {
-                self.model.selectNext();
+                if (self.model.graph) |graph| {
+                    self.model.selected_node = Forms.jumpTo(
+                        graph.nodes.items,
+                        "",
+                        self.model.selected_node,
+                    );
+                }
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .settings => self.openSettings(),
@@ -743,6 +759,17 @@ fn onWindowMessage(
                 switch (row.kind) {
                     .project => app.openProject(app.model.recent_projects.items[row.index].path),
                     .overview => app.client.sendOpenGlobalGraph(),
+                    .loop => if (app.model.graph) |graph| {
+                        if (row.index < graph.nodes.items.len) {
+                            app.model.selected_node = row.index;
+                            if (app.workspace) |*workspace| {
+                                workspace.openNode(0, graph.nodes.items[row.index].id) catch {
+                                    app.setStatus("Unable to open selected loop");
+                                };
+                                workspace.focus(0);
+                            }
+                        }
+                    },
                     .worktree => if (app.worktree_inspection) |inspection| {
                         _ = app.selectWorktreeRow(inspection.entries.items[row.index].path);
                         app.ensureWorktreeVisible(row.index);
@@ -827,75 +854,110 @@ fn runSmokeWorkspaceActions(self: *App) void {
     const actions = if (std.mem.eql(u8, script, "1")) default_script else script;
     var iterator = std.mem.splitScalar(u8, actions, ',');
     self.smoke_workspace_action_failed = false;
+    const initial_tabs = workspace.tabCount();
+    const initial_panes = workspacePaneCount(workspace);
     while (iterator.next()) |raw| {
         const action = std.mem.trim(u8, raw, " \t\r\n");
         if (std.mem.eql(u8, action, "create") or std.mem.eql(u8, action, "tab") or std.mem.eql(u8, action, "new")) {
             const before = workspace.tabCount();
             self.handleAction(.new_tab);
             self.smoke_workspace_create_observed = !self.smoke_workspace_action_failed and
-                workspace.tabCount() >= before;
+                workspace.tabCount() == before + 1;
         } else if (std.mem.eql(u8, action, "split") or std.mem.eql(u8, action, "split-horizontal")) {
+            const before = workspacePaneCount(workspace);
             self.handleAction(.split_horizontal);
-            self.smoke_workspace_split_observed = !self.smoke_workspace_action_failed;
+            self.smoke_workspace_split_observed = !self.smoke_workspace_action_failed and
+                workspacePaneCount(workspace) == before + 1;
         } else if (std.mem.eql(u8, action, "split-vertical")) {
+            const before = workspacePaneCount(workspace);
             self.handleAction(.split_vertical);
-            self.smoke_workspace_split_observed = !self.smoke_workspace_action_failed;
+            self.smoke_workspace_split_observed = !self.smoke_workspace_action_failed and
+                workspacePaneCount(workspace) == before + 1;
         } else if (std.mem.eql(u8, action, "select")) {
             const before = workspace.layout.selected_tab;
             self.dispatchWorkspaceKey(0x22, true, false);
-            self.smoke_workspace_select_observed = workspace.layout.selected_tab != before or workspace.tabCount() > 1;
+            self.smoke_workspace_select_observed = workspace.layout.selected_tab != before;
         } else if (std.mem.eql(u8, action, "focus")) {
+            if (workspace.layout.selected()) |tab| {
+                if (tab.panes.items.len < 2 and workspace.tabCount() > 1)
+                    self.handleAction(.select_previous_tab);
+            }
             const before = workspace.active_surface;
             self.dispatchWorkspaceKey(0xDD, true, false);
-            self.smoke_workspace_focus_observed = workspace.active_surface != before or workspace.tabCount() > 0;
+            self.smoke_workspace_focus_observed = workspace.active_surface != before;
         } else if (std.mem.eql(u8, action, "close")) {
-            const before = workspace.tabCount();
+            const before = workspacePaneCount(workspace);
             self.handleAction(.close_tab);
-            self.smoke_workspace_close_observed = workspace.tabCount() <= before and !self.smoke_workspace_action_failed;
+            self.smoke_workspace_close_observed = workspacePaneCount(workspace) + 1 == before and
+                !self.smoke_workspace_action_failed;
         } else if (std.mem.eql(u8, action, "restart")) {
-            if (workspace.hasSurface(0)) {
-                workspace.recreate(0) catch {
+            const index = workspace.active_surface;
+            const before_tabs = workspace.tabCount();
+            const before_panes = workspacePaneCount(workspace);
+            const before_selected = workspace.layout.selected_tab;
+            if (!workspace.hasSurface(index)) {
+                self.smoke_workspace_action_failed = true;
+                self.setStatus("Smoke workspace restart has no surface");
+            } else {
+                workspace.recreate(index) catch {
                     self.smoke_workspace_action_failed = true;
                     self.setStatus("Smoke workspace restart failed");
                 };
+                self.smoke_workspace_restart_observed = !self.smoke_workspace_action_failed and
+                    workspace.tabCount() == before_tabs and
+                    workspacePaneCount(workspace) == before_panes and
+                    workspace.layout.selected_tab == before_selected;
             }
-            self.smoke_workspace_restart_observed = true;
         }
     }
+    if (workspace.tabCount() < initial_tabs or workspacePaneCount(workspace) < initial_panes)
+        self.smoke_workspace_action_failed = true;
     self.refreshWorkspace();
     self.smoke_workspace_actions_ran = true;
 }
 
+fn workspacePaneCount(workspace: anytype) usize {
+    var count: usize = 0;
+    for (workspace.layout.tabs.items) |tab| count += tab.panes.items.len;
+    return count;
+}
+
 fn smokeContractPassed(self: *const App) bool {
-    if (self.client.connectionState() != .connected) return false;
-    const value = self.model.graph orelse return false;
-    if (value.nodes.items.len < 2) return false;
-    const workspace = self.workspace orelse return false;
+    const scripted_actions = envFlag("GRAPHCODE_SHELL_WORKSPACE_ACTIONS");
+    if (!scripted_actions and self.client.connectionState() != .connected) return false;
+    if (!scripted_actions) {
+        const value = self.model.graph orelse return false;
+        if (value.nodes.items.len < 2) return false;
+    }
+    const workspace = self.workspace orelse {
+        if (scripted_actions) std.debug.print("smoke contract missing workspace\n", .{});
+        return false;
+    };
     var client: c.RECT = undefined;
     if (c.GetClientRect(self.window.hwnd, &client) == 0) return false;
     const layout_width = @max(0, client.right - Tokens.sidebar_width);
     const layout_height = Tokens.workspace_height;
-    const scripted_actions = envFlag("GRAPHCODE_SHELL_WORKSPACE_ACTIONS");
     const workspace_ready = if (scripted_actions)
         workspace.tabCount() > 0
     else
         workspace.hasSurface(0) and workspace.hasSurface(1) and
             workspace.hasAttach(0) and workspace.hasAttach(1);
-    return workspace.layoutMatches(
+    const layout_ok = workspace.layoutMatches(
             Tokens.sidebar_width,
             @max(0, client.bottom - Tokens.workspace_height),
             layout_width,
             layout_height,
-        ) and
-        workspace_ready and
-        (!scripted_actions or (self.smoke_workspace_actions_ran and
+        );
+    const actions_ok = self.smoke_workspace_actions_ran and
             !self.smoke_workspace_action_failed and
             self.smoke_workspace_create_observed and
             self.smoke_workspace_split_observed and
             self.smoke_workspace_select_observed and
             self.smoke_workspace_focus_observed and
             self.smoke_workspace_close_observed and
-            self.smoke_workspace_restart_observed));
+            self.smoke_workspace_restart_observed;
+    const passed = if (scripted_actions) workspace_ready and actions_ok else layout_ok and workspace_ready;
+    return passed;
 }
 
 fn envFlag(name: []const u8) bool {

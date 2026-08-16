@@ -128,6 +128,17 @@ pub const DaemonClient = struct {
             return error.InvalidDaemonPipe;
     }
 
+    pub fn applySettings(
+        self: *DaemonClient,
+        pipe_override: []const u8,
+        support_directory: []const u8,
+    ) !void {
+        try self.validateSettings(pipe_override, support_directory);
+        setTestEnvironment("GRAPHCODE_DAEMON_PIPE", if (pipe_override.len == 0) null else pipe_override);
+        setTestEnvironment("GRAPHCODE_SUPPORT_DIR", if (support_directory.len == 0) null else support_directory);
+        self.reconnect();
+    }
+
     fn validateSupportDirectory(allocator: std.mem.Allocator, support_directory: []const u8) !void {
         const normalized = try normalizedSupportPath(allocator, support_directory);
         defer std.heap.page_allocator.free(normalized);

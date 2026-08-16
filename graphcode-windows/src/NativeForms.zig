@@ -134,6 +134,10 @@ fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !boo
         _ = c.TranslateMessage(&message);
         _ = c.DispatchMessageW(&message);
     }
+    // Destroy the modal window from the owner thread after dispatch returns.
+    // Calling DestroyWindow from the window procedure can violate the C
+    // callback handle alignment contract on some Zig/Win32 combinations.
+    _ = c.DestroyWindow(hwnd);
     _ = c.EnableWindow(state.parent, 1);
     _ = c.SetActiveWindow(state.parent);
     state.* = active_state_storage;
@@ -154,6 +158,7 @@ fn registerClass() !void {
 
 fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
     if (!active_state) return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    const safe_hwnd: c.HWND = @ptrFromInt(@intFromPtr(hwnd.?));
     const value = &active_state_storage;
     switch (message) {
         c.WM_CREATE => {
@@ -174,10 +179,10 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                 },
             }
             for (labels[0..label_count], 0..) |label, index| {
-                createText(hwnd, value, label, index);
+                createText(safe_hwnd, value, label, index);
             }
-            createButton(hwnd, "OK", ok_id, 350, @intCast(35 + label_count * 48));
-            createButton(hwnd, "Cancel", cancel_id, 265, @intCast(35 + label_count * 48));
+            createButton(safe_hwnd, "OK", ok_id, 350, @intCast(35 + label_count * 48));
+            createButton(safe_hwnd, "Cancel", cancel_id, 265, @intCast(35 + label_count * 48));
             return 0;
         },
         c.WM_COMMAND => {
@@ -185,18 +190,15 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             if (command == ok_id) {
                 readValues(value);
                 applyModalCommand(value, .submit);
-                _ = c.DestroyWindow(hwnd);
                 return 0;
             }
             if (command == cancel_id) {
                 applyModalCommand(value, .cancel);
-                _ = c.DestroyWindow(hwnd);
                 return 0;
             }
         },
         c.WM_CLOSE => {
             applyModalCommand(value, .close);
-            _ = c.DestroyWindow(hwnd);
             return 0;
         },
         c.WM_DESTROY => {
@@ -213,7 +215,7 @@ fn createText(hwnd: c.HWND, state: *DialogState, label: []const u8, index: usize
     const wide_label = utf8ToWideZ(state.allocator, label) catch return;
     defer state.allocator.free(wide_label);
     _ = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr, wide_label.ptr, c.WS_CHILD | c.WS_VISIBLE, 18, y, 420, 18, hwnd, null, c.GetModuleHandleW(null), null);
-    const edit = c.CreateWindowExW(c.WS_EX_CLIENTEDGE, std.unicode.utf8ToUtf16LeStringLiteral("EDIT").ptr, null, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.ES_AUTOHSCROLL, 18, y + 18, 420, 24, hwnd, @ptrFromInt(9100 + index), c.GetModuleHandleW(null), null) orelse return;
+    const edit = c.CreateWindowExW(c.WS_EX_CLIENTEDGE, std.unicode.utf8ToUtf16LeStringLiteral("EDIT").ptr, null, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.ES_AUTOHSCROLL, 18, y + 18, 420, 24, hwnd, childId(9100 + index), c.GetModuleHandleW(null), null) orelse return;
     state.edits[index] = edit;
     const wide_value = utf8ToWideZ(state.allocator, state.values[index]) catch return;
     defer state.allocator.free(wide_value);
@@ -223,7 +225,12 @@ fn createText(hwnd: c.HWND, state: *DialogState, label: []const u8, index: usize
 fn createButton(hwnd: c.HWND, text: []const u8, id: usize, x: i32, y: i32) void {
     const wide = utf8ToWideZ(std.heap.c_allocator, text) catch return;
     defer std.heap.c_allocator.free(wide);
-    _ = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr, wide.ptr, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_DEFPUSHBUTTON, x, y, 70, 26, hwnd, @ptrFromInt(id), c.GetModuleHandleW(null), null);
+    _ = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr, wide.ptr, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_DEFPUSHBUTTON, x, y, 70, 26, hwnd, childId(id), c.GetModuleHandleW(null), null);
+}
+
+fn childId(value: usize) c.HMENU {
+    @setRuntimeSafety(false);
+    return @ptrFromInt(value);
 }
 
 fn readValues(state: *DialogState) void {
