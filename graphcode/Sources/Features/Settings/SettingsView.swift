@@ -19,7 +19,7 @@ struct SettingsView: View {
   /// nothing is worse than no tab.
   var body: some View {
     sessions
-      .frame(width: 540)
+      .frame(minWidth: 620, maxWidth: .infinity)
       .padding(.vertical, 4)
   }
 

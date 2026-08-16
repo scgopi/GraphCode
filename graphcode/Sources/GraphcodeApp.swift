@@ -98,5 +98,9 @@ struct GraphcodeApp: App {
     Settings {
       SettingsView()
     }
+    // Settings scenes default to `.contentSize`, which pins the window to its content
+    // and leaves it un-resizable. Min-size keeps the form's own minimum as the floor
+    // while letting anyone drag it larger.
+    .windowResizability(.contentMinSize)
   }
 }
