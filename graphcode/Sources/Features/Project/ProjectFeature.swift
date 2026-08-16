@@ -639,7 +639,9 @@ extension ProjectFeature {
     guard let nodeID = state.nodePendingPromotion, let promotion = state.promotion
     else { return .none }
     state.nodePendingPromotion = nil
-    return send(state, .promoteNode(nodeID, promotion: promotion))
+    // `promotedBy: nil` — a human in the app, the same attribution the form's other
+    // commands carry.
+    return send(state, .promoteNode(nodeID, promotion: promotion, promotedBy: nil))
   }
 
   /// Resets the draft fields and opens the node form — the shared half of

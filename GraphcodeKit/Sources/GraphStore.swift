@@ -269,8 +269,8 @@ public actor GraphStore {
     case .updateNode(let nodeID, let update):
       updateNode(nodeID, with: update)
 
-    case .promoteNode(let nodeID, let promotion):
-      promoteNode(nodeID, promotion: promotion)
+    case .promoteNode(let nodeID, let promotion, let promotedBy):
+      promoteNode(nodeID, promotion: promotion, promotedBy: promotedBy)
 
     case .memoNode(let nodeID, let text, let from):
       memoNode(nodeID, text: text, from: from)
@@ -728,7 +728,13 @@ public actor GraphStore {
       observerSide.append("model tier: \(tier.rawValue) (next launch)")
     }
     guard !sessionFacing.isEmpty || !observerSide.isEmpty else {
-      announceError("update refused: nothing in it applies to a \(node.loopType) loop")
+      // A sketch's refusal answers the obvious next question — "then what does?" —
+      // instead of leaving the caller to discover promotion exists.
+      announceError(
+        node.loopType == .sketch
+          ? "update refused: nothing in it applies to a sketch loop — give it a shape "
+            + "first with `graphcode node promote`"
+          : "update refused: nothing in it applies to a \(node.loopType) loop")
       return
     }
     graph.nodes[id: nodeID] = node
@@ -764,7 +770,7 @@ public actor GraphStore {
   /// The live session (if any) is nudged the same way `updateNode` nudges — its
   /// transcript is the loop's context now, and a shape it was never told about would
   /// make the canvas lie about what the loop is doing.
-  private func promoteNode(_ nodeID: UUID, promotion: SketchPromotion) {
+  private func promoteNode(_ nodeID: UUID, promotion: SketchPromotion, promotedBy: UUID?) {
     guard var node = graph.nodes[id: nodeID] else {
       announceError("no loop \(nodeID) in this graph")
       return
@@ -781,6 +787,15 @@ public actor GraphStore {
       spec.summary = spec.summary.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !spec.summary.isEmpty else {
         announceError("promotion refused: a goal loop needs what done looks like")
+        return
+      }
+      // `updateNode`'s one rule with teeth, held at the other doorway: promotion is the
+      // only other command through which a loop could hand itself a stop condition, and
+      // a self-set predicate is a verifier inside the verified. Summary-only
+      // self-promotion stays allowed — prose states the goal, it doesn't pass it.
+      if spec.effectivePredicate != nil, promotedBy == nodeID {
+        announceError("promotion refused: \(node.title) may not set its own stop condition")
+        recordMemory(nodeID, "promotion refused: a loop may not set its own stop condition")
         return
       }
       node.loopType = .goalBased
@@ -812,8 +827,14 @@ public actor GraphStore {
     }
 
     graph.nodes[id: nodeID] = node
+    // Attributed the way `updateNode` attributes: the promoter's title when the command
+    // came from inside a loop, "a human" otherwise — except a self-promotion, which is
+    // worth naming as what it is rather than as a peer that happens to share the id.
+    let promoter =
+      promotedBy == nodeID
+      ? "itself" : promotedBy.flatMap { graph.nodes[id: $0]?.title } ?? "a human"
     recordMemory(
-      nodeID, "promoted from sketch to \(promotion.targetType.rawValue) — \(nudge)")
+      nodeID, "promoted from sketch to \(promotion.targetType.rawValue) by \(promoter) — \(nudge)")
     pendingNudges.append((nodeID, "[graphcode] \(nudge)"))
 
     // What creation does for the type, promotion does too: an unattended loop's session
