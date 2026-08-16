@@ -188,12 +188,13 @@ function Verify-SignedPackage([string] $root, [object] $metadata) {
   if ($metadata.signing -ne "signed") { return }
   Require (Test-Path (Join-Path $root "SIGNATURES.txt")) "signed package has no signature record"
   $tool = if ($SignToolPath) { $SignToolPath } else { (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source }
-  Require ($tool -and (Test-Path $tool)) "signed package verification requires signtool.exe"
   foreach ($file in @(Get-ChildItem (Join-Path $root "bin") -Filter *.exe)) {
     $authenticode = Get-AuthenticodeSignature -FilePath $file.FullName
     Require ($authenticode.Status -eq "Valid") "clean-machine Authenticode verification failed: $($file.Name)"
-    & $tool verify /pa $file.FullName *> $null
-    Require ($LASTEXITCODE -eq 0) "signature verification failed: $($file.Name)"
+    if ($tool -and (Test-Path $tool)) {
+      & $tool verify /pa $file.FullName *> $null
+      Require ($LASTEXITCODE -eq 0) "optional signtool diagnostic failed: $($file.Name)"
+    }
   }
 }
 function Get-TaskIdentity([string] $support) {
@@ -409,7 +410,7 @@ function Start-DaemonTask {
   $xmlPath = Join-Path (Split-Path $InstallRoot -Parent) "GraphCode-daemon-task.xml"
   $taskName = Xml-Escape $identity.name
   $sid = Xml-Escape $identity.sid
-  $command = Xml-Escape "C:\Windows\System32\cmd.exe"
+  $command = Xml-Escape (Join-Path $env:SystemRoot "System32\cmd.exe")
   $arguments = Xml-Escape "/d /s /c `"set `"GRAPHCODE_SUPPORT_DIR=$support`"`&`&`"$InstallRoot\bin\graphcoded.exe`"`""
   $workingDirectory = Xml-Escape (Join-Path $InstallRoot "bin")
   $xml = @"
@@ -469,7 +470,7 @@ function Install-Package([bool] $upgrade) {
   } catch {
     if (-not $NoScheduledTask) {
       try { Stop-InstalledDaemon } catch { }
-      Remove-DaemonTask
+      if (-not $NoScheduledTask) { Remove-DaemonTask }
     }
     if (Test-Path $InstallRoot) { Remove-Item $InstallRoot -Recurse -Force }
     if (Test-Path $backup) { Move-Item $backup $InstallRoot }

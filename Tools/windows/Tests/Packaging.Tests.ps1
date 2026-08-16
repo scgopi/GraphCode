@@ -81,7 +81,13 @@ try {
   New-Item -ItemType Directory -Force -Path (Split-Path $userData -Parent) | Out-Null
   Set-Content $userData "preserve" -Force
   Invoke-Package "Upgrade" @{ Package = $zip; InstallRoot = $install; NoScheduledTask = $true }
+  $sentinelTask = "GraphCode\packaging-sentinel-$PID"
+  schtasks.exe /Create /TN $sentinelTask /TR "cmd.exe /c exit 0" /SC ONCE /ST (Get-Date).AddMinutes(2).ToString("HH:mm") /F *> $null
+  if ($LASTEXITCODE -ne 0) { throw "could not create scoped task sentinel" }
   Invoke-Package "Uninstall" @{ InstallRoot = $install; KeepUserData = $true; NoScheduledTask = $true }
+  schtasks.exe /Query /TN $sentinelTask *> $null
+  if ($LASTEXITCODE -ne 0) { throw "portable uninstall removed a preexisting scoped task" }
+  schtasks.exe /Delete /TN $sentinelTask /F *> $null
   if (Test-Path $install) { throw "uninstall left installed binaries" }
   if (-not (Test-Path $userData)) { throw "uninstall removed user data" }
   & pwsh -NoProfile -File (Join-Path $PSScriptRoot "Packaging.RealLifecycle.Tests.ps1") `
