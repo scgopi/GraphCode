@@ -59,6 +59,10 @@ try {
   $manifest.files[0].path = "/absolute.txt"
   $manifest | ConvertTo-Json -Depth 10 | Set-Content $manifestPath
   try { Invoke-Package "Verify" @{ Package = $artifact }; throw "absolute manifest was accepted" } catch { if ($_ -like "*absolute manifest was accepted*") { throw } }
+  $graphcodeFile = Get-Item (Join-Path $artifact "bin\graphcode.exe")
+  $manifest.files[0].path = "bin/graphcode.exe"
+  $manifest.files[0].size = $graphcodeFile.Length
+  $manifest.files[0].sha256 = (Get-FileHash $graphcodeFile -Algorithm SHA256).Hash.ToLowerInvariant()
   $metadataFile = Get-Item (Join-Path $artifact "metadata.json")
   $manifest.files += [ordered]@{
     path = "metadata.json"
