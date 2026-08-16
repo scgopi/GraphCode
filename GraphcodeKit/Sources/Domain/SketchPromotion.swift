@@ -10,7 +10,10 @@ import Foundation
 ///
 /// Promotion is one-way by construction. There is no case that lands on `.sketch`, so
 /// demotion — which would silently drop a done check or a cadence — is unrepresentable
-/// rather than merely refused.
+/// rather than merely refused. `.composite` is absent deliberately too, not as an
+/// oversight: a composite is defined by its sub-graph, which is not "exactly one
+/// decision" — a sketch that grew into a pipeline is a new composite whose first loop
+/// the sketch may become, not a promotion.
 public enum SketchPromotion: Codable, Equatable, Sendable {
   /// Goal asks for a done check: what done looks like, in the promoter's words.
   case goal(GoalSpec)

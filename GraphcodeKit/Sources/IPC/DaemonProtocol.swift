@@ -81,7 +81,14 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// never a create + delete, so anything keyed on the node's id survives untouched.
   /// Refused for any node that isn't a sketch; demotion has no wire shape at all
   /// (`SketchPromotion` carries no `.sketch` case).
-  case promoteNode(UUID, promotion: SketchPromotion)
+  ///
+  /// `promotedBy` is attributed the way `updateNode`'s `updatedBy` is (`ZMX_SESSION`,
+  /// honest-by-default) — and enforces the same rule with teeth: a goal promotion that
+  /// carries a predicate is refused when the promoter is the promoted, because a
+  /// promotion is the one other doorway through which a loop could hand itself its own
+  /// stop condition. Optional so frames from clients that predate the field decode as
+  /// an unattributed promotion rather than failing.
+  case promoteNode(UUID, promotion: SketchPromotion, promotedBy: UUID?)
   /// Append a learned note to a node's memory log (`NodeMemory`) — what `graphcode
   /// node memo` rides on. `from` is attributed the same way `messageNode`'s is.
   case memoNode(UUID, text: String, from: UUID?)

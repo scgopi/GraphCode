@@ -215,6 +215,30 @@ do {
       print(GraphcodeCommand.render(graph))
     }
 
+  case .promoteNode(let projectPath, let nodeID, let promotion):
+    // Attributed like `node update` attributes `updatedBy` — which is also what lets
+    // the daemon refuse a loop handing itself a stop condition through promotion.
+    let promoter = SurfaceRef.nodeID(
+      fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
+    try client.send(.openProject(path: projectPath))
+    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try client.send(
+      .graphCommand(
+        projectPath: projectPath,
+        command: .promoteNode(nodeID, promotion: promotion, promotedBy: promoter)))
+    // Same verdict pattern as `update`: a refusal arrives as an error, an applied
+    // promotion as the changed graph.
+    let promoteVerdict = try client.waitForEvent { event in
+      switch event {
+      case .graphChanged, .errorOccurred: return true
+      default: return false
+      }
+    }
+    if case .errorOccurred(let message) = promoteVerdict { fail(message) }
+    if case .graphChanged(let graph) = promoteVerdict {
+      print(GraphcodeCommand.render(graph))
+    }
+
   case .memoNode(let projectPath, let nodeID, let text):
     let author = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")

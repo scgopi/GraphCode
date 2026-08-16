@@ -22,6 +22,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
   case deleteNode(projectPath: String, nodeID: UUID)
   case sendMessage(projectPath: String, nodeID: UUID, text: String)
   case updateNode(projectPath: String, nodeID: UUID, update: NodeUpdate)
+  /// Give a sketch a shape — the CLI half of the canvas's "Promote to…" menu. The
+  /// promoter's identity is attributed at execution (`ZMX_SESSION`), not parsed here,
+  /// matching how `updateNode` fills `updatedBy`.
+  case promoteNode(projectPath: String, nodeID: UUID, promotion: SketchPromotion)
   case memoNode(projectPath: String, nodeID: UUID, text: String)
   case pilotComposite(projectPath: String, nodeID: UUID)
   case armComposite(projectPath: String, nodeID: UUID)
@@ -49,6 +53,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
                            and memory — irreversible; stop is the reversible verb
       graphcode node send <project-path> <node-id> <message…>
       graphcode node update <project-path> <node-id> [options]
+      graphcode node promote <project-path> <node-id> --type <goal|turn|time> [options]
+                           give a sketch a shape, keeping its session, edges and memory
       graphcode node memo <project-path> <node-id> <note…>
       graphcode node pilot <project-path> <node-id>     dry-run a composite
       graphcode node arm <project-path> <node-id>       arm it (needs a pilot first)
@@ -90,6 +96,15 @@ public enum GraphcodeCommand: Equatable, Sendable {
       --stall <seconds>    stall bound; 0 clears it
       A loop may not change its own --predicate: the verifier stays outside the
       verified. Session-facing changes reach a live session as a [graphcode] notice.
+
+    PROMOTE OPTIONS (node promote; each target asks for its one decision)
+      --type goal          with --goal <text> (required); --predicate, --metric,
+                           --direction as above. A loop may not set its own
+                           --predicate through promotion, the same rule update holds.
+      --type turn          with --pause <every-turn|before-writes>  (default: every-turn)
+      --type time          with --prompt <text> (required); put the cadence in it
+      Promotion is one-way: a sketch gains a shape, never the reverse, and only a
+      sketch can be promoted.
 
     node memo appends a note to the loop's own memory log — what the next pass reads
     before starting. Record dead ends and decisions, not a transcript.
@@ -176,7 +191,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
           into = id
         }
         return .createNode(projectPath: path, draft: try parseDraft(arguments), into: into)
-      case "stop", "delete", "pilot", "arm", "send", "update", "memo":
+      case "stop", "delete", "pilot", "arm", "send", "update", "memo", "promote":
         let raw = try take(&arguments, name: "node-id")
         guard let nodeID = UUID(uuidString: raw) else {
           throw ParseError.invalidValue(argument: "node-id", value: raw)
@@ -185,6 +200,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
         case "pilot": return .pilotComposite(projectPath: path, nodeID: nodeID)
         case "arm": return .armComposite(projectPath: path, nodeID: nodeID)
         case "delete": return .deleteNode(projectPath: path, nodeID: nodeID)
+        case "promote":
+          return .promoteNode(
+            projectPath: path, nodeID: nodeID, promotion: try parsePromotion(arguments))
         case "send":
           // Everything after the id is the message — joined rather than flagged, so
           // `graphcode node send <path> <id> tests are green, ship it` needs no quoting
@@ -359,6 +377,51 @@ public enum GraphcodeCommand: Equatable, Sendable {
       modelTier: modelTier)
     guard !update.isEmpty else { throw ParseError.missingArgument("an option to change") }
     return update
+  }
+
+  /// The one decision each target type needs — the same vocabulary `node create`
+  /// already taught: `--goal`/`--predicate`/`--metric`/`--direction` for goal,
+  /// `--prompt` for time. Turn's decision is where to pause, which create never asks
+  /// (`--pause every-turn|before-writes`), defaulting to every turn like the app's form.
+  private static func parsePromotion(_ arguments: [String]) throws -> SketchPromotion {
+    let flags = parseFlags(arguments)
+    if flags["help"] != nil { throw HelpRequested() }
+    guard let rawType = flags["type"] else { throw ParseError.missingArgument("--type") }
+
+    switch rawType {
+    case "goal", "goalBased":
+      guard let summary = flags["goal"] else { throw ParseError.missingArgument("--goal") }
+      var metricDirection = MetricDirection.maximize
+      if let raw = flags["direction"] {
+        guard let parsed = MetricDirection(rawValue: raw) else {
+          throw ParseError.invalidValue(argument: "--direction", value: raw)
+        }
+        metricDirection = parsed
+      }
+      return .goal(
+        GoalSpec(
+          summary: summary, predicate: flags["predicate"],
+          metricCommand: flags["metric"], metricDirection: metricDirection))
+
+    case "turn", "turnBased":
+      switch flags["pause"] {
+      case nil, "every-turn":
+        return .turn(pausesBeforeWritesOnly: false)
+      case "before-writes":
+        return .turn(pausesBeforeWritesOnly: true)
+      case .some(let raw):
+        throw ParseError.invalidValue(argument: "--pause", value: raw)
+      }
+
+    case "time", "timeBased":
+      guard let prompt = flags["prompt"] else { throw ParseError.missingArgument("--prompt") }
+      return .timed(triggerPrompt: prompt)
+
+    // `sketch` and `composite` are refused by shape, not by the daemon: demotion is
+    // unrepresentable and a composite is not one decision (see `SketchPromotion`).
+    default:
+      throw ParseError.invalidValue(argument: "--type", value: rawType)
+    }
   }
 
   /// `--name value` pairs. Bare positional arguments are ignored here; every caller has
