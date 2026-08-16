@@ -53,23 +53,19 @@ struct GoalDraftFields: View {
 
       if store.isMetricExpanded {
         metricFields
-      } else {
-        Button {
-          store.isMetricExpanded = true
-        } label: {
-          Text("+ Track a progress metric")
-            .font(.system(size: 11.5))
-            .foregroundStyle(.white.opacity(0.6))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 8)
-            .padding(.horizontal, 9)
-            .overlay {
-              RoundedRectangle(cornerRadius: 8)
-                .stroke(
-                  .white.opacity(0.14), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-            }
+      }
+      if store.isBudgetExpanded {
+        budgetFields
+      }
+      if !store.isMetricExpanded || !store.isBudgetExpanded {
+        HStack(spacing: 8) {
+          if !store.isMetricExpanded {
+            expander("+ Track a progress metric") { store.isMetricExpanded = true }
+          }
+          if !store.isBudgetExpanded {
+            expander("+ Cap its token spend") { store.isBudgetExpanded = true }
+          }
         }
-        .buttonStyle(.plain)
       }
 
       DraftField(label: "Name", qualifier: "optional") {
@@ -77,6 +73,23 @@ struct GoalDraftFields: View {
           placeholder: "the loop names itself once it starts", text: $store.draftTitle)
       }
     }
+  }
+
+  private func expander(_ title: String, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+      Text(title)
+        .font(.system(size: 11.5))
+        .foregroundStyle(.white.opacity(0.6))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 8)
+        .padding(.horizontal, 9)
+        .overlay {
+          RoundedRectangle(cornerRadius: 8)
+            .stroke(
+              .white.opacity(0.14), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+        }
+    }
+    .buttonStyle(.plain)
   }
 
   private var metricFields: some View {
@@ -94,6 +107,16 @@ struct GoalDraftFields: View {
       }
       .pickerStyle(.segmented)
       .labelsHidden()
+    }
+  }
+
+  private var budgetFields: some View {
+    DraftField(
+      label: "Token budget", qualifier: "optional",
+      help: "Stopped once its backend reports this many tokens spent (input + output). "
+        + "Reported, never estimated — a backend that reports nothing is never stopped."
+    ) {
+      DraftTextField(placeholder: "200000", text: $store.draftBudget, isMono: true)
     }
   }
 
@@ -380,7 +403,8 @@ struct NodeDraftRecap: View {
         draft.goal?.effectivePredicate == nil
         ? "resolves when its session finishes"
         : "resolves itself when the done check passes"
-      return "Starts now\(location), works toward the goal, and \(check)."
+      let cap = draft.goal?.tokenBudget.map { " Stops if it spends more than \($0) tokens." } ?? ""
+      return "Starts now\(location), works toward the goal, and \(check).\(cap)"
     case .timeBased:
       return "Starts now\(location) and runs again on its own until you stop it."
     case .turnBased:

@@ -209,6 +209,23 @@ struct ProjectFeatureTests {
     state.draftMetric = ""
     #expect(state.draft.goal?.metricCommand == nil)
   }
+
+  /// The budget field becomes `GoalSpec.tokenBudget` — same silent-no-op concern as the
+  /// metric — and anything that isn't a positive integer travels as "no budget".
+  @Test
+  @MainActor
+  func theBudgetFieldTravelsIntoTheGoalSpec() {
+    var state = ProjectFeature.State(graph: LoopGraph(project: Self.testProject))
+    state.draftLoopType = .goalBased
+    state.draftGoal = "the sweep finishes"
+    state.draftBudget = " 200000 "
+    #expect(state.draft.goal?.tokenBudget == 200_000)
+
+    for junk in ["", "0", "-5", "lots"] {
+      state.draftBudget = junk
+      #expect(state.draft.goal?.tokenBudget == nil, "\(junk) should mean no budget")
+    }
+  }
 }
 
 private actor SentGraphCommandsBox {
