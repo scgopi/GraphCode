@@ -1,5 +1,7 @@
-/// The five loop primitives graphcode orchestrates — see docs/01-loop-taxonomy.md for
-/// the full definitions.
+/// The four loop primitives graphcode orchestrates — see docs/01-loop-taxonomy.md for
+/// the full definitions — plus sketch, which is deliberately not a fifth kind: it is
+/// the starting point before the work has a shape, and `SketchPromotion` is how it
+/// becomes one of the four once it does.
 ///
 /// Declared in the order a human should consider them, because that is the order
 /// `allCases` walks and the order every picker shows. The axis is how much you have to
@@ -14,7 +16,7 @@
 /// exactly as before.
 public enum LoopType: String, Codable, CaseIterable, Sendable {
   /// The zero-commitment type: no goal, no cadence, no checkpoint. A bare session that
-  /// works with you until you close it.
+  /// works with you until you promote it or close it.
   case sketch
   case goalBased
   case timeBased

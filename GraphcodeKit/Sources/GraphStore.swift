@@ -269,6 +269,9 @@ public actor GraphStore {
     case .updateNode(let nodeID, let update):
       updateNode(nodeID, with: update)
 
+    case .promoteNode(let nodeID, let promotion):
+      promoteNode(nodeID, promotion: promotion)
+
     case .memoNode(let nodeID, let text, let from):
       memoNode(nodeID, text: text, from: from)
 
@@ -748,6 +751,80 @@ public actor GraphStore {
           "[graphcode] Your instructions were revised: "
             + sessionFacing.joined(separator: "; ")
         ))
+    }
+  }
+
+  /// Gives a sketch a shape — `GraphCommand.promoteNode`.
+  ///
+  /// A mutation on the existing node, deliberately not a create + delete: the id is the
+  /// zmx session name, the memory key, and every edge's endpoint, so keeping it is what
+  /// makes "keep the session, add a shape" literally true. Only `loopType` and the one
+  /// field the new type needs change.
+  ///
+  /// The live session (if any) is nudged the same way `updateNode` nudges — its
+  /// transcript is the loop's context now, and a shape it was never told about would
+  /// make the canvas lie about what the loop is doing.
+  private func promoteNode(_ nodeID: UUID, promotion: SketchPromotion) {
+    guard var node = graph.nodes[id: nodeID] else {
+      announceError("no loop \(nodeID) in this graph")
+      return
+    }
+    guard node.loopType == .sketch else {
+      announceError(
+        "promotion refused: \(node.title) already has a shape — only a sketch can be promoted")
+      return
+    }
+
+    let nudge: String
+    switch promotion {
+    case .goal(var spec):
+      spec.summary = spec.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !spec.summary.isEmpty else {
+        announceError("promotion refused: a goal loop needs what done looks like")
+        return
+      }
+      node.loopType = .goalBased
+      node.goal = spec
+      // What creation gives a goal loop, promotion gives it too: born `.running`,
+      // because its session works toward the goal with no human turn in between.
+      node.state = .running
+      nudge = "You are now a goal loop. Work toward this and stop when it's met: \(spec.summary)"
+
+    case .turn(let beforeWritesOnly):
+      node.loopType = .turnBased
+      node.pausesBeforeWritesOnly = beforeWritesOnly
+      nudge =
+        beforeWritesOnly
+        ? "You are now a turn-based loop. Stop for a human's review before anything that "
+          + "changes files or state; reading and reasoning can run straight through."
+        : "You are now a turn-based loop. Work in turns, stopping after each one for a "
+          + "human's review before you continue."
+
+    case .timed(let prompt):
+      let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else {
+        announceError("promotion refused: a time-based loop needs a cadence to run on")
+        return
+      }
+      node.loopType = .timeBased
+      node.triggerPrompt = trimmed
+      nudge = "You are now a time-based loop. Adopt this cadence by running it now: \(trimmed)"
+    }
+
+    graph.nodes[id: nodeID] = node
+    recordMemory(
+      nodeID, "promoted from sketch to \(promotion.targetType.rawValue) — \(nudge)")
+    pendingNudges.append((nodeID, "[graphcode] \(nudge)"))
+
+    // What creation does for the type, promotion does too: an unattended loop's session
+    // must exist whether or not anyone has the app open, and a goal loop's stop
+    // condition needs its poller.
+    if node.runsUnattended {
+      ensureSession(node)
+    }
+    if node.loopType == .goalBased {
+      cancelGoalPoller(nodeID)
+      armGoalPoller(for: node)
     }
   }
 

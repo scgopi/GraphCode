@@ -76,6 +76,12 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// summary, prompt, check) are nudged into a live session and recorded in the node's
   /// memory for its next wake. A loop may not change its *own* stop condition.
   case updateNode(UUID, update: NodeUpdate)
+  /// Give a sketch a shape — goal, turn or timed — keeping everything else it is:
+  /// same id, same session, same edges, same memory. A mutation on the existing node,
+  /// never a create + delete, so anything keyed on the node's id survives untouched.
+  /// Refused for any node that isn't a sketch; demotion has no wire shape at all
+  /// (`SketchPromotion` carries no `.sketch` case).
+  case promoteNode(UUID, promotion: SketchPromotion)
   /// Append a learned note to a node's memory log (`NodeMemory`) — what `graphcode
   /// node memo` rides on. `from` is attributed the same way `messageNode`'s is.
   case memoNode(UUID, text: String, from: UUID?)

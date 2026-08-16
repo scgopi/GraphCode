@@ -184,25 +184,29 @@ struct OnboardingReadingPage: View {
   }
 }
 
-/// Page 3 — the five kinds, subtitled by what makes each one *stop*, with the edge
-/// lesson folded in underneath.
+/// Page 3 — the four kinds, subtitled by what makes each one *stop*, with the edge
+/// lesson folded in underneath. Sketch shows above them as what it is: not a fifth
+/// kind, the place you start before the work has a shape.
 ///
 /// Two pages became one, which is what freed the room for page 2. The tiles are the
 /// dialog's own `LoopTypeChooser`, so what is taught here is literally what is chosen
 /// there.
 struct OnboardingLoopTypesPage: View {
-  /// Nothing is being chosen on this page — the tiles are showing five things, not
+  /// Nothing is being chosen on this page — the tiles are showing four things, not
   /// asking for one. The selection is fixed on the type most people meet first.
   @State private var shown: LoopType = .goalBased
 
   var body: some View {
     VStack(spacing: 16) {
-      Text("Five kinds of loop")
+      Text("Four kinds of loop")
         .font(.system(size: 25, weight: .bold))
         .tracking(-0.25)
-      Text("They differ in what makes them stop.")
-        .font(.system(size: 14))
-        .foregroundStyle(.white.opacity(0.65))
+      Text(
+        "They differ in what makes them stop — and a sketch is where you start "
+          + "before choosing one."
+      )
+      .font(.system(size: 14))
+      .foregroundStyle(.white.opacity(0.65))
 
       LoopTypeChooser(selection: $shown, explanation: LoopTypeChooser.whatStopsIt)
         .frame(maxWidth: 440)

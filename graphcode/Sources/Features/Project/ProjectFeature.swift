@@ -104,6 +104,16 @@ struct ProjectFeature {
     var nodePendingRename: UUID?
     var draftRenameTitle = ""
 
+    /// Set while a sketch's promotion form is up: which sketch, which shape it is
+    /// taking, and the one field that shape asks for. Flat fields to match how the
+    /// rename prompt and the creation form's `draft*` fields already work here.
+    var nodePendingPromotion: UUID?
+    var promotionTarget: LoopType = .goalBased
+    var promotionGoal = ""
+    var promotionPausesBeforeWritesOnly = false
+    var promotionInterval: IntervalChoice = .hourly
+    var promotionCustomInterval = ""
+
     /// Loops a human said really are a beginning, despite having no edges — the answer
     /// to a card's "Mark as entry". View state, not graph state: the graph's own answer
     /// to "does this start something" is its edges, and a stored flag would be a second
@@ -185,6 +195,10 @@ struct ProjectFeature {
     case renameTitleChanged(String)
     case renameNodeConfirmed
     case renameNodeCancelled
+    /// "Promote to…" on a sketch card: opens the one-field form for the chosen target.
+    case promoteNodeRequested(UUID, to: LoopType)
+    case promotionConfirmed
+    case promotionCancelled
     case deleteEdgeTapped(UUID)
     /// The sidebar dropped a drag-to-reorder: the moved ids in their new order, which
     /// take the front of `sidebarNodeOrder`; ids not in the list keep their relative
@@ -510,6 +524,16 @@ struct ProjectFeature {
             .graphCommand(projectPath: projectPath, command: .deleteNode(nodeID)))
         }
 
+      case .promoteNodeRequested(let nodeID, let target):
+        return openPromotionForm(&state, nodeID: nodeID, target: target)
+
+      case .promotionCancelled:
+        state.nodePendingPromotion = nil
+        return .none
+
+      case .promotionConfirmed:
+        return confirmPromotion(&state)
+
       case .renameNodeRequested(let nodeID):
         guard let node = state.graph.nodes[id: nodeID] else { return .none }
         state.nodePendingRename = nodeID
@@ -592,6 +616,30 @@ extension ProjectFeature {
   static var rememberedLoopType: LoopType {
     UserDefaults.standard.string(forKey: lastLoopTypeKey)
       .flatMap(LoopType.init(rawValue:)) ?? .goalBased
+  }
+
+  /// Resets the promotion form's one field and opens it for the chosen target — only
+  /// ever for a sketch; anything already shaped has nothing to promote.
+  private func openPromotionForm(
+    _ state: inout State, nodeID: UUID, target: LoopType
+  ) -> Effect<Action> {
+    guard state.graph.nodes[id: nodeID]?.loopType == .sketch else { return .none }
+    state.nodePendingPromotion = nodeID
+    state.promotionTarget = target
+    state.promotionGoal = ""
+    state.promotionPausesBeforeWritesOnly = false
+    state.promotionInterval = .hourly
+    state.promotionCustomInterval = ""
+    return .none
+  }
+
+  /// Sends the promotion the form currently means; a nil `promotion` (empty required
+  /// field) leaves the form up, matching the disabled Promote button beside it.
+  private func confirmPromotion(_ state: inout State) -> Effect<Action> {
+    guard let nodeID = state.nodePendingPromotion, let promotion = state.promotion
+    else { return .none }
+    state.nodePendingPromotion = nil
+    return send(state, .promoteNode(nodeID, promotion: promotion))
   }
 
   /// Resets the draft fields and opens the node form — the shared half of

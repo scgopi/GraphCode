@@ -12,7 +12,7 @@ struct SketchDraftFields: View {
   var body: some View {
     DraftField(
       label: "Starting note", qualifier: "optional — leave it blank and it opens quiet",
-      help: "No done check, no cadence — it works with you until you close it."
+      help: "No done check, no cadence — it works with you until you promote it or close it."
     ) {
       DraftProseField(
         placeholder: "e.g. where does the usage cap get read from?",
@@ -374,7 +374,7 @@ struct NodeDraftRecap: View {
     case .sketch:
       return
         "Opens a session\(location) and waits for you. Nothing is scheduled and nothing "
-        + "resolves on its own — it works with you until you close it."
+        + "resolves on its own — it works with you until you promote it or close it."
     case .goalBased:
       let check =
         draft.goal?.effectivePredicate == nil

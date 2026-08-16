@@ -1,7 +1,8 @@
 import GraphcodeKit
 import SwiftUI
 
-/// The five kinds of loop, as tiles that explain themselves.
+/// The four kinds of loop as tiles that explain themselves, with Sketch — the
+/// starting point that isn't yet any of them — banded above.
 ///
 /// It was a four-segment picker, and the problem with that wasn't the shape — it was
 /// that four segments can only *name* the types. A control that names four things reads
@@ -147,7 +148,7 @@ struct LoopTypeChooser: View {
   /// question a person actually has about an agent that runs on its own.
   static func whatStopsIt(_ type: LoopType) -> String {
     switch type {
-    case .sketch: "Never on its own — you close it when you're done"
+    case .sketch: "Never on its own — you close it, or promote it into a kind"
     case .goalBased: "Stops when your check passes"
     case .timeBased: "Never — it runs again each interval"
     case .turnBased: "Stops after every turn, for you"
