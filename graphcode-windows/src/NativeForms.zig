@@ -12,7 +12,7 @@ const DialogState = struct {
     values: [3][]u8 = .{ &.{}, &.{}, &.{} },
 };
 
-const Kind = enum { node, edge, settings };
+const Kind = enum { node, edge, settings, jump };
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeNativeForm");
 const ok_id = 9001;
 const cancel_id = 9002;
@@ -83,6 +83,7 @@ pub fn settings(
         freeValues(state);
         allocator.destroy(state);
     }
+
     state.values[0] = try allocator.dupe(u8, initial.daemon_pipe);
     state.values[1] = try allocator.dupe(u8, initial.support_directory);
     if (!(try show(state, "GraphCode settings", &.{ "Daemon pipe override", "Support directory" }))) return null;
@@ -91,6 +92,18 @@ pub fn settings(
         .support_directory = try allocator.dupe(u8, state.values[1]),
         .reconnect_automatically = initial.reconnect_automatically,
     };
+}
+
+pub fn jump(parent: c.HWND, allocator: std.mem.Allocator, initial: []const u8) !?[]u8 {
+    const state = try allocator.create(DialogState);
+    state.* = .{ .allocator = allocator, .kind = .jump, .parent = parent };
+    defer {
+        freeValues(state);
+        allocator.destroy(state);
+    }
+    state.values[0] = try allocator.dupe(u8, initial);
+    if (!(try show(state, "Jump to loop", &.{"Loop title or ID"}))) return null;
+    return try allocator.dupe(u8, state.values[0]);
 }
 
 fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !bool {
@@ -177,6 +190,10 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                     labels = .{ "Daemon pipe override", "Support directory", "" };
                     label_count = 2;
                 },
+                .jump => {
+                    labels = .{ "Loop title or ID", "", "" };
+                    label_count = 1;
+                },
             }
             for (labels[0..label_count], 0..) |label, index| {
                 createText(safe_hwnd, value, label, index);
@@ -239,6 +256,7 @@ fn readValues(state: *DialogState) void {
         .node => 1,
         .edge => 3,
         .settings => 2,
+        .jump => 1,
     };
     for (0..count) |index| {
         const length = c.GetWindowTextW(state.edits[index], &buffer, @intCast(buffer.len));

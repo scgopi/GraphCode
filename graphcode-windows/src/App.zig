@@ -54,6 +54,8 @@ pub const App = struct {
     smoke_workspace_focus_observed: bool = false,
     smoke_workspace_close_observed: bool = false,
     smoke_workspace_restart_observed: bool = false,
+    smoke_restart_index: ?usize = null,
+    smoke_restart_session: []const u8 = &.{},
 
     pub fn init(allocator: std.mem.Allocator) !*App {
         var client = try DaemonClient.init(allocator);
@@ -85,6 +87,7 @@ pub const App = struct {
         if (self.pending_project_path.len != 0) self.allocator.free(self.pending_project_path);
         if (self.status_override.len != 0) self.allocator.free(self.status_override);
         if (self.smoke_workspace_actions.len != 0) self.allocator.free(self.smoke_workspace_actions);
+        if (self.smoke_restart_session.len != 0) self.allocator.free(self.smoke_restart_session);
         self.allocator.destroy(self);
     }
 
@@ -301,7 +304,13 @@ pub const App = struct {
     }
 
     fn openSettings(self: *App) void {
-        const draft = NativeForms.settings(self.window.hwnd, self.allocator, .{}) catch {
+        const initial = self.client.effectiveSettings(self.allocator) catch {
+            self.setStatus("Unable to load current settings");
+            return;
+        };
+        defer self.allocator.free(initial.daemon_pipe);
+        defer self.allocator.free(initial.support_directory);
+        const draft = NativeForms.settings(self.window.hwnd, self.allocator, initial) catch {
             self.setStatus("Unable to open settings form");
             return;
         } orelse return;
@@ -311,6 +320,28 @@ pub const App = struct {
             self.setStatus("Invalid daemon settings");
             return;
         };
+    }
+
+    fn jumpToNode(self: *App) void {
+        const graph = self.model.graph orelse {
+            self.setStatus("No graph is open");
+            return;
+        };
+        const query = NativeForms.jump(self.window.hwnd, self.allocator, "") catch {
+            self.setStatus("Unable to open jump form");
+            return;
+        } orelse return;
+        defer self.allocator.free(query);
+        const next = Forms.jumpTo(graph.nodes.items, query, self.model.selected_node) orelse {
+            self.setStatus("No matching loop");
+            return;
+        };
+        self.model.selected_node = next;
+        self.sidebar_scroll = Sidebar.clampScroll(
+            Sidebar.loopRowTop(self.model.recent_projects.items.len, next) - 24,
+            Sidebar.maxScroll(&self.model, if (self.worktree_inspection) |*value| value else null, 700),
+        );
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
     fn openSelectedNode(self: *App) void {
@@ -485,16 +516,7 @@ pub const App = struct {
             .send_node => self.sendSelectedNode(),
             .edit_node => self.editSelectedNode(),
             .create_edge => self.createEdge(),
-            .jump_next => {
-                if (self.model.graph) |graph| {
-                    self.model.selected_node = Forms.jumpTo(
-                        graph.nodes.items,
-                        "",
-                        self.model.selected_node,
-                    );
-                }
-                _ = c.InvalidateRect(self.window.hwnd, null, 0);
-            },
+            .jump_next => self.jumpToNode(),
             .settings => self.openSettings(),
             .cycle_attention => {
                 self.model.selectNextAttention();
@@ -655,6 +677,16 @@ fn onWindowMessage(
             if (app.client.isIdle()) app.smoke_idle_ticks += 1 else app.smoke_idle_ticks = 0;
             if (app.workspace) |*workspace| {
                 workspace.poll();
+                if (!app.smoke_workspace_restart_observed) {
+                    if (app.smoke_restart_index) |index| {
+                        if (workspace.surfaceIdentityReady(index, app.smoke_restart_session, workspace.projectPath())) {
+                            app.smoke_workspace_restart_observed = true;
+                            app.allocator.free(app.smoke_restart_session);
+                            app.smoke_restart_session = &.{};
+                            app.smoke_restart_index = null;
+                        }
+                    }
+                }
                 if (workspace.inputStatus()) |input_message| app.setStatus(input_message);
             }
             if (app.smoke and app.smoke_tick == 8) {
@@ -877,7 +909,7 @@ fn runSmokeWorkspaceActions(self: *App) void {
                 workspacePaneCount(workspace) == before + 1;
         } else if (std.mem.eql(u8, action, "select")) {
             const before = workspace.layout.selected_tab;
-            self.dispatchWorkspaceKey(0x22, true, false);
+            workspace.dispatchKeyForTest(0x22, true, false);
             self.smoke_workspace_select_observed = workspace.layout.selected_tab != before;
         } else if (std.mem.eql(u8, action, "focus")) {
             if (workspace.layout.selected()) |tab| {
@@ -885,7 +917,7 @@ fn runSmokeWorkspaceActions(self: *App) void {
                     self.handleAction(.select_previous_tab);
             }
             const before = workspace.active_surface;
-            self.dispatchWorkspaceKey(0xDD, true, false);
+            workspace.dispatchKeyForTest(0xDD, true, false);
             self.smoke_workspace_focus_observed = workspace.active_surface != before;
         } else if (std.mem.eql(u8, action, "close")) {
             const before = workspacePaneCount(workspace);
@@ -901,6 +933,10 @@ fn runSmokeWorkspaceActions(self: *App) void {
             const before_tabs = workspace.tabCount();
             const before_panes = workspacePaneCount(workspace);
             const before_selected = workspace.layout.selected_tab;
+            const session = self.allocator.dupe(u8, workspace.surfaces[index].session_name) catch {
+                self.smoke_workspace_action_failed = true;
+                continue;
+            };
             if (!workspace.hasSurface(index) and !workspace.hasAttach(index)) {
                 self.smoke_workspace_action_failed = true;
                 self.setStatus("Smoke workspace restart has no live slot");
@@ -909,10 +945,15 @@ fn runSmokeWorkspaceActions(self: *App) void {
                     self.smoke_workspace_action_failed = true;
                     self.setStatus("Smoke workspace restart failed");
                 };
-                self.smoke_workspace_restart_observed = !self.smoke_workspace_action_failed and
-                    workspace.tabCount() == before_tabs and
-                    workspacePaneCount(workspace) == before_panes and
-                    workspace.layout.selected_tab == before_selected;
+                self.smoke_workspace_restart_observed = false;
+                self.smoke_restart_index = index;
+                self.smoke_restart_session = session;
+                if (workspace.tabCount() != before_tabs or
+                    workspacePaneCount(workspace) != before_panes or
+                    workspace.layout.selected_tab != before_selected)
+                {
+                    self.smoke_workspace_action_failed = true;
+                }
             }
         }
     }

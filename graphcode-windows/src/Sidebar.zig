@@ -28,7 +28,7 @@ pub fn draw(
         y += 62;
         drawText(hdc, allocator, "Loops", 18, y + 10, 11, 0x007A7A7A);
         for (graph.nodes.items, 0..) |node, index| {
-            const row_y = loopRowTop(model.recent_projects.items.len, index) - scroll_offset;
+            const row_y = layoutFor(model, inspection).loopTop(index) - scroll_offset;
             drawText(hdc, allocator, node.title, 24, row_y, 11, 0x00E6E6E6);
         }
         y += @as(i32, @intCast(graph.nodes.items.len * 24));
@@ -48,7 +48,7 @@ pub fn draw(
             y += 24;
         for (value.entries.items, 0..) |entry, index| {
                 const selected = std.mem.eql(u8, entry.path, selected_worktree_path);
-            const row_y = worktreeRowTop(model.recent_projects.items.len, graph.nodes.items.len, index) - scroll_offset;
+            const row_y = layoutFor(model, inspection).worktreeTop(index) - scroll_offset;
             if (selected and WorktreeStatus.decision(entry) == .reclaimable)
                 fill(hdc, rect(12, row_y - 3, Tokens.sidebar_width - 12, row_y + 25), 0x003A3A44);
             drawText(hdc, allocator, entry.path, 24, row_y, 11, 0x00E6E6E6);
@@ -72,18 +72,48 @@ pub fn draw(
 }
 
 pub fn loopRowTop(project_count: usize, index: usize) i32 {
-    return Tokens.header_height + 78 + @as(i32, @intCast(project_count * 24)) + 62 + 24 +
-        @as(i32, @intCast(index * 24));
+    const layout = Layout{ .base = Tokens.header_height + 78, .project_count = project_count, .loop_count = 0, .worktree_count = 0 };
+    return layout.loopTop(index);
 }
 
 pub fn worktreeRowTop(project_count: usize, loop_count: usize, index: usize) i32 {
-    return Tokens.header_height + 78 + @as(i32, @intCast(project_count * 24)) + 62 + 54 + 24 +
-        @as(i32, @intCast(loop_count * 24)) +
-        @as(i32, @intCast(index * 34));
+    const layout = Layout{ .base = Tokens.header_height + 78, .project_count = project_count, .loop_count = loop_count, .worktree_count = 0 };
+    return layout.worktreeTop(index);
 }
 
 pub const RowKind = enum { project, overview, loop, worktree };
 pub const Row = struct { kind: RowKind, index: usize, top: i32 };
+pub const Layout = struct {
+    base: i32,
+    project_count: usize,
+    loop_count: usize,
+    worktree_count: usize,
+
+    pub fn projectTop(self: Layout, index: usize) i32 {
+        return self.base + @as(i32, @intCast(index * 24));
+    }
+    pub fn overviewTop(self: Layout) i32 {
+        return self.base + @as(i32, @intCast(self.project_count * 24)) + 24;
+    }
+    pub fn loopTop(self: Layout, index: usize) i32 {
+        return self.base + @as(i32, @intCast(self.project_count * 24)) + 86 +
+            @as(i32, @intCast(index * 24));
+    }
+    pub fn worktreeTop(self: Layout, index: usize) i32 {
+        return self.base + @as(i32, @intCast(self.project_count * 24)) + 140 +
+            @as(i32, @intCast(self.loop_count * 24)) +
+            @as(i32, @intCast(index * 34));
+    }
+};
+
+pub fn layoutFor(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection) Layout {
+    return .{
+        .base = Tokens.header_height + 78,
+        .project_count = model.recent_projects.items.len,
+        .loop_count = if (model.graph) |graph| graph.nodes.items.len else 0,
+        .worktree_count = if (inspection) |value| value.entries.items.len else 0,
+    };
+}
 
 pub fn rowAt(
     x: i32,
@@ -94,25 +124,24 @@ pub fn rowAt(
     viewport_bottom: i32,
 ) ?Row {
     if (x < 0 or x >= Tokens.sidebar_width or y < Tokens.header_height or y >= viewport_bottom) return null;
-    const project_top = Tokens.header_height + 78 - scroll_offset;
+    const layout = layoutFor(model, inspection);
+    const project_top = layout.projectTop(0) - scroll_offset;
     if (y >= project_top and y < project_top + @as(i32, @intCast(model.recent_projects.items.len * 24))) {
         return .{ .kind = .project, .index = @intCast(@divTrunc(y - project_top, 24)), .top = project_top };
     }
     if (model.graph != null) {
-        const overview_top = Tokens.header_height + 78 +
-            @as(i32, @intCast(model.recent_projects.items.len * 24)) - scroll_offset;
-        if (y >= overview_top and y < overview_top + 24) {
+        const overview_top = layout.overviewTop() - scroll_offset;
+        if (y >= overview_top and y < overview_top + 38) {
             return .{ .kind = .overview, .index = 0, .top = overview_top };
         }
-        const loop_top = overview_top + 24;
+        const loop_top = layout.loopTop(0) - scroll_offset;
         const loop_count = model.graph.?.nodes.items.len;
         if (y >= loop_top and y < loop_top + @as(i32, @intCast(loop_count * 24))) {
             return .{ .kind = .loop, .index = @intCast(@divTrunc(y - loop_top, 24)), .top = loop_top };
         }
     }
     if (inspection) |value| {
-        const loop_count = if (model.graph) |graph| graph.nodes.items.len else 0;
-        const worktree_top = worktreeRowTop(model.recent_projects.items.len, loop_count, 0) - scroll_offset;
+        const worktree_top = layout.worktreeTop(0) - scroll_offset;
         if (y >= worktree_top and y < worktree_top + @as(i32, @intCast(value.entries.items.len * 34))) {
             return .{ .kind = .worktree, .index = @intCast(@divTrunc(y - worktree_top, 34)), .top = worktree_top };
         }
@@ -151,7 +180,8 @@ pub fn clampScroll(value: i32, maximum: i32) i32 {
 pub fn hitTestWorktree(x: i32, y: i32, project_count: usize, count: usize, scroll_offset: i32, viewport_bottom: i32) ?usize {
     if (x < 12 or x >= Tokens.sidebar_width) return null;
     if (y < Tokens.header_height or y >= viewport_bottom) return null;
-    const top = worktreeRowTop(project_count, 0, 0) - scroll_offset;
+    const layout = Layout{ .base = Tokens.header_height + 78, .project_count = project_count, .loop_count = 0, .worktree_count = 0 };
+    const top = layout.worktreeTop(0) - scroll_offset;
     if (y < top) return null;
     const index: usize = @intCast(@divTrunc(y - top, 34));
     if (index >= count) return null;
@@ -195,6 +225,26 @@ test "worktree row hit testing selects only visible rows" {
     try std.testing.expectEqual(@as(?usize, null), hitTestWorktree(Tokens.sidebar_width + 1, top, 2, 2, 0, 700));
     try std.testing.expectEqual(@as(?usize, null), hitTestWorktree(24, top + 68, 2, 2, 0, 700));
     try std.testing.expectEqual(@as(i32, worktreeRowTop(3, 0, 0) - worktreeRowTop(1, 0, 0)), 48);
+}
+
+test "shared sidebar layout routes every loop row after project rows and scroll" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    try model.recent_projects.append(.{ .name = @constCast("Project"), .path = @constCast("C:\\project") });
+    var graph = GraphModel.Graph{
+        .project = .{ .path = @constCast("C:\\project"), .name = @constCast("Project") },
+        .nodes = std.array_list.Managed(GraphModel.Node).init(std.testing.allocator),
+        .edges = std.array_list.Managed(GraphModel.Edge).init(std.testing.allocator),
+    };
+    try graph.nodes.append(.{ .id = @constCast("node-7"), .title = @constCast("Seven"), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") });
+    try graph.nodes.append(.{ .id = @constCast("node-42"), .title = @constCast("Forty two"), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") });
+    model.graph = graph;
+    const layout = layoutFor(&model, null);
+    for (0..2) |index| {
+        const row = rowAt(24, layout.loopTop(index) - 11, &model, null, 11, 700) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(RowKind.loop, row.kind);
+        try std.testing.expectEqual(index, row.index);
+    }
 }
 
 test "sidebar scroll clamps overflow, shrink, and resize" {

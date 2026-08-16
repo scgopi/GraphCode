@@ -1,6 +1,7 @@
 const std = @import("std");
 const FrameBuffer = @import("FrameBuffer.zig").FrameBuffer;
 const Wire = @import("Wire.zig");
+const Forms = @import("Forms.zig");
 const c = @import("Win32.zig").c;
 
 pub const EventCallback = *const fn (
@@ -134,9 +135,24 @@ pub const DaemonClient = struct {
         support_directory: []const u8,
     ) !void {
         try self.validateSettings(pipe_override, support_directory);
-        setTestEnvironment("GRAPHCODE_DAEMON_PIPE", if (pipe_override.len == 0) null else pipe_override);
-        setTestEnvironment("GRAPHCODE_SUPPORT_DIR", if (support_directory.len == 0) null else support_directory);
+        const old_pipe = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_DAEMON_PIPE") catch null;
+        defer if (old_pipe) |value| self.allocator.free(value);
+        const old_support = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SUPPORT_DIR") catch null;
+        defer if (old_support) |value| self.allocator.free(value);
+        setEnvironmentChecked("GRAPHCODE_DAEMON_PIPE", if (pipe_override.len == 0) null else pipe_override) catch return error.EnvironmentUpdateFailed;
+        setEnvironmentChecked("GRAPHCODE_SUPPORT_DIR", if (support_directory.len == 0) null else support_directory) catch {
+            setEnvironmentChecked("GRAPHCODE_DAEMON_PIPE", old_pipe) catch {};
+            return error.EnvironmentUpdateFailed;
+        };
         self.reconnect();
+    }
+
+    pub fn effectiveSettings(self: *DaemonClient, allocator: std.mem.Allocator) !Forms.Settings {
+        _ = self;
+        const pipe = std.process.getEnvVarOwned(allocator, "GRAPHCODE_DAEMON_PIPE") catch try allocator.dupe(u8, "");
+        errdefer allocator.free(pipe);
+        const support = std.process.getEnvVarOwned(allocator, "GRAPHCODE_SUPPORT_DIR") catch try allocator.dupe(u8, "");
+        return .{ .daemon_pipe = pipe, .support_directory = support };
     }
 
     fn validateSupportDirectory(allocator: std.mem.Allocator, support_directory: []const u8) !void {
@@ -867,6 +883,19 @@ fn setTestEnvironment(name: []const u8, value: ?[]const u8) void {
         null;
     defer if (value_wide) |wide| std.heap.page_allocator.free(wide);
     _ = c.SetEnvironmentVariableW(name_wide.ptr, if (value_wide) |wide| wide.ptr else null);
+}
+
+fn setEnvironmentChecked(name: []const u8, value: ?[]const u8) !void {
+    if (std.process.getEnvVarOwned(std.heap.page_allocator, "GRAPHCODE_TEST_FAIL_SET_ENV")) |fail| {
+        defer std.heap.page_allocator.free(fail);
+        if (std.mem.eql(u8, fail, name)) return error.EnvironmentUpdateFailed;
+    } else |_| {}
+    const name_wide = try utf8ToWide(std.heap.page_allocator, name);
+    defer std.heap.page_allocator.free(name_wide);
+    const value_wide = if (value) |text| try utf8ToWide(std.heap.page_allocator, text) else null;
+    defer if (value_wide) |wide| std.heap.page_allocator.free(wide);
+    if (c.SetEnvironmentVariableW(name_wide.ptr, if (value_wide) |wide| wide.ptr else null) == 0)
+        return error.EnvironmentUpdateFailed;
 }
 
 fn endpointName(allocator: std.mem.Allocator) ![]u8 {

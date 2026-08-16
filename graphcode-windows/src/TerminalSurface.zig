@@ -246,18 +246,46 @@ pub const Workspace = struct {
 
     pub fn rebindProject(self: *Workspace, project_path: []const u8) !bool {
         if (project_path.len == 0) return false;
-        const changed = !std.mem.eql(u8, self.project_key, project_path) or
-            !std.mem.eql(u8, self.project_path, project_path);
-        if (!changed) return false;
+        const key_changed = !std.mem.eql(u8, self.project_key, project_path);
+        const path_changed = !std.mem.eql(u8, self.project_path, project_path);
+        if (!key_changed and !path_changed) return false;
+
+        const new_project_key = try self.allocator.dupe(u8, project_path);
+        errdefer self.allocator.free(new_project_key);
         const new_project_path = try self.allocator.dupe(u8, project_path);
         errdefer self.allocator.free(new_project_path);
-        if (!std.mem.eql(u8, self.project_key, project_path)) {
-            try self.setProject(project_path);
+        const new_layout_path = try self.layoutPathForProject(project_path);
+        errdefer self.allocator.free(new_layout_path);
+        var new_layout: WorkspaceLayout.Layout = undefined;
+        if (key_changed) {
+            new_layout = try WorkspaceLayout.Layout.init(self.allocator, project_path);
+            errdefer new_layout.deinit();
+            if (WorkspaceLayout.Layout.load(self.allocator, new_layout_path, project_path)) |restored| {
+                new_layout.deinit();
+                new_layout = restored;
+            } else |_| {}
+        } else {
+            new_layout = self.layout;
         }
-        const old_project_path = self.project_path;
+
+        const old_key = self.project_key;
+        const old_path = self.project_path;
+        const old_layout_path = self.layout_path;
+        var old_layout = self.layout;
+        self.project_key = new_project_key;
         self.project_path = new_project_path;
-        if (old_project_path.len != 0) self.allocator.free(old_project_path);
-        return changed;
+        self.layout_path = new_layout_path;
+        self.layout = new_layout;
+        for (self.surfaces, 0..) |_, index| self.destroySurface(index);
+        self.clearAllRecreateState();
+        for (&self.recreate_due_ms) |*due| due.* = 0;
+        for (&self.recreate_delay_ms) |*delay| delay.* = 100;
+        if (key_changed) old_layout.deinit();
+        self.allocator.free(old_key);
+        self.allocator.free(old_path);
+        self.allocator.free(old_layout_path);
+        self.restorePersistedSurfaces();
+        return true;
     }
 
     pub fn projectPath(self: *const Workspace) []const u8 {
@@ -377,6 +405,7 @@ pub const Workspace = struct {
             }
 
             self.surfaces[index].session_name = owned_session;
+            self.surfaces[index].project_path = try self.allocator.dupe(u8, self.project_path);
             self.surfaces[index].destroyed = false;
             self.surfaces[index].destroying = false;
             clearCells(&self.surfaces[index]);
@@ -705,6 +734,17 @@ pub const Workspace = struct {
             if (slot.surface != null or slot.attach != null) return index;
         }
         return null;
+    }
+
+    pub fn surfaceIdentityReady(self: *const Workspace, index: usize, session: []const u8, project: []const u8) bool {
+        if (index >= self.surfaces.len) return false;
+        const slot = &self.surfaces[index];
+        return (slot.surface != null or slot.attach != null) and
+            surfaceIdentityMatches(slot, project, session);
+    }
+
+    pub fn dispatchKeyForTest(self: *Workspace, key: usize, ctrl: bool, shift: bool) void {
+        if (self.key_callback) |callback| callback(self.key_callback_context, key, ctrl, shift);
     }
 
     pub fn topologyHealthy(self: *const Workspace) bool {
