@@ -13,6 +13,7 @@ on:
       - "Tools/windows/package.ps1"
       - "Tools/windows/PACKAGING.md"
       - "Tools/windows/Tests/Packaging.Tests.ps1"
+      - "Tools/windows/Tests/Packaging.RealLifecycle.Tests.ps1"
       - "graphcode-windows/package-metadata.json"
       - "investigation/windows-implementation-plan.md"
 

@@ -29,6 +29,25 @@ function Resolve-Input([string] $path) {
   if (-not (Test-Path -LiteralPath $path -PathType Container)) { Fail "input directory does not exist: $path" }
   return (Resolve-Path -LiteralPath $path).Path
 }
+function Save-Shortcut([string] $destination) {
+  foreach ($path in @(
+      (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\GraphCode.lnk"),
+      (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\GraphCode.cmd")
+    )) {
+    if (Test-Path $path) {
+      Copy-Item $path (Join-Path $destination (Split-Path $path -Leaf)) -Force
+    }
+  }
+}
+function Restore-Shortcut([string] $source) {
+  Set-Shortcut $false
+  foreach ($name in @("GraphCode.lnk", "GraphCode.cmd")) {
+    $path = Join-Path $source $name
+    if (Test-Path $path) {
+      Copy-Item $path (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$name") -Force
+    }
+  }
+}
 function Copy-Tree([string] $source, [string] $destination) {
   New-Item -ItemType Directory -Force -Path $destination | Out-Null
   Get-ChildItem -LiteralPath $source -File -Recurse | ForEach-Object {
@@ -40,7 +59,10 @@ function Copy-Tree([string] $source, [string] $destination) {
 }
 function Get-Manifest([string] $root) {
   @(Get-ChildItem -LiteralPath $root -File -Recurse |
-    Where-Object { $_.Name -notin @("manifest.json", "checksums.sha256") } |
+    Where-Object {
+      $_.FullName -ne (Join-Path $root "manifest.json") -and
+      $_.FullName -ne (Join-Path $root "checksums.sha256")
+    } |
     ForEach-Object {
       $relative = $_.FullName.Substring($root.Length).TrimStart("\", "/").Replace("\", "/")
       [ordered]@{
@@ -57,14 +79,20 @@ function Normalize-ManifestPath([string] $path) {
     $normalized -notmatch "^[A-Za-z]:/" -and $normalized -notmatch "://" ) `
     "manifest contains an absolute path: $path"
   $parts = $normalized.Split("/")
+  $leaf = $parts[-1]
   Require ($parts -notcontains "" -and $parts -notcontains "." -and $parts -notcontains "..") `
     "manifest contains an unsafe path: $path"
+  Require ($leaf -notin @("manifest.json", "checksums.sha256")) `
+    "manifest contains a reserved filename: $path"
   Require ($normalized -notmatch "[<>:`"|?*]") "manifest contains an invalid path: $path"
   return $normalized
 }
 function Get-ActualPackageFiles([string] $root) {
   @(Get-ChildItem -LiteralPath $root -File -Recurse |
-    Where-Object { $_.Name -notin @("manifest.json", "checksums.sha256") } |
+    Where-Object {
+      $_.FullName -ne (Join-Path $root "manifest.json") -and
+      $_.FullName -ne (Join-Path $root "checksums.sha256")
+    } |
     ForEach-Object {
       Normalize-ManifestPath $_.FullName.Substring($root.Length).TrimStart("\", "/")
     } | Sort-Object -Unique)
@@ -101,6 +129,8 @@ function Assert-Package([string] $root) {
   Require (@(Get-ChildItem -LiteralPath (Join-Path $root "bin") -Filter *.dll -ErrorAction SilentlyContinue).Count -gt 0) "Swift runtime DLLs are missing"
   Require (Test-Path -LiteralPath (Join-Path $root "LICENSE")) "LICENSE is missing"
   Require (Test-Path -LiteralPath (Join-Path $root "THIRD-PARTY-NOTICES.txt")) "third-party notices are missing"
+  Require (Test-Path -LiteralPath (Join-Path $root "licenses\WINGHOSTTY-LICENSE.txt")) "Winghostty license is missing"
+  Require (Test-Path -LiteralPath (Join-Path $root "licenses\ZMX-LICENSE.txt")) "zmx license is missing"
   Require (Test-Path -LiteralPath (Join-Path $root "provider-provenance.json")) "provider provenance is missing"
   Require ($metadata.platform -eq "windows-x86_64") "unsupported package platform"
   return $metadata
@@ -138,9 +168,14 @@ function Read-ProviderProvenance([string] $root) {
     $pin = $pins.$provider
     Require ($p.sha -eq $pin.sha -and $p.repository -eq $pin.repository) "$provider provenance pin mismatch"
     Require ([string]$p.sha256 -match "^[0-9a-fA-F]{64}$") "$provider provenance digest is missing"
+    $normalizedPath = Normalize-ManifestPath ([string]$p.packagePath)
+    Require ($normalizedPath -eq $p.packagePath) "$provider provenance path is not normalized"
     $artifact = Join-Path $root ($p.packagePath -replace "/", "\")
     Require (Test-Path $artifact -PathType Leaf) "$provider provenance artifact is missing"
     Require ((Get-FileHash $artifact -Algorithm SHA256).Hash.ToLowerInvariant() -eq $p.sha256.ToLowerInvariant()) "$provider provenance digest mismatch"
+    $licensePath = Join-Path $root ($p.licensePath -replace "/", "\")
+    Require (Test-Path $licensePath -PathType Leaf) "$provider license file is missing"
+    Require ((Get-FileHash $licensePath -Algorithm SHA256).Hash.ToLowerInvariant() -eq $p.licenseSha256.ToLowerInvariant()) "$provider license digest mismatch"
   }
   return $provenance
 }
@@ -185,20 +220,31 @@ function Build-Package {
       zmx = @{ repository = $pins.zmx.repository; sha = $pins.zmx.sha; packagePath = "bin/zmx.exe"; sha256 = $zmxDigest }
     } | ConvertTo-Json -Depth 5 | Set-Content $provenancePath -Encoding utf8
   } else {
-    Require (Test-Path (Join-Path $source "provider-provenance.json")) "InputDirectory must contain provider-provenance.json"
-    Copy-Item (Join-Path $source "provider-provenance.json") $provenancePath -Force
+    Fail "trusted pinned Winghostty and zmx roots are required; fixture provenance is not accepted"
   }
   foreach ($name in $required + "graphcode-windows.exe") {
     Require (Test-Path (Join-Path $root "bin\$name")) "$name was not found; pass -InputDirectory with release outputs"
   }
   Require (@(Get-ChildItem (Join-Path $root "bin") -Filter *.dll).Count -gt 0) "Swift runtime DLLs were not found"
   Copy-Item (Join-Path $repoRoot "LICENSE") (Join-Path $root "LICENSE") -Force
-  $wingLicense = if ($WinghosttyRoot) { Get-Content (Join-Path $WinghosttyRoot "LICENSE") -Raw } else { Get-Content (Join-Path $source "WINGHOSTTY-LICENSE.txt") -Raw }
-  $zmxLicense = if ($ZmxRoot) { Get-Content (Join-Path $ZmxRoot "LICENSE") -Raw } else { Get-Content (Join-Path $source "ZMX-LICENSE.txt") -Raw }
-  Require ($wingLicense -match "Permission is hereby granted" -and
-    $zmxLicense -match "Permission is hereby granted" -and
-    $wingLicense -match "THE SOFTWARE IS PROVIDED" -and
-    $zmxLicense -match "THE SOFTWARE IS PROVIDED") "provider license texts are incomplete"
+  Require ($WinghosttyRoot -and $ZmxRoot) "trusted provider roots are required for license attribution"
+  $wingLicensePath = Join-Path $WinghosttyRoot "LICENSE"
+  $zmxLicensePath = Join-Path $ZmxRoot "LICENSE"
+  Require (Test-Path $wingLicensePath -PathType Leaf) "Winghostty LICENSE is missing"
+  Require (Test-Path $zmxLicensePath -PathType Leaf) "zmx LICENSE is missing"
+  $wingLicense = Get-Content $wingLicensePath -Raw
+  $zmxLicense = Get-Content $zmxLicensePath -Raw
+  New-Item -ItemType Directory -Force (Join-Path $root "licenses") | Out-Null
+  Set-Content (Join-Path $root "licenses\WINGHOSTTY-LICENSE.txt") $wingLicense -Encoding utf8
+  Set-Content (Join-Path $root "licenses\ZMX-LICENSE.txt") $zmxLicense -Encoding utf8
+  $provenance = Get-Content $provenancePath -Raw | ConvertFrom-Json
+  $provenance.winghostty | Add-Member -NotePropertyName licensePath -NotePropertyValue "licenses/WINGHOSTTY-LICENSE.txt"
+  $provenance.winghostty | Add-Member -NotePropertyName licenseSha256 -NotePropertyValue `
+    ((Get-FileHash (Join-Path $root "licenses\WINGHOSTTY-LICENSE.txt") -Algorithm SHA256).Hash.ToLowerInvariant())
+  $provenance.zmx | Add-Member -NotePropertyName licensePath -NotePropertyValue "licenses/ZMX-LICENSE.txt"
+  $provenance.zmx | Add-Member -NotePropertyName licenseSha256 -NotePropertyValue `
+    ((Get-FileHash (Join-Path $root "licenses\ZMX-LICENSE.txt") -Algorithm SHA256).Hash.ToLowerInvariant())
+  $provenance | ConvertTo-Json -Depth 8 | Set-Content $provenancePath -Encoding utf8
   @"
 GraphCode provider attributions
 
@@ -291,10 +337,15 @@ function Get-InstalledDaemons {
     })
 }
 function Stop-InstalledDaemon {
+  & schtasks.exe /End /TN "GraphCode daemon" *> $null
+  $deadline = [DateTime]::UtcNow.AddSeconds(8)
+  while (@(Get-InstalledDaemons).Count -gt 0 -and [DateTime]::UtcNow -lt $deadline) {
+    Start-Sleep -Milliseconds 200
+  }
   foreach ($process in @(Get-InstalledDaemons)) {
     Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
   }
-  $deadline = [DateTime]::UtcNow.AddSeconds(10)
+  $deadline = [DateTime]::UtcNow.AddSeconds(4)
   while (@(Get-InstalledDaemons).Count -gt 0 -and [DateTime]::UtcNow -lt $deadline) {
     Start-Sleep -Milliseconds 200
   }
@@ -307,7 +358,13 @@ function Remove-DaemonTask {
 function Start-DaemonTask {
   $support = Join-Path $env:USERPROFILE ".graphcode"
   New-Item -ItemType Directory -Force $support | Out-Null
-  $taskCommand = "cmd.exe /d /c `"set GRAPHCODE_SUPPORT_DIR=$support&& `"$InstallRoot\bin\graphcoded.exe`"`""
+  $launcher = Join-Path $InstallRoot "graphcoded-launcher.cmd"
+  Set-Content -LiteralPath $launcher -Encoding ascii -Value @(
+    "@echo off"
+    "set `"GRAPHCODE_SUPPORT_DIR=$support`""
+    "`"$InstallRoot\bin\graphcoded.exe`""
+  )
+  $taskCommand = "`"$launcher`""
   & schtasks.exe /Create /TN "GraphCode daemon" /SC ONLOGON /TR $taskCommand /F *> $null
   Require ($LASTEXITCODE -eq 0) "scheduled-task registration failed"
   & schtasks.exe /Run /TN "GraphCode daemon" *> $null
@@ -336,6 +393,9 @@ function Install-Package([bool] $upgrade) {
   $stage = Join-Path $parent ".GraphCode-install-$([guid]::NewGuid())"
   Copy-Tree $root $stage
   $backup = Join-Path $parent ".GraphCode-rollback-$([guid]::NewGuid())"
+  $shortcutBackup = Join-Path $parent ".GraphCode-shortcut-$([guid]::NewGuid())"
+  New-Item -ItemType Directory -Force $shortcutBackup | Out-Null
+  Save-Shortcut $shortcutBackup
   $oldPath = [Environment]::GetEnvironmentVariable("Path", "User")
   try {
     if (-not $NoScheduledTask) { Stop-InstalledDaemon; Remove-DaemonTask }
@@ -347,16 +407,20 @@ function Install-Package([bool] $upgrade) {
       Start-DaemonTask
     }
   } catch {
+    if (-not $NoScheduledTask) {
+      try { Stop-InstalledDaemon } catch { }
+      Remove-DaemonTask
+    }
     if (Test-Path $InstallRoot) { Remove-Item $InstallRoot -Recurse -Force }
     if (Test-Path $backup) { Move-Item $backup $InstallRoot }
     [Environment]::SetEnvironmentVariable("Path", $oldPath, "User")
-    Set-Shortcut $false
+    Restore-Shortcut $shortcutBackup
     if (-not $NoScheduledTask -and (Test-Path (Join-Path $InstallRoot "bin\graphcoded.exe"))) {
-      try { Start-DaemonTask } catch { }
+      Start-DaemonTask
     }
     throw
   } finally {
-    Remove-Item $stage,$backup -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item $stage,$backup,$shortcutBackup -Recurse -Force -ErrorAction SilentlyContinue
   }
     Write-Output "Installed GraphCode $($metadata.version) at $InstallRoot"
   } finally {
