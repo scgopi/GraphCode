@@ -383,17 +383,16 @@ if ($Run -eq 0) {
   $runs = [System.Collections.Generic.List[string]]::new()
   $metricRuns = [System.Collections.Generic.List[object]]::new()
   for ($index = 1; $index -le 3; $index++) {
-    if ($Environment -and -not $SchemaOnly) {
-      $output = & $pwsh -NoProfile -File $PSCommandPath -Run $index -Environment -SchemaOnly:$SchemaOnly
-    } else {
-      $output = & $pwsh -NoProfile -File $PSCommandPath -Run $index
-    }
+    $childArgs = @("-NoProfile", "-File", $PSCommandPath, "-Run", $index)
+    if ($Environment) { $childArgs += "-Environment" }
+    if ($SchemaOnly) { $childArgs += "-SchemaOnly" }
+    $output = & $pwsh @childArgs
     if ($LASTEXITCODE -ne 0) {
       throw "hardening repeated run $index failed with exit code $LASTEXITCODE"
     }
     $runs.Add(($output -join "`n"))
     $metrics = @($output | Where-Object { $_ -is [string] -and $_.StartsWith("PRODUCT_RESOURCE_METRICS_JSON=") })
-    if ($Environment) {
+    if (-not $SchemaOnly) {
       Assert-True ($metrics.Count -gt 0) "run $index emitted no typed product resource metrics"
     }
     $runSnapshots = [System.Collections.Generic.List[object]]::new()

@@ -7,6 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
 $shellRoot = Join-Path $repoRoot "graphcode-windows"
+$shellScript = Join-Path $repoRoot "Tools\windows\windows-shell.ps1"
 
 if ($List) {
   @(
@@ -27,6 +28,16 @@ function Assert-Contract([object] $condition, [string] $message) {
     throw "Windows shell contract: $message"
   }
 }
+
+if ((Get-Content $shellScript -Raw) -match '(?m)^\s*Write-OwnedResourceMetrics\s*$') {
+  throw "Windows shell contract: empty resource metric phase"
+}
+Assert-Contract ((Get-Content $shellScript -Raw) -match 'inputApp\.Id') `
+  "large-paste workload does not record its launched PID"
+Assert-Contract ((Get-Content $shellScript -Raw) -match 'windows-shell:large-paste') `
+  "large-paste workload has no dedicated metric phase"
+Assert-Contract ((Get-Content $shellScript -Raw) -notmatch 'restart.*large-paste') `
+  "restart path can satisfy large-paste phase"
 
 function Invoke-Native([string] $description, [scriptblock] $command) {
   Write-Host "==> $description"

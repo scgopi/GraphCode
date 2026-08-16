@@ -226,7 +226,7 @@ try {
     Invoke-ShellProcess $arguments "windows-shell:topology"
   }
   Record-TestOwnedSessions
-  Write-OwnedResourceMetrics
+  Write-OwnedResourceMetrics "windows-shell:topology"
   if ($UseStubDaemon) {
     Invoke-Native "GraphCode Windows shell restart smoke" {
       Invoke-ShellProcess $arguments "windows-shell:large-paste"
@@ -301,6 +301,11 @@ try {
     Remove-Item -LiteralPath $inputError -Force -ErrorAction SilentlyContinue
     $inputApp = Start-Process -FilePath $app -ArgumentList @("--smoke") -PassThru `
       -RedirectStandardError $inputError
+    [void] $ownedProcessIds.Add($inputApp.Id)
+    $shellProcess = $inputApp
+    Start-Sleep -Milliseconds 250
+    Record-TestOwnedSessions
+    Write-OwnedResourceMetrics "windows-shell:large-paste"
     [void] $inputApp.Handle
     if (-not $inputApp.WaitForExit(8000)) {
       Stop-Process -Id $inputApp.Id -Force
@@ -308,6 +313,8 @@ try {
     }
     $inputApp.WaitForExit()
     $inputApp.Refresh()
+    $inputApp.Dispose()
+    $shellProcess = $null
     Record-TestOwnedSessions
     $inputExitCode = $inputApp.ExitCode
     if ($null -eq $inputExitCode) {
