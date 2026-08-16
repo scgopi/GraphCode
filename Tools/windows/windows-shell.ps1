@@ -86,9 +86,12 @@ function Record-TestOwnedSessions {
   }
 }
 
-function Write-OwnedResourceMetrics([string] $phase) {
+function Write-OwnedResourceMetrics([string] $phase, [int[]] $focusPids = @()) {
   $script:metricSequence++
-  $metrics = @($ownedProcessIds | ForEach-Object {
+  $metricPids = if ($focusPids.Count -gt 0) {
+    @(Get-ProcessTreeIds $focusPids)
+  } else { @($ownedProcessIds) }
+  $metrics = @($metricPids | ForEach-Object {
       $p = Get-Process -Id $_ -ErrorAction SilentlyContinue
       if ($p) {
         [pscustomobject]@{
@@ -229,7 +232,7 @@ try {
   Write-OwnedResourceMetrics "windows-shell:topology"
   if ($UseStubDaemon) {
     Invoke-Native "GraphCode Windows shell restart smoke" {
-      Invoke-ShellProcess $arguments "windows-shell:large-paste"
+      Invoke-ShellProcess $arguments "windows-shell:restart"
     }
     Record-TestOwnedSessions
   }
@@ -305,7 +308,7 @@ try {
     $shellProcess = $inputApp
     Start-Sleep -Milliseconds 250
     Record-TestOwnedSessions
-    Write-OwnedResourceMetrics "windows-shell:large-paste"
+    Write-OwnedResourceMetrics "windows-shell:large-paste" @($inputApp.Id)
     [void] $inputApp.Handle
     if (-not $inputApp.WaitForExit(8000)) {
       Stop-Process -Id $inputApp.Id -Force

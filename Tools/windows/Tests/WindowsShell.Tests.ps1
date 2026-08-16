@@ -29,14 +29,17 @@ function Assert-Contract([object] $condition, [string] $message) {
   }
 }
 
-if ((Get-Content $shellScript -Raw) -match '(?m)^\s*Write-OwnedResourceMetrics\s*$') {
+$shellSource = Get-Content $shellScript -Raw
+if ($shellSource -match '(?m)^\s*Write-OwnedResourceMetrics\s*$') {
   throw "Windows shell contract: empty resource metric phase"
 }
-Assert-Contract ((Get-Content $shellScript -Raw) -match 'inputApp\.Id') `
-  "large-paste workload does not record its launched PID"
-Assert-Contract ((Get-Content $shellScript -Raw) -match 'windows-shell:large-paste') `
-  "large-paste workload has no dedicated metric phase"
-Assert-Contract ((Get-Content $shellScript -Raw) -notmatch 'restart.*large-paste') `
+Assert-Contract ($shellSource -match '(?s)\$inputApp\s*=\s*Start-Process.*?\$inputApp\.Id.*?Write-OwnedResourceMetrics "windows-shell:large-paste" @\(\$inputApp\.Id\)') `
+  "large-paste metric is not tied to the recorded inputApp PID"
+Assert-Contract ($shellSource -match '(?s)GraphCode Windows shell restart smoke.*?Invoke-ShellProcess \$arguments "windows-shell:restart"') `
+  "restart snapshot is not assigned the restart phase"
+$restartBlock = [regex]::Match($shellSource,
+  '(?s)GraphCode Windows shell restart smoke.*?Invoke-ShellProcess \$arguments "windows-shell:restart".*?\r?\n\s*}')
+Assert-Contract ($restartBlock.Success -and $restartBlock.Value -notmatch 'windows-shell:large-paste') `
   "restart path can satisfy large-paste phase"
 
 function Invoke-Native([string] $description, [scriptblock] $command) {
