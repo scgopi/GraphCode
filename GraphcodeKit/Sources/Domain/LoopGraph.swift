@@ -173,9 +173,14 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   }
 
   /// Returned in `nodes` order, so the canvas's lines don't reshuffle between renders.
+  ///
+  /// Sketches are excluded before roots are picked: a sketch is not a graph beginning,
+  /// and a fresh one — edgeless by construction — would otherwise claim an entry port
+  /// the moment it was created.
   public var startAnchors: [UUID] {
     let targeted = Set(edges.map(\.to))
-    let entries = nodes.map(\.id).filter { !targeted.contains($0) }
+    let entries = nodes.filter { $0.loopType != .sketch }.map(\.id)
+      .filter { !targeted.contains($0) }
 
     var anchored = Set(entries)
     // Walk out from the entry points; whatever the walk never reaches is a cycle-only
@@ -188,7 +193,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
         frontier.append(edge.to)
       }
     }
-    for node in nodes where !reached.contains(node.id) {
+    for node in nodes where !reached.contains(node.id) && node.loopType != .sketch {
       anchored.insert(node.id)
       var frontier = [node.id]
       reached.insert(node.id)

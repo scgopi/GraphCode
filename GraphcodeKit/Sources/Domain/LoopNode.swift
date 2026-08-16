@@ -183,6 +183,11 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// sequence, so a person opening it is what should begin it.
   public var sessionPrompt: String? {
     switch loopType {
+    case .sketch:
+      // The starting note, when there is one. A blank note means the session opens
+      // quiet and waits — asking nothing up front is what the type is for.
+      let note = firstInstruction?.trimmingCharacters(in: .whitespaces) ?? ""
+      return note.isEmpty ? nil : note
     case .timeBased: return triggerPrompt
     case .goalBased: return goal?.sessionPrompt
     case .turnBased:

@@ -48,7 +48,13 @@ extension ProjectFeature.State {
       loopType: draftLoopType,
       checkDescription: draftLoopType == .turnBased ? draftCheck : nil,
       triggerPrompt: composedTriggerPrompt,
-      firstInstruction: draftLoopType == .turnBased ? draftFirstInstruction : nil,
+      firstInstruction: {
+        switch draftLoopType {
+        case .turnBased: return draftFirstInstruction
+        case .sketch: return draftSketchNote.isEmpty ? nil : draftSketchNote
+        case .goalBased, .timeBased, .composite: return nil
+        }
+      }(),
       pausesBeforeWritesOnly: draftLoopType == .turnBased && draftPausesBeforeWritesOnly,
       goal: draftLoopType == .goalBased
         ? GoalSpec(
@@ -86,7 +92,7 @@ extension ProjectFeature.State {
       return directive
     case .composite:
       return "Intended schedule: \(draftSchedule.summary(at: draftScheduleTime))"
-    case .goalBased, .turnBased:
+    case .sketch, .goalBased, .turnBased:
       return nil
     }
   }

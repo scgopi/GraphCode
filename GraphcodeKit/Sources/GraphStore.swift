@@ -716,7 +716,7 @@ public actor GraphStore {
         sessionFacing.append("each turn is now verified against: \(check)")
       }
 
-    case .composite:
+    case .sketch, .composite:
       break
     }
 

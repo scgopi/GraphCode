@@ -373,7 +373,8 @@ public enum RemoteGraphAccess {
             fail("missing --title")
         if not flags.get("type"):
             fail("missing --type")
-        types = {"turn": "turnBased", "turnBased": "turnBased",
+        types = {"sketch": "sketch",
+                 "turn": "turnBased", "turnBased": "turnBased",
                  "goal": "goalBased", "goalBased": "goalBased",
                  "time": "timeBased", "timeBased": "timeBased",
                  "composite": "proactive", "proactive": "proactive"}
@@ -394,7 +395,7 @@ public enum RemoteGraphAccess {
             draft["checkDescription"] = flags["check"]
         if flags.get("prompt"):
             draft["triggerPrompt"] = flags["prompt"]
-            if loop_type == "turnBased":
+            if loop_type in ("turnBased", "sketch"):
                 draft["firstInstruction"] = flags["prompt"]
         if flags.get("goal"):
             direction = flags.get("direction", "maximize")

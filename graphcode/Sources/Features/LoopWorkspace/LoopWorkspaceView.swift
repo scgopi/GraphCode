@@ -229,7 +229,7 @@ struct LoopWorkspaceView: View {
     switch store.node.loopType {
     case .timeBased: return "Loop"
     case .goalBased: return "Goal"
-    case .turnBased, .composite: return "Claude Code"
+    case .sketch, .turnBased, .composite: return "Claude Code"
     }
   }
 

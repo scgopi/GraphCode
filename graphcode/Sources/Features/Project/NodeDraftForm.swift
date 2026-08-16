@@ -52,8 +52,11 @@ struct NodeDraftForm: View {
     .padding(.horizontal, 22)
     .padding(.top, 20)
     .padding(.bottom, 18)
-    .frame(width: 520)
-    .frame(maxHeight: 680)
+    // Flexible on both axes so the sheet can be dragged larger — a fixed frame is what
+    // pinned it. The ideal height grew with the chooser, which is a band and a rule
+    // taller now that Sketch sits above the grid.
+    .frame(minWidth: 520, idealWidth: 520, maxWidth: .infinity)
+    .frame(minHeight: 560, idealHeight: 760, maxHeight: .infinity)
     .background(Theme.sheet)
   }
 
@@ -69,6 +72,7 @@ struct NodeDraftForm: View {
   @ViewBuilder
   private var typeFields: some View {
     switch store.draftLoopType {
+    case .sketch: SketchDraftFields(store: store)
     case .goalBased: GoalDraftFields(store: store)
     case .timeBased: TimedDraftFields(store: store)
     case .turnBased: TurnDraftFields(store: store)
@@ -107,6 +111,15 @@ struct NodeDraftForm: View {
       }
       if store.draftWorktree == .newBranch {
         DraftTextField(placeholder: "branch name", text: $store.draftBranch, isMono: true)
+      }
+      if store.draftLoopType == .sketch {
+        Text(
+          "Sketch loops don't cut a worktree by default — most of them read rather than "
+            + "write. Pick a branch here if this one will."
+        )
+        .font(.system(size: 11))
+        .foregroundStyle(.white.opacity(0.6))
+        .fixedSize(horizontal: false, vertical: true)
       }
       // The capability logic stays exactly where it was — this only shows what it says.
       if !store.draftBackend.canHost(store.draftLoopType) {
@@ -149,7 +162,7 @@ struct NodeDraftForm: View {
       store.send(.createNodeConfirmed)
     } label: {
       HStack(spacing: 6) {
-        Text(store.draftLoopType == .composite ? "Create & open" : "Create loop")
+        Text(createLabel)
           .font(.system(size: 13, weight: .semibold))
         Text("⏎").font(.system(size: 11, design: .monospaced)).opacity(0.7)
       }
@@ -167,6 +180,16 @@ struct NodeDraftForm: View {
     .disabled(!store.draft.isValid)
   }
 
+  /// A sketch *starts* rather than being created — asking for nothing and opening a
+  /// session is the whole type, and "Create loop" would overstate the ceremony.
+  private var createLabel: String {
+    switch store.draftLoopType {
+    case .sketch: "Start"
+    case .composite: "Create & open"
+    case .goalBased, .timeBased, .turnBased: "Create loop"
+    }
+  }
+
   /// Which field is missing, in the words of the thing that is missing.
   private var disabledReason: String? {
     guard !store.draft.isValid else { return nil }
@@ -174,6 +197,7 @@ struct NodeDraftForm: View {
       return "This agent can't host this kind of loop"
     }
     switch store.draftLoopType {
+    case .sketch: return nil  // Never incomplete — an empty sketch is a valid one.
     case .goalBased: return "Say what done looks like to continue"
     case .timeBased: return "Say what to do each time to continue"
     case .turnBased: return "Add a first instruction to continue"

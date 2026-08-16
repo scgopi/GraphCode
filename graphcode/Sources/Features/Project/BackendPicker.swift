@@ -79,6 +79,10 @@ struct BackendPicker: View {
         + "loops running inside one node. Claude Code can host this one."
     case .turnBased:
       return "\(name) can't host a turn-based loop."
+    case .sketch:
+      // Unreachable while every spiked backend hosts a bare session, but the compiler
+      // rightly wants the sentence written down.
+      return "\(name) can't host a sketch."
     }
   }
 }

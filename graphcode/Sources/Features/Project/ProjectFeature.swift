@@ -62,6 +62,9 @@ struct ProjectFeature {
     /// `.turnBased`: what the session is asked to do, and where it pauses.
     var draftFirstInstruction = ""
     var draftPausesBeforeWritesOnly = false
+    /// `.sketch`: the optional starting note. Its own field rather than sharing
+    /// `draftFirstInstruction`, so flipping between types never carries text across.
+    var draftSketchNote = ""
     /// `.timeBased`: how often, and what to do each time. GraphCode composes the `/loop`
     /// directive from the two — see `ProjectFeature.State.composedTriggerPrompt`.
     var draftInterval: IntervalChoice = .hourly
@@ -296,6 +299,7 @@ struct ProjectFeature {
         // simply doesn't submit — the Create button is disabled on it too, and this is
         // the backstop for the keyboard shortcut path.
         guard draft.isValid else { return .none }
+        UserDefaults.standard.set(draft.loopType.rawValue, forKey: Self.lastLoopTypeKey)
         let projectPath = state.graph.project.path
         // A form opened from a node card's + handle also wires the new loop up: a
         // default hand-off edge from the parent, created right after the node so the
@@ -356,9 +360,12 @@ struct ProjectFeature {
           // draft's id *is* the node's id (see `NodeDraft.id`); no answer just means
           // the fallback name stays.
           guard draft.title.trimmingCharacters(in: .whitespaces).isEmpty,
-            let basis = [draft.checkDescription, draft.triggerPrompt, draft.goal?.summary]
-              .compactMap({ $0 })
-              .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
+            let basis = [
+              draft.checkDescription, draft.triggerPrompt, draft.goal?.summary,
+              draft.firstInstruction,
+            ]
+            .compactMap({ $0 })
+            .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
             let title = await titleSuggestionClient.suggest(
               draft.effectiveBackend, basis, loopTitleDirectory.allTitles())
           else { return }
@@ -574,18 +581,33 @@ struct ProjectFeature {
 }
 
 extension ProjectFeature {
+  /// The loop type the form opens on: the last one a loop was actually created with.
+  ///
+  /// Set at creation rather than at selection — browsing the chooser is not a
+  /// preference, pressing Create is. App-side `UserDefaults` like the other UI
+  /// memories (`hasSeenOnboarding`, the rail width): which type someone reaches for
+  /// is not a setting the daemon or another machine has any use for.
+  static let lastLoopTypeKey = "lastCreatedLoopType"
+
+  static var rememberedLoopType: LoopType {
+    UserDefaults.standard.string(forKey: lastLoopTypeKey)
+      .flatMap(LoopType.init(rawValue:)) ?? .goalBased
+  }
+
   /// Resets the draft fields and opens the node form — the shared half of
   /// `.addNodeButtonTapped` and `.addChildNodeTapped`.
   ///
-  /// Goal-based by default, matching `LoopType`'s own ordering and the segmented
-  /// control's first segment: a loop that starts itself and knows when it is finished
-  /// is what most work wants, where the old turn-based default made a loop that sits
-  /// idle until a human opens it — surprising as the *default* outcome of Create.
+  /// The type defaults to whatever was chosen last (`rememberedLoopType`): someone who
+  /// always makes goal loops shouldn't re-pick Goal every time. Goal-based before
+  /// anything has been created, because a loop that starts itself and knows when it is
+  /// finished is what most work wants, where the old turn-based default made a loop
+  /// that sits idle until a human opens it — surprising as the *default* outcome of
+  /// Create.
   private func openNodeForm(
     _ state: inout State, backend: CLISessionBackendKind?, parentNodeID: UUID?
   ) -> Effect<Action> {
     state.draftID = UUID()
-    state.draftLoopType = .goalBased
+    state.draftLoopType = Self.rememberedLoopType
     state.draftTitle = ""
     state.draftCheck = ""
     state.draftPrompt = ""
@@ -598,6 +620,7 @@ extension ProjectFeature {
     state.isTestingDoneCheck = false
     state.draftFirstInstruction = ""
     state.draftPausesBeforeWritesOnly = false
+    state.draftSketchNote = ""
     state.draftInterval = .hourly
     state.draftCustomInterval = ""
     state.draftTimedTask = ""

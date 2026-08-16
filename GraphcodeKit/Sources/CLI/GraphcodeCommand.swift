@@ -43,7 +43,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
     USAGE
       graphcode projects
       graphcode status <project-path>
-      graphcode node create <project-path> --title <t> --type <turn|goal|time|composite> [options]
+      graphcode node create <project-path> --title <t> --type <sketch|turn|goal|time|composite> [options]
       graphcode node stop <project-path> <node-id>
       graphcode node delete <project-path> <node-id>   removes it, its edges, session
                            and memory — irreversible; stop is the reversible verb
@@ -74,7 +74,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
       --check <text>       what a human verifies each turn; optional
       --goal <text>        required for --type goal
       --predicate <cmd>    optional stop condition for --type goal (exit 0 = met)
-      --prompt <text>      required for --type time; put the cadence in it (/loop 1h …)
+      --prompt <text>      required for --type time; put the cadence in it (/loop 1h …).
+                           For --type sketch it is the optional starting note
       --backend <name>     claudeCode | copilotCLI | codex — default: run from inside a
                            loop, the creating loop's backend; otherwise claudeCode
       --model <tier>       fast | standard | capable           (default: by loop type)
@@ -249,6 +250,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
 
     let loopType: LoopType
     switch rawType {
+    case "sketch": loopType = .sketch
     case "turn", "turnBased": loopType = .turnBased
     case "goal", "goalBased": loopType = .goalBased
     case "time", "timeBased": loopType = .timeBased
@@ -294,7 +296,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
       // A turn-based loop needs something to do. `--prompt` is what a caller already
       // types for a timed loop's opening instruction, so it means the same thing here
       // rather than making them learn a second flag for the same idea.
-      firstInstruction: loopType == .turnBased ? flags["prompt"] : nil,
+      // A sketch's `--prompt` is its optional starting note, the same reuse.
+      firstInstruction: loopType == .turnBased || loopType == .sketch ? flags["prompt"] : nil,
       goal: flags["goal"].map {
         GoalSpec(
           summary: $0, predicate: flags["predicate"],

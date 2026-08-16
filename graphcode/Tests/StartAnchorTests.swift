@@ -154,4 +154,16 @@ struct StartAnchorTests {
     #expect(lasso.entryPoints == [head.id])
     #expect(lasso.cycleOnlyNodeIDs.isEmpty)
   }
+
+  /// A sketch is not a graph beginning. Edgeless by construction, it would otherwise
+  /// claim an entry port the moment it was created — re-creating the starburst the
+  /// entry-point work removed.
+  @Test
+  func aSketchNeverClaimsAnEntryPort() {
+    let sketch = LoopNode(title: "Poke around", loopType: .sketch)
+    let worker = node("Worker")
+    let mixed = graph(nodes: [sketch, worker], edges: [])
+    #expect(mixed.startAnchors == [worker.id])
+    #expect(graph(nodes: [sketch], edges: []).startAnchors.isEmpty)
+  }
 }
