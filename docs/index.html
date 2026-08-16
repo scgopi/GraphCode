@@ -1,0 +1,671 @@
+---
+title: Graph Engineering, simplified — with GraphCode
+description: Graph engineering for coding agents on macOS — loops connected on a canvas, running unattended, bounded, and still live to attach to and steer.
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{% seo %}
+<link rel="icon" type="image/png" href="assets/icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+{% include head-custom.html %}
+<style>
+  * { box-sizing: border-box; }
+  :root {
+    --bg: #08080a;
+    --panel: #0b0b0d;
+    --panel2: #0a0a0c;
+    --card: #0c0c0f;
+    --line: #1c1c20;
+    --line2: #1e1e23;
+    --line3: #212126;
+    --line4: #2a2a30;
+    --ink: #f3f3f1;
+    --ink-soft: #b6b6bc;
+    --ink-mid: #9a9aa2;
+    --ink-dim: #8b8b92;
+    --ink-faint: #77777e;
+    --ink-ghost: #6a6a72;
+    --ink-mute: #63636a;
+    --amber: #f0a23b;
+    --amber-hi: #ffc178;
+    --green: #4ec98a;
+    --blue: #4a9eff;
+    --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--ink); -webkit-font-smoothing: antialiased; font-family: "Helvetica Neue", Helvetica, "Segoe UI", sans-serif; overflow-x: hidden; }
+  a { color: var(--amber); text-decoration: none; }
+  a:hover { color: var(--amber-hi); }
+  ::selection { background: rgba(240,162,59,.3); }
+  img, video { max-width: 100%; }
+  .mono { font-family: var(--mono); }
+  .wrap { max-width: 1180px; margin: 0 auto; padding-left: 28px; padding-right: 28px; }
+
+  @keyframes gcDash { to { stroke-dashoffset: -240; } }
+  @keyframes gcPulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.8); } }
+  @keyframes gcGlow { 0%,100% { box-shadow: 0 0 0 1px rgba(240,162,59,.45), 0 0 34px -6px rgba(240,162,59,.35); } 50% { box-shadow: 0 0 0 1px rgba(240,162,59,.85), 0 0 54px -4px rgba(240,162,59,.6); } }
+  @keyframes gcFloat { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
+  @keyframes gcBar { from { height: 6px; } }
+  @keyframes gcCaret { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
+  @keyframes gcSweep { 0% { transform: translateY(-100%); } 100% { transform: translateY(420%); } }
+  @keyframes gcTick { 0%,100% { opacity: .25; } 50% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; }
+  }
+
+  .nav { position: sticky; top: 0; z-index: 50; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); background: rgba(8,8,10,.78); border-bottom: 1px solid var(--line); }
+  .nav-inner { max-width: 1180px; margin: 0 auto; padding: 14px 28px; display: flex; align-items: center; gap: 28px; }
+  .nav-brand { display: flex; align-items: center; gap: 10px; margin-right: auto; }
+  .nav-brand img { width: 26px; height: 26px; display: block; }
+  .nav-brand span { font-size: 15px; letter-spacing: -.01em; font-weight: 600; }
+  .nav-links { display: flex; align-items: center; gap: 22px; font-size: 13.5px; }
+  .nav-links a { color: var(--ink-dim); }
+  .nav-links a:hover { color: var(--ink); }
+  .nav-actions { display: flex; align-items: center; gap: 10px; }
+  .btn-star { display: flex; align-items: center; gap: 8px; padding: 8px 13px; border: 1px solid var(--line4); border-radius: 8px; font-size: 13px; color: #d6d6d2; font-family: var(--mono); }
+  .btn-star:hover { border-color: #4a4a52; color: #fff; }
+  .btn-star .star, .btn-ghost .star { color: var(--amber); }
+  .btn-amber { padding: 9px 16px; background: var(--amber); color: #12100c; border-radius: 8px; font-size: 13px; font-weight: 600; }
+  .btn-amber:hover { background: var(--amber-hi); color: #12100c; }
+
+  .hero { position: relative; padding: 96px 28px 0; overflow: hidden; }
+  .hero-grid-bg { position: absolute; inset: 0; background-image: linear-gradient(#141418 1px, transparent 1px), linear-gradient(90deg, #141418 1px, transparent 1px); background-size: 46px 46px; -webkit-mask-image: radial-gradient(ellipse 90% 60% at 50% 0%, #000 30%, transparent 75%); mask-image: radial-gradient(ellipse 90% 60% at 50% 0%, #000 30%, transparent 75%); pointer-events: none; }
+  .hero-copy { max-width: 1000px; margin: 0 auto; position: relative; text-align: center; }
+  .hero-badge { display: inline-flex; align-items: center; gap: 10px; padding: 6px 12px 6px 8px; border: 1px solid var(--line4); border-radius: 999px; font-family: var(--mono); font-size: 12px; color: var(--ink-mid); margin-bottom: 30px; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; }
+  .dot-blue { background: var(--blue); animation: gcPulse 2s ease-in-out infinite; }
+  .hero h1 { font-size: 68px; line-height: .98; letter-spacing: -.035em; font-weight: 600; margin: 0 0 22px; text-wrap: balance; }
+  .hero h1 .accent { color: var(--amber); }
+  .hero-sub { font-size: 19px; line-height: 1.55; color: var(--ink-mid); max-width: 620px; margin: 0 auto 34px; text-wrap: pretty; }
+  .hero-ctas { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; align-items: center; margin-bottom: 18px; }
+  .btn-primary { padding: 14px 24px; background: var(--amber); color: #12100c; border-radius: 10px; font-size: 15px; font-weight: 600; }
+  .btn-primary:hover { background: var(--amber-hi); color: #12100c; }
+  .btn-ghost { padding: 14px 22px; border: 1px solid var(--line4); border-radius: 10px; font-size: 15px; color: #e6e6e2; display: flex; align-items: center; gap: 9px; }
+  .btn-ghost:hover { border-color: #4a4a52; color: #e6e6e2; }
+  .brew { display: inline-flex; align-items: center; gap: 12px; padding: 11px 16px; background: #101013; border: 1px solid var(--line3); border-radius: 10px; font-family: var(--mono); font-size: 13px; color: #b9b9b2; }
+  .brew .prompt { color: var(--green); }
+  .caret { width: 7px; height: 15px; background: var(--amber); animation: gcCaret 1.1s steps(1) infinite; }
+
+  .hero-canvas-wrap { max-width: 1180px; margin: 62px auto 0; position: relative; }
+  .hero-canvas-frame { position: relative; border: 1px solid var(--line3); border-radius: 16px; background: var(--panel); overflow: hidden; box-shadow: 0 40px 120px -40px rgba(240,162,59,.22); }
+  .hero-canvas-grid { position: absolute; inset: 0; background-image: linear-gradient(#131317 1px, transparent 1px), linear-gradient(90deg, #131317 1px, transparent 1px); background-size: 34px 34px; }
+  .hero-sweep { position: absolute; left: 0; right: 0; height: 90px; background: linear-gradient(180deg, transparent, rgba(240,162,59,.055), transparent); animation: gcSweep 9s linear infinite; }
+  .hero-canvas { position: relative; aspect-ratio: 1180 / 620; width: 100%; }
+  .hero-canvas svg.edges { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .entry-label { position: absolute; left: 14px; top: 44%; font-family: var(--mono); font-size: 10px; letter-spacing: .14em; color: var(--ink-ghost); }
+  .node-card { position: absolute; border-radius: 12px; }
+  .card-sidebar { left: 3.5%; top: 6%; width: 19%; padding: 14px; border: 1px solid var(--line2); background: rgba(15,15,18,.9); }
+  .card-label { font-family: var(--mono); font-size: 9.5px; letter-spacing: .16em; color: var(--ink-ghost); margin-bottom: 12px; }
+  .sidebar-rows { display: flex; flex-direction: column; gap: 9px; font-size: 12.5px; color: var(--ink-soft); }
+  .sidebar-row { display: flex; align-items: center; gap: 8px; }
+  .sidebar-row.indent { padding-left: 12px; }
+  .sidebar-tick { width: 3px; height: 13px; border-radius: 2px; flex: none; }
+  .sidebar-age { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--ink-mute); }
+  .card-monetization { left: 44%; top: 12%; width: 29%; padding: 14px 15px; background: #131316; border: 1px solid rgba(240,162,59,.5); animation: gcGlow 3.6s ease-in-out infinite; }
+  .node-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .node-title { font-size: 14.5px; font-weight: 600; }
+  .pill { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 999px; font-family: var(--mono); font-size: 9.5px; letter-spacing: .1em; }
+  .pill .dot { width: 5px; height: 5px; }
+  .pill-amber { background: rgba(240,162,59,.14); color: var(--amber); }
+  .pill-amber .dot { background: var(--amber); animation: gcPulse 1.8s ease-in-out infinite; }
+  .pill-blue { background: rgba(74,158,255,.14); color: var(--blue); }
+  .pill-blue .dot { background: var(--blue); animation: gcPulse 1.4s ease-in-out infinite; }
+  .node-desc { font-family: var(--mono); font-size: 11.5px; color: #8e8e94; line-height: 1.5; margin-bottom: 14px; }
+  .node-meta { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); }
+  .sq { width: 7px; height: 7px; flex: none; }
+  .tag-entry { padding: 2px 7px; border-radius: 4px; background: rgba(78,201,138,.14); color: var(--green); }
+  .card-marketing { left: 78%; top: 14%; width: 19%; padding: 13px 14px; background: #111114; border: 1px solid #24242a; }
+  .card-marketing .node-head { gap: 8px; margin-bottom: 9px; }
+  .card-marketing .node-title { font-size: 13.5px; }
+  .sched { margin-left: auto; font-family: var(--mono); font-size: 9px; letter-spacing: .1em; color: #8e8e94; }
+  .card-marketing .node-desc { font-size: 11px; margin-bottom: 0; }
+  .card-marketing .node-meta { margin-top: 12px; }
+  .card-permissions { left: 44%; top: 44%; width: 29%; padding: 14px 15px; background: #111114; border: 1px solid rgba(74,158,255,.4); animation: gcFloat 7s ease-in-out infinite; }
+  .card-granularity { left: 44%; top: 76%; width: 29%; padding: 12px 15px; background: rgba(17,17,20,.85); border: 1px dashed #2d2d34; }
+  .card-granularity .node-head { margin-bottom: 0; }
+  .card-granularity .node-title { font-size: 13.5px; color: #c6c6cc; }
+  .card-granularity .hint { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--ink-faint); }
+  .card-guard { right: 3%; top: 46%; width: 15%; padding: 12px 13px; background: #0f0f12; border: 1px solid #24242a; text-align: center; }
+  .card-guard .card-label { margin-bottom: 8px; letter-spacing: .14em; font-size: 9px; }
+  .guard-value { font-family: var(--mono); font-size: 20px; color: var(--green); }
+  .guard-pass { font-family: var(--mono); font-size: 10px; color: var(--ink-faint); margin-top: 6px; }
+  .hero-caption { display: flex; gap: 10px; justify-content: center; margin-top: 16px; font-family: var(--mono); font-size: 11.5px; color: var(--ink-mute); }
+  .hero-caption .hi { color: var(--ink-soft); }
+
+  .stats { max-width: 1180px; margin: 0 auto; padding: 90px 28px 0; }
+  .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+  .stat { background: var(--panel); padding: 24px 22px; }
+  .stat-num { font-family: var(--mono); font-size: 27px; color: var(--amber); letter-spacing: -.02em; }
+  .stat-desc { font-size: 13px; color: var(--ink-dim); margin-top: 8px; line-height: 1.45; }
+
+  .section { max-width: 1180px; margin: 0 auto; padding: 110px 28px 0; }
+  .kicker { font-family: var(--mono); font-size: 11px; letter-spacing: .18em; color: var(--amber); margin-bottom: 18px; }
+  .section h2 { font-size: 42px; line-height: 1.06; letter-spacing: -.03em; font-weight: 600; margin: 0 0 16px; }
+  .section-intro { max-width: 700px; margin-bottom: 46px; }
+  .lede { font-size: 17px; line-height: 1.6; color: var(--ink-mid); margin: 0; }
+
+  .loops-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  .loop-card { padding: 22px; border: 1px solid var(--line2); border-radius: 14px; background: linear-gradient(180deg, #0e0e11, #0a0a0c); }
+  .loop-card:hover { border-color: #3a3a42; }
+  .loop-viz { height: 92px; display: flex; align-items: center; justify-content: center; gap: 9px; margin-bottom: 20px; }
+  .loop-name { font-size: 17px; font-weight: 600; margin-bottom: 8px; }
+  .loop-hand { font-family: var(--mono); font-size: 11px; color: var(--amber); margin-bottom: 12px; }
+  .loop-card p { font-size: 13.5px; line-height: 1.55; color: var(--ink-dim); margin: 0; }
+  .loop-card p .cmd { font-family: var(--mono); color: var(--ink-soft); }
+  .viz-node { width: 26px; height: 26px; border-radius: 7px; }
+  .viz-link { width: 22px; height: 1px; background: #3a3a42; }
+  .viz-goal { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
+  .viz-chip { font-family: var(--mono); font-size: 11.5px; color: #8e8e94; padding: 6px 10px; border: 1px solid var(--line4); border-radius: 6px; }
+  .viz-vlink { width: 1px; height: 14px; background: #3a3a42; }
+  .viz-chip-ok { font-family: var(--mono); font-size: 11.5px; color: var(--green); padding: 6px 10px; border: 1px solid rgba(78,201,138,.35); border-radius: 6px; background: rgba(78,201,138,.08); }
+  .viz-time { gap: 7px; }
+  .viz-bar { width: 9px; height: 34px; border-radius: 3px; background: var(--amber); animation: gcTick 2s ease-in-out infinite; }
+  .viz-composite { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; align-content: center; justify-items: center; }
+  .viz-cell { width: 18px; height: 18px; border-radius: 5px; }
+  .loops-note { margin-top: 18px; padding: 18px 22px; border: 1px solid var(--line2); border-radius: 12px; background: var(--panel); font-size: 14px; color: var(--ink-dim); line-height: 1.55; }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 44px; align-items: center; }
+  .two-col h2 { font-size: 40px; }
+  .checks { display: flex; flex-direction: column; gap: 12px; }
+  .check { display: flex; gap: 11px; align-items: flex-start; font-size: 14.5px; color: var(--ink-soft); }
+  .check .arrow { color: var(--green); font-family: var(--mono); }
+  .term { border: 1px solid var(--line3); border-radius: 14px; background: var(--panel2); overflow: hidden; }
+  .term-bar { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--line); background: #0d0d10; }
+  .term-dot { width: 10px; height: 10px; border-radius: 50%; background: #3a3a42; flex: none; }
+  .term-title { margin-left: 10px; font-family: var(--mono); font-size: 11px; color: var(--ink-faint); }
+  .term-status { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 9.5px; letter-spacing: .1em; color: var(--blue); }
+  .term-status .dot { width: 5px; height: 5px; background: var(--blue); animation: gcPulse 1.4s ease-in-out infinite; }
+  .term-body { padding: 18px 16px; font-family: var(--mono); font-size: 12.5px; line-height: 1.85; color: #b9b9b2; }
+  .term-body .announce { color: var(--amber); }
+  .term-body .dim { color: var(--ink-faint); }
+  .term-body .gap { height: 10px; }
+  .term-body .g { color: var(--green); }
+  .term-body .b { color: var(--blue); }
+  .term-caret { display: inline-block; width: 7px; height: 13px; background: var(--amber); vertical-align: -2px; margin-left: 6px; animation: gcCaret 1.1s steps(1) infinite; }
+
+  .band { margin-top: 110px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--panel2); }
+  .band-inner { max-width: 1180px; margin: 0 auto; padding: 84px 28px; }
+  .band .section-intro { max-width: 720px; margin-bottom: 48px; }
+  .self-grid { display: grid; grid-template-columns: 1.25fr 1fr; gap: 20px; }
+  .cycle-panel { position: relative; padding: 30px; border: 1px solid var(--line2); border-radius: 16px; background: var(--card); overflow: hidden; display: flex; flex-direction: column; }
+  .cycle-grid-bg { position: absolute; inset: 0; background-image: linear-gradient(#121216 1px, transparent 1px), linear-gradient(90deg, #121216 1px, transparent 1px); background-size: 30px 30px; }
+  .cycle-canvas { position: relative; flex: 1; min-height: 300px; }
+  .cycle-canvas svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .cycle-node { position: absolute; width: 30%; padding: 14px; border-radius: 12px; background: #131316; }
+  .cycle-node .role { font-family: var(--mono); font-size: 9.5px; letter-spacing: .14em; margin-bottom: 8px; }
+  .cycle-node .what { font-size: 14px; font-weight: 600; }
+  .cycle-node .state { font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); margin-top: 8px; }
+  .cycle-forge { left: 6%; top: 12%; border: 1px solid rgba(240,162,59,.45); }
+  .cycle-forge .role { color: var(--amber); }
+  .cycle-critic { left: 60%; top: 12%; border: 1px solid var(--line4); }
+  .cycle-critic .role { color: #8e8e94; }
+  .cycle-guard { position: absolute; left: 50%; transform: translateX(-50%); bottom: 6%; padding: 10px 16px; border-radius: 999px; background: rgba(78,201,138,.1); border: 1px solid rgba(78,201,138,.35); font-family: var(--mono); font-size: 11.5px; color: var(--green); white-space: nowrap; }
+  .cycle-note { position: relative; margin-top: 22px; font-size: 13.5px; color: var(--ink-dim); line-height: 1.55; }
+  .self-col { display: flex; flex-direction: column; gap: 20px; }
+  .panel { padding: 24px; border: 1px solid var(--line2); border-radius: 16px; background: var(--card); }
+  .panel-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+  .panel-title { font-size: 16px; font-weight: 600; }
+  .panel-aside { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); margin-left: auto; }
+  .panel p { font-size: 13.5px; line-height: 1.55; color: var(--ink-dim); margin: 8px 0 20px; }
+  .metric-bars { display: flex; align-items: flex-end; gap: 10px; height: 120px; }
+  .metric-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .metric-val { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); }
+  .metric-val.hi { color: var(--ink-soft); }
+  .metric-bar { width: 100%; border-radius: 5px 5px 0 0; }
+  .metric-stalled { display: flex; align-items: center; gap: 8px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); font-family: var(--mono); font-size: 11.5px; color: #8e8e94; }
+  .tag-stalled { padding: 3px 8px; border-radius: 4px; background: rgba(240,162,59,.12); color: var(--amber); }
+  .diary-panel .panel-title { margin-bottom: 8px; }
+  .diary-panel p { margin: 0 0 16px; }
+  .diary-log { font-family: var(--mono); font-size: 11.5px; line-height: 1.85; color: #8e8e94; padding: 14px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); }
+  .diary-log .t { color: var(--ink-mute); }
+  .diary-log .g { color: var(--green); white-space: pre; }
+
+  .live-frame { border: 1px solid var(--line3); border-radius: 16px; background: var(--panel2); overflow: hidden; box-shadow: 0 40px 120px -50px rgba(74,158,255,.25); }
+  .live-frame img { display: block; width: 100%; height: auto; }
+  .live-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; margin-top: 16px; align-items: stretch; }
+  .demo-frame { border: 1px solid var(--line3); border-radius: 14px; background: var(--panel2); overflow: hidden; }
+  .demo-bar { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--line); background: #0d0d10; font-family: var(--mono); font-size: 11px; color: var(--ink-faint); }
+  .demo-live { display: inline-flex; align-items: center; gap: 6px; color: var(--amber); }
+  .demo-live .dot { width: 5px; height: 5px; background: var(--amber); animation: gcPulse 1.8s ease-in-out infinite; }
+  .demo-frame video, .demo-frame img { display: block; width: 100%; height: auto; }
+  .edge-col { display: flex; flex-direction: column; gap: 16px; }
+  .edge-card { padding: 20px; border: 1px solid var(--line2); border-radius: 12px; background: var(--panel); flex: 1; }
+  .edge-card .name { font-size: 15px; font-weight: 600; margin-bottom: 7px; }
+  .edge-card p { font-size: 13px; color: var(--ink-dim); margin: 0; line-height: 1.5; }
+
+  .hood-grid { display: grid; grid-template-columns: 1fr 1.1fr; gap: 44px; align-items: start; }
+  .hood-grid h2 { font-size: 40px; }
+  .hood-grid .lede { margin-bottom: 24px; }
+  .hood-grid .lede .path { font-family: var(--mono); font-size: 15px; color: var(--ink-soft); }
+  .honesty { padding: 18px 20px; border: 1px solid rgba(78,201,138,.3); border-radius: 12px; background: rgba(78,201,138,.05); font-size: 14px; line-height: 1.55; color: var(--ink-soft); }
+  .honesty strong { color: var(--green); }
+  .pieces { display: flex; flex-direction: column; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+  .piece { background: var(--panel); padding: 20px 22px; display: flex; gap: 18px; align-items: baseline; }
+  .piece-name { font-family: var(--mono); font-size: 13px; color: var(--amber); min-width: 130px; flex: none; }
+  .piece-name.g { color: var(--green); }
+  .piece-desc { font-size: 13.5px; color: var(--ink-dim); line-height: 1.5; }
+
+  .cta { max-width: 1180px; margin: 110px auto 0; padding: 0 28px; }
+  .cta-card { position: relative; border: 1px solid var(--line3); border-radius: 20px; background: var(--panel); overflow: hidden; }
+  .cta-grid-bg { position: absolute; inset: 0; background-image: linear-gradient(#131317 1px, transparent 1px), linear-gradient(90deg, #131317 1px, transparent 1px); background-size: 40px 40px; -webkit-mask-image: radial-gradient(ellipse 70% 90% at 50% 100%, #000, transparent 70%); mask-image: radial-gradient(ellipse 70% 90% at 50% 100%, #000, transparent 70%); }
+  .cta-inner { position: relative; padding: 68px 40px 60px; text-align: center; }
+  .cta-inner h2 { font-size: 44px; line-height: 1.05; letter-spacing: -.03em; font-weight: 600; margin: 0 0 14px; }
+  .cta-inner .lede { max-width: 560px; margin: 0 auto 32px; line-height: 1.55; }
+  .cta-ctas { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-bottom: 26px; }
+  .cta .brew { background: var(--bg); }
+  .cta-fine { font-family: var(--mono); font-size: 11.5px; color: var(--ink-mute); margin-top: 18px; }
+
+  .footer { max-width: 1180px; margin: 80px auto 0; padding: 32px 28px 56px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 20px; align-items: center; font-size: 13px; color: var(--ink-faint); }
+  .footer img { width: 22px; height: 22px; display: block; opacity: .8; }
+  .footer .made { margin-right: auto; }
+  .footer-links { display: flex; gap: 20px; flex-wrap: wrap; }
+  .footer-links a { color: var(--ink-faint); }
+  .footer-links a:hover { color: var(--ink); }
+
+  @media (max-width: 980px) {
+    .hero h1 { font-size: 48px; }
+    .section h2, .two-col h2, .hood-grid h2, .cta-inner h2 { font-size: 32px; }
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    .loops-grid { grid-template-columns: repeat(2, 1fr); }
+    .two-col, .self-grid, .live-grid, .hood-grid { grid-template-columns: 1fr; }
+    .hero-canvas-frame { overflow-x: auto; }
+    .hero-canvas { min-width: 900px; aspect-ratio: auto; height: 480px; }
+    .section { padding-top: 80px; }
+    .band { margin-top: 80px; }
+    .cta { margin-top: 80px; }
+  }
+  @media (max-width: 720px) {
+    .nav-links { display: none; }
+    .hero { padding-top: 64px; }
+    .hero h1 { font-size: 36px; }
+    .hero-sub { font-size: 16px; }
+    .loops-grid { grid-template-columns: 1fr; }
+    .stats-grid { grid-template-columns: 1fr 1fr; }
+    .brew { font-size: 11.5px; }
+    .cta-inner { padding: 48px 20px 44px; }
+  }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <div class="nav-brand">
+      <img src="assets/icon.png" alt="GraphCode">
+      <span>GraphCode</span>
+    </div>
+    <div class="nav-links">
+      <a href="#loops">Loops</a>
+      <a href="#self">Self-improving</a>
+      <a href="#hood">Under the hood</a>
+      <a href="shortcuts.html">Docs</a>
+    </div>
+    <div class="nav-actions">
+      <a class="btn-star" href="https://github.com/scgopi/GraphCode"><span class="star">★</span>Star</a>
+      <a class="btn-amber" href="https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg">Download .dmg</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <div class="hero-grid-bg"></div>
+  <div class="hero-copy">
+    <div class="hero-badge"><span class="dot dot-blue"></span>macOS 15+ · Apple Silicon · FSL-1.1-MIT</div>
+    <h1>Graph Engineering, simplified —<br><span class="accent">with GraphCode.</span></h1>
+    <p class="hero-sub">A loop is an agent session that runs on repeat. GraphCode connects loops on a canvas — they run unattended, bounded, and still live, so you can attach to any one of them mid-run and steer.</p>
+    <div class="hero-ctas">
+      <a class="btn-primary" href="https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg">⬇ Download for macOS</a>
+      <a class="btn-ghost" href="https://github.com/scgopi/GraphCode"><span class="star">★</span> Star on GitHub</a>
+    </div>
+    <div class="brew"><span class="prompt">$</span><span>brew install --cask scgopi/graphcode/graphcode</span><span class="caret"></span></div>
+  </div>
+
+  <div class="hero-canvas-wrap">
+    <div class="hero-canvas-frame">
+      <div class="hero-canvas-grid"></div>
+      <div class="hero-sweep"></div>
+      <div class="hero-canvas">
+        <svg class="edges" viewBox="0 0 1180 620" preserveAspectRatio="none" aria-hidden="true">
+          <path d="M300 300 C 400 300, 400 150, 520 150" fill="none" stroke="#3a3a42" stroke-width="1.6"/>
+          <path d="M300 300 C 400 300, 400 150, 520 150" fill="none" stroke="#f0a23b" stroke-width="1.6" stroke-dasharray="8 14" style="animation: gcDash 3s linear infinite;"/>
+          <path d="M300 300 C 400 300, 400 320, 520 320" fill="none" stroke="#3a3a42" stroke-width="1.6"/>
+          <path d="M300 300 C 400 300, 400 320, 520 320" fill="none" stroke="#4a9eff" stroke-width="1.6" stroke-dasharray="8 14" style="animation: gcDash 2.4s linear infinite;"/>
+          <path d="M300 300 C 400 300, 400 500, 520 500" fill="none" stroke="#3a3a42" stroke-width="1.6"/>
+          <path d="M860 150 C 940 150, 940 320, 1000 320" fill="none" stroke="#3a3a42" stroke-width="1.6" stroke-dasharray="4 8"/>
+          <path d="M860 320 C 900 320, 900 220, 860 200" fill="none" stroke="#4ec98a" stroke-width="1.6" stroke-dasharray="6 10" style="animation: gcDash 2.8s linear infinite;"/>
+          <circle cx="300" cy="300" r="7" fill="#0b0b0d" stroke="#6a6a72" stroke-width="1.6"/>
+        </svg>
+        <div class="entry-label">ENTRY</div>
+
+        <div class="node-card card-sidebar">
+          <div class="card-label">LOCAL PROJECTS</div>
+          <div class="sidebar-rows">
+            <div class="sidebar-row"><span class="sidebar-tick" style="background:#f0a23b;"></span>Monetization<span class="sidebar-age">7d 6h</span></div>
+            <div class="sidebar-row indent"><span class="sidebar-tick" style="background:#4a4a52;"></span>Marketing<span class="sidebar-age">7d</span></div>
+            <div class="sidebar-row indent"><span class="sidebar-tick" style="background:#f0a23b;"></span>Loops Article<span class="sidebar-age">4d</span></div>
+            <div class="sidebar-row"><span class="sidebar-tick" style="background:#4a9eff;"></span>permissions<span class="sidebar-age">8h</span></div>
+          </div>
+        </div>
+
+        <div class="node-card card-monetization">
+          <div class="node-head">
+            <span class="node-title">Monetization</span>
+            <span class="pill pill-amber"><span class="dot"></span>NEEDS YOU</span>
+          </div>
+          <div class="node-desc">Check how we improve conversion on the pricing page…</div>
+          <div class="node-meta"><span class="sq" style="background:#4ec98a;"></span>Goal · 7d 6h <span class="tag-entry">entry</span></div>
+        </div>
+
+        <div class="node-card card-marketing">
+          <div class="node-head">
+            <span class="node-title">Marketing</span>
+            <span class="sched">SCHEDULED</span>
+          </div>
+          <div class="node-desc">/loop 6h Sales and marketing…</div>
+          <div class="node-meta"><span class="sq" style="background:#f0a23b;"></span>Timed · 7d</div>
+        </div>
+
+        <div class="node-card card-permissions">
+          <div class="node-head">
+            <span class="node-title">permissions</span>
+            <span class="pill pill-blue"><span class="dot"></span>RUNNING</span>
+          </div>
+          <div class="node-desc">editing GraphStore.swift</div>
+          <div class="node-meta"><span class="sq" style="background:#4ec98a;"></span>Goal · 8h 17m</div>
+        </div>
+
+        <div class="node-card card-granularity">
+          <div class="node-head">
+            <span class="node-title">granularity</span>
+            <span class="hint">Nothing runs it yet</span>
+          </div>
+        </div>
+
+        <div class="node-card card-guard">
+          <div class="card-label">GUARD</div>
+          <div class="guard-value">≤5×</div>
+          <div class="guard-pass">pass 2 of 5</div>
+        </div>
+      </div>
+    </div>
+    <div class="hero-caption">An <span class="hi">&nbsp;Issue orchestration&nbsp;</span> loop on a 15-minute cadence, fanning out a child loop per GitHub issue.</div>
+  </div>
+</section>
+
+<section class="stats">
+  <div class="stats-grid">
+    <div class="stat"><div class="stat-num">10+</div><div class="stat-desc">parallel live sessions, one canvas</div></div>
+    <div class="stat"><div class="stat-num">0</div><div class="stat-desc">files written inside your project folder</div></div>
+    <div class="stat"><div class="stat-num">3</div><div class="stat-desc">backends: Claude Code, Copilot, Codex</div></div>
+    <div class="stat"><div class="stat-num">∞</div><div class="stat-desc">reboots survived — sessions outlive the app</div></div>
+  </div>
+</section>
+
+<section id="loops" class="section">
+  <div class="section-intro">
+    <div class="kicker">01 — FOUR LOOP TYPES</div>
+    <h2>Pick by what you're ready to let go of.</h2>
+    <p class="lede">Put an agent on repeat and you hand off exactly one thing: the check, the stop condition, the trigger, or the prompt itself. That's the whole space.</p>
+  </div>
+  <div class="loops-grid">
+    <div class="loop-card">
+      <div class="loop-viz">
+        <div class="viz-node" style="background:#f0a23b;"></div>
+        <div class="viz-link"></div>
+        <div class="viz-node" style="border:1px dashed #4a4a52;"></div>
+        <div class="viz-link"></div>
+        <div class="viz-node" style="border:1px dashed #2d2d34;"></div>
+      </div>
+      <div class="loop-name">Turn-based</div>
+      <div class="loop-hand">hands off: the check</div>
+      <p>Pauses each turn until you say go. For a refactor you eyeball step by step.</p>
+    </div>
+    <div class="loop-card">
+      <div class="loop-viz viz-goal">
+        <div class="viz-chip">make test</div>
+        <div class="viz-vlink"></div>
+        <div class="viz-chip-ok">exit 0 → resolved</div>
+      </div>
+      <div class="loop-name">Goal-based</div>
+      <div class="loop-hand">hands off: the stop condition</div>
+      <p>Runs until the goal is met — optionally proven by a shell command exiting 0.</p>
+    </div>
+    <div class="loop-card">
+      <div class="loop-viz viz-time">
+        <div class="viz-bar"></div>
+        <div class="viz-bar" style="animation-delay:.4s;"></div>
+        <div class="viz-bar" style="animation-delay:.8s;"></div>
+        <div class="viz-bar" style="animation-delay:1.2s;"></div>
+        <div class="viz-bar" style="animation-delay:1.6s;"></div>
+      </div>
+      <div class="loop-name">Time-based</div>
+      <div class="loop-hand">hands off: the trigger</div>
+      <p>A cadence in the prompt: <span class="cmd">/loop 1h</span> triage new bug reports.</p>
+    </div>
+    <div class="loop-card">
+      <div class="loop-viz viz-composite">
+        <div class="viz-cell" style="background:#4a4a52;"></div>
+        <div class="viz-cell" style="background:#f0a23b;"></div>
+        <div class="viz-cell" style="background:#4a4a52;"></div>
+        <div class="viz-cell" style="background:#f0a23b;"></div>
+        <div class="viz-cell" style="background:#4a4a52;"></div>
+        <div class="viz-cell" style="background:#f0a23b;"></div>
+      </div>
+      <div class="loop-name">Composite</div>
+      <div class="loop-hand">hands off: the prompt</div>
+      <p>A pipeline that plans its own steps and runs a sub-graph end to end.</p>
+    </div>
+  </div>
+  <div class="loops-note">A working graph mixes them — a time-based triage loop hands findings to a goal-based fixer, which hands the fix to a turn-based reviewer.</div>
+</section>
+
+<section class="section">
+  <div class="two-col">
+    <div>
+      <div class="kicker">02 — SESSIONS OUTLIVE EVERYTHING</div>
+      <h2>The daemon starts it at 3 a.m. You're in that same session at 9.</h2>
+      <p class="lede" style="margin-bottom:20px;">Every loop is a <a href="https://zmx.sh">zmx</a> session — a PTY that survives quitting the app, restarting the daemon, or rebooting. Click a node and you attach to the terminal that did the work, live, with one scrollback.</p>
+      <div class="checks">
+        <div class="check"><span class="arrow">→</span>Drag between nodes for hand-off, message, or spawn edges.</div>
+        <div class="check"><span class="arrow">→</span>Each edge carries a condition: always, on success, on failure.</div>
+        <div class="check"><span class="arrow">→</span>A message to a sleeping loop is staged, not lost.</div>
+      </div>
+    </div>
+    <div class="term">
+      <div class="term-bar">
+        <span class="term-dot"></span><span class="term-dot"></span><span class="term-dot"></span>
+        <span class="term-title">loop-a4f2 · attached</span>
+        <span class="term-status"><span class="dot"></span>RUNNING</span>
+      </div>
+      <div class="term-body">
+        <div class="announce">[graphcode] Cycle re-entry 2 of 5 — the stop condition</div>
+        <div class="announce">is not yet met. Continue toward your goal.</div>
+        <div class="gap"></div>
+        <div><span class="g">⏺</span> Reading wake digest… 40 lines</div>
+        <div class="dim">&nbsp;&nbsp;• approach A failed</div>
+        <div class="dim">&nbsp;&nbsp;• metric 41 → 38</div>
+        <div class="dim">&nbsp;&nbsp;• try B next</div>
+        <div class="gap"></div>
+        <div><span class="b">⏺</span> editing GraphStore.swift<span class="term-caret"></span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="self" class="band">
+  <div class="band-inner">
+    <div class="section-intro">
+      <div class="kicker">03 — THE SELF-IMPROVING LOOP</div>
+      <h2>Try → get judged → remember → try again smarter → stop honestly.</h2>
+      <p class="lede">A maker, a reviewer, and a guarded back-edge closing the cycle. The feature that lets a loop repeat is the same feature that bounds it — so "loop forever, spending tokens" can't be said by accident.</p>
+    </div>
+
+    <div class="self-grid">
+      <div class="cycle-panel">
+        <div class="cycle-grid-bg"></div>
+        <div class="cycle-canvas">
+          <svg viewBox="0 0 620 300" preserveAspectRatio="none" aria-hidden="true">
+            <path d="M215 90 L 385 90" fill="none" stroke="#3a3a42" stroke-width="1.6"/>
+            <path d="M215 90 L 385 90" fill="none" stroke="#f0a23b" stroke-width="1.6" stroke-dasharray="7 12" style="animation: gcDash 2.6s linear infinite;"/>
+            <path d="M470 130 C 470 230, 150 230, 150 130" fill="none" stroke="#4ec98a" stroke-width="1.6" stroke-dasharray="6 10" style="animation: gcDash 3.4s linear infinite;"/>
+            <polygon points="385,84 397,90 385,96" fill="#f0a23b"/>
+            <polygon points="144,136 150,124 156,136" fill="#4ec98a"/>
+          </svg>
+          <div class="cycle-node cycle-forge">
+            <div class="role">FORGE</div>
+            <div class="what">Make change</div>
+            <div class="state">pass 2 · running</div>
+          </div>
+          <div class="cycle-node cycle-critic">
+            <div class="role">CRITIC</div>
+            <div class="what">Verify change</div>
+            <div class="state">idle · judges only</div>
+          </div>
+          <div class="cycle-guard">GUARD · ≤5 passes · stop after 2 idle</div>
+        </div>
+        <div class="cycle-note">A loop may not change its own stop condition. The verifier stays outside the verified — the same reason maker and reviewer are separate sessions.</div>
+      </div>
+
+      <div class="self-col">
+        <div class="panel">
+          <div class="panel-head">
+            <div class="panel-title">Measured by</div>
+            <div class="panel-aside">lower is better</div>
+          </div>
+          <p>The orchestrator runs your metric command once per pass, so recorded numbers come from the measurement — never the loop's self-report.</p>
+          <div class="metric-bars">
+            <div class="metric-col"><div class="metric-val">41</div><div class="metric-bar" style="height:100px;background:#2a2a30;animation:gcBar .9s ease-out;"></div></div>
+            <div class="metric-col"><div class="metric-val">38</div><div class="metric-bar" style="height:88px;background:#45454e;animation:gcBar 1.1s ease-out;"></div></div>
+            <div class="metric-col"><div class="metric-val hi">27</div><div class="metric-bar" style="height:62px;background:#f0a23b;animation:gcBar 1.3s ease-out;"></div></div>
+            <div class="metric-col"><div class="metric-val hi">27</div><div class="metric-bar" style="height:62px;background:repeating-linear-gradient(45deg, #4a4a52 0 5px, #2a2a30 5px 10px);animation:gcBar 1.5s ease-out;"></div></div>
+          </div>
+          <div class="metric-stalled"><span class="tag-stalled">STALLED</span>stopped after 2 passes without improvement</div>
+        </div>
+
+        <div class="panel diary-panel">
+          <div class="panel-title">Every loop keeps a diary</div>
+          <p>The daemon records facts, the agent records lessons. A relaunched session opens by reading the digest — round two starts smarter, not from scratch.</p>
+          <div class="diary-log">
+            <div><span class="t">14:24</span> tried A, failed</div>
+            <div><span class="t">14:31</span> metric: 38</div>
+            <div><span class="t">14:42</span> pass 3 started</div>
+            <div class="g">      ↳ read wake digest</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="section-intro" style="margin-bottom:40px;">
+    <div class="kicker">04 — THE GRAPH, LIVE</div>
+    <h2 style="margin:0;">A canvas you design, not a pile of terminals you babysit.</h2>
+  </div>
+  <div class="live-frame">
+    <div class="term-bar">
+      <span class="term-dot"></span><span class="term-dot"></span><span class="term-dot"></span>
+      <span class="term-title">graphcode · 6 worktrees</span>
+    </div>
+    <img src="assets/graph-hero.png" alt="GraphCode graph canvas with live loop nodes">
+  </div>
+  <div class="live-grid">
+    <div class="demo-frame">
+      <div class="demo-bar">
+        <span class="demo-live"><span class="dot"></span>LIVE</span>
+        Issue orchestration · fan-out per GitHub issue
+      </div>
+      <!-- The GIF is the fallback, not the default: same take, but 800x650 and 10fps against
+           the video's 1920x1560 at 30fps, and it decodes every frame before anything paints. -->
+      <video autoplay muted loop playsinline preload="metadata">
+        <source src="assets/graphcode-demo.mp4" type="video/mp4">
+        <img src="assets/graphcode-demo.gif" alt="An issue orchestration loop fans out child loops for six GitHub issues">
+      </video>
+    </div>
+    <div class="edge-col">
+      <div class="edge-card">
+        <div class="name">Hand-off</div>
+        <p>Fires when the source resolves, unblocking the target.</p>
+      </div>
+      <div class="edge-card">
+        <div class="name">Message</div>
+        <p>Injects text into a running peer. Staged if it's asleep.</p>
+      </div>
+      <div class="edge-card">
+        <div class="name">Spawn</div>
+        <p>Instantiates a copy from a template. Children die with their parent.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="hood" class="section">
+  <div class="hood-grid">
+    <div>
+      <div class="kicker">05 — UNDER THE HOOD</div>
+      <h2>Four pieces, one socket.</h2>
+      <p class="lede">App and CLI are both clients speaking length-framed JSON over <span class="path">~/.graphcode/graphcoded.sock</span>. Validation lives in the daemon — a rule only one client enforces isn't a rule.</p>
+      <div class="honesty">
+        <strong>Reported, never estimated.</strong> Presence, current tool call and token usage come from the backend's own hooks. Without hooks the UI says "not reported" rather than a zero nobody measured.
+      </div>
+    </div>
+    <div class="pieces">
+      <div class="piece">
+        <div class="piece-name">graphcode.app</div>
+        <div class="piece-desc">SwiftUI app — sidebar, canvas, per-loop terminal rendered with GhosttyKit.</div>
+      </div>
+      <div class="piece">
+        <div class="piece-name">graphcoded</div>
+        <div class="piece-desc">The orchestrator daemon, kept alive by launchd — owns every graph and all automation.</div>
+      </div>
+      <div class="piece">
+        <div class="piece-name">graphcode</div>
+        <div class="piece-desc">CLI on the same socket: status, node create, send, memo, update, delete.</div>
+      </div>
+      <div class="piece">
+        <div class="piece-name">GraphcodeKit</div>
+        <div class="piece-desc">The shared framework, so app and daemon can never disagree about what a loop is.</div>
+      </div>
+      <div class="piece">
+        <div class="piece-name g">~/.graphcode/</div>
+        <div class="piece-desc">Graphs, memory logs, layouts, socket — plain JSON. Nothing is ever written inside a project folder you open.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="cta">
+  <div class="cta-card">
+    <div class="cta-grid-bg"></div>
+    <div class="cta-inner">
+      <h2>Draw your first graph in a minute.</h2>
+      <p class="lede">Add a folder, write a goal — GraphCode names the loop for you. Connect a second with an edge. Then close the app; the loops won't notice.</p>
+      <div class="cta-ctas">
+        <a class="btn-primary" href="https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg">⬇ Download .dmg</a>
+        <a class="btn-ghost" href="https://github.com/scgopi/GraphCode"><span class="star">★</span> Star the repo</a>
+      </div>
+      <div class="brew"><span class="prompt">$</span>brew install --cask scgopi/graphcode/graphcode</div>
+      <div class="cta-fine">Developer ID signed &amp; notarized · requires Claude Code on your PATH</div>
+    </div>
+  </div>
+</section>
+
+<footer class="footer">
+  <img src="assets/icon.png" alt="GraphCode">
+  <div class="made">GraphCode is maintained by <a href="https://github.com/scgopi">scgopi</a>. Built on <a href="https://ghostty.org">Ghostty</a> and <a href="https://zmx.sh">zmx</a>.</div>
+  <div class="footer-links">
+    <a href="https://github.com/scgopi/GraphCode/releases">Releases</a>
+    <a href="shortcuts.html">Shortcuts</a>
+    <a href="https://github.com/scgopi/GraphCode/blob/main/LICENSE">FSL-1.1-MIT</a>
+    <a href="https://x.com/scgopi">X</a>
+    <a href="https://www.linkedin.com/in/scgopi/">LinkedIn</a>
+  </div>
+</footer>
+
+</body>
+</html>
