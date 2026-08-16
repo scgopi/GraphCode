@@ -7,18 +7,20 @@ metadata, `LICENSE`, and `THIRD-PARTY-NOTICES.txt`.
 
 ```powershell
 pwsh Tools/windows/package.ps1 -Command Build `
-  -InputDirectory .build/windows/release -Version 1.0.0
+  -InputDirectory .build/windows/release `
+  -Version 1.0.0
 pwsh Tools/windows/package.ps1 -Command Verify `
-  -Package .build/windows/packages/GraphCode-1.0.0-windows-x86_64
+  -Package .build/windows/packages/GraphCode-1.0.0-windows-x86_64.zip
 pwsh Tools/windows/package.ps1 -Command Install `
   -Package .build/windows/packages/GraphCode-1.0.0-windows-x86_64
 ```
 
-Installation is staged and swapped atomically. A failed swap restores the
-previous `current` tree. The per-user `data` directory is never removed by
-uninstall. Installation adds `current/bin` to the user PATH and registers an
-`ONLOGON` scheduled task for `graphcoded`; `-NoScheduledTask` is intended for
-tests and portable deployments.
+The ZIP contains one top-level `GraphCode` directory. Installation verifies the
+complete manifest and provider provenance before copying anything, then stages
+and swaps atomically. The scheduled task is created and run; the exact installed
+daemon endpoint must become reachable or the previous installation is restored.
+The daemon's actual `%USERPROFILE%\.graphcode` data directory is preserved by
+uninstall unless `-RemoveUserData` is explicitly requested.
 
 Unsigned artifacts are explicitly marked `UNSIGNED (development artifact; not
 code signed)` in `metadata.json` and `SIGNING.txt`. Signing is opt-in:

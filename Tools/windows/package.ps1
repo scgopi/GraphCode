@@ -9,6 +9,8 @@ param(
   [string] $Version = "0.0.0-dev",
   [string] $SignCertificate,
   [string] $SignTimestampUrl,
+  [string] $WinghosttyRoot,
+  [string] $ZmxRoot,
   [switch] $KeepUserData,
   [switch] $RemoveUserData,
   [switch] $NoScheduledTask,
@@ -48,6 +50,25 @@ function Get-Manifest([string] $root) {
       }
     } | Sort-Object path)
 }
+function Normalize-ManifestPath([string] $path) {
+  Require (-not [string]::IsNullOrWhiteSpace($path)) "manifest contains an empty path"
+  $normalized = $path.Replace("\", "/")
+  Require (-not [IO.Path]::IsPathRooted($normalized) -and
+    $normalized -notmatch "^[A-Za-z]:/" -and $normalized -notmatch "://" ) `
+    "manifest contains an absolute path: $path"
+  $parts = $normalized.Split("/")
+  Require ($parts -notcontains "" -and $parts -notcontains "." -and $parts -notcontains "..") `
+    "manifest contains an unsafe path: $path"
+  Require ($normalized -notmatch "[<>:`"|?*]") "manifest contains an invalid path: $path"
+  return $normalized
+}
+function Get-ActualPackageFiles([string] $root) {
+  @(Get-ChildItem -LiteralPath $root -File -Recurse |
+    Where-Object { $_.Name -notin @("manifest.json", "checksums.sha256") } |
+    ForEach-Object {
+      Normalize-ManifestPath $_.FullName.Substring($root.Length).TrimStart("\", "/")
+    } | Sort-Object -Unique)
+}
 function Write-Metadata([string] $root, [string] $version) {
   $pins = Get-Content -LiteralPath (Join-Path $shellRoot "provider-pins.json") -Raw | ConvertFrom-Json
   $metadata = [ordered]@{
@@ -60,7 +81,8 @@ function Write-Metadata([string] $root, [string] $version) {
       Where-Object { $_.Name -match "winghostty|host" } | ForEach-Object { "bin/$($_.Name)" })
     providerPins = $pins
     signing = if ($SignCertificate) { "signed" } else { "UNSIGNED (development artifact; not code signed)" }
-    userData = "%LOCALAPPDATA%/GraphCode/data (preserved by uninstall)"
+    userData = "%USERPROFILE%/.graphcode (preserved by uninstall)"
+    providerProvenance = "provider-provenance.json"
   }
   $metadata | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $root "metadata.json") -Encoding utf8
   @"
@@ -79,6 +101,7 @@ function Assert-Package([string] $root) {
   Require (@(Get-ChildItem -LiteralPath (Join-Path $root "bin") -Filter *.dll -ErrorAction SilentlyContinue).Count -gt 0) "Swift runtime DLLs are missing"
   Require (Test-Path -LiteralPath (Join-Path $root "LICENSE")) "LICENSE is missing"
   Require (Test-Path -LiteralPath (Join-Path $root "THIRD-PARTY-NOTICES.txt")) "third-party notices are missing"
+  Require (Test-Path -LiteralPath (Join-Path $root "provider-provenance.json")) "provider provenance is missing"
   Require ($metadata.platform -eq "windows-x86_64") "unsupported package platform"
   return $metadata
 }
@@ -86,13 +109,40 @@ function Verify-Manifest([string] $root) {
   $manifestPath = Join-Path $root "manifest.json"
   Require (Test-Path -LiteralPath $manifestPath) "manifest.json is missing"
   $expected = Get-Content $manifestPath -Raw | ConvertFrom-Json
-  foreach ($entry in $expected.files) {
-    $file = Join-Path $root ($entry.path -replace "/", "\")
+  $entries = @($expected.files)
+  $normalizedEntries = @()
+  foreach ($entry in $entries) {
+    $normalized = Normalize-ManifestPath ([string] $entry.path)
+    Require ($entry.size -is [int] -or $entry.size -is [long] -or $entry.size -is [double]) "manifest size is invalid: $normalized"
+    Require ([string] $entry.sha256 -match "^[0-9a-fA-F]{64}$") "manifest hash is invalid: $normalized"
+    Require ($normalizedEntries -notcontains $normalized.ToLowerInvariant()) "manifest contains duplicate paths"
+    $normalizedEntries += $normalized.ToLowerInvariant()
+    $file = Join-Path $root ($normalized -replace "/", "\")
     Require (Test-Path -LiteralPath $file -PathType Leaf) "manifest file is missing: $($entry.path)"
+    $item = Get-Item -LiteralPath $file
+    Require ($item.Length -eq [int64]$entry.size) "size mismatch: $normalized"
     $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
-    Require ($actual -eq $entry.sha256) "checksum mismatch: $($entry.path)"
+    Require ($actual -eq ([string]$entry.sha256).ToLowerInvariant()) "checksum mismatch: $normalized"
   }
+  $actualFiles = @(Get-ActualPackageFiles $root | ForEach-Object { $_.ToLowerInvariant() })
+  $expectedFiles = @($normalizedEntries | Sort-Object -Unique)
+  Require (($actualFiles -join "`n") -eq ($expectedFiles -join "`n")) "manifest file set differs from package contents"
   return $expected
+}
+function Read-ProviderProvenance([string] $root) {
+  $path = Join-Path $root "provider-provenance.json"
+  $provenance = Get-Content $path -Raw | ConvertFrom-Json
+  $pins = Get-Content (Join-Path $shellRoot "provider-pins.json") -Raw | ConvertFrom-Json
+  foreach ($provider in @("winghostty", "zmx")) {
+    $p = $provenance.$provider
+    $pin = $pins.$provider
+    Require ($p.sha -eq $pin.sha -and $p.repository -eq $pin.repository) "$provider provenance pin mismatch"
+    Require ([string]$p.sha256 -match "^[0-9a-fA-F]{64}$") "$provider provenance digest is missing"
+    $artifact = Join-Path $root ($p.packagePath -replace "/", "\")
+    Require (Test-Path $artifact -PathType Leaf) "$provider provenance artifact is missing"
+    Require ((Get-FileHash $artifact -Algorithm SHA256).Hash.ToLowerInvariant() -eq $p.sha256.ToLowerInvariant()) "$provider provenance digest mismatch"
+  }
+  return $provenance
 }
 function Build-Package {
   $out = if ($OutputDirectory) { $OutputDirectory } else { Join-Path $repoRoot ".build\windows\packages" }
@@ -111,15 +161,52 @@ function Build-Package {
     )
     foreach ($location in $locations) { if (Test-Path $location) { Get-ChildItem $location -File | Copy-Item -Destination (Join-Path $root "bin") -Force } }
   }
+  $provenancePath = Join-Path $root "provider-provenance.json"
+  if ($WinghosttyRoot -or $ZmxRoot) {
+    Require ($WinghosttyRoot -and $ZmxRoot) "both provider roots are required"
+    $pins = Get-Content (Join-Path $shellRoot "provider-pins.json") -Raw | ConvertFrom-Json
+    foreach ($spec in @(
+      @{ name = "winghostty"; root = $WinghosttyRoot; pin = $pins.winghostty; source = $pins.winghostty.artifact; destination = "assets/winghostty-win32-host.lib" },
+      @{ name = "zmx"; root = $ZmxRoot; pin = $pins.zmx; source = $pins.zmx.artifact; destination = "bin/zmx.exe" }
+    )) {
+      Require ((git -C $spec.root rev-parse HEAD) -eq $spec.pin.sha) "$($spec.name) provider is not pinned"
+      Require (@(git -C $spec.root status --porcelain).Count -eq 0) "$($spec.name) provider worktree is dirty"
+      $providerArtifact = Join-Path $spec.root ($spec.source -replace "/", "\")
+      Require (Test-Path $providerArtifact -PathType Leaf) "$($spec.name) provider artifact is missing"
+      $destination = Join-Path $root ($spec.destination -replace "/", "\")
+      New-Item -ItemType Directory -Force (Split-Path $destination -Parent) | Out-Null
+      Copy-Item $providerArtifact $destination -Force
+      $digest = (Get-FileHash $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+      if ($spec.name -eq "winghostty") { $wingDigest = $digest } else { $zmxDigest = $digest }
+    }
+    @{
+      schemaVersion = 1
+      winghostty = @{ repository = $pins.winghostty.repository; sha = $pins.winghostty.sha; packagePath = "assets/winghostty-win32-host.lib"; sha256 = $wingDigest }
+      zmx = @{ repository = $pins.zmx.repository; sha = $pins.zmx.sha; packagePath = "bin/zmx.exe"; sha256 = $zmxDigest }
+    } | ConvertTo-Json -Depth 5 | Set-Content $provenancePath -Encoding utf8
+  } else {
+    Require (Test-Path (Join-Path $source "provider-provenance.json")) "InputDirectory must contain provider-provenance.json"
+    Copy-Item (Join-Path $source "provider-provenance.json") $provenancePath -Force
+  }
   foreach ($name in $required + "graphcode-windows.exe") {
     Require (Test-Path (Join-Path $root "bin\$name")) "$name was not found; pass -InputDirectory with release outputs"
   }
   Require (@(Get-ChildItem (Join-Path $root "bin") -Filter *.dll).Count -gt 0) "Swift runtime DLLs were not found"
   Copy-Item (Join-Path $repoRoot "LICENSE") (Join-Path $root "LICENSE") -Force
+  $wingLicense = if ($WinghosttyRoot) { Get-Content (Join-Path $WinghosttyRoot "LICENSE") -Raw } else { Get-Content (Join-Path $source "WINGHOSTTY-LICENSE.txt") -Raw }
+  $zmxLicense = if ($ZmxRoot) { Get-Content (Join-Path $ZmxRoot "LICENSE") -Raw } else { Get-Content (Join-Path $source "ZMX-LICENSE.txt") -Raw }
+  Require ($wingLicense -match "Permission is hereby granted" -and
+    $zmxLicense -match "Permission is hereby granted" -and
+    $wingLicense -match "THE SOFTWARE IS PROVIDED" -and
+    $zmxLicense -match "THE SOFTWARE IS PROVIDED") "provider license texts are incomplete"
   @"
-GraphCode includes zmx and Winghostty provider artifacts pinned in metadata.json.
-Provider source: https://github.com/coneilen/zmx and https://github.com/coneilen/winghostty
-See provider-pins.json in the source repository for immutable revisions.
+GraphCode provider attributions
+
+Winghostty: https://github.com/coneilen/winghostty
+$wingLicense
+
+zmx: https://github.com/coneilen/zmx
+$zmxLicense
 "@ | Set-Content (Join-Path $root "THIRD-PARTY-NOTICES.txt") -Encoding utf8
   Copy-Item (Join-Path $shellRoot "provider-pins.json") (Join-Path $root "provider-pins.json") -Force
   Write-Metadata $root $Version
@@ -141,7 +228,7 @@ See provider-pins.json in the source repository for immutable revisions.
   $lines | Set-Content (Join-Path $root "checksums.sha256") -Encoding utf8
   $archive = Join-Path $out "GraphCode-$Version-windows-x86_64.zip"
   if (Test-Path $archive) { Remove-Item $archive -Force }
-  Compress-Archive -Path (Join-Path $root "*") -DestinationPath $archive -CompressionLevel Optimal
+  Compress-Archive -Path $root -DestinationPath $archive -CompressionLevel Optimal
   $final = Join-Path $out "GraphCode-$Version-windows-x86_64"
   if (Test-Path $final) { Remove-Item $final -Recurse -Force }
   Move-Item $root $final
@@ -155,8 +242,19 @@ function Open-Package([string] $path) {
   if ((Get-Item $path).PSIsContainer) { return (Resolve-Path $path).Path }
   $extract = Join-Path ([IO.Path]::GetTempPath()) "graphcode-package-$([guid]::NewGuid())"
   Expand-Archive -LiteralPath $path -DestinationPath $extract
-  $nested = Get-ChildItem $extract -Directory | Select-Object -First 1
-  return $nested.FullName
+  $script:PackageExtraction = $extract
+  $entries = @(Get-ChildItem $extract)
+  $nested = @($entries | Where-Object { $_.PSIsContainer })
+  if ($nested.Count -eq 1 -and $nested[0].Name -eq "GraphCode" -and
+    @($entries | Where-Object { -not $_.PSIsContainer }).Count -eq 0) { return $nested[0].FullName }
+  if ((Test-Path (Join-Path $extract "manifest.json")) -and (Test-Path (Join-Path $extract "metadata.json"))) { return $extract }
+  Fail "ZIP must contain one GraphCode directory or a verified flat package root"
+}
+function Close-Package {
+  if ($script:PackageExtraction) {
+    Remove-Item -LiteralPath $script:PackageExtraction -Recurse -Force -ErrorAction SilentlyContinue
+    $script:PackageExtraction = $null
+  }
 }
 function Set-UserPath([string] $bin, [bool] $add) {
   $current = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -185,11 +283,54 @@ function Set-Shortcut([bool] $create) {
     Set-Content -LiteralPath $fallback -Value "@echo off`r`n`"$InstallRoot\bin\graphcode-windows.exe`" %*" -Encoding ascii
   }
 }
+function Get-InstalledDaemons {
+  $expected = [IO.Path]::GetFullPath((Join-Path $InstallRoot "bin\graphcoded.exe"))
+  @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+      $_.Name -ieq "graphcoded.exe" -and $_.ExecutablePath -and
+      ([IO.Path]::GetFullPath($_.ExecutablePath) -ieq $expected)
+    })
+}
+function Stop-InstalledDaemon {
+  foreach ($process in @(Get-InstalledDaemons)) {
+    Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+  }
+  $deadline = [DateTime]::UtcNow.AddSeconds(10)
+  while (@(Get-InstalledDaemons).Count -gt 0 -and [DateTime]::UtcNow -lt $deadline) {
+    Start-Sleep -Milliseconds 200
+  }
+  Require (@(Get-InstalledDaemons).Count -eq 0) "installed graphcoded process did not stop"
+}
+function Remove-DaemonTask {
+  & schtasks.exe /End /TN "GraphCode daemon" *> $null
+  & schtasks.exe /Delete /TN "GraphCode daemon" /F *> $null
+}
+function Start-DaemonTask {
+  $support = Join-Path $env:USERPROFILE ".graphcode"
+  New-Item -ItemType Directory -Force $support | Out-Null
+  $taskCommand = "cmd.exe /d /c `"set GRAPHCODE_SUPPORT_DIR=$support&& `"$InstallRoot\bin\graphcoded.exe`"`""
+  & schtasks.exe /Create /TN "GraphCode daemon" /SC ONLOGON /TR $taskCommand /F *> $null
+  Require ($LASTEXITCODE -eq 0) "scheduled-task registration failed"
+  & schtasks.exe /Run /TN "GraphCode daemon" *> $null
+  Require ($LASTEXITCODE -eq 0) "scheduled-task start failed"
+  $deadline = [DateTime]::UtcNow.AddSeconds(15)
+  while ([DateTime]::UtcNow -lt $deadline) {
+    if (@(Get-InstalledDaemons).Count -gt 0) {
+      $cli = Join-Path $InstallRoot "bin\graphcode.exe"
+      $env:GRAPHCODE_SUPPORT_DIR = $support
+      & $cli projects *> $null
+      if ($LASTEXITCODE -eq 0) { return }
+    }
+    Start-Sleep -Milliseconds 300
+  }
+  throw "scheduled graphcoded endpoint did not become reachable"
+}
 function Install-Package([bool] $upgrade) {
-  $root = Open-Package ($(if ($Package) { $Package } else { Fail "-Package is required" }))
-  $metadata = Assert-Package $root
-  Verify-Manifest $root | Out-Null
-  if ($Version -ne "0.0.0-dev" -and $metadata.version -ne $Version) { Fail "version mismatch: expected $Version, package is $($metadata.version)" }
+  try {
+    $root = Open-Package ($(if ($Package) { $Package } else { Fail "-Package is required" }))
+    $metadata = Assert-Package $root
+    Verify-Manifest $root | Out-Null
+    Read-ProviderProvenance $root | Out-Null
+    if ($Version -ne "0.0.0-dev" -and $metadata.version -ne $Version) { Fail "version mismatch: expected $Version, package is $($metadata.version)" }
   $parent = Split-Path $InstallRoot -Parent
   New-Item -ItemType Directory -Force -Path $parent | Out-Null
   $stage = Join-Path $parent ".GraphCode-install-$([guid]::NewGuid())"
@@ -197,33 +338,39 @@ function Install-Package([bool] $upgrade) {
   $backup = Join-Path $parent ".GraphCode-rollback-$([guid]::NewGuid())"
   $oldPath = [Environment]::GetEnvironmentVariable("Path", "User")
   try {
+    if (-not $NoScheduledTask) { Stop-InstalledDaemon; Remove-DaemonTask }
     if (Test-Path $InstallRoot) { Move-Item $InstallRoot $backup }
     Move-Item $stage $InstallRoot
     Set-UserPath (Join-Path $InstallRoot "bin") $true
     Set-Shortcut $true
     if (-not $NoScheduledTask) {
-      $taskName = "GraphCode daemon"
-      & schtasks.exe /Create /TN $taskName /SC ONLOGON /TR "`"$InstallRoot\bin\graphcoded.exe`"" /F *> $null
-      Require ($LASTEXITCODE -eq 0) "scheduled-task registration failed"
+      Start-DaemonTask
     }
   } catch {
     if (Test-Path $InstallRoot) { Remove-Item $InstallRoot -Recurse -Force }
     if (Test-Path $backup) { Move-Item $backup $InstallRoot }
     [Environment]::SetEnvironmentVariable("Path", $oldPath, "User")
     Set-Shortcut $false
+    if (-not $NoScheduledTask -and (Test-Path (Join-Path $InstallRoot "bin\graphcoded.exe"))) {
+      try { Start-DaemonTask } catch { }
+    }
     throw
   } finally {
     Remove-Item $stage,$backup -Recurse -Force -ErrorAction SilentlyContinue
   }
-  Write-Output "Installed GraphCode $($metadata.version) at $InstallRoot"
+    Write-Output "Installed GraphCode $($metadata.version) at $InstallRoot"
+  } finally {
+    Close-Package
+  }
 }
 function Uninstall-Package {
+  if (-not $NoScheduledTask) { Stop-InstalledDaemon; Remove-DaemonTask }
   $bin = Join-Path $InstallRoot "bin"
   Set-UserPath $bin $false
   Set-Shortcut $false
   & schtasks.exe /Delete /TN "GraphCode daemon" /F *> $null
   if (Test-Path $InstallRoot) { Remove-Item $InstallRoot -Recurse -Force }
-  $data = Join-Path (Split-Path $InstallRoot -Parent) "data"
+  $data = Join-Path $env:USERPROFILE ".graphcode"
   if ($RemoveUserData -and -not $KeepUserData) {
     Remove-Item $data -Recurse -Force -ErrorAction SilentlyContinue
   } else {
@@ -233,7 +380,7 @@ function Uninstall-Package {
 
 switch ($Command) {
   "Build" { Build-Package }
-  "Verify" { $root = Open-Package $Package; Assert-Package $root | Out-Null; Verify-Manifest $root | Out-Null; Write-Output "Package verification: PASS" }
+  "Verify" { try { $root = Open-Package $Package; Assert-Package $root | Out-Null; Verify-Manifest $root | Out-Null; Read-ProviderProvenance $root | Out-Null; Write-Output "Package verification: PASS" } finally { Close-Package } }
   "Install" { Install-Package $false }
   "Upgrade" { Install-Package $true }
   "Uninstall" { Uninstall-Package }
