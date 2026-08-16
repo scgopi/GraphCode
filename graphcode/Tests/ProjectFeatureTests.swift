@@ -226,6 +226,54 @@ struct ProjectFeatureTests {
       #expect(state.draft.goal?.tokenBudget == nil, "\(junk) should mean no budget")
     }
   }
+
+  /// The form's "Driven by" choice becomes the draft's cadence model: heartbeat mode
+  /// sends the bare task plus an interval in seconds, /loop mode composes the
+  /// directive exactly as it always has.
+  @Test
+  @MainActor
+  func theCadenceChoiceTravelsIntoTheDraft() {
+    var state = ProjectFeature.State(graph: LoopGraph(project: Self.testProject))
+    state.draftLoopType = .timeBased
+    state.draftTimedTask = "check for new crash reports"
+    state.draftInterval = .quarterHour
+    state.draftStopAfter = "20 runs"
+
+    // Default: prompt-owned, /loop composed, stop-after included, no interval stored.
+    var draft = state.draft
+    #expect(draft.triggerPrompt == "/loop 15m check for new crash reports Stop after 20 runs.")
+    #expect(draft.heartbeatIntervalSeconds == nil)
+
+    // Heartbeat: bare task, interval in seconds, and the stop-after clause dropped —
+    // a heartbeat loop runs until stopped, and a clause the daemon can't honour must
+    // not ride into the prompt looking honoured.
+    state.draftUsesHeartbeat = true
+    draft = state.draft
+    #expect(draft.triggerPrompt == "check for new crash reports")
+    #expect(draft.heartbeatIntervalSeconds == 900)
+  }
+
+  @Test
+  @MainActor
+  func customIntervalsParseIntoSecondsWithAnHonestFallback() {
+    #expect(ProjectFeature.State.seconds(fromInterval: "90s") == 90)
+    #expect(ProjectFeature.State.seconds(fromInterval: "30m") == 1800)
+    #expect(ProjectFeature.State.seconds(fromInterval: "2h") == 7200)
+    #expect(ProjectFeature.State.seconds(fromInterval: "3d") == 259_200)
+    // Bare digits are minutes, matching what people type into the /loop field.
+    #expect(ProjectFeature.State.seconds(fromInterval: "45") == 2700)
+    #expect(ProjectFeature.State.seconds(fromInterval: "tomorrow") == nil)
+
+    var state = ProjectFeature.State(graph: LoopGraph(project: Self.testProject))
+    state.draftLoopType = .timeBased
+    state.draftTimedTask = "check"
+    state.draftUsesHeartbeat = true
+    state.draftInterval = .custom
+    state.draftCustomInterval = "tomorrow"
+    // A timer needs a number where an agent could have interpreted prose; the
+    // fallback is the same hour a blank custom /loop interval gets.
+    #expect(state.draft.heartbeatIntervalSeconds == 3600)
+  }
 }
 
 private actor SentGraphCommandsBox {

@@ -193,6 +193,22 @@ struct TimedDraftFields: View {
           text: $store.draftTimedTask)
       }
 
+      if SettingsModel.shared.settings.daemonHeartbeatEnabled {
+        DraftField(
+          label: "Driven by", qualifier: "experimental",
+          help: "Heartbeat: the daemon wakes the loop each interval and holds the "
+            + "timer; the loop schedules nothing itself, and stopping it stops the "
+            + "timer. Off, the loop runs itself with /loop as always."
+        ) {
+          Picker("", selection: $store.draftUsesHeartbeat) {
+            Text("Itself, with /loop").tag(false)
+            Text("Daemon heartbeat").tag(true)
+          }
+          .pickerStyle(.segmented)
+          .labelsHidden()
+        }
+      }
+
       if !store.triggerPreview.isEmpty {
         HStack(spacing: 8) {
           Text("will run")
@@ -208,11 +224,13 @@ struct TimedDraftFields: View {
         .background(Theme.draftField, in: RoundedRectangle(cornerRadius: 8))
       }
 
-      DraftField(
-        label: "Stop after", qualifier: "optional",
-        help: "Left empty, it keeps running until you stop it."
-      ) {
-        DraftTextField(placeholder: "20 runs, or 3 days", text: $store.draftStopAfter)
+      if !store.draftUsesHeartbeat {
+        DraftField(
+          label: "Stop after", qualifier: "optional",
+          help: "Left empty, it keeps running until you stop it."
+        ) {
+          DraftTextField(placeholder: "20 runs, or 3 days", text: $store.draftStopAfter)
+        }
       }
 
       DraftField(label: "Name", qualifier: "optional") {
@@ -406,6 +424,10 @@ struct NodeDraftRecap: View {
       let cap = draft.goal?.tokenBudget.map { " Stops if it spends more than \($0) tokens." } ?? ""
       return "Starts now\(location), works toward the goal, and \(check).\(cap)"
     case .timeBased:
+      if draft.heartbeatIntervalSeconds != nil {
+        return "Starts now\(location); the daemon wakes it each interval until you "
+          + "stop it — stopping also stops the timer."
+      }
       return "Starts now\(location) and runs again on its own until you stop it."
     case .turnBased:
       return

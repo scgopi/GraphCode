@@ -74,6 +74,10 @@ struct ProjectFeature {
     /// `.timeBased`: how often, and what to do each time. GraphCode composes the `/loop`
     /// directive from the two — see `ProjectFeature.State.composedTriggerPrompt`.
     var draftInterval: IntervalChoice = .hourly
+    /// `.timeBased`, experimental: the daemon holds the timer instead of the prompt
+    /// carrying /loop. Offered by the form only while the Settings toggle is on;
+    /// always defaults off, per loop — enabling the experiment converts nothing.
+    var draftUsesHeartbeat = false
     var draftCustomInterval = ""
     var draftTimedTask = ""
     var draftStopAfter = ""
@@ -686,6 +690,7 @@ extension ProjectFeature {
     state.draftPausesBeforeWritesOnly = false
     state.draftSketchNote = ""
     state.draftInterval = .hourly
+    state.draftUsesHeartbeat = false
     state.draftCustomInterval = ""
     state.draftTimedTask = ""
     state.draftStopAfter = ""

@@ -48,6 +48,8 @@ extension ProjectFeature.State {
       loopType: draftLoopType,
       checkDescription: draftLoopType == .turnBased ? draftCheck : nil,
       triggerPrompt: composedTriggerPrompt,
+      heartbeatIntervalSeconds: draftLoopType == .timeBased && draftUsesHeartbeat
+        ? draftHeartbeatSeconds : nil,
       firstInstruction: {
         switch draftLoopType {
         case .turnBased: return draftFirstInstruction
@@ -96,6 +98,10 @@ extension ProjectFeature.State {
     case .timeBased:
       let task = draftTimedTask.trimmingCharacters(in: .whitespaces)
       guard !task.isEmpty else { return nil }
+      // Heartbeat mode: the daemon holds the timer, so the prompt is the bare task —
+      // `LoopNode.sessionPrompt` wraps it in the who-holds-the-timer framing at
+      // launch. No /loop, and no "Stop after": a heartbeat loop runs until stopped.
+      if draftUsesHeartbeat { return task }
       var directive = "/loop \(draftInterval.directiveValue(custom: draftCustomInterval)) \(task)"
       let stop = draftStopAfter.trimmingCharacters(in: .whitespaces)
       if !stop.isEmpty { directive += " Stop after \(stop)." }
@@ -109,7 +115,46 @@ extension ProjectFeature.State {
 
   /// The mono line the dialog shows under the interval control, so what will be written
   /// is visible before it is written.
-  var triggerPreview: String { composedTriggerPrompt ?? "" }
+  var triggerPreview: String {
+    if draftLoopType == .timeBased, draftUsesHeartbeat,
+      !draftTimedTask.trimmingCharacters(in: .whitespaces).isEmpty
+    {
+      let interval = draftInterval.directiveValue(custom: draftCustomInterval)
+      return "[graphcode] heartbeat every \(interval) — the daemon holds the timer"
+    }
+    return composedTriggerPrompt ?? ""
+  }
+
+  /// The form's interval as the seconds `LoopNode.heartbeatIntervalSeconds` stores.
+  /// A custom value nobody can parse falls back to an hour, the same forgiveness
+  /// `IntervalChoice.directiveValue` shows a blank one — the /loop path hands garbage
+  /// to an agent that can interpret it, but a timer needs a number.
+  var draftHeartbeatSeconds: Double {
+    switch draftInterval {
+    case .quarterHour: return 900
+    case .hourly: return 3600
+    case .sixHourly: return 21600
+    case .daily: return 86400
+    case .custom:
+      return Self.seconds(fromInterval: draftCustomInterval) ?? 3600
+    }
+  }
+
+  /// "90s", "30m", "2h", "3d" — bare digits count as minutes, matching what people
+  /// type into the /loop field today.
+  static func seconds(fromInterval text: String) -> Double? {
+    let trimmed = text.trimmingCharacters(in: .whitespaces).lowercased()
+    guard !trimmed.isEmpty else { return nil }
+    let digits = trimmed.hasSuffix("s") || trimmed.hasSuffix("m") || trimmed.hasSuffix("h")
+      || trimmed.hasSuffix("d") ? String(trimmed.dropLast()) : trimmed
+    guard let value = Double(digits), value > 0 else { return nil }
+    switch trimmed.last {
+    case "s": return value
+    case "h": return value * 3600
+    case "d": return value * 86400
+    default: return value * 60
+    }
+  }
 
   /// What the promotion form currently means — nil while its one required field is
   /// empty. Computed like `draft`, so there is exactly one definition of it.
