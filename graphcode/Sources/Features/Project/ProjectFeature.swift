@@ -717,7 +717,13 @@ extension ProjectFeature {
     state.draftPausesBeforeWritesOnly = false
     state.draftSketchNote = ""
     state.draftInterval = .hourly
-    state.draftUsesHeartbeat = false
+    // While the experiment is on, the daemon heartbeat is the *default* for new timed
+    // loops — the /loop skill runs only when a person explicitly picks "Itself, with
+    // /loop" in the form. The toggle governing a default rather than mere availability
+    // is a deliberate, user-directed reversal of the earlier converts-nothing stance;
+    // existing loops are still never converted. Same settings read the defaultBackend
+    // line below already does.
+    state.draftUsesHeartbeat = GraphcodeSettingsStore.load().daemonHeartbeatEnabled
     state.draftCustomInterval = ""
     state.draftTimedTask = ""
     state.draftStopAfter = ""
