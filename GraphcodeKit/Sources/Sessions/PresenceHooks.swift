@@ -123,6 +123,15 @@ public enum PresenceHooks {
   /// keys (their preceding byte is `_`, not `"`), which are summed separately below —
   /// a budget is spent by what the API metered, cache reads included.
   ///
+  /// **One count per message, not per line.** Claude Code writes one JSONL record per
+  /// content block — a turn with text plus three tool calls is four records — and
+  /// every record repeats the same message-level `usage`. A naive line-sum therefore
+  /// overcounted roughly 2× (measured on a real transcript: 1,524,855 vs 768,566 after
+  /// dedup), tripping budgets at half their stated bound. Records dedup on the
+  /// message `id` (`"id":"msg_…"`), and a record with a usage block but no such id —
+  /// not a shape Claude Code writes today — still counts rather than silently
+  /// vanishing.
+  ///
   /// Runs on `Stop` — once per turn, when the spend just changed — never per tool call:
   /// it reads the whole transcript, and `PreToolUse` frequency would price it wrong.
   /// Cannot fail and cannot block, same contract as every hook here: every path exits 0.
@@ -148,6 +157,10 @@ public enum PresenceHooks {
         return n
       }
       {
+        if (match($0, /"id":"msg_[A-Za-z0-9]+"/)) {
+          id = substr($0, RSTART, RLENGTH)
+          if (seen[id]++) next
+        }
         input += grab("\\"input_tokens\\":")
         input += grab("\\"cache_creation_input_tokens\\":")
         input += grab("\\"cache_read_input_tokens\\":")
