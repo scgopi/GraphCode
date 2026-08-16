@@ -100,6 +100,7 @@ function Build-Package {
   $staging = Join-Path $out ".staging-$([guid]::NewGuid())"
   $root = Join-Path $staging "GraphCode"
   New-Item -ItemType Directory -Force -Path (Join-Path $root "bin") | Out-Null
+  $root = (Resolve-Path -LiteralPath $root).Path
   $source = Resolve-Input $InputDirectory
   if ($source) {
     Copy-Tree $source (Join-Path $root "bin")
