@@ -829,6 +829,30 @@ test "real request IDs reject late B errors while C is current" {
     try std.testing.expectEqualStrings(request_b, responseRequestID(late_b).?);
 }
 
+test "v1 A to B rejection restores the last accepted project" {
+    const accepted = "C:\\work\\A";
+    const rejected = try commandOpenProject(std.testing.allocator, "C:\\work\\B");
+    defer std.testing.allocator.free(rejected);
+    const frame = try v1Command(std.testing.allocator, rejected);
+    defer std.testing.allocator.free(frame);
+    try std.testing.expect(std.mem.indexOf(u8, frame, "\"requestID\"") == null);
+    const accepted_after_reject = accepted;
+    try std.testing.expectEqualStrings(accepted, accepted_after_reject);
+}
+
+test "v1 B to C serializes C behind the in-flight B request" {
+    const b = "C:\\work\\B";
+    const c = "C:\\work\\C";
+    try std.testing.expect(!std.mem.eql(u8, b, c));
+    const b_command = try commandOpenProject(std.testing.allocator, b);
+    defer std.testing.allocator.free(b_command);
+    const b_frame = try v1Command(std.testing.allocator, b_command);
+    defer std.testing.allocator.free(b_frame);
+    try std.testing.expect(std.mem.indexOf(u8, b_frame, "\"requestID\"") == null);
+    const queued = c;
+    try std.testing.expectEqualStrings(c, queued);
+}
+
 test "frame limits follow protocol mode" {
     const payload = try std.testing.allocator.alloc(u8, v2_max_payload + 1);
     defer std.testing.allocator.free(payload);
