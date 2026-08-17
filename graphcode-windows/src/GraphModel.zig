@@ -415,15 +415,8 @@ pub const Model = struct {
     }
 
     pub fn findEdgeIndex(self: *const Model, id: []const u8) ?usize {
-        if (self.graph) |graph| {
-            if (findEdgeIndexByID(graph.edges.items, id)) |index| return index;
-        }
-        const summary = self.currentGraph() orelse return null;
-        if (findEdgeIndexByID(summary.edges.items, id)) |index| return index;
-        for (self.graphs.items) |candidate| {
-            if (findEdgeIndexByID(candidate.edges.items, id)) |index| return index;
-        }
-        return null;
+        const graph = self.currentGraph() orelse return null;
+        return findEdgeIndexByID(graph.edges.items, id);
     }
 
     pub fn selectNext(self: *Model) void {
@@ -1482,4 +1475,21 @@ test "stable selection survives a daemon graph refresh during a modal edit" {
     _ = try model.updateFromFrame(second);
     try std.testing.expectEqual(@as(?usize, 1), model.findNodeIndex("node-a"));
     try std.testing.expectEqual(@as(?usize, 0), model.findEdgeIndex("edge-a"));
+}
+
+test "edge lookup is scoped to the selected project" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const first =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"a","title":"A","state":"running"}],"edges":[{"id":"shared","from":"a","to":"a","kind":"handoff"}]}}}
+    ;
+    const second =
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"B","name":"B"},"nodes":[{"id":"b","title":"B","state":"running"}],"edges":[]}}}
+    ;
+    _ = try model.updateFromFrame(first);
+    _ = try model.updateFromFrame(second);
+    try std.testing.expect(model.selectProject("B"));
+    try std.testing.expect(model.findEdgeIndex("shared") == null);
+    try std.testing.expect(model.selectProject("A"));
+    try std.testing.expectEqual(@as(?usize, 0), model.findEdgeIndex("shared"));
 }

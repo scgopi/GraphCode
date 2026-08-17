@@ -36,6 +36,7 @@ pub const App = struct {
     model: GraphModel.Model,
     canvas: GraphCanvas.CanvasState = .{},
     selected_node_id: []u8 = &.{},
+    selected_edge_project_path: []u8 = &.{},
     selected_edge_id: []u8 = &.{},
     edge_drag_source_id: []u8 = &.{},
     selection_initialized: bool = false,
@@ -142,6 +143,7 @@ pub const App = struct {
         }
         if (self.selected_worktree_path.len != 0) self.allocator.free(self.selected_worktree_path);
         if (self.selected_node_id.len != 0) self.allocator.free(self.selected_node_id);
+        if (self.selected_edge_project_path.len != 0) self.allocator.free(self.selected_edge_project_path);
         if (self.selected_edge_id.len != 0) self.allocator.free(self.selected_edge_id);
         if (self.edge_drag_source_id.len != 0) self.allocator.free(self.edge_drag_source_id);
         if (self.instance_mutex != null) _ = c.CloseHandle(self.instance_mutex);
@@ -210,10 +212,12 @@ pub const App = struct {
     }
 
     fn onFrame(self: *App, frame: []const u8) void {
+        var incoming_project_path: ?[]u8 = null;
+        defer if (incoming_project_path) |path| self.allocator.free(path);
         if (self.pending_rebind_path.len != 0 and Wire.eventKind(frame) == .graph_changed) {
             const path = Wire.copyGraphChangedProjectPath(self.allocator, frame) catch null;
-            defer if (path) |value| self.allocator.free(value);
             if (path) |value| {
+                incoming_project_path = value;
                 if (self.client.protocolMode() == .v1 and self.pending_open_sent) {
                     if (!std.mem.eql(u8, value, self.pending_sent_path) and
                         !std.mem.eql(u8, value, self.accepted_subscription)) return;
@@ -236,16 +240,27 @@ pub const App = struct {
                 }
             },
             .graph_changed => {
+                if (incoming_project_path) |path| {
+                    if (self.pending_rebind_path.len != 0 and
+                        (std.mem.eql(u8, path, self.pending_rebind_path) or
+                            (self.client.protocolMode() == .v1 and
+                                std.mem.eql(u8, path, self.pending_sent_path))))
+                    {
+                        if (self.model.selectProject(path) and
+                            (self.selected_edge_project_path.len == 0 or
+                                !std.mem.eql(u8, self.selected_edge_project_path, path)))
+                        {
+                            self.clearEdgeSelection();
+                        }
+                    }
+                }
                 if (self.model.graph) |graph| {
                     if (self.canvas.selected_edge) |edge| {
                         if (edge >= graph.edges.items.len) self.canvas.selected_edge = null;
                     }
-                    const accepted_path = if (self.client.protocolMode() == .v1 and self.pending_sent_path.len != 0)
-                        self.pending_sent_path
-                    else
-                        self.pending_rebind_path;
-                    const accepted = self.pending_rebind_path.len != 0 and
-                        std.mem.eql(u8, accepted_path, graph.project.path);
+                    const accepted = incoming_project_path != null and
+                        self.pending_rebind_path.len != 0 and
+                        std.mem.eql(u8, incoming_project_path.?, graph.project.path);
                     if (accepted) {
                         self.client.setSubscription(graph.project.path);
                         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
@@ -491,6 +506,10 @@ pub const App = struct {
     fn clearEdgeSelection(self: *App) void {
         self.canvas.selected_edge = null;
         self.canvas.selected_edge_id = "";
+        if (self.selected_edge_project_path.len != 0) {
+            self.allocator.free(self.selected_edge_project_path);
+            self.selected_edge_project_path = &.{};
+        }
         if (self.selected_edge_id.len != 0) {
             self.allocator.free(self.selected_edge_id);
             self.selected_edge_id = &.{};
@@ -535,6 +554,7 @@ pub const App = struct {
         if (index >= graph.edges.items.len) return false;
         if (graph.edges.items[index].id.len != 0) {
             if (!self.replaceSelectionID(&self.selected_edge_id, graph.edges.items[index].id)) return false;
+            if (!self.replaceSelectionID(&self.selected_edge_project_path, graph.project.path)) return false;
         } else {
             if (self.selected_edge_id.len != 0) self.allocator.free(self.selected_edge_id);
             self.selected_edge_id = &.{};
@@ -568,8 +588,15 @@ pub const App = struct {
         } else {
             self.model.selected_index = null;
         }
-        if (self.selected_edge_id.len != 0) {
-            self.canvas.selected_edge = self.model.findEdgeIndex(self.selected_edge_id);
+        if (self.selected_edge_id.len != 0 and
+            self.selected_edge_project_path.len != 0 and
+            self.model.currentGraph() != null and
+            std.mem.eql(u8, self.model.currentGraph().?.project.path, self.selected_edge_project_path))
+        {
+            self.canvas.selected_edge = GraphModel.findEdgeIndexByID(
+                self.model.graph.?.edges.items,
+                self.selected_edge_id,
+            );
             if (self.canvas.selected_edge == null) {
                 self.clearEdgeSelection();
             } else {
@@ -600,12 +627,16 @@ pub const App = struct {
     }
 
     fn selectedEdgeIndex(self: *const App) ?usize {
-        if (self.selected_edge_id.len == 0) return null;
-        return self.model.findEdgeIndex(self.selected_edge_id);
+        if (self.selected_edge_id.len == 0 or self.selected_edge_project_path.len == 0) return null;
+        const graph = self.model.graph orelse return null;
+        if (!std.mem.eql(u8, graph.project.path, self.selected_edge_project_path)) return null;
+        return GraphModel.findEdgeIndexByID(graph.edges.items, self.selected_edge_id);
     }
 
     fn createNode(self: *App) void {
-        const path = self.currentProject() orelse return;
+        const current_path = self.currentProject() orelse return;
+        const path = self.allocator.dupe(u8, current_path) catch return;
+        defer self.allocator.free(path);
         var draft = NativeForms.node(self.window.hwnd, self.allocator, .{ .title = "" }) catch {
             self.setStatus("Unable to open node form");
             return;
@@ -622,6 +653,10 @@ pub const App = struct {
         const graph = self.model.graph orelse return;
         const index = self.model.selectedIndex() orelse return;
         if (index >= graph.nodes.items.len) return;
+        const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
+        defer self.allocator.free(project_path);
+        const node_id = self.allocator.dupe(u8, graph.nodes.items[index].id) catch return;
+        defer self.allocator.free(node_id);
         const node = graph.nodes.items[index];
         var initial = Forms.NodeUpdate{
             .goal_summary = if (node.goal_summary.len == 0) null else self.allocator.dupe(u8, node.goal_summary) catch null,
@@ -640,8 +675,13 @@ pub const App = struct {
             return;
         } orelse return;
         defer update.deinit(self.allocator);
-        const path = self.currentProject() orelse return;
-        self.client.sendUpdateNodeForm(path, node.id, update);
+        const updated_graph = self.model.graph orelse return;
+        if (!std.mem.eql(u8, updated_graph.project.path, project_path)) return;
+        const updated_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, node_id) orelse {
+            self.setStatus("Loop changed while editing");
+            return;
+        };
+        self.client.sendUpdateNodeForm(project_path, updated_graph.nodes.items[updated_index].id, update);
     }
 
     fn createEdge(self: *App) void {
@@ -1128,7 +1168,9 @@ pub const App = struct {
                 const graph = self.model.graph orelse return;
                 if (graph.nodes.items.len == 0) return;
                 const current = self.model.selected_index orelse 0;
-                self.model.selected_index = if (current == 0) graph.nodes.items.len - 1 else current - 1;
+                const previous = if (current == 0) graph.nodes.items.len - 1 else current - 1;
+                if (!self.model.setSelectedIndex(previous)) return;
+                _ = self.selectNodeIndex(previous);
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .new_tab => if (self.workspace) |workspace| workspace.newTab() catch {
@@ -1595,15 +1637,22 @@ fn onWindowMessage(
                 switch (row.kind) {
                     .project => app.openProject(app.model.recent_projects.items[row.index].path),
                     .open_project => if (row.project_path) |path| {
-                        _ = app.model.selectProject(path);
+                        if (app.model.selectProject(path)) {
+                            app.clearEdgeSelection();
+                            app.rebindWorkspace(path);
+                        }
                     },
                     .overview => app.client.sendOpenGlobalGraph(),
                     .loop => if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
                         if (row.index < graph.nodes.items.len) {
-                            _ = app.model.selectProject(path);
+                            if (!app.model.selectProject(path)) return true;
+                            app.clearEdgeSelection();
+                            app.rebindWorkspace(path);
+                            const selected_graph = app.model.graph orelse return true;
+                            if (row.index >= selected_graph.nodes.items.len) return true;
                             _ = app.selectNodeIndex(row.index);
                             if (app.workspace) |workspace| {
-                                workspace.openNode(0, graph.nodes.items[row.index].id) catch {
+                                workspace.openNode(0, selected_graph.nodes.items[row.index].id) catch {
                                     app.setStatus("Unable to open selected loop");
                                 };
                                 workspace.focus(0);
