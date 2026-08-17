@@ -745,6 +745,7 @@ pub fn jsonString(data: []const u8, key: []const u8) ?[]const u8 {
             escaped = false;
             continue;
         }
+
         if (data[cursor] == '\\') {
             escaped = true;
             continue;
@@ -752,6 +753,19 @@ pub fn jsonString(data: []const u8, key: []const u8) ?[]const u8 {
         if (data[cursor] == '"') return data[value_start..cursor];
     }
     return null;
+}
+
+pub fn copyGraphChangedProjectPath(allocator: std.mem.Allocator, data: []const u8) !?[]u8 {
+    const graph_start = std.mem.indexOf(u8, data, "\"graphChanged\"") orelse return null;
+    const project_start = std.mem.indexOf(u8, data[graph_start..], "\"project\"") orelse return null;
+    const project = data[graph_start + project_start..];
+    const raw = jsonString(project, "path") orelse return null;
+    return try decodeJsonString(allocator, raw);
+}
+
+pub fn copyErrorProjectPath(allocator: std.mem.Allocator, data: []const u8) !?[]u8 {
+    const raw = jsonString(data, "projectPath") orelse return null;
+    return try decodeJsonString(allocator, raw);
 }
 
 pub fn jsonNumber(data: []const u8, key: []const u8) ?u64 {
@@ -784,6 +798,19 @@ test "JSON strings round-trip control characters and unicode" {
     const decoded = try decodeJsonString(allocator, quoted[1 .. quoted.len - 1]);
     defer allocator.free(decoded);
     try std.testing.expectEqualStrings(value, decoded);
+}
+
+test "project and error paths are extracted for open ordering" {
+    const graph =
+        "{\"event\":{\"graphChanged\":{\"project\":{\"path\":\"C:\\\\work\\\\C\"}}}}";
+    const error_frame =
+        "{\"event\":{\"errorOccurred\":\"rejected\",\"projectPath\":\"C:\\\\work\\\\B\"}}";
+    const graph_path = (try copyGraphChangedProjectPath(std.testing.allocator, graph)).?;
+    defer std.testing.allocator.free(graph_path);
+    const error_path = (try copyErrorProjectPath(std.testing.allocator, error_frame)).?;
+    defer std.testing.allocator.free(error_path);
+    try std.testing.expectEqualStrings("C:\\work\\C", graph_path);
+    try std.testing.expectEqualStrings("C:\\work\\B", error_path);
 }
 
 test "frame limits follow protocol mode" {

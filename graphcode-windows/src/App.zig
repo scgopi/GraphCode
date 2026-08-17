@@ -44,8 +44,11 @@ pub const App = struct {
     open_project_pending: bool = false,
     pending_rebind_path: []u8 = &.{},
     pending_previous_subscription: []u8 = &.{},
+    open_generation: u64 = 0,
+    pending_open_generation: u64 = 0,
     last_connection_state: Wire.ConnectionState = .disconnected,
     last_project_opened: []const u8 = "",
+    accepted_subscription: []const u8 = "",
     pending_project_path: []u8 = &.{},
     status_override: []u8 = &.{},
     running: bool = true,
@@ -107,6 +110,7 @@ pub const App = struct {
         if (self.selected_worktree_path.len != 0) self.allocator.free(self.selected_worktree_path);
         if (self.instance_mutex != null) _ = c.CloseHandle(self.instance_mutex);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
+        if (self.accepted_subscription.len != 0) self.allocator.free(self.accepted_subscription);
         if (self.pending_project_path.len != 0) self.allocator.free(self.pending_project_path);
         if (self.pending_rebind_path.len != 0) self.allocator.free(self.pending_rebind_path);
         if (self.pending_previous_subscription.len != 0) self.allocator.free(self.pending_previous_subscription);
@@ -169,6 +173,16 @@ pub const App = struct {
     }
 
     fn onFrame(self: *App, frame: []const u8) void {
+        if (self.pending_rebind_path.len != 0 and Wire.eventKind(frame) == .graph_changed) {
+            const path = Wire.copyGraphChangedProjectPath(self.allocator, frame) catch null;
+            defer if (path) |value| self.allocator.free(value);
+            if (path) |value| {
+                const is_pending = std.mem.eql(u8, value, self.pending_rebind_path);
+                const is_accepted = self.accepted_subscription.len != 0 and
+                    std.mem.eql(u8, value, self.accepted_subscription);
+                if (!is_pending and !is_accepted) return;
+            }
+        }
         const event = self.model.updateFromFrame(frame) catch {
             self.setStatus("Malformed GraphcodeKit event");
             return;
@@ -191,8 +205,14 @@ pub const App = struct {
                             self.setStatus("Unable to retain accepted project");
                             return;
                         };
+                        if (self.accepted_subscription.len != 0) self.allocator.free(self.accepted_subscription);
+                        self.accepted_subscription = self.allocator.dupe(u8, graph.project.path) catch {
+                            self.setStatus("Unable to retain accepted subscription");
+                            return;
+                        };
                         self.allocator.free(self.pending_rebind_path);
                         self.pending_rebind_path = &.{};
+                        self.pending_open_generation = 0;
                         if (self.pending_previous_subscription.len != 0) {
                             self.allocator.free(self.pending_previous_subscription);
                             self.pending_previous_subscription = &.{};
@@ -224,11 +244,21 @@ pub const App = struct {
             },
             .error_occurred => {
                 if (self.pending_rebind_path.len != 0) {
+                    const error_path = Wire.copyErrorProjectPath(self.allocator, frame) catch null;
+                    defer if (error_path) |value| self.allocator.free(value);
+                    if (error_path) |value| {
+                        if (!std.mem.eql(u8, value, self.pending_rebind_path)) {
+                            return;
+                        }
+                    }
                     self.client.setSubscription(self.pending_previous_subscription);
                     if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
                     self.last_project_opened = self.allocator.dupe(u8, self.pending_previous_subscription) catch &.{};
+                    if (self.accepted_subscription.len != 0) self.allocator.free(self.accepted_subscription);
+                    self.accepted_subscription = self.allocator.dupe(u8, self.pending_previous_subscription) catch &.{};
                     self.allocator.free(self.pending_rebind_path);
                     self.pending_rebind_path = &.{};
+                    self.pending_open_generation = 0;
                     if (self.pending_previous_subscription.len != 0) {
                         self.allocator.free(self.pending_previous_subscription);
                         self.pending_previous_subscription = &.{};
@@ -272,10 +302,21 @@ pub const App = struct {
 
     pub fn openProject(self: *App, path: []const u8) void {
         if (path.len == 0) return;
-        const previous = self.client.subscriptionPath(self.allocator) catch {
-            self.setStatus("Unable to retain previous project subscription");
-            return;
-        };
+        const previous = if (self.pending_rebind_path.len != 0)
+            self.allocator.dupe(u8, self.pending_previous_subscription) catch {
+                self.setStatus("Unable to retain previous project subscription");
+                return;
+            }
+        else if (self.accepted_subscription.len != 0)
+            self.allocator.dupe(u8, self.accepted_subscription) catch {
+                self.setStatus("Unable to retain previous project subscription");
+                return;
+            }
+        else
+            self.client.subscriptionPath(self.allocator) catch {
+                self.setStatus("Unable to retain previous project subscription");
+                return;
+            };
         const pending = self.allocator.dupe(u8, path) catch {
             self.allocator.free(previous);
             self.setStatus("Unable to retain pending project");
@@ -289,6 +330,8 @@ pub const App = struct {
         };
         if (self.pending_previous_subscription.len != 0) self.allocator.free(self.pending_previous_subscription);
         self.pending_previous_subscription = previous;
+        self.open_generation +%= 1;
+        self.pending_open_generation = self.open_generation;
         self.client.setSubscription(path);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
         self.last_project_opened = opened;
