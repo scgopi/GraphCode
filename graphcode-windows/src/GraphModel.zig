@@ -56,19 +56,59 @@ pub const Graph = struct {
     edges: std.array_list.Managed(Edge),
 };
 
+pub const LifecycleAction = enum {
+    select,
+    close,
+    forget,
+    delete,
+};
+
+pub const LifecycleRequest = struct {
+    action: LifecycleAction,
+    project_path: []const u8,
+};
+
+pub const LifecycleCallback = *const fn (context: ?*anyopaque, request: LifecycleRequest) void;
+
+pub const RestoreState = enum {
+    cold,
+    restoring,
+    restored,
+    reconnecting,
+};
+
+pub const GraphSummary = struct {
+    project: Project,
+    nodes: std.array_list.Managed(Node),
+
+    fn deinit(self: *GraphSummary, allocator: std.mem.Allocator) void {
+        freeProject(allocator, self.project);
+        for (self.nodes.items) |node| freeNode(allocator, node);
+        self.nodes.deinit();
+    }
+};
+
 pub const Model = struct {
     allocator: std.mem.Allocator,
     recent_projects: std.array_list.Managed(Project),
+    open_projects: std.array_list.Managed(Project),
+    graphs: std.array_list.Managed(GraphSummary),
     graph: ?Graph = null,
+    selected_project_path: ?[]u8 = null,
     selected_node: ?usize = null,
     last_sequence: u64 = 0,
     attention: std.array_list.Managed(Node) ,
     activity: std.array_list.Managed(ActivityEvent),
+    lifecycle_callback: ?LifecycleCallback = null,
+    lifecycle_context: ?*anyopaque = null,
+    restore_state: RestoreState = .cold,
 
     pub fn init(allocator: std.mem.Allocator) Model {
         return .{
             .allocator = allocator,
             .recent_projects = std.array_list.Managed(Project).init(allocator),
+            .open_projects = std.array_list.Managed(Project).init(allocator),
+            .graphs = std.array_list.Managed(GraphSummary).init(allocator),
             .attention = std.array_list.Managed(Node).init(allocator),
             .activity = std.array_list.Managed(ActivityEvent).init(allocator),
         };
@@ -77,6 +117,10 @@ pub const Model = struct {
     pub fn deinit(self: *Model) void {
         for (self.recent_projects.items) |project| freeProject(self.allocator, project);
         self.recent_projects.deinit();
+        for (self.open_projects.items) |project| freeProject(self.allocator, project);
+        self.open_projects.deinit();
+        for (self.graphs.items) |*summary| summary.deinit(self.allocator);
+        self.graphs.deinit();
         for (self.attention.items) |node| freeNode(self.allocator, node);
         self.attention.deinit();
         for (self.activity.items) |event| {
@@ -85,11 +129,126 @@ pub const Model = struct {
         }
         self.activity.deinit();
         if (self.graph) |*graph| freeGraph(self.allocator, graph);
+        if (self.selected_project_path) |path| self.allocator.free(path);
     }
 
     pub fn clearProjects(self: *Model) void {
         for (self.recent_projects.items) |project| freeProject(self.allocator, project);
         self.recent_projects.clearRetainingCapacity();
+    }
+
+    pub fn setLifecycleCallback(self: *Model, context: ?*anyopaque, callback: ?LifecycleCallback) void {
+        self.lifecycle_context = context;
+        self.lifecycle_callback = callback;
+    }
+
+    pub fn dispatchLifecycle(self: *Model, action: LifecycleAction, project_path: []const u8) void {
+        if (self.lifecycle_callback) |callback| {
+            callback(self.lifecycle_context, .{ .action = action, .project_path = project_path });
+        }
+    }
+
+    pub fn beginRestore(self: *Model) void {
+        self.restore_state = .restoring;
+    }
+
+    pub fn markRestored(self: *Model) void {
+        self.restore_state = .restored;
+    }
+
+    pub fn markReconnecting(self: *Model) void {
+        // Graph summaries and selection intentionally survive transport loss.
+        self.restore_state = .reconnecting;
+    }
+
+    pub fn selectedNodeID(self: *const Model) ?[]const u8 {
+        return if (self.selected()) |node| node.id else null;
+    }
+
+    pub fn currentGraph(self: *const Model) ?*const Graph {
+        return if (self.graph) |*graph| graph else null;
+    }
+
+    pub fn graphFor(self: *const Model, project_path: []const u8) ?*const GraphSummary {
+        for (self.graphs.items) |*summary| {
+            if (std.mem.eql(u8, summary.project.path, project_path)) return summary;
+        }
+        return null;
+    }
+
+    pub fn selectProject(self: *Model, project_path: []const u8) bool {
+        const summary = self.graphFor(project_path) orelse return false;
+        if (self.selected_project_path) |path| self.allocator.free(path);
+        self.selected_project_path = self.allocator.dupe(u8, summary.project.path) catch return false;
+        self.selected_node = if (summary.nodes.items.len == 0) null else 0;
+        return true;
+    }
+
+    pub fn applyLifecycle(self: *Model, action: LifecycleAction, project_path: []const u8) bool {
+        const index = for (self.graphs.items, 0..) |summary, i| {
+            if (std.mem.eql(u8, summary.project.path, project_path)) break i;
+        } else null;
+        if (action == .select) {
+            const selected = self.selectProject(project_path);
+            if (selected) self.dispatchLifecycle(action, project_path);
+            return selected;
+        }
+        var known = index != null;
+        for (self.open_projects.items) |project| known = known or std.mem.eql(u8, project.path, project_path);
+        for (self.recent_projects.items) |project| known = known or std.mem.eql(u8, project.path, project_path);
+        if (!known) return false;
+        switch (action) {
+            .select => unreachable,
+            .close => {
+                if (index) |i| {
+                    var summary = self.graphs.orderedRemove(i);
+                    summary.deinit(self.allocator);
+                }
+                self.removeOpenProject(project_path);
+            },
+            .forget => self.removeRecentProject(project_path),
+            .delete => {
+                if (index) |i| {
+                    var summary = self.graphs.orderedRemove(i);
+                    summary.deinit(self.allocator);
+                }
+                self.removeOpenProject(project_path);
+                self.removeRecentProject(project_path);
+            },
+        }
+        if (self.selected_project_path) |selected| {
+            if (std.mem.eql(u8, selected, project_path)) {
+                self.allocator.free(selected);
+                self.selected_project_path = null;
+                if (self.graph) |*graph| {
+                    freeGraph(self.allocator, graph);
+                    self.graph = null;
+                }
+                self.selected_node = null;
+            }
+        }
+        self.dispatchLifecycle(action, project_path);
+        return true;
+    }
+
+    fn removeOpenProject(self: *Model, path: []const u8) void {
+        var i: usize = 0;
+        while (i < self.open_projects.items.len) {
+            if (std.mem.eql(u8, self.open_projects.items[i].path, path)) {
+                const project = self.open_projects.orderedRemove(i);
+                freeProject(self.allocator, project);
+            } else i += 1;
+        }
+    }
+
+    fn removeRecentProject(self: *Model, path: []const u8) void {
+        var i: usize = 0;
+        while (i < self.recent_projects.items.len) {
+            if (std.mem.eql(u8, self.recent_projects.items[i].path, path)) {
+                const project = self.recent_projects.orderedRemove(i);
+                freeProject(self.allocator, project);
+            } else i += 1;
+        }
     }
 
     pub fn updateFromFrame(self: *Model, frame: []const u8) !Wire.EventKind {
@@ -169,6 +328,27 @@ pub const Model = struct {
             });
             cursor = object_end + 1;
         }
+        // The daemon's recent list is also the authoritative restore/open seed.
+        // Keep open projects separate so a later project event never evicts older
+        // graph summaries.
+        if (std.mem.indexOf(u8, frame, "\"openProjects\"")) |open_key| {
+            if (indexOfByte(frame, open_key, '[')) |open| {
+                if (findClosing(frame, open, '[', ']')) |close| {
+                    var open_cursor = open + 1;
+                    while (open_cursor < close) {
+                        const start = indexOfByte(frame, open_cursor, '{') orelse break;
+                        if (start >= close) break;
+                        const end = findClosing(frame, start, '{', '}') orelse break;
+                        const object = frame[start .. end + 1];
+                        try self.addOpenProject(.{
+                            .path = try duplicateJsonString(self.allocator, object, "path"),
+                            .name = try duplicateJsonString(self.allocator, object, "name"),
+                        });
+                        open_cursor = end + 1;
+                    }
+                }
+            }
+        }
     }
 
     fn decodeGraph(self: *Model, frame: []const u8) !void {
@@ -200,11 +380,67 @@ pub const Model = struct {
                 }
             }
         }
+        var prior_node_id: ?[]const u8 = null;
+        if (self.graph) |old| {
+            if (self.selected_node) |index| {
+                if (index < old.nodes.items.len) prior_node_id = old.nodes.items[index].id;
+            }
+        }
         self.recordActivity(graph);
         self.replaceAttention(&graph);
+        try self.upsertSummary(&graph);
+        try self.addOpenProject(.{
+            .path = try self.allocator.dupe(u8, graph.project.path),
+            .name = try self.allocator.dupe(u8, graph.project.name),
+        });
         if (self.graph) |*old| freeGraph(self.allocator, old);
         self.graph = graph;
-        if (graph.nodes.items.len == 0) self.selected_node = null else if (self.selected_node == null) self.selected_node = 0;
+        if (self.selected_project_path) |path| self.allocator.free(path);
+        self.selected_project_path = try self.allocator.dupe(u8, graph.project.path);
+        self.restore_state = .restored;
+        if (graph.nodes.items.len == 0) {
+            self.selected_node = null;
+        } else if (prior_node_id) |node_id| {
+            self.selected_node = 0;
+            for (graph.nodes.items, 0..) |node, index| {
+                if (std.mem.eql(u8, node.id, node_id)) {
+                    self.selected_node = index;
+                    break;
+                }
+            }
+        } else {
+            self.selected_node = 0;
+        }
+    }
+
+    fn addOpenProject(self: *Model, project: Project) !void {
+        for (self.open_projects.items) |existing| {
+            if (std.mem.eql(u8, existing.path, project.path)) {
+                freeProject(self.allocator, project);
+                return;
+            }
+        }
+        try self.open_projects.append(project);
+    }
+
+    fn upsertSummary(self: *Model, graph: *const Graph) !void {
+        for (self.graphs.items) |*summary| {
+            if (!std.mem.eql(u8, summary.project.path, graph.project.path)) continue;
+            for (summary.nodes.items) |node| freeNode(self.allocator, node);
+            summary.nodes.clearRetainingCapacity();
+            for (graph.nodes.items) |node| try summary.nodes.append(try cloneNode(self.allocator, node));
+            return;
+        }
+        var summary = GraphSummary{
+            .project = .{
+                .path = try self.allocator.dupe(u8, graph.project.path),
+                .name = try self.allocator.dupe(u8, graph.project.name),
+            },
+            .nodes = std.array_list.Managed(Node).init(self.allocator),
+        };
+        errdefer summary.deinit(self.allocator);
+        for (graph.nodes.items) |node| try summary.nodes.append(try cloneNode(self.allocator, node));
+        try self.graphs.append(summary);
     }
 
     fn replaceAttention(self: *Model, graph: *const Graph) void {
@@ -308,6 +544,7 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
         .poll_interval_seconds = node.poll_interval_seconds,
         .stall_after_seconds = node.stall_after_seconds,
         .worktree_path = try allocator.dupe(u8, node.worktree_path),
+        .worktree_branch = try allocator.dupe(u8, node.worktree_branch),
     };
 }
 
@@ -570,6 +807,42 @@ test "project identity derives remote and global from Codable paths" {
     try std.testing.expect(!global.isRemote());
     try std.testing.expect(!local.isRemote());
     try std.testing.expect(!local.isGlobal());
+}
+
+test "multi-project fixture retains both summaries and selection identity" {
+    const allocator = std.testing.allocator;
+    var model = Model.init(allocator);
+    defer model.deinit();
+    const local = try std.fs.cwd().readFileAlloc(allocator, "fixtures/daemon-v2-multi-project.json", 64 * 1024);
+    defer allocator.free(local);
+    const remote = try std.fs.cwd().readFileAlloc(allocator, "fixtures/daemon-v2-multi-project-remote.json", 64 * 1024);
+    defer allocator.free(remote);
+    _ = try model.updateFromFrame(local);
+    _ = try model.updateFromFrame(remote);
+    try std.testing.expectEqual(@as(usize, 2), model.graphs.items.len);
+    try std.testing.expectEqual(@as(usize, 2), model.open_projects.items.len);
+    try std.testing.expectEqualStrings("ssh://build/remote", model.selected_project_path.?);
+    try std.testing.expect(model.graphFor("C:\\work\\local") != null);
+    try std.testing.expect(model.selectProject("C:\\work\\local"));
+    try std.testing.expectEqualStrings("C:\\work\\local", model.selected_project_path.?);
+}
+
+test "close forget and delete have distinct graph lifecycle semantics" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const frame =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"g","project":{"path":"C:\\work\\graph","name":"Graph"},"nodes":[],"edges":[]}}}
+    ;
+    _ = try model.updateFromFrame(frame);
+    try model.recent_projects.append(.{
+        .path = try std.testing.allocator.dupe(u8, "C:\\work\\graph"),
+        .name = try std.testing.allocator.dupe(u8, "Graph"),
+    });
+    try std.testing.expect(model.applyLifecycle(.close, "C:\\work\\graph"));
+    try std.testing.expectEqual(@as(usize, 0), model.graphs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), model.recent_projects.items.len);
+    try std.testing.expect(model.applyLifecycle(.forget, "C:\\work\\graph"));
+    try std.testing.expectEqual(@as(usize, 0), model.recent_projects.items.len);
 }
 
 test "attention fixture preserves awaiting input and stranded edge metadata" {

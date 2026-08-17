@@ -1,0 +1,1 @@
+{"version":2,"kind":"event","sequence":12,"event":{"graphChanged":{"id":"graph-local","project":{"path":"C:\\work\\local","name":"Local Graph"},"nodes":[{"id":"local-loop","title":"Local loop","loopType":"turnBased","state":"running","presence":{"presence":"busy"}}],"edges":[]}}}

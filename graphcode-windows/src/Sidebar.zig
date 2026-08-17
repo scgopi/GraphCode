@@ -22,7 +22,33 @@ pub fn draw(
         drawText(hdc, allocator, project.name, 24, y, 13, 0x00E6E6E6);
         y += 24;
     }
-    if (model.graph) |graph| {
+    if (model.graphs.items.len != 0) {
+        drawText(hdc, allocator, "Open", 18, y + 10, 14, 0x00B8B8B8);
+        y += 36;
+        for (model.graphs.items) |summary| {
+            const selected = if (model.selected_project_path) |path|
+                std.mem.eql(u8, path, summary.project.path)
+            else false;
+            drawText(hdc, allocator, summary.project.name, 24, y, 13,
+                if (selected) 0x00FFFFFF else 0x00D0D0D0);
+            y += 24;
+            drawText(hdc, allocator, "Loops", 18, y + 10, 11, 0x007A7A7A);
+            y += 24;
+            for (summary.nodes.items) |node| {
+                drawText(hdc, allocator, node.title, 36, y, 11, 0x00E6E6E6);
+                y += 24;
+            }
+            y += 14;
+        }
+        if (inspection) |value| {
+            drawText(hdc, allocator, "Worktrees", 18, y + 10, 11, 0x007A7A7A);
+            y += 24;
+            for (value.entries.items) |entry| {
+                drawText(hdc, allocator, entry.path, 24, y, 11, 0x00E6E6E6);
+                y += 34;
+            }
+        }
+    } else if (model.graph) |graph| {
         drawText(hdc, allocator, "Open", 18, y + 10, 14, 0x00B8B8B8);
         drawText(hdc, allocator, graph.project.name, 24, y + 36, 13, 0x00FFFFFF);
         y += 62;
@@ -82,7 +108,12 @@ pub fn worktreeRowTop(project_count: usize, loop_count: usize, index: usize) i32
 }
 
 pub const RowKind = enum { project, overview, loop, worktree };
-pub const Row = struct { kind: RowKind, index: usize, top: i32 };
+pub const Row = struct {
+    kind: RowKind,
+    index: usize,
+    top: i32,
+    project_path: ?[]const u8 = null,
+};
 pub const Layout = struct {
     base: i32,
     project_count: usize,
@@ -107,10 +138,16 @@ pub const Layout = struct {
 };
 
 pub fn layoutFor(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection) Layout {
+    var loop_count: usize = 0;
+    if (model.graphs.items.len != 0) {
+        for (model.graphs.items) |summary| loop_count += summary.nodes.items.len;
+    } else if (model.graph) |graph| {
+        loop_count = graph.nodes.items.len;
+    }
     return .{
         .base = Tokens.header_height + 78,
         .project_count = model.recent_projects.items.len,
-        .loop_count = if (model.graph) |graph| graph.nodes.items.len else 0,
+        .loop_count = loop_count,
         .worktree_count = if (inspection) |value| value.entries.items.len else 0,
     };
 }
@@ -127,15 +164,21 @@ pub fn rowAt(
     const layout = layoutFor(model, inspection);
     const project_top = layout.projectTop(0) - scroll_offset;
     if (y >= project_top and y < project_top + @as(i32, @intCast(model.recent_projects.items.len * 24))) {
-        return .{ .kind = .project, .index = @intCast(@divTrunc(y - project_top, 24)), .top = project_top };
+        const index: usize = @intCast(@divTrunc(y - project_top, 24));
+        return .{
+            .kind = .project,
+            .index = index,
+            .top = project_top,
+            .project_path = model.recent_projects.items[index].path,
+        };
     }
-    if (model.graph != null) {
+    if (model.graph != null or model.graphs.items.len != 0) {
         const overview_top = layout.overviewTop() - scroll_offset;
         if (y >= overview_top and y < overview_top + 38) {
             return .{ .kind = .overview, .index = 0, .top = overview_top };
         }
         const loop_top = layout.loopTop(0) - scroll_offset;
-        const loop_count = model.graph.?.nodes.items.len;
+        const loop_count = layout.loop_count;
         if (y >= loop_top and y < loop_top + @as(i32, @intCast(loop_count * 24))) {
             return .{ .kind = .loop, .index = @intCast(@divTrunc(y - loop_top, 24)), .top = loop_top };
         }
@@ -162,7 +205,13 @@ pub fn contentBottom(model: *const GraphModel.Model, inspection: ?*const Worktre
 pub fn sidebarSectionBottom(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection) i32 {
     var bottom = Tokens.header_height + 78 +
         @as(i32, @intCast(model.recent_projects.items.len * 24));
-    if (model.graph != null) {
+    if (model.graphs.items.len != 0) {
+        var loops: usize = 0;
+        for (model.graphs.items) |summary| loops += summary.nodes.items.len;
+        bottom += 36 + @as(i32, @intCast(model.graphs.items.len * 38)) +
+            @as(i32, @intCast(loops * 24)) + @as(i32, @intCast(model.graphs.items.len * 38));
+        if (inspection) |value| bottom += 24 + @as(i32, @intCast(value.entries.items.len * 34)) + 10;
+    } else if (model.graph != null) {
         bottom += 62 + 54 + @as(i32, @intCast(model.graph.?.nodes.items.len * 24));
         if (inspection) |value| bottom += 24 + @as(i32, @intCast(value.entries.items.len * 34)) + 10;
     }
@@ -201,9 +250,9 @@ pub fn hitTestOverviewLoop(x: i32, y: i32, model: *const GraphModel.Model, scrol
     if (x < 0 or x >= Tokens.sidebar_width or y < Tokens.header_height or y >= viewport_bottom) return null;
     const top = Tokens.header_height + 78 +
         @as(i32, @intCast(model.recent_projects.items.len * 24)) - scroll_offset;
-    if (model.graph == null or y < top) return null;
+    if (model.graph == null and model.graphs.items.len == 0 or y < top) return null;
     const index: usize = @intCast(@divTrunc(y - top, 24));
-    if (index >= model.graph.?.nodes.items.len) return null;
+    if (index >= layoutFor(model, null).loop_count) return null;
     return index;
 }
 
