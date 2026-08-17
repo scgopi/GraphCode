@@ -266,10 +266,40 @@ fn safeSubgraphJson(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
     Forms.validateSubgraphJson(value) catch return allocator.dupe(u8, "null");
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, value, .{});
     defer parsed.deinit();
+    stripRuntimeFields(&parsed.value);
     var output = std.array_list.Managed(u8).init(allocator);
     errdefer output.deinit();
     try output.writer().print("{f}", .{std.json.fmt(parsed.value, .{})});
     return try output.toOwnedSlice();
+}
+
+fn stripRuntimeFields(value: *std.json.Value) void {
+    switch (value.*) {
+        .object => |*object| {
+            _ = object.swapRemove("hasActiveDependents");
+            if (object.getPtr("subGraph")) |nested| stripRuntimeFields(nested);
+            if (object.getPtr("nodes")) |nodes| switch (nodes.*) {
+                .array => |*items| for (items.items) |*item| stripRuntimeFields(item),
+                else => {},
+            };
+        },
+        .array => |*items| for (items.items) |*item| stripRuntimeFields(item),
+        else => {},
+    }
+}
+
+test "canonical subgraphs omit runtime-only node fields recursively" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\{"id":"11111111-1111-4111-8111-111111111111","project":{"path":"C:\\work\\graph","name":"Graph","lastOpenedAt":0},"nodes":[{"id":"22222222-2222-4222-8222-222222222222","title":"Loop","loopType":"turnBased","backend":"claudeCode","pilotState":"notPiloted","hasActiveDependents":true,"metricHistory":[],"state":{"idle":{}},"createdAt":0,"subGraph":{"id":"33333333-3333-4333-8333-333333333333","project":{"path":"C:\\work\\nested","name":"Nested","lastOpenedAt":0},"nodes":[],"edges":[]}}],"edges":[]}
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, input, .{});
+    defer parsed.deinit();
+    stripRuntimeFields(&parsed.value);
+    var output = std.array_list.Managed(u8).init(allocator);
+    defer output.deinit();
+    try output.writer().print("{f}", .{std.json.fmt(parsed.value, .{})});
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "hasActiveDependents") == null);
 }
 
 fn goalJson(allocator: std.mem.Allocator, draft: Forms.NodeDraft) ![]u8 {

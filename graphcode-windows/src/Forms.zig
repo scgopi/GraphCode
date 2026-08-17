@@ -275,7 +275,7 @@ fn validateLoopGraphValue(value: std.json.Value, depth: usize) FormError!void {
         try validateUsage(node.get("usage"));
         try optionalString(node.get("activity"));
         try validatePresence(node.get("presence"));
-        try requiredBool(node.get("hasActiveDependents"));
+        // Runtime-only and intentionally ignored by Codable persistence.
         try validateMetricHistory(node.get("metricHistory"));
         if (!isUuidOrNull(node.get("createdBy"))) return error.InvalidSubgraph;
         if (!enumObject(node.get("state"), isLoopState)) return error.InvalidSubgraph;
