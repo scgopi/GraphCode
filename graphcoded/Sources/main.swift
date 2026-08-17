@@ -7,6 +7,21 @@ import GraphcodeKit
 #if os(Windows)
   SupportDirectory.prepare()
   let endpointName: String = {
+    #if os(Windows)
+      if let startupEventName = ProcessInfo.processInfo.environment[
+        "GRAPHCODE_DAEMON_STARTUP_EVENT"
+      ] {
+        var wideName = Array(startupEventName.utf16)
+        wideName.append(0)
+        if let startupEvent = wideName.withUnsafeBufferPointer({
+          OpenEventW(DWORD(SYNCHRONIZE), false, $0.baseAddress)
+        }) {
+          _ = WaitForSingleObject(startupEvent, 5_000)
+          CloseHandle(startupEvent)
+        }
+      }
+    #endif
+
     do {
       return try WindowsNamedPipeEndpoint.name()
     } catch {
@@ -15,30 +30,6 @@ import GraphcodeKit
     }
   }()
 
-  #if os(Windows)
-    if let shutdownEventName = ProcessInfo.processInfo.environment[
-      "GRAPHCODE_DAEMON_SHUTDOWN_EVENT"
-    ] {
-      var wideName = Array(shutdownEventName.utf16)
-      wideName.append(0)
-      if let shutdownEvent = wideName.withUnsafeBufferPointer({
-        OpenEventW(DWORD(SYNCHRONIZE), false, $0.baseAddress)
-      }) {
-        DispatchQueue.global(qos: .utility).async {
-          _ = WaitForSingleObject(shutdownEvent, INFINITE)
-          shutdown.lock.lock()
-          shutdown.stopped = true
-          shutdown.lock.unlock()
-          Task {
-            await ZmxSessionLauncher.shutdownWindowsRemoteBridge()
-            try? await listener.close()
-            CloseHandle(shutdownEvent)
-            exit(0)
-          }
-        }
-      }
-    }
-  #endif
   do {
     try WindowsNamedPipeEndpoint.recordActiveGeneration()
   } catch {
@@ -83,6 +74,31 @@ import GraphcodeKit
     }
   }
   let shutdown = ShutdownState()
+
+  #if os(Windows)
+    if let shutdownEventName = ProcessInfo.processInfo.environment[
+      "GRAPHCODE_DAEMON_SHUTDOWN_EVENT"
+    ] {
+      var wideName = Array(shutdownEventName.utf16)
+      wideName.append(0)
+      if let shutdownEvent = wideName.withUnsafeBufferPointer({
+        OpenEventW(DWORD(SYNCHRONIZE), false, $0.baseAddress)
+      }) {
+        DispatchQueue.global(qos: .utility).async {
+          _ = WaitForSingleObject(shutdownEvent, INFINITE)
+          shutdown.lock.lock()
+          shutdown.stopped = true
+          shutdown.lock.unlock()
+          Task {
+            await ZmxSessionLauncher.shutdownWindowsRemoteBridge()
+            try? await listener.close()
+            CloseHandle(shutdownEvent)
+            exit(0)
+          }
+        }
+      }
+    }
+  #endif
 
   func handleWindowsConnection(_ connection: any DaemonConnection) {
     guard let handshakePermit = handshakeLimiter.tryAcquire() else {

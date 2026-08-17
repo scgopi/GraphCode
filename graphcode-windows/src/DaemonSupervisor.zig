@@ -7,10 +7,30 @@ pub const Supervisor = struct {
     allocator: std.mem.Allocator,
     process: c.HANDLE = null,
     shutdown_event: c.HANDLE = null,
+    startup_event: c.HANDLE = null,
+    startup_reservation: c.HANDLE = null,
     owned: bool = false,
     failure: []u8 = &.{},
 
     pub fn start(self: *Supervisor, endpoint: []const u8, lock_name: []const u8) void {
+        self.acquireStartupReservation(lock_name) catch |err| {
+            switch (err) {
+                error.ReservationBusy => {
+                    const deadline = std.time.milliTimestamp() + 5_000;
+                    while (std.time.milliTimestamp() < deadline) {
+                        if (probeEndpoint(endpoint) == .available) return;
+                        std.Thread.sleep(100 * std.time.ns_per_ms);
+                    }
+                    return;
+                },
+                else => {
+                    self.setFailure("Unable to reserve daemon startup");
+                    return;
+                },
+            }
+        };
+        defer self.releaseStartupReservation();
+
         const deadline = std.time.milliTimestamp() + 5_000;
         const grace_deadline = std.time.milliTimestamp() + 1_000;
         while (std.time.milliTimestamp() < deadline) {
@@ -34,15 +54,24 @@ pub const Supervisor = struct {
             return;
         };
         defer self.allocator.free(exe);
+        self.createStartupEvent(lock_name) catch {
+            self.setFailure("Unable to create daemon startup reservation event");
+            return;
+        };
         self.createShutdownEvent(lock_name) catch {
             self.setFailure("Unable to create daemon shutdown event");
+            self.closeStartupEvent();
             return;
         };
         self.spawn(exe) catch {
             self.setFailure("Unable to start graphcoded.exe");
             self.closeShutdownEvent();
+            self.closeStartupEvent();
             return;
         };
+        _ = c.SetEvent(self.startup_event);
+        self.clearStartupEnvironment();
+        self.closeStartupEvent();
         const startup_deadline = std.time.milliTimestamp() + 5_000;
         while (std.time.milliTimestamp() < startup_deadline) {
             if (probeEndpoint(endpoint) == .available) return;
@@ -60,6 +89,7 @@ pub const Supervisor = struct {
             self.closeProcess();
         }
         self.closeShutdownEvent();
+        self.closeStartupEvent();
     }
 
     pub fn forceStop(self: *Supervisor) void {
@@ -111,6 +141,56 @@ pub const Supervisor = struct {
         const env_name = try utf16(self.allocator, "GRAPHCODE_DAEMON_SHUTDOWN_EVENT");
         defer self.allocator.free(env_name);
         if (c.SetEnvironmentVariableW(env_name.ptr, wide.ptr) == 0) return error.EnvironmentUpdateFailed;
+    }
+
+    fn acquireStartupReservation(self: *Supervisor, lock_name: []const u8) !void {
+        const name = try std.fmt.allocPrint(self.allocator, "{s}-startup", .{lock_name});
+        defer self.allocator.free(name);
+        const wide = try utf16(self.allocator, name);
+        defer self.allocator.free(wide);
+        self.startup_reservation = c.CreateMutexW(null, 1, wide.ptr);
+        if (self.startup_reservation == null) return error.ReservationCreationFailed;
+        if (c.GetLastError() == c.ERROR_ALREADY_EXISTS) {
+            _ = c.CloseHandle(self.startup_reservation);
+            self.startup_reservation = null;
+            return error.ReservationBusy;
+        }
+    }
+
+    fn releaseStartupReservation(self: *Supervisor) void {
+        if (self.startup_reservation != null) {
+            _ = c.ReleaseMutex(self.startup_reservation);
+            _ = c.CloseHandle(self.startup_reservation);
+        }
+        self.startup_reservation = null;
+    }
+
+    fn createStartupEvent(self: *Supervisor, lock_name: []const u8) !void {
+        const name = try std.fmt.allocPrint(self.allocator, "{s}-startup-ready", .{lock_name});
+        defer self.allocator.free(name);
+        const wide = try utf16(self.allocator, name);
+        defer self.allocator.free(wide);
+        self.startup_event = c.CreateEventW(null, 1, 0, wide.ptr);
+        if (self.startup_event == null) return error.EventCreationFailed;
+        _ = c.ResetEvent(self.startup_event);
+        const env_name = try utf16(self.allocator, "GRAPHCODE_DAEMON_STARTUP_EVENT");
+        defer self.allocator.free(env_name);
+        if (c.SetEnvironmentVariableW(env_name.ptr, wide.ptr) == 0) {
+            return error.EnvironmentUpdateFailed;
+        }
+    }
+
+    fn clearStartupEnvironment(self: *Supervisor) void {
+        _ = self;
+        const env_name = utf16(std.heap.page_allocator, "GRAPHCODE_DAEMON_STARTUP_EVENT") catch return;
+        defer std.heap.page_allocator.free(env_name);
+        _ = c.SetEnvironmentVariableW(env_name.ptr, null);
+    }
+
+    fn closeStartupEvent(self: *Supervisor) void {
+        self.clearStartupEnvironment();
+        if (self.startup_event != null) _ = c.CloseHandle(self.startup_event);
+        self.startup_event = null;
     }
 
     fn closeShutdownEvent(self: *Supervisor) void {

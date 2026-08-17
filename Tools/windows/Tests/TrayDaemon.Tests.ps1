@@ -26,8 +26,16 @@ if ($supervisor -notmatch "owned") { throw "daemon ownership state is missing" }
 if ($supervisor -notmatch "OpenMutexW" -or $supervisor -notmatch "ERROR_SEM_TIMEOUT") {
   throw "daemon startup race coordination is missing"
 }
+if ($supervisor -notmatch "startup-ready" -or
+    $supervisor -notmatch "acquireStartupReservation" -or
+    $supervisor -notmatch "SetEvent") {
+  throw "daemon startup reservation protocol is missing"
+}
 if ($supervisor -notmatch "SetEvent" -or $supervisor -notmatch "forceStop") {
   throw "graceful daemon shutdown fallback is missing"
+}
+if ($supervisor -notmatch "GRAPHCODE_DAEMON_STARTUP_EVENT") {
+  throw "daemon startup reservation handoff is missing"
 }
 if ($app -notmatch "WM_CLOSE[\s\S]*?SW_HIDE") { throw "window close must hide to tray" }
 if ($app -notmatch "command_open[\s\S]*?SW_SHOW" -or

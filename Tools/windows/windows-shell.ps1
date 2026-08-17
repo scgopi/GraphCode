@@ -231,6 +231,12 @@ try {
   Record-TestOwnedSessions
   Write-OwnedResourceMetrics "windows-shell:topology"
   if ($UseStubDaemon) {
+    Invoke-Native "GraphCode Windows tray live executable interaction" {
+      & (Join-Path $repoRoot "Tools\windows\Tests\TrayLive.Tests.ps1") `
+        -Executable $app `
+        -PipeName $pipeName `
+        -ExternalDaemonPid $stubProcess.Id
+    }
     Invoke-Native "GraphCode Windows shell restart smoke" {
       Invoke-ShellProcess $arguments "windows-shell:restart"
     }
