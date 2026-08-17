@@ -61,6 +61,10 @@ struct GhosttyTerminalView: NSViewRepresentable {
   var isVisible: Bool = true
   /// The user clicked into this surface. See `GhosttyTerminalNSView.onFocusRequested`.
   var onFocusRequested: (() -> Void)?
+  /// The user pressed a key on the "Process exited. Press any key to close." screen.
+  /// See `GhosttyTerminalNSView.onExitAcknowledged`. `nil` for a plain-shell pane, whose
+  /// exit closes the pane outright (`.paneClosed`) so the screen never lingers.
+  var onExitAcknowledged: (() -> Void)?
   let onProcessExited: (Bool) -> Void
 
   /// Carries `initialPrompt` into the shell as a variable instead of interpolating it
@@ -113,6 +117,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
     view.isActive = isActive
     view.isVisible = isVisible
     view.onFocusRequested = onFocusRequested
+    view.onExitAcknowledged = onExitAcknowledged
     view.onProcessExited = onProcessExited
   }
 

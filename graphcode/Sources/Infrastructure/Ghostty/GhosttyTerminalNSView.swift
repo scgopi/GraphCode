@@ -17,6 +17,18 @@ final class GhosttyTerminalNSView: NSView {
   private(set) var surface: ghostty_surface_t!
   var onProcessExited: ((Bool) -> Void)?
 
+  /// Called on the first keypress after the process has exited — the "Press any key to
+  /// close the terminal." screen being taken up on its offer. Keystrokes stop reaching
+  /// the surface once the process is gone (see `keyDown`), so without this the message
+  /// was a promise nobody kept: libghostty re-requested a close the app had already
+  /// handled, and the dead pane stayed on screen.
+  var onExitAcknowledged: (() -> Void)?
+
+  /// Set once `handleSurfaceClosed` reports the process gone, and never unset: a
+  /// surface's child does not come back to life, and every keystroke after this belongs
+  /// to `onExitAcknowledged` rather than to a shell that no longer exists.
+  private(set) var processHasExited = false
+
   /// Called when the user clicks into this surface, so the workspace can record which
   /// pane of a split they meant.
   ///
@@ -132,6 +144,7 @@ final class GhosttyTerminalNSView: NSView {
   /// process is still alive — so "succeeded" here means "the surface closed because the
   /// command finished on its own," not a real exit status.
   func handleSurfaceClosed(processAlive: Bool) {
+    if !processAlive { processHasExited = true }
     onProcessExited?(!processAlive)
   }
 
@@ -243,6 +256,14 @@ final class GhosttyTerminalNSView: NSView {
   // MARK: - Keyboard
 
   override func keyDown(with event: NSEvent) {
+    // "Any key" means any key: taken here, before the surface, because the process the
+    // surface would encode it for is gone. Left to libghostty, only keys that encode a
+    // character would count, and each one re-requested a close the app had already
+    // acted on — the screen that says "Press any key to close" doing nothing at all.
+    if processHasExited {
+      onExitAcknowledged?()
+      return
+    }
     // Zoom first, and never forwarded. libghostty binds these same keys itself, so letting
     // the event through as well would apply the step twice — and would apply the second
     // one to this surface alone, which is the per-surface behaviour the app-wide zoom
@@ -262,6 +283,8 @@ final class GhosttyTerminalNSView: NSView {
   }
 
   override func keyUp(with event: NSEvent) {
+    // The release of the acknowledging press — swallowed for the reason below.
+    guard !processHasExited else { return }
     // Swallowed to match the press. A release whose press the surface never saw is exactly
     // the sort of thing the kitty keyboard protocol reports to the program on the other
     // end, and a shell being told about a key nobody pressed is worse than being told

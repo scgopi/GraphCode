@@ -68,6 +68,11 @@ struct LoopWorkspaceFeature {
     case focusPreviousPane
     case paneClosed(tabID: UUID, surfaceID: UUID)
     case primarySurfaceExited(succeeded: Bool)
+    /// A keypress on the agent pane's "Process exited. Press any key to close." screen —
+    /// the human agreeing the loop is over. Declared here (the surface is this feature's
+    /// to wire) and handled by `AppFeature`, which owns both the workspace's dismissal
+    /// and the daemon connection the deletion goes out on.
+    case primaryExitAcknowledged
     /// The loop bar's Stop loop and Show in graph, and the right rail's downstream rows.
     /// All three are `AppFeature`'s to carry out — stopping talks to the daemon, and both
     /// of the others change what the whole window is showing — so they are declared here
@@ -240,7 +245,7 @@ struct LoopWorkspaceFeature {
         state.seenBeatID = state.node.summary?.current?.id
         return .none
 
-      case .stopLoopTapped, .showInGraphTapped, .railTargetTapped:
+      case .stopLoopTapped, .showInGraphTapped, .railTargetTapped, .primaryExitAcknowledged:
         // Handled by `AppFeature`'s parent `Reduce` — see the actions' own doc comment.
         return .none
       }
