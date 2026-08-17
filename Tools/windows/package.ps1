@@ -35,7 +35,7 @@ function Resolve-Input([string] $path) {
 function Save-Shortcut([string] $destination) {
   foreach ($path in @(
       (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\GraphCode.lnk"),
-      (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\GraphCode.cmd")
+      (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\GraphCode.url")
     )) {
     if (Test-Path $path) {
       Copy-Item $path (Join-Path $destination (Split-Path $path -Leaf)) -Force
@@ -44,7 +44,7 @@ function Save-Shortcut([string] $destination) {
 }
 function Restore-Shortcut([string] $source) {
   Set-Shortcut $false
-  foreach ($name in @("GraphCode.lnk", "GraphCode.cmd")) {
+  foreach ($name in @("GraphCode.lnk", "GraphCode.url")) {
     $path = Join-Path $source $name
     if (Test-Path $path) {
       Copy-Item $path (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$name") -Force
@@ -354,7 +354,7 @@ function Set-UserPath([string] $bin, [bool] $add) {
 }
 function Set-Shortcut([bool] $create) {
   $shortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\GraphCode.lnk"
-  $fallback = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\GraphCode.cmd"
+  $fallback = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\GraphCode.url"
   if (-not $create) {
     Remove-Item -LiteralPath $shortcut -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $fallback -Force -ErrorAction SilentlyContinue
@@ -370,7 +370,13 @@ function Set-Shortcut([bool] $create) {
     $link.Description = "GraphCode Windows shell"
     $link.Save()
   } catch {
-    throw "Windows shell shortcut creation requires the Shell Link COM API; console launcher scripts are not supported."
+    $target = [Uri]::new((Join-Path $InstallRoot "bin\graphcode-windows.exe")).AbsoluteUri
+    @"
+[InternetShortcut]
+URL=$target
+IconFile=$(Join-Path $InstallRoot "bin\graphcode-windows.exe")
+IconIndex=0
+"@ | Set-Content -LiteralPath $fallback -Encoding ascii
   }
 }
 function Get-InstalledDaemons {
