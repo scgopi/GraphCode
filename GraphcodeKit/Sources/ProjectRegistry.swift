@@ -396,7 +396,14 @@ public actor ProjectRegistry {
       error = nil
 
     case .listQuickChats:
-      response = .quickChatsListed(quickChatStore.load())
+      guard let chats = try? quickChatStore.loadResult() else {
+        error = "quick chat store is corrupt or unreadable"
+        break
+      }
+      switch chats {
+      case .missing: response = .quickChatsListed([])
+      case .loaded(let values): response = .quickChatsListed(values)
+      }
       await broadcast(response!)
 
     case .createQuickChat(let title, let backend):
@@ -505,7 +512,11 @@ public actor ProjectRegistry {
     case .deleteProjectGraph:
       return .recentProjectsListed(persistence.loadRecentProjects())
     case .listQuickChats:
-      return .quickChatsListed(quickChatStore.load())
+      guard let chats = try? quickChatStore.loadResult() else { return nil }
+      switch chats {
+      case .missing: return .quickChatsListed([])
+      case .loaded(let values): return .quickChatsListed(values)
+      }
     case .createQuickChat, .openQuickChat, .renameQuickChat:
       return nil
     case .deleteQuickChat(let id):

@@ -534,6 +534,7 @@ public enum ZmxSessionLauncher {
     if await sessionExists(node, projectPath: projectPath) {
       return .success(.attached)
     }
+    var spawnedProcess: Process?
     if node.sessionPrompt == nil || node.sessionPrompt?.isEmpty == true {
       guard let executable = node.backend.executableName else {
         return .failure(.unavailable("backend has no executable"))
@@ -548,6 +549,7 @@ public enum ZmxSessionLauncher {
             process.currentDirectoryURL = URL(fileURLWithPath: directory)
           }
           try process.run()
+          spawnedProcess = process
         } catch {
           return .failure(.failed("zmx daemon launch failed: \(error)"))
         }
@@ -562,12 +564,26 @@ public enum ZmxSessionLauncher {
       await start(node, projectPath: projectPath)
     }
     for delay in [100, 200, 400, 800, 1200] {
+      try? await Task.sleep(for: .milliseconds(delay))
       if await sessionExists(node, projectPath: projectPath) {
+        spawnedProcess = nil
         return .success(.started)
+      }
+    }
+    if let spawnedProcess {
+      if spawnedProcess.isRunning { spawnedProcess.terminate() }
+      spawnedProcess.waitUntilExit()
+    }
+    await kill(node, projectPath: projectPath)
+    for delay in [100, 200, 400] {
+      if await sessionExists(node, projectPath: projectPath) {
+        await kill(node, projectPath: projectPath)
       }
       try? await Task.sleep(for: .milliseconds(delay))
     }
-    await kill(node, projectPath: projectPath)
+    if await sessionExists(node, projectPath: projectPath) {
+      return .failure(.failed("zmx session appeared after startup timeout"))
+    }
     return .failure(.failed(
       "zmx session did not become live (\(SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName))"))
   }

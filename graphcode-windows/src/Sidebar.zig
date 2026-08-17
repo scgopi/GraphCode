@@ -488,6 +488,21 @@ test "sidebar without graph counts only static rendered content" {
     try std.testing.expectEqual(no_graph_max, clampScroll(80, no_graph_max));
 }
 
+test "quick chats remain selectable without an open graph or inspection" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    try model.quick_chats.append(.{
+        .id = try std.testing.allocator.dupe(u8, "chat-1"),
+        .title = try std.testing.allocator.dupe(u8, "Scratch"),
+        .backend = try std.testing.allocator.dupe(u8, "claudeCode"),
+    });
+    const layout = layoutFor(&model, null);
+    const row = rowAt(24, layout.quickChatTop(0) + 4, &model, null, 0, 700) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(RowKind.quick_chat, row.kind);
+    try std.testing.expectEqual(@as(usize, 0), row.index);
+}
+
 fn rect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {
     return .{ .left = left, .top = top, .right = right, .bottom = bottom };
 }
