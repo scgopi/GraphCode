@@ -22,7 +22,6 @@ let graphcodeKitTarget: Target = .target(
     "DaemonBootstrap.swift",
     "GraphStore.swift",
     "QuickChatStore.swift",
-    "Sessions/QuickChatSessionRegistry.swift",
     "ProjectPersistence.swift",
     "ProjectRegistry.swift",
     "SupportDirectory.swift",

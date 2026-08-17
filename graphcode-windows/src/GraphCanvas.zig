@@ -3,7 +3,6 @@ const GraphModel = @import("GraphModel.zig");
 const Tokens = @import("DesignTokens.zig");
 const Sidebar = @import("Sidebar.zig");
 const WorktreeStatus = @import("WorktreeStatus.zig");
-const WorkspaceControls = @import("WorkspaceControls.zig");
 const c = @import("Win32.zig").c;
 
 pub const CanvasState = struct {
@@ -88,19 +87,6 @@ pub const CardTextLayout = struct {
     show_attention: bool,
 };
 
-pub const RenderBounds = struct { left: i32, top: i32, right: i32, bottom: i32 };
-
-pub fn renderBounds(client_right: i32, client_bottom: i32, controls: WorkspaceControls.State) RenderBounds {
-    const left = if (controls.rail_visible) Tokens.sidebar_width else 0;
-    const activity = if (controls.activity_enabled) Tokens.activity_strip_height else 0;
-    return .{
-        .left = left,
-        .top = Tokens.header_height,
-        .right = client_right,
-        .bottom = @max(Tokens.header_height + 1, client_bottom - Tokens.workspace_height - activity),
-    };
-}
-
 pub fn paint(
     hwnd: c.HWND,
     hdc: c.HDC,
@@ -110,8 +96,8 @@ pub fn paint(
     sidebar_scroll: i32,
     status: []const u8,
     allocator: std.mem.Allocator,
+    show_activity: bool,
     state: *const CanvasState,
-    controls: WorkspaceControls.State,
 ) void {
     var client: c.RECT = undefined;
     _ = c.GetClientRect(hwnd, &client);
@@ -124,12 +110,17 @@ pub fn paint(
             null
     else
         null;
-    if (controls.rail_visible) {
-        Sidebar.draw(hdc, model, visible_inspection, selected_worktree_path, sidebar_scroll, status, allocator);
-    }
+    Sidebar.draw(hdc, model, visible_inspection, selected_worktree_path, sidebar_scroll, status, allocator);
 
-    const bounds = renderBounds(client.right, client.bottom, controls);
-    const graph_bounds = rect(bounds.left, bounds.top, bounds.right, bounds.bottom);
+    const graph_bounds = rect(
+        Tokens.sidebar_width,
+        Tokens.header_height,
+        client.right,
+        @max(
+            Tokens.header_height + 1,
+            client.bottom - Tokens.workspace_height - if (show_activity) Tokens.activity_strip_height else 0,
+        ),
+    );
     fill(hdc, graph_bounds, Tokens.canvas_tone);
     const saved = c.SaveDC(hdc);
     _ = c.IntersectClipRect(hdc, graph_bounds.left, graph_bounds.top, graph_bounds.right, graph_bounds.bottom);
@@ -139,29 +130,17 @@ pub fn paint(
         for (graph.nodes.items, 0..) |node, index| {
             drawNode(hdc, allocator, node, index, model.selectedIndex(), graph.nodes.items, graph.edges.items, state);
         }
-
     } else {
         drawText(hdc, allocator, "Open a project to view its graph", Tokens.sidebar_width + 32, 120, 18, 0x00B8B8B8);
     }
     _ = c.RestoreDC(hdc, saved);
     attentionRail(hdc, allocator, model, client.right);
-    if (controls.activity_enabled) {
-        activityStrip(
-            hdc,
-            allocator,
-            model,
-            rect(0, client.bottom - Tokens.workspace_height - Tokens.activity_strip_height,
-                client.right, client.bottom - Tokens.workspace_height),
-        );
-    }
-}
-
-test "workspace controls change graph render bounds" {
-    const shown = renderBounds(1200, 900, .{});
-    const hidden = renderBounds(1200, 900, .{ .rail_visible = false, .activity_enabled = false });
-    try std.testing.expectEqual(@as(i32, Tokens.sidebar_width), shown.left);
-    try std.testing.expectEqual(@as(i32, 0), hidden.left);
-    try std.testing.expect(hidden.bottom > shown.bottom);
+    if (show_activity) activityStrip(
+        hdc,
+        allocator,
+        model,
+        rect(0, client.bottom - Tokens.workspace_height - Tokens.activity_strip_height, client.right, client.bottom - Tokens.workspace_height),
+    );
 }
 
 fn header(hdc: c.HDC, allocator: std.mem.Allocator, width: i32, status: []const u8) void {
