@@ -13,10 +13,6 @@ pub const Action = enum {
     delete_selected,
     create_edge,
     jump_next,
-    command_palette,
-    next_identity,
-    previous_identity,
-    quick_chat,
     settings,
     product_settings,
     clone_repository,
@@ -43,10 +39,6 @@ pub const Action = enum {
     focus_previous_pane,
     select_previous_tab,
     select_next_tab,
-    show_graph,
-    toggle_rail,
-    toggle_panel,
-    toggle_activity,
 };
 
 pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
@@ -54,7 +46,7 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (ctrl and shift and key == 'C') return .clone_repository;
     if (ctrl and shift and key == 'X') return .cancel_clone;
     if (ctrl and shift and key == 'R') return .remote_repository;
-    if (ctrl and key == 'R' and !shift) return .reconnect;
+    if (ctrl and key == 'R') return .reconnect;
     if (ctrl and key == 'N') return .create_node;
     if (ctrl and key == 'O') return .open_folder;
     if (ctrl and shift and key == 'I') return .inspect_worktrees;
@@ -67,10 +59,6 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (!ctrl and key == 0x71) return .rename_selected;
     if (!ctrl and key == 0x2E) return .delete_selected;
     if (ctrl and key == 'J') return .jump_next;
-    if (ctrl and key == 'P' and !shift) return .command_palette;
-    if (ctrl and key == 0x28) return .next_identity;
-    if (ctrl and key == 0x26) return .previous_identity;
-    if (ctrl and key == 'Q') return .quick_chat;
     if (ctrl and (key == ',' or key == 0xBC)) return .settings;
     if (key == 0x70) return .onboarding;
     if (ctrl and key == 0x09) return .cycle_attention;
@@ -89,10 +77,6 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (ctrl and key == 0xDD) return .focus_next_pane;
     if (ctrl and key == 0x21) return .select_previous_tab;
     if (ctrl and key == 0x22) return .select_next_tab;
-    if (ctrl and key == 'G' and shift) return .show_graph;
-    if (ctrl and key == 'R' and shift) return .toggle_rail;
-    if (ctrl and key == 'P' and shift) return .toggle_panel;
-    if (ctrl and key == 'A' and shift) return .toggle_activity;
     return .none;
 }
 
@@ -108,10 +92,6 @@ pub fn commandText(allocator: std.mem.Allocator, action: Action) ![]u8 {
         .delete_selected => allocator.dupe(u8, "Delete selected canvas item"),
         .create_edge => allocator.dupe(u8, "Create edge"),
         .jump_next => allocator.dupe(u8, "Jump to next node"),
-        .command_palette => allocator.dupe(u8, "Command / jump palette"),
-        .next_identity => allocator.dupe(u8, "Next loop"),
-        .previous_identity => allocator.dupe(u8, "Previous loop"),
-        .quick_chat => allocator.dupe(u8, "Quick chats (protocol unavailable)"),
         .settings => allocator.dupe(u8, "Settings"),
         .product_settings => allocator.dupe(u8, "Product settings"),
         .clone_repository => allocator.dupe(u8, "Clone HTTPS repository"),
@@ -139,10 +119,6 @@ pub fn commandText(allocator: std.mem.Allocator, action: Action) ![]u8 {
         .focus_previous_pane => allocator.dupe(u8, "Focus previous pane"),
         .select_previous_tab => allocator.dupe(u8, "Select previous terminal tab"),
         .select_next_tab => allocator.dupe(u8, "Select next terminal tab"),
-        .show_graph => allocator.dupe(u8, "Show graph"),
-        .toggle_rail => allocator.dupe(u8, "Toggle workspace rail"),
-        .toggle_panel => allocator.dupe(u8, "Toggle workspace panel"),
-        .toggle_activity => allocator.dupe(u8, "Toggle activity"),
         .none => allocator.dupe(u8, ""),
     };
 }
@@ -190,14 +166,4 @@ test "modifier-specific actions win over base shortcuts" {
     try std.testing.expectEqual(Action.edit_worktree_policy, keyAction('P', true, true));
     try std.testing.expectEqual(Action.save_worktree_policy, keyAction('S', true, true));
     try std.testing.expectEqual(Action.inspect_worktrees, keyAction('I', true, true));
-}
-
-test "parity shortcuts expose palette navigation quick chat and workspace controls" {
-    try std.testing.expectEqual(Action.command_palette, keyAction('P', true, false));
-    try std.testing.expectEqual(Action.next_identity, keyAction(0x28, true, false));
-    try std.testing.expectEqual(Action.previous_identity, keyAction(0x26, true, false));
-    try std.testing.expectEqual(Action.quick_chat, keyAction('Q', true, false));
-    try std.testing.expectEqual(Action.toggle_rail, keyAction('R', true, true));
-    try std.testing.expectEqual(Action.toggle_panel, keyAction('P', true, true));
-    try std.testing.expectEqual(Action.toggle_activity, keyAction('A', true, true));
 }
