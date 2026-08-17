@@ -37,7 +37,7 @@ pub const App = struct {
     worktree_inspection: ?WorktreeStatus.Inspection = null,
     selected_worktree_path: []u8 = &.{},
     sidebar_scroll: i32 = 0,
-    workspace: ?TerminalWorkspace.Workspace = null,
+    workspace: ?*TerminalWorkspace.Workspace = null,
     instance_mutex: c.HANDLE = null,
     sync_requested: bool = false,
     restore_requested: bool = false,
@@ -91,7 +91,10 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
-        if (self.workspace) |*workspace| workspace.deinit();
+        if (self.workspace) |workspace| {
+            workspace.deinit();
+            self.allocator.destroy(workspace);
+        }
         self.client.deinit();
         self.daemon.stop();
         self.tray.remove();
@@ -130,8 +133,8 @@ pub const App = struct {
         self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
         self.createEmptyStateControls();
         self.updateNativeChrome();
-        if (self.workspace) |*workspace| workspace.setKeyCallback(self, &onWorkspaceKey);
-        if (self.workspace) |*workspace| try workspace.startInputWorker();
+        if (self.workspace) |workspace| workspace.setKeyCallback(self, &onWorkspaceKey);
+        if (self.workspace) |workspace| try workspace.startInputWorker();
         self.layoutWorkspace();
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_REQUIRE_DAEMON")) |value| {
             defer self.allocator.free(value);
@@ -206,8 +209,8 @@ pub const App = struct {
     }
 
     fn refreshWorkspace(self: *App) void {
-        const workspace = if (self.workspace) |*value| value else return;
-        const graph = if (self.model.graph) |*value| value else return;
+        const workspace = if (self.workspace) |value| value else return;
+        const graph = if (self.model.graph) |value| value else return;
         if (graph.nodes.items.len > 0 and !workspace.hasSurface(0)) {
             workspace.openNode(0, graph.nodes.items[0].id) catch {
                 self.setStatus("Unable to attach terminal A");
@@ -222,7 +225,7 @@ pub const App = struct {
     }
 
     fn rebindWorkspace(self: *App, path: []const u8) void {
-        if (self.workspace) |*workspace| {
+        if (self.workspace) |workspace| {
             _ = workspace.rebindProject(path) catch {
                 self.setStatus("Unable to rebind workspace project");
                 return;
@@ -232,34 +235,13 @@ pub const App = struct {
 
     pub fn openProject(self: *App, path: []const u8) void {
         if (path.len == 0) return;
-        if (self.workspace) |*workspace| {
+        if (self.workspace) |workspace| {
             _ = workspace.rebindProject(path) catch {
                 self.setStatus("Unable to switch workspace project");
                 return;
             };
         }
 
-        pub fn openFolder(self: *App) void {
-            var path: [32768]u16 = undefined;
-            const picked = graphcode_pick_folder(self.window.hwnd, &path, path.len);
-            if (picked < 0) {
-                self.setStatus("Unable to open the folder picker");
-                return;
-            }
-            if (picked == 0) return;
-            var length: usize = 0;
-            while (length < path.len and path[length] != 0) : (length += 1) {}
-            const utf8 = std.unicode.utf16LeToUtf8Alloc(self.allocator, path[0..length]) catch {
-                self.setStatus("Unable to read the selected folder");
-                return;
-            };
-            defer self.allocator.free(utf8);
-            self.openProject(utf8);
-        }
-
-        pub fn openGlobalOverview(self: *App) void {
-            self.client.sendOpenGlobalGraph();
-        }
         self.client.setSubscription(path);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
         self.last_project_opened = self.allocator.dupe(u8, path) catch {
@@ -271,6 +253,28 @@ pub const App = struct {
             self.client.sendOpenProject(path);
             self.open_project_pending = false;
         }
+    }
+
+    pub fn openFolder(self: *App) void {
+        var path: [32768]u16 = undefined;
+        const picked = graphcode_pick_folder(self.window.hwnd, &path, path.len);
+        if (picked < 0) {
+            self.setStatus("Unable to open the folder picker");
+            return;
+        }
+        if (picked == 0) return;
+        var length: usize = 0;
+        while (length < path.len and path[length] != 0) : (length += 1) {}
+        const utf8 = std.unicode.utf16LeToUtf8Alloc(self.allocator, path[0..length]) catch {
+            self.setStatus("Unable to read the selected folder");
+            return;
+        };
+        defer self.allocator.free(utf8);
+        self.openProject(utf8);
+    }
+
+    pub fn openGlobalOverview(self: *App) void {
+        self.client.sendOpenGlobalGraph();
     }
 
     fn queueProject(self: *App, path: []const u8) void {
@@ -408,10 +412,10 @@ pub const App = struct {
     }
 
     fn openSelectedNode(self: *App) void {
-        const graph = if (self.model.graph) |*value| value else return;
+        const graph = if (self.model.graph) |value| value else return;
         const index = self.model.selectedIndex() orelse return;
         if (index >= graph.nodes.items.len) return;
-        const workspace = if (self.workspace) |*value| value else return;
+        const workspace = if (self.workspace) |value| value else return;
         workspace.openNode(0, graph.nodes.items[index].id) catch {
             self.setStatus("Unable to open selected node");
         };
@@ -591,8 +595,8 @@ pub const App = struct {
             .reclaim_worktrees => self.reclaimWorktrees(),
             .worktree_next => self.moveWorktreeSelection(1),
             .worktree_previous => self.moveWorktreeSelection(-1),
-            .focus_terminal_a => if (self.workspace) |*workspace| workspace.focus(0),
-            .focus_terminal_b => if (self.workspace) |*workspace| workspace.focus(1),
+            .focus_terminal_a => if (self.workspace) |workspace| workspace.focus(0),
+            .focus_terminal_b => if (self.workspace) |workspace| workspace.focus(1),
             .select_next => {
                 self.model.selectNext();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
@@ -604,26 +608,26 @@ pub const App = struct {
                 self.model.selected_node = if (current == 0) graph.nodes.items.len - 1 else current - 1;
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
-            .new_tab => if (self.workspace) |*workspace| workspace.newTab() catch {
+            .new_tab => if (self.workspace) |workspace| workspace.newTab() catch {
                 self.smoke_workspace_action_failed = true;
                 self.setStatus("Unable to create tab");
             },
-            .close_tab => if (self.workspace) |*workspace| workspace.closeFocusedPane() catch {
+            .close_tab => if (self.workspace) |workspace| workspace.closeFocusedPane() catch {
                 self.smoke_workspace_action_failed = true;
                 self.setStatus("Unable to close tab");
             },
-            .split_horizontal => if (self.workspace) |*workspace| workspace.splitFocused(.horizontal) catch {
+            .split_horizontal => if (self.workspace) |workspace| workspace.splitFocused(.horizontal) catch {
                 self.smoke_workspace_action_failed = true;
                 self.setStatus("Unable to split workspace");
             },
-            .split_vertical => if (self.workspace) |*workspace| workspace.splitFocused(.vertical) catch {
+            .split_vertical => if (self.workspace) |workspace| workspace.splitFocused(.vertical) catch {
                 self.smoke_workspace_action_failed = true;
                 self.setStatus("Unable to split workspace");
             },
-            .focus_next_pane => if (self.workspace) |*workspace| workspace.focusNextPane(),
-            .focus_previous_pane => if (self.workspace) |*workspace| workspace.focusPreviousPane(),
-            .select_previous_tab => if (self.workspace) |*workspace| workspace.selectPreviousTab(),
-            .select_next_tab => if (self.workspace) |*workspace| workspace.selectNextTab(),
+            .focus_next_pane => if (self.workspace) |workspace| workspace.focusNextPane(),
+            .focus_previous_pane => if (self.workspace) |workspace| workspace.focusPreviousPane(),
+            .select_previous_tab => if (self.workspace) |workspace| workspace.selectPreviousTab(),
+            .select_next_tab => if (self.workspace) |workspace| workspace.selectNextTab(),
             .none => {},
         }
     }
@@ -640,7 +644,7 @@ pub const App = struct {
     fn layoutWorkspace(self: *App) void {
         var client: c.RECT = undefined;
         if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
-        if (self.workspace) |*workspace| {
+        if (self.workspace) |workspace| {
             workspace.resize(
                 Tokens.sidebar_width,
                 @max(0, client.bottom - Tokens.workspace_height),
@@ -695,10 +699,15 @@ pub const App = struct {
             220,
             32,
             parent,
-            @ptrFromInt(id),
+            controlId(id),
             c.GetModuleHandleW(null),
             null,
         );
+    }
+
+    fn controlId(value: usize) c.HMENU {
+        @setRuntimeSafety(false);
+        return @ptrFromInt(value);
     }
 
     fn updateNativeChrome(self: *App) void {
@@ -859,7 +868,7 @@ fn onWindowMessage(
             const hdc = c.BeginPaint(hwnd, &paint);
             const inspection = if (app.worktree_inspection) |*value| value else null;
             GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), app.allocator, &app.canvas);
-            if (app.workspace) |*workspace| workspace.paintChrome(hdc);
+            if (app.workspace) |workspace| workspace.paintChrome(hdc);
             _ = c.EndPaint(hwnd, &paint);
             result.* = 0;
             return true;
@@ -913,7 +922,7 @@ fn onWindowMessage(
                 app.restore_requested = false;
             }
             if (app.client.isIdle()) app.smoke_idle_ticks += 1 else app.smoke_idle_ticks = 0;
-            if (app.workspace) |*workspace| {
+            if (app.workspace) |workspace| {
                 workspace.poll();
                 if (!app.smoke_workspace_restart_observed) {
                     if (app.smoke_restart_index) |index| {
@@ -943,7 +952,7 @@ fn onWindowMessage(
                 envFlag("GRAPHCODE_SHELL_LARGE_PASTE"))
             {
                 app.smoke_input_requested = true;
-                if (app.workspace) |*workspace| {
+                if (app.workspace) |workspace| {
                     const paste = app.allocator.alloc(u8, 1024 * 1024) catch {
                         app.setStatus("Large paste allocation failed");
                         return true;
@@ -958,7 +967,7 @@ fn onWindowMessage(
                     (!app.stress and app.smoke_tick == 12)) and
                 !envFlag("GRAPHCODE_SHELL_WORKSPACE_ACTIONS"))
             {
-                if (app.workspace) |*workspace| {
+                if (app.workspace) |workspace| {
                     if (workspace.hasSurface(0)) {
                         workspace.recreate(0) catch {
                             app.setStatus("Terminal recreate failed");
@@ -1003,7 +1012,7 @@ fn onWindowMessage(
             _ = c.GetClientRect(hwnd, &client);
             const workspace_top = client.bottom - Tokens.workspace_height;
             if (x >= Tokens.sidebar_width and y >= workspace_top) {
-                if (app.workspace) |*workspace| {
+                if (app.workspace) |workspace| {
                     if (workspace.selectTabAt(x, y)) {
                         result.* = 0;
                         return true;
@@ -1036,9 +1045,14 @@ fn onWindowMessage(
                     .overview => app.client.sendOpenGlobalGraph(),
                     .loop => if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
                         if (row.index < graph.nodes.items.len) {
+<<<<<<< HEAD
                             _ = app.model.selectProject(path);
                             _ = app.model.setSelectedIndex(row.index);
                             if (app.workspace) |*workspace| {
+=======
+                            app.model.selected_node = row.index;
+                            if (app.workspace) |workspace| {
+>>>>>>> 5356833 (fix(windows): harden parity shell runtime)
                                 workspace.openNode(0, graph.nodes.items[row.index].id) catch {
                                     app.setStatus("Unable to open selected loop");
                                 };
@@ -1100,7 +1114,7 @@ fn onWindowMessage(
             return true;
         },
         c.WM_SETFOCUS => {
-            if (app.workspace) |*workspace| workspace.focus(workspace.active_surface);
+            if (app.workspace) |workspace| workspace.focus(workspace.active_surface);
             result.* = 0;
             return true;
         },
@@ -1160,7 +1174,7 @@ fn restoreShellWindow(hwnd: c.HWND) void {
 fn runSmokeWorkspaceActions(self: *App) void {
     const script = self.smoke_workspace_actions;
     if (script.len == 0) return;
-    const workspace = if (self.workspace) |*value| value else return;
+    const workspace = if (self.workspace) |value| value else return;
     if (workspace.firstLiveSurface() == null) return;
     const default_script = "create,split,select,focus,close,restart";
     const actions = if (std.mem.eql(u8, script, "1")) default_script else script;

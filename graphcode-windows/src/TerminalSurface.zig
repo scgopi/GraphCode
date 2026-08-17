@@ -139,8 +139,9 @@ pub const Workspace = struct {
     syncing_focus: bool = false,
     persisting_layout: bool = false,
 
-    pub fn init(parent: c.HWND, allocator_: std.mem.Allocator) !Workspace {
-        var workspace = Workspace{
+    pub fn init(parent: c.HWND, allocator_: std.mem.Allocator) !*Workspace {
+        const workspace = try allocator_.create(Workspace);
+        workspace.* = .{
             .parent = parent,
             .allocator = allocator_,
             .zmx_path = try allocator_.dupe(u8, std.process.getEnvVarOwned(allocator_, "GRAPHCODE_ZMX") catch "zmx.exe"),
@@ -173,6 +174,7 @@ pub const Workspace = struct {
             workspace.layout.deinit();
             allocator_.free(workspace.layout_path);
             allocator_.free(workspace.project_key);
+            allocator_.destroy(workspace);
         }
         workspace.layout_path = try workspace.layoutPathForProject(workspace.project_key);
         if (WorkspaceLayout.Layout.load(allocator_, workspace.layout_path, workspace.project_key)) |restored| {

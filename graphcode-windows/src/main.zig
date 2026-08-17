@@ -2,7 +2,7 @@ const std = @import("std");
 const App = @import("App.zig").App;
 const c = @import("Win32.zig").c;
 
-fn run() !void {
+pub fn main() !void {
     const allocator = std.heap.c_allocator;
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -19,7 +19,6 @@ fn run() !void {
 }
 
 pub fn main() !void {
-    try run();
 }
 
 pub export fn WinMain(

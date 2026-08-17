@@ -46,7 +46,7 @@ pub const MenuState = struct {
 };
 
 pub fn commandFromId(id: usize) ?Command {
-    return std.meta.intToEnum(Command, @intCast(id)) catch null;
+    return std.meta.intToEnum(Command, @as(u16, @intCast(id))) catch null;
 }
 
 pub const Window = struct {
@@ -105,7 +105,6 @@ pub const Window = struct {
     }
 
     pub fn messageLoop(self: *Window) !void {
-        _ = self;
         var message: c.MSG = undefined;
         while (true) {
             const result = c.GetMessageW(&message, null, 0, 0);
@@ -209,7 +208,8 @@ pub fn updateMenu(hwnd: c.HWND, state: MenuState) void {
 }
 
 fn setEnabled(hwnd: c.HWND, command: Command, enabled: bool) void {
-    const flags: c.UINT = c.MF_BYCOMMAND | if (enabled) c.MF_ENABLED else c.MF_GRAYED;
+    const flags: c.UINT = @intCast(@as(i32, c.MF_BYCOMMAND) |
+        if (enabled) @as(i32, c.MF_ENABLED) else @as(i32, c.MF_GRAYED));
     _ = c.EnableMenuItem(c.GetMenu(hwnd), @intFromEnum(command), flags);
 }
 
