@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "product": "GraphCode Windows shell",
   "executable": "graphcode-windows.exe",
+  "launchMode": "tray-shell",
   "platform": "windows-x86_64",
   "installer": true,
   "bundle": {
@@ -11,6 +12,7 @@
   },
   "runtime": {
     "daemon": "graphcoded.exe",
+    "daemonLifecycle": "shell-supervised-when-unavailable",
     "terminal": "zmx.exe",
     "host": "winghostty-win32-host.lib"
   },

@@ -155,6 +155,11 @@ pub const DaemonClient = struct {
         return .{ .daemon_pipe = pipe, .support_directory = support };
     }
 
+    pub fn currentEndpointName(self: *DaemonClient, allocator: std.mem.Allocator) ![]u8 {
+        _ = self;
+        return endpointName(allocator);
+    }
+
     fn validateSupportDirectory(allocator: std.mem.Allocator, support_directory: []const u8) !void {
         const normalized = try normalizedSupportPath(allocator, support_directory);
         defer std.heap.page_allocator.free(normalized);

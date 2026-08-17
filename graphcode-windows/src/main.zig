@@ -7,7 +7,7 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
     var app = App.init(allocator) catch |err| {
         if (err == error.InstanceAlreadyRunning) {
-            std.debug.print("GraphCode Windows is already running for this user.\n", .{});
+            @import("MainWindow.zig").restoreExistingInstance();
             return;
         }
         return err;

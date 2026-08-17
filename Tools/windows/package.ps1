@@ -370,7 +370,7 @@ function Set-Shortcut([bool] $create) {
     $link.Description = "GraphCode Windows shell"
     $link.Save()
   } catch {
-    Set-Content -LiteralPath $fallback -Value "@echo off`r`n`"$InstallRoot\bin\graphcode-windows.exe`" %*" -Encoding ascii
+    throw "Windows shell shortcut creation requires the Shell Link COM API; console launcher scripts are not supported."
   }
 }
 function Get-InstalledDaemons {

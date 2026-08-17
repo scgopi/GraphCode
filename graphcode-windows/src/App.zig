@@ -12,6 +12,8 @@ const TerminalWorkspace = @import("TerminalWorkspace.zig");
 const Tokens = @import("DesignTokens.zig");
 const Wire = @import("Wire.zig");
 const WorktreeStatus = @import("WorktreeStatus.zig");
+const Tray = @import("Tray.zig").Tray;
+const DaemonSupervisor = @import("DaemonSupervisor.zig").Supervisor;
 const c = @import("Win32.zig").c;
 
 const title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Windows");
@@ -21,6 +23,8 @@ pub const App = struct {
     allocator: std.mem.Allocator,
     window: MainWindow.Window = .{},
     client: DaemonClient,
+    daemon: DaemonSupervisor,
+    tray: Tray = .{},
     model: GraphModel.Model,
     canvas: GraphCanvas.CanvasState = .{},
     worktree_inspection: ?WorktreeStatus.Inspection = null,
@@ -36,6 +40,7 @@ pub const App = struct {
     pending_project_path: []u8 = &.{},
     status_override: []u8 = &.{},
     running: bool = true,
+    exit_requested: bool = false,
     smoke: bool = false,
     stress: bool = false,
     require_smoke_contract: bool = false,
@@ -66,6 +71,7 @@ pub const App = struct {
         app.* = .{
             .allocator = allocator,
             .client = client,
+            .daemon = .{ .allocator = allocator },
             .model = GraphModel.Model.init(allocator),
         };
         errdefer app.deinit();
@@ -77,6 +83,8 @@ pub const App = struct {
     pub fn deinit(self: *App) void {
         if (self.workspace) |*workspace| workspace.deinit();
         self.client.deinit();
+        self.daemon.stop();
+        self.tray.remove();
         self.model.deinit();
         if (self.worktree_inspection) |*inspection| {
             WorktreeStatus.deinitInspection(self.allocator, inspection);
@@ -93,6 +101,11 @@ pub const App = struct {
 
     pub fn run(self: *App) !void {
         try self.window.create(self, &onWindowMessage, title.ptr);
+        try self.tray.add(self.window.hwnd);
+        const endpoint = self.client.currentEndpointName(self.allocator) catch &.{};
+        defer if (endpoint.len != 0) self.allocator.free(endpoint);
+        if (endpoint.len != 0) self.daemon.start(endpoint);
+        if (self.daemon.status().len != 0) self.setStatus(self.daemon.status());
         self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
         if (self.workspace) |*workspace| workspace.setKeyCallback(self, &onWorkspaceKey);
         if (self.workspace) |*workspace| try workspace.startInputWorker();
@@ -434,7 +447,9 @@ pub const App = struct {
             return;
         };
         const message = std.fmt.allocPrint(
-            self.allocator, "Reclaimed {d} selected worktrees", .{removed},
+            self.allocator,
+            "Reclaimed {d} selected worktrees",
+            .{removed},
         ) catch {
             self.setStatus("Reclaim complete");
             return;
@@ -558,7 +573,6 @@ pub const App = struct {
             .select_next_tab => if (self.workspace) |*workspace| workspace.selectNextTab(),
             .none => {},
         }
-
     }
 
     fn onWorkspaceKey(context: ?*anyopaque, key: usize, ctrl: bool, shift: bool) callconv(.c) void {
@@ -649,6 +663,48 @@ fn onWindowMessage(
             _ = c.EndPaint(hwnd, &paint);
             result.* = 0;
             return true;
+        },
+        Tray.taskbar_created => {
+            app.tray.readd();
+            result.* = 0;
+            return true;
+        },
+        MainWindow.restore_message => {
+            _ = c.ShowWindow(hwnd, c.SW_SHOW);
+            _ = c.ShowWindow(hwnd, c.SW_RESTORE);
+            _ = c.SetForegroundWindow(hwnd);
+            _ = c.SetFocus(hwnd);
+            result.* = 0;
+            return true;
+        },
+        Tray.notify_message => {
+            if (lparam == c.WM_LBUTTONDBLCLK) {
+                _ = c.ShowWindow(hwnd, c.SW_SHOW);
+                _ = c.ShowWindow(hwnd, c.SW_RESTORE);
+                _ = c.SetForegroundWindow(hwnd);
+                _ = c.SetFocus(hwnd);
+            } else if (lparam == c.WM_RBUTTONUP or lparam == c.WM_CONTEXTMENU) {
+                app.tray.showMenu();
+            }
+            result.* = 0;
+            return true;
+        },
+        c.WM_COMMAND => {
+            const command = @as(c.WPARAM, @intCast(@as(usize, @bitCast(wparam)) & 0xffff));
+            if (command == Tray.command_open) {
+                _ = c.ShowWindow(hwnd, c.SW_SHOW);
+                _ = c.ShowWindow(hwnd, c.SW_RESTORE);
+                _ = c.SetForegroundWindow(hwnd);
+                _ = c.SetFocus(hwnd);
+                result.* = 0;
+                return true;
+            }
+            if (command == Tray.command_exit) {
+                app.exit_requested = true;
+                _ = c.DestroyWindow(hwnd);
+                result.* = 0;
+                return true;
+            }
         },
         c.WM_SIZE => {
             app.layoutWorkspace();
@@ -743,6 +799,7 @@ fn onWindowMessage(
                 if (app.require_smoke_contract and !smokeContractPassed(app)) {
                     app.smoke_failure = true;
                 }
+                app.exit_requested = true;
                 _ = c.DestroyWindow(hwnd);
             }
             _ = c.InvalidateRect(hwnd, null, 0);
@@ -792,8 +849,7 @@ fn onWindowMessage(
                 result.* = 0;
                 return true;
             }
-            if (Sidebar.rowAt(x, y, &app.model, if (app.worktree_inspection) |*value| value else null,
-                app.sidebar_scroll, workspace_top)) |row| {
+            if (Sidebar.rowAt(x, y, &app.model, if (app.worktree_inspection) |*value| value else null, app.sidebar_scroll, workspace_top)) |row| {
                 switch (row.kind) {
                     .project => app.openProject(app.model.recent_projects.items[row.index].path),
                     .overview => app.client.sendOpenGlobalGraph(),
@@ -850,8 +906,7 @@ fn onWindowMessage(
             _ = c.GetClientRect(hwnd, &client);
             const workspace_top = client.bottom - Tokens.workspace_height;
             if (x < Tokens.sidebar_width) {
-                app.sidebar_scroll = Sidebar.clampScroll(app.sidebar_scroll - @divTrunc(@as(i32, delta), 4),
-                    Sidebar.maxScroll(&app.model, if (app.worktree_inspection) |*value| value else null, workspace_top));
+                app.sidebar_scroll = Sidebar.clampScroll(app.sidebar_scroll - @divTrunc(@as(i32, delta), 4), Sidebar.maxScroll(&app.model, if (app.worktree_inspection) |*value| value else null, workspace_top));
             } else if (y < workspace_top) {
                 const bounds = c.RECT{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = client.right, .bottom = workspace_top };
                 if (x >= bounds.left and y >= bounds.top and y < bounds.bottom) {
@@ -868,13 +923,14 @@ fn onWindowMessage(
             return true;
         },
         c.WM_CLOSE => {
-            _ = c.DestroyWindow(hwnd);
+            _ = c.ShowWindow(hwnd, c.SW_HIDE);
             result.* = 0;
             return true;
         },
         c.WM_DESTROY => {
             app.running = false;
             _ = c.KillTimer(hwnd, MainWindow.timer_id);
+            app.tray.remove();
             c.PostQuitMessage(0);
             result.* = 0;
             return true;
@@ -1004,19 +1060,19 @@ fn smokeContractPassed(self: *const App) bool {
         workspace.hasSurface(0) and workspace.hasSurface(1) and
             workspace.hasAttach(0) and workspace.hasAttach(1);
     const layout_ok = workspace.layoutMatches(
-            Tokens.sidebar_width,
-            @max(0, client.bottom - Tokens.workspace_height),
-            layout_width,
-            layout_height,
-        );
+        Tokens.sidebar_width,
+        @max(0, client.bottom - Tokens.workspace_height),
+        layout_width,
+        layout_height,
+    );
     const actions_ok = self.smoke_workspace_actions_ran and
-            !self.smoke_workspace_action_failed and
-            self.smoke_workspace_create_observed and
-            self.smoke_workspace_split_observed and
-            self.smoke_workspace_select_observed and
-            self.smoke_workspace_focus_observed and
-            self.smoke_workspace_close_observed and
-            self.smoke_workspace_restart_observed;
+        !self.smoke_workspace_action_failed and
+        self.smoke_workspace_create_observed and
+        self.smoke_workspace_split_observed and
+        self.smoke_workspace_select_observed and
+        self.smoke_workspace_focus_observed and
+        self.smoke_workspace_close_observed and
+        self.smoke_workspace_restart_observed;
     const passed = if (scripted_actions) actions_ok else layout_ok and workspace_ready;
     return passed;
 }
