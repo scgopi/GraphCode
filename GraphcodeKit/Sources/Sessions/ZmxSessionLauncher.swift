@@ -262,6 +262,34 @@ public enum ZmxSessionLauncher {
   /// and a lost message costs the whole point of sending it.
   static let submitDelay: Duration = .milliseconds(400)
 
+  /// How a delivery is paced into one backend's composer. The shared constants were
+  /// tuned on Claude Code's TUI; Copilot's composer ingests pasted PTY input more
+  /// slowly, and under the shared pacing its Enter could land mid-ingest — swallowed,
+  /// with the message sitting rendered-but-unsent in the input bar, or worse a partial
+  /// submit with the remainder stranded. The same composer race the split-out Enter
+  /// fixed for Claude, surfacing one backend later.
+  struct SendPacing {
+    /// Seconds between chunk writes — the TUI's time to drain one from the PTY queue.
+    let interChunkSeconds: Double
+    /// Seconds between the last chunk and the Enter.
+    let submitSeconds: Double
+    /// Seconds after the first Enter to send a second, for a composer that may have
+    /// eaten the first mid-ingest. On a composer the first Enter already emptied, the
+    /// second is a keystroke into an empty input box — a no-op. `nil` skips it.
+    let confirmSubmitSeconds: Double?
+
+    static func forBackend(_ backend: CLISessionBackendKind) -> SendPacing {
+      switch backend {
+      case .copilotCLI:
+        return SendPacing(
+          interChunkSeconds: 0.3, submitSeconds: 1.0, confirmSubmitSeconds: 0.8)
+      case .claudeCode, .codex:
+        return SendPacing(
+          interChunkSeconds: 0.15, submitSeconds: 0.4, confirmSubmitSeconds: nil)
+      }
+    }
+  }
+
   static func send(_ text: String, to node: LoopNode, projectPath: String? = nil) async -> Bool {
     // A remote loop's session lives in another host's zmx daemon — the local socket has
     // never heard of it, so a local send was a guaranteed failure (observed as every
@@ -277,8 +305,9 @@ public enum ZmxSessionLauncher {
     // the composer, exactly as the text and the later `\r` already do; nothing is
     // submitted until the one Enter below.
     let sessionName = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    let pacing = SendPacing.forBackend(node.backend)
     for (index, chunk) in messageChunks(text).enumerated() {
-      if index > 0 { try? await Task.sleep(for: interChunkDelay) }
+      if index > 0 { try? await Task.sleep(for: .seconds(pacing.interChunkSeconds)) }
       guard
         let session = try? PTYProcessSession(
           executable: ZmxLocator.binaryURL.path,
@@ -287,13 +316,22 @@ public enum ZmxSessionLauncher {
       guard await session.waitUntilFinished() else { return false }
     }
     // Typed is not sent: submit as a second, separate keystroke — see `submitArguments`.
-    try? await Task.sleep(for: submitDelay)
+    try? await Task.sleep(for: .seconds(pacing.submitSeconds))
     guard
       let submit = try? PTYProcessSession(
         executable: ZmxLocator.binaryURL.path,
         arguments: submitArguments(forNode: node))
     else { return false }
     let delivered = await submit.waitUntilFinished()
+    if delivered, let confirm = pacing.confirmSubmitSeconds {
+      try? await Task.sleep(for: .seconds(confirm))
+      if let second = try? PTYProcessSession(
+        executable: ZmxLocator.binaryURL.path,
+        arguments: submitArguments(forNode: node))
+      {
+        _ = await second.waitUntilFinished()
+      }
+    }
     // Typing into a Codex session starts a turn, and Codex has no way to say so itself.
     // Clearing the label here is that missing edge — see `codexPresence`.
     if delivered, node.backend == .codex { await clearPresenceLabel(of: node) }
@@ -1020,11 +1058,15 @@ public enum ZmxSessionLauncher {
     // ours — but chained into the one ssh round-trip, with the same drain beat
     // between writes.
     let sessionName = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    let pacing = SendPacing.forBackend(node.backend)
     let sends = messageChunks(text)
       .map { quotedCommand(["zmx", "send", sessionName, $0]) }
-      .joined(separator: " && sleep 0.15 && ")
+      .joined(separator: " && sleep \(pacing.interChunkSeconds) && ")
     let submit = quotedCommand(["zmx"] + submitArguments(forNode: node))
-    let script = "\(sends) && sleep 0.4 && \(submit)"
+    var script = "\(sends) && sleep \(pacing.submitSeconds) && \(submit)"
+    if let confirm = pacing.confirmSubmitSeconds {
+      script += " && sleep \(confirm) && \(submit)"
+    }
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
   }
 
