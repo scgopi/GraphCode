@@ -124,6 +124,8 @@ function Invoke-TrayContextMenu([GraphCodeTrayLiveNative+Rect] $rect, [ValidateS
   $x = [int](($rect.left + $rect.right) / 2)
   $y = [int](($rect.top + $rect.bottom) / 2)
   [void][GraphCodeTrayLiveNative]::SetCursorPos($x, $y)
+  [void][GraphCodeTrayLiveNative]::SetForegroundWindow($script:trayWindow)
+  Start-Sleep -Milliseconds 100
   [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, [UIntPtr]::Zero)
   [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_RIGHTUP, 0, 0, 0, [UIntPtr]::Zero)
   $menu = [IntPtr]::Zero
@@ -210,7 +212,7 @@ try {
   if ([GraphCodeTrayLiveNative]::IsWindowVisible($hwnd)) { throw "WM_CLOSE did not hide the shell" }
   $trayRect = Assert-TrayIcon $hwnd
 
-  [void][GraphCodeTrayLiveNative]::SendMessage($hwnd, 0x804D, [IntPtr]::new(1), [IntPtr]0x0203)
+  Invoke-MouseClick $trayRect $true
   Start-Sleep -Milliseconds 250
   if (-not [GraphCodeTrayLiveNative]::IsWindowVisible($hwnd)) { throw "Tray double-click did not restore the shell" }
 
