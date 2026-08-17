@@ -104,10 +104,14 @@ fn windowProc(
         }
     }
     const value = window orelse return c.DefWindowProcW(hwnd, message, wparam, lparam);
-    var result: c.LRESULT = c.DefWindowProcW(hwnd, message, wparam, lparam);
+    var result: c.LRESULT = 0;
     if (value.callback) |callback| {
-        if (callback(value.context, hwnd, message, wparam, lparam, &result)) return result;
+        if (callback(value.context, hwnd, message, wparam, lparam, &result)) {
+            if (message == c.WM_NCDESTROY) _ = c.SetWindowLongPtrW(hwnd, c.GWLP_USERDATA, 0);
+            return result;
+        }
     }
+    result = c.DefWindowProcW(hwnd, message, wparam, lparam);
     if (message == c.WM_NCDESTROY) _ = c.SetWindowLongPtrW(hwnd, c.GWLP_USERDATA, 0);
     return result;
 }

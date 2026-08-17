@@ -166,6 +166,19 @@ $stop = Get-Content `
 Assert-Contract ($stop.command.graphCommand.command.stopNode._0) `
   "stop-node fixture does not match Codable payload shape"
 
+$mainWindowSource = Get-Content -LiteralPath (Join-Path $shellRoot "src\MainWindow.zig") -Raw
+$callbackIndex = $mainWindowSource.IndexOf("if (value.callback) |callback|")
+$defaultIndex = $mainWindowSource.IndexOf(
+  "result = c.DefWindowProcW(hwnd, message, wparam, lparam);",
+  $callbackIndex
+)
+Assert-Contract ($callbackIndex -ge 0 -and $defaultIndex -gt $callbackIndex) `
+  "window messages must reach GraphCode before DefWindowProc handles unclaimed messages"
+
+$appSource = Get-Content -LiteralPath (Join-Path $shellRoot "src\App.zig") -Raw
+Assert-Contract ($appSource -match "GraphCanvas\.paint[\s\S]+workspace\.paintChrome\(hdc\)") `
+  "WM_PAINT must render both the GraphCode canvas and terminal workspace chrome"
+
 $zig = Resolve-TestZig
 Invoke-Native "Wire executable tests" {
   Push-Location $shellRoot

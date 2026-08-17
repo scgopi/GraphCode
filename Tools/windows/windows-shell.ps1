@@ -304,12 +304,12 @@ try {
     Remove-Item -LiteralPath $inputError -Force -ErrorAction SilentlyContinue
     $inputApp = Start-Process -FilePath $app -ArgumentList @("--smoke") -PassThru `
       -RedirectStandardError $inputError
+    [void] $inputApp.Handle
     [void] $ownedProcessIds.Add($inputApp.Id)
     $shellProcess = $inputApp
     Start-Sleep -Milliseconds 250
     Record-TestOwnedSessions
     Write-OwnedResourceMetrics "windows-shell:large-paste" @($inputApp.Id)
-    [void] $inputApp.Handle
     if (-not $inputApp.WaitForExit(8000)) {
       Stop-Process -Id $inputApp.Id -Force
       throw "Large paste/non-reading attach smoke blocked the UI beyond the bounded timeout"
