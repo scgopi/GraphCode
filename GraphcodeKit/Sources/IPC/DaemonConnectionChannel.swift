@@ -670,6 +670,8 @@ public actor DaemonConnectionChannel {
       return paths.contains(graph.project.path)
     case .recentProjectsListed:
       return true
+    case .quickChatsListed, .quickChatChanged, .quickChatDeleted, .quickChatActivity:
+      return true
     case .errorOccurred:
       return true
     }

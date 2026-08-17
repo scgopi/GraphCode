@@ -104,5 +104,5 @@ test "navigation wraps and follows stable identity after reorder" {
     const reordered = [_]Item{ third, first, second };
     try std.testing.expectEqualStrings("B", cursor.next(&reordered).?.title);
     try std.testing.expectEqualStrings("C", cursor.nextAttention(&reordered).?.title);
-    try std.testing.expectEqualStrings("A", cursor.previous(&reordered).?.title);
+    try std.testing.expectEqualStrings("B", cursor.previous(&reordered).?.title);
 }

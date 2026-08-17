@@ -24,7 +24,6 @@ const WindowsUpdates = @import("WindowsUpdates.zig");
 const WorktreeDialog = @import("WorktreeDialog.zig");
 const Accessibility = @import("Accessibility.zig");
 const Navigation = @import("Navigation.zig");
-const QuickChats = @import("QuickChats.zig");
 const WorkspaceControls = @import("WorkspaceControls.zig");
 const c = @import("Win32.zig").c;
 
@@ -59,6 +58,8 @@ pub const App = struct {
     workspace: ?*TerminalWorkspace.Workspace = null,
     navigation_cursor: Navigation.Cursor = .{},
     workspace_controls: WorkspaceControls.State = .{},
+    quick_chats_requested: bool = false,
+    selected_quick_chat: ?usize = null,
     instance_mutex: c.HANDLE = null,
     sync_requested: bool = false,
     restore_requested: bool = false,
@@ -407,6 +408,12 @@ pub const App = struct {
                     self.refreshWorkspace();
                 }
             },
+            .quick_chats, .quick_chat_changed, .quick_chat_deleted, .quick_chat_activity => {
+                if (event == .quick_chat_changed) {
+                    if (Wire.jsonString(frame, "id")) |id| self.openQuickChat(id);
+                }
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            },
             .error_occurred => {
                 if (self.pending_rebind_path.len != 0) {
                     if (self.client.protocolMode() == .v2) {
@@ -688,6 +695,49 @@ pub const App = struct {
         } else {
             self.canvas.selected_edge = null;
             self.canvas.selected_edge_id = "";
+        }
+    }
+
+    fn createQuickChat(self: *App) void {
+        self.client.sendCreateQuickChat("Chat", "claudeCode");
+    }
+
+    fn renameSelectedQuickChat(self: *App) void {
+        const index = self.selected_quick_chat orelse return;
+        if (index >= self.model.quick_chats.items.len) return;
+        const chat = self.model.quick_chats.items[index];
+        var draft = NativeForms.node(self.window.hwnd, self.allocator, .{ .title = chat.title }) catch {
+            self.setStatus("Unable to open quick chat rename form");
+            return;
+        } orelse return;
+        defer draft.deinit(self.allocator);
+        Forms.validateNode(draft) catch {
+            self.setStatus("Invalid quick chat title");
+            return;
+        };
+        self.client.sendRenameQuickChat(chat.id, draft.title);
+    }
+
+    fn deleteSelectedQuickChat(self: *App) void {
+        const index = self.selected_quick_chat orelse return;
+        if (index >= self.model.quick_chats.items.len) return;
+        self.client.sendDeleteQuickChat(self.model.quick_chats.items[index].id);
+    }
+
+    fn openQuickChat(self: *App, id: []const u8) void {
+        for (self.model.quick_chats.items, 0..) |chat, index| {
+            if (!std.mem.eql(u8, chat.id, id)) continue;
+            self.selected_quick_chat = index;
+            if (self.workspace) |workspace| {
+                if (std.process.getEnvVarOwned(self.allocator, "USERPROFILE")) |home| {
+                    defer self.allocator.free(home);
+                    _ = workspace.rebindProject(home) catch {};
+                } else |_| {}
+                workspace.openNode(0, chat.id) catch {
+                    self.setStatus("Unable to open quick chat workspace");
+                };
+            }
+            return;
         }
     }
 
@@ -1716,7 +1766,9 @@ pub const App = struct {
             .command_palette => self.jumpToNode(),
             .next_identity => self.navigateIdentity(1, false),
             .previous_identity => self.navigateIdentity(-1, false),
-            .quick_chat => self.setStatus(QuickChats.protocolGapMessage(.create)),
+            .quick_chat => self.createQuickChat(),
+            .rename_quick_chat => self.renameSelectedQuickChat(),
+            .delete_quick_chat => self.deleteSelectedQuickChat(),
             .settings => self.openSettings(),
             .product_settings => self.openProductSettings(),
             .clone_repository => self.cloneRepository(),
@@ -2198,6 +2250,10 @@ fn onWindowMessage(
                 } else if (!app.sync_requested) {
                     app.sync_requested = true;
                     app.client.sendListProjects();
+                    if (!app.quick_chats_requested) {
+                        app.quick_chats_requested = true;
+                        app.client.sendListQuickChats();
+                    }
                 } else if (!app.restore_requested) {
                     app.restore_requested = true;
                     app.client.sendRestoreOpenProjects();
@@ -2209,6 +2265,7 @@ fn onWindowMessage(
                 app.last_connection_state = updated_connection_state;
                 app.sync_requested = false;
                 app.restore_requested = false;
+                app.quick_chats_requested = false;
             }
             if (app.client.isIdle()) app.smoke_idle_ticks += 1 else app.smoke_idle_ticks = 0;
             if (app.workspace) |workspace| {

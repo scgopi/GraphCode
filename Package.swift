@@ -10,7 +10,6 @@ let graphcodeKitTarget: Target = .target(
   ],
   path: "GraphcodeKit/Sources",
   exclude: [
-    "QuickChatStore.swift",
     "TerminalLayoutStore.swift",
     "Platform/WindowsSessionServices.swift",
     "Sessions/PTYProcessSession.swift",
@@ -22,6 +21,7 @@ let graphcodeKitTarget: Target = .target(
     "Platform",
     "DaemonBootstrap.swift",
     "GraphStore.swift",
+    "QuickChatStore.swift",
     "ProjectPersistence.swift",
     "ProjectRegistry.swift",
     "SupportDirectory.swift",

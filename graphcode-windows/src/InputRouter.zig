@@ -17,6 +17,8 @@ pub const Action = enum {
     next_identity,
     previous_identity,
     quick_chat,
+    rename_quick_chat,
+    delete_quick_chat,
     settings,
     product_settings,
     clone_repository,
@@ -70,7 +72,9 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (ctrl and key == 'P' and !shift) return .command_palette;
     if (ctrl and key == 0x28) return .next_identity;
     if (ctrl and key == 0x26) return .previous_identity;
-    if (ctrl and key == 'Q') return .quick_chat;
+    if (ctrl and key == 'Q' and !shift) return .quick_chat;
+    if (ctrl and key == 'Q' and shift) return .rename_quick_chat;
+    if (ctrl and shift and key == 0x2E) return .delete_quick_chat;
     if (ctrl and (key == ',' or key == 0xBC)) return .settings;
     if (key == 0x70) return .onboarding;
     if (ctrl and key == 0x09) return .cycle_attention;
@@ -90,8 +94,8 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (ctrl and key == 0x21) return .select_previous_tab;
     if (ctrl and key == 0x22) return .select_next_tab;
     if (ctrl and key == 'G' and shift) return .show_graph;
-    if (ctrl and key == 'R' and shift) return .toggle_rail;
-    if (ctrl and key == 'P' and shift) return .toggle_panel;
+    if (ctrl and key == 'L' and shift) return .toggle_rail;
+    if (ctrl and key == 'B' and shift) return .toggle_panel;
     if (ctrl and key == 'A' and shift) return .toggle_activity;
     return .none;
 }
@@ -112,6 +116,8 @@ pub fn commandText(allocator: std.mem.Allocator, action: Action) ![]u8 {
         .next_identity => allocator.dupe(u8, "Next loop"),
         .previous_identity => allocator.dupe(u8, "Previous loop"),
         .quick_chat => allocator.dupe(u8, "Quick chats (protocol blocked)"),
+        .rename_quick_chat => allocator.dupe(u8, "Rename quick chat"),
+        .delete_quick_chat => allocator.dupe(u8, "Delete quick chat"),
         .settings => allocator.dupe(u8, "Settings"),
         .product_settings => allocator.dupe(u8, "Product settings"),
         .clone_repository => allocator.dupe(u8, "Clone HTTPS repository"),
@@ -197,7 +203,9 @@ test "parity shortcuts expose palette navigation quick chat and workspace contro
     try std.testing.expectEqual(Action.next_identity, keyAction(0x28, true, false));
     try std.testing.expectEqual(Action.previous_identity, keyAction(0x26, true, false));
     try std.testing.expectEqual(Action.quick_chat, keyAction('Q', true, false));
-    try std.testing.expectEqual(Action.toggle_rail, keyAction('R', true, true));
-    try std.testing.expectEqual(Action.toggle_panel, keyAction('P', true, true));
+    try std.testing.expectEqual(Action.rename_quick_chat, keyAction('Q', true, true));
+    try std.testing.expectEqual(Action.delete_quick_chat, keyAction(0x2E, true, true));
+    try std.testing.expectEqual(Action.toggle_rail, keyAction('L', true, true));
+    try std.testing.expectEqual(Action.toggle_panel, keyAction('B', true, true));
     try std.testing.expectEqual(Action.toggle_activity, keyAction('A', true, true));
 }

@@ -24,6 +24,10 @@ pub const ConnectionState = enum {
 pub const EventKind = enum {
     recent_projects,
     graph_changed,
+    quick_chats,
+    quick_chat_changed,
+    quick_chat_deleted,
+    quick_chat_activity,
     error_occurred,
     unknown,
 };
@@ -36,6 +40,11 @@ pub const CommandKind = enum {
     close_project,
     forget_project,
     delete_project_graph,
+    list_quick_chats,
+    create_quick_chat,
+    open_quick_chat,
+    rename_quick_chat,
+    delete_quick_chat,
     graph_command,
 };
 
@@ -48,6 +57,11 @@ pub fn commandName(kind: CommandKind) []const u8 {
         .close_project => "closeProject",
         .forget_project => "forgetProject",
         .delete_project_graph => "deleteProjectGraph",
+        .list_quick_chats => "listQuickChats",
+        .create_quick_chat => "createQuickChat",
+        .open_quick_chat => "openQuickChat",
+        .rename_quick_chat => "renameQuickChat",
+        .delete_quick_chat => "deleteQuickChat",
         .graph_command => "graphCommand",
     };
 }
@@ -93,6 +107,10 @@ pub fn eventKind(data: []const u8) EventKind {
     if (std.mem.indexOf(u8, data, "\"graphChanged\"") != null) {
         return .graph_changed;
     }
+    if (std.mem.indexOf(u8, data, "\"quickChatsListed\"") != null) return .quick_chats;
+    if (std.mem.indexOf(u8, data, "\"quickChatChanged\"") != null) return .quick_chat_changed;
+    if (std.mem.indexOf(u8, data, "\"quickChatDeleted\"") != null) return .quick_chat_deleted;
+    if (std.mem.indexOf(u8, data, "\"quickChatActivity\"") != null) return .quick_chat_activity;
     if (std.mem.indexOf(u8, data, "\"errorOccurred\"") != null or
         std.mem.indexOf(u8, data, "\"error\"") != null)
     {
@@ -196,6 +214,47 @@ fn daemonPathCommand(allocator: std.mem.Allocator, name: []const u8, path: []con
     const quoted = try quoteJson(allocator, path);
     defer allocator.free(quoted);
     return std.mem.concat(allocator, u8, &.{"{\"", name, "\":{\"path\":", quoted, "}}"});
+}
+
+pub fn commandListQuickChats(allocator: std.mem.Allocator) ![]u8 {
+    return allocator.dupe(u8, "{\"listQuickChats\":{}}");
+}
+
+pub fn commandCreateQuickChat(
+    allocator: std.mem.Allocator,
+    title: []const u8,
+    backend: []const u8,
+) ![]u8 {
+    const quoted_title = try quoteJson(allocator, title);
+    defer allocator.free(quoted_title);
+    const quoted_backend = try quoteJson(allocator, backend);
+    defer allocator.free(quoted_backend);
+    return std.mem.concat(allocator, u8, &.{
+        "{\"createQuickChat\":{\"title\":", quoted_title,
+        ",\"backend\":", quoted_backend, "}}",
+    });
+}
+
+pub fn commandOpenQuickChat(allocator: std.mem.Allocator, id: []const u8) ![]u8 {
+    const quoted = try quoteJson(allocator, id);
+    defer allocator.free(quoted);
+    return std.mem.concat(allocator, u8, &.{"{\"openQuickChat\":{\"id\":", quoted, "}}"});
+}
+
+pub fn commandRenameQuickChat(allocator: std.mem.Allocator, id: []const u8, title: []const u8) ![]u8 {
+    const quoted_id = try quoteJson(allocator, id);
+    defer allocator.free(quoted_id);
+    const quoted_title = try quoteJson(allocator, title);
+    defer allocator.free(quoted_title);
+    return std.mem.concat(allocator, u8, &.{
+        "{\"renameQuickChat\":{\"id\":", quoted_id, ",\"title\":", quoted_title, "}}",
+    });
+}
+
+pub fn commandDeleteQuickChat(allocator: std.mem.Allocator, id: []const u8) ![]u8 {
+    const quoted = try quoteJson(allocator, id);
+    defer allocator.free(quoted);
+    return std.mem.concat(allocator, u8, &.{"{\"deleteQuickChat\":{\"id\":", quoted, "}}"});
 }
 
 pub fn commandGraphCreateNode(
@@ -1021,6 +1080,31 @@ test "typed node and edge forms retain every supported field on the wire" {
     defer allocator.free(edge);
     for ([_][]const u8{ "onFailure", "template", "payload", "maxIterations", "spawnTargetProjectPath" }) |field|
         try std.testing.expect(std.mem.indexOf(u8, edge, field) != null);
+}
+
+test "quick chat commands match shared Codable labels" {
+    const allocator = std.testing.allocator;
+    const list = try commandListQuickChats(allocator);
+    defer allocator.free(list);
+    try std.testing.expectEqualStrings("{\"listQuickChats\":{}}", list);
+    const create = try commandCreateQuickChat(allocator, "Scratch", "claudeCode");
+    defer allocator.free(create);
+    try std.testing.expectEqualStrings(
+        "{\"createQuickChat\":{\"title\":\"Scratch\",\"backend\":\"claudeCode\"}}",
+        create,
+    );
+    const open = try commandOpenQuickChat(allocator, "11111111-1111-4111-8111-111111111111");
+    defer allocator.free(open);
+    try std.testing.expectEqualStrings(
+        "{\"openQuickChat\":{\"id\":\"11111111-1111-4111-8111-111111111111\"}}",
+        open,
+    );
+    const rename = try commandRenameQuickChat(allocator, "11111111-1111-4111-8111-111111111111", "Renamed");
+    defer allocator.free(rename);
+    try std.testing.expect(std.mem.indexOf(u8, rename, "\"renameQuickChat\"") != null);
+    const delete = try commandDeleteQuickChat(allocator, "11111111-1111-4111-8111-111111111111");
+    defer allocator.free(delete);
+    try std.testing.expect(std.mem.indexOf(u8, delete, "\"deleteQuickChat\"") != null);
 }
 
 test "v2 edge fixtures exactly match Zig-generated request envelopes" {

@@ -39,6 +39,7 @@ public struct ProjectRegistryCommandResult: Equatable, Sendable {
 /// `.deleteProjectGraph` additionally discards its saved loops.
 public actor ProjectRegistry {
   private let persistence: ProjectPersistence
+  private let quickChatStore: QuickChatStore
   private let platformPaths: any PlatformPaths
   private let replayStore: DaemonReplayStore
   private var stores: [String: GraphStore] = [:]
@@ -82,6 +83,7 @@ public actor ProjectRegistry {
     self.platformPaths = platformPaths
     persistence = ProjectPersistence(
       baseDirectory: persistenceDirectory, platformPaths: platformPaths)
+    quickChatStore = QuickChatStore(baseDirectory: persistenceDirectory)
     self.replayStore = replayStore
     self.ensureSession = ensureSession
     self.terminateSession = terminateSession
@@ -233,6 +235,21 @@ public actor ProjectRegistry {
     _ = await apply(command, connectionID: connectionID)
   }
 
+  /// Called by the daemon's session/activity poller. Sequence numbers are persisted with
+  /// the chat so reconnecting clients can order updates deterministically.
+  public func updateQuickChatActivity(
+    id: UUID,
+    text: String?,
+    presence: PresenceReading?
+  ) async -> Bool {
+    guard let chat = quickChatStore.chat(id: id) else { return false }
+    let sequence = (chat.activity?.sequence ?? 0) + 1
+    let activity = QuickChatActivity(sequence: sequence, text: text, presence: presence)
+    guard quickChatStore.updateActivity(id: id, activity: activity) != nil else { return false }
+    await broadcast(.quickChatActivity(id: id, activity: activity))
+    return true
+  }
+
   /// Applies a command and snapshots its correlated result before returning to the
   /// daemon read loop. Keeping mutation and response selection together prevents a
   /// concurrent disconnect or command from turning a rejected mutation into a stale
@@ -319,6 +336,50 @@ public actor ProjectRegistry {
       response = .recentProjectsListed(persistence.loadRecentProjects())
       error = nil
 
+    case .listQuickChats:
+      response = .quickChatsListed(quickChatStore.load())
+      await broadcast(response!)
+
+    case .createQuickChat(let title, let backend):
+      let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else {
+        error = "quick chat title must not be empty"
+        break
+      }
+      let chat = QuickChat(title: trimmed, backend: backend)
+      quickChatStore.create(chat)
+      response = .quickChatChanged(chat)
+      await broadcast(response!)
+
+    case .openQuickChat(let id):
+      guard let chat = quickChatStore.chat(id: id) else {
+        error = "quick chat not found"
+        break
+      }
+      response = .quickChatChanged(chat)
+      await broadcast(response!)
+
+    case .renameQuickChat(let id, let title):
+      let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else {
+        error = "quick chat title must not be empty"
+        break
+      }
+      guard let chat = quickChatStore.rename(id: id, title: trimmed) else {
+        error = "quick chat not found"
+        break
+      }
+      response = .quickChatChanged(chat)
+      await broadcast(response!)
+
+    case .deleteQuickChat(let id):
+      guard quickChatStore.delete(id: id) != nil else {
+        error = "quick chat not found"
+        break
+      }
+      response = .quickChatDeleted(id)
+      await broadcast(response!)
+
     case .graphCommand(let path, let inner):
       guard let store = stores[Self.canonicalize(path, platformPaths: platformPaths)] else {
         return ProjectRegistryCommandResult(error: "project is not open")
@@ -359,6 +420,12 @@ public actor ProjectRegistry {
       return .graphChanged(await store.graph)
     case .deleteProjectGraph:
       return .recentProjectsListed(persistence.loadRecentProjects())
+    case .listQuickChats:
+      return .quickChatsListed(quickChatStore.load())
+    case .createQuickChat, .openQuickChat, .renameQuickChat:
+      return nil
+    case .deleteQuickChat(let id):
+      return .quickChatDeleted(id)
     case .openGlobalGraph:
       guard let store = stores[LoopGraphScope.globalPath] else { return nil }
       return .graphChanged(await store.graph)
@@ -564,6 +631,12 @@ public actor ProjectRegistry {
       try await channel.sendEvent(event)
     } catch {
       await removeConnection(connectionID)
+    }
+  }
+
+  private func broadcast(_ event: DaemonEvent) async {
+    for id in connections.keys {
+      await send(event, to: id)
     }
   }
 }
