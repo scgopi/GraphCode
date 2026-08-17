@@ -88,9 +88,7 @@ pub const Surface = struct {
     output_events: usize = 0,
     terminal_buffer: [16 * 1024]u8 = undefined,
     terminal_buffer_len: usize = 0,
-    cells: [cell_count]c.winghostty_terminal_cell = [_]c.winghostty_terminal_cell{
-        .{ .codepoint = 0, .foreground = 0xE6E6E6, .background = 0, .flags = 0 },
-    } ** cell_count,
+    cells: []c.winghostty_terminal_cell = &.{},
     terminal_x: usize = 0,
     terminal_y: usize = 0,
     parser: ParserState = .normal,
@@ -160,7 +158,16 @@ pub const Workspace = struct {
                     catch "global",
             ),
         };
+        for (&workspace.surfaces) |*surface| {
+            surface.cells = try allocator_.alloc(c.winghostty_terminal_cell, cell_count);
+            for (surface.cells) |*cell| {
+                cell.* = .{ .codepoint = 0, .foreground = 0xE6E6E6, .background = 0, .flags = 0 };
+            }
+        }
         errdefer {
+            for (&workspace.surfaces) |*surface| {
+                if (surface.cells.len != 0) allocator_.free(surface.cells);
+            }
             allocator_.free(workspace.zmx_path);
             allocator_.free(workspace.cwd);
             workspace.layout.deinit();
@@ -193,6 +200,12 @@ pub const Workspace = struct {
         for (&self.restore_errors) |*message| {
             if (message.*.len != 0) self.allocator.free(message.*);
             message.* = &.{};
+        }
+        for (&self.surfaces) |*surface| {
+            if (surface.cells.len != 0) {
+                self.allocator.free(surface.cells);
+                surface.cells = &.{};
+            }
         }
         if (self.project_path.len != 0) self.allocator.free(self.project_path);
         if (self.host) |host| {
@@ -1138,7 +1151,7 @@ pub const Workspace = struct {
             surface,
             columns,
             rows,
-            &slot.cells,
+            slot.cells.ptr,
             cell_count,
         );
         _ = c.winghostty_surface_notify_accessibility_text(
@@ -1505,7 +1518,7 @@ fn appendOutput(slot: *Surface, bytes: []const u8) void {
 }
 
 fn clearCells(slot: *Surface) void {
-    for (&slot.cells) |*cell| cell.* = .{ .codepoint = 0, .foreground = 0xE6E6E6, .background = 0, .flags = 0 };
+    for (slot.cells) |*cell| cell.* = .{ .codepoint = 0, .foreground = 0xE6E6E6, .background = 0, .flags = 0 };
     slot.terminal_x = 0;
     slot.terminal_y = 0;
 }
