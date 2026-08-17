@@ -560,7 +560,7 @@ extension ProjectFeature {
     // (Settings → Sessions), never a hardcoded one.
     state.draftBackend = backend ?? GraphcodeSettingsStore.load().defaultBackend
     let settings = GraphcodeSettingsStore.load()
-    state.draftModelTier = settings.autoSelectsModel ? settings.defaultModelTier : nil
+    state.draftModelTier = settings.autoSelectsModel ? nil : settings.defaultModelTier
     state.draftWorktree = .none
     state.draftBranch = ""
     state.draftParentNodeID = parentNodeID

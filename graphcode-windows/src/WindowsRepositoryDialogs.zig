@@ -31,10 +31,20 @@ pub const CloneProcess = struct {
     child: std.process.Child,
     args: []const []u8,
     destination: []u8,
+    destination_preexisted: bool,
+    destination_owned: bool,
     finished: bool = false,
     cancelled: bool = false,
 
     pub fn start(allocator: std.mem.Allocator, fields: CloneFields) !CloneProcess {
+        const destination_preexisted = try inspectDestination(fields.destination);
+        if (destination_preexisted) {
+            var dir = try std.fs.cwd().openDir(fields.destination, .{ .iterate = true });
+            var iterator = dir.iterate();
+            const non_empty = (try iterator.next()) != null;
+            dir.close();
+            if (non_empty) return error.DestinationNotEmpty;
+        }
         const args = try cloneCommand(allocator, fields);
         var child = std.process.Child.init(args, allocator);
         child.stdout_behavior = .Pipe;
@@ -47,7 +57,9 @@ pub const CloneProcess = struct {
             allocator.free(args);
             return err;
         };
-        return .{ .allocator = allocator, .child = child, .args = args, .destination = destination };
+
+        return .{ .allocator = allocator, .child = child, .args = args, .destination = destination,
+            .destination_preexisted = destination_preexisted, .destination_owned = !destination_preexisted };
     }
 
     pub fn cancel(self: *CloneProcess) void {
@@ -63,8 +75,10 @@ pub const CloneProcess = struct {
             .Exited => |code| if (code == 0) .finished else .failed,
             else => .failed,
         };
+
         self.releaseArgs();
-        if (status != .finished) std.fs.cwd().deleteTree(self.destination) catch {};
+        if (status != .finished and self.destination_owned and !self.destination_preexisted)
+            std.fs.cwd().deleteTree(self.destination) catch {};
         return status;
     }
 
@@ -85,6 +99,76 @@ pub const CloneProcess = struct {
     }
 };
 
+fn inspectDestination(path: []const u8) !bool {
+    var dir = std.fs.cwd().openDir(path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        error.NotDir => return error.DestinationNotDirectory,
+        else => return err,
+    };
+    dir.close();
+    return true;
+}
+
+pub const CloneOperation = struct {
+    allocator: std.mem.Allocator,
+    process: *CloneProcess,
+    thread: std.Thread,
+    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    status: CloneStatus = .cloning,
+
+    pub fn start(allocator: std.mem.Allocator, fields: CloneFields) !*CloneOperation {
+        const operation = try allocator.create(CloneOperation);
+        errdefer allocator.destroy(operation);
+        const process = try allocator.create(CloneProcess);
+        errdefer allocator.destroy(process);
+        process.* = try CloneProcess.start(allocator, fields);
+        operation.* = .{ .allocator = allocator, .process = process, .thread = undefined };
+        operation.thread = std.Thread.spawn(.{}, worker, .{operation}) catch |err| {
+            process.deinit();
+            allocator.destroy(process);
+            return err;
+        };
+        return operation;
+    }
+
+    pub fn cancel(self: *CloneOperation) void {
+        self.process.cancel();
+    }
+
+    pub fn poll(self: *CloneOperation) ?CloneStatus {
+        if (!self.done.load(.acquire)) return null;
+        return self.status;
+    }
+
+    pub fn deinit(self: *CloneOperation) void {
+        if (!self.done.load(.acquire)) self.cancel();
+        self.thread.join();
+        self.process.deinit();
+        self.allocator.destroy(self.process);
+        self.allocator.destroy(self);
+    }
+
+    fn worker(self: *CloneOperation) void {
+        var stdout_thread = std.Thread.spawn(.{}, drainPipe, .{ &self.process.child.stdout.?, self.allocator }) catch {
+            self.process.cancel();
+            self.status = .failed;
+            self.done.store(true, .release);
+            return;
+        };
+        var stderr_thread = std.Thread.spawn(.{}, drainPipe, .{ &self.process.child.stderr.?, self.allocator }) catch {
+            self.process.cancel();
+            stdout_thread.join();
+            self.status = .failed;
+            self.done.store(true, .release);
+            return;
+        };
+        stdout_thread.join();
+        stderr_thread.join();
+        self.status = self.process.finish() catch .failed;
+        self.done.store(true, .release);
+    }
+};
+
 pub fn validateClone(fields: CloneFields) !void {
     if (std.mem.trim(u8, fields.url, " \t\r\n").len == 0) return error.MissingRepositoryURL;
     if (!std.mem.startsWith(u8, fields.url, "https://")) return error.HTTPSRequired;
@@ -102,6 +186,9 @@ pub fn validateRemote(fields: RemoteFields) !void {
     if (port == 0) return error.InvalidPort;
     if (std.mem.startsWith(u8, fields.host, "-") or std.mem.startsWith(u8, fields.user, "-"))
         return error.InvalidSSHComponent;
+    for ([_][]const u8{ fields.host, fields.user, fields.path }) |value| {
+        if (std.mem.indexOfAny(u8, value, "\x00\r\n") != null) return error.InvalidSSHComponent;
+    }
 }
 
 pub fn sshDestination(allocator: std.mem.Allocator, fields: RemoteFields) ![]u8 {
@@ -112,11 +199,35 @@ pub fn sshDestination(allocator: std.mem.Allocator, fields: RemoteFields) ![]u8 
 pub fn reconnectCommand(allocator: std.mem.Allocator, fields: RemoteFields) ![]u8 {
     const destination = try sshDestination(allocator, fields);
     defer allocator.free(destination);
+    const quoted_destination = try shellQuote(allocator, destination);
+    defer allocator.free(quoted_destination);
+    const quoted_path = try shellQuote(allocator, fields.path);
+    defer allocator.free(quoted_path);
     return std.fmt.allocPrint(
         allocator,
         "ssh -o BatchMode=yes -o ConnectTimeout=10 -p {s} {s} -- zmx attach -- {s}",
-        .{ fields.port, destination, fields.path },
+        .{ fields.port, quoted_destination, quoted_path },
     );
+}
+
+fn shellQuote(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    var size: usize = 2;
+    for (value) |byte| size += if (byte == '\'') 4 else 1;
+    var result = try allocator.alloc(u8, size);
+    var index: usize = 0;
+    result[index] = '\'';
+    index += 1;
+    for (value) |byte| {
+        if (byte == '\'') {
+            @memcpy(result[index .. index + 4], "'\\''");
+            index += 4;
+        } else {
+            result[index] = byte;
+            index += 1;
+        }
+    }
+    result[index] = '\'';
+    return result;
 }
 
 pub fn sshValidationArgs(allocator: std.mem.Allocator, fields: RemoteFields) ![][]u8 {
@@ -258,8 +369,8 @@ test "clone validation and argv preserve HTTPS, Unicode, and option boundaries" 
         for (args) |arg| std.testing.allocator.free(arg);
         std.testing.allocator.free(args);
     }
-    try std.testing.expectEqualStrings("--", args[6]);
-    try std.testing.expectEqualStrings(fields.destination, args[8]);
+    try std.testing.expectEqualStrings("--", args[7]);
+    try std.testing.expectEqualStrings(fields.destination, args[9]);
 }
 
 test "SSH validation and reconnect command reject injection-shaped identities" {
@@ -281,4 +392,34 @@ test "SSH validation argv keeps destination and remote path separate" {
     try std.testing.expectEqualStrings("BatchMode=yes", args[2]);
     try std.testing.expectEqualStrings("dev@build-box", args[7]);
     try std.testing.expectEqualStrings("/srv/граф", args[11]);
+}
+
+test "SSH reconnect command quotes shell metacharacters and rejects newlines" {
+    const command = try reconnectCommand(std.testing.allocator, .{
+        .host = "build-box", .user = "dev", .path = "/srv/a;$(touch p)'q",
+    });
+    defer std.testing.allocator.free(command);
+    try std.testing.expect(std.mem.indexOf(u8, command, "'/srv/a;$(touch p)'\\''q'") != null);
+    try std.testing.expectError(error.InvalidSSHComponent, validateRemote(.{
+        .host = "build-box", .user = "dev\nwhoami", .path = "/repo",
+    }));
+}
+
+test "clone refuses non-empty destinations without deleting sentinels" {
+    const path = "graphcode-clone-sentinel-regression";
+    std.fs.cwd().deleteTree(path) catch {};
+    try std.fs.cwd().makePath(path);
+    defer std.fs.cwd().deleteTree(path) catch {};
+    var sentinel = try std.fs.cwd().createFile("graphcode-clone-sentinel-regression\\keep.txt", .{});
+    try sentinel.writeAll("keep");
+    sentinel.close();
+    try std.testing.expectError(error.DestinationNotEmpty, CloneProcess.start(std.testing.allocator, .{
+        .url = "https://example.test/repo.git", .destination = path,
+    }));
+    var kept = try std.fs.cwd().openFile("graphcode-clone-sentinel-regression\\keep.txt", .{});
+    defer kept.close();
+    var bytes: [4]u8 = undefined;
+    var reader = kept.reader(&.{});
+    try reader.interface.readSliceAll(&bytes);
+    try std.testing.expectEqualStrings("keep", &bytes);
 }

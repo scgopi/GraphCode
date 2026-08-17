@@ -60,10 +60,10 @@ pub const Store = struct {
         const base = std.process.getEnvVarOwned(allocator, "LOCALAPPDATA") catch
             try std.process.getEnvVarOwned(allocator, "USERPROFILE");
         defer allocator.free(base);
-        const dir = try std.fs.path.join(allocator, &.{ base, "GraphCode" });
+        const dir = try std.fs.path.join(allocator, &.{ base, ".graphcode" });
         errdefer allocator.free(dir);
         try std.fs.cwd().makePath(dir);
-        const path = try std.fs.path.join(allocator, &.{ dir, "settings.ini" });
+        const path = try std.fs.path.join(allocator, &.{ dir, "settings.json" });
         allocator.free(dir);
         return .{ .allocator = allocator, .path = path };
     }
@@ -77,45 +77,53 @@ pub const Store = struct {
         const data = std.fs.cwd().readFileAlloc(self.allocator, self.path, 16 * 1024) catch
             return Settings.init(self.allocator);
         defer self.allocator.free(data);
-        var values: [9][]const u8 = undefined;
-        values = .{ "", "", "", "", "", "", "", "", "" };
-        var lines = std.mem.splitScalar(u8, data, '\n');
-        while (lines.next()) |line| {
-            const pair = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-            const key = line[0..pair];
-            const value = std.mem.trim(u8, line[pair + 1 ..], " \r");
-            if (std.mem.eql(u8, key, "backend")) values[0] = value;
-            if (std.mem.eql(u8, key, "model")) values[1] = value;
-            if (std.mem.eql(u8, key, "claudePermissions")) values[2] = value;
-            if (std.mem.eql(u8, key, "copilotPermissions")) values[3] = value;
-            if (std.mem.eql(u8, key, "codexApprovals")) values[4] = value;
-            if (std.mem.eql(u8, key, "activity")) values[5] = value;
-            if (std.mem.eql(u8, key, "briefing")) values[6] = value;
-            if (std.mem.eql(u8, key, "beta")) values[7] = value;
-            if (std.mem.eql(u8, key, "autoSelectsModel")) values[8] = value;
-        }
-        return Settings.parse(self.allocator, &values);
+        const parsed = try std.json.parseFromSlice(Contract, self.allocator, data, .{});
+        defer parsed.deinit();
+        return Settings.parse(self.allocator, &.{
+            parsed.value.defaultBackend orelse "claudeCode",
+            parsed.value.defaultModelTier orelse "standard",
+            parsed.value.claudePermissionMode orelse "auto",
+            parsed.value.copilotPermissions orelse "allowEverything",
+            parsed.value.codexApprovals orelse "workspace",
+            if (parsed.value.showsActivityStrip orelse false) "on" else "off",
+            if (parsed.value.briefsSessionsAboutTheGraph orelse true) "on" else "off",
+            if (parsed.value.betaUpdates orelse false) "on" else "off",
+            if (parsed.value.autoSelectsModel orelse false) "on" else "off",
+        });
     }
 
     pub fn save(self: Store, settings: Settings) !void {
         var file = try std.fs.cwd().createFile(self.path, .{ .truncate = true });
         defer file.close();
-        const fields = settings.fields();
         const data = try std.fmt.allocPrint(self.allocator,
-            "backend={s}\nmodel={s}\nclaudePermissions={s}\ncopilotPermissions={s}\ncodexApprovals={s}\nactivity={s}\nbriefing={s}\nbeta={s}\nautoSelectsModel={s}\n",
-            .{ fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6], fields[7], fields[8] },
+            "{{\"defaultBackend\":\"{s}\",\"defaultModelTier\":\"{s}\",\"claudePermissionMode\":\"{s}\",\"copilotPermissions\":\"{s}\",\"codexApprovals\":\"{s}\",\"briefsSessionsAboutTheGraph\":{},\"autoSelectsModel\":{},\"showsActivityStrip\":{},\"betaUpdates\":{}}}",
+            .{ settings.default_backend, settings.default_model, settings.claude_permissions,
+                settings.copilot_permissions, settings.codex_approvals, settings.briefing,
+                settings.auto_selects_model, settings.activity, settings.beta },
         );
         defer self.allocator.free(data);
         try file.writeAll(data);
     }
 };
 
+const Contract = struct {
+    defaultBackend: ?[]const u8 = null,
+    defaultModelTier: ?[]const u8 = null,
+    claudePermissionMode: ?[]const u8 = null,
+    copilotPermissions: ?[]const u8 = null,
+    codexApprovals: ?[]const u8 = null,
+    briefsSessionsAboutTheGraph: ?bool = null,
+    autoSelectsModel: ?bool = null,
+    showsActivityStrip: ?bool = null,
+    betaUpdates: ?bool = null,
+};
+
 pub fn open(parent: c.HWND, allocator: std.mem.Allocator, current: Settings) !?Settings {
     const fields = current.fields();
     const result = try NativeDialogs.text(parent, allocator, "GraphCode product settings", &.{
         "Default backend", "Default model tier", "Claude permissions", "Copilot permissions",
-        "Activity strip (on/off)", "Graph briefing (on/off)", "Beta updates (on/off)",
-        "Codex approvals", "Pick models automatically",
+        "Codex approvals", "Activity strip (on/off)", "Graph briefing (on/off)",
+        "Beta updates (on/off)", "Pick models automatically",
     }, &fields);
     var values = result orelse return null;
     defer values.deinit(allocator);

@@ -39,12 +39,20 @@ pub fn text(
     var state = State{ .allocator = allocator, .parent = parent, .count = labels.len };
     for (labels, 0..) |label, index| {
         state.labels[index] = label;
-        state.values[index] = try allocator.dupe(u8, initial[index]);
+        state.values[index] = allocator.dupe(u8, initial[index]) catch |err| {
+            freeStateValues(&state);
+            return err;
+        };
     }
-    errdefer freeStateValues(&state);
 
-    registerClass() catch return error.DialogClassRegistrationFailed;
-    const wide_title = try wideZ(allocator, title);
+    registerClass() catch {
+        freeStateValues(&state);
+        return error.DialogClassRegistrationFailed;
+    };
+    const wide_title = wideZ(allocator, title) catch |err| {
+        freeStateValues(&state);
+        return err;
+    };
     defer allocator.free(wide_title);
     active_state = state;
     active_state.closed = false;
@@ -93,7 +101,11 @@ pub fn text(
     var result = Result{ .values = .{ &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{} }, .count = state.count };
     readValues(&active_state);
     for (active_state.values[0..state.count], 0..) |value, index| {
-        result.values[index] = try allocator.dupe(u8, value);
+        result.values[index] = allocator.dupe(u8, value) catch |err| {
+            result.deinit(allocator);
+            freeStateValues(&active_state);
+            return err;
+        };
     }
     freeStateValues(&active_state);
     return result;

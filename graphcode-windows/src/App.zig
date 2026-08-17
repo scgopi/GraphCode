@@ -88,6 +88,7 @@ pub const App = struct {
     product_settings_store: ?ProductSettings.Store = null,
     product_settings: ?ProductSettings.Settings = null,
     onboarding_store: ?Onboarding.Store = null,
+    clone_operation: ?*RepositoryDialogs.CloneOperation = null,
     smoke_restart_index: ?usize = null,
     smoke_restart_session: []const u8 = &.{},
 
@@ -165,6 +166,7 @@ pub const App = struct {
         if (self.product_settings_store) |*store| store.deinit();
         if (self.product_settings) |*settings| settings.deinit();
         if (self.onboarding_store) |*store| store.deinit();
+        if (self.clone_operation) |operation| operation.deinit();
         self.allocator.destroy(self);
     }
 
@@ -663,7 +665,7 @@ pub const App = struct {
         var draft = NativeForms.node(self.window.hwnd, self.allocator, .{
             .title = "",
             .backend = settings.default_backend,
-            .model_tier = if (settings.auto_selects_model) settings.default_model else null,
+            .model_tier = if (settings.auto_selects_model) null else settings.default_model,
             .claude_permissions = settings.claude_permissions,
             .copilot_permissions = settings.copilot_permissions,
             .briefing_enabled = settings.briefing,
@@ -833,12 +835,22 @@ pub const App = struct {
             self.setStatus(@errorName(err));
             return;
         };
-        self.setStatus("Cloning repository…");
-        const clone_status = RepositoryDialogs.runClone(self.allocator, draft) catch {
-            self.setStatus("Clone failed");
+        if (self.clone_operation != null) {
+            self.setStatus("A clone is already running");
+            return;
+        }
+        self.clone_operation = RepositoryDialogs.CloneOperation.start(self.allocator, draft) catch {
+            self.setStatus("Clone could not start");
             return;
         };
-        self.setStatus(if (clone_status == .finished) "Clone complete" else "Clone failed");
+        self.setStatus("Cloning repository… (Ctrl+Shift+X cancels)");
+    }
+
+    fn cancelClone(self: *App) void {
+        if (self.clone_operation) |operation| {
+            operation.cancel();
+            self.setStatus("Cancelling clone…");
+        }
     }
 
     fn addRemoteRepository(self: *App) void {
@@ -1263,6 +1275,7 @@ pub const App = struct {
             .settings => self.openSettings(),
             .product_settings => self.openProductSettings(),
             .clone_repository => self.cloneRepository(),
+            .cancel_clone => self.cancelClone(),
             .remote_repository => self.addRemoteRepository(),
             .onboarding => if (self.onboarding_store) |store|
                 Onboarding.showFirstRun(self.window.hwnd, self.allocator, store) catch
@@ -1585,6 +1598,17 @@ fn onWindowMessage(
             app.smoke_tick += 1;
             if (!app.tray.added and app.smoke_tick % 10 == 0) {
                 app.tray.add(hwnd) catch app.setStatus("System tray unavailable; retrying");
+            }
+            if (app.clone_operation) |operation| {
+                if (operation.poll()) |status| {
+                    operation.deinit();
+                    app.clone_operation = null;
+                    app.setStatus(switch (status) {
+                        .finished => "Clone complete",
+                        .cancelled => "Clone cancelled; partial output removed",
+                        else => "Clone failed; partial output removed",
+                    });
+                }
             }
             app.client.poll();
             const connection_state = app.client.connectionState();

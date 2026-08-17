@@ -16,6 +16,7 @@ pub const Action = enum {
     settings,
     product_settings,
     clone_repository,
+    cancel_clone,
     remote_repository,
     onboarding,
     cycle_attention,
@@ -40,6 +41,7 @@ pub const Action = enum {
 pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (ctrl and shift and key == ',') return .product_settings;
     if (ctrl and shift and key == 'C') return .clone_repository;
+    if (ctrl and shift and key == 'X') return .cancel_clone;
     if (ctrl and shift and key == 'R') return .remote_repository;
     if (ctrl and key == 'R') return .reconnect;
     if (ctrl and key == 'N') return .create_node;
@@ -86,6 +88,7 @@ pub fn commandText(allocator: std.mem.Allocator, action: Action) ![]u8 {
         .settings => allocator.dupe(u8, "Settings"),
         .product_settings => allocator.dupe(u8, "Product settings"),
         .clone_repository => allocator.dupe(u8, "Clone HTTPS repository"),
+        .cancel_clone => allocator.dupe(u8, "Cancel clone"),
         .remote_repository => allocator.dupe(u8, "Add SSH repository"),
         .onboarding => allocator.dupe(u8, "GraphCode onboarding"),
         .cycle_attention => allocator.dupe(u8, "Review next loop needing you"),
