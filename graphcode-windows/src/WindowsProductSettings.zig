@@ -57,14 +57,15 @@ pub const Store = struct {
     path: []u8,
 
     pub fn init(allocator: std.mem.Allocator) !Store {
-        const base = std.process.getEnvVarOwned(allocator, "LOCALAPPDATA") catch
-            try std.process.getEnvVarOwned(allocator, "USERPROFILE");
+        const base = std.process.getEnvVarOwned(allocator, "GRAPHCODE_SUPPORT_DIR") catch blk: {
+            const profile = try std.process.getEnvVarOwned(allocator, "USERPROFILE");
+            const result = try std.fs.path.join(allocator, &.{ profile, ".graphcode" });
+            allocator.free(profile);
+            break :blk result;
+        };
         defer allocator.free(base);
-        const dir = try std.fs.path.join(allocator, &.{ base, ".graphcode" });
-        errdefer allocator.free(dir);
-        try std.fs.cwd().makePath(dir);
-        const path = try std.fs.path.join(allocator, &.{ dir, "settings.json" });
-        allocator.free(dir);
+        try std.fs.cwd().makePath(base);
+        const path = try std.fs.path.join(allocator, &.{ base, "settings.json" });
         return .{ .allocator = allocator, .path = path };
     }
 

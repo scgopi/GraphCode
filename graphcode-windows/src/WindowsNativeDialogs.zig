@@ -2,7 +2,7 @@ const std = @import("std");
 const c = @import("Win32.zig").c;
 
 pub const Result = struct {
-    values: [8][]u8,
+    values: [16][]u8,
     count: usize,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
@@ -14,10 +14,12 @@ pub const Result = struct {
 const State = struct {
     allocator: std.mem.Allocator,
     parent: c.HWND,
-    labels: [8][]const u8 = .{ "", "", "", "", "", "", "", "" },
-    values: [8][]u8 = .{ &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{} },
-    edits: [8]c.HWND = .{ null, null, null, null, null, null, null, null },
+    labels: [16][]const u8 = [_][]const u8{""} ** 16,
+    values: [16][]u8 = [_][]u8{&.{}} ** 16,
+    label_windows: [16]c.HWND = [_]c.HWND{null} ** 16,
+    edits: [16]c.HWND = [_]c.HWND{null} ** 16,
     count: usize = 0,
+    scroll_offset: i32 = 0,
     accepted: bool = false,
     closed: bool = false,
 };
@@ -35,7 +37,7 @@ pub fn text(
     labels: []const []const u8,
     initial: []const []const u8,
 ) !?Result {
-    if (labels.len == 0 or labels.len > 8 or labels.len != initial.len) return error.InvalidDialogFields;
+    if (labels.len == 0 or labels.len > 16 or labels.len != initial.len) return error.InvalidDialogFields;
     var state = State{ .allocator = allocator, .parent = parent, .count = labels.len };
     for (labels, 0..) |label, index| {
         state.labels[index] = label;
@@ -62,11 +64,11 @@ pub fn text(
         c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT,
         class_name.ptr,
         wide_title.ptr,
-        c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU,
+        c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU | c.WS_VSCROLL,
         c.CW_USEDEFAULT,
         c.CW_USEDEFAULT,
-        560,
-        @intCast(150 + labels.len * 52),
+        600,
+        620,
         parent,
         null,
         c.GetModuleHandleW(null),
@@ -98,7 +100,7 @@ pub fn text(
         freeStateValues(&active_state);
         return null;
     }
-    var result = Result{ .values = .{ &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{} }, .count = state.count };
+    var result = Result{ .values = [_][]u8{&.{}} ** 16, .count = state.count };
     readValues(&active_state);
     for (active_state.values[0..state.count], 0..) |value, index| {
         result.values[index] = allocator.dupe(u8, value) catch |err| {
@@ -113,7 +115,7 @@ pub fn text(
 
 fn freeStateValues(state: *State) void {
     for (state.values[0..state.count]) |value| state.allocator.free(value);
-    state.values = .{ &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{} };
+    state.values = [_][]u8{&.{}} ** 16;
     state.count = 0;
 }
 
@@ -134,9 +136,21 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             for (active_state.labels[0..active_state.count], 0..) |label, index| {
                 createField(hwnd, &active_state, label, index);
             }
-            const y: i32 = @intCast(35 + active_state.count * 52);
-            createButton(hwnd, "OK", ok_id, 390, y);
-            createButton(hwnd, "Cancel", cancel_id, 300, y);
+            createButton(hwnd, "OK", ok_id, 490, 565);
+            createButton(hwnd, "Cancel", cancel_id, 400, 565);
+            return 0;
+        },
+        c.WM_VSCROLL => {
+            const action: u16 = @truncate(wparam);
+            const max_offset: i32 = @max(0, @as(i32, @intCast(active_state.count * 52)) - 510);
+            switch (action) {
+                c.SB_LINEUP => active_state.scroll_offset = @max(0, active_state.scroll_offset - 52),
+                c.SB_LINEDOWN => active_state.scroll_offset = @min(max_offset, active_state.scroll_offset + 52),
+                c.SB_PAGEUP => active_state.scroll_offset = @max(0, active_state.scroll_offset - 510),
+                c.SB_PAGEDOWN => active_state.scroll_offset = @min(max_offset, active_state.scroll_offset + 510),
+                else => {},
+            }
+            repositionFields();
             return 0;
         },
         c.WM_COMMAND => {
@@ -167,13 +181,26 @@ fn createField(hwnd: c.HWND, state: *State, label: []const u8, index: usize) voi
     const y: i32 = @intCast(12 + index * 52);
     const wide_label = wideZ(state.allocator, label) catch return;
     defer state.allocator.free(wide_label);
-    _ = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr, wide_label.ptr, c.WS_CHILD | c.WS_VISIBLE, 18, y, 500, 18, hwnd, null, c.GetModuleHandleW(null), null);
+    state.label_windows[index] = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr, wide_label.ptr, c.WS_CHILD | c.WS_VISIBLE, 18, y, 500, 18, hwnd, null, c.GetModuleHandleW(null), null);
     const edit_id: c.HMENU = @ptrFromInt(9904 + index * 8);
     const edit = c.CreateWindowExW(c.WS_EX_CLIENTEDGE, std.unicode.utf8ToUtf16LeStringLiteral("EDIT").ptr, null, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.ES_AUTOHSCROLL, 18, y + 18, 500, 24, hwnd, edit_id, c.GetModuleHandleW(null), null) orelse return;
     state.edits[index] = edit;
     const wide_value = wideZ(state.allocator, state.values[index]) catch return;
     defer state.allocator.free(wide_value);
     _ = c.SetWindowTextW(edit, wide_value.ptr);
+}
+
+fn repositionFields() void {
+    for (0..active_state.count) |index| {
+        const y: i32 = @as(i32, @intCast(12 + index * 52)) - active_state.scroll_offset;
+        const visible = y >= 0 and y < 535;
+        _ = c.ShowWindow(active_state.label_windows[index], if (visible) c.SW_SHOW else c.SW_HIDE);
+        _ = c.ShowWindow(active_state.edits[index], if (visible) c.SW_SHOW else c.SW_HIDE);
+        if (visible) {
+            _ = c.SetWindowPos(active_state.label_windows[index], null, 18, y, 500, 18, c.SWP_NOZORDER);
+            _ = c.SetWindowPos(active_state.edits[index], null, 18, y + 18, 500, 24, c.SWP_NOZORDER);
+        }
+    }
 }
 
 fn createButton(hwnd: c.HWND, label: []const u8, id: usize, x: i32, y: i32) void {

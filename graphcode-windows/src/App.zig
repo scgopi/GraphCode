@@ -1600,6 +1600,14 @@ fn onWindowMessage(
                 app.tray.add(hwnd) catch app.setStatus("System tray unavailable; retrying");
             }
             if (app.clone_operation) |operation| {
+                var progress: [256]u8 = undefined;
+                var recent_stderr: [256]u8 = undefined;
+                const output = operation.snapshot(&progress, &recent_stderr);
+                if (output.progress_len != 0) {
+                    app.setStatus(progress[0..output.progress_len]);
+                } else if (output.stderr_len != 0) {
+                    app.setStatus(recent_stderr[0..output.stderr_len]);
+                }
                 if (operation.poll()) |status| {
                     operation.deinit();
                     app.clone_operation = null;

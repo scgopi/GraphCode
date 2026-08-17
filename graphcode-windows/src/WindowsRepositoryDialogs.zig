@@ -31,21 +31,21 @@ pub const CloneProcess = struct {
     child: std.process.Child,
     args: []const []u8,
     destination: []u8,
-    destination_preexisted: bool,
-    destination_owned: bool,
+    staging: []u8,
+    recent_stderr: [4096]u8 = undefined,
+    recent_stderr_len: usize = 0,
+    progress: [256]u8 = undefined,
+    progress_len: usize = 0,
+    output_lock: std.Thread.Mutex = .{},
     finished: bool = false,
     cancelled: bool = false,
 
     pub fn start(allocator: std.mem.Allocator, fields: CloneFields) !CloneProcess {
-        const destination_preexisted = try inspectDestination(fields.destination);
-        if (destination_preexisted) {
-            var dir = try std.fs.cwd().openDir(fields.destination, .{ .iterate = true });
-            var iterator = dir.iterate();
-            const non_empty = (try iterator.next()) != null;
-            dir.close();
-            if (non_empty) return error.DestinationNotEmpty;
-        }
-        const args = try cloneCommand(allocator, fields);
+        if (try inspectDestination(fields.destination)) return error.DestinationAlreadyExists;
+        const staging = try makeStagingPath(allocator, fields.destination);
+        errdefer allocator.free(staging);
+        const staged_fields = CloneFields{ .url = fields.url, .destination = staging, .branch = fields.branch, .depth = fields.depth };
+        const args = try cloneCommand(allocator, staged_fields);
         var child = std.process.Child.init(args, allocator);
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
@@ -58,8 +58,7 @@ pub const CloneProcess = struct {
             return err;
         };
 
-        return .{ .allocator = allocator, .child = child, .args = args, .destination = destination,
-            .destination_preexisted = destination_preexisted, .destination_owned = !destination_preexisted };
+        return .{ .allocator = allocator, .child = child, .args = args, .destination = destination, .staging = staging };
     }
 
     pub fn cancel(self: *CloneProcess) void {
@@ -77,8 +76,14 @@ pub const CloneProcess = struct {
         };
 
         self.releaseArgs();
-        if (status != .finished and self.destination_owned and !self.destination_preexisted)
-            std.fs.cwd().deleteTree(self.destination) catch {};
+        if (status == .finished) {
+            std.fs.cwd().rename(self.staging, self.destination) catch {
+                std.fs.cwd().deleteTree(self.staging) catch {};
+                return error.DestinationCommitFailed;
+            };
+        } else {
+            std.fs.cwd().deleteTree(self.staging) catch {};
+        }
         return status;
     }
 
@@ -88,6 +93,7 @@ pub const CloneProcess = struct {
             _ = self.finish() catch {};
         }
         self.allocator.free(self.destination);
+        self.allocator.free(self.staging);
         self.* = undefined;
     }
 
@@ -96,6 +102,31 @@ pub const CloneProcess = struct {
         for (self.args) |arg| self.allocator.free(arg);
         self.allocator.free(self.args);
         self.args = &.{};
+    }
+
+    pub fn snapshot(self: *CloneProcess, progress: []u8, stderr: []u8) struct { progress_len: usize, stderr_len: usize } {
+        self.output_lock.lock();
+        defer self.output_lock.unlock();
+        const progress_len = @min(progress.len, self.progress_len);
+        const stderr_len = @min(stderr.len, self.recent_stderr_len);
+        @memcpy(progress[0..progress_len], self.progress[0..progress_len]);
+        @memcpy(stderr[0..stderr_len], self.recent_stderr[0..stderr_len]);
+        return .{ .progress_len = progress_len, .stderr_len = stderr_len };
+    }
+
+    fn recordOutput(self: *CloneProcess, bytes: []const u8, is_stderr: bool) void {
+        self.output_lock.lock();
+        defer self.output_lock.unlock();
+        const target = if (is_stderr) &self.recent_stderr else &self.progress;
+        const len = if (is_stderr) &self.recent_stderr_len else &self.progress_len;
+        const capacity = target.len;
+        const copy_len = @min(capacity, bytes.len);
+        if (copy_len < capacity) {
+            @memcpy(target[0..copy_len], bytes[bytes.len - copy_len ..]);
+        } else {
+            @memcpy(target[0..capacity], bytes[bytes.len - capacity ..]);
+        }
+        len.* = copy_len;
     }
 };
 
@@ -107,6 +138,20 @@ fn inspectDestination(path: []const u8) !bool {
     };
     dir.close();
     return true;
+}
+
+fn makeStagingPath(allocator: std.mem.Allocator, destination: []const u8) ![]u8 {
+    const parent = std.fs.path.dirname(destination) orelse ".";
+    const base = std.fs.path.basename(destination);
+    var attempt: usize = 0;
+    while (attempt < 32) : (attempt += 1) {
+        const candidate = try std.fmt.allocPrint(allocator, "{s}{c}{s}.graphcode-clone-{d}-{d}", .{
+            parent, std.fs.path.sep, base, std.time.nanoTimestamp(), attempt,
+        });
+        if (!try inspectDestination(candidate)) return candidate;
+        allocator.free(candidate);
+    }
+    return error.StagingPathUnavailable;
 }
 
 pub const CloneOperation = struct {
@@ -140,6 +185,10 @@ pub const CloneOperation = struct {
         return self.status;
     }
 
+    pub fn snapshot(self: *CloneOperation, progress: []u8, stderr: []u8) struct { progress_len: usize, stderr_len: usize } {
+        return self.process.snapshot(progress, stderr);
+    }
+
     pub fn deinit(self: *CloneOperation) void {
         if (!self.done.load(.acquire)) self.cancel();
         self.thread.join();
@@ -149,13 +198,13 @@ pub const CloneOperation = struct {
     }
 
     fn worker(self: *CloneOperation) void {
-        var stdout_thread = std.Thread.spawn(.{}, drainPipe, .{ &self.process.child.stdout.?, self.allocator }) catch {
+        var stdout_thread = std.Thread.spawn(.{}, drainPipe, .{ self.process, &self.process.child.stdout.?, false }) catch {
             self.process.cancel();
             self.status = .failed;
             self.done.store(true, .release);
             return;
         };
-        var stderr_thread = std.Thread.spawn(.{}, drainPipe, .{ &self.process.child.stderr.?, self.allocator }) catch {
+        var stderr_thread = std.Thread.spawn(.{}, drainPipe, .{ self.process, &self.process.child.stderr.?, true }) catch {
             self.process.cancel();
             stdout_thread.join();
             self.status = .failed;
@@ -243,12 +292,10 @@ pub fn sshValidationArgs(allocator: std.mem.Allocator, fields: RemoteFields) ![]
     const destination = try sshDestination(allocator, fields);
     defer allocator.free(destination);
     try args.append(try allocator.dupe(u8, destination));
-    try args.append(try allocator.dupe(u8, "--"));
-    try args.append(try allocator.dupe(u8, "git"));
-    try args.append(try allocator.dupe(u8, "-C"));
-    try args.append(try allocator.dupe(u8, fields.path));
-    try args.append(try allocator.dupe(u8, "rev-parse"));
-    try args.append(try allocator.dupe(u8, "--show-toplevel"));
+    const quoted_path = try shellQuote(allocator, fields.path);
+    defer allocator.free(quoted_path);
+    const remote_command = try std.fmt.allocPrint(allocator, "git -C {s} rev-parse --show-toplevel", .{quoted_path});
+    try args.append(remote_command);
     return args.toOwnedSlice();
 }
 
@@ -262,8 +309,8 @@ pub fn validateRemoteConnection(allocator: std.mem.Allocator, fields: RemoteFiel
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Pipe;
     try child.spawn();
-    var out_thread = try std.Thread.spawn(.{}, drainPipe, .{ &child.stdout.?, allocator });
-    var err_thread = try std.Thread.spawn(.{}, drainPipe, .{ &child.stderr.?, allocator });
+    var out_thread = try std.Thread.spawn(.{}, drainPipeDiscard, .{ &child.stdout.? });
+    var err_thread = try std.Thread.spawn(.{}, drainPipeDiscard, .{ &child.stderr.? });
     out_thread.join();
     err_thread.join();
     switch (try child.wait()) {
@@ -345,16 +392,25 @@ pub fn openRemote(parent: c.HWND, allocator: std.mem.Allocator, initial: RemoteF
 pub fn runClone(allocator: std.mem.Allocator, fields: CloneFields) !CloneStatus {
     var process = try CloneProcess.start(allocator, fields);
     defer process.deinit();
-    var stdout_thread = try std.Thread.spawn(.{}, drainPipe, .{ &process.child.stdout.?, allocator });
-    var stderr_thread = try std.Thread.spawn(.{}, drainPipe, .{ &process.child.stderr.?, allocator });
+    var stdout_thread = try std.Thread.spawn(.{}, drainPipe, .{ &process, &process.child.stdout.?, false });
+    var stderr_thread = try std.Thread.spawn(.{}, drainPipe, .{ &process, &process.child.stderr.?, true });
     stdout_thread.join();
     stderr_thread.join();
     return process.finish();
 }
 
-fn drainPipe(file: *std.fs.File, allocator: std.mem.Allocator) void {
-    const output = file.readToEndAlloc(allocator, 16 * 1024 * 1024) catch return;
-    allocator.free(output);
+fn drainPipe(process: *CloneProcess, file: *std.fs.File, is_stderr: bool) void {
+    var buffer: [4096]u8 = undefined;
+    while (true) {
+        const count = file.read(&buffer) catch return;
+        if (count == 0) return;
+        process.recordOutput(buffer[0..count], is_stderr);
+    }
+}
+
+fn drainPipeDiscard(file: *std.fs.File) void {
+    var buffer: [4096]u8 = undefined;
+    while ((file.read(&buffer) catch 0) != 0) {}
 }
 
 test "clone validation and argv preserve HTTPS, Unicode, and option boundaries" {
@@ -381,7 +437,7 @@ test "SSH validation and reconnect command reject injection-shaped identities" {
     try std.testing.expect(std.mem.indexOf(u8, command, "/srv/граф") != null);
 }
 
-test "SSH validation argv keeps destination and remote path separate" {
+test "SSH validation argv uses one quoted remote command" {
     const args = try sshValidationArgs(std.testing.allocator, .{
         .host = "build-box", .user = "dev", .port = "2222", .path = "/srv/граф",
     });
@@ -391,7 +447,7 @@ test "SSH validation argv keeps destination and remote path separate" {
     }
     try std.testing.expectEqualStrings("BatchMode=yes", args[2]);
     try std.testing.expectEqualStrings("dev@build-box", args[7]);
-    try std.testing.expectEqualStrings("/srv/граф", args[11]);
+    try std.testing.expectEqualStrings("git -C '/srv/граф' rev-parse --show-toplevel", args[8]);
 }
 
 test "SSH reconnect command quotes shell metacharacters and rejects newlines" {
@@ -413,7 +469,7 @@ test "clone refuses non-empty destinations without deleting sentinels" {
     var sentinel = try std.fs.cwd().createFile("graphcode-clone-sentinel-regression\\keep.txt", .{});
     try sentinel.writeAll("keep");
     sentinel.close();
-    try std.testing.expectError(error.DestinationNotEmpty, CloneProcess.start(std.testing.allocator, .{
+    try std.testing.expectError(error.DestinationAlreadyExists, CloneProcess.start(std.testing.allocator, .{
         .url = "https://example.test/repo.git", .destination = path,
     }));
     var kept = try std.fs.cwd().openFile("graphcode-clone-sentinel-regression\\keep.txt", .{});
