@@ -436,6 +436,12 @@ pub const DaemonClient = struct {
         return client.state;
     }
 
+    pub fn protocolMode(self: *DaemonClient) Wire.ProtocolMode {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.mode;
+    }
+
     pub fn isIdle(self: *const DaemonClient) bool {
         const client: *DaemonClient = @constCast(self);
         client.mutex.lock();
