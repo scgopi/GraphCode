@@ -8,6 +8,7 @@ const DialogState = struct {
     parent: c.HWND,
     result: bool = false,
     closed: bool = false,
+    scroll_offset: i32 = 0,
     edits: [20]c.HWND = .{ null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null },
     values: [20][]u8 = .{ &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{} },
 };
@@ -70,29 +71,28 @@ pub fn node(
     }))) return null;
     const poll_interval = parseRequiredFloat(state.values[8]) catch return error.InvalidNumericInput;
     const stall_after = parseOptionalFloat(state.values[9]) catch return error.InvalidNumericInput;
-    var result = Forms.NodeDraft{
-        .title = try allocator.dupe(u8, state.values[0]),
-        .loop_type = try allocator.dupe(u8, state.values[1]),
-        .check_description = try allocator.dupe(u8, state.values[2]),
-        .trigger_prompt = try allocator.dupe(u8, state.values[3]),
-        .first_instruction = try allocator.dupe(u8, state.values[4]),
-        .pauses_before_writes_only = std.mem.eql(u8, state.values[5], "true"),
-        .goal_summary = try allocator.dupe(u8, state.values[6]),
-        .goal_predicate = try allocator.dupe(u8, state.values[7]),
-        .poll_interval_seconds = poll_interval,
-        .stall_after_seconds = stall_after,
-        .metric_command = try allocator.dupe(u8, state.values[10]),
-        .metric_direction = try allocator.dupe(u8, state.values[11]),
-        .backend = if (std.mem.trim(u8, state.values[12], " \t\r\n").len == 0) null else try allocator.dupe(u8, state.values[12]),
-        .model_tier = try allocator.dupe(u8, state.values[13]),
-        .worktree_repository = try allocator.dupe(u8, state.values[14]),
-        .worktree_id = try allocator.dupe(u8, state.values[15]),
-        .worktree_path = try allocator.dupe(u8, state.values[16]),
-        .worktree_branch = try allocator.dupe(u8, state.values[17]),
-        .subgraph_json = try allocator.dupe(u8, state.values[18]),
-        .created_by = try allocator.dupe(u8, state.values[19]),
-    };
+    var result = Forms.NodeDraft{ .title = &.{}, .loop_type = &.{}, .check_description = &.{}, .trigger_prompt = &.{}, .first_instruction = &.{}, .goal_summary = &.{}, .goal_predicate = &.{}, .metric_command = &.{}, .metric_direction = &.{}, .model_tier = &.{}, .worktree_repository = &.{}, .worktree_id = &.{}, .worktree_path = &.{}, .worktree_branch = &.{}, .subgraph_json = &.{}, .created_by = &.{} };
     errdefer result.deinit(allocator);
+    result.title = try allocator.dupe(u8, state.values[0]);
+    result.loop_type = try allocator.dupe(u8, state.values[1]);
+    result.check_description = try allocator.dupe(u8, state.values[2]);
+    result.trigger_prompt = try allocator.dupe(u8, state.values[3]);
+    result.first_instruction = try allocator.dupe(u8, state.values[4]);
+    result.pauses_before_writes_only = std.mem.eql(u8, state.values[5], "true");
+    result.goal_summary = try allocator.dupe(u8, state.values[6]);
+    result.goal_predicate = try allocator.dupe(u8, state.values[7]);
+    result.poll_interval_seconds = poll_interval;
+    result.stall_after_seconds = stall_after;
+    result.metric_command = try allocator.dupe(u8, state.values[10]);
+    result.metric_direction = try allocator.dupe(u8, state.values[11]);
+    result.backend = if (std.mem.trim(u8, state.values[12], " \t\r\n").len == 0) null else try allocator.dupe(u8, state.values[12]);
+    result.model_tier = try allocator.dupe(u8, state.values[13]);
+    result.worktree_repository = try allocator.dupe(u8, state.values[14]);
+    result.worktree_id = try allocator.dupe(u8, state.values[15]);
+    result.worktree_path = try allocator.dupe(u8, state.values[16]);
+    result.worktree_branch = try allocator.dupe(u8, state.values[17]);
+    result.subgraph_json = try allocator.dupe(u8, state.values[18]);
+    result.created_by = try allocator.dupe(u8, state.values[19]);
     return result;
 }
 
@@ -125,19 +125,18 @@ pub fn edge(
     }))) return null;
     const cycle_max = parseOptionalInt(state.values[7]) catch return error.InvalidNumericInput;
     const cycle_stop = parseOptionalInt(state.values[8]) catch return error.InvalidNumericInput;
-    var result = Forms.EdgeDraft{
-        .from = try allocator.dupe(u8, state.values[0]),
-        .to = try allocator.dupe(u8, state.values[1]),
-        .kind = try allocator.dupe(u8, state.values[2]),
-        .condition = try allocator.dupe(u8, state.values[3]),
-        .transform_kind = try allocator.dupe(u8, state.values[4]),
-        .transform_value = try allocator.dupe(u8, state.values[5]),
-        .cycle_until = try allocator.dupe(u8, state.values[6]),
-        .cycle_max_iterations = cycle_max,
-        .cycle_stop_after_passes = cycle_stop,
-        .spawn_target_project_path = try allocator.dupe(u8, state.values[9]),
-    };
+    var result = Forms.EdgeDraft{ .from = &.{}, .to = &.{}, .kind = &.{}, .condition = &.{}, .transform_kind = &.{}, .transform_value = &.{}, .cycle_until = &.{}, .spawn_target_project_path = &.{} };
     errdefer result.deinit(allocator);
+    result.from = try allocator.dupe(u8, state.values[0]);
+    result.to = try allocator.dupe(u8, state.values[1]);
+    result.kind = try allocator.dupe(u8, state.values[2]);
+    result.condition = try allocator.dupe(u8, state.values[3]);
+    result.transform_kind = try allocator.dupe(u8, state.values[4]);
+    result.transform_value = try allocator.dupe(u8, state.values[5]);
+    result.cycle_until = try allocator.dupe(u8, state.values[6]);
+    result.cycle_max_iterations = cycle_max;
+    result.cycle_stop_after_passes = cycle_stop;
+    result.spawn_target_project_path = try allocator.dupe(u8, state.values[9]);
     return result;
 }
 
@@ -284,6 +283,7 @@ pub fn jump(parent: c.HWND, allocator: std.mem.Allocator, initial: []const u8) !
 }
 
 fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !bool {
+    _ = labels;
     registerClass() catch return error.FormClassRegistrationFailed;
     const wide_title = try utf8ToWideZ(state.allocator, title);
     defer state.allocator.free(wide_title);
@@ -291,15 +291,17 @@ fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !boo
     active_state_storage.closed = false;
     active_state_storage.result = false;
     active_state = true;
+    const screen_height = c.GetSystemMetrics(c.SM_CYSCREEN);
+    const dialog_height: i32 = @max(320, @min(700, screen_height - 96));
     const hwnd = c.CreateWindowExW(
         c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT,
         class_name.ptr,
         wide_title.ptr,
-        c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU,
+        c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU | c.WS_VSCROLL,
         c.CW_USEDEFAULT,
         c.CW_USEDEFAULT,
         470,
-        @intCast(150 + labels.len * 48),
+        dialog_height,
         state.parent,
         null,
         c.GetModuleHandleW(null),
@@ -379,8 +381,36 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             for (labels[0..label_count], 0..) |label, index| {
                 createText(safe_hwnd, value, label, index);
             }
-            createButton(safe_hwnd, "OK", ok_id, 350, @intCast(35 + label_count * 48));
-            createButton(safe_hwnd, "Cancel", cancel_id, 265, @intCast(35 + label_count * 48));
+            var client: c.RECT = undefined;
+            _ = c.GetClientRect(safe_hwnd, &client);
+            createButton(safe_hwnd, "OK", ok_id, 350, client.bottom - 38);
+            createButton(safe_hwnd, "Cancel", cancel_id, 265, client.bottom - 38);
+            return 0;
+        },
+        c.WM_SIZE => {
+            var client: c.RECT = undefined;
+            _ = c.GetClientRect(safe_hwnd, &client);
+            _ = c.MoveWindow(c.GetDlgItem(safe_hwnd, @intCast(ok_id)), 350, client.bottom - 38, 70, 26, 1);
+            _ = c.MoveWindow(c.GetDlgItem(safe_hwnd, @intCast(cancel_id)), 265, client.bottom - 38, 70, 26, 1);
+            return 0;
+        },
+        c.WM_VSCROLL => {
+            const command: u16 = @truncate(wparam);
+            const delta: i32 = switch (command) {
+                0 => -48,
+                1 => 48,
+                2 => -@as(i32, @intCast(@max(48, clientHeight(safe_hwnd) - 60))),
+                3 => @as(i32, @intCast(@max(48, clientHeight(safe_hwnd) - 60))),
+                6 => -100000,
+                7 => 100000,
+                else => 0,
+            };
+            scrollFields(safe_hwnd, value, delta);
+            return 0;
+        },
+        c.WM_MOUSEWHEEL => {
+            const wheel_delta: i16 = @bitCast(@as(u16, @truncate(wparam >> 16)));
+            scrollFields(safe_hwnd, value, if (wheel_delta > 0) -48 else 48);
             return 0;
         },
         c.WM_COMMAND => {
@@ -412,12 +442,40 @@ fn createText(hwnd: c.HWND, state: *DialogState, label: []const u8, index: usize
     const y: i32 = @intCast(15 + index * 48);
     const wide_label = utf8ToWideZ(state.allocator, label) catch return;
     defer state.allocator.free(wide_label);
-    _ = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr, wide_label.ptr, c.WS_CHILD | c.WS_VISIBLE, 18, y, 420, 18, hwnd, null, c.GetModuleHandleW(null), null);
+    _ = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr, wide_label.ptr, c.WS_CHILD | c.WS_VISIBLE, 18, y, 420, 18, hwnd, childId(8000 + index), c.GetModuleHandleW(null), null);
     const edit = c.CreateWindowExW(c.WS_EX_CLIENTEDGE, std.unicode.utf8ToUtf16LeStringLiteral("EDIT").ptr, null, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.ES_AUTOHSCROLL, 18, y + 18, 420, 24, hwnd, childId(9100 + index), c.GetModuleHandleW(null), null) orelse return;
     state.edits[index] = edit;
     const wide_value = utf8ToWideZ(state.allocator, state.values[index]) catch return;
     defer state.allocator.free(wide_value);
     _ = c.SetWindowTextW(edit, wide_value.ptr);
+}
+
+fn clientHeight(hwnd: c.HWND) i32 {
+    var rect: c.RECT = undefined;
+    _ = c.GetClientRect(hwnd, &rect);
+    return rect.bottom;
+}
+
+fn scrollFields(hwnd: c.HWND, state: *DialogState, requested: i32) void {
+    const count: usize = switch (state.kind) {
+        .node => 20,
+        .edge => 10,
+        .update => 9,
+        .settings => 2,
+        .jump => 1,
+    };
+    const viewport = clientHeight(hwnd);
+    const content: i32 = @intCast(15 + count * 48 + 12);
+    const max_offset = @max(0, content - @max(120, viewport - 48));
+    const next = std.math.clamp(state.scroll_offset + requested, 0, max_offset);
+    const delta = state.scroll_offset - next;
+    if (delta == 0) return;
+    state.scroll_offset = next;
+    for (0..count) |index| {
+        const y: i32 = @as(i32, @intCast(15 + index * 48)) - state.scroll_offset;
+        _ = c.MoveWindow(c.GetDlgItem(hwnd, @intCast(8000 + index)), 18, y, 420, 18, 1);
+        _ = c.MoveWindow(c.GetDlgItem(hwnd, @intCast(9100 + index)), 18, y + 18, 420, 24, 1);
+    }
 }
 
 fn createButton(hwnd: c.HWND, text: []const u8, id: usize, x: i32, y: i32) void {

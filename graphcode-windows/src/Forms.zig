@@ -24,23 +24,23 @@ pub const NodeDraft = struct {
     created_by: []const u8 = "",
 
     pub fn deinit(self: *NodeDraft, allocator: std.mem.Allocator) void {
-        allocator.free(self.title);
-        allocator.free(self.loop_type);
-        allocator.free(self.check_description);
-        allocator.free(self.trigger_prompt);
-        allocator.free(self.first_instruction);
-        allocator.free(self.goal_summary);
-        allocator.free(self.goal_predicate);
-        allocator.free(self.metric_command);
-        allocator.free(self.metric_direction);
-        if (self.backend) |value| allocator.free(value);
-        allocator.free(self.model_tier);
-        allocator.free(self.worktree_repository);
-        allocator.free(self.worktree_id);
-        allocator.free(self.worktree_path);
-        allocator.free(self.worktree_branch);
-        allocator.free(self.subgraph_json);
-        allocator.free(self.created_by);
+        freeSlice(allocator, self.title);
+        freeSlice(allocator, self.loop_type);
+        freeSlice(allocator, self.check_description);
+        freeSlice(allocator, self.trigger_prompt);
+        freeSlice(allocator, self.first_instruction);
+        freeSlice(allocator, self.goal_summary);
+        freeSlice(allocator, self.goal_predicate);
+        freeSlice(allocator, self.metric_command);
+        freeSlice(allocator, self.metric_direction);
+        if (self.backend) |value| freeSlice(allocator, value);
+        freeSlice(allocator, self.model_tier);
+        freeSlice(allocator, self.worktree_repository);
+        freeSlice(allocator, self.worktree_id);
+        freeSlice(allocator, self.worktree_path);
+        freeSlice(allocator, self.worktree_branch);
+        freeSlice(allocator, self.subgraph_json);
+        freeSlice(allocator, self.created_by);
     }
 };
 
@@ -57,16 +57,20 @@ pub const EdgeDraft = struct {
     spawn_target_project_path: []const u8 = "",
 
     pub fn deinit(self: *EdgeDraft, allocator: std.mem.Allocator) void {
-        allocator.free(self.from);
-        allocator.free(self.to);
-        allocator.free(self.kind);
-        allocator.free(self.condition);
-        allocator.free(self.transform_kind);
-        allocator.free(self.transform_value);
-        allocator.free(self.cycle_until);
-        allocator.free(self.spawn_target_project_path);
+        freeSlice(allocator, self.from);
+        freeSlice(allocator, self.to);
+        freeSlice(allocator, self.kind);
+        freeSlice(allocator, self.condition);
+        freeSlice(allocator, self.transform_kind);
+        freeSlice(allocator, self.transform_value);
+        freeSlice(allocator, self.cycle_until);
+        freeSlice(allocator, self.spawn_target_project_path);
     }
 };
+
+fn freeSlice(allocator: std.mem.Allocator, value: []const u8) void {
+    if (value.len != 0) allocator.free(value);
+}
 
 pub const NodeUpdate = struct {
     goal_summary: ?[]const u8 = null,
@@ -110,6 +114,8 @@ pub const FormError = error{
     UnsupportedMetricDirection,
     InvalidGoal,
     InvalidWorktree,
+    InvalidSubgraph,
+    InvalidCreatedBy,
     InvalidCycleGuard,
     InvalidNumericInput,
     MissingFirstInstruction,
@@ -170,6 +176,32 @@ pub fn validateNode(draft: NodeDraft) FormError!void {
     if (has_worktree and (draft.worktree_repository.len == 0 or
         draft.worktree_path.len == 0 or draft.worktree_branch.len == 0))
         return error.InvalidWorktree;
+    if (draft.subgraph_json.len != 0) try validateSubgraphJson(draft.subgraph_json);
+    if (draft.created_by.len != 0 and !isUuid(draft.created_by)) return error.InvalidCreatedBy;
+}
+
+pub fn validateSubgraphJson(value: []const u8) FormError!void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    var parsed = std.json.parseFromSlice(std.json.Value, arena.allocator(), value, .{}) catch return error.InvalidSubgraph;
+    defer parsed.deinit();
+    const object = switch (parsed.value) {
+        .object => |item| item,
+        else => return error.InvalidSubgraph,
+    };
+    const nodes = object.get("nodes") orelse return error.InvalidSubgraph;
+    const edges = object.get("edges") orelse return error.InvalidSubgraph;
+    if (nodes != .array or edges != .array) return error.InvalidSubgraph;
+}
+
+pub fn isUuid(value: []const u8) bool {
+    if (value.len != 36) return false;
+    for (value, 0..) |byte, index| {
+        if (index == 8 or index == 13 or index == 18 or index == 23) {
+            if (byte != '-') return false;
+        } else if (!std.ascii.isHex(byte)) return false;
+    }
+    return true;
 }
 
 pub fn validateEdge(draft: EdgeDraft) FormError!void {
@@ -261,6 +293,9 @@ test "node and edge forms reject invalid drafts explicitly" {
     try std.testing.expectEqualStrings("New Loop", resolvedTitle(" \n"));
     try std.testing.expectError(error.SameEndpoint, validateEdge(.{ .from = "a", .to = "a" }));
     try std.testing.expectError(error.UnsupportedEdgeKind, validateEdge(.{ .from = "a", .to = "b", .kind = "bad" }));
+    try validateNode(.{ .title = "Composite", .loop_type = "composite", .subgraph_json = "{\"nodes\":[],\"edges\":[]}", .created_by = "11111111-1111-4111-8111-111111111111" });
+    try std.testing.expectError(error.InvalidSubgraph, validateNode(.{ .title = "Composite", .loop_type = "composite", .subgraph_json = "{\"nodes\":[]}" }));
+    try std.testing.expectError(error.InvalidCreatedBy, validateNode(.{ .title = "Loop", .created_by = "not-a-uuid" }));
 }
 
 test "node updates preserve unchanged fields and allow stall clear sentinel" {
@@ -309,6 +344,48 @@ test "typed form result deinit releases every owned allocation" {
         .spawn_target_project_path = try allocator.dupe(u8, ""),
     };
     edge.deinit(allocator);
+}
+
+test "incremental draft construction survives every allocation failure" {
+    const Builder = struct {
+        fn node(allocator: std.mem.Allocator) !void {
+            var draft = NodeDraft{ .title = &.{}, .loop_type = &.{}, .check_description = &.{}, .trigger_prompt = &.{}, .first_instruction = &.{}, .goal_summary = &.{}, .goal_predicate = &.{}, .metric_command = &.{}, .metric_direction = &.{}, .model_tier = &.{}, .worktree_repository = &.{}, .worktree_id = &.{}, .worktree_path = &.{}, .worktree_branch = &.{}, .subgraph_json = &.{}, .created_by = &.{} };
+            errdefer draft.deinit(allocator);
+            draft.title = try allocator.dupe(u8, "title");
+            draft.loop_type = try allocator.dupe(u8, "turnBased");
+            draft.check_description = try allocator.dupe(u8, "check");
+            draft.trigger_prompt = try allocator.dupe(u8, "trigger");
+            draft.first_instruction = try allocator.dupe(u8, "instruction");
+            draft.goal_summary = try allocator.dupe(u8, "goal");
+            draft.goal_predicate = try allocator.dupe(u8, "predicate");
+            draft.metric_command = try allocator.dupe(u8, "metric");
+            draft.metric_direction = try allocator.dupe(u8, "maximize");
+            draft.model_tier = try allocator.dupe(u8, "standard");
+            draft.worktree_repository = try allocator.dupe(u8, "repo");
+            draft.worktree_id = try allocator.dupe(u8, "id");
+            draft.worktree_path = try allocator.dupe(u8, "path");
+            draft.worktree_branch = try allocator.dupe(u8, "branch");
+            draft.subgraph_json = try allocator.dupe(u8, "{\"nodes\":[],\"edges\":[]}");
+            draft.created_by = try allocator.dupe(u8, "11111111-1111-4111-8111-111111111111");
+            draft.deinit(allocator);
+        }
+
+        fn edge(allocator: std.mem.Allocator) !void {
+            var draft = EdgeDraft{ .from = &.{}, .to = &.{}, .kind = &.{}, .condition = &.{}, .transform_kind = &.{}, .transform_value = &.{}, .cycle_until = &.{}, .spawn_target_project_path = &.{} };
+            errdefer draft.deinit(allocator);
+            draft.from = try allocator.dupe(u8, "from");
+            draft.to = try allocator.dupe(u8, "to");
+            draft.kind = try allocator.dupe(u8, "handoff");
+            draft.condition = try allocator.dupe(u8, "always");
+            draft.transform_kind = try allocator.dupe(u8, "none");
+            draft.transform_value = try allocator.dupe(u8, "value");
+            draft.cycle_until = try allocator.dupe(u8, "until");
+            draft.spawn_target_project_path = try allocator.dupe(u8, "project");
+            draft.deinit(allocator);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Builder.node, .{});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Builder.edge, .{});
 }
 
 test "jump navigation wraps and matches title or id case insensitively" {

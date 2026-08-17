@@ -241,9 +241,9 @@ pub fn commandGraphCreateNodeFull(
     const backend = try nullableString(allocator, draft.backend); defer allocator.free(backend);
     const tier = try nullableString(allocator, draft.model_tier); defer allocator.free(tier);
     const worktree = try worktreeJson(allocator, draft); defer allocator.free(worktree);
-    const subgraph = if (draft.subgraph_json.len == 0) try allocator.dupe(u8, "null") else try allocator.dupe(u8, draft.subgraph_json);
+    const subgraph = try safeSubgraphJson(allocator, draft.subgraph_json);
     defer allocator.free(subgraph);
-    const created_by = try nullableString(allocator, draft.created_by); defer allocator.free(created_by);
+    const created_by = if (Forms.isUuid(draft.created_by)) try quoteJson(allocator, draft.created_by) else try allocator.dupe(u8, "null"); defer allocator.free(created_by);
     return std.mem.concat(allocator, u8, &.{
         "{\"graphCommand\":{\"projectPath\":", path, ",\"command\":{\"createNode\":{\"_0\":{\"id\":",
         id, ",\"title\":", title, ",\"loopType\":", lt, ",\"checkDescription\":", check,
@@ -259,6 +259,17 @@ fn nullableString(allocator: std.mem.Allocator, value: ?[]const u8) ![]u8 {
     const text = value orelse return allocator.dupe(u8, "null");
     if (text.len == 0) return allocator.dupe(u8, "null");
     return quoteJson(allocator, text);
+}
+
+fn safeSubgraphJson(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    if (value.len == 0) return allocator.dupe(u8, "null");
+    Forms.validateSubgraphJson(value) catch return allocator.dupe(u8, "null");
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, value, .{});
+    defer parsed.deinit();
+    var output = std.array_list.Managed(u8).init(allocator);
+    errdefer output.deinit();
+    try output.writer().print("{f}", .{std.json.fmt(parsed.value, .{})});
+    return try output.toOwnedSlice();
 }
 
 fn goalJson(allocator: std.mem.Allocator, draft: Forms.NodeDraft) ![]u8 {
@@ -846,11 +857,11 @@ test "typed node and edge forms retain every supported field on the wire" {
         .worktree_id = "wt",
         .worktree_path = "C:\\repo-wt",
         .worktree_branch = "feature",
-        .subgraph_json = "{\"nodes\":[]}",
-        .created_by = "user",
+        .subgraph_json = "{\"nodes\":[],\"edges\":[]}",
+        .created_by = "11111111-1111-4111-8111-111111111111",
     });
     defer allocator.free(node);
-    for ([_][]const u8{ "\"summary\":\"Done\"", "\"predicate\":\"test -f done\"", "pollIntervalSeconds", "stallAfterSeconds", "metricCommand", "metricDirection", "codex", "capable", "repositoryPath", "worktreePath", "feature", "\"nodes\":[]", "\"createdBy\":\"user\"" }) |field| {
+    for ([_][]const u8{ "\"summary\":\"Done\"", "\"predicate\":\"test -f done\"", "pollIntervalSeconds", "stallAfterSeconds", "metricCommand", "metricDirection", "codex", "capable", "repositoryPath", "worktreePath", "feature", "\"nodes\":[]", "\"createdBy\":\"11111111-1111-4111-8111-111111111111\"" }) |field| {
         try std.testing.expect(std.mem.indexOf(u8, node, field) != null);
     }
     const inherited = try commandGraphCreateNodeFull(allocator, "C:\\work\\graph", "11111111-1111-4111-8111-111111111111", .{
@@ -859,6 +870,7 @@ test "typed node and edge forms retain every supported field on the wire" {
     });
     defer allocator.free(inherited);
     try std.testing.expect(std.mem.indexOf(u8, inherited, "\"backend\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inherited, "\"createdBy\":null") != null);
     const edge = try commandGraphCreateEdgeFull(allocator, "C:\\work\\graph", "a", "b", .{
         .from = "a",
         .to = "b",
