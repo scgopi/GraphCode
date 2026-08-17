@@ -238,6 +238,10 @@ pub const App = struct {
         }
         self.createEmptyStateControls();
         self.updateNativeChrome();
+        if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_FIXTURE_ROWS")) |fixture| {
+            defer self.allocator.free(fixture);
+            self.installUiaFixture();
+        } else |_| {}
         const uia_gate = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_GATE") catch null;
         defer if (uia_gate) |value| self.allocator.free(value);
         if (uia_gate == null or !std.mem.eql(u8, uia_gate.?, "1")) {
@@ -554,6 +558,7 @@ pub const App = struct {
     fn currentProject(self: *const App) ?[]const u8 {
         if (self.model.currentGraph()) |graph| return graph.project.path;
         if (self.model.recent_projects.items.len != 0) return self.model.recent_projects.items[0].path;
+        if (self.worktree_inspection) |inspection| return inspection.project_path;
         return null;
     }
 
@@ -1255,6 +1260,7 @@ pub const App = struct {
             for (graph.nodes.items) |node| {
                 if (node.worktree_path.len != 0) bindings.append(.{ .path = node.worktree_path }) catch {};
             }
+
         }
         const inspection = WorktreeStatus.inspect(self.allocator, path, bindings.items) catch |err| {
             self.setStatus(switch (err) {
@@ -1294,6 +1300,37 @@ pub const App = struct {
             return;
         };
         self.replaceStatus(message);
+    }
+
+    fn installUiaFixture(self: *App) void {
+        const project = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_GATE_CWD") catch
+            self.allocator.dupe(u8, "C:\\GraphCode\\fixture") catch return;
+        var inspection = WorktreeStatus.Inspection{
+            .entries = std.array_list.Managed(WorktreeStatus.Entry).init(self.allocator),
+            .default_branch = self.allocator.dupe(u8, "main") catch {
+                self.allocator.free(project);
+                return;
+            },
+            .project_path = project,
+        };
+        inspection.entries.append(.{
+            .path = self.allocator.dupe(u8, "C:\\fixture-safe") catch return,
+            .branch = self.allocator.dupe(u8, "safe") catch return,
+            .pushed = true,
+            .landed = true,
+        }) catch return;
+        inspection.entries.append(.{
+            .path = self.allocator.dupe(u8, "C:\\fixture-unsafe") catch return,
+            .branch = self.allocator.dupe(u8, "unsafe") catch return,
+            .dirty = true,
+            .pushed = true,
+            .landed = true,
+        }) catch return;
+        self.worktree_inspection = inspection;
+        self.worktree_dialog = WorktreeDialog.Dialog.init(
+            self.allocator, project, inspection.entries.items, .{ .allow_reclaim = true },
+        ) catch null;
+        self.setStatus("UIA fixture inspection ready");
     }
 
     fn reclaimWorktrees(self: *App) void {
@@ -1441,6 +1478,24 @@ pub const App = struct {
             self.setStatus("Unable to save worktree policy");
             return;
         };
+    }
+
+    fn toggleAllowReclaim(self: *App) void {
+        if (self.worktree_dialog) |*dialog| {
+            var policy = dialog.policy;
+            policy.allow_reclaim = !policy.allow_reclaim;
+            dialog.setPolicy(policy);
+            self.setStatus(if (policy.allow_reclaim) "Policy: reclaim enabled" else "Policy: reclaim disabled");
+        }
+    }
+
+    fn toggleConfirmReclaim(self: *App) void {
+        if (self.worktree_dialog) |*dialog| {
+            var policy = dialog.policy;
+            policy.confirm_each_reclaim = !policy.confirm_each_reclaim;
+            dialog.setPolicy(policy);
+            self.setStatus(if (policy.confirm_each_reclaim) "Policy: confirmation required" else "Policy: confirmation disabled");
+        }
     }
 
     fn revealSelectedWorktree(self: *App) void {
@@ -1859,6 +1914,8 @@ fn onWindowMessage(
                 8 => app.revealSelectedWorktree(),
                 9 => app.editWorktreePolicy(),
                 10 => app.saveCurrentWorktreePolicy(),
+                12 => app.toggleAllowReclaim(),
+                13 => app.toggleConfirmReclaim(),
                 else => if (wparam >= 2000 and wparam < 5000) {
                     const encoded = wparam - 2000;
                     const index = @as(usize, @intCast(encoded / 3));
