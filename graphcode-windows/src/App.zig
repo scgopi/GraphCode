@@ -291,7 +291,7 @@ pub const App = struct {
 
     fn editSelectedNode(self: *App) void {
         const graph = self.model.graph orelse return;
-        const index = self.model.selected_node orelse return;
+        const index = self.model.selectedIndex() orelse return;
         if (index >= graph.nodes.items.len) return;
         const node = graph.nodes.items[index];
         var initial = Forms.NodeUpdate{
@@ -368,11 +368,11 @@ pub const App = struct {
             self.setStatus("Enter a jump query");
             return;
         };
-        const next = Forms.jumpTo(graph.nodes.items, trimmed_query, self.model.selected_node) orelse {
+        const next = Forms.jumpTo(graph.nodes.items, trimmed_query, self.model.selectedIndex()) orelse {
             self.setStatus("No matching loop");
             return;
         };
-        self.model.selected_node = next;
+        _ = self.model.setSelectedIndex(next);
         self.sidebar_scroll = Sidebar.clampScroll(
             Sidebar.loopRowTop(self.model.recent_projects.items.len, next) - 24,
             Sidebar.maxScroll(&self.model, if (self.worktree_inspection) |*value| value else null, 700),
@@ -382,7 +382,7 @@ pub const App = struct {
 
     fn openSelectedNode(self: *App) void {
         const graph = if (self.model.graph) |*value| value else return;
-        const index = self.model.selected_node orelse return;
+        const index = self.model.selectedIndex() orelse return;
         if (index >= graph.nodes.items.len) return;
         const workspace = if (self.workspace) |*value| value else return;
         workspace.openNode(0, graph.nodes.items[index].id) catch {
@@ -880,7 +880,7 @@ fn onWindowMessage(
                 const bounds = c.RECT{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = client.right, .bottom = workspace_top };
                 if (app.model.graph) |graph| {
                     if (GraphCanvas.hitTest(graph.nodes.items, x, y, &app.canvas, bounds)) |index| {
-                        app.model.selected_node = index;
+                        _ = app.model.setSelectedIndex(index);
                         _ = c.InvalidateRect(hwnd, null, 0);
                     } else {
                         app.canvas.beginPan(x, y);
@@ -896,10 +896,14 @@ fn onWindowMessage(
             if (Sidebar.rowAt(x, y, &app.model, if (app.worktree_inspection) |*value| value else null, app.sidebar_scroll, workspace_top)) |row| {
                 switch (row.kind) {
                     .project => app.openProject(app.model.recent_projects.items[row.index].path),
+                    .open_project => if (row.project_path) |path| {
+                        _ = app.model.selectProject(path);
+                    },
                     .overview => app.client.sendOpenGlobalGraph(),
-                    .loop => if (app.model.graph) |graph| {
+                    .loop => if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
                         if (row.index < graph.nodes.items.len) {
-                            app.model.selected_node = row.index;
+                            _ = app.model.selectProject(path);
+                            _ = app.model.setSelectedIndex(row.index);
                             if (app.workspace) |*workspace| {
                                 workspace.openNode(0, graph.nodes.items[row.index].id) catch {
                                     app.setStatus("Unable to open selected loop");

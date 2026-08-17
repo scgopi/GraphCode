@@ -87,6 +87,19 @@ pub const RestoreState = enum {
     reconnecting,
 };
 
+const LifecycleProbe = struct {
+    path: [64]u8 = undefined,
+    path_len: usize = 0,
+    called: bool = false,
+};
+
+fn lifecycleProbeCallback(context: ?*anyopaque, request: LifecycleRequest) void {
+    const probe: *LifecycleProbe = @ptrCast(@alignCast(context.?));
+    probe.path_len = request.project_path.len;
+    @memcpy(probe.path[0..probe.path_len], request.project_path);
+    probe.called = true;
+}
+
 pub const GraphSummary = struct {
     project: Project,
     nodes: std.array_list.Managed(Node),
@@ -109,7 +122,7 @@ pub const Model = struct {
     graph: ?Graph = null,
     selected_project_path: ?[]u8 = null,
     selected_node_id: ?[]u8 = null,
-    selected_node: ?usize = null,
+    selected_index: ?usize = null,
     last_sequence: u64 = 0,
     attention: std.array_list.Managed(Node) ,
     attention_entries: std.array_list.Managed(AttentionEntry),
@@ -191,6 +204,27 @@ pub const Model = struct {
         return if (self.selected()) |node| node.id else null;
     }
 
+    pub fn selectedIndex(self: *const Model) ?usize {
+        return self.selected_index;
+    }
+
+    pub fn setSelectedIndex(self: *Model, index: ?usize) bool {
+        const graph = self.currentGraph() orelse return index == null;
+        if (index) |value| {
+            if (value >= graph.nodes.items.len) return false;
+            self.selected_index = value;
+            self.replaceSelectedNodeID(graph.nodes.items[value].id);
+        } else {
+            self.selected_index = null;
+            self.freeSelectedNodeID();
+        }
+        return true;
+    }
+
+    pub fn setSelectedID(self: *Model, id: []const u8) bool {
+        return self.selectNodeID(id);
+    }
+
     fn freeSelectedNodeID(self: *Model) void {
         if (self.selected_node_id) |id| self.allocator.free(id);
         self.selected_node_id = null;
@@ -219,7 +253,7 @@ pub const Model = struct {
         const summary = self.graphFor(project_path) orelse return false;
         if (self.selected_project_path) |path| self.allocator.free(path);
         self.selected_project_path = self.allocator.dupe(u8, summary.project.path) catch return false;
-        self.selected_node = if (summary.nodes.items.len == 0) null else 0;
+        self.selected_index = if (summary.nodes.items.len == 0) null else 0;
         if (summary.nodes.items.len == 0) self.freeSelectedNodeID() else self.replaceSelectedNodeID(summary.nodes.items[0].id);
         return true;
     }
@@ -247,24 +281,27 @@ pub const Model = struct {
         if (self.graphs.items.len != 0) {
             _ = self.selectProject(self.graphs.items[0].project.path);
         } else {
-            self.selected_node = null;
+            self.selected_index = null;
             self.freeSelectedNodeID();
         }
         self.rebuildAttention();
     }
 
     pub fn applyLifecycle(self: *Model, action: LifecycleAction, project_path: []const u8) bool {
+        const stable_path = self.allocator.dupe(u8, project_path) catch return false;
+        defer self.allocator.free(stable_path);
+        const path = stable_path;
         const index = for (self.graphs.items, 0..) |summary, i| {
-            if (std.mem.eql(u8, summary.project.path, project_path)) break i;
+            if (std.mem.eql(u8, summary.project.path, path)) break i;
         } else null;
         if (action == .select) {
-            const selected_result = self.selectProject(project_path);
-            if (selected_result) self.dispatchLifecycle(action, project_path);
+            const selected_result = self.selectProject(path);
+            if (selected_result) self.dispatchLifecycle(action, path);
             return selected_result;
         }
         var known = index != null;
-        for (self.open_projects.items) |project| known = known or std.mem.eql(u8, project.path, project_path);
-        for (self.recent_projects.items) |project| known = known or std.mem.eql(u8, project.path, project_path);
+        for (self.open_projects.items) |project| known = known or std.mem.eql(u8, project.path, path);
+        for (self.recent_projects.items) |project| known = known or std.mem.eql(u8, project.path, path);
         if (!known) return false;
         switch (action) {
             .select => unreachable,
@@ -273,37 +310,38 @@ pub const Model = struct {
                     var summary = self.graphs.orderedRemove(i);
                     summary.deinit(self.allocator);
                 }
-                self.removeOpenProject(project_path);
+                self.removeOpenProject(path);
             },
             .forget => {
                 if (index) |i| {
                     var summary = self.graphs.orderedRemove(i);
                     summary.deinit(self.allocator);
                 }
-                self.removeOpenProject(project_path);
-                self.removeRecentProject(project_path);
+                self.removeOpenProject(path);
+                self.removeRecentProject(path);
             },
             .delete => {
                 if (index) |i| {
                     var summary = self.graphs.orderedRemove(i);
                     summary.deinit(self.allocator);
                 }
-                self.removeOpenProject(project_path);
-                self.removeRecentProject(project_path);
+                self.removeOpenProject(path);
+                self.removeRecentProject(path);
             },
         }
         if (self.selected_project_path) |selected_path| {
-            if (std.mem.eql(u8, selected_path, project_path)) {
+            if (std.mem.eql(u8, selected_path, path)) {
                 self.allocator.free(selected_path);
                 self.selected_project_path = null;
                 if (self.graph) |*graph| {
                     freeGraph(self.allocator, graph);
                     self.graph = null;
                 }
-                self.selected_node = null;
+                self.selected_index = null;
             }
         }
-        self.dispatchLifecycle(action, project_path);
+        self.rebuildAttention();
+        self.dispatchLifecycle(action, path);
         return true;
     }
 
@@ -351,7 +389,7 @@ pub const Model = struct {
         if (self.selected_node_id) |id| {
             for (graph.nodes.items) |*node| if (std.mem.eql(u8, node.id, id)) return node;
         }
-        const index = self.selected_node orelse return null;
+        const index = self.selected_index orelse return null;
         if (index >= graph.nodes.items.len) return null;
         return &graph.nodes.items[index];
     }
@@ -359,10 +397,10 @@ pub const Model = struct {
     pub fn selectNext(self: *Model) void {
         const graph = self.currentGraph() orelse return;
         if (graph.nodes.items.len == 0) {
-            self.selected_node = null;
+            self.selected_index = null;
         } else {
-            self.selected_node = ((self.selected_node orelse 0) + 1) % graph.nodes.items.len;
-            self.replaceSelectedNodeID(graph.nodes.items[self.selected_node.?].id);
+            self.selected_index = ((self.selected_index orelse 0) + 1) % graph.nodes.items.len;
+            self.replaceSelectedNodeID(graph.nodes.items[self.selected_index.?].id);
         }
     }
 
@@ -372,7 +410,7 @@ pub const Model = struct {
         if (self.selected_project_path) |project_path| {
             var current_node_id = self.selected_node_id;
             if (self.currentGraph()) |graph| {
-                if (self.selected_node) |index| {
+                if (self.selected_index) |index| {
                     if (index < graph.nodes.items.len) current_node_id = graph.nodes.items[index].id;
                 }
             }
@@ -389,18 +427,18 @@ pub const Model = struct {
         }
         const next = self.attention_entries.items[next_index];
         if (!self.selectProject(next.project_path)) return;
-        self.selectNodeID(next.node.id);
+        _ = self.selectNodeID(next.node.id);
     }
 
-    fn selectNodeID(self: *Model, node_id: []const u8) void {
-        const graph = self.currentGraph() orelse return;
+    fn selectNodeID(self: *Model, node_id: []const u8) bool {
+        const graph = self.currentGraph() orelse return false;
         for (graph.nodes.items, 0..) |node, index| {
             if (std.mem.eql(u8, node.id, node_id)) {
-                self.selected_node = index;
-                self.replaceSelectedNodeID(node.id);
-                return;
+                _ = self.setSelectedIndex(index);
+                return true;
             }
         }
+        return false;
     }
 
     fn decodeRecentProjects(self: *Model, frame: []const u8) !void {
@@ -489,16 +527,15 @@ pub const Model = struct {
         if (self.selected_project_path == null) {
             self.selected_project_path = try self.allocator.dupe(u8, graph.project.path);
         }
-        self.restore_state = .restored;
         if (was_selected and graph.nodes.items.len == 0) {
-            self.selected_node = null;
+            self.selected_index = null;
             self.freeSelectedNodeID();
         } else if (was_selected) {
-            self.selected_node = 0;
+            self.selected_index = 0;
             if (prior_node_id) |node_id| {
                 for (graph.nodes.items, 0..) |node, index| {
                     if (std.mem.eql(u8, node.id, node_id)) {
-                        self.selected_node = index;
+                        self.selected_index = index;
                         self.replaceSelectedNodeID(node.id);
                         break;
                     }
@@ -599,7 +636,7 @@ pub const Model = struct {
     }
 
     fn recordActivity(self: *Model, next: Graph) void {
-        const previous = self.graph orelse return;
+        const previous = self.graphFor(next.project.path) orelse return;
         for (next.nodes.items) |node| {
             const old = findNode(previous.nodes.items, node.id) orelse continue;
             if (std.mem.eql(u8, old.state, node.state)) continue;
@@ -1081,6 +1118,53 @@ test "close forget and delete have distinct graph lifecycle semantics" {
     try std.testing.expectEqual(@as(usize, 0), model.recent_projects.items.len);
 }
 
+test "lifecycle callback receives an owned path before graph storage is freed" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const frame =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"g","project":{"path":"owned-path","name":"Graph"},"nodes":[],"edges":[]}}}
+    ;
+    _ = try model.updateFromFrame(frame);
+    var probe = LifecycleProbe{};
+    model.setLifecycleCallback(&probe, lifecycleProbeCallback);
+    try std.testing.expect(model.applyLifecycle(.close, model.graphs.items[0].project.path));
+    try std.testing.expect(probe.called);
+    try std.testing.expectEqualStrings("owned-path", probe.path[0..probe.path_len]);
+}
+
+test "restore remains restoring until markRestored" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const frame =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"g","project":{"path":"restore-path","name":"Graph"},"nodes":[],"edges":[]}}}
+    ;
+    model.beginRestore();
+    _ = try model.updateFromFrame(frame);
+    try std.testing.expectEqual(RestoreState.restoring, model.restore_state);
+    model.markRestored();
+    try std.testing.expectEqual(RestoreState.restored, model.restore_state);
+}
+
+test "activity compares the prior graph for the same project across interleaved updates" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const a1 =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"a","project":{"path":"a","name":"A"},"nodes":[{"id":"a1","title":"A","state":"running"}],"edges":[]}}}
+    ;
+    const b1 =
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"b","project":{"path":"b","name":"B"},"nodes":[{"id":"b1","title":"B","state":"running"}],"edges":[]}}}
+    ;
+    const a2 =
+        \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"id":"a","project":{"path":"a","name":"A"},"nodes":[{"id":"a1","title":"A","state":"failed"}],"edges":[]}}}
+    ;
+    _ = try model.updateFromFrame(a1);
+    _ = try model.updateFromFrame(b1);
+    _ = try model.updateFromFrame(a2);
+    try std.testing.expectEqual(@as(usize, 1), model.activity.items.len);
+    try std.testing.expectEqualStrings("A", model.activity.items[0].title);
+    try std.testing.expectEqualStrings("failed", model.activity.items[0].state);
+}
+
 test "attention fixture preserves awaiting input and stranded edge metadata" {
     const allocator = std.testing.allocator;
     const frame = try std.fs.cwd().readFileAlloc(
@@ -1199,9 +1283,9 @@ test "attention cursor is independent from ordinary selection" {
         \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"g","project":{"path":"C:\\work\\graph","name":"Graph"},"nodes":[{"id":"a","title":"A","state":"failed"},{"id":"b","title":"B","state":"failed"}],"edges":[]}}}
     ;
     _ = try model.updateFromFrame(frame);
-    model.selected_node = 1;
+    try std.testing.expect(model.setSelectedIndex(1));
     model.selectNextAttention();
-    try std.testing.expectEqual(@as(usize, 0), model.selected_node.?);
+    try std.testing.expectEqual(@as(usize, 0), model.selectedIndex().?);
     model.selectNextAttention();
-    try std.testing.expectEqual(@as(usize, 1), model.selected_node.?);
+    try std.testing.expectEqual(@as(usize, 1), model.selectedIndex().?);
 }

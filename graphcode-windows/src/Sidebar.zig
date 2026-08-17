@@ -108,7 +108,7 @@ pub fn worktreeRowTop(project_count: usize, loop_count: usize, index: usize) i32
     return layout.worktreeTop(index);
 }
 
-pub const RowKind = enum { project, overview, loop, worktree };
+pub const RowKind = enum { project, open_project, overview, loop, worktree };
 pub const Row = struct {
     kind: RowKind,
     index: usize,
@@ -137,6 +137,53 @@ pub const Layout = struct {
             @as(i32, @intCast(index * 34));
     }
 };
+
+fn appendRows(
+    allocator: std.mem.Allocator,
+    model: *const GraphModel.Model,
+    inspection: ?*const WorktreeStatus.Inspection,
+    scroll_offset: i32,
+) !std.ArrayList(Row) {
+    var rows: std.ArrayList(Row) = .empty;
+    var top: i32 = Tokens.header_height + 78 - scroll_offset;
+    for (model.recent_projects.items, 0..) |project, index| {
+        try rows.append(allocator, .{ .kind = .project, .index = index, .top = top, .project_path = project.path });
+        top += 24;
+    }
+    if (model.graphs.items.len != 0 or model.graph != null) {
+        try rows.append(allocator, .{ .kind = .overview, .index = 0, .top = top + 24 });
+        top += 62;
+        if (model.graphs.items.len != 0) {
+            for (model.graphs.items, 0..) |summary, graph_index| {
+                try rows.append(allocator, .{ .kind = .open_project, .index = graph_index, .top = top, .project_path = summary.project.path });
+                top += 24;
+                for (summary.nodes.items, 0..) |node, node_index| {
+                    _ = node;
+                    try rows.append(allocator, .{ .kind = .loop, .index = node_index, .top = top, .project_path = summary.project.path });
+                    top += 24;
+                }
+                top += 38;
+            }
+        } else if (model.graph) |graph| {
+            try rows.append(allocator, .{ .kind = .open_project, .index = 0, .top = top, .project_path = graph.project.path });
+            top += 24;
+            for (graph.nodes.items, 0..) |node, node_index| {
+                _ = node;
+                try rows.append(allocator, .{ .kind = .loop, .index = node_index, .top = top, .project_path = graph.project.path });
+                top += 24;
+            }
+            top += 38;
+        }
+    }
+    if (inspection) |value| {
+        top += 24;
+        for (value.entries.items, 0..) |_, index| {
+            try rows.append(allocator, .{ .kind = .worktree, .index = index, .top = top });
+            top += 34;
+        }
+    }
+    return rows;
+}
 
 pub fn layoutFor(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection) Layout {
     var loop_count: usize = 0;
@@ -185,53 +232,14 @@ pub fn rowAt(
     viewport_bottom: i32,
 ) ?Row {
     if (x < 0 or x >= Tokens.sidebar_width or y < Tokens.header_height or y >= viewport_bottom) return null;
-    const layout = layoutFor(model, inspection);
-    const project_top = layout.projectTop(0) - scroll_offset;
-    if (y >= project_top and y < project_top + @as(i32, @intCast(model.recent_projects.items.len * 24))) {
-        const index: usize = @intCast(@divTrunc(y - project_top, 24));
-        return .{
-            .kind = .project,
-            .index = index,
-            .top = project_top,
-            .project_path = model.recent_projects.items[index].path,
+    var rows = appendRows(std.heap.page_allocator, model, inspection, scroll_offset) catch return null;
+    defer rows.deinit(std.heap.page_allocator);
+    for (rows.items) |row| {
+        const height: i32 = switch (row.kind) {
+            .project, .open_project, .overview, .loop => 24,
+            .worktree => 34,
         };
-    }
-    if (model.graph != null or model.graphs.items.len != 0) {
-        const overview_top = layout.overviewTop() - scroll_offset;
-        if (y >= overview_top and y < overview_top + 38) {
-            return .{ .kind = .overview, .index = 0, .top = overview_top };
-        }
-        var loop_index: usize = 0;
-        for (model.graphs.items, 0..) |summary, graph_index| {
-            for (summary.nodes.items, 0..) |_, node_index| {
-                const loop_top = sharedLoopTop(model, graph_index, node_index) - scroll_offset;
-                if (y >= loop_top and y < loop_top + 24) {
-                    return .{
-                        .kind = .loop,
-                        .index = loop_index,
-                        .top = loop_top,
-                        .project_path = summary.project.path,
-                    };
-                }
-                loop_index += 1;
-            }
-        }
-        if (model.graphs.items.len == 0) {
-            const loop_top = layout.loopTop(0) - scroll_offset;
-            if (y >= loop_top and y < loop_top + @as(i32, @intCast(layout.loop_count * 24))) {
-                return .{ .kind = .loop, .index = @intCast(@divTrunc(y - loop_top, 24)), .top = loop_top };
-            }
-        }
-    }
-    if (inspection) |value| {
-        const worktree_base = if (model.graphs.items.len == 0)
-            layout.worktreeTop(0)
-        else
-            sharedWorktreeTop(model, 0);
-        const worktree_top = worktree_base - scroll_offset;
-        if (y >= worktree_top and y < worktree_top + @as(i32, @intCast(value.entries.items.len * 34))) {
-            return .{ .kind = .worktree, .index = @intCast(@divTrunc(y - worktree_top, 34)), .top = worktree_top };
-        }
+        if (y >= row.top and y < row.top + height) return row;
     }
     return null;
 }

@@ -92,7 +92,7 @@ pub fn paint(
     if (model.graph) |graph| {
         drawEdges(hdc, graph, state);
         for (graph.nodes.items, 0..) |node, index| {
-            drawNode(hdc, allocator, node, index, model.selected_node, graph.nodes.items, graph.edges.items, state);
+            drawNode(hdc, allocator, node, index, model.selectedIndex(), graph.nodes.items, graph.edges.items, state);
         }
     } else {
         drawText(hdc, allocator, "Open a project to view its graph", Tokens.sidebar_width + 32, 120, 18, 0x00B8B8B8);
