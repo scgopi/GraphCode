@@ -39,6 +39,7 @@ public struct ProjectRegistryCommandResult: Equatable, Sendable {
 /// `.deleteProjectGraph` additionally discards its saved loops.
 public actor ProjectRegistry {
   private let persistence: ProjectPersistence
+  private let quickChatStore: QuickChatStore
   private let platformPaths: any PlatformPaths
   private let replayStore: DaemonReplayStore
   private var stores: [String: GraphStore] = [:]
@@ -46,6 +47,10 @@ public actor ProjectRegistry {
   private var connectionProjectPaths: [UUID: Set<String>] = [:]
   private let ensureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let terminateSession: (@Sendable (LoopNode, String?) -> Void)?
+  private let startQuickChat: (@Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>)?
+  private let terminateQuickChat: (@Sendable (LoopNode, String?) async -> Result<Void, CLISessionError>)?
+  private let quickChatExists: (@Sendable (LoopNode, String?) async -> Bool)?
+  private let enumerateQuickChatSessions: (@Sendable () async -> [UUID])?
   private let evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)?
   private let deliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)?
   private let captureScript: (@Sendable (ShellPredicate) async -> String?)?
@@ -54,6 +59,29 @@ public actor ProjectRegistry {
   private let readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)?
   /// Non-nil only while at least one client is attached — see `startPresencePolling`.
   private var presencePoller: Task<Void, Never>?
+
+  /// Quick Chats are session-backed records too. Reusing the GraphStore launcher
+  /// closures keeps their zmx identity stable (the chat UUID is the LoopNode UUID)
+  /// without inventing a second session protocol.
+  private func quickChatNode(_ chat: QuickChat) -> LoopNode {
+    LoopNode(
+      id: chat.id,
+      title: chat.title,
+      loopType: .turnBased,
+      backend: chat.backend,
+      state: .idle,
+      createdAt: chat.createdAt)
+  }
+
+  private func ensureQuickChatSession(_ chat: QuickChat) async -> Result<CLISessionStartOutcome, CLISessionError> {
+    guard let startQuickChat else { return .failure(.unavailable("session launcher unavailable")) }
+    return await startQuickChat(quickChatNode(chat), nil)
+  }
+
+  private func terminateQuickChatSession(_ chat: QuickChat) async -> Result<Void, CLISessionError> {
+    guard let terminateQuickChat else { return .failure(.unavailable("session launcher unavailable")) }
+    return await terminateQuickChat(quickChatNode(chat), nil)
+  }
 
   /// These default to the real `ZmxSessionLauncher`/`ShellPredicateEvaluator` closures —
   /// every `GraphStore` this registry creates gets them, so an unattended node's session
@@ -77,11 +105,16 @@ public actor ProjectRegistry {
     readActivity: (@Sendable (LoopNode, String?) async -> String?)? =
       CLISessionBackend.readActivity,
     readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)? =
-      CLISessionBackend.readPresence
+      CLISessionBackend.readPresence,
+    startQuickChat: (@Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>)? = nil,
+    terminateQuickChat: (@Sendable (LoopNode, String?) async -> Result<Void, CLISessionError>)? = nil,
+    quickChatExists: (@Sendable (LoopNode, String?) async -> Bool)? = nil
+    , enumerateQuickChatSessions: (@Sendable () async -> [UUID])? = nil
   ) {
     self.platformPaths = platformPaths
     persistence = ProjectPersistence(
       baseDirectory: persistenceDirectory, platformPaths: platformPaths)
+    quickChatStore = QuickChatStore(baseDirectory: persistenceDirectory)
     self.replayStore = replayStore
     self.ensureSession = ensureSession
     self.terminateSession = terminateSession
@@ -91,6 +124,22 @@ public actor ProjectRegistry {
     self.readUsage = readUsage
     self.readActivity = readActivity
     self.readPresence = readPresence
+    self.startQuickChat = startQuickChat ?? { node, path in
+      let result = await CLISessionBackend.backend(for: node).startResult(node, path)
+      if case .success = result { QuickChatSessionRegistry.markLive(node.id) }
+      return result
+    }
+    self.terminateQuickChat = terminateQuickChat ?? { node, path in
+      let result = await CLISessionBackend.backend(for: node).terminateResult(node, path)
+      if case .success = result { QuickChatSessionRegistry.remove(node.id) }
+      return result
+    }
+    self.quickChatExists = quickChatExists ?? { node, path in
+      await CLISessionBackend.backend(for: node).exists(node, path)
+    }
+    self.enumerateQuickChatSessions = enumerateQuickChatSessions ?? {
+      await CLISessionBackend.backend(for: .init(title: "", backend: .claudeCode)).enumerate()
+    }
   }
 
   // MARK: - Connections
@@ -111,6 +160,16 @@ public actor ProjectRegistry {
 
   public func addConnection(id: UUID, channel: DaemonConnectionChannel) async {
     connections[id] = channel
+    // Reattach every persisted chat on reconnect. zmx's stable node ID makes this
+    // idempotent when the previous daemon instance is still winding down.
+    for chat in quickChatStore.load() {
+      _ = await ensureQuickChatSession(chat)
+    }
+    let known = Set(quickChatStore.load().map(\.id))
+    for orphan in await (enumerateQuickChatSessions?() ?? []) where !known.contains(orphan) {
+      _ = await terminateQuickChatSession(
+        QuickChat(id: orphan, title: "orphan", backend: .claudeCode))
+    }
     startPresencePolling()
   }
 
@@ -233,6 +292,21 @@ public actor ProjectRegistry {
     _ = await apply(command, connectionID: connectionID)
   }
 
+  /// Called by the daemon's session/activity poller. Sequence numbers are persisted with
+  /// the chat so reconnecting clients can order updates deterministically.
+  public func updateQuickChatActivity(
+    id: UUID,
+    text: String?,
+    presence: PresenceReading?
+  ) async -> Bool {
+    guard let chat = quickChatStore.chat(id: id) else { return false }
+    let sequence = (chat.activity?.sequence ?? 0) + 1
+    let activity = QuickChatActivity(sequence: sequence, text: text, presence: presence)
+    guard (try? quickChatStore.updateActivity(id: id, activity: activity)) != nil else { return false }
+    await broadcast(.quickChatActivity(id: id, activity: activity))
+    return true
+  }
+
   /// Applies a command and snapshots its correlated result before returning to the
   /// daemon read loop. Keeping mutation and response selection together prevents a
   /// concurrent disconnect or command from turning a rejected mutation into a stale
@@ -319,6 +393,75 @@ public actor ProjectRegistry {
       response = .recentProjectsListed(persistence.loadRecentProjects())
       error = nil
 
+    case .listQuickChats:
+      response = .quickChatsListed(quickChatStore.load())
+      await broadcast(response!)
+
+    case .createQuickChat(let title, let backend):
+      let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else {
+        error = "quick chat title must not be empty"
+        break
+      }
+      let chat = QuickChat(title: trimmed, backend: backend)
+      do {
+        try quickChatStore.create(chat)
+      } catch _ {
+        error = "quick chat persistence failed"
+        break
+      }
+      response = .quickChatChanged(chat)
+      await broadcast(response!)
+
+    case .openQuickChat(let id):
+      guard let chat = quickChatStore.chat(id: id) else {
+        error = "quick chat not found"
+        break
+      }
+      switch await ensureQuickChatSession(chat) {
+      case .failure(let failure):
+        error = "quick chat session unavailable: \(failure)"
+        break
+      case .success:
+        response = .quickChatChanged(chat)
+        await broadcast(response!)
+      }
+      if error != nil { break }
+
+    case .renameQuickChat(let id, let title):
+      let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else {
+        error = "quick chat title must not be empty"
+        break
+      }
+      guard let chat = (try? quickChatStore.rename(id: id, title: trimmed)) ?? nil else {
+        error = "quick chat not found"
+        break
+      }
+      response = .quickChatChanged(chat)
+      await broadcast(response!)
+
+    case .deleteQuickChat(let id):
+      guard let chat = quickChatStore.chat(id: id) else {
+        error = "quick chat not found"
+        break
+      }
+      // Stop and confirm first. The record remains durable on failure so reconnect
+      // can retry rather than leaving an untracked live session.
+      guard case .success = await terminateQuickChatSession(chat) else {
+        error = "quick chat session termination failed"
+        break
+      }
+      do {
+        _ = try quickChatStore.delete(id: id)
+      } catch _ {
+        _ = await ensureQuickChatSession(chat)
+        error = "quick chat persistence failed"
+        break
+      }
+      response = .quickChatDeleted(id)
+      await broadcast(response!)
+
     case .graphCommand(let path, let inner):
       guard let store = stores[Self.canonicalize(path, platformPaths: platformPaths)] else {
         return ProjectRegistryCommandResult(error: "project is not open")
@@ -359,6 +502,12 @@ public actor ProjectRegistry {
       return .graphChanged(await store.graph)
     case .deleteProjectGraph:
       return .recentProjectsListed(persistence.loadRecentProjects())
+    case .listQuickChats:
+      return .quickChatsListed(quickChatStore.load())
+    case .createQuickChat, .openQuickChat, .renameQuickChat:
+      return nil
+    case .deleteQuickChat(let id):
+      return .quickChatDeleted(id)
     case .openGlobalGraph:
       guard let store = stores[LoopGraphScope.globalPath] else { return nil }
       return .graphChanged(await store.graph)
@@ -564,6 +713,12 @@ public actor ProjectRegistry {
       try await channel.sendEvent(event)
     } catch {
       await removeConnection(connectionID)
+    }
+  }
+
+  private func broadcast(_ event: DaemonEvent) async {
+    for id in connections.keys {
+      await send(event, to: id)
     }
   }
 }

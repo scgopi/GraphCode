@@ -27,6 +27,14 @@ pub const ActivityEvent = struct {
     state: []u8,
 };
 
+pub const QuickChat = struct {
+    id: []u8,
+    title: []u8,
+    backend: []u8,
+    activity: []u8 = &.{},
+    activity_sequence: u64 = 0,
+};
+
 pub const Edge = struct {
     id: []u8 = &.{},
     from: []u8,
@@ -137,6 +145,7 @@ pub const Model = struct {
     restore_state: RestoreState = .cold,
     restore_generation: u64 = 0,
     graph_generations: std.array_list.Managed(GraphGeneration),
+    quick_chats: std.array_list.Managed(QuickChat),
 
     pub fn init(allocator: std.mem.Allocator) Model {
         return .{
@@ -148,6 +157,7 @@ pub const Model = struct {
             .attention_entries = std.array_list.Managed(AttentionEntry).init(allocator),
             .activity = std.array_list.Managed(ActivityEvent).init(allocator),
             .graph_generations = std.array_list.Managed(GraphGeneration).init(allocator),
+            .quick_chats = std.array_list.Managed(QuickChat).init(allocator),
         };
     }
 
@@ -167,6 +177,8 @@ pub const Model = struct {
             self.allocator.free(event.state);
         }
         self.activity.deinit();
+        for (self.quick_chats.items) |chat| freeQuickChat(self.allocator, chat);
+        self.quick_chats.deinit();
         if (self.graph) |*graph| freeGraph(self.allocator, graph);
         if (self.selected_project_path) |path| self.allocator.free(path);
         self.freeSelectedNodeID();
@@ -391,6 +403,10 @@ pub const Model = struct {
                 try self.decodeRecentProjects(frame);
                 return .recent_projects;
             },
+            .quick_chats, .quick_chat_changed, .quick_chat_deleted, .quick_chat_activity => {
+                try self.decodeQuickChats(frame, Wire.eventKind(frame));
+                return Wire.eventKind(frame);
+            },
             else => return Wire.eventKind(frame),
         }
     }
@@ -504,6 +520,94 @@ pub const Model = struct {
                 }
             }
         }
+    }
+
+    fn decodeQuickChats(self: *Model, frame: []const u8, kind: Wire.EventKind) !void {
+            if (kind == .quick_chats) {
+                for (self.quick_chats.items) |chat| freeQuickChat(self.allocator, chat);
+                self.quick_chats.clearRetainingCapacity();
+            }
+            const marker = switch (kind) {
+                .quick_chats => "\"quickChatsListed\"",
+                .quick_chat_changed => "\"quickChatChanged\"",
+                .quick_chat_deleted => "\"quickChatDeleted\"",
+                .quick_chat_activity => "\"quickChatActivity\"",
+                else => return,
+            };
+            const start = std.mem.indexOf(u8, frame, marker) orelse return;
+            if (kind == .quick_chat_deleted) {
+                const id = Wire.jsonString(frame[start..], "quickChatDeleted") orelse return;
+                var index: usize = 0;
+                while (index < self.quick_chats.items.len) : (index += 1) {
+                    if (std.mem.eql(u8, self.quick_chats.items[index].id, id)) {
+                        const removed = self.quick_chats.orderedRemove(index);
+                        freeQuickChat(self.allocator, removed);
+                        return;
+                    }
+                }
+                return;
+            }
+            const open = indexOfByte(frame, start, if (kind == .quick_chats) '[' else '{') orelse return;
+            const close = findClosing(frame, open, if (kind == .quick_chats) '[' else '{', if (kind == .quick_chats) ']' else '}') orelse return;
+            if (kind == .quick_chats) {
+                var cursor = open + 1;
+                while (cursor < close) {
+                    const object_start = indexOfByte(frame, cursor, '{') orelse break;
+                    if (object_start >= close) break;
+                    const object_end = findClosing(frame, object_start, '{', '}') orelse break;
+                    try self.upsertQuickChat(frame[object_start .. object_end + 1]);
+                    cursor = object_end + 1;
+                }
+            } else if (kind == .quick_chat_activity) {
+                const object = frame[open .. close + 1];
+                const id = Wire.jsonString(object, "id") orelse return;
+                const activity_start = std.mem.indexOf(u8, object, "\"activity\"") orelse return;
+                const activity_open = indexOfByte(object, activity_start, '{') orelse return;
+                const activity_close = findClosing(object, activity_open, '{', '}') orelse return;
+                const activity_object = object[activity_open .. activity_close + 1];
+                const sequence = Wire.jsonNumber(activity_object, "sequence") orelse 0;
+                const activity = Wire.jsonString(activity_object, "text") orelse "";
+                for (self.quick_chats.items) |*chat| {
+                    if (std.mem.eql(u8, chat.id, id) and sequence >= chat.activity_sequence) {
+                        self.allocator.free(chat.activity);
+                        chat.activity = try self.allocator.dupe(u8, activity);
+                        chat.activity_sequence = sequence;
+                    }
+                }
+            } else {
+                try self.upsertQuickChat(frame[open .. close + 1]);
+            }
+        }
+
+    fn upsertQuickChat(self: *Model, object: []const u8) !void {
+        const id = duplicateJsonString(self.allocator, object, "id") catch return;
+        errdefer self.allocator.free(id);
+        for (self.quick_chats.items) |*existing| {
+            if (std.mem.eql(u8, existing.id, id)) {
+                self.allocator.free(existing.title);
+                existing.title = try duplicateJsonString(self.allocator, object, "title");
+                self.allocator.free(id);
+                return;
+            }
+        }
+        var chat = QuickChat{
+            .id = id,
+            .title = try duplicateJsonString(self.allocator, object, "title"),
+            .backend = try duplicateJsonStringOr(self.allocator, object, "backend", "claudeCode"),
+        };
+        if (std.mem.indexOf(u8, object, "\"activity\"")) |activity_key| {
+            if (indexOfByte(object, activity_key, '{')) |activity_open| {
+                if (findClosing(object, activity_open, '{', '}')) |activity_close| {
+                    const activity_object = object[activity_open .. activity_close + 1];
+                    chat.activity_sequence = Wire.jsonNumber(activity_object, "sequence") orelse 0;
+                    chat.activity = try self.allocator.dupe(
+                        u8,
+                        Wire.jsonString(activity_object, "text") orelse "",
+                    );
+                }
+            }
+        }
+        try self.quick_chats.append(chat);
     }
 
     fn decodeGraph(self: *Model, frame: []const u8) !void {
@@ -1018,6 +1122,13 @@ fn freeNode(allocator: std.mem.Allocator, node: Node) void {
     allocator.free(node.worktree_branch);
 }
 
+fn freeQuickChat(allocator: std.mem.Allocator, chat: QuickChat) void {
+    allocator.free(chat.id);
+    allocator.free(chat.title);
+    allocator.free(chat.backend);
+    if (chat.activity.len != 0) allocator.free(chat.activity);
+}
+
 fn freeGraph(allocator: std.mem.Allocator, graph: *Graph) void {
     freeProject(allocator, graph.project);
     for (graph.nodes.items) |node| freeNode(allocator, node);
@@ -1083,6 +1194,22 @@ test "reordered graph fixture preserves nonsequential edge IDs" {
     try std.testing.expectEqualStrings("node-q", graph.edges.items[0].to);
     try std.testing.expectEqualStrings("node-z", graph.edges.items[1].from);
     try std.testing.expectEqualStrings("node-a", graph.edges.items[1].to);
+}
+
+test "quick chat fixture preserves stable identity and activity ordering" {
+    const allocator = std.testing.allocator;
+    const frame = try std.fs.cwd().readFileAlloc(
+        allocator,
+        "fixtures/daemon-v2-quick-chats.json",
+        64 * 1024,
+    );
+    defer allocator.free(frame);
+    var model = Model.init(allocator);
+    defer model.deinit();
+    try std.testing.expectEqual(Wire.EventKind.quick_chats, try model.updateFromFrame(frame));
+    try std.testing.expectEqual(@as(usize, 2), model.quick_chats.items.len);
+    try std.testing.expectEqualStrings("Scratch", model.quick_chats.items[0].title);
+    try std.testing.expectEqual(@as(u64, 2), model.quick_chats.items[0].activity_sequence);
 }
 
 test "project identity derives remote and global from Codable paths" {

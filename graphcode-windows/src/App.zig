@@ -23,6 +23,8 @@ const Onboarding = @import("WindowsOnboarding.zig");
 const WindowsUpdates = @import("WindowsUpdates.zig");
 const WorktreeDialog = @import("WorktreeDialog.zig");
 const Accessibility = @import("Accessibility.zig");
+const Navigation = @import("Navigation.zig");
+const WorkspaceControls = @import("WorkspaceControls.zig");
 const c = @import("Win32.zig").c;
 
 const title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Windows");
@@ -54,6 +56,10 @@ pub const App = struct {
     accessibility: ?Accessibility.Provider = null,
     sidebar_scroll: i32 = 0,
     workspace: ?*TerminalWorkspace.Workspace = null,
+    navigation_cursor: Navigation.Cursor = .{},
+    workspace_controls: WorkspaceControls.State = .{},
+    quick_chats_requested: bool = false,
+    selected_quick_chat: ?usize = null,
     instance_mutex: c.HANDLE = null,
     sync_requested: bool = false,
     restore_requested: bool = false,
@@ -229,6 +235,7 @@ pub const App = struct {
         }
         if (self.product_settings) |settings| {
             self.activity_enabled = settings.activity;
+            self.workspace_controls.activity_enabled = settings.activity;
             self.update_state = WindowsUpdates.CheckState.configure(settings.beta);
         }
         self.onboarding_store = Onboarding.Store.init(self.allocator) catch null;
@@ -401,6 +408,12 @@ pub const App = struct {
                     self.clampSidebarScroll();
                     self.refreshWorkspace();
                 }
+            },
+            .quick_chats, .quick_chat_changed, .quick_chat_deleted, .quick_chat_activity => {
+                if (event == .quick_chat_changed) {
+                    if (Wire.jsonString(frame, "id")) |id| self.openQuickChat(id);
+                }
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .error_occurred => {
                 if (self.pending_rebind_path.len != 0) {
@@ -686,6 +699,49 @@ pub const App = struct {
         }
     }
 
+    fn createQuickChat(self: *App) void {
+        self.client.sendCreateQuickChat("Chat", "claudeCode");
+    }
+
+    fn renameSelectedQuickChat(self: *App) void {
+        const index = self.selected_quick_chat orelse return;
+        if (index >= self.model.quick_chats.items.len) return;
+        const chat = self.model.quick_chats.items[index];
+        var draft = NativeForms.node(self.window.hwnd, self.allocator, .{ .title = chat.title }) catch {
+            self.setStatus("Unable to open quick chat rename form");
+            return;
+        } orelse return;
+        defer draft.deinit(self.allocator);
+        Forms.validateNode(draft) catch {
+            self.setStatus("Invalid quick chat title");
+            return;
+        };
+        self.client.sendRenameQuickChat(chat.id, draft.title);
+    }
+
+    fn deleteSelectedQuickChat(self: *App) void {
+        const index = self.selected_quick_chat orelse return;
+        if (index >= self.model.quick_chats.items.len) return;
+        self.client.sendDeleteQuickChat(self.model.quick_chats.items[index].id);
+    }
+
+    fn openQuickChat(self: *App, id: []const u8) void {
+        for (self.model.quick_chats.items, 0..) |chat, index| {
+            if (!std.mem.eql(u8, chat.id, id)) continue;
+            self.selected_quick_chat = index;
+            if (self.workspace) |workspace| {
+                if (std.process.getEnvVarOwned(self.allocator, "USERPROFILE")) |home| {
+                    defer self.allocator.free(home);
+                    _ = workspace.rebindProject(home) catch {};
+                } else |_| {}
+                workspace.openNode(0, chat.id) catch {
+                    self.setStatus("Unable to open quick chat workspace");
+                };
+            }
+            return;
+        }
+    }
+
     fn selectNextNode(self: *App) void {
         const graph = self.model.graph orelse return;
         if (graph.nodes.items.len == 0) {
@@ -873,6 +929,7 @@ pub const App = struct {
         if (self.product_settings) |*settings| settings.deinit();
         self.product_settings = draft;
         self.activity_enabled = draft.activity;
+        self.workspace_controls.activity_enabled = draft.activity;
         self.update_lock.lock();
         self.update_state = WindowsUpdates.CheckState.configure(draft.beta);
         self.update_lock.unlock();
@@ -1708,6 +1765,12 @@ pub const App = struct {
             .delete_selected => if (self.selectedEdgeIndex()) |edge| self.deleteEdge(edge) else self.deleteSelectedNode(),
             .create_edge => self.createEdge(),
             .jump_next => self.jumpToNode(),
+            .command_palette => self.jumpToNode(),
+            .next_identity => self.navigateIdentity(1, false),
+            .previous_identity => self.navigateIdentity(-1, false),
+            .quick_chat => self.createQuickChat(),
+            .rename_quick_chat => self.renameSelectedQuickChat(),
+            .delete_quick_chat => self.deleteSelectedQuickChat(),
             .settings => self.openSettings(),
             .product_settings => self.openProductSettings(),
             .clone_repository => self.cloneRepository(),
@@ -1762,7 +1825,64 @@ pub const App = struct {
             .focus_previous_pane => if (self.workspace) |workspace| workspace.focusPreviousPane(),
             .select_previous_tab => if (self.workspace) |workspace| workspace.selectPreviousTab(),
             .select_next_tab => if (self.workspace) |workspace| workspace.selectNextTab(),
+            .show_graph => {
+                self.workspace_controls.apply(.show_graph);
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            },
+            .toggle_rail => {
+                self.workspace_controls.apply(.toggle_rail);
+                self.layoutWorkspace();
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
+                self.setStatus(if (self.workspace_controls.rail_visible) "Workspace rail shown" else "Workspace rail hidden");
+            },
+            .toggle_panel => {
+                self.workspace_controls.apply(.toggle_panel);
+                self.layoutWorkspace();
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
+                self.setStatus(if (self.workspace_controls.panel_visible) "Workspace panel shown" else "Workspace panel hidden");
+            },
+            .toggle_activity => {
+                self.workspace_controls.apply(.toggle_activity);
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
+                self.setStatus(if (self.workspace_controls.activity_enabled) "Activity enabled" else "Activity disabled");
+            },
             .none => {},
+        }
+    }
+
+    fn navigateIdentity(self: *App, offset: isize, attention_only: bool) void {
+        const graph = self.model.graph orelse return;
+        if (graph.nodes.items.len == 0) return;
+        var items: [256]Navigation.Item = undefined;
+        const count = @min(graph.nodes.items.len, items.len);
+        for (graph.nodes.items[0..count], 0..) |node, index| {
+            var attention = false;
+            for (self.model.attention.items) |candidate| {
+                if (std.mem.eql(u8, candidate.id, node.id)) {
+                    attention = true;
+                    break;
+                }
+            }
+            items[index] = .{
+                .identity = .{ .project_path = graph.project.path, .node_id = node.id },
+                .title = node.title,
+                .attention = attention,
+            };
+        }
+        const selected = if (attention_only)
+            self.navigation_cursor.nextAttention(items[0..count])
+        else if (offset > 0)
+            self.navigation_cursor.next(items[0..count])
+        else
+            self.navigation_cursor.previous(items[0..count]);
+        const item = selected orelse return;
+        for (graph.nodes.items, 0..) |node, index| {
+            if (std.mem.eql(u8, node.id, item.identity.node_id)) {
+                if (!self.selectNodeIndex(index)) return;
+                self.openSelectedNode();
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
+                return;
+            }
         }
     }
 
@@ -1780,9 +1900,9 @@ pub const App = struct {
         if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
         if (self.workspace) |workspace| {
             workspace.resize(
-                Tokens.sidebar_width,
+                if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
                 @max(0, client.bottom - Tokens.workspace_height),
-                @max(0, client.right - Tokens.sidebar_width),
+                @max(0, client.right - (if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0)),
                 Tokens.workspace_height,
             );
         }
@@ -2088,10 +2208,9 @@ fn onWindowMessage(
             var paint: c.PAINTSTRUCT = undefined;
             const hdc = c.BeginPaint(hwnd, &paint);
             const inspection = if (app.worktree_inspection) |*value| value else null;
-            GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), app.allocator, app.activity_enabled, &app.canvas);
-            if (app.workspace) |*workspace| {
-                // workspace.paintChrome(hdc)
-                workspace.*.paintChrome(hdc);
+            GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), app.allocator, &app.canvas, app.workspace_controls);
+            if (app.workspace_controls.panel_visible) {
+                if (app.workspace) |workspace| workspace.paintChrome(hdc);
             }
             _ = c.EndPaint(hwnd, &paint);
             result.* = 0;
@@ -2140,6 +2259,10 @@ fn onWindowMessage(
                 } else if (!app.sync_requested) {
                     app.sync_requested = true;
                     app.client.sendListProjects();
+                    if (!app.quick_chats_requested) {
+                        app.quick_chats_requested = true;
+                        app.client.sendListQuickChats();
+                    }
                 } else if (!app.restore_requested) {
                     app.restore_requested = true;
                     app.client.sendRestoreOpenProjects();
@@ -2151,6 +2274,7 @@ fn onWindowMessage(
                 app.last_connection_state = updated_connection_state;
                 app.sync_requested = false;
                 app.restore_requested = false;
+                app.quick_chats_requested = false;
             }
             if (app.client.isIdle()) app.smoke_idle_ticks += 1 else app.smoke_idle_ticks = 0;
             if (app.workspace) |workspace| {
@@ -2338,6 +2462,10 @@ fn onWindowMessage(
                             _ = app.selectWorktreeRow(inspection.entries.items[row.index].path);
                         }
                         app.ensureWorktreeVisible(row.index);
+                    },
+                    .quick_chat => if (row.index < app.model.quick_chats.items.len) {
+                        app.client.sendOpenQuickChat(app.model.quick_chats.items[row.index].id);
+                        app.setStatus("Opening quick chat...");
                     },
                 }
                 _ = c.InvalidateRect(hwnd, null, 0);

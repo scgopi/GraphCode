@@ -31,6 +31,11 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
   /// Discard a project's saved loops entirely. Irreversible, and separate from
   /// `forgetProject` precisely because it is.
   case deleteProjectGraph(path: String)
+  case listQuickChats
+  case createQuickChat(title: String, backend: CLISessionBackendKind)
+  case openQuickChat(id: UUID)
+  case renameQuickChat(id: UUID, title: String)
+  case deleteQuickChat(id: UUID)
   case graphCommand(projectPath: String, command: GraphCommand)
 }
 
@@ -125,5 +130,9 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
 public enum DaemonEvent: Codable, Sendable, Equatable {
   case recentProjectsListed([ProjectRef])
   case graphChanged(LoopGraph)
+  case quickChatsListed([QuickChat])
+  case quickChatChanged(QuickChat)
+  case quickChatDeleted(UUID)
+  case quickChatActivity(id: UUID, activity: QuickChatActivity)
   case errorOccurred(String)
 }

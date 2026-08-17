@@ -28,6 +28,13 @@ actions use the Windows `IFileOpenDialog` folder picker. The no-project state
 also presents accessible native buttons for opening a folder or the global
 overview; recent projects remain selectable in the sidebar.
 
+Parity actions are reachable without App-specific view coupling: `Ctrl+P` opens
+the searchable jump/palette form, `Ctrl+Up`/`Ctrl+Down` navigate by stable
+project/node identity, `Ctrl+Tab` advances attention, and `Ctrl+Shift+R`,
+`Ctrl+Shift+P`, and `Ctrl+Shift+A` toggle the workspace rail, panel, and
+activity settings. `Ctrl+Q` creates a daemon-owned Quick Chat; `Ctrl+Shift+Q`
+renames the selected chat and `Ctrl+Shift+X` deletes it.
+
 ## Build
 
 Use the exact provider pins in `provider-pins.json` and clean local worktrees:
