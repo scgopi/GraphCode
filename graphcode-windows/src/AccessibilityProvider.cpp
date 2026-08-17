@@ -12,8 +12,10 @@ namespace {
 constexpr int kRootChildren[] = {1, 2, 3, 4, 5, 6};
 constexpr int kActionChildren[] = {7, 8, 9, 10, 11, 12, 13};
 
+class Node;
 struct State {
   HWND hwnd{};
+  Node *root{};
   std::wstring status = L"Ready";
   std::vector<std::wstring> rows;
   std::vector<bool> selected;
@@ -41,7 +43,12 @@ class Node final : public IRawElementProviderSimple,
                    public ISelectionItemProvider,
                    public IToggleProvider {
  public:
-  Node(std::shared_ptr<State> state, int id) : state_(std::move(state)), id_(id), refs_(1) {}
+  Node(std::shared_ptr<State> state, int id) : state_(std::move(state)), id_(id), refs_(1) {
+    if (id_ == 0) state_->root = this;
+  }
+  ~Node() {
+    if (id_ == 0 && state_->root == this) state_->root = nullptr;
+  }
 
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void **out) override {
     if (!out) return E_POINTER;
@@ -182,10 +189,9 @@ class Node final : public IRawElementProviderSimple,
   HRESULT STDMETHODCALLTYPE get_FragmentRoot(IRawElementProviderFragmentRoot **value) override {
     if (!value) return E_POINTER;
     *value = nullptr;
-    Node *node = new Node(state_, 0);
-    if (!node) return E_OUTOFMEMORY;
-    *value = static_cast<IRawElementProviderFragmentRoot *>(node);
-    return S_OK;
+    if (!state_->root) return UIA_E_ELEMENTNOTAVAILABLE;
+    return state_->root->QueryInterface(
+        __uuidof(IRawElementProviderFragmentRoot), reinterpret_cast<void **>(value));
   }
   HRESULT STDMETHODCALLTYPE ElementProviderFromPoint(double, double,
                                                       IRawElementProviderFragment **value) override {
@@ -289,7 +295,6 @@ class Node final : public IRawElementProviderSimple,
     state_->status = wide(status);
     Node *status_node = new Node(state_, 6);
     UiaRaiseAutomationEvent(status_node, UIA_LiveRegionChangedEventId);
-    status_node->Release();
     VARIANT old_value, new_value;
     VariantInit(&old_value);
     VariantInit(&new_value);
@@ -309,40 +314,29 @@ class Node final : public IRawElementProviderSimple,
   bool supportsInvoke() const { return id_ == 0 || (id_ >= 7 && id_ <= 13); }
   int parentId() const {
     if (id_ == 0) return -1;
-    if (id_ >= 100) return id_ == 100 ? 3 : id_ - 1;
+    if (id_ >= 100) return 3;
     if (id_ == 1) return 0;
-    if (id_ == 6) return 13;
-    if (id_ >= 2 && id_ <= 5) return id_ - 1;
+    if (id_ >= 2 && id_ <= 6) return 0;
     if (id_ == 7) return 5;
-    if (id_ >= 8 && id_ <= 13) return id_ - 1;
+    if (id_ >= 8 && id_ <= 13) return 5;
     return 0;
   }
   int firstChild() const {
     if (id_ == 0) return 1;
     if (id_ == 3 && !state_->rows.empty()) return 100;
-    if (id_ >= 100 && id_ + 1 < 100 + static_cast<int>(state_->rows.size())) return id_ + 1;
-    if (id_ >= 100) return 4;
     if (id_ == 5) return 7;
-    if (id_ >= 7 && id_ < 13) return id_ + 1;
-    if (id_ == 13) return 6;
-    if (id_ >= 1 && id_ < 6) return id_ + 1;
     return -1;
   }
   int lastChild() const {
     if (id_ == 0) return 6;
     if (id_ == 3 && !state_->rows.empty()) return 99 + static_cast<int>(state_->rows.size());
-    if (id_ >= 100) return firstChild();
     if (id_ == 5) return 13;
-    if (id_ >= 7 && id_ < 13) return id_ + 1;
-    if (id_ == 13) return 6;
-    if (id_ >= 1 && id_ < 6) return id_ + 1;
     return -1;
   }
   int sibling(int delta) const {
     if (id_ >= 100) {
       const int index = id_ - 100 + delta;
       if (index >= 0 && index < static_cast<int>(state_->rows.size())) return 100 + index;
-      if (delta > 0 && index == static_cast<int>(state_->rows.size())) return 4;
       return -1;
     }
     if (id_ >= 1 && id_ <= 6) {

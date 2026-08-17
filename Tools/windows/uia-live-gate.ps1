@@ -45,10 +45,14 @@ try {
   }
   if ($null -eq $root) { throw "shell did not expose graphcode-root through WM_GETOBJECT" }
 
-  $children = $root.FindAll(
-    [System.Windows.Automation.TreeScope]::Children,
-    [System.Windows.Automation.Condition]::TrueCondition
-  )
+  $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+  $childList = New-Object System.Collections.Generic.List[System.Windows.Automation.AutomationElement]
+  $child = $walker.GetFirstChild($root)
+  while ($null -ne $child) {
+    $childList.Add($child)
+    $child = $walker.GetNextSibling($child)
+  }
+  $children = $childList.ToArray()
   $childNames = @($children | ForEach-Object { $_.Current.Name })
   $descendants = $root.FindAll(
     [System.Windows.Automation.TreeScope]::Descendants,
