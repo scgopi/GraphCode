@@ -719,7 +719,7 @@ pub const App = struct {
         var draft = NativeForms.node(self.window.hwnd, self.allocator, .{
             .title = "",
             .backend = settings.default_backend,
-            .model_tier = if (settings.auto_selects_model) null else settings.default_model,
+            .model_tier = settings.default_model,
             .claude_permissions = settings.claude_permissions,
             .copilot_permissions = settings.copilot_permissions,
             .briefing_enabled = settings.briefing,
@@ -1029,7 +1029,7 @@ pub const App = struct {
             return;
         };
         defer self.allocator.free(remote_path);
-        self.client.sendOpenProject(remote_path);
+        _ = self.client.sendOpenProject(remote_path);
         self.client.reconnect();
         self.setStatus("SSH repository connected; reconnect requested");
     }
@@ -2077,7 +2077,7 @@ fn onWindowMessage(
             const hdc = c.BeginPaint(hwnd, &paint);
             const inspection = if (app.worktree_inspection) |*value| value else null;
             GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), app.allocator, app.activity_enabled, &app.canvas);
-            if (app.workspace) |*workspace| workspace.paintChrome(hdc);
+            if (app.workspace) |*workspace| workspace.*.paintChrome(hdc);
             _ = c.EndPaint(hwnd, &paint);
             result.* = 0;
             return true;
@@ -2440,6 +2440,11 @@ fn onWindowMessage(
             return true;
         },
         c.WM_CLOSE => {
+            hideShellWindow(hwnd);
+            result.* = 0;
+            return true;
+        },
+        c.WM_SYSCOMMAND => if ((wparam & 0xfff0) == c.SC_CLOSE) {
             hideShellWindow(hwnd);
             result.* = 0;
             return true;
