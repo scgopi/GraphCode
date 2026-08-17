@@ -16,6 +16,8 @@ public static class GraphCodeUiaGateState {
   public static volatile bool LiveObserved;
   public static volatile bool NamePropertyObserved;
   public static volatile bool FocusObserved;
+  public static int LiveEvents;
+  public static int NamePropertyEvents;
   public static int SelectedEvents;
   public static int AddedEvents;
   public static int RemovedEvents;
@@ -40,11 +42,13 @@ public static class GraphCodeUiaGateState {
     LiveSourceAutomationId = element.Current.AutomationId;
     LiveSourceName = element.Current.Name;
     LiveSourceRuntimeId = String.Join(",", element.GetRuntimeId());
+    LiveEvents++;
     LiveObserved = true;
   }
   private static void HandleNameProperty(object sender, AutomationPropertyChangedEventArgs eventArgs) {
     var element = sender as AutomationElement;
     if (element != null) NamePropertySourceAutomationId = element.Current.AutomationId;
+    NamePropertyEvents++;
     NamePropertyObserved = true;
   }
   private static void HandleFocus(object sender, AutomationFocusChangedEventArgs eventArgs) {
@@ -310,6 +314,12 @@ try {
     [System.Windows.Automation.Automation]::RemoveAutomationEventHandler($addedEvent, $safeRow, $addedHandler)
     [System.Windows.Automation.Automation]::RemoveAutomationEventHandler($removedEvent, $safeRow, $removedHandler)
   }
+  $selectionEventEvidence = @{
+    selected = [GraphCodeUiaGateState]::SelectedEvents
+    added = [GraphCodeUiaGateState]::AddedEvents
+    removed = [GraphCodeUiaGateState]::RemovedEvents
+    source = [GraphCodeUiaGateState]::SelectionSourceAutomationId
+  }
 
   $actions = @{}
   foreach ($actionId in @("inspect-worktrees", "reclaim-worktrees", "reveal-worktree",
@@ -363,6 +373,8 @@ try {
   $statusRuntimeId = Get-RuntimeIdentity $status
   [GraphCodeUiaGateState]::LiveObserved = $false
   [GraphCodeUiaGateState]::NamePropertyObserved = $false
+  [GraphCodeUiaGateState]::LiveEvents = 0
+  [GraphCodeUiaGateState]::NamePropertyEvents = 0
   [GraphCodeUiaGateState]::LiveSourceAutomationId = $null
   [GraphCodeUiaGateState]::LiveSourceName = $null
   [GraphCodeUiaGateState]::LiveSourceRuntimeId = $null
@@ -385,13 +397,48 @@ try {
   [System.Windows.Automation.Automation]::AddAutomationFocusChangedEventHandler($focusHandler)
   $focusEventRegistered = $true
   try {
-    $actions["inspect-worktrees"].Invoke()
-    $actions["reveal-worktree"].Invoke()
-    $actions["edit-worktree-policy"].Invoke()
-    $actions["allow-reclaim"].Invoke()
-    $actions["confirm-each-reclaim"].Invoke()
+    Require ([GraphCodeUiaGateState]::PostKeyboard($process.MainWindowHandle, 0x28)) "negative keyboard selection message was rejected"
+    Start-Sleep -Milliseconds 150
+    Require ([GraphCodeUiaGateState]::PostMouseClick($process.MainWindowHandle)) "negative mouse selection message was rejected"
+    Start-Sleep -Milliseconds 150
+
+    Require ([GraphCodeUiaGateState]::PostFixtureMutation($process.MainWindowHandle, 1)) "negative fixture reorder message was rejected"
+    Start-Sleep -Milliseconds 150
+    Assert-Ids @((Get-DirectChildren $worktrees $rawWalker | ForEach-Object { $_.Current.AutomationId })) `
+      @($initialRowIds[1], $initialRowIds[0]) "negative reordered Worktrees"
+    Require ([GraphCodeUiaGateState]::PostFixtureMutation($process.MainWindowHandle, 1)) "fixture reorder restore message was rejected"
+    Start-Sleep -Milliseconds 150
+    Assert-Ids @((Get-DirectChildren $worktrees $rawWalker | ForEach-Object { $_.Current.AutomationId })) `
+      $initialRowIds "restored Worktrees"
+
+    Require ([GraphCodeUiaGateState]::PostFixtureMutation($process.MainWindowHandle, 3)) "eligibility mutation message was rejected"
+    Start-Sleep -Milliseconds 150
+    $unsafeSelection.Select()
+    Start-Sleep -Milliseconds 150
+    Require $unsafeSelection.Current.IsSelected "eligibility-only sync did not make the fixture row selectable"
+
+    $allowStateBefore = $allowToggle.Current.ToggleState
+    Require ([GraphCodeUiaGateState]::PostFixtureMutation($process.MainWindowHandle, 4)) "allow policy sync message was rejected"
+    for ($index = 0; $index -lt 20 -and $allowToggle.Current.ToggleState -eq $allowStateBefore; $index++) {
+      Start-Sleep -Milliseconds 50
+    }
+    Require ($allowToggle.Current.ToggleState -ne $allowStateBefore) "allow policy-only sync was not observed"
+    $confirmStateBefore = $confirmToggle.Current.ToggleState
+    Require ([GraphCodeUiaGateState]::PostFixtureMutation($process.MainWindowHandle, 5)) "confirm policy sync message was rejected"
+    for ($index = 0; $index -lt 20 -and $confirmToggle.Current.ToggleState -eq $confirmStateBefore; $index++) {
+      Start-Sleep -Milliseconds 50
+    }
+    Require ($confirmToggle.Current.ToggleState -ne $confirmStateBefore) "confirm policy-only sync was not observed"
+
+    Start-Sleep -Milliseconds 250
+    $statusNoChangeLiveEvents = [GraphCodeUiaGateState]::LiveEvents
+    $statusNoChangeNameEvents = [GraphCodeUiaGateState]::NamePropertyEvents
+    Require ($status.Current.Name -eq $initialStatus) "non-status sync changed status text"
+    Require ($statusNoChangeLiveEvents -eq 0) "non-status sync raised LiveRegionChanged"
+    Require ($statusNoChangeNameEvents -eq 0) "non-status sync raised a status Name property change"
+
     $actions["save-worktree-policy"].Invoke()
-    for ($i = 0; $i -lt 40 -and -not [GraphCodeUiaGateState]::LiveObserved; $i++) {
+    for ($i = 0; $i -lt 40 -and [GraphCodeUiaGateState]::LiveEvents -lt 1; $i++) {
       Start-Sleep -Milliseconds 50
     }
   } finally {
@@ -413,12 +460,14 @@ try {
   $statusTextAfter = [string]$statusAfter.Current.Name
   $statusEventObserved = [GraphCodeUiaGateState]::LiveObserved
   Require $statusEventObserved "LiveRegionChanged was not delivered for status"
+  Require ([GraphCodeUiaGateState]::LiveEvents -eq 1) "status change did not raise exactly one LiveRegionChanged event"
   Require ([GraphCodeUiaGateState]::LiveSourceAutomationId -eq "status") "LiveRegionChanged source was not status"
   Require ([GraphCodeUiaGateState]::LiveSourceRuntimeId -eq $statusRuntimeId) "LiveRegionChanged source identity changed"
   Require ([GraphCodeUiaGateState]::NamePropertyObserved) "status Name property change was not delivered"
+  Require ([GraphCodeUiaGateState]::NamePropertyEvents -eq 1) "status change did not raise exactly one Name property change"
   Require ([GraphCodeUiaGateState]::NamePropertySourceAutomationId -eq "status") "status Name property source was not status"
   Require (($statusTextAfter -ne $initialStatus) -and
-           ([GraphCodeUiaGateState]::LiveSourceName -ne $initialStatus)) "status LiveRegionChanged did not expose updated text"
+           ([GraphCodeUiaGateState]::LiveSourceName -eq $statusTextAfter)) "status LiveRegionChanged did not expose updated text"
 
   $currentRowsBeforeFocus = @(Get-DirectChildren $worktrees $rawWalker)
   $currentSafe = @($currentRowsBeforeFocus | Where-Object { $_.Current.Name -eq "C:\fixture-safe" })[0]
@@ -519,17 +568,16 @@ try {
     fixtureRows = 2
     unsafeSelectionRejected = $unsafeRejected
     repeatedSelectionObserved = $true
-    selectionEvents = @{
-      selected = [GraphCodeUiaGateState]::SelectedEvents
-      added = [GraphCodeUiaGateState]::AddedEvents
-      removed = [GraphCodeUiaGateState]::RemovedEvents
-      source = [GraphCodeUiaGateState]::SelectionSourceAutomationId
-    }
+    selectionEvents = $selectionEventEvidence
     togglePropertyEvents = [GraphCodeUiaGateState]::TogglePropertyEvents
     togglePropertySource = [GraphCodeUiaGateState]::TogglePropertySourceAutomationId
     actionPatterns = @($actions.Keys | Sort-Object)
     statusText = $statusTextAfter
     statusChanged = ($statusTextAfter -ne $initialStatus)
+    statusNoChangeLiveEvents = $statusNoChangeLiveEvents
+    statusNoChangeNameEvents = $statusNoChangeNameEvents
+    statusLiveEvents = [GraphCodeUiaGateState]::LiveEvents
+    statusNamePropertyEvents = [GraphCodeUiaGateState]::NamePropertyEvents
     statusEventObserved = $statusEventObserved
     statusNamePropertyObserved = [GraphCodeUiaGateState]::NamePropertyObserved
     statusNamePropertySource = [GraphCodeUiaGateState]::NamePropertySourceAutomationId

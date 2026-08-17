@@ -1512,6 +1512,22 @@ pub const App = struct {
                     self.selected_worktree_path = &.{};
                 }
             },
+            3 => {
+                const target = for (dialog.rows.items, 0..) |row, index| {
+                    if (std.mem.eql(u8, row.entry.path, "C:\\fixture-unsafe")) break index;
+                } else return;
+                dialog.rows.items[target].entry.dirty = !dialog.rows.items[target].entry.dirty;
+            },
+            4 => {
+                var policy = dialog.policy;
+                policy.allow_reclaim = !policy.allow_reclaim;
+                dialog.setPolicy(policy);
+            },
+            5 => {
+                var policy = dialog.policy;
+                policy.confirm_each_reclaim = !policy.confirm_each_reclaim;
+                dialog.setPolicy(policy);
+            },
             else => return,
         }
         self.syncAccessibility();

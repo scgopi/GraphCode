@@ -421,6 +421,7 @@ class Node final : public IRawElementProviderSimple,
     Node *confirm_reclaim_node = nullptr;
     std::vector<Node *> retired;
     std::vector<std::pair<Node *, EVENTID>> selection_events;
+    bool status_changed = false;
     bool focus_changed = false;
     bool structure_changed = false;
     bool allow_reclaim_changed = false;
@@ -431,6 +432,7 @@ class Node final : public IRawElementProviderSimple,
       old_status = state_->status;
       state_->status = wide(status);
       new_status = state_->status;
+      status_changed = old_status != new_status;
       const bool old_allow_reclaim = state_->allow_reclaim;
       const bool old_confirm_reclaim = state_->confirm_each_reclaim;
       state_->allow_reclaim = allow_reclaim;
@@ -508,7 +510,7 @@ class Node final : public IRawElementProviderSimple,
       const int64_t old_focus = state_->focused;
       if (!isKeyAvailableLocked(state_->focused)) state_->focused = 0;
       focus_changed = old_focus != state_->focused;
-      status_node = retainElementLocked(6);
+      if (status_changed) status_node = retainElementLocked(6);
       if (focus_changed) focus_node = retainElementLocked(state_->focused);
     }
     for (Node *node : retired) node->Release();
@@ -536,13 +538,15 @@ class Node final : public IRawElementProviderSimple,
     std::wstring old_status;
     std::wstring new_status;
     Node *status_node = nullptr;
+    bool status_changed = false;
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
       if (!state_->active) return;
       old_status = state_->status;
       state_->status = wide(status);
       new_status = state_->status;
-      status_node = retainElementLocked(6);
+      status_changed = old_status != new_status;
+      if (status_changed) status_node = retainElementLocked(6);
     }
     raiseStatusChanged(status_node, old_status, new_status);
   }
@@ -691,6 +695,10 @@ class Node final : public IRawElementProviderSimple,
       const std::wstring &old_status,
       const std::wstring &new_status) {
     if (!status_node) return;
+    if (old_status == new_status) {
+      status_node->Release();
+      return;
+    }
     auto *provider = static_cast<IRawElementProviderSimple *>(status_node);
     UiaRaiseAutomationEvent(provider, UIA_LiveRegionChangedEventId);
     VARIANT old_value, new_value;
