@@ -45,4 +45,21 @@ struct QuickChatProtocolTests {
     #expect(store.chat(id: chat.id)?.activity?.sequence == 2)
     #expect(store.chat(id: chat.id)?.activity?.text == "second")
   }
+
+  @Test
+  func zmxFixtureUsesChatIdentityForAttachAndKill() throws {
+    let chat = QuickChat(
+      id: UUID(uuidString: "11111111-1111-4111-8111-111111111111")!,
+      title: "Scratch",
+      backend: .claudeCode)
+    let node = LoopNode(
+      id: chat.id,
+      title: chat.title,
+      backend: chat.backend,
+      state: .idle,
+      createdAt: chat.createdAt)
+    let sessionName = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    #expect(sessionName == "graphcode-\(chat.id.uuidString)")
+    #expect(SurfaceRef.nodeID(fromZmxSessionName: sessionName) == chat.id)
+  }
 }
