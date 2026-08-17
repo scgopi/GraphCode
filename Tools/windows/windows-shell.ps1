@@ -9,12 +9,20 @@ param(
   [string] $DaemonRuntimeDirectory,
   [switch] $SkipBuild,
   [switch] $Stress,
-  [switch] $UseStubDaemon
+  [switch] $UseStubDaemon,
+  [string] $Version
 )
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $shellRoot = Join-Path $repoRoot "graphcode-windows"
+$packageManifest = Get-Content (Join-Path $shellRoot "build.zig.zon") -Raw
+if (-not $Version) {
+  if ($packageManifest -notmatch '(?m)\.version\s*=\s*"([^"]+)"') {
+    throw "GraphCode Windows shell package version is missing"
+  }
+  $Version = $Matches[1]
+}
 $pins = Get-Content (Join-Path $shellRoot "provider-pins.json") -Raw | ConvertFrom-Json
 $app = Join-Path $shellRoot "zig-out\bin\graphcode-windows.exe"
 $stubProcess = $null
@@ -194,6 +202,7 @@ try {
         & $Zig0152 build `
           "-Dwinghostty-dir=$WinghosttyRoot" `
           "-Dwinghostty-lib=$(Join-Path $WinghosttyRoot 'zig-out\lib\winghostty-win32-host.lib')" `
+          "-Dversion=$Version" `
           -Doptimize=ReleaseSafe
       } finally { Pop-Location }
     }
@@ -201,6 +210,10 @@ try {
 
   if (-not (Test-Path -LiteralPath $app)) {
     throw "GraphCode Windows shell executable is missing: $app"
+  }
+  $reportedVersion = (& $app --version 2>$null | Select-Object -First 1).Trim()
+  if ($reportedVersion -ne $Version) {
+    throw "GraphCode Windows shell version mismatch: expected $Version, executable reports $reportedVersion"
   }
   $env:GRAPHCODE_ZMX = Join-Path $ZmxRoot "zig-out\bin\zmx.exe"
   $env:GRAPHCODE_GATE_CWD = $repoRoot

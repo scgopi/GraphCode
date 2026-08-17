@@ -72,11 +72,11 @@ fn fetchWinHttp(allocator: std.mem.Allocator, feed_url: []const u8, cancelled: *
     const path_component = try uri.path.toRawMaybeAlloc(scratch);
     const query = if (uri.query) |value| try value.toRawMaybeAlloc(scratch) else null;
     const path = if (query) |value| try std.fmt.allocPrint(scratch, "{s}?{s}", .{ path_component, value }) else path_component;
-    const host16 = try std.unicode.utf8ToUtf16LeAlloc(scratch, host);
-    const path16 = try std.unicode.utf8ToUtf16LeAlloc(scratch, path);
-    const agent16 = try std.unicode.utf8ToUtf16LeAlloc(scratch, "GraphCode-Windows-Updater");
-    const accept_header16 = try std.unicode.utf8ToUtf16LeAlloc(scratch, "Accept: application/vnd.github+json");
-    const user_agent_header16 = try std.unicode.utf8ToUtf16LeAlloc(scratch, "User-Agent: GraphCode-Windows-Updater");
+    const host16 = try utf16Z(scratch, host);
+    const path16 = try utf16Z(scratch, path);
+    const agent16 = try utf16Z(scratch, "GraphCode-Windows-Updater");
+    const accept_header16 = try utf16Z(scratch, "Accept: application/vnd.github+json");
+    const user_agent_header16 = try utf16Z(scratch, "User-Agent: GraphCode-Windows-Updater");
     const session = c.WinHttpOpen(agent16.ptr, c.WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, null, null, 0) orelse return error.UpdateConnectFailed;
     defer _ = c.WinHttpCloseHandle(session);
     if (c.WinHttpSetTimeouts(session, 2000, 2000, 2000, 2000) == 0) return error.UpdateConnectFailed;
@@ -88,8 +88,8 @@ fn fetchWinHttp(allocator: std.mem.Allocator, feed_url: []const u8, cancelled: *
     var accepts = [_]?[*:0]const u16{null};
     const request = c.WinHttpOpenRequest(connection, verb, path16.ptr, null, null, @ptrCast(&accepts), flags) orelse return error.UpdateConnectFailed;
     defer _ = c.WinHttpCloseHandle(request);
-    if (c.WinHttpAddRequestHeaders(request, accept_header16.ptr, 0, c.WINHTTP_ADDREQ_FLAG_ADD) == 0 or
-        c.WinHttpAddRequestHeaders(request, user_agent_header16.ptr, 0, c.WINHTTP_ADDREQ_FLAG_ADD) == 0)
+    if (c.WinHttpAddRequestHeaders(request, accept_header16.ptr, @intCast(accept_header16.len), c.WINHTTP_ADDREQ_FLAG_ADD) == 0 or
+        c.WinHttpAddRequestHeaders(request, user_agent_header16.ptr, @intCast(user_agent_header16.len), c.WINHTTP_ADDREQ_FLAG_ADD) == 0)
         return error.UpdateSendFailed;
     if (cancelled.load(.acquire)) return error.Cancelled;
     if (c.WinHttpSendRequest(request, @as([*c]const u16, null), 0, null, 0, 0, 0) == 0) return error.UpdateSendFailed;
@@ -113,7 +113,12 @@ fn fetchWinHttp(allocator: std.mem.Allocator, feed_url: []const u8, cancelled: *
         if (c.WinHttpReadData(request, body.items[old_len..].ptr, available, &read) == 0) return error.UpdateReceiveFailed;
         body.items.len = old_len + read;
     }
+
     return body.toOwnedSlice();
+}
+
+fn utf16Z(allocator: std.mem.Allocator, value: []const u8) ![:0]u16 {
+    return std.unicode.utf8ToUtf16LeAllocZ(allocator, value);
 }
 
 pub fn currentVersion(allocator: std.mem.Allocator) ![]u8 {
@@ -175,6 +180,15 @@ test "current version comes from package metadata override" {
     const version = try currentVersionFromMetadata(std.testing.allocator, "v7.2.1");
     defer std.testing.allocator.free(version);
     try std.testing.expectEqualStrings("v7.2.1", version);
+}
+
+test "WinHTTP UTF-16 arguments are sentinel terminated" {
+    const value = try utf16Z(std.testing.allocator, "fixture/path/☃");
+    defer std.testing.allocator.free(value);
+    try std.testing.expectEqual(@as(u16, 0), value[value.len]);
+    const round_trip = try std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, value[0..value.len]);
+    defer std.testing.allocator.free(round_trip);
+    try std.testing.expectEqualStrings("fixture/path/☃", round_trip);
 }
 
 test "stale update results cannot overwrite a newer channel request" {

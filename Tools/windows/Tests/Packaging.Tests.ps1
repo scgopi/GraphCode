@@ -45,6 +45,14 @@ try {
   Push-Location $testZmxRoot
   try { & $zig0160 build -Dtarget=x86_64-windows-gnu } finally { Pop-Location }
   if ($LASTEXITCODE -ne 0) { throw "could not build isolated pinned zmx provider" }
+  Push-Location (Join-Path $repoRoot "graphcode-windows")
+  try {
+    & $zig0152 build `
+      "-Dwinghostty-dir=$wingRoot" `
+      "-Dwinghostty-lib=$(Join-Path $wingRoot 'zig-out\lib\winghostty-win32-host.lib')" `
+      "-Dversion=1.2.3" -Doptimize=ReleaseSafe
+  } finally { Pop-Location }
+  if ($LASTEXITCODE -ne 0) { throw "could not build versioned GraphCode Windows artifact" }
   $fixtureBin = Join-Path $fixture "nested space\unicode-日本\bin"
   New-Item -ItemType Directory -Force -Path $fixtureBin | Out-Null
   $release = Join-Path $repoRoot ".build\windows\release-artifact"

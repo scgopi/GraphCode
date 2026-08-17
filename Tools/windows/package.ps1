@@ -6,7 +6,7 @@ param(
   [string] $OutputDirectory,
   [string] $Package,
   [string] $InstallRoot = (Join-Path $env:LOCALAPPDATA "GraphCode\current"),
-  [string] $Version = "0.0.0-dev",
+  [string] $Version,
   [string] $SignCertificate,
   [string] $SignTimestampUrl,
   [string] $SignToolPath,
@@ -21,9 +21,17 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$versionWasProvided = [bool]$Version
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $shellRoot = Join-Path $repoRoot "graphcode-windows"
 $required = @("graphcoded.exe", "graphcode.exe", "zmx.exe")
+$packageManifest = Get-Content (Join-Path $shellRoot "build.zig.zon") -Raw
+if (-not $Version) {
+  if ($packageManifest -notmatch '(?m)\.version\s*=\s*"([^"]+)"') {
+    throw "GraphCode packaging: package version is missing"
+  }
+  $Version = $Matches[1]
+}
 
 function Fail([string] $message) { throw "GraphCode packaging: $message" }
 function Require([bool] $condition, [string] $message) { if (-not $condition) { Fail $message } }
@@ -208,6 +216,7 @@ function Xml-Escape([string] $value) {
   return [System.Security.SecurityElement]::Escape($value)
 }
 function Build-Package {
+  Require ($Version -and $Version -notin @("dev", "0.0.0-dev")) "release packaging requires a non-dev package version"
   $out = if ($OutputDirectory) { $OutputDirectory } else { Join-Path $repoRoot ".build\windows\packages" }
   New-Item -ItemType Directory -Force -Path $out | Out-Null
   $staging = Join-Path $out ".staging-$([guid]::NewGuid())"
@@ -263,9 +272,26 @@ function Build-Package {
   } else {
     Fail "trusted pinned Winghostty and zmx roots are required; fixture provenance is not accepted"
   }
+  if (-not $source) {
+    Require ($WinghosttyRoot -and $Zig0152) "release build requires pinned Winghostty root and Zig 0.15.2"
+    Push-Location $shellRoot
+    try {
+      & $Zig0152 build `
+        "-Dwinghostty-dir=$WinghosttyRoot" `
+        "-Dwinghostty-lib=$(Join-Path $WinghosttyRoot 'zig-out\lib\winghostty-win32-host.lib')" `
+        "-Dversion=$Version" `
+        -Doptimize=ReleaseSafe
+      Require ($LASTEXITCODE -eq 0) "GraphCode Windows release build failed"
+    } finally { Pop-Location }
+    foreach ($file in @(Get-ChildItem (Join-Path $shellRoot "zig-out\bin") -File)) {
+      Copy-Item $file (Join-Path $root "bin\$($file.Name)") -Force
+    }
+  }
   foreach ($name in $required + "graphcode-windows.exe") {
     Require (Test-Path (Join-Path $root "bin\$name")) "$name was not found; pass -InputDirectory with release outputs"
   }
+  $reportedVersion = (& (Join-Path $root "bin\graphcode-windows.exe") --version 2>$null | Select-Object -First 1).Trim()
+  Require ($reportedVersion -eq $Version) "graphcode-windows.exe reports $reportedVersion, expected $Version"
   Require (@(Get-ChildItem (Join-Path $root "bin") -Filter *.dll).Count -gt 0) "Swift runtime DLLs were not found"
   Copy-Item (Join-Path $repoRoot "LICENSE") (Join-Path $root "LICENSE") -Force
   Require ($WinghosttyRoot -and $ZmxRoot) "trusted provider roots are required for license attribution"
@@ -454,7 +480,7 @@ function Install-Package([bool] $upgrade) {
     Verify-Manifest $root | Out-Null
     Read-ProviderProvenance $root | Out-Null
     Verify-SignedPackage $root $metadata
-    if ($Version -ne "0.0.0-dev" -and $metadata.version -ne $Version) { Fail "version mismatch: expected $Version, package is $($metadata.version)" }
+    if ($versionWasProvided -and $metadata.version -ne $Version) { Fail "version mismatch: expected $Version, package is $($metadata.version)" }
   $parent = Split-Path $InstallRoot -Parent
   New-Item -ItemType Directory -Force -Path $parent | Out-Null
   $stage = Join-Path $parent ".GraphCode-install-$([guid]::NewGuid())"
