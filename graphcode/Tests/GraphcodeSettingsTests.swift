@@ -30,9 +30,10 @@ struct GraphcodeSettingsTests {
     defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
     let settings = GraphcodeSettings(
       defaultBackend: .copilotCLI, defaultModelTier: .capable,
+      codexApprovals: .unsandboxed,
       claudePermissionMode: .bypassPermissions,
       copilotPermissions: .ask, briefsSessionsAboutTheGraph: false,
-      betaUpdates: true)
+      autoSelectsModel: true, showsActivityStrip: true, betaUpdates: true)
 
     #expect(GraphcodeSettingsStore.save(settings, to: url))
     #expect(GraphcodeSettingsStore.load(from: url) == settings)

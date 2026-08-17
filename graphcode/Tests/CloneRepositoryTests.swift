@@ -34,6 +34,23 @@ struct CloneRepositoryTests {
     #expect(GitClient.cloneCredentials(of: "https://github.com/a/b.git") == nil)
   }
 
+  @Test
+  func cloneUsesNativeSeparatedArgumentsAndRedactsCredentials() {
+    let url = "https://token@example.com/acme/über.git"
+    let destination = #"C:\Users\me\Проекты\über"#
+    let arguments = GitClient.cloneArguments(
+      url: url, destinationPath: destination, branch: "main", depth: 1)
+
+    #expect(Array(arguments.prefix(3)) == ["git", "clone", "--progress"])
+    #expect(arguments.contains("--"))
+    #expect(arguments.last == destination)
+    #expect(
+      GitClient.redactCloneOutput(
+        "fatal: https://token@example.com/acme/über.git", credentials: "token")
+        == "fatal: https://•••@example.com/acme/über.git")
+    #expect(arguments[arguments.firstIndex(of: "--")! + 1] == url)
+  }
+
   // MARK: - Draft derivations
 
   @Test

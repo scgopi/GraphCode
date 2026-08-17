@@ -208,8 +208,7 @@ private func runClone(
     // stderr lines, and `commandFailed` should carry them rather than a bare status.
     let recentLines = OSAllocatedUnfairLock(initialState: [String]())
     let onLine: @Sendable (String) -> Void = { line in
-      let shown =
-        credentials.map { line.replacingOccurrences(of: $0, with: "•••") } ?? line
+      let shown = GitClient.redactCloneOutput(line, credentials: credentials)
       recentLines.withLock { recent in
         recent.append(shown)
         if recent.count > 5 { recent.removeFirst() }
@@ -257,13 +256,8 @@ private func runClone(
 private func cloneProcess(
   url: String, destinationPath: String, branch: String?, depth: Int?
 ) -> Process {
-  var arguments = ["git", "clone", "--progress"]
-  if let branch, !branch.isEmpty { arguments += ["--branch", branch] }
-  if let depth { arguments += ["--depth", String(depth)] }
-  // `--` before the positionals so a pasted URL like `--upload-pack=<cmd>` reaches git
-  // as a repository to clone, not an option to obey (git's clone-URL option injection,
-  // CVE-2017-1000117 shape). Documented git syntax: `clone [<options>] [--] <repo> [dir]`.
-  arguments += ["--", url, destinationPath]
+  let arguments = GitClient.cloneArguments(
+    url: url, destinationPath: destinationPath, branch: branch, depth: depth)
 
   let process = Process()
   process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -279,6 +273,26 @@ private func cloneProcess(
   environment["LC_ALL"] = "C"
   process.environment = environment
   return process
+}
+
+extension GitClient {
+  /// The native-process argv used by clone. Keeping this pure makes the option boundary
+  /// executable in tests and prevents a future UI caller from rebuilding it through a
+  /// shell string.
+  static func cloneArguments(
+    url: String, destinationPath: String, branch: String?, depth: Int?
+  ) -> [String] {
+    var arguments = ["git", "clone", "--progress"]
+    if let branch, !branch.isEmpty { arguments += ["--branch", branch] }
+    if let depth { arguments += ["--depth", String(depth)] }
+    // `--` before the positionals keeps pasted URLs and Unicode destinations positional.
+    arguments += ["--", url, destinationPath]
+    return arguments
+  }
+
+  static func redactCloneOutput(_ line: String, credentials: String?) -> String {
+    credentials.map { line.replacingOccurrences(of: $0, with: "•••") } ?? line
+  }
 }
 
 /// Feeds `onLine` every completed line out of `pipe`, treating `\r` (git's redraw-in-
