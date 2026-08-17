@@ -864,6 +864,22 @@ pub const App = struct {
         }
     }
 
+    pub fn checkForUpdates(self: *App) void {
+            const beta = self.update_state.channel == .beta;
+            var client = WindowsUpdates.CheckClient{ .allocator = self.allocator };
+            const result = client.check(beta, "0.0.0") catch {
+                self.update_state = .{ .channel = if (beta) .beta else .stable, .state = .failed };
+                self.setStatus(self.update_state.label());
+                return;
+            };
+            defer {
+                var owned = result;
+                owned.deinit(self.allocator);
+            }
+            self.update_state = .{ .channel = result.channel, .state = result.state };
+            self.setStatus(self.update_state.label());
+    }
+
     fn addRemoteRepository(self: *App) void {
         const draft = RepositoryDialogs.openRemote(self.window.hwnd, self.allocator, .{}) catch {
             self.setStatus("Unable to open SSH repository dialog");
@@ -887,9 +903,7 @@ pub const App = struct {
             self.setStatus("SSH validated but remote configuration could not be saved");
             return;
         };
-        const remote_path = std.fmt.allocPrint(self.allocator, "ssh://{s}@{s}:{s}{s}", .{
-            draft.user, draft.host, draft.port, draft.path,
-        }) catch {
+        const remote_path = RepositoryDialogs.remoteProjectURI(self.allocator, draft) catch {
             self.setStatus("Unable to encode remote repository");
             return;
         };

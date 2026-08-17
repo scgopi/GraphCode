@@ -94,18 +94,29 @@ pub const Store = struct {
         const data = std.fs.cwd().readFileAlloc(self.allocator, self.path, 16 * 1024) catch
             return Settings.init(self.allocator);
         defer self.allocator.free(data);
-        const parsed = try std.json.parseFromSlice(Contract, self.allocator, data, .{});
-        defer parsed.deinit();
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const value = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), data, .{});
+        if (value != .object) return error.SettingsRootMustBeObject;
+        const stringValue = struct {
+            fn get(object: std.json.ObjectMap, name: []const u8, fallback: []const u8) []const u8 {
+                return if (object.get(name)) |item| if (item == .string) item.string else fallback else fallback;
+            }
+            fn boolean(object: std.json.ObjectMap, name: []const u8, fallback: bool) bool {
+                return if (object.get(name)) |item| if (item == .bool) item.bool else fallback else fallback;
+            }
+        };
+        const object = value.object;
         return Settings.parse(self.allocator, &.{
-            parsed.value.defaultBackend orelse "claudeCode",
-            parsed.value.defaultModelTier orelse "standard",
-            parsed.value.claudePermissionMode orelse "auto",
-            parsed.value.copilotPermissions orelse "allowEverything",
-            parsed.value.codexApprovals orelse "workspace",
-            if (parsed.value.showsActivityStrip orelse false) "on" else "off",
-            if (parsed.value.briefsSessionsAboutTheGraph orelse true) "on" else "off",
-            if (parsed.value.betaUpdates orelse false) "on" else "off",
-            if (parsed.value.autoSelectsModel orelse false) "on" else "off",
+            stringValue.get(object, "defaultBackend", "claudeCode"),
+            stringValue.get(object, "defaultModelTier", "standard"),
+            stringValue.get(object, "claudePermissionMode", "auto"),
+            stringValue.get(object, "copilotPermissions", "allowEverything"),
+            stringValue.get(object, "codexApprovals", "workspace"),
+            if (stringValue.boolean(object, "showsActivityStrip", false)) "on" else "off",
+            if (stringValue.boolean(object, "briefsSessionsAboutTheGraph", true)) "on" else "off",
+            if (stringValue.boolean(object, "betaUpdates", false)) "on" else "off",
+            if (stringValue.boolean(object, "autoSelectsModel", false)) "on" else "off",
         });
     }
 
@@ -237,6 +248,26 @@ test "settings save preserves worktree policies and unknown JSON fields" {
     try std.testing.expect(std.mem.indexOf(u8, saved, "worktreePolicies") != null);
     try std.testing.expect(std.mem.indexOf(u8, saved, "futureFlag") != null);
     try std.testing.expect(std.mem.indexOf(u8, saved, "copilotCLI") != null);
+}
+
+test "settings load then save preserves unknown fields and worktree policies" {
+    const path = "graphcode-settings-load-save-preservation-test.json";
+    std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    var file = try std.fs.cwd().createFile(path, .{});
+    try file.writeAll("{\"worktreePolicies\":{\"repo\":\"ask\"},\"future\":{\"enabled\":true},\"defaultBackend\":\"copilotCLI\",\"defaultModelTier\":\"capable\"}");
+    file.close();
+    var store = Store{ .allocator = std.testing.allocator, .path = try std.testing.allocator.dupe(u8, path) };
+    defer store.deinit();
+    var settings = try store.load();
+    defer settings.deinit();
+    try std.testing.expectEqualStrings("copilotCLI", settings.default_backend);
+    try std.testing.expectEqualStrings("capable", settings.default_model);
+    try store.save(settings);
+    const saved = try std.fs.cwd().readFileAlloc(std.testing.allocator, path, 4096);
+    defer std.testing.allocator.free(saved);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "worktreePolicies") != null);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "\"future\"") != null);
 }
 
 test "settings reject values outside Swift selector enums" {

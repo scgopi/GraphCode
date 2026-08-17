@@ -48,7 +48,13 @@ public struct RemoteProjectLocation: Equatable, Sendable {
 
   /// The path string this location travels as — `parse`'s inverse.
   public var projectPath: String {
-    "\(Self.scheme)://\(authority)\(remotePath)"
+    var components = URLComponents()
+    components.scheme = Self.scheme
+    components.user = user
+    components.host = host
+    components.port = port
+    components.path = remotePath
+    return components.string ?? "\(Self.scheme)://\(authority)\(remotePath)"
   }
 
   /// An absolute remote path reduced to the one spelling git will print for it, so two

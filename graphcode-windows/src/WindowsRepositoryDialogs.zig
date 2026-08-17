@@ -37,9 +37,9 @@ pub const CloneProcess = struct {
     recent_stderr_len: usize = 0,
     progress: [256]u8 = undefined,
     progress_len: usize = 0,
-    redaction_pending_stdout: [128]u8 = undefined,
+    redaction_pending_stdout: [16384]u8 = undefined,
     redaction_pending_stdout_len: usize = 0,
-    redaction_pending_stderr: [128]u8 = undefined,
+    redaction_pending_stderr: [16384]u8 = undefined,
     redaction_pending_stderr_len: usize = 0,
     output_lock: std.Thread.Mutex = .{},
     finished: bool = false,
@@ -126,9 +126,9 @@ pub const CloneProcess = struct {
         defer self.output_lock.unlock();
         const pending = if (is_stderr) self.redaction_pending_stderr[0..self.redaction_pending_stderr_len]
             else self.redaction_pending_stdout[0..self.redaction_pending_stdout_len];
-        var combined: [4352]u8 = undefined;
         const combined_len = pending.len + bytes.len;
-        if (combined_len > combined.len) return;
+        const combined = self.allocator.alloc(u8, combined_len) catch return;
+        defer self.allocator.free(combined);
         @memcpy(combined[0..pending.len], pending);
         @memcpy(combined[pending.len..combined_len], bytes);
         const safe_end = if (flush) combined_len else combined_len - @min(combined_len, 128);
@@ -309,6 +309,33 @@ pub fn validateRemote(fields: RemoteFields) !void {
 pub fn sshDestination(allocator: std.mem.Allocator, fields: RemoteFields) ![]u8 {
     try validateRemote(fields);
     return std.fmt.allocPrint(allocator, "{s}@{s}", .{ fields.user, fields.host });
+}
+
+pub fn remoteProjectURI(allocator: std.mem.Allocator, fields: RemoteFields) ![]u8 {
+    try validateRemote(fields);
+    var encoded = std.array_list.Managed(u8).init(allocator);
+    defer encoded.deinit();
+    try encoded.appendSlice("ssh://");
+    for (fields.user) |byte| try appendURIByte(&encoded, byte, true);
+    try encoded.append('@');
+    if (std.mem.indexOfScalar(u8, fields.host, ':') != null) try encoded.append('[');
+    for (fields.host) |byte| try appendURIByte(&encoded, byte, false);
+    if (std.mem.indexOfScalar(u8, fields.host, ':') != null) try encoded.append(']');
+    if (!std.mem.eql(u8, fields.port, "22")) {
+        try encoded.append(':');
+        try encoded.appendSlice(fields.port);
+    }
+    for (fields.path) |byte| try appendURIByte(&encoded, byte, byte != '/');
+    return encoded.toOwnedSlice();
+}
+
+fn appendURIByte(list: *std.array_list.Managed(u8), byte: u8, encode: bool) !void {
+    const safe = std.ascii.isAlphanumeric(byte) or std.mem.indexOfScalar(u8, "-._~", byte) != null;
+    if (safe or (!encode and (byte == '/' or byte == ':'))) return list.append(byte);
+    const hex = "0123456789ABCDEF";
+    try list.append('%');
+    try list.append(hex[byte >> 4]);
+    try list.append(hex[byte & 15]);
 }
 
 pub fn reconnectCommand(allocator: std.mem.Allocator, fields: RemoteFields) ![]u8 {
@@ -531,6 +558,25 @@ test "SSH reconnect command quotes shell metacharacters and rejects newlines" {
     try std.testing.expectError(error.InvalidSSHComponent, validateRemote(.{
         .host = "build-box", .user = "dev\nwhoami", .path = "/repo",
     }));
+}
+
+test "remote URI percent-encodes path and brackets IPv6" {
+    const uri = try remoteProjectURI(std.testing.allocator, .{
+        .host = "2001:db8::1", .user = "dev", .port = "2200", .path = "/repo name/#q?x%雪",
+    });
+    defer std.testing.allocator.free(uri);
+    try std.testing.expectEqualStrings("ssh://dev@[2001:db8::1]:2200/repo%20name/%23q%3Fx%25%E9%9B%AA", uri);
+}
+
+test "redaction handles output larger than four kilobytes" {
+    var input = std.array_list.Managed(u8).init(std.testing.allocator);
+    defer input.deinit();
+    try input.appendNTimes('x', 8192);
+    try input.appendSlice(" https://user:very-long-secret@example.test/repo.git ");
+    const safe = try redactSecrets(std.testing.allocator, input.items);
+    defer std.testing.allocator.free(safe);
+    try std.testing.expect(std.mem.indexOf(u8, safe, "very-long-secret") == null);
+    try std.testing.expect(std.mem.indexOf(u8, safe, "<redacted>@example.test") != null);
 }
 
 test "clone output redacts hostile HTTPS credentials" {
