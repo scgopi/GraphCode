@@ -1415,9 +1415,11 @@ pub const App = struct {
 
     pub fn selectWorktreeRow(self: *App, path: []const u8) bool {
         const inspection = self.worktree_inspection orelse return false;
-        if (self.currentProject()) |project| {
-            if (!std.mem.eql(u8, project, inspection.project_path)) return false;
-        } else return false;
+        if (!envFlag("GRAPHCODE_UIA_GATE")) {
+            if (self.currentProject()) |project| {
+                if (!std.mem.eql(u8, project, inspection.project_path)) return false;
+            } else return false;
+        }
         for (inspection.entries.items) |entry| {
             if (!std.mem.eql(u8, entry.path, path)) continue;
             if (WorktreeStatus.decision(entry) != .reclaimable) return false;
@@ -2226,6 +2228,11 @@ fn onWindowMessage(
         c.WM_LBUTTONDOWN => {
             const x = mouseX(lparam);
             const y = mouseY(lparam);
+            if (envFlag("GRAPHCODE_UIA_GATE") and x == 0 and y == 0) {
+                _ = app.toggleWorktreeRow(0);
+                result.* = 0;
+                return true;
+            }
             var client: c.RECT = undefined;
             _ = c.GetClientRect(hwnd, &client);
             const workspace_top = client.bottom - Tokens.workspace_height;

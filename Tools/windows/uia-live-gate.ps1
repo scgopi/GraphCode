@@ -16,14 +16,24 @@ public static class GraphCodeUiaGateState {
   public static volatile bool LiveObserved;
   public static volatile bool NamePropertyObserved;
   public static volatile bool FocusObserved;
+  public static int SelectedEvents;
+  public static int AddedEvents;
+  public static int RemovedEvents;
+  public static int TogglePropertyEvents;
   public static string LiveSourceAutomationId;
   public static string LiveSourceName;
   public static string LiveSourceRuntimeId;
   public static string NamePropertySourceAutomationId;
   public static string FocusSourceAutomationId;
+  public static string SelectionSourceAutomationId;
+  public static string TogglePropertySourceAutomationId;
   public static readonly AutomationEventHandler LiveHandler = HandleLive;
   public static readonly AutomationPropertyChangedEventHandler NamePropertyHandler = HandleNameProperty;
   public static readonly AutomationFocusChangedEventHandler FocusHandler = HandleFocus;
+  public static readonly AutomationEventHandler SelectedHandler = HandleSelected;
+  public static readonly AutomationEventHandler AddedHandler = HandleAdded;
+  public static readonly AutomationEventHandler RemovedHandler = HandleRemoved;
+  public static readonly AutomationPropertyChangedEventHandler TogglePropertyHandler = HandleToggleProperty;
   private static void HandleLive(object sender, AutomationEventArgs eventArgs) {
     var element = sender as AutomationElement;
     if (element == null) return;
@@ -42,10 +52,36 @@ public static class GraphCodeUiaGateState {
     if (element != null) FocusSourceAutomationId = element.Current.AutomationId;
     FocusObserved = true;
   }
+  private static void HandleSelected(object sender, AutomationEventArgs eventArgs) {
+    var element = sender as AutomationElement;
+    if (element != null) SelectionSourceAutomationId = element.Current.AutomationId;
+    SelectedEvents++;
+  }
+  private static void HandleAdded(object sender, AutomationEventArgs eventArgs) {
+    var element = sender as AutomationElement;
+    if (element != null) SelectionSourceAutomationId = element.Current.AutomationId;
+    AddedEvents++;
+  }
+  private static void HandleRemoved(object sender, AutomationEventArgs eventArgs) {
+    var element = sender as AutomationElement;
+    if (element != null) SelectionSourceAutomationId = element.Current.AutomationId;
+    RemovedEvents++;
+  }
+  private static void HandleToggleProperty(object sender, AutomationPropertyChangedEventArgs eventArgs) {
+    var element = sender as AutomationElement;
+    if (element != null) TogglePropertySourceAutomationId = element.Current.AutomationId;
+    TogglePropertyEvents++;
+  }
   [DllImport("user32.dll", SetLastError = true)]
   private static extern bool PostMessage(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
   public static bool PostFixtureMutation(IntPtr window, uint mutation) {
     return PostMessage(window, 0x802A, (UIntPtr)mutation, IntPtr.Zero);
+  }
+  public static bool PostKeyboard(IntPtr window, uint key) {
+    return PostMessage(window, 0x0100, (UIntPtr)key, IntPtr.Zero);
+  }
+  public static bool PostMouseClick(IntPtr window) {
+    return PostMessage(window, 0x0201, UIntPtr.Zero, IntPtr.Zero);
   }
 }
 "@ -ReferencedAssemblies @(
@@ -204,18 +240,76 @@ try {
   $safeRowRuntimeId = Get-RuntimeIdentity $safeRow
   $safeSelection = $safeRow.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
   $unsafeSelection = $unsafeRow.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
-  $safeSelection.Select()
-  Start-Sleep -Milliseconds 100
-  Require ($safeSelection.Current.IsSelected) "safe SelectionItem.Select was not observed"
-  $unsafeRejected = $false
-  try { $unsafeSelection.Select() } catch { $unsafeRejected = $true }
-  Require $unsafeRejected "unsafe SelectionItem.Select was accepted"
-  $safeSelection.RemoveFromSelection()
-  Start-Sleep -Milliseconds 100
-  Require ($selection.Current.GetSelection().Count -eq 0) "selection removal was not observed"
-  $safeSelection.Select()
-  Start-Sleep -Milliseconds 100
-  Require (($selection.Current.GetSelection().Count -eq 1) -and $safeSelection.Current.IsSelected) "repeated SelectionItem.Select was not observed"
+  [GraphCodeUiaGateState]::SelectedEvents = 0
+  [GraphCodeUiaGateState]::AddedEvents = 0
+  [GraphCodeUiaGateState]::RemovedEvents = 0
+  [GraphCodeUiaGateState]::SelectionSourceAutomationId = $null
+  $selectedEvent = [System.Windows.Automation.SelectionItemPattern]::ElementSelectedEvent
+  $addedEvent = [System.Windows.Automation.SelectionItemPattern]::ElementAddedToSelectionEvent
+  $removedEvent = [System.Windows.Automation.SelectionItemPattern]::ElementRemovedFromSelectionEvent
+  $selectedHandler = [GraphCodeUiaGateState]::SelectedHandler
+  $addedHandler = [GraphCodeUiaGateState]::AddedHandler
+  $removedHandler = [GraphCodeUiaGateState]::RemovedHandler
+  [System.Windows.Automation.Automation]::AddAutomationEventHandler(
+    $selectedEvent, $safeRow, [System.Windows.Automation.TreeScope]::Element, $selectedHandler
+  )
+  [System.Windows.Automation.Automation]::AddAutomationEventHandler(
+    $addedEvent, $safeRow, [System.Windows.Automation.TreeScope]::Element, $addedHandler
+  )
+  [System.Windows.Automation.Automation]::AddAutomationEventHandler(
+    $removedEvent, $safeRow, [System.Windows.Automation.TreeScope]::Element, $removedHandler
+  )
+  try {
+    $safeSelection.Select()
+    for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::SelectedEvents -lt 1; $index++) {
+      Start-Sleep -Milliseconds 50
+    }
+    Require (($safeSelection.Current.IsSelected) -and
+             ([GraphCodeUiaGateState]::SelectedEvents -eq 1)) "Select did not raise ElementSelected exactly once"
+    $safeSelection.Select()
+    Start-Sleep -Milliseconds 150
+    Require ([GraphCodeUiaGateState]::SelectedEvents -eq 1) "idempotent Select raised a duplicate event"
+    $unsafeRejected = $false
+    try { $unsafeSelection.Select() } catch { $unsafeRejected = $true }
+    Require $unsafeRejected "unsafe SelectionItem.Select was accepted"
+    $safeSelection.RemoveFromSelection()
+    for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::RemovedEvents -lt 1; $index++) {
+      Start-Sleep -Milliseconds 50
+    }
+    Require (($selection.Current.GetSelection().Count -eq 0) -and
+             ([GraphCodeUiaGateState]::RemovedEvents -eq 1)) "RemoveFromSelection did not raise ElementRemovedFromSelection"
+    $safeSelection.RemoveFromSelection()
+    Start-Sleep -Milliseconds 150
+    Require ([GraphCodeUiaGateState]::RemovedEvents -eq 1) "idempotent RemoveFromSelection raised a duplicate event"
+    $safeSelection.AddToSelection()
+    for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::AddedEvents -lt 1; $index++) {
+      Start-Sleep -Milliseconds 50
+    }
+    Require ([GraphCodeUiaGateState]::AddedEvents -eq 1) "AddToSelection did not raise ElementAddedToSelection"
+    $safeSelection.AddToSelection()
+    Start-Sleep -Milliseconds 150
+    Require ([GraphCodeUiaGateState]::AddedEvents -eq 1) "idempotent AddToSelection raised a duplicate event"
+    $safeSelection.RemoveFromSelection()
+    for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::RemovedEvents -lt 2; $index++) {
+      Start-Sleep -Milliseconds 50
+    }
+    Require ([GraphCodeUiaGateState]::RemovedEvents -eq 2) "second RemoveFromSelection did not raise an event"
+    Require ([GraphCodeUiaGateState]::PostKeyboard($process.MainWindowHandle, 0x28)) "keyboard selection message was rejected"
+    for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::SelectedEvents -lt 2; $index++) {
+      Start-Sleep -Milliseconds 50
+    }
+    Require ([GraphCodeUiaGateState]::SelectedEvents -eq 2) "App keyboard selection did not raise ElementSelected"
+    Require ([GraphCodeUiaGateState]::PostMouseClick($process.MainWindowHandle)) "mouse selection message was rejected"
+    for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::RemovedEvents -lt 3; $index++) {
+      Start-Sleep -Milliseconds 50
+    }
+    Require ([GraphCodeUiaGateState]::RemovedEvents -eq 3) "App mouse selection did not raise ElementRemovedFromSelection"
+    Require ([GraphCodeUiaGateState]::SelectionSourceAutomationId -eq $safeRowId) "selection event source identity changed"
+  } finally {
+    [System.Windows.Automation.Automation]::RemoveAutomationEventHandler($selectedEvent, $safeRow, $selectedHandler)
+    [System.Windows.Automation.Automation]::RemoveAutomationEventHandler($addedEvent, $safeRow, $addedHandler)
+    [System.Windows.Automation.Automation]::RemoveAutomationEventHandler($removedEvent, $safeRow, $removedHandler)
+  }
 
   $actions = @{}
   foreach ($actionId in @("inspect-worktrees", "reclaim-worktrees", "reveal-worktree",
@@ -224,6 +318,43 @@ try {
     $action = Find-FragmentById $root $actionId $rawWalker
     Require ($null -ne $action) "missing action $actionId"
     $actions[$actionId] = $action.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+  }
+  $allowReclaim = Find-FragmentById $root "allow-reclaim" $controlWalker
+  $confirmReclaim = Find-FragmentById $root "confirm-each-reclaim" $controlWalker
+  Require (($null -ne $allowReclaim) -and ($null -ne $confirmReclaim)) "missing worktree policy toggles"
+  $allowToggle = $allowReclaim.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
+  $confirmToggle = $confirmReclaim.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
+  [GraphCodeUiaGateState]::TogglePropertyEvents = 0
+  [GraphCodeUiaGateState]::TogglePropertySourceAutomationId = $null
+  $togglePropertyHandler = [GraphCodeUiaGateState]::TogglePropertyHandler
+  [System.Windows.Automation.Automation]::AddAutomationPropertyChangedEventHandler(
+    $allowReclaim, [System.Windows.Automation.TreeScope]::Element, $togglePropertyHandler,
+    [System.Windows.Automation.TogglePattern]::ToggleStateProperty
+  )
+  [System.Windows.Automation.Automation]::AddAutomationPropertyChangedEventHandler(
+    $confirmReclaim, [System.Windows.Automation.TreeScope]::Element, $togglePropertyHandler,
+    [System.Windows.Automation.TogglePattern]::ToggleStateProperty
+  )
+  try {
+    $allowToggle.Toggle()
+    for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::TogglePropertyEvents -lt 1; $index++) {
+      Start-Sleep -Milliseconds 50
+    }
+    Require (([GraphCodeUiaGateState]::TogglePropertyEvents -eq 1) -and
+             ([GraphCodeUiaGateState]::TogglePropertySourceAutomationId -eq "allow-reclaim")) "allow reclaim did not raise ToggleState property change"
+    $confirmToggle.Toggle()
+    for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::TogglePropertyEvents -lt 2; $index++) {
+      Start-Sleep -Milliseconds 50
+    }
+    Require (([GraphCodeUiaGateState]::TogglePropertyEvents -eq 2) -and
+             ([GraphCodeUiaGateState]::TogglePropertySourceAutomationId -eq "confirm-each-reclaim")) "confirm reclaim did not raise ToggleState property change"
+  } finally {
+    [System.Windows.Automation.Automation]::RemoveAutomationPropertyChangedEventHandler(
+      $allowReclaim, $togglePropertyHandler
+    )
+    [System.Windows.Automation.Automation]::RemoveAutomationPropertyChangedEventHandler(
+      $confirmReclaim, $togglePropertyHandler
+    )
   }
 
   $status = Find-FragmentById $root "status" $controlWalker
@@ -388,6 +519,14 @@ try {
     fixtureRows = 2
     unsafeSelectionRejected = $unsafeRejected
     repeatedSelectionObserved = $true
+    selectionEvents = @{
+      selected = [GraphCodeUiaGateState]::SelectedEvents
+      added = [GraphCodeUiaGateState]::AddedEvents
+      removed = [GraphCodeUiaGateState]::RemovedEvents
+      source = [GraphCodeUiaGateState]::SelectionSourceAutomationId
+    }
+    togglePropertyEvents = [GraphCodeUiaGateState]::TogglePropertyEvents
+    togglePropertySource = [GraphCodeUiaGateState]::TogglePropertySourceAutomationId
     actionPatterns = @($actions.Keys | Sort-Object)
     statusText = $statusTextAfter
     statusChanged = ($statusTextAfter -ne $initialStatus)

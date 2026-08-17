@@ -417,15 +417,22 @@ class Node final : public IRawElementProviderSimple,
     std::wstring new_status;
     Node *status_node = nullptr;
     Node *focus_node = nullptr;
+    Node *allow_reclaim_node = nullptr;
+    Node *confirm_reclaim_node = nullptr;
     std::vector<Node *> retired;
+    std::vector<std::pair<Node *, EVENTID>> selection_events;
     bool focus_changed = false;
     bool structure_changed = false;
+    bool allow_reclaim_changed = false;
+    bool confirm_reclaim_changed = false;
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
       if (!state_->active) return;
       old_status = state_->status;
       state_->status = wide(status);
       new_status = state_->status;
+      const bool old_allow_reclaim = state_->allow_reclaim;
+      const bool old_confirm_reclaim = state_->confirm_each_reclaim;
       state_->allow_reclaim = allow_reclaim;
       state_->confirm_each_reclaim = confirm_each_reclaim;
 
@@ -450,6 +457,24 @@ class Node final : public IRawElementProviderSimple,
         next_order.push_back(key);
       }
       structure_changed = state_->row_order != next_order || state_->rows.size() != next_rows.size();
+      std::vector<int64_t> added_selection;
+      std::vector<int64_t> removed_selection;
+      size_t next_selected_count = 0;
+      for (const auto &item : next_rows) {
+        if (item.second.selected) ++next_selected_count;
+        const auto old = state_->rows.find(item.first);
+        if (item.second.selected &&
+            (old == state_->rows.end() || !old->second.selected)) {
+          added_selection.push_back(item.first);
+        }
+      }
+      for (const auto &item : state_->rows) {
+        const auto next = next_rows.find(item.first);
+        if (item.second.selected &&
+            (next == next_rows.end() || !next->second.selected)) {
+          removed_selection.push_back(item.first);
+        }
+      }
       for (const auto &item : state_->rows) {
         if (next_rows.find(item.first) != next_rows.end()) continue;
         const auto element = state_->elements.find(item.first);
@@ -460,6 +485,26 @@ class Node final : public IRawElementProviderSimple,
       }
       state_->rows = std::move(next_rows);
       state_->row_order = std::move(next_order);
+      if (added_selection.size() == 1 && next_selected_count == 1) {
+        if (Node *node = retainElementLocked(added_selection.front())) {
+          selection_events.emplace_back(node, UIA_SelectionItem_ElementSelectedEventId);
+        }
+      } else {
+        for (int64_t id : added_selection) {
+          if (Node *node = retainElementLocked(id)) {
+            selection_events.emplace_back(node, UIA_SelectionItem_ElementAddedToSelectionEventId);
+          }
+        }
+        for (int64_t id : removed_selection) {
+          if (Node *node = retainElementLocked(id)) {
+            selection_events.emplace_back(node, UIA_SelectionItem_ElementRemovedFromSelectionEventId);
+          }
+        }
+      }
+      allow_reclaim_changed = old_allow_reclaim != state_->allow_reclaim;
+      confirm_reclaim_changed = old_confirm_reclaim != state_->confirm_each_reclaim;
+      if (allow_reclaim_changed) allow_reclaim_node = retainElementLocked(12);
+      if (confirm_reclaim_changed) confirm_reclaim_node = retainElementLocked(13);
       const int64_t old_focus = state_->focused;
       if (!isKeyAvailableLocked(state_->focused)) state_->focused = 0;
       focus_changed = old_focus != state_->focused;
@@ -467,6 +512,13 @@ class Node final : public IRawElementProviderSimple,
       if (focus_changed) focus_node = retainElementLocked(state_->focused);
     }
     for (Node *node : retired) node->Release();
+    for (const auto &event : selection_events) {
+      UiaRaiseAutomationEvent(
+          static_cast<IRawElementProviderSimple *>(event.first), event.second);
+      event.first->Release();
+    }
+    raiseToggleChanged(allow_reclaim_node, !allow_reclaim, allow_reclaim);
+    raiseToggleChanged(confirm_reclaim_node, !confirm_each_reclaim, confirm_each_reclaim);
     if (structure_changed) {
       UiaRaiseStructureChangedEvent(
           static_cast<IRawElementProviderSimple *>(this),
@@ -653,6 +705,20 @@ class Node final : public IRawElementProviderSimple,
     VariantClear(&new_value);
     status_node->Release();
   }
+  void raiseToggleChanged(Node *toggle_node, bool old_value, bool new_value) {
+    if (!toggle_node) return;
+    VARIANT old_state, new_state;
+    VariantInit(&old_state);
+    VariantInit(&new_state);
+    old_state.vt = VT_I4;
+    old_state.lVal = old_value ? ToggleState_On : ToggleState_Off;
+    new_state.vt = VT_I4;
+    new_state.lVal = new_value ? ToggleState_On : ToggleState_Off;
+    UiaRaiseAutomationPropertyChangedEvent(
+        static_cast<IRawElementProviderSimple *>(toggle_node),
+        UIA_ToggleToggleStatePropertyId, old_state, new_state);
+    toggle_node->Release();
+  }
   HRESULT setSelected(SelectionOperation operation) {
     HWND hwnd = nullptr;
     bool changed = false;
@@ -664,7 +730,8 @@ class Node final : public IRawElementProviderSimple,
         return UIA_E_INVALIDOPERATION;
       if (operation == kSelect) {
         for (auto &item : state_->rows) {
-          if (item.second.selected && item.first != id_) changed = true;
+          if (item.first == id_) continue;
+          if (item.second.selected) changed = true;
           item.second.selected = false;
         }
       }
@@ -678,10 +745,11 @@ class Node final : public IRawElementProviderSimple,
         (static_cast<WPARAM>(id_) & kRowPayloadMask);
     PostMessageW(hwnd, WM_COMMAND, command, 0);
     if (changed) {
+      EVENTID event = UIA_SelectionItem_ElementSelectedEventId;
+      if (operation == kAdd) event = UIA_SelectionItem_ElementAddedToSelectionEventId;
+      if (operation == kRemove) event = UIA_SelectionItem_ElementRemovedFromSelectionEventId;
       UiaRaiseAutomationEvent(
-          static_cast<IRawElementProviderSimple *>(this),
-          operation == kRemove ? UIA_SelectionItem_ElementRemovedFromSelectionEventId
-                               : UIA_SelectionItem_ElementSelectedEventId);
+          static_cast<IRawElementProviderSimple *>(this), event);
     }
     return S_OK;
   }
