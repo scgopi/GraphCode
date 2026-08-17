@@ -501,9 +501,6 @@ pub fn commandGraphDeleteEdge(
     });
 }
 
-pub fn commandGraphDeleteNode(allocator: std.mem.Allocator, project_path: []const u8, node_id: []const u8) ![]u8 {
-    return graphUnaryUUID(allocator, project_path, "deleteNode", node_id);
-}
 
 pub fn commandGraphPilotComposite(allocator: std.mem.Allocator, project_path: []const u8, node_id: []const u8) ![]u8 {
     return graphUnaryUUID(allocator, project_path, "pilotComposite", node_id);

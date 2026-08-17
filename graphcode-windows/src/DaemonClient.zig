@@ -278,12 +278,7 @@ pub const DaemonClient = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         return self.mode != .v1 or
-<<<<<<< HEAD
-            (self.outbound_count == 0 and !self.worker_busy and self.v1_pending_count == 0);
-
-=======
             (self.outbound_count == 0 and !self.worker_busy and self.v1_pending_expectation == null);
->>>>>>> c0309fd (fix(windows): account v1 responses by expected event)
     }
 
     pub fn sendCreateNode(self: *DaemonClient, project_path: []const u8, title: []const u8) void {
@@ -386,16 +381,6 @@ pub const DaemonClient = struct {
             self.publishState(self.connectionState(), "create edge command encoding failed");
             return;
         };
-        self.sendCommand(command);
-    }
-
-    pub fn sendDeleteNode(self: *DaemonClient, project_path: []const u8, node_id: []const u8) void {
-        const command = Wire.commandGraphDeleteNode(self.allocator, project_path, node_id) catch return;
-        self.sendCommand(command);
-    }
-
-    pub fn sendDeleteEdge(self: *DaemonClient, project_path: []const u8, edge_id: []const u8) void {
-        const command = Wire.commandGraphDeleteEdge(self.allocator, project_path, edge_id) catch return;
         self.sendCommand(command);
     }
 

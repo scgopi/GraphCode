@@ -415,8 +415,15 @@ pub const Model = struct {
     }
 
     pub fn findEdgeIndex(self: *const Model, id: []const u8) ?usize {
-        const graph = self.graph orelse return null;
-        return findEdgeIndexByID(graph.edges.items, id);
+        if (self.graph) |graph| {
+            if (findEdgeIndexByID(graph.edges.items, id)) |index| return index;
+        }
+        const summary = self.currentGraph() orelse return null;
+        if (findEdgeIndexByID(summary.edges.items, id)) |index| return index;
+        for (self.graphs.items) |candidate| {
+            if (findEdgeIndexByID(candidate.edges.items, id)) |index| return index;
+        }
+        return null;
     }
 
     pub fn selectNext(self: *Model) void {
@@ -670,7 +677,6 @@ pub const Model = struct {
             if (std.mem.eql(u8, entry.project_path, path)) return entry.generation == self.restore_generation;
         }
         return false;
-        if (graph.nodes.items.len == 0) self.selected_node = null;
     }
 
     fn replaceAttention(self: *Model, graph: *const Graph) void {
@@ -696,7 +702,6 @@ pub const Model = struct {
             std.sort.heap(AttentionEntry, self.attention_entries.items, {}, compareAttentionEntry);
             std.sort.heap(Node, self.attention.items, {}, compareAttentionNode);
         }
-    }
 
     fn recordActivity(self: *Model, next: Graph) void {
         const previous = self.graphFor(next.project.path) orelse return;
@@ -1312,6 +1317,8 @@ test "activity compares the prior graph for the same project across interleaved 
     try std.testing.expectEqual(@as(usize, 1), model.activity.items.len);
     try std.testing.expectEqualStrings("A", model.activity.items[0].title);
     try std.testing.expectEqualStrings("failed", model.activity.items[0].state);
+}
+
 test "worktrees are limited to local filesystem projects" {
     const local = Project{ .path = @constCast("C:\\work\\graph"), .name = @constCast("Graph") };
     const remote = Project{ .path = @constCast("ssh://host/graph"), .name = @constCast("Graph") };
