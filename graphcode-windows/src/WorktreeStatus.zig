@@ -14,6 +14,91 @@ pub const Entry = struct {
     bound_running: bool = false,
 };
 
+pub const FailureReason = enum {
+    primary, locked, prunable, dirty, untracked, conflicted,
+    unpushed, not_landed, bound_running, safe,
+};
+
+pub const Policy = struct {
+    /// Reclaim is opt-in; missing or malformed policy stays disabled.
+    allow_reclaim: bool = false,
+    confirm_each_reclaim: bool = true,
+};
+
+pub const PolicyParseError = error{MalformedPolicy};
+
+pub fn failureReason(entry: Entry) FailureReason {
+    if (entry.primary) return .primary;
+    if (entry.locked) return .locked;
+    if (entry.prunable) return .prunable;
+    if (entry.dirty) return .dirty;
+    if (entry.untracked) return .untracked;
+    if (entry.conflicted) return .conflicted;
+    if (!entry.pushed) return .unpushed;
+    if (!entry.landed) return .not_landed;
+    if (entry.bound_running) return .bound_running;
+    return .safe;
+}
+
+pub fn failureReasonText(entry: Entry) []const u8 {
+    return switch (failureReason(entry)) {
+        .primary => "primary checkout",
+        .locked => "locked",
+        .prunable => "prunable/stale",
+        .dirty => "local changes",
+        .untracked => "untracked files",
+        .conflicted => "merge conflicts",
+        .unpushed => "unpushed commits",
+        .not_landed => "not landed on default",
+        .bound_running => "bound to active loop",
+        .safe => "safe to reclaim",
+    };
+}
+
+pub fn policyPath(allocator: std.mem.Allocator, project_path: []const u8) ![]u8 {
+    if (project_path.len == 0) return error.EmptyProjectPath;
+    return std.fmt.allocPrint(allocator, "{s}\\.graphcode\\worktree-policy.json", .{project_path});
+}
+
+pub fn encodePolicy(allocator: std.mem.Allocator, policy: Policy) ![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "{{\"allowReclaim\":{s},\"confirmEachReclaim\":{s}}}",
+        .{ if (policy.allow_reclaim) "true" else "false", if (policy.confirm_each_reclaim) "true" else "false" },
+    );
+}
+
+pub fn decodePolicy(bytes: []const u8) PolicyParseError!Policy {
+    const allow = std.mem.indexOf(u8, bytes, "\"allowReclaim\":") orelse return error.MalformedPolicy;
+    const confirm = std.mem.indexOf(u8, bytes, "\"confirmEachReclaim\":") orelse return error.MalformedPolicy;
+    const allow_value = std.mem.trimLeft(u8, bytes[allow + 15 ..], " \t\r\n");
+    const confirm_value = std.mem.trimLeft(u8, bytes[confirm + 21 ..], " \t\r\n");
+    const allow_reclaim = if (std.mem.startsWith(u8, allow_value, "true")) true else if (std.mem.startsWith(u8, allow_value, "false")) false else return error.MalformedPolicy;
+    const confirm_each_reclaim = if (std.mem.startsWith(u8, confirm_value, "true")) true else if (std.mem.startsWith(u8, confirm_value, "false")) false else return error.MalformedPolicy;
+    return .{ .allow_reclaim = allow_reclaim, .confirm_each_reclaim = confirm_each_reclaim };
+}
+
+pub fn loadPolicy(allocator: std.mem.Allocator, project_path: []const u8) Policy {
+    const path = policyPath(allocator, project_path) catch return .{};
+    defer allocator.free(path);
+    const bytes = std.fs.cwd().readFileAlloc(allocator, path, 4096) catch return .{};
+    defer allocator.free(bytes);
+    return decodePolicy(bytes) catch .{};
+}
+
+pub fn savePolicy(allocator: std.mem.Allocator, project_path: []const u8, policy: Policy) !void {
+    const path = try policyPath(allocator, project_path);
+    defer allocator.free(path);
+    const directory = std.fmt.allocPrint(allocator, "{s}\\.graphcode", .{project_path}) catch return error.OutOfMemory;
+    defer allocator.free(directory);
+    try std.fs.cwd().makePath(directory);
+    const bytes = try encodePolicy(allocator, policy);
+    defer allocator.free(bytes);
+    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(bytes);
+}
+
 pub const Summary = struct {
     total: usize = 0,
     reclaimable: usize = 0,
@@ -39,13 +124,33 @@ pub const Binding = struct {
 pub const ReclaimDecision = enum { reclaimable, keep };
 
 pub fn decision(entry: Entry) ReclaimDecision {
-    if (entry.primary or entry.locked or entry.dirty or entry.untracked or
+    if (entry.primary or entry.locked or entry.prunable or entry.dirty or entry.untracked or
         entry.conflicted or !entry.pushed or !entry.landed or entry.bound_running)
     {
         return .keep;
     }
-
     return .reclaimable;
+}
+
+pub fn canReclaim(entry: Entry, policy: Policy, confirmed: bool) bool {
+    return policy.allow_reclaim and (!policy.confirm_each_reclaim or confirmed) and
+        decision(entry) == .reclaimable;
+}
+
+pub const ExplorerArgs = struct {
+    executable: []const u8 = "explorer.exe",
+    verb: []const u8,
+    path: []const u8,
+};
+
+pub fn explorerArgs(path: []const u8) !ExplorerArgs {
+    if (path.len == 0) return error.EmptyProjectPath;
+    return .{ .verb = "explore", .path = path };
+}
+
+pub fn explorerCommandLine(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (path.len == 0) return error.EmptyProjectPath;
+    return std.fmt.allocPrint(allocator, "explorer.exe /select,\"{s}\"", .{path});
 }
 
 pub fn selectedEntry(entries: []const Entry, path: []const u8) ?Entry {
@@ -60,7 +165,6 @@ pub fn inspect(
     project_path: []const u8,
     bindings: []const Binding,
 ) !Inspection {
-    _ = bindings;
         if (project_path.len == 0) return error.EmptyProjectPath;
         const list = try runGit(allocator, &.{
             "git", "-C", project_path, "worktree", "list", "--porcelain",
@@ -72,6 +176,12 @@ pub fn inspect(
         errdefer allocator.free(default_branch);
         for (entries.items, 0..) |*entry, index| {
             entry.primary = index == 0;
+            for (bindings) |binding| {
+                if (std.mem.eql(u8, entry.path, binding.path)) {
+                    entry.bound_running = true;
+                    break;
+                }
+            }
             if (entry.primary or entry.prunable) continue;
             const status = try runGit(allocator, &.{
                 "git", "-C", entry.path, "status", "--porcelain=v1", "--untracked-files=all",
@@ -121,12 +231,25 @@ pub fn reclaim(allocator: std.mem.Allocator, entries: []const Entry) !usize {
     }
 
 pub fn reclaimSelected(
-            allocator: std.mem.Allocator,
-            project_path: []const u8,
-            selected: []const []const u8,
-            bindings: []const Binding,
-        ) !usize {
-            var inspection = try inspect(allocator, project_path, bindings);
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    selected: []const []const u8,
+    bindings: []const Binding,
+) !usize {
+    return reclaimSelectedWithPolicy(allocator, project_path, selected, bindings, .{}, false);
+}
+
+pub fn reclaimSelectedWithPolicy(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    selected: []const []const u8,
+    bindings: []const Binding,
+    policy: Policy,
+    confirmed: bool,
+) (ReclaimError || InspectionError || std.mem.Allocator.Error)!usize {
+    if (!policy.allow_reclaim) return error.PolicyDisabled;
+    if (policy.confirm_each_reclaim and !confirmed) return error.ConfirmationRequired;
+    var inspection = try inspect(allocator, project_path, bindings);
             defer {
                 deinit(allocator, &inspection.entries);
                 allocator.free(inspection.default_branch);
@@ -137,7 +260,7 @@ pub fn reclaimSelected(
                     if (std.mem.eql(u8, path, binding.path)) return error.GitFailed;
                 }
                 const entry = selectedEntry(inspection.entries.items, path) orelse continue;
-                if (decision(entry) != .reclaimable) continue;
+                if (decision(entry) != .reclaimable) return error.UnsafeSelection;
                 _ = try runGit(allocator, &.{ "git", "-C", project_path, "worktree", "remove", path });
                 removed += 1;
             }
@@ -211,6 +334,7 @@ fn runGit(allocator: std.mem.Allocator, args: []const []const u8) !GitResult {
 pub const Action = enum { inspect, reclaim };
 
 pub const CommandError = error{EmptyProjectPath};
+pub const ReclaimError = error{PolicyDisabled, ConfirmationRequired, UnsafeSelection};
 
 pub fn command(
     allocator: std.mem.Allocator,
@@ -394,4 +518,20 @@ test "explicit row selection is independent of graph binding safety" {
     };
     try std.testing.expectEqual(ReclaimDecision.reclaimable, decision(selectedEntry(&entries, "C:\\safe").?));
     try std.testing.expectEqual(ReclaimDecision.keep, decision(selectedEntry(&entries, "C:\\bound").?));
+}
+
+test "policy decoding fails closed and round trips explicit settings" {
+    try std.testing.expectError(error.MalformedPolicy, decodePolicy("{}"));
+    const encoded = try encodePolicy(std.testing.allocator, .{ .allow_reclaim = true, .confirm_each_reclaim = false });
+    defer std.testing.allocator.free(encoded);
+    const decoded = try decodePolicy(encoded);
+    try std.testing.expect(decoded.allow_reclaim);
+    try std.testing.expect(!decoded.confirm_each_reclaim);
+    try std.testing.expect(!canReclaim(.{ .path = @constCast("safe"), .branch = @constCast("main"), .pushed = true, .landed = true }, .{}, true));
+}
+
+test "Explorer command line preserves Windows Unicode arguments" {
+    const command_line = try explorerCommandLine(std.testing.allocator, "C:\\工作 space\\review");
+    defer std.testing.allocator.free(command_line);
+    try std.testing.expectEqualStrings("explorer.exe /select,\"C:\\工作 space\\review\"", command_line);
 }

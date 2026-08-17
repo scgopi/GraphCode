@@ -47,6 +47,7 @@ pub const App = struct {
     selection_initialized: bool = false,
     worktree_inspection: ?WorktreeStatus.Inspection = null,
     selected_worktree_path: []u8 = &.{},
+    reclaim_confirmation_armed: bool = false,
     sidebar_scroll: i32 = 0,
     workspace: ?*TerminalWorkspace.Workspace = null,
     instance_mutex: c.HANDLE = null,
@@ -359,6 +360,7 @@ pub const App = struct {
                                     self.allocator.free(self.selected_worktree_path);
                                     self.selected_worktree_path = &.{};
                                 }
+                                self.reclaim_confirmation_armed = false;
                             }
                         }
                     }
@@ -1278,19 +1280,36 @@ pub const App = struct {
             self.setStatus("Select a worktree row before reclaiming");
             return;
         }
+        const policy = WorktreeStatus.loadPolicy(self.allocator, path);
+        if (!policy.allow_reclaim) {
+            self.setStatus("Reclaim disabled by project worktree policy");
+            return;
+        }
+        if (policy.confirm_each_reclaim and !self.reclaim_confirmation_armed) {
+            self.reclaim_confirmation_armed = true;
+            self.setStatus("Reclaim is destructive; press Ctrl+Shift+W again to confirm");
+            return;
+        }
         var selected = [_][]const u8{self.selected_worktree_path};
         var bindings = std.array_list.Managed(WorktreeStatus.Binding).init(self.allocator);
         defer bindings.deinit();
         if (self.model.graph) |graph| for (graph.nodes.items) |bound| {
             if (bound.worktree_path.len != 0) bindings.append(.{ .path = bound.worktree_path }) catch {};
         };
-        const removed = WorktreeStatus.reclaimSelected(self.allocator, path, &selected, bindings.items) catch |err| {
+        const removed = WorktreeStatus.reclaimSelectedWithPolicy(
+            self.allocator, path, &selected, bindings.items, policy, true,
+        ) catch |err| {
+            self.reclaim_confirmation_armed = false;
             self.setStatus(switch (err) {
                 error.GitFailed => "Reclaim failed: git refused a selected worktree",
+                error.PolicyDisabled => "Reclaim disabled by project worktree policy",
+                error.ConfirmationRequired => "Reclaim confirmation required",
+                error.UnsafeSelection => "Reclaim blocked: selected worktree is unsafe",
                 else => "Reclaim failed",
             });
             return;
         };
+        self.reclaim_confirmation_armed = false;
         const message = std.fmt.allocPrint(
             self.allocator,
             "Reclaimed {d} selected worktrees",
@@ -1313,6 +1332,7 @@ pub const App = struct {
             if (WorktreeStatus.decision(entry) != .reclaimable) return false;
             if (self.selected_worktree_path.len != 0) self.allocator.free(self.selected_worktree_path);
             self.selected_worktree_path = self.allocator.dupe(u8, path) catch return false;
+            self.reclaim_confirmation_armed = false;
             return true;
         }
         return false;
