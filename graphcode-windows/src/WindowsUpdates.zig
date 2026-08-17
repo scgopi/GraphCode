@@ -1,7 +1,12 @@
 const std = @import("std");
+const c = @import("Win32.zig").c;
 
 pub const Channel = enum { stable, beta };
 pub const State = enum { disabled, available, up_to_date, failed };
+
+pub fn acceptsResult(current_generation: u64, result_generation: u64, cancelled: bool) bool {
+    return !cancelled and current_generation == result_generation;
+}
 
 pub const CheckResult = struct {
     channel: Channel,
@@ -39,34 +44,77 @@ pub const CheckClient = struct {
     feed_url: []const u8 = "https://api.github.com/repos/GraphCode/GraphCode/releases",
 
     pub fn check(self: CheckClient, beta_enabled: bool, current_version: []const u8) !CheckResult {
+        var cancelled = std.atomic.Value(bool).init(false);
+        return self.checkWithCancel(beta_enabled, current_version, &cancelled);
+    }
+
+    pub fn checkWithCancel(
+        self: CheckClient,
+        beta_enabled: bool,
+        current_version: []const u8,
+        cancelled: *std.atomic.Value(bool),
+    ) !CheckResult {
         const channel: Channel = if (beta_enabled) .beta else .stable;
-        const uri = try std.Uri.parse(self.feed_url);
-        var client = std.http.Client{ .allocator = self.allocator };
-        defer client.deinit();
-        const headers = [_]std.http.Header{
-            .{ .name = "User-Agent", .value = "GraphCode-Windows-Updater" },
-            .{ .name = "Accept", .value = "application/vnd.github+json" },
-        };
-        var request = try client.request(.GET, uri, .{ .extra_headers = &headers });
-        defer request.deinit();
-        try request.sendBodiless();
-        var response = try request.receiveHead(&.{});
-        if (response.head.status != .ok) return error.UpdateFeedUnavailable;
-        var reader = response.reader(&.{});
-        var body_list = std.array_list.Managed(u8).init(self.allocator);
-        defer body_list.deinit();
-        var buffer: [8192]u8 = undefined;
-        while (true) {
-            const count = reader.readSliceShort(&buffer) catch |err| return err;
-            if (count == 0) break;
-            if (body_list.items.len + count > 1024 * 1024) return error.UpdateFeedTooLarge;
-            try body_list.appendSlice(buffer[0..count]);
-        }
-        const body = try self.allocator.dupe(u8, body_list.items);
+        const body = try fetchWinHttp(self.allocator, self.feed_url, cancelled);
         defer self.allocator.free(body);
         return parseFeed(self.allocator, body, channel, current_version);
     }
 };
+
+fn fetchWinHttp(allocator: std.mem.Allocator, feed_url: []const u8, cancelled: *std.atomic.Value(bool)) ![]u8 {
+    if (cancelled.load(.acquire)) return error.Cancelled;
+    const uri = try std.Uri.parse(feed_url);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const host_component = uri.host orelse return error.InvalidUpdateFeed;
+    const host = try host_component.toRawMaybeAlloc(scratch);
+    const path_component = try uri.path.toRawMaybeAlloc(scratch);
+    const query = if (uri.query) |value| try value.toRawMaybeAlloc(scratch) else null;
+    const path = if (query) |value| try std.fmt.allocPrint(scratch, "{s}?{s}", .{ path_component, value }) else path_component;
+    const host16 = try std.unicode.utf8ToUtf16LeAlloc(scratch, host);
+    const path16 = try std.unicode.utf8ToUtf16LeAlloc(scratch, path);
+    const agent16 = try std.unicode.utf8ToUtf16LeAlloc(scratch, "GraphCode-Windows-Updater");
+    const accept_header16 = try std.unicode.utf8ToUtf16LeAlloc(scratch, "Accept: application/vnd.github+json");
+    const user_agent_header16 = try std.unicode.utf8ToUtf16LeAlloc(scratch, "User-Agent: GraphCode-Windows-Updater");
+    const session = c.WinHttpOpen(agent16.ptr, c.WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, null, null, 0) orelse return error.UpdateConnectFailed;
+    defer _ = c.WinHttpCloseHandle(session);
+    if (c.WinHttpSetTimeouts(session, 2000, 2000, 2000, 2000) == 0) return error.UpdateConnectFailed;
+    const port: c.INTERNET_PORT = uri.port orelse if (std.mem.eql(u8, uri.scheme, "https")) 443 else 80;
+    const connection = c.WinHttpConnect(session, host16.ptr, port, 0) orelse return error.UpdateConnectFailed;
+    defer _ = c.WinHttpCloseHandle(connection);
+    const flags: c.DWORD = if (std.mem.eql(u8, uri.scheme, "https")) c.WINHTTP_FLAG_SECURE else 0;
+    const verb: [*:0]const u16 = &[_:0]u16{ 'G', 'E', 'T' };
+    var accepts = [_]?[*:0]const u16{null};
+    const request = c.WinHttpOpenRequest(connection, verb, path16.ptr, null, null, @ptrCast(&accepts), flags) orelse return error.UpdateConnectFailed;
+    defer _ = c.WinHttpCloseHandle(request);
+    if (c.WinHttpAddRequestHeaders(request, accept_header16.ptr, 0, c.WINHTTP_ADDREQ_FLAG_ADD) == 0 or
+        c.WinHttpAddRequestHeaders(request, user_agent_header16.ptr, 0, c.WINHTTP_ADDREQ_FLAG_ADD) == 0)
+        return error.UpdateSendFailed;
+    if (cancelled.load(.acquire)) return error.Cancelled;
+    if (c.WinHttpSendRequest(request, @as([*c]const u16, null), 0, null, 0, 0, 0) == 0) return error.UpdateSendFailed;
+    if (cancelled.load(.acquire)) return error.Cancelled;
+    if (c.WinHttpReceiveResponse(request, null) == 0) return error.UpdateReceiveFailed;
+    var status: c.DWORD = 0;
+    var status_len: c.DWORD = @sizeOf(c.DWORD);
+    if (c.WinHttpQueryHeaders(request, c.WINHTTP_QUERY_STATUS_CODE | c.WINHTTP_QUERY_FLAG_NUMBER, null, &status, &status_len, null) == 0 or status != 200)
+        return error.UpdateFeedUnavailable;
+    var body = std.array_list.Managed(u8).init(allocator);
+    defer body.deinit();
+    while (true) {
+        if (cancelled.load(.acquire)) return error.Cancelled;
+        var available: c.DWORD = 0;
+        if (c.WinHttpQueryDataAvailable(request, &available) == 0) return error.UpdateReceiveFailed;
+        if (available == 0) break;
+        if (body.items.len + available > 1024 * 1024) return error.UpdateFeedTooLarge;
+        const old_len = body.items.len;
+        try body.resize(old_len + available);
+        var read: c.DWORD = 0;
+        if (c.WinHttpReadData(request, body.items[old_len..].ptr, available, &read) == 0) return error.UpdateReceiveFailed;
+        body.items.len = old_len + read;
+    }
+    return body.toOwnedSlice();
+}
 
 pub fn currentVersion(allocator: std.mem.Allocator) ![]u8 {
     if (std.process.getEnvVarOwned(allocator, "GRAPHCODE_VERSION")) |value| {
@@ -127,4 +175,16 @@ test "current version comes from package metadata override" {
     const version = try currentVersionFromMetadata(std.testing.allocator, "v7.2.1");
     defer std.testing.allocator.free(version);
     try std.testing.expectEqualStrings("v7.2.1", version);
+}
+
+test "stale update results cannot overwrite a newer channel request" {
+    try std.testing.expect(!acceptsResult(2, 1, false));
+    try std.testing.expect(!acceptsResult(2, 2, true));
+    try std.testing.expect(acceptsResult(2, 2, false));
+}
+
+test "cancelled update request exits before contacting a stalled server" {
+    var cancelled = std.atomic.Value(bool).init(true);
+    const client = CheckClient{ .allocator = std.testing.allocator, .feed_url = "https://127.0.0.1:9/releases" };
+    try std.testing.expectError(error.Cancelled, client.checkWithCancel(false, "v1", &cancelled));
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const DaemonClient = @import("DaemonClient.zig").DaemonClient;
 const GraphCanvas = @import("GraphCanvas.zig");
 const CanvasInput = @import("CanvasInput.zig");
@@ -95,6 +96,9 @@ pub const App = struct {
     update_lock: std.Thread.Mutex = .{},
     update_thread: ?std.Thread = null,
     update_done: bool = false,
+    update_cancel: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    update_generation: u64 = 0,
+    update_pending: bool = false,
     smoke_restart_index: ?usize = null,
     smoke_restart_session: []const u8 = &.{},
 
@@ -173,6 +177,7 @@ pub const App = struct {
         if (self.product_settings) |*settings| settings.deinit();
         if (self.onboarding_store) |*store| store.deinit();
         if (self.clone_operation) |operation| operation.deinit();
+        self.update_cancel.store(true, .release);
         if (self.update_thread) |thread| thread.join();
         self.allocator.destroy(self);
     }
@@ -221,7 +226,7 @@ pub const App = struct {
         if (self.workspace) |workspace| workspace.setKeyCallback(self, &onWorkspaceKey);
         if (self.workspace) |workspace| try workspace.startInputWorker();
         self.layoutWorkspace();
-        self.startUpdateCheck();
+        self.requestUpdateCheck();
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_REQUIRE_DAEMON")) |value| {
             defer self.allocator.free(value);
             self.require_smoke_contract = std.mem.eql(u8, value, "1");
@@ -834,9 +839,11 @@ pub const App = struct {
         if (self.product_settings) |*settings| settings.deinit();
         self.product_settings = draft;
         self.activity_enabled = draft.activity;
+        self.update_lock.lock();
         self.update_state = WindowsUpdates.CheckState.configure(draft.beta);
+        self.update_lock.unlock();
         self.setStatus("Checking for updates…");
-        self.startUpdateCheck();
+        self.requestUpdateCheck();
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
@@ -874,16 +881,28 @@ pub const App = struct {
     }
 
     pub fn checkForUpdates(self: *App) void {
-            self.startUpdateCheck();
+            self.requestUpdateCheck();
     }
 
-    fn startUpdateCheck(self: *App) void {
+    fn requestUpdateCheck(self: *App) void {
             self.update_lock.lock();
+            self.update_generation += 1;
+            self.update_pending = true;
             if (self.update_thread != null) {
+                self.update_cancel.store(true, .release);
                 self.update_lock.unlock();
                 return;
             }
+            self.update_pending = false;
+            self.update_cancel.store(false, .release);
+            self.update_lock.unlock();
+            self.launchUpdateCheck();
+    }
+
+    fn launchUpdateCheck(self: *App) void {
+            self.update_lock.lock();
             self.update_done = false;
+            self.update_cancel.store(false, .release);
             self.update_lock.unlock();
             self.update_thread = std.Thread.spawn(.{}, updateWorker, .{self}) catch {
                 self.update_lock.lock();
@@ -895,31 +914,36 @@ pub const App = struct {
     }
 
     fn updateWorker(self: *App) void {
-            const beta = self.update_state.channel == .beta;
-            const version = WindowsUpdates.currentVersion(self.allocator) catch {
-                self.update_lock.lock();
-                self.update_state = .{ .channel = if (beta) .beta else .stable, .state = .failed };
-                self.update_done = true;
-                self.update_lock.unlock();
-                return;
-            };
-            defer self.allocator.free(version);
-            var client = WindowsUpdates.CheckClient{ .allocator = self.allocator };
-            const result = client.check(beta, version) catch {
-                self.update_lock.lock();
-                self.update_state = .{ .channel = if (beta) .beta else .stable, .state = .failed };
-                self.update_done = true;
-                self.update_lock.unlock();
-                return;
-            };
-            defer {
-                var owned = result;
-                owned.deinit(self.allocator);
-            }
+        self.update_lock.lock();
+        const generation = self.update_generation;
+        const beta = self.update_state.channel == .beta;
+        self.update_lock.unlock();
+        const version = WindowsUpdates.currentVersionFromMetadata(self.allocator, build_options.version) catch {
             self.update_lock.lock();
-            self.update_state = .{ .channel = result.channel, .state = result.state };
+            if (generation == self.update_generation) self.update_state = .{ .channel = if (beta) .beta else .stable, .state = .failed };
             self.update_done = true;
             self.update_lock.unlock();
+            return;
+        };
+        defer self.allocator.free(version);
+        var client = WindowsUpdates.CheckClient{ .allocator = self.allocator };
+        const result = client.checkWithCancel(beta, version, &self.update_cancel) catch {
+            self.update_lock.lock();
+            if (generation == self.update_generation and !self.update_cancel.load(.acquire))
+                self.update_state = .{ .channel = if (beta) .beta else .stable, .state = .failed };
+            self.update_done = true;
+            self.update_lock.unlock();
+            return;
+        };
+        defer {
+            var owned = result;
+            owned.deinit(self.allocator);
+        }
+        self.update_lock.lock();
+        if (generation == self.update_generation and !self.update_cancel.load(.acquire))
+            self.update_state = .{ .channel = result.channel, .state = result.state };
+        self.update_done = true;
+        self.update_lock.unlock();
     }
 
     fn finishUpdateCheck(self: *App) void {
@@ -930,7 +954,16 @@ pub const App = struct {
             if (self.update_thread) |thread| {
                 thread.join();
                 self.update_thread = null;
-                self.setStatus(self.update_state.label());
+                self.update_lock.lock();
+                const pending = self.update_pending;
+                self.update_pending = false;
+                const label = self.update_state.label();
+                self.update_lock.unlock();
+                if (pending) {
+                    self.launchUpdateCheck();
+                } else {
+                    self.setStatus(label);
+                }
             }
     }
 

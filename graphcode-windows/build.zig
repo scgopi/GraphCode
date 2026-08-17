@@ -9,6 +9,7 @@ pub fn build(b: *std.Build) !void {
         },
     });
     const optimize = b.standardOptimizeOption(.{});
+    const package_version = b.option([]const u8, "version", "Packaged GraphCode release version") orelse "dev";
 
     const winghostty_dir = b.option(
         []const u8,
@@ -37,6 +38,9 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
     });
     module.addIncludePath(.{ .cwd_relative = winghostty_include });
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", package_version);
+    module.addOptions("build_options", build_options);
 
     const exe = b.addExecutable(.{
         .name = "graphcode-windows",
@@ -59,6 +63,7 @@ pub fn build(b: *std.Build) !void {
         "uiautomationcore",
         "shell32",
         "advapi32",
+        "winhttp",
     }) |library| {
         exe.linkSystemLibrary(library);
     }
