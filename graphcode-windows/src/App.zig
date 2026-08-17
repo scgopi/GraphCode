@@ -35,6 +35,36 @@ const daemon_supervisor_test_property =
     std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.DaemonSupervisorState");
 extern fn graphcode_pick_folder(owner: c.HWND, buffer: [*]u16, capacity: c.DWORD) callconv(.c) c_int;
 
+const InputBounds = struct {
+    rail_left: i32,
+    workspace_top: i32,
+    canvas: GraphCanvas.RenderBounds,
+};
+
+const WheelRegion = enum { sidebar, canvas, none };
+
+fn inputBounds(client_right: i32, client_bottom: i32, controls: WorkspaceControls.State) InputBounds {
+    return .{
+        .rail_left = if (controls.rail_visible) Tokens.sidebar_width else 0,
+        .workspace_top = client_bottom - (if (controls.panel_visible) Tokens.workspace_height else 0),
+        .canvas = GraphCanvas.renderBounds(client_right, client_bottom, controls),
+    };
+}
+
+fn wheelRegion(x: i32, y: i32, bounds: InputBounds, controls: WorkspaceControls.State) WheelRegion {
+    if (controls.rail_visible and x < bounds.rail_left and
+        y >= Tokens.header_height and y < bounds.canvas.bottom)
+    {
+        return .sidebar;
+    }
+    if (x >= bounds.canvas.left and x < bounds.canvas.right and
+        y >= bounds.canvas.top and y < bounds.canvas.bottom)
+    {
+        return .canvas;
+    }
+    return .none;
+}
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     window: MainWindow.Window = .{},
@@ -2391,9 +2421,9 @@ fn onWindowMessage(
             }
             var client: c.RECT = undefined;
             _ = c.GetClientRect(hwnd, &client);
-            const workspace_top = client.bottom -
-                (if (app.workspace_controls.panel_visible) Tokens.workspace_height else 0);
-            const rail_left = if (app.workspace_controls.rail_visible) Tokens.sidebar_width else 0;
+            const routing = inputBounds(client.right, client.bottom, app.workspace_controls);
+            const workspace_top = routing.workspace_top;
+            const rail_left = routing.rail_left;
             if (app.workspace_controls.panel_visible and x >= rail_left and y >= workspace_top) {
                 if (app.workspace) |workspace| {
                     if (workspace.selectTabAt(x, y)) {
@@ -2571,14 +2601,13 @@ fn onWindowMessage(
             const delta = wheel.delta;
             var client: c.RECT = undefined;
             _ = c.GetClientRect(hwnd, &client);
-            const workspace_top = client.bottom - Tokens.workspace_height;
-            if (x < Tokens.sidebar_width) {
-                app.sidebar_scroll = Sidebar.clampScroll(app.sidebar_scroll - @divTrunc(@as(i32, delta), 4), Sidebar.maxScroll(&app.model, if (app.worktree_inspection) |*value| value else null, workspace_top));
-            } else if (y < workspace_top) {
-                const bounds = c.RECT{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = client.right, .bottom = workspace_top };
-                if (x >= bounds.left and y >= bounds.top and y < bounds.bottom) {
-                    app.canvas.zoomAt(x, y, delta);
-                }
+            const routing = inputBounds(client.right, client.bottom, app.workspace_controls);
+            switch (wheelRegion(x, y, routing, app.workspace_controls)) {
+                .sidebar => {
+                    app.sidebar_scroll = Sidebar.clampScroll(app.sidebar_scroll - @divTrunc(@as(i32, delta), 4), Sidebar.maxScroll(&app.model, if (app.worktree_inspection) |*value| value else null, routing.canvas.bottom));
+                },
+                .canvas => app.canvas.zoomAt(x, y, delta),
+                .none => {},
             }
             _ = c.InvalidateRect(hwnd, null, 0);
             result.* = 0;
@@ -2646,6 +2675,28 @@ fn restoreShellWindow(hwnd: c.HWND) void {
         }
     }
     _ = c.SetFocus(hwnd);
+}
+
+test "input routing bounds follow hidden workspace panel and rail" {
+    const shown = inputBounds(1200, 900, .{});
+    try std.testing.expectEqual(@as(i32, Tokens.sidebar_width), shown.rail_left);
+    try std.testing.expectEqual(@as(i32, 900 - Tokens.workspace_height), shown.workspace_top);
+    try std.testing.expectEqual(shown.rail_left, shown.canvas.left);
+    try std.testing.expectEqual(WheelRegion.sidebar, wheelRegion(20, 300, shown, .{}));
+    try std.testing.expectEqual(WheelRegion.none, wheelRegion(20, 850, shown, .{}));
+
+    const hidden_controls = WorkspaceControls.State{
+        .rail_visible = false,
+        .panel_visible = false,
+        .activity_enabled = false,
+    };
+    const hidden = inputBounds(1200, 900, hidden_controls);
+    try std.testing.expectEqual(@as(i32, 0), hidden.rail_left);
+    try std.testing.expectEqual(@as(i32, 900), hidden.workspace_top);
+    try std.testing.expectEqual(hidden.rail_left, hidden.canvas.left);
+    try std.testing.expect(hidden.canvas.bottom > shown.canvas.bottom);
+    try std.testing.expectEqual(WheelRegion.canvas, wheelRegion(20, 300, hidden, hidden_controls));
+    try std.testing.expectEqual(WheelRegion.canvas, wheelRegion(600, 850, hidden, hidden_controls));
 }
 
 fn runSmokeWorkspaceActions(self: *App) void {

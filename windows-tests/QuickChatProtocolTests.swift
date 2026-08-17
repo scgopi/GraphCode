@@ -100,4 +100,50 @@ struct QuickChatProtocolTests {
       try store.loadResult()
     }
   }
+
+  @Test
+  func v1ListQuickChatsReportsCorruptStoreInsteadOfHanging() async throws {
+    let directory = URL(fileURLWithPath: "quick-chat-v1-corrupt-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try Data("{not-json".utf8).write(to: directory.appendingPathComponent("quick-chats.json"))
+
+    let connection = QuickChatRecordingConnection()
+    let registry = ProjectRegistry(
+      persistenceDirectory: directory,
+      readPresence: nil,
+      enumerateQuickChatSessions: { [] })
+    await registry.addConnection(id: connection.id, connection: connection)
+    await registry.handle(.listQuickChats, connectionID: connection.id)
+
+    let frames = await connection.recordedFrames()
+    #expect(frames.count == 1)
+    #expect(
+      try JSONDecoder().decode(DaemonEvent.self, from: frames[0])
+        == .errorOccurred("quick chat store is corrupt or unreadable"))
+  }
+}
+
+private actor QuickChatRecordingConnection: DaemonConnection {
+  nonisolated let id = UUID()
+  nonisolated let endpoint: DaemonEndpoint = .namedPipe("\\\\.\\pipe\\graphcode-quick-chat-test")
+  private var frames: [Data] = []
+
+  func receiveFrame() async throws -> Data {
+    throw RecordingError.closed
+  }
+
+  func sendFrame(_ data: Data) async throws {
+    frames.append(data)
+  }
+
+  func close() async throws {}
+
+  func recordedFrames() -> [Data] {
+    frames
+  }
+
+  private enum RecordingError: Error {
+    case closed
+  }
 }

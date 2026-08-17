@@ -291,7 +291,18 @@ public actor ProjectRegistry {
   // MARK: - Commands
 
   public func handle(_ command: DaemonCommand, connectionID: UUID) async {
-    _ = await apply(command, connectionID: connectionID)
+    guard let result = await apply(command, connectionID: connectionID),
+      let message = result.error,
+      let channel = connections[connectionID],
+      case .v1 = channel.mode
+    else { return }
+    if case .graphCommand(let path, _) = command,
+      stores[Self.canonicalize(path, platformPaths: platformPaths)] != nil
+    {
+      // GraphStore has already emitted this rejection to its v1 subscribers.
+      return
+    }
+    await send(.errorOccurred(message), to: connectionID)
   }
 
   /// Called by the daemon's session/activity poller. Sequence numbers are persisted with

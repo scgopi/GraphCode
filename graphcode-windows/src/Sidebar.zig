@@ -50,6 +50,8 @@ pub fn draw(
                 drawText(hdc, allocator, model.quick_chats.items[row.index].title, 24, row.top, 11, 0x00E6E6E6),
         }
     }
+    const layout = layoutFor(model, inspection);
+    drawText(hdc, allocator, "Quick Chats", 18, layout.quickChatHeadingTop() - scroll_offset, 11, 0x007A7A7A);
 
     const section_y = sidebarSectionBottom(model, inspection) - scroll_offset;
     if (model.attentionCount() != 0) {
@@ -87,6 +89,9 @@ pub const Layout = struct {
     loop_count: usize,
     worktree_count: usize,
     quick_chat_count: usize = 0,
+    graph_present: bool = true,
+    inspection_present: bool = false,
+    graph_section_height: i32 = 0,
 
     pub fn projectTop(self: Layout, index: usize) i32 {
         return self.base + @as(i32, @intCast(index * 24));
@@ -103,8 +108,17 @@ pub const Layout = struct {
             @as(i32, @intCast(self.loop_count * 24)) +
             @as(i32, @intCast(index * 34));
     }
-    pub fn quickChatTop(self: Layout, index: usize) i32 {
-        return self.worktreeTop(self.worktree_count) + 42 + @as(i32, @intCast(index * 24));
+    pub fn quickChatHeadingTop(self: Layout) i32 {
+        return self.quickChatRowTop(0) - 32;
+    }
+    pub fn quickChatRowTop(self: Layout, index: usize) i32 {
+        const project_bottom = self.base + @as(i32, @intCast(self.project_count * 24));
+        const worktree_height: i32 = if (self.inspection_present)
+            24 + @as(i32, @intCast(self.worktree_count * 34))
+        else
+            0;
+        const section_bottom = project_bottom + self.graph_section_height + worktree_height;
+        return section_bottom + 42 + @as(i32, @intCast(index * 24));
     }
 };
 
@@ -162,10 +176,16 @@ fn appendRows(
 
 pub fn layoutFor(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection) Layout {
     var loop_count: usize = 0;
+    var graph_section_height: i32 = 0;
     if (model.graphs.items.len != 0) {
-        for (model.graphs.items) |summary| loop_count += summary.nodes.items.len;
+        graph_section_height = 62;
+        for (model.graphs.items) |summary| {
+            loop_count += summary.nodes.items.len;
+            graph_section_height += 62 + @as(i32, @intCast(summary.nodes.items.len * 24));
+        }
     } else if (model.graph) |graph| {
         loop_count = graph.nodes.items.len;
+        graph_section_height = 124 + @as(i32, @intCast(graph.nodes.items.len * 24));
     }
 
     return .{
@@ -174,6 +194,9 @@ pub fn layoutFor(model: *const GraphModel.Model, inspection: ?*const WorktreeSta
         .loop_count = loop_count,
         .worktree_count = if (inspection) |value| value.entries.items.len else 0,
         .quick_chat_count = model.quick_chats.items.len,
+        .graph_present = model.graphs.items.len != 0 or model.graph != null,
+        .inspection_present = inspection != null,
+        .graph_section_height = graph_section_height,
     };
 }
 
@@ -231,17 +254,8 @@ pub fn contentBottom(model: *const GraphModel.Model, inspection: ?*const Worktre
 }
 
 pub fn sidebarSectionBottom(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection) i32 {
-    var bottom = Tokens.header_height + 78 +
-        @as(i32, @intCast(model.recent_projects.items.len * 24));
-    if (model.graphs.items.len != 0) {
-        bottom = sharedWorktreeTop(model, 0);
-        if (inspection) |value| bottom += 24 + @as(i32, @intCast(value.entries.items.len * 34)) + 10;
-    } else if (model.graph != null) {
-        bottom += 62 + 54 + @as(i32, @intCast(model.graph.?.nodes.items.len * 24));
-        if (inspection) |value| bottom += 24 + @as(i32, @intCast(value.entries.items.len * 34)) + 10;
-    }
-    bottom += 42 + @as(i32, @intCast(model.quick_chats.items.len * 24));
-    return bottom;
+    const layout = layoutFor(model, inspection);
+    return layout.quickChatRowTop(model.quick_chats.items.len);
 }
 
 pub fn maxScroll(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection, viewport_bottom: i32) i32 {
@@ -497,10 +511,28 @@ test "quick chats remain selectable without an open graph or inspection" {
         .backend = try std.testing.allocator.dupe(u8, "claudeCode"),
     });
     const layout = layoutFor(&model, null);
-    const row = rowAt(24, layout.quickChatTop(0) + 4, &model, null, 0, 700) orelse
+    try std.testing.expect(layout.quickChatHeadingTop() + 11 < layout.quickChatRowTop(0));
+    const row = rowAt(24, layout.quickChatRowTop(0) + 4, &model, null, 0, 700) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(RowKind.quick_chat, row.kind);
     try std.testing.expectEqual(@as(usize, 0), row.index);
+    try std.testing.expectEqual(
+        @as(i32, Tokens.header_height + 78 + 42),
+        layout.quickChatRowTop(0),
+    );
+    try std.testing.expect(rowAt(24, layout.quickChatHeadingTop() + 4, &model, null, 0, 700) == null);
+}
+
+test "quick chat heading and rows stay distinct across graph layouts" {
+    const layouts = [_]Layout{
+        .{ .base = 100, .project_count = 2, .loop_count = 0, .worktree_count = 0, .graph_present = false },
+        .{ .base = 100, .project_count = 2, .loop_count = 3, .worktree_count = 0 },
+        .{ .base = 100, .project_count = 2, .loop_count = 3, .worktree_count = 4, .inspection_present = true },
+    };
+    for (layouts) |layout| {
+        try std.testing.expect(layout.quickChatHeadingTop() + 11 < layout.quickChatRowTop(0));
+        try std.testing.expectEqual(@as(i32, 24), layout.quickChatRowTop(1) - layout.quickChatRowTop(0));
+    }
 }
 
 fn rect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {
