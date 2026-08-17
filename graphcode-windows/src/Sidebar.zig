@@ -46,6 +46,8 @@ pub fn draw(
                 drawText(hdc, allocator, reason(entry), 24, row.top + 14, 10,
                     if (WorktreeStatus.decision(entry) == .reclaimable) 0x0078D7A8 else 0x00FFCD7A);
             },
+            .quick_chat => if (row.index < model.quick_chats.items.len)
+                drawText(hdc, allocator, model.quick_chats.items[row.index].title, 24, row.top, 11, 0x00E6E6E6),
         }
     }
 
@@ -72,7 +74,7 @@ pub fn worktreeRowTop(project_count: usize, loop_count: usize, index: usize) i32
     return layout.worktreeTop(index);
 }
 
-pub const RowKind = enum { project, open_project, overview, loop, worktree };
+pub const RowKind = enum { project, open_project, overview, loop, worktree, quick_chat };
 pub const Row = struct {
     kind: RowKind,
     index: usize,
@@ -84,6 +86,7 @@ pub const Layout = struct {
     project_count: usize,
     loop_count: usize,
     worktree_count: usize,
+    quick_chat_count: usize = 0,
 
     pub fn projectTop(self: Layout, index: usize) i32 {
         return self.base + @as(i32, @intCast(index * 24));
@@ -99,6 +102,9 @@ pub const Layout = struct {
         return self.base + @as(i32, @intCast(self.project_count * 24)) + 140 +
             @as(i32, @intCast(self.loop_count * 24)) +
             @as(i32, @intCast(index * 34));
+    }
+    pub fn quickChatTop(self: Layout, index: usize) i32 {
+        return self.worktreeTop(self.worktree_count) + 42 + @as(i32, @intCast(index * 24));
     }
 };
 
@@ -146,6 +152,11 @@ fn appendRows(
             top += 34;
         }
     }
+    top += 42;
+    for (model.quick_chats.items, 0..) |_, index| {
+        try rows.append(allocator, .{ .kind = .quick_chat, .index = index, .top = top });
+        top += 24;
+    }
     return rows;
 }
 
@@ -162,6 +173,7 @@ pub fn layoutFor(model: *const GraphModel.Model, inspection: ?*const WorktreeSta
         .project_count = model.recent_projects.items.len,
         .loop_count = loop_count,
         .worktree_count = if (inspection) |value| value.entries.items.len else 0,
+        .quick_chat_count = model.quick_chats.items.len,
     };
 }
 
@@ -200,7 +212,7 @@ pub fn rowAt(
     defer rows.deinit(std.heap.page_allocator);
     for (rows.items) |row| {
         const height: i32 = switch (row.kind) {
-            .project, .open_project, .overview, .loop => 24,
+            .project, .open_project, .overview, .loop, .quick_chat => 24,
             .worktree => 34,
         };
         if (y >= row.top and y < row.top + height) return row;
@@ -228,6 +240,7 @@ pub fn sidebarSectionBottom(model: *const GraphModel.Model, inspection: ?*const 
         bottom += 62 + 54 + @as(i32, @intCast(model.graph.?.nodes.items.len * 24));
         if (inspection) |value| bottom += 24 + @as(i32, @intCast(value.entries.items.len * 34)) + 10;
     }
+    bottom += 42 + @as(i32, @intCast(model.quick_chats.items.len * 24));
     return bottom;
 }
 
@@ -424,7 +437,7 @@ test "sidebar scroll clamps overflow, shrink, and resize" {
         .branch = @constCast("branch"),
     });
     const short_max = maxScroll(&model, &inspection, 400);
-    const expected_short = Tokens.header_height + 78 + 72 + 62 + 54 + 24 + 170 + 10 + 30 + 4 * 19 - 400;
+    const expected_short = Tokens.header_height + 78 + 72 + 62 + 54 + 24 + 170 + 10 + 42 + 30 + 4 * 19 - 400;
     try std.testing.expectEqual(expected_short, short_max);
     const activity_only_max = maxScroll(&model, &inspection, 400);
     try std.testing.expectEqual(short_max, activity_only_max);
@@ -455,7 +468,7 @@ test "sidebar scroll clamps overflow, shrink, and resize" {
     }
     inspection.entries.shrinkRetainingCapacity(2);
     const reduced_max = maxScroll(&model, &inspection, 500);
-    const expected_reduced = @max(Tokens.header_height + 78 + 24 + 62 + 54 + 24 + 68 + 10 + 30 + 1 * 19 - 500, 0);
+    const expected_reduced = @max(Tokens.header_height + 78 + 24 + 62 + 54 + 24 + 68 + 10 + 42 + 30 + 1 * 19 - 500, 0);
     try std.testing.expectEqual(expected_reduced, reduced_max);
     scroll = clampScroll(scroll, reduced_max);
     try std.testing.expectEqual(@as(i32, 0), scroll);
@@ -471,7 +484,7 @@ test "sidebar without graph counts only static rendered content" {
         .name = try std.testing.allocator.dupe(u8, "Project"),
     });
     const no_graph_max = maxScroll(&model, null, 100);
-    try std.testing.expectEqual(@as(i32, Tokens.header_height + 78 + 24 - 100), no_graph_max);
+    try std.testing.expectEqual(@as(i32, Tokens.header_height + 78 + 24 + 42 - 100), no_graph_max);
     try std.testing.expectEqual(no_graph_max, clampScroll(80, no_graph_max));
 }
 

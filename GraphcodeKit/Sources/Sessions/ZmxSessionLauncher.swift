@@ -558,7 +558,7 @@ public enum ZmxSessionLauncher {
 
   public static func enumerateSessionIDs() async -> [UUID] {
     var live: [UUID] = []
-    for id in SessionIDStore.nodeIDs() {
+    for id in QuickChatSessionRegistry.ids() {
       if await sessionExists(LoopNode(id: id, title: "")) {
         live.append(id)
       }

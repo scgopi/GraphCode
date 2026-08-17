@@ -43,6 +43,11 @@ public struct QuickChatActivity: Codable, Equatable, Sendable {
 /// Reads/writes the quick-chat list — one JSON file under `<baseDirectory>`. Same shape
 /// as `TerminalLayoutStore` and for the same reason: small local file I/O, app-side
 /// state the daemon has no reason to know about.
+public enum QuickChatStoreError: Error, Equatable, Sendable {
+  case encodingFailed
+  case persistenceFailed
+}
+
 public struct QuickChatStore: Sendable {
   private let fileURL: URL
 
@@ -57,42 +62,48 @@ public struct QuickChatStore: Sendable {
     return (try? JSONDecoder().decode([QuickChat].self, from: data)) ?? []
   }
 
-  public func save(_ chats: [QuickChat]) {
-    guard let data = try? JSONEncoder().encode(chats) else { return }
-    try? data.write(to: fileURL, options: .atomic)
+  public func save(_ chats: [QuickChat]) throws {
+    guard let data = try? JSONEncoder().encode(chats) else {
+      throw QuickChatStoreError.encodingFailed
+    }
+    do {
+      try data.write(to: fileURL, options: .atomic)
+    } catch {
+      throw QuickChatStoreError.persistenceFailed
+    }
   }
 
-  public func create(_ chat: QuickChat) {
+  public func create(_ chat: QuickChat) throws {
     var chats = load().filter { $0.id != chat.id }
     chats.append(chat)
-    save(chats.sorted { $0.createdAt < $1.createdAt })
+    try save(chats.sorted { $0.createdAt < $1.createdAt })
   }
 
   public func chat(id: UUID) -> QuickChat? {
     load().first { $0.id == id }
   }
 
-  public func rename(id: UUID, title: String) -> QuickChat? {
+  public func rename(id: UUID, title: String) throws -> QuickChat? {
     var chats = load()
     guard let index = chats.firstIndex(where: { $0.id == id }) else { return nil }
     chats[index].title = title
-    save(chats)
+    try save(chats)
     return chats[index]
   }
 
-  public func delete(id: UUID) -> QuickChat? {
+  public func delete(id: UUID) throws -> QuickChat? {
     var chats = load()
     guard let index = chats.firstIndex(where: { $0.id == id }) else { return nil }
     let removed = chats.remove(at: index)
-    save(chats)
+    try save(chats)
     return removed
   }
 
-  public func updateActivity(id: UUID, activity: QuickChatActivity) -> QuickChat? {
+  public func updateActivity(id: UUID, activity: QuickChatActivity) throws -> QuickChat? {
     var chats = load()
     guard let index = chats.firstIndex(where: { $0.id == id }) else { return nil }
     chats[index].activity = activity
-    save(chats)
+    try save(chats)
     return chats[index]
   }
 }
