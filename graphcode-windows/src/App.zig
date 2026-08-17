@@ -23,6 +23,9 @@ const Onboarding = @import("WindowsOnboarding.zig");
 const WindowsUpdates = @import("WindowsUpdates.zig");
 const WorktreeDialog = @import("WorktreeDialog.zig");
 const Accessibility = @import("Accessibility.zig");
+const Navigation = @import("Navigation.zig");
+const QuickChats = @import("QuickChats.zig");
+const WorkspaceControls = @import("WorkspaceControls.zig");
 const c = @import("Win32.zig").c;
 
 const title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Windows");
@@ -54,6 +57,8 @@ pub const App = struct {
     accessibility: ?Accessibility.Provider = null,
     sidebar_scroll: i32 = 0,
     workspace: ?*TerminalWorkspace.Workspace = null,
+    navigation_cursor: Navigation.Cursor = .{},
+    workspace_controls: WorkspaceControls.State = .{},
     instance_mutex: c.HANDLE = null,
     sync_requested: bool = false,
     restore_requested: bool = false,
@@ -1708,6 +1713,10 @@ pub const App = struct {
             .delete_selected => if (self.selectedEdgeIndex()) |edge| self.deleteEdge(edge) else self.deleteSelectedNode(),
             .create_edge => self.createEdge(),
             .jump_next => self.jumpToNode(),
+            .command_palette => self.jumpToNode(),
+            .next_identity => self.navigateIdentity(1, false),
+            .previous_identity => self.navigateIdentity(-1, false),
+            .quick_chat => self.setStatus(QuickChats.protocolGapMessage(.create)),
             .settings => self.openSettings(),
             .product_settings => self.openProductSettings(),
             .clone_repository => self.cloneRepository(),
@@ -1762,7 +1771,59 @@ pub const App = struct {
             .focus_previous_pane => if (self.workspace) |workspace| workspace.focusPreviousPane(),
             .select_previous_tab => if (self.workspace) |workspace| workspace.selectPreviousTab(),
             .select_next_tab => if (self.workspace) |workspace| workspace.selectNextTab(),
+            .show_graph => {
+                self.workspace_controls.apply(.show_graph);
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            },
+            .toggle_rail => {
+                self.workspace_controls.apply(.toggle_rail);
+                self.setStatus(if (self.workspace_controls.rail_visible) "Workspace rail shown" else "Workspace rail hidden");
+            },
+            .toggle_panel => {
+                self.workspace_controls.apply(.toggle_panel);
+                self.setStatus(if (self.workspace_controls.panel_visible) "Workspace panel shown" else "Workspace panel hidden");
+            },
+            .toggle_activity => {
+                self.workspace_controls.apply(.toggle_activity);
+                self.setStatus(if (self.workspace_controls.activity_enabled) "Activity enabled" else "Activity disabled");
+            },
             .none => {},
+        }
+    }
+
+    fn navigateIdentity(self: *App, offset: isize, attention_only: bool) void {
+        const graph = self.model.graph orelse return;
+        if (graph.nodes.items.len == 0) return;
+        var items: [256]Navigation.Item = undefined;
+        const count = @min(graph.nodes.items.len, items.len);
+        for (graph.nodes.items[0..count], 0..) |node, index| {
+            var attention = false;
+            for (self.model.attention.items) |candidate| {
+                if (std.mem.eql(u8, candidate.id, node.id)) {
+                    attention = true;
+                    break;
+                }
+            }
+            items[index] = .{
+                .identity = .{ .project_path = graph.project.path, .node_id = node.id },
+                .title = node.title,
+                .attention = attention,
+            };
+        }
+        const selected = if (attention_only)
+            self.navigation_cursor.nextAttention(items[0..count])
+        else if (offset > 0)
+            self.navigation_cursor.next(items[0..count])
+        else
+            self.navigation_cursor.previous(items[0..count]);
+        const item = selected orelse return;
+        for (graph.nodes.items, 0..) |node, index| {
+            if (std.mem.eql(u8, node.id, item.identity.node_id)) {
+                if (!self.selectNodeIndex(index)) return;
+                self.openSelectedNode();
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
+                return;
+            }
         }
     }
 
