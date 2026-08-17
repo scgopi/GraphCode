@@ -1,8 +1,11 @@
 const std = @import("std");
 const Wire = @import("Wire.zig");
 
+/// Quick chats are intentionally not emulated by the Windows shell. The authoritative
+/// daemon protocol has no chat command or event, so exposing local-only chats would make
+/// their identity and lifetime diverge from the other clients.
 pub const Availability = enum {
-    available,
+    blocked_protocol_gap,
 };
 
 pub const Operation = enum {
@@ -13,41 +16,42 @@ pub const Operation = enum {
 };
 
 pub const Result = union(enum) {
-    accepted: Availability,
+    unavailable: Availability,
 };
 
 pub const Controller = struct {
     pub fn availability(_: Controller) Availability {
-        return .available;
+        return .blocked_protocol_gap;
     }
 
     pub fn request(_: Controller, _: Operation) Result {
-        return .{ .accepted = .available };
+        return .{ .unavailable = .blocked_protocol_gap };
     }
 };
 
 pub fn protocolGapMessage(operation: Operation) []const u8 {
     return switch (operation) {
-        .create => "Quick chats: create command unavailable",
-        .open => "Quick chats: open command unavailable",
-        .rename => "Quick chats: rename command unavailable",
-        .delete => "Quick chats: delete command unavailable",
+        .create => "Quick chats blocked: daemon protocol has no create-chat command",
+        .open => "Quick chats blocked: daemon protocol has no open-chat command",
+        .rename => "Quick chats blocked: daemon protocol has no rename-chat command",
+        .delete => "Quick chats blocked: daemon protocol has no delete-chat command",
     };
 }
 
-test "quick chat operations are available through the daemon controller" {
+test "quick chat operations stay explicitly unavailable until daemon protocol support exists" {
     const controller = Controller{};
-    try std.testing.expectEqual(Availability.available, controller.availability());
+    try std.testing.expectEqual(Availability.blocked_protocol_gap, controller.availability());
     inline for (std.meta.tags(Operation)) |operation| {
         const result = controller.request(operation);
-        try std.testing.expectEqual(Availability.available, result.accepted);
+        try std.testing.expectEqual(Availability.blocked_protocol_gap, result.unavailable);
+        try std.testing.expect(std.mem.indexOf(u8, protocolGapMessage(operation), "protocol") != null);
     }
-}
 
-test "authoritative wire command vocabulary includes every quick chat operation" {
-    try std.testing.expectEqualStrings("listQuickChats", Wire.commandName(.list_quick_chats));
-    try std.testing.expectEqualStrings("createQuickChat", Wire.commandName(.create_quick_chat));
-    try std.testing.expectEqualStrings("openQuickChat", Wire.commandName(.open_quick_chat));
-    try std.testing.expectEqualStrings("renameQuickChat", Wire.commandName(.rename_quick_chat));
-    try std.testing.expectEqualStrings("deleteQuickChat", Wire.commandName(.delete_quick_chat));
+    test "authoritative wire command vocabulary has no quick chat operation" {
+        inline for (std.meta.tags(Wire.CommandKind)) |kind| {
+            const name = Wire.commandName(kind);
+            try std.testing.expect(std.mem.indexOf(u8, name, "Chat") == null);
+            try std.testing.expect(std.mem.indexOf(u8, name, "chat") == null);
+        }
+    }
 }

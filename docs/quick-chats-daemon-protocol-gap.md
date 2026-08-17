@@ -1,12 +1,18 @@
-# Quick Chats daemon protocol parity
+# Quick Chats daemon protocol gap
 
-The former protocol gap is implemented in this branch. Quick Chats now use daemon-owned
-Codable commands/events, persisted stable UUIDs, activity sequencing, v1/v2 event delivery,
-and Windows wire/client APIs.
+## Ready-to-file issue
 
-## Implemented contract
+**Title:** Add shared daemon-owned Quick Chat commands, snapshots, and activity events
 
-The shared protocol includes:
+The macOS implementation currently stores `QuickChat` records in
+`GraphcodeKit/Sources/QuickChatStore.swift` under the app support directory and owns the
+zmx session directly. `DaemonCommand`/`DaemonEvent` have no Quick Chat cases, so a Windows
+client cannot implement parity without inventing a second persistence and lifecycle
+protocol.
+
+### Required contract
+
+Add these `DaemonCommand` cases:
 
 ```swift
 case listQuickChats
@@ -25,12 +31,28 @@ case quickChatDeleted(UUID)
 case quickChatActivity(id: UUID, activity: String?, presence: PresenceReading?)
 ```
 
-Every mutation is echoed and broadcast, and stale activity sequences are ignored by clients.
-The Windows app exposes production create/open/rename/delete callbacks and keyboard actions.
+`QuickChat` must remain keyed by stable UUID, persist atomically under the daemon support
+directory, and use the same backend/session lifecycle hooks as a composite session.
+`openQuickChat` must return the canonical record and ensure/attach its zmx session; delete
+must terminate that session before removing persistence. Every mutation must be echoed to
+the requesting v2 client and broadcast to subscribed clients. v1 should receive the same
+event-shaped compatibility frames used by graph mutations.
 
-## Follow-up lifecycle integration
+## Dependent todo / acceptance contract
 
-The daemon command surface is complete. The remaining integration point is attaching and
-terminating the backend zmx session from `openQuickChat`/`deleteQuickChat`; until that hook
-is wired, those commands still provide canonical persisted records and events but do not
-claim a live terminal session.
+1. **GraphcodeKit model:** move the persisted Quick Chat record and store behind a daemon
+   service; add Codable command/event cases and round-trip tests.
+2. **ProjectRegistry:** own the service, route all five commands, and broadcast snapshots
+   plus activity/presence updates.
+3. **graphcoded:** wire session ensure/terminate and activity polling to the service.
+4. **macOS app:** replace `QuickChatStore` file mutations with daemon requests while
+   retaining the existing canvas and rename/delete UI.
+5. **Windows shell:** replace `QuickChats.Controller`'s `blocked_protocol_gap` result with
+   wire encoders/decoders and reachable create/open/rename/delete actions.
+6. **Acceptance:** two clients observe identical list/order, rename/delete survive daemon
+   restart, open reattaches the stable zmx session, activity updates do not reorder
+   unrelated chats, and no client reports a chat as available before the negotiated daemon
+   version advertises these cases.
+
+Until this contract lands, Quick Chats remain intentionally **blocked**, not “available”
+through a local-only Windows implementation.

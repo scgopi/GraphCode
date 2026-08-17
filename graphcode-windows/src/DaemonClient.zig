@@ -281,31 +281,6 @@ pub const DaemonClient = struct {
             (self.outbound_count == 0 and !self.worker_busy and self.v1_pending_expectation == null);
     }
 
-    pub fn sendListQuickChats(self: *DaemonClient) void {
-        const command = Wire.commandListQuickChats(self.allocator) catch return;
-        self.sendCommand(command);
-    }
-
-    pub fn sendCreateQuickChat(self: *DaemonClient, title: []const u8, backend: []const u8) void {
-        const command = Wire.commandCreateQuickChat(self.allocator, title, backend) catch return;
-        self.sendCommand(command);
-    }
-
-    pub fn sendOpenQuickChat(self: *DaemonClient, id: []const u8) void {
-        const command = Wire.commandOpenQuickChat(self.allocator, id) catch return;
-        self.sendCommand(command);
-    }
-
-    pub fn sendRenameQuickChat(self: *DaemonClient, id: []const u8, title: []const u8) void {
-        const command = Wire.commandRenameQuickChat(self.allocator, id, title) catch return;
-        self.sendCommand(command);
-    }
-
-    pub fn sendDeleteQuickChat(self: *DaemonClient, id: []const u8) void {
-        const command = Wire.commandDeleteQuickChat(self.allocator, id) catch return;
-        self.sendCommand(command);
-    }
-
     pub fn sendCreateNode(self: *DaemonClient, project_path: []const u8, title: []const u8) void {
         self.sendCreateNodeConfigured(project_path, title, "claudeCode", null);
     }
