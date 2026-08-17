@@ -24,28 +24,29 @@ pub fn draw(
     }
     if (model.graphs.items.len != 0) {
         drawText(hdc, allocator, "Open", 18, y + 10, 14, 0x00B8B8B8);
-        y += 36;
-        for (model.graphs.items) |summary| {
+        for (model.graphs.items, 0..) |summary, graph_index| {
+            const project_top = sharedGraphTop(model, graph_index);
             const selected = if (model.selected_project_path) |path|
                 std.mem.eql(u8, path, summary.project.path)
             else false;
-            drawText(hdc, allocator, summary.project.name, 24, y, 13,
+            drawText(hdc, allocator, summary.project.name, 24, project_top, 13,
                 if (selected) 0x00FFFFFF else 0x00D0D0D0);
-            y += 24;
-            drawText(hdc, allocator, "Loops", 18, y + 10, 11, 0x007A7A7A);
-            y += 24;
-            for (summary.nodes.items) |node| {
-                drawText(hdc, allocator, node.title, 36, y, 11, 0x00E6E6E6);
-                y += 24;
+            for (summary.nodes.items, 0..) |node, node_index| {
+                drawText(
+                    hdc,
+                    allocator,
+                    node.title,
+                    36,
+                    sharedLoopTop(model, graph_index, node_index),
+                    11,
+                    0x00E6E6E6,
+                );
             }
-            y += 14;
         }
         if (inspection) |value| {
-            drawText(hdc, allocator, "Worktrees", 18, y + 10, 11, 0x007A7A7A);
-            y += 24;
-            for (value.entries.items) |entry| {
-                drawText(hdc, allocator, entry.path, 24, y, 11, 0x00E6E6E6);
-                y += 34;
+            drawText(hdc, allocator, "Worktrees", 18, sharedWorktreeTop(model, 0) - 14, 11, 0x007A7A7A);
+            for (value.entries.items, 0..) |entry, index| {
+                drawText(hdc, allocator, entry.path, 24, sharedWorktreeTop(model, index), 11, 0x00E6E6E6);
             }
         }
     } else if (model.graph) |graph| {
@@ -144,12 +145,35 @@ pub fn layoutFor(model: *const GraphModel.Model, inspection: ?*const WorktreeSta
     } else if (model.graph) |graph| {
         loop_count = graph.nodes.items.len;
     }
+
     return .{
         .base = Tokens.header_height + 78,
         .project_count = model.recent_projects.items.len,
         .loop_count = loop_count,
         .worktree_count = if (inspection) |value| value.entries.items.len else 0,
     };
+}
+
+pub fn sharedGraphTop(model: *const GraphModel.Model, graph_index: usize) i32 {
+    var top = Tokens.header_height + 78 +
+        @as(i32, @intCast(model.recent_projects.items.len * 24)) + 36;
+    for (model.graphs.items[0..@min(graph_index, model.graphs.items.len)]) |summary| {
+        top += 62 + @as(i32, @intCast(summary.nodes.items.len * 24));
+    }
+    return top;
+}
+
+pub fn sharedLoopTop(model: *const GraphModel.Model, graph_index: usize, node_index: usize) i32 {
+    return sharedGraphTop(model, graph_index) + 48 + @as(i32, @intCast(node_index * 24));
+}
+
+pub fn sharedWorktreeTop(model: *const GraphModel.Model, index: usize) i32 {
+    var top = Tokens.header_height + 78 +
+        @as(i32, @intCast(model.recent_projects.items.len * 24)) + 36;
+    for (model.graphs.items) |summary| {
+        top += 62 + @as(i32, @intCast(summary.nodes.items.len * 24));
+    }
+    return top + 24 + @as(i32, @intCast(index * 34));
 }
 
 pub fn rowAt(
@@ -177,14 +201,34 @@ pub fn rowAt(
         if (y >= overview_top and y < overview_top + 38) {
             return .{ .kind = .overview, .index = 0, .top = overview_top };
         }
-        const loop_top = layout.loopTop(0) - scroll_offset;
-        const loop_count = layout.loop_count;
-        if (y >= loop_top and y < loop_top + @as(i32, @intCast(loop_count * 24))) {
-            return .{ .kind = .loop, .index = @intCast(@divTrunc(y - loop_top, 24)), .top = loop_top };
+        var loop_index: usize = 0;
+        for (model.graphs.items, 0..) |summary, graph_index| {
+            for (summary.nodes.items, 0..) |_, node_index| {
+                const loop_top = sharedLoopTop(model, graph_index, node_index) - scroll_offset;
+                if (y >= loop_top and y < loop_top + 24) {
+                    return .{
+                        .kind = .loop,
+                        .index = loop_index,
+                        .top = loop_top,
+                        .project_path = summary.project.path,
+                    };
+                }
+                loop_index += 1;
+            }
+        }
+        if (model.graphs.items.len == 0) {
+            const loop_top = layout.loopTop(0) - scroll_offset;
+            if (y >= loop_top and y < loop_top + @as(i32, @intCast(layout.loop_count * 24))) {
+                return .{ .kind = .loop, .index = @intCast(@divTrunc(y - loop_top, 24)), .top = loop_top };
+            }
         }
     }
     if (inspection) |value| {
-        const worktree_top = layout.worktreeTop(0) - scroll_offset;
+        const worktree_base = if (model.graphs.items.len == 0)
+            layout.worktreeTop(0)
+        else
+            sharedWorktreeTop(model, 0);
+        const worktree_top = worktree_base - scroll_offset;
         if (y >= worktree_top and y < worktree_top + @as(i32, @intCast(value.entries.items.len * 34))) {
             return .{ .kind = .worktree, .index = @intCast(@divTrunc(y - worktree_top, 34)), .top = worktree_top };
         }
@@ -206,10 +250,7 @@ pub fn sidebarSectionBottom(model: *const GraphModel.Model, inspection: ?*const 
     var bottom = Tokens.header_height + 78 +
         @as(i32, @intCast(model.recent_projects.items.len * 24));
     if (model.graphs.items.len != 0) {
-        var loops: usize = 0;
-        for (model.graphs.items) |summary| loops += summary.nodes.items.len;
-        bottom += 36 + @as(i32, @intCast(model.graphs.items.len * 38)) +
-            @as(i32, @intCast(loops * 24)) + @as(i32, @intCast(model.graphs.items.len * 38));
+        bottom = sharedWorktreeTop(model, 0);
         if (inspection) |value| bottom += 24 + @as(i32, @intCast(value.entries.items.len * 34)) + 10;
     } else if (model.graph != null) {
         bottom += 62 + 54 + @as(i32, @intCast(model.graph.?.nodes.items.len * 24));
@@ -314,6 +355,26 @@ test "shared sidebar layout routes every loop row after project rows and scroll"
         try std.testing.expectEqual(RowKind.loop, row.kind);
         try std.testing.expectEqual(index, row.index);
     }
+
+}
+
+test "multi-project rows share render and hit-test offsets with project identity" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    const local = try std.fs.cwd().readFileAlloc(allocator, "fixtures/daemon-v2-multi-project.json", 64 * 1024);
+    defer allocator.free(local);
+    const remote = try std.fs.cwd().readFileAlloc(allocator, "fixtures/daemon-v2-multi-project-remote.json", 64 * 1024);
+    defer allocator.free(remote);
+    _ = try model.updateFromFrame(local);
+    _ = try model.updateFromFrame(remote);
+    const local_top = sharedLoopTop(&model, 0, 0);
+    const remote_top = sharedLoopTop(&model, 1, 0);
+    const local_row = rowAt(24, local_top + 4, &model, null, 0, 700) orelse return error.TestUnexpectedResult;
+    const remote_row = rowAt(24, remote_top + 4, &model, null, 0, 700) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("C:\\work\\local", local_row.project_path.?);
+    try std.testing.expectEqualStrings("ssh://build/remote", remote_row.project_path.?);
+    try std.testing.expectEqual(sharedWorktreeTop(&model, 0), sidebarSectionBottom(&model, null));
 }
 
 test "sidebar scroll clamps overflow, shrink, and resize" {
