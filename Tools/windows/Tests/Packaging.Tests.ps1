@@ -81,11 +81,15 @@ try {
   New-Item -ItemType Directory -Force -Path (Split-Path $userData -Parent) | Out-Null
   Set-Content $userData "preserve" -Force
   Invoke-Package "Upgrade" @{ Package = $zip; InstallRoot = $install; NoScheduledTask = $true }
-  $supportIdentity = [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE ".graphcode")).TrimEnd("\").ToLowerInvariant()
+  $supportIdentity = [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE ".graphcode")).TrimEnd([char]92).ToLowerInvariant()
   $sid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
-  $identityBytes = [Text.Encoding]::UTF8.GetBytes("$sid|$supportIdentity")
-  $identityHash = (([Security.Cryptography.SHA256]::Create().ComputeHash($identityBytes) | ForEach-Object { $_.ToString("x2") }) -join "")
-  $sentinelTask = "GraphCode\graphcoded-$($identityHash.Substring(0, 32))"
+  $identityBytes = [Text.Encoding]::UTF8.GetBytes(($sid + '|' + $supportIdentity))
+  $identityHex = @()
+  foreach ($byte in [Security.Cryptography.SHA256]::Create().ComputeHash($identityBytes)) {
+    $identityHex += $byte.ToString('x2')
+  }
+  $identityHash = $identityHex -join ''
+  $sentinelTask = 'GraphCode\graphcoded-' + $identityHash.Substring(0, 32)
   schtasks.exe /Create /TN $sentinelTask /TR "cmd.exe /c exit 0" /SC ONCE /ST (Get-Date).AddMinutes(2).ToString("HH:mm") /F *> $null
   if ($LASTEXITCODE -ne 0) { throw "could not create scoped task sentinel" }
   $sentinelBefore = (& schtasks.exe /Query /TN $sentinelTask /XML | Out-String)
@@ -139,6 +143,6 @@ try {
   exit 0
 } finally {
   Remove-Item $fixture,$out,(Split-Path $install -Parent), `
-    (Join-Path $env:USERPROFILE ".graphcode\packaging-test-$PID") `
+    (Join-Path $env:USERPROFILE ('.graphcode\packaging-test-' + $PID)) `
     -Recurse -Force -ErrorAction SilentlyContinue
 }
