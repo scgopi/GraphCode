@@ -14,7 +14,7 @@ pub const NodeDraft = struct {
     stall_after_seconds: ?f64 = null,
     metric_command: []const u8 = "",
     metric_direction: []const u8 = "maximize",
-    backend: []const u8 = "claudeCode",
+    backend: ?[]const u8 = null,
     model_tier: []const u8 = "",
     worktree_repository: []const u8 = "",
     worktree_id: []const u8 = "",
@@ -33,7 +33,7 @@ pub const NodeDraft = struct {
         allocator.free(self.goal_predicate);
         allocator.free(self.metric_command);
         allocator.free(self.metric_direction);
-        allocator.free(self.backend);
+        if (self.backend) |value| allocator.free(value);
         allocator.free(self.model_tier);
         allocator.free(self.worktree_repository);
         allocator.free(self.worktree_id);
@@ -111,6 +111,7 @@ pub const FormError = error{
     InvalidGoal,
     InvalidWorktree,
     InvalidCycleGuard,
+    InvalidNumericInput,
     MissingFirstInstruction,
     MissingTriggerPrompt,
     EmptyJumpQuery,
@@ -138,10 +139,12 @@ pub fn validateNode(draft: NodeDraft) FormError!void {
     if (std.mem.eql(u8, draft.loop_type, "composite") and
         std.mem.trim(u8, draft.title, " \t\r\n").len == 0)
         return error.EmptyTitle;
-    if (!std.mem.eql(u8, draft.backend, "claudeCode") and
-        !std.mem.eql(u8, draft.backend, "copilotCLI") and
-        !std.mem.eql(u8, draft.backend, "codex"))
-        return error.UnsupportedBackend;
+    if (draft.backend) |backend| {
+        if (!std.mem.eql(u8, backend, "claudeCode") and
+            !std.mem.eql(u8, backend, "copilotCLI") and
+            !std.mem.eql(u8, backend, "codex"))
+            return error.UnsupportedBackend;
+    }
     if (draft.model_tier.len != 0 and
         !std.mem.eql(u8, draft.model_tier, "fast") and
         !std.mem.eql(u8, draft.model_tier, "standard") and

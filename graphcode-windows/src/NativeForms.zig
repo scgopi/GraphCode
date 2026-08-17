@@ -8,8 +8,8 @@ const DialogState = struct {
     parent: c.HWND,
     result: bool = false,
     closed: bool = false,
-    edits: [17]c.HWND = .{ null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null },
-    values: [17][]u8 = .{ &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{} },
+    edits: [20]c.HWND = .{ null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null },
+    values: [20][]u8 = .{ &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{} },
 };
 
 const Kind = enum { node, edge, update, settings, jump };
@@ -53,18 +53,23 @@ pub fn node(
     state.values[9] = try dupOptionalFloatText(allocator, initial.stall_after_seconds);
     state.values[10] = try allocator.dupe(u8, initial.metric_command);
     state.values[11] = try allocator.dupe(u8, initial.metric_direction);
-    state.values[12] = try allocator.dupe(u8, initial.backend);
+    state.values[12] = try allocator.dupe(u8, initial.backend orelse "");
     state.values[13] = try allocator.dupe(u8, initial.model_tier);
     state.values[14] = try allocator.dupe(u8, initial.worktree_repository);
-    state.values[15] = try allocator.dupe(u8, initial.worktree_path);
-    state.values[16] = try allocator.dupe(u8, initial.worktree_branch);
+    state.values[15] = try allocator.dupe(u8, initial.worktree_id);
+    state.values[16] = try allocator.dupe(u8, initial.worktree_path);
+    state.values[17] = try allocator.dupe(u8, initial.worktree_branch);
+    state.values[18] = try allocator.dupe(u8, initial.subgraph_json);
+    state.values[19] = try allocator.dupe(u8, initial.created_by);
     if (!(try show(state, "Create or edit node", &.{
         "Title", "Loop type", "Check description", "Trigger prompt",
         "First instruction", "Pause before writes only (true/false)", "Goal summary",
         "Goal predicate", "Poll interval seconds", "Stall after seconds", "Metric command",
-        "Metric direction (maximize/minimize)", "Backend", "Model tier", "Worktree repository",
-        "Worktree path", "Worktree branch",
+        "Metric direction (maximize/minimize)", "Backend (blank inherits default)", "Model tier", "Worktree repository",
+        "Worktree ID", "Worktree path", "Worktree branch", "Subgraph JSON", "Created by",
     }))) return null;
+    const poll_interval = parseRequiredFloat(state.values[8]) catch return error.InvalidNumericInput;
+    const stall_after = parseOptionalFloat(state.values[9]) catch return error.InvalidNumericInput;
     var result = Forms.NodeDraft{
         .title = try allocator.dupe(u8, state.values[0]),
         .loop_type = try allocator.dupe(u8, state.values[1]),
@@ -74,15 +79,18 @@ pub fn node(
         .pauses_before_writes_only = std.mem.eql(u8, state.values[5], "true"),
         .goal_summary = try allocator.dupe(u8, state.values[6]),
         .goal_predicate = try allocator.dupe(u8, state.values[7]),
-        .poll_interval_seconds = std.fmt.parseFloat(f64, state.values[8]) catch 60,
-        .stall_after_seconds = if (std.mem.trim(u8, state.values[9], " \t\r\n").len == 0) null else std.fmt.parseFloat(f64, state.values[9]) catch null,
+        .poll_interval_seconds = poll_interval,
+        .stall_after_seconds = stall_after,
         .metric_command = try allocator.dupe(u8, state.values[10]),
         .metric_direction = try allocator.dupe(u8, state.values[11]),
-        .backend = try allocator.dupe(u8, state.values[12]),
+        .backend = if (std.mem.trim(u8, state.values[12], " \t\r\n").len == 0) null else try allocator.dupe(u8, state.values[12]),
         .model_tier = try allocator.dupe(u8, state.values[13]),
         .worktree_repository = try allocator.dupe(u8, state.values[14]),
-        .worktree_path = try allocator.dupe(u8, state.values[15]),
-        .worktree_branch = try allocator.dupe(u8, state.values[16]),
+        .worktree_id = try allocator.dupe(u8, state.values[15]),
+        .worktree_path = try allocator.dupe(u8, state.values[16]),
+        .worktree_branch = try allocator.dupe(u8, state.values[17]),
+        .subgraph_json = try allocator.dupe(u8, state.values[18]),
+        .created_by = try allocator.dupe(u8, state.values[19]),
     };
     errdefer result.deinit(allocator);
     return result;
@@ -107,12 +115,16 @@ pub fn edge(
     state.values[4] = try allocator.dupe(u8, initial.transform_kind);
     state.values[5] = try allocator.dupe(u8, initial.transform_value);
     state.values[6] = try allocator.dupe(u8, initial.cycle_until);
-    state.values[7] = try allocator.dupe(u8, initial.spawn_target_project_path);
+    state.values[7] = try dupOptionalIntText(allocator, initial.cycle_max_iterations);
+    state.values[8] = try dupOptionalIntText(allocator, initial.cycle_stop_after_passes);
+    state.values[9] = try allocator.dupe(u8, initial.spawn_target_project_path);
     if (!(try show(state, "Create or edit edge", &.{
         "From node ID", "To node ID", "Edge kind", "Condition",
         "Transform (none/template/script)", "Transform value", "Cycle until",
-        "Spawn target project path",
+        "Cycle max iterations", "Cycle stop after passes", "Spawn target project path",
     }))) return null;
+    const cycle_max = parseOptionalInt(state.values[7]) catch return error.InvalidNumericInput;
+    const cycle_stop = parseOptionalInt(state.values[8]) catch return error.InvalidNumericInput;
     var result = Forms.EdgeDraft{
         .from = try allocator.dupe(u8, state.values[0]),
         .to = try allocator.dupe(u8, state.values[1]),
@@ -121,7 +133,9 @@ pub fn edge(
         .transform_kind = try allocator.dupe(u8, state.values[4]),
         .transform_value = try allocator.dupe(u8, state.values[5]),
         .cycle_until = try allocator.dupe(u8, state.values[6]),
-        .spawn_target_project_path = try allocator.dupe(u8, state.values[7]),
+        .cycle_max_iterations = cycle_max,
+        .cycle_stop_after_passes = cycle_stop,
+        .spawn_target_project_path = try allocator.dupe(u8, state.values[9]),
     };
     errdefer result.deinit(allocator);
     return result;
@@ -150,24 +164,23 @@ pub fn update(
     if (!(try show(state, "Update node", &.{
         "Goal summary (blank leaves unchanged)", "Goal predicate (blank clears)",
         "Poll interval seconds", "Stall after seconds", "Metric command",
-        "Metric direction (maximize/minimize)", "Trigger prompt", "Check description",
-        "Model tier (fast/standard/capable)",
+        "Metric direction (blank leaves unchanged; maximize/minimize)", "Trigger prompt (blank clears)", "Check description (blank clears)",
+        "Model tier (blank leaves unchanged; fast/standard/capable)",
     }))) return null;
-    var result = Forms.NodeUpdate{
-        .goal_summary = try changedOptional(allocator, state.values[0], initial.goal_summary),
-        .goal_predicate = try changedOptional(allocator, state.values[1], initial.goal_predicate),
-        .poll_interval_seconds = try changedFloat(state.values[2], initial.poll_interval_seconds, false),
-        .stall_after_seconds = try changedFloat(state.values[3], initial.stall_after_seconds, true),
-        .metric_command = try changedOptional(allocator, state.values[4], initial.metric_command),
-        .metric_direction = try changedOptional(allocator, state.values[5], initial.metric_direction),
-        .trigger_prompt = try changedOptional(allocator, state.values[6], initial.trigger_prompt),
-        .check_description = try changedOptional(allocator, state.values[7], initial.check_description),
-        .model_tier = try changedOptional(allocator, state.values[8], initial.model_tier),
-    };
-    Forms.validateNodeUpdate(result) catch {
-        result.deinit(allocator);
-        return error.InvalidNodeUpdate;
-    };
+    const poll_interval = try changedFloat(state.values[2], initial.poll_interval_seconds, false);
+    const stall_after = try changedFloat(state.values[3], initial.stall_after_seconds, true);
+    var result = Forms.NodeUpdate{};
+    errdefer result.deinit(allocator);
+    result.goal_summary = try changedOptional(allocator, state.values[0], initial.goal_summary, false);
+    result.goal_predicate = try changedOptional(allocator, state.values[1], initial.goal_predicate, true);
+    result.poll_interval_seconds = poll_interval;
+    result.stall_after_seconds = stall_after;
+    result.metric_command = try changedOptional(allocator, state.values[4], initial.metric_command, true);
+    result.metric_direction = try changedOptional(allocator, state.values[5], initial.metric_direction, false);
+    result.trigger_prompt = try changedOptional(allocator, state.values[6], initial.trigger_prompt, true);
+    result.check_description = try changedOptional(allocator, state.values[7], initial.check_description, true);
+    result.model_tier = try changedOptional(allocator, state.values[8], initial.model_tier, false);
+    Forms.validateNodeUpdate(result) catch return error.InvalidNodeUpdate;
     return result;
 }
 
@@ -187,6 +200,26 @@ fn dupOptionalFloatText(allocator: std.mem.Allocator, value: ?f64) ![]u8 {
     return if (value) |number| std.fmt.allocPrint(allocator, "{d}", .{number}) else allocator.dupe(u8, "");
 }
 
+fn dupOptionalIntText(allocator: std.mem.Allocator, value: ?i64) ![]u8 {
+    return if (value) |number| std.fmt.allocPrint(allocator, "{d}", .{number}) else allocator.dupe(u8, "");
+}
+
+fn parseRequiredFloat(value: []const u8) !f64 {
+    return std.fmt.parseFloat(f64, std.mem.trim(u8, value, " \t\r\n"));
+}
+
+fn parseOptionalFloat(value: []const u8) !?f64 {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return try std.fmt.parseFloat(f64, trimmed);
+}
+
+fn parseOptionalInt(value: []const u8) !?i64 {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return try std.fmt.parseInt(i64, trimmed, 10);
+}
+
 fn optionalValue(allocator: std.mem.Allocator, value: []const u8) !?[]u8 {
     if (std.mem.trim(u8, value, " \t\r\n").len == 0) return null;
     return try allocator.dupe(u8, value);
@@ -196,10 +229,12 @@ fn changedOptional(
     allocator: std.mem.Allocator,
     value: []const u8,
     initial: ?[]const u8,
+    allow_clear: bool,
 ) !?[]u8 {
     const trimmed = std.mem.trim(u8, value, " \t\r\n");
     const original = initial orelse "";
     if (std.mem.eql(u8, trimmed, std.mem.trim(u8, original, " \t\r\n"))) return null;
+    if (trimmed.len == 0 and !allow_clear) return null;
     return try allocator.dupe(u8, if (trimmed.len == 0) "" else value);
 }
 
@@ -317,27 +352,27 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
     const value = &active_state_storage;
     switch (message) {
         c.WM_CREATE => {
-            var labels: [17][]const u8 = .{ "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "" };
+            var labels: [20][]const u8 = .{ "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "" };
             var label_count: usize = 0;
             switch (value.kind) {
-                .node => {
-                    labels = .{ "Title", "Loop type", "Check description", "Trigger prompt", "First instruction", "Pause before writes only (true/false)", "Goal summary", "Goal predicate", "Poll interval seconds", "Stall after seconds", "Metric command", "Metric direction (maximize/minimize)", "Backend", "Model tier", "Worktree repository", "Worktree path", "Worktree branch" };
-                    label_count = 17;
+                    .node => {
+                        labels = .{ "Title", "Loop type", "Check description", "Trigger prompt", "First instruction", "Pause before writes only (true/false)", "Goal summary", "Goal predicate", "Poll interval seconds", "Stall after seconds", "Metric command", "Metric direction (maximize/minimize)", "Backend (blank inherits default)", "Model tier", "Worktree repository", "Worktree ID", "Worktree path", "Worktree branch", "Subgraph JSON", "Created by" };
+                        label_count = 20;
                 },
                 .edge => {
-                    labels = .{ "From node ID", "To node ID", "Edge kind", "Condition", "Transform (none/template/script)", "Transform value", "Cycle until", "Spawn target project path", "", "", "", "", "", "", "", "", "" };
-                    label_count = 8;
+                        labels = .{ "From node ID", "To node ID", "Edge kind", "Condition", "Transform (none/template/script)", "Transform value", "Cycle until", "Cycle max iterations", "Cycle stop after passes", "Spawn target project path", "", "", "", "", "", "", "", "", "", "" };
+                        label_count = 10;
                 },
                 .update => {
-                    labels = .{ "Goal summary (blank leaves unchanged)", "Goal predicate (blank clears)", "Poll interval seconds", "Stall after seconds", "Metric command", "Metric direction (maximize/minimize)", "Trigger prompt", "Check description", "Model tier (fast/standard/capable)", "", "", "", "", "", "", "", "" };
+                    labels = .{ "Goal summary (blank leaves unchanged)", "Goal predicate (blank clears)", "Poll interval seconds", "Stall after seconds", "Metric command", "Metric direction (maximize/minimize)", "Trigger prompt", "Check description", "Model tier (fast/standard/capable)", "", "", "", "", "", "", "", "", "", "", "", };
                     label_count = 9;
                 },
                 .settings => {
-                    labels = .{ "Daemon pipe override", "Support directory", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "" };
+                    labels = .{ "Daemon pipe override", "Support directory", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "" };
                     label_count = 2;
                 },
                 .jump => {
-                    labels = .{ "Loop title or ID", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "" };
+                    labels = .{ "Loop title or ID", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "" };
                     label_count = 1;
                 },
             }
@@ -399,8 +434,8 @@ fn childId(value: usize) c.HMENU {
 fn readValues(state: *DialogState) void {
     var buffer: [1024]u16 = undefined;
     const count: usize = switch (state.kind) {
-        .node => 17,
-        .edge => 8,
+        .node => 20,
+        .edge => 10,
         .update => 9,
         .settings => 2,
         .jump => 1,
@@ -450,4 +485,11 @@ test "jump modal result uses production query validation" {
     try std.testing.expectError(error.EmptyJumpQuery, Forms.validateJumpQuery(state.values[0]));
     state.values[0] = @constCast("Beta");
     try std.testing.expectEqualStrings("Beta", try Forms.validateJumpQuery(state.values[0]));
+}
+
+test "numeric form values reject malformed input instead of substituting defaults" {
+    try std.testing.expectError(error.InvalidCharacter, parseRequiredFloat("not-a-number"));
+    try std.testing.expectError(error.InvalidCharacter, parseOptionalInt("3x"));
+    try std.testing.expectEqual(@as(?f64, null), try parseOptionalFloat(" \t"));
+    try std.testing.expectEqual(@as(?i64, 7), try parseOptionalInt("7"));
 }

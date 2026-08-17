@@ -9,6 +9,15 @@ pub const Node = struct {
     state: []u8,
     activity: []u8,
     presence: []u8,
+    goal_summary: []u8 = &.{},
+    goal_predicate: []u8 = &.{},
+    metric_command: []u8 = &.{},
+    metric_direction: []u8 = &.{},
+    trigger_prompt: []u8 = &.{},
+    check_description: []u8 = &.{},
+    model_tier: []u8 = &.{},
+    poll_interval_seconds: ?f64 = null,
+    stall_after_seconds: ?f64 = null,
     worktree_path: []u8 = @constCast(""),
     worktree_branch: []u8 = &.{},
 };
@@ -289,6 +298,15 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
         .state = try allocator.dupe(u8, node.state),
         .activity = try allocator.dupe(u8, node.activity),
         .presence = try allocator.dupe(u8, node.presence),
+        .goal_summary = try allocator.dupe(u8, node.goal_summary),
+        .goal_predicate = try allocator.dupe(u8, node.goal_predicate),
+        .metric_command = try allocator.dupe(u8, node.metric_command),
+        .metric_direction = try allocator.dupe(u8, node.metric_direction),
+        .trigger_prompt = try allocator.dupe(u8, node.trigger_prompt),
+        .check_description = try allocator.dupe(u8, node.check_description),
+        .model_tier = try allocator.dupe(u8, node.model_tier),
+        .poll_interval_seconds = node.poll_interval_seconds,
+        .stall_after_seconds = node.stall_after_seconds,
         .worktree_path = try allocator.dupe(u8, node.worktree_path),
     };
 }
@@ -310,6 +328,15 @@ fn decodeNodes(
             .state = try duplicateJsonStringOr(allocator, object, "state", "idle"),
             .activity = try duplicateJsonStringOr(allocator, object, "activity", ""),
             .presence = try duplicatePresence(allocator, object),
+            .goal_summary = try duplicateJsonStringOr(allocator, object, "summary", ""),
+            .goal_predicate = try duplicateJsonStringOr(allocator, object, "predicate", ""),
+            .metric_command = try duplicateJsonStringOr(allocator, object, "metricCommand", ""),
+            .metric_direction = try duplicateJsonStringOr(allocator, object, "metricDirection", ""),
+            .trigger_prompt = try duplicateJsonStringOr(allocator, object, "triggerPrompt", ""),
+            .check_description = try duplicateJsonStringOr(allocator, object, "checkDescription", ""),
+            .model_tier = try duplicateJsonStringOr(allocator, object, "modelTier", ""),
+            .poll_interval_seconds = jsonFloat(object, "pollIntervalSeconds"),
+            .stall_after_seconds = jsonFloat(object, "stallAfterSeconds"),
             .worktree_path = try duplicateWorktreePath(allocator, object),
             .worktree_branch = try duplicateWorktreeBranch(allocator, object),
         });
@@ -360,6 +387,17 @@ fn jsonNumber(object: []const u8, key: []const u8) ?u32 {
     while (end < value.len and value[end] >= '0' and value[end] <= '9') : (end += 1) {}
     if (end == 0) return null;
     return std.fmt.parseInt(u32, value[0..end], 10) catch null;
+}
+
+fn jsonFloat(object: []const u8, key: []const u8) ?f64 {
+    const needle = std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":", .{key}) catch return null;
+    defer std.heap.page_allocator.free(needle);
+    const start = std.mem.indexOf(u8, object, needle) orelse return null;
+    const value = std.mem.trimLeft(u8, object[start + needle.len ..], " ");
+    var end: usize = 0;
+    while (end < value.len and (std.ascii.isDigit(value[end]) or value[end] == '.' or value[end] == '-' or value[end] == '+' or value[end] == 'e' or value[end] == 'E')) : (end += 1) {}
+    if (end == 0) return null;
+    return std.fmt.parseFloat(f64, value[0..end]) catch null;
 }
 
 fn duplicateJsonString(allocator: std.mem.Allocator, object: []const u8, key: []const u8) ![]u8 {
@@ -445,6 +483,13 @@ fn freeNode(allocator: std.mem.Allocator, node: Node) void {
     allocator.free(node.state);
     allocator.free(node.activity);
     allocator.free(node.presence);
+    allocator.free(node.goal_summary);
+    allocator.free(node.goal_predicate);
+    allocator.free(node.metric_command);
+    allocator.free(node.metric_direction);
+    allocator.free(node.trigger_prompt);
+    allocator.free(node.check_description);
+    allocator.free(node.model_tier);
     allocator.free(node.worktree_path);
     allocator.free(node.worktree_branch);
 }

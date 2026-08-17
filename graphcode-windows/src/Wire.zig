@@ -238,7 +238,7 @@ pub fn commandGraphCreateNodeFull(
     const trigger = try nullableString(allocator, draft.trigger_prompt); defer allocator.free(trigger);
     const first = try nullableString(allocator, draft.first_instruction); defer allocator.free(first);
     const goal = try goalJson(allocator, draft); defer allocator.free(goal);
-    const backend = try quoteJson(allocator, draft.backend); defer allocator.free(backend);
+    const backend = try nullableString(allocator, draft.backend); defer allocator.free(backend);
     const tier = try nullableString(allocator, draft.model_tier); defer allocator.free(tier);
     const worktree = try worktreeJson(allocator, draft); defer allocator.free(worktree);
     const subgraph = if (draft.subgraph_json.len == 0) try allocator.dupe(u8, "null") else try allocator.dupe(u8, draft.subgraph_json);
@@ -255,9 +255,10 @@ pub fn commandGraphCreateNodeFull(
     });
 }
 
-fn nullableString(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
-    if (value.len == 0) return allocator.dupe(u8, "null");
-    return quoteJson(allocator, value);
+fn nullableString(allocator: std.mem.Allocator, value: ?[]const u8) ![]u8 {
+    const text = value orelse return allocator.dupe(u8, "null");
+    if (text.len == 0) return allocator.dupe(u8, "null");
+    return quoteJson(allocator, text);
 }
 
 fn goalJson(allocator: std.mem.Allocator, draft: Forms.NodeDraft) ![]u8 {
@@ -845,11 +846,19 @@ test "typed node and edge forms retain every supported field on the wire" {
         .worktree_id = "wt",
         .worktree_path = "C:\\repo-wt",
         .worktree_branch = "feature",
+        .subgraph_json = "{\"nodes\":[]}",
+        .created_by = "user",
     });
     defer allocator.free(node);
-    for ([_][]const u8{ "\"summary\":\"Done\"", "\"predicate\":\"test -f done\"", "pollIntervalSeconds", "stallAfterSeconds", "metricCommand", "metricDirection", "codex", "capable", "repositoryPath", "worktreePath", "feature" }) |field| {
+    for ([_][]const u8{ "\"summary\":\"Done\"", "\"predicate\":\"test -f done\"", "pollIntervalSeconds", "stallAfterSeconds", "metricCommand", "metricDirection", "codex", "capable", "repositoryPath", "worktreePath", "feature", "\"nodes\":[]", "\"createdBy\":\"user\"" }) |field| {
         try std.testing.expect(std.mem.indexOf(u8, node, field) != null);
     }
+    const inherited = try commandGraphCreateNodeFull(allocator, "C:\\work\\graph", "11111111-1111-4111-8111-111111111111", .{
+        .title = "Inherited",
+        .backend = null,
+    });
+    defer allocator.free(inherited);
+    try std.testing.expect(std.mem.indexOf(u8, inherited, "\"backend\":null") != null);
     const edge = try commandGraphCreateEdgeFull(allocator, "C:\\work\\graph", "a", "b", .{
         .from = "a",
         .to = "b",

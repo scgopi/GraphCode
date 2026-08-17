@@ -294,20 +294,25 @@ pub const App = struct {
         const index = self.model.selected_node orelse return;
         if (index >= graph.nodes.items.len) return;
         const node = graph.nodes.items[index];
-        var draft = NativeForms.node(self.window.hwnd, self.allocator, .{
-            .title = node.title,
-            .loop_type = node.loop_type,
-        }) catch {
+        var initial = Forms.NodeUpdate{
+            .goal_summary = if (node.goal_summary.len == 0) null else self.allocator.dupe(u8, node.goal_summary) catch null,
+            .goal_predicate = if (node.goal_predicate.len == 0) null else self.allocator.dupe(u8, node.goal_predicate) catch null,
+            .poll_interval_seconds = node.poll_interval_seconds,
+            .stall_after_seconds = node.stall_after_seconds,
+            .metric_command = if (node.metric_command.len == 0) null else self.allocator.dupe(u8, node.metric_command) catch null,
+            .metric_direction = if (node.metric_direction.len == 0) null else self.allocator.dupe(u8, node.metric_direction) catch null,
+            .trigger_prompt = if (node.trigger_prompt.len == 0) null else self.allocator.dupe(u8, node.trigger_prompt) catch null,
+            .check_description = if (node.check_description.len == 0) null else self.allocator.dupe(u8, node.check_description) catch null,
+            .model_tier = if (node.model_tier.len == 0) null else self.allocator.dupe(u8, node.model_tier) catch null,
+        };
+        defer initial.deinit(self.allocator);
+        var update = NativeForms.update(self.window.hwnd, self.allocator, initial) catch {
             self.setStatus("Unable to open node form");
             return;
         } orelse return;
-        defer draft.deinit(self.allocator);
-        Forms.validateNode(draft) catch {
-            self.setStatus("Invalid node form");
-            return;
-        };
+        defer update.deinit(self.allocator);
         const path = self.currentProject() orelse return;
-        self.client.sendRenameNode(path, node.id, draft.title);
+        self.client.sendUpdateNodeForm(path, node.id, update);
     }
 
     fn createEdge(self: *App) void {
