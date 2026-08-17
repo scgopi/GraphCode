@@ -279,14 +279,34 @@ test "worktree row hit testing selects only visible rows" {
 test "shared sidebar layout routes every loop row after project rows and scroll" {
     var model = GraphModel.Model.init(std.testing.allocator);
     defer model.deinit();
-    try model.recent_projects.append(.{ .name = @constCast("Project"), .path = @constCast("C:\\project") });
+    try model.recent_projects.append(.{
+        .name = try std.testing.allocator.dupe(u8, "Project"),
+        .path = try std.testing.allocator.dupe(u8, "C:\\project"),
+    });
     var graph = GraphModel.Graph{
-        .project = .{ .path = @constCast("C:\\project"), .name = @constCast("Project") },
+        .project = .{
+            .path = try std.testing.allocator.dupe(u8, "C:\\project"),
+            .name = try std.testing.allocator.dupe(u8, "Project"),
+        },
         .nodes = std.array_list.Managed(GraphModel.Node).init(std.testing.allocator),
         .edges = std.array_list.Managed(GraphModel.Edge).init(std.testing.allocator),
     };
-    try graph.nodes.append(.{ .id = @constCast("node-7"), .title = @constCast("Seven"), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") });
-    try graph.nodes.append(.{ .id = @constCast("node-42"), .title = @constCast("Forty two"), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") });
+    try graph.nodes.append(.{
+        .id = try std.testing.allocator.dupe(u8, "node-7"),
+        .title = try std.testing.allocator.dupe(u8, "Seven"),
+        .loop_type = try std.testing.allocator.dupe(u8, ""),
+        .state = try std.testing.allocator.dupe(u8, ""),
+        .activity = try std.testing.allocator.dupe(u8, ""),
+        .presence = try std.testing.allocator.dupe(u8, ""),
+    });
+    try graph.nodes.append(.{
+        .id = try std.testing.allocator.dupe(u8, "node-42"),
+        .title = try std.testing.allocator.dupe(u8, "Forty two"),
+        .loop_type = try std.testing.allocator.dupe(u8, ""),
+        .state = try std.testing.allocator.dupe(u8, ""),
+        .activity = try std.testing.allocator.dupe(u8, ""),
+        .presence = try std.testing.allocator.dupe(u8, ""),
+    });
     model.graph = graph;
     const layout = layoutFor(&model, null);
     for (0..2) |index| {

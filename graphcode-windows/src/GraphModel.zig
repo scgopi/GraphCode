@@ -189,9 +189,9 @@ pub const Model = struct {
             if (std.mem.eql(u8, summary.project.path, project_path)) break i;
         } else null;
         if (action == .select) {
-            const selected = self.selectProject(project_path);
-            if (selected) self.dispatchLifecycle(action, project_path);
-            return selected;
+            const selected_result = self.selectProject(project_path);
+            if (selected_result) self.dispatchLifecycle(action, project_path);
+            return selected_result;
         }
         var known = index != null;
         for (self.open_projects.items) |project| known = known or std.mem.eql(u8, project.path, project_path);
@@ -216,9 +216,9 @@ pub const Model = struct {
                 self.removeRecentProject(project_path);
             },
         }
-        if (self.selected_project_path) |selected| {
-            if (std.mem.eql(u8, selected, project_path)) {
-                self.allocator.free(selected);
+        if (self.selected_project_path) |selected_path| {
+            if (std.mem.eql(u8, selected_path, project_path)) {
+                self.allocator.free(selected_path);
                 self.selected_project_path = null;
                 if (self.graph) |*graph| {
                     freeGraph(self.allocator, graph);
@@ -332,12 +332,12 @@ pub const Model = struct {
         // Keep open projects separate so a later project event never evicts older
         // graph summaries.
         if (std.mem.indexOf(u8, frame, "\"openProjects\"")) |open_key| {
-            if (indexOfByte(frame, open_key, '[')) |open| {
-                if (findClosing(frame, open, '[', ']')) |close| {
-                    var open_cursor = open + 1;
-                    while (open_cursor < close) {
+            if (indexOfByte(frame, open_key, '[')) |open_projects_start| {
+                if (findClosing(frame, open_projects_start, '[', ']')) |open_projects_end| {
+                    var open_cursor = open_projects_start + 1;
+                    while (open_cursor < open_projects_end) {
                         const start = indexOfByte(frame, open_cursor, '{') orelse break;
-                        if (start >= close) break;
+                        if (start >= open_projects_end) break;
                         const end = findClosing(frame, start, '{', '}') orelse break;
                         const object = frame[start .. end + 1];
                         try self.addOpenProject(.{
