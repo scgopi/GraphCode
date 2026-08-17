@@ -8,6 +8,26 @@ import XCTest
 #endif
 
 final class WindowsDaemonTests: XCTestCase {
+  func testGraphcodeSettingsPersistAllProductChoices() throws {
+    let url = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-settings-\(UUID().uuidString)", isDirectory: true)
+      .appendingPathComponent("settings.json")
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+    let settings = GraphcodeSettings(
+      defaultBackend: .copilotCLI,
+      defaultModelTier: .capable,
+      codexApprovals: .unsandboxed,
+      claudePermissionMode: .bypassPermissions,
+      copilotPermissions: .ask,
+      briefsSessionsAboutTheGraph: false,
+      autoSelectsModel: true,
+      showsActivityStrip: true,
+      betaUpdates: true)
+    XCTAssertTrue(GraphcodeSettingsStore.save(settings, to: url))
+    XCTAssertEqual(GraphcodeSettingsStore.load(from: url), settings)
+  }
+
   #if os(Windows)
     func testEndpointIsPerUserAndSupportDirectory() throws {
       let root = FileManager.default.temporaryDirectory
