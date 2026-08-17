@@ -10,6 +10,7 @@ pub const Supervisor = struct {
     process: c.HANDLE = null,
     shutdown_event: c.HANDLE = null,
     startup_event: c.HANDLE = null,
+    startup_handoff_event: c.HANDLE = null,
     startup_reservation: c.HANDLE = null,
     owned: bool = false,
     failure: []u8 = &.{},
@@ -52,27 +53,37 @@ pub const Supervisor = struct {
             self.setFailure("Unable to create daemon startup reservation event");
             return;
         };
+        self.createStartupHandoffEvent(lock_name) catch {
+            self.setFailure("Unable to create daemon startup handoff event");
+            self.closeStartupEvent();
+            return;
+        };
         self.createShutdownEvent(lock_name) catch {
             self.setFailure("Unable to create daemon shutdown event");
+            self.closeStartupHandoffEvent();
             self.closeStartupEvent();
             return;
         };
         self.spawn(exe) catch {
             self.setFailure("Unable to start graphcoded.exe");
             self.closeShutdownEvent();
+            self.closeStartupHandoffEvent();
             self.closeStartupEvent();
             return;
         };
-        _ = c.SetEvent(self.startup_event);
-        self.clearStartupEnvironment();
-        self.closeStartupEvent();
-        self.releaseStartupReservation();
-        const startup_deadline = std.time.milliTimestamp() + 5_000;
-        while (std.time.milliTimestamp() < startup_deadline) {
-            if (probeEndpoint(endpoint) == .available) return;
-            std.Thread.sleep(100 * std.time.ns_per_ms);
+        if (c.SetEvent(self.startup_event) == 0) {
+            self.setFailure("Unable to release graphcoded.exe startup gate");
+            self.cleanupFailedStartup();
+            return;
         }
-        self.setFailure("graphcoded.exe did not become reachable");
+        self.clearDaemonChildEnvironment();
+        if (!self.waitForChildHandoff()) {
+            self.setFailure("graphcoded.exe did not complete startup handoff");
+            self.cleanupFailedStartup();
+            return;
+        }
+        self.closeStartupHandoffEvent();
+        self.closeStartupEvent();
     }
 
     pub fn stop(self: *Supervisor) void {
@@ -85,6 +96,7 @@ pub const Supervisor = struct {
         }
         self.closeShutdownEvent();
         self.closeStartupEvent();
+        self.closeStartupHandoffEvent();
     }
 
     pub fn forceStop(self: *Supervisor) void {
@@ -93,6 +105,8 @@ pub const Supervisor = struct {
         _ = c.WaitForSingleObject(self.process, 2_000);
         self.closeProcess();
         self.closeShutdownEvent();
+        self.closeStartupHandoffEvent();
+        self.closeStartupEvent();
     }
 
     pub fn status(self: *const Supervisor) []const u8 {
@@ -230,20 +244,53 @@ pub const Supervisor = struct {
         }
     }
 
-    fn clearStartupEnvironment(self: *Supervisor) void {
-        _ = self;
-        const env_name = utf16(std.heap.page_allocator, "GRAPHCODE_DAEMON_STARTUP_EVENT") catch return;
+    fn createStartupHandoffEvent(self: *Supervisor, lock_name: []const u8) !void {
+        const name = try std.fmt.allocPrint(self.allocator, "{s}-startup-child-ready", .{lock_name});
+        defer self.allocator.free(name);
+        const wide = try utf16(self.allocator, name);
+        defer self.allocator.free(wide);
+        self.startup_handoff_event = c.CreateEventW(null, 1, 0, wide.ptr);
+        if (self.startup_handoff_event == null) return error.EventCreationFailed;
+        if (c.GetLastError() == c.ERROR_ALREADY_EXISTS) {
+            _ = c.CloseHandle(self.startup_handoff_event);
+            self.startup_handoff_event = null;
+            return error.EventCreationFailed;
+        }
+        _ = c.ResetEvent(self.startup_handoff_event);
+        const env_name = try utf16(self.allocator, "GRAPHCODE_DAEMON_HANDOFF_READY_EVENT");
+        defer self.allocator.free(env_name);
+        if (c.SetEnvironmentVariableW(env_name.ptr, wide.ptr) == 0) {
+            return error.EnvironmentUpdateFailed;
+        }
+    }
+
+    fn clearChildEnvironmentVariable(name: []const u8) void {
+        const env_name = utf16(std.heap.page_allocator, name) catch return;
         defer std.heap.page_allocator.free(env_name);
         _ = c.SetEnvironmentVariableW(env_name.ptr, null);
     }
 
+    fn clearDaemonChildEnvironment(self: *Supervisor) void {
+        _ = self;
+        clearChildEnvironmentVariable("GRAPHCODE_DAEMON_STARTUP_EVENT");
+        clearChildEnvironmentVariable("GRAPHCODE_DAEMON_HANDOFF_READY_EVENT");
+        clearChildEnvironmentVariable("GRAPHCODE_DAEMON_SHUTDOWN_EVENT");
+    }
+
     fn closeStartupEvent(self: *Supervisor) void {
-        self.clearStartupEnvironment();
+        clearChildEnvironmentVariable("GRAPHCODE_DAEMON_STARTUP_EVENT");
         if (self.startup_event != null) _ = c.CloseHandle(self.startup_event);
         self.startup_event = null;
     }
 
+    fn closeStartupHandoffEvent(self: *Supervisor) void {
+        clearChildEnvironmentVariable("GRAPHCODE_DAEMON_HANDOFF_READY_EVENT");
+        if (self.startup_handoff_event != null) _ = c.CloseHandle(self.startup_handoff_event);
+        self.startup_handoff_event = null;
+    }
+
     fn closeShutdownEvent(self: *Supervisor) void {
+        clearChildEnvironmentVariable("GRAPHCODE_DAEMON_SHUTDOWN_EVENT");
         if (self.shutdown_event != null) _ = c.CloseHandle(self.shutdown_event);
         self.shutdown_event = null;
     }
@@ -252,6 +299,22 @@ pub const Supervisor = struct {
         if (self.process != null) _ = c.CloseHandle(self.process);
         self.process = null;
         self.owned = false;
+    }
+
+    fn cleanupFailedStartup(self: *Supervisor) void {
+        self.forceStop();
+        self.closeStartupHandoffEvent();
+        self.closeStartupEvent();
+        self.closeShutdownEvent();
+    }
+
+    fn waitForChildHandoff(self: *Supervisor) bool {
+        if (self.startup_handoff_event == null) return false;
+        switch (c.WaitForSingleObject(self.startup_handoff_event, 5_000)) {
+            c.WAIT_OBJECT_0 => {},
+            else => return false,
+        }
+        return self.process != null and c.WaitForSingleObject(self.process, 0) == c.WAIT_TIMEOUT;
     }
 
     fn setFailure(self: *Supervisor, message: []const u8) void {
@@ -346,4 +409,66 @@ test "failed startup competitor releases reservation for owned recovery" {
     try std.testing.expect(supervisor.startup_reservation != null);
     try std.testing.expectEqual(Probe.missing, probeEndpoint(endpoint));
     try std.testing.expect(!daemonLockExists(lock_name));
+}
+
+test "concurrent shells retain startup reservation through child lifetime handoff" {
+    const suffix = std.time.nanoTimestamp();
+    const lock_name = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "Local\\graphcode-supervisor-handoff-{d}",
+        .{suffix},
+    );
+    defer std.testing.allocator.free(lock_name);
+    const reservation_name = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{s}-startup",
+        .{lock_name},
+    );
+    defer std.testing.allocator.free(reservation_name);
+    const wide_reservation = try utf16(std.testing.allocator, reservation_name);
+    defer std.testing.allocator.free(wide_reservation);
+    const wide_lifetime = try utf16(std.testing.allocator, lock_name);
+    defer std.testing.allocator.free(wide_lifetime);
+    const parent_reservation = c.CreateMutexW(null, 1, wide_reservation.ptr);
+    try std.testing.expect(parent_reservation != null);
+
+    const child_ready = c.CreateEventW(null, 1, 0, null);
+    try std.testing.expect(child_ready != null);
+    defer _ = c.CloseHandle(child_ready);
+    const child_release = c.CreateEventW(null, 1, 0, null);
+    try std.testing.expect(child_release != null);
+    defer _ = c.CloseHandle(child_release);
+
+    const Child = struct {
+        fn run(
+            lifetime_name: [*:0]const u16,
+            ready_event: c.HANDLE,
+            release_event: c.HANDLE,
+        ) void {
+            const lifetime = c.CreateMutexW(null, 1, lifetime_name);
+            if (lifetime == null) return;
+            _ = c.SetEvent(ready_event);
+            _ = c.WaitForSingleObject(release_event, c.INFINITE);
+            _ = c.ReleaseMutex(lifetime);
+            _ = c.CloseHandle(lifetime);
+        }
+    };
+    var child = try std.Thread.spawn(
+        .{},
+        Child.run,
+        .{ wide_lifetime.ptr, child_ready, child_release },
+    );
+    defer child.join();
+
+    try std.testing.expectEqual(c.WAIT_OBJECT_0, c.WaitForSingleObject(child_ready, 5_000));
+    try std.testing.expect(daemonLockExists(lock_name));
+
+    _ = c.ReleaseMutex(parent_reservation);
+    _ = c.CloseHandle(parent_reservation);
+    var contender = Supervisor{ .allocator = std.testing.allocator };
+    try std.testing.expect(try contender.acquireStartupReservationBounded(lock_name));
+    defer contender.releaseStartupReservation();
+    try std.testing.expect(daemonLockExists(lock_name));
+
+    _ = c.SetEvent(child_release);
 }

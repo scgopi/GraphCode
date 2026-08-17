@@ -52,6 +52,10 @@ rather than injecting a command message.
 
 When another shell owns the named startup reservation, daemon supervision opens
 it for synchronization and waits only for the bounded reservation interval.
-After release it checks the endpoint and daemon lifetime lock again, so a
-failed competitor is replaced by an owned daemon while a successful one is
-never duplicated.
+The spawning shell retains that reservation until its child has acquired the
+lifetime lock and published its named-pipe listener through a child-ready event.
+The child recognizes this handoff and does not wait on the parent-held
+reservation. On timeout or incomplete publication the parent terminates only
+its own child; contenders then recheck the endpoint and lifetime lock. The live
+handoff test starts two distinct shell instances, verifies exactly one daemon,
+and verifies that only the owning shell shuts it down.

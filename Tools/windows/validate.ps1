@@ -587,6 +587,28 @@ function Invoke-Task([string] $name) {
     }
     "windows-shell" {
       $zig0152 = Resolve-ZigVersion "0.15.2" "GRAPHCODE_ZIG0152"
+      $swift = Resolve-SwiftExecutable
+      Initialize-SwiftEnvironment $swift
+      $swiftBin = Split-Path $swift
+      foreach ($product in @("graphcoded", "graphcode")) {
+        Invoke-Native "Swift release build for shell daemon handoff: $product" {
+          & (Join-Path $swiftBin "swift-build.exe") `
+            --package-path $repoRoot `
+            --configuration release `
+            --product $product
+        }
+      }
+      $daemonRuntime = & (Join-Path $swiftBin "swift-build.exe") `
+        --package-path $repoRoot `
+        --configuration release `
+        --show-bin-path
+      if ($LASTEXITCODE -ne 0) {
+        throw "Swift release bin path lookup for shell daemon handoff failed"
+      }
+      $daemonRuntime = $daemonRuntime | Select-Object -Last 1
+      $swiftRuntime = Resolve-SwiftRuntimeDirectory $swift
+      Get-ChildItem -LiteralPath $swiftRuntime -Filter *.dll |
+        Copy-Item -Destination $daemonRuntime -Force
       & (Join-Path $repoRoot "Tools\windows\Tests\WindowsShell.Tests.ps1") `
         -ZigExecutable $zig0152
       if ($LASTEXITCODE -ne 0) {
@@ -614,6 +636,7 @@ function Invoke-Task([string] $name) {
           -ZmxRoot $zmxRoot `
           -Zig0152 $zig0152 `
           -Zig0160 $zig0160 `
+          -DaemonRuntimeDirectory $daemonRuntime `
           -UseStubDaemon `
           -Stress
       }

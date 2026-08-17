@@ -20,6 +20,9 @@ const c = @import("Win32.zig").c;
 const title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Windows");
 const instance_prefix = "Local\\graphcode-windows-";
 const tray_test_hook_environment = "GRAPHCODE_TRAY_TEST_HOOK";
+const daemon_supervisor_test_hook_environment = "GRAPHCODE_DAEMON_SUPERVISOR_TEST_HOOK";
+const daemon_supervisor_test_property =
+    std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.DaemonSupervisorState");
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -112,6 +115,14 @@ pub const App = struct {
         defer if (endpoint.len != 0) self.allocator.free(endpoint);
         defer if (lock_name.len != 0) self.allocator.free(lock_name);
         if (endpoint.len != 0 and lock_name.len != 0) self.daemon.start(endpoint, lock_name);
+        if (envFlag(daemon_supervisor_test_hook_environment)) {
+            const state: usize = if (self.daemon.owned) 1 else if (self.daemon.status().len == 0) 2 else 3;
+            _ = c.SetPropW(
+                self.window.hwnd,
+                daemon_supervisor_test_property.ptr,
+                @ptrFromInt(state),
+            );
+        }
         if (self.daemon.status().len != 0) self.setStatus(self.daemon.status());
         self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
         if (self.workspace) |*workspace| workspace.setKeyCallback(self, &onWorkspaceKey);

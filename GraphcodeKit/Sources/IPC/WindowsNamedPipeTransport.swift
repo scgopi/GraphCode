@@ -1214,8 +1214,10 @@ import Foundation
     private let sid: String
     private let writeTimeout: TimeInterval
     private let beforeConnectionReturn: (@Sendable () -> Void)?
+    private let onPublished: (@Sendable () -> Void)?
     private let lock = NSCondition()
     private var closed = false
+    private var published = false
     private var pendingHandles: Set<UInt> = []
     private var transferringHandles: Set<UInt> = []
 
@@ -1223,13 +1225,15 @@ import Foundation
       pipeName: String? = nil,
       backlog: Int = 16,
       writeTimeout: TimeInterval = 5,
-      beforeConnectionReturn: (@Sendable () -> Void)? = nil
+      beforeConnectionReturn: (@Sendable () -> Void)? = nil,
+      onPublished: (@Sendable () -> Void)? = nil
     ) throws {
       _ = backlog
       name = try pipeName ?? WindowsNamedPipeEndpoint.name()
       sid = try WindowsUserIdentity.currentSID()
       self.writeTimeout = max(0.001, writeTimeout)
       self.beforeConnectionReturn = beforeConnectionReturn
+      self.onPublished = onPublished
       endpoint = .namedPipe(name)
     }
 
@@ -1274,15 +1278,27 @@ import Foundation
 
     private func makeTrackedPipe() throws -> HANDLE {
       lock.lock()
-      defer { lock.unlock() }
       guard !closed else {
+        lock.unlock()
         throw WindowsPipeError.connectionClosed
       }
-      let handle = try makePipe(
-        name: name,
-        userSID: sid,
-        maxInstances: DWORD(PIPE_UNLIMITED_INSTANCES))
+      let handle: HANDLE
+      do {
+        handle = try makePipe(
+          name: name,
+          userSID: sid,
+          maxInstances: DWORD(PIPE_UNLIMITED_INSTANCES))
+      } catch {
+        lock.unlock()
+        throw error
+      }
       pendingHandles.insert(UInt(bitPattern: handle))
+      let shouldPublish = !published
+      published = true
+      lock.unlock()
+      if shouldPublish {
+        onPublished?()
+      }
       return handle
     }
 

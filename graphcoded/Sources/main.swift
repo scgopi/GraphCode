@@ -5,27 +5,97 @@ import GraphcodeKit
 #endif
 
 #if os(Windows)
-  SupportDirectory.prepare()
-  var startupEventHandle: HANDLE?
-  let endpointName: String = {
-    #if os(Windows)
-      if let startupEventName = ProcessInfo.processInfo.environment[
-        "GRAPHCODE_DAEMON_STARTUP_EVENT"
-      ] {
-        var wideName = Array(startupEventName.utf16)
-        wideName.append(0)
-        if let startupEvent = wideName.withUnsafeBufferPointer({
-          OpenEventW(DWORD(SYNCHRONIZE), false, $0.baseAddress)
-        }) {
-          _ = WaitForSingleObject(startupEvent, 5_000)
-          startupEventHandle = startupEvent
-        }
-      }
-    #endif
+  private enum DaemonStartupHandoffError: Error {
+    case missingReadyEvent
+    case openStartupEvent(UInt32)
+    case waitStartupEvent(DWORD)
+    case openReadyEvent(UInt32)
+  }
 
+  private final class DaemonStartupHandoff: @unchecked Sendable {
+    let startupEvent: HANDLE?
+    let readyEvent: HANDLE?
+
+    init(environment: [String: String] = ProcessInfo.processInfo.environment) throws {
+      guard let startupEventName = environment["GRAPHCODE_DAEMON_STARTUP_EVENT"] else {
+        startupEvent = nil
+        readyEvent = nil
+        return
+      }
+      var startupName = Array(startupEventName.utf16)
+      startupName.append(0)
+      guard
+        let startupEvent = startupName.withUnsafeBufferPointer({
+          OpenEventW(DWORD(SYNCHRONIZE), false, $0.baseAddress)
+        })
+      else {
+        throw DaemonStartupHandoffError.openStartupEvent(GetLastError())
+      }
+      let startupResult = WaitForSingleObject(startupEvent, 5_000)
+      guard startupResult == WAIT_OBJECT_0 else {
+        CloseHandle(startupEvent)
+        throw DaemonStartupHandoffError.waitStartupEvent(startupResult)
+      }
+
+      guard let readyEventName = environment["GRAPHCODE_DAEMON_HANDOFF_READY_EVENT"] else {
+        CloseHandle(startupEvent)
+        throw DaemonStartupHandoffError.missingReadyEvent
+      }
+      var readyName = Array(readyEventName.utf16)
+      readyName.append(0)
+      guard
+        let readyEvent = readyName.withUnsafeBufferPointer({
+          OpenEventW(DWORD(EVENT_MODIFY_STATE), false, $0.baseAddress)
+        })
+      else {
+        let code = GetLastError()
+        CloseHandle(startupEvent)
+        throw DaemonStartupHandoffError.openReadyEvent(code)
+      }
+      self.startupEvent = startupEvent
+      self.readyEvent = readyEvent
+    }
+
+    var isParentHandoff: Bool { startupEvent != nil }
+
+    func publish() -> Bool {
+      guard let readyEvent else { return true }
+      return SetEvent(readyEvent)
+    }
+
+    deinit {
+      if let startupEvent {
+        CloseHandle(startupEvent)
+      }
+      if let readyEvent {
+        CloseHandle(readyEvent)
+      }
+    }
+  }
+
+  private func writeDaemonHandoffTestState(_ state: String) {
+    guard let path = ProcessInfo.processInfo.environment["GRAPHCODE_DAEMON_HANDOFF_TEST_STATE"]
+    else { return }
+    try? Data(state.utf8).write(to: URL(fileURLWithPath: path), options: .atomic)
+  }
+
+  SupportDirectory.prepare()
+  private let startupHandoff: DaemonStartupHandoff = {
+    do {
+      return try DaemonStartupHandoff()
+    } catch {
+      FileHandle.standardError.write(Data("graphcoded: \(error)\n".utf8))
+      exit(1)
+    }
+  }()
+  if startupHandoff.isParentHandoff {
+    writeDaemonHandoffTestState("startup-gate")
+  }
+  let endpointName: String = {
     do {
       return try WindowsNamedPipeEndpoint.name()
     } catch {
+      writeDaemonHandoffTestState("failed: \(error)")
       FileHandle.standardError.write(Data("graphcoded: \(error)\n".utf8))
       exit(1)
     }
@@ -33,23 +103,28 @@ import GraphcodeKit
 
   let instanceLock: WindowsDaemonInstanceLock = {
     do {
-      let startupReservation = try WindowsDaemonStartupReservation()
-      defer {
-        _ = startupReservation
-        if let startupEventHandle {
-          CloseHandle(startupEventHandle)
-        }
+      let startupReservation: WindowsDaemonStartupReservation?
+      if startupHandoff.isParentHandoff {
+        startupReservation = nil
+      } else {
+        startupReservation = try WindowsDaemonStartupReservation()
       }
+      defer { _ = startupReservation }
       try WindowsNamedPipeEndpoint.recordActiveGeneration()
       return try WindowsDaemonInstanceLock()
     } catch WindowsPipeError.instanceAlreadyRunning {
+      writeDaemonHandoffTestState("failed: instance already running")
       FileHandle.standardError.write(Data("graphcoded: daemon is already running\n".utf8))
       exit(1)
     } catch {
+      writeDaemonHandoffTestState("failed: \(error)")
       FileHandle.standardError.write(Data("graphcoded: \(error)\n".utf8))
       exit(1)
     }
   }()
+  if startupHandoff.isParentHandoff {
+    writeDaemonHandoffTestState("lifetime-lock")
+  }
   let supportDirectory = SupportDirectory.url
   let replayStore = DaemonReplayStore(capacity: 128)
   let handshakeLimiter = WindowsPipeHandshakeLimiter(limit: 32)
@@ -59,8 +134,14 @@ import GraphcodeKit
   let replayCleanupTask = replayStore.startCleanup()
   let listener: WindowsNamedPipeListener = {
     do {
-      return try WindowsNamedPipeListener(pipeName: endpointName)
+      return try WindowsNamedPipeListener(
+        pipeName: endpointName,
+        onPublished: {
+          writeDaemonHandoffTestState(
+            startupHandoff.publish() ? "published" : "failed: ready event")
+        })
     } catch {
+      writeDaemonHandoffTestState("failed: \(error)")
       FileHandle.standardError.write(Data("graphcoded: \(error)\n".utf8))
       exit(1)
     }

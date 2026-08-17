@@ -6,6 +6,7 @@ param(
   [string] $ZmxRoot,
   [string] $Zig0152 = "zig",
   [string] $Zig0160 = "zig",
+  [string] $DaemonRuntimeDirectory,
   [switch] $SkipBuild,
   [switch] $Stress,
   [switch] $UseStubDaemon
@@ -40,6 +41,7 @@ $workspaceLayoutBase = Join-Path $shellRoot "graphcode-workspace-$PID.json"
 $ownedSessionNames = [System.Collections.Generic.HashSet[string]]::new()
 $ownedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
 $shellProcess = $null
+$handoffStage = $null
 $resourceRole = "graphcode-windows"
 $metricSequence = 0
 
@@ -336,6 +338,24 @@ try {
     }
     Remove-Item -LiteralPath $inputError -Force -ErrorAction SilentlyContinue
   }
+  if ($DaemonRuntimeDirectory) {
+    $runtime = Resolve-Path -LiteralPath $DaemonRuntimeDirectory -ErrorAction Stop
+    foreach ($name in @("graphcoded.exe", "graphcode.exe")) {
+      if (-not (Test-Path -LiteralPath (Join-Path $runtime $name) -PathType Leaf)) {
+        throw "Daemon handoff runtime is missing $name"
+      }
+    }
+    $handoffStage = Join-Path $shellRoot "daemon-handoff-live-$PID"
+    New-Item -ItemType Directory -Force -Path $handoffStage | Out-Null
+    Copy-Item -LiteralPath $app -Destination (Join-Path $handoffStage "graphcode-windows.exe") -Force
+    Get-ChildItem -LiteralPath $runtime -File |
+      Where-Object { $_.Name -in @("graphcoded.exe", "graphcode.exe") -or $_.Extension -ieq ".dll" } |
+      Copy-Item -Destination $handoffStage -Force
+    Invoke-Native "Concurrent shell daemon handoff" {
+      & (Join-Path $repoRoot "Tools\windows\Tests\DaemonHandoff.Live.Tests.ps1") `
+        -Executable (Join-Path $handoffStage "graphcode-windows.exe")
+    }
+  }
   Record-TestOwnedSessions
   Write-Host "Windows shell smoke/stress: PASS"
 }
@@ -422,6 +442,9 @@ finally {
     Remove-Item -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $stubResult -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $busyResult,$busyError,$inputError -Force -ErrorAction SilentlyContinue
+  if ($handoffStage) {
+    Remove-Item -LiteralPath $handoffStage -Recurse -Force -ErrorAction SilentlyContinue
+  }
   Assert-NoOrphanShellProcesses
 }
 

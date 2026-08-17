@@ -7,6 +7,7 @@ $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
 $app = Get-Content (Join-Path $root "graphcode-windows\src\App.zig") -Raw
 $supervisor = Get-Content (Join-Path $root "graphcode-windows\src\DaemonSupervisor.zig") -Raw
+$daemonMain = Get-Content (Join-Path $root "graphcoded\Sources\main.swift") -Raw
 $tray = Get-Content (Join-Path $root "graphcode-windows\src\Tray.zig") -Raw
 $package = Get-Content (Join-Path $root "Tools\windows\package.ps1") -Raw
 
@@ -44,6 +45,29 @@ if ($supervisor -notmatch "SetEvent" -or $supervisor -notmatch "forceStop") {
 }
 if ($supervisor -notmatch "GRAPHCODE_DAEMON_STARTUP_EVENT") {
   throw "daemon startup reservation handoff is missing"
+}
+if ($supervisor -notmatch "GRAPHCODE_DAEMON_HANDOFF_READY_EVENT" -or
+    $supervisor -notmatch "startup-child-ready" -or
+    $supervisor -notmatch "waitForChildHandoff" -or
+    $supervisor -notmatch "cleanupFailedStartup") {
+  throw "parent must retain and clean the startup reservation through child handoff"
+}
+if ($daemonMain -notmatch "DaemonStartupHandoff" -or
+    $daemonMain -notmatch "startupHandoff\.isParentHandoff" -or
+    $daemonMain -notmatch "onPublished:" -or
+    $daemonMain -notmatch "startupHandoff\.publish\(\)" -or
+    $daemonMain -notmatch "recordActiveGeneration\(\)[\s\S]*?WindowsDaemonInstanceLock\(\)") {
+  throw "child must skip the parent-held reservation and publish readiness after its lifetime lock"
+}
+$handoffLive = Join-Path $root "Tools\windows\Tests\DaemonHandoff.Live.Tests.ps1"
+if (-not (Test-Path -LiteralPath $handoffLive) -or
+    (Get-Content -LiteralPath $handoffLive -Raw) -notmatch
+      "Concurrent shells did not spawn exactly one graphcoded child") {
+  throw "concurrent two-shell handoff coverage is missing"
+}
+if ($app -notmatch "GRAPHCODE_DAEMON_SUPERVISOR_TEST_HOOK" -or
+    $app -notmatch "DaemonSupervisorState") {
+  throw "concurrent handoff test observability is missing"
 }
 if ($app -notmatch "WM_CLOSE[\s\S]*?SW_HIDE") { throw "window close must hide to tray" }
 if ($app -notmatch "command_open[\s\S]*?SW_SHOW" -or
