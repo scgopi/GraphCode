@@ -22,6 +22,12 @@ edges, a settings dialog, context menus, and keyboard-accessible actions:
 selection, and `Ctrl+,` opens settings. Mutations are sent as correlated v2
 daemon requests; daemon refusals remain visible as explicit status errors.
 
+The shell exposes a native File/Loop/Terminal/View/Help menu bar. Menu items
+share the same application action router as keyboard shortcuts, and project
+actions use the Windows `IFileOpenDialog` folder picker. The no-project state
+also presents accessible native buttons for opening a folder or the global
+overview; recent projects remain selectable in the sidebar.
+
 ## Build
 
 Use the exact provider pins in `provider-pins.json` and clean local worktrees:

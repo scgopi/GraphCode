@@ -43,6 +43,10 @@ pub fn build(b: *std.Build) !void {
         .root_module = module,
     });
     exe.subsystem = .Windows;
+    exe.addCSourceFile(.{
+        .file = b.path("src/FolderPicker.c"),
+        .flags = &.{ "-DUNICODE", "-D_UNICODE" },
+    });
     exe.addObjectFile(.{ .cwd_relative = winghostty_lib });
     for ([_][]const u8{
         "user32",

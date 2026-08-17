@@ -19,6 +19,7 @@ pub const Action = enum {
     focus_terminal_a,
     focus_terminal_b,
     select_next,
+    select_previous,
     new_tab,
     close_tab,
     split_horizontal,
@@ -44,6 +45,7 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (!ctrl and key == 0x26) return .worktree_previous;
     if (key == 0x31) return .focus_terminal_a;
     if (key == 0x32) return .focus_terminal_b;
+    if (key == 0x09 and shift) return .select_previous;
     if (key == 0x09) return .select_next;
     if (ctrl and key == 'D' and shift) return .split_vertical;
     if (ctrl and key == 'D') return .split_horizontal;
@@ -75,6 +77,7 @@ pub fn commandText(allocator: std.mem.Allocator, action: Action) ![]u8 {
         .focus_terminal_a => allocator.dupe(u8, "Focus terminal A"),
         .focus_terminal_b => allocator.dupe(u8, "Focus terminal B"),
         .select_next => allocator.dupe(u8, "Select next node"),
+        .select_previous => allocator.dupe(u8, "Select previous node"),
         .new_tab => allocator.dupe(u8, "New terminal tab"),
         .close_tab => allocator.dupe(u8, "Close terminal tab"),
         .split_horizontal => allocator.dupe(u8, "Split terminal right"),
@@ -103,4 +106,5 @@ test "attention and worktree shortcuts are distinct from ordinary selection" {
     try std.testing.expectEqual(Action.close_tab, keyAction('W', true, false));
     try std.testing.expectEqual(Action.reclaim_worktrees, keyAction('W', true, true));
     try std.testing.expectEqual(Action.select_next, keyAction(0x09, false, false));
+    try std.testing.expectEqual(Action.select_previous, keyAction(0x09, false, true));
 }

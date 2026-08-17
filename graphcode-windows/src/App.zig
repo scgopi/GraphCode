@@ -23,6 +23,7 @@ const tray_test_hook_environment = "GRAPHCODE_TRAY_TEST_HOOK";
 const daemon_supervisor_test_hook_environment = "GRAPHCODE_DAEMON_SUPERVISOR_TEST_HOOK";
 const daemon_supervisor_test_property =
     std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.DaemonSupervisorState");
+extern fn graphcode_pick_folder(owner: c.HWND, buffer: [*]u16, capacity: c.DWORD) callconv(.c) c_int;
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -65,6 +66,8 @@ pub const App = struct {
     smoke_workspace_focus_observed: bool = false,
     smoke_workspace_close_observed: bool = false,
     smoke_workspace_restart_observed: bool = false,
+    empty_open_folder_button: c.HWND = null,
+    empty_global_overview_button: c.HWND = null,
     smoke_restart_index: ?usize = null,
     smoke_restart_session: []const u8 = &.{},
 
@@ -125,6 +128,8 @@ pub const App = struct {
         }
         if (self.daemon.status().len != 0) self.setStatus(self.daemon.status());
         self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
+        self.createEmptyStateControls();
+        self.updateNativeChrome();
         if (self.workspace) |*workspace| workspace.setKeyCallback(self, &onWorkspaceKey);
         if (self.workspace) |*workspace| try workspace.startInputWorker();
         self.layoutWorkspace();
@@ -225,13 +230,35 @@ pub const App = struct {
         }
     }
 
-    fn openProject(self: *App, path: []const u8) void {
+    pub fn openProject(self: *App, path: []const u8) void {
         if (path.len == 0) return;
         if (self.workspace) |*workspace| {
             _ = workspace.rebindProject(path) catch {
                 self.setStatus("Unable to switch workspace project");
                 return;
             };
+        }
+
+        pub fn openFolder(self: *App) void {
+            var path: [32768]u16 = undefined;
+            const picked = graphcode_pick_folder(self.window.hwnd, &path, path.len);
+            if (picked < 0) {
+                self.setStatus("Unable to open the folder picker");
+                return;
+            }
+            if (picked == 0) return;
+            var length: usize = 0;
+            while (length < path.len and path[length] != 0) : (length += 1) {}
+            const utf8 = std.unicode.utf16LeToUtf8Alloc(self.allocator, path[0..length]) catch {
+                self.setStatus("Unable to read the selected folder");
+                return;
+            };
+            defer self.allocator.free(utf8);
+            self.openProject(utf8);
+        }
+
+        pub fn openGlobalOverview(self: *App) void {
+            self.client.sendOpenGlobalGraph();
         }
         self.client.setSubscription(path);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
@@ -570,6 +597,13 @@ pub const App = struct {
                 self.model.selectNext();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
+            .select_previous => {
+                const graph = self.model.graph orelse return;
+                if (graph.nodes.items.len == 0) return;
+                const current = self.model.selected_node orelse 0;
+                self.model.selected_node = if (current == 0) graph.nodes.items.len - 1 else current - 1;
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            },
             .new_tab => if (self.workspace) |*workspace| workspace.newTab() catch {
                 self.smoke_workspace_action_failed = true;
                 self.setStatus("Unable to create tab");
@@ -619,6 +653,62 @@ pub const App = struct {
     fn status(self: *const App) []const u8 {
         if (self.status_override.len != 0) return self.status_override;
         return self.client.statusText();
+    }
+
+    fn createEmptyStateControls(self: *App) void {
+        self.empty_open_folder_button = createButton(
+            self.window.hwnd,
+            "Open Folder...",
+            MainWindow.empty_open_folder_id,
+        );
+        self.empty_global_overview_button = createButton(
+            self.window.hwnd,
+            "Open Global Overview",
+            MainWindow.empty_global_overview_id,
+        );
+        self.layoutEmptyStateControls();
+    }
+
+    fn layoutEmptyStateControls(self: *App) void {
+        var client: c.RECT = undefined;
+        if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
+        const visible = self.model.graph == null;
+        const x = Tokens.sidebar_width + 48;
+        const y = Tokens.header_height + 160;
+        for ([_]c.HWND{ self.empty_open_folder_button, self.empty_global_overview_button }, 0..) |button, index| {
+            if (button == null) continue;
+            _ = c.ShowWindow(button, if (visible) c.SW_SHOW else c.SW_HIDE);
+            _ = c.SetWindowPos(button, null, x, y + @as(i32, @intCast(index * 42)), 220, 32, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+        }
+    }
+
+    fn createButton(parent: c.HWND, text: []const u8, id: usize) c.HWND {
+        const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.c_allocator, text) catch return null;
+        defer std.heap.c_allocator.free(wide);
+        return c.CreateWindowExW(
+            0,
+            std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr,
+            wide.ptr,
+            c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_PUSHBUTTON,
+            0,
+            0,
+            220,
+            32,
+            parent,
+            @ptrFromInt(id),
+            c.GetModuleHandleW(null),
+            null,
+        );
+    }
+
+    fn updateNativeChrome(self: *App) void {
+        MainWindow.updateMenu(self.window.hwnd, .{
+            .has_project = self.model.graph != null,
+            .has_workspace = self.workspace != null and self.model.graph != null,
+            .has_attention = self.model.attentionCount() != 0,
+            .can_close_tab = if (self.workspace) |workspace| workspace.tabCount() > 1 else false,
+        });
+        self.layoutEmptyStateControls();
     }
 
     fn setStatus(self: *App, value: []const u8) void {
@@ -723,6 +813,47 @@ fn onWindowMessage(
         return true;
     }
     switch (message) {
+        c.WM_INITMENUPOPUP => {
+            app.updateNativeChrome();
+            result.* = 0;
+            return true;
+        },
+        c.WM_COMMAND => {
+            const id: usize = @intCast(@as(u16, @truncate(wparam)));
+            if (id == MainWindow.empty_open_folder_id) {
+                app.openFolder();
+            } else if (id == MainWindow.empty_global_overview_id) {
+                app.openGlobalOverview();
+            } else if (MainWindow.commandFromId(id)) |command| {
+                switch (command) {
+                    .open_folder => app.openFolder(),
+                    .open_global_overview => app.openGlobalOverview(),
+                    .worktrees => app.handleAction(.inspect_worktrees),
+                    .exit => _ = c.DestroyWindow(hwnd),
+                    .jump_loop => app.handleAction(.jump_next),
+                    .review_attention => app.handleAction(.cycle_attention),
+                    .next_loop => app.handleAction(.select_next),
+                    .previous_loop => app.handleAction(.select_previous),
+                    .create_node => app.handleAction(.create_node),
+                    .create_edge => app.handleAction(.create_edge),
+                    .stop_loop => app.handleAction(.stop_node),
+                    .new_tab => app.handleAction(.new_tab),
+                    .close_tab => app.handleAction(.close_tab),
+                    .split_right => app.handleAction(.split_horizontal),
+                    .split_down => app.handleAction(.split_vertical),
+                    .next_tab => app.handleAction(.select_next_tab),
+                    .previous_tab => app.handleAction(.select_previous_tab),
+                    .focus_next_pane => app.handleAction(.focus_next_pane),
+                    .focus_previous_pane => app.handleAction(.focus_previous_pane),
+                    .reconnect => app.handleAction(.reconnect),
+                    .settings => app.handleAction(.settings),
+                    .about => app.setStatus("GraphCode Windows — native Win32 shell"),
+                }
+            }
+            app.updateNativeChrome();
+            result.* = 0;
+            return true;
+        },
         c.WM_PAINT => {
             var paint: c.PAINTSTRUCT = undefined;
             const hdc = c.BeginPaint(hwnd, &paint);
@@ -750,6 +881,7 @@ fn onWindowMessage(
         c.WM_SIZE => {
             app.layoutWorkspace();
             app.clampSidebarScroll();
+            app.layoutEmptyStateControls();
             result.* = 0;
             return true;
         },
@@ -772,6 +904,7 @@ fn onWindowMessage(
                     app.restore_requested = true;
                     app.client.sendRestoreOpenProjects();
                 }
+                app.updateNativeChrome();
             }
             const updated_connection_state = app.client.connectionState();
             if (updated_connection_state != app.last_connection_state) {
@@ -859,6 +992,7 @@ fn onWindowMessage(
             const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
             const shift = (@as(i32, c.GetKeyState(c.VK_SHIFT)) & 0x8000) != 0;
             app.handleAction(InputRouter.keyAction(wparam, ctrl, shift));
+            app.updateNativeChrome();
             result.* = 0;
             return true;
         },

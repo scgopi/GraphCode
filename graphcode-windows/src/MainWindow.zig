@@ -10,11 +10,51 @@ pub const MessageCallback = *const fn (
     result: *c.LRESULT,
 ) callconv(.c) bool;
 
+pub const Command = enum(u16) {
+    open_folder = 4101,
+    open_global_overview = 4102,
+    worktrees = 4103,
+    exit = 4104,
+    jump_loop = 4201,
+    review_attention = 4202,
+    next_loop = 4203,
+    previous_loop = 4204,
+    create_node = 4205,
+    create_edge = 4206,
+    stop_loop = 4207,
+    new_tab = 4301,
+    close_tab = 4302,
+    split_right = 4303,
+    split_down = 4304,
+    next_tab = 4305,
+    previous_tab = 4306,
+    focus_next_pane = 4307,
+    focus_previous_pane = 4308,
+    reconnect = 4401,
+    settings = 4402,
+    about = 4501,
+};
+
+pub const empty_open_folder_id: usize = 4601;
+pub const empty_global_overview_id: usize = 4602;
+
+pub const MenuState = struct {
+    has_project: bool,
+    has_workspace: bool,
+    has_attention: bool,
+    can_close_tab: bool,
+};
+
+pub fn commandFromId(id: usize) ?Command {
+    return std.meta.intToEnum(Command, @intCast(id)) catch null;
+}
+
 pub const Window = struct {
     hwnd: c.HWND = null,
     instance: c.HINSTANCE = null,
     context: ?*anyopaque = null,
     callback: ?MessageCallback = null,
+    accelerators: c.HACCEL = null,
     class_name: [*:0]const u16 = class_name.ptr,
 
     pub fn create(
@@ -46,12 +86,18 @@ pub const Window = struct {
             self.instance,
             @ptrCast(self),
         ) orelse return error.WindowCreationFailed;
+        try installMenu(self.hwnd);
+        self.accelerators = createAccelerators();
         _ = c.ShowWindow(self.hwnd, c.SW_SHOW);
         _ = c.UpdateWindow(self.hwnd);
         _ = c.SetTimer(self.hwnd, timer_id, 100, null);
     }
 
     pub fn destroy(self: *Window) void {
+        if (self.accelerators != null) {
+            _ = c.DestroyAcceleratorTable(self.accelerators);
+            self.accelerators = null;
+        }
         if (self.hwnd != null and c.IsWindow(self.hwnd) != 0) {
             _ = c.DestroyWindow(self.hwnd);
         }
@@ -65,6 +111,8 @@ pub const Window = struct {
             const result = c.GetMessageW(&message, null, 0, 0);
             if (result == 0) break;
             if (result == -1) return error.MessageLoopFailed;
+            if (self.accelerators != null and c.TranslateAcceleratorW(self.hwnd, self.accelerators, &message) != 0)
+                continue;
             _ = c.TranslateMessage(&message);
             _ = c.DispatchMessageW(&message);
         }
@@ -87,6 +135,122 @@ pub fn restoreExistingInstance() void {
         _ = c.PostMessageW(hwnd, message, 0, 0);
     }
 }
+
+pub fn installMenu(hwnd: c.HWND) !void {
+    const menu = c.CreateMenu() orelse return error.MenuCreationFailed;
+    const file = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
+    const loop = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
+    const terminal = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
+    const view = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
+    const help = c.CreatePopupMenu() orelse return error.MenuCreationFailed;
+
+    append(file, "Open Folder...\tCtrl+O", @intFromEnum(Command.open_folder));
+    append(file, "Open Global Overview", @intFromEnum(Command.open_global_overview));
+    append(file, "Worktrees...\tCtrl+Shift+W", @intFromEnum(Command.worktrees));
+    separator(file);
+    append(file, "Exit", @intFromEnum(Command.exit));
+
+    append(loop, "Jump to Loop...\tCtrl+J", @intFromEnum(Command.jump_loop));
+    append(loop, "Review What Needs You\tCtrl+Tab", @intFromEnum(Command.review_attention));
+    separator(loop);
+    append(loop, "Next Loop\tTab", @intFromEnum(Command.next_loop));
+    append(loop, "Previous Loop\tShift+Tab", @intFromEnum(Command.previous_loop));
+    separator(loop);
+    append(loop, "Create Node...\tCtrl+N", @intFromEnum(Command.create_node));
+    append(loop, "Create Edge...", @intFromEnum(Command.create_edge));
+    append(loop, "Stop Loop\tCtrl+S", @intFromEnum(Command.stop_loop));
+
+    append(terminal, "New Tab\tCtrl+T", @intFromEnum(Command.new_tab));
+    append(terminal, "Close Tab\tCtrl+W", @intFromEnum(Command.close_tab));
+    separator(terminal);
+    append(terminal, "Split Right\tCtrl+D", @intFromEnum(Command.split_right));
+    append(terminal, "Split Down\tCtrl+Shift+D", @intFromEnum(Command.split_down));
+    separator(terminal);
+    append(terminal, "Next Tab\tCtrl+PageDown", @intFromEnum(Command.next_tab));
+    append(terminal, "Previous Tab\tCtrl+PageUp", @intFromEnum(Command.previous_tab));
+    append(terminal, "Focus Next Pane\tCtrl+]", @intFromEnum(Command.focus_next_pane));
+    append(terminal, "Focus Previous Pane\tCtrl+[", @intFromEnum(Command.focus_previous_pane));
+
+    append(view, "Global Overview", @intFromEnum(Command.open_global_overview));
+    append(view, "Reconnect", @intFromEnum(Command.reconnect));
+    append(view, "Settings...\tCtrl+,", @intFromEnum(Command.settings));
+    append(help, "About GraphCode Windows", @intFromEnum(Command.about));
+
+    appendPopup(menu, "File", file);
+    appendPopup(menu, "Loop", loop);
+    appendPopup(menu, "Terminal", terminal);
+    appendPopup(menu, "View", view);
+    appendPopup(menu, "Help", help);
+    if (c.SetMenu(hwnd, menu) == 0) return error.MenuInstallFailed;
+    _ = c.DrawMenuBar(hwnd);
+}
+
+pub fn updateMenu(hwnd: c.HWND, state: MenuState) void {
+    setEnabled(hwnd, .open_global_overview, true);
+    setEnabled(hwnd, .worktrees, state.has_project);
+    setEnabled(hwnd, .jump_loop, state.has_project);
+    setEnabled(hwnd, .review_attention, state.has_attention);
+    setEnabled(hwnd, .next_loop, state.has_project);
+    setEnabled(hwnd, .previous_loop, state.has_project);
+    setEnabled(hwnd, .create_node, state.has_project);
+    setEnabled(hwnd, .create_edge, state.has_project);
+    setEnabled(hwnd, .stop_loop, state.has_project);
+    setEnabled(hwnd, .new_tab, state.has_workspace);
+    setEnabled(hwnd, .close_tab, state.can_close_tab);
+    setEnabled(hwnd, .split_right, state.has_workspace);
+    setEnabled(hwnd, .split_down, state.has_workspace);
+    setEnabled(hwnd, .next_tab, state.has_workspace);
+    setEnabled(hwnd, .previous_tab, state.has_workspace);
+    setEnabled(hwnd, .focus_next_pane, state.has_workspace);
+    setEnabled(hwnd, .focus_previous_pane, state.has_workspace);
+    setEnabled(hwnd, .settings, true);
+    setEnabled(hwnd, .reconnect, true);
+    _ = c.DrawMenuBar(hwnd);
+}
+
+fn setEnabled(hwnd: c.HWND, command: Command, enabled: bool) void {
+    const flags: c.UINT = c.MF_BYCOMMAND | if (enabled) c.MF_ENABLED else c.MF_GRAYED;
+    _ = c.EnableMenuItem(c.GetMenu(hwnd), @intFromEnum(command), flags);
+}
+
+fn append(menu: c.HMENU, text: []const u8, id: usize) void {
+    const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.c_allocator, text) catch return;
+    defer std.heap.c_allocator.free(wide);
+    _ = c.AppendMenuW(menu, c.MF_STRING, id, wide.ptr);
+}
+
+fn appendPopup(menu: c.HMENU, text: []const u8, popup: c.HMENU) void {
+    const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.c_allocator, text) catch return;
+    defer std.heap.c_allocator.free(wide);
+    _ = c.AppendMenuW(menu, c.MF_POPUP | c.MF_STRING, @intFromPtr(popup), wide.ptr);
+}
+
+fn separator(menu: c.HMENU) void {
+    _ = c.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+}
+
+fn createAccelerators() c.HACCEL {
+    var entries = [_]c.ACCEL{
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'O', .cmd = @intFromEnum(Command.open_folder) },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'J', .cmd = @intFromEnum(Command.jump_loop) },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'N', .cmd = @intFromEnum(Command.create_node) },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'S', .cmd = @intFromEnum(Command.stop_loop) },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'T', .cmd = @intFromEnum(Command.new_tab) },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'W', .cmd = @intFromEnum(Command.close_tab) },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'D', .cmd = @intFromEnum(Command.split_right) },
+        .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = 'D', .cmd = @intFromEnum(Command.split_down) },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = c.VK_NEXT, .cmd = @intFromEnum(Command.next_tab) },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = c.VK_PRIOR, .cmd = @intFromEnum(Command.previous_tab) },
+    };
+    return c.CreateAcceleratorTableW(&entries, entries.len);
+}
+
+test "native menu exposes the parity command groups" {
+    try std.testing.expectEqual(Command.open_folder, commandFromId(4101).?);
+    try std.testing.expectEqual(Command.split_right, commandFromId(4303).?);
+    try std.testing.expectEqual(@as(?Command, null), commandFromId(9999));
+}
+
 
 fn windowFromHandle(hwnd: c.HWND) ?*Window {
     const raw = c.GetWindowLongPtrW(hwnd, c.GWLP_USERDATA);
