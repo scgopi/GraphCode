@@ -235,6 +235,7 @@ pub const App = struct {
         }
         if (self.product_settings) |settings| {
             self.activity_enabled = settings.activity;
+            self.workspace_controls.activity_enabled = settings.activity;
             self.update_state = WindowsUpdates.CheckState.configure(settings.beta);
         }
         self.onboarding_store = Onboarding.Store.init(self.allocator) catch null;
@@ -928,6 +929,7 @@ pub const App = struct {
         if (self.product_settings) |*settings| settings.deinit();
         self.product_settings = draft;
         self.activity_enabled = draft.activity;
+        self.workspace_controls.activity_enabled = draft.activity;
         self.update_lock.lock();
         self.update_state = WindowsUpdates.CheckState.configure(draft.beta);
         self.update_lock.unlock();
@@ -1829,14 +1831,19 @@ pub const App = struct {
             },
             .toggle_rail => {
                 self.workspace_controls.apply(.toggle_rail);
+                self.layoutWorkspace();
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
                 self.setStatus(if (self.workspace_controls.rail_visible) "Workspace rail shown" else "Workspace rail hidden");
             },
             .toggle_panel => {
                 self.workspace_controls.apply(.toggle_panel);
+                self.layoutWorkspace();
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
                 self.setStatus(if (self.workspace_controls.panel_visible) "Workspace panel shown" else "Workspace panel hidden");
             },
             .toggle_activity => {
                 self.workspace_controls.apply(.toggle_activity);
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
                 self.setStatus(if (self.workspace_controls.activity_enabled) "Activity enabled" else "Activity disabled");
             },
             .none => {},
@@ -1893,9 +1900,9 @@ pub const App = struct {
         if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
         if (self.workspace) |workspace| {
             workspace.resize(
-                Tokens.sidebar_width,
+                if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
                 @max(0, client.bottom - Tokens.workspace_height),
-                @max(0, client.right - Tokens.sidebar_width),
+                @max(0, client.right - (if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0)),
                 Tokens.workspace_height,
             );
         }
@@ -2201,8 +2208,10 @@ fn onWindowMessage(
             var paint: c.PAINTSTRUCT = undefined;
             const hdc = c.BeginPaint(hwnd, &paint);
             const inspection = if (app.worktree_inspection) |*value| value else null;
-            GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), app.allocator, app.activity_enabled, &app.canvas);
-            if (app.workspace) |*workspace| workspace.*.paintChrome(hdc);
+            GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), app.allocator, &app.canvas, app.workspace_controls);
+            if (app.workspace_controls.panel_visible) {
+                if (app.workspace) |workspace| workspace.paintChrome(hdc);
+            }
             _ = c.EndPaint(hwnd, &paint);
             result.* = 0;
             return true;

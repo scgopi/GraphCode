@@ -406,7 +406,7 @@ public actor ProjectRegistry {
       let chat = QuickChat(title: trimmed, backend: backend)
       do {
         try quickChatStore.create(chat)
-      } catch {
+      } catch _ {
         error = "quick chat persistence failed"
         break
       }
@@ -454,7 +454,7 @@ public actor ProjectRegistry {
       }
       do {
         _ = try quickChatStore.delete(id: id)
-      } catch {
+      } catch _ {
         _ = await ensureQuickChatSession(chat)
         error = "quick chat persistence failed"
         break
