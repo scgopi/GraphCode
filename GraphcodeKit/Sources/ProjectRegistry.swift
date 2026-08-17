@@ -56,29 +56,6 @@ public actor ProjectRegistry {
   /// Non-nil only while at least one client is attached — see `startPresencePolling`.
   private var presencePoller: Task<Void, Never>?
 
-  /// Quick Chats are session-backed records too. Reusing the GraphStore launcher
-  /// closures keeps their zmx identity stable (the chat UUID is the LoopNode UUID)
-  /// without inventing a second session protocol.
-  private func quickChatNode(_ chat: QuickChat) -> LoopNode {
-    LoopNode(
-      id: chat.id,
-      title: chat.title,
-      loopType: .turnBased,
-      backend: chat.backend,
-      state: .idle,
-      createdAt: chat.createdAt)
-  }
-
-  private func ensureQuickChatSession(_ chat: QuickChat) {
-    guard chat.backend.isSpiked else { return }
-    ensureSession?(quickChatNode(chat), nil)
-  }
-
-  private func terminateQuickChatSession(_ chat: QuickChat) {
-    guard chat.backend.isSpiked else { return }
-    terminateSession?(quickChatNode(chat), nil)
-  }
-
   /// These default to the real `ZmxSessionLauncher`/`ShellPredicateEvaluator` closures —
   /// every `GraphStore` this registry creates gets them, so an unattended node's session
   /// is (re)started as soon as its project's graph is loaded, torn down when the node is
@@ -136,11 +113,6 @@ public actor ProjectRegistry {
 
   public func addConnection(id: UUID, channel: DaemonConnectionChannel) async {
     connections[id] = channel
-    // Reattach every persisted chat on reconnect. zmx's stable node ID makes this
-    // idempotent when the previous daemon instance is still winding down.
-    for chat in quickChatStore.load() {
-      ensureQuickChatSession(chat)
-    }
     startPresencePolling()
   }
 
@@ -384,11 +356,6 @@ public actor ProjectRegistry {
         error = "quick chat not found"
         break
       }
-      guard chat.backend.isSpiked else {
-        error = "quick chat backend is unavailable"
-        break
-      }
-      ensureQuickChatSession(chat)
       response = .quickChatChanged(chat)
       await broadcast(response!)
 
@@ -406,14 +373,10 @@ public actor ProjectRegistry {
       await broadcast(response!)
 
     case .deleteQuickChat(let id):
-      guard let chat = quickChatStore.chat(id: id) else {
+      guard quickChatStore.delete(id: id) != nil else {
         error = "quick chat not found"
         break
       }
-      // Stop first, then remove the durable record. This ordering prevents an
-      // orphaned zmx session when persistence succeeds but termination races.
-      terminateQuickChatSession(chat)
-      _ = quickChatStore.delete(id: id)
       response = .quickChatDeleted(id)
       await broadcast(response!)
 
