@@ -12,6 +12,7 @@ pub const Supervisor = struct {
 
     pub fn start(self: *Supervisor, endpoint: []const u8, lock_name: []const u8) void {
         const deadline = std.time.milliTimestamp() + 5_000;
+        const grace_deadline = std.time.milliTimestamp() + 1_000;
         while (std.time.milliTimestamp() < deadline) {
             switch (probeEndpoint(endpoint)) {
                 .available, .busy => return,
@@ -21,7 +22,7 @@ pub const Supervisor = struct {
                 },
                 .missing => {},
             }
-            if (daemonLockExists(lock_name)) {
+            if (daemonLockExists(lock_name) or std.time.milliTimestamp() < grace_deadline) {
                 std.Thread.sleep(100 * std.time.ns_per_ms);
                 continue;
             }

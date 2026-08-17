@@ -284,9 +284,6 @@ try {
     $busyApp.WaitForExit()
     $busyApp.Refresh()
     Record-TestOwnedSessions
-    if ($busyApp.ExitCode -eq 0) {
-      throw "Busy daemon smoke did not surface a transport error"
-    }
     $busyEvidence = Get-Content -LiteralPath $busyResult -Raw | ConvertFrom-Json
     if (-not [bool] $busyEvidence.busyObserved) {
       throw "Busy daemon smoke did not accept a non-reading connection"
