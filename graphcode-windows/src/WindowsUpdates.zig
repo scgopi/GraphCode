@@ -43,15 +43,43 @@ pub const CheckClient = struct {
         const uri = try std.Uri.parse(self.feed_url);
         var client = std.http.Client{ .allocator = self.allocator };
         defer client.deinit();
-        var request = try client.open(.GET, uri, .{ .server_header_buffer = &[_]u8{0} ** 4096 });
+        const headers = [_]std.http.Header{
+            .{ .name = "User-Agent", .value = "GraphCode-Windows-Updater" },
+            .{ .name = "Accept", .value = "application/vnd.github+json" },
+        };
+        var request = try client.request(.GET, uri, .{ .extra_headers = &headers });
         defer request.deinit();
-        try request.send();
-        try request.finish();
-        const body = try request.reader().readAllAlloc(self.allocator, 1024 * 1024);
+        try request.sendBodiless();
+        var response = try request.receiveHead(&.{});
+        if (response.head.status != .ok) return error.UpdateFeedUnavailable;
+        var reader = response.reader(&.{});
+        var body_list = std.array_list.Managed(u8).init(self.allocator);
+        defer body_list.deinit();
+        var buffer: [8192]u8 = undefined;
+        while (true) {
+            const count = reader.readSliceShort(&buffer) catch |err| return err;
+            if (count == 0) break;
+            if (body_list.items.len + count > 1024 * 1024) return error.UpdateFeedTooLarge;
+            try body_list.appendSlice(buffer[0..count]);
+        }
+        const body = try self.allocator.dupe(u8, body_list.items);
         defer self.allocator.free(body);
         return parseFeed(self.allocator, body, channel, current_version);
     }
 };
+
+pub fn currentVersion(allocator: std.mem.Allocator) ![]u8 {
+    if (std.process.getEnvVarOwned(allocator, "GRAPHCODE_VERSION")) |value| {
+        if (value.len != 0) return value;
+        allocator.free(value);
+    } else |_| {}
+    return currentVersionFromMetadata(allocator, null);
+}
+
+pub fn currentVersionFromMetadata(allocator: std.mem.Allocator, metadata: ?[]const u8) ![]u8 {
+    if (metadata) |value| if (value.len != 0) return allocator.dupe(u8, value);
+    return allocator.dupe(u8, "dev");
+}
 
 fn parseFeed(allocator: std.mem.Allocator, body: []const u8, channel: Channel, current_version: []const u8) !CheckResult {
     var parsed = try std.json.parseFromSlice([]const Release, allocator, body, .{});
@@ -93,4 +121,10 @@ test "update feed errors are explicit" {
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqual(State.failed, result.state);
     try std.testing.expect(result.message != null);
+}
+
+test "current version comes from package metadata override" {
+    const version = try currentVersionFromMetadata(std.testing.allocator, "v7.2.1");
+    defer std.testing.allocator.free(version);
+    try std.testing.expectEqualStrings("v7.2.1", version);
 }

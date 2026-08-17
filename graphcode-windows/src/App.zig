@@ -92,6 +92,9 @@ pub const App = struct {
     clone_operation: ?*RepositoryDialogs.CloneOperation = null,
     activity_enabled: bool = false,
     update_state: WindowsUpdates.CheckState = .{},
+    update_lock: std.Thread.Mutex = .{},
+    update_thread: ?std.Thread = null,
+    update_done: bool = false,
     smoke_restart_index: ?usize = null,
     smoke_restart_session: []const u8 = &.{},
 
@@ -170,6 +173,7 @@ pub const App = struct {
         if (self.product_settings) |*settings| settings.deinit();
         if (self.onboarding_store) |*store| store.deinit();
         if (self.clone_operation) |operation| operation.deinit();
+        if (self.update_thread) |thread| thread.join();
         self.allocator.destroy(self);
     }
 
@@ -193,8 +197,11 @@ pub const App = struct {
         if (self.daemon.status().len != 0) self.setStatus(self.daemon.status());
         self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
         self.product_settings_store = ProductSettings.Store.init(self.allocator) catch null;
-        if (self.product_settings_store) |store| {
-            self.product_settings = store.load() catch ProductSettings.Settings.init(self.allocator) catch null;
+        if (self.product_settings_store) |*store| {
+            self.product_settings = store.load() catch |err| blk: {
+                self.setStatus(if (err == error.FileNotFound) "Product settings unavailable" else "Product settings could not be loaded");
+                break :blk null;
+            };
         }
         if (self.product_settings) |settings| {
             self.activity_enabled = settings.activity;
@@ -214,6 +221,7 @@ pub const App = struct {
         if (self.workspace) |workspace| workspace.setKeyCallback(self, &onWorkspaceKey);
         if (self.workspace) |workspace| try workspace.startInputWorker();
         self.layoutWorkspace();
+        self.startUpdateCheck();
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_REQUIRE_DAEMON")) |value| {
             defer self.allocator.free(value);
             self.require_smoke_contract = std.mem.eql(u8, value, "1");
@@ -806,11 +814,11 @@ pub const App = struct {
     }
 
     fn openProductSettings(self: *App) void {
-        const store = self.product_settings_store orelse {
+        const store = if (self.product_settings_store) |*value| value else {
             self.setStatus("Product settings storage unavailable");
             return;
         };
-        var current = store.load() catch ProductSettings.Settings.init(self.allocator) catch {
+        var current = store.load() catch {
             self.setStatus("Unable to load product settings");
             return;
         };
@@ -827,7 +835,8 @@ pub const App = struct {
         self.product_settings = draft;
         self.activity_enabled = draft.activity;
         self.update_state = WindowsUpdates.CheckState.configure(draft.beta);
-        self.setStatus(self.update_state.label());
+        self.setStatus("Checking for updates…");
+        self.startUpdateCheck();
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
@@ -865,19 +874,64 @@ pub const App = struct {
     }
 
     pub fn checkForUpdates(self: *App) void {
+            self.startUpdateCheck();
+    }
+
+    fn startUpdateCheck(self: *App) void {
+            self.update_lock.lock();
+            if (self.update_thread != null) {
+                self.update_lock.unlock();
+                return;
+            }
+            self.update_done = false;
+            self.update_lock.unlock();
+            self.update_thread = std.Thread.spawn(.{}, updateWorker, .{self}) catch {
+                self.update_lock.lock();
+                self.update_done = true;
+                self.update_lock.unlock();
+                self.setStatus("Update check could not start");
+                return;
+            };
+    }
+
+    fn updateWorker(self: *App) void {
             const beta = self.update_state.channel == .beta;
-            var client = WindowsUpdates.CheckClient{ .allocator = self.allocator };
-            const result = client.check(beta, "0.0.0") catch {
+            const version = WindowsUpdates.currentVersion(self.allocator) catch {
+                self.update_lock.lock();
                 self.update_state = .{ .channel = if (beta) .beta else .stable, .state = .failed };
-                self.setStatus(self.update_state.label());
+                self.update_done = true;
+                self.update_lock.unlock();
+                return;
+            };
+            defer self.allocator.free(version);
+            var client = WindowsUpdates.CheckClient{ .allocator = self.allocator };
+            const result = client.check(beta, version) catch {
+                self.update_lock.lock();
+                self.update_state = .{ .channel = if (beta) .beta else .stable, .state = .failed };
+                self.update_done = true;
+                self.update_lock.unlock();
                 return;
             };
             defer {
                 var owned = result;
                 owned.deinit(self.allocator);
             }
+            self.update_lock.lock();
             self.update_state = .{ .channel = result.channel, .state = result.state };
-            self.setStatus(self.update_state.label());
+            self.update_done = true;
+            self.update_lock.unlock();
+    }
+
+    fn finishUpdateCheck(self: *App) void {
+            self.update_lock.lock();
+            const done = self.update_done;
+            self.update_lock.unlock();
+            if (!done) return;
+            if (self.update_thread) |thread| {
+                thread.join();
+                self.update_thread = null;
+                self.setStatus(self.update_state.label());
+            }
     }
 
     fn addRemoteRepository(self: *App) void {
@@ -1624,6 +1678,7 @@ fn onWindowMessage(
             if (!app.tray.added and app.smoke_tick % 10 == 0) {
                 app.tray.add(hwnd) catch app.setStatus("System tray unavailable; retrying");
             }
+            app.finishUpdateCheck();
             if (app.clone_operation) |operation| {
                 var progress: [256]u8 = undefined;
                 var recent_stderr: [256]u8 = undefined;

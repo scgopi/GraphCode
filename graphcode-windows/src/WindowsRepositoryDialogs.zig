@@ -37,9 +37,9 @@ pub const CloneProcess = struct {
     recent_stderr_len: usize = 0,
     progress: [256]u8 = undefined,
     progress_len: usize = 0,
-    redaction_pending_stdout: [16384]u8 = undefined,
+    redaction_pending_stdout: [1024 * 1024]u8 = undefined,
     redaction_pending_stdout_len: usize = 0,
-    redaction_pending_stderr: [16384]u8 = undefined,
+    redaction_pending_stderr: [1024 * 1024]u8 = undefined,
     redaction_pending_stderr_len: usize = 0,
     output_lock: std.Thread.Mutex = .{},
     finished: bool = false,
@@ -131,7 +131,10 @@ pub const CloneProcess = struct {
         defer self.allocator.free(combined);
         @memcpy(combined[0..pending.len], pending);
         @memcpy(combined[pending.len..combined_len], bytes);
-        const safe_end = if (flush) combined_len else combined_len - @min(combined_len, 128);
+        var safe_end = if (flush) combined_len else combined_len - @min(combined_len, 128);
+        if (!flush) {
+            if (findUnterminatedSecret(combined)) |start_pos| safe_end = @min(safe_end, start_pos);
+        }
         const safe = redactSecrets(self.allocator, combined[0..safe_end]) catch return;
         defer self.allocator.free(safe);
         const target = if (is_stderr) &self.recent_stderr else &self.progress;
@@ -155,6 +158,20 @@ pub const CloneProcess = struct {
         }
     }
 };
+
+fn findUnterminatedSecret(input: []const u8) ?usize {
+    var index: usize = 0;
+    while (index < input.len) : (index += 1) {
+        const is_url = std.mem.startsWith(u8, input[index..], "https://");
+        const is_token = std.mem.startsWith(u8, input[index..], "token=") or
+            std.mem.startsWith(u8, input[index..], "access_token=");
+        if (!is_url and !is_token) continue;
+        const rest = input[index..];
+        const terminators = if (is_token) "& \t\r\n" else " \t\r\n";
+        if (std.mem.indexOfAny(u8, rest, terminators) == null) return index;
+    }
+    return null;
+}
 
 fn redactSecrets(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var output = std.array_list.Managed(u8).init(allocator);
@@ -577,6 +594,33 @@ test "redaction handles output larger than four kilobytes" {
     defer std.testing.allocator.free(safe);
     try std.testing.expect(std.mem.indexOf(u8, safe, "very-long-secret") == null);
     try std.testing.expect(std.mem.indexOf(u8, safe, "<redacted>@example.test") != null);
+}
+
+test "redaction holds and removes an eight kilobyte split credential" {
+    var secret = std.array_list.Managed(u8).init(std.testing.allocator);
+    defer secret.deinit();
+    try secret.appendNTimes('s', 9000);
+    var process = CloneProcess{
+        .allocator = std.testing.allocator,
+        .child = undefined,
+        .args = &.{},
+        .destination = &.{},
+        .staging = &.{},
+    };
+    var first = std.array_list.Managed(u8).init(std.testing.allocator);
+    defer first.deinit();
+    try first.appendSlice("fatal: https://user:");
+    try first.appendSlice(secret.items);
+    process.recordOutput(first.items, true, false);
+    var second = std.array_list.Managed(u8).init(std.testing.allocator);
+    defer second.deinit();
+    try second.appendSlice("@example.test/repo.git");
+    process.recordOutput(second.items, true, true);
+    var progress: [256]u8 = undefined;
+    var stderr: [4096]u8 = undefined;
+    const snapshot = process.snapshot(&progress, &stderr);
+    try std.testing.expect(std.mem.indexOf(u8, stderr[0..snapshot.stderr_len], secret.items) == null);
+    try std.testing.expect(std.mem.indexOf(u8, stderr[0..snapshot.stderr_len], "<redacted>@example.test") != null);
 }
 
 test "clone output redacts hostile HTTPS credentials" {

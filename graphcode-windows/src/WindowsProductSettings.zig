@@ -71,6 +71,7 @@ fn isOneOf(value: []const u8, choices: []const []const u8) bool {
 pub const Store = struct {
     allocator: std.mem.Allocator,
     path: []u8,
+    load_failed: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) !Store {
         const base = resolveSupportDirectory(allocator) catch blk: {
@@ -90,14 +91,28 @@ pub const Store = struct {
         self.* = undefined;
     }
 
-    pub fn load(self: Store) !Settings {
-        const data = std.fs.cwd().readFileAlloc(self.allocator, self.path, 16 * 1024) catch
-            return Settings.init(self.allocator);
+    pub fn load(self: *Store) !Settings {
+        const data = std.fs.cwd().readFileAlloc(self.allocator, self.path, 1024 * 1024) catch |err| switch (err) {
+            error.FileNotFound => {
+                self.load_failed = false;
+                return Settings.init(self.allocator);
+            },
+            else => {
+                self.load_failed = true;
+                return err;
+            },
+        };
         defer self.allocator.free(data);
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
-        const value = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), data, .{});
-        if (value != .object) return error.SettingsRootMustBeObject;
+        const value = std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), data, .{}) catch |err| {
+            self.load_failed = true;
+            return err;
+        };
+        if (value != .object) {
+            self.load_failed = true;
+            return error.SettingsRootMustBeObject;
+        }
         const stringValue = struct {
             fn get(object: std.json.ObjectMap, name: []const u8, fallback: []const u8) []const u8 {
                 return if (object.get(name)) |item| if (item == .string) item.string else fallback else fallback;
@@ -107,7 +122,7 @@ pub const Store = struct {
             }
         };
         const object = value.object;
-        return Settings.parse(self.allocator, &.{
+        const settings = Settings.parse(self.allocator, &.{
             stringValue.get(object, "defaultBackend", "claudeCode"),
             stringValue.get(object, "defaultModelTier", "standard"),
             stringValue.get(object, "claudePermissionMode", "auto"),
@@ -117,10 +132,16 @@ pub const Store = struct {
             if (stringValue.boolean(object, "briefsSessionsAboutTheGraph", true)) "on" else "off",
             if (stringValue.boolean(object, "betaUpdates", false)) "on" else "off",
             if (stringValue.boolean(object, "autoSelectsModel", false)) "on" else "off",
-        });
+        }) catch |err| {
+            self.load_failed = true;
+            return err;
+        };
+        self.load_failed = false;
+        return settings;
     }
 
     pub fn save(self: Store, settings: Settings) !void {
+        if (self.load_failed) return error.SettingsLoadFailed;
         const existing = std.fs.cwd().readFileAlloc(self.allocator, self.path, 1024 * 1024) catch null;
         defer if (existing) |data| self.allocator.free(data);
         var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -268,6 +289,44 @@ test "settings load then save preserves unknown fields and worktree policies" {
     defer std.testing.allocator.free(saved);
     try std.testing.expect(std.mem.indexOf(u8, saved, "worktreePolicies") != null);
     try std.testing.expect(std.mem.indexOf(u8, saved, "\"future\"") != null);
+}
+
+test "large worktree policies survive load and save" {
+    const path = "graphcode-settings-large-policy-test.json";
+    std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    var policy = std.array_list.Managed(u8).init(std.testing.allocator);
+    defer policy.deinit();
+    try policy.appendSlice("{\"worktreePolicies\":{\"");
+    try policy.appendNTimes('x', 900 * 1024);
+    try policy.appendSlice("\":\"ask\"},\"defaultBackend\":\"claudeCode\"}");
+    var file = try std.fs.cwd().createFile(path, .{});
+    try file.writeAll(policy.items);
+    file.close();
+    var store = Store{ .allocator = std.testing.allocator, .path = try std.testing.allocator.dupe(u8, path) };
+    defer store.deinit();
+    var settings = try store.load();
+    defer settings.deinit();
+    try store.save(settings);
+    const saved = try std.fs.cwd().readFileAlloc(std.testing.allocator, path, 1024 * 1024);
+    defer std.testing.allocator.free(saved);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "worktreePolicies") != null);
+    try std.testing.expect(saved.len > 900 * 1024);
+}
+
+test "malformed settings surface failure and cannot overwrite without recovery" {
+    const path = "graphcode-settings-malformed-test.json";
+    std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    var file = try std.fs.cwd().createFile(path, .{});
+    try file.writeAll("{not-json");
+    file.close();
+    var store = Store{ .allocator = std.testing.allocator, .path = try std.testing.allocator.dupe(u8, path) };
+    defer store.deinit();
+    _ = store.load() catch {};
+    var settings = try Settings.init(std.testing.allocator);
+    defer settings.deinit();
+    try std.testing.expectError(error.SettingsLoadFailed, store.save(settings));
 }
 
 test "settings reject values outside Swift selector enums" {
