@@ -17,7 +17,7 @@ pub const CanvasState = struct {
     selected_edge: ?usize = null,
     selected_edge_id: []const u8 = "",
     edge_dragging: bool = false,
-    edge_drag_source: ?usize = null,
+    edge_drag_source_id: []const u8 = "",
     edge_drag_x: i32 = 0,
     edge_drag_y: i32 = 0,
 
@@ -42,12 +42,12 @@ pub const CanvasState = struct {
     pub fn cancelInteraction(self: *CanvasState) void {
         self.dragging = false;
         self.edge_dragging = false;
-        self.edge_drag_source = null;
+        self.edge_drag_source_id = "";
     }
 
-    pub fn beginEdgeDrag(self: *CanvasState, source: usize, x: i32, y: i32) void {
+    pub fn beginEdgeDrag(self: *CanvasState, source_id: []const u8, x: i32, y: i32) void {
         self.edge_dragging = true;
-        self.edge_drag_source = source;
+        self.edge_drag_source_id = source_id;
         self.edge_drag_x = x;
         self.edge_drag_y = y;
     }
@@ -58,12 +58,12 @@ pub const CanvasState = struct {
         self.edge_drag_y = y;
     }
 
-    pub fn endEdgeDrag(self: *CanvasState) ?usize {
+    pub fn endEdgeDrag(self: *CanvasState) ?[]const u8 {
         if (!self.edge_dragging) return null;
-        const source = self.edge_drag_source;
+        const source_id = self.edge_drag_source_id;
         self.edge_dragging = false;
-        self.edge_drag_source = null;
-        return source;
+        self.edge_drag_source_id = "";
+        return source_id;
     }
 
     pub fn zoomAt(self: *CanvasState, x: i32, y: i32, wheel_delta: i16) void {
@@ -214,9 +214,8 @@ fn drawEdges(hdc: c.HDC, graph: GraphModel.Graph, state: *const CanvasState) voi
         drawBezier(hdc, from, to, if (selected) Tokens.rgb(Tokens.canvas_selection) else Tokens.rgb(Tokens.canvas_edge));
     }
     if (state.edge_dragging) {
-        if (state.edge_drag_source) |source| {
-            if (source < graph.nodes.items.len) {
-                const from = connectorPositionForIndex(graph.nodes.items, source, true, state);
+        if (state.edge_drag_source_id.len != 0) {
+            if (connectorPosition(graph.nodes.items, state.edge_drag_source_id, true, state)) |from| {
                 drawBezier(hdc, from, .{ .x = state.edge_drag_x, .y = state.edge_drag_y }, Tokens.rgb(Tokens.canvas_selection));
             }
         }
@@ -628,19 +627,19 @@ test "edge hit testing follows reordered endpoint IDs and zoom pan" {
 
 test "edge drag state cancels without leaving a selection" {
     var state = CanvasState{};
-    state.beginEdgeDrag(3, 100, 120);
+    state.beginEdgeDrag("node-3", 100, 120);
     state.updateEdgeDrag(140, 160);
-    try std.testing.expectEqual(@as(?usize, 3), state.endEdgeDrag());
+    try std.testing.expectEqualStrings("node-3", state.endEdgeDrag().?);
     try std.testing.expect(!state.edge_dragging);
-    try std.testing.expect(state.edge_drag_source == null);
+    try std.testing.expectEqualStrings("", state.edge_drag_source_id);
 }
 
 test "capture loss cancels both pan and edge drag state" {
     var state = CanvasState{};
     state.beginPan(10, 20);
-    state.beginEdgeDrag(1, 30, 40);
+    state.beginEdgeDrag("node-1", 30, 40);
     state.cancelInteraction();
     try std.testing.expect(!state.dragging);
     try std.testing.expect(!state.edge_dragging);
-    try std.testing.expect(state.edge_drag_source == null);
+    try std.testing.expectEqualStrings("", state.edge_drag_source_id);
 }

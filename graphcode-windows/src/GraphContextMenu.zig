@@ -1,9 +1,19 @@
 const c = @import("Win32.zig").c;
 
+pub const NodeTarget = struct {
+    project_path: []const u8,
+    id: []const u8,
+};
+
+pub const EdgeTarget = struct {
+    project_path: []const u8,
+    id: []const u8,
+};
+
 pub const Target = union(enum) {
     background,
-    node: usize,
-    edge: usize,
+    node: NodeTarget,
+    edge: EdgeTarget,
 };
 
 pub const Action = enum {
@@ -141,4 +151,12 @@ test "destructive context actions cannot bypass a cancelled confirmation" {
 test "edge editing requires a stable edge identifier" {
     try std.testing.expect(!canEditEdge(""));
     try std.testing.expect(canEditEdge("edge-1"));
+}
+
+test "context targets carry stable copied identity rather than collection indices" {
+    const node = NodeTarget{ .project_path = "C:\\work\\graph", .id = "node-a" };
+    const edge = EdgeTarget{ .project_path = "C:\\work\\graph", .id = "edge-a" };
+    try std.testing.expectEqualStrings("node-a", node.id);
+    try std.testing.expectEqualStrings("edge-a", edge.id);
+    try std.testing.expectEqualStrings("C:\\work\\graph", edge.project_path);
 }

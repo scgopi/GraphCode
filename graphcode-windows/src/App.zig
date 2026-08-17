@@ -37,6 +37,7 @@ pub const App = struct {
     canvas: GraphCanvas.CanvasState = .{},
     selected_node_id: []u8 = &.{},
     selected_edge_id: []u8 = &.{},
+    edge_drag_source_id: []u8 = &.{},
     selection_initialized: bool = false,
     worktree_inspection: ?WorktreeStatus.Inspection = null,
     selected_worktree_path: []u8 = &.{},
@@ -142,6 +143,7 @@ pub const App = struct {
         if (self.selected_worktree_path.len != 0) self.allocator.free(self.selected_worktree_path);
         if (self.selected_node_id.len != 0) self.allocator.free(self.selected_node_id);
         if (self.selected_edge_id.len != 0) self.allocator.free(self.selected_edge_id);
+        if (self.edge_drag_source_id.len != 0) self.allocator.free(self.edge_drag_source_id);
         if (self.instance_mutex != null) _ = c.CloseHandle(self.instance_mutex);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
         if (self.accepted_subscription.len != 0) self.allocator.free(self.accepted_subscription);
@@ -503,6 +505,10 @@ pub const App = struct {
 
     fn cancelCanvasInteraction(self: *App) void {
         self.canvas.cancelInteraction();
+        if (self.edge_drag_source_id.len != 0) {
+            self.allocator.free(self.edge_drag_source_id);
+            self.edge_drag_source_id = &.{};
+        }
         _ = c.ReleaseCapture();
     }
 
@@ -533,6 +539,11 @@ pub const App = struct {
     }
 
     fn remapSelection(self: *App) void {
+        if (self.edge_drag_source_id.len != 0) {
+            if (self.model.findNodeIndex(self.edge_drag_source_id) == null) {
+                self.cancelCanvasInteraction();
+            }
+        }
         if (!self.selection_initialized) {
             if (self.model.graph) |graph| {
                 if (graph.nodes.items.len != 0) {
@@ -684,11 +695,11 @@ pub const App = struct {
         const path = self.currentProject() orelse return;
         self.client.sendCreateEdgeDraft(path, draft);
         const updated_graph = self.model.graph orelse return;
-        const from_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, from_id) orelse {
+        const from_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, draft.from) orelse {
             self.setStatus("Source loop changed while creating edge");
             return;
         };
-        const to_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, to_id) orelse {
+        const to_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, draft.to) orelse {
             self.setStatus("Target loop changed while creating edge");
             return;
         };
@@ -698,11 +709,17 @@ pub const App = struct {
     fn createEdgeBetween(self: *App, source: usize, target: usize) void {
         const graph = self.model.graph orelse return;
         if (source >= graph.nodes.items.len or target >= graph.nodes.items.len or source == target) return;
+        self.createEdgeBetweenIDs(graph.nodes.items[source].id, graph.nodes.items[target].id);
+    }
+
+    fn createEdgeBetweenIDs(self: *App, source_id: []const u8, target_id: []const u8) void {
+        const graph = self.model.graph orelse return;
+        if (std.mem.eql(u8, source_id, target_id)) return;
         const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
         defer self.allocator.free(project_path);
-        const from_id = self.allocator.dupe(u8, graph.nodes.items[source].id) catch return;
+        const from_id = self.allocator.dupe(u8, source_id) catch return;
         defer self.allocator.free(from_id);
-        const to_id = self.allocator.dupe(u8, graph.nodes.items[target].id) catch return;
+        const to_id = self.allocator.dupe(u8, target_id) catch return;
         defer self.allocator.free(to_id);
         const draft = NativeForms.edge(self.window.hwnd, self.allocator, .{
             .from = from_id,
@@ -720,11 +737,11 @@ pub const App = struct {
             return;
         };
         const updated_graph = self.model.graph orelse return;
-        const from_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, from_id) orelse {
+        const from_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, draft.from) orelse {
             self.setStatus("Source loop changed while creating edge");
             return;
         };
-        const to_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, to_id) orelse {
+        const to_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, draft.to) orelse {
             self.setStatus("Target loop changed while creating edge");
             return;
         };
@@ -751,10 +768,12 @@ pub const App = struct {
     }
 
     fn jumpToNode(self: *App) void {
-        const graph = self.model.graph orelse {
+        if (self.model.graph == null) {
             self.setStatus("No graph is open");
             return;
-        };
+        }
+        const current_id = self.allocator.dupe(u8, self.selected_node_id) catch return;
+        defer self.allocator.free(current_id);
         const query = NativeForms.jump(self.window.hwnd, self.allocator, "") catch {
             self.setStatus("Unable to open jump form");
             return;
@@ -764,7 +783,12 @@ pub const App = struct {
             self.setStatus("Enter a jump query");
             return;
         };
-        const next = Forms.jumpTo(graph.nodes.items, trimmed_query, self.model.selectedIndex()) orelse {
+        const graph = self.model.graph orelse {
+            self.setStatus("Graph closed while jumping");
+            return;
+        };
+        const current_index = if (current_id.len == 0) null else GraphModel.findNodeIndexByID(graph.nodes.items, current_id);
+        const next = Forms.jumpTo(graph.nodes.items, trimmed_query, current_index) orelse {
             self.setStatus("No matching loop");
             return;
         };
@@ -850,8 +874,21 @@ pub const App = struct {
             self.setStatus("Edge changed while editing");
             return;
         };
+        const from_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, draft.from) orelse {
+            self.setStatus("Source loop changed while editing edge");
+            return;
+        };
+        const to_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, draft.to) orelse {
+            self.setStatus("Target loop changed while editing edge");
+            return;
+        };
         self.client.sendDeleteEdge(project_path, updated_graph.edges.items[updated_index].id);
-        self.client.sendCreateEdge(project_path, draft.from, draft.to, draft.kind);
+        self.client.sendCreateEdge(
+            project_path,
+            updated_graph.nodes.items[from_index].id,
+            updated_graph.nodes.items[to_index].id,
+            draft.kind,
+        );
     }
 
     fn deleteEdge(self: *App, index: usize) void {
@@ -872,11 +909,46 @@ pub const App = struct {
         self.client.sendDeleteEdge(project_path, updated_graph.edges.items[updated_index].id);
     }
 
+    fn showNodeContextMenu(self: *App, index: usize, x: i32, y: i32) void {
+        const graph = self.model.graph orelse return;
+        if (index >= graph.nodes.items.len) return;
+        const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
+        defer self.allocator.free(project_path);
+        const node_id = self.allocator.dupe(u8, graph.nodes.items[index].id) catch return;
+        defer self.allocator.free(node_id);
+        GraphContextMenu.show(
+            self.window.hwnd,
+            .{ .node = .{ .project_path = project_path, .id = node_id } },
+            x,
+            y,
+            self,
+            &onContextAction,
+        );
+    }
+
+    fn showEdgeContextMenu(self: *App, index: usize, x: i32, y: i32) void {
+        const graph = self.model.graph orelse return;
+        if (index >= graph.edges.items.len) return;
+        const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
+        defer self.allocator.free(project_path);
+        const edge_id = self.allocator.dupe(u8, graph.edges.items[index].id) catch return;
+        defer self.allocator.free(edge_id);
+        GraphContextMenu.show(
+            self.window.hwnd,
+            .{ .edge = .{ .project_path = project_path, .id = edge_id } },
+            x,
+            y,
+            self,
+            &onContextAction,
+        );
+    }
+
     fn handleContextAction(self: *App, action: GraphContextMenu.Action, target: GraphContextMenu.Target) void {
         switch (target) {
-            .node => |index| {
+            .node => |stable| {
                 const graph = self.model.graph orelse return;
-                if (index >= graph.nodes.items.len) return;
+                if (!std.mem.eql(u8, graph.project.path, stable.project_path)) return;
+                const index = GraphModel.findNodeIndexByID(graph.nodes.items, stable.id) orelse return;
                 if (!self.selectNodeIndex(index)) return;
                 switch (action) {
                     .rename_node => self.editSelectedNode(),
@@ -888,7 +960,11 @@ pub const App = struct {
                     else => {},
                 }
             },
-            .edge => |index| {
+            .edge => |stable| {
+                const graph = self.model.graph orelse return;
+                if (!std.mem.eql(u8, graph.project.path, stable.project_path)) return;
+                if (stable.id.len == 0) return;
+                const index = GraphModel.findEdgeIndexByID(graph.edges.items, stable.id) orelse return;
                 if (!self.selectEdgeIndex(index)) return;
                 switch (action) {
                     .edit_edge => self.editSelectedEdge(index),
@@ -1535,8 +1611,12 @@ fn onWindowMessage(
                 const bounds = c.RECT{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = client.right, .bottom = workspace_top };
                 if (app.model.graph) |graph| {
                     if (GraphCanvas.hitTestConnector(graph.nodes.items, x, y, &app.canvas, bounds)) |index| {
-                        app.canvas.beginEdgeDrag(index, x, y);
-                        _ = c.SetCapture(hwnd);
+                        if (app.edge_drag_source_id.len != 0) app.allocator.free(app.edge_drag_source_id);
+                        app.edge_drag_source_id = app.allocator.dupe(u8, graph.nodes.items[index].id) catch &.{};
+                        if (app.edge_drag_source_id.len != 0) {
+                            app.canvas.beginEdgeDrag(app.edge_drag_source_id, x, y);
+                            _ = c.SetCapture(hwnd);
+                        }
                     } else if (GraphCanvas.hitTest(graph.nodes.items, x, y, &app.canvas, bounds)) |index| {
                         _ = app.selectNodeIndex(index);
                         _ = c.InvalidateRect(hwnd, null, 0);
@@ -1593,17 +1673,24 @@ fn onWindowMessage(
             const workspace_top = client.bottom - Tokens.workspace_height;
             if (point.x >= Tokens.sidebar_width and point.y >= Tokens.header_height and point.y < workspace_top) {
                 const bounds = c.RECT{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = client.right, .bottom = workspace_top };
-                var target: GraphContextMenu.Target = .background;
+                var target: enum { background, node, edge } = .background;
+                var target_index: usize = 0;
                 if (app.model.graph) |graph| {
                     if (GraphCanvas.hitTest(graph.nodes.items, point.x, point.y, &app.canvas, bounds)) |index| {
-                        target = .{ .node = index };
+                        target = .node;
+                        target_index = index;
                     } else if (GraphCanvas.hitTestEdge(graph.nodes.items, graph.edges.items, point.x, point.y, &app.canvas, bounds)) |index| {
-                        target = .{ .edge = index };
+                        target = .edge;
+                        target_index = index;
                     }
                 }
                 var screen = c.POINT{ .x = point.x, .y = point.y };
                 _ = c.ClientToScreen(hwnd, &screen);
-                GraphContextMenu.show(hwnd, target, screen.x, screen.y, app, &onContextAction);
+                switch (target) {
+                    .background => GraphContextMenu.show(hwnd, .background, screen.x, screen.y, app, &onContextAction),
+                    .node => app.showNodeContextMenu(target_index, screen.x, screen.y),
+                    .edge => app.showEdgeContextMenu(target_index, screen.x, screen.y),
+                }
                 result.* = 0;
                 return true;
             }
@@ -1613,14 +1700,22 @@ fn onWindowMessage(
         c.WM_LBUTTONUP => {
             if (app.canvas.edge_dragging) {
                 const point = CanvasInput.decodeMouseMessage(lparam);
-                const source = app.canvas.endEdgeDrag() orelse 0;
+                const source_id = app.canvas.endEdgeDrag() orelse {
+                    app.cancelCanvasInteraction();
+                    result.* = 0;
+                    return true;
+                };
                 _ = c.ReleaseCapture();
                 if (app.model.graph) |graph| {
                     const bounds = c.RECT{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = clientRight(hwnd), .bottom = clientBottom(hwnd) - Tokens.workspace_height };
-                    if (GraphCanvas.hitTest(graph.nodes.items, point.x, point.y, &app.canvas, bounds)) |target| {
-                        if (target != source) app.createEdgeBetween(source, target);
+                    if (GraphModel.findNodeIndexByID(graph.nodes.items, source_id)) |source| {
+                        if (GraphCanvas.hitTest(graph.nodes.items, point.x, point.y, &app.canvas, bounds)) |target| {
+                            if (target != source) app.createEdgeBetweenIDs(source_id, graph.nodes.items[target].id);
+                        }
                     }
                 }
+                if (app.edge_drag_source_id.len != 0) app.allocator.free(app.edge_drag_source_id);
+                app.edge_drag_source_id = &.{};
                 _ = c.InvalidateRect(hwnd, null, 0);
                 result.* = 0;
                 return true;
