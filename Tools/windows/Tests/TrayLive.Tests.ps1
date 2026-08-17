@@ -190,17 +190,23 @@ $process = $null
 try {
   $env:GRAPHCODE_DAEMON_PIPE = "\\.\pipe\$PipeName"
   $env:GRAPHCODE_SHELL_REQUIRE_DAEMON = "0"
-  $process = Start-Process -FilePath $Executable -PassThru -WindowStyle Hidden
+  $process = Start-Process -FilePath $Executable -PassThru
   $hwnd = [IntPtr]::Zero
   for ($i = 0; $i -lt 60 -and $hwnd -eq [IntPtr]::Zero; $i++) {
     Start-Sleep -Milliseconds 100
     $hwnd = Get-ShellWindow $process.Id
   }
   if ($hwnd -eq [IntPtr]::Zero) { throw "GraphCode GUI window did not start" }
+  for ($i = 0; $i -lt 20 -and -not [GraphCodeTrayLiveNative]::IsWindowVisible($hwnd); $i++) {
+    Start-Sleep -Milliseconds 100
+  }
+  if (-not [GraphCodeTrayLiveNative]::IsWindowVisible($hwnd)) {
+    throw "GraphCode GUI window did not become visible"
+  }
   Assert-NoConsoleWindow $process.Id
   $trayRect = Assert-TrayIcon $hwnd
 
-  $racer = Start-Process -FilePath $Executable -PassThru -WindowStyle Hidden
+  $racer = Start-Process -FilePath $Executable -PassThru
   if (-not $racer.WaitForExit(5000)) { throw "Competing shell start did not complete" }
   if ($racer.ExitCode -ne 0) { throw "Competing shell start exited with code $($racer.ExitCode)" }
   Start-Sleep -Milliseconds 250
@@ -209,7 +215,7 @@ try {
   }
 
   Invoke-WindowClose $hwnd
-  Start-Sleep -Milliseconds 250
+  Start-Sleep -Milliseconds 750
   if ([GraphCodeTrayLiveNative]::IsWindowVisible($hwnd)) { throw "WM_CLOSE did not hide the shell" }
   $trayRect = Assert-TrayIcon $hwnd
 
@@ -220,7 +226,7 @@ try {
   Invoke-WindowClose $hwnd
   Start-Sleep -Milliseconds 200
   if ([GraphCodeTrayLiveNative]::IsWindowVisible($hwnd)) { throw "Alt+F4 did not hide the shell" }
-  $second = Start-Process -FilePath $Executable -PassThru -WindowStyle Hidden
+  $second = Start-Process -FilePath $Executable -PassThru
   if (-not $second.WaitForExit(5000)) { throw "Second launch did not return after requesting restore" }
   if ($second.ExitCode -ne 0) { throw "Second launch exited with code $($second.ExitCode)" }
   Start-Sleep -Milliseconds 250
