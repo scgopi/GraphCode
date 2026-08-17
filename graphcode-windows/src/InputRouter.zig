@@ -111,7 +111,7 @@ pub fn commandText(allocator: std.mem.Allocator, action: Action) ![]u8 {
         .command_palette => allocator.dupe(u8, "Command / jump palette"),
         .next_identity => allocator.dupe(u8, "Next loop"),
         .previous_identity => allocator.dupe(u8, "Previous loop"),
-        .quick_chat => allocator.dupe(u8, "Quick chats (protocol blocked)"),
+        .quick_chat => allocator.dupe(u8, "Quick chats (protocol unavailable)"),
         .settings => allocator.dupe(u8, "Settings"),
         .product_settings => allocator.dupe(u8, "Product settings"),
         .clone_repository => allocator.dupe(u8, "Clone HTTPS repository"),
