@@ -1424,6 +1424,25 @@ pub const App = struct {
         self.setStatus("Worktree policy saved");
     }
 
+    fn editWorktreePolicy(self: *App) void {
+        if (self.worktree_dialog == null) {
+            self.setStatus("Inspect worktrees before editing policy");
+            return;
+        }
+        self.setStatus("Worktree policy editor opened; Ctrl+Shift+S saves changes");
+    }
+
+    fn saveCurrentWorktreePolicy(self: *App) void {
+        const dialog = self.worktree_dialog orelse {
+            self.setStatus("Inspect worktrees before saving policy");
+            return;
+        };
+        self.saveWorktreePolicy(dialog.policy) catch {
+            self.setStatus("Unable to save worktree policy");
+            return;
+        };
+    }
+
     fn revealSelectedWorktree(self: *App) void {
         const dialog = self.worktree_dialog orelse {
             self.setStatus("Inspect worktrees before revealing a row");
@@ -1542,6 +1561,8 @@ pub const App = struct {
             .inspect_worktrees => self.inspectWorktrees(),
             .reclaim_worktrees => self.reclaimWorktrees(),
             .reveal_worktree => self.revealSelectedWorktree(),
+            .edit_worktree_policy => self.editWorktreePolicy(),
+            .save_worktree_policy => self.saveCurrentWorktreePolicy(),
             .worktree_next => self.moveWorktreeSelection(1),
             .worktree_previous => self.moveWorktreeSelection(-1),
             .focus_terminal_a => if (self.workspace) |workspace| workspace.focus(0),
@@ -1687,6 +1708,7 @@ pub const App = struct {
     fn replaceStatus(self: *App, value: []u8) void {
         if (self.status_override.len != 0) self.allocator.free(self.status_override);
         self.status_override = value;
+        self.syncAccessibility();
     }
 
     fn syncAccessibility(self: *App) void {
@@ -1695,8 +1717,16 @@ pub const App = struct {
         defer rows.deinit();
         if (self.worktree_dialog) |dialog| {
             for (dialog.rows.items) |row| {
-                rows.append(.{ .path = row.entry.path, .selected = row.selected }) catch return;
+                rows.append(.{
+                    .path = row.entry.path,
+                    .selected = row.selected,
+                    .eligible = WorktreeStatus.decision(row.entry) == .reclaimable,
+                }) catch return;
             }
+        } else if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_FIXTURE_ROWS") catch null) |fixture| {
+            defer self.allocator.free(fixture);
+            provider.syncStatus(self.status());
+            return;
         }
         provider.syncWorktrees(self.status(), rows.items);
     }
@@ -1827,7 +1857,26 @@ fn onWindowMessage(
                 6 => app.inspectWorktrees(),
                 7 => app.reclaimWorktrees(),
                 8 => app.revealSelectedWorktree(),
-                else => if (wparam >= 1000 and wparam < 2000) {
+                9 => app.editWorktreePolicy(),
+                10 => app.saveCurrentWorktreePolicy(),
+                else => if (wparam >= 2000 and wparam < 5000) {
+                    const encoded = wparam - 2000;
+                    const index = @as(usize, @intCast(encoded / 3));
+                    const operation = encoded % 3;
+                    if (operation == 0) {
+                        if (app.worktree_dialog) |*dialog| dialog.clearSelection();
+                        _ = app.toggleWorktreeRow(index);
+                    } else if (operation == 1) {
+                        _ = app.toggleWorktreeRow(index);
+                    } else if (operation == 2) {
+                        if (app.worktree_dialog) |*dialog| {
+                            if (index < dialog.rows.items.len and dialog.rows.items[index].selected) {
+                                _ = dialog.toggle(index);
+                            }
+                        }
+                        app.syncAccessibility();
+                    }
+                } else if (wparam >= 1000 and wparam < 2000) {
                     _ = app.toggleWorktreeRow(@intCast(wparam - 1000));
                 },
             }

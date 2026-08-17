@@ -12,6 +12,8 @@ struct State {
   std::wstring status = L"Ready";
   std::vector<std::wstring> rows;
   std::vector<bool> selected;
+  std::vector<bool> eligible;
+  int focused = 0;
 };
 
 static std::wstring wide(const char *value) {
@@ -106,7 +108,12 @@ class Node final : public IRawElementProviderSimple,
       value->boolVal = VARIANT_TRUE;
       return S_OK;
     }
-    if (property == UIA_ValueValuePropertyId && id_ == 8) {
+    if (property == UIA_LiveSettingPropertyId && id_ == 6) {
+      value->vt = VT_I4;
+      value->lVal = 1;
+      return S_OK;
+    }
+    if (property == UIA_ValueValuePropertyId && id_ == 6) {
       value->vt = VT_BSTR;
       value->bstrVal = SysAllocString(state_->status.c_str());
       return value->bstrVal ? S_OK : E_OUTOFMEMORY;
@@ -155,6 +162,9 @@ class Node final : public IRawElementProviderSimple,
   }
   HRESULT STDMETHODCALLTYPE SetFocus() override {
     ::SetFocus(state_->hwnd);
+    const int old = state_->focused;
+    state_->focused = id_;
+    if (old != id_) UiaRaiseAutomationEvent(this, UIA_AutomationFocusChangedEventId);
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE get_FragmentRoot(IRawElementProviderFragmentRoot **value) override {
@@ -169,15 +179,18 @@ class Node final : public IRawElementProviderSimple,
                                                       IRawElementProviderFragment **value) override {
     if (!value) return E_POINTER;
     *value = nullptr;
-    return make(0, value);
+    return make(state_->focused, value);
   }
   HRESULT STDMETHODCALLTYPE GetFocus(IRawElementProviderFragment **value) override {
-    return ElementProviderFromPoint(0, 0, value);
+    if (!value) return E_POINTER;
+    *value = nullptr;
+    return make(state_->focused, value);
   }
 
   HRESULT STDMETHODCALLTYPE Invoke() override {
     if (!supportsInvoke()) return UIA_E_ELEMENTNOTENABLED;
-    UINT command = id_ == 5 ? 6 : id_ == 6 ? 7 : id_ == 7 ? 8 : 6;
+    UINT command = id_ == 7 ? 6 : id_ == 8 ? 7 : id_ == 9 ? 8 :
+                   id_ == 10 ? 9 : id_ == 11 ? 10 : 6;
     PostMessageW(state_->hwnd, WM_COMMAND, command, 0);
     return S_OK;
   }
@@ -213,9 +226,9 @@ class Node final : public IRawElementProviderSimple,
     }
     return S_OK;
   }
-  HRESULT STDMETHODCALLTYPE Select() override { return setSelected(true); }
-  HRESULT STDMETHODCALLTYPE AddToSelection() override { return setSelected(true); }
-  HRESULT STDMETHODCALLTYPE RemoveFromSelection() override { return setSelected(false); }
+  HRESULT STDMETHODCALLTYPE Select() override { return setSelected(true, 0); }
+  HRESULT STDMETHODCALLTYPE AddToSelection() override { return setSelected(true, 1); }
+  HRESULT STDMETHODCALLTYPE RemoveFromSelection() override { return setSelected(false, 2); }
   HRESULT STDMETHODCALLTYPE get_IsSelected(BOOL *value) override {
     if (!value) return E_POINTER;
     *value = isRow() && state_->selected[static_cast<size_t>(id_ - 100)] ? TRUE : FALSE;
@@ -226,39 +239,57 @@ class Node final : public IRawElementProviderSimple,
     *value = nullptr;
     return makeSimple(3, value);
   }
-  void update(const char *status, const char **rows, const int *selected, int count) {
+  void update(const char *status, const char **rows, const int *selected,
+              const int *eligible, int count, int focused) {
     state_->status = wide(status);
     state_->rows.clear();
     state_->selected.clear();
+    state_->eligible.clear();
+    state_->focused = focused;
     for (int i = 0; i < count; ++i) {
       state_->rows.push_back(wide(rows ? rows[i] : nullptr));
       state_->selected.push_back(selected && selected[i] != 0);
+      state_->eligible.push_back(eligible && eligible[i] != 0);
     }
+    UiaRaiseAutomationEvent(this, UIA_LiveRegionChangedEventId);
+  }
+  void setStatus(const char *status) {
+    state_->status = wide(status);
     UiaRaiseAutomationEvent(this, UIA_LiveRegionChangedEventId);
   }
 
  private:
   bool isRow() const { return id_ >= 100 && static_cast<size_t>(id_ - 100) < state_->rows.size(); }
-  bool supportsInvoke() const { return id_ == 0 || (id_ >= 5 && id_ <= 7); }
+  bool supportsInvoke() const { return id_ == 0 || (id_ >= 7 && id_ <= 11); }
   int parentId() const {
     if (id_ == 0) return -1;
-    if (id_ >= 100) return 3;
+    if (id_ >= 100) return id_ == 100 ? 3 : id_ - 1;
     if (id_ == 1) return 0;
-    if (id_ == 2) return 1;
-    if (id_ >= 3) return id_ - 1;
+    if (id_ == 6) return 11;
+    if (id_ >= 2 && id_ <= 6) return id_ - 1;
+    if (id_ == 7) return 5;
+    if (id_ >= 8 && id_ <= 11) return id_ - 1;
     return 0;
   }
   int firstChild() const {
     if (id_ == 0) return 1;
     if (id_ == 3 && !state_->rows.empty()) return 100;
-    if (id_ >= 1 && id_ < 8) return id_ + 1;
-    if (id_ == 8) return -1;
+    if (id_ >= 100 && id_ + 1 < 100 + static_cast<int>(state_->rows.size())) return id_ + 1;
+    if (id_ >= 100) return 4;
+    if (id_ == 5) return 7;
+    if (id_ >= 7 && id_ < 11) return id_ + 1;
+    if (id_ == 11) return 6;
+    if (id_ >= 1 && id_ < 6) return id_ + 1;
     return -1;
   }
   int lastChild() const {
-    if (id_ == 0) return 8;
+    if (id_ == 0) return 6;
     if (id_ == 3 && !state_->rows.empty()) return 99 + static_cast<int>(state_->rows.size());
-    if (id_ >= 1 && id_ < 8) return id_ + 1;
+    if (id_ >= 100) return firstChild();
+    if (id_ == 5) return 11;
+    if (id_ >= 7 && id_ < 11) return id_ + 1;
+    if (id_ == 11) return 6;
+    if (id_ >= 1 && id_ < 6) return id_ + 1;
     return -1;
   }
   int sibling(int delta) const {
@@ -266,31 +297,47 @@ class Node final : public IRawElementProviderSimple,
       int next = id_ + delta;
       if (next >= 100 && next < 100 + static_cast<int>(state_->rows.size())) return next;
       if (delta > 0 && next == 100 + static_cast<int>(state_->rows.size())) return 4;
+      if (delta > 0 && next == 100 + static_cast<int>(state_->rows.size())) return -1;
       return -1;
+    }
+    if (id_ >= 1 && id_ <= 6) {
+      const int next = id_ + delta;
+      return next >= 1 && next <= 6 ? next : -1;
+    }
+    if (id_ >= 7 && id_ <= 11) {
+      const int next = id_ + delta;
+      return next >= 7 && next <= 11 ? next : -1;
+    }
+    if (id_ >= 7 && id_ <= 9) {
+      const int next = id_ + delta;
+      return next >= 7 && next <= 9 ? next : -1;
     }
     return -1;
   }
   std::wstring name() const {
     if (isRow()) return state_->rows[static_cast<size_t>(id_ - 100)];
-    if (id_ == 8) return state_->status;
+    if (id_ == 6) return state_->status;
     static const wchar_t *names[] = {L"GraphCode UIA Root", L"Projects", L"Loops", L"Worktrees",
-                                     L"Graph", L"Inspect worktrees", L"Reclaim selected worktrees",
-                                     L"Reveal in Explorer", L"Status"};
-    return names[id_ <= 8 ? id_ : 0];
+                                     L"Graph", L"Actions", L"Status", L"Inspect worktrees",
+                                     L"Reclaim selected worktrees", L"Reveal in Explorer",
+                                     L"Edit worktree policy", L"Save worktree policy"};
+    return names[id_ <= 11 ? id_ : 0];
   }
   std::wstring automationId() const {
     if (isRow()) return L"worktree-row-" + std::to_wstring(id_ - 100);
     static const wchar_t *ids[] = {L"graphcode-root", L"projects", L"loops", L"worktrees",
-                                   L"graph", L"inspect-worktrees", L"reclaim-worktrees",
-                                   L"reveal-worktree", L"status"};
-    return ids[id_ <= 8 ? id_ : 0];
+                                   L"graph", L"actions", L"status", L"inspect-worktrees",
+                                   L"reclaim-worktrees", L"reveal-worktree",
+                                   L"edit-worktree-policy", L"save-worktree-policy"};
+    return ids[id_ <= 11 ? id_ : 0];
   }
   CONTROLTYPEID controlType() const {
     if (id_ == 0) return UIA_WindowControlTypeId;
     if (id_ == 3) return UIA_ListControlTypeId;
     if (id_ >= 100) return UIA_ListItemControlTypeId;
-    if (id_ >= 5 && id_ <= 7) return UIA_ButtonControlTypeId;
-    if (id_ == 8) return UIA_StatusBarControlTypeId;
+    if (id_ >= 7 && id_ <= 11) return UIA_ButtonControlTypeId;
+    if (id_ == 5) return UIA_MenuControlTypeId;
+    if (id_ == 6) return UIA_StatusBarControlTypeId;
     return UIA_PaneControlTypeId;
   }
   HRESULT make(int id, IRawElementProviderFragment **value) {
@@ -306,12 +353,19 @@ class Node final : public IRawElementProviderSimple,
     *value = static_cast<IRawElementProviderSimple *>(node);
     return S_OK;
   }
-  HRESULT setSelected(bool selected) {
+  HRESULT setSelected(bool selected, int operation) {
     if (!isRow()) return UIA_E_INVALIDOPERATION;
     size_t index = static_cast<size_t>(id_ - 100);
+    if (!state_->eligible[index]) return UIA_E_INVALIDOPERATION;
+    if (operation == 0) {
+      for (size_t i = 0; i < state_->selected.size(); ++i) state_->selected[i] = false;
+    }
     state_->selected[index] = selected;
-    PostMessageW(state_->hwnd, WM_COMMAND, 1000 + static_cast<UINT>(index), 0);
-    UiaRaiseAutomationEvent(this, UIA_SelectionItem_ElementSelectedEventId);
+    const UINT command = 2000 + static_cast<UINT>(index) * 3 + static_cast<UINT>(operation);
+    PostMessageW(state_->hwnd, WM_COMMAND, command, 0);
+    UiaRaiseAutomationEvent(this, selected
+        ? UIA_SelectionItem_ElementSelectedEventId
+        : UIA_SelectionItem_ElementRemovedFromSelectionEventId);
     return S_OK;
   }
 
@@ -325,6 +379,25 @@ class Node final : public IRawElementProviderSimple,
 extern "C" IRawElementProviderSimple *gc_uia_create(HWND hwnd) {
   auto state = std::make_shared<State>();
   state->hwnd = hwnd;
+  char fixture[4096]{};
+  if (GetEnvironmentVariableA("GRAPHCODE_UIA_FIXTURE_ROWS", fixture, sizeof(fixture)) > 0) {
+    std::string input(fixture);
+    size_t start = 0;
+    while (start <= input.size()) {
+      size_t end = input.find(',', start);
+      std::string item = input.substr(start, end == std::string::npos ? end : end - start);
+      if (!item.empty()) {
+        const bool eligible = item.rfind("|unsafe") == std::string::npos;
+        const size_t marker = item.find('|');
+        const std::string path = item.substr(0, marker);
+        state->rows.push_back(wide(path.c_str()));
+        state->selected.push_back(false);
+        state->eligible.push_back(eligible);
+      }
+      if (end == std::string::npos) break;
+      start = end + 1;
+    }
+  }
   return new Node(std::move(state), 0);
 }
 
@@ -339,14 +412,22 @@ extern "C" LRESULT gc_uia_get_object(HWND hwnd, WPARAM wparam, LPARAM lparam,
 }
 
 extern "C" HRESULT gc_uia_update(IRawElementProviderSimple *provider, const char *status,
-                                  const char **rows, const int *selected, int count) {
+                                  const char **rows, const int *selected, const int *eligible,
+                                  int count, int focused) {
   if (!provider || count < 0) return E_INVALIDARG;
   auto *root = static_cast<Node *>(provider);
-  root->update(status, rows, selected, count);
+  root->update(status, rows, selected, eligible, count, focused);
   return S_OK;
 }
 
 extern "C" HRESULT gc_uia_notify(IRawElementProviderSimple *provider) {
   if (!provider) return E_INVALIDARG;
   return UiaRaiseAutomationEvent(provider, UIA_LiveRegionChangedEventId);
+}
+
+extern "C" HRESULT gc_uia_set_status(IRawElementProviderSimple *provider, const char *status) {
+  if (!provider) return E_INVALIDARG;
+  auto *root = static_cast<Node *>(provider);
+  root->setStatus(status);
+  return S_OK;
 }

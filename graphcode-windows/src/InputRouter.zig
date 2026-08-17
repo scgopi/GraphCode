@@ -23,6 +23,8 @@ pub const Action = enum {
     inspect_worktrees,
     reclaim_worktrees,
     reveal_worktree,
+    edit_worktree_policy,
+    save_worktree_policy,
     worktree_next,
     worktree_previous,
     focus_terminal_a,
@@ -47,6 +49,8 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (ctrl and key == 'R') return .reconnect;
     if (ctrl and key == 'N') return .create_node;
     if (ctrl and key == 'O') return .open_folder;
+    if (ctrl and shift and key == 'S') return .save_worktree_policy;
+    if (ctrl and shift and key == 'P') return .edit_worktree_policy;
     if (ctrl and key == 'S') return .stop_node;
     if (ctrl and key == 'M') return .send_node;
     if (ctrl and key == 'E' and shift) return .reveal_worktree;
@@ -97,6 +101,8 @@ pub fn commandText(allocator: std.mem.Allocator, action: Action) ![]u8 {
         .inspect_worktrees => allocator.dupe(u8, "Inspect worktrees"),
         .reclaim_worktrees => allocator.dupe(u8, "Reclaim selected worktrees"),
         .reveal_worktree => allocator.dupe(u8, "Reveal selected worktree in Explorer"),
+        .edit_worktree_policy => allocator.dupe(u8, "Edit worktree policy"),
+        .save_worktree_policy => allocator.dupe(u8, "Save worktree policy"),
         .worktree_next => allocator.dupe(u8, "Select next worktree row"),
         .worktree_previous => allocator.dupe(u8, "Select previous worktree row"),
         .reconnect => allocator.dupe(u8, "Reconnect"),
@@ -156,4 +162,6 @@ test "modifier-specific actions win over base shortcuts" {
     try std.testing.expectEqual(Action.remote_repository, keyAction('R', true, true));
     try std.testing.expectEqual(Action.clone_repository, keyAction('C', true, true));
     try std.testing.expectEqual(Action.reconnect, keyAction('R', true, false));
+    try std.testing.expectEqual(Action.edit_worktree_policy, keyAction('P', true, true));
+    try std.testing.expectEqual(Action.save_worktree_policy, keyAction('S', true, true));
 }

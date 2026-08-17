@@ -12,12 +12,14 @@ $oldZmx = [Environment]::GetEnvironmentVariable("GRAPHCODE_ZMX")
 $oldCwd = [Environment]::GetEnvironmentVariable("GRAPHCODE_GATE_CWD")
 $oldGate = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_GATE")
 $oldUser = [Environment]::GetEnvironmentVariable("USERNAME")
+$oldFixture = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_FIXTURE_ROWS")
 $process = $null
 try {
   if ($Zmx) { $env:GRAPHCODE_ZMX = $Zmx }
   $env:GRAPHCODE_GATE_CWD = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
   $env:GRAPHCODE_UIA_GATE = "1"
   $env:USERNAME = "GraphCodeUIAGate"
+  $env:GRAPHCODE_UIA_FIXTURE_ROWS = "C:\fixture-safe|safe,C:\fixture-unsafe|unsafe"
   if ($ArgumentList.Count -gt 0) {
     $process = Start-Process -FilePath $Shell -ArgumentList $ArgumentList -PassThru -WindowStyle Normal
   } else {
@@ -49,7 +51,8 @@ try {
   )
   $treeNames = @($descendants | ForEach-Object { $_.Current.Name })
   foreach ($required in @("Projects", "Loops", "Worktrees", "Inspect worktrees",
-                          "Reclaim selected worktrees", "Reveal in Explorer")) {
+                          "Reclaim selected worktrees", "Reveal in Explorer",
+                          "Edit worktree policy", "Save worktree policy")) {
     if ($treeNames -notcontains $required) {
       throw "UIA tree missing required child: $required"
     }
@@ -64,8 +67,33 @@ try {
   $selection = $worktrees.GetCurrentPattern(
     [System.Windows.Automation.SelectionPattern]::Pattern
   )
+  $safeRow = $root.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::AutomationIdProperty, "worktree-row-0"
+    ))
+  )
+  $unsafeRow = $root.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::AutomationIdProperty, "worktree-row-1"
+    ))
+  )
+  $safeSelection = $safeRow.GetCurrentPattern(
+    [System.Windows.Automation.SelectionItemPattern]::Pattern
+  )
+  $unsafeSelection = $unsafeRow.GetCurrentPattern(
+    [System.Windows.Automation.SelectionItemPattern]::Pattern
+  )
+  $safeSelection.Select()
+  $unsafeRejected = $false
+  try { $unsafeSelection.Select() } catch { $unsafeRejected = $true }
+  if (-not $unsafeRejected) { throw "unsafe SelectionItem.Select was accepted" }
+  $safeSelection.RemoveFromSelection()
+  if ($selection.Current.GetSelection().Count -ne 0) { throw "selection removal was not observed" }
   $actions = @{}
-  foreach ($actionId in @("inspect-worktrees", "reclaim-worktrees", "reveal-worktree")) {
+  foreach ($actionId in @("inspect-worktrees", "reclaim-worktrees", "reveal-worktree",
+                          "edit-worktree-policy", "save-worktree-policy")) {
     $action = $root.FindFirst(
       [System.Windows.Automation.TreeScope]::Descendants,
       (New-Object System.Windows.Automation.PropertyCondition(
@@ -84,8 +112,10 @@ try {
     ))
   )
   if ($null -eq $status) { throw "missing status element" }
+  $initialStatus = $status.Current.Name
   $actions["inspect-worktrees"].Invoke()
   $actions["reveal-worktree"].Invoke()
+  if ($status.Current.Name -eq $initialStatus) { throw "status live region did not change" }
   $root.SetFocus()
   $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
 
@@ -96,8 +126,11 @@ try {
     childCount = $children.Count
     children = $childNames
     selectionPattern = $true
+    fixtureRows = 2
+    unsafeSelectionRejected = $unsafeRejected
     actionPatterns = @($actions.Keys)
     statusText = $status.Current.Name
+    statusChanged = ($status.Current.Name -ne $initialStatus)
     focusObserved = ($null -ne $focused)
   } | ConvertTo-Json -Compress
 } finally {
@@ -113,4 +146,6 @@ try {
   else { $env:GRAPHCODE_UIA_GATE = $oldGate }
   if ($null -eq $oldUser) { Remove-Item Env:USERNAME -ErrorAction SilentlyContinue }
   else { $env:USERNAME = $oldUser }
+  if ($null -eq $oldFixture) { Remove-Item Env:GRAPHCODE_UIA_FIXTURE_ROWS -ErrorAction SilentlyContinue }
+  else { $env:GRAPHCODE_UIA_FIXTURE_ROWS = $oldFixture }
 }

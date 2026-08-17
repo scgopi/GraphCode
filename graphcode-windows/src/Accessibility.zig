@@ -18,12 +18,15 @@ extern fn gc_uia_create(hwnd: c.HWND) ?*NativeProvider;
 extern fn gc_uia_release(provider: *NativeProvider) void;
 extern fn gc_uia_get_object(hwnd: c.HWND, wparam: c.WPARAM, lparam: c.LPARAM, provider: *NativeProvider) c.LRESULT;
 extern fn gc_uia_notify(provider: *NativeProvider) c.HRESULT;
+extern fn gc_uia_set_status(provider: *NativeProvider, status: [*:0]const u8) c.HRESULT;
 extern fn gc_uia_update(
     provider: *NativeProvider,
     status: [*:0]const u8,
     rows: ?[*]const [*:0]const u8,
     selected: ?[*]const c_int,
+    eligible: ?[*]const c_int,
     count: c_int,
+    focused: c_int,
 ) c.HRESULT;
 
 pub const Role = enum { window, navigation, list, list_item, button, card, menu, menu_item, text, terminal, status, dialog };
@@ -39,7 +42,7 @@ pub const Element = struct {
 pub const NotificationKind = enum { status, @"error", focus, action };
 pub const Notification = struct { text: []const u8, kind: NotificationKind };
 pub const Announcement = struct { role: []const u8, name: []const u8, state: []const u8 };
-pub const WorktreeRow = struct { path: []const u8, selected: bool };
+pub const WorktreeRow = struct { path: []const u8, selected: bool, eligible: bool };
 
 pub const Provider = struct {
     allocator: std.mem.Allocator,
@@ -114,6 +117,8 @@ pub const Provider = struct {
         defer self.allocator.free(names);
         var selected = self.allocator.alloc(c_int, rows.len) catch return;
         defer self.allocator.free(selected);
+        var eligible = self.allocator.alloc(c_int, rows.len) catch return;
+        defer self.allocator.free(eligible);
         var owned = self.allocator.alloc([:0]u8, rows.len) catch return;
         defer self.allocator.free(owned);
         for (owned) |*name| name.* = @constCast(&.{});
@@ -122,14 +127,31 @@ pub const Provider = struct {
             owned[index] = self.allocator.dupeZ(u8, row.path) catch return;
             names[index] = owned[index].ptr;
             selected[index] = if (row.selected) 1 else 0;
+            eligible[index] = if (row.eligible) 1 else 0;
+        }
+        var focused: c_int = 0;
+        for (rows, 0..) |row, index| {
+            if (row.selected) {
+                focused = @intCast(100 + index);
+                break;
+            }
         }
         _ = gc_uia_update(
             native,
             status_z.ptr,
             if (names.len == 0) null else names.ptr,
             if (selected.len == 0) null else selected.ptr,
+            if (eligible.len == 0) null else eligible.ptr,
             @intCast(rows.len),
+            focused,
         );
+    }
+    pub fn syncStatus(self: *Provider, status: []const u8) void {
+        if (!builtin.link_libc) return;
+        const native = self.native_provider orelse return;
+        const status_z = self.allocator.dupeZ(u8, status) catch return;
+        defer self.allocator.free(status_z);
+        _ = gc_uia_set_status(native, status_z.ptr);
     }
     pub fn add(self: *Provider, element: Element) !usize {
         const index = self.elements.items.len;
