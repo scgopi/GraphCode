@@ -107,6 +107,13 @@ function Assert-TrayIcon([IntPtr] $hwnd) {
   return $rect
 }
 
+function Wait-TrayIcon([IntPtr] $hwnd) {
+  for ($i = 0; $i -lt 30; $i++) {
+    try { return Assert-TrayIcon $hwnd } catch { Start-Sleep -Milliseconds 100 }
+  }
+  return Assert-TrayIcon $hwnd
+}
+
 function Invoke-MouseClick([GraphCodeTrayLiveNative+Rect] $rect, [bool] $double = $false) {
   $x = [int](($rect.left + $rect.right) / 2)
   $y = [int](($rect.top + $rect.bottom) / 2)
@@ -204,7 +211,7 @@ try {
     throw "GraphCode GUI window did not become visible"
   }
   Assert-NoConsoleWindow $process.Id
-  $trayRect = Assert-TrayIcon $hwnd
+  $trayRect = Wait-TrayIcon $hwnd
 
   $racer = Start-Process -FilePath $Executable -PassThru
   if (-not $racer.WaitForExit(5000)) { throw "Competing shell start did not complete" }
@@ -217,7 +224,7 @@ try {
   Invoke-WindowClose $hwnd
   Start-Sleep -Milliseconds 750
   if ([GraphCodeTrayLiveNative]::IsWindowVisible($hwnd)) { throw "WM_CLOSE did not hide the shell" }
-  $trayRect = Assert-TrayIcon $hwnd
+  $trayRect = Wait-TrayIcon $hwnd
 
   Invoke-MouseClick $trayRect $true
   Start-Sleep -Milliseconds 250
@@ -242,7 +249,7 @@ try {
   $taskbar = [GraphCodeTrayLiveNative]::RegisterWindowMessage("TaskbarCreated")
   [void][GraphCodeTrayLiveNative]::PostMessage($hwnd, [int]$taskbar, [IntPtr]::Zero, [IntPtr]::Zero)
   Start-Sleep -Milliseconds 250
-  $trayRect = Assert-TrayIcon $hwnd
+  $trayRect = Wait-TrayIcon $hwnd
   $script:trayWindow = $hwnd
 
   Invoke-TrayContextMenu $trayRect "Exit"

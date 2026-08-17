@@ -930,7 +930,7 @@ fn onWindowMessage(
             return true;
         },
         c.WM_CLOSE => {
-            _ = c.ShowWindow(hwnd, c.SW_HIDE);
+            hideShellWindow(hwnd);
             result.* = 0;
             return true;
         },
@@ -944,7 +944,21 @@ fn onWindowMessage(
         },
         else => {},
     }
+
     return false;
+}
+
+fn hideShellWindow(hwnd: c.HWND) void {
+    _ = c.ShowWindow(hwnd, c.SW_HIDE);
+    _ = c.SetWindowPos(
+        hwnd,
+        null,
+        0,
+        0,
+        0,
+        0,
+        c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_HIDEWINDOW,
+    );
 }
 
 fn runSmokeWorkspaceActions(self: *App) void {
