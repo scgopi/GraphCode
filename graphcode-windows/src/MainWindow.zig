@@ -123,6 +123,7 @@ pub const Window = struct {
 pub const timer_id: usize = 41;
 pub const wm_app_tick: c.UINT = c.WM_APP + 41;
 pub var restore_message: c.UINT = 0;
+pub const wm_uia_fixture_mutate: c.UINT = c.WM_APP + 42;
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeWindowsShell");
 

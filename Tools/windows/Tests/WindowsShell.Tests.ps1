@@ -30,6 +30,9 @@ function Assert-Contract([object] $condition, [string] $message) {
 }
 
 $shellSource = Get-Content $shellScript -Raw
+$appSource = Get-Content (Join-Path $shellRoot "src\App.zig") -Raw
+$nativeFormsSource = Get-Content (Join-Path $shellRoot "src\NativeForms.zig") -Raw
+$inputSource = Get-Content (Join-Path $shellRoot "src\InputRouter.zig") -Raw
 if ($shellSource -match '(?m)^\s*Write-OwnedResourceMetrics\s*$') {
   throw "Windows shell contract: empty resource metric phase"
 }
@@ -41,6 +44,14 @@ $restartBlock = [regex]::Match($shellSource,
   '(?s)GraphCode Windows shell restart smoke.*?Invoke-ShellProcess \$arguments "windows-shell:restart".*?\r?\n\s*}')
 Assert-Contract ($restartBlock.Success -and $restartBlock.Value -notmatch 'windows-shell:large-paste') `
   "restart path can satisfy large-paste phase"
+Assert-Contract ($appSource -match 'installWorktreeMenu' -and
+  $appSource -match 'NativeForms\.worktreePolicy') `
+  "worktree policy editor is not reachable from the native shell"
+Assert-Contract ($nativeFormsSource -match 'BS_AUTOCHECKBOX' -and
+  $nativeFormsSource -match 'Confirm each reclaim') `
+  "worktree policy editor does not expose both native checkbox controls"
+Assert-Contract ($inputSource -match "ctrl and shift and key == 'I'.*inspect_worktrees") `
+  "Inspect worktrees is not routed from Ctrl+Shift+I"
 
 function Invoke-Native([string] $description, [scriptblock] $command) {
   Write-Host "==> $description"

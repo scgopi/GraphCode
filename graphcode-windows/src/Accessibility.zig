@@ -26,7 +26,6 @@ extern fn gc_uia_update(
     selected: ?[*]const c_int,
     eligible: ?[*]const c_int,
     count: c_int,
-    focused: c_int,
     allow_reclaim: c_int,
     confirm_each_reclaim: c_int,
 ) c.HRESULT;
@@ -45,6 +44,20 @@ pub const NotificationKind = enum { status, @"error", focus, action };
 pub const Notification = struct { text: []const u8, kind: NotificationKind };
 pub const Announcement = struct { role: []const u8, name: []const u8, state: []const u8 };
 pub const WorktreeRow = struct { path: []const u8, selected: bool, eligible: bool };
+pub const uia_selection_command_tag: usize = 0xC000000000000000;
+pub const uia_selection_command_mask: usize = 0xC000000000000000;
+pub const uia_selection_operation_mask: usize = 0x3000000000000000;
+pub const uia_selection_operation_shift: u6 = 60;
+pub const uia_row_payload_mask: usize = 0x0FFFFFFFFFFFFFFF;
+
+pub fn worktreeIdentityPayload(path: []const u8) usize {
+    var hash: u64 = 1469598103934665603;
+    for (path) |value| {
+        hash ^= value;
+        hash *%= 1099511628211;
+    }
+    return @intCast(hash & uia_row_payload_mask);
+}
 
 pub const Provider = struct {
     allocator: std.mem.Allocator,
@@ -128,13 +141,6 @@ pub const Provider = struct {
             selected[index] = if (row.selected) 1 else 0;
             eligible[index] = if (row.eligible) 1 else 0;
         }
-        var focused: c_int = 0;
-        for (rows, 0..) |row, index| {
-            if (row.selected) {
-                focused = @intCast(100 + index);
-                break;
-            }
-        }
         _ = gc_uia_update(
             native,
             status_z.ptr,
@@ -142,7 +148,6 @@ pub const Provider = struct {
             if (selected.len == 0) null else selected.ptr,
             if (eligible.len == 0) null else eligible.ptr,
             @intCast(rows.len),
-            focused,
             if (policy.allow_reclaim) 1 else 0,
             if (policy.confirm_each_reclaim) 1 else 0,
         );

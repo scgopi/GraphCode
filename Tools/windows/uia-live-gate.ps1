@@ -10,16 +10,20 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -TypeDefinition @"
 using System;
+using System.Runtime.InteropServices;
 using System.Windows.Automation;
 public static class GraphCodeUiaGateState {
   public static volatile bool LiveObserved;
   public static volatile bool NamePropertyObserved;
+  public static volatile bool FocusObserved;
   public static string LiveSourceAutomationId;
   public static string LiveSourceName;
   public static string LiveSourceRuntimeId;
   public static string NamePropertySourceAutomationId;
+  public static string FocusSourceAutomationId;
   public static readonly AutomationEventHandler LiveHandler = HandleLive;
   public static readonly AutomationPropertyChangedEventHandler NamePropertyHandler = HandleNameProperty;
+  public static readonly AutomationFocusChangedEventHandler FocusHandler = HandleFocus;
   private static void HandleLive(object sender, AutomationEventArgs eventArgs) {
     var element = sender as AutomationElement;
     if (element == null) return;
@@ -32,6 +36,16 @@ public static class GraphCodeUiaGateState {
     var element = sender as AutomationElement;
     if (element != null) NamePropertySourceAutomationId = element.Current.AutomationId;
     NamePropertyObserved = true;
+  }
+  private static void HandleFocus(object sender, AutomationFocusChangedEventArgs eventArgs) {
+    var element = sender as AutomationElement;
+    if (element != null) FocusSourceAutomationId = element.Current.AutomationId;
+    FocusObserved = true;
+  }
+  [DllImport("user32.dll", SetLastError = true)]
+  private static extern bool PostMessage(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
+  public static bool PostFixtureMutation(IntPtr window, uint mutation) {
+    return PostMessage(window, 0x802A, (UIntPtr)mutation, IntPtr.Zero);
   }
 }
 "@ -ReferencedAssemblies @(
@@ -122,8 +136,11 @@ $status = $null
 $liveRegionEvent = $null
 $eventHandler = $null
 $propertyHandler = $null
+$focusHandler = $null
 $liveEventRegistered = $false
 $propertyEventRegistered = $false
+$focusEventRegistered = $false
+$stressJob = $null
 $policyDirectory = $null
 $policyPath = $null
 $policyDirectoryExisted = $false
@@ -169,14 +186,22 @@ try {
 
   $worktrees = Find-FragmentById $root "worktrees" $rawWalker
   Require ($null -ne $worktrees) "missing Worktrees fragment"
-  $expectedRowIds = @("worktree-row-0", "worktree-row-1")
-  $rawRows = @(Assert-FragmentLinks $worktrees $rawWalker $expectedRowIds "RawView Worktrees")
-  $controlRows = @(Assert-FragmentLinks $worktrees $controlWalker $expectedRowIds "ControlView Worktrees")
+  $initialRowIds = @(Get-DirectChildren $worktrees $rawWalker | ForEach-Object { $_.Current.AutomationId })
+  Require (($initialRowIds.Count -eq 2) -and
+           ($initialRowIds | ForEach-Object { $_ -match '^worktree-row-[0-9]+$' } | Where-Object { -not $_ }).Count -eq 0) `
+    "Worktrees did not expose two stable dynamic row IDs"
+  $rawRows = @(Assert-FragmentLinks $worktrees $rawWalker $initialRowIds "RawView Worktrees")
+  $controlRows = @(Assert-FragmentLinks $worktrees $controlWalker $initialRowIds "ControlView Worktrees")
+  Require ((@($rawRows | ForEach-Object { $_.Current.Name }) -join "|") -eq
+           "C:\fixture-safe|C:\fixture-unsafe") "fixture worktree names were not ordered as expected"
 
   $selection = $worktrees.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
-  $safeRow = Find-FragmentById $root "worktree-row-0" $rawWalker
-  $unsafeRow = Find-FragmentById $root "worktree-row-1" $rawWalker
-  Require (($null -ne $safeRow) -and ($null -ne $unsafeRow)) "missing fixture worktree rows"
+  $safeRow = @($rawRows | Where-Object { $_.Current.Name -eq "C:\fixture-safe" })[0]
+  $unsafeRow = @($rawRows | Where-Object { $_.Current.Name -eq "C:\fixture-unsafe" })[0]
+  $safeFocusRow = @($controlRows | Where-Object { $_.Current.Name -eq "C:\fixture-safe" })[0]
+  Require (($null -ne $safeRow) -and ($null -ne $unsafeRow) -and ($null -ne $safeFocusRow)) "missing fixture worktree rows"
+  $safeRowId = $safeRow.Current.AutomationId
+  $safeRowRuntimeId = Get-RuntimeIdentity $safeRow
   $safeSelection = $safeRow.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
   $unsafeSelection = $unsafeRow.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
   $safeSelection.Select()
@@ -211,9 +236,12 @@ try {
   [GraphCodeUiaGateState]::LiveSourceName = $null
   [GraphCodeUiaGateState]::LiveSourceRuntimeId = $null
   [GraphCodeUiaGateState]::NamePropertySourceAutomationId = $null
+  [GraphCodeUiaGateState]::FocusObserved = $false
+  [GraphCodeUiaGateState]::FocusSourceAutomationId = $null
   $eventHandler = [GraphCodeUiaGateState]::LiveHandler
   $liveRegionEvent = [System.Windows.Automation.AutomationEvent]::LookupById(20024)
   $propertyHandler = [GraphCodeUiaGateState]::NamePropertyHandler
+  $focusHandler = [GraphCodeUiaGateState]::FocusHandler
   [System.Windows.Automation.Automation]::AddAutomationEventHandler(
     $liveRegionEvent, $status, [System.Windows.Automation.TreeScope]::Element, $eventHandler
   )
@@ -223,6 +251,8 @@ try {
     [System.Windows.Automation.AutomationElement]::NameProperty
   )
   $propertyEventRegistered = $true
+  [System.Windows.Automation.Automation]::AddAutomationFocusChangedEventHandler($focusHandler)
+  $focusEventRegistered = $true
   try {
     $actions["inspect-worktrees"].Invoke()
     $actions["reveal-worktree"].Invoke()
@@ -259,19 +289,76 @@ try {
   Require (($statusTextAfter -ne $initialStatus) -and
            ([GraphCodeUiaGateState]::LiveSourceName -ne $initialStatus)) "status LiveRegionChanged did not expose updated text"
 
-  $safeRow.SetFocus()
+  $currentRowsBeforeFocus = @(Get-DirectChildren $worktrees $rawWalker)
+  $currentSafe = @($currentRowsBeforeFocus | Where-Object { $_.Current.Name -eq "C:\fixture-safe" })[0]
+  Require ($null -ne $currentSafe) "safe worktree row disappeared before focus: $(@($currentRowsBeforeFocus | ForEach-Object { $_.Current.AutomationId }) -join ',')"
+  Require ($currentSafe.Current.AutomationId -eq $safeRowId) "safe worktree identity changed before focus: $safeRowId -> $($currentSafe.Current.AutomationId)"
+  Require ($safeFocusRow.Current.Name -eq "C:\fixture-safe") "safe worktree provider became unavailable before focus"
+  $safeFocusRow.SetFocus()
   $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-  Require ($focused.Current.AutomationId -eq "worktree-row-0") "focus source identity was not worktree-row-0"
-  Require ((Get-RuntimeIdentity $focused) -eq (Get-RuntimeIdentity $safeRow)) "focus runtime identity changed"
+  Require ($focused.Current.AutomationId -eq $safeRowId) "focus source identity was not the safe worktree row"
+  Require ((Get-RuntimeIdentity $focused) -eq (Get-RuntimeIdentity $safeFocusRow)) "focus runtime identity changed"
+  for ($index = 0; $index -lt 20 -and -not [GraphCodeUiaGateState]::FocusObserved; $index++) {
+    Start-Sleep -Milliseconds 50
+  }
+  Require ([GraphCodeUiaGateState]::FocusObserved) "FocusChanged was not delivered"
+  Require ([GraphCodeUiaGateState]::FocusSourceAutomationId -eq $safeRowId) "FocusChanged source identity changed"
+  $initialFocusSource = [GraphCodeUiaGateState]::FocusSourceAutomationId
+
+  $stressJob = Start-Job -ArgumentList ([int64]$process.MainWindowHandle) -ScriptBlock {
+    param([int64] $window)
+    $ErrorActionPreference = "Stop"
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    $element = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$window)
+    for ($index = 0; $index -lt 100; $index++) {
+      $null = $element.Current.Name
+      Start-Sleep -Milliseconds 5
+    }
+  }
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($process.MainWindowHandle, 1)) "fixture reorder message was rejected"
+  Start-Sleep -Milliseconds 150
+  $reorderedRows = @(Get-DirectChildren $worktrees $rawWalker)
+  $reorderedRowIds = @($reorderedRows | ForEach-Object { $_.Current.AutomationId })
+  Assert-Ids $reorderedRowIds @($initialRowIds[1], $initialRowIds[0]) "reordered Worktrees"
+  $reorderedSafe = Find-FragmentById $root $safeRowId $rawWalker
+  Require (($null -ne $reorderedSafe) -and
+           ((Get-RuntimeIdentity $reorderedSafe) -eq $safeRowRuntimeId)) "reordered safe row lost its identity"
+  Require ($rawWalker.GetParent($reorderedSafe).Current.AutomationId -eq "worktrees") "reordered safe row lost its parent"
+
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($process.MainWindowHandle, 2)) "fixture removal message was rejected"
+  Start-Sleep -Milliseconds 150
+  $null = Wait-Job -Job $stressJob -Timeout 10
+  $stressErrors = @()
+  Receive-Job -Job $stressJob -ErrorAction SilentlyContinue -ErrorVariable +stressErrors | Out-Null
+  Require ($stressJob.State -eq "Completed") "UIA read stress did not finish: $($stressJob.State) $($stressErrors -join '; ')"
+  Remove-Job -Job $stressJob -Force
+  $remainingRows = @(Get-DirectChildren $worktrees $rawWalker)
+  $remainingRowIds = @($remainingRows | ForEach-Object { $_.Current.AutomationId })
+  Assert-Ids $remainingRowIds @($unsafeRow.Current.AutomationId) "removed Worktrees"
+  $removedProviderUnavailable = $false
+  try {
+    $null = $safeRow.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::NameProperty)
+  } catch [System.Windows.Automation.ElementNotAvailableException] {
+    $removedProviderUnavailable = $true
+  }
+  Require $removedProviderUnavailable "removed worktree provider remained available"
+  for ($index = 0; $index -lt 20 -and
+       [GraphCodeUiaGateState]::FocusSourceAutomationId -ne "graphcode-root"; $index++) {
+    Start-Sleep -Milliseconds 50
+  }
+  Require ([GraphCodeUiaGateState]::FocusSourceAutomationId -eq "graphcode-root") "removed focus did not fall back to the root"
+  [System.Windows.Automation.Automation]::RemoveAutomationFocusChangedEventHandler($focusHandler)
+  $focusEventRegistered = $false
 
   $rootName = $root.Current.Name
   $rootAutomationId = $root.Current.AutomationId
   $rootControlType = $root.Current.ControlType.ProgrammaticName
   $rawRootChildIds = @($rawRootChildren | ForEach-Object { $_.Current.AutomationId })
   $controlRootChildIds = @($controlRootChildren | ForEach-Object { $_.Current.AutomationId })
-  $rawWorktreeRowIds = @($rawRows | ForEach-Object { $_.Current.AutomationId })
-  $controlWorktreeRowIds = @($controlRows | ForEach-Object { $_.Current.AutomationId })
-  $focusIdentity = $focused.Current.AutomationId
+  $rawWorktreeRowIds = $initialRowIds
+  $controlWorktreeRowIds = $initialRowIds
+  $focusIdentity = $safeRowId
 
   Require $process.CloseMainWindow() "shell refused graceful window teardown"
   Require $process.WaitForExit(5000) "shell did not exit after WM_CLOSE"
@@ -293,6 +380,10 @@ try {
     controlRootChildren = $controlRootChildIds
     rawWorktreeRows = $rawWorktreeRowIds
     controlWorktreeRows = $controlWorktreeRowIds
+    reorderedWorktreeRows = $reorderedRowIds
+    remainingWorktreeRows = $remainingRowIds
+    removedProviderUnavailable = $removedProviderUnavailable
+    concurrencyStressPassed = $true
     selectionPattern = $true
     fixtureRows = 2
     unsafeSelectionRejected = $unsafeRejected
@@ -306,9 +397,15 @@ try {
     statusEventSource = [GraphCodeUiaGateState]::LiveSourceAutomationId
     statusEventText = [GraphCodeUiaGateState]::LiveSourceName
     focusIdentity = $focusIdentity
+    focusEventObserved = [GraphCodeUiaGateState]::FocusObserved
+    initialFocusEventSource = $initialFocusSource
+    focusFallbackSource = [GraphCodeUiaGateState]::FocusSourceAutomationId
     providerTeardownSafe = $retainedProviderSafe
   } | ConvertTo-Json -Compress
 } finally {
+  if ($stressJob) {
+    Remove-Job -Job $stressJob -Force -ErrorAction SilentlyContinue
+  }
   if ($propertyEventRegistered) {
     [System.Windows.Automation.Automation]::RemoveAutomationPropertyChangedEventHandler(
       $status, $propertyHandler
@@ -318,6 +415,9 @@ try {
     [System.Windows.Automation.Automation]::RemoveAutomationEventHandler(
       $liveRegionEvent, $status, $eventHandler
     )
+  }
+  if ($focusEventRegistered) {
+    [System.Windows.Automation.Automation]::RemoveAutomationFocusChangedEventHandler($focusHandler)
   }
   if ($process -and -not $process.HasExited) {
     $process.Kill()

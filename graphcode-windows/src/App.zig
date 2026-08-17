@@ -216,6 +216,7 @@ pub const App = struct {
             );
         }
         if (self.daemon.status().len != 0) self.setStatus(self.daemon.status());
+        self.installWorktreeMenu();
         if (self.accessibility) |*provider| {
             if (!provider.attach(self.window.hwnd)) self.setStatus("Accessibility provider unavailable");
         }
@@ -1457,6 +1458,63 @@ pub const App = struct {
         return true;
     }
 
+    fn applyUiaWorktreeSelection(self: *App, payload: usize, operation: usize) bool {
+        const dialog = if (self.worktree_dialog) |*value| value else return false;
+        var target: ?usize = null;
+        for (dialog.rows.items, 0..) |row, index| {
+            if (Accessibility.worktreeIdentityPayload(row.entry.path) == payload) {
+                target = index;
+                break;
+            }
+        }
+        const index = target orelse return false;
+        if (WorktreeStatus.decision(dialog.rows.items[index].entry) != .reclaimable) return false;
+        switch (operation) {
+            0 => {
+                for (dialog.rows.items) |*row| row.selected = false;
+                dialog.rows.items[index].selected = true;
+            },
+            1 => dialog.rows.items[index].selected = true,
+            2 => dialog.rows.items[index].selected = false,
+            else => return false,
+        }
+        if (self.selected_worktree_path.len != 0) {
+            self.allocator.free(self.selected_worktree_path);
+            self.selected_worktree_path = &.{};
+        }
+        for (dialog.rows.items) |row| {
+            if (!row.selected) continue;
+            self.selected_worktree_path = self.allocator.dupe(u8, row.entry.path) catch &.{};
+            break;
+        }
+        self.reclaim_confirmation_armed = false;
+        self.syncAccessibility();
+        return true;
+    }
+
+    fn mutateUiaFixture(self: *App, mutation: usize) void {
+        if (!envFlag("GRAPHCODE_UIA_GATE")) return;
+        const dialog = if (self.worktree_dialog) |*value| value else return;
+        switch (mutation) {
+            1 => {
+                if (dialog.rows.items.len > 1)
+                    std.mem.swap(WorktreeDialog.Row, &dialog.rows.items[0], &dialog.rows.items[1]);
+            },
+            2 => {
+                const target = for (dialog.rows.items, 0..) |row, index| {
+                    if (std.mem.eql(u8, row.entry.path, "C:\\fixture-safe")) break index;
+                } else return;
+                _ = dialog.rows.orderedRemove(target);
+                if (self.selected_worktree_path.len != 0) {
+                    self.allocator.free(self.selected_worktree_path);
+                    self.selected_worktree_path = &.{};
+                }
+            },
+            else => return,
+        }
+        self.syncAccessibility();
+    }
+
     pub fn saveWorktreePolicy(self: *App, policy: WorktreeStatus.Policy) !void {
         const path = self.currentProject() orelse return error.EmptyProjectPath;
         try WorktreeStatus.savePolicy(self.allocator, path, policy);
@@ -1465,11 +1523,39 @@ pub const App = struct {
     }
 
     fn editWorktreePolicy(self: *App) void {
-        if (self.worktree_dialog == null) {
+        const dialog = if (self.worktree_dialog) |*value| value else {
             self.setStatus("Inspect worktrees before editing policy");
             return;
+        };
+        if (envFlag("GRAPHCODE_UIA_GATE")) {
+            self.setStatus("Worktree policy editor opened; Ctrl+Shift+S saves changes");
+            return;
         }
-        self.setStatus("Worktree policy editor opened; Ctrl+Shift+S saves changes");
+        const policy = NativeForms.worktreePolicy(self.window.hwnd, self.allocator, dialog.policy) catch {
+            self.setStatus("Unable to open worktree policy editor");
+            return;
+        } orelse {
+            self.setStatus("Worktree policy edit cancelled");
+            return;
+        };
+        dialog.setPolicy(policy);
+        self.setStatus("Worktree policy editor updated; Ctrl+Shift+S saves changes");
+    }
+
+    fn installWorktreeMenu(self: *App) void {
+        const menu = c.CreateMenu() orelse return;
+        const worktrees = c.CreatePopupMenu() orelse {
+            _ = c.DestroyMenu(menu);
+            return;
+        };
+        _ = c.AppendMenuW(worktrees, c.MF_STRING, 6, std.unicode.utf8ToUtf16LeStringLiteral("Inspect worktrees\tCtrl+Shift+I").ptr);
+        _ = c.AppendMenuW(worktrees, c.MF_STRING, 7, std.unicode.utf8ToUtf16LeStringLiteral("Reclaim selected worktrees\tCtrl+Shift+W").ptr);
+        _ = c.AppendMenuW(worktrees, c.MF_STRING, 8, std.unicode.utf8ToUtf16LeStringLiteral("Reveal in Explorer\tCtrl+Shift+E").ptr);
+        _ = c.AppendMenuW(worktrees, c.MF_SEPARATOR, 0, null);
+        _ = c.AppendMenuW(worktrees, c.MF_STRING, 9, std.unicode.utf8ToUtf16LeStringLiteral("Edit worktree policy\tCtrl+Shift+P").ptr);
+        _ = c.AppendMenuW(worktrees, c.MF_STRING, 10, std.unicode.utf8ToUtf16LeStringLiteral("Save worktree policy\tCtrl+Shift+S").ptr);
+        _ = c.AppendMenuW(menu, c.MF_POPUP, @intFromPtr(worktrees), std.unicode.utf8ToUtf16LeStringLiteral("Worktrees").ptr);
+        if (c.SetMenu(self.window.hwnd, menu) == 0) _ = c.DestroyMenu(menu);
     }
 
     fn saveCurrentWorktreePolicy(self: *App) void {
@@ -1899,6 +1985,14 @@ fn onWindowMessage(
             return true;
         },
         c.WM_COMMAND => {
+            if ((wparam & Accessibility.uia_selection_command_mask) == Accessibility.uia_selection_command_tag) {
+                const operation = (wparam & Accessibility.uia_selection_operation_mask) >>
+                    Accessibility.uia_selection_operation_shift;
+                _ = app.applyUiaWorktreeSelection(
+                    wparam & Accessibility.uia_row_payload_mask,
+                    operation,
+                );
+            } else {
             const tray_command = @as(c.WPARAM, @intCast(@as(usize, @bitCast(wparam)) & 0xffff));
             if (tray_command == TrayModule.command_open) {
                 restoreShellWindow(hwnd);
@@ -1919,26 +2013,10 @@ fn onWindowMessage(
                 10 => app.saveCurrentWorktreePolicy(),
                 12 => app.toggleAllowReclaim(),
                 13 => app.toggleConfirmReclaim(),
-                else => if (wparam >= 2000 and wparam < 5000) {
-                    const encoded = wparam - 2000;
-                    const index = @as(usize, @intCast(encoded / 3));
-                    const operation = encoded % 3;
-                    if (operation == 0) {
-                        if (app.worktree_dialog) |*dialog| dialog.clearSelection();
-                        _ = app.toggleWorktreeRow(index);
-                    } else if (operation == 1) {
-                        _ = app.toggleWorktreeRow(index);
-                    } else if (operation == 2) {
-                        if (app.worktree_dialog) |*dialog| {
-                            if (index < dialog.rows.items.len and dialog.rows.items[index].selected) {
-                                _ = dialog.toggle(index);
-                            }
-                        }
-                        app.syncAccessibility();
-                    }
-                } else if (wparam >= 1000 and wparam < 2000) {
+                else => if (wparam >= 1000 and wparam < 2000) {
                     _ = app.toggleWorktreeRow(@intCast(wparam - 1000));
                 },
+            }
             }
             const id: usize = @intCast(@as(u16, @truncate(wparam)));
             if (id == MainWindow.empty_open_folder_id) {
@@ -2114,6 +2192,11 @@ fn onWindowMessage(
         },
         MainWindow.wm_app_tick => {
             app.client.reconnect();
+            result.* = 0;
+            return true;
+        },
+        MainWindow.wm_uia_fixture_mutate => {
+            app.mutateUiaFixture(wparam);
             result.* = 0;
             return true;
         },

@@ -49,6 +49,7 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (ctrl and key == 'R') return .reconnect;
     if (ctrl and key == 'N') return .create_node;
     if (ctrl and key == 'O') return .open_folder;
+    if (ctrl and shift and key == 'I') return .inspect_worktrees;
     if (ctrl and shift and key == 'S') return .save_worktree_policy;
     if (ctrl and shift and key == 'P') return .edit_worktree_policy;
     if (ctrl and key == 'S') return .stop_node;
@@ -164,4 +165,5 @@ test "modifier-specific actions win over base shortcuts" {
     try std.testing.expectEqual(Action.reconnect, keyAction('R', true, false));
     try std.testing.expectEqual(Action.edit_worktree_policy, keyAction('P', true, true));
     try std.testing.expectEqual(Action.save_worktree_policy, keyAction('S', true, true));
+    try std.testing.expectEqual(Action.inspect_worktrees, keyAction('I', true, true));
 }

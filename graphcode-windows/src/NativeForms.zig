@@ -1,5 +1,6 @@
 const std = @import("std");
 const Forms = @import("Forms.zig");
+const WorktreeStatus = @import("WorktreeStatus.zig");
 const c = @import("Win32.zig").c;
 
 const DialogState = struct {
@@ -9,11 +10,13 @@ const DialogState = struct {
     result: bool = false,
     closed: bool = false,
     scroll_offset: i32 = 0,
+    checks: [2]c.HWND = .{ null, null },
     edits: [20]c.HWND = .{ null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null },
     values: [20][]u8 = .{ &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{} },
+    policy: WorktreeStatus.Policy = .{},
 };
 
-const Kind = enum { node, edge, update, settings, jump };
+const Kind = enum { node, edge, update, settings, jump, worktree_policy };
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeNativeForm");
 const ok_id = 9001;
 const cancel_id = 9002;
@@ -281,6 +284,14 @@ pub fn jump(parent: c.HWND, allocator: std.mem.Allocator, initial: []const u8) !
         freeValues(state);
         allocator.destroy(state);
     }
+
+    pub fn worktreePolicy(parent: c.HWND, allocator: std.mem.Allocator, initial: WorktreeStatus.Policy) !?WorktreeStatus.Policy {
+        const state = try allocator.create(DialogState);
+        state.* = .{ .allocator = allocator, .kind = .worktree_policy, .parent = parent, .policy = initial };
+        defer allocator.destroy(state);
+        if (!(try show(state, "Worktree policy", &.{}))) return null;
+        return state.policy;
+    }
     state.values[0] = try allocator.dupe(u8, initial);
     if (!(try show(state, "Jump to loop", &.{"Loop title or ID"}))) return null;
     return try allocator.dupe(u8, state.values[0]);
@@ -296,7 +307,7 @@ fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !boo
     active_state_storage.result = false;
     active_state = true;
     const screen_height = c.GetSystemMetrics(c.SM_CYSCREEN);
-    const dialog_height: i32 = @max(320, @min(700, screen_height - 96));
+    const dialog_height: i32 = if (state.kind == .worktree_policy) 260 else @max(320, @min(700, screen_height - 96));
     const hwnd = c.CreateWindowExW(
         c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT,
         class_name.ptr,
@@ -381,6 +392,10 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                     labels = .{ "Loop title or ID", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "" };
                     label_count = 1;
                 },
+                .worktree_policy => {
+                    createCheckBox(safe_hwnd, value, "Allow reclaim", 0, 18);
+                    createCheckBox(safe_hwnd, value, "Confirm each reclaim", 1, 52);
+                },
             }
             for (labels[0..label_count], 0..) |label, index| {
                 createText(safe_hwnd, value, label, index);
@@ -436,6 +451,7 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             }
             if (command == ok_id) {
                 readValues(value);
+                readPolicy(value);
                 applyModalCommand(value, .submit);
                 return 0;
             }
@@ -492,6 +508,7 @@ fn scrollFields(hwnd: c.HWND, state: *DialogState, requested: i32) void {
         .update => 9,
         .settings => 2,
         .jump => 1,
+        .worktree_policy => 0,
     };
     const viewport = clientHeight(hwnd);
     const content: i32 = @intCast(15 + count * 48 + 12);
@@ -506,6 +523,7 @@ fn setScrollOffset(hwnd: c.HWND, state: *DialogState, requested: i32) void {
         .update => 9,
         .settings => 2,
         .jump => 1,
+        .worktree_policy => 0,
     };
     const viewport = clientHeight(hwnd);
     const content: i32 = @intCast(15 + count * 48 + 12);
@@ -523,6 +541,7 @@ fn setScrollOffsetValue(hwnd: c.HWND, state: *DialogState, next: i32) void {
         .update => 9,
         .settings => 2,
         .jump => 1,
+        .worktree_policy => 0,
     };
     for (0..count) |index| {
         const y: i32 = @as(i32, @intCast(15 + index * 48)) - state.scroll_offset;
@@ -539,6 +558,7 @@ fn updateScrollBar(hwnd: c.HWND, state: *DialogState) void {
         .update => 9,
         .settings => 2,
         .jump => 1,
+        .worktree_policy => 0,
     };
     const viewport = clientHeight(hwnd);
     const content: i32 = @intCast(15 + count * 48 + 12);
@@ -580,6 +600,17 @@ fn createButton(hwnd: c.HWND, text: []const u8, id: usize, x: i32, y: i32) void 
     _ = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr, wide.ptr, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_DEFPUSHBUTTON, x, y, 70, 26, hwnd, childId(id), c.GetModuleHandleW(null), null);
 }
 
+fn createCheckBox(hwnd: c.HWND, state: *DialogState, text: []const u8, index: usize, y: i32) void {
+    const wide = utf8ToWideZ(state.allocator, text) catch return;
+    defer state.allocator.free(wide);
+    const check = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr, wide.ptr,
+        c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_AUTOCHECKBOX, 18, y, 380, 24,
+        hwnd, childId(9200 + index), c.GetModuleHandleW(null), null) orelse return;
+    state.checks[index] = check;
+    const selected = if (index == 0) state.policy.allow_reclaim else state.policy.confirm_each_reclaim;
+    _ = c.SendMessageW(check, c.BM_SETCHECK, if (selected) c.BST_CHECKED else c.BST_UNCHECKED, 0);
+}
+
 fn childId(value: usize) c.HMENU {
     @setRuntimeSafety(false);
     return @ptrFromInt(value);
@@ -593,6 +624,7 @@ fn readValues(state: *DialogState) void {
         .update => 9,
         .settings => 2,
         .jump => 1,
+        .worktree_policy => 0,
     };
     for (0..count) |index| {
         const length = c.GetWindowTextW(state.edits[index], &buffer, @intCast(buffer.len));
@@ -600,6 +632,12 @@ fn readValues(state: *DialogState) void {
         state.allocator.free(state.values[index]);
         state.values[index] = value;
     }
+}
+
+fn readPolicy(state: *DialogState) void {
+    if (state.kind != .worktree_policy) return;
+    state.policy.allow_reclaim = c.SendMessageW(state.checks[0], c.BM_GETCHECK, 0, 0) == c.BST_CHECKED;
+    state.policy.confirm_each_reclaim = c.SendMessageW(state.checks[1], c.BM_GETCHECK, 0, 0) == c.BST_CHECKED;
 }
 
 fn freeValues(state: *DialogState) void {
@@ -667,3 +705,4 @@ test "scrollbar thumb positions seek and clamp the dialog content" {
     try std.testing.expectEqual(@as(i32, 200), std.math.clamp(@as(i32, 200), 0, max_offset));
     try std.testing.expectEqual(max_offset, std.math.clamp(@as(i32, 100000), 0, max_offset));
 }
+
