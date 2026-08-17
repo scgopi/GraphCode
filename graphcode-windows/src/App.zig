@@ -111,7 +111,14 @@ pub const App = struct {
             self.setStatus("Unable to retain sent project");
             return;
         };
-        self.pending_open_request_id = self.client.sendOpenProject(self.pending_sent_path);
+        const token = self.client.sendOpenProject(self.pending_sent_path);
+        if (token == null) {
+            self.allocator.free(self.pending_sent_path);
+            self.pending_sent_path = &.{};
+            self.open_project_pending = true;
+            return;
+        }
+        self.pending_open_request_id = token;
         self.pending_open_sent = true;
         self.open_project_pending = false;
     }
