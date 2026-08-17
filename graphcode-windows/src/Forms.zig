@@ -82,9 +82,7 @@ pub fn validateJumpQuery(query: []const u8) FormError![]const u8 {
 }
 
 pub fn validateNode(draft: NodeDraft) FormError!void {
-    if (std.mem.eql(u8, draft.loop_type, "composite")) {
-        if (std.mem.trim(u8, draft.title, " \t\r\n").len == 0) return error.EmptyTitle;
-    }
+    if (std.mem.trim(u8, draft.title, " \t\r\n").len == 0) return error.EmptyTitle;
     if (!std.mem.eql(u8, draft.loop_type, "turnBased") and
         !std.mem.eql(u8, draft.loop_type, "timeBased") and
         !std.mem.eql(u8, draft.loop_type, "goalBased") and

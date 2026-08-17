@@ -12,7 +12,7 @@ const DialogState = struct {
     values: [13][]u8 = .{ &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{} },
 };
 
-const Kind = enum { node, edge, settings, jump };
+const Kind = enum { node, edge, update, settings, jump };
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeNativeForm");
 const ok_id = 9001;
 const cancel_id = 9002;
@@ -87,6 +87,7 @@ pub fn edge(
         freeValues(state);
         allocator.destroy(state);
     }
+
     state.values[0] = try allocator.dupe(u8, initial.from);
     state.values[1] = try allocator.dupe(u8, initial.to);
     state.values[2] = try allocator.dupe(u8, initial.kind);
@@ -110,6 +111,65 @@ pub fn edge(
         .cycle_until = try allocator.dupe(u8, state.values[6]),
         .spawn_target_project_path = try allocator.dupe(u8, state.values[7]),
     };
+}
+
+pub fn update(
+    parent: c.HWND,
+    allocator: std.mem.Allocator,
+    initial: Forms.NodeUpdate,
+) !?Forms.NodeUpdate {
+    const state = try allocator.create(DialogState);
+    state.* = .{ .allocator = allocator, .kind = .update, .parent = parent };
+    defer {
+        freeValues(state);
+        allocator.destroy(state);
+    }
+    state.values[0] = try dupOptional(allocator, initial.goal_summary);
+    state.values[1] = try dupOptional(allocator, initial.goal_predicate);
+    state.values[2] = try dupFloat(allocator, initial.poll_interval_seconds);
+    state.values[3] = try dupFloat(allocator, initial.stall_after_seconds);
+    state.values[4] = try dupOptional(allocator, initial.metric_command);
+    state.values[5] = try dupOptional(allocator, initial.metric_direction);
+    state.values[6] = try dupOptional(allocator, initial.trigger_prompt);
+    state.values[7] = try dupOptional(allocator, initial.check_description);
+    state.values[8] = try dupOptional(allocator, initial.model_tier);
+    if (!(try show(state, "Update node", &.{
+        "Goal summary (blank leaves unchanged)", "Goal predicate (blank clears)",
+        "Poll interval seconds", "Stall after seconds", "Metric command",
+        "Metric direction (maximize/minimize)", "Trigger prompt", "Check description",
+        "Model tier (fast/standard/capable)",
+    }))) return null;
+    const result = Forms.NodeUpdate{
+        .goal_summary = try optionalValue(allocator, state.values[0]),
+        .goal_predicate = try optionalValue(allocator, state.values[1]),
+        .poll_interval_seconds = try parseOptionalFloat(state.values[2]),
+        .stall_after_seconds = try parseOptionalFloat(state.values[3]),
+        .metric_command = try optionalValue(allocator, state.values[4]),
+        .metric_direction = try optionalValue(allocator, state.values[5]),
+        .trigger_prompt = try optionalValue(allocator, state.values[6]),
+        .check_description = try optionalValue(allocator, state.values[7]),
+        .model_tier = try optionalValue(allocator, state.values[8]),
+    };
+    Forms.validateNodeUpdate(result) catch return error.InvalidNodeUpdate;
+    return result;
+}
+
+fn dupOptional(allocator: std.mem.Allocator, value: ?[]const u8) ![]u8 {
+    return allocator.dupe(u8, value orelse "");
+}
+
+fn dupFloat(allocator: std.mem.Allocator, value: ?f64) ![]u8 {
+    return if (value) |number| std.fmt.allocPrint(allocator, "{d}", .{number}) else allocator.dupe(u8, "");
+}
+
+fn optionalValue(allocator: std.mem.Allocator, value: []const u8) !?[]u8 {
+    if (std.mem.trim(u8, value, " \t\r\n").len == 0) return null;
+    return try allocator.dupe(u8, value);
+}
+
+fn parseOptionalFloat(value: []const u8) !?f64 {
+    if (std.mem.trim(u8, value, " \t\r\n").len == 0) return null;
+    return try std.fmt.parseFloat(f64, value);
 }
 
 pub fn settings(
@@ -223,15 +283,19 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                     label_count = 13;
                 },
                 .edge => {
-                    labels = .{ "From node ID", "To node ID", "Edge kind", "Condition", "Transform (none/template/script)", "Transform value", "Cycle until", "Spawn target project path", "", "", "", "" };
+                    labels = .{ "From node ID", "To node ID", "Edge kind", "Condition", "Transform (none/template/script)", "Transform value", "Cycle until", "Spawn target project path", "", "", "", "", "" };
                     label_count = 8;
                 },
+                .update => {
+                    labels = .{ "Goal summary (blank leaves unchanged)", "Goal predicate (blank clears)", "Poll interval seconds", "Stall after seconds", "Metric command", "Metric direction (maximize/minimize)", "Trigger prompt", "Check description", "Model tier (fast/standard/capable)", "", "", "", "" };
+                    label_count = 9;
+                },
                 .settings => {
-                    labels = .{ "Daemon pipe override", "Support directory", "" };
+                    labels = .{ "Daemon pipe override", "Support directory", "", "", "", "", "", "", "", "", "", "", "" };
                     label_count = 2;
                 },
                 .jump => {
-                    labels = .{ "Loop title or ID", "", "" };
+                    labels = .{ "Loop title or ID", "", "", "", "", "", "", "", "", "", "", "", "" };
                     label_count = 1;
                 },
             }
@@ -295,6 +359,7 @@ fn readValues(state: *DialogState) void {
     const count: usize = switch (state.kind) {
         .node => 13,
         .edge => 8,
+        .update => 9,
         .settings => 2,
         .jump => 1,
     };
