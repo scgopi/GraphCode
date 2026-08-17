@@ -25,6 +25,7 @@ pub const RemoteFields = struct {
 };
 
 pub const CloneStatus = enum { ready, cloning, cancelled, finished, failed };
+pub const OutputSnapshot = struct { progress_len: usize, stderr_len: usize };
 
 pub const CloneProcess = struct {
     allocator: std.mem.Allocator,
@@ -104,7 +105,7 @@ pub const CloneProcess = struct {
         self.args = &.{};
     }
 
-    pub fn snapshot(self: *CloneProcess, progress: []u8, stderr: []u8) struct { progress_len: usize, stderr_len: usize } {
+    pub fn snapshot(self: *CloneProcess, progress: []u8, stderr: []u8) OutputSnapshot {
         self.output_lock.lock();
         defer self.output_lock.unlock();
         const progress_len = @min(progress.len, self.progress_len);
@@ -185,7 +186,7 @@ pub const CloneOperation = struct {
         return self.status;
     }
 
-    pub fn snapshot(self: *CloneOperation, progress: []u8, stderr: []u8) struct { progress_len: usize, stderr_len: usize } {
+    pub fn snapshot(self: *CloneOperation, progress: []u8, stderr: []u8) OutputSnapshot {
         return self.process.snapshot(progress, stderr);
     }
 
