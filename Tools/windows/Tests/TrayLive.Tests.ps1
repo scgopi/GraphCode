@@ -131,9 +131,8 @@ function Invoke-MouseClick([GraphCodeTrayLiveNative+Rect] $rect, [bool] $double 
   $x = [int](($rect.left + $rect.right) / 2)
   $y = [int](($rect.top + $rect.bottom) / 2)
   [void][GraphCodeTrayLiveNative]::SetCursorPos($x, $y)
-  if ($script:trayWindow -ne [IntPtr]::Zero) {
-    [void][GraphCodeTrayLiveNative]::SetForegroundWindow($script:trayWindow)
-  }
+  $trayHost = [GraphCodeTrayLiveNative]::FindWindow("Shell_TrayWnd", $null)
+  if ($trayHost -ne [IntPtr]::Zero) { [void][GraphCodeTrayLiveNative]::SetForegroundWindow($trayHost) }
   Invoke-PhysicalMouseButton $script:MOUSEEVENTF_LEFTDOWN
   Invoke-PhysicalMouseButton $script:MOUSEEVENTF_LEFTUP
   if ($double) {
