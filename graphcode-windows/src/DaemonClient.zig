@@ -243,6 +243,21 @@ pub const DaemonClient = struct {
         self.sendCommand(command);
     }
 
+    pub fn sendCloseProject(self: *DaemonClient, path: []const u8) void {
+        const command = Wire.commandCloseProject(self.allocator, path) catch return;
+        self.sendCommand(command);
+    }
+
+    pub fn sendForgetProject(self: *DaemonClient, path: []const u8) void {
+        const command = Wire.commandForgetProject(self.allocator, path) catch return;
+        self.sendCommand(command);
+    }
+
+    pub fn sendDeleteProjectGraph(self: *DaemonClient, path: []const u8) void {
+        const command = Wire.commandDeleteProjectGraph(self.allocator, path) catch return;
+        self.sendCommand(command);
+    }
+
     pub fn sendCreateNode(self: *DaemonClient, project_path: []const u8, title: []const u8) void {
         var node_id: [36]u8 = undefined;
         self.mutex.lock();
@@ -256,6 +271,24 @@ pub const DaemonClient = struct {
             title,
             &node_id,
         ) catch return;
+        self.sendCommand(command);
+    }
+
+    pub fn sendCreateNodeDraft(
+        self: *DaemonClient,
+        project_path: []const u8,
+        draft: Forms.NodeDraft,
+    ) void {
+        var node_id: [36]u8 = undefined;
+        self.mutex.lock();
+        const sequence = self.next_draft;
+        self.next_draft +%= 1;
+        self.mutex.unlock();
+        makeRequestID(&node_id, sequence);
+        const command = Wire.commandGraphCreateNodeFull(self.allocator, project_path, &node_id, draft) catch {
+            self.publishState(self.connectionState(), "create node command encoding failed");
+            return;
+        };
         self.sendCommand(command);
     }
 
@@ -295,6 +328,76 @@ pub const DaemonClient = struct {
             self.publishState(self.connectionState(), "create edge command encoding failed");
             return;
         };
+        self.sendCommand(command);
+    }
+
+    pub fn sendCreateEdgeDraft(
+        self: *DaemonClient,
+        project_path: []const u8,
+        draft: Forms.EdgeDraft,
+    ) void {
+        const command = Wire.commandGraphCreateEdgeFull(
+            self.allocator, project_path, draft.from, draft.to, draft,
+        ) catch {
+            self.publishState(self.connectionState(), "create edge command encoding failed");
+            return;
+        };
+        self.sendCommand(command);
+    }
+
+    pub fn sendDeleteNode(self: *DaemonClient, project_path: []const u8, node_id: []const u8) void {
+        const command = Wire.commandGraphDeleteNode(self.allocator, project_path, node_id) catch return;
+        self.sendCommand(command);
+    }
+
+    pub fn sendDeleteEdge(self: *DaemonClient, project_path: []const u8, edge_id: []const u8) void {
+        const command = Wire.commandGraphDeleteEdge(self.allocator, project_path, edge_id) catch return;
+        self.sendCommand(command);
+    }
+
+    pub fn sendPilotComposite(self: *DaemonClient, project_path: []const u8, node_id: []const u8) void {
+        const command = Wire.commandGraphPilotComposite(self.allocator, project_path, node_id) catch return;
+        self.sendCommand(command);
+    }
+
+    pub fn sendArmComposite(self: *DaemonClient, project_path: []const u8, node_id: []const u8) void {
+        const command = Wire.commandGraphArmComposite(self.allocator, project_path, node_id) catch return;
+        self.sendCommand(command);
+    }
+
+    pub fn sendRefreshUsage(self: *DaemonClient, project_path: []const u8) void {
+        const command = Wire.commandGraphRefreshUsage(self.allocator, project_path) catch return;
+        self.sendCommand(command);
+    }
+
+    pub fn sendMemoNode(
+        self: *DaemonClient,
+        project_path: []const u8,
+        node_id: []const u8,
+        text: []const u8,
+        from: ?[]const u8,
+    ) void {
+        const command = Wire.commandGraphMemoNode(self.allocator, project_path, node_id, text, from) catch return;
+        self.sendCommand(command);
+    }
+
+    pub fn sendUpdateNode(
+        self: *DaemonClient,
+        project_path: []const u8,
+        node_id: []const u8,
+        update_json: []const u8,
+    ) void {
+        const command = Wire.commandGraphUpdateNode(self.allocator, project_path, node_id, update_json) catch return;
+        self.sendCommand(command);
+    }
+
+    pub fn sendUpdateNodeForm(
+        self: *DaemonClient,
+        project_path: []const u8,
+        node_id: []const u8,
+        update: Forms.NodeUpdate,
+    ) void {
+        const command = Wire.commandGraphUpdateNodeForm(self.allocator, project_path, node_id, update) catch return;
         self.sendCommand(command);
     }
 

@@ -4,12 +4,49 @@ const GraphModel = @import("GraphModel.zig");
 pub const NodeDraft = struct {
     title: []const u8,
     loop_type: []const u8 = "turnBased",
+    check_description: []const u8 = "",
+    trigger_prompt: []const u8 = "",
+    first_instruction: []const u8 = "Work on the requested Windows shell task.",
+    pauses_before_writes_only: bool = false,
+    goal_summary: []const u8 = "",
+    goal_predicate: []const u8 = "",
+    poll_interval_seconds: f64 = 60,
+    stall_after_seconds: ?f64 = null,
+    metric_command: []const u8 = "",
+    metric_direction: []const u8 = "maximize",
+    backend: []const u8 = "claudeCode",
+    model_tier: []const u8 = "",
+    worktree_repository: []const u8 = "",
+    worktree_id: []const u8 = "",
+    worktree_path: []const u8 = "",
+    worktree_branch: []const u8 = "",
+    subgraph_json: []const u8 = "",
+    created_by: []const u8 = "",
 };
 
 pub const EdgeDraft = struct {
     from: []const u8,
     to: []const u8,
     kind: []const u8 = "handoff",
+    condition: []const u8 = "always",
+    transform_kind: []const u8 = "none",
+    transform_value: []const u8 = "",
+    cycle_max_iterations: ?i64 = null,
+    cycle_until: []const u8 = "",
+    cycle_stop_after_passes: ?i64 = null,
+    spawn_target_project_path: []const u8 = "",
+};
+
+pub const NodeUpdate = struct {
+    goal_summary: ?[]const u8 = null,
+    goal_predicate: ?[]const u8 = null,
+    poll_interval_seconds: ?f64 = null,
+    stall_after_seconds: ?f64 = null,
+    metric_command: ?[]const u8 = null,
+    metric_direction: ?[]const u8 = null,
+    trigger_prompt: ?[]const u8 = null,
+    check_description: ?[]const u8 = null,
+    model_tier: ?[]const u8 = null,
 };
 
 pub const Settings = struct {
@@ -25,6 +62,16 @@ pub const FormError = error{
     SameEndpoint,
     UnsupportedLoopType,
     UnsupportedEdgeKind,
+    UnsupportedEdgeCondition,
+    UnsupportedTransform,
+    UnsupportedBackend,
+    UnsupportedModelTier,
+    UnsupportedMetricDirection,
+    InvalidGoal,
+    InvalidWorktree,
+    InvalidCycleGuard,
+    MissingFirstInstruction,
+    MissingTriggerPrompt,
     EmptyJumpQuery,
 };
 
@@ -35,11 +82,43 @@ pub fn validateJumpQuery(query: []const u8) FormError![]const u8 {
 }
 
 pub fn validateNode(draft: NodeDraft) FormError!void {
-    if (std.mem.trim(u8, draft.title, " \t\r\n").len == 0) return error.EmptyTitle;
+    if (std.mem.eql(u8, draft.loop_type, "composite")) {
+        if (std.mem.trim(u8, draft.title, " \t\r\n").len == 0) return error.EmptyTitle;
+    }
     if (!std.mem.eql(u8, draft.loop_type, "turnBased") and
         !std.mem.eql(u8, draft.loop_type, "timeBased") and
-        !std.mem.eql(u8, draft.loop_type, "goalBased"))
+        !std.mem.eql(u8, draft.loop_type, "goalBased") and
+        !std.mem.eql(u8, draft.loop_type, "composite"))
         return error.UnsupportedLoopType;
+    if (!std.mem.eql(u8, draft.backend, "claudeCode") and
+        !std.mem.eql(u8, draft.backend, "copilotCLI") and
+        !std.mem.eql(u8, draft.backend, "codex"))
+        return error.UnsupportedBackend;
+    if (draft.model_tier.len != 0 and
+        !std.mem.eql(u8, draft.model_tier, "fast") and
+        !std.mem.eql(u8, draft.model_tier, "standard") and
+        !std.mem.eql(u8, draft.model_tier, "capable"))
+        return error.UnsupportedModelTier;
+    if (std.mem.eql(u8, draft.loop_type, "turnBased") and
+        std.mem.trim(u8, draft.first_instruction, " \t\r\n").len == 0)
+        return error.MissingFirstInstruction;
+    if (std.mem.eql(u8, draft.loop_type, "timeBased") and
+        std.mem.trim(u8, draft.trigger_prompt, " \t\r\n").len == 0)
+        return error.MissingTriggerPrompt;
+    if (std.mem.eql(u8, draft.loop_type, "goalBased")) {
+        if (std.mem.trim(u8, draft.goal_summary, " \t\r\n").len == 0) return error.InvalidGoal;
+        if (draft.poll_interval_seconds <= 0) return error.InvalidGoal;
+        if (draft.stall_after_seconds) |seconds| if (seconds <= 0) return error.InvalidGoal;
+        if (draft.metric_direction.len != 0 and
+            !std.mem.eql(u8, draft.metric_direction, "maximize") and
+            !std.mem.eql(u8, draft.metric_direction, "minimize"))
+            return error.UnsupportedMetricDirection;
+    }
+    const has_worktree = draft.worktree_repository.len != 0 or
+        draft.worktree_path.len != 0 or draft.worktree_branch.len != 0;
+    if (has_worktree and (draft.worktree_repository.len == 0 or
+        draft.worktree_path.len == 0 or draft.worktree_branch.len == 0))
+        return error.InvalidWorktree;
 }
 
 pub fn validateEdge(draft: EdgeDraft) FormError!void {
@@ -50,6 +129,34 @@ pub fn validateEdge(draft: EdgeDraft) FormError!void {
         !std.mem.eql(u8, draft.kind, "message") and
         !std.mem.eql(u8, draft.kind, "spawn"))
         return error.UnsupportedEdgeKind;
+    if (!std.mem.eql(u8, draft.condition, "always") and
+        !std.mem.eql(u8, draft.condition, "onSuccess") and
+        !std.mem.eql(u8, draft.condition, "onFailure"))
+        return error.UnsupportedEdgeCondition;
+    if (!std.mem.eql(u8, draft.transform_kind, "none") and
+        !std.mem.eql(u8, draft.transform_kind, "template") and
+        !std.mem.eql(u8, draft.transform_kind, "script"))
+        return error.UnsupportedTransform;
+    if (!std.mem.eql(u8, draft.transform_kind, "none") and draft.transform_value.len == 0)
+        return error.UnsupportedTransform;
+    if (draft.cycle_max_iterations) |count| if (count <= 0) return error.InvalidCycleGuard;
+    if (draft.cycle_stop_after_passes) |count| if (count <= 0) return error.InvalidCycleGuard;
+}
+
+pub fn validateNodeUpdate(update: NodeUpdate) FormError!void {
+    if (update.goal_summary) |value| if (std.mem.trim(u8, value, " \t\r\n").len == 0) return error.InvalidGoal;
+    if (update.poll_interval_seconds) |value| if (value <= 0) return error.InvalidGoal;
+    if (update.stall_after_seconds) |value| if (value <= 0) return error.InvalidGoal;
+    if (update.metric_direction) |value|
+        if (!std.mem.eql(u8, value, "maximize") and !std.mem.eql(u8, value, "minimize"))
+            return error.UnsupportedMetricDirection;
+    if (update.model_tier) |value|
+        if (!std.mem.eql(u8, value, "fast") and !std.mem.eql(u8, value, "standard") and !std.mem.eql(u8, value, "capable"))
+            return error.UnsupportedModelTier;
+    if (update.goal_summary == null and update.goal_predicate == null and update.poll_interval_seconds == null and
+        update.stall_after_seconds == null and update.metric_command == null and update.metric_direction == null and
+        update.trigger_prompt == null and update.check_description == null and update.model_tier == null)
+        return error.InvalidGoal;
 }
 
 pub fn jumpTo(nodes: []const GraphModel.Node, query: []const u8, current: ?usize) ?usize {

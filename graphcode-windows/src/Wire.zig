@@ -1,4 +1,5 @@
 const std = @import("std");
+const Forms = @import("Forms.zig");
 
 pub const current_version: u8 = 2;
 pub const supported_versions = [_]u8{ 1, 2 };
@@ -33,6 +34,8 @@ pub const CommandKind = enum {
     open_global_graph,
     open_project,
     close_project,
+    forget_project,
+    delete_project_graph,
     graph_command,
 };
 
@@ -43,6 +46,8 @@ pub fn commandName(kind: CommandKind) []const u8 {
         .open_global_graph => "openGlobalGraph",
         .open_project => "openProject",
         .close_project => "closeProject",
+        .forget_project => "forgetProject",
+        .delete_project_graph => "deleteProjectGraph",
         .graph_command => "graphCommand",
     };
 }
@@ -175,6 +180,24 @@ pub fn commandOpenProject(allocator: std.mem.Allocator, path: []const u8) ![]u8 
     });
 }
 
+pub fn commandCloseProject(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    return daemonPathCommand(allocator, "closeProject", path);
+}
+
+pub fn commandForgetProject(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    return daemonPathCommand(allocator, "forgetProject", path);
+}
+
+pub fn commandDeleteProjectGraph(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    return daemonPathCommand(allocator, "deleteProjectGraph", path);
+}
+
+fn daemonPathCommand(allocator: std.mem.Allocator, name: []const u8, path: []const u8) ![]u8 {
+    const quoted = try quoteJson(allocator, path);
+    defer allocator.free(quoted);
+    return std.mem.concat(allocator, u8, &.{"{\"", name, "\":{\"path\":", quoted, "}}"});
+}
+
 pub fn commandGraphCreateNode(
     allocator: std.mem.Allocator,
     project_path: []const u8,
@@ -196,6 +219,69 @@ pub fn commandGraphCreateNode(
         quoted_title,
         ",\"loopType\":\"turnBased\",\"checkDescription\":null,\"triggerPrompt\":null,\"firstInstruction\":\"Work on the requested Windows shell task.\",\"pausesBeforeWritesOnly\":false,\"goal\":null,\"backend\":\"claudeCode\",\"modelTier\":null,\"worktree\":null,\"subGraph\":null,\"createdBy\":null}}}}}",
     });
+}
+
+/// Encodes every field currently accepted by Swift `NodeDraft`. Empty form strings
+/// intentionally become `null`, matching Optional Codable rather than inventing values.
+pub fn commandGraphCreateNodeFull(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    node_id: []const u8,
+    draft: Forms.NodeDraft,
+) ![]u8 {
+    const path = try quoteJson(allocator, project_path); defer allocator.free(path);
+    const id = try quoteJson(allocator, node_id); defer allocator.free(id);
+    const title = try quoteJson(allocator, draft.title); defer allocator.free(title);
+    const loop_type = if (std.mem.eql(u8, draft.loop_type, "composite")) "proactive" else draft.loop_type;
+    const lt = try quoteJson(allocator, loop_type); defer allocator.free(lt);
+    const check = try nullableString(allocator, draft.check_description); defer allocator.free(check);
+    const trigger = try nullableString(allocator, draft.trigger_prompt); defer allocator.free(trigger);
+    const first = try nullableString(allocator, draft.first_instruction); defer allocator.free(first);
+    const goal = try goalJson(allocator, draft); defer allocator.free(goal);
+    const backend = try quoteJson(allocator, draft.backend); defer allocator.free(backend);
+    const tier = try nullableString(allocator, draft.model_tier); defer allocator.free(tier);
+    const worktree = try worktreeJson(allocator, draft); defer allocator.free(worktree);
+    const subgraph = if (draft.subgraph_json.len == 0) try allocator.dupe(u8, "null") else try allocator.dupe(u8, draft.subgraph_json);
+    defer allocator.free(subgraph);
+    const created_by = try nullableString(allocator, draft.created_by); defer allocator.free(created_by);
+    return std.fmt.allocPrint(allocator,
+        "{{\"graphCommand\":{{\"projectPath\":{s},\"command\":{{\"createNode\":{{\"_0\":{{\"id\":{s},\"title\":{s},\"loopType\":{s},\"checkDescription\":{s},\"triggerPrompt\":{s},\"firstInstruction\":{s},\"pausesBeforeWritesOnly\":{s},\"goal\":{s},\"backend\":{s},\"modelTier\":{s},\"worktree\":{s},\"subGraph\":{s},\"createdBy\":{s}}}}}}}}",
+        .{ path, id, title, lt, check, trigger, first,
+            if (draft.pauses_before_writes_only) "true" else "false", goal, backend, tier, worktree, subgraph, created_by });
+}
+
+fn nullableString(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    if (value.len == 0) return allocator.dupe(u8, "null");
+    return quoteJson(allocator, value);
+}
+
+fn goalJson(allocator: std.mem.Allocator, draft: Forms.NodeDraft) ![]u8 {
+    if (draft.goal_summary.len == 0) return allocator.dupe(u8, "null");
+    const summary = try quoteJson(allocator, draft.goal_summary); defer allocator.free(summary);
+    const predicate = try nullableString(allocator, draft.goal_predicate); defer allocator.free(predicate);
+    const stall = if (draft.stall_after_seconds) |value|
+        try std.fmt.allocPrint(allocator, "{d}", .{value})
+    else
+        try allocator.dupe(u8, "null");
+    defer allocator.free(stall);
+    const metric = try nullableString(allocator, draft.metric_command); defer allocator.free(metric);
+    const direction = try quoteJson(allocator, if (draft.metric_direction.len == 0) "maximize" else draft.metric_direction);
+    defer allocator.free(direction);
+    return std.fmt.allocPrint(allocator,
+        "{{\"summary\":{s},\"predicate\":{s},\"pollIntervalSeconds\":{d},\"stallAfterSeconds\":{s},\"metricCommand\":{s},\"metricDirection\":{s}}}",
+        .{ summary, predicate, draft.poll_interval_seconds, stall, metric, direction });
+}
+
+fn worktreeJson(allocator: std.mem.Allocator, draft: Forms.NodeDraft) ![]u8 {
+    if (draft.worktree_repository.len == 0 and draft.worktree_path.len == 0 and draft.worktree_branch.len == 0)
+        return allocator.dupe(u8, "null");
+    const repo = try quoteJson(allocator, draft.worktree_repository); defer allocator.free(repo);
+    const id = try quoteJson(allocator, if (draft.worktree_id.len == 0) draft.worktree_branch else draft.worktree_id); defer allocator.free(id);
+    const path = try quoteJson(allocator, draft.worktree_path); defer allocator.free(path);
+    const branch = try quoteJson(allocator, draft.worktree_branch); defer allocator.free(branch);
+    return std.fmt.allocPrint(allocator,
+        "{{\"id\":{s},\"repositoryPath\":{s},\"worktreePath\":{s},\"branch\":{s}}}",
+        .{ id, repo, path, branch });
 }
 
 pub fn commandGraphNodeAction(
@@ -279,6 +365,48 @@ pub fn commandGraphCreateEdge(
     });
 }
 
+pub fn commandGraphCreateEdgeFull(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    from: []const u8,
+    to: []const u8,
+    draft: Forms.EdgeDraft,
+) ![]u8 {
+    const path = try quoteJson(allocator, project_path); defer allocator.free(path);
+    const source = try quoteJson(allocator, from); defer allocator.free(source);
+    const target = try quoteJson(allocator, to); defer allocator.free(target);
+    const kind = try quoteJson(allocator, draft.kind); defer allocator.free(kind);
+    const condition = try quoteJson(allocator, draft.condition); defer allocator.free(condition);
+    const transform_value = if (std.mem.eql(u8, draft.transform_kind, "none"))
+        try allocator.dupe(u8, "{}")
+    else blk: {
+        const quoted = try quoteJson(allocator, draft.transform_value);
+        defer allocator.free(quoted);
+        break :blk try std.fmt.allocPrint(allocator, "{{\"_0\":{s}}}", .{quoted});
+    };
+    defer allocator.free(transform_value);
+    const transform = try std.fmt.allocPrint(allocator, "{{\"{s}\":{s}}}", .{draft.transform_kind, transform_value});
+    defer allocator.free(transform);
+    const cycle = if (draft.cycle_max_iterations == null and draft.cycle_until.len == 0 and
+        draft.cycle_stop_after_passes == null)
+        try allocator.dupe(u8, "null")
+    else blk: {
+        const until = try nullableString(allocator, draft.cycle_until); defer allocator.free(until);
+        const max = if (draft.cycle_max_iterations) |value| try std.fmt.allocPrint(allocator, "{d}", .{value}) else try allocator.dupe(u8, "null");
+        defer allocator.free(max);
+        const flat = if (draft.cycle_stop_after_passes) |value| try std.fmt.allocPrint(allocator, "{d}", .{value}) else try allocator.dupe(u8, "null");
+        defer allocator.free(flat);
+        break :blk try std.fmt.allocPrint(allocator,
+            "{{\"maxIterations\":{s},\"until\":{s},\"stopAfterPassesWithoutImprovement\":{s}}}",
+            .{max, until, flat});
+    };
+    defer allocator.free(cycle);
+    const spawn = try nullableString(allocator, draft.spawn_target_project_path); defer allocator.free(spawn);
+    return std.fmt.allocPrint(allocator,
+        "{{\"graphCommand\":{{\"projectPath\":{s},\"command\":{{\"createEdge\":{{\"from\":{s},\"to\":{s},\"spec\":{{\"kind\":{s},\"condition\":{s},\"payloadTransform\":{s},\"cycleGuard\":{s},\"spawnTargetProjectPath\":{s}}}}}}}}}}",
+        .{path, source, target, kind, condition, transform, cycle, spawn});
+}
+
 pub fn commandGraphDeleteEdge(
     allocator: std.mem.Allocator,
     project_path: []const u8,
@@ -293,6 +421,106 @@ pub fn commandGraphDeleteEdge(
         ",\"command\":{\"deleteEdge\":{\"_0\":", quoted_edge,
         "}}}}",
     });
+}
+
+pub fn commandGraphDeleteNode(allocator: std.mem.Allocator, project_path: []const u8, node_id: []const u8) ![]u8 {
+    return graphUnaryUUID(allocator, project_path, "deleteNode", node_id);
+}
+
+pub fn commandGraphPilotComposite(allocator: std.mem.Allocator, project_path: []const u8, node_id: []const u8) ![]u8 {
+    return graphUnaryUUID(allocator, project_path, "pilotComposite", node_id);
+}
+
+pub fn commandGraphArmComposite(allocator: std.mem.Allocator, project_path: []const u8, node_id: []const u8) ![]u8 {
+    return graphUnaryUUID(allocator, project_path, "armComposite", node_id);
+}
+
+pub fn commandGraphRefreshUsage(allocator: std.mem.Allocator, project_path: []const u8) ![]u8 {
+    const path = try quoteJson(allocator, project_path); defer allocator.free(path);
+    return std.fmt.allocPrint(allocator,
+        "{{\"graphCommand\":{{\"projectPath\":{s},\"command\":{{\"refreshUsage\":{{}}}}}}}}", .{path});
+}
+
+fn graphUnaryUUID(allocator: std.mem.Allocator, project_path: []const u8, name: []const u8, node_id: []const u8) ![]u8 {
+    const path = try quoteJson(allocator, project_path); defer allocator.free(path);
+    const id = try quoteJson(allocator, node_id); defer allocator.free(id);
+    return std.fmt.allocPrint(allocator,
+        "{{\"graphCommand\":{{\"projectPath\":{s},\"command\":{{\"{s}\":{{\"_0\":{s}}}}}}}}}", .{path, name, id});
+}
+
+pub fn commandGraphUpdateNode(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    node_id: []const u8,
+    update_json: []const u8,
+) ![]u8 {
+    const path = try quoteJson(allocator, project_path); defer allocator.free(path);
+    const id = try quoteJson(allocator, node_id); defer allocator.free(id);
+    return std.fmt.allocPrint(allocator,
+        "{{\"graphCommand\":{{\"projectPath\":{s},\"command\":{{\"updateNode\":{{\"_0\":{s},\"update\":{s}}}}}}}}}", .{path, id, update_json});
+}
+
+pub fn commandGraphUpdateNodeForm(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    node_id: []const u8,
+    update: Forms.NodeUpdate,
+) ![]u8 {
+    const json = try nodeUpdateJson(allocator, update);
+    defer allocator.free(json);
+    return commandGraphUpdateNode(allocator, project_path, node_id, json);
+}
+
+fn nodeUpdateJson(allocator: std.mem.Allocator, update: Forms.NodeUpdate) ![]u8 {
+    const summary = if (update.goal_summary) |value| try quoteJson(allocator, value) else try allocator.dupe(u8, "null");
+    defer allocator.free(summary);
+    const predicate = if (update.goal_predicate) |value| try quoteJson(allocator, value) else try allocator.dupe(u8, "null");
+    defer allocator.free(predicate);
+    const poll = if (update.poll_interval_seconds) |value| try std.fmt.allocPrint(allocator, "{d}", .{value}) else try allocator.dupe(u8, "null");
+    defer allocator.free(poll);
+    const stall = if (update.stall_after_seconds) |value| try std.fmt.allocPrint(allocator, "{d}", .{value}) else try allocator.dupe(u8, "null");
+    defer allocator.free(stall);
+    const metric = if (update.metric_command) |value| try quoteJson(allocator, value) else try allocator.dupe(u8, "null");
+    defer allocator.free(metric);
+    const direction = if (update.metric_direction) |value| try quoteJson(allocator, value) else try allocator.dupe(u8, "null");
+    defer allocator.free(direction);
+    const trigger = if (update.trigger_prompt) |value| try quoteJson(allocator, value) else try allocator.dupe(u8, "null");
+    defer allocator.free(trigger);
+    const check = if (update.check_description) |value| try quoteJson(allocator, value) else try allocator.dupe(u8, "null");
+    defer allocator.free(check);
+    const tier = if (update.model_tier) |value| try quoteJson(allocator, value) else try allocator.dupe(u8, "null");
+    defer allocator.free(tier);
+    return std.fmt.allocPrint(allocator,
+        "{{\"goalSummary\":{s},\"goalPredicate\":{s},\"pollIntervalSeconds\":{s},\"stallAfterSeconds\":{s},\"metricCommand\":{s},\"metricDirection\":{s},\"triggerPrompt\":{s},\"checkDescription\":{s},\"modelTier\":{s},\"updatedBy\":null}}",
+        .{summary, predicate, poll, stall, metric, direction, trigger, check, tier});
+}
+
+pub fn commandGraphMemoNode(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    node_id: []const u8,
+    text: []const u8,
+    from: ?[]const u8,
+) ![]u8 {
+    const path = try quoteJson(allocator, project_path); defer allocator.free(path);
+    const id = try quoteJson(allocator, node_id); defer allocator.free(id);
+    const memo = try quoteJson(allocator, text); defer allocator.free(memo);
+    const origin = if (from) |value| try quoteJson(allocator, value) else try allocator.dupe(u8, "null");
+    defer allocator.free(origin);
+    return std.fmt.allocPrint(allocator,
+        "{{\"graphCommand\":{{\"projectPath\":{s},\"command\":{{\"memoNode\":{{\"_0\":{s},\"text\":{s},\"from\":{s}}}}}}}}}", .{path, id, memo, origin});
+}
+
+pub fn commandGraphSubGraph(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    node_id: []const u8,
+    nested_command_json: []const u8,
+) ![]u8 {
+    const path = try quoteJson(allocator, project_path); defer allocator.free(path);
+    const id = try quoteJson(allocator, node_id); defer allocator.free(id);
+    return std.fmt.allocPrint(allocator,
+        "{{\"graphCommand\":{{\"projectPath\":{s},\"command\":{{\"subGraphCommand\":{{\"nodeID\":{s},\"command\":{s}}}}}}}}}", .{path, id, nested_command_json});
 }
 
 fn quoteJson(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
@@ -577,6 +805,19 @@ test "global overview command uses the daemon command shape" {
     const command = try commandOpenGlobalGraph(std.testing.allocator);
     defer std.testing.allocator.free(command);
     try std.testing.expectEqualStrings("{\"openGlobalGraph\":{}}", command);
+}
+
+test "project lifecycle commands preserve Swift Codable labels" {
+    const allocator = std.testing.allocator;
+    const close = try commandCloseProject(allocator, "C:\\work\\graph");
+    defer allocator.free(close);
+    try std.testing.expectEqualStrings("{\"closeProject\":{\"path\":\"C:\\\\work\\\\graph\"}}", close);
+    const forget = try commandForgetProject(allocator, "C:\\work\\graph");
+    defer allocator.free(forget);
+    try std.testing.expectEqualStrings("{\"forgetProject\":{\"path\":\"C:\\\\work\\\\graph\"}}", forget);
+    const delete = try commandDeleteProjectGraph(allocator, "C:\\work\\graph");
+    defer allocator.free(delete);
+    try std.testing.expectEqualStrings("{\"deleteProjectGraph\":{\"path\":\"C:\\\\work\\\\graph\"}}", delete);
 }
 
 test "v2 edge fixtures exactly match Zig-generated request envelopes" {

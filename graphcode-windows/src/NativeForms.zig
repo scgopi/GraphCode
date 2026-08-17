@@ -8,8 +8,8 @@ const DialogState = struct {
     parent: c.HWND,
     result: bool = false,
     closed: bool = false,
-    edits: [3]c.HWND = .{ null, null, null },
-    values: [3][]u8 = .{ &.{}, &.{}, &.{} },
+    edits: [13]c.HWND = .{ null, null, null, null, null, null, null, null, null, null, null, null, null },
+    values: [13][]u8 = .{ &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{} },
 };
 
 const Kind = enum { node, edge, settings, jump };
@@ -43,10 +43,36 @@ pub fn node(
     }
     state.values[0] = try allocator.dupe(u8, initial.title);
     state.values[1] = try allocator.dupe(u8, initial.loop_type);
-    if (!(try show(state, "Create or edit node (turn-based)", &.{"Title"}))) return null;
+    state.values[2] = try allocator.dupe(u8, initial.check_description);
+    state.values[3] = try allocator.dupe(u8, initial.trigger_prompt);
+    state.values[4] = try allocator.dupe(u8, initial.first_instruction);
+    state.values[5] = try allocator.dupe(u8, if (initial.pauses_before_writes_only) "true" else "false");
+    state.values[6] = try allocator.dupe(u8, initial.goal_summary);
+    state.values[7] = try allocator.dupe(u8, initial.goal_predicate);
+    state.values[8] = try allocator.dupe(u8, initial.backend);
+    state.values[9] = try allocator.dupe(u8, initial.model_tier);
+    state.values[10] = try allocator.dupe(u8, initial.worktree_repository);
+    state.values[11] = try allocator.dupe(u8, initial.worktree_path);
+    state.values[12] = try allocator.dupe(u8, initial.worktree_branch);
+    if (!(try show(state, "Create or edit node", &.{
+        "Title", "Loop type", "Check description", "Trigger prompt",
+        "First instruction", "Pause before writes only (true/false)", "Goal summary",
+        "Goal predicate", "Backend", "Model tier", "Worktree repository", "Worktree path", "Worktree branch",
+    }))) return null;
     return .{
         .title = try allocator.dupe(u8, state.values[0]),
         .loop_type = try allocator.dupe(u8, state.values[1]),
+        .check_description = try allocator.dupe(u8, state.values[2]),
+        .trigger_prompt = try allocator.dupe(u8, state.values[3]),
+        .first_instruction = try allocator.dupe(u8, state.values[4]),
+        .pauses_before_writes_only = std.mem.eql(u8, state.values[5], "true"),
+        .goal_summary = try allocator.dupe(u8, state.values[6]),
+        .goal_predicate = try allocator.dupe(u8, state.values[7]),
+        .backend = try allocator.dupe(u8, state.values[8]),
+        .model_tier = try allocator.dupe(u8, state.values[9]),
+        .worktree_repository = try allocator.dupe(u8, state.values[10]),
+        .worktree_path = try allocator.dupe(u8, state.values[11]),
+        .worktree_branch = try allocator.dupe(u8, state.values[12]),
     };
 }
 
@@ -64,11 +90,25 @@ pub fn edge(
     state.values[0] = try allocator.dupe(u8, initial.from);
     state.values[1] = try allocator.dupe(u8, initial.to);
     state.values[2] = try allocator.dupe(u8, initial.kind);
-    if (!(try show(state, "Create or edit edge", &.{ "From node ID", "To node ID", "Edge kind" }))) return null;
+    state.values[3] = try allocator.dupe(u8, initial.condition);
+    state.values[4] = try allocator.dupe(u8, initial.transform_kind);
+    state.values[5] = try allocator.dupe(u8, initial.transform_value);
+    state.values[6] = try allocator.dupe(u8, initial.cycle_until);
+    state.values[7] = try allocator.dupe(u8, initial.spawn_target_project_path);
+    if (!(try show(state, "Create or edit edge", &.{
+        "From node ID", "To node ID", "Edge kind", "Condition",
+        "Transform (none/template/script)", "Transform value", "Cycle until",
+        "Spawn target project path",
+    }))) return null;
     return .{
         .from = try allocator.dupe(u8, state.values[0]),
         .to = try allocator.dupe(u8, state.values[1]),
         .kind = try allocator.dupe(u8, state.values[2]),
+        .condition = try allocator.dupe(u8, state.values[3]),
+        .transform_kind = try allocator.dupe(u8, state.values[4]),
+        .transform_value = try allocator.dupe(u8, state.values[5]),
+        .cycle_until = try allocator.dupe(u8, state.values[6]),
+        .spawn_target_project_path = try allocator.dupe(u8, state.values[7]),
     };
 }
 
@@ -175,16 +215,16 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
     const value = &active_state_storage;
     switch (message) {
         c.WM_CREATE => {
-            var labels: [3][]const u8 = .{ "", "", "" };
+            var labels: [13][]const u8 = .{ "", "", "", "", "", "", "", "", "", "", "", "", "" };
             var label_count: usize = 0;
             switch (value.kind) {
                 .node => {
-                    labels = .{ "Title (turn-based nodes only)", "", "" };
-                    label_count = 1;
+                    labels = .{ "Title", "Loop type", "Check description", "Trigger prompt", "First instruction", "Pause before writes only (true/false)", "Goal summary", "Goal predicate", "Backend", "Model tier", "Worktree repository", "Worktree path", "Worktree branch" };
+                    label_count = 13;
                 },
                 .edge => {
-                    labels = .{ "From node ID", "To node ID", "Edge kind" };
-                    label_count = 3;
+                    labels = .{ "From node ID", "To node ID", "Edge kind", "Condition", "Transform (none/template/script)", "Transform value", "Cycle until", "Spawn target project path", "", "", "", "" };
+                    label_count = 8;
                 },
                 .settings => {
                     labels = .{ "Daemon pipe override", "Support directory", "" };
@@ -253,8 +293,8 @@ fn childId(value: usize) c.HMENU {
 fn readValues(state: *DialogState) void {
     var buffer: [1024]u16 = undefined;
     const count: usize = switch (state.kind) {
-        .node => 1,
-        .edge => 3,
+        .node => 13,
+        .edge => 8,
         .settings => 2,
         .jump => 1,
     };
