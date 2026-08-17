@@ -55,7 +55,9 @@ pub const Dialog = struct {
 
     pub fn selectedCount(self: *const Dialog) usize {
         var count: usize = 0;
-        for (self.rows.items) |row| if (row.selected) count += 1;
+        for (self.rows.items) |row| {
+            if (row.selected) count += 1;
+        }
         return count;
     }
 
@@ -115,4 +117,18 @@ test "reveal preserves Unicode path and uses Explorer verb" {
     const args = try dialog.revealSelected();
     try std.testing.expectEqualStrings("explore", args.verb);
     try std.testing.expectEqualStrings("C:\\工作\\review", args.path);
+}
+
+test "confirmed multi-select is consumable exactly once" {
+    var entries = [_]WorktreeStatus.Entry{
+        .{ .path = @constCast("C:\\one"), .branch = @constCast("one"), .pushed = true, .landed = true },
+        .{ .path = @constCast("C:\\two"), .branch = @constCast("two"), .pushed = true, .landed = true },
+    };
+    var dialog = try Dialog.init(std.testing.allocator, "C:\\project", &entries, .{ .allow_reclaim = true });
+    defer dialog.deinit();
+    _ = dialog.toggle(0);
+    _ = dialog.toggle(1);
+    try dialog.armConfirmation();
+    try dialog.consumeConfirmation();
+    try std.testing.expectError(error.ConfirmationRequired, dialog.consumeConfirmation());
 }

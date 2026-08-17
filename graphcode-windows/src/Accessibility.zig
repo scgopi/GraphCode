@@ -1,4 +1,14 @@
 const std = @import("std");
+const builtin = @import("builtin");
+const c = if (builtin.os.tag == .windows and builtin.link_libc) @import("Win32.zig").c else struct {
+    pub const HWND = ?*anyopaque;
+    pub const HANDLE = ?*anyopaque;
+    pub fn SetPropW(_: HWND, _: [*:0]const u16, _: HANDLE) c_int { return 0; }
+    pub fn RemovePropW(_: HWND, _: [*:0]const u16) HANDLE { return null; }
+    pub fn GetPropW(_: HWND, _: [*:0]const u16) HANDLE { return null; }
+    pub fn GetDesktopWindow() HWND { return null; }
+};
+const provider_property = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.AccessibilityProvider");
 
 pub const Role = enum { window, navigation, list, list_item, button, card, menu, menu_item, text, terminal, status, dialog };
 pub const Pattern = enum { invoke, selection, selection_item, expand_collapse, scroll, value, text };
@@ -10,7 +20,8 @@ pub const Element = struct {
     focusable: bool = false,
     parent: ?usize = null,
 };
-pub const Notification = struct { text: []const u8, kind: enum { status, error, focus, action } };
+pub const NotificationKind = enum { status, @"error", focus, action };
+pub const Notification = struct { text: []const u8, kind: NotificationKind };
 pub const Announcement = struct { role: []const u8, name: []const u8, state: []const u8 };
 
 pub const Provider = struct {
@@ -18,6 +29,7 @@ pub const Provider = struct {
     elements: std.array_list.Managed(Element),
     focus_order: std.array_list.Managed(usize),
     notifications: std.array_list.Managed(Notification),
+    attached_hwnd: c.HWND = null,
 
     pub fn init(allocator: std.mem.Allocator) Provider {
         return .{
@@ -28,7 +40,24 @@ pub const Provider = struct {
         };
     }
     pub fn deinit(self: *Provider) void {
+        self.detach();
         self.elements.deinit(); self.focus_order.deinit(); self.notifications.deinit();
+    }
+    pub fn attach(self: *Provider, hwnd: c.HWND) bool {
+        if (hwnd == null) return false;
+        if (c.SetPropW(hwnd, provider_property.ptr, @ptrCast(self)) == 0) return false;
+        self.attached_hwnd = hwnd;
+        return true;
+    }
+    pub fn detach(self: *Provider) void {
+        if (self.attached_hwnd) |hwnd| {
+            _ = c.RemovePropW(hwnd, provider_property.ptr);
+            self.attached_hwnd = null;
+        }
+    }
+    pub fn isAttached(self: *const Provider) bool {
+        const hwnd = self.attached_hwnd orelse return false;
+        return c.GetPropW(hwnd, provider_property.ptr) == @as(c.HANDLE, @ptrCast(@constCast(self)));
     }
     pub fn add(self: *Provider, element: Element) !usize {
         const index = self.elements.items.len;
@@ -36,7 +65,7 @@ pub const Provider = struct {
         if (element.focusable) try self.focus_order.append(index);
         return index;
     }
-    pub fn announce(self: *Provider, text: []const u8, kind: Notification.kind) !void {
+    pub fn announce(self: *Provider, text: []const u8, kind: NotificationKind) !void {
         try self.notifications.append(.{ .text = text, .kind = kind });
     }
     pub fn nextFocus(self: *const Provider, current: ?usize) ?usize {
@@ -104,6 +133,18 @@ test "status and error announcements are retained for screen readers" {
     var provider = Provider.init(std.testing.allocator);
     defer provider.deinit();
     try provider.announce("Worktrees inspected", .status);
-    try provider.announce("Reclaim blocked: unpushed commits", .error);
+    try provider.announce("Reclaim blocked: unpushed commits", .@"error");
     try std.testing.expectEqual(@as(usize, 2), provider.notifications.items.len);
+}
+
+test "production provider attaches to and detaches from a live HWND" {
+    if (!builtin.link_libc) return;
+    var provider = Provider.init(std.testing.allocator);
+    defer provider.deinit();
+    const hwnd = c.GetDesktopWindow();
+    try std.testing.expect(hwnd != null);
+    try std.testing.expect(provider.attach(hwnd));
+    try std.testing.expect(provider.isAttached());
+    provider.detach();
+    try std.testing.expect(!provider.isAttached());
 }

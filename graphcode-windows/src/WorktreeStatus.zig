@@ -246,7 +246,7 @@ pub fn reclaimSelectedWithPolicy(
     bindings: []const Binding,
     policy: Policy,
     confirmed: bool,
-) (ReclaimError || InspectionError || std.mem.Allocator.Error)!usize {
+) !usize {
     if (!policy.allow_reclaim) return error.PolicyDisabled;
     if (policy.confirm_each_reclaim and !confirmed) return error.ConfirmationRequired;
     var inspection = try inspect(allocator, project_path, bindings);

@@ -21,6 +21,7 @@ const ProductSettings = @import("WindowsProductSettings.zig");
 const RepositoryDialogs = @import("WindowsRepositoryDialogs.zig");
 const Onboarding = @import("WindowsOnboarding.zig");
 const WindowsUpdates = @import("WindowsUpdates.zig");
+const Accessibility = @import("Accessibility.zig");
 const c = @import("Win32.zig").c;
 
 const title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Windows");
@@ -48,6 +49,7 @@ pub const App = struct {
     worktree_inspection: ?WorktreeStatus.Inspection = null,
     selected_worktree_path: []u8 = &.{},
     reclaim_confirmation_armed: bool = false,
+    accessibility: ?Accessibility.Provider = null,
     sidebar_scroll: i32 = 0,
     workspace: ?*TerminalWorkspace.Workspace = null,
     instance_mutex: c.HANDLE = null,
@@ -109,12 +111,18 @@ pub const App = struct {
             client.deinit();
             return err;
         };
+        const accessibility = Accessibility.defaultContract(allocator) catch |err| {
+            client.deinit();
+            allocator.destroy(app);
+            return err;
+        };
         app.* = .{
             .allocator = allocator,
             .client = client,
             .daemon = .{ .allocator = allocator },
             .model = GraphModel.Model.init(allocator),
             .tray_test_hook_enabled = envFlag(tray_test_hook_environment),
+            .accessibility = accessibility,
         };
         errdefer app.deinit();
         try app.client.start();
@@ -156,6 +164,7 @@ pub const App = struct {
         self.daemon.stop();
         self.tray.remove();
         self.model.deinit();
+        if (self.accessibility) |*provider| provider.deinit();
         if (self.worktree_inspection) |*inspection| {
             WorktreeStatus.deinitInspection(self.allocator, inspection);
         }
@@ -201,6 +210,9 @@ pub const App = struct {
             );
         }
         if (self.daemon.status().len != 0) self.setStatus(self.daemon.status());
+        if (self.accessibility) |*provider| {
+            if (!provider.attach(self.window.hwnd)) self.setStatus("Accessibility provider unavailable");
+        }
         self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
         self.product_settings_store = ProductSettings.Store.init(self.allocator) catch null;
         if (self.product_settings_store) |*store| {
