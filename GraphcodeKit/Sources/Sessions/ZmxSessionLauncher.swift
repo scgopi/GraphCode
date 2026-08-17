@@ -534,9 +534,27 @@ public enum ZmxSessionLauncher {
     if await sessionExists(node, projectPath: projectPath) {
       return .success(.attached)
     }
-    await start(node, projectPath: projectPath)
+    if node.sessionPrompt == nil || node.sessionPrompt?.isEmpty == true {
+      guard let executable = node.backend.executableName else {
+        return .failure(.unavailable("backend has no executable"))
+      }
+      let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+      do {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ZmxLocator.binaryURL.path)
+        process.arguments = ["--daemon", name, executable]
+        if let directory = workingDirectory(forNode: node, projectPath: projectPath) {
+          process.currentDirectoryURL = URL(fileURLWithPath: directory)
+        }
+        try process.run()
+      } catch {
+        return .failure(.failed("zmx daemon launch failed: \(error)"))
+      }
+    } else {
+      await start(node, projectPath: projectPath)
+    }
     guard await sessionExists(node, projectPath: projectPath) else {
-      return .failure(.failed("zmx session did not become live"))
+      return .failure(.failed("zmx session did not become live (\(SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName))"))
     }
     return .success(.started)
   }
