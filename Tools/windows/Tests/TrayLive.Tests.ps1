@@ -118,6 +118,9 @@ function Invoke-MouseClick([GraphCodeTrayLiveNative+Rect] $rect, [bool] $double 
   $x = [int](($rect.left + $rect.right) / 2)
   $y = [int](($rect.top + $rect.bottom) / 2)
   [void][GraphCodeTrayLiveNative]::SetCursorPos($x, $y)
+  if ($script:trayWindow -ne [IntPtr]::Zero) {
+    [void][GraphCodeTrayLiveNative]::SetForegroundWindow($script:trayWindow)
+  }
   [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
   [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
   if ($double) {
@@ -210,6 +213,7 @@ try {
   if (-not [GraphCodeTrayLiveNative]::IsWindowVisible($hwnd)) {
     throw "GraphCode GUI window did not become visible"
   }
+  $script:trayWindow = $hwnd
   Assert-NoConsoleWindow $process.Id
   $trayRect = Wait-TrayIcon $hwnd
 
