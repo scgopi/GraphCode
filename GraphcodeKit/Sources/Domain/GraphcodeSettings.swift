@@ -199,6 +199,11 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       if !defaultBackend.isSpiked { defaultBackend = oldValue.isSpiked ? oldValue : .claudeCode }
     }
   }
+  /// The model tier used by a new loop when it does not pin one itself.
+  ///
+  /// This is deliberately a tier rather than a provider-specific model id so the
+  /// setting remains useful as backend model names change.
+  public var defaultModelTier: ModelTier
   public var claudePermissionMode: ClaudePermissionMode
   public var copilotPermissions: CopilotPermissions
   /// Whether a session is told it's part of a graph and how to add loops to it
@@ -235,6 +240,8 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// useful during a working session and genuinely thin the moment you relaunch, which
   /// is a trade worth offering and not worth imposing.
   public var showsActivityStrip: Bool
+  /// Whether this installation should receive pre-release updates.
+  public var betaUpdates: Bool
 
   // There is deliberately no window-opacity setting here any more. graphcode used to own
   // one and apply it as `NSWindow.alphaValue`, which fades the whole window — terminal
@@ -245,21 +252,25 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
 
   public init(
     defaultBackend: CLISessionBackendKind = .claudeCode,
+    defaultModelTier: ModelTier = .standard,
     codexApprovals: CodexApprovals = .workspace,
     claudePermissionMode: ClaudePermissionMode = .auto,
     copilotPermissions: CopilotPermissions = .allowEverything,
     briefsSessionsAboutTheGraph: Bool = true,
     autoSelectsModel: Bool = false,
     showsActivityStrip: Bool = false,
+    betaUpdates: Bool = false,
     worktreePolicies: [String: WorktreeHygienePolicy] = [:]
   ) {
     self.defaultBackend = defaultBackend.isSpiked ? defaultBackend : .claudeCode
+    self.defaultModelTier = defaultModelTier
     self.codexApprovals = codexApprovals
     self.claudePermissionMode = claudePermissionMode
     self.copilotPermissions = copilotPermissions
     self.briefsSessionsAboutTheGraph = briefsSessionsAboutTheGraph
     self.autoSelectsModel = autoSelectsModel
     self.showsActivityStrip = showsActivityStrip
+    self.betaUpdates = betaUpdates
     self.worktreePolicies = worktreePolicies
   }
 
@@ -272,6 +283,8 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       try container.decodeIfPresent(CLISessionBackendKind.self, forKey: .defaultBackend)
       ?? .claudeCode
     defaultBackend = storedBackend.isSpiked ? storedBackend : .claudeCode
+    defaultModelTier =
+      try container.decodeIfPresent(ModelTier.self, forKey: .defaultModelTier) ?? .standard
     codexApprovals =
       try container.decodeIfPresent(CodexApprovals.self, forKey: .codexApprovals) ?? .workspace
     claudePermissionMode =
@@ -289,6 +302,8 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       try container.decodeIfPresent(Bool.self, forKey: .autoSelectsModel) ?? false
     showsActivityStrip =
       try container.decodeIfPresent(Bool.self, forKey: .showsActivityStrip) ?? false
+    betaUpdates =
+      try container.decodeIfPresent(Bool.self, forKey: .betaUpdates) ?? false
     worktreePolicies =
       try container.decodeIfPresent(
         [String: WorktreeHygienePolicy].self, forKey: .worktreePolicies) ?? [:]

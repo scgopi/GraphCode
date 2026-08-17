@@ -71,6 +71,7 @@ struct ProjectFeature {
     var draftSchedule: CompositeSchedule = .daily
     var draftScheduleTime = "09:00"
     var draftBackend: CLISessionBackendKind = .claudeCode
+    var draftModelTier: ModelTier?
     var draftWorktree: WorktreeSelection = .none
     var draftBranch = ""
     /// Set when the form was opened from a node card's + handle: the node the new loop
@@ -558,6 +559,7 @@ extension ProjectFeature {
     // The parent's backend when there is one; the human's default otherwise
     // (Settings → Sessions), never a hardcoded one.
     state.draftBackend = backend ?? GraphcodeSettingsStore.load().defaultBackend
+    state.draftModelTier = GraphcodeSettingsStore.load().defaultModelTier
     state.draftWorktree = .none
     state.draftBranch = ""
     state.draftParentNodeID = parentNodeID

@@ -58,6 +58,7 @@ extension ProjectFeature.State {
           metricDirection: draftMetricDirection)
         : nil,
       backend: draftBackend,
+      modelTier: draftModelTier,
       // Only an *existing* worktree can be bound here; a new one has to be created on
       // disk first, which is `.createNodeConfirmed`'s job.
       worktree: {

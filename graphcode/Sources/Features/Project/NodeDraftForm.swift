@@ -92,6 +92,17 @@ struct NodeDraftForm: View {
           }
           .labelsHidden()
         }
+        DraftField(label: "Model") {
+          Picker("", selection: Binding(
+            get: { store.draftModelTier ?? .standard },
+            set: { store.draftModelTier = $0 }
+          )) {
+            ForEach(ModelTier.allCases, id: \.self) { tier in
+              Text(tier.displayName).tag(tier)
+            }
+          }
+          .labelsHidden()
+        }
         if !isRemoteProject && !store.graph.isGlobal {
           DraftField(label: "Branch") {
             Picker("", selection: $store.draftWorktree) {

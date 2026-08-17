@@ -85,15 +85,19 @@ struct SettingsView: View {
       }
 
       Section {
+        Picker("Default model", selection: $model.settings.defaultModelTier) {
+          ForEach(ModelTier.allCases, id: \.self) { tier in
+            Text(tier.displayName).tag(tier)
+          }
+        }
         Toggle("Pick a model for each loop", isOn: $model.settings.autoSelectsModel)
       } header: {
         Text("Model")
       } footer: {
         Text(
-          "Off, graphcode passes no model and your CLI runs on whatever it's already set "
-            + "up to use. On, a loop with no model of its own is routed by its type — "
-            + "turn-based loops get a more capable model, time-based polling a faster one. "
-            + "A model set on an individual loop always wins either way."
+          "The default model tier is copied into new loops. On, an unpinned loop is instead "
+            + "routed by its type — turn-based loops get a more capable model, time-based "
+            + "polling a faster one. A model set on an individual loop always wins."
         )
         .font(.caption2)
         .foregroundStyle(.secondary)
