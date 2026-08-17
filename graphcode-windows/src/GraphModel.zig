@@ -255,6 +255,7 @@ pub const Model = struct {
         self.selected_project_path = self.allocator.dupe(u8, summary.project.path) catch return false;
         self.selected_index = if (summary.nodes.items.len == 0) null else 0;
         if (summary.nodes.items.len == 0) self.freeSelectedNodeID() else self.replaceSelectedNodeID(summary.nodes.items[0].id);
+        self.syncLegacyGraph();
         return true;
     }
 
@@ -272,6 +273,7 @@ pub const Model = struct {
         }
         if (self.selected_project_path) |path| {
             if (self.graphFor(path) != null) {
+                self.syncLegacyGraph();
                 self.rebuildAttention();
                 return;
             }
@@ -284,6 +286,7 @@ pub const Model = struct {
             self.selected_index = null;
             self.freeSelectedNodeID();
         }
+        self.syncLegacyGraph();
         self.rebuildAttention();
     }
 
@@ -1115,6 +1118,23 @@ test "current graph and selection operations resolve the selected project" {
     try std.testing.expectEqualStrings("B2", model.selected().?.title);
 }
 
+test "selecting B resynchronizes the active snapshot and current graph" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const a =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"a","project":{"path":"A","name":"A"},"nodes":[{"id":"a1","title":"A1","state":"running"}],"edges":[]}}}
+    ;
+    const b =
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"b","project":{"path":"B","name":"B"},"nodes":[{"id":"b1","title":"B1","state":"failed"}],"edges":[]}}}
+    ;
+    _ = try model.updateFromFrame(a);
+    _ = try model.updateFromFrame(b);
+    try std.testing.expect(model.selectProject("B"));
+    try std.testing.expectEqualStrings("B", model.currentGraph().?.project.path);
+    try std.testing.expectEqualStrings("B", model.graph.?.project.path);
+    try std.testing.expectEqualStrings("B1", model.graph.?.nodes.items[0].title);
+}
+
 test "restore generation removes unreplayed graphs and preserves valid selection" {
     const allocator = std.testing.allocator;
     var model = Model.init(allocator);
@@ -1132,6 +1152,27 @@ test "restore generation removes unreplayed graphs and preserves valid selection
     try std.testing.expectEqual(@as(usize, 1), model.graphs.items.len);
     try std.testing.expectEqualStrings("ssh://build/remote", model.selected_project_path.?);
     try std.testing.expectEqual(RestoreState.restored, model.restore_state);
+}
+
+test "restore fallback resynchronizes graph after removing selected A" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const a =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"a","project":{"path":"A","name":"A"},"nodes":[{"id":"a1","title":"A1","state":"running"}],"edges":[]}}}
+    ;
+    const b =
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"b","project":{"path":"B","name":"B"},"nodes":[{"id":"b1","title":"B1","state":"failed"}],"edges":[]}}}
+    ;
+    _ = try model.updateFromFrame(a);
+    _ = try model.updateFromFrame(b);
+    try std.testing.expect(model.selectProject("A"));
+    model.beginRestore();
+    _ = try model.updateFromFrame(b);
+    model.markRestored();
+    try std.testing.expectEqualStrings("B", model.selected_project_path.?);
+    try std.testing.expectEqualStrings("B", model.currentGraph().?.project.path);
+    try std.testing.expectEqualStrings("B", model.graph.?.project.path);
+    try std.testing.expectEqualStrings("B1", model.graph.?.nodes.items[0].title);
 }
 
 test "attention aggregate keeps project and node identity" {
