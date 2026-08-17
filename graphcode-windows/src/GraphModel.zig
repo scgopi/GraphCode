@@ -334,10 +334,16 @@ pub const Model = struct {
                 self.allocator.free(selected_path);
                 self.selected_project_path = null;
                 if (self.graph) |*graph| {
-                    freeGraph(self.allocator, graph);
-                    self.graph = null;
+                    if (std.mem.eql(u8, graph.project.path, path)) {
+                        freeGraph(self.allocator, graph);
+                        self.graph = null;
+                    }
                 }
                 self.selected_index = null;
+                self.freeSelectedNodeID();
+                if (self.graphs.items.len != 0) {
+                    _ = self.selectProject(self.graphs.items[0].project.path);
+                }
             }
         }
         self.rebuildAttention();
@@ -1130,6 +1136,24 @@ test "lifecycle callback receives an owned path before graph storage is freed" {
     try std.testing.expect(model.applyLifecycle(.close, model.graphs.items[0].project.path));
     try std.testing.expect(probe.called);
     try std.testing.expectEqualStrings("owned-path", probe.path[0..probe.path_len]);
+}
+
+test "closing selected A preserves project B and its active snapshot" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const a =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"a","project":{"path":"A","name":"A"},"nodes":[{"id":"a1","title":"A1","state":"running"}],"edges":[]}}}
+    ;
+    const b =
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"b","project":{"path":"B","name":"B"},"nodes":[{"id":"b1","title":"B1","state":"running"}],"edges":[]}}}
+    ;
+    _ = try model.updateFromFrame(a);
+    _ = try model.updateFromFrame(b);
+    try std.testing.expect(model.selectProject("A"));
+    try std.testing.expect(model.applyLifecycle(.close, "A"));
+    try std.testing.expectEqualStrings("B", model.selected_project_path.?);
+    try std.testing.expectEqualStrings("B", model.currentGraph().?.project.path);
+    try std.testing.expectEqualStrings("B", model.graph.?.project.path);
 }
 
 test "restore remains restoring until markRestored" {

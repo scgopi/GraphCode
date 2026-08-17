@@ -17,71 +17,35 @@ pub fn draw(
     fill(hdc, sidebar, Tokens.workspace_rail);
     drawText(hdc, allocator, "GRAPH", 18, Tokens.header_height + 20, 16, 0x00FFFFFF);
     drawText(hdc, allocator, "Projects", 18, Tokens.header_height + 54, 14, 0x00B8B8B8);
-    var y: i32 = Tokens.header_height + 78 - scroll_offset;
-    for (model.recent_projects.items) |project| {
-        drawText(hdc, allocator, project.name, 24, y, 13, 0x00E6E6E6);
-        y += 24;
-    }
-    if (model.graphs.items.len != 0) {
-        drawText(hdc, allocator, "Open", 18, y + 10, 14, 0x00B8B8B8);
-        for (model.graphs.items, 0..) |summary, graph_index| {
-            const project_top = sharedGraphTop(model, graph_index);
-            const selected = if (model.selected_project_path) |path|
-                std.mem.eql(u8, path, summary.project.path)
-            else false;
-            drawText(hdc, allocator, summary.project.name, 24, project_top, 13,
-                if (selected) 0x00FFFFFF else 0x00D0D0D0);
-            for (summary.nodes.items, 0..) |node, node_index| {
-                drawText(
-                    hdc,
-                    allocator,
-                    node.title,
-                    36,
-                    sharedLoopTop(model, graph_index, node_index),
-                    11,
-                    0x00E6E6E6,
-                );
-            }
-        }
-        if (inspection) |value| {
-            drawText(hdc, allocator, "Worktrees", 18, sharedWorktreeTop(model, 0) - 14, 11, 0x007A7A7A);
-            for (value.entries.items, 0..) |entry, index| {
-                drawText(hdc, allocator, entry.path, 24, sharedWorktreeTop(model, index), 11, 0x00E6E6E6);
-            }
-        }
-    } else if (model.graph) |graph| {
-        drawText(hdc, allocator, "Open", 18, y + 10, 14, 0x00B8B8B8);
-        drawText(hdc, allocator, graph.project.name, 24, y + 36, 13, 0x00FFFFFF);
-        y += 62;
-        drawText(hdc, allocator, "Loops", 18, y + 10, 11, 0x007A7A7A);
-        for (graph.nodes.items, 0..) |node, index| {
-            const row_y = layoutFor(model, inspection).loopTop(index) - scroll_offset;
-            drawText(hdc, allocator, node.title, 24, row_y, 11, 0x00E6E6E6);
-        }
-        y += @as(i32, @intCast(graph.nodes.items.len * 24));
-        drawText(hdc, allocator, "Worktrees", 18, y + 10, 11, 0x007A7A7A);
-        drawText(
-            hdc,
-            allocator,
-            "Inspect live repository hygiene",
-            24,
-            y + 30,
-            11,
-            0x00B8B8B8,
-        );
-        y += 54;
-        if (inspection) |value| {
-            drawText(hdc, allocator, "Live rows", 18, y + 10, 11, 0x007A7A7A);
-            y += 24;
-        for (value.entries.items, 0..) |entry, index| {
+    var rows = appendRows(allocator, model, inspection, scroll_offset) catch return;
+    defer rows.deinit(allocator);
+    for (rows.items) |row| {
+        switch (row.kind) {
+            .project => {
+                const project = model.recent_projects.items[row.index];
+                drawText(hdc, allocator, project.name, 24, row.top, 13, 0x00E6E6E6);
+            },
+            .overview => drawText(hdc, allocator, "Open", 18, row.top, 14, 0x00B8B8B8),
+            .open_project => if (row.project_path) |path| if (model.graphFor(path)) |summary| {
+                const selected = if (model.selected_project_path) |selected_path|
+                    std.mem.eql(u8, selected_path, path)
+                else false;
+                drawText(hdc, allocator, summary.project.name, 24, row.top, 13,
+                    if (selected) 0x00FFFFFF else 0x00D0D0D0);
+            },
+            .loop => if (row.project_path) |path| if (model.graphFor(path)) |summary| {
+                if (row.index < summary.nodes.items.len)
+                    drawText(hdc, allocator, summary.nodes.items[row.index].title, 36, row.top, 11, 0x00E6E6E6);
+            },
+            .worktree => if (inspection) |value| {
+                const entry = value.entries.items[row.index];
                 const selected = std.mem.eql(u8, entry.path, selected_worktree_path);
-            const row_y = layoutFor(model, inspection).worktreeTop(index) - scroll_offset;
-            if (selected and WorktreeStatus.decision(entry) == .reclaimable)
-                fill(hdc, rect(12, row_y - 3, Tokens.sidebar_width - 12, row_y + 25), 0x003A3A44);
-            drawText(hdc, allocator, entry.path, 24, row_y, 11, 0x00E6E6E6);
-            drawText(hdc, allocator, reason(entry), 24, row_y + 14, 10,
-                if (WorktreeStatus.decision(entry) == .reclaimable) 0x0078D7A8 else 0x00FFCD7A);
-        }
+                if (selected and WorktreeStatus.decision(entry) == .reclaimable)
+                    fill(hdc, rect(12, row.top - 3, Tokens.sidebar_width - 12, row.top + 25), 0x003A3A44);
+                drawText(hdc, allocator, entry.path, 24, row.top, 11, 0x00E6E6E6);
+                drawText(hdc, allocator, reason(entry), 24, row.top + 14, 10,
+                    if (WorktreeStatus.decision(entry) == .reclaimable) 0x0078D7A8 else 0x00FFCD7A);
+            },
         }
     }
 
@@ -383,6 +347,40 @@ test "multi-project rows share render and hit-test offsets with project identity
     try std.testing.expectEqualStrings("C:\\work\\local", local_row.project_path.?);
     try std.testing.expectEqualStrings("ssh://build/remote", remote_row.project_path.?);
     try std.testing.expectEqual(sharedWorktreeTop(&model, 0), sidebarSectionBottom(&model, null));
+}
+
+test "scroll-adjusted generated rows hit titles loops and worktrees" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    const frame =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"a","project":{"path":"A","name":"Alpha"},"nodes":[{"id":"a1","title":"Loop A","state":"running"}],"edges":[]}}}
+    ;
+    _ = try model.updateFromFrame(frame);
+    try model.recent_projects.append(.{
+        .path = try allocator.dupe(u8, "recent"),
+        .name = try allocator.dupe(u8, "Recent"),
+    });
+    var inspection = WorktreeStatus.Inspection{
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator),
+        .default_branch = try allocator.dupe(u8, "main"),
+        .project_path = try allocator.dupe(u8, "A"),
+    };
+    defer WorktreeStatus.deinitInspection(allocator, &inspection);
+    try inspection.entries.append(.{
+        .path = try allocator.dupe(u8, "wt"),
+        .branch = try allocator.dupe(u8, "main"),
+    });
+    const scroll: i32 = 37;
+    var rows = try appendRows(allocator, &model, &inspection, scroll);
+    defer rows.deinit(allocator);
+    for (rows.items) |row| {
+        const hit = rowAt(24, row.top + 4, &model, &inspection, scroll, 700) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(row.kind, hit.kind);
+        if (row.kind == .project or row.kind == .open_project or row.kind == .loop)
+            try std.testing.expectEqualStrings(row.project_path orelse "recent", hit.project_path orelse "recent");
+    }
 }
 
 test "sidebar scroll clamps overflow, shrink, and resize" {
