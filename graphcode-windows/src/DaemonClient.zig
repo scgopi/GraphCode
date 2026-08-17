@@ -26,6 +26,7 @@ pub const DaemonClient = struct {
     reconnect_requested: bool = false,
     retry_now: bool = false,
     outbound: [outbound_capacity][]u8 = undefined,
+    outbound_request_ids: [outbound_capacity]? [36]u8 = [_]? [36]u8{null} ** outbound_capacity,
     outbound_head: usize = 0,
     outbound_count: usize = 0,
     worker_busy: bool = false,
@@ -242,9 +243,15 @@ pub const DaemonClient = struct {
         self.sendCommand(command);
     }
 
-    pub fn sendOpenProject(self: *DaemonClient, path: []const u8) void {
-        const command = Wire.commandOpenProject(self.allocator, path) catch return;
-        self.sendCommand(command);
+    pub fn sendOpenProject(self: *DaemonClient, path: []const u8) ?[36]u8 {
+        const command = Wire.commandOpenProject(self.allocator, path) catch return null;
+        var request_id: [36]u8 = undefined;
+        self.mutex.lock();
+        makeRequestID(&request_id, self.next_request);
+        self.next_request +%= 1;
+        self.mutex.unlock();
+        self.sendCommandWithRequestID(command, request_id);
+        return request_id;
     }
 
     pub fn sendCloseProject(self: *DaemonClient, path: []const u8) void {
@@ -457,6 +464,14 @@ pub const DaemonClient = struct {
     }
 
     fn sendCommand(self: *DaemonClient, command_json: []const u8) void {
+        self.sendCommandInternal(command_json, null);
+    }
+
+    fn sendCommandWithRequestID(self: *DaemonClient, command_json: []const u8, request_id: [36]u8) void {
+        self.sendCommandInternal(command_json, request_id);
+    }
+
+    fn sendCommandInternal(self: *DaemonClient, command_json: []const u8, request_id: ?[36]u8) void {
         self.mutex.lock();
         if (self.stop_worker or self.outbound_count == outbound_capacity) {
             self.last_error = "daemon outbound queue is full";
@@ -466,6 +481,7 @@ pub const DaemonClient = struct {
         }
         const index = (self.outbound_head + self.outbound_count) % outbound_capacity;
         self.outbound[index] = @constCast(command_json);
+        self.outbound_request_ids[index] = request_id;
         self.outbound_count += 1;
         self.condition.signal();
         self.mutex.unlock();
@@ -535,9 +551,9 @@ pub const DaemonClient = struct {
             }
 
             if (self.pipe != c.INVALID_HANDLE_VALUE and self.state == .connected) {
-                if (self.dequeueOutbound()) |command| {
-                    self.sendCommandOnWorker(command);
-                    self.allocator.free(command);
+                if (self.dequeueOutbound()) |outbound| {
+                    self.sendCommandOnWorker(outbound.command, outbound.request_id);
+                    self.allocator.free(outbound.command);
                     self.mutex.lock();
                     self.worker_busy = false;
                     self.mutex.unlock();
@@ -561,22 +577,33 @@ pub const DaemonClient = struct {
         return self.stop_worker;
     }
 
-    fn dequeueOutbound(self: *DaemonClient) ?[]u8 {
+    const OutboundCommand = struct {
+        command: []u8,
+        request_id: ?[36]u8,
+    };
+
+    fn dequeueOutbound(self: *DaemonClient) ?OutboundCommand {
         self.mutex.lock();
         defer self.mutex.unlock();
         if (self.outbound_count == 0) return null;
         const command = self.outbound[self.outbound_head];
+        const request_id = self.outbound_request_ids[self.outbound_head];
+        self.outbound_request_ids[self.outbound_head] = null;
         self.outbound_head = (self.outbound_head + 1) % outbound_capacity;
         self.outbound_count -= 1;
         self.worker_busy = true;
-        return command;
+        return .{ .command = command, .request_id = request_id };
     }
 
-    fn sendCommandOnWorker(self: *DaemonClient, command_json: []const u8) void {
+    fn sendCommandOnWorker(self: *DaemonClient, command_json: []const u8, requested_id: ?[36]u8) void {
         const frame = if (self.mode == .v2) blk: {
             var request_id: [36]u8 = undefined;
-            makeRequestID(&request_id, self.next_request);
-            self.next_request +%= 1;
+            if (requested_id) |value| {
+                request_id = value;
+            } else {
+                makeRequestID(&request_id, self.next_request);
+                self.next_request +%= 1;
+            }
             if (!self.trackRequest(&request_id)) {
                 self.publishState(self.state, "too many outstanding daemon requests");
                 return;
@@ -838,6 +865,21 @@ test "subscription can be restored after a rejected project open" {
     try std.testing.expectEqualStrings("C:\\old-project", restored);
 }
 
+test "open project returns the request ID used by the v2 envelope" {
+    var client = try DaemonClient.init(std.testing.allocator);
+    defer client.deinit();
+    const request_id = client.sendOpenProject("C:\\work\\C").?;
+    try std.testing.expectEqual(@as(usize, 1), client.outbound_count);
+    try std.testing.expect(client.outbound_request_ids[client.outbound_head].? == request_id);
+    const frame = try Wire.v2Request(
+        std.testing.allocator,
+        &request_id,
+        client.outbound[client.outbound_head],
+    );
+    defer std.testing.allocator.free(frame);
+    try std.testing.expectEqualStrings(&request_id, Wire.responseRequestID(frame).?);
+}
+
     fn publishState(self: *DaemonClient, state: Wire.ConnectionState, message: []const u8) void {
         self.mutex.lock();
         self.state = state;
@@ -878,9 +920,11 @@ test "subscription can be restored after a rejected project open" {
 
     fn clearOutboundLocked(self: *DaemonClient) void {
         while (self.outbound_count != 0) {
-            const command = self.outbound[self.outbound_head];
+            const index = self.outbound_head;
+            const command = self.outbound[index];
             self.outbound_head = (self.outbound_head + 1) % outbound_capacity;
             self.outbound_count -= 1;
+            self.outbound_request_ids[index] = null;
             self.allocator.free(command);
         }
     }

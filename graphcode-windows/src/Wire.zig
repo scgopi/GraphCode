@@ -763,18 +763,8 @@ pub fn copyGraphChangedProjectPath(allocator: std.mem.Allocator, data: []const u
     return try decodeJsonString(allocator, raw);
 }
 
-pub fn copyErrorProjectPath(allocator: std.mem.Allocator, data: []const u8) !?[]u8 {
-    const raw = jsonString(data, "projectPath") orelse return null;
-    return try decodeJsonString(allocator, raw);
-}
-
 pub fn isCurrentGraphPath(pending: []const u8, accepted: []const u8, path: []const u8) bool {
     return pending.len == 0 or std.mem.eql(u8, path, pending) or std.mem.eql(u8, path, accepted);
-}
-
-pub fn isCurrentOpenError(pending: []const u8, error_path: ?[]const u8) bool {
-    if (error_path) |path| return std.mem.eql(u8, path, pending);
-    return true;
 }
 
 pub fn jsonNumber(data: []const u8, key: []const u8) ?u64 {
@@ -809,29 +799,34 @@ test "JSON strings round-trip control characters and unicode" {
     try std.testing.expectEqualStrings(value, decoded);
 }
 
-test "project and error paths are extracted for open ordering" {
+test "graph project paths are extracted for open ordering" {
     const graph =
         "{\"event\":{\"graphChanged\":{\"project\":{\"path\":\"C:\\\\work\\\\C\"}}}}";
-    const error_frame =
-        "{\"event\":{\"errorOccurred\":\"rejected\",\"projectPath\":\"C:\\\\work\\\\B\"}}";
     const graph_path = (try copyGraphChangedProjectPath(std.testing.allocator, graph)).?;
     defer std.testing.allocator.free(graph_path);
-    const error_path = (try copyErrorProjectPath(std.testing.allocator, error_frame)).?;
-    defer std.testing.allocator.free(error_path);
     try std.testing.expectEqualStrings("C:\\work\\C", graph_path);
-    try std.testing.expectEqualStrings("C:\\work\\B", error_path);
 }
 
-test "superseding open ordering keeps A, ignores late B, and rejects C" {
+test "superseding open ordering keeps A and ignores late B" {
     const accepted = "C:\\work\\A";
     const pending_b = "C:\\work\\B";
     const pending_c = "C:\\work\\C";
     try std.testing.expect(!isCurrentGraphPath(pending_c, accepted, pending_b));
     try std.testing.expect(isCurrentGraphPath(pending_c, accepted, pending_c));
-    try std.testing.expect(!isCurrentOpenError(pending_c, pending_b));
-    try std.testing.expect(isCurrentOpenError(pending_c, pending_c));
     const rollback_target = accepted;
     try std.testing.expectEqualStrings("C:\\work\\A", rollback_target);
+}
+
+test "real request IDs reject late B errors while C is current" {
+    const request_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const request_c = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const late_b =
+        "{\"version\":2,\"kind\":\"response\",\"requestID\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"event\":{\"errorOccurred\":\"B rejected\"}}";
+    const current_c =
+        "{\"version\":2,\"kind\":\"response\",\"requestID\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"event\":{\"errorOccurred\":\"C rejected\"}}";
+    try std.testing.expect(!std.mem.eql(u8, responseRequestID(late_b).?, request_c));
+    try std.testing.expectEqualStrings(request_c, responseRequestID(current_c).?);
+    try std.testing.expectEqualStrings(request_b, responseRequestID(late_b).?);
 }
 
 test "frame limits follow protocol mode" {

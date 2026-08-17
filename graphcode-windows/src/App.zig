@@ -46,6 +46,7 @@ pub const App = struct {
     pending_previous_subscription: []u8 = &.{},
     open_generation: u64 = 0,
     pending_open_generation: u64 = 0,
+    pending_open_request_id: ?[36]u8 = null,
     last_connection_state: Wire.ConnectionState = .disconnected,
     last_project_opened: []const u8 = "",
     accepted_subscription: []const u8 = "",
@@ -214,6 +215,7 @@ pub const App = struct {
                         self.allocator.free(self.pending_rebind_path);
                         self.pending_rebind_path = &.{};
                         self.pending_open_generation = 0;
+                        self.pending_open_request_id = null;
                         if (self.pending_previous_subscription.len != 0) {
                             self.allocator.free(self.pending_previous_subscription);
                             self.pending_previous_subscription = &.{};
@@ -245,9 +247,9 @@ pub const App = struct {
             },
             .error_occurred => {
                 if (self.pending_rebind_path.len != 0) {
-                    const error_path = Wire.copyErrorProjectPath(self.allocator, frame) catch null;
-                    defer if (error_path) |value| self.allocator.free(value);
-                    if (!Wire.isCurrentOpenError(self.pending_rebind_path, error_path)) return;
+                    const request_id = self.pending_open_request_id orelse return;
+                    const response_id = Wire.responseRequestID(frame) orelse return;
+                    if (!std.mem.eql(u8, response_id, &request_id)) return;
                     self.client.setSubscription(self.pending_previous_subscription);
                     if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
                     self.last_project_opened = self.allocator.dupe(u8, self.pending_previous_subscription) catch &.{};
@@ -256,6 +258,7 @@ pub const App = struct {
                     self.allocator.free(self.pending_rebind_path);
                     self.pending_rebind_path = &.{};
                     self.pending_open_generation = 0;
+                    self.pending_open_request_id = null;
                     if (self.pending_previous_subscription.len != 0) {
                         self.allocator.free(self.pending_previous_subscription);
                         self.pending_previous_subscription = &.{};
@@ -329,6 +332,7 @@ pub const App = struct {
         self.pending_previous_subscription = previous;
         self.open_generation +%= 1;
         self.pending_open_generation = self.open_generation;
+        self.pending_open_request_id = null;
         self.client.setSubscription(path);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
         self.last_project_opened = opened;
@@ -336,7 +340,7 @@ pub const App = struct {
         self.pending_rebind_path = pending;
         self.open_project_pending = true;
         if (self.client.connectionState() == .connected) {
-            self.client.sendOpenProject(path);
+            self.pending_open_request_id = self.client.sendOpenProject(path);
             self.open_project_pending = false;
         }
     }
@@ -1017,7 +1021,7 @@ fn onWindowMessage(
                         app.pending_rebind_path
                     else
                         app.last_project_opened;
-                    app.client.sendOpenProject(pending);
+                    app.pending_open_request_id = app.client.sendOpenProject(pending);
                     app.open_project_pending = false;
                 } else if (!app.sync_requested) {
                     app.sync_requested = true;
