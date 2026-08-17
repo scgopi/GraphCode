@@ -25,6 +25,17 @@ public static class GraphCodeTrayLiveNative {
   }
   [StructLayout(LayoutKind.Sequential)]
   public struct Rect { public int left, top, right, bottom; }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct MouseInput {
+    public int dx, dy;
+    public uint mouseData, flags, time;
+    public UIntPtr extraInfo;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct Input {
+    public uint type;
+    public MouseInput mouse;
+  }
   [DllImport("user32.dll")]
   public static extern bool IsWindowVisible(IntPtr hwnd);
   [DllImport("user32.dll")]
@@ -41,6 +52,8 @@ public static class GraphCodeTrayLiveNative {
   public static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
   [DllImport("user32.dll")]
   public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+  [DllImport("user32.dll")]
+  public static extern uint SendInput(uint count, Input[] inputs, int size);
   [DllImport("user32.dll")]
   public static extern IntPtr GetMenu(IntPtr hwnd);
   [DllImport("user32.dll")]
@@ -121,12 +134,23 @@ function Invoke-MouseClick([GraphCodeTrayLiveNative+Rect] $rect, [bool] $double 
   if ($script:trayWindow -ne [IntPtr]::Zero) {
     [void][GraphCodeTrayLiveNative]::SetForegroundWindow($script:trayWindow)
   }
-  [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
-  [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+  Invoke-PhysicalMouseButton $script:MOUSEEVENTF_LEFTDOWN
+  Invoke-PhysicalMouseButton $script:MOUSEEVENTF_LEFTUP
   if ($double) {
-    Start-Sleep -Milliseconds 80
-    [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
-    [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 120
+    Invoke-PhysicalMouseButton $script:MOUSEEVENTF_LEFTDOWN
+    Invoke-PhysicalMouseButton $script:MOUSEEVENTF_LEFTUP
+  }
+}
+
+function Invoke-PhysicalMouseButton([uint32] $flags) {
+  $input = [GraphCodeTrayLiveNative+Input]::new()
+  $input.type = 0
+  $input.mouse.flags = $flags
+  $input.mouse.extraInfo = [UIntPtr]::Zero
+  $inputs = [GraphCodeTrayLiveNative+Input[]]@($input)
+  if ([GraphCodeTrayLiveNative]::SendInput(1, $inputs, [Runtime.InteropServices.Marshal]::SizeOf($input)) -ne 1) {
+    throw "SendInput failed for tray mouse event"
   }
 }
 
@@ -136,8 +160,8 @@ function Invoke-TrayContextMenu([GraphCodeTrayLiveNative+Rect] $rect, [ValidateS
   [void][GraphCodeTrayLiveNative]::SetCursorPos($x, $y)
   [void][GraphCodeTrayLiveNative]::SetForegroundWindow($script:trayWindow)
   Start-Sleep -Milliseconds 100
-  [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, [UIntPtr]::Zero)
-  [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_RIGHTUP, 0, 0, 0, [UIntPtr]::Zero)
+  Invoke-PhysicalMouseButton $script:MOUSEEVENTF_RIGHTDOWN
+  Invoke-PhysicalMouseButton $script:MOUSEEVENTF_RIGHTUP
   $menu = [IntPtr]::Zero
   for ($i = 0; $i -lt 30 -and $menu -eq [IntPtr]::Zero; $i++) {
     Start-Sleep -Milliseconds 50
@@ -162,8 +186,8 @@ function Invoke-TrayContextMenu([GraphCodeTrayLiveNative+Rect] $rect, [ValidateS
   $itemX = [int](($itemRect.left + $itemRect.right) / 2)
   $itemY = [int](($itemRect.top + $itemRect.bottom) / 2)
   [void][GraphCodeTrayLiveNative]::SetCursorPos($itemX, $itemY)
-  [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
-  [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+  Invoke-PhysicalMouseButton $script:MOUSEEVENTF_LEFTDOWN
+  Invoke-PhysicalMouseButton $script:MOUSEEVENTF_LEFTUP
 }
 
 function Invoke-AltF4 {
