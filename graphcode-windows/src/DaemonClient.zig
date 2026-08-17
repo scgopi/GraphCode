@@ -932,7 +932,11 @@ test "open project returns the request ID used by the v2 envelope" {
     defer client.deinit();
     const request_id = client.sendOpenProject("C:\\work\\C").?;
     try std.testing.expectEqual(@as(usize, 1), client.outbound_count);
-    try std.testing.expect(client.outbound_request_ids[client.outbound_head].? == request_id);
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &client.outbound_request_ids[client.outbound_head].?,
+        &request_id,
+    ));
     const frame = try Wire.v2Request(
         std.testing.allocator,
         &request_id,

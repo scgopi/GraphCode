@@ -481,7 +481,7 @@ pub const App = struct {
     }
 
     fn clearNodeSelection(self: *App) void {
-        self.model.selected_node = null;
+        self.model.selected_index = null;
         if (self.selected_node_id.len != 0) {
             self.allocator.free(self.selected_node_id);
             self.selected_node_id = &.{};
@@ -524,7 +524,7 @@ pub const App = struct {
         const graph = self.model.graph orelse return false;
         if (index >= graph.nodes.items.len) return false;
         if (!self.replaceSelectionID(&self.selected_node_id, graph.nodes.items[index].id)) return false;
-        self.model.selected_node = index;
+        self.model.selected_index = index;
         self.selection_initialized = true;
         self.clearEdgeSelection();
         return true;
@@ -561,12 +561,12 @@ pub const App = struct {
             }
         }
         if (self.selected_node_id.len != 0) {
-            self.model.selected_node = self.model.findNodeIndex(self.selected_node_id);
-            if (self.model.selected_node == null) {
+            self.model.selected_index = self.model.findNodeIndex(self.selected_node_id);
+            if (self.model.selected_index == null) {
                 self.clearNodeSelection();
             }
         } else {
-            self.model.selected_node = null;
+            self.model.selected_index = null;
         }
         if (self.selected_edge_id.len != 0) {
             self.canvas.selected_edge = self.model.findEdgeIndex(self.selected_edge_id);
@@ -587,7 +587,7 @@ pub const App = struct {
             self.clearNodeSelection();
             return;
         }
-        const next = if (self.model.selected_node) |index|
+        const next = if (self.model.selected_index) |index|
             (index + 1) % graph.nodes.items.len
         else
             0;
@@ -596,7 +596,7 @@ pub const App = struct {
 
     fn selectNextAttention(self: *App) void {
         self.model.selectNextAttention();
-        if (self.model.selected_node) |index| _ = self.selectNodeIndex(index);
+        if (self.model.selected_index) |index| _ = self.selectNodeIndex(index);
     }
 
     fn selectedEdgeIndex(self: *const App) ?usize {
@@ -607,10 +607,6 @@ pub const App = struct {
     fn createNode(self: *App) void {
         const path = self.currentProject() orelse return;
         var draft = NativeForms.node(self.window.hwnd, self.allocator, .{ .title = "" }) catch {
-        const current_path = self.currentProject() orelse return;
-        const path = self.allocator.dupe(u8, current_path) catch return;
-        defer self.allocator.free(path);
-        const draft = NativeForms.node(self.window.hwnd, self.allocator, .{ .title = "" }) catch {
             self.setStatus("Unable to open node form");
             return;
         } orelse return;
@@ -646,50 +642,15 @@ pub const App = struct {
         defer update.deinit(self.allocator);
         const path = self.currentProject() orelse return;
         self.client.sendUpdateNodeForm(path, node.id, update);
-        const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
-        defer self.allocator.free(project_path);
-        const node_id = self.allocator.dupe(u8, node.id) catch return;
-        defer self.allocator.free(node_id);
-        const initial_title = self.allocator.dupe(u8, node.title) catch return;
-        defer self.allocator.free(initial_title);
-        const initial_loop_type = self.allocator.dupe(u8, node.loop_type) catch return;
-        defer self.allocator.free(initial_loop_type);
-        const draft = NativeForms.node(self.window.hwnd, self.allocator, .{
-            .title = initial_title,
-            .loop_type = initial_loop_type,
-        }) catch {
-            self.setStatus("Unable to open node form");
-            return;
-        } orelse return;
-        defer self.allocator.free(draft.title);
-        defer self.allocator.free(draft.loop_type);
-        Forms.validateNode(draft) catch {
-            self.setStatus("Invalid node form");
-            return;
-        };
-        const updated_graph = self.model.graph orelse return;
-        const updated_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, node_id) orelse {
-            self.setStatus("Loop changed while editing");
-            return;
-        };
-        self.client.sendRenameNode(project_path, updated_graph.nodes.items[updated_index].id, draft.title);
     }
 
     fn createEdge(self: *App) void {
         const graph = self.model.graph orelse return;
         if (graph.nodes.items.len < 2) return;
+        const path = self.currentProject() orelse return;
         var draft = NativeForms.edge(self.window.hwnd, self.allocator, .{
             .from = graph.nodes.items[0].id,
             .to = graph.nodes.items[1].id,
-        const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
-        defer self.allocator.free(project_path);
-        const from_id = self.allocator.dupe(u8, graph.nodes.items[0].id) catch return;
-        defer self.allocator.free(from_id);
-        const to_id = self.allocator.dupe(u8, graph.nodes.items[1].id) catch return;
-        defer self.allocator.free(to_id);
-        const draft = NativeForms.edge(self.window.hwnd, self.allocator, .{
-            .from = from_id,
-            .to = to_id,
             .kind = "handoff",
         }) catch {
             self.setStatus("Unable to open edge form");
@@ -700,18 +661,7 @@ pub const App = struct {
             self.setStatus("Invalid edge form");
             return;
         };
-        const path = self.currentProject() orelse return;
         self.client.sendCreateEdgeDraft(path, draft);
-        const updated_graph = self.model.graph orelse return;
-        const from_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, draft.from) orelse {
-            self.setStatus("Source loop changed while creating edge");
-            return;
-        };
-        const to_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, draft.to) orelse {
-            self.setStatus("Target loop changed while creating edge");
-            return;
-        };
-        self.client.sendCreateEdge(project_path, updated_graph.nodes.items[from_index].id, updated_graph.nodes.items[to_index].id, draft.kind);
     }
 
     fn createEdgeBetween(self: *App, source: usize, target: usize) void {
@@ -832,7 +782,7 @@ pub const App = struct {
 
     fn deleteSelectedNode(self: *App) void {
         const graph = self.model.graph orelse return;
-        const index = self.model.selected_node orelse return;
+        const index = self.model.selected_index orelse return;
         if (index >= graph.nodes.items.len) return;
         const path = self.allocator.dupe(u8, graph.project.path) catch return;
         defer self.allocator.free(path);
@@ -1177,8 +1127,8 @@ pub const App = struct {
             .select_previous => {
                 const graph = self.model.graph orelse return;
                 if (graph.nodes.items.len == 0) return;
-                const current = self.model.selected_node orelse 0;
-                self.model.selected_node = if (current == 0) graph.nodes.items.len - 1 else current - 1;
+                const current = self.model.selected_index orelse 0;
+                self.model.selected_index = if (current == 0) graph.nodes.items.len - 1 else current - 1;
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .new_tab => if (self.workspace) |workspace| workspace.newTab() catch {
@@ -1407,6 +1357,18 @@ fn onWindowMessage(
             return true;
         },
         c.WM_COMMAND => {
+            const tray_command = @as(c.WPARAM, @intCast(@as(usize, @bitCast(wparam)) & 0xffff));
+            if (tray_command == TrayModule.command_open) {
+                restoreShellWindow(hwnd);
+                result.* = 0;
+                return true;
+            }
+            if (tray_command == TrayModule.command_exit) {
+                app.exit_requested = true;
+                _ = c.DestroyWindow(hwnd);
+                result.* = 0;
+                return true;
+            }
             const id: usize = @intCast(@as(u16, @truncate(wparam)));
             if (id == MainWindow.empty_open_folder_id) {
                 app.openFolder();
@@ -1452,20 +1414,6 @@ fn onWindowMessage(
             _ = c.EndPaint(hwnd, &paint);
             result.* = 0;
             return true;
-        },
-        c.WM_COMMAND => {
-            const command = @as(c.WPARAM, @intCast(@as(usize, @bitCast(wparam)) & 0xffff));
-            if (command == TrayModule.command_open) {
-                restoreShellWindow(hwnd);
-                result.* = 0;
-                return true;
-            }
-            if (command == TrayModule.command_exit) {
-                app.exit_requested = true;
-                _ = c.DestroyWindow(hwnd);
-                result.* = 0;
-                return true;
-            }
         },
         c.WM_SIZE => {
             app.layoutWorkspace();

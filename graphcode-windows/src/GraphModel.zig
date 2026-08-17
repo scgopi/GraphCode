@@ -818,6 +818,7 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
 
 fn cloneEdge(allocator: std.mem.Allocator, edge: Edge) !Edge {
     return .{
+        .id = try allocator.dupe(u8, edge.id),
         .from = try allocator.dupe(u8, edge.from),
         .to = try allocator.dupe(u8, edge.to),
         .kind = try allocator.dupe(u8, edge.kind),
@@ -829,6 +830,7 @@ fn cloneEdge(allocator: std.mem.Allocator, edge: Edge) !Edge {
 }
 
 fn freeEdge(allocator: std.mem.Allocator, edge: Edge) void {
+    allocator.free(edge.id);
     allocator.free(edge.from);
     allocator.free(edge.to);
     allocator.free(edge.kind);

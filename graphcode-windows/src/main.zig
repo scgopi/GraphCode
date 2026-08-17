@@ -18,15 +18,12 @@ pub fn main() !void {
     try app.run();
 }
 
-pub fn main() !void {
-}
-
 pub export fn WinMain(
     _: c.HINSTANCE,
     _: c.HINSTANCE,
     _: [*:0]u16,
     _: c.INT,
 ) callconv(.winapi) c.INT {
-    run() catch return 1;
+    main() catch return 1;
     return 0;
 }
