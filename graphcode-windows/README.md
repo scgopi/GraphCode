@@ -46,5 +46,12 @@ re-registers after `TaskbarCreated`. `TrayLive.Tests.ps1` retains physical
 its test-only registered-message hook relays Open and context events back
 through and observes the production notification callback. This avoids treating
 injected screen coordinates as a reliable substitute for overflow-tray
-activation; the context callback runs the real `TrackPopupMenu` path before the
-test dispatches its production Exit command.
+activation. The context test locates the live popup and its actual `Exit` item,
+verifies the menu label and command ID, and activates it with physical input
+rather than injecting a command message.
+
+When another shell owns the named startup reservation, daemon supervision opens
+it for synchronization and waits only for the bounded reservation interval.
+After release it checks the endpoint and daemon lifetime lock again, so a
+failed competitor is replaced by an owned daemon while a successful one is
+never duplicated.

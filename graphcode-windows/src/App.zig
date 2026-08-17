@@ -675,6 +675,10 @@ fn onWindowMessage(
         TrayModule.test_hook_message != 0 and
         message == TrayModule.test_hook_message)
     {
+        if (wparam == TrayModule.test_hook_menu) {
+            result.* = if (app.tray.menu) |menu| @intCast(@intFromPtr(menu)) else 0;
+            return true;
+        }
         const event: c.UINT = switch (wparam) {
             TrayModule.test_hook_open => @intCast(c.WM_LBUTTONDBLCLK),
             TrayModule.test_hook_context => @intCast(c.WM_CONTEXTMENU),
@@ -683,13 +687,21 @@ fn onWindowMessage(
                 return true;
             },
         };
-        _ = c.PostMessageW(hwnd, TrayModule.notify_message, 0, TrayModule.testNotificationLParam(event));
+        _ = c.PostMessageW(
+            hwnd,
+            TrayModule.notify_message,
+            TrayModule.test_callback_wparam,
+            TrayModule.testNotificationLParam(event),
+        );
         result.* = 0;
         return true;
     }
     if (message == TrayModule.notify_message and TrayModule.callbackTargetsIcon(lparam)) {
         const event = TrayModule.notificationEvent(lparam);
-        app.tray.observeTestCallback(event);
+        app.tray.observeTestCallback(
+            event,
+            app.tray_test_hook_enabled and wparam == TrayModule.test_callback_wparam,
+        );
         if (event == c.WM_LBUTTONDBLCLK) {
             restoreShellWindow(hwnd);
         } else if (event == c.WM_RBUTTONUP or event == c.WM_CONTEXTMENU) {

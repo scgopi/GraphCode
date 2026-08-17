@@ -5,11 +5,13 @@ pub const command_open: c.WPARAM = 0x5001;
 pub const command_exit: c.WPARAM = 0x5002;
 pub const icon_id: c.UINT = 1;
 pub const notify_message: c.UINT = c.WM_APP + 77;
+pub const test_callback_wparam: c.WPARAM = 0xC0D1;
 pub const test_hook_open: c.WPARAM = 1;
 pub const test_hook_context: c.WPARAM = 2;
+pub const test_hook_menu: c.WPARAM = 3;
 pub var taskbar_created: c.UINT = 0;
 pub var test_hook_message: c.UINT = 0;
-const test_callback_property = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.TrayCallback");
+const test_callback_ack_property = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.TrayTestCallback");
 
 pub const Tray = struct {
     hwnd: c.HWND = null,
@@ -67,7 +69,7 @@ pub const Tray = struct {
         if (self.menu != null) _ = c.DestroyMenu(self.menu);
         self.menu = null;
         if (self.test_hook_enabled) {
-            _ = c.RemovePropW(self.hwnd, test_callback_property.ptr);
+            _ = c.RemovePropW(self.hwnd, test_callback_ack_property.ptr);
         }
     }
 
@@ -75,14 +77,22 @@ pub const Tray = struct {
         if (self.menu == null) return;
         var point: c.POINT = undefined;
         _ = c.GetCursorPos(&point);
-        _ = c.SetForegroundWindow(self.hwnd);
-        _ = c.TrackPopupMenu(self.menu, c.TPM_RIGHTALIGN | c.TPM_BOTTOMALIGN, point.x, point.y, 0, self.hwnd, null);
+        foregroundWindow(self.hwnd);
+        _ = c.TrackPopupMenu(
+            self.menu,
+            c.TPM_RIGHTALIGN | c.TPM_BOTTOMALIGN | c.TPM_RIGHTBUTTON,
+            point.x,
+            point.y,
+            0,
+            self.hwnd,
+            null,
+        );
         _ = c.PostMessageW(self.hwnd, c.WM_NULL, 0, 0);
     }
 
-    pub fn observeTestCallback(self: *Tray, event: c.UINT) void {
-        if (self.test_hook_enabled) {
-            _ = c.SetPropW(self.hwnd, test_callback_property.ptr, @ptrFromInt(@as(usize, event)));
+    pub fn observeTestCallback(self: *Tray, event: c.UINT, test_callback: bool) void {
+        if (self.test_hook_enabled and test_callback) {
+            _ = c.SetPropW(self.hwnd, test_callback_ack_property.ptr, @ptrFromInt(@as(usize, event)));
         }
     }
 };
@@ -113,4 +123,22 @@ fn registerMessages() void {
             std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.TrayTestHook").ptr,
         );
     }
+}
+
+fn foregroundWindow(hwnd: c.HWND) void {
+    if (c.SetForegroundWindow(hwnd) == 0) {
+        const foreground = c.GetForegroundWindow();
+        if (foreground != null and foreground != hwnd) {
+            const current_thread = c.GetCurrentThreadId();
+            const foreground_thread = c.GetWindowThreadProcessId(foreground, null);
+            if (foreground_thread != 0 and foreground_thread != current_thread and
+                c.AttachThreadInput(current_thread, foreground_thread, 1) != 0)
+            {
+                defer _ = c.AttachThreadInput(current_thread, foreground_thread, 0);
+                _ = c.BringWindowToTop(hwnd);
+                _ = c.SetForegroundWindow(hwnd);
+            }
+        }
+    }
+    _ = c.SetFocus(hwnd);
 }

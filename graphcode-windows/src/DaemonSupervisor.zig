@@ -2,6 +2,8 @@ const std = @import("std");
 const c = @import("Win32.zig").c;
 
 pub const Probe = enum { available, busy, missing, unknown };
+const startup_reservation_timeout_ms: i64 = 5_000;
+const ReservationWait = enum { acquired, missing, timed_out };
 
 pub const Supervisor = struct {
     allocator: std.mem.Allocator,
@@ -13,32 +15,15 @@ pub const Supervisor = struct {
     failure: []u8 = &.{},
 
     pub fn start(self: *Supervisor, endpoint: []const u8, lock_name: []const u8) void {
-        self.acquireStartupReservation(lock_name) catch |err| {
-            switch (err) {
-                error.ReservationBusy => {
-                    const deadline = std.time.milliTimestamp() + 5_000;
-                    while (std.time.milliTimestamp() < deadline) {
-                        if (probeEndpoint(endpoint) == .available) return;
-                        std.Thread.sleep(100 * std.time.ns_per_ms);
-                    }
-                    return;
-                },
-                else => {
-                    self.setFailure("Unable to reserve daemon startup");
-                    return;
-                },
-            }
+        const acquired = self.acquireStartupReservationBounded(lock_name) catch {
+            self.setFailure("Unable to reserve daemon startup");
+            return;
         };
-        defer self.releaseStartupReservation();
-
-        if (startupEventExists(lock_name)) {
-            const deadline = std.time.milliTimestamp() + 5_000;
-            while (std.time.milliTimestamp() < deadline) {
-                if (probeEndpoint(endpoint) == .available) return;
-                std.Thread.sleep(100 * std.time.ns_per_ms);
-            }
+        if (!acquired) {
+            self.setFailure("Timed out waiting for daemon startup reservation");
             return;
         }
+        defer self.releaseStartupReservation();
 
         const deadline = std.time.milliTimestamp() + 5_000;
         const grace_deadline = std.time.milliTimestamp() + 1_000;
@@ -167,6 +152,56 @@ pub const Supervisor = struct {
         }
     }
 
+    fn acquireStartupReservationBounded(self: *Supervisor, lock_name: []const u8) !bool {
+        const deadline = std.time.milliTimestamp() + startup_reservation_timeout_ms;
+        while (std.time.milliTimestamp() < deadline) {
+            self.acquireStartupReservation(lock_name) catch |err| switch (err) {
+                error.ReservationBusy => {
+                    const remaining = deadline - std.time.milliTimestamp();
+                    if (remaining <= 0) return false;
+                    switch (try self.waitForStartupReservation(lock_name, @intCast(remaining))) {
+                        .acquired => return true,
+                        .missing => continue,
+                        .timed_out => return false,
+                    }
+                },
+                else => return err,
+            };
+            return true;
+        }
+        return false;
+    }
+
+    fn waitForStartupReservation(
+        self: *Supervisor,
+        lock_name: []const u8,
+        timeout_ms: c.DWORD,
+    ) !ReservationWait {
+        const name = try std.fmt.allocPrint(self.allocator, "{s}-startup", .{lock_name});
+        defer self.allocator.free(name);
+        const wide = try utf16(self.allocator, name);
+        defer self.allocator.free(wide);
+        const handle = c.OpenMutexW(c.SYNCHRONIZE | c.MUTEX_MODIFY_STATE, 0, wide.ptr);
+        if (handle == null) {
+            if (c.GetLastError() == c.ERROR_FILE_NOT_FOUND) return .missing;
+            return error.ReservationOpenFailed;
+        }
+        switch (c.WaitForSingleObject(handle, timeout_ms)) {
+            c.WAIT_OBJECT_0, c.WAIT_ABANDONED => {
+                self.startup_reservation = handle;
+                return .acquired;
+            },
+            c.WAIT_TIMEOUT => {
+                _ = c.CloseHandle(handle);
+                return .timed_out;
+            },
+            else => {
+                _ = c.CloseHandle(handle);
+                return error.ReservationWaitFailed;
+            },
+        }
+    }
+
     fn releaseStartupReservation(self: *Supervisor) void {
         if (self.startup_reservation != null) {
             _ = c.ReleaseMutex(self.startup_reservation);
@@ -245,17 +280,6 @@ fn daemonLockExists(name: []const u8) bool {
     return true;
 }
 
-fn startupEventExists(lock_name: []const u8) bool {
-    const name = std.fmt.allocPrint(std.heap.page_allocator, "{s}-startup-ready", .{lock_name}) catch return false;
-    defer std.heap.page_allocator.free(name);
-    const wide = utf16(std.heap.page_allocator, name) catch return false;
-    defer std.heap.page_allocator.free(wide);
-    const handle = c.OpenEventW(c.SYNCHRONIZE, 0, wide.ptr);
-    if (handle == null) return false;
-    _ = c.CloseHandle(handle);
-    return true;
-}
-
 fn siblingDaemon(allocator: std.mem.Allocator) ![]u8 {
     const self_path = try std.fs.selfExePathAlloc(allocator);
     defer allocator.free(self_path);
@@ -279,4 +303,47 @@ test "daemon supervisor preserves Unicode sibling paths" {
     const path = try siblingDaemon(std.testing.allocator);
     defer std.testing.allocator.free(path);
     try std.testing.expect(std.mem.endsWith(u8, path, "graphcoded.exe"));
+}
+
+test "failed startup competitor releases reservation for owned recovery" {
+    const suffix = std.time.nanoTimestamp();
+    const lock_name = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "Local\\graphcode-supervisor-test-{d}",
+        .{suffix},
+    );
+    defer std.testing.allocator.free(lock_name);
+    const endpoint = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "\\\\.\\pipe\\graphcode-supervisor-test-{d}",
+        .{suffix},
+    );
+    defer std.testing.allocator.free(endpoint);
+    const reservation_name = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{s}-startup",
+        .{lock_name},
+    );
+    defer std.testing.allocator.free(reservation_name);
+    const wide = try utf16(std.testing.allocator, reservation_name);
+    defer std.testing.allocator.free(wide);
+    const competitor = c.CreateMutexW(null, 1, wide.ptr);
+    try std.testing.expect(competitor != null);
+
+    const ReleaseCompetitor = struct {
+        fn run(handle: c.HANDLE) void {
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+            _ = c.ReleaseMutex(handle);
+            _ = c.CloseHandle(handle);
+        }
+    };
+    var thread = try std.Thread.spawn(.{}, ReleaseCompetitor.run, .{competitor});
+    defer thread.join();
+
+    var supervisor = Supervisor{ .allocator = std.testing.allocator };
+    try std.testing.expect(try supervisor.acquireStartupReservationBounded(lock_name));
+    defer supervisor.releaseStartupReservation();
+    try std.testing.expect(supervisor.startup_reservation != null);
+    try std.testing.expectEqual(Probe.missing, probeEndpoint(endpoint));
+    try std.testing.expect(!daemonLockExists(lock_name));
 }

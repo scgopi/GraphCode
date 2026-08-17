@@ -31,6 +31,14 @@ if ($supervisor -notmatch "startup-ready" -or
     $supervisor -notmatch "SetEvent") {
   throw "daemon startup reservation protocol is missing"
 }
+if ($supervisor -notmatch "OpenMutexW\(c\.SYNCHRONIZE" -or
+    $supervisor -notmatch "WaitForSingleObject\(handle, timeout_ms\)" -or
+    $supervisor -notmatch "acquireStartupReservationBounded") {
+  throw "daemon startup reservation waiting and recovery are missing"
+}
+if ($supervisor -notmatch "failed startup competitor releases reservation for owned recovery") {
+  throw "failed startup competitor recovery coverage is missing"
+}
 if ($supervisor -notmatch "SetEvent" -or $supervisor -notmatch "forceStop") {
   throw "graceful daemon shutdown fallback is missing"
 }
@@ -47,6 +55,7 @@ if ($tray -notmatch "NIM_SETVERSION" -or
     $tray -notmatch "NOTIFYICON_VERSION_4" -or
     $tray -notmatch "icon_id") { throw "tray callback identity is incomplete" }
 if ($tray -notmatch "TrackPopupMenu" -or
+    $tray -notmatch "TPM_RIGHTBUTTON" -or
     $tray -notmatch "observeTestCallback" -or
     $app -notmatch "observeTestCallback[\s\S]*?showMenu") {
   throw "tray test observability must use the production callback and popup menu"
@@ -56,6 +65,14 @@ if ($app -notmatch "test_hook_message[\s\S]*?PostMessageW[\s\S]*?notify_message"
 }
 if ($app -notmatch "callbackTargetsIcon" -or
     $app -notmatch "restoreShellWindow") { throw "tray callback routing is incomplete" }
+$live = Get-Content (Join-Path $root "Tools\windows\Tests\TrayLive.Tests.ps1") -Raw
+if ($live -match "WM_COMMAND" -or
+    $live -notmatch "GetMenuString" -or
+    $live -notmatch "GetMenuItemID" -or
+    $live -notmatch "GetMenuItemRect" -or
+    $live -notmatch "SendInput") {
+  throw "tray live context Exit must validate and activate the actual popup item without WM_COMMAND"
+}
 $mainWindow = Get-Content (Join-Path $root "graphcode-windows\src\MainWindow.zig") -Raw
 if ($mainWindow -notmatch "AllowSetForegroundWindow") {
   throw "single-instance restore must grant the existing shell foreground permission"
