@@ -14,6 +14,10 @@ pub const Action = enum {
     create_edge,
     jump_next,
     settings,
+    product_settings,
+    clone_repository,
+    remote_repository,
+    onboarding,
     cycle_attention,
     inspect_worktrees,
     reclaim_worktrees,
@@ -43,7 +47,11 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (!ctrl and key == 0x71) return .rename_selected;
     if (!ctrl and key == 0x2E) return .delete_selected;
     if (ctrl and key == 'J') return .jump_next;
-    if (ctrl and key == 0xBC) return .settings;
+    if (ctrl and key == ',') return .settings;
+    if (ctrl and shift and key == ',') return .product_settings;
+    if (ctrl and shift and key == 'C') return .clone_repository;
+    if (ctrl and shift and key == 'R') return .remote_repository;
+    if (key == 0x70) return .onboarding;
     if (ctrl and key == 0x09) return .cycle_attention;
     if (ctrl and key == 'W' and shift) return .inspect_worktrees;
     if (!ctrl and key == 0x28) return .worktree_next;
@@ -76,6 +84,10 @@ pub fn commandText(allocator: std.mem.Allocator, action: Action) ![]u8 {
         .create_edge => allocator.dupe(u8, "Create edge"),
         .jump_next => allocator.dupe(u8, "Jump to next node"),
         .settings => allocator.dupe(u8, "Settings"),
+        .product_settings => allocator.dupe(u8, "Product settings"),
+        .clone_repository => allocator.dupe(u8, "Clone HTTPS repository"),
+        .remote_repository => allocator.dupe(u8, "Add SSH repository"),
+        .onboarding => allocator.dupe(u8, "GraphCode onboarding"),
         .cycle_attention => allocator.dupe(u8, "Review next loop needing you"),
         .inspect_worktrees => allocator.dupe(u8, "Inspect worktrees"),
         .reclaim_worktrees => allocator.dupe(u8, "Reclaim selected worktrees"),

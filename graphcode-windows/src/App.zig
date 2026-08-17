@@ -16,6 +16,9 @@ const WorktreeStatus = @import("WorktreeStatus.zig");
 const TrayModule = @import("Tray.zig");
 const Tray = TrayModule.Tray;
 const DaemonSupervisor = @import("DaemonSupervisor.zig").Supervisor;
+const ProductSettings = @import("WindowsProductSettings.zig");
+const RepositoryDialogs = @import("WindowsRepositoryDialogs.zig");
+const Onboarding = @import("WindowsOnboarding.zig");
 const c = @import("Win32.zig").c;
 
 const title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Windows");
@@ -82,6 +85,8 @@ pub const App = struct {
     smoke_workspace_restart_observed: bool = false,
     empty_open_folder_button: c.HWND = null,
     empty_global_overview_button: c.HWND = null,
+    product_settings_store: ?ProductSettings.Store = null,
+    onboarding_store: ?Onboarding.Store = null,
     smoke_restart_index: ?usize = null,
     smoke_restart_session: []const u8 = &.{},
 
@@ -156,6 +161,8 @@ pub const App = struct {
         if (self.status_override.len != 0) self.allocator.free(self.status_override);
         if (self.smoke_workspace_actions.len != 0) self.allocator.free(self.smoke_workspace_actions);
         if (self.smoke_restart_session.len != 0) self.allocator.free(self.smoke_restart_session);
+        if (self.product_settings_store) |*store| store.deinit();
+        if (self.onboarding_store) |*store| store.deinit();
         self.allocator.destroy(self);
     }
 
@@ -178,6 +185,16 @@ pub const App = struct {
         }
         if (self.daemon.status().len != 0) self.setStatus(self.daemon.status());
         self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
+        self.product_settings_store = ProductSettings.Store.init(self.allocator) catch null;
+        self.onboarding_store = Onboarding.Store.init(self.allocator) catch null;
+        if (self.onboarding_store) |store| {
+            const shell_test = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_REQUIRE_DAEMON") catch null;
+            defer if (shell_test) |value| self.allocator.free(value);
+            if (shell_test == null or !std.mem.eql(u8, shell_test.?, "1")) {
+                Onboarding.showFirstRun(self.window.hwnd, self.allocator, store) catch
+                    self.setStatus("First-run onboarding could not be shown");
+            }
+        }
         self.createEmptyStateControls();
         self.updateNativeChrome();
         if (self.workspace) |workspace| workspace.setKeyCallback(self, &onWorkspaceKey);
@@ -765,6 +782,65 @@ pub const App = struct {
         };
     }
 
+    fn openProductSettings(self: *App) void {
+        const store = self.product_settings_store orelse {
+            self.setStatus("Product settings storage unavailable");
+            return;
+        };
+        const current = store.load();
+        const draft = ProductSettings.open(self.window.hwnd, self.allocator, current) catch {
+            self.setStatus("Unable to open product settings");
+            return;
+        } orelse return;
+        store.save(draft) catch self.setStatus("Unable to save product settings");
+    }
+
+    fn cloneRepository(self: *App) void {
+        const draft = RepositoryDialogs.openClone(self.window.hwnd, self.allocator, .{}) catch {
+            self.setStatus("Unable to open clone repository dialog");
+            return;
+        } orelse return;
+        defer {
+            self.allocator.free(draft.url);
+            self.allocator.free(draft.destination);
+            self.allocator.free(draft.branch);
+            self.allocator.free(draft.depth);
+        }
+        RepositoryDialogs.validateClone(draft) catch |err| {
+            self.setStatus(@errorName(err));
+            return;
+        };
+        self.setStatus("Cloning repository…");
+        const clone_status = RepositoryDialogs.runClone(self.allocator, draft) catch {
+            self.setStatus("Clone failed");
+            return;
+        };
+        self.setStatus(if (clone_status == .finished) "Clone complete" else "Clone failed");
+    }
+
+    fn addRemoteRepository(self: *App) void {
+        const draft = RepositoryDialogs.openRemote(self.window.hwnd, self.allocator, .{}) catch {
+            self.setStatus("Unable to open SSH repository dialog");
+            return;
+        } orelse return;
+        defer {
+            self.allocator.free(draft.host);
+            self.allocator.free(draft.user);
+            self.allocator.free(draft.port);
+            self.allocator.free(draft.path);
+        }
+        RepositoryDialogs.validateRemote(draft) catch |err| {
+            self.setStatus(@errorName(err));
+            return;
+        };
+        const command = RepositoryDialogs.reconnectCommand(self.allocator, draft) catch {
+            self.setStatus("Unable to build SSH reconnect command");
+            return;
+        };
+        defer self.allocator.free(command);
+        self.setStatus("SSH connection validated; reconnect is ready");
+    }
+
     fn jumpToNode(self: *App) void {
         if (self.model.graph == null) {
             self.setStatus("No graph is open");
@@ -1150,6 +1226,12 @@ pub const App = struct {
             .create_edge => self.createEdge(),
             .jump_next => self.jumpToNode(),
             .settings => self.openSettings(),
+            .product_settings => self.openProductSettings(),
+            .clone_repository => self.cloneRepository(),
+            .remote_repository => self.addRemoteRepository(),
+            .onboarding => if (self.onboarding_store) |store|
+                Onboarding.showFirstRun(self.window.hwnd, self.allocator, store) catch
+                    self.setStatus("Unable to show onboarding"),
             .cycle_attention => {
                 self.selectNextAttention();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
