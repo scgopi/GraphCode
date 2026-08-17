@@ -2003,6 +2003,18 @@ fn onWindowMessage(
             return true;
         },
         c.WM_COMMAND => {
+            const command_id: u16 = @truncate(wparam);
+            if (command_id == @as(u16, @truncate(TrayModule.command_exit))) {
+                app.exit_requested = true;
+                _ = c.DestroyWindow(hwnd);
+                result.* = 0;
+                return true;
+            }
+            if (command_id == @as(u16, @truncate(TrayModule.command_open))) {
+                restoreShellWindow(hwnd);
+                result.* = 0;
+                return true;
+            }
             if ((wparam & Accessibility.uia_selection_command_mask) == Accessibility.uia_selection_command_tag) {
                 const operation = (wparam & Accessibility.uia_selection_operation_mask) >>
                     Accessibility.uia_selection_operation_shift;
