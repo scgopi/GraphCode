@@ -73,6 +73,14 @@ try {
   if ($windowsWorkflow -notmatch "GRAPHCODE_HARDENING_TARGET") {
     throw "RED: full-pinned Windows CI does not provide an owned environment harness"
   }
+  $windowsShellWorkflow = Get-Content (Join-Path $repoRoot ".github\workflows\windows-shell.yml") -Raw
+  if ($windowsShellWorkflow -notmatch "Tools/windows/uia-live-gate\.ps1") {
+    throw "RED: Windows shell CI does not include the UI Automation live gate"
+  }
+  $runnerSource = Get-Content $runner -Raw
+  if ($runnerSource -notmatch '(?s)Pinned GraphCode Windows shell build and smoke.*?Native UI Automation live gate.*?uia-live-gate\.ps1') {
+    throw "RED: Windows shell validation does not execute the UI Automation live gate"
+  }
   if ($windowsWorkflow -notmatch "(?s)environment:.*Hardening\.Tests\.ps1 -Environment -SchemaOnly") {
     throw "RED: environment CI does not invoke the exact schema-only hardening contract"
   }

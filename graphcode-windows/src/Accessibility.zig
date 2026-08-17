@@ -18,7 +18,6 @@ const NativeProvider = opaque {};
 extern fn gc_uia_create(hwnd: c.HWND) ?*NativeProvider;
 extern fn gc_uia_release(provider: *NativeProvider) void;
 extern fn gc_uia_get_object(hwnd: c.HWND, wparam: c.WPARAM, lparam: c.LPARAM, provider: *NativeProvider) c.LRESULT;
-extern fn gc_uia_notify(provider: *NativeProvider) c.HRESULT;
 extern fn gc_uia_set_status(provider: *NativeProvider, status: [*:0]const u8) c.HRESULT;
 extern fn gc_uia_update(
     provider: *NativeProvider,
@@ -102,10 +101,6 @@ pub const Provider = struct {
         if (!builtin.link_libc) return 0;
         const native = self.native_provider orelse return 0;
         return gc_uia_get_object(hwnd, wparam, lparam, native);
-    }
-    pub fn notify(self: *const Provider) void {
-        if (!builtin.link_libc) return;
-        if (self.native_provider) |native| _ = gc_uia_notify(native);
     }
     pub fn syncWorktrees(
         self: *Provider,

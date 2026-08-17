@@ -3,6 +3,7 @@
 #include <UIAutomation.h>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -16,6 +17,7 @@ class Node;
 struct State {
   HWND hwnd{};
   Node *root{};
+  std::unordered_map<int, Node *> elements;
   std::wstring status = L"Ready";
   std::vector<std::wstring> rows;
   std::vector<bool> selected;
@@ -23,6 +25,7 @@ struct State {
   int focused = 0;
   bool allow_reclaim = false;
   bool confirm_each_reclaim = true;
+  bool active = true;
 };
 
 static std::wstring wide(const char *value) {
@@ -84,7 +87,8 @@ class Node final : public IRawElementProviderSimple,
 
   HRESULT STDMETHODCALLTYPE get_ProviderOptions(ProviderOptions *value) override {
     if (!value) return E_POINTER;
-    *value = ProviderOptions_ServerSideProvider;
+    *value = static_cast<ProviderOptions>(
+        ProviderOptions_ServerSideProvider | ProviderOptions_UseComThreading);
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE GetPatternProvider(PATTERNID id, IUnknown **value) override {
@@ -106,6 +110,7 @@ class Node final : public IRawElementProviderSimple,
   HRESULT STDMETHODCALLTYPE GetPropertyValue(PROPERTYID property, VARIANT *value) override {
     if (!value) return E_POINTER;
     VariantInit(value);
+    if (!state_->active) return UIA_E_ELEMENTNOTAVAILABLE;
     if (property == UIA_NamePropertyId) {
       value->vt = VT_BSTR;
       value->bstrVal = SysAllocString(name().c_str());
@@ -141,6 +146,14 @@ class Node final : public IRawElementProviderSimple,
   }
   HRESULT STDMETHODCALLTYPE get_HostRawElementProvider(IRawElementProviderSimple **value) override {
     if (!value) return E_POINTER;
+    if (!state_->active) {
+      *value = nullptr;
+      return UIA_E_ELEMENTNOTAVAILABLE;
+    }
+    if (id_ != 0) {
+      *value = nullptr;
+      return S_OK;
+    }
     return UiaHostProviderFromHwnd(state_->hwnd, value);
   }
 
@@ -148,6 +161,7 @@ class Node final : public IRawElementProviderSimple,
                                       IRawElementProviderFragment **value) override {
     if (!value) return E_POINTER;
     *value = nullptr;
+    if (!state_->active) return UIA_E_ELEMENTNOTAVAILABLE;
     const int parent = parentId();
     if (direction == NavigateDirection_Parent && parent >= 0) return make(parent, value);
     if (direction == NavigateDirection_FirstChild) return make(firstChild(), value);
@@ -158,14 +172,18 @@ class Node final : public IRawElementProviderSimple,
   }
   HRESULT STDMETHODCALLTYPE GetRuntimeId(SAFEARRAY **value) override {
     if (!value) return E_POINTER;
-    *value = SafeArrayCreateVector(VT_I4, 0, 3);
+    *value = nullptr;
+    // A fragment root hosted by an HWND receives its runtime ID from the host.
+    if (id_ == 0) return S_OK;
+    *value = SafeArrayCreateVector(VT_I4, 0, 2);
     if (!*value) return E_OUTOFMEMORY;
-    LONG values[3] = { UiaAppendRuntimeId, 0x475243, id_ };
-    for (LONG i = 0; i < 3; ++i) SafeArrayPutElement(*value, &i, &values[i]);
+    LONG values[2] = { UiaAppendRuntimeId, id_ };
+    for (LONG i = 0; i < 2; ++i) SafeArrayPutElement(*value, &i, &values[i]);
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE get_BoundingRectangle(UiaRect *value) override {
     if (!value) return E_POINTER;
+    if (!state_->active) return UIA_E_ELEMENTNOTAVAILABLE;
     RECT rect{};
     GetWindowRect(state_->hwnd, &rect);
     value->left = rect.left;
@@ -180,6 +198,7 @@ class Node final : public IRawElementProviderSimple,
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE SetFocus() override {
+    if (!state_->active) return UIA_E_ELEMENTNOTAVAILABLE;
     ::SetFocus(state_->hwnd);
     const int old = state_->focused;
     state_->focused = id_;
@@ -189,7 +208,7 @@ class Node final : public IRawElementProviderSimple,
   HRESULT STDMETHODCALLTYPE get_FragmentRoot(IRawElementProviderFragmentRoot **value) override {
     if (!value) return E_POINTER;
     *value = nullptr;
-    if (!state_->root) return UIA_E_ELEMENTNOTAVAILABLE;
+    if (!state_->active || !state_->root) return UIA_E_ELEMENTNOTAVAILABLE;
     return state_->root->QueryInterface(
         __uuidof(IRawElementProviderFragmentRoot), reinterpret_cast<void **>(value));
   }
@@ -197,18 +216,19 @@ class Node final : public IRawElementProviderSimple,
                                                       IRawElementProviderFragment **value) override {
     if (!value) return E_POINTER;
     *value = nullptr;
+    if (!state_->active) return UIA_E_ELEMENTNOTAVAILABLE;
     return make(state_->focused, value);
   }
   HRESULT STDMETHODCALLTYPE GetFocus(IRawElementProviderFragment **value) override {
     if (!value) return E_POINTER;
     *value = nullptr;
+    if (!state_->active) return UIA_E_ELEMENTNOTAVAILABLE;
     return make(state_->focused, value);
   }
 
   HRESULT STDMETHODCALLTYPE Invoke() override {
     if (!supportsInvoke()) return UIA_E_ELEMENTNOTENABLED;
-    if (id_ == 10) setStatus("Worktree policy editor opened");
-    if (id_ == 11) setStatus("Worktree policy saved");
+    if (!state_->active) return UIA_E_ELEMENTNOTAVAILABLE;
     UINT command = id_ == 7 ? 6 : id_ == 8 ? 7 : id_ == 9 ? 8 :
                    id_ == 10 ? 9 : id_ == 11 ? 10 : id_ == 12 ? 12 : id_ == 13 ? 13 : 6;
     PostMessageW(state_->hwnd, WM_COMMAND, command, 0);
@@ -226,13 +246,17 @@ class Node final : public IRawElementProviderSimple,
   }
   HRESULT STDMETHODCALLTYPE GetSelection(SAFEARRAY **value) override {
     if (!value) return E_POINTER;
+    if (!state_->active) {
+      *value = nullptr;
+      return UIA_E_ELEMENTNOTAVAILABLE;
+    }
     std::vector<int> selected;
     for (size_t i = 0; i < state_->selected.size(); ++i)
       if (state_->selected[i]) selected.push_back(static_cast<int>(i));
     *value = SafeArrayCreateVector(VT_UNKNOWN, 0, static_cast<ULONG>(selected.size()));
     if (!*value) return selected.empty() ? S_OK : E_OUTOFMEMORY;
     for (LONG i = 0; i < static_cast<LONG>(selected.size()); ++i) {
-      Node *node = new Node(state_, 100 + selected[static_cast<size_t>(i)]);
+      Node *node = element(100 + selected[static_cast<size_t>(i)]);
       if (!node) {
         SafeArrayDestroy(*value);
         *value = nullptr;
@@ -240,7 +264,6 @@ class Node final : public IRawElementProviderSimple,
       }
       IUnknown *unknown = nullptr;
       node->QueryInterface(IID_IUnknown, reinterpret_cast<void **>(&unknown));
-      node->Release();
       SafeArrayPutElement(*value, &i, unknown);
       if (unknown) unknown->Release();
     }
@@ -251,21 +274,25 @@ class Node final : public IRawElementProviderSimple,
   HRESULT STDMETHODCALLTYPE RemoveFromSelection() override { return setSelected(false, 2); }
   HRESULT STDMETHODCALLTYPE get_IsSelected(BOOL *value) override {
     if (!value) return E_POINTER;
+    if (!state_->active) return UIA_E_ELEMENTNOTAVAILABLE;
     *value = isRow() && state_->selected[static_cast<size_t>(id_ - 100)] ? TRUE : FALSE;
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE get_SelectionContainer(IRawElementProviderSimple **value) override {
     if (!value) return E_POINTER;
     *value = nullptr;
+    if (!state_->active) return UIA_E_ELEMENTNOTAVAILABLE;
     return makeSimple(3, value);
   }
   HRESULT STDMETHODCALLTYPE Toggle() override {
     if (id_ != 12 && id_ != 13) return UIA_E_INVALIDOPERATION;
+    if (!state_->active) return UIA_E_ELEMENTNOTAVAILABLE;
     PostMessageW(state_->hwnd, WM_COMMAND, id_, 0);
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE get_ToggleState(ToggleState *value) override {
     if (!value) return E_POINTER;
+    if (!state_->active) return UIA_E_ELEMENTNOTAVAILABLE;
     if (id_ == 12) *value = state_->allow_reclaim ? ToggleState_On : ToggleState_Off;
     else if (id_ == 13) *value = state_->confirm_each_reclaim ? ToggleState_On : ToggleState_Off;
     else return UIA_E_INVALIDOPERATION;
@@ -274,6 +301,7 @@ class Node final : public IRawElementProviderSimple,
   void update(const char *status, const char **rows, const int *selected,
               const int *eligible, int count, int focused, bool allow_reclaim,
               bool confirm_each_reclaim) {
+    const std::wstring old_status = state_->status;
     state_->status = wide(status);
     state_->rows.clear();
     state_->selected.clear();
@@ -286,15 +314,38 @@ class Node final : public IRawElementProviderSimple,
       state_->selected.push_back(selected && selected[i] != 0);
       state_->eligible.push_back(eligible && eligible[i] != 0);
     }
-    UiaRaiseAutomationEvent(this, UIA_LiveRegionChangedEventId);
-    Node *status_node = new Node(state_, 6);
-    UiaRaiseAutomationEvent(status_node, UIA_LiveRegionChangedEventId);
+    raiseStatusChanged(old_status);
   }
   void setStatus(const char *status) {
     const std::wstring old_status = state_->status;
     state_->status = wide(status);
-    Node *status_node = new Node(state_, 6);
-    UiaRaiseAutomationEvent(status_node, UIA_LiveRegionChangedEventId);
+    raiseStatusChanged(old_status);
+  }
+  void shutdown() {
+    if (id_ != 0 || !state_->active) return;
+    state_->active = false;
+    state_->root = nullptr;
+    auto elements = std::move(state_->elements);
+    state_->elements.clear();
+    for (const auto &entry : elements) entry.second->Release();
+  }
+
+ private:
+  Node *element(int id) {
+    if (!state_->active) return nullptr;
+    if (id == 0) return state_->root;
+    const auto existing = state_->elements.find(id);
+    if (existing != state_->elements.end()) return existing->second;
+    Node *node = new Node(state_, id);
+    if (!node) return nullptr;
+    state_->elements.emplace(id, node);
+    return node;
+  }
+  void raiseStatusChanged(const std::wstring &old_status) {
+    Node *status_node = element(6);
+    if (!status_node) return;
+    auto *provider = static_cast<IRawElementProviderSimple *>(status_node);
+    UiaRaiseAutomationEvent(provider, UIA_LiveRegionChangedEventId);
     VARIANT old_value, new_value;
     VariantInit(&old_value);
     VariantInit(&new_value);
@@ -303,13 +354,10 @@ class Node final : public IRawElementProviderSimple,
     new_value.vt = VT_BSTR;
     new_value.bstrVal = SysAllocString(state_->status.c_str());
     UiaRaiseAutomationPropertyChangedEvent(
-        status_node, UIA_NamePropertyId, old_value, new_value);
+        provider, UIA_NamePropertyId, old_value, new_value);
     VariantClear(&old_value);
     VariantClear(&new_value);
-    status_node->Release();
   }
-
- private:
   bool isRow() const { return id_ >= 100 && static_cast<size_t>(id_ - 100) < state_->rows.size(); }
   bool supportsInvoke() const { return id_ == 0 || (id_ >= 7 && id_ <= 13); }
   int parentId() const {
@@ -351,6 +399,7 @@ class Node final : public IRawElementProviderSimple,
   }
   std::wstring name() const {
     if (isRow()) return state_->rows[static_cast<size_t>(id_ - 100)];
+    if (id_ >= 100) return {};
     if (id_ == 6) return state_->status;
     static const wchar_t *names[] = {L"GraphCode UIA Root", L"Projects", L"Loops", L"Worktrees",
                                      L"Graph", L"Actions", L"Status", L"Inspect worktrees",
@@ -361,6 +410,7 @@ class Node final : public IRawElementProviderSimple,
   }
   std::wstring automationId() const {
     if (isRow()) return L"worktree-row-" + std::to_wstring(id_ - 100);
+    if (id_ >= 100) return {};
     static const wchar_t *ids[] = {L"graphcode-root", L"projects", L"loops", L"worktrees",
                                    L"graph", L"actions", L"status", L"inspect-worktrees",
                                    L"reclaim-worktrees", L"reveal-worktree",
@@ -380,19 +430,22 @@ class Node final : public IRawElementProviderSimple,
   }
   HRESULT make(int id, IRawElementProviderFragment **value) {
     if (id < 0) return S_OK;
-    Node *node = new Node(state_, id);
+    Node *node = element(id);
     if (!node) return E_OUTOFMEMORY;
+    node->AddRef();
     *value = static_cast<IRawElementProviderFragment *>(node);
     return S_OK;
   }
   HRESULT makeSimple(int id, IRawElementProviderSimple **value) {
-    Node *node = new Node(state_, id);
+    Node *node = element(id);
     if (!node) return E_OUTOFMEMORY;
+    node->AddRef();
     *value = static_cast<IRawElementProviderSimple *>(node);
     return S_OK;
   }
   HRESULT setSelected(bool selected, int operation) {
     if (!isRow()) return UIA_E_INVALIDOPERATION;
+    if (!state_->active) return UIA_E_ELEMENTNOTAVAILABLE;
     size_t index = static_cast<size_t>(id_ - 100);
     if (!state_->eligible[index]) return UIA_E_INVALIDOPERATION;
     if (operation == 0) {
@@ -421,7 +474,10 @@ extern "C" IRawElementProviderSimple *gc_uia_create(HWND hwnd) {
 }
 
 extern "C" void gc_uia_release(IRawElementProviderSimple *provider) {
-  if (provider) provider->Release();
+  if (provider) {
+    static_cast<Node *>(provider)->shutdown();
+    provider->Release();
+  }
 }
 
 extern "C" LRESULT gc_uia_get_object(HWND hwnd, WPARAM wparam, LPARAM lparam,
@@ -439,11 +495,6 @@ extern "C" HRESULT gc_uia_update(IRawElementProviderSimple *provider, const char
   root->update(status, rows, selected, eligible, count, focused,
                allow_reclaim != 0, confirm_each_reclaim != 0);
   return S_OK;
-}
-
-extern "C" HRESULT gc_uia_notify(IRawElementProviderSimple *provider) {
-  if (!provider) return E_INVALIDARG;
-  return UiaRaiseAutomationEvent(provider, UIA_LiveRegionChangedEventId);
 }
 
 extern "C" HRESULT gc_uia_set_status(IRawElementProviderSimple *provider, const char *status) {

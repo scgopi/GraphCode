@@ -196,6 +196,9 @@ pub const App = struct {
     }
 
     pub fn run(self: *App) !void {
+        const com_result = c.CoInitializeEx(null, c.COINIT_APARTMENTTHREADED);
+        if (com_result < 0) return error.ComInitializationFailed;
+        defer c.CoUninitialize();
         try self.window.create(self, &onWindowMessage, title.ptr);
         self.tray.test_hook_enabled = self.tray_test_hook_enabled;
         self.tray.add(self.window.hwnd) catch self.setStatus("System tray unavailable; GraphCode remains open");
@@ -1756,7 +1759,6 @@ pub const App = struct {
             provider.announce(self.status_override, if (std.mem.indexOf(u8, value, "failed") != null or
                 std.mem.indexOf(u8, value, "Unable") != null or
                 std.mem.indexOf(u8, value, "blocked") != null) .@"error" else .status) catch {};
-            provider.notify();
         }
     }
 
@@ -2337,6 +2339,7 @@ fn onWindowMessage(
             return true;
         },
         c.WM_DESTROY => {
+            if (app.accessibility) |*provider| provider.detach();
             app.running = false;
             _ = c.KillTimer(hwnd, MainWindow.timer_id);
             app.tray.remove();

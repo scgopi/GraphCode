@@ -645,6 +645,10 @@ function Invoke-Task([string] $name) {
       if ($LASTEXITCODE -ne 0) {
         throw "Tray daemon executable tests failed with exit code $LASTEXITCODE"
       }
+      Invoke-Native "Native UI Automation live gate" {
+        & (Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1") `
+          -Shell (Join-Path $repoRoot "graphcode-windows\zig-out\bin\graphcode-windows.exe")
+      }
     }
     "packaging" {
       & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Tests.ps1")

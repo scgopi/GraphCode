@@ -7,6 +7,7 @@ on:
       - ".github/workflows/windows-shell.yml"
       - "graphcode-windows/**"
       - "Tools/windows/windows-shell.ps1"
+      - "Tools/windows/uia-live-gate.ps1"
       - "Tools/windows/validate.ps1"
       - "Tools/windows/Tests/WindowsShell.Tests.ps1"
       - "Tools/windows/Tests/TrayDaemon.Tests.ps1"

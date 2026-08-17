@@ -40,7 +40,8 @@ zig build `
 ```
 
 `Tools\windows\validate.ps1 -Task windows-shell` performs pin, clean-worktree,
-format, lifecycle-contract, and real provider build checks. This scaffold has
+format, lifecycle-contract, real provider build, and native UI Automation live
+event checks. This scaffold has
 package metadata only; it intentionally does not create an installer.
 
 ## Tray lifecycle coverage
