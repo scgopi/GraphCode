@@ -1,16 +1,5 @@
 import Foundation
 
-public enum CLISessionError: Error, Equatable, Sendable {
-  case unavailable(String)
-  case failed(String)
-  case notFound
-}
-
-public enum CLISessionStartOutcome: Equatable, Sendable {
-  case attached
-  case started
-}
-
 /// The abstraction over Claude Code, Copilot CLI, and Codex —
 /// docs/04-cli-backends.md#clisessionbackend-protocol.
 ///
@@ -59,10 +48,6 @@ public struct CLISessionBackend: Sendable {
   /// What the session says it is doing right now, or `nil` when nothing reports it —
   /// see `LoopNode.activity`. `projectPath` routed as `presence`'s is.
   public var activity: @Sendable (LoopNode, String?) async -> String?
-  public var startResult: @Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>
-  public var terminateResult: @Sendable (LoopNode, String?) async -> Result<Void, CLISessionError>
-  public var exists: @Sendable (LoopNode, String?) async -> Bool
-  public var enumerate: @Sendable () async -> [UUID]
 
   public init(
     kind: CLISessionBackendKind,
@@ -71,11 +56,7 @@ public struct CLISessionBackend: Sendable {
     sendInput: @escaping @Sendable (LoopNode, String, String?) async -> Bool,
     presence: @escaping @Sendable (LoopNode, String?) async -> PresenceReading,
     usage: @escaping @Sendable (LoopNode, String?) async -> UsageSample?,
-    activity: @escaping @Sendable (LoopNode, String?) async -> String? = { _, _ in nil },
-    startResult: (@Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>)? = nil,
-    terminateResult: (@Sendable (LoopNode, String?) async -> Result<Void, CLISessionError>)? = nil,
-    exists: (@Sendable (LoopNode, String?) async -> Bool)? = nil
-    , enumerate: (@Sendable () async -> [UUID])? = nil
+    activity: @escaping @Sendable (LoopNode, String?) async -> String? = { _, _ in nil }
   ) {
     self.kind = kind
     self.launch = launch
@@ -84,16 +65,6 @@ public struct CLISessionBackend: Sendable {
     self.presence = presence
     self.usage = usage
     self.activity = activity
-    self.startResult = startResult ?? { node, path in
-      await launch(node, path)
-      return .success(.started)
-    }
-    self.terminateResult = terminateResult ?? { node, path in
-      await terminate(node, path)
-      return .success(())
-    }
-    self.exists = exists ?? { _, _ in false }
-    self.enumerate = enumerate ?? { [] }
   }
 }
 
@@ -153,17 +124,7 @@ extension CLISessionBackend {
         case .codex:
           return await CodexSessionLog.activity(of: node, projectPath: projectPath)
         }
-      },
-      startResult: { node, projectPath in
-        await ZmxSessionLauncher.startResult(node, projectPath: projectPath)
-      },
-      terminateResult: { node, projectPath in
-        await ZmxSessionLauncher.terminateResult(node, projectPath: projectPath)
-      },
-      exists: { node, projectPath in
-        await ZmxSessionLauncher.sessionExists(node, projectPath: projectPath)
-      },
-      enumerate: { await ZmxSessionLauncher.enumerateSessionIDs() }
+      }
     )
   }
 
@@ -187,11 +148,7 @@ extension CLISessionBackend {
       terminate: { _, _ in },
       sendInput: { _, _, _ in false },
       presence: { _, _ in PresenceReading(presence: .absent, confidence: .reported) },
-      usage: { _, _ in nil },
-      startResult: { _, _ in .failure(.unavailable("backend is not spiked")) },
-      terminateResult: { _, _ in .success(()) },
-      exists: { _, _ in false }
-      , enumerate: { [] }
+      usage: { _, _ in nil }
     )
   }
 

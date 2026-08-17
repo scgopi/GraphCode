@@ -512,58 +512,13 @@ public enum ZmxSessionLauncher {
   /// Whether the node has a live session at all. Internal rather than private because
   /// `CopilotSessionLog` needs the same liveness gate before it trusts a log tail: a
   /// killed session's log still ends at whatever it was doing.
-  static func sessionExists(_ node: LoopNode, projectPath: String? = nil) async -> Bool {
-    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
-      return await runRemoteRetrying(remoteStatusInvocation(
-        forNode: node, label: "presence", at: remote))
-    }
+  static func sessionExists(_ node: LoopNode) async -> Bool {
     guard
       let session = try? PTYProcessSession(
         executable: ZmxLocator.binaryURL.path,
         arguments: existenceCheckArguments(forNode: node))
     else { return false }
     return await session.waitUntilFinished()
-  }
-
-  public static func startResult(
-    _ node: LoopNode, projectPath: String? = nil
-  ) async -> Result<CLISessionStartOutcome, CLISessionError> {
-    guard ZmxLocator.isInstalled else {
-      return .failure(.unavailable("zmx is not installed"))
-    }
-    if await sessionExists(node, projectPath: projectPath) {
-      return .success(.attached)
-    }
-    await start(node, projectPath: projectPath)
-    guard await sessionExists(node, projectPath: projectPath) else {
-      return .failure(.failed("zmx session did not become live"))
-    }
-    return .success(.started)
-  }
-
-  public static func terminateResult(
-    _ node: LoopNode, projectPath: String? = nil
-  ) async -> Result<Void, CLISessionError> {
-    guard await sessionExists(node, projectPath: projectPath) else {
-      SessionIDStore.remove(forNodeID: node.id)
-      return .success(())
-    }
-
-    await kill(node, projectPath: projectPath)
-    guard !(await sessionExists(node, projectPath: projectPath)) else {
-      return .failure(.failed("zmx session remained after terminate"))
-    }
-    return .success(())
-  }
-
-  public static func enumerateSessionIDs() async -> [UUID] {
-    var live: [UUID] = []
-    for id in SessionIDStore.nodeIDs() {
-      if await sessionExists(LoopNode(id: id, title: "")) {
-        live.append(id)
-      }
-    }
-    return live
   }
 
   /// Kills the session behind an id that isn't a graph node — a quick chat. Public
