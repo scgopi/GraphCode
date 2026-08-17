@@ -311,7 +311,15 @@ struct LoopWorkspaceView: View {
       // are told so and stop drawing entirely — without that they render frames nobody
       // can see, at the same thread priority as the pane you're actually looking at.
       isVisible: tab.id == store.layout.selectedTabID,
-      onFocusRequested: { store.send(.paneFocused(tabID: tab.id, surfaceID: ref.id)) }
+      onFocusRequested: { store.send(.paneFocused(tabID: tab.id, surfaceID: ref.id)) },
+      // Only the agent pane lingers after its process exits (it holds the loop's
+      // resolution, so `.primarySurfaceExited` leaves it mounted) — which left the
+      // "Press any key to close" screen with no key that did anything. The keypress is
+      // the human agreeing the loop is over: the workspace closes and the node goes
+      // with it. A plain shell's exit already closes its pane, so it has no screen to
+      // acknowledge.
+      onExitAcknowledged: ref.launchesClaudeCode
+        ? { store.send(.primaryExitAcknowledged) } : nil
     ) { succeeded in
       if ref.launchesClaudeCode {
         store.send(.primarySurfaceExited(succeeded: succeeded))

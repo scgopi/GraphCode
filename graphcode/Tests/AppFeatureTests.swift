@@ -309,6 +309,63 @@ struct AppFeatureTests {
       ])
   }
 
+  /// The keypress on the "Process exited. Press any key to close." screen: the dead
+  /// workspace closes immediately, and the loop's node is deleted from the graph.
+  @Test
+  @MainActor
+  func acknowledgingAPrimaryExitClosesTheWorkspaceAndDeletesTheNode() async {
+    let node = LoopNode(title: "Hello", checkDescription: "Said?")
+    var state = AppFeature.State()
+    state.projects.append(
+      ProjectFeature.State(graph: LoopGraph(project: Self.projectA, nodes: [node])))
+    state.selectedProjectPath = Self.projectA.path
+    state.openLoop = LoopWorkspaceFeature.State(
+      node: node, layout: .defaultLayout(forNode: node.id), projectPath: Self.projectA.path,
+      projectName: Self.projectA.name)
+
+    let sentCommands = SentCommandsBox()
+    let store = TestStore(initialState: state) {
+      AppFeature()
+    } withDependencies: {
+      $0.orchestratorClient.send = { command in await sentCommands.append(command) }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.openLoop(.primaryExitAcknowledged))
+    #expect(store.state.openLoop == nil)
+    #expect(store.state.selectedProjectPath == Self.projectA.path)
+    #expect(
+      await sentCommands.all == [
+        .graphCommand(projectPath: Self.projectA.path, command: .deleteNode(node.id))
+      ])
+  }
+
+  /// A quick chat's session ending the same way just puts the dead terminal away — a
+  /// chat is not a node in any graph, and the chat itself outlives its session.
+  @Test
+  @MainActor
+  func acknowledgingAQuickChatsExitOnlyClosesTheWorkspace() async {
+    let chat = QuickChat(title: "Chat")
+    var state = AppFeature.State()
+    state.quickChats.append(chat)
+    let node = LoopNode(id: chat.id, title: chat.title, loopType: .composite)
+    state.openLoop = LoopWorkspaceFeature.State(
+      node: node, layout: .defaultLayout(forNode: node.id), projectPath: "",
+      projectName: chat.title)
+
+    let sentCommands = SentCommandsBox()
+    let store = TestStore(initialState: state) {
+      AppFeature()
+    } withDependencies: {
+      $0.orchestratorClient.send = { command in await sentCommands.append(command) }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.openLoop(.primaryExitAcknowledged))
+    #expect(store.state.openLoop == nil)
+    #expect(await sentCommands.all.isEmpty)
+  }
+
   /// ⇧⌘]/⇧⌘[ walk the same flattened list the sidebar draws — across projects, skipping
   /// blocked loops, wrapping at the ends — and go through `.nodeTapped` rather than a
   /// path of their own, so what the shortcut opens is exactly what a click would.

@@ -539,6 +539,30 @@ struct AppFeature {
             .graphCommand(projectPath: projectPath, command: command))
         }
 
+      // The keypress on the agent pane's "Press any key to close" screen. The session
+      // was already resolved when it exited (above) — this is the human dismissing what
+      // remains, so the workspace closes *and* the node leaves the graph. Deleting via
+      // the daemon rather than locally, the same way the sidebar's delete does: the
+      // resulting broadcast is what removes the card everywhere, and `GraphStore` also
+      // kills the loop's zmx session. Closed here as well rather than waiting for that
+      // broadcast, so the dead pane goes away even with the daemon unreachable.
+      case .openLoop(.primaryExitAcknowledged):
+        guard let id = state.openLoop?.node.id, let projectPath = state.openLoop?.projectPath
+        else { return .none }
+        // A chat is not a node in any graph — there is nothing to delete, and the chat
+        // itself should outlive its session. Just put the dead terminal away.
+        guard !state.isQuickChat(id) else {
+          closeOpenWorkspace(&state)
+          state.detailSelection = .quickChats
+          return .none
+        }
+        closeOpenWorkspace(&state)
+        state.selectedProjectPath = projectPath
+        return .run { _ in
+          try? await orchestratorClient.send(
+            .graphCommand(projectPath: projectPath, command: .deleteNode(id)))
+        }
+
       case .openLoop(.stopLoopTapped):
         guard let id = state.openLoop?.node.id, let path = state.openLoop?.projectPath
         else { return .none }
