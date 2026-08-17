@@ -277,17 +277,16 @@ pub const App = struct {
 
     fn createNode(self: *App) void {
         const path = self.currentProject() orelse return;
-        const draft = NativeForms.node(self.window.hwnd, self.allocator, .{ .title = "" }) catch {
+        var draft = NativeForms.node(self.window.hwnd, self.allocator, .{ .title = "" }) catch {
             self.setStatus("Unable to open node form");
             return;
         } orelse return;
-        defer self.allocator.free(draft.title);
-        defer self.allocator.free(draft.loop_type);
+        defer draft.deinit(self.allocator);
         Forms.validateNode(draft) catch {
             self.setStatus("Invalid node form");
             return;
         };
-        self.client.sendCreateNode(path, draft.title);
+        self.client.sendCreateNodeDraft(path, draft);
     }
 
     fn editSelectedNode(self: *App) void {
@@ -295,15 +294,14 @@ pub const App = struct {
         const index = self.model.selected_node orelse return;
         if (index >= graph.nodes.items.len) return;
         const node = graph.nodes.items[index];
-        const draft = NativeForms.node(self.window.hwnd, self.allocator, .{
+        var draft = NativeForms.node(self.window.hwnd, self.allocator, .{
             .title = node.title,
             .loop_type = node.loop_type,
         }) catch {
             self.setStatus("Unable to open node form");
             return;
         } orelse return;
-        defer self.allocator.free(draft.title);
-        defer self.allocator.free(draft.loop_type);
+        defer draft.deinit(self.allocator);
         Forms.validateNode(draft) catch {
             self.setStatus("Invalid node form");
             return;
@@ -315,7 +313,7 @@ pub const App = struct {
     fn createEdge(self: *App) void {
         const graph = self.model.graph orelse return;
         if (graph.nodes.items.len < 2) return;
-        const draft = NativeForms.edge(self.window.hwnd, self.allocator, .{
+        var draft = NativeForms.edge(self.window.hwnd, self.allocator, .{
             .from = graph.nodes.items[0].id,
             .to = graph.nodes.items[1].id,
             .kind = "handoff",
@@ -323,15 +321,13 @@ pub const App = struct {
             self.setStatus("Unable to open edge form");
             return;
         } orelse return;
-        defer self.allocator.free(draft.from);
-        defer self.allocator.free(draft.to);
-        defer self.allocator.free(draft.kind);
+        defer draft.deinit(self.allocator);
         Forms.validateEdge(draft) catch {
             self.setStatus("Invalid edge form");
             return;
         };
         const path = self.currentProject() orelse return;
-        self.client.sendCreateEdge(path, draft.from, draft.to, draft.kind);
+        self.client.sendCreateEdgeDraft(path, draft);
     }
 
     fn openSettings(self: *App) void {

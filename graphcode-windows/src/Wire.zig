@@ -244,10 +244,15 @@ pub fn commandGraphCreateNodeFull(
     const subgraph = if (draft.subgraph_json.len == 0) try allocator.dupe(u8, "null") else try allocator.dupe(u8, draft.subgraph_json);
     defer allocator.free(subgraph);
     const created_by = try nullableString(allocator, draft.created_by); defer allocator.free(created_by);
-    return std.fmt.allocPrint(allocator,
-        "{{\"graphCommand\":{{\"projectPath\":{s},\"command\":{{\"createNode\":{{\"_0\":{{\"id\":{s},\"title\":{s},\"loopType\":{s},\"checkDescription\":{s},\"triggerPrompt\":{s},\"firstInstruction\":{s},\"pausesBeforeWritesOnly\":{s},\"goal\":{s},\"backend\":{s},\"modelTier\":{s},\"worktree\":{s},\"subGraph\":{s},\"createdBy\":{s}}}}}}}}",
-        .{ path, id, title, lt, check, trigger, first,
-            if (draft.pauses_before_writes_only) "true" else "false", goal, backend, tier, worktree, subgraph, created_by });
+    return std.mem.concat(allocator, u8, &.{
+        "{\"graphCommand\":{\"projectPath\":", path, ",\"command\":{\"createNode\":{\"_0\":{\"id\":",
+        id, ",\"title\":", title, ",\"loopType\":", lt, ",\"checkDescription\":", check,
+        ",\"triggerPrompt\":", trigger, ",\"firstInstruction\":", first,
+        ",\"pausesBeforeWritesOnly\":", if (draft.pauses_before_writes_only) "true" else "false",
+        ",\"goal\":", goal, ",\"backend\":", backend, ",\"modelTier\":", tier,
+        ",\"worktree\":", worktree, ",\"subGraph\":", subgraph, ",\"createdBy\":", created_by,
+        "}}}}}",
+    });
 }
 
 fn nullableString(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
@@ -402,9 +407,12 @@ pub fn commandGraphCreateEdgeFull(
     };
     defer allocator.free(cycle);
     const spawn = try nullableString(allocator, draft.spawn_target_project_path); defer allocator.free(spawn);
-    return std.fmt.allocPrint(allocator,
-        "{{\"graphCommand\":{{\"projectPath\":{s},\"command\":{{\"createEdge\":{{\"from\":{s},\"to\":{s},\"spec\":{{\"kind\":{s},\"condition\":{s},\"payloadTransform\":{s},\"cycleGuard\":{s},\"spawnTargetProjectPath\":{s}}}}}}}}}}",
-        .{path, source, target, kind, condition, transform, cycle, spawn});
+    return std.mem.concat(allocator, u8, &.{
+        "{\"graphCommand\":{\"projectPath\":", path, ",\"command\":{\"createEdge\":{\"from\":",
+        source, ",\"to\":", target, ",\"spec\":{\"kind\":", kind, ",\"condition\":", condition,
+        ",\"payloadTransform\":", transform, ",\"cycleGuard\":", cycle,
+        ",\"spawnTargetProjectPath\":", spawn, "}}}}}",
+    });
 }
 
 pub fn commandGraphDeleteEdge(
@@ -818,6 +826,43 @@ test "project lifecycle commands preserve Swift Codable labels" {
     const delete = try commandDeleteProjectGraph(allocator, "C:\\work\\graph");
     defer allocator.free(delete);
     try std.testing.expectEqualStrings("{\"deleteProjectGraph\":{\"path\":\"C:\\\\work\\\\graph\"}}", delete);
+}
+
+test "typed node and edge forms retain every supported field on the wire" {
+    const allocator = std.testing.allocator;
+    const node = try commandGraphCreateNodeFull(allocator, "C:\\work\\graph", "11111111-1111-4111-8111-111111111111", .{
+        .title = "Goal",
+        .loop_type = "goalBased",
+        .goal_summary = "Done",
+        .goal_predicate = "test -f done",
+        .poll_interval_seconds = 15,
+        .stall_after_seconds = 0,
+        .metric_command = "metric",
+        .metric_direction = "minimize",
+        .backend = "codex",
+        .model_tier = "capable",
+        .worktree_repository = "C:\\repo",
+        .worktree_id = "wt",
+        .worktree_path = "C:\\repo-wt",
+        .worktree_branch = "feature",
+    });
+    defer allocator.free(node);
+    for ([_][]const u8{ "\"summary\":\"Done\"", "\"predicate\":\"test -f done\"", "pollIntervalSeconds", "stallAfterSeconds", "metricCommand", "metricDirection", "codex", "capable", "repositoryPath", "worktreePath", "feature" }) |field| {
+        try std.testing.expect(std.mem.indexOf(u8, node, field) != null);
+    }
+    const edge = try commandGraphCreateEdgeFull(allocator, "C:\\work\\graph", "a", "b", .{
+        .from = "a",
+        .to = "b",
+        .kind = "spawn",
+        .condition = "onFailure",
+        .transform_kind = "template",
+        .transform_value = "payload",
+        .cycle_max_iterations = 3,
+        .spawn_target_project_path = "C:\\other",
+    });
+    defer allocator.free(edge);
+    for ([_][]const u8{ "onFailure", "template", "payload", "maxIterations", "spawnTargetProjectPath" }) |field|
+        try std.testing.expect(std.mem.indexOf(u8, edge, field) != null);
 }
 
 test "v2 edge fixtures exactly match Zig-generated request envelopes" {

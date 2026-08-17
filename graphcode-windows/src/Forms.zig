@@ -22,6 +22,26 @@ pub const NodeDraft = struct {
     worktree_branch: []const u8 = "",
     subgraph_json: []const u8 = "",
     created_by: []const u8 = "",
+
+    pub fn deinit(self: *NodeDraft, allocator: std.mem.Allocator) void {
+        allocator.free(self.title);
+        allocator.free(self.loop_type);
+        allocator.free(self.check_description);
+        allocator.free(self.trigger_prompt);
+        allocator.free(self.first_instruction);
+        allocator.free(self.goal_summary);
+        allocator.free(self.goal_predicate);
+        allocator.free(self.metric_command);
+        allocator.free(self.metric_direction);
+        allocator.free(self.backend);
+        allocator.free(self.model_tier);
+        allocator.free(self.worktree_repository);
+        allocator.free(self.worktree_id);
+        allocator.free(self.worktree_path);
+        allocator.free(self.worktree_branch);
+        allocator.free(self.subgraph_json);
+        allocator.free(self.created_by);
+    }
 };
 
 pub const EdgeDraft = struct {
@@ -35,6 +55,17 @@ pub const EdgeDraft = struct {
     cycle_until: []const u8 = "",
     cycle_stop_after_passes: ?i64 = null,
     spawn_target_project_path: []const u8 = "",
+
+    pub fn deinit(self: *EdgeDraft, allocator: std.mem.Allocator) void {
+        allocator.free(self.from);
+        allocator.free(self.to);
+        allocator.free(self.kind);
+        allocator.free(self.condition);
+        allocator.free(self.transform_kind);
+        allocator.free(self.transform_value);
+        allocator.free(self.cycle_until);
+        allocator.free(self.spawn_target_project_path);
+    }
 };
 
 pub const NodeUpdate = struct {
@@ -47,6 +78,16 @@ pub const NodeUpdate = struct {
     trigger_prompt: ?[]const u8 = null,
     check_description: ?[]const u8 = null,
     model_tier: ?[]const u8 = null,
+
+    pub fn deinit(self: *NodeUpdate, allocator: std.mem.Allocator) void {
+        if (self.goal_summary) |value| allocator.free(value);
+        if (self.goal_predicate) |value| allocator.free(value);
+        if (self.metric_command) |value| allocator.free(value);
+        if (self.metric_direction) |value| allocator.free(value);
+        if (self.trigger_prompt) |value| allocator.free(value);
+        if (self.check_description) |value| allocator.free(value);
+        if (self.model_tier) |value| allocator.free(value);
+    }
 };
 
 pub const Settings = struct {
@@ -75,6 +116,13 @@ pub const FormError = error{
     EmptyJumpQuery,
 };
 
+pub const untitled_fallback = "New Loop";
+
+pub fn resolvedTitle(title: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, title, " \t\r\n");
+    return if (trimmed.len == 0) untitled_fallback else trimmed;
+}
+
 pub fn validateJumpQuery(query: []const u8) FormError![]const u8 {
     const trimmed = std.mem.trim(u8, query, " \t\r\n");
     if (trimmed.len == 0) return error.EmptyJumpQuery;
@@ -82,12 +130,14 @@ pub fn validateJumpQuery(query: []const u8) FormError![]const u8 {
 }
 
 pub fn validateNode(draft: NodeDraft) FormError!void {
-    if (std.mem.trim(u8, draft.title, " \t\r\n").len == 0) return error.EmptyTitle;
     if (!std.mem.eql(u8, draft.loop_type, "turnBased") and
         !std.mem.eql(u8, draft.loop_type, "timeBased") and
         !std.mem.eql(u8, draft.loop_type, "goalBased") and
         !std.mem.eql(u8, draft.loop_type, "composite"))
         return error.UnsupportedLoopType;
+    if (std.mem.eql(u8, draft.loop_type, "composite") and
+        std.mem.trim(u8, draft.title, " \t\r\n").len == 0)
+        return error.EmptyTitle;
     if (!std.mem.eql(u8, draft.backend, "claudeCode") and
         !std.mem.eql(u8, draft.backend, "copilotCLI") and
         !std.mem.eql(u8, draft.backend, "codex"))
@@ -144,7 +194,10 @@ pub fn validateEdge(draft: EdgeDraft) FormError!void {
 pub fn validateNodeUpdate(update: NodeUpdate) FormError!void {
     if (update.goal_summary) |value| if (std.mem.trim(u8, value, " \t\r\n").len == 0) return error.InvalidGoal;
     if (update.poll_interval_seconds) |value| if (value <= 0) return error.InvalidGoal;
-    if (update.stall_after_seconds) |value| if (value <= 0) return error.InvalidGoal;
+    if (update.stall_after_seconds) |value| {
+        // Zero or negative is the explicit clear sentinel used by NodeUpdate.
+        if (!std.math.isFinite(value)) return error.InvalidGoal;
+    }
     if (update.metric_direction) |value|
         if (!std.mem.eql(u8, value, "maximize") and !std.mem.eql(u8, value, "minimize"))
             return error.UnsupportedMetricDirection;
@@ -200,9 +253,59 @@ pub const ContextCommand = enum {
 };
 
 test "node and edge forms reject invalid drafts explicitly" {
-    try std.testing.expectError(error.EmptyTitle, validateNode(.{ .title = " \n" }));
+    try std.testing.expectError(error.EmptyTitle, validateNode(.{ .title = " \n", .loop_type = "composite" }));
+    try validateNode(.{ .title = " \n", .loop_type = "turnBased" });
+    try std.testing.expectEqualStrings("New Loop", resolvedTitle(" \n"));
     try std.testing.expectError(error.SameEndpoint, validateEdge(.{ .from = "a", .to = "a" }));
     try std.testing.expectError(error.UnsupportedEdgeKind, validateEdge(.{ .from = "a", .to = "b", .kind = "bad" }));
+}
+
+test "node updates preserve unchanged fields and allow stall clear sentinel" {
+    try validateNodeUpdate(.{ .stall_after_seconds = 0 });
+    try std.testing.expectError(error.InvalidGoal, validateNodeUpdate(.{ .poll_interval_seconds = 0 }));
+}
+
+test "typed form result deinit releases every owned allocation" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch unreachable;
+    const allocator = gpa.allocator();
+    var draft = NodeDraft{
+        .title = try allocator.dupe(u8, "title"),
+        .loop_type = try allocator.dupe(u8, "turnBased"),
+        .check_description = try allocator.dupe(u8, "check"),
+        .trigger_prompt = try allocator.dupe(u8, "trigger"),
+        .first_instruction = try allocator.dupe(u8, "do"),
+        .goal_summary = try allocator.dupe(u8, ""),
+        .goal_predicate = try allocator.dupe(u8, ""),
+        .metric_command = try allocator.dupe(u8, ""),
+        .metric_direction = try allocator.dupe(u8, "maximize"),
+        .backend = try allocator.dupe(u8, "claudeCode"),
+        .model_tier = try allocator.dupe(u8, ""),
+        .worktree_repository = try allocator.dupe(u8, ""),
+        .worktree_id = try allocator.dupe(u8, ""),
+        .worktree_path = try allocator.dupe(u8, ""),
+        .worktree_branch = try allocator.dupe(u8, ""),
+        .subgraph_json = try allocator.dupe(u8, ""),
+        .created_by = try allocator.dupe(u8, ""),
+    };
+    draft.deinit(allocator);
+    var update = NodeUpdate{
+        .goal_summary = try allocator.dupe(u8, "done"),
+        .goal_predicate = try allocator.dupe(u8, ""),
+        .metric_command = try allocator.dupe(u8, "metric"),
+    };
+    update.deinit(allocator);
+    var edge = EdgeDraft{
+        .from = try allocator.dupe(u8, "a"),
+        .to = try allocator.dupe(u8, "b"),
+        .kind = try allocator.dupe(u8, "handoff"),
+        .condition = try allocator.dupe(u8, "always"),
+        .transform_kind = try allocator.dupe(u8, "none"),
+        .transform_value = try allocator.dupe(u8, ""),
+        .cycle_until = try allocator.dupe(u8, ""),
+        .spawn_target_project_path = try allocator.dupe(u8, ""),
+    };
+    edge.deinit(allocator);
 }
 
 test "jump navigation wraps and matches title or id case insensitively" {
