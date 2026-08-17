@@ -557,8 +557,15 @@ extension ProjectFeature {
   /// Landing on any committed type puts a whole form in front of a person who never
   /// picked it. A stored value nothing can decode (an old build's spelling, a
   /// hand-edited defaults write) gets the same treatment as none.
+  ///
+  /// Composite is filtered on read as well as never written: the key is app-wide and
+  /// only form-creates update it, so one composite made months ago in another project
+  /// owned every project's form until the next form-create — the "why does this keep
+  /// opening on Composite" report. Values written by older builds are exactly why the
+  /// write-side skip alone isn't enough.
   static func loopType(remembered raw: String?) -> LoopType {
-    raw.flatMap(LoopType.init(rawValue:)) ?? .sketch
+    let remembered = raw.flatMap(LoopType.init(rawValue:))
+    return remembered == .composite ? .sketch : (remembered ?? .sketch)
   }
 
   /// Resets the promotion form's one field and opens it for the chosen target — only
@@ -621,7 +628,12 @@ extension ProjectFeature {
     // simply doesn't submit — the Create button is disabled on it too, and this is
     // the backstop for the keyboard shortcut path.
     guard draft.isValid else { return .none }
-    UserDefaults.standard.set(draft.loopType.rawValue, forKey: Self.lastLoopTypeKey)
+    // Composite is deliberately not remembered: creating one is a rare, structural
+    // act, and the *next* loop is almost never another composite — remembering it
+    // made the heaviest type the default everywhere (see `loopType(remembered:)`).
+    if draft.loopType != .composite {
+      UserDefaults.standard.set(draft.loopType.rawValue, forKey: Self.lastLoopTypeKey)
+    }
     let projectPath = state.graph.project.path
     // A form opened from a node card's + handle also wires the new loop up: a
     // default hand-off edge from the parent, created right after the node so the

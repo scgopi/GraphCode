@@ -365,7 +365,37 @@ struct ProjectFeatureTests {
     #expect(ProjectFeature.loopType(remembered: nil) == .sketch)
     #expect(ProjectFeature.loopType(remembered: "not-a-type") == .sketch)
     #expect(ProjectFeature.loopType(remembered: "goalBased") == .goalBased)
-    #expect(ProjectFeature.loopType(remembered: LoopType.composite.rawValue) == .composite)
+    // A remembered composite reads as Sketch: the key is app-wide, only form-creates
+    // update it, and one composite must not own every project's form until the next
+    // form-create. "proactive" is composite's stored spelling.
+    #expect(ProjectFeature.loopType(remembered: "proactive") == .sketch)
+    #expect(ProjectFeature.loopType(remembered: LoopType.composite.rawValue) == .sketch)
+  }
+
+  /// The write side of the same rule: creating a composite leaves the memory alone.
+  @Test
+  @MainActor
+  func creatingACompositeIsNotRemembered() async {
+    UserDefaults.standard.set(LoopType.goalBased.rawValue, forKey: ProjectFeature.lastLoopTypeKey)
+    let store = TestStore(
+      initialState: ProjectFeature.State(graph: LoopGraph(project: Self.testProject))
+    ) {
+      ProjectFeature()
+    } withDependencies: {
+      $0.gitClient.listWorktrees = { _ in [] }
+      $0.orchestratorClient.send = { _ in }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.addNodeButtonTapped(parentBackend: nil))
+    await store.send(.binding(.set(\.draftLoopType, LoopType.composite)))
+    await store.send(.binding(.set(\.draftTitle, "Nightly sweep")))
+    await store.send(.createNodeConfirmed)
+    await store.finish()
+
+    #expect(
+      UserDefaults.standard.string(forKey: ProjectFeature.lastLoopTypeKey)
+        == LoopType.goalBased.rawValue)
   }
 
   /// The workspace gate's live-session reading: presence is the only honest signal
