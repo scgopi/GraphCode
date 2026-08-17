@@ -2089,7 +2089,10 @@ fn onWindowMessage(
             const hdc = c.BeginPaint(hwnd, &paint);
             const inspection = if (app.worktree_inspection) |*value| value else null;
             GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), app.allocator, app.activity_enabled, &app.canvas);
-            if (app.workspace) |*workspace| workspace.*.paintChrome(hdc);
+            if (app.workspace) |*workspace| {
+                // workspace.paintChrome(hdc)
+                workspace.*.paintChrome(hdc);
+            }
             _ = c.EndPaint(hwnd, &paint);
             result.* = 0;
             return true;
