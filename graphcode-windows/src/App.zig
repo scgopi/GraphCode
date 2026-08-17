@@ -276,18 +276,22 @@ pub const App = struct {
             self.setStatus("Unable to retain previous project subscription");
             return;
         };
+        const pending = self.allocator.dupe(u8, path) catch {
+            self.allocator.free(previous);
+            self.setStatus("Unable to retain pending project");
+            return;
+        };
+        const opened = self.allocator.dupe(u8, path) catch {
+            self.allocator.free(previous);
+            self.allocator.free(pending);
+            self.setStatus("Unable to retain project subscription");
+            return;
+        };
         if (self.pending_previous_subscription.len != 0) self.allocator.free(self.pending_previous_subscription);
         self.pending_previous_subscription = previous;
         self.client.setSubscription(path);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
-        self.last_project_opened = self.allocator.dupe(u8, path) catch {
-            self.setStatus("Unable to retain project subscription");
-            return;
-        };
-        const pending = self.allocator.dupe(u8, path) catch {
-            self.setStatus("Unable to retain pending project");
-            return;
-        };
+        self.last_project_opened = opened;
         if (self.pending_rebind_path.len != 0) self.allocator.free(self.pending_rebind_path);
         self.pending_rebind_path = pending;
         self.open_project_pending = true;
