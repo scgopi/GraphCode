@@ -59,10 +59,10 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (!ctrl and key == 0x71) return .rename_selected;
     if (!ctrl and key == 0x2E) return .delete_selected;
     if (ctrl and key == 'J') return .jump_next;
-    if (ctrl and key == ',') return .settings;
+    if (ctrl and (key == ',' or key == 0xBC)) return .settings;
     if (key == 0x70) return .onboarding;
     if (ctrl and key == 0x09) return .cycle_attention;
-    if (ctrl and key == 'W' and shift) return .reclaim_worktrees;
+    if (ctrl and key == 'W' and shift) return .inspect_worktrees;
     if (!ctrl and key == 0x28) return .worktree_next;
     if (!ctrl and key == 0x26) return .worktree_previous;
     if (key == 0x31) return .focus_terminal_a;

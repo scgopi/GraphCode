@@ -285,16 +285,17 @@ pub fn jump(parent: c.HWND, allocator: std.mem.Allocator, initial: []const u8) !
         allocator.destroy(state);
     }
 
-    pub fn worktreePolicy(parent: c.HWND, allocator: std.mem.Allocator, initial: WorktreeStatus.Policy) !?WorktreeStatus.Policy {
-        const state = try allocator.create(DialogState);
-        state.* = .{ .allocator = allocator, .kind = .worktree_policy, .parent = parent, .policy = initial };
-        defer allocator.destroy(state);
-        if (!(try show(state, "Worktree policy", &.{}))) return null;
-        return state.policy;
-    }
     state.values[0] = try allocator.dupe(u8, initial);
     if (!(try show(state, "Jump to loop", &.{"Loop title or ID"}))) return null;
     return try allocator.dupe(u8, state.values[0]);
+}
+
+pub fn worktreePolicy(parent: c.HWND, allocator: std.mem.Allocator, initial: WorktreeStatus.Policy) !?WorktreeStatus.Policy {
+    const state = try allocator.create(DialogState);
+    state.* = .{ .allocator = allocator, .kind = .worktree_policy, .parent = parent, .policy = initial };
+    defer allocator.destroy(state);
+    if (!(try show(state, "Worktree policy", &.{}))) return null;
+    return state.policy;
 }
 
 fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !bool {
@@ -705,4 +706,3 @@ test "scrollbar thumb positions seek and clamp the dialog content" {
     try std.testing.expectEqual(@as(i32, 200), std.math.clamp(@as(i32, 200), 0, max_offset));
     try std.testing.expectEqual(max_offset, std.math.clamp(@as(i32, 100000), 0, max_offset));
 }
-
