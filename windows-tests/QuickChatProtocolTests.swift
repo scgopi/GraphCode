@@ -62,4 +62,27 @@ struct QuickChatProtocolTests {
     #expect(sessionName == "graphcode-\(chat.id.uuidString)")
     #expect(SurfaceRef.nodeID(fromZmxSessionName: sessionName) == chat.id)
   }
+
+  @Test
+  func launcherFailureIsExplicit() async {
+    let backend = CLISessionBackend(
+      kind: .claudeCode,
+      launch: { _, _ in },
+      terminate: { _, _ in },
+      sendInput: { _, _, _ in false },
+      presence: { _, _ in .unknown },
+      usage: { _, _ in nil },
+      startResult: { _, _ in .failure(.failed("fixture start failure")) },
+      terminateResult: { _, _ in .failure(.failed("fixture terminate failure")) },
+      exists: { _, _ in false },
+      enumerate: { [] })
+    let node = LoopNode(title: "fixture")
+    #expect(await backend.startResult(node, nil) == .failure(.failed("fixture start failure")))
+    let termination = await backend.terminateResult(node, nil)
+    if case .failure(.failed(let message)) = termination {
+      #expect(message == "fixture terminate failure")
+    } else {
+      Issue.record("termination failure was not surfaced")
+    }
+  }
 }

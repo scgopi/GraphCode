@@ -47,6 +47,10 @@ public actor ProjectRegistry {
   private var connectionProjectPaths: [UUID: Set<String>] = [:]
   private let ensureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let terminateSession: (@Sendable (LoopNode, String?) -> Void)?
+  private let startQuickChat: (@Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>)?
+  private let terminateQuickChat: (@Sendable (LoopNode, String?) async -> Result<Void, CLISessionError>)?
+  private let quickChatExists: (@Sendable (LoopNode, String?) async -> Bool)?
+  private let enumerateQuickChatSessions: (@Sendable () async -> [UUID])?
   private let evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)?
   private let deliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)?
   private let captureScript: (@Sendable (ShellPredicate) async -> String?)?
@@ -69,14 +73,14 @@ public actor ProjectRegistry {
       createdAt: chat.createdAt)
   }
 
-  private func ensureQuickChatSession(_ chat: QuickChat) {
-    guard chat.backend.isSpiked else { return }
-    ensureSession?(quickChatNode(chat), nil)
+  private func ensureQuickChatSession(_ chat: QuickChat) async -> Result<CLISessionStartOutcome, CLISessionError> {
+    guard let startQuickChat else { return .failure(.unavailable("session launcher unavailable")) }
+    return await startQuickChat(quickChatNode(chat), nil)
   }
 
-  private func terminateQuickChatSession(_ chat: QuickChat) {
-    guard chat.backend.isSpiked else { return }
-    terminateSession?(quickChatNode(chat), nil)
+  private func terminateQuickChatSession(_ chat: QuickChat) async -> Result<Void, CLISessionError> {
+    guard let terminateQuickChat else { return .failure(.unavailable("session launcher unavailable")) }
+    return await terminateQuickChat(quickChatNode(chat), nil)
   }
 
   /// These default to the real `ZmxSessionLauncher`/`ShellPredicateEvaluator` closures —
@@ -101,7 +105,11 @@ public actor ProjectRegistry {
     readActivity: (@Sendable (LoopNode, String?) async -> String?)? =
       CLISessionBackend.readActivity,
     readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)? =
-      CLISessionBackend.readPresence
+      CLISessionBackend.readPresence,
+    startQuickChat: (@Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>)? = nil,
+    terminateQuickChat: (@Sendable (LoopNode, String?) async -> Result<Void, CLISessionError>)? = nil,
+    quickChatExists: (@Sendable (LoopNode, String?) async -> Bool)? = nil
+    , enumerateQuickChatSessions: (@Sendable () async -> [UUID])? = nil
   ) {
     self.platformPaths = platformPaths
     persistence = ProjectPersistence(
@@ -116,6 +124,18 @@ public actor ProjectRegistry {
     self.readUsage = readUsage
     self.readActivity = readActivity
     self.readPresence = readPresence
+    self.startQuickChat = startQuickChat ?? { node, path in
+      await CLISessionBackend.backend(for: node).startResult(node, path)
+    }
+    self.terminateQuickChat = terminateQuickChat ?? { node, path in
+      await CLISessionBackend.backend(for: node).terminateResult(node, path)
+    }
+    self.quickChatExists = quickChatExists ?? { node, path in
+      await CLISessionBackend.backend(for: node).exists(node, path)
+    }
+    self.enumerateQuickChatSessions = enumerateQuickChatSessions ?? {
+      await CLISessionBackend.backend(for: .init(title: "", backend: .claudeCode)).enumerate()
+    }
   }
 
   // MARK: - Connections
@@ -139,7 +159,12 @@ public actor ProjectRegistry {
     // Reattach every persisted chat on reconnect. zmx's stable node ID makes this
     // idempotent when the previous daemon instance is still winding down.
     for chat in quickChatStore.load() {
-      ensureQuickChatSession(chat)
+      _ = await ensureQuickChatSession(chat)
+    }
+    let known = Set(quickChatStore.load().map(\.id))
+    for orphan in await (enumerateQuickChatSessions?() ?? []) where !known.contains(orphan) {
+      _ = await terminateQuickChatSession(
+        QuickChat(id: orphan, title: "orphan", backend: .claudeCode))
     }
     startPresencePolling()
   }
@@ -384,13 +409,15 @@ public actor ProjectRegistry {
         error = "quick chat not found"
         break
       }
-      guard chat.backend.isSpiked else {
-        error = "quick chat backend is unavailable"
+      switch await ensureQuickChatSession(chat) {
+      case .failure(let failure):
+        error = "quick chat session unavailable: \(failure)"
         break
+      case .success:
+        response = .quickChatChanged(chat)
+        await broadcast(response!)
       }
-      ensureQuickChatSession(chat)
-      response = .quickChatChanged(chat)
-      await broadcast(response!)
+      if error != nil { break }
 
     case .renameQuickChat(let id, let title):
       let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -410,9 +437,12 @@ public actor ProjectRegistry {
         error = "quick chat not found"
         break
       }
-      // Stop first, then remove the durable record. This ordering prevents an
-      // orphaned zmx session when persistence succeeds but termination races.
-      terminateQuickChatSession(chat)
+      // Stop and confirm first. The record remains durable on failure so reconnect
+      // can retry rather than leaving an untracked live session.
+      guard case .success = await terminateQuickChatSession(chat) else {
+        error = "quick chat session termination failed"
+        break
+      }
       _ = quickChatStore.delete(id: id)
       response = .quickChatDeleted(id)
       await broadcast(response!)
