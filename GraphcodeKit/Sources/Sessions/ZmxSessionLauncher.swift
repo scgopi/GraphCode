@@ -539,24 +539,37 @@ public enum ZmxSessionLauncher {
         return .failure(.unavailable("backend has no executable"))
       }
       let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
-      do {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: ZmxLocator.binaryURL.path)
-        process.arguments = ["--daemon", name, executable]
-        if let directory = workingDirectory(forNode: node, projectPath: projectPath) {
-          process.currentDirectoryURL = URL(fileURLWithPath: directory)
+      #if os(Windows)
+        do {
+          let process = Process()
+          process.executableURL = URL(fileURLWithPath: ZmxLocator.binaryURL.path)
+          process.arguments = ["--daemon", name, executable]
+          if let directory = workingDirectory(forNode: node, projectPath: projectPath) {
+            process.currentDirectoryURL = URL(fileURLWithPath: directory)
+          }
+          try process.run()
+        } catch {
+          return .failure(.failed("zmx daemon launch failed: \(error)"))
         }
-        try process.run()
-      } catch {
-        return .failure(.failed("zmx daemon launch failed: \(error)"))
-      }
+      #else
+        await atomicCheckOrRun(
+          checkArguments: existenceCheckArguments(forNode: node),
+          runArguments: ["run", name, "-d", executable],
+          zmxPath: ZmxLocator.binaryURL.path,
+          workingDirectory: workingDirectory(forNode: node, projectPath: projectPath))
+      #endif
     } else {
       await start(node, projectPath: projectPath)
     }
-    guard await sessionExists(node, projectPath: projectPath) else {
-      return .failure(.failed("zmx session did not become live (\(SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName))"))
+    for delay in [100, 200, 400, 800, 1200] {
+      if await sessionExists(node, projectPath: projectPath) {
+        return .success(.started)
+      }
+      try? await Task.sleep(for: .milliseconds(delay))
     }
-    return .success(.started)
+    await kill(node, projectPath: projectPath)
+    return .failure(.failed(
+      "zmx session did not become live (\(SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName))"))
   }
 
   public static func terminateResult(
