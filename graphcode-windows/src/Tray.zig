@@ -3,17 +3,23 @@ const c = @import("Win32.zig").c;
 
 pub const command_open: c.WPARAM = 0x5001;
 pub const command_exit: c.WPARAM = 0x5002;
+pub const icon_id: c.UINT = 1;
 pub const notify_message: c.UINT = c.WM_APP + 77;
-pub var taskbar_created: c.UINT = c.WM_APP + 78;
+pub const test_hook_open: c.WPARAM = 1;
+pub const test_hook_context: c.WPARAM = 2;
+pub var taskbar_created: c.UINT = 0;
+pub var test_hook_message: c.UINT = 0;
+const test_callback_property = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.TrayCallback");
 
 pub const Tray = struct {
     hwnd: c.HWND = null,
     menu: c.HMENU = null,
     added: bool = false,
+    test_hook_enabled: bool = false,
 
     pub fn add(self: *Tray, hwnd: c.HWND) !void {
         self.hwnd = hwnd;
-        taskbar_created = c.RegisterWindowMessageW(std.unicode.utf8ToUtf16LeStringLiteral("TaskbarCreated").ptr);
+        registerMessages();
         self.menu = c.CreatePopupMenu();
         if (self.menu == null) return error.TrayMenuFailed;
         const open = std.unicode.utf8ToUtf16LeStringLiteral("Open GraphCode");
@@ -27,7 +33,7 @@ pub const Tray = struct {
         var data: c.NOTIFYICONDATAW = std.mem.zeroes(c.NOTIFYICONDATAW);
         data.cbSize = @sizeOf(c.NOTIFYICONDATAW);
         data.hWnd = hwnd;
-        data.uID = 1;
+        data.uID = icon_id;
         data.uFlags = c.NIF_MESSAGE | c.NIF_TIP | c.NIF_ICON;
         data.uCallbackMessage = notify_message;
         data.hIcon = c.LoadIconW(null, @ptrFromInt(32512));
@@ -37,6 +43,8 @@ pub const Tray = struct {
             self.remove();
             return error.TrayIconFailed;
         }
+        data.unnamed_0.uVersion = c.NOTIFYICON_VERSION_4;
+        _ = c.Shell_NotifyIconW(c.NIM_SETVERSION, &data);
         self.added = true;
     }
 
@@ -52,12 +60,15 @@ pub const Tray = struct {
             var data: c.NOTIFYICONDATAW = std.mem.zeroes(c.NOTIFYICONDATAW);
             data.cbSize = @sizeOf(c.NOTIFYICONDATAW);
             data.hWnd = self.hwnd;
-            data.uID = 1;
+            data.uID = icon_id;
             _ = c.Shell_NotifyIconW(c.NIM_DELETE, &data);
             self.added = false;
         }
         if (self.menu != null) _ = c.DestroyMenu(self.menu);
         self.menu = null;
+        if (self.test_hook_enabled) {
+            _ = c.RemovePropW(self.hwnd, test_callback_property.ptr);
+        }
     }
 
     pub fn showMenu(self: *Tray) void {
@@ -68,4 +79,38 @@ pub const Tray = struct {
         _ = c.TrackPopupMenu(self.menu, c.TPM_RIGHTALIGN | c.TPM_BOTTOMALIGN, point.x, point.y, 0, self.hwnd, null);
         _ = c.PostMessageW(self.hwnd, c.WM_NULL, 0, 0);
     }
+
+    pub fn observeTestCallback(self: *Tray, event: c.UINT) void {
+        if (self.test_hook_enabled) {
+            _ = c.SetPropW(self.hwnd, test_callback_property.ptr, @ptrFromInt(@as(usize, event)));
+        }
+    }
 };
+
+pub fn notificationEvent(lparam: c.LPARAM) c.UINT {
+    const raw: usize = @bitCast(lparam);
+    return @intCast(raw & 0xffff);
+}
+
+pub fn callbackTargetsIcon(lparam: c.LPARAM) bool {
+    const raw: usize = @bitCast(lparam);
+    const callback_icon_id = (raw >> 16) & 0xffff;
+    return callback_icon_id == 0 or callback_icon_id == icon_id;
+}
+
+pub fn testNotificationLParam(event: c.UINT) c.LPARAM {
+    return @intCast((@as(usize, icon_id) << 16) | event);
+}
+
+fn registerMessages() void {
+    if (taskbar_created == 0) {
+        taskbar_created = c.RegisterWindowMessageW(
+            std.unicode.utf8ToUtf16LeStringLiteral("TaskbarCreated").ptr,
+        );
+    }
+    if (test_hook_message == 0) {
+        test_hook_message = c.RegisterWindowMessageW(
+            std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.TrayTestHook").ptr,
+        );
+    }
+}

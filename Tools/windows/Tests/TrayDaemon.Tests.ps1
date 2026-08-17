@@ -43,6 +43,23 @@ if ($app -notmatch "command_open[\s\S]*?SW_SHOW" -or
 if ($app -notmatch "taskbar_created[\s\S]*?tray\.readd") { throw "TaskbarCreated recovery is missing" }
 if ($tray -notmatch "Shell_NotifyIconW" -or
     $tray -notmatch "Open GraphCode" -or $tray -notmatch "Exit") { throw "tray shell contract is incomplete" }
+if ($tray -notmatch "NIM_SETVERSION" -or
+    $tray -notmatch "NOTIFYICON_VERSION_4" -or
+    $tray -notmatch "icon_id") { throw "tray callback identity is incomplete" }
+if ($tray -notmatch "TrackPopupMenu" -or
+    $tray -notmatch "observeTestCallback" -or
+    $app -notmatch "observeTestCallback[\s\S]*?showMenu") {
+  throw "tray test observability must use the production callback and popup menu"
+}
+if ($app -notmatch "test_hook_message[\s\S]*?PostMessageW[\s\S]*?notify_message") {
+  throw "tray live hook must relay through the production callback message"
+}
+if ($app -notmatch "callbackTargetsIcon" -or
+    $app -notmatch "restoreShellWindow") { throw "tray callback routing is incomplete" }
+$mainWindow = Get-Content (Join-Path $root "graphcode-windows\src\MainWindow.zig") -Raw
+if ($mainWindow -notmatch "AllowSetForegroundWindow") {
+  throw "single-instance restore must grant the existing shell foreground permission"
+}
 if ($package -match 'Set-Content[^`r`n]*graphcode-windows\.exe') {
   throw "package must not generate a console launcher script"
 }

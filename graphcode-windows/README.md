@@ -36,3 +36,15 @@ zig build `
 `Tools\windows\validate.ps1 -Task windows-shell` performs pin, clean-worktree,
 format, lifecycle-contract, and real provider build checks. This scaffold has
 package metadata only; it intentionally does not create an installer.
+
+## Tray lifecycle coverage
+
+The shell registers a version-4 notification icon with a stable `HWND`/icon ID
+identity, restores through the same callback path used by Explorer, and
+re-registers after `TaskbarCreated`. `TrayLive.Tests.ps1` retains physical
+`Shell_NotifyIconGetRect` discovery (including monitor and DPI checks), while
+its test-only registered-message hook relays Open and context events back
+through and observes the production notification callback. This avoids treating
+injected screen coordinates as a reliable substitute for overflow-tray
+activation; the context callback runs the real `TrackPopupMenu` path before the
+test dispatches its production Exit command.

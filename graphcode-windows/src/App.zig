@@ -19,6 +19,7 @@ const c = @import("Win32.zig").c;
 
 const title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Windows");
 const instance_prefix = "Local\\graphcode-windows-";
+const tray_test_hook_environment = "GRAPHCODE_TRAY_TEST_HOOK";
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -26,6 +27,7 @@ pub const App = struct {
     client: DaemonClient,
     daemon: DaemonSupervisor,
     tray: Tray = .{},
+    tray_test_hook_enabled: bool = false,
     model: GraphModel.Model,
     canvas: GraphCanvas.CanvasState = .{},
     worktree_inspection: ?WorktreeStatus.Inspection = null,
@@ -74,6 +76,7 @@ pub const App = struct {
             .client = client,
             .daemon = .{ .allocator = allocator },
             .model = GraphModel.Model.init(allocator),
+            .tray_test_hook_enabled = envFlag(tray_test_hook_environment),
         };
         errdefer app.deinit();
         try app.client.start();
@@ -102,6 +105,7 @@ pub const App = struct {
 
     pub fn run(self: *App) !void {
         try self.window.create(self, &onWindowMessage, title.ptr);
+        self.tray.test_hook_enabled = self.tray_test_hook_enabled;
         self.tray.add(self.window.hwnd) catch self.setStatus("System tray unavailable; GraphCode remains open");
         const endpoint = self.client.currentEndpointName(self.allocator) catch &.{};
         const lock_name = self.client.currentDaemonLockName(self.allocator) catch &.{};
@@ -656,27 +660,39 @@ fn onWindowMessage(
     result: *c.LRESULT,
 ) callconv(.c) bool {
     const app: *App = @ptrCast(@alignCast(context.?));
-    if (message == TrayModule.taskbar_created) {
+    if (TrayModule.taskbar_created != 0 and message == TrayModule.taskbar_created) {
         app.tray.readd();
         if (!app.tray.added) app.setStatus("System tray unavailable; retrying");
         result.* = 0;
         return true;
     }
-    if (message == MainWindow.restore_message) {
-        _ = c.ShowWindow(hwnd, c.SW_SHOW);
-        _ = c.ShowWindow(hwnd, c.SW_RESTORE);
-        _ = c.SetForegroundWindow(hwnd);
-        _ = c.SetFocus(hwnd);
+    if (MainWindow.restore_message != 0 and message == MainWindow.restore_message) {
+        restoreShellWindow(hwnd);
         result.* = 0;
         return true;
     }
-    if (message == TrayModule.notify_message) {
-        if (lparam == c.WM_LBUTTONDBLCLK) {
-            _ = c.ShowWindow(hwnd, c.SW_SHOW);
-            _ = c.ShowWindow(hwnd, c.SW_RESTORE);
-            _ = c.SetForegroundWindow(hwnd);
-            _ = c.SetFocus(hwnd);
-        } else if (lparam == c.WM_RBUTTONUP or lparam == c.WM_CONTEXTMENU) {
+    if (app.tray_test_hook_enabled and
+        TrayModule.test_hook_message != 0 and
+        message == TrayModule.test_hook_message)
+    {
+        const event: c.UINT = switch (wparam) {
+            TrayModule.test_hook_open => @intCast(c.WM_LBUTTONDBLCLK),
+            TrayModule.test_hook_context => @intCast(c.WM_CONTEXTMENU),
+            else => {
+                result.* = 0;
+                return true;
+            },
+        };
+        _ = c.PostMessageW(hwnd, TrayModule.notify_message, 0, TrayModule.testNotificationLParam(event));
+        result.* = 0;
+        return true;
+    }
+    if (message == TrayModule.notify_message and TrayModule.callbackTargetsIcon(lparam)) {
+        const event = TrayModule.notificationEvent(lparam);
+        app.tray.observeTestCallback(event);
+        if (event == c.WM_LBUTTONDBLCLK) {
+            restoreShellWindow(hwnd);
+        } else if (event == c.WM_RBUTTONUP or event == c.WM_CONTEXTMENU) {
             app.tray.showMenu();
         }
         result.* = 0;
@@ -696,10 +712,7 @@ fn onWindowMessage(
         c.WM_COMMAND => {
             const command = @as(c.WPARAM, @intCast(@as(usize, @bitCast(wparam)) & 0xffff));
             if (command == TrayModule.command_open) {
-                _ = c.ShowWindow(hwnd, c.SW_SHOW);
-                _ = c.ShowWindow(hwnd, c.SW_RESTORE);
-                _ = c.SetForegroundWindow(hwnd);
-                _ = c.SetFocus(hwnd);
+                restoreShellWindow(hwnd);
                 result.* = 0;
                 return true;
             }
@@ -959,6 +972,27 @@ fn hideShellWindow(hwnd: c.HWND) void {
         0,
         c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_HIDEWINDOW,
     );
+}
+
+fn restoreShellWindow(hwnd: c.HWND) void {
+    _ = c.ShowWindow(hwnd, c.SW_RESTORE);
+    _ = c.ShowWindow(hwnd, c.SW_SHOW);
+    _ = c.BringWindowToTop(hwnd);
+    if (c.SetForegroundWindow(hwnd) == 0) {
+        const foreground = c.GetForegroundWindow();
+        if (foreground != null and foreground != hwnd) {
+            const current_thread = c.GetCurrentThreadId();
+            const foreground_thread = c.GetWindowThreadProcessId(foreground, null);
+            if (foreground_thread != 0 and foreground_thread != current_thread and
+                c.AttachThreadInput(current_thread, foreground_thread, 1) != 0)
+            {
+                defer _ = c.AttachThreadInput(current_thread, foreground_thread, 0);
+                _ = c.BringWindowToTop(hwnd);
+                _ = c.SetForegroundWindow(hwnd);
+            }
+        }
+    }
+    _ = c.SetFocus(hwnd);
 }
 
 fn runSmokeWorkspaceActions(self: *App) void {

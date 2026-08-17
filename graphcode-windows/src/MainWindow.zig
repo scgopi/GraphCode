@@ -24,7 +24,11 @@ pub const Window = struct {
         title: [*:0]const u16,
     ) !void {
         self.instance = c.GetModuleHandleW(null);
-        restore_message = c.RegisterWindowMessageW(std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.Restore").ptr);
+        if (restore_message == 0) {
+            restore_message = c.RegisterWindowMessageW(
+                std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.Restore").ptr,
+            );
+        }
         self.context = context;
         self.callback = callback;
         try registerClass(self.instance);
@@ -69,14 +73,19 @@ pub const Window = struct {
 
 pub const timer_id: usize = 41;
 pub const wm_app_tick: c.UINT = c.WM_APP + 41;
-pub var restore_message: c.UINT = c.WM_APP + 79;
+pub var restore_message: c.UINT = 0;
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeWindowsShell");
 
 pub fn restoreExistingInstance() void {
     const hwnd = c.FindWindowW(class_name.ptr, null);
     const message = c.RegisterWindowMessageW(std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.Restore").ptr);
-    if (hwnd != null and message != 0) _ = c.PostMessageW(hwnd, message, 0, 0);
+    if (hwnd != null and message != 0) {
+        var process_id: c.DWORD = 0;
+        _ = c.GetWindowThreadProcessId(hwnd, &process_id);
+        if (process_id != 0) _ = c.AllowSetForegroundWindow(process_id);
+        _ = c.PostMessageW(hwnd, message, 0, 0);
+    }
 }
 
 fn windowFromHandle(hwnd: c.HWND) ?*Window {
