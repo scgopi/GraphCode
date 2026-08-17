@@ -11,6 +11,7 @@ pub const EventCallback = *const fn (
 ) callconv(.c) void;
 
 pub const DaemonClient = struct {
+    const V1Expectation = enum { recent_projects, graph_changed };
     const reconnect_initial_ms: i64 = 100;
     const reconnect_max_ms: i64 = 4_000;
     const negotiation_timeout_ms: i64 = 1_500;
@@ -27,6 +28,7 @@ pub const DaemonClient = struct {
     retry_now: bool = false,
     outbound: [outbound_capacity][]u8 = undefined,
     outbound_request_ids: [outbound_capacity]? [36]u8 = [_]? [36]u8{null} ** outbound_capacity,
+    outbound_expectations: [outbound_capacity]V1Expectation = [_]V1Expectation{.graph_changed} ** outbound_capacity,
     outbound_head: usize = 0,
     outbound_count: usize = 0,
     worker_busy: bool = false,
@@ -46,6 +48,7 @@ pub const DaemonClient = struct {
     pending_request_ids: [64][36]u8 = undefined,
     pending_request_count: usize = 0,
     v1_pending_count: usize = 0,
+    v1_pending_expectation: ?V1Expectation = null,
     subscription_path: []const u8 = "",
     frame_buffer: FrameBuffer,
     retry_at_ms: i64 = 0,
@@ -275,8 +278,12 @@ pub const DaemonClient = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         return self.mode != .v1 or
+<<<<<<< HEAD
             (self.outbound_count == 0 and !self.worker_busy and self.v1_pending_count == 0);
 
+=======
+            (self.outbound_count == 0 and !self.worker_busy and self.v1_pending_expectation == null);
+>>>>>>> c0309fd (fix(windows): account v1 responses by expected event)
     }
 
     pub fn sendCreateNode(self: *DaemonClient, project_path: []const u8, title: []const u8) void {
@@ -479,6 +486,13 @@ pub const DaemonClient = struct {
         };
     }
 
+    fn expectationForCommand(command_json: []const u8) V1Expectation {
+        if (std.mem.indexOf(u8, command_json, "\"listRecentProjects\"") != null or
+            std.mem.indexOf(u8, command_json, "\"restoreOpenProjects\"") != null)
+            return .recent_projects;
+        return .graph_changed;
+    }
+
     fn sendCommand(self: *DaemonClient, command_json: []u8) void {
         _ = self.sendCommandInternal(command_json, null);
     }
@@ -498,6 +512,7 @@ pub const DaemonClient = struct {
         const index = (self.outbound_head + self.outbound_count) % outbound_capacity;
         self.outbound[index] = @constCast(command_json);
         self.outbound_request_ids[index] = request_id;
+        self.outbound_expectations[index] = expectationForCommand(command_json);
         self.outbound_count += 1;
         self.condition.signal();
         self.mutex.unlock();
@@ -569,7 +584,7 @@ pub const DaemonClient = struct {
 
             if (self.pipe != c.INVALID_HANDLE_VALUE and self.state == .connected) {
                 if (self.dequeueOutbound()) |outbound| {
-                    self.sendCommandOnWorker(outbound.command, outbound.request_id);
+                    self.sendCommandOnWorker(outbound.command, outbound.request_id, outbound.expectation);
                     self.allocator.free(outbound.command);
                     self.mutex.lock();
                     self.worker_busy = false;
@@ -597,22 +612,30 @@ pub const DaemonClient = struct {
     const OutboundCommand = struct {
         command: []u8,
         request_id: ?[36]u8,
+        expectation: V1Expectation,
     };
 
     fn dequeueOutbound(self: *DaemonClient) ?OutboundCommand {
         self.mutex.lock();
         defer self.mutex.unlock();
         if (self.outbound_count == 0) return null;
+        if (self.mode == .v1 and self.v1_pending_expectation != null) return null;
         const command = self.outbound[self.outbound_head];
         const request_id = self.outbound_request_ids[self.outbound_head];
+        const expectation = self.outbound_expectations[self.outbound_head];
         self.outbound_request_ids[self.outbound_head] = null;
         self.outbound_head = (self.outbound_head + 1) % outbound_capacity;
         self.outbound_count -= 1;
         self.worker_busy = true;
-        return .{ .command = command, .request_id = request_id };
+        return .{ .command = command, .request_id = request_id, .expectation = expectation };
     }
 
-    fn sendCommandOnWorker(self: *DaemonClient, command_json: []const u8, requested_id: ?[36]u8) void {
+    fn sendCommandOnWorker(
+        self: *DaemonClient,
+        command_json: []const u8,
+        requested_id: ?[36]u8,
+        expectation: V1Expectation,
+    ) void {
         const frame = if (self.mode == .v2) blk: {
             var request_id: [36]u8 = undefined;
             if (requested_id) |value| {
@@ -650,6 +673,7 @@ pub const DaemonClient = struct {
         if (self.mode == .v1) {
             self.mutex.lock();
             self.v1_pending_count += 1;
+            self.v1_pending_expectation = expectation;
             self.mutex.unlock();
         }
     }
@@ -843,7 +867,16 @@ pub const DaemonClient = struct {
         }
         if (self.mode == .v1) {
             self.mutex.lock();
-            if (self.v1_pending_count != 0) self.v1_pending_count -= 1;
+            const expected = self.v1_pending_expectation;
+            const kind = Wire.eventKind(frame);
+            if (expected != null and
+                (kind == .error_occurred or
+                    (expected.? == .recent_projects and kind == .recent_projects) or
+                    (expected.? == .graph_changed and kind == .graph_changed)))
+            {
+                self.v1_pending_expectation = null;
+                self.v1_pending_count = 0;
+            }
             self.mutex.unlock();
         }
         self.enqueueInbound(frame);
@@ -913,12 +946,34 @@ test "v1 open waits for all earlier commands and retains retry on full queue" {
     defer client.deinit();
     client.mode = .v1;
     client.v1_pending_count = 1;
+    client.v1_pending_expectation = .graph_changed;
     try std.testing.expect(!client.v1OpenReady());
     try std.testing.expect(client.sendOpenProject("C:\\work\\B") == null);
     client.v1_pending_count = 0;
     for (&client.outbound) |*slot| slot.* = try std.testing.allocator.dupe(u8, "");
     client.outbound_count = outbound_capacity;
     try std.testing.expect(client.sendOpenProject("C:\\work\\C") == null);
+}
+
+test "v1 response accounting ignores unsolicited events before the expected result" {
+    var client = try DaemonClient.init(std.testing.allocator);
+    defer client.deinit();
+    client.mode = .v1;
+    client.state = .connected;
+    client.v1_pending_count = 1;
+    client.v1_pending_expectation = .graph_changed;
+    try std.testing.expect(client.handleFrame(
+        "{\"version\":1,\"kind\":\"event\",\"event\":{\"recentProjectsListed\":[]}}",
+    ));
+    try std.testing.expectEqual(@as(usize, 1), client.v1_pending_count);
+    try std.testing.expect(client.handleFrame(
+        "{\"version\":1,\"kind\":\"event\",\"event\":{\"attentionChanged\":{}}}",
+    ));
+    try std.testing.expectEqual(@as(usize, 1), client.v1_pending_count);
+    try std.testing.expect(client.handleFrame(
+        "{\"version\":1,\"kind\":\"event\",\"event\":{\"errorOccurred\":\"rejected\"}}",
+    ));
+    try std.testing.expectEqual(@as(usize, 0), client.v1_pending_count);
 }
 
     fn publishState(self: *DaemonClient, state: Wire.ConnectionState, message: []const u8) void {
@@ -958,6 +1013,7 @@ test "v1 open waits for all earlier commands and retains retry on full queue" {
         defer self.mutex.unlock();
         self.pending_request_count = 0;
         self.v1_pending_count = 0;
+        self.v1_pending_expectation = null;
     }
 
     fn clearOutboundLocked(self: *DaemonClient) void {
@@ -967,6 +1023,7 @@ test "v1 open waits for all earlier commands and retains retry on full queue" {
             self.outbound_head = (self.outbound_head + 1) % outbound_capacity;
             self.outbound_count -= 1;
             self.outbound_request_ids[index] = null;
+            self.outbound_expectations[index] = .graph_changed;
             self.allocator.free(command);
         }
     }
