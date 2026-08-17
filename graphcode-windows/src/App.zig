@@ -42,6 +42,7 @@ pub const App = struct {
     sync_requested: bool = false,
     restore_requested: bool = false,
     open_project_pending: bool = false,
+    pending_rebind_path: []u8 = &.{},
     last_connection_state: Wire.ConnectionState = .disconnected,
     last_project_opened: []const u8 = "",
     pending_project_path: []u8 = &.{},
@@ -106,6 +107,7 @@ pub const App = struct {
         if (self.instance_mutex != null) _ = c.CloseHandle(self.instance_mutex);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
         if (self.pending_project_path.len != 0) self.allocator.free(self.pending_project_path);
+        if (self.pending_rebind_path.len != 0) self.allocator.free(self.pending_rebind_path);
         if (self.status_override.len != 0) self.allocator.free(self.status_override);
         if (self.smoke_workspace_actions.len != 0) self.allocator.free(self.smoke_workspace_actions);
         if (self.smoke_restart_session.len != 0) self.allocator.free(self.smoke_restart_session);
@@ -178,7 +180,15 @@ pub const App = struct {
             },
             .graph_changed => {
                 if (self.model.graph) |graph| {
-                    self.rebindWorkspace(graph.project.path);
+                    const accepted = self.pending_rebind_path.len != 0 and
+                        std.mem.eql(u8, self.pending_rebind_path, graph.project.path);
+                    if (accepted) {
+                        self.allocator.free(self.pending_rebind_path);
+                        self.pending_rebind_path = &.{};
+                        self.rebindWorkspace(graph.project.path);
+                    } else if (self.pending_rebind_path.len == 0) {
+                        self.rebindWorkspace(graph.project.path);
+                    }
                     self.clampSidebarScroll();
                     if (self.worktree_inspection) |inspection| {
                         if (self.model.graph) |current_graph| {
@@ -192,12 +202,18 @@ pub const App = struct {
                             }
                         }
                     }
-                    if (self.model.graph) |current_graph| self.queueProject(current_graph.project.path);
+                    if (self.pending_rebind_path.len == 0) {
+                        if (self.model.graph) |current_graph| self.queueProject(current_graph.project.path);
+                    }
                     self.clampSidebarScroll();
                     self.refreshWorkspace();
                 }
             },
             .error_occurred => {
+                if (self.pending_rebind_path.len != 0) {
+                    self.allocator.free(self.pending_rebind_path);
+                    self.pending_rebind_path = &.{};
+                }
                 if (Wire.copyErrorMessage(self.allocator, frame) catch null) |message| {
                     self.replaceStatus(message);
                 } else {
@@ -235,19 +251,18 @@ pub const App = struct {
 
     pub fn openProject(self: *App, path: []const u8) void {
         if (path.len == 0) return;
-        if (self.workspace) |workspace| {
-            _ = workspace.rebindProject(path) catch {
-                self.setStatus("Unable to switch workspace project");
-                return;
-            };
-        }
-
         self.client.setSubscription(path);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
         self.last_project_opened = self.allocator.dupe(u8, path) catch {
             self.setStatus("Unable to retain project subscription");
             return;
         };
+        const pending = self.allocator.dupe(u8, path) catch {
+            self.setStatus("Unable to retain pending project");
+            return;
+        };
+        if (self.pending_rebind_path.len != 0) self.allocator.free(self.pending_rebind_path);
+        self.pending_rebind_path = pending;
         self.open_project_pending = true;
         if (self.client.connectionState() == .connected) {
             self.client.sendOpenProject(path);
@@ -434,6 +449,12 @@ pub const App = struct {
     }
 
     fn inspectWorktrees(self: *App) void {
+        if (self.model.graph) |graph| {
+            if (!graph.project.isLocalFilesystem()) {
+                self.setStatus("Worktrees require a local filesystem project");
+                return;
+            }
+        }
         const path = self.currentProject() orelse {
             self.setStatus("No project selected for worktree inspection");
             return;
@@ -475,6 +496,12 @@ pub const App = struct {
     }
 
     fn reclaimWorktrees(self: *App) void {
+        if (self.model.graph) |graph| {
+            if (!graph.project.isLocalFilesystem()) {
+                self.setStatus("Worktrees require a local filesystem project");
+                return;
+            }
+        }
         const path = self.currentProject() orelse {
             self.setStatus("No project selected for worktree reclaim");
             return;
@@ -579,6 +606,7 @@ pub const App = struct {
             .reconnect => {
                 self.client.reconnect();
             },
+            .open_folder => self.openFolder(),
             .create_node => self.createNode(),
             .open_node => self.openSelectedNode(),
             .stop_node => self.stopSelectedNode(),
@@ -713,6 +741,7 @@ pub const App = struct {
     fn updateNativeChrome(self: *App) void {
         MainWindow.updateMenu(self.window.hwnd, .{
             .has_project = self.model.graph != null,
+            .can_worktrees = if (self.model.graph) |graph| graph.project.isLocalFilesystem() else false,
             .has_workspace = self.workspace != null and self.model.graph != null,
             .has_attention = self.model.attentionCount() != 0,
             .can_close_tab = if (self.workspace) |workspace| workspace.tabCount() > 1 else false,
@@ -838,6 +867,7 @@ fn onWindowMessage(
                     .open_folder => app.openFolder(),
                     .open_global_overview => app.openGlobalOverview(),
                     .worktrees => app.handleAction(.inspect_worktrees),
+                    .reclaim_worktrees => app.handleAction(.reclaim_worktrees),
                     .exit => _ = c.DestroyWindow(hwnd),
                     .jump_loop => app.handleAction(.jump_next),
                     .review_attention => app.handleAction(.cycle_attention),

@@ -1,4 +1,5 @@
 const std = @import("std");
+const InputRouter = @import("InputRouter.zig");
 const c = @import("Win32.zig").c;
 const WorkspaceLayout = @import("WorkspaceLayout.zig");
 const Tokens = @import("DesignTokens.zig");
@@ -1344,7 +1345,7 @@ fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c
     if (event.action == c.WINGHOSTTY_KEY_RELEASE) return;
     const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
     const shift = (@as(i32, c.GetKeyState(c.VK_SHIFT)) & 0x8000) != 0;
-    if (ctrl and isWorkspaceShortcut(event.virtual_key))
+    if (isRoutedShortcut(event.virtual_key, ctrl, shift))
     {
         if (workspace.key_callback) |callback|
             callback(workspace.key_callback_context, event.virtual_key, true, shift);
@@ -1366,15 +1367,17 @@ fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c
     workspace.enqueueInput(index, bytes);
 }
 
-fn isWorkspaceShortcut(key: usize) bool {
-    return key == 'T' or key == 'W' or key == 'D' or key == 0xDB or key == 0xDD or
-        key == c.VK_PRIOR or key == c.VK_NEXT;
+fn isRoutedShortcut(key: usize, ctrl: bool, shift: bool) bool {
+    return @intFromEnum(InputRouter.keyAction(key, ctrl, shift)) != @intFromEnum(InputRouter.Action.none);
 }
 
-test "child key callback forwards tab navigation virtual keys" {
-    try std.testing.expect(isWorkspaceShortcut(c.VK_PRIOR));
-    try std.testing.expect(isWorkspaceShortcut(c.VK_NEXT));
-    try std.testing.expect(isWorkspaceShortcut('T'));
+test "child key callback forwards advertised menu shortcuts" {
+    try std.testing.expect(isRoutedShortcut(c.VK_PRIOR, true, false));
+    try std.testing.expect(isRoutedShortcut(c.VK_NEXT, true, false));
+    try std.testing.expect(isRoutedShortcut(c.VK_TAB, true, false));
+    try std.testing.expect(isRoutedShortcut(c.VK_TAB, false, true));
+    try std.testing.expect(isRoutedShortcut(0xBC, true, false));
+    try std.testing.expect(isRoutedShortcut('W', true, true));
 }
 
 fn onText(user_data: ?*anyopaque, surface: *c.winghostty_surface, text: [*:0]const u8, length: u32) callconv(.c) void {

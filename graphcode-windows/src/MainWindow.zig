@@ -15,6 +15,7 @@ pub const Command = enum(u16) {
     open_global_overview = 4102,
     worktrees = 4103,
     exit = 4104,
+    reclaim_worktrees = 4105,
     jump_loop = 4201,
     review_attention = 4202,
     next_loop = 4203,
@@ -40,6 +41,7 @@ pub const empty_global_overview_id: usize = 4602;
 
 pub const MenuState = struct {
     has_project: bool,
+    can_worktrees: bool,
     has_workspace: bool,
     has_attention: bool,
     can_close_tab: bool,
@@ -146,6 +148,7 @@ pub fn installMenu(hwnd: c.HWND) !void {
     append(file, "Open Folder...\tCtrl+O", @intFromEnum(Command.open_folder));
     append(file, "Open Global Overview", @intFromEnum(Command.open_global_overview));
     append(file, "Worktrees...\tCtrl+Shift+W", @intFromEnum(Command.worktrees));
+    append(file, "Reclaim Selected Worktrees...", @intFromEnum(Command.reclaim_worktrees));
     separator(file);
     append(file, "Exit", @intFromEnum(Command.exit));
 
@@ -186,7 +189,8 @@ pub fn installMenu(hwnd: c.HWND) !void {
 
 pub fn updateMenu(hwnd: c.HWND, state: MenuState) void {
     setEnabled(hwnd, .open_global_overview, true);
-    setEnabled(hwnd, .worktrees, state.has_project);
+    setEnabled(hwnd, .worktrees, state.can_worktrees);
+    setEnabled(hwnd, .reclaim_worktrees, state.can_worktrees);
     setEnabled(hwnd, .jump_loop, state.has_project);
     setEnabled(hwnd, .review_attention, state.has_attention);
     setEnabled(hwnd, .next_loop, state.has_project);
@@ -232,7 +236,11 @@ fn separator(menu: c.HMENU) void {
 fn createAccelerators() c.HACCEL {
     var entries = [_]c.ACCEL{
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'O', .cmd = @intFromEnum(Command.open_folder) },
+        .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = 'W', .cmd = @intFromEnum(Command.worktrees) },
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'J', .cmd = @intFromEnum(Command.jump_loop) },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = c.VK_TAB, .cmd = @intFromEnum(Command.review_attention) },
+        .{ .fVirt = c.FVIRTKEY, .key = c.VK_TAB, .cmd = @intFromEnum(Command.next_loop) },
+        .{ .fVirt = c.FSHIFT | c.FVIRTKEY, .key = c.VK_TAB, .cmd = @intFromEnum(Command.previous_loop) },
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'N', .cmd = @intFromEnum(Command.create_node) },
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'S', .cmd = @intFromEnum(Command.stop_loop) },
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'T', .cmd = @intFromEnum(Command.new_tab) },
@@ -241,6 +249,7 @@ fn createAccelerators() c.HACCEL {
         .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = 'D', .cmd = @intFromEnum(Command.split_down) },
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = c.VK_NEXT, .cmd = @intFromEnum(Command.next_tab) },
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = c.VK_PRIOR, .cmd = @intFromEnum(Command.previous_tab) },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 0xBC, .cmd = @intFromEnum(Command.settings) },
     };
     return c.CreateAcceleratorTableW(&entries, entries.len);
 }

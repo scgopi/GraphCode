@@ -3,6 +3,7 @@ const std = @import("std");
 pub const Action = enum {
     none,
     reconnect,
+    open_folder,
     create_node,
     open_node,
     stop_node,
@@ -33,14 +34,14 @@ pub const Action = enum {
 pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (ctrl and key == 'R') return .reconnect;
     if (ctrl and key == 'N') return .create_node;
-    if (ctrl and key == 'O') return .open_node;
+    if (ctrl and key == 'O') return .open_folder;
     if (ctrl and key == 'S') return .stop_node;
     if (ctrl and key == 'M') return .send_node;
     if (ctrl and key == 'E') return .edit_node;
     if (ctrl and key == 'J') return .jump_next;
     if (ctrl and key == ',') return .settings;
     if (ctrl and key == 0x09) return .cycle_attention;
-    if (ctrl and key == 'W' and shift) return .reclaim_worktrees;
+    if (ctrl and key == 'W' and shift) return .inspect_worktrees;
     if (!ctrl and key == 0x28) return .worktree_next;
     if (!ctrl and key == 0x26) return .worktree_previous;
     if (key == 0x31) return .focus_terminal_a;
@@ -60,6 +61,7 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
 
 pub fn commandText(allocator: std.mem.Allocator, action: Action) ![]u8 {
     return switch (action) {
+        .open_folder => allocator.dupe(u8, "Open folder"),
         .create_node => allocator.dupe(u8, "Create node"),
         .open_node => allocator.dupe(u8, "Open node"),
         .stop_node => allocator.dupe(u8, "Stop node"),
@@ -104,7 +106,7 @@ test "workspace shortcuts route to tabs splits and panes" {
 test "attention and worktree shortcuts are distinct from ordinary selection" {
     try std.testing.expectEqual(Action.cycle_attention, keyAction(0x09, true, false));
     try std.testing.expectEqual(Action.close_tab, keyAction('W', true, false));
-    try std.testing.expectEqual(Action.reclaim_worktrees, keyAction('W', true, true));
+    try std.testing.expectEqual(Action.inspect_worktrees, keyAction('W', true, true));
     try std.testing.expectEqual(Action.select_next, keyAction(0x09, false, false));
     try std.testing.expectEqual(Action.select_previous, keyAction(0x09, false, true));
 }

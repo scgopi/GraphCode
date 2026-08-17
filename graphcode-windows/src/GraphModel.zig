@@ -48,6 +48,10 @@ pub const Project = struct {
     pub fn isGlobal(self: Project) bool {
         return std.mem.eql(u8, self.path, "graphcode://global");
     }
+
+    pub fn isLocalFilesystem(self: Project) bool {
+        return !self.isRemote() and !self.isGlobal() and std.mem.indexOf(u8, self.path, "://") == null;
+    }
 };
 
 pub const Graph = struct {
@@ -1294,6 +1298,14 @@ test "activity compares the prior graph for the same project across interleaved 
     try std.testing.expectEqual(@as(usize, 1), model.activity.items.len);
     try std.testing.expectEqualStrings("A", model.activity.items[0].title);
     try std.testing.expectEqualStrings("failed", model.activity.items[0].state);
+=======
+test "worktrees are limited to local filesystem projects" {
+    const local = Project{ .path = @constCast("C:\\work\\graph"), .name = @constCast("Graph") };
+    const remote = Project{ .path = @constCast("ssh://host/graph"), .name = @constCast("Graph") };
+    const global = Project{ .path = @constCast("graphcode://global"), .name = @constCast("Global") };
+    try std.testing.expect(local.isLocalFilesystem());
+    try std.testing.expect(!remote.isLocalFilesystem());
+    try std.testing.expect(!global.isLocalFilesystem());
 }
 
 test "attention fixture preserves awaiting input and stranded edge metadata" {
