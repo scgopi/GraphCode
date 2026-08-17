@@ -137,7 +137,7 @@ pub fn validateJumpQuery(query: []const u8) FormError![]const u8 {
 }
 
 pub fn validateNode(draft: NodeDraft) FormError!void {
-    if (!isLoopType(draft.loop_type))
+    if (!isLoopType(draft.loop_type) and !std.mem.eql(u8, draft.loop_type, "composite"))
         return error.UnsupportedLoopType;
     if (std.mem.eql(u8, draft.loop_type, "composite") and
         std.mem.trim(u8, draft.title, " \t\r\n").len == 0)
@@ -177,6 +177,7 @@ pub fn validateSubgraphJson(value: []const u8) FormError!void {
     defer arena.deinit();
     var parsed = std.json.parseFromSlice(std.json.Value, arena.allocator(), value, .{}) catch return error.InvalidSubgraph;
     defer parsed.deinit();
+    canonicalizeLoopTypeAliases(&parsed.value);
     try validateLoopGraphValue(parsed.value, 0);
 }
 
@@ -184,8 +185,27 @@ pub fn isLoopType(value: []const u8) bool {
     return std.mem.eql(u8, value, "turnBased") or
         std.mem.eql(u8, value, "timeBased") or
         std.mem.eql(u8, value, "goalBased") or
-        std.mem.eql(u8, value, "proactive") or
-        std.mem.eql(u8, value, "composite");
+        std.mem.eql(u8, value, "proactive");
+}
+
+pub fn canonicalizeLoopTypeAliases(value: *std.json.Value) void {
+    switch (value.*) {
+        .object => |*object| {
+            if (object.getPtr("loopType")) |loop_type| switch (loop_type.*) {
+                .string => |text| if (std.mem.eql(u8, text, "composite")) {
+                    loop_type.* = .{ .string = "proactive" };
+                },
+                else => {},
+            };
+            if (object.getPtr("subGraph")) |nested| canonicalizeLoopTypeAliases(nested);
+            if (object.getPtr("nodes")) |nodes| switch (nodes.*) {
+                .array => |*items| for (items.items) |*item| canonicalizeLoopTypeAliases(item),
+                else => {},
+            };
+        },
+        .array => |*items| for (items.items) |*item| canonicalizeLoopTypeAliases(item),
+        else => {},
+    }
 }
 
 pub fn isBackend(value: []const u8) bool {

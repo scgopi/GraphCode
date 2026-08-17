@@ -266,6 +266,7 @@ fn safeSubgraphJson(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
     Forms.validateSubgraphJson(value) catch return allocator.dupe(u8, "null");
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, value, .{});
     defer parsed.deinit();
+    Forms.canonicalizeLoopTypeAliases(&parsed.value);
     stripRuntimeFields(&parsed.value);
     var output = std.array_list.Managed(u8).init(allocator);
     errdefer output.deinit();
@@ -300,6 +301,17 @@ test "canonical subgraphs omit runtime-only node fields recursively" {
     defer output.deinit();
     try output.writer().print("{f}", .{std.json.fmt(parsed.value, .{})});
     try std.testing.expect(std.mem.indexOf(u8, output.items, "hasActiveDependents") == null);
+}
+
+test "subgraph canonicalization maps nested composite aliases to Swift proactive" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\{"id":"11111111-1111-4111-8111-111111111111","project":{"path":"C:\\work\\graph","name":"Graph","lastOpenedAt":0},"nodes":[{"id":"22222222-2222-4222-8222-222222222222","title":"Composite","loopType":"composite","pausesBeforeWritesOnly":false,"backend":"claudeCode","pilotState":"notPiloted","hasActiveDependents":false,"metricHistory":[],"state":{"idle":{}},"createdAt":0,"subGraph":{"id":"33333333-3333-4333-8333-333333333333","project":{"path":"C:\\work\\nested","name":"Nested","lastOpenedAt":0},"nodes":[{"id":"44444444-4444-4444-8444-444444444444","title":"Nested composite","loopType":"composite","pausesBeforeWritesOnly":false,"backend":"copilotCLI","pilotState":"notPiloted","hasActiveDependents":false,"metricHistory":[],"state":{"idle":{}},"createdAt":0}],"edges":[]}}],"edges":[]}
+    ;
+    const canonical = try safeSubgraphJson(allocator, input);
+    defer allocator.free(canonical);
+    try std.testing.expect(std.mem.indexOf(u8, canonical, "\"loopType\":\"proactive\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, canonical, "\"loopType\":\"composite\"") == null);
 }
 
 fn goalJson(allocator: std.mem.Allocator, draft: Forms.NodeDraft) ![]u8 {

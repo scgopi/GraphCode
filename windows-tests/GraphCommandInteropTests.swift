@@ -99,7 +99,7 @@ final class GraphCommandInteropTests: XCTestCase {
         LoopNode(
           id: UUID(uuidString: "44444444-4444-4444-8444-444444444444")!,
           title: "Nested loop",
-          loopType: .turnBased,
+          loopType: .composite,
           firstInstruction: "nested work",
           backend: .copilotCLI,
           createdAt: Date(timeIntervalSince1970: 1767225600))
