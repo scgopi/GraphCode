@@ -10,7 +10,7 @@
   "zmx": {
     "repository": "coneilen/zmx",
     "remoteUrl": "https://github.com/coneilen/zmx.git",
-    "sha": "029e11d2b19162fb3bdf90c8270237d303b8bfb4",
+    "sha": "858727af10cdf43d66cb3733cff58dc90ec4b3dd",
     "artifact": "zig-out/bin/zmx.exe",
     "minimumZig": "0.16.0"
   },
@@ -20,7 +20,7 @@
     "reason": "Consume reviewed clean provider worktrees until immutable provider artifacts are publishable.",
     "paths": [
       "Winghostty-worktrees/host-integration",
-      "zmx-worktrees/quickchat-hang"
+      "zmx-worktrees/attach"
     ]
   }
 }
