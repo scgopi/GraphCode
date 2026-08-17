@@ -25,8 +25,6 @@ public static class GraphCodeTrayLiveNative {
   }
   [StructLayout(LayoutKind.Sequential)]
   public struct Rect { public int left, top, right, bottom; }
-  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-  public static extern IntPtr FindWindow(string className, string title);
   [DllImport("user32.dll")]
   public static extern bool IsWindowVisible(IntPtr hwnd);
   [DllImport("user32.dll")]
@@ -38,6 +36,22 @@ public static class GraphCodeTrayLiveNative {
   [DllImport("user32.dll")]
   public static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")]
+  public static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
+  [DllImport("user32.dll")]
+  public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetMenu(IntPtr hwnd);
+  [DllImport("user32.dll")]
+  public static extern int GetMenuItemCount(IntPtr menu);
+  [DllImport("user32.dll")]
+  public static extern bool GetMenuItemRect(IntPtr hwnd, IntPtr menu, uint item, out Rect rect);
+  [DllImport("user32.dll")]
+  public static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern IntPtr FindWindow(string className, string title);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   public static extern uint RegisterWindowMessage(string name);
   [DllImport("user32.dll")]
   public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
@@ -47,9 +61,18 @@ public static class GraphCodeTrayLiveNative {
   public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
   [DllImport("shell32.dll")]
   public static extern int Shell_NotifyIconGetRect(ref NotifyIconIdentifier identifier, out Rect rect);
+  [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+  public static extern bool Shell_NotifyIcon(uint message, ref NotifyIconIdentifier identifier);
 }
 "@
 }
+
+$script:MOUSEEVENTF_LEFTDOWN = 0x0002
+$script:MOUSEEVENTF_LEFTUP = 0x0004
+$script:MOUSEEVENTF_RIGHTDOWN = 0x0008
+$script:MOUSEEVENTF_RIGHTUP = 0x0010
+$script:KEYEVENTF_KEYUP = 0x0002
+$script:NIM_DELETE = 0x0002
 
 function Get-ShellWindow([int] $processId) {
   $script:foundWindow = [IntPtr]::Zero
@@ -81,6 +104,65 @@ function Assert-TrayIcon([IntPtr] $hwnd) {
   if ($result -ne 0 -or $rect.right -le $rect.left -or $rect.bottom -le $rect.top) {
     throw "GraphCode tray icon was not discoverable through Shell_NotifyIconGetRect"
   }
+  return $rect
+}
+
+function Invoke-MouseClick([GraphCodeTrayLiveNative+Rect] $rect, [bool] $double = $false) {
+  $x = [int](($rect.left + $rect.right) / 2)
+  $y = [int](($rect.top + $rect.bottom) / 2)
+  [void][GraphCodeTrayLiveNative]::SetCursorPos($x, $y)
+  [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+  [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+  if ($double) {
+    Start-Sleep -Milliseconds 80
+    [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+    [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+  }
+}
+
+function Invoke-TrayContextMenu([GraphCodeTrayLiveNative+Rect] $rect, [ValidateSet("Open", "Exit")] [string] $action) {
+  $x = [int](($rect.left + $rect.right) / 2)
+  $y = [int](($rect.top + $rect.bottom) / 2)
+  [void][GraphCodeTrayLiveNative]::SetCursorPos($x, $y)
+  [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+  [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_RIGHTUP, 0, 0, 0, [UIntPtr]::Zero)
+  $menu = [IntPtr]::Zero
+  for ($i = 0; $i -lt 30 -and $menu -eq [IntPtr]::Zero; $i++) {
+    Start-Sleep -Milliseconds 50
+    $menu = [GraphCodeTrayLiveNative]::FindWindow("#32768", $null)
+  }
+  if ($menu -eq [IntPtr]::Zero) { throw "Tray context menu did not open" }
+  $menuRect = [GraphCodeTrayLiveNative+Rect]::new()
+  if (-not [GraphCodeTrayLiveNative]::GetWindowRect($menu, [ref]$menuRect)) {
+    throw "Could not locate tray context menu bounds"
+  }
+  $nativeMenu = [GraphCodeTrayLiveNative]::GetMenu($menu)
+  $itemIndex = if ($action -eq "Open") { 0 } else { 1 }
+  if ($nativeMenu -eq [IntPtr]::Zero -or
+      [GraphCodeTrayLiveNative]::GetMenuItemCount($nativeMenu) -lt 2) {
+    throw "Tray context menu did not expose the expected accessible items"
+  }
+  $itemRect = [GraphCodeTrayLiveNative+Rect]::new()
+  if (-not [GraphCodeTrayLiveNative]::GetMenuItemRect(
+      $menu, $nativeMenu, [uint32]$itemIndex, [ref]$itemRect)) {
+    throw "Could not locate tray context menu item bounds"
+  }
+  $itemX = [int](($itemRect.left + $itemRect.right) / 2)
+  $itemY = [int](($itemRect.top + $itemRect.bottom) / 2)
+  [void][GraphCodeTrayLiveNative]::SetCursorPos($itemX, $itemY)
+  [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+  [GraphCodeTrayLiveNative]::mouse_event($script:MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+}
+
+function Invoke-AltF4 {
+  [GraphCodeTrayLiveNative]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+  [GraphCodeTrayLiveNative]::keybd_event(0x73, 0, 0, [UIntPtr]::Zero)
+  [GraphCodeTrayLiveNative]::keybd_event(0x73, 0, $script:KEYEVENTF_KEYUP, [UIntPtr]::Zero)
+  [GraphCodeTrayLiveNative]::keybd_event(0x12, 0, $script:KEYEVENTF_KEYUP, [UIntPtr]::Zero)
+}
+
+function Invoke-WindowClose([IntPtr] $hwnd) {
+  [void][GraphCodeTrayLiveNative]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
 }
 
 function Assert-NoConsoleWindow([int] $processId) {
@@ -114,7 +196,7 @@ try {
   }
   if ($hwnd -eq [IntPtr]::Zero) { throw "GraphCode GUI window did not start" }
   Assert-NoConsoleWindow $process.Id
-  Assert-TrayIcon $hwnd
+  $trayRect = Assert-TrayIcon $hwnd
 
   $racer = Start-Process -FilePath $Executable -PassThru -WindowStyle Hidden
   if (-not $racer.WaitForExit(5000)) { throw "Competing shell start did not complete" }
@@ -123,32 +205,37 @@ try {
     throw "Competing shell start did not preserve the existing window"
   }
 
-  [void][GraphCodeTrayLiveNative]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+  Invoke-WindowClose $hwnd
   Start-Sleep -Milliseconds 250
   if ([GraphCodeTrayLiveNative]::IsWindowVisible($hwnd)) { throw "WM_CLOSE did not hide the shell" }
-  Assert-TrayIcon $hwnd
+  $trayRect = Assert-TrayIcon $hwnd
 
-  [void][GraphCodeTrayLiveNative]::SendMessage($hwnd, 0x8000004D, [IntPtr]::Zero, [IntPtr]0x0203)
+  [void][GraphCodeTrayLiveNative]::SendMessage($hwnd, 0x804D, [IntPtr]::new(1), [IntPtr]0x0203)
   Start-Sleep -Milliseconds 250
-  if (-not [GraphCodeTrayLiveNative]::IsWindowVisible($hwnd)) {
-    [void][GraphCodeTrayLiveNative]::SendMessage($hwnd, 0x0111, [IntPtr]0x5001, [IntPtr]::Zero)
-  }
   if (-not [GraphCodeTrayLiveNative]::IsWindowVisible($hwnd)) { throw "Tray double-click did not restore the shell" }
-  if ([GraphCodeTrayLiveNative]::GetForegroundWindow() -ne $hwnd) {
-    [void][GraphCodeTrayLiveNative]::SetForegroundWindow($hwnd)
-  }
 
+  Invoke-WindowClose $hwnd
+  Start-Sleep -Milliseconds 200
+  if ([GraphCodeTrayLiveNative]::IsWindowVisible($hwnd)) { throw "Alt+F4 did not hide the shell" }
   $second = Start-Process -FilePath $Executable -PassThru -WindowStyle Hidden
   if (-not $second.WaitForExit(5000)) { throw "Second launch did not return after requesting restore" }
   if ($second.ExitCode -ne 0) { throw "Second launch exited with code $($second.ExitCode)" }
   if (-not [GraphCodeTrayLiveNative]::IsWindowVisible($hwnd)) { throw "Second launch did not restore the existing shell" }
 
+  $icon = [GraphCodeTrayLiveNative+NotifyIconIdentifier]::new()
+  $icon.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($icon)
+  $icon.hWnd = $hwnd
+  $icon.uID = 1
+  if (-not [GraphCodeTrayLiveNative]::Shell_NotifyIcon($script:NIM_DELETE, [ref]$icon)) {
+    throw "Could not remove tray icon for Explorer-loss simulation"
+  }
   $taskbar = [GraphCodeTrayLiveNative]::RegisterWindowMessage("TaskbarCreated")
-  [void][GraphCodeTrayLiveNative]::PostMessage($hwnd, $taskbar, [IntPtr]::Zero, [IntPtr]::Zero)
+  [void][GraphCodeTrayLiveNative]::PostMessage($hwnd, [int]$taskbar, [IntPtr]::Zero, [IntPtr]::Zero)
   Start-Sleep -Milliseconds 250
-  Assert-TrayIcon $hwnd
+  $trayRect = Assert-TrayIcon $hwnd
+  $script:trayWindow = $hwnd
 
-  [void][GraphCodeTrayLiveNative]::PostMessage($hwnd, 0x0111, [IntPtr]0x5002, [IntPtr]::Zero)
+  Invoke-TrayContextMenu $trayRect "Exit"
   if (-not $process.WaitForExit(5000)) { throw "Tray Exit command did not terminate the shell" }
   if ($ExternalDaemonPid -and -not (Get-Process -Id $ExternalDaemonPid -ErrorAction SilentlyContinue)) {
     throw "External daemon was terminated by tray Exit"

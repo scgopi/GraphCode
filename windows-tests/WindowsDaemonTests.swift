@@ -41,6 +41,40 @@ final class WindowsDaemonTests: XCTestCase {
       withExtendedLifetime(first) {}
     }
 
+    func testStartupReservationSerializesCompetingLaunches() throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("graphcode-startup-\(UUID().uuidString)", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      let environment = [SupportDirectory.environmentKey: root.path]
+      var first: WindowsDaemonStartupReservation? =
+        try WindowsDaemonStartupReservation(environment: environment)
+      withExtendedLifetime(first) {}
+      let started = DispatchSemaphore(value: 0)
+      let completed = DispatchSemaphore(value: 0)
+      final class Result: @unchecked Sendable {
+        let lock = NSLock()
+        var succeeded = false
+      }
+      let result = Result()
+      DispatchQueue.global(qos: .utility).async {
+        started.signal()
+        if let second = try? WindowsDaemonStartupReservation(environment: environment) {
+          result.lock.lock()
+          result.succeeded = true
+          result.lock.unlock()
+          withExtendedLifetime(second) {}
+        }
+        completed.signal()
+      }
+      XCTAssertEqual(started.wait(timeout: .now() + 1), .success)
+      XCTAssertEqual(completed.wait(timeout: .now() + 0.2), .timedOut)
+      first = nil
+      XCTAssertEqual(completed.wait(timeout: .now() + 2), .success)
+      result.lock.lock()
+      defer { result.lock.unlock() }
+      XCTAssertTrue(result.succeeded)
+    }
+
     func testRendezvousSecretPersistsRotatesAndScopesTaskIdentity() throws {
       let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("graphcode-rendezvous-\(UUID().uuidString)", isDirectory: true)

@@ -585,12 +585,58 @@ import Foundation
       "Global\\graphcode-daemon-\(sid)-\(supportHash.prefix(20))"
     }
 
+    public static func startupName(sid: String, supportHash: String) -> String {
+      "\(name(sid: sid, supportHash: supportHash))-startup"
+    }
+
     static func name(sid: String, supportHash: String, rendezvousHash: String) -> String {
       name(sid: sid, supportHash: supportHash)
     }
 
     static func securityDescriptor(for sid: String) -> String {
       WindowsPipeSecurity.descriptor(for: sid)
+    }
+  }
+
+  /// Serializes every daemon launch path, including scheduled-task and shell
+  /// children, before the lifetime instance lock is acquired.
+  public final class WindowsDaemonStartupReservation: @unchecked Sendable {
+    private let handle: HANDLE
+
+    public init(
+      environment: [String: String] = ProcessInfo.processInfo.environment,
+      homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) throws {
+      let identity = try WindowsNamedPipeIdentity.stableValues(
+        environment: environment, homeDirectory: homeDirectory)
+      let name = WindowsDaemonInstanceLock.startupName(
+        sid: identity.sid, supportHash: identity.supportHash)
+      let securityResult = try WindowsPipeSecurity.attributes(for: identity.sid)
+      var security = securityResult.0
+      defer { _ = LocalFree(securityResult.1) }
+
+      guard
+        let mutex = withWideString(
+          name,
+          { wideName in CreateMutexW(&security, true, wideName) })
+      else {
+        throw WindowsPipeError.win32(
+          operation: "CreateMutexW", code: GetLastError())
+      }
+      let error = GetLastError()
+      if error == ERROR_ALREADY_EXISTS {
+        let result = WaitForSingleObject(mutex, 5_000)
+        guard result == WAIT_OBJECT_0 else {
+          _ = CloseHandle(mutex)
+          throw WindowsPipeError.timedOut
+        }
+      }
+      handle = mutex
+    }
+
+    deinit {
+      _ = ReleaseMutex(handle)
+      _ = CloseHandle(handle)
     }
   }
 

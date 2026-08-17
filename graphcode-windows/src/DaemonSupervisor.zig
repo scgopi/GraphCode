@@ -31,6 +31,15 @@ pub const Supervisor = struct {
         };
         defer self.releaseStartupReservation();
 
+        if (startupEventExists(lock_name)) {
+            const deadline = std.time.milliTimestamp() + 5_000;
+            while (std.time.milliTimestamp() < deadline) {
+                if (probeEndpoint(endpoint) == .available) return;
+                std.Thread.sleep(100 * std.time.ns_per_ms);
+            }
+            return;
+        }
+
         const deadline = std.time.milliTimestamp() + 5_000;
         const grace_deadline = std.time.milliTimestamp() + 1_000;
         while (std.time.milliTimestamp() < deadline) {
@@ -72,6 +81,7 @@ pub const Supervisor = struct {
         _ = c.SetEvent(self.startup_event);
         self.clearStartupEnvironment();
         self.closeStartupEvent();
+        self.releaseStartupReservation();
         const startup_deadline = std.time.milliTimestamp() + 5_000;
         while (std.time.milliTimestamp() < startup_deadline) {
             if (probeEndpoint(endpoint) == .available) return;
@@ -172,6 +182,11 @@ pub const Supervisor = struct {
         defer self.allocator.free(wide);
         self.startup_event = c.CreateEventW(null, 1, 0, wide.ptr);
         if (self.startup_event == null) return error.EventCreationFailed;
+        if (c.GetLastError() == c.ERROR_ALREADY_EXISTS) {
+            _ = c.CloseHandle(self.startup_event);
+            self.startup_event = null;
+            return error.EventCreationFailed;
+        }
         _ = c.ResetEvent(self.startup_event);
         const env_name = try utf16(self.allocator, "GRAPHCODE_DAEMON_STARTUP_EVENT");
         defer self.allocator.free(env_name);
@@ -225,6 +240,17 @@ fn daemonLockExists(name: []const u8) bool {
     const wide = utf16(std.heap.page_allocator, name) catch return false;
     defer std.heap.page_allocator.free(wide);
     const handle = c.OpenMutexW(c.SYNCHRONIZE, 0, wide.ptr);
+    if (handle == null) return false;
+    _ = c.CloseHandle(handle);
+    return true;
+}
+
+fn startupEventExists(lock_name: []const u8) bool {
+    const name = std.fmt.allocPrint(std.heap.page_allocator, "{s}-startup-ready", .{lock_name}) catch return false;
+    defer std.heap.page_allocator.free(name);
+    const wide = utf16(std.heap.page_allocator, name) catch return false;
+    defer std.heap.page_allocator.free(wide);
+    const handle = c.OpenEventW(c.SYNCHRONIZE, 0, wide.ptr);
     if (handle == null) return false;
     _ = c.CloseHandle(handle);
     return true;

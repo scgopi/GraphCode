@@ -6,6 +6,7 @@ import GraphcodeKit
 
 #if os(Windows)
   SupportDirectory.prepare()
+  var startupEventHandle: HANDLE?
   let endpointName: String = {
     #if os(Windows)
       if let startupEventName = ProcessInfo.processInfo.environment[
@@ -17,7 +18,7 @@ import GraphcodeKit
           OpenEventW(DWORD(SYNCHRONIZE), false, $0.baseAddress)
         }) {
           _ = WaitForSingleObject(startupEvent, 5_000)
-          CloseHandle(startupEvent)
+          startupEventHandle = startupEvent
         }
       }
     #endif
@@ -30,14 +31,16 @@ import GraphcodeKit
     }
   }()
 
-  do {
-    try WindowsNamedPipeEndpoint.recordActiveGeneration()
-  } catch {
-    FileHandle.standardError.write(Data("graphcoded: \(error)\n".utf8))
-    exit(1)
-  }
   let instanceLock: WindowsDaemonInstanceLock = {
     do {
+      let startupReservation = try WindowsDaemonStartupReservation()
+      defer {
+        _ = startupReservation
+        if let startupEventHandle {
+          CloseHandle(startupEventHandle)
+        }
+      }
+      try WindowsNamedPipeEndpoint.recordActiveGeneration()
       return try WindowsDaemonInstanceLock()
     } catch WindowsPipeError.instanceAlreadyRunning {
       FileHandle.standardError.write(Data("graphcoded: daemon is already running\n".utf8))
