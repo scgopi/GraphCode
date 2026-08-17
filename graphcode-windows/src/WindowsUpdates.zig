@@ -222,6 +222,10 @@ const SemVer = struct {
             } else if (isNumeric(l) != isNumeric(r)) {
                 return if (isNumeric(l)) .less else .greater;
             } else if (!std.mem.eql(u8, l, r)) {
+                if (compareBetaIdentifiers(l, r)) |order| {
+                    if (order != .equal) return order;
+                    continue;
+                }
                 return if (std.mem.lessThan(u8, l, r)) .less else .greater;
             }
         }
@@ -232,6 +236,20 @@ fn isNumeric(value: []const u8) bool {
     if (value.len == 0) return false;
     for (value) |byte| if (byte < '0' or byte > '9') return false;
     return true;
+}
+
+fn compareBetaIdentifiers(left: []const u8, right: []const u8) ?SemVer.Order {
+    const left_suffix = betaSuffix(left) orelse return null;
+    const right_suffix = betaSuffix(right) orelse return null;
+    if (left_suffix != right_suffix) return if (left_suffix < right_suffix) .less else .greater;
+    return .equal;
+}
+
+fn betaSuffix(value: []const u8) ?u64 {
+    if (value.len <= 4 or !std.ascii.eqlIgnoreCase(value[0..4], "beta")) return null;
+    const suffix = value[4..];
+    if (!isNumeric(suffix)) return null;
+    return std.fmt.parseInt(u64, suffix, 10) catch null;
 }
 
 fn parseNumber(value: []const u8) !u64 {
@@ -308,6 +326,24 @@ test "beta selection prefers a final stable release over a beta" {
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqual(State.available, result.state);
     try std.testing.expectEqualStrings("v2.0.0", result.version.?);
+}
+
+test "GraphCode beta identifiers compare by numeric suffix" {
+    const releases =
+        \\[{"tag_name":"v1.0.0-beta9","prerelease":true,"draft":false},{"tag_name":"v1.0.0-beta1","prerelease":true,"draft":false},{"tag_name":"v1.0.0","prerelease":false,"draft":false},{"tag_name":"v1.0.0-beta10","prerelease":true,"draft":false}]
+    ;
+    var result = try parseFeed(std.testing.allocator, releases, .beta, "v1.0.0-beta9");
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.up_to_date, result.state);
+    try std.testing.expectEqualStrings("v1.0.0", result.version.?);
+
+    const prereleases =
+        \\[{"tag_name":"v1.0.0-beta9","prerelease":true,"draft":false},{"tag_name":"v1.0.0-beta1","prerelease":true,"draft":false},{"tag_name":"v1.0.0-beta10","prerelease":true,"draft":false}]
+    ;
+    var numeric = try parseFeed(std.testing.allocator, prereleases, .beta, "v1.0.0-beta9");
+    defer numeric.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.available, numeric.state);
+    try std.testing.expectEqualStrings("v1.0.0-beta10", numeric.version.?);
 }
 
 test "variable length GraphCode version tuples normalize trailing zeroes" {
