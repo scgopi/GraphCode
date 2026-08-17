@@ -49,6 +49,7 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (ctrl and key == 'O') return .open_folder;
     if (ctrl and key == 'S') return .stop_node;
     if (ctrl and key == 'M') return .send_node;
+    if (ctrl and key == 'E' and shift) return .reveal_worktree;
     if (ctrl and key == 'E') return .edit_node;
     if (!ctrl and key == 0x71) return .rename_selected;
     if (!ctrl and key == 0x2E) return .delete_selected;
@@ -57,7 +58,6 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (key == 0x70) return .onboarding;
     if (ctrl and key == 0x09) return .cycle_attention;
     if (ctrl and key == 'W' and shift) return .reclaim_worktrees;
-    if (ctrl and key == 'E' and shift) return .reveal_worktree;
     if (!ctrl and key == 0x28) return .worktree_next;
     if (!ctrl and key == 0x26) return .worktree_previous;
     if (key == 0x31) return .focus_terminal_a;

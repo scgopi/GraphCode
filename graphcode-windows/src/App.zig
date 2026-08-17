@@ -216,7 +216,6 @@ pub const App = struct {
         if (self.accessibility) |*provider| {
             if (!provider.attach(self.window.hwnd)) self.setStatus("Accessibility provider unavailable");
         }
-        self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
         self.product_settings_store = ProductSettings.Store.init(self.allocator) catch null;
         if (self.product_settings_store) |*store| {
             self.product_settings = store.load() catch |err| blk: {
@@ -239,8 +238,13 @@ pub const App = struct {
         }
         self.createEmptyStateControls();
         self.updateNativeChrome();
+        const uia_gate = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_GATE") catch null;
+        defer if (uia_gate) |value| self.allocator.free(value);
+        if (uia_gate == null or !std.mem.eql(u8, uia_gate.?, "1")) {
+        self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
         if (self.workspace) |workspace| workspace.setKeyCallback(self, &onWorkspaceKey);
         if (self.workspace) |workspace| try workspace.startInputWorker();
+        }
         self.layoutWorkspace();
         self.requestUpdateCheck();
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_REQUIRE_DAEMON")) |value| {
@@ -1278,6 +1282,7 @@ pub const App = struct {
             inspection.entries.items,
             WorktreeStatus.loadPolicy(self.allocator, path),
         ) catch null;
+        self.syncAccessibility();
         self.clampSidebarScroll();
         const summary = WorktreeStatus.summarize(inspection.entries.items);
         const message = std.fmt.allocPrint(
@@ -1387,6 +1392,7 @@ pub const App = struct {
             if (self.selected_worktree_path.len != 0) self.allocator.free(self.selected_worktree_path);
             self.selected_worktree_path = self.allocator.dupe(u8, path) catch return false;
             self.reclaim_confirmation_armed = false;
+            self.syncAccessibility();
             return true;
         }
         return false;
@@ -1407,6 +1413,7 @@ pub const App = struct {
             break;
         }
         self.reclaim_confirmation_armed = false;
+        self.syncAccessibility();
         return true;
     }
 
@@ -1669,6 +1676,7 @@ pub const App = struct {
         const copy = self.allocator.dupe(u8, value) catch return;
         self.replaceStatus(copy);
         if (self.accessibility) |*provider| {
+            self.syncAccessibility();
             provider.announce(self.status_override, if (std.mem.indexOf(u8, value, "failed") != null or
                 std.mem.indexOf(u8, value, "Unable") != null or
                 std.mem.indexOf(u8, value, "blocked") != null) .@"error" else .status) catch {};
@@ -1679,6 +1687,18 @@ pub const App = struct {
     fn replaceStatus(self: *App, value: []u8) void {
         if (self.status_override.len != 0) self.allocator.free(self.status_override);
         self.status_override = value;
+    }
+
+    fn syncAccessibility(self: *App) void {
+        const provider = if (self.accessibility) |*value| value else return;
+        var rows = std.array_list.Managed(Accessibility.WorktreeRow).init(self.allocator);
+        defer rows.deinit();
+        if (self.worktree_dialog) |dialog| {
+            for (dialog.rows.items) |row| {
+                rows.append(.{ .path = row.entry.path, .selected = row.selected }) catch return;
+            }
+        }
+        provider.syncWorktrees(self.status(), rows.items);
     }
 
     fn acquireSingleInstance(self: *App) !void {
@@ -1807,7 +1827,9 @@ fn onWindowMessage(
                 6 => app.inspectWorktrees(),
                 7 => app.reclaimWorktrees(),
                 8 => app.revealSelectedWorktree(),
-                else => {},
+                else => if (wparam >= 1000 and wparam < 2000) {
+                    _ = app.toggleWorktreeRow(@intCast(wparam - 1000));
+                },
             }
             const id: usize = @intCast(@as(u16, @truncate(wparam)));
             if (id == MainWindow.empty_open_folder_id) {
