@@ -116,6 +116,13 @@ try {
   Assert-NoConsoleWindow $process.Id
   Assert-TrayIcon $hwnd
 
+  $racer = Start-Process -FilePath $Executable -PassThru -WindowStyle Hidden
+  if (-not $racer.WaitForExit(5000)) { throw "Competing shell start did not complete" }
+  if ($racer.ExitCode -ne 0) { throw "Competing shell start exited with code $($racer.ExitCode)" }
+  if (-not [GraphCodeTrayLiveNative]::IsWindowVisible($hwnd)) {
+    throw "Competing shell start did not preserve the existing window"
+  }
+
   [void][GraphCodeTrayLiveNative]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
   Start-Sleep -Milliseconds 250
   if ([GraphCodeTrayLiveNative]::IsWindowVisible($hwnd)) { throw "WM_CLOSE did not hide the shell" }
