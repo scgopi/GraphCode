@@ -203,6 +203,7 @@ try {
   $racer = Start-Process -FilePath $Executable -PassThru -WindowStyle Hidden
   if (-not $racer.WaitForExit(5000)) { throw "Competing shell start did not complete" }
   if ($racer.ExitCode -ne 0) { throw "Competing shell start exited with code $($racer.ExitCode)" }
+  Start-Sleep -Milliseconds 250
   if (-not [GraphCodeTrayLiveNative]::IsWindowVisible($hwnd)) {
     throw "Competing shell start did not preserve the existing window"
   }
@@ -222,6 +223,7 @@ try {
   $second = Start-Process -FilePath $Executable -PassThru -WindowStyle Hidden
   if (-not $second.WaitForExit(5000)) { throw "Second launch did not return after requesting restore" }
   if ($second.ExitCode -ne 0) { throw "Second launch exited with code $($second.ExitCode)" }
+  Start-Sleep -Milliseconds 250
   if (-not [GraphCodeTrayLiveNative]::IsWindowVisible($hwnd)) { throw "Second launch did not restore the existing shell" }
 
   $icon = [GraphCodeTrayLiveNative+NotifyIconIdentifier]::new()
