@@ -13,13 +13,17 @@ pub const Tray = struct {
 
     pub fn add(self: *Tray, hwnd: c.HWND) !void {
         self.hwnd = hwnd;
-        taskbar_created = c.RegisterWindowMessageW(std.unicode.utf16LeStringLiteral("TaskbarCreated").ptr);
+        taskbar_created = c.RegisterWindowMessageW(std.unicode.utf8ToUtf16LeStringLiteral("TaskbarCreated").ptr);
         self.menu = c.CreatePopupMenu();
         if (self.menu == null) return error.TrayMenuFailed;
         const open = std.unicode.utf8ToUtf16LeStringLiteral("Open GraphCode");
         const exit = std.unicode.utf8ToUtf16LeStringLiteral("Exit");
         if (c.AppendMenuW(self.menu, c.MF_STRING, command_open, open.ptr) == 0 or
-            c.AppendMenuW(self.menu, c.MF_STRING, command_exit, exit.ptr) == 0) return error.TrayMenuFailed;
+            c.AppendMenuW(self.menu, c.MF_STRING, command_exit, exit.ptr) == 0)
+        {
+            self.remove();
+            return error.TrayMenuFailed;
+        }
         var data: c.NOTIFYICONDATAW = std.mem.zeroes(c.NOTIFYICONDATAW);
         data.cbSize = @sizeOf(c.NOTIFYICONDATAW);
         data.hWnd = hwnd;
@@ -29,7 +33,10 @@ pub const Tray = struct {
         data.hIcon = c.LoadIconW(null, @ptrFromInt(32512));
         const tip = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode");
         @memcpy(data.szTip[0..tip.len], tip);
-        if (c.Shell_NotifyIconW(c.NIM_ADD, &data) == 0) return error.TrayIconFailed;
+        if (c.Shell_NotifyIconW(c.NIM_ADD, &data) == 0) {
+            self.remove();
+            return error.TrayIconFailed;
+        }
         self.added = true;
     }
 

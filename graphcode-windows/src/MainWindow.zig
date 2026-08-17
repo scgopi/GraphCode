@@ -24,7 +24,7 @@ pub const Window = struct {
         title: [*:0]const u16,
     ) !void {
         self.instance = c.GetModuleHandleW(null);
-        restore_message = c.RegisterWindowMessageW(std.unicode.utf16LeStringLiteral("GraphCode.Windows.Restore").ptr);
+        restore_message = c.RegisterWindowMessageW(std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.Restore").ptr);
         self.context = context;
         self.callback = callback;
         try registerClass(self.instance);
@@ -75,7 +75,7 @@ const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeWindowsShell
 
 pub fn restoreExistingInstance() void {
     const hwnd = c.FindWindowW(class_name.ptr, null);
-    const message = c.RegisterWindowMessageW(std.unicode.utf16LeStringLiteral("GraphCode.Windows.Restore").ptr);
+    const message = c.RegisterWindowMessageW(std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.Restore").ptr);
     if (hwnd != null and message != 0) _ = c.PostMessageW(hwnd, message, 0, 0);
 }
 

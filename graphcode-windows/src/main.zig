@@ -1,7 +1,8 @@
 const std = @import("std");
 const App = @import("App.zig").App;
+const c = @import("Win32.zig").c;
 
-pub fn main() !void {
+fn run() !void {
     const allocator = std.heap.c_allocator;
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -15,4 +16,18 @@ pub fn main() !void {
     defer app.deinit();
     app.configureArgs(args[1..]);
     try app.run();
+}
+
+pub fn main() !void {
+    try run();
+}
+
+pub export fn WinMain(
+    _: c.HINSTANCE,
+    _: c.HINSTANCE,
+    _: [*:0]u16,
+    _: c.INT,
+) callconv(.winapi) c.INT {
+    run() catch return 1;
+    return 0;
 }

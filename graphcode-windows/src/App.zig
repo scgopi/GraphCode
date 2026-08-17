@@ -12,7 +12,8 @@ const TerminalWorkspace = @import("TerminalWorkspace.zig");
 const Tokens = @import("DesignTokens.zig");
 const Wire = @import("Wire.zig");
 const WorktreeStatus = @import("WorktreeStatus.zig");
-const Tray = @import("Tray.zig").Tray;
+const TrayModule = @import("Tray.zig");
+const Tray = TrayModule.Tray;
 const DaemonSupervisor = @import("DaemonSupervisor.zig").Supervisor;
 const c = @import("Win32.zig").c;
 
@@ -101,10 +102,12 @@ pub const App = struct {
 
     pub fn run(self: *App) !void {
         try self.window.create(self, &onWindowMessage, title.ptr);
-        try self.tray.add(self.window.hwnd);
+        self.tray.add(self.window.hwnd) catch self.setStatus("System tray unavailable; GraphCode remains open");
         const endpoint = self.client.currentEndpointName(self.allocator) catch &.{};
+        const lock_name = self.client.currentDaemonLockName(self.allocator) catch &.{};
         defer if (endpoint.len != 0) self.allocator.free(endpoint);
-        if (endpoint.len != 0) self.daemon.start(endpoint);
+        defer if (lock_name.len != 0) self.allocator.free(lock_name);
+        if (endpoint.len != 0 and lock_name.len != 0) self.daemon.start(endpoint, lock_name);
         if (self.daemon.status().len != 0) self.setStatus(self.daemon.status());
         self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
         if (self.workspace) |*workspace| workspace.setKeyCallback(self, &onWorkspaceKey);
@@ -653,6 +656,32 @@ fn onWindowMessage(
     result: *c.LRESULT,
 ) callconv(.c) bool {
     const app: *App = @ptrCast(@alignCast(context.?));
+    if (message == TrayModule.taskbar_created) {
+        app.tray.readd();
+        if (!app.tray.added) app.setStatus("System tray unavailable; retrying");
+        result.* = 0;
+        return true;
+    }
+    if (message == MainWindow.restore_message) {
+        _ = c.ShowWindow(hwnd, c.SW_SHOW);
+        _ = c.ShowWindow(hwnd, c.SW_RESTORE);
+        _ = c.SetForegroundWindow(hwnd);
+        _ = c.SetFocus(hwnd);
+        result.* = 0;
+        return true;
+    }
+    if (message == TrayModule.notify_message) {
+        if (lparam == c.WM_LBUTTONDBLCLK) {
+            _ = c.ShowWindow(hwnd, c.SW_SHOW);
+            _ = c.ShowWindow(hwnd, c.SW_RESTORE);
+            _ = c.SetForegroundWindow(hwnd);
+            _ = c.SetFocus(hwnd);
+        } else if (lparam == c.WM_RBUTTONUP or lparam == c.WM_CONTEXTMENU) {
+            app.tray.showMenu();
+        }
+        result.* = 0;
+        return true;
+    }
     switch (message) {
         c.WM_PAINT => {
             var paint: c.PAINTSTRUCT = undefined;
@@ -664,34 +693,9 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
-        Tray.taskbar_created => {
-            app.tray.readd();
-            result.* = 0;
-            return true;
-        },
-        MainWindow.restore_message => {
-            _ = c.ShowWindow(hwnd, c.SW_SHOW);
-            _ = c.ShowWindow(hwnd, c.SW_RESTORE);
-            _ = c.SetForegroundWindow(hwnd);
-            _ = c.SetFocus(hwnd);
-            result.* = 0;
-            return true;
-        },
-        Tray.notify_message => {
-            if (lparam == c.WM_LBUTTONDBLCLK) {
-                _ = c.ShowWindow(hwnd, c.SW_SHOW);
-                _ = c.ShowWindow(hwnd, c.SW_RESTORE);
-                _ = c.SetForegroundWindow(hwnd);
-                _ = c.SetFocus(hwnd);
-            } else if (lparam == c.WM_RBUTTONUP or lparam == c.WM_CONTEXTMENU) {
-                app.tray.showMenu();
-            }
-            result.* = 0;
-            return true;
-        },
         c.WM_COMMAND => {
             const command = @as(c.WPARAM, @intCast(@as(usize, @bitCast(wparam)) & 0xffff));
-            if (command == Tray.command_open) {
+            if (command == TrayModule.command_open) {
                 _ = c.ShowWindow(hwnd, c.SW_SHOW);
                 _ = c.ShowWindow(hwnd, c.SW_RESTORE);
                 _ = c.SetForegroundWindow(hwnd);
@@ -699,7 +703,7 @@ fn onWindowMessage(
                 result.* = 0;
                 return true;
             }
-            if (command == Tray.command_exit) {
+            if (command == TrayModule.command_exit) {
                 app.exit_requested = true;
                 _ = c.DestroyWindow(hwnd);
                 result.* = 0;
@@ -714,6 +718,9 @@ fn onWindowMessage(
         },
         c.WM_TIMER => if (wparam == MainWindow.timer_id) {
             app.smoke_tick += 1;
+            if (!app.tray.added and app.smoke_tick % 10 == 0) {
+                app.tray.add(hwnd) catch app.setStatus("System tray unavailable; retrying");
+            }
             app.client.poll();
             const connection_state = app.client.connectionState();
             if (connection_state == .connected) app.flushPendingProject();

@@ -160,6 +160,23 @@ pub const DaemonClient = struct {
         return endpointName(allocator);
     }
 
+    pub fn currentDaemonLockName(self: *DaemonClient, allocator: std.mem.Allocator) ![]u8 {
+        _ = self;
+        const support = try supportDirectory(allocator);
+        defer allocator.free(support);
+        const normalized = try normalizedSupportPath(allocator, support);
+        defer allocator.free(normalized);
+        const support_hash = try sha256Hex(allocator, normalized);
+        defer allocator.free(support_hash);
+        const sid = try currentSID(allocator);
+        defer allocator.free(sid);
+        return std.fmt.allocPrint(
+            allocator,
+            "Global\\graphcode-daemon-{s}-{s}",
+            .{ sid, support_hash[0..20] },
+        );
+    }
+
     fn validateSupportDirectory(allocator: std.mem.Allocator, support_directory: []const u8) !void {
         const normalized = try normalizedSupportPath(allocator, support_directory);
         defer std.heap.page_allocator.free(normalized);

@@ -1,38 +1,72 @@
 const std = @import("std");
 const c = @import("Win32.zig").c;
 
+pub const Probe = enum { available, busy, missing, unknown };
+
 pub const Supervisor = struct {
     allocator: std.mem.Allocator,
     process: c.HANDLE = null,
+    shutdown_event: c.HANDLE = null,
     owned: bool = false,
     failure: []u8 = &.{},
 
-    pub fn start(self: *Supervisor, endpoint: []const u8) void {
-        if (endpointAvailable(endpoint)) return;
+    pub fn start(self: *Supervisor, endpoint: []const u8, lock_name: []const u8) void {
+        const deadline = std.time.milliTimestamp() + 5_000;
+        while (std.time.milliTimestamp() < deadline) {
+            switch (probeEndpoint(endpoint)) {
+                .available, .busy => return,
+                .unknown => {
+                    self.setFailure("Unable to determine daemon endpoint state");
+                    return;
+                },
+                .missing => {},
+            }
+            if (daemonLockExists(lock_name)) {
+                std.Thread.sleep(100 * std.time.ns_per_ms);
+                continue;
+            }
+            break;
+        }
+        if (probeEndpoint(endpoint) != .missing or daemonLockExists(lock_name)) return;
         const exe = siblingDaemon(self.allocator) catch {
             self.setFailure("Unable to locate packaged graphcoded.exe");
             return;
         };
         defer self.allocator.free(exe);
+        self.createShutdownEvent(lock_name) catch {
+            self.setFailure("Unable to create daemon shutdown event");
+            return;
+        };
         self.spawn(exe) catch {
             self.setFailure("Unable to start graphcoded.exe");
+            self.closeShutdownEvent();
+            return;
         };
+        const startup_deadline = std.time.milliTimestamp() + 5_000;
+        while (std.time.milliTimestamp() < startup_deadline) {
+            if (probeEndpoint(endpoint) == .available) return;
+            std.Thread.sleep(100 * std.time.ns_per_ms);
+        }
+        self.setFailure("graphcoded.exe did not become reachable");
     }
 
     pub fn stop(self: *Supervisor) void {
         if (!self.owned or self.process == null) return;
-        if (c.WaitForSingleObject(self.process, 2000) == c.WAIT_TIMEOUT) {
-            _ = c.TerminateProcess(self.process, 0);
-            _ = c.WaitForSingleObject(self.process, 2000);
+        if (self.shutdown_event != null) _ = c.SetEvent(self.shutdown_event);
+        if (c.WaitForSingleObject(self.process, 5_000) == c.WAIT_TIMEOUT) {
+            self.forceStop();
+        } else {
+            self.closeProcess();
         }
-        _ = c.CloseHandle(self.process);
-        self.process = null;
-        self.owned = false;
+        self.closeShutdownEvent();
     }
 
     pub fn forceStop(self: *Supervisor) void {
         if (!self.owned or self.process == null) return;
-        self.stop();
+        _ = c.TerminateProcess(self.process, 1);
+        _ = c.WaitForSingleObject(self.process, 2_000);
+        self.closeProcess();
+        self.closeShutdownEvent();
     }
 
     pub fn status(self: *const Supervisor) []const u8 {
@@ -66,15 +100,53 @@ pub const Supervisor = struct {
         self.owned = true;
     }
 
+    fn createShutdownEvent(self: *Supervisor, lock_name: []const u8) !void {
+        const name = try std.fmt.allocPrint(self.allocator, "{s}-shutdown", .{lock_name});
+        defer self.allocator.free(name);
+        const wide = try utf16(self.allocator, name);
+        defer self.allocator.free(wide);
+        self.shutdown_event = c.CreateEventW(null, 1, 0, wide.ptr);
+        if (self.shutdown_event == null) return error.EventCreationFailed;
+        const env_name = try utf16(self.allocator, "GRAPHCODE_DAEMON_SHUTDOWN_EVENT");
+        defer self.allocator.free(env_name);
+        if (c.SetEnvironmentVariableW(env_name.ptr, wide.ptr) == 0) return error.EnvironmentUpdateFailed;
+    }
+
+    fn closeShutdownEvent(self: *Supervisor) void {
+        if (self.shutdown_event != null) _ = c.CloseHandle(self.shutdown_event);
+        self.shutdown_event = null;
+    }
+
+    fn closeProcess(self: *Supervisor) void {
+        if (self.process != null) _ = c.CloseHandle(self.process);
+        self.process = null;
+        self.owned = false;
+    }
+
     fn setFailure(self: *Supervisor, message: []const u8) void {
+        if (self.failure.len != 0) self.allocator.free(self.failure);
         self.failure = self.allocator.dupe(u8, message) catch &.{};
     }
 };
 
-fn endpointAvailable(endpoint: []const u8) bool {
-    const wide = utf16(std.heap.page_allocator, endpoint) catch return false;
+fn probeEndpoint(endpoint: []const u8) Probe {
+    const wide = utf16(std.heap.page_allocator, endpoint) catch return .unknown;
     defer std.heap.page_allocator.free(wide);
-    return c.WaitNamedPipeW(wide.ptr, 0) != 0;
+    if (c.WaitNamedPipeW(wide.ptr, 250) != 0) return .available;
+    return switch (c.GetLastError()) {
+        c.ERROR_FILE_NOT_FOUND => .missing,
+        c.ERROR_SEM_TIMEOUT, c.ERROR_PIPE_BUSY => .busy,
+        else => .unknown,
+    };
+}
+
+fn daemonLockExists(name: []const u8) bool {
+    const wide = utf16(std.heap.page_allocator, name) catch return false;
+    defer std.heap.page_allocator.free(wide);
+    const handle = c.OpenMutexW(c.SYNCHRONIZE, 0, wide.ptr);
+    if (handle == null) return false;
+    _ = c.CloseHandle(handle);
+    return true;
 }
 
 fn siblingDaemon(allocator: std.mem.Allocator) ![]u8 {
@@ -90,6 +162,10 @@ fn utf16(allocator: std.mem.Allocator, value: []const u8) ![:0]u16 {
     @memcpy(result[0..raw.len], raw);
     result[raw.len] = 0;
     return result[0..raw.len :0];
+}
+
+test "busy endpoint is never treated as missing" {
+    try std.testing.expect(@intFromEnum(Probe.busy) != @intFromEnum(Probe.missing));
 }
 
 test "daemon supervisor preserves Unicode sibling paths" {

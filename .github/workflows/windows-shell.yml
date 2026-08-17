@@ -9,6 +9,7 @@ on:
       - "Tools/windows/windows-shell.ps1"
       - "Tools/windows/validate.ps1"
       - "Tools/windows/Tests/WindowsShell.Tests.ps1"
+      - "Tools/windows/Tests/TrayDaemon.Tests.ps1"
       - "Tools/windows/Tests/ValidationRunner.Tests.ps1"
       - "Tools/windows/package.ps1"
       - "Tools/windows/PACKAGING.md"

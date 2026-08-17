@@ -1,5 +1,8 @@
 import Foundation
 import GraphcodeKit
+#if os(Windows)
+  import WinSDK
+#endif
 
 #if os(Windows)
   SupportDirectory.prepare()
@@ -11,6 +14,29 @@ import GraphcodeKit
       exit(1)
     }
   }()
+
+  #if os(Windows)
+    if let shutdownEventName = ProcessInfo.processInfo.environment["GRAPHCODE_DAEMON_SHUTDOWN_EVENT"] {
+      var wideName = Array(shutdownEventName.utf16)
+      wideName.append(0)
+      if let shutdownEvent = wideName.withUnsafeBufferPointer({
+        OpenEventW(SYNCHRONIZE, false, $0.baseAddress)
+      }) {
+        DispatchQueue.global(qos: .utility).async {
+          _ = WaitForSingleObject(shutdownEvent, INFINITE)
+          shutdown.lock.lock()
+          shutdown.stopped = true
+          shutdown.lock.unlock()
+          Task {
+            await ZmxSessionLauncher.shutdownWindowsRemoteBridge()
+            try? await listener.close()
+            CloseHandle(shutdownEvent)
+            exit(0)
+          }
+        }
+      }
+    }
+  #endif
   do {
     try WindowsNamedPipeEndpoint.recordActiveGeneration()
   } catch {

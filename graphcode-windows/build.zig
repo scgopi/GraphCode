@@ -42,6 +42,7 @@ pub fn build(b: *std.Build) !void {
         .name = "graphcode-windows",
         .root_module = module,
     });
+    exe.subsystem = .Windows;
     exe.addObjectFile(.{ .cwd_relative = winghostty_lib });
     for ([_][]const u8{
         "user32",
