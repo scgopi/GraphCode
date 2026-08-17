@@ -162,13 +162,15 @@ public actor ProjectRegistry {
     connections[id] = channel
     // Reattach every persisted chat on reconnect. zmx's stable node ID makes this
     // idempotent when the previous daemon instance is still winding down.
-    for chat in quickChatStore.load() {
-      _ = await ensureQuickChatSession(chat)
-    }
-    let known = Set(quickChatStore.load().map(\.id))
-    for orphan in await (enumerateQuickChatSessions?() ?? []) where !known.contains(orphan) {
-      _ = await terminateQuickChatSession(
-        QuickChat(id: orphan, title: "orphan", backend: .claudeCode))
+    if let chats = try? quickChatStore.loadResult(), case .loaded(let loaded) = chats {
+      for chat in loaded {
+        _ = await ensureQuickChatSession(chat)
+      }
+      let known = Set(loaded.map(\.id))
+      for orphan in await (enumerateQuickChatSessions?() ?? []) where !known.contains(orphan) {
+        _ = await terminateQuickChatSession(
+          QuickChat(id: orphan, title: "orphan", backend: .claudeCode))
+      }
     }
     startPresencePolling()
   }

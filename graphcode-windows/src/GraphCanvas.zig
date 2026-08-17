@@ -97,7 +97,10 @@ pub fn renderBounds(client_right: i32, client_bottom: i32, controls: WorkspaceCo
         .left = left,
         .top = Tokens.header_height,
         .right = client_right,
-        .bottom = @max(Tokens.header_height + 1, client_bottom - Tokens.workspace_height - activity),
+        .bottom = @max(
+            Tokens.header_height + 1,
+            client_bottom - (if (controls.panel_visible) Tokens.workspace_height else 0) - activity,
+        ),
     };
 }
 

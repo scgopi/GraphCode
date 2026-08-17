@@ -46,6 +46,12 @@ public struct QuickChatActivity: Codable, Equatable, Sendable {
 public enum QuickChatStoreError: Error, Equatable, Sendable {
   case encodingFailed
   case persistenceFailed
+  case corruptOrUnreadable
+}
+
+public enum QuickChatStoreLoad: Equatable, Sendable {
+  case missing
+  case loaded([QuickChat])
 }
 
 public struct QuickChatStore: Sendable {
@@ -58,8 +64,17 @@ public struct QuickChatStore: Sendable {
   }
 
   public func load() -> [QuickChat] {
-    guard let data = try? Data(contentsOf: fileURL) else { return [] }
-    return (try? JSONDecoder().decode([QuickChat].self, from: data)) ?? []
+    guard case .loaded(let chats) = (try? loadResult()) ?? .missing else { return [] }
+    return chats
+  }
+
+  public func loadResult() throws -> QuickChatStoreLoad {
+    guard FileManager.default.fileExists(atPath: fileURL.path) else { return .missing }
+    do {
+      return .loaded(try JSONDecoder().decode([QuickChat].self, from: Data(contentsOf: fileURL)))
+    } catch {
+      throw QuickChatStoreError.corruptOrUnreadable
+    }
   }
 
   public func save(_ chats: [QuickChat]) throws {
@@ -74,7 +89,7 @@ public struct QuickChatStore: Sendable {
   }
 
   public func create(_ chat: QuickChat) throws {
-    var chats = load().filter { $0.id != chat.id }
+    var chats = try loadedChats().filter { $0.id != chat.id }
     chats.append(chat)
     try save(chats.sorted { $0.createdAt < $1.createdAt })
   }
@@ -84,7 +99,7 @@ public struct QuickChatStore: Sendable {
   }
 
   public func rename(id: UUID, title: String) throws -> QuickChat? {
-    var chats = load()
+    var chats = try loadedChats()
     guard let index = chats.firstIndex(where: { $0.id == id }) else { return nil }
     chats[index].title = title
     try save(chats)
@@ -92,7 +107,7 @@ public struct QuickChatStore: Sendable {
   }
 
   public func delete(id: UUID) throws -> QuickChat? {
-    var chats = load()
+    var chats = try loadedChats()
     guard let index = chats.firstIndex(where: { $0.id == id }) else { return nil }
     let removed = chats.remove(at: index)
     try save(chats)
@@ -100,10 +115,17 @@ public struct QuickChatStore: Sendable {
   }
 
   public func updateActivity(id: UUID, activity: QuickChatActivity) throws -> QuickChat? {
-    var chats = load()
+    var chats = try loadedChats()
     guard let index = chats.firstIndex(where: { $0.id == id }) else { return nil }
     chats[index].activity = activity
     try save(chats)
     return chats[index]
+  }
+
+  private func loadedChats() throws -> [QuickChat] {
+    switch try loadResult() {
+    case .missing: return []
+    case .loaded(let chats): return chats
+    }
   }
 }

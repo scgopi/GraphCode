@@ -85,4 +85,19 @@ struct QuickChatProtocolTests {
       Issue.record("termination failure was not surfaced")
     }
   }
+
+  @Test
+  func corruptStoreIsNotTreatedAsEmptyForMutation() throws {
+    let directory = URL(fileURLWithPath: "quick-chat-corrupt-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try Data("{not-json".utf8).write(to: directory.appendingPathComponent("quick-chats.json"))
+    let store = QuickChatStore(baseDirectory: directory)
+    #expect(throws: QuickChatStoreError.corruptOrUnreadable) {
+      try store.create(QuickChat(title: "must not overwrite"))
+    }
+    #expect(throws: QuickChatStoreError.corruptOrUnreadable) {
+      try store.loadResult()
+    }
+  }
 }

@@ -1899,11 +1899,12 @@ pub const App = struct {
         var client: c.RECT = undefined;
         if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
         if (self.workspace) |workspace| {
+            const panel_height = if (self.workspace_controls.panel_visible) Tokens.workspace_height else 0;
             workspace.resize(
                 if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
-                @max(0, client.bottom - Tokens.workspace_height),
+                @max(0, client.bottom - panel_height),
                 @max(0, client.right - (if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0)),
-                Tokens.workspace_height,
+                panel_height,
             );
         }
     }
@@ -2390,8 +2391,10 @@ fn onWindowMessage(
             }
             var client: c.RECT = undefined;
             _ = c.GetClientRect(hwnd, &client);
-            const workspace_top = client.bottom - Tokens.workspace_height;
-            if (x >= Tokens.sidebar_width and y >= workspace_top) {
+            const workspace_top = client.bottom -
+                (if (app.workspace_controls.panel_visible) Tokens.workspace_height else 0);
+            const rail_left = if (app.workspace_controls.rail_visible) Tokens.sidebar_width else 0;
+            if (app.workspace_controls.panel_visible and x >= rail_left and y >= workspace_top) {
                 if (app.workspace) |workspace| {
                     if (workspace.selectTabAt(x, y)) {
                         result.* = 0;
@@ -2399,8 +2402,8 @@ fn onWindowMessage(
                     }
                 }
             }
-            if (x >= Tokens.sidebar_width and y < workspace_top) {
-                const bounds = c.RECT{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = client.right, .bottom = workspace_top };
+            if (x >= rail_left and y < workspace_top) {
+                const bounds = c.RECT{ .left = rail_left, .top = Tokens.header_height, .right = client.right, .bottom = workspace_top };
                 if (app.model.graph) |graph| {
                     if (GraphCanvas.hitTestConnector(graph.nodes.items, x, y, &app.canvas, bounds)) |index| {
                         if (app.edge_drag_source_id.len != 0) app.allocator.free(app.edge_drag_source_id);
@@ -2427,9 +2430,12 @@ fn onWindowMessage(
                 result.* = 0;
                 return true;
             }
-            if (Sidebar.rowAt(x, y, &app.model, if (app.worktree_inspection) |*value| value else null,
-                app.sidebar_scroll, workspace_top)) |row| {
-                const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
+            if (app.workspace_controls.rail_visible) {
+                if (Sidebar.rowAt(
+                    x, y, &app.model, if (app.worktree_inspection) |*value| value else null,
+                    app.sidebar_scroll, workspace_top,
+                )) |row| {
+                    const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
                 switch (row.kind) {
                     .project => app.openProject(app.model.recent_projects.items[row.index].path),
                     .open_project => if (row.project_path) |path| {
@@ -2470,7 +2476,8 @@ fn onWindowMessage(
                 }
                 _ = c.InvalidateRect(hwnd, null, 0);
                 result.* = 0;
-                return true;
+                    return true;
+                }
             }
             result.* = 0;
             return true;
