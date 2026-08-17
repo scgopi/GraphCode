@@ -72,6 +72,18 @@ guard listen(socketDescriptor, 8) == 0 else {
 
 FileHandle.standardOutput.write(Data("graphcoded: listening on \(path)\n".utf8))
 
+// A broadcast writes to every connected client, and a client can vanish without a
+// clean close — the app killed, a CLI exiting early, a pane crashing. The write then
+// raises SIGPIPE, whose default action *terminates the daemon*: observed as exit
+// status -13 in `launchctl list`, with every loop's in-flight send failing until
+// launchd restarted the process seconds later.
+//
+// Ignoring it turns that into what the code already handles correctly:
+// `FramedMessageIO.writeAll` sees write() return -1/EPIPE, throws, and
+// `GraphStore.send` drops the dead connection. The error path was always right; the
+// process just never lived long enough to run it.
+signal(SIGPIPE, SIG_IGN)
+
 signal(SIGTERM) { _ in
   unlink(path)
   exit(0)
@@ -135,6 +147,11 @@ DispatchQueue.global().async {
   while true {
     let clientDescriptor = accept(socketDescriptor, nil, nil)
     guard clientDescriptor >= 0 else { continue }
+    // Belt and braces beside the process-wide ignore above: this socket raises no
+    // SIGPIPE whatever any library does to the signal disposition later.
+    var noSignal: Int32 = 1
+    setsockopt(
+      clientDescriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
     handleConnection(clientDescriptor)
   }
 }

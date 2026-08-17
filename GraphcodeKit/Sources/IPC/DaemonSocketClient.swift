@@ -130,6 +130,18 @@ public struct DaemonSocketClient: Sendable {
       tv_usec: Int32((timeout - timeout.rounded(.down)) * 1_000_000))
     setsockopt(
       descriptor, SOL_SOCKET, SO_RCVTIMEO, &interval, socklen_t(MemoryLayout<timeval>.size))
+    applyNoSignal(to: descriptor)
+  }
+
+  /// The client half of the daemon's own `SIGPIPE` armour. Writing to a socket the
+  /// daemon has closed — it restarted, it was stopped mid-exchange — otherwise raises
+  /// SIGPIPE, and the default action kills the writer: the app, or a `graphcode`
+  /// invocation that would rather exit 75 and say so. With this the `write(2)` returns
+  /// `EPIPE`, `FramedMessageIO` throws, and every caller's existing error path runs.
+  private static func applyNoSignal(to descriptor: Int32) {
+    var enabled: Int32 = 1
+    setsockopt(
+      descriptor, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
   }
 
   public func send(_ command: DaemonCommand) throws {
