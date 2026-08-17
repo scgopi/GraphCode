@@ -39,7 +39,7 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (ctrl and key == 'M') return .send_node;
     if (ctrl and key == 'E') return .edit_node;
     if (ctrl and key == 'J') return .jump_next;
-    if (ctrl and key == ',') return .settings;
+    if (ctrl and key == 0xBC) return .settings;
     if (ctrl and key == 0x09) return .cycle_attention;
     if (ctrl and key == 'W' and shift) return .inspect_worktrees;
     if (!ctrl and key == 0x28) return .worktree_next;
@@ -109,4 +109,15 @@ test "attention and worktree shortcuts are distinct from ordinary selection" {
     try std.testing.expectEqual(Action.inspect_worktrees, keyAction('W', true, true));
     try std.testing.expectEqual(Action.select_next, keyAction(0x09, false, false));
     try std.testing.expectEqual(Action.select_previous, keyAction(0x09, false, true));
+}
+
+test "OEM comma routes to settings only with control" {
+    try std.testing.expectEqual(Action.settings, keyAction(0xBC, true, false));
+    try std.testing.expectEqual(Action.none, keyAction(0xBC, false, false));
+}
+
+test "tab variants keep terminal navigation distinct" {
+    try std.testing.expectEqual(Action.select_next, keyAction(0x09, false, false));
+    try std.testing.expectEqual(Action.select_previous, keyAction(0x09, false, true));
+    try std.testing.expectEqual(Action.cycle_attention, keyAction(0x09, true, false));
 }

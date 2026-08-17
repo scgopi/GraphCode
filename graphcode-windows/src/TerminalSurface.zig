@@ -1,5 +1,4 @@
 const std = @import("std");
-const InputRouter = @import("InputRouter.zig");
 const c = @import("Win32.zig").c;
 const WorkspaceLayout = @import("WorkspaceLayout.zig");
 const Tokens = @import("DesignTokens.zig");
@@ -1343,12 +1342,13 @@ fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c
     const workspace = workspaceFromUserData(user_data) orelse return;
     _ = callbackSlot(workspace, surface) orelse return;
     if (event.action == c.WINGHOSTTY_KEY_RELEASE) return;
-    const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
-    const shift = (@as(i32, c.GetKeyState(c.VK_SHIFT)) & 0x8000) != 0;
-    if (isRoutedShortcut(event.virtual_key, ctrl, shift))
+    const modifiers = callbackModifiers(event.modifiers);
+    const ctrl = modifiers.ctrl;
+    const shift = modifiers.shift;
+    if (isApplicationShortcut(event.virtual_key, ctrl, shift))
     {
         if (workspace.key_callback) |callback|
-            callback(workspace.key_callback_context, event.virtual_key, true, shift);
+            callback(workspace.key_callback_context, event.virtual_key, ctrl, shift);
         return;
     }
 
@@ -1367,17 +1367,45 @@ fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c
     workspace.enqueueInput(index, bytes);
 }
 
-fn isRoutedShortcut(key: usize, ctrl: bool, shift: bool) bool {
-    return @intFromEnum(InputRouter.keyAction(key, ctrl, shift)) != @intFromEnum(InputRouter.Action.none);
+fn isApplicationShortcut(key: usize, ctrl: bool, shift: bool) bool {
+    _ = shift;
+    if (key == c.VK_TAB) return true;
+    if (!ctrl) return false;
+    return switch (key) {
+        'O', 'J', 'N', 'S', 'T', 'W', 'D', c.VK_PRIOR, c.VK_NEXT, 0xDB, 0xDD, 0xBC => true,
+        else => false,
+    };
 }
 
-test "child key callback forwards advertised menu shortcuts" {
-    try std.testing.expect(isRoutedShortcut(c.VK_PRIOR, true, false));
-    try std.testing.expect(isRoutedShortcut(c.VK_NEXT, true, false));
-    try std.testing.expect(isRoutedShortcut(c.VK_TAB, true, false));
-    try std.testing.expect(isRoutedShortcut(c.VK_TAB, false, true));
-    try std.testing.expect(isRoutedShortcut(0xBC, true, false));
-    try std.testing.expect(isRoutedShortcut('W', true, true));
+fn callbackModifiers(mask: u32) struct { ctrl: bool, shift: bool } {
+    return .{ .ctrl = (mask & 0x02) != 0, .shift = (mask & 0x01) != 0 };
+}
+
+test "child key callback forwards advertised menu shortcuts only" {
+    try std.testing.expect(isApplicationShortcut(c.VK_PRIOR, true, false));
+    try std.testing.expect(isApplicationShortcut(c.VK_NEXT, true, false));
+    try std.testing.expect(isApplicationShortcut(c.VK_TAB, true, false));
+    try std.testing.expect(isApplicationShortcut(c.VK_TAB, false, true));
+    try std.testing.expect(isApplicationShortcut(0xBC, true, false));
+    try std.testing.expect(isApplicationShortcut('W', true, true));
+    try std.testing.expect(!isApplicationShortcut(c.VK_UP, false, false));
+    try std.testing.expect(!isApplicationShortcut(c.VK_DOWN, false, false));
+    try std.testing.expect(!isApplicationShortcut('M', true, false));
+}
+
+test "child callback preserves actual modifier bits" {
+    const plain = callbackModifiers(0);
+    try std.testing.expect(!plain.ctrl);
+    try std.testing.expect(!plain.shift);
+    const shifted = callbackModifiers(0x01);
+    try std.testing.expect(!shifted.ctrl);
+    try std.testing.expect(shifted.shift);
+    const controlled = callbackModifiers(0x02);
+    try std.testing.expect(controlled.ctrl);
+    try std.testing.expect(!controlled.shift);
+    const both = callbackModifiers(0x03);
+    try std.testing.expect(both.ctrl);
+    try std.testing.expect(both.shift);
 }
 
 fn onText(user_data: ?*anyopaque, surface: *c.winghostty_surface, text: [*:0]const u8, length: u32) callconv(.c) void {

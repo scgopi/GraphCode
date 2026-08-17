@@ -43,6 +43,7 @@ pub const App = struct {
     restore_requested: bool = false,
     open_project_pending: bool = false,
     pending_rebind_path: []u8 = &.{},
+    pending_previous_subscription: []u8 = &.{},
     last_connection_state: Wire.ConnectionState = .disconnected,
     last_project_opened: []const u8 = "",
     pending_project_path: []u8 = &.{},
@@ -108,6 +109,7 @@ pub const App = struct {
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
         if (self.pending_project_path.len != 0) self.allocator.free(self.pending_project_path);
         if (self.pending_rebind_path.len != 0) self.allocator.free(self.pending_rebind_path);
+        if (self.pending_previous_subscription.len != 0) self.allocator.free(self.pending_previous_subscription);
         if (self.status_override.len != 0) self.allocator.free(self.status_override);
         if (self.smoke_workspace_actions.len != 0) self.allocator.free(self.smoke_workspace_actions);
         if (self.smoke_restart_session.len != 0) self.allocator.free(self.smoke_restart_session);
@@ -183,8 +185,19 @@ pub const App = struct {
                     const accepted = self.pending_rebind_path.len != 0 and
                         std.mem.eql(u8, self.pending_rebind_path, graph.project.path);
                     if (accepted) {
+                        self.client.setSubscription(graph.project.path);
+                        if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
+                        self.last_project_opened = self.allocator.dupe(u8, graph.project.path) catch {
+                            self.setStatus("Unable to retain accepted project");
+                            return;
+                        };
                         self.allocator.free(self.pending_rebind_path);
                         self.pending_rebind_path = &.{};
+                        if (self.pending_previous_subscription.len != 0) {
+                            self.allocator.free(self.pending_previous_subscription);
+                            self.pending_previous_subscription = &.{};
+                        }
+                        self.open_project_pending = false;
                         self.rebindWorkspace(graph.project.path);
                     } else if (self.pending_rebind_path.len == 0) {
                         self.rebindWorkspace(graph.project.path);
@@ -211,8 +224,16 @@ pub const App = struct {
             },
             .error_occurred => {
                 if (self.pending_rebind_path.len != 0) {
+                    self.client.setSubscription(self.pending_previous_subscription);
+                    if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
+                    self.last_project_opened = self.allocator.dupe(u8, self.pending_previous_subscription) catch &.{};
                     self.allocator.free(self.pending_rebind_path);
                     self.pending_rebind_path = &.{};
+                    if (self.pending_previous_subscription.len != 0) {
+                        self.allocator.free(self.pending_previous_subscription);
+                        self.pending_previous_subscription = &.{};
+                    }
+                    self.open_project_pending = false;
                 }
                 if (Wire.copyErrorMessage(self.allocator, frame) catch null) |message| {
                     self.replaceStatus(message);
@@ -251,6 +272,12 @@ pub const App = struct {
 
     pub fn openProject(self: *App, path: []const u8) void {
         if (path.len == 0) return;
+        const previous = self.client.subscriptionPath(self.allocator) catch {
+            self.setStatus("Unable to retain previous project subscription");
+            return;
+        };
+        if (self.pending_previous_subscription.len != 0) self.allocator.free(self.pending_previous_subscription);
+        self.pending_previous_subscription = previous;
         self.client.setSubscription(path);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
         self.last_project_opened = self.allocator.dupe(u8, path) catch {
@@ -939,8 +966,14 @@ fn onWindowMessage(
             const connection_state = app.client.connectionState();
             if (connection_state == .connected) app.flushPendingProject();
             if (app.client.connectionState() == .connected) {
-                if (app.open_project_pending and app.last_project_opened.len != 0) {
-                    app.client.sendOpenProject(app.last_project_opened);
+                if (app.open_project_pending and
+                    (app.pending_rebind_path.len != 0 or app.last_project_opened.len != 0))
+                {
+                    const pending = if (app.pending_rebind_path.len != 0)
+                        app.pending_rebind_path
+                    else
+                        app.last_project_opened;
+                    app.client.sendOpenProject(pending);
                     app.open_project_pending = false;
                 } else if (!app.sync_requested) {
                     app.sync_requested = true;

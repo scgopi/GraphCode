@@ -113,6 +113,10 @@ pub const DaemonClient = struct {
         self.publishState(.reconnecting, "");
     }
 
+    pub fn subscriptionPath(self: *DaemonClient, allocator: std.mem.Allocator) ![]u8 {
+        return self.subscriptionSnapshotWithAllocator(allocator);
+    }
+
     pub fn validateSettings(
         self: *DaemonClient,
         pipe_override: []const u8,
@@ -812,10 +816,27 @@ pub const DaemonClient = struct {
     }
 
     fn subscriptionSnapshot(self: *DaemonClient) ![]u8 {
+        return self.subscriptionSnapshotWithAllocator(self.allocator);
+    }
+
+    fn subscriptionSnapshotWithAllocator(self: *DaemonClient, allocator: std.mem.Allocator) ![]u8 {
         self.mutex.lock();
         defer self.mutex.unlock();
-        return self.allocator.dupe(u8, self.subscription_path);
+        return allocator.dupe(u8, self.subscription_path);
     }
+
+test "subscription can be restored after a rejected project open" {
+    var client = try DaemonClient.init(std.testing.allocator);
+    defer client.deinit();
+    client.setSubscription("C:\\old-project");
+    const previous = try client.subscriptionSnapshot();
+    defer std.testing.allocator.free(previous);
+    client.setSubscription("C:\\rejected-project");
+    client.setSubscription(previous);
+    const restored = try client.subscriptionSnapshot();
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings("C:\\old-project", restored);
+}
 
     fn publishState(self: *DaemonClient, state: Wire.ConnectionState, message: []const u8) void {
         self.mutex.lock();
