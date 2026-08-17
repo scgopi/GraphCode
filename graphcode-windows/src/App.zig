@@ -449,16 +449,19 @@ pub const App = struct {
     }
 
     fn inspectWorktrees(self: *App) void {
-        if (self.model.graph) |graph| {
-            if (!graph.project.isLocalFilesystem()) {
-                self.setStatus("Worktrees require a local filesystem project");
-                return;
-            }
-        }
-        const path = self.currentProject() orelse {
-            self.setStatus("No project selected for worktree inspection");
+        const current_graph = self.model.graph orelse {
+            self.setStatus("Worktrees require a local filesystem project");
             return;
         };
+        if (!current_graph.project.isLocalFilesystem()) {
+            self.setStatus("Worktrees require a local filesystem project");
+            return;
+        }
+        const path = current_graph.project.path;
+        if (path.len == 0) {
+            self.setStatus("No project selected for worktree inspection");
+            return;
+        }
         var bindings = std.array_list.Managed(WorktreeStatus.Binding).init(self.allocator);
         defer bindings.deinit();
         if (self.model.graph) |graph| {
@@ -496,16 +499,19 @@ pub const App = struct {
     }
 
     fn reclaimWorktrees(self: *App) void {
-        if (self.model.graph) |graph| {
-            if (!graph.project.isLocalFilesystem()) {
-                self.setStatus("Worktrees require a local filesystem project");
-                return;
-            }
-        }
-        const path = self.currentProject() orelse {
-            self.setStatus("No project selected for worktree reclaim");
+        const current_graph = self.model.graph orelse {
+            self.setStatus("Worktrees require a local filesystem project");
             return;
         };
+        if (!current_graph.project.isLocalFilesystem()) {
+            self.setStatus("Worktrees require a local filesystem project");
+            return;
+        }
+        const path = current_graph.project.path;
+        if (path.len == 0) {
+            self.setStatus("No project selected for worktree reclaim");
+            return;
+        }
         if (self.selected_worktree_path.len == 0) {
             self.setStatus("Select a worktree row before reclaiming");
             return;
