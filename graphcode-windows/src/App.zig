@@ -270,7 +270,7 @@ pub const App = struct {
     }
 
     fn currentProject(self: *const App) ?[]const u8 {
-        if (self.model.graph) |graph| return graph.project.path;
+        if (self.model.currentGraph()) |graph| return graph.project.path;
         if (self.model.recent_projects.items.len != 0) return self.model.recent_projects.items[0].path;
         return null;
     }

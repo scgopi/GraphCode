@@ -346,6 +346,7 @@ pub const Model = struct {
                 }
             }
         }
+        self.syncLegacyGraph();
         self.rebuildAttention();
         self.dispatchLifecycle(action, path);
         return true;
@@ -550,6 +551,52 @@ pub const Model = struct {
                 self.replaceSelectedNodeID(graph.nodes.items[0].id);
             }
         }
+        self.syncLegacyGraph();
+    }
+
+    fn syncLegacyGraph(self: *Model) void {
+        if (self.graph) |*old| {
+            freeGraph(self.allocator, old);
+            self.graph = null;
+        }
+        const path = self.selected_project_path orelse return;
+        const summary = self.graphFor(path) orelse return;
+        const project_path = self.allocator.dupe(u8, summary.project.path) catch return;
+        const project_name = self.allocator.dupe(u8, summary.project.name) catch {
+            self.allocator.free(project_path);
+            return;
+        };
+        var graph = Graph{
+            .project = .{
+                .path = project_path,
+                .name = project_name,
+            },
+            .nodes = std.array_list.Managed(Node).init(self.allocator),
+            .edges = std.array_list.Managed(Edge).init(self.allocator),
+        };
+        for (summary.nodes.items) |node| {
+            const copy = cloneNode(self.allocator, node) catch {
+                freeGraph(self.allocator, &graph);
+                return;
+            };
+            graph.nodes.append(copy) catch {
+                freeNode(self.allocator, copy);
+                freeGraph(self.allocator, &graph);
+                return;
+            };
+        }
+        for (summary.edges.items) |edge| {
+            const copy = cloneEdge(self.allocator, edge) catch {
+                freeGraph(self.allocator, &graph);
+                return;
+            };
+            graph.edges.append(copy) catch {
+                freeEdge(self.allocator, copy);
+                freeGraph(self.allocator, &graph);
+                return;
+            };
+        }
+        self.graph = graph;
     }
 
     fn addOpenProject(self: *Model, project: Project) !void {
@@ -1154,6 +1201,25 @@ test "closing selected A preserves project B and its active snapshot" {
     try std.testing.expectEqualStrings("B", model.selected_project_path.?);
     try std.testing.expectEqualStrings("B", model.currentGraph().?.project.path);
     try std.testing.expectEqualStrings("B", model.graph.?.project.path);
+}
+
+test "closing snapshot B while selected A resynchronizes the active graph to A" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const a =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"a","project":{"path":"A","name":"A"},"nodes":[{"id":"a1","title":"A1","state":"running"}],"edges":[]}}}
+    ;
+    const b =
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"b","project":{"path":"B","name":"B"},"nodes":[{"id":"b1","title":"B1","state":"running"}],"edges":[]}}}
+    ;
+    _ = try model.updateFromFrame(a);
+    _ = try model.updateFromFrame(b);
+    try std.testing.expect(model.selectProject("A"));
+    try std.testing.expectEqualStrings("A", model.currentGraph().?.project.path);
+    try std.testing.expect(model.applyLifecycle(.close, "B"));
+    try std.testing.expectEqualStrings("A", model.selected_project_path.?);
+    try std.testing.expectEqualStrings("A", model.currentGraph().?.project.path);
+    try std.testing.expectEqualStrings("A", model.graph.?.project.path);
 }
 
 test "restore remains restoring until markRestored" {
