@@ -6,8 +6,11 @@ $targetRoot = Join-Path $spike "Sources\GraphcodeWindowsContracts"
 
 New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
 $supportLink = Join-Path $targetRoot "SupportDirectory.swift"
-if (Test-Path -LiteralPath $supportLink) {
-  Remove-Item -LiteralPath $supportLink -Force
+$quickChatLink = Join-Path $targetRoot "QuickChatStore.swift"
+foreach ($file in @($supportLink, $quickChatLink)) {
+  if (Test-Path -LiteralPath $file) {
+    Remove-Item -LiteralPath $file -Force
+  }
 }
 $links = @{
   Domain = Join-Path $repo "GraphcodeKit\Sources\Domain"
@@ -24,5 +27,7 @@ foreach ($entry in $links.GetEnumerator()) {
 New-Item -ItemType HardLink `
   -Path $supportLink `
   -Target (Join-Path $repo "GraphcodeKit\Sources\SupportDirectory.swift") | Out-Null
-Write-Host "Linked Graphcode contract sources"
+New-Item -ItemType HardLink `
+  -Path $quickChatLink `
+  -Target (Join-Path $repo "GraphcodeKit\Sources\QuickChatStore.swift") | Out-Null
 Write-Host "Linked Graphcode contract sources"

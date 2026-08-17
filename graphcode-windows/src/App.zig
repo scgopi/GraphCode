@@ -272,7 +272,10 @@ pub const App = struct {
         if (self.onboarding_store) |store| {
             const shell_test = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_REQUIRE_DAEMON") catch null;
             defer if (shell_test) |value| self.allocator.free(value);
-            if (shell_test == null or !std.mem.eql(u8, shell_test.?, "1")) {
+            if (!envFlag("GRAPHCODE_UIA_GATE") and
+                !envFlag(daemon_supervisor_test_hook_environment) and
+                (shell_test == null or !std.mem.eql(u8, shell_test.?, "1")))
+            {
                 Onboarding.showFirstRun(self.window.hwnd, self.allocator, store) catch
                     self.setStatus("First-run onboarding could not be shown");
             }
@@ -302,6 +305,7 @@ pub const App = struct {
         self.client.setCallback(&onDaemonFrame, self);
         self.client.connect();
         try self.window.messageLoop();
+        if (self.exit_requested) std.process.exit(0);
         if (self.smoke_failure) {
             if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_EXPECT_TRANSPORT_ERROR")) |value| {
                 defer self.allocator.free(value);
@@ -2157,9 +2161,10 @@ fn onWindowMessage(
             const command_id: u16 = @truncate(wparam);
             if (command_id == @as(u16, @truncate(TrayModule.command_exit))) {
                 app.exit_requested = true;
-                _ = c.DestroyWindow(hwnd);
-                result.* = 0;
-                return true;
+                app.update_cancel.store(true, .release);
+                _ = c.EndMenu();
+                app.tray.remove();
+                c.ExitProcess(0);
             }
             if (command_id == @as(u16, @truncate(TrayModule.command_open))) {
                 restoreShellWindow(hwnd);
@@ -2182,9 +2187,10 @@ fn onWindowMessage(
             }
             if (tray_command == TrayModule.command_exit) {
                 app.exit_requested = true;
-                _ = c.DestroyWindow(hwnd);
-                result.* = 0;
-                return true;
+                app.update_cancel.store(true, .release);
+                _ = c.EndMenu();
+                app.tray.remove();
+                c.ExitProcess(0);
             }
             switch (tray_command) {
                 6 => app.inspectWorktrees(),
@@ -2210,7 +2216,12 @@ fn onWindowMessage(
                     .open_global_overview => app.openGlobalOverview(),
                     .worktrees => app.handleAction(.inspect_worktrees),
                     .reclaim_worktrees => app.handleAction(.reclaim_worktrees),
-                    .exit => _ = c.DestroyWindow(hwnd),
+                    .exit => {
+                        app.exit_requested = true;
+                        app.update_cancel.store(true, .release);
+                        app.tray.remove();
+                        c.ExitProcess(0);
+                    },
                     .jump_loop => app.handleAction(.jump_next),
                     .review_attention => app.handleAction(.cycle_attention),
                     .next_loop => app.handleAction(.select_next),
@@ -2619,12 +2630,20 @@ fn onWindowMessage(
             return true;
         },
         c.WM_CLOSE => {
-            hideShellWindow(hwnd);
+            if (app.exit_requested) {
+                _ = c.DestroyWindow(hwnd);
+            } else {
+                hideShellWindow(hwnd);
+            }
             result.* = 0;
             return true;
         },
         c.WM_SYSCOMMAND => if ((wparam & 0xfff0) == c.SC_CLOSE) {
-            hideShellWindow(hwnd);
+            if (app.exit_requested) {
+                _ = c.DestroyWindow(hwnd);
+            } else {
+                hideShellWindow(hwnd);
+            }
             result.* = 0;
             return true;
         },
@@ -2867,6 +2886,7 @@ test "edge drop source remains valid across synchronous capture cancellation" {
     var app: App = .{
         .allocator = allocator,
         .client = undefined,
+        .daemon = undefined,
         .model = undefined,
     };
     app.edge_drag_source_id = try allocator.dupe(u8, "source-node");

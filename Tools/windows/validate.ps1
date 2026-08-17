@@ -623,7 +623,7 @@ function Invoke-Task([string] $name) {
       }
       $zmxRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_ZMX_ROOT")
       if (-not $zmxRoot) {
-        $zmxRoot = Join-Path $depotRoot "zmx-worktrees\attach"
+        $zmxRoot = Join-Path $depotRoot "zmx-worktrees\quickchat-hang"
       }
       if (-not (Test-Path -LiteralPath $winghosttyRoot -PathType Container) -or
         -not (Test-Path -LiteralPath $zmxRoot -PathType Container)) {

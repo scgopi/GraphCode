@@ -166,7 +166,7 @@ fn appendRows(
             top += 34;
         }
     }
-    top += 42;
+    top = layoutFor(model, inspection).quickChatRowTop(0) - scroll_offset;
     for (model.quick_chats.items, 0..) |_, index| {
         try rows.append(allocator, .{ .kind = .quick_chat, .index = index, .top = top });
         top += 24;
@@ -373,7 +373,10 @@ test "multi-project rows share render and hit-test offsets with project identity
     const remote_row = rowAt(24, remote_top + 4, &model, null, 0, 700) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("C:\\work\\local", local_row.project_path.?);
     try std.testing.expectEqualStrings("ssh://build/remote", remote_row.project_path.?);
-    try std.testing.expectEqual(sharedWorktreeTop(&model, 0), sidebarSectionBottom(&model, null));
+    try std.testing.expectEqual(
+        layoutFor(&model, null).quickChatRowTop(model.quick_chats.items.len),
+        sidebarSectionBottom(&model, null),
+    );
 }
 
 test "scroll-adjusted generated rows hit titles loops and worktrees" {
@@ -451,7 +454,7 @@ test "sidebar scroll clamps overflow, shrink, and resize" {
         .branch = @constCast("branch"),
     });
     const short_max = maxScroll(&model, &inspection, 400);
-    const expected_short = Tokens.header_height + 78 + 72 + 62 + 54 + 24 + 170 + 10 + 42 + 30 + 4 * 19 - 400;
+    const expected_short = sidebarSectionBottom(&model, &inspection) + 30 + 4 * 19 - 400;
     try std.testing.expectEqual(expected_short, short_max);
     const activity_only_max = maxScroll(&model, &inspection, 400);
     try std.testing.expectEqual(short_max, activity_only_max);
@@ -482,7 +485,7 @@ test "sidebar scroll clamps overflow, shrink, and resize" {
     }
     inspection.entries.shrinkRetainingCapacity(2);
     const reduced_max = maxScroll(&model, &inspection, 500);
-    const expected_reduced = @max(Tokens.header_height + 78 + 24 + 62 + 54 + 24 + 68 + 10 + 42 + 30 + 1 * 19 - 500, 0);
+    const expected_reduced = @max(sidebarSectionBottom(&model, &inspection) + 30 + 1 * 19 - 500, 0);
     try std.testing.expectEqual(expected_reduced, reduced_max);
     scroll = clampScroll(scroll, reduced_max);
     try std.testing.expectEqual(@as(i32, 0), scroll);

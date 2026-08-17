@@ -29,6 +29,7 @@ let package = Package(
         "Domain",
         "IPC",
         "Platform",
+        "QuickChatStore.swift",
         "SupportDirectory.swift",
       ]),
     .testTarget(

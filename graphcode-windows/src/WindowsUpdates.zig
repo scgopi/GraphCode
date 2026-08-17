@@ -334,7 +334,7 @@ test "GraphCode beta identifiers compare by numeric suffix" {
     ;
     var result = try parseFeed(std.testing.allocator, releases, .beta, "v1.0.0-beta9");
     defer result.deinit(std.testing.allocator);
-    try std.testing.expectEqual(State.up_to_date, result.state);
+    try std.testing.expectEqual(State.available, result.state);
     try std.testing.expectEqualStrings("v1.0.0", result.version.?);
 
     const prereleases =

@@ -28,7 +28,7 @@ function Assert-VerifyReject([string] $label, [scriptblock] $mutate, [string] $m
 try {
   $depot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $wingRoot = if ($env:GRAPHCODE_WINGHOSTTY_ROOT) { $env:GRAPHCODE_WINGHOSTTY_ROOT } else { Join-Path $depot "Winghostty-worktrees\host-integration" }
-  $zmxRoot = if ($env:GRAPHCODE_ZMX_ROOT) { $env:GRAPHCODE_ZMX_ROOT } else { Join-Path $depot "zmx-worktrees\attach" }
+  $zmxRoot = if ($env:GRAPHCODE_ZMX_ROOT) { $env:GRAPHCODE_ZMX_ROOT } else { Join-Path $depot "zmx-worktrees\quickchat-hang" }
   $zig0152 = $env:GRAPHCODE_ZIG0152
   $zig0160 = $env:GRAPHCODE_ZIG0160
   if (-not $zig0152) { $zig0152 = Join-Path $depot "GraphCode-worktrees\ghostty-winghostty-spike\zig-x86_64-windows-0.15.2\zig.exe" }

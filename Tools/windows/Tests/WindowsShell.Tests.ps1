@@ -125,7 +125,7 @@ Assert-Contract ($pins.schemaVersion -eq 1) "provider pin schema is not 1"
 Assert-Contract ($pins.winghostty.sha -eq
   "f5abc059e4ca58b376eb209313aca7784659c679") "Winghostty pin changed"
 Assert-Contract ($pins.zmx.sha -eq
-  "858727af10cdf43d66cb3733cff58dc90ec4b3dd") "zmx pin changed"
+  "029e11d2b19162fb3bdf90c8270237d303b8bfb4") "zmx pin changed"
 Assert-Contract ($pins.winghostty.remoteUrl -eq
   "https://github.com/coneilen/winghostty.git") "Winghostty remote URL changed"
 Assert-Contract ($pins.zmx.remoteUrl -eq

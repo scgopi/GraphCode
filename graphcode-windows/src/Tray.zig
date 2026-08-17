@@ -78,15 +78,18 @@ pub const Tray = struct {
         var point: c.POINT = undefined;
         _ = c.GetCursorPos(&point);
         foregroundWindow(self.hwnd);
-        _ = c.TrackPopupMenu(
+        const command = c.TrackPopupMenu(
             self.menu,
-            c.TPM_RIGHTALIGN | c.TPM_BOTTOMALIGN | c.TPM_RIGHTBUTTON,
+            c.TPM_RIGHTALIGN | c.TPM_BOTTOMALIGN | c.TPM_RIGHTBUTTON | c.TPM_RETURNCMD,
             point.x,
             point.y,
             0,
             self.hwnd,
             null,
         );
+        if (command != 0) {
+            _ = c.PostMessageW(self.hwnd, c.WM_COMMAND, @intCast(command), 0);
+        }
         _ = c.PostMessageW(self.hwnd, c.WM_NULL, 0, 0);
     }
 

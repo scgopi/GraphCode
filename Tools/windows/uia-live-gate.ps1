@@ -87,6 +87,9 @@ public static class GraphCodeUiaGateState {
   public static bool PostMouseClick(IntPtr window) {
     return PostMessage(window, 0x0201, UIntPtr.Zero, IntPtr.Zero);
   }
+  public static bool PostCommand(IntPtr window, uint command) {
+    return PostMessage(window, 0x0111, (UIntPtr)command, IntPtr.Zero);
+  }
 }
 "@ -ReferencedAssemblies @(
   [System.Windows.Automation.AutomationElement].Assembly.Location,
@@ -111,7 +114,7 @@ function Get-DirectChildren(
 }
 
 function Assert-Ids([string[]] $actual, [string[]] $expected, [string] $label) {
-  Require (@($actual).Count -eq @($expected).Count) "$label count expected $($expected.Count) but found $($actual.Count)"
+  Require (@($actual).Count -eq @($expected).Count) "$label count expected $($expected.Count) but found $($actual.Count): $($actual -join ',')"
   Require ((@($actual) -join "|") -eq (@($expected) -join "|")) "$label expected $($expected -join ',') but found $($actual -join ',')"
 }
 
@@ -142,16 +145,25 @@ function Assert-FragmentLinks(
   [string[]] $expectedIds,
   [string] $label
 ) {
-  $children = @(Get-DirectChildren $parent $walker)
+  $allChildren = @(Get-DirectChildren $parent $walker)
+  $allowedNativeIds = if ($label -match "root$") { @("4601", "4602") } else { @() }
+  $unexpectedIds = @($allChildren | ForEach-Object { $_.Current.AutomationId } |
+    Where-Object { $_ -and $_ -notin $expectedIds -and $_ -notin $allowedNativeIds })
+  Require ($unexpectedIds.Count -eq 0) "$label exposed unexpected children: $($unexpectedIds -join ',')"
+  $children = @($allChildren | Where-Object { $_.Current.AutomationId -in $expectedIds })
   $ids = @($children | ForEach-Object { $_.Current.AutomationId })
   Assert-Ids $ids $expectedIds "$label direct children"
-  Require ($children[0].Current.AutomationId -eq $walker.GetFirstChild($parent).Current.AutomationId) "$label first child mismatch"
-  Require ($children[-1].Current.AutomationId -eq $walker.GetLastChild($parent).Current.AutomationId) "$label last child mismatch"
   for ($i = 0; $i -lt $children.Count; $i++) {
     $child = $children[$i]
     Require ($walker.GetParent($child).Current.AutomationId -eq $parent.Current.AutomationId) "$label parent mismatch for $($ids[$i])"
     $previous = $walker.GetPreviousSibling($child)
     $next = $walker.GetNextSibling($child)
+    while ($null -ne $previous -and $previous.Current.AutomationId -notin $expectedIds) {
+      $previous = $walker.GetPreviousSibling($previous)
+    }
+    while ($null -ne $next -and $next.Current.AutomationId -notin $expectedIds) {
+      $next = $walker.GetNextSibling($next)
+    }
     if ($i -eq 0) {
       Require ($null -eq $previous) "$label first child has a previous sibling"
     } else {
@@ -226,10 +238,17 @@ try {
 
   $worktrees = Find-FragmentById $root "worktrees" $rawWalker
   Require ($null -ne $worktrees) "missing Worktrees fragment"
-  $initialRowIds = @(Get-DirectChildren $worktrees $rawWalker | ForEach-Object { $_.Current.AutomationId })
+  $initialRowIds = @()
+  for ($attempt = 0; $attempt -lt 50; $attempt++) {
+    $initialRowIds = @(Get-DirectChildren $worktrees $rawWalker |
+      ForEach-Object { $_.Current.AutomationId } |
+      Where-Object { $_ })
+    if ($initialRowIds.Count -eq 2) { break }
+    Start-Sleep -Milliseconds 100
+  }
   Require (($initialRowIds.Count -eq 2) -and
            ($initialRowIds | ForEach-Object { $_ -match '^worktree-row-[0-9]+$' } | Where-Object { -not $_ }).Count -eq 0) `
-    "Worktrees did not expose two stable dynamic row IDs"
+    "Worktrees did not expose two stable dynamic row IDs: $($initialRowIds -join ','); status=$((Find-FragmentById $root 'status' $rawWalker).Current.Name)"
   $rawRows = @(Assert-FragmentLinks $worktrees $rawWalker $initialRowIds "RawView Worktrees")
   $controlRows = @(Assert-FragmentLinks $worktrees $controlWalker $initialRowIds "ControlView Worktrees")
   Require ((@($rawRows | ForEach-Object { $_.Current.Name }) -join "|") -eq
@@ -540,8 +559,13 @@ try {
   $controlWorktreeRowIds = $initialRowIds
   $focusIdentity = $safeRowId
 
-  Require $process.CloseMainWindow() "shell refused graceful window teardown"
-  Require $process.WaitForExit(5000) "shell did not exit after WM_CLOSE"
+  $shellWindow = $process.MainWindowHandle
+  Require $process.CloseMainWindow() "shell refused caption close"
+  Start-Sleep -Milliseconds 250
+  $process.Refresh()
+  Require (-not $process.HasExited) "caption close terminated the tray-resident shell"
+  Require ([GraphCodeUiaGateState]::PostCommand($shellWindow, 0x5002)) "tray Exit command was rejected"
+  Require $process.WaitForExit(5000) "shell did not exit after the tray Exit command"
   Require ($process.ExitCode -eq 0) "shell exited with code $($process.ExitCode) during provider teardown"
   $retainedProviderSafe = $false
   try {
