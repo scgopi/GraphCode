@@ -22,11 +22,20 @@ edges, a settings dialog, context menus, and keyboard-accessible actions:
 selection, and `Ctrl+,` opens settings. Mutations are sent as correlated v2
 daemon requests; daemon refusals remain visible as explicit status errors.
 
+<<<<<<< HEAD
 The shell exposes a native File/Loop/Terminal/View/Help menu bar. Menu items
 share the same application action router as keyboard shortcuts, and project
 actions use the Windows `IFileOpenDialog` folder picker. The no-project state
 also presents accessible native buttons for opening a folder or the global
 overview; recent projects remain selectable in the sidebar.
+=======
+Parity actions are reachable without App-specific view coupling: `Ctrl+P` opens
+the searchable jump/palette form, `Ctrl+Up`/`Ctrl+Down` navigate by stable
+project/node identity, `Ctrl+Tab` advances attention, and `Ctrl+Shift+R`,
+`Ctrl+Shift+P`, and `Ctrl+Shift+A` toggle the workspace rail, panel, and
+activity settings. `Ctrl+Q` reports the Quick Chats protocol blocker rather
+than creating a local-only chat.
+>>>>>>> 0fc03bf (docs(windows): document parity action reachability)
 
 ## Build
 
