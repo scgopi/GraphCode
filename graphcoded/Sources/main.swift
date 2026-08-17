@@ -16,7 +16,9 @@ import GraphcodeKit
   }()
 
   #if os(Windows)
-    if let shutdownEventName = ProcessInfo.processInfo.environment["GRAPHCODE_DAEMON_SHUTDOWN_EVENT"] {
+    if let shutdownEventName = ProcessInfo.processInfo.environment[
+      "GRAPHCODE_DAEMON_SHUTDOWN_EVENT"
+    ] {
       var wideName = Array(shutdownEventName.utf16)
       wideName.append(0)
       if let shutdownEvent = wideName.withUnsafeBufferPointer({
