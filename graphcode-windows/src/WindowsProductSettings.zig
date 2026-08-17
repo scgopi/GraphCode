@@ -57,7 +57,7 @@ pub const Store = struct {
     path: []u8,
 
     pub fn init(allocator: std.mem.Allocator) !Store {
-        const base = std.process.getEnvVarOwned(allocator, "GRAPHCODE_SUPPORT_DIR") catch blk: {
+        const base = resolveSupportDirectory(allocator) catch blk: {
             const profile = try std.process.getEnvVarOwned(allocator, "USERPROFILE");
             const result = try std.fs.path.join(allocator, &.{ profile, ".graphcode" });
             allocator.free(profile);
@@ -94,18 +94,73 @@ pub const Store = struct {
     }
 
     pub fn save(self: Store, settings: Settings) !void {
-        var file = try std.fs.cwd().createFile(self.path, .{ .truncate = true });
-        defer file.close();
-        const data = try std.fmt.allocPrint(self.allocator,
-            "{{\"defaultBackend\":\"{s}\",\"defaultModelTier\":\"{s}\",\"claudePermissionMode\":\"{s}\",\"copilotPermissions\":\"{s}\",\"codexApprovals\":\"{s}\",\"briefsSessionsAboutTheGraph\":{},\"autoSelectsModel\":{},\"showsActivityStrip\":{},\"betaUpdates\":{}}}",
-            .{ settings.default_backend, settings.default_model, settings.claude_permissions,
-                settings.copilot_permissions, settings.codex_approvals, settings.briefing,
-                settings.auto_selects_model, settings.activity, settings.beta },
-        );
+        const existing = std.fs.cwd().readFileAlloc(self.allocator, self.path, 1024 * 1024) catch null;
+        defer if (existing) |data| self.allocator.free(data);
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const arena_allocator = arena.allocator();
+        var value = if (existing) |data|
+            try std.json.parseFromSliceLeaky(std.json.Value, arena_allocator, data, .{})
+        else
+            try std.json.parseFromSliceLeaky(std.json.Value, arena_allocator, "{}", .{});
+        if (value != .object) return error.SettingsRootMustBeObject;
+        try value.object.ensureTotalCapacity(value.object.count() + 9);
+        try value.object.put("defaultBackend", .{ .string = settings.default_backend });
+        try value.object.put("defaultModelTier", .{ .string = settings.default_model });
+        try value.object.put("claudePermissionMode", .{ .string = settings.claude_permissions });
+        try value.object.put("copilotPermissions", .{ .string = settings.copilot_permissions });
+        try value.object.put("codexApprovals", .{ .string = settings.codex_approvals });
+        try value.object.put("briefsSessionsAboutTheGraph", .{ .bool = settings.briefing });
+        try value.object.put("autoSelectsModel", .{ .bool = settings.auto_selects_model });
+        try value.object.put("showsActivityStrip", .{ .bool = settings.activity });
+        try value.object.put("betaUpdates", .{ .bool = settings.beta });
+        const data = try std.fmt.allocPrint(self.allocator, "{f}", .{std.json.fmt(value, .{})});
         defer self.allocator.free(data);
+        const temp_path = try std.fmt.allocPrint(self.allocator, "{s}.tmp-{d}", .{ self.path, std.time.nanoTimestamp() });
+        defer self.allocator.free(temp_path);
+        var file = try std.fs.cwd().createFile(temp_path, .{ .truncate = true });
         try file.writeAll(data);
+        file.close();
+        try atomicReplace(self.allocator, temp_path, self.path);
     }
 };
+
+fn resolveSupportDirectory(allocator: std.mem.Allocator) ![]u8 {
+    const raw = std.process.getEnvVarOwned(allocator, "GRAPHCODE_SUPPORT_DIR") catch {
+        const home = try std.process.getEnvVarOwned(allocator, "USERPROFILE");
+        defer allocator.free(home);
+        return std.fs.path.join(allocator, &.{ home, ".graphcode" });
+    };
+    defer allocator.free(raw);
+    const value = std.mem.trim(u8, raw, " \t\r\n");
+    if (value.len == 0) {
+        const home = try std.process.getEnvVarOwned(allocator, "USERPROFILE");
+        defer allocator.free(home);
+        return std.fs.path.join(allocator, &.{ home, ".graphcode" });
+    }
+    if (std.mem.eql(u8, value, "~") or std.mem.startsWith(u8, value, "~\\") or std.mem.startsWith(u8, value, "~/")) {
+        const home = try std.process.getEnvVarOwned(allocator, "USERPROFILE");
+        defer allocator.free(home);
+        const suffix = std.mem.trimLeft(u8, value[1..], "/\\");
+        return if (suffix.len == 0) allocator.dupe(u8, home)
+            else std.fs.path.join(allocator, &.{ home, suffix });
+    }
+    if (!std.fs.path.isAbsolute(value)) {
+        const home = try std.process.getEnvVarOwned(allocator, "USERPROFILE");
+        defer allocator.free(home);
+        return std.fs.path.join(allocator, &.{ home, value });
+    }
+    return allocator.dupe(u8, value);
+}
+
+fn atomicReplace(allocator: std.mem.Allocator, temp_path: []const u8, target_path: []const u8) !void {
+    _ = allocator;
+    try std.os.windows.MoveFileEx(
+        temp_path,
+        target_path,
+        std.os.windows.MOVEFILE_REPLACE_EXISTING | std.os.windows.MOVEFILE_WRITE_THROUGH,
+    );
+}
 
 const Contract = struct {
     defaultBackend: ?[]const u8 = null,
@@ -143,4 +198,23 @@ test "settings round trip preserves product choices and defaults" {
     try std.testing.expect(parsed.activity);
     try std.testing.expect(!parsed.briefing);
     try std.testing.expect(parsed.beta);
+}
+
+test "settings save preserves worktree policies and unknown JSON fields" {
+    const path = "graphcode-settings-preservation-test.json";
+    std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    var file = try std.fs.cwd().createFile(path, .{});
+    try file.writeAll("{\"worktreePolicies\":{\"repo\":\"ask\"},\"futureFlag\":true,\"defaultBackend\":\"claudeCode\"}");
+    file.close();
+    var store = Store{ .allocator = std.testing.allocator, .path = try std.testing.allocator.dupe(u8, path) };
+    defer store.deinit();
+    var settings = try Settings.parse(std.testing.allocator, &.{ "copilotCLI", "capable", "auto", "ask", "workspace", "on", "on", "off", "on" });
+    defer settings.deinit();
+    try store.save(settings);
+    const saved = try std.fs.cwd().readFileAlloc(std.testing.allocator, path, 4096);
+    defer std.testing.allocator.free(saved);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "worktreePolicies") != null);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "futureFlag") != null);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "copilotCLI") != null);
 }

@@ -62,7 +62,7 @@ pub const CloneProcess = struct {
         return .{ .allocator = allocator, .child = child, .args = args, .destination = destination, .staging = staging };
     }
 
-    pub fn cancel(self: *CloneProcess) void {
+    fn terminate(self: *CloneProcess) void {
         self.cancelled = true;
         _ = self.child.kill() catch {};
     }
@@ -90,7 +90,7 @@ pub const CloneProcess = struct {
 
     pub fn deinit(self: *CloneProcess) void {
         if (!self.finished) {
-            self.cancel();
+            self.terminate();
             _ = self.finish() catch {};
         }
         self.allocator.free(self.destination);
@@ -116,20 +116,53 @@ pub const CloneProcess = struct {
     }
 
     fn recordOutput(self: *CloneProcess, bytes: []const u8, is_stderr: bool) void {
+        const safe = redactSecrets(self.allocator, bytes) catch return;
+        defer self.allocator.free(safe);
         self.output_lock.lock();
         defer self.output_lock.unlock();
         const target = if (is_stderr) &self.recent_stderr else &self.progress;
         const len = if (is_stderr) &self.recent_stderr_len else &self.progress_len;
         const capacity = target.len;
-        const copy_len = @min(capacity, bytes.len);
+        const copy_len = @min(capacity, safe.len);
         if (copy_len < capacity) {
-            @memcpy(target[0..copy_len], bytes[bytes.len - copy_len ..]);
+            @memcpy(target[0..copy_len], safe[safe.len - copy_len ..]);
         } else {
-            @memcpy(target[0..capacity], bytes[bytes.len - capacity ..]);
+            @memcpy(target[0..capacity], safe[safe.len - capacity ..]);
         }
         len.* = copy_len;
     }
 };
+
+fn redactSecrets(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var output = std.array_list.Managed(u8).init(allocator);
+    var index: usize = 0;
+    while (index < input.len) {
+        if (std.mem.startsWith(u8, input[index..], "https://")) {
+            const rest = input[index + 8 ..];
+            if (std.mem.lastIndexOfScalar(u8, rest, '@')) |at| {
+                const end = std.mem.indexOfAny(u8, rest[0..at], " \t\r\n") == null;
+                if (end) {
+                    try output.appendSlice("https://<redacted>@");
+                    index += 8 + at + 1;
+                    continue;
+                }
+            }
+        }
+        if (std.mem.startsWith(u8, input[index..], "token=") or
+            std.mem.startsWith(u8, input[index..], "access_token="))
+        {
+            const equals = std.mem.indexOfScalar(u8, input[index..], '=').?;
+            try output.appendSlice(input[index .. index + equals + 1]);
+            index += equals + 1;
+            try output.appendSlice("<redacted>");
+            while (index < input.len and std.mem.indexOfScalar(u8, "& \t\r\n", input[index]) == null) index += 1;
+            continue;
+        }
+        try output.append(input[index]);
+        index += 1;
+    }
+    return output.toOwnedSlice();
+}
 
 fn inspectDestination(path: []const u8) !bool {
     var dir = std.fs.cwd().openDir(path, .{ .iterate = true }) catch |err| switch (err) {
@@ -161,6 +194,9 @@ pub const CloneOperation = struct {
     thread: std.Thread,
     done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     status: CloneStatus = .cloning,
+    cancel_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    stdout_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    stderr_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn start(allocator: std.mem.Allocator, fields: CloneFields) !*CloneOperation {
         const operation = try allocator.create(CloneOperation);
@@ -178,7 +214,7 @@ pub const CloneOperation = struct {
     }
 
     pub fn cancel(self: *CloneOperation) void {
-        self.process.cancel();
+        self.cancel_requested.store(true, .release);
     }
 
     pub fn poll(self: *CloneOperation) ?CloneStatus {
@@ -199,19 +235,25 @@ pub const CloneOperation = struct {
     }
 
     fn worker(self: *CloneOperation) void {
-        var stdout_thread = std.Thread.spawn(.{}, drainPipe, .{ self.process, &self.process.child.stdout.?, false }) catch {
-            self.process.cancel();
+        var stdout_thread = std.Thread.spawn(.{}, drainPipe, .{ self.process, &self.process.child.stdout.?, false, &self.stdout_done }) catch {
+            self.process.terminate();
+            _ = self.process.finish() catch {};
             self.status = .failed;
             self.done.store(true, .release);
             return;
         };
-        var stderr_thread = std.Thread.spawn(.{}, drainPipe, .{ self.process, &self.process.child.stderr.?, true }) catch {
-            self.process.cancel();
+        var stderr_thread = std.Thread.spawn(.{}, drainPipe, .{ self.process, &self.process.child.stderr.?, true, &self.stderr_done }) catch {
+            self.process.terminate();
             stdout_thread.join();
+            _ = self.process.finish() catch {};
             self.status = .failed;
             self.done.store(true, .release);
             return;
         };
+        while (!self.stdout_done.load(.acquire) or !self.stderr_done.load(.acquire)) {
+            if (self.cancel_requested.load(.acquire)) self.process.terminate();
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+        }
         stdout_thread.join();
         stderr_thread.join();
         self.status = self.process.finish() catch .failed;
@@ -393,14 +435,17 @@ pub fn openRemote(parent: c.HWND, allocator: std.mem.Allocator, initial: RemoteF
 pub fn runClone(allocator: std.mem.Allocator, fields: CloneFields) !CloneStatus {
     var process = try CloneProcess.start(allocator, fields);
     defer process.deinit();
-    var stdout_thread = try std.Thread.spawn(.{}, drainPipe, .{ &process, &process.child.stdout.?, false });
-    var stderr_thread = try std.Thread.spawn(.{}, drainPipe, .{ &process, &process.child.stderr.?, true });
+    var stdout_done = std.atomic.Value(bool).init(false);
+    var stderr_done = std.atomic.Value(bool).init(false);
+    var stdout_thread = try std.Thread.spawn(.{}, drainPipe, .{ &process, &process.child.stdout.?, false, &stdout_done });
+    var stderr_thread = try std.Thread.spawn(.{}, drainPipe, .{ &process, &process.child.stderr.?, true, &stderr_done });
     stdout_thread.join();
     stderr_thread.join();
     return process.finish();
 }
 
-fn drainPipe(process: *CloneProcess, file: *std.fs.File, is_stderr: bool) void {
+fn drainPipe(process: *CloneProcess, file: *std.fs.File, is_stderr: bool, done: *std.atomic.Value(bool)) void {
+    defer done.store(true, .release);
     var buffer: [4096]u8 = undefined;
     while (true) {
         const count = file.read(&buffer) catch return;
@@ -460,6 +505,15 @@ test "SSH reconnect command quotes shell metacharacters and rejects newlines" {
     try std.testing.expectError(error.InvalidSSHComponent, validateRemote(.{
         .host = "build-box", .user = "dev\nwhoami", .path = "/repo",
     }));
+}
+
+test "clone output redacts hostile HTTPS credentials" {
+    const safe = try redactSecrets(std.testing.allocator,
+        "fatal: https://user:p@ss;token@example.test/repo.git?access_token=secret");
+    defer std.testing.allocator.free(safe);
+    try std.testing.expect(std.mem.indexOf(u8, safe, "user:p@ss") == null);
+    try std.testing.expect(std.mem.indexOf(u8, safe, "<redacted>@example.test") != null);
+    try std.testing.expect(std.mem.indexOf(u8, safe, "secret") == null);
 }
 
 test "clone refuses non-empty destinations without deleting sentinels" {
