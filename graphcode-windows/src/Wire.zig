@@ -857,7 +857,7 @@ test "typed node and edge forms retain every supported field on the wire" {
         .worktree_id = "wt",
         .worktree_path = "C:\\repo-wt",
         .worktree_branch = "feature",
-        .subgraph_json = "{\"nodes\":[],\"edges\":[]}",
+        .subgraph_json = "{\"id\":\"33333333-3333-4333-8333-333333333333\",\"project\":{\"path\":\"C:\\\\work\\\\subgraph\",\"name\":\"subgraph\",\"lastOpenedAt\":1767225600},\"nodes\":[],\"edges\":[]}",
         .created_by = "11111111-1111-4111-8111-111111111111",
     });
     defer allocator.free(node);

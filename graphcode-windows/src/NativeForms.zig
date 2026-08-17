@@ -392,6 +392,7 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             _ = c.GetClientRect(safe_hwnd, &client);
             _ = c.MoveWindow(c.GetDlgItem(safe_hwnd, @intCast(ok_id)), 350, client.bottom - 38, 70, 26, 1);
             _ = c.MoveWindow(c.GetDlgItem(safe_hwnd, @intCast(cancel_id)), 265, client.bottom - 38, 70, 26, 1);
+            updateScrollBar(safe_hwnd, value);
             return 0;
         },
         c.WM_VSCROLL => {
@@ -415,6 +416,11 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
         },
         c.WM_COMMAND => {
             const command = @as(u16, @truncate(wparam));
+            const notification: u16 = @truncate(wparam >> 16);
+            if (notification == c.EN_SETFOCUS and command >= 9100 and command < 9120) {
+                ensureControlVisible(safe_hwnd, value, command - 9100);
+                return 0;
+            }
             if (command == ok_id) {
                 readValues(value);
                 applyModalCommand(value, .submit);
@@ -428,6 +434,16 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
         c.WM_CLOSE => {
             applyModalCommand(value, .close);
             return 0;
+        },
+        c.WM_SETFOCUS => {
+            if (c.GetFocus()) |focused| {
+                for (0..20) |index| {
+                    if (focused == value.edits[index]) {
+                        ensureControlVisible(safe_hwnd, value, index);
+                        break;
+                    }
+                }
+            }
         },
         c.WM_DESTROY => {
             applyModalCommand(value, .destroy);
@@ -466,8 +482,7 @@ fn scrollFields(hwnd: c.HWND, state: *DialogState, requested: i32) void {
     };
     const viewport = clientHeight(hwnd);
     const content: i32 = @intCast(15 + count * 48 + 12);
-    const max_offset = @max(0, content - @max(120, viewport - 48));
-    const next = std.math.clamp(state.scroll_offset + requested, 0, max_offset);
+    const next = boundedScrollOffset(content, viewport, state.scroll_offset, requested);
     const delta = state.scroll_offset - next;
     if (delta == 0) return;
     state.scroll_offset = next;
@@ -476,6 +491,49 @@ fn scrollFields(hwnd: c.HWND, state: *DialogState, requested: i32) void {
         _ = c.MoveWindow(c.GetDlgItem(hwnd, @intCast(8000 + index)), 18, y, 420, 18, 1);
         _ = c.MoveWindow(c.GetDlgItem(hwnd, @intCast(9100 + index)), 18, y + 18, 420, 24, 1);
     }
+    updateScrollBar(hwnd, state);
+}
+
+fn updateScrollBar(hwnd: c.HWND, state: *DialogState) void {
+    const count: usize = switch (state.kind) {
+        .node => 20,
+        .edge => 10,
+        .update => 9,
+        .settings => 2,
+        .jump => 1,
+    };
+    const viewport = clientHeight(hwnd);
+    const content: i32 = @intCast(15 + count * 48 + 12);
+    const page: u32 = @intCast(@max(1, viewport - 48));
+    const max_offset = @max(0, content - @as(i32, @intCast(page)));
+    state.scroll_offset = std.math.clamp(state.scroll_offset, 0, max_offset);
+    var info: c.SCROLLINFO = std.mem.zeroes(c.SCROLLINFO);
+    info.cbSize = @sizeOf(c.SCROLLINFO);
+    info.fMask = c.SIF_RANGE | c.SIF_PAGE | c.SIF_POS;
+    info.nMin = 0;
+    info.nMax = content;
+    info.nPage = page;
+    info.nPos = @intCast(state.scroll_offset);
+    _ = c.SetScrollInfo(hwnd, c.SB_VERT, &info, 1);
+}
+
+fn ensureControlVisible(hwnd: c.HWND, state: *DialogState, index: usize) void {
+    const viewport = clientHeight(hwnd);
+    const top: i32 = @intCast(15 + index * 48);
+    const bottom = top + 42;
+    const visible_top = state.scroll_offset;
+    const visible_bottom = state.scroll_offset + @max(1, viewport - 48);
+    if (top < visible_top) {
+        scrollFields(hwnd, state, top - visible_top);
+    } else if (bottom > visible_bottom) {
+        scrollFields(hwnd, state, bottom - visible_bottom);
+    }
+
+}
+
+fn boundedScrollOffset(content: i32, viewport: i32, current: i32, requested: i32) i32 {
+    const max_offset = @max(0, content - @max(120, viewport - 48));
+    return std.math.clamp(current + requested, 0, max_offset);
 }
 
 fn createButton(hwnd: c.HWND, text: []const u8, id: usize, x: i32, y: i32) void {
@@ -550,4 +608,15 @@ test "numeric form values reject malformed input instead of substituting default
     try std.testing.expectError(error.InvalidCharacter, parseOptionalInt("3x"));
     try std.testing.expectEqual(@as(?f64, null), try parseOptionalFloat(" \t"));
     try std.testing.expectEqual(@as(?i64, 7), try parseOptionalInt("7"));
+}
+
+test "keyboard-sized form keeps every field reachable through bounded scrolling" {
+    const content: i32 = 15 + 20 * 48 + 12;
+    const viewport: i32 = 768 - 96;
+    const max_offset = boundedScrollOffset(content, viewport, 0, 100000);
+    try std.testing.expect(max_offset > 0);
+    try std.testing.expectEqual(max_offset, boundedScrollOffset(content, viewport, max_offset, 48));
+    try std.testing.expectEqual(@as(i32, 0), boundedScrollOffset(content, viewport, 0, -48));
+    const last_top: i32 = 15 + 19 * 48;
+    try std.testing.expect(last_top + 42 <= max_offset + viewport - 48);
 }

@@ -189,9 +189,47 @@ pub fn validateSubgraphJson(value: []const u8) FormError!void {
         .object => |item| item,
         else => return error.InvalidSubgraph,
     };
+    const graph_id = object.get("id") orelse return error.InvalidSubgraph;
+    if (!isUuidValue(graph_id)) return error.InvalidSubgraph;
+    const project = object.get("project") orelse return error.InvalidSubgraph;
+    const project_object = switch (project) {
+        .object => |item| item,
+        else => return error.InvalidSubgraph,
+    };
+    if (!nonEmptyString(project_object.get("path")) or
+        !nonEmptyString(project_object.get("name")) or
+        !isDateValue(project_object.get("lastOpenedAt")))
+        return error.InvalidSubgraph;
     const nodes = object.get("nodes") orelse return error.InvalidSubgraph;
     const edges = object.get("edges") orelse return error.InvalidSubgraph;
-    if (nodes != .array or edges != .array) return error.InvalidSubgraph;
+    const node_items = switch (nodes) {
+        .array => |items| items,
+        else => return error.InvalidSubgraph,
+    };
+    const edge_items = switch (edges) {
+        .array => |items| items,
+        else => return error.InvalidSubgraph,
+    };
+    for (node_items.items) |item| {
+        const node = switch (item) {
+            .object => |value_object| value_object,
+            else => return error.InvalidSubgraph,
+        };
+        if (!isUuidValue(node.get("id")) or
+            !nonEmptyString(node.get("title")) or
+            !nonEmptyString(node.get("loopType")))
+            return error.InvalidSubgraph;
+    }
+    for (edge_items.items) |item| {
+        const edge = switch (item) {
+            .object => |value_object| value_object,
+            else => return error.InvalidSubgraph,
+        };
+        if (!isUuidValue(edge.get("id")) or
+            !isUuidValue(edge.get("from")) or
+            !isUuidValue(edge.get("to")))
+            return error.InvalidSubgraph;
+    }
 }
 
 pub fn isUuid(value: []const u8) bool {
@@ -202,6 +240,27 @@ pub fn isUuid(value: []const u8) bool {
         } else if (!std.ascii.isHex(byte)) return false;
     }
     return true;
+}
+
+fn isUuidValue(value: ?std.json.Value) bool {
+    return switch (value orelse return false) {
+        .string => |text| isUuid(text),
+        else => false,
+    };
+}
+
+fn nonEmptyString(value: ?std.json.Value) bool {
+    return switch (value orelse return false) {
+        .string => |text| std.mem.trim(u8, text, " \t\r\n").len != 0,
+        else => false,
+    };
+}
+
+fn isDateValue(value: ?std.json.Value) bool {
+    return switch (value orelse return false) {
+        .float, .integer => true,
+        else => false,
+    };
 }
 
 pub fn validateEdge(draft: EdgeDraft) FormError!void {
@@ -293,7 +352,7 @@ test "node and edge forms reject invalid drafts explicitly" {
     try std.testing.expectEqualStrings("New Loop", resolvedTitle(" \n"));
     try std.testing.expectError(error.SameEndpoint, validateEdge(.{ .from = "a", .to = "a" }));
     try std.testing.expectError(error.UnsupportedEdgeKind, validateEdge(.{ .from = "a", .to = "b", .kind = "bad" }));
-    try validateNode(.{ .title = "Composite", .loop_type = "composite", .subgraph_json = "{\"nodes\":[],\"edges\":[]}", .created_by = "11111111-1111-4111-8111-111111111111" });
+    try validateNode(.{ .title = "Composite", .loop_type = "composite", .subgraph_json = "{\"id\":\"33333333-3333-4333-8333-333333333333\",\"project\":{\"path\":\"C:\\\\work\\\\subgraph\",\"name\":\"subgraph\",\"lastOpenedAt\":1767225600},\"nodes\":[],\"edges\":[]}", .created_by = "11111111-1111-4111-8111-111111111111" });
     try std.testing.expectError(error.InvalidSubgraph, validateNode(.{ .title = "Composite", .loop_type = "composite", .subgraph_json = "{\"nodes\":[]}" }));
     try std.testing.expectError(error.InvalidCreatedBy, validateNode(.{ .title = "Loop", .created_by = "not-a-uuid" }));
 }

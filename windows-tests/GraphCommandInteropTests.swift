@@ -59,6 +59,24 @@ final class GraphCommandInteropTests: XCTestCase {
     }
   }
 
+  func testNodeDraftAndLoopGraphFixturesDecodeWithCompleteSwiftSchema() throws {
+    let draft = try JSONDecoder().decode(NodeDraft.self, from: fixture("swift-node-draft-valid.json"))
+    XCTAssertEqual(draft.id, UUID(uuidString: "22222222-2222-4222-8222-222222222222"))
+    XCTAssertNil(draft.backend)
+    XCTAssertEqual(draft.firstInstruction, "work")
+
+    let graph = try JSONDecoder().decode(LoopGraph.self, from: fixture("swift-loopgraph-valid.json"))
+    XCTAssertEqual(graph.id, UUID(uuidString: "11111111-1111-4111-8111-111111111111"))
+    XCTAssertEqual(graph.project.path, "C:\\work\\graph")
+    XCTAssertTrue(graph.nodes.isEmpty)
+    XCTAssertTrue(graph.edges.isEmpty)
+
+    XCTAssertThrowsError(
+      try JSONDecoder().decode(
+        LoopGraph.self,
+        from: Data(#"{"nodes":[],"edges":[]}"#.utf8)))
+  }
+
   private func fixture(_ name: String) throws -> Data {
     let root = URL(fileURLWithPath: #filePath)
       .deletingLastPathComponent()
