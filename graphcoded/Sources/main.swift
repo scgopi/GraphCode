@@ -20,7 +20,7 @@ import GraphcodeKit
       var wideName = Array(shutdownEventName.utf16)
       wideName.append(0)
       if let shutdownEvent = wideName.withUnsafeBufferPointer({
-        OpenEventW(SYNCHRONIZE, false, $0.baseAddress)
+        OpenEventW(DWORD(SYNCHRONIZE), false, $0.baseAddress)
       }) {
         DispatchQueue.global(qos: .utility).async {
           _ = WaitForSingleObject(shutdownEvent, INFINITE)
