@@ -14,6 +14,11 @@ pub const CanvasState = struct {
     drag_y: i32 = 0,
     start_pan_x: f32 = 0,
     start_pan_y: f32 = 0,
+    selected_edge: ?usize = null,
+    edge_dragging: bool = false,
+    edge_drag_source: ?usize = null,
+    edge_drag_x: i32 = 0,
+    edge_drag_y: i32 = 0,
 
     pub fn beginPan(self: *CanvasState, x: i32, y: i32) void {
         self.dragging = true;
@@ -31,6 +36,27 @@ pub const CanvasState = struct {
 
     pub fn endPan(self: *CanvasState) void {
         self.dragging = false;
+    }
+
+    pub fn beginEdgeDrag(self: *CanvasState, source: usize, x: i32, y: i32) void {
+        self.edge_dragging = true;
+        self.edge_drag_source = source;
+        self.edge_drag_x = x;
+        self.edge_drag_y = y;
+    }
+
+    pub fn updateEdgeDrag(self: *CanvasState, x: i32, y: i32) void {
+        if (!self.edge_dragging) return;
+        self.edge_drag_x = x;
+        self.edge_drag_y = y;
+    }
+
+    pub fn endEdgeDrag(self: *CanvasState) ?usize {
+        if (!self.edge_dragging) return null;
+        const source = self.edge_drag_source;
+        self.edge_dragging = false;
+        self.edge_drag_source = null;
+        return source;
     }
 
     pub fn zoomAt(self: *CanvasState, x: i32, y: i32, wheel_delta: i16) void {
@@ -72,8 +98,10 @@ pub fn paint(
     const visible_inspection = if (inspection) |value|
         if (model.graph) |graph|
             if (std.mem.eql(u8, value.project_path, graph.project.path)) value else null
-        else null
-    else null;
+        else
+            null
+    else
+        null;
     Sidebar.draw(hdc, model, visible_inspection, selected_worktree_path, sidebar_scroll, status, allocator);
 
     const graph_bounds = rect(
@@ -103,8 +131,7 @@ pub fn paint(
         hdc,
         allocator,
         model,
-        rect(0, client.bottom - Tokens.workspace_height - Tokens.activity_strip_height,
-            client.right, client.bottom - Tokens.workspace_height),
+        rect(0, client.bottom - Tokens.workspace_height - Tokens.activity_strip_height, client.right, client.bottom - Tokens.workspace_height),
     );
 }
 
@@ -126,8 +153,7 @@ fn attentionRail(
         "1 loop needs you"
     else
         std.fmt.bufPrint(&count, "{d} loops need you", .{model.attentionCount()}) catch "loops need you";
-    fill(hdc, rect(Tokens.sidebar_width + 20, Tokens.header_height + 12, width - 20,
-        Tokens.header_height + 43), 0x002D2418);
+    fill(hdc, rect(Tokens.sidebar_width + 20, Tokens.header_height + 12, width - 20, Tokens.header_height + 43), 0x002D2418);
     drawText(hdc, allocator, label, Tokens.sidebar_width + 34, Tokens.header_height + 21, 12, 0x00FFCD7A);
     drawText(hdc, allocator, "Ctrl+Tab review", Tokens.sidebar_width + 210, Tokens.header_height + 21, 11, 0x00B8B8B8);
 }
@@ -168,22 +194,39 @@ fn drawGrid(hdc: c.HDC, bounds: c.RECT, state: *const CanvasState) void {
 }
 
 fn drawEdges(hdc: c.HDC, graph: GraphModel.Graph, state: *const CanvasState) void {
-    const pen = c.CreatePen(c.PS_SOLID, 2, 0x006A6A6A);
+    const pen = c.CreatePen(c.PS_SOLID, 2, Tokens.rgb(Tokens.canvas_edge));
     if (pen == null) return;
     const old = c.SelectObject(hdc, pen);
-    for (graph.edges.items) |edge| {
+    for (graph.edges.items, 0..) |edge, index| {
         const from = connectorPosition(graph.nodes.items, edge.from, true, state) orelse continue;
         const to = connectorPosition(graph.nodes.items, edge.to, false, state) orelse continue;
-        const distance: i32 = if (to.x >= from.x) to.x - from.x else from.x - to.x;
-        const bend: i32 = @max(@as(i32, 24), @divTrunc(distance, 2));
-        var points = [_]c.POINT{
-            .{ .x = from.x, .y = from.y },
-            .{ .x = from.x + bend, .y = from.y },
-            .{ .x = to.x - bend, .y = to.y },
-            .{ .x = to.x, .y = to.y },
-        };
-        _ = c.PolyBezier(hdc, &points, 4);
+        drawBezier(hdc, from, to, if (state.selected_edge == index) Tokens.rgb(Tokens.canvas_selection) else Tokens.rgb(Tokens.canvas_edge));
     }
+    if (state.edge_dragging) {
+        if (state.edge_drag_source) |source| {
+            if (source < graph.nodes.items.len) {
+                const from = connectorPositionForIndex(graph.nodes.items, source, true, state);
+                drawBezier(hdc, from, .{ .x = state.edge_drag_x, .y = state.edge_drag_y }, Tokens.rgb(Tokens.canvas_selection));
+            }
+        }
+    }
+    _ = c.SelectObject(hdc, old);
+    _ = c.DeleteObject(pen);
+}
+
+fn drawBezier(hdc: c.HDC, from: Connector, to: Connector, color: u32) void {
+    const pen = c.CreatePen(c.PS_SOLID, 2, color);
+    if (pen == null) return;
+    const old = c.SelectObject(hdc, pen);
+    const distance: i32 = if (to.x >= from.x) to.x - from.x else from.x - to.x;
+    const bend: i32 = @max(@as(i32, 24), @divTrunc(distance, 2));
+    var points = [_]c.POINT{
+        .{ .x = from.x, .y = from.y },
+        .{ .x = from.x + bend, .y = from.y },
+        .{ .x = to.x - bend, .y = to.y },
+        .{ .x = to.x, .y = to.y },
+    };
+    _ = c.PolyBezier(hdc, &points, 4);
     _ = c.SelectObject(hdc, old);
     _ = c.DeleteObject(pen);
 }
@@ -196,13 +239,18 @@ const Connector = struct {
 fn connectorPosition(nodes: []const GraphModel.Node, node_id: []const u8, outgoing: bool, state: *const CanvasState) ?Connector {
     for (nodes, 0..) |node, index| {
         if (!std.mem.eql(u8, node.id, node_id)) continue;
-        const bounds = nodeBounds(index, state);
-        return .{
-            .x = if (outgoing) bounds.right else bounds.left,
-            .y = @divTrunc(bounds.top + bounds.bottom, 2),
-        };
+        return connectorPositionForIndex(nodes, index, outgoing, state);
     }
     return null;
+}
+
+fn connectorPositionForIndex(nodes: []const GraphModel.Node, index: usize, outgoing: bool, state: *const CanvasState) Connector {
+    _ = nodes;
+    const bounds = nodeBounds(index, state);
+    return .{
+        .x = if (outgoing) bounds.right else bounds.left,
+        .y = @divTrunc(bounds.top + bounds.bottom, 2),
+    };
 }
 
 fn drawNode(
@@ -296,6 +344,92 @@ pub fn hitTest(nodes: []const GraphModel.Node, x: i32, y: i32, state: *const Can
     }
 
     return null;
+}
+
+pub fn hitTestConnector(nodes: []const GraphModel.Node, x: i32, y: i32, state: *const CanvasState, graph_bounds: c.RECT) ?usize {
+    if (!insideGraph(x, y, graph_bounds)) return null;
+    for (nodes, 0..) |_, index| {
+        const connector = connectorPositionForIndex(nodes, index, true, state);
+        if (distanceSquared(x, y, connector.x, connector.y) <= connectorRadius(state) * connectorRadius(state)) return index;
+    }
+    return null;
+}
+
+pub fn hitTestEdge(
+    nodes: []const GraphModel.Node,
+    edges: []const GraphModel.Edge,
+    x: i32,
+    y: i32,
+    state: *const CanvasState,
+    graph_bounds: c.RECT,
+) ?usize {
+    if (!insideGraph(x, y, graph_bounds)) return null;
+    for (edges, 0..) |edge, index| {
+        const from = connectorPosition(nodes, edge.from, true, state) orelse continue;
+        const to = connectorPosition(nodes, edge.to, false, state) orelse continue;
+        if (bezierDistanceSquared(from, to, x, y) <= edgeHitRadius(state) * edgeHitRadius(state)) return index;
+    }
+    return null;
+}
+
+fn insideGraph(x: i32, y: i32, bounds: c.RECT) bool {
+    return x >= bounds.left and x < bounds.right and y >= bounds.top and y < bounds.bottom;
+}
+
+fn connectorRadius(state: *const CanvasState) i32 {
+    return @max(7, @as(i32, @intFromFloat(9 * state.zoom)));
+}
+
+fn edgeHitRadius(state: *const CanvasState) i32 {
+    return @max(6, @as(i32, @intFromFloat(8 * state.zoom)));
+}
+
+fn distanceSquared(x1: i32, y1: i32, x2: i32, y2: i32) i32 {
+    const dx = x1 - x2;
+    const dy = y1 - y2;
+    return dx * dx + dy * dy;
+}
+
+fn bezierDistanceSquared(from: Connector, to: Connector, x: i32, y: i32) i32 {
+    const distance: i32 = if (to.x >= from.x) to.x - from.x else from.x - to.x;
+    const bend: i32 = @max(@as(i32, 24), @divTrunc(distance, 2));
+    var previous = from;
+    var best: i32 = std.math.maxInt(i32);
+    var step: i32 = 1;
+    while (step <= 24) : (step += 1) {
+        const t = @as(f32, @floatFromInt(step)) / 24.0;
+        const one = 1.0 - t;
+        const px = @as(f32, @floatFromInt(from.x)) * one * one * one +
+            @as(f32, @floatFromInt(from.x + bend)) * 3 * one * one * t +
+            @as(f32, @floatFromInt(to.x - bend)) * 3 * one * t * t +
+            @as(f32, @floatFromInt(to.x)) * t * t * t;
+        const py = @as(f32, @floatFromInt(from.y)) * one * one * one +
+            @as(f32, @floatFromInt(from.y)) * 3 * one * one * t +
+            @as(f32, @floatFromInt(to.y)) * 3 * one * t * t +
+            @as(f32, @floatFromInt(to.y)) * t * t * t;
+        const current = Connector{ .x = @intFromFloat(px), .y = @intFromFloat(py) };
+        best = @min(best, segmentDistanceSquared(previous, current, x, y));
+        previous = current;
+    }
+    return best;
+}
+
+fn segmentDistanceSquared(a: Connector, b: Connector, x: i32, y: i32) i32 {
+    const ax = @as(f32, @floatFromInt(a.x));
+    const ay = @as(f32, @floatFromInt(a.y));
+    const bx = @as(f32, @floatFromInt(b.x));
+    const by = @as(f32, @floatFromInt(b.y));
+    const dx = bx - ax;
+    const dy = by - ay;
+    const denominator = dx * dx + dy * dy;
+    const raw = if (denominator == 0) 0 else ((@as(f32, @floatFromInt(x)) - ax) * dx +
+        (@as(f32, @floatFromInt(y)) - ay) * dy) / denominator;
+    const t = std.math.clamp(raw, 0, 1);
+    const px = ax + dx * t;
+    const py = ay + dy * t;
+    const ex = @as(f32, @floatFromInt(x)) - px;
+    const ey = @as(f32, @floatFromInt(y)) - py;
+    return @intFromFloat(ex * ex + ey * ey);
 }
 
 fn cardTextLayout(zoom: f32, entry: bool, attention: bool) CardTextLayout {
@@ -453,4 +587,39 @@ test "hit testing rejects cards outside the graph viewport" {
     const bounds = rect(Tokens.sidebar_width, Tokens.header_height, 900, 500);
     try std.testing.expect(hitTest(&nodes, 10, 100, &state, bounds) == null);
     try std.testing.expect(hitTest(&nodes, 300, 20, &state, bounds) == null);
+}
+
+test "edge hit testing follows reordered endpoint IDs and zoom pan" {
+    var state = CanvasState{ .pan_x = 18, .pan_y = -7, .zoom = 1.15 };
+    const nodes = [_]GraphModel.Node{
+        .{ .id = @constCast("target"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
+        .{ .id = @constCast("source"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
+    };
+    const edges = [_]GraphModel.Edge{
+        .{ .from = @constCast("source"), .to = @constCast("target"), .kind = @constCast("handoff") },
+    };
+    const from = connectorPosition(&nodes, "source", true, &state) orelse return error.MissingConnector;
+    const to = connectorPosition(&nodes, "target", false, &state) orelse return error.MissingConnector;
+    const distance: i32 = if (to.x >= from.x) to.x - from.x else from.x - to.x;
+    const bend: i32 = @max(@as(i32, 24), @divTrunc(distance, 2));
+    const midpoint = Connector{
+        .x = @intFromFloat(
+            @as(f32, @floatFromInt(from.x)) * 0.125 +
+                @as(f32, @floatFromInt(from.x + bend)) * 0.375 +
+                @as(f32, @floatFromInt(to.x - bend)) * 0.375 +
+                @as(f32, @floatFromInt(to.x)) * 0.125,
+        ),
+        .y = @intFromFloat((@as(f32, @floatFromInt(from.y)) + @as(f32, @floatFromInt(to.y))) / 2),
+    };
+    const bounds = rect(Tokens.sidebar_width, Tokens.header_height, 1200, 800);
+    try std.testing.expectEqual(@as(?usize, 0), hitTestEdge(&nodes, &edges, midpoint.x, midpoint.y, &state, bounds));
+}
+
+test "edge drag state cancels without leaving a selection" {
+    var state = CanvasState{};
+    state.beginEdgeDrag(3, 100, 120);
+    state.updateEdgeDrag(140, 160);
+    try std.testing.expectEqual(@as(?usize, 3), state.endEdgeDrag());
+    try std.testing.expect(!state.edge_dragging);
+    try std.testing.expect(state.edge_drag_source == null);
 }

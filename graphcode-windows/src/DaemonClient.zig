@@ -345,6 +345,22 @@ pub const DaemonClient = struct {
         self.sendCommand(command);
     }
 
+    pub fn sendDeleteNode(self: *DaemonClient, project_path: []const u8, node_id: []const u8) void {
+        const command = Wire.commandGraphDeleteNode(self.allocator, project_path, node_id) catch {
+            self.publishState(self.connectionState(), "delete node command encoding failed");
+            return;
+        };
+        self.sendCommand(command);
+    }
+
+    pub fn sendDeleteEdge(self: *DaemonClient, project_path: []const u8, edge_id: []const u8) void {
+        const command = Wire.commandGraphDeleteEdge(self.allocator, project_path, edge_id) catch {
+            self.publishState(self.connectionState(), "delete edge command encoding failed");
+            return;
+        };
+        self.sendCommand(command);
+    }
+
     pub fn sendCreateEdge(
         self: *DaemonClient,
         project_path: []const u8,

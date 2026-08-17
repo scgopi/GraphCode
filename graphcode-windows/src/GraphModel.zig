@@ -28,6 +28,7 @@ pub const ActivityEvent = struct {
 };
 
 pub const Edge = struct {
+    id: []u8 = &.{},
     from: []u8,
     to: []u8,
     kind: []u8 = &.{},
@@ -128,7 +129,7 @@ pub const Model = struct {
     selected_node_id: ?[]u8 = null,
     selected_index: ?usize = null,
     last_sequence: u64 = 0,
-    attention: std.array_list.Managed(Node) ,
+    attention: std.array_list.Managed(Node),
     attention_entries: std.array_list.Managed(AttentionEntry),
     activity: std.array_list.Managed(ActivityEvent),
     lifecycle_callback: ?LifecycleCallback = null,
@@ -673,26 +674,17 @@ pub const Model = struct {
             self.attention_entries.clearRetainingCapacity();
             for (self.graphs.items) |summary| {
                 for (summary.nodes.items) |node| {
-                    if (!needsAttention(node) and
-                        !(std.mem.eql(u8, node.state, "blocked") and isStrandedSummary(&summary, node.id))) continue;
+                    if (!needsAttention(node) and !(std.mem.eql(u8, node.state, "blocked") and isStrandedSummary(&summary, node.id))) continue;
                     const node_copy = cloneNode(self.allocator, node) catch continue;
-                    const entry = AttentionEntry{
-                        .project_path = self.allocator.dupe(u8, summary.project.path) catch {
-                            freeNode(self.allocator, node_copy);
-                            continue;
-                        },
-                        .node = node_copy,
-                    };
-                    self.attention_entries.append(entry) catch {
-                        freeAttentionEntry(self.allocator, entry);
-                        continue;
-                    };
+                    const entry = AttentionEntry{ .project_path = self.allocator.dupe(u8, summary.project.path) catch { freeNode(self.allocator, node_copy); continue; }, .node = node_copy };
+                    self.attention_entries.append(entry) catch { freeAttentionEntry(self.allocator, entry); continue; };
                     const compat = cloneNode(self.allocator, node) catch continue;
                     self.attention.append(compat) catch freeNode(self.allocator, compat);
                 }
             }
             std.sort.heap(AttentionEntry, self.attention_entries.items, {}, compareAttentionEntry);
             std.sort.heap(Node, self.attention.items, {}, compareAttentionNode);
+        }
     }
 
     fn recordActivity(self: *Model, next: Graph) void {
@@ -866,6 +858,7 @@ fn decodeEdges(
         const end = findClosing(bytes, start, '{', '}') orelse break;
         const object = bytes[start .. end + 1];
         try edges.append(.{
+            .id = try duplicateJsonStringOr(allocator, object, "id", ""),
             .from = try duplicateJsonString(allocator, object, "from"),
             .to = try duplicateJsonString(allocator, object, "to"),
             .kind = try duplicateJsonStringOr(allocator, object, "kind", "handoff"),
@@ -876,7 +869,6 @@ fn decodeEdges(
         });
         cursor = end + 1;
     }
-
 }
 
 fn jsonBool(object: []const u8, key: []const u8) ?bool {
@@ -1009,6 +1001,7 @@ fn freeGraph(allocator: std.mem.Allocator, graph: *Graph) void {
     freeProject(allocator, graph.project);
     for (graph.nodes.items) |node| freeNode(allocator, node);
     for (graph.edges.items) |edge| {
+        if (edge.id.len != 0) allocator.free(edge.id);
         allocator.free(edge.from);
         allocator.free(edge.to);
         allocator.free(edge.kind);
@@ -1298,7 +1291,6 @@ test "activity compares the prior graph for the same project across interleaved 
     try std.testing.expectEqual(@as(usize, 1), model.activity.items.len);
     try std.testing.expectEqualStrings("A", model.activity.items[0].title);
     try std.testing.expectEqualStrings("failed", model.activity.items[0].state);
-=======
 test "worktrees are limited to local filesystem projects" {
     const local = Project{ .path = @constCast("C:\\work\\graph"), .name = @constCast("Graph") };
     const remote = Project{ .path = @constCast("ssh://host/graph"), .name = @constCast("Graph") };

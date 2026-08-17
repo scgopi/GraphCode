@@ -2,6 +2,7 @@ const std = @import("std");
 const DaemonClient = @import("DaemonClient.zig").DaemonClient;
 const GraphCanvas = @import("GraphCanvas.zig");
 const CanvasInput = @import("CanvasInput.zig");
+const GraphContextMenu = @import("GraphContextMenu.zig");
 const Forms = @import("Forms.zig");
 const NativeForms = @import("NativeForms.zig");
 const Sidebar = @import("Sidebar.zig");
@@ -229,6 +230,9 @@ pub const App = struct {
             },
             .graph_changed => {
                 if (self.model.graph) |graph| {
+                    if (self.canvas.selected_edge) |edge| {
+                        if (edge >= graph.edges.items.len) self.canvas.selected_edge = null;
+                    }
                     const accepted_path = if (self.client.protocolMode() == .v1 and self.pending_sent_path.len != 0)
                         self.pending_sent_path
                     else
@@ -274,6 +278,10 @@ pub const App = struct {
                     } else if (self.pending_rebind_path.len == 0) {
                         self.rebindWorkspace(graph.project.path);
                     }
+                    if (self.canvas.selected_edge) |edge| {
+                        if (edge >= graph.edges.items.len) self.canvas.selected_edge = null;
+                    }
+                    self.rebindWorkspace(graph.project.path);
                     self.clampSidebarScroll();
                     if (self.worktree_inspection) |inspection| {
                         if (self.model.graph) |current_graph| {
@@ -517,6 +525,28 @@ pub const App = struct {
         self.client.sendCreateEdgeDraft(path, draft);
     }
 
+    fn createEdgeBetween(self: *App, source: usize, target: usize) void {
+        const graph = self.model.graph orelse return;
+        if (source >= graph.nodes.items.len or target >= graph.nodes.items.len or source == target) return;
+        const path = self.currentProject() orelse return;
+        const draft = NativeForms.edge(self.window.hwnd, self.allocator, .{
+            .from = graph.nodes.items[source].id,
+            .to = graph.nodes.items[target].id,
+            .kind = "handoff",
+        }) catch {
+            self.setStatus("Unable to open edge form");
+            return;
+        } orelse return;
+        defer self.allocator.free(draft.from);
+        defer self.allocator.free(draft.to);
+        defer self.allocator.free(draft.kind);
+        Forms.validateEdge(draft) catch {
+            self.setStatus("Invalid edge form");
+            return;
+        };
+        self.client.sendCreateEdge(path, draft.from, draft.to, draft.kind);
+    }
+
     fn openSettings(self: *App) void {
         const initial = self.client.effectiveSettings(self.allocator) catch {
             self.setStatus("Unable to load current settings");
@@ -582,6 +612,80 @@ pub const App = struct {
         const path = self.currentProject() orelse return;
         const node = self.model.selected() orelse return;
         self.client.sendNodeAction(path, node.id, "messageNode", "GraphCode Windows shell message");
+    }
+
+    fn deleteSelectedNode(self: *App) void {
+        const path = self.currentProject() orelse return;
+        const node = self.model.selected() orelse return;
+        if (!GraphContextMenu.confirm(self.window.hwnd, "Delete Loop", "Delete this loop? This cannot be undone.")) return;
+        self.client.sendDeleteNode(path, node.id);
+    }
+
+    fn editSelectedEdge(self: *App, index: usize) void {
+        const graph = self.model.graph orelse return;
+        if (index >= graph.edges.items.len) return;
+        const edge = graph.edges.items[index];
+        const draft = NativeForms.edge(self.window.hwnd, self.allocator, .{
+            .from = edge.from,
+            .to = edge.to,
+            .kind = edge.kind,
+        }) catch {
+            self.setStatus("Unable to open edge form");
+            return;
+        } orelse return;
+        defer self.allocator.free(draft.from);
+        defer self.allocator.free(draft.to);
+        defer self.allocator.free(draft.kind);
+        Forms.validateEdge(draft) catch {
+            self.setStatus("Invalid edge form");
+            return;
+        };
+        const path = self.currentProject() orelse return;
+        const edge_id = edge.id;
+        if (edge_id.len != 0) self.client.sendDeleteEdge(path, edge_id);
+        self.client.sendCreateEdge(path, draft.from, draft.to, draft.kind);
+    }
+
+    fn deleteEdge(self: *App, index: usize) void {
+        const graph = self.model.graph orelse return;
+        if (index >= graph.edges.items.len) return;
+        const edge = graph.edges.items[index];
+        if (!GraphContextMenu.confirm(self.window.hwnd, "Delete Edge", "Delete this edge?")) return;
+        const path = self.currentProject() orelse return;
+        if (edge.id.len == 0) {
+            self.setStatus("This graph edge has no stable delete identifier");
+            return;
+        }
+        self.client.sendDeleteEdge(path, edge.id);
+    }
+
+    fn handleContextAction(self: *App, action: GraphContextMenu.Action, target: GraphContextMenu.Target) void {
+        switch (target) {
+            .node => |index| {
+                const graph = self.model.graph orelse return;
+                if (index >= graph.nodes.items.len) return;
+                self.model.selected_node = index;
+                switch (action) {
+                    .rename_node => self.editSelectedNode(),
+                    .stop_node => self.stopSelectedNode(),
+                    .delete_node => self.deleteSelectedNode(),
+                    .open_terminal => self.openSelectedNode(),
+                    .message_node => self.sendSelectedNode(),
+                    .memo_node => self.sendSelectedNode(),
+                    else => {},
+                }
+            },
+            .edge => |index| {
+                self.canvas.selected_edge = index;
+                switch (action) {
+                    .edit_edge => self.editSelectedEdge(index),
+                    .delete_edge => self.deleteEdge(index),
+                    else => {},
+                }
+            },
+            .background => if (action == .create_edge) self.createEdge(),
+        }
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
     fn inspectWorktrees(self: *App) void {
@@ -753,7 +857,9 @@ pub const App = struct {
             .open_node => self.openSelectedNode(),
             .stop_node => self.stopSelectedNode(),
             .send_node => self.sendSelectedNode(),
-            .edit_node => self.editSelectedNode(),
+            .edit_node => if (self.canvas.selected_edge) |edge| self.editSelectedEdge(edge) else self.editSelectedNode(),
+            .rename_selected => self.editSelectedNode(),
+            .delete_selected => if (self.canvas.selected_edge) |edge| self.deleteEdge(edge) else self.deleteSelectedNode(),
             .create_edge => self.createEdge(),
             .jump_next => self.jumpToNode(),
             .settings => self.openSettings(),
@@ -931,6 +1037,11 @@ fn onDaemonFrame(
     const app: *App = @ptrCast(@alignCast(context.?));
     app.onFrame(frame[0..length]);
     _ = c.InvalidateRect(app.window.hwnd, null, 0);
+}
+
+fn onContextAction(context: ?*anyopaque, action: GraphContextMenu.Action, target: GraphContextMenu.Target) void {
+    const app: *App = @ptrCast(@alignCast(context.?));
+    app.handleContextAction(action, target);
 }
 
 fn onWindowMessage(
@@ -1195,10 +1306,19 @@ fn onWindowMessage(
             if (x >= Tokens.sidebar_width and y < workspace_top) {
                 const bounds = c.RECT{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = client.right, .bottom = workspace_top };
                 if (app.model.graph) |graph| {
-                    if (GraphCanvas.hitTest(graph.nodes.items, x, y, &app.canvas, bounds)) |index| {
+                    if (GraphCanvas.hitTestConnector(graph.nodes.items, x, y, &app.canvas, bounds)) |index| {
+                        app.canvas.beginEdgeDrag(index, x, y);
+                        _ = c.SetCapture(hwnd);
+                    } else if (GraphCanvas.hitTest(graph.nodes.items, x, y, &app.canvas, bounds)) |index| {
                         _ = app.model.setSelectedIndex(index);
+                        app.canvas.selected_edge = null;
+                        _ = c.InvalidateRect(hwnd, null, 0);
+                    } else if (GraphCanvas.hitTestEdge(graph.nodes.items, graph.edges.items, x, y, &app.canvas, bounds)) |index| {
+                        app.canvas.selected_edge = index;
+                        app.model.clearSelection();
                         _ = c.InvalidateRect(hwnd, null, 0);
                     } else {
+                        app.canvas.selected_edge = null;
                         app.canvas.beginPan(x, y);
                         _ = c.SetCapture(hwnd);
                     }
@@ -1218,14 +1338,9 @@ fn onWindowMessage(
                     .overview => app.client.sendOpenGlobalGraph(),
                     .loop => if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
                         if (row.index < graph.nodes.items.len) {
-<<<<<<< HEAD
                             _ = app.model.selectProject(path);
                             _ = app.model.setSelectedIndex(row.index);
-                            if (app.workspace) |*workspace| {
-=======
-                            app.model.selected_node = row.index;
                             if (app.workspace) |workspace| {
->>>>>>> 5356833 (fix(windows): harden parity shell runtime)
                                 workspace.openNode(0, graph.nodes.items[row.index].id) catch {
                                     app.setStatus("Unable to open selected loop");
                                 };
@@ -1245,7 +1360,45 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
+        c.WM_RBUTTONUP => {
+            const point = CanvasInput.decodeMouseMessage(lparam);
+            var client: c.RECT = undefined;
+            _ = c.GetClientRect(hwnd, &client);
+            const workspace_top = client.bottom - Tokens.workspace_height;
+            if (point.x >= Tokens.sidebar_width and point.y >= Tokens.header_height and point.y < workspace_top) {
+                const bounds = c.RECT{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = client.right, .bottom = workspace_top };
+                var target: GraphContextMenu.Target = .background;
+                if (app.model.graph) |graph| {
+                    if (GraphCanvas.hitTest(graph.nodes.items, point.x, point.y, &app.canvas, bounds)) |index| {
+                        target = .{ .node = index };
+                    } else if (GraphCanvas.hitTestEdge(graph.nodes.items, graph.edges.items, point.x, point.y, &app.canvas, bounds)) |index| {
+                        target = .{ .edge = index };
+                    }
+                }
+                var screen = c.POINT{ .x = point.x, .y = point.y };
+                _ = c.ClientToScreen(hwnd, &screen);
+                GraphContextMenu.show(hwnd, target, screen.x, screen.y, app, &onContextAction);
+                result.* = 0;
+                return true;
+            }
+            result.* = 0;
+            return true;
+        },
         c.WM_LBUTTONUP => {
+            if (app.canvas.edge_dragging) {
+                const point = CanvasInput.decodeMouseMessage(lparam);
+                const source = app.canvas.endEdgeDrag() orelse 0;
+                _ = c.ReleaseCapture();
+                if (app.model.graph) |graph| {
+                    const bounds = c.RECT{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = clientRight(hwnd), .bottom = clientBottom(hwnd) - Tokens.workspace_height };
+                    if (GraphCanvas.hitTest(graph.nodes.items, point.x, point.y, &app.canvas, bounds)) |target| {
+                        if (target != source) app.createEdgeBetween(source, target);
+                    }
+                }
+                _ = c.InvalidateRect(hwnd, null, 0);
+                result.* = 0;
+                return true;
+            }
             if (app.canvas.dragging) {
                 app.canvas.endPan();
                 _ = c.ReleaseCapture();
@@ -1254,7 +1407,12 @@ fn onWindowMessage(
             return true;
         },
         c.WM_MOUSEMOVE => {
-            if (app.canvas.dragging) {
+            if (app.canvas.edge_dragging) {
+                app.canvas.updateEdgeDrag(mouseX(lparam), mouseY(lparam));
+                _ = c.InvalidateRect(hwnd, null, 0);
+                result.* = 0;
+                return true;
+            } else if (app.canvas.dragging) {
                 app.canvas.updatePan(mouseX(lparam), mouseY(lparam));
                 _ = c.InvalidateRect(hwnd, null, 0);
                 result.* = 0;
@@ -1488,9 +1646,21 @@ fn envFlag(name: []const u8) bool {
 }
 
 fn mouseX(lparam: c.LPARAM) i32 {
-    return @intCast(@as(u16, @truncate(@as(usize, @bitCast(lparam)))));
+    return CanvasInput.decodeMouseMessage(lparam).x;
 }
 
 fn mouseY(lparam: c.LPARAM) i32 {
-    return @intCast(@as(u16, @truncate(@as(usize, @bitCast(lparam)) >> 16)));
+    return CanvasInput.decodeMouseMessage(lparam).y;
+}
+
+fn clientRight(hwnd: c.HWND) i32 {
+    var client: c.RECT = undefined;
+    _ = c.GetClientRect(hwnd, &client);
+    return client.right;
+}
+
+fn clientBottom(hwnd: c.HWND) i32 {
+    var client: c.RECT = undefined;
+    _ = c.GetClientRect(hwnd, &client);
+    return client.bottom;
 }

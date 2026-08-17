@@ -400,6 +400,22 @@ pub fn commandGraphRenameNode(
     });
 }
 
+pub fn commandGraphDeleteNode(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    node_id: []const u8,
+) ![]u8 {
+    const quoted_path = try quoteJson(allocator, project_path);
+    defer allocator.free(quoted_path);
+    const quoted_node = try quoteJson(allocator, node_id);
+    defer allocator.free(quoted_node);
+    return std.mem.concat(allocator, u8, &.{
+        "{\"graphCommand\":{\"projectPath\":",   quoted_path,
+        ",\"command\":{\"deleteNode\":{\"_0\":", quoted_node,
+        "}}}}",
+    });
+}
+
 pub fn commandGraphCreateEdge(
     allocator: std.mem.Allocator,
     project_path: []const u8,

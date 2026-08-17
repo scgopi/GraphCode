@@ -9,6 +9,8 @@ pub const Action = enum {
     stop_node,
     send_node,
     edit_node,
+    rename_selected,
+    delete_selected,
     create_edge,
     jump_next,
     settings,
@@ -38,6 +40,8 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (ctrl and key == 'S') return .stop_node;
     if (ctrl and key == 'M') return .send_node;
     if (ctrl and key == 'E') return .edit_node;
+    if (!ctrl and key == 0x71) return .rename_selected;
+    if (!ctrl and key == 0x2E) return .delete_selected;
     if (ctrl and key == 'J') return .jump_next;
     if (ctrl and key == 0xBC) return .settings;
     if (ctrl and key == 0x09) return .cycle_attention;
@@ -67,6 +71,8 @@ pub fn commandText(allocator: std.mem.Allocator, action: Action) ![]u8 {
         .stop_node => allocator.dupe(u8, "Stop node"),
         .send_node => allocator.dupe(u8, "Send node"),
         .edit_node => allocator.dupe(u8, "Edit node"),
+        .rename_selected => allocator.dupe(u8, "Rename selected loop"),
+        .delete_selected => allocator.dupe(u8, "Delete selected canvas item"),
         .create_edge => allocator.dupe(u8, "Create edge"),
         .jump_next => allocator.dupe(u8, "Jump to next node"),
         .settings => allocator.dupe(u8, "Settings"),
@@ -120,4 +126,9 @@ test "tab variants keep terminal navigation distinct" {
     try std.testing.expectEqual(Action.select_next, keyAction(0x09, false, false));
     try std.testing.expectEqual(Action.select_previous, keyAction(0x09, false, true));
     try std.testing.expectEqual(Action.cycle_attention, keyAction(0x09, true, false));
+}
+
+test "canvas destructive and rename keyboard equivalents are explicit" {
+    try std.testing.expectEqual(Action.delete_selected, keyAction(0x2E, false, false));
+    try std.testing.expectEqual(Action.rename_selected, keyAction(0x71, false, false));
 }

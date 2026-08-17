@@ -6,6 +6,16 @@ pub const WheelMessage = struct {
     delta: i16,
 };
 
+pub const MouseMessage = struct {
+    x: i32,
+    y: i32,
+};
+
+pub fn decodeMouseMessage(lparam: c.LPARAM) MouseMessage {
+    const value: usize = @bitCast(lparam);
+    return .{ .x = signedWord(value), .y = signedWord(value >> 16) };
+}
+
 pub fn decodeWheelMessage(lparam: c.LPARAM, wparam: c.WPARAM) WheelMessage {
     return .{
         .point = .{
@@ -41,6 +51,12 @@ test "screen wheel point preserves non-origin client mapping contract" {
     try std.testing.expect(mapped != null);
     try std.testing.expectEqual(@as(i32, 120), mapped.?.x);
     try std.testing.expectEqual(@as(i32, 120), mapped.?.y);
+}
+
+test "mouse message decodes signed client coordinates" {
+    const decoded = decodeMouseMessage(@as(c.LPARAM, 0xFFF08020));
+    try std.testing.expectEqual(@as(i32, 32), decoded.x);
+    try std.testing.expectEqual(@as(i32, -16), decoded.y);
 }
 
 fn fakeScreenToClient(hwnd: c.HWND, point: *c.POINT) c.BOOL {
