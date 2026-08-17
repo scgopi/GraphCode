@@ -96,6 +96,7 @@ pub fn paint(
     sidebar_scroll: i32,
     status: []const u8,
     allocator: std.mem.Allocator,
+    show_activity: bool,
     state: *const CanvasState,
 ) void {
     var client: c.RECT = undefined;
@@ -117,7 +118,7 @@ pub fn paint(
         client.right,
         @max(
             Tokens.header_height + 1,
-            client.bottom - Tokens.workspace_height - Tokens.activity_strip_height,
+            client.bottom - Tokens.workspace_height - if (show_activity) Tokens.activity_strip_height else 0,
         ),
     );
     fill(hdc, graph_bounds, Tokens.canvas_tone);
@@ -134,7 +135,7 @@ pub fn paint(
     }
     _ = c.RestoreDC(hdc, saved);
     attentionRail(hdc, allocator, model, client.right);
-    activityStrip(
+    if (show_activity) activityStrip(
         hdc,
         allocator,
         model,

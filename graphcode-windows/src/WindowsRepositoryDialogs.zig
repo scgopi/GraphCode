@@ -37,6 +37,10 @@ pub const CloneProcess = struct {
     recent_stderr_len: usize = 0,
     progress: [256]u8 = undefined,
     progress_len: usize = 0,
+    redaction_pending_stdout: [128]u8 = undefined,
+    redaction_pending_stdout_len: usize = 0,
+    redaction_pending_stderr: [128]u8 = undefined,
+    redaction_pending_stderr_len: usize = 0,
     output_lock: std.Thread.Mutex = .{},
     finished: bool = false,
     cancelled: bool = false,
@@ -52,7 +56,7 @@ pub const CloneProcess = struct {
         child.stderr_behavior = .Pipe;
         try child.spawn();
         const destination = allocator.dupe(u8, fields.destination) catch |err| {
-            _ = child.kill() catch {};
+            _ = std.os.windows.kernel32.TerminateProcess(child.id, 1);
             _ = child.wait() catch {};
             for (args) |arg| allocator.free(arg);
             allocator.free(args);
@@ -64,7 +68,9 @@ pub const CloneProcess = struct {
 
     fn terminate(self: *CloneProcess) void {
         self.cancelled = true;
-        _ = self.child.kill() catch {};
+        if (comptime @import("builtin").os.tag == .windows) {
+            _ = std.os.windows.kernel32.TerminateProcess(self.child.id, 1);
+        }
     }
 
     pub fn finish(self: *CloneProcess) !CloneStatus {
@@ -115,11 +121,19 @@ pub const CloneProcess = struct {
         return .{ .progress_len = progress_len, .stderr_len = stderr_len };
     }
 
-    fn recordOutput(self: *CloneProcess, bytes: []const u8, is_stderr: bool) void {
-        const safe = redactSecrets(self.allocator, bytes) catch return;
-        defer self.allocator.free(safe);
+    fn recordOutput(self: *CloneProcess, bytes: []const u8, is_stderr: bool, flush: bool) void {
         self.output_lock.lock();
         defer self.output_lock.unlock();
+        const pending = if (is_stderr) self.redaction_pending_stderr[0..self.redaction_pending_stderr_len]
+            else self.redaction_pending_stdout[0..self.redaction_pending_stdout_len];
+        var combined: [4352]u8 = undefined;
+        const combined_len = pending.len + bytes.len;
+        if (combined_len > combined.len) return;
+        @memcpy(combined[0..pending.len], pending);
+        @memcpy(combined[pending.len..combined_len], bytes);
+        const safe_end = if (flush) combined_len else combined_len - @min(combined_len, 128);
+        const safe = redactSecrets(self.allocator, combined[0..safe_end]) catch return;
+        defer self.allocator.free(safe);
         const target = if (is_stderr) &self.recent_stderr else &self.progress;
         const len = if (is_stderr) &self.recent_stderr_len else &self.progress_len;
         const capacity = target.len;
@@ -130,6 +144,15 @@ pub const CloneProcess = struct {
             @memcpy(target[0..capacity], safe[safe.len - capacity ..]);
         }
         len.* = copy_len;
+        if (is_stderr) {
+            const retained = combined[safe_end..combined_len];
+            @memcpy(self.redaction_pending_stderr[0..retained.len], retained);
+            self.redaction_pending_stderr_len = retained.len;
+        } else {
+            const retained = combined[safe_end..combined_len];
+            @memcpy(self.redaction_pending_stdout[0..retained.len], retained);
+            self.redaction_pending_stdout_len = retained.len;
+        }
     }
 };
 
@@ -449,8 +472,11 @@ fn drainPipe(process: *CloneProcess, file: *std.fs.File, is_stderr: bool, done: 
     var buffer: [4096]u8 = undefined;
     while (true) {
         const count = file.read(&buffer) catch return;
-        if (count == 0) return;
-        process.recordOutput(buffer[0..count], is_stderr);
+        if (count == 0) {
+            process.recordOutput(&.{}, is_stderr, true);
+            return;
+        }
+        process.recordOutput(buffer[0..count], is_stderr, false);
     }
 }
 
@@ -514,6 +540,33 @@ test "clone output redacts hostile HTTPS credentials" {
     try std.testing.expect(std.mem.indexOf(u8, safe, "user:p@ss") == null);
     try std.testing.expect(std.mem.indexOf(u8, safe, "<redacted>@example.test") != null);
     try std.testing.expect(std.mem.indexOf(u8, safe, "secret") == null);
+}
+
+test "clone redaction survives split credential boundaries" {
+    var process = CloneProcess{
+        .allocator = std.testing.allocator,
+        .child = undefined,
+        .args = &.{},
+        .destination = &.{},
+        .staging = &.{},
+    };
+    process.recordOutput("fatal https://user:secret@", true, false);
+    process.recordOutput("example.test/repo.git", true, true);
+    var progress: [256]u8 = undefined;
+    var stderr: [256]u8 = undefined;
+    const snapshot = process.snapshot(&progress, &stderr);
+    try std.testing.expect(std.mem.indexOf(u8, stderr[0..snapshot.stderr_len], "secret") == null);
+    try std.testing.expect(std.mem.indexOf(u8, stderr[0..snapshot.stderr_len], "<redacted>@example.test") != null);
+}
+
+test "clone cancellation only signals worker ownership" {
+    var operation = CloneOperation{
+        .allocator = std.testing.allocator,
+        .process = undefined,
+        .thread = undefined,
+    };
+    operation.cancel();
+    try std.testing.expect(operation.cancel_requested.load(.acquire));
 }
 
 test "clone refuses non-empty destinations without deleting sentinels" {

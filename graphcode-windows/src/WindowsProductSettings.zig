@@ -37,13 +37,24 @@ pub const Settings = struct {
     }
 
     pub fn parse(allocator: std.mem.Allocator, values: []const []const u8) !Settings {
+        const backend = if (values.len > 0 and values[0].len != 0) values[0] else "claudeCode";
+        const model = if (values.len > 1 and values[1].len != 0) values[1] else "standard";
+        const claude = if (values.len > 2 and values[2].len != 0) values[2] else "auto";
+        const copilot = if (values.len > 3 and values[3].len != 0) values[3] else "allowEverything";
+        const codex = if (values.len > 4 and values[4].len != 0) values[4] else "workspace";
+        if (!isOneOf(backend, &.{ "claudeCode", "copilotCLI", "codex" }) or
+            !isOneOf(model, &.{ "fast", "standard", "capable" }) or
+            !isOneOf(claude, &.{ "manual", "acceptEdits", "auto", "dontAsk", "bypassPermissions" }) or
+            !isOneOf(copilot, &.{ "ask", "allowTools", "allowEverything" }) or
+            !isOneOf(codex, &.{ "ask", "workspace", "unsandboxed" }))
+            return error.InvalidSettingValue;
         return .{
             .allocator = allocator,
-            .default_backend = try allocator.dupe(u8, if (values.len > 0 and values[0].len != 0) values[0] else "claudeCode"),
-            .default_model = try allocator.dupe(u8, if (values.len > 1 and values[1].len != 0) values[1] else "standard"),
-            .claude_permissions = try allocator.dupe(u8, if (values.len > 2 and values[2].len != 0) values[2] else "auto"),
-            .copilot_permissions = try allocator.dupe(u8, if (values.len > 3 and values[3].len != 0) values[3] else "allowEverything"),
-            .codex_approvals = try allocator.dupe(u8, if (values.len > 4 and values[4].len != 0) values[4] else "workspace"),
+            .default_backend = try allocator.dupe(u8, backend),
+            .default_model = try allocator.dupe(u8, model),
+            .claude_permissions = try allocator.dupe(u8, claude),
+            .copilot_permissions = try allocator.dupe(u8, copilot),
+            .codex_approvals = try allocator.dupe(u8, codex),
             .activity = values.len > 5 and std.mem.eql(u8, values[5], "on"),
             .briefing = values.len <= 6 or std.mem.eql(u8, values[6], "on"),
             .beta = values.len > 7 and std.mem.eql(u8, values[7], "on"),
@@ -51,6 +62,11 @@ pub const Settings = struct {
         };
     }
 };
+
+fn isOneOf(value: []const u8, choices: []const []const u8) bool {
+    for (choices) |choice| if (std.mem.eql(u8, value, choice)) return true;
+    return false;
+}
 
 pub const Store = struct {
     allocator: std.mem.Allocator,
@@ -177,9 +193,13 @@ const Contract = struct {
 pub fn open(parent: c.HWND, allocator: std.mem.Allocator, current: Settings) !?Settings {
     const fields = current.fields();
     const result = try NativeDialogs.text(parent, allocator, "GraphCode product settings", &.{
-        "Default backend", "Default model tier", "Claude permissions", "Copilot permissions",
-        "Codex approvals", "Activity strip (on/off)", "Graph briefing (on/off)",
-        "Beta updates (on/off)", "Pick models automatically",
+        "Default backend (claudeCode|copilotCLI|codex)",
+        "Default model tier (fast|standard|capable)",
+        "Claude permissions (manual|acceptEdits|auto|dontAsk|bypassPermissions)",
+        "Copilot permissions (ask|allowTools|allowEverything)",
+        "Codex approvals (ask|workspace|unsandboxed)",
+        "Activity strip (on/off)", "Graph briefing (on/off)",
+        "Beta updates (on/off)", "Pick models automatically (on/off)",
     }, &fields);
     var values = result orelse return null;
     defer values.deinit(allocator);
@@ -217,4 +237,13 @@ test "settings save preserves worktree policies and unknown JSON fields" {
     try std.testing.expect(std.mem.indexOf(u8, saved, "worktreePolicies") != null);
     try std.testing.expect(std.mem.indexOf(u8, saved, "futureFlag") != null);
     try std.testing.expect(std.mem.indexOf(u8, saved, "copilotCLI") != null);
+}
+
+test "settings reject values outside Swift selector enums" {
+    try std.testing.expectError(error.InvalidSettingValue, Settings.parse(std.testing.allocator, &.{
+        "not-a-backend", "standard", "auto", "ask", "workspace", "off", "on", "off", "off",
+    }));
+    try std.testing.expectError(error.InvalidSettingValue, Settings.parse(std.testing.allocator, &.{
+        "claudeCode", "not-a-tier", "auto", "ask", "workspace", "off", "on", "off", "off",
+    }));
 }

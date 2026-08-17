@@ -19,6 +19,7 @@ const DaemonSupervisor = @import("DaemonSupervisor.zig").Supervisor;
 const ProductSettings = @import("WindowsProductSettings.zig");
 const RepositoryDialogs = @import("WindowsRepositoryDialogs.zig");
 const Onboarding = @import("WindowsOnboarding.zig");
+const WindowsUpdates = @import("WindowsUpdates.zig");
 const c = @import("Win32.zig").c;
 
 const title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Windows");
@@ -89,6 +90,8 @@ pub const App = struct {
     product_settings: ?ProductSettings.Settings = null,
     onboarding_store: ?Onboarding.Store = null,
     clone_operation: ?*RepositoryDialogs.CloneOperation = null,
+    activity_enabled: bool = false,
+    update_state: WindowsUpdates.CheckState = .{},
     smoke_restart_index: ?usize = null,
     smoke_restart_session: []const u8 = &.{},
 
@@ -192,6 +195,10 @@ pub const App = struct {
         self.product_settings_store = ProductSettings.Store.init(self.allocator) catch null;
         if (self.product_settings_store) |store| {
             self.product_settings = store.load() catch ProductSettings.Settings.init(self.allocator) catch null;
+        }
+        if (self.product_settings) |settings| {
+            self.activity_enabled = settings.activity;
+            self.update_state = WindowsUpdates.CheckState.configure(settings.beta);
         }
         self.onboarding_store = Onboarding.Store.init(self.allocator) catch null;
         if (self.onboarding_store) |store| {
@@ -818,6 +825,10 @@ pub const App = struct {
         };
         if (self.product_settings) |*settings| settings.deinit();
         self.product_settings = draft;
+        self.activity_enabled = draft.activity;
+        self.update_state = WindowsUpdates.CheckState.configure(draft.beta);
+        self.setStatus(self.update_state.label());
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
     fn cloneRepository(self: *App) void {
@@ -1581,8 +1592,8 @@ fn onWindowMessage(
             var paint: c.PAINTSTRUCT = undefined;
             const hdc = c.BeginPaint(hwnd, &paint);
             const inspection = if (app.worktree_inspection) |*value| value else null;
-            GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), app.allocator, &app.canvas);
-            if (app.workspace) |workspace| workspace.paintChrome(hdc);
+            GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), app.allocator, app.activity_enabled, &app.canvas);
+            if (app.workspace) |*workspace| workspace.paintChrome(hdc);
             _ = c.EndPaint(hwnd, &paint);
             result.* = 0;
             return true;
