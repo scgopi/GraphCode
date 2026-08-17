@@ -397,13 +397,22 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
         },
         c.WM_VSCROLL => {
             const command: u16 = @truncate(wparam);
+            if (command == c.SB_THUMBTRACK or command == c.SB_THUMBPOSITION) {
+                var info: c.SCROLLINFO = std.mem.zeroes(c.SCROLLINFO);
+                info.cbSize = @sizeOf(c.SCROLLINFO);
+                info.fMask = c.SIF_TRACKPOS;
+                if (c.GetScrollInfo(safe_hwnd, c.SB_VERT, &info) != 0) {
+                    setScrollOffset(safe_hwnd, value, info.nTrackPos);
+                }
+                return 0;
+            }
             const delta: i32 = switch (command) {
-                0 => -48,
-                1 => 48,
-                2 => -@as(i32, @intCast(@max(48, clientHeight(safe_hwnd) - 60))),
-                3 => @as(i32, @intCast(@max(48, clientHeight(safe_hwnd) - 60))),
-                6 => -100000,
-                7 => 100000,
+                c.SB_LINEUP => -48,
+                c.SB_LINEDOWN => 48,
+                c.SB_PAGEUP => -@as(i32, @intCast(@max(48, clientHeight(safe_hwnd) - 60))),
+                c.SB_PAGEDOWN => @as(i32, @intCast(@max(48, clientHeight(safe_hwnd) - 60))),
+                c.SB_TOP => -100000,
+                c.SB_BOTTOM => 100000,
                 else => 0,
             };
             scrollFields(safe_hwnd, value, delta);
@@ -483,9 +492,34 @@ fn scrollFields(hwnd: c.HWND, state: *DialogState, requested: i32) void {
     const viewport = clientHeight(hwnd);
     const content: i32 = @intCast(15 + count * 48 + 12);
     const next = boundedScrollOffset(content, viewport, state.scroll_offset, requested);
+    setScrollOffsetValue(hwnd, state, next);
+}
+
+fn setScrollOffset(hwnd: c.HWND, state: *DialogState, requested: i32) void {
+    const count: usize = switch (state.kind) {
+        .node => 20,
+        .edge => 10,
+        .update => 9,
+        .settings => 2,
+        .jump => 1,
+    };
+    const viewport = clientHeight(hwnd);
+    const content: i32 = @intCast(15 + count * 48 + 12);
+    const next = std.math.clamp(requested, 0, @max(0, content - @max(120, viewport - 48)));
+    setScrollOffsetValue(hwnd, state, next);
+}
+
+fn setScrollOffsetValue(hwnd: c.HWND, state: *DialogState, next: i32) void {
     const delta = state.scroll_offset - next;
     if (delta == 0) return;
     state.scroll_offset = next;
+    const count: usize = switch (state.kind) {
+        .node => 20,
+        .edge => 10,
+        .update => 9,
+        .settings => 2,
+        .jump => 1,
+    };
     for (0..count) |index| {
         const y: i32 = @as(i32, @intCast(15 + index * 48)) - state.scroll_offset;
         _ = c.MoveWindow(c.GetDlgItem(hwnd, @intCast(8000 + index)), 18, y, 420, 18, 1);
@@ -619,4 +653,13 @@ test "keyboard-sized form keeps every field reachable through bounded scrolling"
     try std.testing.expectEqual(@as(i32, 0), boundedScrollOffset(content, viewport, 0, -48));
     const last_top: i32 = 15 + 19 * 48;
     try std.testing.expect(last_top + 42 <= max_offset + viewport - 48);
+}
+
+test "scrollbar thumb positions seek and clamp the dialog content" {
+    const content: i32 = 15 + 20 * 48 + 12;
+    const viewport: i32 = 768 - 96;
+    try std.testing.expectEqual(@as(i32, 0), std.math.clamp(@as(i32, 0), 0, content - (viewport - 48)));
+    const max_offset = boundedScrollOffset(content, viewport, 0, 100000);
+    try std.testing.expectEqual(@as(i32, 200), std.math.clamp(@as(i32, 200), 0, max_offset));
+    try std.testing.expectEqual(max_offset, std.math.clamp(@as(i32, 100000), 0, max_offset));
 }

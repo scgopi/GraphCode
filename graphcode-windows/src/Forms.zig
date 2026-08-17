@@ -137,24 +137,17 @@ pub fn validateJumpQuery(query: []const u8) FormError![]const u8 {
 }
 
 pub fn validateNode(draft: NodeDraft) FormError!void {
-    if (!std.mem.eql(u8, draft.loop_type, "turnBased") and
-        !std.mem.eql(u8, draft.loop_type, "timeBased") and
-        !std.mem.eql(u8, draft.loop_type, "goalBased") and
-        !std.mem.eql(u8, draft.loop_type, "composite"))
+    if (!isLoopType(draft.loop_type))
         return error.UnsupportedLoopType;
     if (std.mem.eql(u8, draft.loop_type, "composite") and
         std.mem.trim(u8, draft.title, " \t\r\n").len == 0)
         return error.EmptyTitle;
     if (draft.backend) |backend| {
-        if (!std.mem.eql(u8, backend, "claudeCode") and
-            !std.mem.eql(u8, backend, "copilotCLI") and
-            !std.mem.eql(u8, backend, "codex"))
+        if (!isBackend(backend))
             return error.UnsupportedBackend;
     }
     if (draft.model_tier.len != 0 and
-        !std.mem.eql(u8, draft.model_tier, "fast") and
-        !std.mem.eql(u8, draft.model_tier, "standard") and
-        !std.mem.eql(u8, draft.model_tier, "capable"))
+        !isModelTier(draft.model_tier))
         return error.UnsupportedModelTier;
     if (std.mem.eql(u8, draft.loop_type, "turnBased") and
         std.mem.trim(u8, draft.first_instruction, " \t\r\n").len == 0)
@@ -167,8 +160,7 @@ pub fn validateNode(draft: NodeDraft) FormError!void {
         if (draft.poll_interval_seconds <= 0) return error.InvalidGoal;
         if (draft.stall_after_seconds) |seconds| if (seconds <= 0) return error.InvalidGoal;
         if (draft.metric_direction.len != 0 and
-            !std.mem.eql(u8, draft.metric_direction, "maximize") and
-            !std.mem.eql(u8, draft.metric_direction, "minimize"))
+            !isMetricDirection(draft.metric_direction))
             return error.UnsupportedMetricDirection;
     }
     const has_worktree = draft.worktree_repository.len != 0 or
@@ -185,7 +177,54 @@ pub fn validateSubgraphJson(value: []const u8) FormError!void {
     defer arena.deinit();
     var parsed = std.json.parseFromSlice(std.json.Value, arena.allocator(), value, .{}) catch return error.InvalidSubgraph;
     defer parsed.deinit();
-    const object = switch (parsed.value) {
+    try validateLoopGraphValue(parsed.value, 0);
+}
+
+pub fn isLoopType(value: []const u8) bool {
+    return std.mem.eql(u8, value, "turnBased") or
+        std.mem.eql(u8, value, "timeBased") or
+        std.mem.eql(u8, value, "goalBased") or
+        std.mem.eql(u8, value, "proactive") or
+        std.mem.eql(u8, value, "composite");
+}
+
+pub fn isBackend(value: []const u8) bool {
+    return std.mem.eql(u8, value, "claudeCode") or
+        std.mem.eql(u8, value, "copilotCLI") or
+        std.mem.eql(u8, value, "codex");
+}
+
+pub fn isModelTier(value: []const u8) bool {
+    return std.mem.eql(u8, value, "fast") or
+        std.mem.eql(u8, value, "standard") or
+        std.mem.eql(u8, value, "capable");
+}
+
+pub fn isMetricDirection(value: []const u8) bool {
+    return std.mem.eql(u8, value, "maximize") or std.mem.eql(u8, value, "minimize");
+}
+
+pub fn isEdgeKind(value: []const u8) bool {
+    return std.mem.eql(u8, value, "handoff") or
+        std.mem.eql(u8, value, "message") or
+        std.mem.eql(u8, value, "spawn");
+}
+
+pub fn isEdgeCondition(value: []const u8) bool {
+    return std.mem.eql(u8, value, "always") or
+        std.mem.eql(u8, value, "onSuccess") or
+        std.mem.eql(u8, value, "onFailure");
+}
+
+pub fn isTransformKind(value: []const u8) bool {
+    return std.mem.eql(u8, value, "none") or
+        std.mem.eql(u8, value, "template") or
+        std.mem.eql(u8, value, "script");
+}
+
+fn validateLoopGraphValue(value: std.json.Value, depth: usize) FormError!void {
+    if (depth > 32) return error.InvalidSubgraph;
+    const object = switch (value) {
         .object => |item| item,
         else => return error.InvalidSubgraph,
     };
@@ -217,8 +256,30 @@ pub fn validateSubgraphJson(value: []const u8) FormError!void {
         };
         if (!isUuidValue(node.get("id")) or
             !nonEmptyString(node.get("title")) or
-            !nonEmptyString(node.get("loopType")))
+            !enumString(node.get("loopType"), isLoopType))
             return error.InvalidSubgraph;
+        try optionalString(node.get("checkDescription"));
+        try optionalString(node.get("triggerPrompt"));
+        try optionalString(node.get("firstInstruction"));
+        try requiredBool(node.get("pausesBeforeWritesOnly"));
+        try validateGoal(node.get("goal"));
+        if (!enumString(node.get("backend"), isBackend)) return error.InvalidSubgraph;
+        if (!enumStringOrNull(node.get("modelTier"), isModelTier)) return error.InvalidSubgraph;
+        try validateWorktree(node.get("worktreeBinding"));
+        const subgraph = node.get("subGraph") orelse null;
+        if (subgraph) |nested| switch (nested) {
+            .null => {},
+            else => try validateLoopGraphValue(nested, depth + 1),
+        };
+        if (!enumString(node.get("pilotState"), isPilotState)) return error.InvalidSubgraph;
+        try validateUsage(node.get("usage"));
+        try optionalString(node.get("activity"));
+        try validatePresence(node.get("presence"));
+        try requiredBool(node.get("hasActiveDependents"));
+        try validateMetricHistory(node.get("metricHistory"));
+        if (!isUuidOrNull(node.get("createdBy"))) return error.InvalidSubgraph;
+        if (!enumObject(node.get("state"), isLoopState)) return error.InvalidSubgraph;
+        if (!isDateValue(node.get("createdAt"))) return error.InvalidSubgraph;
     }
     for (edge_items.items) |item| {
         const edge = switch (item) {
@@ -227,9 +288,266 @@ pub fn validateSubgraphJson(value: []const u8) FormError!void {
         };
         if (!isUuidValue(edge.get("id")) or
             !isUuidValue(edge.get("from")) or
-            !isUuidValue(edge.get("to")))
+            !isUuidValue(edge.get("to")) or
+            !enumString(edge.get("kind"), isEdgeKind) or
+            !enumString(edge.get("condition"), isEdgeCondition))
+            return error.InvalidSubgraph;
+        try validatePayloadTransform(edge.get("payloadTransform"));
+        try validateCycleGuard(edge.get("cycleGuard"));
+        try optionalString(edge.get("spawnTargetProjectPath"));
+        try optionalInteger(edge.get("fireCount"));
+    }
+}
+
+fn validateGoal(value: ?std.json.Value) FormError!void {
+    const item = value orelse return;
+    if (item == .null) return;
+    const object = switch (item) {
+        .object => |value_object| value_object,
+        else => return error.InvalidSubgraph,
+    };
+    if (!nonEmptyString(object.get("summary")) or
+        !isPositiveNumber(object.get("pollIntervalSeconds")))
+        return error.InvalidSubgraph;
+    try optionalString(object.get("predicate"));
+    try optionalNumber(object.get("stallAfterSeconds"));
+    try optionalString(object.get("metricCommand"));
+    if (!enumString(object.get("metricDirection"), isMetricDirection)) return error.InvalidSubgraph;
+}
+
+fn validateWorktree(value: ?std.json.Value) FormError!void {
+    const item = value orelse return;
+    if (item == .null) return;
+    const object = switch (item) {
+        .object => |value_object| value_object,
+        else => return error.InvalidSubgraph,
+    };
+    if (!nonEmptyString(object.get("id")) or
+        !nonEmptyString(object.get("repositoryPath")) or
+        !nonEmptyString(object.get("worktreePath")) or
+        !nonEmptyString(object.get("branch")))
+        return error.InvalidSubgraph;
+}
+
+fn validatePayloadTransform(value: ?std.json.Value) FormError!void {
+    const item = value orelse return;
+    const object = switch (item) {
+        .object => |value_object| value_object,
+        else => return error.InvalidSubgraph,
+    };
+    var count: usize = 0;
+    if (object.get("none")) |none| {
+        count += 1;
+        if (none != .object) return error.InvalidSubgraph;
+    }
+    for ([_][]const u8{ "template", "script" }) |key| {
+        if (object.get(key)) |payload| {
+            count += 1;
+            if (!transformPayloadValue(payload)) return error.InvalidSubgraph;
+        }
+    }
+    if (count != 1) return error.InvalidSubgraph;
+}
+
+fn transformPayloadValue(value: std.json.Value) bool {
+    return switch (value) {
+        .object => |object| nonEmptyString(object.get("_0")),
+        .string => |text| std.mem.trim(u8, text, " \t\r\n").len != 0,
+        else => false,
+    };
+}
+
+fn validateCycleGuard(value: ?std.json.Value) FormError!void {
+    const item = value orelse return;
+    if (item == .null) return;
+    const object = switch (item) {
+        .object => |value_object| value_object,
+        else => return error.InvalidSubgraph,
+    };
+    var bounded = false;
+    if (object.get("maxIterations")) |field| {
+        if (field == .null) {} else {
+            if (!isPositiveInteger(field)) return error.InvalidSubgraph;
+            bounded = true;
+        }
+    }
+    if (object.get("until")) |field| {
+        if (field == .null) {} else {
+            if (!nonEmptyStringValue(field)) return error.InvalidSubgraph;
+            bounded = true;
+        }
+    }
+    if (object.get("stopAfterPassesWithoutImprovement")) |field| {
+        if (field == .null) {} else {
+            if (!isPositiveInteger(field)) return error.InvalidSubgraph;
+            bounded = true;
+        }
+    }
+    if (!bounded) return error.InvalidSubgraph;
+}
+
+fn validateUsage(value: ?std.json.Value) FormError!void {
+    const item = value orelse return;
+    if (item == .null) return;
+    const object = switch (item) {
+        .object => |value_object| value_object,
+        else => return error.InvalidSubgraph,
+    };
+    try optionalInteger(object.get("inputTokens"));
+    try optionalInteger(object.get("outputTokens"));
+    try optionalNumber(object.get("costUSD"));
+    try optionalDate(object.get("reportedAt"));
+}
+
+fn validatePresence(value: ?std.json.Value) FormError!void {
+    const item = value orelse return;
+    if (item == .null) return;
+    const object = switch (item) {
+        .object => |value_object| value_object,
+        else => return error.InvalidSubgraph,
+    };
+    if (!enumString(object.get("presence"), isPresence) or
+        !enumString(object.get("confidence"), isPresenceConfidence))
+        return error.InvalidSubgraph;
+}
+
+fn validateMetricHistory(value: ?std.json.Value) FormError!void {
+    const item = value orelse return;
+    const array = switch (item) {
+        .array => |items| items,
+        else => return error.InvalidSubgraph,
+    };
+    for (array.items) |entry| {
+        const object = switch (entry) {
+            .object => |value_object| value_object,
+            else => return error.InvalidSubgraph,
+        };
+        if (!isFiniteNumber(object.get("value")) or !isDateValue(object.get("recordedAt")))
             return error.InvalidSubgraph;
     }
+}
+
+fn isPilotState(value: []const u8) bool {
+    return std.mem.eql(u8, value, "notPiloted") or std.mem.eql(u8, value, "piloting") or
+        std.mem.eql(u8, value, "piloted") or std.mem.eql(u8, value, "armed");
+}
+
+fn isLoopState(value: []const u8) bool {
+    return std.mem.eql(u8, value, "idle") or std.mem.eql(u8, value, "running") or
+        std.mem.eql(u8, value, "awaitingInput") or std.mem.eql(u8, value, "blocked") or
+        std.mem.eql(u8, value, "succeeded") or std.mem.eql(u8, value, "failed") or
+        std.mem.eql(u8, value, "stalled") or std.mem.eql(u8, value, "waiting") or
+        std.mem.eql(u8, value, "stopped");
+}
+
+fn isPresence(value: []const u8) bool {
+    return std.mem.eql(u8, value, "busy") or std.mem.eql(u8, value, "awaitingInput") or
+        std.mem.eql(u8, value, "idle") or std.mem.eql(u8, value, "absent") or
+        std.mem.eql(u8, value, "unknown");
+}
+
+fn isPresenceConfidence(value: []const u8) bool {
+    return std.mem.eql(u8, value, "reported") or std.mem.eql(u8, value, "scanned") or
+        std.mem.eql(u8, value, "heuristic");
+}
+
+fn enumString(value: ?std.json.Value, validator: *const fn ([]const u8) bool) bool {
+    return switch (value orelse return false) {
+        .string => |text| validator(text),
+        else => false,
+    };
+}
+
+fn enumStringOrNull(value: ?std.json.Value, validator: *const fn ([]const u8) bool) bool {
+    const item = value orelse return true;
+    return switch (item) {
+        .null => true,
+        .string => |text| validator(text),
+        else => false,
+    };
+}
+
+fn enumObject(value: ?std.json.Value, validator: *const fn ([]const u8) bool) bool {
+    const item = value orelse return false;
+    const object = switch (item) {
+        .object => |value_object| value_object,
+        else => return false,
+    };
+    var count: usize = 0;
+    var valid = false;
+    var iterator = object.iterator();
+    while (iterator.next()) |entry| {
+        count += 1;
+        if (validator(entry.key_ptr.*)) {
+            valid = entry.value_ptr.* == .object;
+        }
+    }
+    return count == 1 and valid;
+}
+
+fn optionalString(value: ?std.json.Value) FormError!void {
+    const item = value orelse return;
+    if (item != .null and item != .string) return error.InvalidSubgraph;
+}
+
+fn optionalBool(value: ?std.json.Value) FormError!void {
+    const item = value orelse return;
+    if (item != .null and item != .bool) return error.InvalidSubgraph;
+}
+
+fn requiredBool(value: ?std.json.Value) FormError!void {
+    const item = value orelse return error.InvalidSubgraph;
+    if (item != .bool) return error.InvalidSubgraph;
+}
+
+fn optionalNumber(value: ?std.json.Value) FormError!void {
+    const item = value orelse return;
+    if (item != .null and !isFiniteNumber(item)) return error.InvalidSubgraph;
+}
+
+fn optionalInteger(value: ?std.json.Value) FormError!void {
+    const item = value orelse return;
+    if (item != .null and item != .integer) return error.InvalidSubgraph;
+}
+
+fn optionalDate(value: ?std.json.Value) FormError!void {
+    const item = value orelse return;
+    if (item != .null and !isDateValue(item)) return error.InvalidSubgraph;
+}
+
+fn isUuidOrNull(value: ?std.json.Value) bool {
+    const item = value orelse return true;
+    return item == .null or isUuidValue(item);
+}
+
+fn isPositiveNumber(value: ?std.json.Value) bool {
+    return switch (value orelse return false) {
+        .integer => |number| number > 0,
+        .float => |number| std.math.isFinite(number) and number > 0,
+        else => false,
+    };
+}
+
+fn isPositiveInteger(value: std.json.Value) bool {
+    return switch (value) {
+        .integer => |number| number > 0,
+        else => false,
+    };
+}
+
+fn isFiniteNumber(value: ?std.json.Value) bool {
+    return switch (value orelse return false) {
+        .integer => true,
+        .float => |number| std.math.isFinite(number),
+        else => false,
+    };
+}
+
+fn nonEmptyStringValue(value: std.json.Value) bool {
+    return switch (value) {
+        .string => |text| std.mem.trim(u8, text, " \t\r\n").len != 0,
+        else => false,
+    };
 }
 
 pub fn isUuid(value: []const u8) bool {
@@ -267,17 +585,11 @@ pub fn validateEdge(draft: EdgeDraft) FormError!void {
     if (draft.from.len == 0) return error.MissingSource;
     if (draft.to.len == 0) return error.MissingTarget;
     if (std.mem.eql(u8, draft.from, draft.to)) return error.SameEndpoint;
-    if (!std.mem.eql(u8, draft.kind, "handoff") and
-        !std.mem.eql(u8, draft.kind, "message") and
-        !std.mem.eql(u8, draft.kind, "spawn"))
+    if (!isEdgeKind(draft.kind))
         return error.UnsupportedEdgeKind;
-    if (!std.mem.eql(u8, draft.condition, "always") and
-        !std.mem.eql(u8, draft.condition, "onSuccess") and
-        !std.mem.eql(u8, draft.condition, "onFailure"))
+    if (!isEdgeCondition(draft.condition))
         return error.UnsupportedEdgeCondition;
-    if (!std.mem.eql(u8, draft.transform_kind, "none") and
-        !std.mem.eql(u8, draft.transform_kind, "template") and
-        !std.mem.eql(u8, draft.transform_kind, "script"))
+    if (!isTransformKind(draft.transform_kind))
         return error.UnsupportedTransform;
     if (!std.mem.eql(u8, draft.transform_kind, "none") and draft.transform_value.len == 0)
         return error.UnsupportedTransform;

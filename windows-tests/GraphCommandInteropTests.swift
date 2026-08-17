@@ -77,6 +77,19 @@ final class GraphCommandInteropTests: XCTestCase {
         from: Data(#"{"nodes":[],"edges":[]}"#.utf8)))
   }
 
+  func testPopulatedLoopGraphFixturesDecodeOrRejectInSwift() throws {
+    let graph = try JSONDecoder().decode(
+      LoopGraph.self, from: fixture("swift-loopgraph-populated-valid.json"))
+    XCTAssertEqual(graph.nodes.count, 1)
+    XCTAssertEqual(graph.edges.count, 1)
+    XCTAssertEqual(graph.nodes.first?.subGraph?.nodes.count, 1)
+    XCTAssertEqual(graph.nodes.first?.goal?.metricDirection, .minimize)
+    XCTAssertEqual(graph.edges.first?.payloadTransform, .template("payload {{output}}"))
+    XCTAssertThrowsError(
+      try JSONDecoder().decode(
+        LoopGraph.self, from: fixture("swift-loopgraph-populated-invalid.json")))
+  }
+
   private func fixture(_ name: String) throws -> Data {
     let root = URL(fileURLWithPath: #filePath)
       .deletingLastPathComponent()
