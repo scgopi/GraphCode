@@ -3,12 +3,21 @@ const builtin = @import("builtin");
 const c = if (builtin.os.tag == .windows and builtin.link_libc) @import("Win32.zig").c else struct {
     pub const HWND = ?*anyopaque;
     pub const HANDLE = ?*anyopaque;
+    pub const WPARAM = usize;
+    pub const LPARAM = isize;
+    pub const LRESULT = isize;
+    pub const HRESULT = i32;
     pub fn SetPropW(_: HWND, _: [*:0]const u16, _: HANDLE) c_int { return 0; }
     pub fn RemovePropW(_: HWND, _: [*:0]const u16) HANDLE { return null; }
     pub fn GetPropW(_: HWND, _: [*:0]const u16) HANDLE { return null; }
     pub fn GetDesktopWindow() HWND { return null; }
 };
 const provider_property = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.AccessibilityProvider");
+const NativeProvider = opaque {};
+extern fn gc_uia_create(hwnd: c.HWND) ?*NativeProvider;
+extern fn gc_uia_release(provider: *NativeProvider) void;
+extern fn gc_uia_get_object(hwnd: c.HWND, wparam: c.WPARAM, lparam: c.LPARAM, provider: *NativeProvider) c.LRESULT;
+extern fn gc_uia_notify(provider: *NativeProvider) c.HRESULT;
 
 pub const Role = enum { window, navigation, list, list_item, button, card, menu, menu_item, text, terminal, status, dialog };
 pub const Pattern = enum { invoke, selection, selection_item, expand_collapse, scroll, value, text };
@@ -30,6 +39,7 @@ pub const Provider = struct {
     focus_order: std.array_list.Managed(usize),
     notifications: std.array_list.Managed(Notification),
     attached_hwnd: c.HWND = null,
+    native_provider: ?*NativeProvider = null,
 
     pub fn init(allocator: std.mem.Allocator) Provider {
         return .{
@@ -44,9 +54,19 @@ pub const Provider = struct {
         self.elements.deinit(); self.focus_order.deinit(); self.notifications.deinit();
     }
     pub fn attach(self: *Provider, hwnd: c.HWND) bool {
+        if (!builtin.link_libc) return false;
         if (hwnd == null) return false;
-        if (c.SetPropW(hwnd, provider_property.ptr, @ptrCast(self)) == 0) return false;
+        const native = gc_uia_create(hwnd) orelse {
+            std.debug.print("UIA provider creation failed\n", .{});
+            return false;
+        };
+        if (c.SetPropW(hwnd, provider_property.ptr, @ptrCast(native)) == 0) {
+            std.debug.print("UIA SetPropW failed\n", .{});
+            gc_uia_release(native);
+            return false;
+        }
         self.attached_hwnd = hwnd;
+        self.native_provider = native;
         return true;
     }
     pub fn detach(self: *Provider) void {
@@ -54,10 +74,24 @@ pub const Provider = struct {
             _ = c.RemovePropW(hwnd, provider_property.ptr);
             self.attached_hwnd = null;
         }
+        if (self.native_provider) |native| {
+            if (builtin.link_libc) gc_uia_release(native);
+            self.native_provider = null;
+        }
     }
     pub fn isAttached(self: *const Provider) bool {
         const hwnd = self.attached_hwnd orelse return false;
-        return c.GetPropW(hwnd, provider_property.ptr) == @as(c.HANDLE, @ptrCast(@constCast(self)));
+        const native = self.native_provider orelse return false;
+        return c.GetPropW(hwnd, provider_property.ptr) == @as(c.HANDLE, @ptrCast(native));
+    }
+    pub fn getObject(self: *const Provider, hwnd: c.HWND, wparam: c.WPARAM, lparam: c.LPARAM) c.LRESULT {
+        if (!builtin.link_libc) return 0;
+        const native = self.native_provider orelse return 0;
+        return gc_uia_get_object(hwnd, wparam, lparam, native);
+    }
+    pub fn notify(self: *const Provider) void {
+        if (!builtin.link_libc) return;
+        if (self.native_provider) |native| _ = gc_uia_notify(native);
     }
     pub fn add(self: *Provider, element: Element) !usize {
         const index = self.elements.items.len;

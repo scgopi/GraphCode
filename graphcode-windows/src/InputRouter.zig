@@ -22,6 +22,7 @@ pub const Action = enum {
     cycle_attention,
     inspect_worktrees,
     reclaim_worktrees,
+    reveal_worktree,
     worktree_next,
     worktree_previous,
     focus_terminal_a,
@@ -55,7 +56,8 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (ctrl and key == ',') return .settings;
     if (key == 0x70) return .onboarding;
     if (ctrl and key == 0x09) return .cycle_attention;
-    if (ctrl and key == 'W' and shift) return .inspect_worktrees;
+    if (ctrl and key == 'W' and shift) return .reclaim_worktrees;
+    if (ctrl and key == 'E' and shift) return .reveal_worktree;
     if (!ctrl and key == 0x28) return .worktree_next;
     if (!ctrl and key == 0x26) return .worktree_previous;
     if (key == 0x31) return .focus_terminal_a;
@@ -94,6 +96,7 @@ pub fn commandText(allocator: std.mem.Allocator, action: Action) ![]u8 {
         .cycle_attention => allocator.dupe(u8, "Review next loop needing you"),
         .inspect_worktrees => allocator.dupe(u8, "Inspect worktrees"),
         .reclaim_worktrees => allocator.dupe(u8, "Reclaim selected worktrees"),
+        .reveal_worktree => allocator.dupe(u8, "Reveal selected worktree in Explorer"),
         .worktree_next => allocator.dupe(u8, "Select next worktree row"),
         .worktree_previous => allocator.dupe(u8, "Select previous worktree row"),
         .reconnect => allocator.dupe(u8, "Reconnect"),

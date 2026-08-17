@@ -51,6 +51,10 @@ pub fn build(b: *std.Build) !void {
         .file = b.path("src/FolderPicker.c"),
         .flags = &.{ "-DUNICODE", "-D_UNICODE" },
     });
+    exe.addCSourceFile(.{
+        .file = b.path("src/AccessibilityProvider.cpp"),
+        .flags = &.{ "-Wno-unused-command-line-argument" },
+    });
     exe.addObjectFile(.{ .cwd_relative = winghostty_lib });
     for ([_][]const u8{
         "user32",
@@ -60,6 +64,7 @@ pub fn build(b: *std.Build) !void {
         "imm32",
         "oleaut32",
         "ole32",
+        "oleaut32",
         "uiautomationcore",
         "shell32",
         "advapi32",

@@ -14,6 +14,11 @@ pub const Entry = struct {
     bound_running: bool = false,
 };
 
+pub fn explorerParameters(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (path.len == 0) return error.EmptyProjectPath;
+    return std.fmt.allocPrint(allocator, "/select,\"{s}\"", .{path});
+}
+
 pub const FailureReason = enum {
     primary, locked, prunable, dirty, untracked, conflicted,
     unpushed, not_landed, bound_running, safe,
@@ -69,12 +74,23 @@ pub fn encodePolicy(allocator: std.mem.Allocator, policy: Policy) ![]u8 {
 }
 
 pub fn decodePolicy(bytes: []const u8) PolicyParseError!Policy {
-    const allow = std.mem.indexOf(u8, bytes, "\"allowReclaim\":") orelse return error.MalformedPolicy;
-    const confirm = std.mem.indexOf(u8, bytes, "\"confirmEachReclaim\":") orelse return error.MalformedPolicy;
-    const allow_value = std.mem.trimLeft(u8, bytes[allow + 15 ..], " \t\r\n");
-    const confirm_value = std.mem.trimLeft(u8, bytes[confirm + 21 ..], " \t\r\n");
-    const allow_reclaim = if (std.mem.startsWith(u8, allow_value, "true")) true else if (std.mem.startsWith(u8, allow_value, "false")) false else return error.MalformedPolicy;
-    const confirm_each_reclaim = if (std.mem.startsWith(u8, confirm_value, "true")) true else if (std.mem.startsWith(u8, confirm_value, "false")) false else return error.MalformedPolicy;
+    var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, bytes, .{}) catch return error.MalformedPolicy;
+    defer parsed.deinit();
+    const object = switch (parsed.value) {
+        .object => |value| value,
+        else => return error.MalformedPolicy,
+    };
+    if (object.count() != 2) return error.MalformedPolicy;
+    const allow_value = object.get("allowReclaim") orelse return error.MalformedPolicy;
+    const confirm_value = object.get("confirmEachReclaim") orelse return error.MalformedPolicy;
+    const allow_reclaim = switch (allow_value) {
+        .bool => |value| value,
+        else => return error.MalformedPolicy,
+    };
+    const confirm_each_reclaim = switch (confirm_value) {
+        .bool => |value| value,
+        else => return error.MalformedPolicy,
+    };
     return .{ .allow_reclaim = allow_reclaim, .confirm_each_reclaim = confirm_each_reclaim };
 }
 
@@ -199,7 +215,7 @@ pub fn inspect(
             }
             entry.pushed = succeedsGit(allocator, &.{
                 "git", "-C", entry.path, "rev-parse", "--verify", "@{u}",
-            });
+            }) and zeroCommitsAhead(allocator, entry.path);
             entry.landed = succeedsGit(allocator, &.{
                 "git", "-C", project_path, "merge-base", "--is-ancestor",
                 entry.branch, default_branch,
@@ -249,23 +265,40 @@ pub fn reclaimSelectedWithPolicy(
 ) !usize {
     if (!policy.allow_reclaim) return error.PolicyDisabled;
     if (policy.confirm_each_reclaim and !confirmed) return error.ConfirmationRequired;
+    if (selected.len == 0) return error.UnsafeSelection;
     var inspection = try inspect(allocator, project_path, bindings);
-            defer {
-                deinit(allocator, &inspection.entries);
-                allocator.free(inspection.default_branch);
-            }
-            var removed: usize = 0;
-            for (selected) |path| {
-                for (bindings) |binding| {
-                    if (std.mem.eql(u8, path, binding.path)) return error.GitFailed;
-                }
-                const entry = selectedEntry(inspection.entries.items, path) orelse continue;
-                if (decision(entry) != .reclaimable) return error.UnsafeSelection;
-                _ = try runGit(allocator, &.{ "git", "-C", project_path, "worktree", "remove", path });
-                removed += 1;
-            }
-            return removed;
+    defer {
+        deinit(allocator, &inspection.entries);
+        allocator.free(inspection.default_branch);
+    }
+    try validateSelected(allocator, inspection.entries.items, selected, bindings);
+    var removed: usize = 0;
+    for (selected) |path| {
+        _ = try runGit(allocator, &.{ "git", "-C", project_path, "worktree", "remove", path });
+        removed += 1;
+    }
+    return removed;
+}
+
+pub fn validateSelected(
+    allocator: std.mem.Allocator,
+    entries: []const Entry,
+    selected: []const []const u8,
+    bindings: []const Binding,
+) !void {
+    if (selected.len == 0) return error.UnsafeSelection;
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+    for (selected) |path| {
+        if (path.len == 0 or seen.contains(path)) return error.UnsafeSelection;
+        try seen.put(path, {});
+        for (bindings) |binding| {
+            if (std.mem.eql(u8, path, binding.path)) return error.UnsafeSelection;
         }
+        const entry = selectedEntry(entries, path) orelse return error.UnsafeSelection;
+        if (decision(entry) != .reclaimable) return error.UnsafeSelection;
+    }
+}
 
 const GitResult = struct { output: []u8 };
 
@@ -522,6 +555,15 @@ test "explicit row selection is independent of graph binding safety" {
 
 test "policy decoding fails closed and round trips explicit settings" {
     try std.testing.expectError(error.MalformedPolicy, decodePolicy("{}"));
+    try std.testing.expectError(error.MalformedPolicy, decodePolicy(
+        "{\"allowReclaim\":true,\"confirmEachReclaim\":false,\"unknown\":true}",
+    ));
+    try std.testing.expectError(error.MalformedPolicy, decodePolicy(
+        "{\"allowReclaim\":\"true\",\"confirmEachReclaim\":false}",
+    ));
+    try std.testing.expectError(error.MalformedPolicy, decodePolicy(
+        "{\"allowReclaim\":true,\"confirmEachReclaim\":}",
+    ));
     const encoded = try encodePolicy(std.testing.allocator, .{ .allow_reclaim = true, .confirm_each_reclaim = false });
     defer std.testing.allocator.free(encoded);
     const decoded = try decodePolicy(encoded);
@@ -534,4 +576,24 @@ test "Explorer command line preserves Windows Unicode arguments" {
     const command_line = try explorerCommandLine(std.testing.allocator, "C:\\工作 space\\review");
     defer std.testing.allocator.free(command_line);
     try std.testing.expectEqualStrings("explorer.exe /select,\"C:\\工作 space\\review\"", command_line);
+}
+
+test "selected batch validation rejects duplicate missing bound and unsafe rows before removal" {
+    var entries = [_]Entry{
+        .{ .path = @constCast("safe"), .branch = @constCast("safe"), .pushed = true, .landed = true },
+        .{ .path = @constCast("dirty"), .branch = @constCast("dirty"), .dirty = true, .pushed = true, .landed = true },
+    };
+    try validateSelected(std.testing.allocator, &entries, &[_][]const u8{"safe"}, &.{});
+    try std.testing.expectError(error.UnsafeSelection, validateSelected(
+        std.testing.allocator, &entries, &[_][]const u8{"safe", "safe"}, &.{},
+    ));
+    try std.testing.expectError(error.UnsafeSelection, validateSelected(
+        std.testing.allocator, &entries, &[_][]const u8{"missing"}, &.{},
+    ));
+    try std.testing.expectError(error.UnsafeSelection, validateSelected(
+        std.testing.allocator, &entries, &[_][]const u8{"safe"}, &.{.{ .path = "safe" }},
+    ));
+    try std.testing.expectError(error.UnsafeSelection, validateSelected(
+        std.testing.allocator, &entries, &[_][]const u8{"dirty"}, &.{},
+    ));
 }

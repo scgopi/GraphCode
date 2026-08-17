@@ -53,6 +53,15 @@ pub const Dialog = struct {
         self.confirmation_armed = false;
     }
 
+    pub fn setPolicy(self: *Dialog, policy: WorktreeStatus.Policy) void {
+        self.policy = policy;
+        self.confirmation_armed = false;
+    }
+
+    pub fn savePolicy(self: *const Dialog) !void {
+        try WorktreeStatus.savePolicy(self.allocator, self.project_path, self.policy);
+    }
+
     pub fn selectedCount(self: *const Dialog) usize {
         var count: usize = 0;
         for (self.rows.items) |row| {

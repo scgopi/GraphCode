@@ -21,6 +21,7 @@ const ProductSettings = @import("WindowsProductSettings.zig");
 const RepositoryDialogs = @import("WindowsRepositoryDialogs.zig");
 const Onboarding = @import("WindowsOnboarding.zig");
 const WindowsUpdates = @import("WindowsUpdates.zig");
+const WorktreeDialog = @import("WorktreeDialog.zig");
 const Accessibility = @import("Accessibility.zig");
 const c = @import("Win32.zig").c;
 
@@ -49,6 +50,7 @@ pub const App = struct {
     worktree_inspection: ?WorktreeStatus.Inspection = null,
     selected_worktree_path: []u8 = &.{},
     reclaim_confirmation_armed: bool = false,
+    worktree_dialog: ?WorktreeDialog.Dialog = null,
     accessibility: ?Accessibility.Provider = null,
     sidebar_scroll: i32 = 0,
     workspace: ?*TerminalWorkspace.Workspace = null,
@@ -165,6 +167,7 @@ pub const App = struct {
         self.tray.remove();
         self.model.deinit();
         if (self.accessibility) |*provider| provider.deinit();
+        if (self.worktree_dialog) |*dialog| dialog.deinit();
         if (self.worktree_inspection) |*inspection| {
             WorktreeStatus.deinitInspection(self.allocator, inspection);
         }
@@ -368,6 +371,10 @@ pub const App = struct {
                             if (!std.mem.eql(u8, inspection.project_path, current_graph.project.path)) {
                                 WorktreeStatus.deinitInspection(self.allocator, &self.worktree_inspection.?);
                                 self.worktree_inspection = null;
+                                if (self.worktree_dialog) |*dialog| {
+                                    dialog.deinit();
+                                    self.worktree_dialog = null;
+                                }
                                 if (self.selected_worktree_path.len != 0) {
                                     self.allocator.free(self.selected_worktree_path);
                                     self.selected_worktree_path = &.{};
@@ -1256,11 +1263,21 @@ pub const App = struct {
         if (self.worktree_inspection) |*old| {
             WorktreeStatus.deinitInspection(self.allocator, old);
         }
+        if (self.worktree_dialog) |*dialog| {
+            dialog.deinit();
+            self.worktree_dialog = null;
+        }
         if (self.selected_worktree_path.len != 0) {
             self.allocator.free(self.selected_worktree_path);
             self.selected_worktree_path = &.{};
         }
         self.worktree_inspection = inspection;
+        self.worktree_dialog = WorktreeDialog.Dialog.init(
+            self.allocator,
+            path,
+            inspection.entries.items,
+            WorktreeStatus.loadPolicy(self.allocator, path),
+        ) catch null;
         self.clampSidebarScroll();
         const summary = WorktreeStatus.summarize(inspection.entries.items);
         const message = std.fmt.allocPrint(
@@ -1288,7 +1305,9 @@ pub const App = struct {
             self.setStatus("No project selected for worktree reclaim");
             return;
         }
-        if (self.selected_worktree_path.len == 0) {
+        if (self.selected_worktree_path.len == 0 and
+            (self.worktree_dialog == null or self.worktree_dialog.?.selectedCount() == 0))
+        {
             self.setStatus("Select a worktree row before reclaiming");
             return;
         }
@@ -1302,14 +1321,28 @@ pub const App = struct {
             self.setStatus("Reclaim is destructive; press Ctrl+Shift+W again to confirm");
             return;
         }
-        var selected = [_][]const u8{self.selected_worktree_path};
+        var selected_list = if (self.worktree_dialog) |*dialog|
+            dialog.selectedPaths(self.allocator) catch {
+                self.setStatus("Unable to collect selected worktrees");
+                return;
+            }
+        else blk: {
+            var single = std.array_list.Managed([]const u8).init(self.allocator);
+            single.append(self.selected_worktree_path) catch {
+                single.deinit();
+                self.setStatus("Unable to collect selected worktrees");
+                return;
+            };
+            break :blk single;
+        };
+        defer selected_list.deinit();
         var bindings = std.array_list.Managed(WorktreeStatus.Binding).init(self.allocator);
         defer bindings.deinit();
         if (self.model.graph) |graph| for (graph.nodes.items) |bound| {
             if (bound.worktree_path.len != 0) bindings.append(.{ .path = bound.worktree_path }) catch {};
         };
         const removed = WorktreeStatus.reclaimSelectedWithPolicy(
-            self.allocator, path, &selected, bindings.items, policy, true,
+            self.allocator, path, selected_list.items, bindings.items, policy, true,
         ) catch |err| {
             self.reclaim_confirmation_armed = false;
             self.setStatus(switch (err) {
@@ -1342,12 +1375,83 @@ pub const App = struct {
         for (inspection.entries.items) |entry| {
             if (!std.mem.eql(u8, entry.path, path)) continue;
             if (WorktreeStatus.decision(entry) != .reclaimable) return false;
+            if (self.worktree_dialog) |*dialog| {
+                dialog.clearSelection();
+                for (dialog.rows.items, 0..) |row, index| {
+                    if (std.mem.eql(u8, row.entry.path, path)) {
+                        _ = dialog.toggle(index);
+                        break;
+                    }
+                }
+            }
             if (self.selected_worktree_path.len != 0) self.allocator.free(self.selected_worktree_path);
             self.selected_worktree_path = self.allocator.dupe(u8, path) catch return false;
             self.reclaim_confirmation_armed = false;
             return true;
         }
         return false;
+    }
+
+    pub fn toggleWorktreeRow(self: *App, index: usize) bool {
+        const dialog = if (self.worktree_dialog) |*value| value else return false;
+        if (index >= dialog.rows.items.len or
+            WorktreeStatus.decision(dialog.rows.items[index].entry) != .reclaimable) return false;
+        _ = dialog.toggle(index);
+        if (self.selected_worktree_path.len != 0) {
+            self.allocator.free(self.selected_worktree_path);
+            self.selected_worktree_path = &.{};
+        }
+        for (dialog.rows.items) |row| {
+            if (!row.selected) continue;
+            self.selected_worktree_path = self.allocator.dupe(u8, row.entry.path) catch &.{};
+            break;
+        }
+        self.reclaim_confirmation_armed = false;
+        return true;
+    }
+
+    pub fn saveWorktreePolicy(self: *App, policy: WorktreeStatus.Policy) !void {
+        const path = self.currentProject() orelse return error.EmptyProjectPath;
+        try WorktreeStatus.savePolicy(self.allocator, path, policy);
+        if (self.worktree_dialog) |*dialog| dialog.setPolicy(policy);
+        self.setStatus("Worktree policy saved");
+    }
+
+    fn revealSelectedWorktree(self: *App) void {
+        const dialog = self.worktree_dialog orelse {
+            self.setStatus("Inspect worktrees before revealing a row");
+            return;
+        };
+        const args = dialog.revealSelected() catch {
+            self.setStatus("Select a worktree row before revealing it");
+            return;
+        };
+        const parameters = WorktreeStatus.explorerParameters(self.allocator, args.path) catch {
+            self.setStatus("Unable to prepare Explorer");
+            return;
+        };
+        defer self.allocator.free(parameters);
+        const wide_params_raw = std.unicode.utf8ToUtf16LeAlloc(self.allocator, parameters) catch {
+            self.setStatus("Unable to encode Explorer path");
+            return;
+        };
+        defer self.allocator.free(wide_params_raw);
+        const wide_params = self.allocator.alloc(u16, wide_params_raw.len + 1) catch {
+            self.setStatus("Unable to encode Explorer path");
+            return;
+        };
+        defer self.allocator.free(wide_params);
+        @memcpy(wide_params[0..wide_params_raw.len], wide_params_raw);
+        wide_params[wide_params_raw.len] = 0;
+        const result = c.ShellExecuteW(
+            self.window.hwnd,
+            std.unicode.utf8ToUtf16LeStringLiteral("open").ptr,
+            std.unicode.utf8ToUtf16LeStringLiteral("explorer.exe").ptr,
+            wide_params.ptr,
+            null,
+            c.SW_SHOWNORMAL,
+        );
+        if (@intFromPtr(result) <= 32) self.setStatus("Unable to open Explorer") else self.setStatus("Opened selected worktree in Explorer");
     }
 
     fn moveWorktreeSelection(self: *App, delta: i32) void {
@@ -1430,6 +1534,7 @@ pub const App = struct {
             },
             .inspect_worktrees => self.inspectWorktrees(),
             .reclaim_worktrees => self.reclaimWorktrees(),
+            .reveal_worktree => self.revealSelectedWorktree(),
             .worktree_next => self.moveWorktreeSelection(1),
             .worktree_previous => self.moveWorktreeSelection(-1),
             .focus_terminal_a => if (self.workspace) |workspace| workspace.focus(0),
@@ -1563,6 +1668,12 @@ pub const App = struct {
     fn setStatus(self: *App, value: []const u8) void {
         const copy = self.allocator.dupe(u8, value) catch return;
         self.replaceStatus(copy);
+        if (self.accessibility) |*provider| {
+            provider.announce(self.status_override, if (std.mem.indexOf(u8, value, "failed") != null or
+                std.mem.indexOf(u8, value, "Unable") != null or
+                std.mem.indexOf(u8, value, "blocked") != null) .@"error" else .status) catch {};
+            provider.notify();
+        }
     }
 
     fn replaceStatus(self: *App, value: []u8) void {
@@ -1667,6 +1778,13 @@ fn onWindowMessage(
         return true;
     }
     switch (message) {
+        c.WM_GETOBJECT => if (app.accessibility) |*provider| {
+            const object = provider.getObject(hwnd, wparam, lparam);
+            if (object != 0) {
+                result.* = object;
+                return true;
+            }
+        },
         c.WM_INITMENUPOPUP => {
             app.updateNativeChrome();
             result.* = 0;
@@ -1684,6 +1802,12 @@ fn onWindowMessage(
                 _ = c.DestroyWindow(hwnd);
                 result.* = 0;
                 return true;
+            }
+            switch (tray_command) {
+                6 => app.inspectWorktrees(),
+                7 => app.reclaimWorktrees(),
+                8 => app.revealSelectedWorktree(),
+                else => {},
             }
             const id: usize = @intCast(@as(u16, @truncate(wparam)));
             if (id == MainWindow.empty_open_folder_id) {
@@ -1927,7 +2051,9 @@ fn onWindowMessage(
                 result.* = 0;
                 return true;
             }
-            if (Sidebar.rowAt(x, y, &app.model, if (app.worktree_inspection) |*value| value else null, app.sidebar_scroll, workspace_top)) |row| {
+            if (Sidebar.rowAt(x, y, &app.model, if (app.worktree_inspection) |*value| value else null,
+                app.sidebar_scroll, workspace_top)) |row| {
+                const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
                 switch (row.kind) {
                     .project => app.openProject(app.model.recent_projects.items[row.index].path),
                     .open_project => if (row.project_path) |path| {
@@ -1954,7 +2080,11 @@ fn onWindowMessage(
                         }
                     },
                     .worktree => if (app.worktree_inspection) |inspection| {
-                        _ = app.selectWorktreeRow(inspection.entries.items[row.index].path);
+                        if (ctrl) {
+                            _ = app.toggleWorktreeRow(row.index);
+                        } else {
+                            _ = app.selectWorktreeRow(inspection.entries.items[row.index].path);
+                        }
                         app.ensureWorktreeVisible(row.index);
                     },
                 }
