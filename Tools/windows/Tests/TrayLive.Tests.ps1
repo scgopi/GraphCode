@@ -164,7 +164,7 @@ function Invoke-AltF4 {
 }
 
 function Invoke-WindowClose([IntPtr] $hwnd) {
-  [void][GraphCodeTrayLiveNative]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+  [void][GraphCodeTrayLiveNative]::SendMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
 }
 
 function Assert-NoConsoleWindow([int] $processId) {
