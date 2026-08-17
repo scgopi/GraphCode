@@ -177,10 +177,11 @@ pub const App = struct {
             const path = Wire.copyGraphChangedProjectPath(self.allocator, frame) catch null;
             defer if (path) |value| self.allocator.free(value);
             if (path) |value| {
-                const is_pending = std.mem.eql(u8, value, self.pending_rebind_path);
-                const is_accepted = self.accepted_subscription.len != 0 and
-                    std.mem.eql(u8, value, self.accepted_subscription);
-                if (!is_pending and !is_accepted) return;
+                if (!Wire.isCurrentGraphPath(
+                    self.pending_rebind_path,
+                    self.accepted_subscription,
+                    value,
+                )) return;
             }
         }
         const event = self.model.updateFromFrame(frame) catch {
@@ -246,11 +247,7 @@ pub const App = struct {
                 if (self.pending_rebind_path.len != 0) {
                     const error_path = Wire.copyErrorProjectPath(self.allocator, frame) catch null;
                     defer if (error_path) |value| self.allocator.free(value);
-                    if (error_path) |value| {
-                        if (!std.mem.eql(u8, value, self.pending_rebind_path)) {
-                            return;
-                        }
-                    }
+                    if (!Wire.isCurrentOpenError(self.pending_rebind_path, error_path)) return;
                     self.client.setSubscription(self.pending_previous_subscription);
                     if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
                     self.last_project_opened = self.allocator.dupe(u8, self.pending_previous_subscription) catch &.{};

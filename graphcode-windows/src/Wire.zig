@@ -768,6 +768,15 @@ pub fn copyErrorProjectPath(allocator: std.mem.Allocator, data: []const u8) !?[]
     return try decodeJsonString(allocator, raw);
 }
 
+pub fn isCurrentGraphPath(pending: []const u8, accepted: []const u8, path: []const u8) bool {
+    return pending.len == 0 or std.mem.eql(u8, path, pending) or std.mem.eql(u8, path, accepted);
+}
+
+pub fn isCurrentOpenError(pending: []const u8, error_path: ?[]const u8) bool {
+    if (error_path) |path| return std.mem.eql(u8, path, pending);
+    return true;
+}
+
 pub fn jsonNumber(data: []const u8, key: []const u8) ?u64 {
     var needle_buffer: [128]u8 = undefined;
     if (key.len + 3 > needle_buffer.len) return null;
@@ -811,6 +820,18 @@ test "project and error paths are extracted for open ordering" {
     defer std.testing.allocator.free(error_path);
     try std.testing.expectEqualStrings("C:\\work\\C", graph_path);
     try std.testing.expectEqualStrings("C:\\work\\B", error_path);
+}
+
+test "superseding open ordering keeps A, ignores late B, and rejects C" {
+    const accepted = "C:\\work\\A";
+    const pending_b = "C:\\work\\B";
+    const pending_c = "C:\\work\\C";
+    try std.testing.expect(!isCurrentGraphPath(pending_c, accepted, pending_b));
+    try std.testing.expect(isCurrentGraphPath(pending_c, accepted, pending_c));
+    try std.testing.expect(!isCurrentOpenError(pending_c, pending_b));
+    try std.testing.expect(isCurrentOpenError(pending_c, pending_c));
+    const rollback_target = accepted;
+    try std.testing.expectEqualStrings("C:\\work\\A", rollback_target);
 }
 
 test "frame limits follow protocol mode" {
