@@ -713,7 +713,7 @@ pub const DaemonClient = struct {
         defer self.mutex.unlock();
         if (request_id.len != 36) return false;
         for (self.pending_request_ids[0..self.pending_request_count], 0..) |pending, index| {
-            if (std.mem.eql(u8, &pending, request_id)) {
+            if (std.ascii.eqlIgnoreCase(&pending, request_id)) {
                 self.pending_request_count -= 1;
                 if (index != self.pending_request_count) {
                     self.pending_request_ids[index] = self.pending_request_ids[self.pending_request_count];
@@ -985,7 +985,7 @@ fn normalizedSupportPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const result = try allocator.dupe(u8, utf8);
     for (result) |*byte| {
         if (byte.* >= 'A' and byte.* <= 'Z') byte.* += 'a' - 'A';
-        if (byte.* == '/') byte.* = '\\';
+        if (byte.* == '\\') byte.* = '/';
     }
     return result;
 }
@@ -1023,6 +1023,32 @@ fn sha256Hex(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
         result[index * 2 + 1] = alphabet[byte & 0x0f];
     }
     return result;
+}
+
+test "support identity matches Swift standardized file URL hashing" {
+    const allocator = std.testing.allocator;
+    const normalized = try normalizedSupportPath(allocator, "C:\\Users\\Test User\\.graphcode");
+    defer allocator.free(normalized);
+    try std.testing.expectEqualStrings("c:/users/test user/.graphcode", normalized);
+
+    const digest = try sha256Hex(allocator, normalized);
+    defer allocator.free(digest);
+    try std.testing.expectEqualStrings(
+        "854409ec88ff68bd47d6f7d1c63e12e8d52fa8c695f28719df2c47e1fd1f0221",
+        digest,
+    );
+}
+
+test "response correlation accepts Swift uppercase UUID serialization" {
+    const allocator = std.testing.allocator;
+    var client = try DaemonClient.init(allocator);
+    defer client.deinit();
+    const lower = "00000000-0000-4000-8000-abcdef123456";
+    var request_id: [36]u8 = undefined;
+    @memcpy(&request_id, lower);
+    try std.testing.expect(client.trackRequest(&request_id));
+    try std.testing.expect(client.completeRequest("00000000-0000-4000-8000-ABCDEF123456"));
+    try std.testing.expectEqual(@as(usize, 0), client.pending_request_count);
 }
 
 fn utf8ToWide(allocator: std.mem.Allocator, value: []const u8) ![]u16 {
