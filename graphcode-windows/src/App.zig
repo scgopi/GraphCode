@@ -512,6 +512,14 @@ pub const App = struct {
         _ = c.ReleaseCapture();
     }
 
+    fn copyEdgeDragSourceForDrop(self: *App) ?[]u8 {
+        const source_id = self.canvas.endEdgeDrag() orelse return null;
+        return self.allocator.dupe(u8, source_id) catch {
+            self.cancelCanvasInteraction();
+            return null;
+        };
+    }
+
     fn selectNodeIndex(self: *App, index: usize) bool {
         const graph = self.model.graph orelse return false;
         if (index >= graph.nodes.items.len) return false;
@@ -1700,11 +1708,12 @@ fn onWindowMessage(
         c.WM_LBUTTONUP => {
             if (app.canvas.edge_dragging) {
                 const point = CanvasInput.decodeMouseMessage(lparam);
-                const source_id = app.canvas.endEdgeDrag() orelse {
+                const source_id = app.copyEdgeDragSourceForDrop() orelse {
                     app.cancelCanvasInteraction();
                     result.* = 0;
                     return true;
                 };
+                defer app.allocator.free(source_id);
                 _ = c.ReleaseCapture();
                 if (app.model.graph) |graph| {
                     const bounds = c.RECT{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = clientRight(hwnd), .bottom = clientBottom(hwnd) - Tokens.workspace_height };
@@ -1714,8 +1723,10 @@ fn onWindowMessage(
                         }
                     }
                 }
-                if (app.edge_drag_source_id.len != 0) app.allocator.free(app.edge_drag_source_id);
-                app.edge_drag_source_id = &.{};
+                if (app.edge_drag_source_id.len != 0) {
+                    app.allocator.free(app.edge_drag_source_id);
+                    app.edge_drag_source_id = &.{};
+                }
                 _ = c.InvalidateRect(hwnd, null, 0);
                 result.* = 0;
                 return true;
@@ -1984,4 +1995,23 @@ fn clientBottom(hwnd: c.HWND) i32 {
     var client: c.RECT = undefined;
     _ = c.GetClientRect(hwnd, &client);
     return client.bottom;
+}
+
+test "edge drop source remains valid across synchronous capture cancellation" {
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = undefined,
+        .model = undefined,
+    };
+    app.edge_drag_source_id = try allocator.dupe(u8, "source-node");
+    app.canvas.beginEdgeDrag(app.edge_drag_source_id, 10, 10);
+
+    const copied = app.copyEdgeDragSourceForDrop() orelse return error.MissingSource;
+    defer allocator.free(copied);
+    app.cancelCanvasInteraction();
+
+    try std.testing.expectEqualStrings("source-node", copied);
+    try std.testing.expectEqual(@as(usize, 0), app.edge_drag_source_id.len);
+    try std.testing.expect(!app.canvas.edge_dragging);
 }
