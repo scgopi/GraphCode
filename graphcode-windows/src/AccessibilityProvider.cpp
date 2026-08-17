@@ -7,6 +7,11 @@
 
 namespace {
 
+// Stable fragment IDs: root -> six top-level containers; Worktrees owns only rows;
+// Actions owns the command and policy controls.
+constexpr int kRootChildren[] = {1, 2, 3, 4, 5, 6};
+constexpr int kActionChildren[] = {7, 8, 9, 10, 11, 12, 13};
+
 struct State {
   HWND hwnd{};
   std::wstring status = L"Ready";
@@ -14,6 +19,8 @@ struct State {
   std::vector<bool> selected;
   std::vector<bool> eligible;
   int focused = 0;
+  bool allow_reclaim = false;
+  bool confirm_each_reclaim = true;
 };
 
 static std::wstring wide(const char *value) {
@@ -31,7 +38,8 @@ class Node final : public IRawElementProviderSimple,
                    public IRawElementProviderFragmentRoot,
                    public IInvokeProvider,
                    public ISelectionProvider,
-                   public ISelectionItemProvider {
+                   public ISelectionItemProvider,
+                   public IToggleProvider {
  public:
   Node(std::shared_ptr<State> state, int id) : state_(std::move(state)), id_(id), refs_(1) {}
 
@@ -50,6 +58,8 @@ class Node final : public IRawElementProviderSimple,
       *out = static_cast<ISelectionProvider *>(this);
     else if (iid == __uuidof(ISelectionItemProvider) && isRow())
       *out = static_cast<ISelectionItemProvider *>(this);
+    else if (iid == __uuidof(IToggleProvider) && (id_ == 12 || id_ == 13))
+      *out = static_cast<IToggleProvider *>(this);
     else
       return E_NOINTERFACE;
     AddRef();
@@ -79,6 +89,8 @@ class Node final : public IRawElementProviderSimple,
       *value = static_cast<ISelectionProvider *>(this);
     else if (id == UIA_SelectionItemPatternId && isRow())
       *value = static_cast<ISelectionItemProvider *>(this);
+    else if (id == UIA_TogglePatternId && (id_ == 12 || id_ == 13))
+      *value = static_cast<IToggleProvider *>(this);
     else
       return S_FALSE;
     AddRef();
@@ -189,6 +201,8 @@ class Node final : public IRawElementProviderSimple,
 
   HRESULT STDMETHODCALLTYPE Invoke() override {
     if (!supportsInvoke()) return UIA_E_ELEMENTNOTENABLED;
+    if (id_ == 10) setStatus("Worktree policy editor opened");
+    if (id_ == 11) setStatus("Worktree policy saved");
     UINT command = id_ == 7 ? 6 : id_ == 8 ? 7 : id_ == 9 ? 8 :
                    id_ == 10 ? 9 : id_ == 11 ? 10 : id_ == 12 ? 12 : id_ == 13 ? 13 : 6;
     PostMessageW(state_->hwnd, WM_COMMAND, command, 0);
@@ -239,27 +253,43 @@ class Node final : public IRawElementProviderSimple,
     *value = nullptr;
     return makeSimple(3, value);
   }
+  HRESULT STDMETHODCALLTYPE Toggle() override {
+    if (id_ != 12 && id_ != 13) return UIA_E_INVALIDOPERATION;
+    PostMessageW(state_->hwnd, WM_COMMAND, id_, 0);
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE get_ToggleState(ToggleState *value) override {
+    if (!value) return E_POINTER;
+    if (id_ == 12) *value = state_->allow_reclaim ? ToggleState_On : ToggleState_Off;
+    else if (id_ == 13) *value = state_->confirm_each_reclaim ? ToggleState_On : ToggleState_Off;
+    else return UIA_E_INVALIDOPERATION;
+    return S_OK;
+  }
   void update(const char *status, const char **rows, const int *selected,
-              const int *eligible, int count, int focused) {
+              const int *eligible, int count, int focused, bool allow_reclaim,
+              bool confirm_each_reclaim) {
     state_->status = wide(status);
     state_->rows.clear();
     state_->selected.clear();
     state_->eligible.clear();
     state_->focused = focused;
+    state_->allow_reclaim = allow_reclaim;
+    state_->confirm_each_reclaim = confirm_each_reclaim;
     for (int i = 0; i < count; ++i) {
       state_->rows.push_back(wide(rows ? rows[i] : nullptr));
       state_->selected.push_back(selected && selected[i] != 0);
       state_->eligible.push_back(eligible && eligible[i] != 0);
     }
     UiaRaiseAutomationEvent(this, UIA_LiveRegionChangedEventId);
-    Node status_node(state_, 6);
-    UiaRaiseAutomationEvent(&status_node, UIA_LiveRegionChangedEventId);
+    Node *status_node = new Node(state_, 6);
+    UiaRaiseAutomationEvent(status_node, UIA_LiveRegionChangedEventId);
   }
   void setStatus(const char *status) {
     const std::wstring old_status = state_->status;
     state_->status = wide(status);
-    Node status_node(state_, 6);
-    UiaRaiseAutomationEvent(&status_node, UIA_LiveRegionChangedEventId);
+    Node *status_node = new Node(state_, 6);
+    UiaRaiseAutomationEvent(status_node, UIA_LiveRegionChangedEventId);
+    status_node->Release();
     VARIANT old_value, new_value;
     VariantInit(&old_value);
     VariantInit(&new_value);
@@ -268,9 +298,10 @@ class Node final : public IRawElementProviderSimple,
     new_value.vt = VT_BSTR;
     new_value.bstrVal = SysAllocString(state_->status.c_str());
     UiaRaiseAutomationPropertyChangedEvent(
-        &status_node, UIA_NamePropertyId, old_value, new_value);
+        status_node, UIA_NamePropertyId, old_value, new_value);
     VariantClear(&old_value);
     VariantClear(&new_value);
+    status_node->Release();
   }
 
  private:
@@ -407,10 +438,12 @@ extern "C" LRESULT gc_uia_get_object(HWND hwnd, WPARAM wparam, LPARAM lparam,
 
 extern "C" HRESULT gc_uia_update(IRawElementProviderSimple *provider, const char *status,
                                   const char **rows, const int *selected, const int *eligible,
-                                  int count, int focused) {
+                                  int count, int focused, int allow_reclaim,
+                                  int confirm_each_reclaim) {
   if (!provider || count < 0) return E_INVALIDARG;
   auto *root = static_cast<Node *>(provider);
-  root->update(status, rows, selected, eligible, count, focused);
+  root->update(status, rows, selected, eligible, count, focused,
+               allow_reclaim != 0, confirm_each_reclaim != 0);
   return S_OK;
 }
 

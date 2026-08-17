@@ -1,4 +1,5 @@
 const std = @import("std");
+const WorktreeStatus = @import("WorktreeStatus.zig");
 const builtin = @import("builtin");
 const c = if (builtin.os.tag == .windows and builtin.link_libc) @import("Win32.zig").c else struct {
     pub const HWND = ?*anyopaque;
@@ -27,6 +28,8 @@ extern fn gc_uia_update(
     eligible: ?[*]const c_int,
     count: c_int,
     focused: c_int,
+    allow_reclaim: c_int,
+    confirm_each_reclaim: c_int,
 ) c.HRESULT;
 
 pub const Role = enum { window, navigation, list, list_item, button, card, menu, menu_item, text, terminal, status, dialog };
@@ -108,6 +111,7 @@ pub const Provider = struct {
         self: *Provider,
         status: []const u8,
         rows: []const WorktreeRow,
+        policy: WorktreeStatus.Policy,
     ) void {
         if (!builtin.link_libc) return;
         const native = self.native_provider orelse return;
@@ -144,6 +148,8 @@ pub const Provider = struct {
             if (eligible.len == 0) null else eligible.ptr,
             @intCast(rows.len),
             focused,
+            if (policy.allow_reclaim) 1 else 0,
+            if (policy.confirm_each_reclaim) 1 else 0,
         );
     }
     pub fn syncStatus(self: *Provider, status: []const u8) void {

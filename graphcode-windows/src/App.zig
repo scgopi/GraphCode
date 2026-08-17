@@ -1783,7 +1783,8 @@ pub const App = struct {
             provider.syncStatus(self.status());
             return;
         }
-        provider.syncWorktrees(self.status(), rows.items);
+        const policy = if (self.worktree_dialog) |dialog| dialog.policy else WorktreeStatus.Policy{};
+        provider.syncWorktrees(self.status(), rows.items, policy);
     }
 
     fn acquireSingleInstance(self: *App) !void {

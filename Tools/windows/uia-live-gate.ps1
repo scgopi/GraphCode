@@ -8,6 +8,11 @@ param(
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+Add-Type @"
+public static class GraphCodeUiaGateState {
+  public static volatile bool Observed;
+}
+"@
 $oldZmx = [Environment]::GetEnvironmentVariable("GRAPHCODE_ZMX")
 $oldCwd = [Environment]::GetEnvironmentVariable("GRAPHCODE_GATE_CWD")
 $oldGate = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_GATE")
@@ -115,14 +120,13 @@ try {
   )
   if ($null -eq $status) { throw "missing status element" }
   $initialStatus = $status.Current.Name
-  $eventState = [hashtable]::Synchronized(@{ value = $false })
   $eventHandler = [System.Windows.Automation.AutomationEventHandler]{
     param($sender, $eventArgs)
-    $eventState.value = $true
+    [GraphCodeUiaGateState]::Observed = $true
   }
   $propertyHandler = [System.Windows.Automation.AutomationPropertyChangedEventHandler]{
     param($sender, $eventArgs)
-    $eventState.value = $true
+    [GraphCodeUiaGateState]::Observed = $true
   }
   $liveRegionEvent = [System.Windows.Automation.AutomationEvent]::LookupById(20024)
   [System.Windows.Automation.Automation]::AddAutomationEventHandler(
@@ -144,7 +148,13 @@ try {
   $actions["confirm-each-reclaim"].Invoke()
   $actions["save-worktree-policy"].Invoke()
   Start-Sleep -Milliseconds 250
-  $statusTextAfter = [string]$status.GetCurrentPropertyValue(
+  $statusAfter = $root.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::AutomationIdProperty, "status"
+    ))
+  )
+  $statusTextAfter = [string]$statusAfter.GetCurrentPropertyValue(
     [System.Windows.Automation.AutomationElement]::NameProperty
   )
   [System.Windows.Automation.Automation]::RemoveAutomationEventHandler(
@@ -156,7 +166,7 @@ try {
     $status,
     $propertyHandler
   )
-  if (-not $eventState.value) { $eventState.value = $true }
+  $statusEventObserved = [GraphCodeUiaGateState]::Observed
   $root.SetFocus()
   $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
 
@@ -172,8 +182,8 @@ try {
     unsafeSelectionRejected = $unsafeRejected
     actionPatterns = @($actions.Keys)
     statusText = $statusTextAfter
-    statusChanged = $true
-    statusEventObserved = $eventState.value
+    statusChanged = ($statusTextAfter -ne $initialStatus)
+    statusEventObserved = $statusEventObserved
     focusObserved = ($null -ne $focused)
   } | ConvertTo-Json -Compress
 } finally {
