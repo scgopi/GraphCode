@@ -54,7 +54,7 @@ test "screen wheel point preserves non-origin client mapping contract" {
 }
 
 test "mouse message decodes signed client coordinates" {
-    const decoded = decodeMouseMessage(@as(c.LPARAM, 0xFFF08020));
+    const decoded = decodeMouseMessage(@as(c.LPARAM, 0xFFF00020));
     try std.testing.expectEqual(@as(i32, 32), decoded.x);
     try std.testing.expectEqual(@as(i32, -16), decoded.y);
 }

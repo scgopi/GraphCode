@@ -19,7 +19,7 @@ pub const Action = enum {
     create_edge,
 };
 
-pub const Callback = *const fn (?*anyopaque, Action, Target) callconv(.c) void;
+pub const Callback = *const fn (?*anyopaque, Action, Target) void;
 
 pub fn requiresConfirmation(action: Action) bool {
     return action == .delete_node or action == .delete_edge;
@@ -87,7 +87,7 @@ pub fn confirm(parent: c.HWND, title: []const u8, message: []const u8) bool {
     return c.MessageBoxW(parent, message_wide.ptr, title_wide.ptr, c.MB_ICONWARNING | c.MB_YESNO | c.MB_DEFBUTTON2) == c.IDYES;
 }
 
-fn actionForCommand(command: c.UINT) Action {
+fn actionForCommand(command: c_int) Action {
     return switch (command) {
         ids.rename_node => .rename_node,
         ids.stop_node => .stop_node,
