@@ -1443,10 +1443,18 @@ public enum ZmxSessionLauncher {
   ) async {
     let check = quotedCommand([zmxPath] + checkArguments)
     let run = quotedCommand([zmxPath] + runArguments)
-    let script = "\(check) >/dev/null 2>&1 || \(run)"
+    #if os(Windows)
+      let script = "\(check) >NUL 2>&1 || \(run)"
+      let executable = "cmd.exe"
+      let arguments = ["/d", "/s", "/c", script]
+    #else
+      let script = "\(check) >/dev/null 2>&1 || \(run)"
+      let executable = "/bin/sh"
+      let arguments = ["-c", script]
+    #endif
     guard
       let session = try? PTYProcessSession(
-        executable: "/bin/zsh", arguments: ["-c", script],
+        executable: executable, arguments: arguments,
         workingDirectory: workingDirectory)
     else { return }
     _ = await session.waitUntilFinished()
