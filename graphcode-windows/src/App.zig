@@ -35,6 +35,9 @@ pub const App = struct {
     tray_test_hook_enabled: bool = false,
     model: GraphModel.Model,
     canvas: GraphCanvas.CanvasState = .{},
+    selected_node_id: []u8 = &.{},
+    selected_edge_id: []u8 = &.{},
+    selection_initialized: bool = false,
     worktree_inspection: ?WorktreeStatus.Inspection = null,
     selected_worktree_path: []u8 = &.{},
     sidebar_scroll: i32 = 0,
@@ -137,6 +140,8 @@ pub const App = struct {
             WorktreeStatus.deinitInspection(self.allocator, inspection);
         }
         if (self.selected_worktree_path.len != 0) self.allocator.free(self.selected_worktree_path);
+        if (self.selected_node_id.len != 0) self.allocator.free(self.selected_node_id);
+        if (self.selected_edge_id.len != 0) self.allocator.free(self.selected_edge_id);
         if (self.instance_mutex != null) _ = c.CloseHandle(self.instance_mutex);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
         if (self.accepted_subscription.len != 0) self.allocator.free(self.accepted_subscription);
@@ -281,6 +286,7 @@ pub const App = struct {
                     if (self.canvas.selected_edge) |edge| {
                         if (edge >= graph.edges.items.len) self.canvas.selected_edge = null;
                     }
+                    self.remapSelection();
                     self.rebindWorkspace(graph.project.path);
                     self.clampSidebarScroll();
                     if (self.worktree_inspection) |inspection| {
@@ -465,9 +471,127 @@ pub const App = struct {
         return null;
     }
 
+    fn replaceSelectionID(self: *App, destination: *[]u8, value: []const u8) bool {
+        const copy = self.allocator.dupe(u8, value) catch return false;
+        if (destination.*.len != 0) self.allocator.free(destination.*);
+        destination.* = copy;
+        return true;
+    }
+
+    fn clearNodeSelection(self: *App) void {
+        self.model.selected_node = null;
+        if (self.selected_node_id.len != 0) {
+            self.allocator.free(self.selected_node_id);
+            self.selected_node_id = &.{};
+        }
+    }
+
+    fn clearEdgeSelection(self: *App) void {
+        self.canvas.selected_edge = null;
+        self.canvas.selected_edge_id = "";
+        if (self.selected_edge_id.len != 0) {
+            self.allocator.free(self.selected_edge_id);
+            self.selected_edge_id = &.{};
+        }
+    }
+
+    fn clearSelection(self: *App) void {
+        self.selection_initialized = true;
+        self.clearNodeSelection();
+        self.clearEdgeSelection();
+    }
+
+    fn cancelCanvasInteraction(self: *App) void {
+        self.canvas.cancelInteraction();
+        _ = c.ReleaseCapture();
+    }
+
+    fn selectNodeIndex(self: *App, index: usize) bool {
+        const graph = self.model.graph orelse return false;
+        if (index >= graph.nodes.items.len) return false;
+        if (!self.replaceSelectionID(&self.selected_node_id, graph.nodes.items[index].id)) return false;
+        self.model.selected_node = index;
+        self.selection_initialized = true;
+        self.clearEdgeSelection();
+        return true;
+    }
+
+    fn selectEdgeIndex(self: *App, index: usize) bool {
+        const graph = self.model.graph orelse return false;
+        if (index >= graph.edges.items.len) return false;
+        if (graph.edges.items[index].id.len != 0) {
+            if (!self.replaceSelectionID(&self.selected_edge_id, graph.edges.items[index].id)) return false;
+        } else {
+            if (self.selected_edge_id.len != 0) self.allocator.free(self.selected_edge_id);
+            self.selected_edge_id = &.{};
+        }
+        self.canvas.selected_edge = index;
+        self.canvas.selected_edge_id = self.selected_edge_id;
+        self.selection_initialized = true;
+        self.clearNodeSelection();
+        return true;
+    }
+
+    fn remapSelection(self: *App) void {
+        if (!self.selection_initialized) {
+            if (self.model.graph) |graph| {
+                if (graph.nodes.items.len != 0) {
+                    _ = self.selectNodeIndex(0);
+                    return;
+                }
+            }
+        }
+        if (self.selected_node_id.len != 0) {
+            self.model.selected_node = self.model.findNodeIndex(self.selected_node_id);
+            if (self.model.selected_node == null) {
+                self.clearNodeSelection();
+            }
+        } else {
+            self.model.selected_node = null;
+        }
+        if (self.selected_edge_id.len != 0) {
+            self.canvas.selected_edge = self.model.findEdgeIndex(self.selected_edge_id);
+            if (self.canvas.selected_edge == null) {
+                self.clearEdgeSelection();
+            } else {
+                self.canvas.selected_edge_id = self.selected_edge_id;
+            }
+        } else {
+            self.canvas.selected_edge = null;
+            self.canvas.selected_edge_id = "";
+        }
+    }
+
+    fn selectNextNode(self: *App) void {
+        const graph = self.model.graph orelse return;
+        if (graph.nodes.items.len == 0) {
+            self.clearNodeSelection();
+            return;
+        }
+        const next = if (self.model.selected_node) |index|
+            (index + 1) % graph.nodes.items.len
+        else
+            0;
+        _ = self.selectNodeIndex(next);
+    }
+
+    fn selectNextAttention(self: *App) void {
+        self.model.selectNextAttention();
+        if (self.model.selected_node) |index| _ = self.selectNodeIndex(index);
+    }
+
+    fn selectedEdgeIndex(self: *const App) ?usize {
+        if (self.selected_edge_id.len == 0) return null;
+        return self.model.findEdgeIndex(self.selected_edge_id);
+    }
+
     fn createNode(self: *App) void {
         const path = self.currentProject() orelse return;
         var draft = NativeForms.node(self.window.hwnd, self.allocator, .{ .title = "" }) catch {
+        const current_path = self.currentProject() orelse return;
+        const path = self.allocator.dupe(u8, current_path) catch return;
+        defer self.allocator.free(path);
+        const draft = NativeForms.node(self.window.hwnd, self.allocator, .{ .title = "" }) catch {
             self.setStatus("Unable to open node form");
             return;
         } orelse return;
@@ -503,6 +627,33 @@ pub const App = struct {
         defer update.deinit(self.allocator);
         const path = self.currentProject() orelse return;
         self.client.sendUpdateNodeForm(path, node.id, update);
+        const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
+        defer self.allocator.free(project_path);
+        const node_id = self.allocator.dupe(u8, node.id) catch return;
+        defer self.allocator.free(node_id);
+        const initial_title = self.allocator.dupe(u8, node.title) catch return;
+        defer self.allocator.free(initial_title);
+        const initial_loop_type = self.allocator.dupe(u8, node.loop_type) catch return;
+        defer self.allocator.free(initial_loop_type);
+        const draft = NativeForms.node(self.window.hwnd, self.allocator, .{
+            .title = initial_title,
+            .loop_type = initial_loop_type,
+        }) catch {
+            self.setStatus("Unable to open node form");
+            return;
+        } orelse return;
+        defer self.allocator.free(draft.title);
+        defer self.allocator.free(draft.loop_type);
+        Forms.validateNode(draft) catch {
+            self.setStatus("Invalid node form");
+            return;
+        };
+        const updated_graph = self.model.graph orelse return;
+        const updated_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, node_id) orelse {
+            self.setStatus("Loop changed while editing");
+            return;
+        };
+        self.client.sendRenameNode(project_path, updated_graph.nodes.items[updated_index].id, draft.title);
     }
 
     fn createEdge(self: *App) void {
@@ -511,6 +662,15 @@ pub const App = struct {
         var draft = NativeForms.edge(self.window.hwnd, self.allocator, .{
             .from = graph.nodes.items[0].id,
             .to = graph.nodes.items[1].id,
+        const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
+        defer self.allocator.free(project_path);
+        const from_id = self.allocator.dupe(u8, graph.nodes.items[0].id) catch return;
+        defer self.allocator.free(from_id);
+        const to_id = self.allocator.dupe(u8, graph.nodes.items[1].id) catch return;
+        defer self.allocator.free(to_id);
+        const draft = NativeForms.edge(self.window.hwnd, self.allocator, .{
+            .from = from_id,
+            .to = to_id,
             .kind = "handoff",
         }) catch {
             self.setStatus("Unable to open edge form");
@@ -523,15 +683,30 @@ pub const App = struct {
         };
         const path = self.currentProject() orelse return;
         self.client.sendCreateEdgeDraft(path, draft);
+        const updated_graph = self.model.graph orelse return;
+        const from_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, from_id) orelse {
+            self.setStatus("Source loop changed while creating edge");
+            return;
+        };
+        const to_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, to_id) orelse {
+            self.setStatus("Target loop changed while creating edge");
+            return;
+        };
+        self.client.sendCreateEdge(project_path, updated_graph.nodes.items[from_index].id, updated_graph.nodes.items[to_index].id, draft.kind);
     }
 
     fn createEdgeBetween(self: *App, source: usize, target: usize) void {
         const graph = self.model.graph orelse return;
         if (source >= graph.nodes.items.len or target >= graph.nodes.items.len or source == target) return;
-        const path = self.currentProject() orelse return;
+        const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
+        defer self.allocator.free(project_path);
+        const from_id = self.allocator.dupe(u8, graph.nodes.items[source].id) catch return;
+        defer self.allocator.free(from_id);
+        const to_id = self.allocator.dupe(u8, graph.nodes.items[target].id) catch return;
+        defer self.allocator.free(to_id);
         const draft = NativeForms.edge(self.window.hwnd, self.allocator, .{
-            .from = graph.nodes.items[source].id,
-            .to = graph.nodes.items[target].id,
+            .from = from_id,
+            .to = to_id,
             .kind = "handoff",
         }) catch {
             self.setStatus("Unable to open edge form");
@@ -544,7 +719,16 @@ pub const App = struct {
             self.setStatus("Invalid edge form");
             return;
         };
-        self.client.sendCreateEdge(path, draft.from, draft.to, draft.kind);
+        const updated_graph = self.model.graph orelse return;
+        const from_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, from_id) orelse {
+            self.setStatus("Source loop changed while creating edge");
+            return;
+        };
+        const to_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, to_id) orelse {
+            self.setStatus("Target loop changed while creating edge");
+            return;
+        };
+        self.client.sendCreateEdge(project_path, updated_graph.nodes.items[from_index].id, updated_graph.nodes.items[to_index].id, draft.kind);
     }
 
     fn openSettings(self: *App) void {
@@ -584,7 +768,7 @@ pub const App = struct {
             self.setStatus("No matching loop");
             return;
         };
-        _ = self.model.setSelectedIndex(next);
+        _ = self.selectNodeIndex(next);
         self.sidebar_scroll = Sidebar.clampScroll(
             Sidebar.loopRowTop(self.model.recent_projects.items.len, next) - 24,
             Sidebar.maxScroll(&self.model, if (self.worktree_inspection) |*value| value else null, 700),
@@ -615,20 +799,41 @@ pub const App = struct {
     }
 
     fn deleteSelectedNode(self: *App) void {
-        const path = self.currentProject() orelse return;
-        const node = self.model.selected() orelse return;
+        const graph = self.model.graph orelse return;
+        const index = self.model.selected_node orelse return;
+        if (index >= graph.nodes.items.len) return;
+        const path = self.allocator.dupe(u8, graph.project.path) catch return;
+        defer self.allocator.free(path);
+        const node_id = self.allocator.dupe(u8, graph.nodes.items[index].id) catch return;
+        defer self.allocator.free(node_id);
         if (!GraphContextMenu.confirm(self.window.hwnd, "Delete Loop", "Delete this loop? This cannot be undone.")) return;
-        self.client.sendDeleteNode(path, node.id);
+        const updated_graph = self.model.graph orelse return;
+        const updated_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, node_id) orelse return;
+        self.client.sendDeleteNode(path, updated_graph.nodes.items[updated_index].id);
     }
 
     fn editSelectedEdge(self: *App, index: usize) void {
         const graph = self.model.graph orelse return;
         if (index >= graph.edges.items.len) return;
         const edge = graph.edges.items[index];
+        if (!GraphContextMenu.canEditEdge(edge.id)) {
+            self.setStatus("Cannot edit an edge without a stable identifier");
+            return;
+        }
+        const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
+        defer self.allocator.free(project_path);
+        const edge_id = self.allocator.dupe(u8, edge.id) catch return;
+        defer self.allocator.free(edge_id);
+        const initial_from = self.allocator.dupe(u8, edge.from) catch return;
+        defer self.allocator.free(initial_from);
+        const initial_to = self.allocator.dupe(u8, edge.to) catch return;
+        defer self.allocator.free(initial_to);
+        const initial_kind = self.allocator.dupe(u8, edge.kind) catch return;
+        defer self.allocator.free(initial_kind);
         const draft = NativeForms.edge(self.window.hwnd, self.allocator, .{
-            .from = edge.from,
-            .to = edge.to,
-            .kind = edge.kind,
+            .from = initial_from,
+            .to = initial_to,
+            .kind = initial_kind,
         }) catch {
             self.setStatus("Unable to open edge form");
             return;
@@ -640,23 +845,31 @@ pub const App = struct {
             self.setStatus("Invalid edge form");
             return;
         };
-        const path = self.currentProject() orelse return;
-        const edge_id = edge.id;
-        if (edge_id.len != 0) self.client.sendDeleteEdge(path, edge_id);
-        self.client.sendCreateEdge(path, draft.from, draft.to, draft.kind);
+        const updated_graph = self.model.graph orelse return;
+        const updated_index = GraphModel.findEdgeIndexByID(updated_graph.edges.items, edge_id) orelse {
+            self.setStatus("Edge changed while editing");
+            return;
+        };
+        self.client.sendDeleteEdge(project_path, updated_graph.edges.items[updated_index].id);
+        self.client.sendCreateEdge(project_path, draft.from, draft.to, draft.kind);
     }
 
     fn deleteEdge(self: *App, index: usize) void {
         const graph = self.model.graph orelse return;
         if (index >= graph.edges.items.len) return;
         const edge = graph.edges.items[index];
-        if (!GraphContextMenu.confirm(self.window.hwnd, "Delete Edge", "Delete this edge?")) return;
-        const path = self.currentProject() orelse return;
-        if (edge.id.len == 0) {
+        if (!GraphContextMenu.canEditEdge(edge.id)) {
             self.setStatus("This graph edge has no stable delete identifier");
             return;
         }
-        self.client.sendDeleteEdge(path, edge.id);
+        const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
+        defer self.allocator.free(project_path);
+        const edge_id = self.allocator.dupe(u8, edge.id) catch return;
+        defer self.allocator.free(edge_id);
+        if (!GraphContextMenu.confirm(self.window.hwnd, "Delete Edge", "Delete this edge?")) return;
+        const updated_graph = self.model.graph orelse return;
+        const updated_index = GraphModel.findEdgeIndexByID(updated_graph.edges.items, edge_id) orelse return;
+        self.client.sendDeleteEdge(project_path, updated_graph.edges.items[updated_index].id);
     }
 
     fn handleContextAction(self: *App, action: GraphContextMenu.Action, target: GraphContextMenu.Target) void {
@@ -664,7 +877,7 @@ pub const App = struct {
             .node => |index| {
                 const graph = self.model.graph orelse return;
                 if (index >= graph.nodes.items.len) return;
-                self.model.selected_node = index;
+                if (!self.selectNodeIndex(index)) return;
                 switch (action) {
                     .rename_node => self.editSelectedNode(),
                     .stop_node => self.stopSelectedNode(),
@@ -676,7 +889,7 @@ pub const App = struct {
                 }
             },
             .edge => |index| {
-                self.canvas.selected_edge = index;
+                if (!self.selectEdgeIndex(index)) return;
                 switch (action) {
                     .edit_edge => self.editSelectedEdge(index),
                     .delete_edge => self.deleteEdge(index),
@@ -857,14 +1070,14 @@ pub const App = struct {
             .open_node => self.openSelectedNode(),
             .stop_node => self.stopSelectedNode(),
             .send_node => self.sendSelectedNode(),
-            .edit_node => if (self.canvas.selected_edge) |edge| self.editSelectedEdge(edge) else self.editSelectedNode(),
+            .edit_node => if (self.selectedEdgeIndex()) |edge| self.editSelectedEdge(edge) else self.editSelectedNode(),
             .rename_selected => self.editSelectedNode(),
-            .delete_selected => if (self.canvas.selected_edge) |edge| self.deleteEdge(edge) else self.deleteSelectedNode(),
+            .delete_selected => if (self.selectedEdgeIndex()) |edge| self.deleteEdge(edge) else self.deleteSelectedNode(),
             .create_edge => self.createEdge(),
             .jump_next => self.jumpToNode(),
             .settings => self.openSettings(),
             .cycle_attention => {
-                self.model.selectNextAttention();
+                self.selectNextAttention();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .inspect_worktrees => self.inspectWorktrees(),
@@ -874,7 +1087,7 @@ pub const App = struct {
             .focus_terminal_a => if (self.workspace) |workspace| workspace.focus(0),
             .focus_terminal_b => if (self.workspace) |workspace| workspace.focus(1),
             .select_next => {
-                self.model.selectNext();
+                self.selectNextNode();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .select_previous => {
@@ -1282,10 +1495,25 @@ fn onWindowMessage(
             return true;
         },
         c.WM_KEYDOWN => {
+            if (wparam == c.VK_ESCAPE) {
+                app.cancelCanvasInteraction();
+                result.* = 0;
+                return true;
+            }
             const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
             const shift = (@as(i32, c.GetKeyState(c.VK_SHIFT)) & 0x8000) != 0;
             app.handleAction(InputRouter.keyAction(wparam, ctrl, shift));
             app.updateNativeChrome();
+            result.* = 0;
+            return true;
+        },
+        c.WM_CAPTURECHANGED, c.WM_CANCELMODE => {
+            app.cancelCanvasInteraction();
+            result.* = 0;
+            return true;
+        },
+        c.WM_ACTIVATEAPP => {
+            if (wparam == 0) app.cancelCanvasInteraction();
             result.* = 0;
             return true;
         },
@@ -1310,15 +1538,13 @@ fn onWindowMessage(
                         app.canvas.beginEdgeDrag(index, x, y);
                         _ = c.SetCapture(hwnd);
                     } else if (GraphCanvas.hitTest(graph.nodes.items, x, y, &app.canvas, bounds)) |index| {
-                        _ = app.model.setSelectedIndex(index);
-                        app.canvas.selected_edge = null;
+                        _ = app.selectNodeIndex(index);
                         _ = c.InvalidateRect(hwnd, null, 0);
                     } else if (GraphCanvas.hitTestEdge(graph.nodes.items, graph.edges.items, x, y, &app.canvas, bounds)) |index| {
-                        app.canvas.selected_edge = index;
-                        app.model.clearSelection();
+                        _ = app.selectEdgeIndex(index);
                         _ = c.InvalidateRect(hwnd, null, 0);
                     } else {
-                        app.canvas.selected_edge = null;
+                        app.clearSelection();
                         app.canvas.beginPan(x, y);
                         _ = c.SetCapture(hwnd);
                     }
@@ -1339,7 +1565,7 @@ fn onWindowMessage(
                     .loop => if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
                         if (row.index < graph.nodes.items.len) {
                             _ = app.model.selectProject(path);
-                            _ = app.model.setSelectedIndex(row.index);
+                            _ = app.selectNodeIndex(row.index);
                             if (app.workspace) |workspace| {
                                 workspace.openNode(0, graph.nodes.items[row.index].id) catch {
                                     app.setStatus("Unable to open selected loop");

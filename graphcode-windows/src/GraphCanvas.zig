@@ -15,6 +15,7 @@ pub const CanvasState = struct {
     start_pan_x: f32 = 0,
     start_pan_y: f32 = 0,
     selected_edge: ?usize = null,
+    selected_edge_id: []const u8 = "",
     edge_dragging: bool = false,
     edge_drag_source: ?usize = null,
     edge_drag_x: i32 = 0,
@@ -36,6 +37,12 @@ pub const CanvasState = struct {
 
     pub fn endPan(self: *CanvasState) void {
         self.dragging = false;
+    }
+
+    pub fn cancelInteraction(self: *CanvasState) void {
+        self.dragging = false;
+        self.edge_dragging = false;
+        self.edge_drag_source = null;
     }
 
     pub fn beginEdgeDrag(self: *CanvasState, source: usize, x: i32, y: i32) void {
@@ -200,7 +207,11 @@ fn drawEdges(hdc: c.HDC, graph: GraphModel.Graph, state: *const CanvasState) voi
     for (graph.edges.items, 0..) |edge, index| {
         const from = connectorPosition(graph.nodes.items, edge.from, true, state) orelse continue;
         const to = connectorPosition(graph.nodes.items, edge.to, false, state) orelse continue;
-        drawBezier(hdc, from, to, if (state.selected_edge == index) Tokens.rgb(Tokens.canvas_selection) else Tokens.rgb(Tokens.canvas_edge));
+        const selected = if (state.selected_edge_id.len != 0)
+            std.mem.eql(u8, edge.id, state.selected_edge_id)
+        else
+            state.selected_edge == index;
+        drawBezier(hdc, from, to, if (selected) Tokens.rgb(Tokens.canvas_selection) else Tokens.rgb(Tokens.canvas_edge));
     }
     if (state.edge_dragging) {
         if (state.edge_drag_source) |source| {
@@ -620,6 +631,16 @@ test "edge drag state cancels without leaving a selection" {
     state.beginEdgeDrag(3, 100, 120);
     state.updateEdgeDrag(140, 160);
     try std.testing.expectEqual(@as(?usize, 3), state.endEdgeDrag());
+    try std.testing.expect(!state.edge_dragging);
+    try std.testing.expect(state.edge_drag_source == null);
+}
+
+test "capture loss cancels both pan and edge drag state" {
+    var state = CanvasState{};
+    state.beginPan(10, 20);
+    state.beginEdgeDrag(1, 30, 40);
+    state.cancelInteraction();
+    try std.testing.expect(!state.dragging);
     try std.testing.expect(!state.edge_dragging);
     try std.testing.expect(state.edge_drag_source == null);
 }

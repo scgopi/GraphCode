@@ -409,6 +409,16 @@ pub const Model = struct {
         return &graph.nodes.items[index];
     }
 
+    pub fn findNodeIndex(self: *const Model, id: []const u8) ?usize {
+        const graph = self.graph orelse return null;
+        return findNodeIndexByID(graph.nodes.items, id);
+    }
+
+    pub fn findEdgeIndex(self: *const Model, id: []const u8) ?usize {
+        const graph = self.graph orelse return null;
+        return findEdgeIndexByID(graph.edges.items, id);
+    }
+
     pub fn selectNext(self: *Model) void {
         const graph = self.currentGraph() orelse return;
         if (graph.nodes.items.len == 0) {
@@ -660,6 +670,7 @@ pub const Model = struct {
             if (std.mem.eql(u8, entry.project_path, path)) return entry.generation == self.restore_generation;
         }
         return false;
+        if (graph.nodes.items.len == 0) self.selected_node = null;
     }
 
     fn replaceAttention(self: *Model, graph: *const Graph) void {
@@ -714,6 +725,16 @@ pub const Model = struct {
 
 fn findNode(nodes: []const Node, id: []const u8) ?Node {
     for (nodes) |node| if (std.mem.eql(u8, node.id, id)) return node;
+    return null;
+}
+
+pub fn findNodeIndexByID(nodes: []const Node, id: []const u8) ?usize {
+    for (nodes, 0..) |node, index| if (std.mem.eql(u8, node.id, id)) return index;
+    return null;
+}
+
+pub fn findEdgeIndexByID(edges: []const Edge, id: []const u8) ?usize {
+    for (edges, 0..) |edge, index| if (std.mem.eql(u8, edge.id, id)) return index;
     return null;
 }
 
@@ -1423,4 +1444,33 @@ test "attention cursor is independent from ordinary selection" {
     try std.testing.expectEqual(@as(usize, 0), model.selectedIndex().?);
     model.selectNextAttention();
     try std.testing.expectEqual(@as(usize, 1), model.selectedIndex().?);
+}
+
+test "stable selection lookup survives reordered graph collections" {
+    const nodes = [_]Node{
+        .{ .id = @constCast("node-b"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
+        .{ .id = @constCast("node-a"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
+    };
+    const edges = [_]Edge{
+        .{ .id = @constCast("edge-a"), .from = @constCast("node-a"), .to = @constCast("node-b") },
+        .{ .id = @constCast("edge-b"), .from = @constCast("node-b"), .to = @constCast("node-a") },
+    };
+    try std.testing.expectEqual(@as(?usize, 1), findNodeIndexByID(&nodes, "node-a"));
+    try std.testing.expectEqual(@as(?usize, 1), findEdgeIndexByID(&edges, "edge-b"));
+    try std.testing.expect(findEdgeIndexByID(&edges, "missing") == null);
+}
+
+test "stable selection survives a daemon graph refresh during a modal edit" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const first =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\work\\graph","name":"Graph"},"nodes":[{"id":"node-a","title":"A","state":"running"}],"edges":[{"id":"edge-a","from":"node-a","to":"node-b","kind":"handoff"}]}}}
+    ;
+    const second =
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"C:\\work\\graph","name":"Graph"},"nodes":[{"id":"node-b","title":"B","state":"idle"},{"id":"node-a","title":"A","state":"running"}],"edges":[{"id":"edge-a","from":"node-a","to":"node-b","kind":"handoff"}]}}}
+    ;
+    _ = try model.updateFromFrame(first);
+    _ = try model.updateFromFrame(second);
+    try std.testing.expectEqual(@as(?usize, 1), model.findNodeIndex("node-a"));
+    try std.testing.expectEqual(@as(?usize, 0), model.findEdgeIndex("edge-a"));
 }

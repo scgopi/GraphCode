@@ -29,6 +29,10 @@ pub fn shouldApply(action: Action, confirmed: bool) bool {
     return !requiresConfirmation(action) or confirmed;
 }
 
+pub fn canEditEdge(edge_id: []const u8) bool {
+    return edge_id.len != 0;
+}
+
 const ids = struct {
     const rename_node = 5101;
     const stop_node = 5102;
@@ -132,4 +136,9 @@ test "destructive context actions cannot bypass a cancelled confirmation" {
     try std.testing.expect(!shouldApply(.delete_node, false));
     try std.testing.expect(!shouldApply(.delete_edge, false));
     try std.testing.expect(shouldApply(.rename_node, false));
+}
+
+test "edge editing requires a stable edge identifier" {
+    try std.testing.expect(!canEditEdge(""));
+    try std.testing.expect(canEditEdge("edge-1"));
 }
