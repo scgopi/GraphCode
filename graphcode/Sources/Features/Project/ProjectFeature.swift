@@ -549,8 +549,16 @@ extension ProjectFeature {
   static let lastLoopTypeKey = "lastCreatedLoopType"
 
   static var rememberedLoopType: LoopType {
-    UserDefaults.standard.string(forKey: lastLoopTypeKey)
-      .flatMap(LoopType.init(rawValue:)) ?? .goalBased
+    loopType(remembered: UserDefaults.standard.string(forKey: lastLoopTypeKey))
+  }
+
+  /// No remembered choice lands on Sketch — the type that demands nothing decided
+  /// yet, which is the honest opening for someone who hasn't expressed a preference.
+  /// Landing on any committed type puts a whole form in front of a person who never
+  /// picked it. A stored value nothing can decode (an old build's spelling, a
+  /// hand-edited defaults write) gets the same treatment as none.
+  static func loopType(remembered raw: String?) -> LoopType {
+    raw.flatMap(LoopType.init(rawValue:)) ?? .sketch
   }
 
   /// Resets the promotion form's one field and opens it for the chosen target — only

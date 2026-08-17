@@ -1,4 +1,5 @@
 import ComposableArchitecture
+import Foundation
 import GraphcodeKit
 import Testing
 
@@ -54,7 +55,10 @@ struct ProjectFeatureTests {
     }
     store.exhaustivity = .off
 
-    // The form opens on its default type — goal-based — and only the goal is typed.
+    // Pinned rather than inherited: the form opens on the *remembered* type, and this
+    // test's subject is the title flow, not the memory. Without the pin it read
+    // whatever earlier runs left in UserDefaults.
+    UserDefaults.standard.set(LoopType.goalBased.rawValue, forKey: ProjectFeature.lastLoopTypeKey)
     await store.send(.addNodeButtonTapped(parentBackend: nil))
     #expect(store.state.draftLoopType == .goalBased)
     await store.send(.binding(.set(\.draftGoal, "Say hello")))
@@ -351,6 +355,17 @@ struct ProjectFeatureTests {
         guard case .graphCommand(_, .createEdge(let from, let to, _)) = $0 else { return false }
         return from == parent.id && to == draft.id
       })
+  }
+
+  /// No remembered preference — a fresh machine, or a stored spelling nothing can
+  /// decode — lands the form on Sketch, the type that demands nothing decided yet.
+  @Test
+  @MainActor
+  func noRememberedPreferenceLandsOnSketch() {
+    #expect(ProjectFeature.loopType(remembered: nil) == .sketch)
+    #expect(ProjectFeature.loopType(remembered: "not-a-type") == .sketch)
+    #expect(ProjectFeature.loopType(remembered: "goalBased") == .goalBased)
+    #expect(ProjectFeature.loopType(remembered: LoopType.composite.rawValue) == .composite)
   }
 
   /// The workspace gate's live-session reading: presence is the only honest signal
