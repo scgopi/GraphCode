@@ -2454,10 +2454,6 @@ fn onWindowMessage(
                         }
                         app.ensureWorktreeVisible(row.index);
                     },
-                    .quick_chat => if (row.index < app.model.quick_chats.items.len) {
-                        app.client.sendOpenQuickChat(app.model.quick_chats.items[row.index].id);
-                        app.setStatus("Opening quick chat...");
-                    },
                 }
                 _ = c.InvalidateRect(hwnd, null, 0);
                 result.* = 0;

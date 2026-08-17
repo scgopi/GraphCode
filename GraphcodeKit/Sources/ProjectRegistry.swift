@@ -125,14 +125,10 @@ public actor ProjectRegistry {
     self.readActivity = readActivity
     self.readPresence = readPresence
     self.startQuickChat = startQuickChat ?? { node, path in
-      let result = await CLISessionBackend.backend(for: node).startResult(node, path)
-      if case .success = result { QuickChatSessionRegistry.markLive(node.id) }
-      return result
+      await CLISessionBackend.backend(for: node).startResult(node, path)
     }
     self.terminateQuickChat = terminateQuickChat ?? { node, path in
-      let result = await CLISessionBackend.backend(for: node).terminateResult(node, path)
-      if case .success = result { QuickChatSessionRegistry.remove(node.id) }
-      return result
+      await CLISessionBackend.backend(for: node).terminateResult(node, path)
     }
     self.quickChatExists = quickChatExists ?? { node, path in
       await CLISessionBackend.backend(for: node).exists(node, path)
@@ -302,7 +298,7 @@ public actor ProjectRegistry {
     guard let chat = quickChatStore.chat(id: id) else { return false }
     let sequence = (chat.activity?.sequence ?? 0) + 1
     let activity = QuickChatActivity(sequence: sequence, text: text, presence: presence)
-    guard (try? quickChatStore.updateActivity(id: id, activity: activity)) != nil else { return false }
+    guard quickChatStore.updateActivity(id: id, activity: activity) != nil else { return false }
     await broadcast(.quickChatActivity(id: id, activity: activity))
     return true
   }
@@ -404,12 +400,7 @@ public actor ProjectRegistry {
         break
       }
       let chat = QuickChat(title: trimmed, backend: backend)
-      do {
-        try quickChatStore.create(chat)
-      } catch {
-        error = "quick chat persistence failed"
-        break
-      }
+      quickChatStore.create(chat)
       response = .quickChatChanged(chat)
       await broadcast(response!)
 
@@ -434,7 +425,7 @@ public actor ProjectRegistry {
         error = "quick chat title must not be empty"
         break
       }
-      guard let chat = (try? quickChatStore.rename(id: id, title: trimmed)) ?? nil else {
+      guard let chat = quickChatStore.rename(id: id, title: trimmed) else {
         error = "quick chat not found"
         break
       }
@@ -452,13 +443,7 @@ public actor ProjectRegistry {
         error = "quick chat session termination failed"
         break
       }
-      do {
-        _ = try quickChatStore.delete(id: id)
-      } catch {
-        _ = await ensureQuickChatSession(chat)
-        error = "quick chat persistence failed"
-        break
-      }
+      _ = quickChatStore.delete(id: id)
       response = .quickChatDeleted(id)
       await broadcast(response!)
 

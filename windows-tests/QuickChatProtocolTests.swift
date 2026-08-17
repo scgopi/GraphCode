@@ -34,14 +34,14 @@ struct QuickChatProtocolTests {
   }
 
   @Test
-  func storeKeepsActivitySequenceOnStableChatIdentity() throws {
+  func storeKeepsActivitySequenceOnStableChatIdentity() {
     let directory = URL(fileURLWithPath: "quick-chat-protocol-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = QuickChatStore(baseDirectory: directory)
     let chat = QuickChat(title: "Scratch")
-    try store.create(chat)
-    _ = try store.updateActivity(id: chat.id, activity: QuickChatActivity(sequence: 1, text: "first"))
-    _ = try store.updateActivity(id: chat.id, activity: QuickChatActivity(sequence: 2, text: "second"))
+    store.create(chat)
+    _ = store.updateActivity(id: chat.id, activity: QuickChatActivity(sequence: 1, text: "first"))
+    _ = store.updateActivity(id: chat.id, activity: QuickChatActivity(sequence: 2, text: "second"))
     #expect(store.chat(id: chat.id)?.activity?.sequence == 2)
     #expect(store.chat(id: chat.id)?.activity?.text == "second")
   }
