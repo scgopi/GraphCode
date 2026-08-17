@@ -137,16 +137,91 @@ pub fn currentVersionFromMetadata(allocator: std.mem.Allocator, metadata: ?[]con
 fn parseFeed(allocator: std.mem.Allocator, body: []const u8, channel: Channel, current_version: []const u8) !CheckResult {
     var parsed = try std.json.parseFromSlice([]const Release, allocator, body, .{});
     defer parsed.deinit();
+    const installed = try SemVer.parse(current_version);
     for (parsed.value) |release| {
         if (release.draft or release.prerelease != (channel == .beta)) continue;
         const version = release.tag_name;
+        const candidate = SemVer.parse(version) catch continue;
         return .{
             .channel = channel,
-            .state = if (std.mem.eql(u8, version, current_version)) .up_to_date else .available,
+            .state = if (candidate.compare(installed) == .equal) .up_to_date else .available,
             .version = try allocator.dupe(u8, version),
         };
     }
     return .{ .channel = channel, .state = .failed, .message = try allocator.dupe(u8, "No release found for selected channel") };
+}
+
+const SemVer = struct {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    prerelease: ?[]const u8 = null,
+
+    const Order = enum { less, equal, greater };
+
+    fn parse(input: []const u8) !SemVer {
+        var value = input;
+        if (value.len > 0 and (value[0] == 'v' or value[0] == 'V')) value = value[1..];
+        const build_start = std.mem.indexOfScalar(u8, value, '+') orelse value.len;
+        value = value[0..build_start];
+        const pre_start = std.mem.indexOfScalar(u8, value, '-') orelse value.len;
+        const core = value[0..pre_start];
+        var numbers = std.mem.splitScalar(u8, core, '.');
+        const major = try parseNumber(numbers.next() orelse return error.InvalidVersion);
+        const minor = try parseNumber(numbers.next() orelse return error.InvalidVersion);
+        const patch = try parseNumber(numbers.next() orelse return error.InvalidVersion);
+        if (numbers.next() != null) return error.InvalidVersion;
+        const prerelease = if (pre_start < value.len) value[pre_start + 1 ..] else null;
+        if (prerelease) |identifiers| {
+            if (identifiers.len == 0) return error.InvalidVersion;
+            var parts = std.mem.splitScalar(u8, identifiers, '.');
+            while (parts.next()) |part| {
+                if (part.len == 0) return error.InvalidVersion;
+                if (isNumeric(part) and part.len > 1 and part[0] == '0') return error.InvalidVersion;
+            }
+        }
+        return .{ .major = major, .minor = minor, .patch = patch, .prerelease = prerelease };
+    }
+
+    fn compare(self: SemVer, other: SemVer) Order {
+        if (self.major != other.major) return if (self.major < other.major) .less else .greater;
+        if (self.minor != other.minor) return if (self.minor < other.minor) .less else .greater;
+        if (self.patch != other.patch) return if (self.patch < other.patch) .less else .greater;
+        if (self.prerelease == null and other.prerelease == null) return .equal;
+        if (self.prerelease == null) return .greater;
+        if (other.prerelease == null) return .less;
+        var left = std.mem.splitScalar(u8, self.prerelease.?, '.');
+        var right = std.mem.splitScalar(u8, other.prerelease.?, '.');
+        while (true) {
+            const left_part = left.next();
+            const right_part = right.next();
+            if (left_part == null and right_part == null) return .equal;
+            if (left_part == null) return .less;
+            if (right_part == null) return .greater;
+            const l = left_part.?;
+            const r = right_part.?;
+            if (isNumeric(l) and isNumeric(r)) {
+                const ln = std.fmt.parseInt(u64, l, 10) catch return .less;
+                const rn = std.fmt.parseInt(u64, r, 10) catch return .greater;
+                if (ln != rn) return if (ln < rn) .less else .greater;
+            } else if (isNumeric(l) != isNumeric(r)) {
+                return if (isNumeric(l)) .less else .greater;
+            } else if (!std.mem.eql(u8, l, r)) {
+                return if (std.mem.lessThan(u8, l, r)) .less else .greater;
+            }
+        }
+    }
+};
+
+fn isNumeric(value: []const u8) bool {
+    if (value.len == 0) return false;
+    for (value) |byte| if (byte < '0' or byte > '9') return false;
+    return true;
+}
+
+fn parseNumber(value: []const u8) !u64 {
+    if (value.len == 0 or (value.len > 1 and value[0] == '0')) return error.InvalidVersion;
+    return std.fmt.parseInt(u64, value, 10) catch error.InvalidVersion;
 }
 
 const Release = struct {
@@ -167,6 +242,33 @@ test "real update feed result follows stable and beta channels" {
     defer beta_result.deinit(std.testing.allocator);
     try std.testing.expectEqual(State.up_to_date, beta_result.state);
     try std.testing.expectEqualStrings("v3.0.0-beta", beta_result.version.?);
+}
+
+test "release tags and installed versions compare semantically" {
+    const releases =
+        \\[{"tag_name":"V1.2.3","prerelease":false,"draft":false}]
+    ;
+    var result = try parseFeed(std.testing.allocator, releases, .stable, "v1.2.3");
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.up_to_date, result.state);
+    try std.testing.expectEqualStrings("V1.2.3", result.version.?);
+
+    const prereleases =
+        \\[{"tag_name":"v2.0.0-beta.2","prerelease":true,"draft":false}]
+    ;
+    var beta = try parseFeed(std.testing.allocator, prereleases, .beta, "2.0.0-beta.1");
+    defer beta.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.available, beta.state);
+}
+
+test "stable channel ignores prerelease tags" {
+    const releases =
+        \\[{"tag_name":"v3.0.0-beta.1","prerelease":true,"draft":false},{"tag_name":"v2.9.0","prerelease":false,"draft":false}]
+    ;
+    var result = try parseFeed(std.testing.allocator, releases, .stable, "v2.9.0");
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.up_to_date, result.state);
+    try std.testing.expectEqualStrings("v2.9.0", result.version.?);
 }
 
 test "update feed errors are explicit" {
