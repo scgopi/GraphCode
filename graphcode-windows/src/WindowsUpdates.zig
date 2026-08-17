@@ -137,40 +137,48 @@ pub fn currentVersionFromMetadata(allocator: std.mem.Allocator, metadata: ?[]con
 fn parseFeed(allocator: std.mem.Allocator, body: []const u8, channel: Channel, current_version: []const u8) !CheckResult {
     var parsed = try std.json.parseFromSlice([]const Release, allocator, body, .{});
     defer parsed.deinit();
-    const installed = try SemVer.parse(current_version);
+    var installed = try SemVer.parse(allocator, current_version);
+    defer installed.deinit(allocator);
+    var greatest: ?struct { release: Release, version: SemVer } = null;
     for (parsed.value) |release| {
-        if (release.draft or release.prerelease != (channel == .beta)) continue;
-        const version = release.tag_name;
-        const candidate = SemVer.parse(version) catch continue;
+        if (release.draft or (channel == .stable and release.prerelease)) continue;
+        const candidate = SemVer.parse(allocator, release.tag_name) catch continue;
+        if (greatest == null or candidate.compare(greatest.?.version) == .greater) {
+            if (greatest) |old| old.version.deinit(allocator);
+            greatest = .{ .release = release, .version = candidate };
+        } else {
+            candidate.deinit(allocator);
+        }
+    }
+    if (greatest) |selected| {
+        defer selected.version.deinit(allocator);
         return .{
             .channel = channel,
-            .state = if (candidate.compare(installed) == .equal) .up_to_date else .available,
-            .version = try allocator.dupe(u8, version),
+            .state = if (selected.version.compare(installed) == .greater) .available else .up_to_date,
+            .version = try allocator.dupe(u8, selected.release.tag_name),
         };
     }
     return .{ .channel = channel, .state = .failed, .message = try allocator.dupe(u8, "No release found for selected channel") };
 }
 
 const SemVer = struct {
-    major: u64,
-    minor: u64,
-    patch: u64,
+    core: []u64,
     prerelease: ?[]const u8 = null,
 
     const Order = enum { less, equal, greater };
 
-    fn parse(input: []const u8) !SemVer {
+    fn parse(allocator: std.mem.Allocator, input: []const u8) !SemVer {
         var value = input;
         if (value.len > 0 and (value[0] == 'v' or value[0] == 'V')) value = value[1..];
         const build_start = std.mem.indexOfScalar(u8, value, '+') orelse value.len;
         value = value[0..build_start];
         const pre_start = std.mem.indexOfScalar(u8, value, '-') orelse value.len;
         const core = value[0..pre_start];
+        var core_values = std.array_list.Managed(u64).init(allocator);
+        defer core_values.deinit();
         var numbers = std.mem.splitScalar(u8, core, '.');
-        const major = try parseNumber(numbers.next() orelse return error.InvalidVersion);
-        const minor = try parseNumber(numbers.next() orelse return error.InvalidVersion);
-        const patch = try parseNumber(numbers.next() orelse return error.InvalidVersion);
-        if (numbers.next() != null) return error.InvalidVersion;
+        while (numbers.next()) |number| try core_values.append(try parseNumber(number));
+        if (core_values.items.len == 0) return error.InvalidVersion;
         const prerelease = if (pre_start < value.len) value[pre_start + 1 ..] else null;
         if (prerelease) |identifiers| {
             if (identifiers.len == 0) return error.InvalidVersion;
@@ -180,13 +188,20 @@ const SemVer = struct {
                 if (isNumeric(part) and part.len > 1 and part[0] == '0') return error.InvalidVersion;
             }
         }
-        return .{ .major = major, .minor = minor, .patch = patch, .prerelease = prerelease };
+        return .{ .core = try core_values.toOwnedSlice(), .prerelease = prerelease };
+    }
+
+    fn deinit(self: *const SemVer, allocator: std.mem.Allocator) void {
+        allocator.free(self.core);
     }
 
     fn compare(self: SemVer, other: SemVer) Order {
-        if (self.major != other.major) return if (self.major < other.major) .less else .greater;
-        if (self.minor != other.minor) return if (self.minor < other.minor) .less else .greater;
-        if (self.patch != other.patch) return if (self.patch < other.patch) .less else .greater;
+        const core_len = @max(self.core.len, other.core.len);
+        for (0..core_len) |index| {
+            const left = if (index < self.core.len) self.core[index] else 0;
+            const right = if (index < other.core.len) other.core[index] else 0;
+            if (left != right) return if (left < right) .less else .greater;
+        }
         if (self.prerelease == null and other.prerelease == null) return .equal;
         if (self.prerelease == null) return .greater;
         if (other.prerelease == null) return .less;
@@ -269,6 +284,43 @@ test "stable channel ignores prerelease tags" {
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqual(State.up_to_date, result.state);
     try std.testing.expectEqualStrings("v2.9.0", result.version.?);
+}
+
+test "feed selection uses greatest stable version regardless of order" {
+    const releases =
+        \\[{"tag_name":"v1.9.0","prerelease":false,"draft":false},{"tag_name":"v1.10.0","prerelease":false,"draft":false},{"tag_name":"v1.2.0","prerelease":false,"draft":false}]
+    ;
+    var result = try parseFeed(std.testing.allocator, releases, .stable, "v1.8.0");
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.available, result.state);
+    try std.testing.expectEqualStrings("v1.10.0", result.version.?);
+
+    var no_update = try parseFeed(std.testing.allocator, releases, .stable, "2.0.0");
+    defer no_update.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.up_to_date, no_update.state);
+}
+
+test "beta selection prefers a final stable release over a beta" {
+    const releases =
+        \\[{"tag_name":"v2.0.0-beta.2","prerelease":true,"draft":false},{"tag_name":"v1.9.0","prerelease":false,"draft":false},{"tag_name":"v2.0.0","prerelease":false,"draft":false}]
+    ;
+    var result = try parseFeed(std.testing.allocator, releases, .beta, "v2.0.0-beta.1");
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.available, result.state);
+    try std.testing.expectEqualStrings("v2.0.0", result.version.?);
+}
+
+test "variable length GraphCode version tuples normalize trailing zeroes" {
+    const releases =
+        \\[{"tag_name":"v0.1.26.1","prerelease":false,"draft":false}]
+    ;
+    var result = try parseFeed(std.testing.allocator, releases, .stable, "v0.1.26");
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.available, result.state);
+
+    var equal = try parseFeed(std.testing.allocator, releases, .stable, "0.1.26.1");
+    defer equal.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.up_to_date, equal.state);
 }
 
 test "update feed errors are explicit" {
