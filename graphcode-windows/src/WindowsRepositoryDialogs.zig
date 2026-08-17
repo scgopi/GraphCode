@@ -30,6 +30,9 @@ pub const CloneProcess = struct {
     allocator: std.mem.Allocator,
     child: std.process.Child,
     args: []const []u8,
+    destination: []u8,
+    finished: bool = false,
+    cancelled: bool = false,
 
     pub fn start(allocator: std.mem.Allocator, fields: CloneFields) !CloneProcess {
         const args = try cloneCommand(allocator, fields);
@@ -37,28 +40,48 @@ pub const CloneProcess = struct {
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
         try child.spawn();
-        return .{ .allocator = allocator, .child = child, .args = args };
+        const destination = allocator.dupe(u8, fields.destination) catch |err| {
+            _ = child.kill() catch {};
+            _ = child.wait() catch {};
+            for (args) |arg| allocator.free(arg);
+            allocator.free(args);
+            return err;
+        };
+        return .{ .allocator = allocator, .child = child, .args = args, .destination = destination };
     }
 
     pub fn cancel(self: *CloneProcess) void {
+        self.cancelled = true;
         _ = self.child.kill() catch {};
     }
 
     pub fn finish(self: *CloneProcess) !CloneStatus {
+        if (self.finished) return if (self.cancelled) .cancelled else .finished;
         const term = try self.child.wait();
-        for (self.args) |arg| self.allocator.free(arg);
-        self.allocator.free(self.args);
-        return switch (term) {
+        self.finished = true;
+        const status: CloneStatus = if (self.cancelled) .cancelled else switch (term) {
             .Exited => |code| if (code == 0) .finished else .failed,
             else => .failed,
         };
+        self.releaseArgs();
+        if (status != .finished) std.fs.cwd().deleteTree(self.destination) catch {};
+        return status;
     }
 
     pub fn deinit(self: *CloneProcess) void {
-        self.cancel();
+        if (!self.finished) {
+            self.cancel();
+            _ = self.finish() catch {};
+        }
+        self.allocator.free(self.destination);
+        self.* = undefined;
+    }
+
+    fn releaseArgs(self: *CloneProcess) void {
+        if (self.args.len == 0) return;
         for (self.args) |arg| self.allocator.free(arg);
         self.allocator.free(self.args);
-        self.* = undefined;
+        self.args = &.{};
     }
 };
 
@@ -94,6 +117,67 @@ pub fn reconnectCommand(allocator: std.mem.Allocator, fields: RemoteFields) ![]u
         "ssh -o BatchMode=yes -o ConnectTimeout=10 -p {s} {s} -- zmx attach -- {s}",
         .{ fields.port, destination, fields.path },
     );
+}
+
+pub fn sshValidationArgs(allocator: std.mem.Allocator, fields: RemoteFields) ![][]u8 {
+    try validateRemote(fields);
+    var args = std.array_list.Managed([]u8).init(allocator);
+    try args.append(try allocator.dupe(u8, "ssh"));
+    try args.append(try allocator.dupe(u8, "-o"));
+    try args.append(try allocator.dupe(u8, "BatchMode=yes"));
+    try args.append(try allocator.dupe(u8, "-o"));
+    try args.append(try allocator.dupe(u8, "ConnectTimeout=10"));
+    try args.append(try allocator.dupe(u8, "-p"));
+    try args.append(try allocator.dupe(u8, fields.port));
+    const destination = try sshDestination(allocator, fields);
+    defer allocator.free(destination);
+    try args.append(try allocator.dupe(u8, destination));
+    try args.append(try allocator.dupe(u8, "--"));
+    try args.append(try allocator.dupe(u8, "git"));
+    try args.append(try allocator.dupe(u8, "-C"));
+    try args.append(try allocator.dupe(u8, fields.path));
+    try args.append(try allocator.dupe(u8, "rev-parse"));
+    try args.append(try allocator.dupe(u8, "--show-toplevel"));
+    return args.toOwnedSlice();
+}
+
+pub fn validateRemoteConnection(allocator: std.mem.Allocator, fields: RemoteFields) !void {
+    const args = try sshValidationArgs(allocator, fields);
+    defer {
+        for (args) |arg| allocator.free(arg);
+        allocator.free(args);
+    }
+    var child = std.process.Child.init(args, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    try child.spawn();
+    var out_thread = try std.Thread.spawn(.{}, drainPipe, .{ &child.stdout.?, allocator });
+    var err_thread = try std.Thread.spawn(.{}, drainPipe, .{ &child.stderr.?, allocator });
+    out_thread.join();
+    err_thread.join();
+    switch (try child.wait()) {
+        .Exited => |code| if (code != 0) return error.SSHValidationFailed,
+        else => return error.SSHValidationFailed,
+    }
+}
+
+pub fn saveRemoteConfig(allocator: std.mem.Allocator, fields: RemoteFields) !void {
+    try validateRemote(fields);
+    const base = std.process.getEnvVarOwned(allocator, "LOCALAPPDATA") catch
+        try std.process.getEnvVarOwned(allocator, "USERPROFILE");
+    defer allocator.free(base);
+    const dir = try std.fs.path.join(allocator, &.{ base, "GraphCode" });
+    defer allocator.free(dir);
+    try std.fs.cwd().makePath(dir);
+    const path = try std.fs.path.join(allocator, &.{ dir, "remote.ini" });
+    defer allocator.free(path);
+    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    const data = try std.fmt.allocPrint(allocator, "host={s}\nuser={s}\nport={s}\npath={s}\n", .{
+        fields.host, fields.user, fields.port, fields.path,
+    });
+    defer allocator.free(data);
+    try file.writeAll(data);
 }
 
 pub fn cloneCommand(allocator: std.mem.Allocator, fields: CloneFields) ![]const []u8 {
@@ -148,23 +232,18 @@ pub fn openRemote(parent: c.HWND, allocator: std.mem.Allocator, initial: RemoteF
 }
 
 pub fn runClone(allocator: std.mem.Allocator, fields: CloneFields) !CloneStatus {
-    const args = try cloneCommand(allocator, fields);
-    defer {
-        for (args) |arg| allocator.free(arg);
-        allocator.free(args);
-    }
-    var child = std.process.Child.init(args, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-    child.env_map = null;
-    try child.spawn();
-    _ = child.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch &.{};
-    const stderr = child.stderr.?.readToEndAlloc(allocator, 1024 * 1024) catch &.{};
-    defer if (stderr.len != 0) allocator.free(stderr);
-    return switch (try child.wait()) {
-        .Exited => |code| if (code == 0) .finished else .failed,
-        else => .failed,
-    };
+    var process = try CloneProcess.start(allocator, fields);
+    defer process.deinit();
+    var stdout_thread = try std.Thread.spawn(.{}, drainPipe, .{ &process.child.stdout.?, allocator });
+    var stderr_thread = try std.Thread.spawn(.{}, drainPipe, .{ &process.child.stderr.?, allocator });
+    stdout_thread.join();
+    stderr_thread.join();
+    return process.finish();
+}
+
+fn drainPipe(file: *std.fs.File, allocator: std.mem.Allocator) void {
+    const output = file.readToEndAlloc(allocator, 16 * 1024 * 1024) catch return;
+    allocator.free(output);
 }
 
 test "clone validation and argv preserve HTTPS, Unicode, and option boundaries" {
@@ -189,4 +268,17 @@ test "SSH validation and reconnect command reject injection-shaped identities" {
     defer std.testing.allocator.free(command);
     try std.testing.expect(std.mem.indexOf(u8, command, "BatchMode=yes") != null);
     try std.testing.expect(std.mem.indexOf(u8, command, "/srv/граф") != null);
+}
+
+test "SSH validation argv keeps destination and remote path separate" {
+    const args = try sshValidationArgs(std.testing.allocator, .{
+        .host = "build-box", .user = "dev", .port = "2222", .path = "/srv/граф",
+    });
+    defer {
+        for (args) |arg| std.testing.allocator.free(arg);
+        std.testing.allocator.free(args);
+    }
+    try std.testing.expectEqualStrings("BatchMode=yes", args[2]);
+    try std.testing.expectEqualStrings("dev@build-box", args[7]);
+    try std.testing.expectEqualStrings("/srv/граф", args[11]);
 }

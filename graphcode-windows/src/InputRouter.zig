@@ -38,6 +38,9 @@ pub const Action = enum {
 };
 
 pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
+    if (ctrl and shift and key == ',') return .product_settings;
+    if (ctrl and shift and key == 'C') return .clone_repository;
+    if (ctrl and shift and key == 'R') return .remote_repository;
     if (ctrl and key == 'R') return .reconnect;
     if (ctrl and key == 'N') return .create_node;
     if (ctrl and key == 'O') return .open_folder;
@@ -48,9 +51,6 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (!ctrl and key == 0x2E) return .delete_selected;
     if (ctrl and key == 'J') return .jump_next;
     if (ctrl and key == ',') return .settings;
-    if (ctrl and shift and key == ',') return .product_settings;
-    if (ctrl and shift and key == 'C') return .clone_repository;
-    if (ctrl and shift and key == 'R') return .remote_repository;
     if (key == 0x70) return .onboarding;
     if (ctrl and key == 0x09) return .cycle_attention;
     if (ctrl and key == 'W' and shift) return .inspect_worktrees;
@@ -143,4 +143,11 @@ test "tab variants keep terminal navigation distinct" {
 test "canvas destructive and rename keyboard equivalents are explicit" {
     try std.testing.expectEqual(Action.delete_selected, keyAction(0x2E, false, false));
     try std.testing.expectEqual(Action.rename_selected, keyAction(0x71, false, false));
+}
+
+test "modifier-specific actions win over base shortcuts" {
+    try std.testing.expectEqual(Action.product_settings, keyAction(',', true, true));
+    try std.testing.expectEqual(Action.remote_repository, keyAction('R', true, true));
+    try std.testing.expectEqual(Action.clone_repository, keyAction('C', true, true));
+    try std.testing.expectEqual(Action.reconnect, keyAction('R', true, false));
 }

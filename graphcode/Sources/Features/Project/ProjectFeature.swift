@@ -559,7 +559,8 @@ extension ProjectFeature {
     // The parent's backend when there is one; the human's default otherwise
     // (Settings → Sessions), never a hardcoded one.
     state.draftBackend = backend ?? GraphcodeSettingsStore.load().defaultBackend
-    state.draftModelTier = GraphcodeSettingsStore.load().defaultModelTier
+    let settings = GraphcodeSettingsStore.load()
+    state.draftModelTier = settings.autoSelectsModel ? settings.defaultModelTier : nil
     state.draftWorktree = .none
     state.draftBranch = ""
     state.draftParentNodeID = parentNodeID

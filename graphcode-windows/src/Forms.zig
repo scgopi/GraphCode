@@ -22,7 +22,10 @@ pub const NodeDraft = struct {
     worktree_branch: []const u8 = "",
     subgraph_json: []const u8 = "",
     created_by: []const u8 = "",
-
+    claude_permissions: []const u8 = "auto",
+    copilot_permissions: []const u8 = "allowEverything",
+    briefing_enabled: bool = true,
+    activity_enabled: bool = false,
     pub fn deinit(self: *NodeDraft, allocator: std.mem.Allocator) void {
         freeSlice(allocator, self.title);
         freeSlice(allocator, self.loop_type);

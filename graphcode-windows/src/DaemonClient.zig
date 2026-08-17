@@ -282,17 +282,29 @@ pub const DaemonClient = struct {
     }
 
     pub fn sendCreateNode(self: *DaemonClient, project_path: []const u8, title: []const u8) void {
+        self.sendCreateNodeConfigured(project_path, title, "claudeCode", null);
+    }
+
+    pub fn sendCreateNodeConfigured(
+        self: *DaemonClient,
+        project_path: []const u8,
+        title: []const u8,
+        backend: []const u8,
+        model_tier: ?[]const u8,
+    ) void {
         var node_id: [36]u8 = undefined;
         self.mutex.lock();
         const sequence = self.next_draft;
         self.next_draft +%= 1;
         self.mutex.unlock();
         makeRequestID(&node_id, sequence);
-        const command = Wire.commandGraphCreateNode(
+        const command = Wire.commandGraphCreateNodeConfigured(
             self.allocator,
             project_path,
             title,
             &node_id,
+            backend,
+            model_tier,
         ) catch return;
         self.sendCommand(command);
     }

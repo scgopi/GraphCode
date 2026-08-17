@@ -41,7 +41,7 @@ pub fn text(
         state.labels[index] = label;
         state.values[index] = try allocator.dupe(u8, initial[index]);
     }
-    defer for (state.values[0..state.count]) |value| allocator.free(value);
+    errdefer freeStateValues(&state);
 
     registerClass() catch return error.DialogClassRegistrationFailed;
     const wide_title = try wideZ(allocator, title);
@@ -64,6 +64,7 @@ pub fn text(
         c.GetModuleHandleW(null),
         null,
     ) orelse {
+        freeStateValues(&active_state);
         active = false;
         return error.DialogCreationFailed;
     };
@@ -85,13 +86,23 @@ pub fn text(
     _ = c.EnableWindow(parent, 1);
     _ = c.SetActiveWindow(parent);
     active = false;
-    if (!active_state.accepted) return null;
+    if (!active_state.accepted) {
+        freeStateValues(&active_state);
+        return null;
+    }
     var result = Result{ .values = .{ &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{} }, .count = state.count };
     readValues(&active_state);
     for (active_state.values[0..state.count], 0..) |value, index| {
         result.values[index] = try allocator.dupe(u8, value);
     }
+    freeStateValues(&active_state);
     return result;
+}
+
+fn freeStateValues(state: *State) void {
+    for (state.values[0..state.count]) |value| state.allocator.free(value);
+    state.values = .{ &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{} };
+    state.count = 0;
 }
 
 fn registerClass() !void {

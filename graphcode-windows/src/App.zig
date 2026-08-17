@@ -86,6 +86,7 @@ pub const App = struct {
     empty_open_folder_button: c.HWND = null,
     empty_global_overview_button: c.HWND = null,
     product_settings_store: ?ProductSettings.Store = null,
+    product_settings: ?ProductSettings.Settings = null,
     onboarding_store: ?Onboarding.Store = null,
     smoke_restart_index: ?usize = null,
     smoke_restart_session: []const u8 = &.{},
@@ -162,6 +163,7 @@ pub const App = struct {
         if (self.smoke_workspace_actions.len != 0) self.allocator.free(self.smoke_workspace_actions);
         if (self.smoke_restart_session.len != 0) self.allocator.free(self.smoke_restart_session);
         if (self.product_settings_store) |*store| store.deinit();
+        if (self.product_settings) |*settings| settings.deinit();
         if (self.onboarding_store) |*store| store.deinit();
         self.allocator.destroy(self);
     }
@@ -186,6 +188,9 @@ pub const App = struct {
         if (self.daemon.status().len != 0) self.setStatus(self.daemon.status());
         self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
         self.product_settings_store = ProductSettings.Store.init(self.allocator) catch null;
+        if (self.product_settings_store) |store| {
+            self.product_settings = store.load() catch ProductSettings.Settings.init(self.allocator) catch null;
+        }
         self.onboarding_store = Onboarding.Store.init(self.allocator) catch null;
         if (self.onboarding_store) |store| {
             const shell_test = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_REQUIRE_DAEMON") catch null;
@@ -654,7 +659,16 @@ pub const App = struct {
         const current_path = self.currentProject() orelse return;
         const path = self.allocator.dupe(u8, current_path) catch return;
         defer self.allocator.free(path);
-        var draft = NativeForms.node(self.window.hwnd, self.allocator, .{ .title = "" }) catch {
+        const settings = self.product_settings orelse return;
+        var draft = NativeForms.node(self.window.hwnd, self.allocator, .{
+            .title = "",
+            .backend = settings.default_backend,
+            .model_tier = if (settings.auto_selects_model) settings.default_model else null,
+            .claude_permissions = settings.claude_permissions,
+            .copilot_permissions = settings.copilot_permissions,
+            .briefing_enabled = settings.briefing,
+            .activity_enabled = settings.activity,
+        }) catch {
             self.setStatus("Unable to open node form");
             return;
         } orelse return;
@@ -787,12 +801,21 @@ pub const App = struct {
             self.setStatus("Product settings storage unavailable");
             return;
         };
-        const current = store.load();
+        var current = store.load() catch ProductSettings.Settings.init(self.allocator) catch {
+            self.setStatus("Unable to load product settings");
+            return;
+        };
+        defer current.deinit();
         const draft = ProductSettings.open(self.window.hwnd, self.allocator, current) catch {
             self.setStatus("Unable to open product settings");
             return;
         } orelse return;
-        store.save(draft) catch self.setStatus("Unable to save product settings");
+        store.save(draft) catch {
+            self.setStatus("Unable to save product settings");
+            return;
+        };
+        if (self.product_settings) |*settings| settings.deinit();
+        self.product_settings = draft;
     }
 
     fn cloneRepository(self: *App) void {
@@ -833,12 +856,24 @@ pub const App = struct {
             self.setStatus(@errorName(err));
             return;
         };
-        const command = RepositoryDialogs.reconnectCommand(self.allocator, draft) catch {
-            self.setStatus("Unable to build SSH reconnect command");
+        RepositoryDialogs.validateRemoteConnection(self.allocator, draft) catch |err| {
+            self.setStatus(@errorName(err));
             return;
         };
-        defer self.allocator.free(command);
-        self.setStatus("SSH connection validated; reconnect is ready");
+        RepositoryDialogs.saveRemoteConfig(self.allocator, draft) catch {
+            self.setStatus("SSH validated but remote configuration could not be saved");
+            return;
+        };
+        const remote_path = std.fmt.allocPrint(self.allocator, "ssh://{s}@{s}:{s}{s}", .{
+            draft.user, draft.host, draft.port, draft.path,
+        }) catch {
+            self.setStatus("Unable to encode remote repository");
+            return;
+        };
+        defer self.allocator.free(remote_path);
+        self.client.sendOpenProject(remote_path);
+        self.client.reconnect();
+        self.setStatus("SSH repository connected; reconnect requested");
     }
 
     fn jumpToNode(self: *App) void {

@@ -93,6 +93,10 @@ pub fn node(
     result.worktree_branch = try allocator.dupe(u8, state.values[17]);
     result.subgraph_json = try allocator.dupe(u8, state.values[18]);
     result.created_by = try allocator.dupe(u8, state.values[19]);
+    result.claude_permissions = initial.claude_permissions;
+    result.copilot_permissions = initial.copilot_permissions;
+    result.briefing_enabled = initial.briefing_enabled;
+    result.activity_enabled = initial.activity_enabled;
     return result;
 }
 

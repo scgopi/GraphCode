@@ -204,12 +204,27 @@ pub fn commandGraphCreateNode(
     title: []const u8,
     node_id: []const u8,
 ) ![]u8 {
+    return commandGraphCreateNodeConfigured(allocator, project_path, title, node_id, "claudeCode", null);
+}
+
+pub fn commandGraphCreateNodeConfigured(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    title: []const u8,
+    node_id: []const u8,
+    backend: []const u8,
+    model_tier: ?[]const u8,
+) ![]u8 {
     const quoted_path = try quoteJson(allocator, project_path);
     defer allocator.free(quoted_path);
     const quoted_title = try quoteJson(allocator, title);
     defer allocator.free(quoted_title);
     const quoted_id = try quoteJson(allocator, node_id);
     defer allocator.free(quoted_id);
+    const quoted_backend = try quoteJson(allocator, backend);
+    defer allocator.free(quoted_backend);
+    const quoted_model = if (model_tier) |tier| try quoteJson(allocator, tier) else try allocator.dupe(u8, "null");
+    defer allocator.free(quoted_model);
     return std.mem.concat(allocator, u8, &.{
         "{\"graphCommand\":{\"projectPath\":",
         quoted_path,
@@ -217,7 +232,7 @@ pub fn commandGraphCreateNode(
         quoted_id,
         ",\"title\":",
         quoted_title,
-        ",\"loopType\":\"turnBased\",\"checkDescription\":null,\"triggerPrompt\":null,\"firstInstruction\":\"Work on the requested Windows shell task.\",\"pausesBeforeWritesOnly\":false,\"goal\":null,\"backend\":\"claudeCode\",\"modelTier\":null,\"worktree\":null,\"subGraph\":null,\"createdBy\":null}}}}}",
+        ",\"loopType\":\"turnBased\",\"checkDescription\":null,\"triggerPrompt\":null,\"firstInstruction\":\"Work on the requested Windows shell task.\",\"pausesBeforeWritesOnly\":false,\"goal\":null,\"backend\":", quoted_backend, ",\"modelTier\":", quoted_model, ",\"worktree\":null,\"subGraph\":null,\"createdBy\":null}}}}}",
     });
 }
 
