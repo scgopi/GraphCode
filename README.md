@@ -20,8 +20,8 @@
 You can run one Claude Code session in a terminal. GraphCode lets you run ten —
 connected, unattended, and still yours to attach to and correct mid-run. Each node in the
 graph is a unit of work running inside a real CLI coding-agent session; each edge is a
-hand-off, message, or spawn between them. The sessions are real terminals you can attach
-to, watch, and steer — not headless jobs that report back when they're done.
+hand-off, message, or spawn between them. They are real terminals you can attach to and
+steer, not headless jobs that report back when they're done.
 
 **[Graph Engineering, simplified →](https://graphcode.app/)** — the full
 article: the mental model, then the machinery underneath it.
@@ -42,28 +42,23 @@ Every loop type is "an agent runs repeatedly" — they differ in what *you* stop
 Two design choices explain most of the rest:
 
 - **GraphCode schedules nothing.** A time-based loop's recurrence lives *inside* its
-  session, written into the prompt with the agent's own `/loop` or `/schedule` skill. The
-  daemon only makes sure the session is alive. That's what keeps a running loop something
-  you can attach to and correct, rather than a job that already finished somewhere.
+  session, written into the prompt with the agent's own `/loop` or `/schedule` skill; the
+  daemon only keeps the session alive. That's what makes a running loop something you can
+  attach to and correct, rather than a job that already finished somewhere.
 - **Sessions outlive everything.** Each loop's terminal is a [`zmx`](https://zmx.sh)
-  session, so it survives closing the window, quitting the app, restarting the daemon,
-  and even a reboot — the backend's session ID is persisted, so relaunching after a
-  reboot resumes the conversation with `--resume` rather than starting a duplicate.
+  session, so it survives closing the window, quitting the app, restarting the daemon, and
+  a reboot — the backend's session ID is persisted, so relaunching resumes the conversation
+  with `--resume` rather than starting a duplicate.
 
-So a working graph might look like: a time-based loop runs `/loop 1h Triage new bug
-reports`, a hand-off edge fires a goal-based fixer loop for anything it finds (done when
-the test suite passes), and a second edge hands the fix to a turn-based reviewer loop where
-you approve each change yourself. All three are live terminals the whole time — click any
-node and you're in that session, scrollback and all.
+So a working graph might be an hourly triage loop, a hand-off edge into a goal-based fixer
+(done when the test suite passes), and a second edge into a turn-based reviewer where you
+approve each change yourself. All three stay live terminals — click any node and you're in
+that session, scrollback and all.
 
-Each project you add carries its own graph, laid out as a lane: an origin the loops
-nothing hands off to hang from, and every chain flowing right from there. A card is
-painted by the state it is in, not by its kind — what you read off the canvas is which
-loops are running, which are done, and which are waiting on you.
-
-The **Graph** view (the pinned sidebar row above every folder) shows all projects on one
-canvas — every folder's lane hung off a single START node, so the whole workspace reads
-as one graph with one beginning.
+Each project carries its own graph, laid out as a lane. Cards are painted by the state
+they're in rather than their kind, so the canvas reads as which loops are running, which
+are done, and which are waiting on you — and the **Graph** view hangs every project's lane
+off one START node.
 
 ## Install
 
@@ -74,37 +69,28 @@ GraphCode launches it, it doesn't bundle it.
 brew install --cask scgopi/graphcode/graphcode
 ```
 
-Or download the latest release,
-[v0.1.34](https://github.com/scgopi/GraphCode/releases/latest): grab
-[`graphcode-macos-arm64.dmg`](https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg),
-open it, and drag **GraphCode** to Applications. Releases are Developer ID signed and
-notarized.
+Or grab
+[`graphcode-macos-arm64.dmg`](https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg)
+from the [latest release](https://github.com/scgopi/GraphCode/releases/latest) and drag
+**GraphCode** to Applications. Releases are Developer ID signed and notarized.
 
 ## Using it
 
-1. **Add a project** — the sidebar's ⊕ menu: open a local folder, **clone a repository
-   from a URL**, or **add a remote repository over SSH** (key auth and zmx on the server
-   required — loops then run on the server while this Mac steers them). Each becomes a
-   project with its own graph. Whatever was open is restored next launch; right-click a
-   project to Close, Remove, or delete its loops.
+1. **Add a project** — the sidebar's ⊕ menu: open a local folder, clone a repository from a
+   URL, or add a remote repository over SSH (key auth and zmx on the server required — loops
+   then run on the server while this Mac steers them). Whatever was open is restored next
+   launch.
 2. **Create a loop** — ⊕ on the canvas or the Graph view. Write the prompt and hit Create:
-   the form opens on goal-based, the type chooser explains what each kind hands off, and
-   the title is optional — leave it blank and GraphCode asks the loop's own backend for a
-   name. A time-based loop's `/loop 1h Check for new reports` directive is composed for
-   you, and a goal-based loop's done check has a **Test** button that runs it exactly as
-   the daemon will.
-3. **Open it** — click the node. You get its terminal workspace: tabs (⌘T), splits (⌘D /
-   ⌘⇧D — split as many times as you like), ⌘1–9 to switch tabs, ⌘]/⌘[ to move between a
-   split's panes, and ⇧⌘]/⇧⌘[ to step between loops. ⌘K jumps to any loop by name, ⌥G
-   opens the downstream rail, and ⌘⇧R walks the loops asking for you, oldest first — all
-   of them listed in the menu bar. Every loop type opens the same way, including ones the
-   daemon started on its own — you're attaching to the live session, not a copy of its
-   output.
+   the type chooser explains what each kind hands off, and the title is optional — leave it
+   blank and GraphCode asks the loop's own backend for a name. A goal-based loop's done
+   check has a **Test** button that runs it exactly as the daemon will.
+3. **Open it** — click the node for its terminal workspace: tabs, splits, ⌘K to jump to any
+   loop by name, ⌘⇧R to walk the loops asking for you
+   ([all shortcuts](https://graphcode.app/shortcuts.html)). Every loop type opens the same
+   way, including ones the daemon started on its own — you're attaching to the live session,
+   not a copy of its output.
 4. **Connect loops** — drag between nodes. An edge is a hand-off by default (fires when the
    source resolves); it can also be a message or a spawn, with a condition and a cycle guard.
-
-A turn-based loop resolves when its session exits — the per-turn review happens inside the
-session itself, so there's no separate approve step in the app.
 
 ## Parts
 
@@ -131,32 +117,22 @@ make doctor          # checks every prerequisite and prints the fix for anything
 make third-party     # builds zmx and GhosttyKit (zig)
 make install-zmx install-cli daemon-install
 make run-app
+
+make test            # unit tests
+make check           # swiftlint + swift-format, both strict
 ```
 
-`make doctor` is the fastest way to find a missing piece — it checks the toolchain, the
+Start with `make doctor` when something is missing — it covers the toolchain, the
 submodules, the macOS 15 SDK zig needs, and the Metal toolchain GhosttyKit compiles shaders
-with.
-
-## Development
-
-```sh
-make test     # unit tests
-make check    # swiftlint + swift-format, both strict
-make format   # apply formatting
-```
-
-Design docs live in `docs/` and are kept local (gitignored) for now.
+with. Design docs live in `docs/` and are kept local (gitignored) for now.
 
 ## Known limitations
 
 - **Apple Silicon only.** GhosttyKit is built for the native architecture; there is no
   x86_64 slice, so a universal build won't link.
 - **Claude Code is the most complete backend.** Copilot CLI and Codex loops launch, run,
-  fan out, resume after a reboot, and receive message edges like Claude ones. Copilot
-  presence is read from its event log (local and remote), so a Copilot loop waiting for
-  input shows as "NEEDS YOU"; usage stays Claude Code-only. The picker refuses pairings a
-  backend can't host (time-based needs the session to re-trigger itself; composites need
-  verified sub-agents).
+  fan out, resume after a reboot, and receive message edges like Claude ones; usage
+  reporting stays Claude Code-only. The picker refuses pairings a backend can't host.
 - **A new folder stops at Claude's trust prompt.** An unattended loop started by the daemon
   in a folder Claude hasn't seen waits at *"Do you trust this folder?"* and shows as
   `running` while doing nothing. Attach once and answer it.
@@ -164,14 +140,11 @@ Design docs live in `docs/` and are kept local (gitignored) for now.
   instance) — the queued command runs only after the profile finishes.
 - **Sessions aren't reaped.** Long-lived `graphcode-*` zmx sessions accumulate; list them
   with `zmx list` and remove dead ones with `zmx kill`.
-- **Remote repositories run over one multiplexed SSH connection per host.** Launch,
-  attach, kill, messages, fan-out, and presence/usage/activity readings all ride it;
-  a forwarded daemon socket and a delivered Python CLI shim make `graphcode node
-  create/send/memo` work on the remote host. A dropped link redials itself, degrades
-  readings to "unknown" rather than "stopped", and never resolves a loop it merely
-  lost sight of. Worktrees aren't available there, goal predicates run locally (write
-  an explicit `ssh host …` if the check is remote), and a sleeping Mac fires no
-  edges — the daemon stays local by design.
+- **Remote repositories ride one multiplexed SSH connection per host.** A dropped link
+  redials itself and degrades readings to "unknown" rather than resolving a loop it merely
+  lost sight of. Worktrees aren't available there, goal predicates run locally (write an
+  explicit `ssh host …` if the check is remote), and a sleeping Mac fires no edges — the
+  daemon stays local by design.
 
 ## Inspiration & third-party
 
@@ -181,16 +154,12 @@ its unit is the worktree, GraphCode's is the graph of loops. Built on
 
 ## License
 
-The app and the daemon are under the [Functional Source
-License](https://fsl.software) v1.1 with an MIT future license
-([FSL-1.1-MIT](LICENSE)). Use it, read it, change it, self-host it, redistribute
-it — the one thing it does not permit is shipping a competing commercial product
-built from it. Every release converts to plain MIT two years after that release
-goes out.
-
-`GraphcodeKit/` and `graphcode-cli/` stay [MIT](GraphcodeKit/LICENSE), so
-scripting against `graphcode` or linking the domain types never raises a
-licensing question.
+The app and the daemon are under the [Functional Source License](https://fsl.software) v1.1
+with an MIT future license ([FSL-1.1-MIT](LICENSE)): use it, change it, self-host it,
+redistribute it — the one thing it does not permit is shipping a competing commercial
+product built from it, and every release converts to plain MIT two years after it goes out.
+`GraphcodeKit/` and `graphcode-cli/` stay [MIT](GraphcodeKit/LICENSE), so scripting against
+`graphcode` never raises a licensing question.
 
 Contributions are accepted under the [Developer Certificate of
 Origin](DCO) — add a `Signed-off-by` line with `git commit -s`.
