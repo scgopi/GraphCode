@@ -78,6 +78,12 @@ public static class GraphCodeUiaGateState {
   }
   [DllImport("user32.dll", SetLastError = true)]
   private static extern bool PostMessage(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll")]
+  private static extern IntPtr SendMessage(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr childAfter, string className, string windowName);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  private static extern bool SetWindowText(IntPtr window, string text);
   public static bool PostFixtureMutation(IntPtr window, uint mutation) {
     return PostMessage(window, 0x802A, (UIntPtr)mutation, IntPtr.Zero);
   }
@@ -87,11 +93,23 @@ public static class GraphCodeUiaGateState {
   public static bool PostKeyboard(IntPtr window, uint key) {
     return PostMessage(window, 0x0100, (UIntPtr)key, IntPtr.Zero);
   }
+  public static bool SendReturn(IntPtr window) {
+    if (window == IntPtr.Zero) return false;
+    SendMessage(window, 0x0100, (UIntPtr)0x0D, IntPtr.Zero);
+    return true;
+  }
   public static bool PostMouseClick(IntPtr window) {
     return PostMessage(window, 0x0201, UIntPtr.Zero, IntPtr.Zero);
   }
   public static bool PostCommand(IntPtr window, uint command) {
     return PostMessage(window, 0x0111, (UIntPtr)command, IntPtr.Zero);
+  }
+  public static bool PostClose(IntPtr window) {
+    return PostMessage(window, 0x0010, UIntPtr.Zero, IntPtr.Zero);
+  }
+  public static bool SetFirstEditText(IntPtr parent, string text) {
+    var edit = FindWindowEx(parent, IntPtr.Zero, "Edit", null);
+    return edit != IntPtr.Zero && SetWindowText(edit, text);
   }
 }
 "@ -ReferencedAssemblies @(
@@ -248,6 +266,9 @@ try {
   $navigationIds = @("overview-destination", "quick-chats-destination")
   $canvasActionIds = @("canvas-primary-action", "zoom-out", "actual-size", "zoom-in", "fit-canvas")
   $projectRows = @(Get-DirectChildren $projects $rawWalker | Where-Object { $_.Current.AutomationId -match '^project-row-' })
+  $graphDestination = Find-FragmentById $root "overview-destination" $rawWalker
+  Require (($null -ne $graphDestination) -and ($graphDestination.Current.Name -eq "Graph")) `
+    "global sidebar destination did not expose the pinned Graph identity"
   Require ($projectRows.Count -eq 3) "Projects did not expose grouped recent rows and the open project row"
   Require ((@($projectRows | ForEach-Object { $_.Current.Name }) -join "|") -eq "Fixture local|Fixture remote|UIA project") "dynamic project row names were not synchronized"
   foreach ($projectRow in $projectRows) {
@@ -611,8 +632,17 @@ try {
   Require ($null -ne $currentSafe) "safe worktree row disappeared before focus: $(@($currentRowsBeforeFocus | ForEach-Object { $_.Current.AutomationId }) -join ',')"
   Require ($currentSafe.Current.AutomationId -eq $safeRowId) "safe worktree identity changed before focus: $safeRowId -> $($currentSafe.Current.AutomationId)"
   Require ($safeFocusRow.Current.Name -eq "C:\fixture-safe") "safe worktree provider became unavailable before focus"
-  $safeFocusRow.SetFocus()
-  $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+  $focused = $null
+  for ($index = 0; $index -lt 20; $index++) {
+    $safeFocusRow.SetFocus()
+    Start-Sleep -Milliseconds 50
+    $candidate = [System.Windows.Automation.AutomationElement]::FocusedElement
+    if ($candidate.Current.AutomationId -eq $safeRowId) {
+      $focused = $candidate
+      break
+    }
+  }
+  Require ($null -ne $focused) "worktree row could not retain focus against concurrent desktop focus changes"
   Require ($focused.Current.AutomationId -eq $safeRowId) "focus source identity was '$($focused.Current.AutomationId)', expected '$safeRowId'"
   Require ((Get-RuntimeIdentity $focused) -eq (Get-RuntimeIdentity $safeFocusRow)) "focus runtime identity changed"
   for ($index = 0; $index -lt 20 -and -not [GraphCodeUiaGateState]::FocusObserved; $index++) {
@@ -678,6 +708,111 @@ try {
   $focusIdentity = $safeRowId
 
   $shellWindow = $process.MainWindowHandle
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 7)) "Rename Loop fixture command was rejected"
+  $renameDialog = $null
+  $desktop = [System.Windows.Automation.AutomationElement]::RootElement
+  $renameWindowCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty, "Rename Loop"
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Window
+    ))
+  )
+  $renameCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+    )),
+    $renameWindowCondition
+  )
+  for ($index = 0; $index -lt 40 -and $null -eq $renameDialog; $index++) {
+    Start-Sleep -Milliseconds 50
+    $renameDialog = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $renameCondition
+    )
+  }
+  Require ($null -ne $renameDialog) "Rename Loop command did not open its native dialog"
+  $renameElements = @($renameDialog.FindAll(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    [System.Windows.Automation.Condition]::TrueCondition
+  ))
+  $renameContent = @($renameElements | ForEach-Object { $_.Current.Name }) -join "`n"
+  Require ($renameContent -match "Choose the title shown") "Rename Loop dialog omitted its explanation"
+  Require ($renameContent -match "(?m)^Title$") "Rename Loop dialog omitted its Title field label"
+  Require ($renameContent -match "UIA loop A") "Rename Loop dialog did not populate the current title"
+  Require ([GraphCodeUiaGateState]::SetFirstEditText(
+    [IntPtr]$renameDialog.Current.NativeWindowHandle, "UIA renamed loop"
+  )) "Rename Loop dialog omitted its native editable title field"
+  Require ([GraphCodeUiaGateState]::SendReturn(
+    [IntPtr]$renameDialog.Current.NativeWindowHandle
+  )) "Rename Loop dialog rejected Return"
+  for ($index = 0; $index -lt 40; $index++) {
+    Start-Sleep -Milliseconds 50
+    $remainingRename = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $renameCondition
+    )
+    if ($null -eq $remainingRename) { break }
+  }
+  Require ($null -eq $remainingRename) "Return did not submit and close the Rename Loop dialog"
+
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 6)) "About dialog fixture command was rejected"
+  $aboutDialog = $null
+  $aboutWindowCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty, "About GraphCode"
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Window
+    ))
+  )
+  $aboutCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+    )),
+    $aboutWindowCondition
+  )
+  for ($index = 0; $index -lt 40 -and $null -eq $aboutDialog; $index++) {
+    Start-Sleep -Milliseconds 50
+    $aboutDialog = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $aboutCondition
+    )
+  }
+  if ($null -eq $aboutDialog) {
+    $processWindowCondition = New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+    )
+    $windowNames = @($desktop.FindAll(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $processWindowCondition
+    ) | ForEach-Object { $_.Current.Name })
+    throw "About command did not open the native About GraphCode dialog; process windows: $($windowNames -join ', '); status: $($status.Current.Name)"
+  }
+  $aboutElements = @($aboutDialog.FindAll(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    [System.Windows.Automation.Condition]::TrueCondition
+  ))
+  $aboutContent = @($aboutElements | ForEach-Object { $_.Current.Name }) -join "`n"
+  $aboutDescendants = @($aboutElements | ForEach-Object { "$($_.Current.ControlType.ProgrammaticName):$($_.Current.Name)" })
+  Require ($aboutContent -match "GraphCode\s+for Windows") "About dialog omitted the product identity: $($aboutDescendants -join ' | ')"
+  Require ($aboutContent -match "Version\s+\S+") "About dialog omitted the application version: $($aboutDescendants -join ' | ')"
+  $aboutOk = $aboutDialog.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty,
+      "OK"
+    ))
+  )
+  Require ($null -ne $aboutOk) "About dialog omitted its OK action"
+  Require ([GraphCodeUiaGateState]::PostClose(
+    [IntPtr]$aboutDialog.Current.NativeWindowHandle
+  )) "About dialog rejected its close command"
+  Start-Sleep -Milliseconds 250
+
   Require $process.CloseMainWindow() "shell refused caption close"
   Start-Sleep -Milliseconds 250
   $process.Refresh()
@@ -721,6 +856,8 @@ try {
     dynamicQuickChatCards = $quickChatCardIds
     dynamicInvocationsPassed = $true
     compositeNavigationPassed = $true
+    renameDialogPassed = $true
+    aboutDialogPassed = $true
     statusText = $statusTextAfter
     statusChanged = ($statusTextAfter -ne $initialStatus)
     statusNoChangeLiveEvents = $statusNoChangeLiveEvents

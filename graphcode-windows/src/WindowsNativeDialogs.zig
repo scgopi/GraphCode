@@ -18,6 +18,8 @@ const State = struct {
     values: [16][]u8 = [_][]u8{&.{}} ** 16,
     label_windows: [16]c.HWND = [_]c.HWND{null} ** 16,
     edits: [16]c.HWND = [_]c.HWND{null} ** 16,
+    description: []const u8 = "",
+    description_window: c.HWND = null,
     count: usize = 0,
     scroll_offset: i32 = 0,
     accepted: bool = false,
@@ -38,8 +40,24 @@ pub fn text(
     labels: []const []const u8,
     initial: []const []const u8,
 ) !?Result {
+    return textWithDescription(parent, allocator, title, "", labels, initial);
+}
+
+pub fn textWithDescription(
+    parent: c.HWND,
+    allocator: std.mem.Allocator,
+    title: []const u8,
+    description: []const u8,
+    labels: []const []const u8,
+    initial: []const []const u8,
+) !?Result {
     if (labels.len == 0 or labels.len > 16 or labels.len != initial.len) return error.InvalidDialogFields;
-    var state = State{ .allocator = allocator, .parent = parent, .count = labels.len };
+    var state = State{
+        .allocator = allocator,
+        .parent = parent,
+        .count = labels.len,
+        .description = description,
+    };
     for (labels, 0..) |label, index| {
         state.labels[index] = label;
         state.values[index] = allocator.dupe(u8, initial[index]) catch |err| {
@@ -139,6 +157,7 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
     if (!active) return c.DefWindowProcW(hwnd, message, wparam, lparam);
     switch (message) {
         c.WM_CREATE => {
+            if (active_state.description.len != 0) createDescription(hwnd, &active_state);
             for (active_state.labels[0..active_state.count], 0..) |label, index| {
                 createField(hwnd, &active_state, label, index);
             }
@@ -173,6 +192,19 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                 return 0;
             }
         },
+        c.WM_KEYDOWN => {
+            if (wparam == c.VK_RETURN) {
+                readValues(&active_state);
+                active_state.accepted = true;
+                active_state.closed = true;
+                return 0;
+            }
+            if (wparam == c.VK_ESCAPE) {
+                active_state.accepted = false;
+                active_state.closed = true;
+                return 0;
+            }
+        },
         c.WM_CLOSE => {
             active_state.accepted = false;
             active_state.closed = true;
@@ -183,8 +215,31 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
     return c.DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
+fn createDescription(hwnd: c.HWND, state: *State) void {
+    const wide = wideZ(state.allocator, state.description) catch return;
+    defer state.allocator.free(wide);
+    state.description_window = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr,
+        wide.ptr,
+        c.WS_CHILD | c.WS_VISIBLE,
+        18,
+        12,
+        540,
+        36,
+        hwnd,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    );
+}
+
+fn fieldBaseY(state: *const State) usize {
+    return if (state.description.len == 0) 12 else 56;
+}
+
 fn createField(hwnd: c.HWND, state: *State, label: []const u8, index: usize) void {
-    const y: i32 = @intCast(12 + index * 52);
+    const y: i32 = @intCast(fieldBaseY(state) + index * 52);
     const wide_label = wideZ(state.allocator, label) catch return;
     defer state.allocator.free(wide_label);
     state.label_windows[index] = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr, wide_label.ptr, c.WS_CHILD | c.WS_VISIBLE, 18, y, 500, 18, hwnd, null, c.GetModuleHandleW(null), null);
@@ -198,7 +253,7 @@ fn createField(hwnd: c.HWND, state: *State, label: []const u8, index: usize) voi
 
 fn repositionFields() void {
     for (0..active_state.count) |index| {
-        const y: i32 = @as(i32, @intCast(12 + index * 52)) - active_state.scroll_offset;
+        const y: i32 = @as(i32, @intCast(fieldBaseY(&active_state) + index * 52)) - active_state.scroll_offset;
         const visible = y >= 0 and y < 535;
         _ = c.ShowWindow(active_state.label_windows[index], if (visible) c.SW_SHOW else c.SW_HIDE);
         _ = c.ShowWindow(active_state.edits[index], if (visible) c.SW_SHOW else c.SW_HIDE);

@@ -224,7 +224,7 @@ pub fn installMenu(hwnd: c.HWND) !void {
     append(help, "GraphCode Basics\tF1", @intFromEnum(Command.onboarding));
     append(help, "Check for Updates...", @intFromEnum(Command.check_updates));
     separator(help);
-    append(help, "About GraphCode Windows", @intFromEnum(Command.about));
+    append(help, "About GraphCode", @intFromEnum(Command.about));
 
     appendPopup(menu, "File", file);
     appendPopup(menu, "Loop", loop);
@@ -328,6 +328,7 @@ fn createAccelerators() c.HACCEL {
 test "native menu exposes the parity command groups" {
     try std.testing.expectEqual(Command.open_folder, commandFromId(4101).?);
     try std.testing.expectEqual(Command.split_right, commandFromId(4303).?);
+    try std.testing.expectEqual(Command.about, commandFromId(4501).?);
     try std.testing.expectEqual(@as(?Command, null), commandFromId(9999));
 }
 

@@ -973,10 +973,11 @@ pub const App = struct {
         defer self.allocator.free(project_path);
         const node_id = self.allocator.dupe(u8, graph.nodes.items[index].id) catch return;
         defer self.allocator.free(node_id);
-        var result = NativeDialogs.text(
+        var result = NativeDialogs.textWithDescription(
             self.window.hwnd,
             self.allocator,
             "Rename Loop",
+            "Choose the title shown for this loop throughout the graph.",
             &.{"Title"},
             &.{graph.nodes.items[index].title},
         ) catch {
@@ -1832,6 +1833,23 @@ pub const App = struct {
         );
     }
 
+    fn showAbout(self: *App) void {
+        const message = std.fmt.allocPrint(
+            self.allocator,
+            "GraphCode for Windows\nVersion {s}\n\nVisualize and orchestrate parallel coding-agent work.",
+            .{build_options.version},
+        ) catch return;
+        defer self.allocator.free(message);
+        const message_wide = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, message) catch return;
+        defer self.allocator.free(message_wide);
+        _ = c.MessageBoxW(
+            self.window.hwnd,
+            message_wide.ptr,
+            std.unicode.utf8ToUtf16LeStringLiteral("About GraphCode").ptr,
+            c.MB_OK | c.MB_ICONINFORMATION,
+        );
+    }
+
     fn inspectWorktrees(self: *App) void {
         if (envFlag("GRAPHCODE_UIA_GATE") and envFlag("GRAPHCODE_UIA_SHOW_DIALOGS") and self.worktree_inspection != null) {
             self.presentWorktreeSweep();
@@ -2208,6 +2226,16 @@ pub const App = struct {
 
     fn mutateUiaFixture(self: *App, mutation: usize) void {
         if (!envFlag("GRAPHCODE_UIA_GATE")) return;
+        if (mutation == 6) {
+            self.showAbout();
+            return;
+        }
+        if (mutation == 7) {
+            self.closeCompositeGroup();
+            _ = self.model.setSelectedID("11111111-1111-4111-8111-111111111111");
+            self.editSelectedNode();
+            return;
+        }
         const dialog = if (self.worktree_dialog) |*value| value else return;
         switch (mutation) {
             1 => {
@@ -3326,7 +3354,7 @@ fn onWindowMessage(
                     .fit_canvas => app.handleAction(.fit_canvas),
                     .onboarding => app.handleAction(.onboarding),
                     .check_updates => app.checkForUpdates(),
-                    .about => app.setStatus("GraphCode Windows — native Win32 shell"),
+                    .about => app.showAbout(),
                 }
             }
             app.updateNativeChrome();

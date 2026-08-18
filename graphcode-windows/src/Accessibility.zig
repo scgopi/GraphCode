@@ -266,7 +266,7 @@ pub fn defaultContract(allocator: std.mem.Allocator) !Provider {
     _ = try provider.add(.{ .id = "worktrees", .name = "Worktrees", .role = .list, .parent = sidebar, .focusable = true, .patterns = &.{ .selection, .scroll } });
     const graph = try provider.add(.{ .id = "graph", .name = "Graph", .role = .navigation, .parent = window });
     _ = try provider.add(.{ .id = "graph-card", .name = "Graph card", .role = .card, .parent = graph, .focusable = true, .patterns = &.{ .selection, .invoke } });
-    _ = try provider.add(.{ .id = "overview-destination", .name = "Open overview", .role = .button, .parent = sidebar, .focusable = true, .patterns = &.{.invoke} });
+    _ = try provider.add(.{ .id = "overview-destination", .name = "Graph", .role = .button, .parent = sidebar, .focusable = true, .patterns = &.{.invoke} });
     _ = try provider.add(.{ .id = "quick-chats-destination", .name = "Quick Chats", .role = .button, .parent = sidebar, .focusable = true, .patterns = &.{.invoke} });
     _ = try provider.add(.{ .id = "canvas-primary-action", .name = "New Loop or Chat", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
     _ = try provider.add(.{ .id = "zoom-out", .name = "Zoom out", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });

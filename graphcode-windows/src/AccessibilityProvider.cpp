@@ -762,7 +762,7 @@ class Node final : public IRawElementProviderSimple,
         L"GraphCode UIA Root", L"Projects", L"Loops", L"Worktrees", L"Graph", L"Actions",
         L"Status", L"Inspect worktrees", L"Reclaim selected worktrees", L"Reveal in Explorer",
         L"Edit worktree policy", L"Save worktree policy", L"Allow reclaim", L"Confirm each reclaim",
-        L"Open overview", L"Quick Chats", L"New Loop or Chat", L"Zoom out",
+        L"Graph", L"Quick Chats", L"New Loop or Chat", L"Zoom out",
         L"Actual size", L"Zoom in", L"Fit canvas",
     };
     return names[id_ >= 0 && id_ <= 20 ? id_ : 0];

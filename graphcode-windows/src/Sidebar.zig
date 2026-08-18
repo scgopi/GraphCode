@@ -35,7 +35,10 @@ pub fn draw(
                 drawText(hdc, allocator, if (project.isRemote()) "R" else "L", 18, row.top + 1, 9, 0x007A7A7A);
                 drawText(hdc, allocator, project.name, 34, row.top, 13, 0x00E6E6E6);
             },
-            .overview => drawText(hdc, allocator, "Open", 18, row.top, 14, 0x00B8B8B8),
+            .overview => {
+                drawText(hdc, allocator, "G", 18, row.top, 11, 0x007AB8FF);
+                drawText(hdc, allocator, "Graph", 34, row.top, 13, 0x00E6E6E6);
+            },
             .open_project => if (row.project_path) |path| if (model.graphFor(path)) |summary| {
                 const selected = if (model.selected_project_path) |selected_path|
                     std.mem.eql(u8, selected_path, path)
@@ -262,9 +265,9 @@ pub fn appendRows(
         try rows.append(allocator, .{ .kind = .project, .index = index, .top = top, .project_path = project.path });
         top += 24;
     }
+    try rows.append(allocator, .{ .kind = .overview, .index = 0, .top = top + 24 });
+    top += 62;
     if (model.graphs.items.len != 0 or model.graph != null) {
-        try rows.append(allocator, .{ .kind = .overview, .index = 0, .top = top + 24 });
-        top += 62;
         if (model.graphs.items.len != 0) {
             for (model.graphs.items, 0..) |summary, graph_index| {
                 try rows.append(allocator, .{ .kind = .open_project, .index = graph_index, .top = top, .project_path = summary.project.path });
@@ -308,9 +311,8 @@ pub fn appendRows(
 
 pub fn layoutFor(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection) Layout {
     var loop_count: usize = 0;
-    var graph_section_height: i32 = 0;
+    var graph_section_height: i32 = 62;
     if (model.graphs.items.len != 0) {
-        graph_section_height = 62;
         for (model.graphs.items) |summary| {
             loop_count += summary.nodes.items.len;
             graph_section_height += 62 + @as(i32, @intCast(summary.nodes.items.len * 24));
@@ -327,7 +329,7 @@ pub fn layoutFor(model: *const GraphModel.Model, inspection: ?*const WorktreeSta
         .loop_count = loop_count,
         .worktree_count = if (inspection) |value| value.entries.items.len else 0,
         .quick_chat_count = model.quick_chats.items.len,
-        .graph_present = model.graphs.items.len != 0 or model.graph != null,
+        .graph_present = true,
         .inspection_present = inspection != null,
         .graph_section_height = graph_section_height,
     };
@@ -709,8 +711,19 @@ test "sidebar without graph counts only static rendered content" {
         .name = try std.testing.allocator.dupe(u8, "Project"),
     });
     const no_graph_max = maxScroll(&model, null, 100);
-    try std.testing.expectEqual(@as(i32, Tokens.header_height + 78 + 24 + 24 + 42 + 24 - 100), no_graph_max);
-    try std.testing.expectEqual(no_graph_max, clampScroll(180, no_graph_max));
+    try std.testing.expectEqual(@as(i32, Tokens.header_height + 78 + 24 + 24 + 62 + 42 + 24 - 100), no_graph_max);
+    try std.testing.expectEqual(@as(i32, 180), clampScroll(180, no_graph_max));
+}
+
+test "global Graph row remains pinned without an open project" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    var rows = try appendRows(std.testing.allocator, &model, null, 0);
+    defer rows.deinit(std.testing.allocator);
+    try std.testing.expectEqual(RowKind.overview, rows.items[0].kind);
+    const graph_row = rowAt(24, rows.items[0].top + 4, &model, null, 0, 700) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(RowKind.overview, graph_row.kind);
 }
 
 test "recent projects are grouped into local and remote sections" {
@@ -769,7 +782,7 @@ test "quick chats remain selectable without an open graph or inspection" {
     try std.testing.expectEqual(RowKind.quick_chat, row.kind);
     try std.testing.expectEqual(@as(usize, 0), row.index);
     try std.testing.expectEqual(
-        @as(i32, Tokens.header_height + 78 + 42),
+        @as(i32, Tokens.header_height + 78 + 62 + 42),
         layout.quickChatRowTop(0),
     );
     try std.testing.expect(rowAt(24, layout.quickChatHeadingTop() + 4, &model, null, 0, 700) == null);
