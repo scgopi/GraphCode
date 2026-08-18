@@ -2261,6 +2261,10 @@ pub const App = struct {
             _ = c.InvalidateRect(self.window.hwnd, null, 0);
             return;
         }
+        if (mutation == 11) {
+            self.showRemoteProjectInfo("ssh://builder/GraphCode");
+            return;
+        }
         const dialog = if (self.worktree_dialog) |*value| value else return;
         switch (mutation) {
             1 => {

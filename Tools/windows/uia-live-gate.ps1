@@ -840,6 +840,45 @@ try {
   )) "empty project node form rejected cancellation"
   Start-Sleep -Milliseconds 200
 
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 11)) `
+    "Remote Connection fixture command was rejected"
+  $remoteDialog = $null
+  $remoteWindowCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty, "Remote Connection"
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Window
+    ))
+  )
+  $remoteCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+    )),
+    $remoteWindowCondition
+  )
+  for ($index = 0; $index -lt 40 -and $null -eq $remoteDialog; $index++) {
+    Start-Sleep -Milliseconds 50
+    $remoteDialog = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $remoteCondition
+    )
+  }
+  Require ($null -ne $remoteDialog) "Remote Connection action did not open its read-only sheet"
+  $remoteContent = @($remoteDialog.FindAll(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    [System.Windows.Automation.Condition]::TrueCondition
+  ) | ForEach-Object { $_.Current.Name }) -join "`n"
+  Require ($remoteContent -match "ssh://builder/GraphCode") `
+    "Remote Connection sheet omitted the encoded project identity"
+  Require ($remoteContent -match "removing and adding the remote project") `
+    "Remote Connection sheet omitted its management guidance"
+  Require ([GraphCodeUiaGateState]::PostClose(
+    [IntPtr]$remoteDialog.Current.NativeWindowHandle
+  )) "Remote Connection sheet rejected close"
+  Start-Sleep -Milliseconds 200
+
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 6)) "About dialog fixture command was rejected"
   $aboutDialog = $null
   $aboutWindowCondition = New-Object System.Windows.Automation.AndCondition(
@@ -942,6 +981,7 @@ try {
     inlineIngressErrorPassed = $true
     emptyOverviewPassed = $true
     emptyProjectPassed = $true
+    remoteConnectionInfoPassed = $true
     aboutDialogPassed = $true
     statusText = $statusTextAfter
     statusChanged = ($statusTextAfter -ne $initialStatus)
