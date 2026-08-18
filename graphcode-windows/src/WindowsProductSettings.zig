@@ -222,7 +222,8 @@ const Contract = struct {
     betaUpdates: ?bool = null,
 };
 
-pub fn open(parent: c.HWND, allocator: std.mem.Allocator, current: Settings) !?Settings {
+pub fn open(parent_address: usize, allocator: std.mem.Allocator, current: Settings) !?Settings {
+    const parent = windowHandle(parent_address);
     if (settings_active) return error.SettingsAlreadyOpen;
     try registerSettingsClass();
     settings_state = .{
@@ -241,7 +242,7 @@ pub fn open(parent: c.HWND, allocator: std.mem.Allocator, current: Settings) !?S
 
     var frame = c.RECT{ .left = 0, .top = 0, .right = settings_width, .bottom = settings_height };
     const style = c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU;
-    const ex_style = c.WS_EX_DLGMODALFRAME;
+    const ex_style = c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT;
     _ = c.AdjustWindowRectEx(&frame, style, 0, ex_style);
     const width = frame.right - frame.left;
     const height = frame.bottom - frame.top;
@@ -264,6 +265,8 @@ pub fn open(parent: c.HWND, allocator: std.mem.Allocator, current: Settings) !?S
         settings_active = false;
         return error.SettingsCreationFailed;
     };
+    const safe_hwnd = windowHandle(@intFromPtr(hwnd.?));
+    createSettingsControls(safe_hwnd);
     _ = c.EnableWindow(parent, 0);
     _ = c.ShowWindow(hwnd, c.SW_SHOW);
     _ = c.SetForegroundWindow(hwnd);
@@ -275,8 +278,19 @@ pub fn open(parent: c.HWND, allocator: std.mem.Allocator, current: Settings) !?S
             settings_state.closed = true;
             break;
         }
-        _ = c.TranslateMessage(&message);
-        _ = c.DispatchMessageW(&message);
+        if (message.message == c.WM_KEYDOWN and message.wParam == c.VK_RETURN) {
+            settings_state.accepted = true;
+            settings_state.closed = true;
+            continue;
+        }
+        if (message.message == c.WM_KEYDOWN and message.wParam == c.VK_ESCAPE) {
+            settings_state.closed = true;
+            continue;
+        }
+        if (c.IsDialogMessageW(hwnd, &message) == 0) {
+            _ = c.TranslateMessage(&message);
+            _ = c.DispatchMessageW(&message);
+        }
     }
     const accepted = settings_state.accepted;
     _ = c.DestroyWindow(hwnd);
@@ -304,9 +318,38 @@ const copilot_values = [_][]const u8{ "ask", "allowTools", "allowEverything" };
 const codex_values = [_][]const u8{ "ask", "workspace", "unsandboxed" };
 const backend_labels = [_][]const u8{ "Claude Code", "Copilot CLI", "Codex" };
 const model_labels = [_][]const u8{ "Fast", "Standard", "Capable" };
-const claude_labels = [_][]const u8{ "Ask every time", "Accept edits", "Automatic", "Don't ask", "Bypass all checks" };
-const copilot_labels = [_][]const u8{ "Ask", "Allow tools", "Allow everything" };
-const codex_labels = [_][]const u8{ "Ask", "Workspace writes", "Unsandboxed" };
+const claude_labels = [_][]const u8{ "Ask every time", "Accept file edits", "Auto (recommended)", "Don't ask", "Bypass all checks" };
+const copilot_labels = [_][]const u8{ "Ask every time", "Allow tools only", "YOLO (recommended)" };
+const codex_labels = [_][]const u8{ "Ask when unsure", "Workspace (recommended)", "No sandbox" };
+const claude_explanations = [_][]const u8{
+    "The CLI's own default. An unattended loop will wait at the first prompt forever while the graph reports it as running.",
+    "File edits go through; other tools still ask.",
+    "Approves the ordinary work of a coding session and keeps its guardrails.",
+    "Stops asking, without removing the checks themselves.",
+    "Every permission check is skipped. A loop can do anything you can.",
+};
+const copilot_explanations = [_][]const u8{
+    "Copilot's own default. An unattended loop will wait at the first prompt.",
+    "Tools run without confirmation, but URL access and paths beyond the granted directories still prompt.",
+    "Copilot's --yolo: tools, paths, and URLs all approved — what an unattended loop needs.",
+};
+const codex_explanations = [_][]const u8{
+    "Codex's own default. An unattended loop will wait at the first prompt.",
+    "Runs without asking, and may write inside the project it was given.",
+    "Skips every approval and the sandbox entirely — a loop can do anything you can, anywhere.",
+};
+
+const backend_id = 6112;
+const claude_id = 6120;
+const copilot_id = 6128;
+const codex_id = 6136;
+const model_id = 6144;
+const auto_model_id = 6152;
+const activity_id = 6160;
+const briefing_id = 6168;
+const beta_id = 6176;
+const save_id = 6184;
+const cancel_id = 6192;
 
 const SettingsDialogState = struct {
     allocator: std.mem.Allocator,
@@ -321,12 +364,14 @@ const SettingsDialogState = struct {
     auto_model: bool,
     accepted: bool = false,
     closed: bool = false,
+    controls: [9]c.HWND = @splat(null),
+    explanations: [9]c.HWND = @splat(null),
 };
 
 const settings_class = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeProductSettings");
 const settings_title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Settings");
 const settings_width: i32 = 620;
-const settings_height: i32 = 760;
+const settings_height: i32 = 830;
 var settings_active = false;
 var settings_state: SettingsDialogState = undefined;
 
@@ -347,20 +392,52 @@ fn registerSettingsClass() !void {
 }
 
 fn settingsWindowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
-    if (!settings_active) return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    const safe_hwnd: c.HWND = if (hwnd) |value| windowHandle(@intFromPtr(value)) else null;
+    if (!settings_active) return c.DefWindowProcW(safe_hwnd, message, wparam, lparam);
     switch (message) {
+        c.WM_NCCREATE => return 1,
+        c.WM_CREATE => return 0,
         c.WM_ERASEBKGND => return 1,
         c.WM_PAINT => {
             var state: c.PAINTSTRUCT = undefined;
-            const hdc = c.BeginPaint(hwnd, &state);
+            const hdc = c.BeginPaint(safe_hwnd, &state);
             paintSettings(hdc);
-            _ = c.EndPaint(hwnd, &state);
+            _ = c.EndPaint(safe_hwnd, &state);
             return 0;
         },
         c.WM_LBUTTONUP => {
             const point = CanvasInput.decodeMouseMessage(lparam);
-            if (applySettingsClick(point.x, point.y)) _ = c.InvalidateRect(hwnd, null, 0);
+            if (applySettingsClick(point.x, point.y)) _ = c.InvalidateRect(safe_hwnd, null, 0);
             return 0;
+        },
+        c.WM_COMMAND => {
+            const command: u16 = @truncate(wparam);
+            switch (command) {
+                save_id => {
+                    settings_state.accepted = true;
+                    settings_state.closed = true;
+                },
+                cancel_id => settings_state.closed = true,
+                backend_id => settings_state.backend = (settings_state.backend + 1) % backend_values.len,
+                claude_id => settings_state.claude = (settings_state.claude + 1) % claude_values.len,
+                copilot_id => settings_state.copilot = (settings_state.copilot + 1) % copilot_values.len,
+                codex_id => settings_state.codex = (settings_state.codex + 1) % codex_values.len,
+                model_id => settings_state.model = (settings_state.model + 1) % model_values.len,
+                auto_model_id => settings_state.auto_model = !settings_state.auto_model,
+                activity_id => settings_state.activity = !settings_state.activity,
+                briefing_id => settings_state.briefing = !settings_state.briefing,
+                beta_id => settings_state.beta = !settings_state.beta,
+                else => return c.DefWindowProcW(safe_hwnd, message, wparam, lparam),
+            }
+            updateSettingsControls();
+            _ = c.InvalidateRect(safe_hwnd, null, 0);
+            return 0;
+        },
+        c.WM_CTLCOLORSTATIC => {
+            const hdc = deviceContext(wparam);
+            _ = c.SetTextColor(hdc, settingsRgb(190, 190, 198));
+            _ = c.SetBkMode(hdc, c.TRANSPARENT);
+            return @intCast(@intFromPtr(c.GetStockObject(c.NULL_BRUSH)));
         },
         c.WM_KEYDOWN => {
             if (wparam == c.VK_ESCAPE) {
@@ -379,29 +456,30 @@ fn settingsWindowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c
         },
         else => {},
     }
-    return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    return c.DefWindowProcW(safe_hwnd, message, wparam, lparam);
 }
 
 fn applySettingsClick(x: i32, y: i32) bool {
-    if (inside(x, y, settingsRect(476, 708, 584, 746))) {
+    if (inside(x, y, settingsRect(476, 780, 584, 818))) {
         settings_state.accepted = true;
         settings_state.closed = true;
         return false;
     }
-    if (inside(x, y, settingsRect(374, 708, 466, 746))) {
+    if (inside(x, y, settingsRect(374, 780, 466, 818))) {
         settings_state.closed = true;
         return false;
     }
-    if (rowHit(x, y, 82)) settings_state.backend = (settings_state.backend + 1) % backend_values.len
-    else if (rowHit(x, y, 168)) settings_state.claude = (settings_state.claude + 1) % claude_values.len
-    else if (rowHit(x, y, 224)) settings_state.copilot = (settings_state.copilot + 1) % copilot_values.len
+    if (rowHit(x, y, 70)) settings_state.backend = (settings_state.backend + 1) % backend_values.len
+    else if (rowHit(x, y, 148)) settings_state.claude = (settings_state.claude + 1) % claude_values.len
+    else if (rowHit(x, y, 210)) settings_state.copilot = (settings_state.copilot + 1) % copilot_values.len
     else if (rowHit(x, y, 280)) settings_state.codex = (settings_state.codex + 1) % codex_values.len
-    else if (rowHit(x, y, 390)) settings_state.model = (settings_state.model + 1) % model_values.len
-    else if (rowHit(x, y, 446)) settings_state.auto_model = !settings_state.auto_model
-    else if (rowHit(x, y, 530)) settings_state.activity = !settings_state.activity
-    else if (rowHit(x, y, 586)) settings_state.briefing = !settings_state.briefing
-    else if (rowHit(x, y, 642)) settings_state.beta = !settings_state.beta
+    else if (rowHit(x, y, 398)) settings_state.model = (settings_state.model + 1) % model_values.len
+    else if (rowHit(x, y, 432)) settings_state.auto_model = !settings_state.auto_model
+    else if (rowHit(x, y, 512)) settings_state.activity = !settings_state.activity
+    else if (rowHit(x, y, 584)) settings_state.briefing = !settings_state.briefing
+    else if (rowHit(x, y, 672)) settings_state.beta = !settings_state.beta
     else return false;
+    updateSettingsControls();
     return true;
 }
 
@@ -412,47 +490,112 @@ fn rowHit(x: i32, y: i32, top: i32) bool {
 fn paintSettings(hdc: c.HDC) void {
     settingsFill(hdc, settingsRect(0, 0, settings_width, settings_height), settingsRgb(35, 35, 38));
     settingsText(hdc, "Settings", settingsRect(36, 22, 584, 54), 24, settingsRgb(245, 245, 247), true);
-    settingsText(hdc, "DEFAULT BACKEND", settingsRect(36, 62, 260, 80), 10, settingsRgb(135, 135, 142), true);
-    choiceRow(hdc, 82, "New loops use", backend_labels[settings_state.backend]);
-    settingsText(hdc, "Which backend a new loop starts on. You can still change it per loop.", settingsRect(48, 132, 572, 154), 11, settingsRgb(145, 145, 152), false);
-
-    settingsText(hdc, "PERMISSIONS", settingsRect(36, 154, 260, 172), 10, settingsRgb(135, 135, 142), true);
-    choiceRow(hdc, 168, "Claude Code", claude_labels[settings_state.claude]);
-    choiceRow(hdc, 224, "Copilot CLI", copilot_labels[settings_state.copilot]);
-    choiceRow(hdc, 280, "Codex", codex_labels[settings_state.codex]);
-    settingsText(hdc, "Loops continue when this window is closed. Avoid modes that wait forever at a permission prompt.", settingsRect(48, 332, 572, 370), 11, settingsRgb(145, 145, 152), false);
-
-    settingsText(hdc, "MODEL", settingsRect(36, 372, 260, 390), 10, settingsRgb(135, 135, 142), true);
-    choiceRow(hdc, 390, "Default model", model_labels[settings_state.model]);
-    toggleRow(hdc, 446, "Pick a model for each loop", settings_state.auto_model);
-
-    settingsText(hdc, "BEHAVIOR", settingsRect(36, 506, 260, 524), 10, settingsRgb(135, 135, 142), true);
-    toggleRow(hdc, 530, "Show the activity strip", settings_state.activity);
-    toggleRow(hdc, 586, "Tell sessions they're part of a graph", settings_state.briefing);
-    toggleRow(hdc, 642, "Get beta releases", settings_state.beta);
-
-    settingsButton(hdc, settingsRect(374, 708, 466, 746), "Cancel", false);
-    settingsButton(hdc, settingsRect(476, 708, 584, 746), "Save", true);
+    settingsText(hdc, "DEFAULT BACKEND", settingsRect(36, 52, 260, 68), 10, settingsRgb(135, 135, 142), true);
+    settingsText(hdc, "PERMISSIONS", settingsRect(36, 130, 260, 146), 10, settingsRgb(135, 135, 142), true);
+    settingsText(hdc, "MODEL", settingsRect(36, 380, 260, 396), 10, settingsRgb(135, 135, 142), true);
+    settingsText(hdc, "BEHAVIOR", settingsRect(36, 494, 260, 510), 10, settingsRgb(135, 135, 142), true);
+    settingsText(hdc, "UPDATES", settingsRect(36, 654, 260, 670), 10, settingsRgb(135, 135, 142), true);
 }
 
-fn choiceRow(hdc: c.HDC, top: i32, label: []const u8, value: []const u8) void {
-    settingsRounded(hdc, settingsRect(36, top, 584, top + 48), settingsRgb(45, 45, 49), settingsRgb(66, 66, 72), 8);
-    settingsText(hdc, label, settingsRect(50, top + 15, 280, top + 36), 13, settingsRgb(232, 232, 236), false);
-    settingsText(hdc, value, settingsRect(288, top + 15, 558, top + 36), 12, settingsRgb(90, 174, 255), false);
-    settingsText(hdc, "›", settingsRect(556, top + 13, 574, top + 37), 16, settingsRgb(125, 125, 132), false);
+fn createSettingsControls(hwnd: c.HWND) void {
+    settings_state.controls[0] = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr,
+        std.unicode.utf8ToUtf16LeStringLiteral("New loops use: Claude Code").ptr,
+        c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_PUSHBUTTON,
+        36,
+        70,
+        548,
+        30,
+        hwnd,
+        @ptrFromInt(backend_id),
+        c.GetModuleHandleW(null),
+        null,
+    );
+    settings_state.explanations[0] = createSettingsControl(hwnd, "STATIC", "Which backend a new loop starts on. You can still change it per loop.", c.WS_CHILD | c.WS_VISIBLE | c.SS_LEFT, 48, 102, 524, 24, 0);
+
+    settings_state.controls[1] = createSettingsControl(hwnd, "BUTTON", "", c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_PUSHBUTTON, 36, 148, 548, 30, claude_id);
+    settings_state.explanations[1] = createSettingsControl(hwnd, "STATIC", "", c.WS_CHILD | c.WS_VISIBLE | c.SS_LEFT, 48, 180, 524, 28, 0);
+    settings_state.controls[2] = createSettingsControl(hwnd, "BUTTON", "", c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_PUSHBUTTON, 36, 210, 548, 30, copilot_id);
+    settings_state.explanations[2] = createSettingsControl(hwnd, "STATIC", "", c.WS_CHILD | c.WS_VISIBLE | c.SS_LEFT, 48, 242, 524, 36, 0);
+    settings_state.controls[3] = createSettingsControl(hwnd, "BUTTON", "", c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_PUSHBUTTON, 36, 280, 548, 30, codex_id);
+    settings_state.explanations[3] = createSettingsControl(hwnd, "STATIC", "", c.WS_CHILD | c.WS_VISIBLE | c.SS_LEFT, 48, 312, 524, 28, 0);
+    settings_state.explanations[4] = createSettingsControl(hwnd, "STATIC", "A loop runs whether or not this window is open, so nobody is there to answer a permission prompt.", c.WS_CHILD | c.WS_VISIBLE | c.SS_LEFT, 48, 342, 524, 34, 0);
+
+    settings_state.controls[4] = createSettingsControl(hwnd, "BUTTON", "", c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_PUSHBUTTON, 36, 398, 548, 30, model_id);
+    settings_state.controls[5] = createSettingsControl(hwnd, "BUTTON", "Pick a model for each loop", c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_AUTOCHECKBOX, 44, 432, 532, 26, auto_model_id);
+    settings_state.explanations[5] = createSettingsControl(hwnd, "STATIC", "The default model tier is copied into new loops. On, an unpinned loop is routed by its type; a per-loop model always wins.", c.WS_CHILD | c.WS_VISIBLE | c.SS_LEFT, 48, 462, 524, 42, 0);
+
+    settings_state.controls[6] = createSettingsControl(hwnd, "BUTTON", "Show the activity strip", c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_AUTOCHECKBOX, 44, 512, 532, 26, activity_id);
+    settings_state.explanations[6] = createSettingsControl(hwnd, "STATIC", "A strip along the window's bottom lists passes, hand-offs, and state changes as they happen. It starts empty after a relaunch.", c.WS_CHILD | c.WS_VISIBLE | c.SS_LEFT, 48, 542, 524, 38, 0);
+    settings_state.controls[7] = createSettingsControl(hwnd, "BUTTON", "Tell sessions they're part of a graph", c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_AUTOCHECKBOX, 44, 584, 532, 26, briefing_id);
+    settings_state.explanations[7] = createSettingsControl(hwnd, "STATIC", "Lets a loop create more loops when work genuinely splits. Off, a session does its assigned work and never creates anything.", c.WS_CHILD | c.WS_VISIBLE | c.SS_LEFT, 48, 614, 524, 38, 0);
+
+    settings_state.controls[8] = createSettingsControl(hwnd, "BUTTON", "Get beta releases", c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_AUTOCHECKBOX, 44, 672, 532, 26, beta_id);
+    settings_state.explanations[8] = createSettingsControl(hwnd, "STATIC", "On, Check for Updates offers pre-releases as well as stable releases — newer features, less soak time. Off, stable releases only.", c.WS_CHILD | c.WS_VISIBLE | c.SS_LEFT, 48, 702, 524, 50, 0);
+
+    _ = createSettingsControl(hwnd, "BUTTON", "Cancel", c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_PUSHBUTTON, 374, 780, 92, 38, cancel_id);
+    _ = createSettingsControl(hwnd, "BUTTON", "Save", c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_DEFPUSHBUTTON, 476, 780, 108, 38, save_id);
+    updateSettingsControls();
 }
 
-fn toggleRow(hdc: c.HDC, top: i32, label: []const u8, enabled: bool) void {
-    settingsRounded(hdc, settingsRect(36, top, 584, top + 48), settingsRgb(45, 45, 49), settingsRgb(66, 66, 72), 8);
-    settingsText(hdc, label, settingsRect(50, top + 15, 470, top + 36), 13, settingsRgb(232, 232, 236), false);
-    settingsRounded(hdc, settingsRect(522, top + 12, 566, top + 36), if (enabled) settingsRgb(10, 132, 255) else settingsRgb(82, 82, 88), if (enabled) settingsRgb(10, 132, 255) else settingsRgb(82, 82, 88), 14);
-    const knob_left: i32 = if (enabled) 544 else 524;
-    settingsRounded(hdc, settingsRect(knob_left, top + 14, knob_left + 20, top + 34), settingsRgb(245, 245, 247), settingsRgb(245, 245, 247), 12);
+fn createSettingsControl(hwnd: c.HWND, class_name: []const u8, text: []const u8, style: c.DWORD, x: i32, y: i32, width: i32, height: i32, id: usize) c.HWND {
+    const wide_text = settingsWideZ(text) catch return null;
+    defer settings_state.allocator.free(wide_text);
+    const menu: c.HMENU = if (id == 0) null else @ptrFromInt(id);
+    const wide_class = if (std.mem.eql(u8, class_name, "BUTTON"))
+        std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr
+    else
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr;
+    const control = c.CreateWindowExW(0, wide_class, wide_text.ptr, style, x, y, width, height, hwnd, menu, c.GetModuleHandleW(null), null);
+    return control;
 }
 
-fn settingsButton(hdc: c.HDC, bounds: c.RECT, label: []const u8, primary: bool) void {
-    settingsRounded(hdc, bounds, if (primary) settingsRgb(10, 132, 255) else settingsRgb(52, 52, 57), if (primary) settingsRgb(10, 132, 255) else settingsRgb(78, 78, 84), 8);
-    settingsText(hdc, label, settingsRect(bounds.left, bounds.top + 10, bounds.right, bounds.bottom - 6), 13, settingsRgb(245, 245, 247), true);
+fn updateSettingsControls() void {
+    setSettingsControlText(settings_state.controls[0], "New loops use: ", backend_labels[settings_state.backend]);
+    setSettingsControlText(settings_state.controls[1], "Claude Code: ", claude_labels[settings_state.claude]);
+    setSettingsControlText(settings_state.controls[2], "Copilot CLI: ", copilot_labels[settings_state.copilot]);
+    setSettingsControlText(settings_state.controls[3], "Codex: ", codex_labels[settings_state.codex]);
+    setSettingsControlText(settings_state.controls[4], "Default model: ", model_labels[settings_state.model]);
+    setSettingsControlText(settings_state.explanations[1], "", claude_explanations[settings_state.claude]);
+    setSettingsControlText(settings_state.explanations[2], "", copilot_explanations[settings_state.copilot]);
+    setSettingsControlText(settings_state.explanations[3], "", codex_explanations[settings_state.codex]);
+    setSettingsCheck(settings_state.controls[5], settings_state.auto_model);
+    setSettingsCheck(settings_state.controls[6], settings_state.activity);
+    setSettingsCheck(settings_state.controls[7], settings_state.briefing);
+    setSettingsCheck(settings_state.controls[8], settings_state.beta);
+}
+
+fn setSettingsControlText(hwnd: c.HWND, prefix: []const u8, value: []const u8) void {
+    if (hwnd == null) return;
+    const text = std.fmt.allocPrint(settings_state.allocator, "{s}{s}", .{ prefix, value }) catch return;
+    defer settings_state.allocator.free(text);
+    const wide = settingsWideZ(text) catch return;
+    defer settings_state.allocator.free(wide);
+    _ = c.SetWindowTextW(hwnd, wide.ptr);
+}
+
+fn setSettingsCheck(hwnd: c.HWND, checked: bool) void {
+    if (hwnd != null) _ = c.SendMessageW(hwnd, c.BM_SETCHECK, if (checked) c.BST_CHECKED else c.BST_UNCHECKED, 0);
+}
+
+fn settingsWideZ(value: []const u8) ![]u16 {
+    const raw = try std.unicode.utf8ToUtf16LeAlloc(settings_state.allocator, value);
+    defer settings_state.allocator.free(raw);
+    const result = try settings_state.allocator.alloc(u16, raw.len + 1);
+    @memcpy(result[0..raw.len], raw);
+    result[raw.len] = 0;
+    return result;
+}
+
+fn windowHandle(address: usize) c.HWND {
+    @setRuntimeSafety(false);
+    return @ptrFromInt(address);
+}
+
+fn deviceContext(address: usize) c.HDC {
+    @setRuntimeSafety(false);
+    return @ptrFromInt(address);
 }
 
 fn settingsText(hdc: c.HDC, value: []const u8, bounds_value: c.RECT, size: i32, color: u32, bold: bool) void {
@@ -471,19 +614,6 @@ fn settingsText(hdc: c.HDC, value: []const u8, bounds_value: c.RECT, size: i32, 
         _ = c.SelectObject(hdc, old_font);
         _ = c.DeleteObject(font);
     }
-}
-
-fn settingsRounded(hdc: c.HDC, bounds: c.RECT, fill_color: u32, border_color: u32, radius: i32) void {
-    const brush = c.CreateSolidBrush(fill_color);
-    const pen = c.CreatePen(c.PS_SOLID, 1, border_color);
-    if (brush == null or pen == null) return;
-    const old_brush = c.SelectObject(hdc, brush);
-    const old_pen = c.SelectObject(hdc, pen);
-    _ = c.RoundRect(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom, radius, radius);
-    _ = c.SelectObject(hdc, old_pen);
-    _ = c.SelectObject(hdc, old_brush);
-    _ = c.DeleteObject(pen);
-    _ = c.DeleteObject(brush);
 }
 
 fn settingsFill(hdc: c.HDC, bounds: c.RECT, color: u32) void {
@@ -628,6 +758,15 @@ test "purpose-built settings rows cycle choices and toggle behavior" {
     try std.testing.expect(settings_state.activity);
     try std.testing.expect(applySettingsClick(100, 602));
     try std.testing.expect(!settings_state.briefing);
-    try std.testing.expect(applySettingsClick(100, 658));
+    try std.testing.expect(applySettingsClick(100, 688));
     try std.testing.expect(settings_state.beta);
+}
+
+test "settings expose Swift permission labels and consequence copy" {
+    try std.testing.expectEqualStrings("Auto (recommended)", claude_labels[2]);
+    try std.testing.expectEqualStrings("YOLO (recommended)", copilot_labels[2]);
+    try std.testing.expectEqualStrings("Workspace (recommended)", codex_labels[1]);
+    try std.testing.expect(std.mem.indexOf(u8, claude_explanations[2], "guardrails") != null);
+    try std.testing.expect(std.mem.indexOf(u8, copilot_explanations[2], "tools, paths, and URLs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, codex_explanations[1], "write inside the project") != null);
 }

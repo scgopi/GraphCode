@@ -87,12 +87,39 @@ public static class GraphCodeUiaGateState {
   );
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr childAfter, string className, string windowName);
+  private delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
+  [DllImport("user32.dll")]
+  private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
+  [DllImport("user32.dll")]
+  private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  private static extern int GetClassName(IntPtr window, StringBuilder className, int capacity);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   private static extern bool SetWindowText(IntPtr window, string text);
   [DllImport("user32.dll")]
   private static extern int GetDlgCtrlID(IntPtr window);
+  [DllImport("user32.dll")]
+  private static extern IntPtr SetFocus(IntPtr window);
+  [DllImport("user32.dll")]
+  private static extern IntPtr GetFocus();
+  [DllImport("user32.dll")]
+  private static extern bool SetForegroundWindow(IntPtr window);
   public static IntPtr FindChild(IntPtr parent, string className) {
     return FindWindowEx(parent, IntPtr.Zero, className, null);
+  }
+  public static IntPtr FindTopLevel(string className, uint processId) {
+    IntPtr result = IntPtr.Zero;
+    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+      uint owner;
+      GetWindowThreadProcessId(window, out owner);
+      if (owner != processId) return true;
+      var actualClass = new StringBuilder(256);
+      GetClassName(window, actualClass, actualClass.Capacity);
+      if (!String.Equals(actualClass.ToString(), className, StringComparison.Ordinal)) return true;
+      result = window;
+      return false;
+    }, IntPtr.Zero);
+    return result;
   }
   public static string[] GetListItems(IntPtr list) {
     if (list == IntPtr.Zero) return new string[0];
@@ -127,6 +154,16 @@ public static class GraphCodeUiaGateState {
     if (window == IntPtr.Zero) return false;
     SendMessage(window, 0x0111, (UIntPtr)command, IntPtr.Zero);
     return true;
+  }
+  public static int GetCheckState(IntPtr window) {
+    if (window == IntPtr.Zero) return -1;
+    return (int)SendMessage(window, 0x00F0, UIntPtr.Zero, IntPtr.Zero);
+  }
+  public static bool FocusControl(IntPtr parent, IntPtr control) {
+    if (parent == IntPtr.Zero || control == IntPtr.Zero) return false;
+    SetForegroundWindow(parent);
+    SetFocus(control);
+    return GetFocus() == control;
   }
   public static bool PostMouseClick(IntPtr window) {
     return PostMessage(window, 0x0201, UIntPtr.Zero, IntPtr.Zero);
@@ -239,7 +276,9 @@ $oldConnectionFailure = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_CON
 $oldUser = [Environment]::GetEnvironmentVariable("USERNAME")
 $oldFixture = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_FIXTURE_ROWS")
 $oldDaemonPipe = [Environment]::GetEnvironmentVariable("GRAPHCODE_DAEMON_PIPE")
+$oldSupportDirectory = [Environment]::GetEnvironmentVariable("GRAPHCODE_SUPPORT_DIR")
 $process = $null
+$settingsProcess = $null
 $status = $null
 $liveRegionEvent = $null
 $eventHandler = $null
@@ -254,6 +293,9 @@ $policyPath = $null
 $policyDirectoryExisted = $false
 $policyExisted = $false
 $policyContents = $null
+$settingsDirectory = $null
+$settingsPath = $null
+$settingsErrorPath = $null
 try {
   if ($Zmx) { $env:GRAPHCODE_ZMX = $Zmx }
   $env:GRAPHCODE_GATE_CWD = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -262,6 +304,19 @@ try {
   $env:USERNAME = "GraphCodeUIAGate"
   $env:GRAPHCODE_UIA_FIXTURE_ROWS = "C:\fixture-safe|safe,C:\fixture-unsafe|unsafe"
   $env:GRAPHCODE_DAEMON_PIPE = "\\.\pipe\graphcode-uia-gate-$PID"
+  $settingsDirectory = Join-Path $env:GRAPHCODE_GATE_CWD ".graphcode-uia-product-settings-$PID"
+  $settingsPath = Join-Path $settingsDirectory "settings.json"
+  $settingsErrorPath = Join-Path $settingsDirectory "stderr.log"
+  New-Item -ItemType Directory -Path $settingsDirectory -Force | Out-Null
+  [IO.File]::WriteAllText(
+    $settingsPath,
+    '{"defaultBackend":"claudeCode","defaultModelTier":"capable",' +
+    '"claudePermissionMode":"auto","copilotPermissions":"allowEverything",' +
+    '"codexApprovals":"workspace","showsActivityStrip":true,' +
+    '"briefsSessionsAboutTheGraph":false,"betaUpdates":true,' +
+    '"autoSelectsModel":true,"gateSentinel":"preserve"}'
+  )
+  $env:GRAPHCODE_SUPPORT_DIR = $settingsDirectory
   $policyDirectory = Join-Path $env:GRAPHCODE_GATE_CWD ".graphcode"
   $policyPath = Join-Path $policyDirectory "worktree-policy.json"
   $policyDirectoryExisted = Test-Path -LiteralPath $policyDirectory
@@ -291,6 +346,9 @@ try {
   $expectedRootIds = @("projects", "loops", "worktrees", "graph", "actions", "status")
   $rawWalker = [System.Windows.Automation.TreeWalker]::RawViewWalker
   $controlWalker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+  $shellWindow = $process.MainWindowHandle
+  $desktop = [System.Windows.Automation.AutomationElement]::RootElement
+  $status = Find-FragmentById $root "status" $controlWalker
   $rawRootChildren = @(Assert-FragmentLinks $root $rawWalker $expectedRootIds "RawView root")
   $controlRootChildren = @(Assert-FragmentLinks $root $controlWalker $expectedRootIds "ControlView root")
 
@@ -697,7 +755,7 @@ try {
       break
     }
   }
-  Require ($null -ne $focused) "worktree row could not retain focus against concurrent desktop focus changes"
+  Require ($null -ne $focused) "worktree row could not retain focus against concurrent desktop focus changes; focused=$($candidate.Current.AutomationId):$($candidate.Current.Name)"
   Require ($focused.Current.AutomationId -eq $safeRowId) "focus source identity was '$($focused.Current.AutomationId)', expected '$safeRowId'"
   Require ((Get-RuntimeIdentity $focused) -eq (Get-RuntimeIdentity $safeFocusRow)) "focus runtime identity changed"
   for ($index = 0; $index -lt 20 -and -not [GraphCodeUiaGateState]::FocusObserved; $index++) {
@@ -761,6 +819,7 @@ try {
   $rawWorktreeRowIds = $initialRowIds
   $controlWorktreeRowIds = $initialRowIds
   $focusIdentity = $safeRowId
+
 
   $shellWindow = $process.MainWindowHandle
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 7)) "Rename Loop fixture command was rejected"
@@ -1201,6 +1260,216 @@ try {
     $retainedProviderSafe = $true
   }
   Require $retainedProviderSafe "retained status provider was unsafe after teardown"
+  if ($ArgumentList.Count -gt 0) {
+    $settingsProcess = Start-Process -FilePath $Shell -ArgumentList $ArgumentList -PassThru `
+      -WindowStyle Normal -RedirectStandardError $settingsErrorPath
+  } else {
+    $settingsProcess = Start-Process -FilePath $Shell -PassThru -WindowStyle Normal `
+      -RedirectStandardError $settingsErrorPath
+  }
+  for ($index = 0; $index -lt 160 -and $settingsProcess.MainWindowHandle -eq 0; $index++) {
+    Start-Sleep -Milliseconds 250
+    $settingsProcess.Refresh()
+    Require (-not $settingsProcess.HasExited) "Product Settings fixture shell exited during startup"
+  }
+  Require ($settingsProcess.MainWindowHandle -ne 0) "Product Settings fixture shell did not create its main window"
+  $settingsRoot = $null
+  for ($index = 0; $index -lt 160 -and $null -eq $settingsRoot; $index++) {
+    Start-Sleep -Milliseconds 250
+    $settingsProcess.Refresh()
+    Require (-not $settingsProcess.HasExited) "Product Settings fixture shell exited before UIA readiness"
+    $candidate = [System.Windows.Automation.AutomationElement]::FromHandle(
+      $settingsProcess.MainWindowHandle
+    )
+    if ($candidate.Current.AutomationId -eq "graphcode-root") {
+      $settingsRoot = $candidate
+    }
+  }
+  Require ($null -ne $settingsRoot) "Product Settings fixture shell did not reach UIA readiness"
+  $settingsFixtureReady = $false
+  for ($index = 0; $index -lt 160 -and -not $settingsFixtureReady; $index++) {
+    Start-Sleep -Milliseconds 250
+    $settingsWorktrees = Find-FragmentById $settingsRoot "worktrees" $rawWalker
+    if ($null -ne $settingsWorktrees) {
+      $settingsFixtureReady = @(Get-DirectChildren $settingsWorktrees $rawWalker).Count -eq 2
+    }
+  }
+  Require $settingsFixtureReady "Product Settings fixture shell did not finish startup"
+  $settingsShellWindow = $settingsProcess.MainWindowHandle
+  $settingsMessageLoopReady = $false
+  for ($attempt = 0; $attempt -lt 20 -and -not $settingsMessageLoopReady; $attempt++) {
+    $null = [GraphCodeUiaGateState]::PostFixtureMutation($settingsShellWindow, 1)
+    Start-Sleep -Milliseconds 250
+    $settingsRowNames = @(Get-DirectChildren $settingsWorktrees $rawWalker |
+      ForEach-Object { $_.Current.Name })
+    $settingsMessageLoopReady = ($settingsRowNames -join "|") -eq
+      "C:\fixture-unsafe|C:\fixture-safe"
+  }
+  Require $settingsMessageLoopReady "Product Settings fixture shell message loop did not become ready"
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($settingsShellWindow, 1)) `
+    "Product Settings fixture shell rejected readiness restore"
+  Start-Sleep -Milliseconds 250
+  Start-Sleep -Milliseconds 1500
+  $settingsHandle = [IntPtr]::Zero
+  for ($attempt = 0; $attempt -lt 3 -and
+       $settingsHandle -eq [IntPtr]::Zero; $attempt++) {
+    $null = [GraphCodeUiaGateState]::PostFixtureMutation($settingsShellWindow, 15)
+    Start-Sleep -Milliseconds 500
+    for ($index = 0; $index -lt 100 -and
+         $settingsHandle -eq [IntPtr]::Zero; $index++) {
+      Start-Sleep -Milliseconds 50
+      $settingsHandle = [GraphCodeUiaGateState]::FindTopLevel(
+        "GraphCodeProductSettings", [uint32]$settingsProcess.Id
+      )
+    }
+  }
+  if ($settingsHandle -eq [IntPtr]::Zero) {
+    $settingsProcess.Refresh()
+    if ($settingsProcess.HasExited) {
+      $settingsError = if (Test-Path -LiteralPath $settingsErrorPath) {
+        Get-Content -LiteralPath $settingsErrorPath -Raw
+      } else { "" }
+      throw "Product Settings fixture shell exited with code $($settingsProcess.ExitCode) while opening settings: $settingsError"
+    }
+    $processWindowCondition = New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $settingsProcess.Id
+    )
+    $windowNames = @($desktop.FindAll(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $processWindowCondition
+    ) | ForEach-Object { $_.Current.Name })
+    $settingsStatus = Find-FragmentById $settingsRoot "status" $controlWalker
+    throw "Product Settings fixture did not open the real settings window; process windows: $($windowNames -join ', '); status=$($settingsStatus.Current.Name)"
+  }
+  $productSettings = [System.Windows.Automation.AutomationElement]::FromHandle($settingsHandle)
+  $settingsElements = @($productSettings.FindAll(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    [System.Windows.Automation.Condition]::TrueCondition
+  ))
+  $settingsNames = @($settingsElements | ForEach-Object { $_.Current.Name })
+  $requiredSettingsNames = @(
+    "New loops use: Claude Code",
+    "Claude Code: Auto (recommended)",
+    "Copilot CLI: YOLO (recommended)",
+    "Codex: Workspace (recommended)",
+    "Default model: Capable",
+    "Pick a model for each loop",
+    "Show the activity strip",
+    "Tell sessions they're part of a graph",
+    "Get beta releases",
+    "Save",
+    "Cancel"
+  )
+  foreach ($requiredName in $requiredSettingsNames) {
+    $element = @($settingsElements | Where-Object { $_.Current.Name -eq $requiredName }) |
+      Select-Object -First 1
+    Require ($null -ne $element) "Product Settings omitted '$requiredName'; descendants: $(@($settingsElements | ForEach-Object { ""$($_.Current.ControlType.ProgrammaticName):$($_.Current.Name)"" }) -join ' | ')"
+    Require (($element.Current.BoundingRectangle.Width -gt 0) -and
+             ($element.Current.BoundingRectangle.Height -gt 0) -and
+             (-not $element.Current.IsOffscreen)) "Product Settings hid '$requiredName'"
+  }
+  $settingsContent = $settingsNames -join "`n"
+  foreach ($copy in @(
+    "Which backend a new loop starts on. You can still change it per loop.",
+    "Approves the ordinary work of a coding session and keeps its guardrails.",
+    "Copilot's --yolo: tools, paths, and URLs all approved",
+    "Runs without asking, and may write inside the project it was given.",
+    "nobody is there to answer a permission prompt",
+    "The default model tier is copied into new loops",
+    "A strip along the window's bottom lists passes",
+    "Lets a loop create more loops when work genuinely splits",
+    "Check for Updates offers pre-releases as well as stable releases"
+  )) {
+    Require ($settingsContent -match [regex]::Escape($copy)) `
+      "Product Settings omitted explanatory copy '$copy'"
+  }
+  $expectedToggles = @{
+    "Pick a model for each loop" = 1
+    "Show the activity strip" = 1
+    "Tell sessions they're part of a graph" = 0
+    "Get beta releases" = 1
+  }
+  foreach ($entry in $expectedToggles.GetEnumerator()) {
+    $toggleElement = @($settingsElements | Where-Object { $_.Current.Name -eq $entry.Key }) |
+      Select-Object -First 1
+    Require ([GraphCodeUiaGateState]::GetCheckState(
+      [IntPtr]$toggleElement.Current.NativeWindowHandle
+    ) -eq $entry.Value) `
+      "Product Settings toggle '$($entry.Key)' did not load the isolated fixture"
+  }
+
+  $settingsWindow = $settingsHandle
+  $backendButton = @($settingsElements | Where-Object {
+    $_.Current.Name -eq "New loops use: Claude Code"
+  }) | Select-Object -First 1
+  Require ($null -ne $backendButton) "Product Settings backend control became unavailable"
+  Require ([GraphCodeUiaGateState]::SendCommand($settingsWindow, 6112)) `
+    "Product Settings backend fixture mutation was rejected"
+  $null = [GraphCodeUiaGateState]::FocusControl(
+    $settingsWindow, [IntPtr]$backendButton.Current.NativeWindowHandle
+  )
+  Require ([GraphCodeUiaGateState]::PostKeyboard(
+    [IntPtr]$backendButton.Current.NativeWindowHandle, 0x0D
+  )) "Product Settings focused control rejected Return"
+  for ($index = 0; $index -lt 40; $index++) {
+    Start-Sleep -Milliseconds 50
+    $remainingSettings = [GraphCodeUiaGateState]::FindTopLevel(
+      "GraphCodeProductSettings", [uint32]$settingsProcess.Id
+    )
+    if ($remainingSettings -eq [IntPtr]::Zero) { break }
+  }
+  Require ($remainingSettings -eq [IntPtr]::Zero) "Return did not activate Save and close Product Settings"
+  $savedSettings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+  Require (($savedSettings.defaultBackend -eq "copilotCLI") -and
+           ($savedSettings.gateSentinel -eq "preserve")) `
+    "Return did not save Product Settings or preserve unrelated settings"
+  $savedSettingsBytes = [IO.File]::ReadAllBytes($settingsPath)
+
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($settingsShellWindow, 15)) `
+    "Product Settings Escape fixture command was rejected"
+  Start-Sleep -Milliseconds 500
+  $cancelHandle = [IntPtr]::Zero
+  for ($index = 0; $index -lt 300 -and
+       $cancelHandle -eq [IntPtr]::Zero; $index++) {
+    Start-Sleep -Milliseconds 50
+    $cancelHandle = [GraphCodeUiaGateState]::FindTopLevel(
+      "GraphCodeProductSettings", [uint32]$settingsProcess.Id
+    )
+  }
+  Require ($cancelHandle -ne [IntPtr]::Zero) "Product Settings did not reopen for Escape verification"
+  $cancelSettings = [System.Windows.Automation.AutomationElement]::FromHandle($cancelHandle)
+  $cancelWindow = $cancelHandle
+  Require ([GraphCodeUiaGateState]::SendCommand($cancelWindow, 6112)) `
+    "Product Settings cancel mutation was rejected"
+  $cancelModel = $cancelSettings.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty, "Default model: Capable"
+    ))
+  )
+  Require ($null -ne $cancelModel) "Product Settings omitted its model picker on reopen"
+  $null = [GraphCodeUiaGateState]::FocusControl(
+    $cancelWindow, [IntPtr]$cancelModel.Current.NativeWindowHandle
+  )
+  Require ([GraphCodeUiaGateState]::PostKeyboard(
+    [IntPtr]$cancelModel.Current.NativeWindowHandle, 0x1B
+  )) "Product Settings focused control rejected Escape"
+  for ($index = 0; $index -lt 40; $index++) {
+    Start-Sleep -Milliseconds 50
+    $remainingCancelSettings = [GraphCodeUiaGateState]::FindTopLevel(
+      "GraphCodeProductSettings", [uint32]$settingsProcess.Id
+    )
+    if ($remainingCancelSettings -eq [IntPtr]::Zero) { break }
+  }
+  Require ($remainingCancelSettings -eq [IntPtr]::Zero) "Escape did not cancel and close Product Settings"
+  Require (([Convert]::ToBase64String([IO.File]::ReadAllBytes($settingsPath))) -eq
+           ([Convert]::ToBase64String($savedSettingsBytes))) `
+    "Escape changed persisted Product Settings"
+  Require ([GraphCodeUiaGateState]::PostCommand($settingsShellWindow, 0x5002)) `
+    "Product Settings fixture shell rejected exit"
+  Require $settingsProcess.WaitForExit(5000) "Product Settings fixture shell did not exit"
+  Require ($settingsProcess.ExitCode -eq 0) "Product Settings fixture shell exited with code $($settingsProcess.ExitCode)"
+  $settingsProcess = $null
 
   [pscustomobject]@{
     name = $rootName
@@ -1238,6 +1507,9 @@ try {
     remoteConnectionInfoPassed = $true
     deleteProjectLoopsPassed = $true
     deleteEdgePassed = $true
+    productSettingsPassed = $true
+    productSettingsReturnSaved = ($savedSettings.defaultBackend -eq "copilotCLI")
+    productSettingsEscapeCancelled = $true
     aboutDialogPassed = $true
     statusText = $statusTextAfter
     statusChanged = ($statusTextAfter -ne $initialStatus)
@@ -1278,6 +1550,10 @@ try {
     $process.Kill()
     $process.WaitForExit()
   }
+  if ($settingsProcess -and -not $settingsProcess.HasExited) {
+    $settingsProcess.Kill()
+    $settingsProcess.WaitForExit()
+  }
   if ($policyExisted) {
     [IO.File]::WriteAllBytes($policyPath, $policyContents)
   } elseif ($policyPath) {
@@ -1287,6 +1563,9 @@ try {
           Select-Object -First 1)) {
       Remove-Item -LiteralPath $policyDirectory -Force -ErrorAction SilentlyContinue
     }
+  }
+  if ($settingsDirectory) {
+    Remove-Item -LiteralPath $settingsDirectory -Recurse -Force -ErrorAction SilentlyContinue
   }
   if ($null -eq $oldZmx) { Remove-Item Env:GRAPHCODE_ZMX -ErrorAction SilentlyContinue }
   else { $env:GRAPHCODE_ZMX = $oldZmx }
@@ -1305,4 +1584,7 @@ try {
   else { $env:GRAPHCODE_UIA_FIXTURE_ROWS = $oldFixture }
   if ($null -eq $oldDaemonPipe) { Remove-Item Env:GRAPHCODE_DAEMON_PIPE -ErrorAction SilentlyContinue }
   else { $env:GRAPHCODE_DAEMON_PIPE = $oldDaemonPipe }
+  if ($null -eq $oldSupportDirectory) {
+    Remove-Item Env:GRAPHCODE_SUPPORT_DIR -ErrorAction SilentlyContinue
+  } else { $env:GRAPHCODE_SUPPORT_DIR = $oldSupportDirectory }
 }

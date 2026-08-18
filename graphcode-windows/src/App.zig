@@ -1100,7 +1100,7 @@ pub const App = struct {
             return;
         };
         defer current.deinit();
-        const draft = ProductSettings.open(self.window.hwnd, self.allocator, current) catch {
+        const draft = ProductSettings.open(@intFromPtr(self.window.hwnd.?), self.allocator, current) catch {
             self.setStatus("Unable to open product settings");
             return;
         } orelse return;
@@ -2319,6 +2319,10 @@ pub const App = struct {
             _ = self.model.updateFromFrame(frame) catch return;
             _ = self.model.setSelectedID("11111111-1111-4111-8111-111111111111");
             self.jumpToNode();
+            return;
+        }
+        if (mutation == 15) {
+            self.openProductSettings();
             return;
         }
         const dialog = if (self.worktree_dialog) |*value| value else return;

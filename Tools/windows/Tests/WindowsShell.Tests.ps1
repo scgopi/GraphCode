@@ -106,6 +106,7 @@ foreach ($path in @(
     "src\Forms.zig",
     "src\NativeForms.zig",
     "src\WindowsOnboarding.zig",
+    "src\WindowsProductSettings.zig",
     "src\Accessibility.zig",
     "src\DesignTokens.zig",
     "src\Wire.zig",
@@ -244,6 +245,19 @@ Invoke-Native "Onboarding executable tests" {
   Push-Location $shellRoot
   try {
     & $zig test src\WindowsOnboarding.zig -target x86_64-windows-msvc `
+      -lc -luser32 -lgdi32 "-I$include"
+  } finally { Pop-Location }
+}
+Invoke-Native "Product Settings executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-pinned"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\WindowsProductSettings.zig -target x86_64-windows-msvc `
       -lc -luser32 -lgdi32 "-I$include"
   } finally { Pop-Location }
 }
