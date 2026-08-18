@@ -9,6 +9,7 @@ pub const Node = struct {
     state: []u8,
     activity: []u8,
     presence: []u8,
+    pilot_state: []u8 = &.{},
     goal_summary: []u8 = &.{},
     goal_predicate: []u8 = &.{},
     metric_command: []u8 = &.{},
@@ -137,6 +138,8 @@ pub const Model = struct {
     selected_project_path: ?[]u8 = null,
     selected_node_id: ?[]u8 = null,
     selected_index: ?usize = null,
+    open_composite_id: ?[]u8 = null,
+    open_composite_title: ?[]u8 = null,
     last_sequence: u64 = 0,
     attention: std.array_list.Managed(Node),
     attention_entries: std.array_list.Managed(AttentionEntry),
@@ -183,6 +186,7 @@ pub const Model = struct {
         if (self.graph) |*graph| freeGraph(self.allocator, graph);
         if (self.selected_project_path) |path| self.allocator.free(path);
         self.freeSelectedNodeID();
+        self.clearOpenComposite();
         for (self.graph_generations.items) |entry| self.allocator.free(entry.project_path);
         self.graph_generations.deinit();
     }
@@ -227,7 +231,7 @@ pub const Model = struct {
     }
 
     pub fn setSelectedIndex(self: *Model, index: ?usize) bool {
-        const graph = self.currentGraph() orelse return index == null;
+        const graph = if (self.graph) |*value| value else return index == null;
         if (index) |value| {
             if (value >= graph.nodes.items.len) return false;
             self.selected_index = value;
@@ -269,12 +273,52 @@ pub const Model = struct {
 
     pub fn selectProject(self: *Model, project_path: []const u8) bool {
         const summary = self.graphFor(project_path) orelse return false;
+        self.clearOpenComposite();
         if (self.selected_project_path) |path| self.allocator.free(path);
         self.selected_project_path = self.allocator.dupe(u8, summary.project.path) catch return false;
         self.selected_index = if (summary.nodes.items.len == 0) null else 0;
         if (summary.nodes.items.len == 0) self.freeSelectedNodeID() else self.replaceSelectedNodeID(summary.nodes.items[0].id);
         self.syncLegacyGraph();
         return true;
+    }
+
+    pub fn openComposite(self: *Model, node_id: []const u8) bool {
+        const summary = self.currentGraph() orelse return false;
+        const index = findNodeIndexByID(summary.nodes.items, node_id) orelse return false;
+        const node = summary.nodes.items[index];
+        if ((!std.mem.eql(u8, node.loop_type, "composite") and
+            !std.mem.eql(u8, node.loop_type, "proactive")) or node.subgraph_json.len == 0)
+            return false;
+        const id = self.allocator.dupe(u8, node.id) catch return false;
+        errdefer self.allocator.free(id);
+        const title = self.allocator.dupe(u8, node.title) catch return false;
+        self.clearOpenComposite();
+        self.open_composite_id = id;
+        self.open_composite_title = title;
+        self.syncLegacyGraph();
+        return self.graph != null;
+    }
+
+    pub fn closeComposite(self: *Model) void {
+        const parent_id = if (self.open_composite_id) |id|
+            self.allocator.dupe(u8, id) catch null
+        else
+            null;
+        defer if (parent_id) |id| self.allocator.free(id);
+        self.clearOpenComposite();
+        self.syncLegacyGraph();
+        if (parent_id) |id| _ = self.selectNodeID(id);
+    }
+
+    pub fn isCompositeOpen(self: *const Model) bool {
+        return self.open_composite_id != null;
+    }
+
+    fn clearOpenComposite(self: *Model) void {
+        if (self.open_composite_id) |id| self.allocator.free(id);
+        if (self.open_composite_title) |title| self.allocator.free(title);
+        self.open_composite_id = null;
+        self.open_composite_title = null;
     }
 
     pub fn reconcileRestore(self: *Model) void {
@@ -417,7 +461,7 @@ pub const Model = struct {
     }
 
     pub fn selected(self: *const Model) ?*const Node {
-        const graph = self.currentGraph() orelse return null;
+        const graph = if (self.graph) |*value| value else return null;
         if (self.selected_node_id) |id| {
             for (graph.nodes.items) |*node| if (std.mem.eql(u8, node.id, id)) return node;
         }
@@ -432,12 +476,12 @@ pub const Model = struct {
     }
 
     pub fn findEdgeIndex(self: *const Model, id: []const u8) ?usize {
-        const graph = self.currentGraph() orelse return null;
+        const graph = self.graph orelse return null;
         return findEdgeIndexByID(graph.edges.items, id);
     }
 
     pub fn selectNext(self: *Model) void {
-        const graph = self.currentGraph() orelse return;
+        const graph = self.graph orelse return;
         if (graph.nodes.items.len == 0) {
             self.selected_index = null;
         } else {
@@ -473,7 +517,7 @@ pub const Model = struct {
     }
 
     fn selectNodeID(self: *Model, node_id: []const u8) bool {
-        const graph = self.currentGraph() orelse return false;
+        const graph = self.graph orelse return false;
         for (graph.nodes.items, 0..) |node, index| {
             if (std.mem.eql(u8, node.id, node_id)) {
                 _ = self.setSelectedIndex(index);
@@ -720,6 +764,38 @@ pub const Model = struct {
             };
         }
         self.graph = graph;
+        self.applyOpenComposite();
+    }
+
+    fn applyOpenComposite(self: *Model) void {
+        const node_id = self.open_composite_id orelse return;
+        const top = self.graph orelse return;
+        const index = findNodeIndexByID(top.nodes.items, node_id) orelse {
+            self.clearOpenComposite();
+            return;
+        };
+        const node = top.nodes.items[index];
+        if (self.allocator.dupe(u8, node.title)) |title| {
+            if (self.open_composite_title) |old| self.allocator.free(old);
+            self.open_composite_title = title;
+        } else |_| {}
+        const nested = decodeSubgraph(self.allocator, top.project, node.subgraph_json) catch {
+            self.clearOpenComposite();
+            return;
+        };
+        if (self.graph) |*old| freeGraph(self.allocator, old);
+        self.graph = nested;
+        if (nested.nodes.items.len == 0) {
+            self.selected_index = null;
+            self.freeSelectedNodeID();
+        } else {
+            const retained = if (self.selected_node_id) |id|
+                findNodeIndexByID(nested.nodes.items, id)
+            else
+                null;
+            self.selected_index = retained orelse 0;
+            self.replaceSelectedNodeID(nested.nodes.items[self.selected_index.?].id);
+        }
     }
 
     fn addOpenProject(self: *Model, project: Project) !void {
@@ -900,6 +976,7 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
         .state = try allocator.dupe(u8, node.state),
         .activity = try allocator.dupe(u8, node.activity),
         .presence = try allocator.dupe(u8, node.presence),
+        .pilot_state = try allocator.dupe(u8, node.pilot_state),
         .goal_summary = try allocator.dupe(u8, node.goal_summary),
         .goal_predicate = try allocator.dupe(u8, node.goal_predicate),
         .metric_command = try allocator.dupe(u8, node.metric_command),
@@ -960,6 +1037,7 @@ fn decodeNodes(
             .state = try duplicateJsonStringOr(allocator, scalar_object, "state", "idle"),
             .activity = try duplicateJsonStringOr(allocator, scalar_object, "activity", ""),
             .presence = try duplicatePresence(allocator, scalar_object),
+            .pilot_state = try duplicateJsonStringOr(allocator, scalar_object, "pilotState", "notPiloted"),
             .goal_summary = try duplicateJsonStringOr(allocator, scalar_object, "summary", ""),
             .goal_predicate = try duplicateJsonStringOr(allocator, scalar_object, "predicate", ""),
             .metric_command = try duplicateJsonStringOr(allocator, scalar_object, "metricCommand", ""),
@@ -1093,6 +1171,45 @@ pub fn subgraphNodeCount(subgraph_json: []const u8) usize {
     return count;
 }
 
+pub fn decodeSubgraph(
+    allocator: std.mem.Allocator,
+    parent_project: Project,
+    subgraph_json: []const u8,
+) !Graph {
+    var graph = Graph{
+        .project = .{
+            .path = try allocator.dupe(u8, parent_project.path),
+            .name = try allocator.dupe(u8, parent_project.name),
+        },
+        .nodes = std.array_list.Managed(Node).init(allocator),
+        .edges = std.array_list.Managed(Edge).init(allocator),
+    };
+    errdefer freeGraph(allocator, &graph);
+    if (std.mem.indexOf(u8, subgraph_json, "\"nodes\"")) |nodes_key| {
+        if (indexOfByte(subgraph_json, nodes_key, '[')) |nodes_open| {
+            const nodes_close = findClosing(subgraph_json, nodes_open, '[', ']') orelse
+                return error.MalformedSubgraph;
+            try decodeNodes(
+                allocator,
+                subgraph_json[nodes_open + 1 .. nodes_close],
+                &graph.nodes,
+            );
+        }
+    }
+    if (std.mem.indexOf(u8, subgraph_json, "\"edges\"")) |edges_key| {
+        if (indexOfByte(subgraph_json, edges_key, '[')) |edges_open| {
+            const edges_close = findClosing(subgraph_json, edges_open, '[', ']') orelse
+                return error.MalformedSubgraph;
+            try decodeEdges(
+                allocator,
+                subgraph_json[edges_open + 1 .. edges_close],
+                &graph.edges,
+            );
+        }
+    }
+    return graph;
+}
+
 fn indexOfByte(bytes: []const u8, start: usize, byte: u8) ?usize {
     if (start >= bytes.len) return null;
     const offset = std.mem.indexOf(u8, bytes[start..], &[_]u8{byte}) orelse return null;
@@ -1172,6 +1289,7 @@ fn freeNode(allocator: std.mem.Allocator, node: Node) void {
     allocator.free(node.state);
     allocator.free(node.activity);
     allocator.free(node.presence);
+    allocator.free(node.pilot_state);
     allocator.free(node.goal_summary);
     allocator.free(node.goal_predicate);
     allocator.free(node.metric_command);
@@ -1705,4 +1823,33 @@ test "real subGraph decoding preserves children without inheriting child scalar 
     try std.testing.expectEqual(@as(usize, 1), subgraphNodeCount(nodes.items[0].subgraph_json));
     try std.testing.expectEqualStrings("", nodes.items[0].worktree_path);
     try std.testing.expectEqualStrings("idle", nodes.items[0].state);
+}
+
+test "composite navigation swaps to nested graph and survives refresh" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const first =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\work\\graph","name":"Graph"},"nodes":[{"id":"parent","title":"Group","loopType":"composite","pilotState":"piloted","state":"idle","subGraph":{"nodes":[{"id":"child-a","title":"Child A","state":"idle"},{"id":"child-b","title":"Child B","state":"running"}],"edges":[{"id":"nested-edge","from":"child-a","to":"child-b","kind":"handoff"}]}}],"edges":[]}}}
+    ;
+    const second =
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"C:\\work\\graph","name":"Graph"},"nodes":[{"id":"parent","title":"Group","loopType":"composite","state":"idle","subGraph":{"nodes":[{"id":"child-b","title":"Child B updated","state":"succeeded"},{"id":"child-a","title":"Child A","state":"idle"}],"edges":[]}}],"edges":[]}}}
+    ;
+    _ = try model.updateFromFrame(first);
+    try std.testing.expectEqualStrings("piloted", model.graph.?.nodes.items[0].pilot_state);
+    try std.testing.expect(model.openComposite("parent"));
+    try std.testing.expect(model.isCompositeOpen());
+    try std.testing.expectEqualStrings("Group", model.open_composite_title.?);
+    try std.testing.expectEqual(@as(usize, 2), model.graph.?.nodes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), model.graph.?.edges.items.len);
+    try std.testing.expect(model.setSelectedID("child-b"));
+
+    _ = try model.updateFromFrame(second);
+    try std.testing.expect(model.isCompositeOpen());
+    try std.testing.expectEqualStrings("Child B updated", model.selected().?.title);
+    try std.testing.expectEqual(@as(usize, 0), model.graph.?.edges.items.len);
+
+    model.closeComposite();
+    try std.testing.expect(!model.isCompositeOpen());
+    try std.testing.expectEqual(@as(usize, 1), model.graph.?.nodes.items.len);
+    try std.testing.expectEqualStrings("parent", model.selected().?.id);
 }

@@ -132,6 +132,8 @@ const UiaDynamicTarget = union(enum) {
         project_path: []const u8,
         index: usize,
     },
+    active_loop: usize,
+    composite_back,
     quick_chat: []const u8,
 };
 
@@ -452,7 +454,7 @@ pub const App = struct {
                             (self.client.protocolMode() == .v1 and
                                 std.mem.eql(u8, path, self.pending_sent_path))))
                     {
-                        if (self.model.selectProject(path) and
+                        if (self.selectProject(path) and
                             (self.selected_edge_project_path.len == 0 or
                                 !std.mem.eql(u8, self.selected_edge_project_path, path)))
                         {
@@ -721,6 +723,12 @@ pub const App = struct {
         return null;
     }
 
+    fn selectProject(self: *App, path: []const u8) bool {
+        const selected = self.model.selectProject(path);
+        if (selected) self.client.setSubgraphAddress(null);
+        return selected;
+    }
+
     fn replaceSelectionID(self: *App, destination: *[]u8, value: []const u8) bool {
         const copy = self.allocator.dupe(u8, value) catch return false;
         if (destination.*.len != 0) self.allocator.free(destination.*);
@@ -918,6 +926,7 @@ pub const App = struct {
 
     fn selectNextAttention(self: *App) void {
         self.model.selectNextAttention();
+        if (!self.model.isCompositeOpen()) self.client.setSubgraphAddress(null);
         if (self.model.selected_index) |index| _ = self.selectNodeIndex(index);
     }
 
@@ -1388,7 +1397,7 @@ pub const App = struct {
         if (match.project_index >= self.model.graphs.items.len) return;
         const project_path = self.allocator.dupe(u8, self.model.graphs.items[match.project_index].project.path) catch return;
         defer self.allocator.free(project_path);
-        if (!self.model.selectProject(project_path) or !self.selectNodeIndex(match.node_index)) {
+        if (!self.selectProject(project_path) or !self.selectNodeIndex(match.node_index)) {
             self.setStatus("Matching loop is no longer available");
             return;
         }
@@ -1407,6 +1416,17 @@ pub const App = struct {
         const graph = if (self.model.graph) |value| value else return;
         const index = self.model.selectedIndex() orelse return;
         if (index >= graph.nodes.items.len) return;
+        if (!self.model.isCompositeOpen() and
+            (std.mem.eql(u8, graph.nodes.items[index].loop_type, "composite") or
+                std.mem.eql(u8, graph.nodes.items[index].loop_type, "proactive")))
+        {
+            self.showCompositeGroup(graph.nodes.items[index]);
+            return;
+        }
+        if (self.model.isCompositeOpen()) {
+            self.setStatus("Composite templates have no terminal until the group is piloted");
+            return;
+        }
         const workspace = if (self.workspace) |value| value else return;
         self.surface = .workspace;
         self.workspace_controls.panel_visible = true;
@@ -1587,6 +1607,7 @@ pub const App = struct {
                 .project_path = project_path,
                 .id = node_id,
                 .composite = composite,
+                .can_arm = std.mem.eql(u8, graph.nodes.items[index].pilot_state, "piloted"),
                 .unwired = unwired,
             } },
             x,
@@ -1630,7 +1651,7 @@ pub const App = struct {
     fn handleContextAction(self: *App, action: GraphContextMenu.Action, target: GraphContextMenu.Target) void {
         switch (target) {
             .project => |stable| {
-                const selected = self.model.selectProject(stable.path);
+                const selected = self.selectProject(stable.path);
                 if (selected) {
                     self.surface = .project;
                     self.workspace_controls.panel_visible = false;
@@ -1675,7 +1696,11 @@ pub const App = struct {
                 }
             },
             .node => |stable| {
-                if (!self.model.selectProject(stable.project_path)) return;
+                const already_active = if (self.model.graph) |active|
+                    std.mem.eql(u8, active.project.path, stable.project_path)
+                else
+                    false;
+                if (!already_active and !self.selectProject(stable.project_path)) return;
                 const graph = self.model.graph orelse return;
                 const index = GraphModel.findNodeIndexByID(graph.nodes.items, stable.id) orelse return;
                 if (!self.selectNodeIndex(index)) return;
@@ -1686,14 +1711,18 @@ pub const App = struct {
                     .open_terminal => self.openSelectedNode(),
                     .message_node => self.sendSelectedNode(),
                     .memo_node => self.sendSelectedNode(),
-                    .open_composite => self.showCompositeGroup(graph.project.name, graph.nodes.items[index]),
+                    .open_composite => self.showCompositeGroup(graph.nodes.items[index]),
                     .pilot_composite => {
                         self.client.sendPilotComposite(graph.project.path, graph.nodes.items[index].id);
                         self.setStatus("Piloting composite once...");
                     },
                     .arm_composite => {
-                        self.client.sendArmComposite(graph.project.path, graph.nodes.items[index].id);
-                        self.setStatus("Arming composite schedule...");
+                        if (std.mem.eql(u8, graph.nodes.items[index].pilot_state, "piloted")) {
+                            self.client.sendArmComposite(graph.project.path, graph.nodes.items[index].id);
+                            self.setStatus("Arming composite schedule...");
+                        } else {
+                            self.setStatus("Pilot this composite successfully before arming it");
+                        }
                     },
                     .wire_node => self.beginWireSelectedNode(index),
                     .mark_entry => self.markSelectedNodeAsEntry(index),
@@ -1734,23 +1763,30 @@ pub const App = struct {
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
-    fn showCompositeGroup(self: *App, project_name: []const u8, node: GraphModel.Node) void {
-        const count = GraphModel.subgraphNodeCount(node.subgraph_json);
-        const message = std.fmt.allocPrint(
-            self.allocator,
-            "{s}  >  {s}\n\n{d} nested loop{s}\n\nThe parent graph remains available behind this group summary. Pilot Once and Arm Schedule operate on the authoritative nested workflow.",
-            .{ project_name, node.title, count, if (count == 1) "" else "s" },
-        ) catch return;
-        defer self.allocator.free(message);
-        const message_wide = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, message) catch return;
-        defer self.allocator.free(message_wide);
-        _ = c.MessageBoxW(
-            self.window.hwnd,
-            message_wide.ptr,
-            std.unicode.utf8ToUtf16LeStringLiteral("Composite Group").ptr,
-            c.MB_OK | c.MB_ICONINFORMATION,
-        );
-        self.setStatus("Composite group opened");
+    fn showCompositeGroup(self: *App, node: GraphModel.Node) void {
+        const node_id = self.allocator.dupe(u8, node.id) catch return;
+        defer self.allocator.free(node_id);
+        if (!self.model.openComposite(node_id)) {
+            self.setStatus("Unable to open composite group");
+            return;
+        }
+        self.client.setSubgraphAddress(node_id);
+        self.clearEdgeSelection();
+        self.canvas.actualSize();
+        self.setStatus("Composite group opened · use the breadcrumb to return");
+        self.syncAccessibility();
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
+    }
+
+    fn closeCompositeGroup(self: *App) void {
+        if (!self.model.isCompositeOpen()) return;
+        self.model.closeComposite();
+        self.client.setSubgraphAddress(null);
+        self.clearEdgeSelection();
+        self.canvas.actualSize();
+        self.setStatus("Returned to project graph");
+        self.syncAccessibility();
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
     fn revealProjectPath(self: *App, path: []const u8) void {
@@ -1947,7 +1983,7 @@ pub const App = struct {
 
     fn installUiaFixture(self: *App) void {
         const graph_frame =
-            \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"uia-graph","project":{"path":"C:\\GraphCode\\fixture","name":"UIA project","remote":false},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"UIA loop A","loopType":"goalBased","state":"succeeded","activity":"checking tests","presence":{"presence":"idle","confidence":"reported"},"goal":{"summary":"All tests pass","predicate":"swift test","metric":{"command":"coverage","direction":"maximize"}},"modelTier":"capable","worktreeBinding":{"path":"C:\\fixture-safe","branch":"feature/parity"}},{"id":"22222222-2222-4222-8222-222222222222","title":"UIA loop B","loopType":"proactive","state":"running","activity":"needs response","presence":{"presence":"awaitingInput","confidence":"reported"}}],"edges":[]}}}
+            \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"uia-graph","project":{"path":"C:\\GraphCode\\fixture","name":"UIA project","remote":false},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"UIA loop A","loopType":"goalBased","state":"succeeded","activity":"checking tests","presence":{"presence":"idle","confidence":"reported"},"goal":{"summary":"All tests pass","predicate":"swift test","metric":{"command":"coverage","direction":"maximize"}},"modelTier":"capable","worktreeBinding":{"path":"C:\\fixture-safe","branch":"feature/parity"}},{"id":"22222222-2222-4222-8222-222222222222","title":"UIA loop B","loopType":"proactive","state":"running","activity":"needs response","presence":{"presence":"awaitingInput","confidence":"reported"},"subGraph":{"nodes":[{"id":"55555555-5555-4555-8555-555555555555","title":"UIA nested A","loopType":"turnBased","state":"idle"},{"id":"66666666-6666-4666-8666-666666666666","title":"UIA nested B","loopType":"goalBased","state":"running"}],"edges":[{"id":"77777777-7777-4777-8777-777777777777","from":"55555555-5555-4555-8555-555555555555","to":"66666666-6666-4666-8666-666666666666","kind":"handoff"}]}}],"edges":[]}}}
         ;
         const chats_frame =
             \\{"version":2,"kind":"event","sequence":2,"event":{"quickChatsListed":[{"id":"33333333-3333-4333-8333-333333333333","title":"UIA chat A","backend":"claudeCode","createdAt":0,"activity":null},{"id":"44444444-4444-4444-8444-444444444444","title":"UIA chat B","backend":"copilot","createdAt":1,"activity":null}]}}
@@ -2834,6 +2870,24 @@ pub const App = struct {
         }
         switch (self.surface) {
             .project, .workspace => if (self.model.graph) |graph| {
+                if (self.model.open_composite_id) |parent_id| {
+                    const back_name = std.fmt.allocPrint(self.allocator, "Back to {s}", .{graph.project.name}) catch return;
+                    owned_identities.append(back_name) catch {
+                        self.allocator.free(back_name);
+                        return;
+                    };
+                    self.appendAccessibilityElement(
+                        &elements,
+                        &owned_identities,
+                        "composite-back",
+                        parent_id,
+                        back_name,
+                        4,
+                        GraphCanvas.compositeBreadcrumbBounds(canvas_rect),
+                        false,
+                        false,
+                    ) catch return;
+                }
                 for (graph.nodes.items, 0..) |node, index| {
                     const bounds = GraphCanvas.nodeBounds(index, &self.canvas);
                     const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ graph.project.path, node.id }) catch return;
@@ -2925,6 +2979,26 @@ pub const App = struct {
                     target = .{ .loop = .{ .project_path = graph.project.path, .index = index } };
                 }
             }
+            if (self.model.isCompositeOpen()) if (self.model.graph) |active_graph| {
+                if (self.model.open_composite_id) |parent_id| {
+                    const identity = std.fmt.allocPrint(self.allocator, "composite-back:{s}", .{parent_id}) catch return false;
+                    defer self.allocator.free(identity);
+                    if (Accessibility.worktreeIdentityPayload(identity) == payload) {
+                        if (target != null) return false;
+                        target = .composite_back;
+                    }
+                }
+                for (active_graph.nodes.items, 0..) |node, index| {
+                    const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ active_graph.project.path, node.id }) catch return false;
+                    defer self.allocator.free(key);
+                    const identity = std.fmt.allocPrint(self.allocator, "project-card:{s}", .{key}) catch return false;
+                    defer self.allocator.free(identity);
+                    if (Accessibility.worktreeIdentityPayload(identity) == payload) {
+                        if (target != null) return false;
+                        target = .{ .active_loop = index };
+                    }
+                }
+            };
         }
         for (self.model.quick_chats.items) |chat| {
             const identity = std.fmt.allocPrint(self.allocator, "quick-chat-card:{s}", .{chat.id}) catch return false;
@@ -2938,7 +3012,7 @@ pub const App = struct {
         switch (resolved) {
             .recent_project => |path| self.openProject(path),
             .open_project => |path| {
-                if (self.model.selectProject(path)) {
+                if (self.selectProject(path)) {
                     self.surface = .project;
                     self.workspace_controls.panel_visible = false;
                     self.layoutWorkspace();
@@ -2948,6 +3022,11 @@ pub const App = struct {
                 }
             },
             .loop => |loop| self.openLoopFromAccessibility(loop.project_path, loop.index),
+            .active_loop => |index| {
+                _ = self.selectNodeIndex(index);
+                self.openSelectedNode();
+            },
+            .composite_back => self.closeCompositeGroup(),
             .quick_chat => |id| {
                 self.client.sendOpenQuickChat(id);
                 self.setStatus("Opening quick chat...");
@@ -2957,16 +3036,26 @@ pub const App = struct {
     }
 
     fn openLoopFromAccessibility(self: *App, project_path: []const u8, index: usize) void {
-        if (!self.model.selectProject(project_path)) return;
+        if (!self.selectProject(project_path)) return;
         const graph = self.model.graph orelse return;
         if (index >= graph.nodes.items.len) return;
+        _ = self.selectNodeIndex(index);
+        if (std.mem.eql(u8, graph.nodes.items[index].loop_type, "composite") or
+            std.mem.eql(u8, graph.nodes.items[index].loop_type, "proactive"))
+        {
+            self.surface = .project;
+            self.workspace_controls.panel_visible = false;
+            self.layoutWorkspace();
+            self.layoutEmptyStateControls();
+            self.showCompositeGroup(graph.nodes.items[index]);
+            return;
+        }
         self.surface = .workspace;
         self.workspace_controls.panel_visible = true;
         self.layoutWorkspace();
         self.layoutEmptyStateControls();
         self.clearEdgeSelection();
         self.rebindWorkspace(project_path);
-        _ = self.selectNodeIndex(index);
         if (self.workspace) |workspace| {
             workspace.openNode(0, graph.nodes.items[index].id) catch {
                 self.setStatus("Unable to open selected loop");
@@ -3559,7 +3648,7 @@ fn onWindowMessage(
                     .overview => {
                         if (GraphCanvas.hitTestOverview(&app.model, x, y, &app.canvas, bounds)) |hit| {
                             const graph = app.model.graphs.items[hit.graph_index];
-                            if (app.model.selectProject(graph.project.path)) {
+                            if (app.selectProject(graph.project.path)) {
                                 app.surface = .workspace;
                                 app.workspace_controls.panel_visible = true;
                                 app.layoutWorkspace();
@@ -3591,7 +3680,9 @@ fn onWindowMessage(
                         _ = c.InvalidateRect(hwnd, null, 0);
                     },
                     .project, .workspace => if (app.model.graph) |graph| {
-                        if (GraphCanvas.hitTestReclaimOffer(
+                        if (GraphCanvas.hitTestCompositeBack(&app.model, x, y, bounds)) {
+                            app.closeCompositeGroup();
+                        } else if (GraphCanvas.hitTestReclaimOffer(
                             graph.nodes.items,
                             if (app.worktree_inspection) |*value| value else null,
                             app.kept_worktree_paths.items,
@@ -3651,7 +3742,7 @@ fn onWindowMessage(
                     .local_heading, .remote_heading => {},
                     .project => app.openProject(app.model.recent_projects.items[row.index].path),
                     .open_project => if (row.project_path) |path| {
-                        if (app.model.selectProject(path)) {
+                        if (app.selectProject(path)) {
                             app.surface = .project;
                             app.workspace_controls.panel_visible = false;
                             app.layoutWorkspace();
@@ -3662,7 +3753,7 @@ fn onWindowMessage(
                     .overview => app.openGlobalOverview(),
                     .loop => if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
                         if (row.index < graph.nodes.items.len) {
-                            if (!app.model.selectProject(path)) return true;
+                            if (!app.selectProject(path)) return true;
                             app.surface = .workspace;
                             app.workspace_controls.panel_visible = true;
                             app.layoutWorkspace();
@@ -3748,7 +3839,13 @@ fn onWindowMessage(
                                 _ = c.ClientToScreen(hwnd, &screen);
                                 GraphContextMenu.show(
                                     hwnd,
-                                    .{ .node = .{ .project_path = path, .id = graph.nodes.items[row.index].id } },
+                                    .{ .node = .{
+                                        .project_path = path,
+                                        .id = graph.nodes.items[row.index].id,
+                                        .composite = std.mem.eql(u8, graph.nodes.items[row.index].loop_type, "composite") or
+                                            std.mem.eql(u8, graph.nodes.items[row.index].loop_type, "proactive"),
+                                        .can_arm = std.mem.eql(u8, graph.nodes.items[row.index].pilot_state, "piloted"),
+                                    } },
                                     screen.x,
                                     screen.y,
                                     app,

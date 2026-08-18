@@ -4,6 +4,7 @@ pub const NodeTarget = struct {
     project_path: []const u8,
     id: []const u8,
     composite: bool = false,
+    can_arm: bool = false,
     unwired: bool = false,
 };
 
@@ -140,7 +141,7 @@ pub fn show(
             if (node.composite) {
                 append(menu, ids.open_composite, "Open Group");
                 append(menu, ids.pilot_composite, "Pilot Once");
-                append(menu, ids.arm_composite, "Arm Schedule");
+                appendEnabled(menu, ids.arm_composite, "Arm Schedule", node.can_arm);
                 separator(menu);
             }
             append(menu, ids.message_node, "Message");
@@ -213,9 +214,15 @@ fn actionForCommand(command: c_int) Action {
 }
 
 fn append(menu: c.HMENU, id: usize, text: []const u8) void {
+    appendEnabled(menu, id, text, true);
+}
+
+fn appendEnabled(menu: c.HMENU, id: usize, text: []const u8, enabled: bool) void {
     const wide = toWide(text) orelse return;
     defer std.heap.c_allocator.free(wide);
-    _ = c.AppendMenuW(menu, c.MF_STRING, id, wide.ptr);
+    var flags: c.UINT = @intCast(c.MF_STRING);
+    if (!enabled) flags |= @intCast(c.MF_GRAYED);
+    _ = c.AppendMenuW(menu, flags, id, wide.ptr);
 }
 
 fn separator(menu: c.HMENU) void {

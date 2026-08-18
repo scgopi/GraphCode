@@ -672,6 +672,64 @@ pub fn commandGraphSubGraph(
         "{{\"graphCommand\":{{\"projectPath\":{s},\"command\":{{\"subGraphCommand\":{{\"nodeID\":{s},\"command\":{s}}}}}}}}}", .{path, id, nested_command_json});
 }
 
+pub fn addressGraphCommandToSubGraph(
+    allocator: std.mem.Allocator,
+    command_json: []const u8,
+    node_id: []const u8,
+) ![]u8 {
+    if (std.mem.indexOf(u8, command_json, "\"graphCommand\"") == null)
+        return allocator.dupe(u8, command_json);
+    const encoded_project_path = jsonString(command_json, "projectPath") orelse
+        return error.MalformedGraphCommand;
+    const project_path = try decodeJsonString(allocator, encoded_project_path);
+    defer allocator.free(project_path);
+    const command_key = std.mem.indexOf(u8, command_json, "\"command\":") orelse
+        return error.MalformedGraphCommand;
+    const command_open = std.mem.indexOfScalarPos(u8, command_json, command_key + "\"command\":".len, '{') orelse
+        return error.MalformedGraphCommand;
+    const command_close = findClosingJson(command_json, command_open, '{', '}') orelse
+        return error.MalformedGraphCommand;
+    return commandGraphSubGraph(
+        allocator,
+        project_path,
+        node_id,
+        command_json[command_open .. command_close + 1],
+    );
+}
+
+fn findClosingJson(
+    bytes: []const u8,
+    start: usize,
+    open: u8,
+    close: u8,
+) ?usize {
+    var depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+    for (bytes[start..], start..) |byte, index| {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (byte == '\\') {
+                escaped = true;
+            } else if (byte == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (byte == '"') {
+            in_string = true;
+        } else if (byte == open) {
+            depth += 1;
+        } else if (byte == close) {
+            if (depth == 0) return null;
+            depth -= 1;
+            if (depth == 0) return index;
+        }
+    }
+    return null;
+}
+
 fn quoteJson(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
     var size: usize = 2;
     for (value) |byte| {
@@ -1150,4 +1208,23 @@ test "v2 edge fixtures exactly match Zig-generated request envelopes" {
     );
     defer allocator.free(expected_delete);
     try std.testing.expectEqualStrings(expected_delete, delete);
+}
+
+test "graph commands can be addressed into a composite subgraph" {
+    const command = try commandGraphDeleteNode(
+        std.testing.allocator,
+        "C:\\work\\graph",
+        "child",
+    );
+    defer std.testing.allocator.free(command);
+    const addressed = try addressGraphCommandToSubGraph(
+        std.testing.allocator,
+        command,
+        "parent",
+    );
+    defer std.testing.allocator.free(addressed);
+    try std.testing.expectEqualStrings(
+        "{\"graphCommand\":{\"projectPath\":\"C:\\\\work\\\\graph\",\"command\":{\"subGraphCommand\":{\"nodeID\":\"parent\",\"command\":{\"deleteNode\":{\"_0\":\"child\"}}}}}}",
+        addressed,
+    );
 }

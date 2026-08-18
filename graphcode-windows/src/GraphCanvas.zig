@@ -387,20 +387,26 @@ fn drawCompositeBreadcrumb(
     bounds: c.RECT,
 ) void {
     const graph = model.graph orelse return;
-    const index = model.selectedIndex() orelse return;
-    if (index >= graph.nodes.items.len) return;
-    const node = graph.nodes.items[index];
-    if (!std.mem.eql(u8, node.loop_type, "proactive") and !std.mem.eql(u8, node.loop_type, "composite")) return;
-    const count = GraphModel.subgraphNodeCount(node.subgraph_json);
+    const title = model.open_composite_title orelse return;
     const label = std.fmt.allocPrint(
         allocator,
-        "{s}  >  {s}  ·  {d} nested loop{s}",
-        .{ graph.project.name, node.title, count, if (count == 1) "" else "s" },
+        "‹  {s}  >  {s}  ·  {d} loop{s}",
+        .{ graph.project.name, title, graph.nodes.items.len, if (graph.nodes.items.len == 1) "" else "s" },
     ) catch return;
     defer allocator.free(label);
-    const crumb = rect(bounds.left + 18, bounds.top + 14, @min(bounds.right - 18, bounds.left + 520), bounds.top + 42);
+    const crumb = compositeBreadcrumbBounds(bounds);
     fill(hdc, crumb, 0x00292825);
     drawTextRect(hdc, allocator, label, crumb, 11, 0x00E6E6E6, c.DT_LEFT | c.DT_SINGLELINE | c.DT_VCENTER);
+}
+
+pub fn compositeBreadcrumbBounds(bounds: c.RECT) c.RECT {
+    return rect(bounds.left + 18, bounds.top + 14, @min(bounds.right - 18, bounds.left + 520), bounds.top + 42);
+}
+
+pub fn hitTestCompositeBack(model: *const GraphModel.Model, x: i32, y: i32, bounds: c.RECT) bool {
+    const crumb = compositeBreadcrumbBounds(bounds);
+    return model.isCompositeOpen() and
+        x >= crumb.left and x < crumb.right and y >= crumb.top and y < crumb.bottom;
 }
 
 fn drawOverview(

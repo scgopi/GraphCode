@@ -50,6 +50,7 @@ pub const DaemonClient = struct {
     v1_pending_count: usize = 0,
     v1_pending_expectation: ?V1Expectation = null,
     subscription_path: []const u8 = "",
+    subgraph_node_id: []const u8 = "",
     frame_buffer: FrameBuffer,
     retry_at_ms: i64 = 0,
     retry_delay_ms: i64 = reconnect_initial_ms,
@@ -84,6 +85,7 @@ pub const DaemonClient = struct {
         self.clearQueues();
         if (self.pipe_name.len != 0) self.allocator.free(self.pipe_name);
         if (self.subscription_path.len != 0) self.allocator.free(self.subscription_path);
+        if (self.subgraph_node_id.len != 0) self.allocator.free(self.subgraph_node_id);
         self.frame_buffer.deinit();
     }
 
@@ -109,6 +111,7 @@ pub const DaemonClient = struct {
             self.allocator.free(copy);
             return;
         }
+
         if (self.subscription_path.len != 0) self.allocator.free(self.subscription_path);
         self.subscription_path = copy;
         self.reconnect_requested = true;
@@ -116,6 +119,15 @@ pub const DaemonClient = struct {
         self.condition.signal();
         self.mutex.unlock();
         self.publishState(.reconnecting, "");
+    }
+
+    pub fn setSubgraphAddress(self: *DaemonClient, node_id: ?[]const u8) void {
+        const replacement = if (node_id) |value|
+            self.allocator.dupe(u8, value) catch return
+        else
+            &.{};
+        if (self.subgraph_node_id.len != 0) self.allocator.free(self.subgraph_node_id);
+        self.subgraph_node_id = replacement;
     }
 
     pub fn subscriptionPath(self: *DaemonClient, allocator: std.mem.Allocator) ![]u8 {
@@ -532,7 +544,24 @@ pub const DaemonClient = struct {
     }
 
     fn sendCommand(self: *DaemonClient, command_json: []u8) void {
-        _ = self.sendCommandInternal(command_json, null);
+        var addressed = command_json;
+        if (self.subgraph_node_id.len != 0 and
+            std.mem.indexOf(u8, command_json, "\"graphCommand\"") != null)
+        {
+            addressed = Wire.addressGraphCommandToSubGraph(
+                self.allocator,
+                command_json,
+                self.subgraph_node_id,
+            ) catch {
+                self.allocator.free(command_json);
+                self.mutex.lock();
+                self.last_error = "unable to address composite graph command";
+                self.mutex.unlock();
+                return;
+            };
+            self.allocator.free(command_json);
+        }
+        _ = self.sendCommandInternal(addressed, null);
     }
 
     fn sendCommandWithRequestID(self: *DaemonClient, command_json: []u8, request_id: [36]u8) bool {

@@ -285,6 +285,26 @@ try {
   $graphChildIds = @($projectCardIds + $canvasActionIds)
   $null = Assert-FragmentLinks $graph $rawWalker $graphChildIds "RawView Graph"
   $null = Assert-FragmentLinks $graph $controlWalker $graphChildIds "ControlView Graph"
+  $projectCards[1].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 150
+  $compositeChildren = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.AutomationId -match '^canvas-card-' })
+  $nestedCards = @($compositeChildren | Where-Object { $_.Current.Name -match '^UIA nested ' })
+  Require (($nestedCards.Count -eq 2) -and
+           ((@($nestedCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA nested A|UIA nested B")) `
+    "Open Group did not expose the nested composite canvas"
+  $compositeBack = @($compositeChildren | Where-Object { $_.Current.Name -eq "Back to UIA project" })
+  Require ($compositeBack.Count -eq 1) `
+    "Composite canvas did not expose its Back breadcrumb: $(@($compositeChildren | ForEach-Object { $_.Current.Name }) -join '|')"
+  Require (($compositeBack[0].Current.BoundingRectangle.Width -gt 0) -and
+           ($compositeBack[0].Current.BoundingRectangle.Height -gt 0)) "Composite Back breadcrumb has empty bounds"
+  $compositeBack[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 150
+  $restoredProjectCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+      $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop '
+    })
+  Require (($restoredProjectCards.Count -eq 2) -and
+           ((@($restoredProjectCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) `
+    "Composite Back did not restore the parent project canvas"
   $surfaceActionPatterns = @{}
   foreach ($id in @($navigationIds + $canvasActionIds)) {
     $element = Find-FragmentById $root $id $rawWalker
@@ -700,6 +720,7 @@ try {
     dynamicProjectCards = $projectCardIds
     dynamicQuickChatCards = $quickChatCardIds
     dynamicInvocationsPassed = $true
+    compositeNavigationPassed = $true
     statusText = $statusTextAfter
     statusChanged = ($statusTextAfter -ne $initialStatus)
     statusNoChangeLiveEvents = $statusNoChangeLiveEvents
