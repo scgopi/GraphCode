@@ -775,6 +775,71 @@ try {
            ($inlineError.Current.BoundingRectangle.Height -gt 0)) `
     "inline ingress error had empty canvas bounds"
 
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 9)) "empty overview fixture command was rejected"
+  Start-Sleep -Milliseconds 200
+  $openFolderButton = Find-FragmentById $root "4601" $rawWalker
+  $emptyOverviewLoopButton = Find-FragmentById $root "4602" $rawWalker
+  Require (($null -ne $openFolderButton) -and ($openFolderButton.Current.Name -eq "Open Folder...")) `
+    "empty global graph omitted its Open Folder action"
+  Require (($null -ne $emptyOverviewLoopButton) -and ($emptyOverviewLoopButton.Current.Name -eq "New Loop")) `
+    "empty global graph omitted its New Loop action"
+  Require ((-not $openFolderButton.Current.IsOffscreen) -and
+           (-not $emptyOverviewLoopButton.Current.IsOffscreen)) `
+    "empty global graph actions were not visible"
+  Require ([GraphCodeUiaGateState]::PostCommand($shellWindow, 4602)) `
+    "empty global New Loop command was rejected"
+  $nodeForm = $null
+  $nodeFormWindowCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty, "Create or edit node"
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Window
+    ))
+  )
+  $nodeFormCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+    )),
+    $nodeFormWindowCondition
+  )
+  for ($index = 0; $index -lt 40 -and $null -eq $nodeForm; $index++) {
+    Start-Sleep -Milliseconds 50
+    $nodeForm = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $nodeFormCondition
+    )
+  }
+  Require ($null -ne $nodeForm) "empty global New Loop did not open the node form"
+  Require ([GraphCodeUiaGateState]::PostClose(
+    [IntPtr]$nodeForm.Current.NativeWindowHandle
+  )) "empty global node form rejected cancellation"
+  Start-Sleep -Milliseconds 200
+
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 10)) "empty project fixture command was rejected"
+  Start-Sleep -Milliseconds 200
+  $emptyProjectLoopButton = Find-FragmentById $root "4602" $rawWalker
+  Require (($null -ne $emptyProjectLoopButton) -and
+           ($emptyProjectLoopButton.Current.Name -eq "New Loop") -and
+           (-not $emptyProjectLoopButton.Current.IsOffscreen)) `
+    "empty project canvas omitted its visible New Loop action"
+  Require ([GraphCodeUiaGateState]::PostCommand($shellWindow, 4602)) `
+    "empty project New Loop command was rejected"
+  $projectNodeForm = $null
+  for ($index = 0; $index -lt 40 -and $null -eq $projectNodeForm; $index++) {
+    Start-Sleep -Milliseconds 50
+    $projectNodeForm = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $nodeFormCondition
+    )
+  }
+  Require ($null -ne $projectNodeForm) "empty project New Loop did not open the node form"
+  Require ([GraphCodeUiaGateState]::PostClose(
+    [IntPtr]$projectNodeForm.Current.NativeWindowHandle
+  )) "empty project node form rejected cancellation"
+  Start-Sleep -Milliseconds 200
+
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 6)) "About dialog fixture command was rejected"
   $aboutDialog = $null
   $aboutWindowCondition = New-Object System.Windows.Automation.AndCondition(
@@ -875,6 +940,8 @@ try {
     compositeNavigationPassed = $true
     renameDialogPassed = $true
     inlineIngressErrorPassed = $true
+    emptyOverviewPassed = $true
+    emptyProjectPassed = $true
     aboutDialogPassed = $true
     statusText = $statusTextAfter
     statusChanged = ($statusTextAfter -ne $initialStatus)

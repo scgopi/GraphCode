@@ -35,8 +35,8 @@ Statuses:
 |---|---|---|---|
 | Four-page onboarding | Visual terminology tour, Skip/Back/Continue/Get Started, backend selection, reopen, persisted seen state | Custom rounded Win32 onboarding; all pages exercised and persistence verified | Validated |
 | No-project Welcome detail | Graph icon, pitch, explanatory copy, Open Folder action, inline error | Windows matches the centered Graph identity, pitch, explanatory copy, and single Open Folder action. Persistent project-ingress failures now also render as a bounded, wrapped inline canvas alert without replacing navigation; focused geometry coverage and the populated UIA gate verify the alert text and live bounds | Validated |
-| Empty global graph | “Nothing running yet”, explanatory copy, Open Folder action, New Loop action | Dedicated overview empty copy now exposes both Open Folder and New Loop; New Loop targets the daemon's `graphcode://global` project when no folder is selected. Final live empty-overview command evidence remains pending | Partial |
-| Empty project canvas | Project-specific empty message and New Loop action | Dedicated “No loops yet” copy and New Loop action are implemented; final live empty-project evidence is still pending | Partial |
+| Empty global graph | “Nothing running yet”, explanatory copy, Open Folder action, New Loop action | The dedicated overview empty state exposes both bounded Open Folder and New Loop actions; New Loop targets the daemon's `graphcode://global` project. The live UIA gate switches to an empty model, verifies both visible native controls, invokes New Loop, and observes the node form | Validated |
+| Empty project canvas | Project-specific empty message and New Loop action | The dedicated “No loops yet” project state exposes its visible New Loop action. The live UIA gate installs an empty local project, invokes that exact command, and observes the project-scoped node form | Validated |
 | Empty Quick Chats canvas | Explanation of Quick Chats and New Chat action | Live walkthrough verified the dedicated explanation and New Chat action with corrected non-overlapping layout | Validated |
 
 ## Sidebar

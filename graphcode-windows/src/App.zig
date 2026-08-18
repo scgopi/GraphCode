@@ -2240,6 +2240,27 @@ pub const App = struct {
             self.setIngressError("Folder could not be opened");
             return;
         }
+        if (mutation == 9) {
+            self.clearIngressError();
+            self.model.deinit();
+            self.model = GraphModel.Model.init(self.allocator);
+            self.surface = .overview;
+            self.layoutEmptyStateControls();
+            self.syncAccessibility();
+            _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            return;
+        }
+        if (mutation == 10) {
+            const frame =
+                \\{"version":2,"kind":"event","sequence":50,"event":{"graphChanged":{"project":{"path":"C:\\GraphCode\\empty","name":"Empty project"},"nodes":[],"edges":[]}}}
+            ;
+            _ = self.model.updateFromFrame(frame) catch return;
+            self.surface = .project;
+            self.layoutEmptyStateControls();
+            self.syncAccessibility();
+            _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            return;
+        }
         const dialog = if (self.worktree_dialog) |*value| value else return;
         switch (mutation) {
             1 => {
