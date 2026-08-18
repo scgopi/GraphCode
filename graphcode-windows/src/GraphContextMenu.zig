@@ -24,6 +24,7 @@ pub const ProjectTarget = struct {
 
 pub const Target = union(enum) {
     background,
+    quick_chats,
     project: ProjectTarget,
     node: NodeTarget,
     edge: EdgeTarget,
@@ -58,6 +59,7 @@ pub const Action = enum {
     close_project,
     remove_project,
     delete_project_loops,
+    new_quick_chat,
 };
 
 pub const Callback = *const fn (?*anyopaque, Action, Target) void;
@@ -102,6 +104,7 @@ const ids = struct {
     const close_project = 5146;
     const remove_project = 5147;
     const delete_project_loops = 5148;
+    const new_quick_chat = 5150;
 };
 
 pub fn show(
@@ -116,6 +119,7 @@ pub fn show(
     defer _ = c.DestroyMenu(menu);
     switch (target) {
         .background => append(menu, ids.create_edge, "Create Edge"),
+        .quick_chats => append(menu, ids.new_quick_chat, "New Chat"),
         .project => |project| {
             append(menu, ids.open_project, "Open Project");
             append(menu, ids.new_project_loop, "New Loop...");
@@ -209,6 +213,7 @@ fn actionForCommand(command: c_int) Action {
         ids.close_project => .close_project,
         ids.remove_project => .remove_project,
         ids.delete_project_loops => .delete_project_loops,
+        ids.new_quick_chat => .new_quick_chat,
         else => .none,
     };
 }

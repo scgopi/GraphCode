@@ -165,6 +165,9 @@ public static class GraphCodeUiaGateState {
     SetFocus(control);
     return GetFocus() == control;
   }
+  public static bool ActivateWindow(IntPtr window) {
+    return window != IntPtr.Zero && SetForegroundWindow(window);
+  }
   public static bool PostMouseClick(IntPtr window) {
     return PostMessage(window, 0x0201, UIntPtr.Zero, IntPtr.Zero);
   }
@@ -277,6 +280,7 @@ $oldUser = [Environment]::GetEnvironmentVariable("USERNAME")
 $oldFixture = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_FIXTURE_ROWS")
 $oldDaemonPipe = [Environment]::GetEnvironmentVariable("GRAPHCODE_DAEMON_PIPE")
 $oldSupportDirectory = [Environment]::GetEnvironmentVariable("GRAPHCODE_SUPPORT_DIR")
+$oldResetSidebar = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_RESET_SIDEBAR")
 $process = $null
 $settingsProcess = $null
 $status = $null
@@ -317,6 +321,7 @@ try {
     '"autoSelectsModel":true,"gateSentinel":"preserve"}'
   )
   $env:GRAPHCODE_SUPPORT_DIR = $settingsDirectory
+  $env:GRAPHCODE_UIA_RESET_SIDEBAR = "1"
   $policyDirectory = Join-Path $env:GRAPHCODE_GATE_CWD ".graphcode"
   $policyPath = Join-Path $policyDirectory "worktree-policy.json"
   $policyDirectoryExisted = Test-Path -LiteralPath $policyDirectory
@@ -383,20 +388,115 @@ try {
   $null = $projectRows[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
   $projectRowInvoke = $projectRows[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
   $projectRowIds = @($projectRows | ForEach-Object { $_.Current.AutomationId })
-  $projectChildIds = $projectRowIds + $navigationIds
+  $projectChildIds = @(Get-DirectChildren $projects $rawWalker |
+    ForEach-Object { $_.Current.AutomationId } | Where-Object { $_ })
   $null = Assert-FragmentLinks $projects $rawWalker $projectChildIds "RawView Projects"
   $null = Assert-FragmentLinks $projects $controlWalker $projectChildIds "ControlView Projects"
-  $loopRows = @(Get-DirectChildren $loops $rawWalker)
+  $localSection = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^sidebar-section-' -and $_.Current.Name -eq "Local Projects"
+  }) | Select-Object -First 1
+  $remoteSection = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^sidebar-section-' -and $_.Current.Name -eq "Remote Repositories"
+  }) | Select-Object -First 1
+  Require (($null -ne $localSection) -and ($null -ne $remoteSection)) `
+    "Local and Remote sidebar sections did not expose independent actions"
+  $remoteRowId = @($projectRows | Where-Object { $_.Current.Name -eq "Fixture remote" })[0].Current.AutomationId
+  $localSection.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 150
+  $collapsedProjectNames = @(Get-DirectChildren $projects $rawWalker |
+    Where-Object { $_.Current.AutomationId -match '^project-row-' } |
+    ForEach-Object { $_.Current.Name })
+  Require (("Fixture local" -notin $collapsedProjectNames) -and
+           ("Fixture remote" -in $collapsedProjectNames)) `
+    "Local section collapse affected the Remote section or retained its Local child"
+  $remoteAfterLocalCollapse = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -eq $remoteRowId
+  }) | Select-Object -First 1
+  Require ($null -ne $remoteAfterLocalCollapse) "Remote row identity changed during Local collapse"
+  $localSection = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^sidebar-section-' -and $_.Current.Name -eq "Local Projects"
+  }) | Select-Object -First 1
+  $localSection.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 150
+
+  $loopRows = @(Get-DirectChildren $loops $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^loop-row-'
+  })
+  Require (($loopRows.Count -eq 1) -and ($loopRows[0].Current.Name -eq "UIA loop A")) `
+    "nested loop tree did not start collapsed at its root"
+  $loopDisclosure = @(Get-DirectChildren $loops $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^loop-disclosure-' -and
+    $_.Current.Name -eq "Expand loop children"
+  }) | Select-Object -First 1
+  Require ($null -ne $loopDisclosure) "nested root omitted its disclosure action"
+  $rootLoopId = $loopRows[0].Current.AutomationId
+  $loopDisclosure.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 150
+  $loopRows = @(Get-DirectChildren $loops $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^loop-row-'
+  })
   Require (($loopRows.Count -eq 2) -and
-           ((@($loopRows | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) "Loops did not expose synchronized dynamic rows"
+           ((@($loopRows | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B") -and
+           ($loopRows[0].Current.AutomationId -eq $rootLoopId)) `
+    "nested disclosure did not reveal its child while preserving root identity"
+  $projectDisclosure = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^project-disclosure-' -and
+    $_.Current.Name -eq "Collapse project"
+  }) | Select-Object -First 1
+  Require ($null -ne $projectDisclosure) "open project omitted its disclosure action"
+  $projectDisclosure.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 150
+  Require (@(Get-DirectChildren $loops $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^loop-row-'
+  }).Count -eq 0) "project disclosure did not collapse its loop tree"
+  $projectDisclosure = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^project-disclosure-' -and
+    $_.Current.Name -eq "Expand project"
+  }) | Select-Object -First 1
+  Require ($null -ne $projectDisclosure) "project disclosure did not expose collapsed state"
+  $projectDisclosure.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 150
+  $loopRows = @(Get-DirectChildren $loops $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^loop-row-'
+  })
+  Require (($loopRows.Count -eq 2) -and
+           ($loopRows[0].Current.AutomationId -eq $rootLoopId)) `
+    "project expansion did not restore its stable nested loop tree"
+  $projectNewLoop = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^project-new-loop-' -and $_.Current.Name -eq "New Loop"
+  }) | Select-Object -First 1
+  Require ($null -ne $projectNewLoop) "project row omitted New Loop"
+  $projectNewLoop.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $sidebarNodeForm = $null
+  $sidebarNodeFormCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty, "Create or edit node"
+    ))
+  )
+  for ($index = 0; $index -lt 40 -and $null -eq $sidebarNodeForm; $index++) {
+    Start-Sleep -Milliseconds 50
+    $sidebarNodeForm = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants, $sidebarNodeFormCondition
+    )
+  }
+  Require ($null -ne $sidebarNodeForm) "project-row New Loop did not open the node form"
+  Require ([GraphCodeUiaGateState]::PostClose(
+    [IntPtr]$sidebarNodeForm.Current.NativeWindowHandle
+  )) "project-row New Loop form rejected cancellation"
+  Start-Sleep -Milliseconds 150
   $loopIds = @($loopRows | ForEach-Object { $_.Current.AutomationId })
   $null = $loops.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
   foreach ($row in $loopRows) {
     $null = $row.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
     $null = $row.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
   }
-  $null = Assert-FragmentLinks $loops $rawWalker $loopIds "RawView Loops"
-  $null = Assert-FragmentLinks $loops $controlWalker $loopIds "ControlView Loops"
+  $loopChildIds = @(Get-DirectChildren $loops $rawWalker |
+    ForEach-Object { $_.Current.AutomationId } | Where-Object { $_ })
+  $null = Assert-FragmentLinks $loops $rawWalker $loopChildIds "RawView Loops"
+  $null = Assert-FragmentLinks $loops $controlWalker $loopChildIds "ControlView Loops"
   $projectCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^canvas-card-' -and
     $_.Current.Name -in @("UIA loop A", "UIA loop B")
@@ -456,6 +556,48 @@ try {
   })
   Require (($quickChatCards.Count -eq 2) -and
            ((@($quickChatCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA chat A|UIA chat B")) "Quick Chats did not expose synchronized cards: $(@($quickChatCards | ForEach-Object { $_.Current.Name }) -join '|')"
+  $quickChatRows = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^quick-chat-row-'
+  })
+  Require (($quickChatRows.Count -eq 2) -and
+           ((@($quickChatRows | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA chat A|UIA chat B")) `
+    "Quick Chats sidebar children were not exposed as stable rows"
+  foreach ($chatRow in $quickChatRows) {
+    $null = $chatRow.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+  }
+  $quickDisclosure = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^quick-chats-disclosure-'
+  }) | Select-Object -First 1
+  Require (($null -ne $quickDisclosure) -and
+           ($quickDisclosure.Current.Name -eq "Collapse Quick Chats")) `
+    "Quick Chats disclosure did not expose its expanded state"
+  $firstQuickRowId = $quickChatRows[0].Current.AutomationId
+  $quickDisclosure.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 150
+  Require (@(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^quick-chat-row-'
+  }).Count -eq 0) "Quick Chats disclosure did not collapse child rows"
+  $quickDisclosure = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^quick-chats-disclosure-'
+  }) | Select-Object -First 1
+  Require ($quickDisclosure.Current.Name -eq "Expand Quick Chats") `
+    "Quick Chats disclosure state did not update after collapse"
+  $quickDisclosure.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 150
+  $restoredQuickRows = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^quick-chat-row-'
+  })
+  Require (($restoredQuickRows.Count -eq 2) -and
+           ($restoredQuickRows[0].Current.AutomationId -eq $firstQuickRowId)) `
+    "Quick Chats expansion did not preserve stable child identity"
+  $newChatAction = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^quick-chat-new-' -and $_.Current.Name -eq "New Chat"
+  }) | Select-Object -First 1
+  Require ($null -ne $newChatAction) "Quick Chats header omitted New Chat"
+  $newChatAction.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 150
+  Require ((Find-FragmentById $root "status" $rawWalker).Current.Name -eq "Creating quick chat...") `
+    "Quick Chats New Chat action did not execute"
   $quickChatCardIds = @($quickChatCards | ForEach-Object { $_.Current.AutomationId })
   $quickChatCards[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   Start-Sleep -Milliseconds 150
@@ -468,8 +610,16 @@ try {
   Start-Sleep -Milliseconds 250
   $process.Refresh()
   Require (-not $process.HasExited) "surface UIA actions terminated the shell"
-  $projectRowInvoke.Invoke()
-  $loopRows[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $activeProjectRow = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^project-row-' -and $_.Current.Name -eq "UIA project"
+  }) | Select-Object -First 1
+  $activeLoopRow = @(Get-DirectChildren $loops $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^loop-row-' -and $_.Current.Name -eq "UIA loop A"
+  }) | Select-Object -First 1
+  Require (($null -ne $activeProjectRow) -and ($null -ne $activeLoopRow)) `
+    "sidebar rows were unavailable before dynamic invocation"
+  $activeProjectRow.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $activeLoopRow.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   Start-Sleep -Milliseconds 250
   $process.Refresh()
   Require (-not $process.HasExited) "dynamic project or loop invocation terminated the shell"
@@ -747,6 +897,7 @@ try {
   Require ($safeFocusRow.Current.Name -eq "C:\fixture-safe") "safe worktree provider became unavailable before focus"
   $focused = $null
   for ($index = 0; $index -lt 20; $index++) {
+    $null = [GraphCodeUiaGateState]::ActivateWindow($shellWindow)
     $safeFocusRow.SetFocus()
     Start-Sleep -Milliseconds 50
     $candidate = [System.Windows.Automation.AutomationElement]::FocusedElement
@@ -1260,6 +1411,7 @@ try {
     $retainedProviderSafe = $true
   }
   Require $retainedProviderSafe "retained status provider was unsafe after teardown"
+  $env:GRAPHCODE_UIA_RESET_SIDEBAR = "0"
   if ($ArgumentList.Count -gt 0) {
     $settingsProcess = Start-Process -FilePath $Shell -ArgumentList $ArgumentList -PassThru `
       -WindowStyle Normal -RedirectStandardError $settingsErrorPath
@@ -1295,6 +1447,14 @@ try {
     }
   }
   Require $settingsFixtureReady "Product Settings fixture shell did not finish startup"
+  $settingsLoops = Find-FragmentById $settingsRoot "loops" $rawWalker
+  $persistedLoopRows = @(Get-DirectChildren $settingsLoops $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^loop-row-'
+  })
+  Require (($persistedLoopRows.Count -eq 2) -and
+           ((@($persistedLoopRows | ForEach-Object { $_.Current.Name }) -join "|") -eq
+            "UIA loop A|UIA loop B")) `
+    "nested loop expansion did not persist across shell restart"
   $settingsShellWindow = $settingsProcess.MainWindowHandle
   $settingsMessageLoopReady = $false
   for ($attempt = 0; $attempt -lt 20 -and -not $settingsMessageLoopReady; $attempt++) {
@@ -1587,4 +1747,7 @@ try {
   if ($null -eq $oldSupportDirectory) {
     Remove-Item Env:GRAPHCODE_SUPPORT_DIR -ErrorAction SilentlyContinue
   } else { $env:GRAPHCODE_SUPPORT_DIR = $oldSupportDirectory }
+  if ($null -eq $oldResetSidebar) {
+    Remove-Item Env:GRAPHCODE_UIA_RESET_SIDEBAR -ErrorAction SilentlyContinue
+  } else { $env:GRAPHCODE_UIA_RESET_SIDEBAR = $oldResetSidebar }
 }

@@ -769,10 +769,20 @@ class Node final : public IRawElementProviderSimple,
   }
   std::wstring automationIdLocked() const {
     if (isRowKey(id_)) {
-      const int parent = state_->rows.at(id_).parent;
-      const wchar_t *prefix = parent == 1 ? L"project-row-" :
-                              parent == 2 ? L"loop-row-" :
-                              parent == 3 ? L"worktree-row-" : L"canvas-card-";
+      const Row &row = state_->rows.at(id_);
+      const int parent = row.parent;
+      const wchar_t *prefix =
+          row.identity.rfind("sidebar-section:", 0) == 0 ? L"sidebar-section-" :
+          row.identity.rfind("project-new-loop:", 0) == 0 ? L"project-new-loop-" :
+          row.identity.rfind("project-disclosure:", 0) == 0 ? L"project-disclosure-" :
+          row.identity.rfind("quick-chats-header:", 0) == 0 ? L"quick-chats-header-" :
+          row.identity.rfind("quick-chat-new:", 0) == 0 ? L"quick-chat-new-" :
+          row.identity.rfind("quick-chats-disclosure:", 0) == 0 ? L"quick-chats-disclosure-" :
+          row.identity.rfind("quick-chat-row:", 0) == 0 ? L"quick-chat-row-" :
+          row.identity.rfind("loop-disclosure:", 0) == 0 ? L"loop-disclosure-" :
+          parent == 1 ? L"project-row-" :
+          parent == 2 ? L"loop-row-" :
+          parent == 3 ? L"worktree-row-" : L"canvas-card-";
       return prefix + std::to_wstring(id_);
     }
     static const wchar_t *ids[] = {
@@ -787,8 +797,18 @@ class Node final : public IRawElementProviderSimple,
   CONTROLTYPEID controlTypeLocked() const {
     if (id_ == 0) return UIA_WindowControlTypeId;
     if (id_ >= 1 && id_ <= 3) return UIA_ListControlTypeId;
-    if (isRowKey(id_))
-      return state_->rows.at(id_).parent == 4 ? UIA_ButtonControlTypeId : UIA_ListItemControlTypeId;
+    if (isRowKey(id_)) {
+      const Row &row = state_->rows.at(id_);
+      const bool action =
+          row.identity.rfind("sidebar-section:", 0) == 0 ||
+          row.identity.rfind("project-new-loop:", 0) == 0 ||
+          row.identity.rfind("project-disclosure:", 0) == 0 ||
+          row.identity.rfind("quick-chats-header:", 0) == 0 ||
+          row.identity.rfind("quick-chat-new:", 0) == 0 ||
+          row.identity.rfind("quick-chats-disclosure:", 0) == 0 ||
+          row.identity.rfind("loop-disclosure:", 0) == 0;
+      return row.parent == 4 || action ? UIA_ButtonControlTypeId : UIA_ListItemControlTypeId;
+    }
     if ((id_ >= 7 && id_ <= 11) || (id_ >= 14 && id_ <= 20)) return UIA_ButtonControlTypeId;
     if (id_ == 12 || id_ == 13) return UIA_CheckBoxControlTypeId;
     if (id_ == 5) return UIA_MenuControlTypeId;

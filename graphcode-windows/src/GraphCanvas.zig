@@ -305,6 +305,8 @@ pub fn paint(
     kept_worktrees: []const []const u8,
     allocator: std.mem.Allocator,
     state: *const CanvasState,
+    sidebar_state: *const Sidebar.State,
+    sidebar_hover_y: i32,
     controls: WorkspaceControls.State,
     surface: Surface,
 ) void {
@@ -334,6 +336,8 @@ pub fn paint(
             sidebar_bottom,
             update_version,
             ingress_error,
+            sidebar_state,
+            sidebar_hover_y,
             allocator,
         );
     }

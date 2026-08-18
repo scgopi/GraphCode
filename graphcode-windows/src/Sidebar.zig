@@ -4,6 +4,135 @@ const WorktreeStatus = @import("WorktreeStatus.zig");
 const Tokens = @import("DesignTokens.zig");
 const c = @import("Win32.zig").c;
 
+pub const State = struct {
+    allocator: std.mem.Allocator,
+    local_collapsed: bool = false,
+    remote_collapsed: bool = false,
+    chats_collapsed: bool = false,
+    collapsed_projects: std.StringHashMapUnmanaged(void) = .empty,
+    expanded_nodes: std.StringHashMapUnmanaged(void) = .empty,
+
+    pub fn init(allocator: std.mem.Allocator) State {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *State) void {
+        freeSet(self.allocator, &self.collapsed_projects);
+        freeSet(self.allocator, &self.expanded_nodes);
+        self.* = undefined;
+    }
+
+    pub fn toggleProject(self: *State, path: []const u8) !void {
+        try toggleSet(self.allocator, &self.collapsed_projects, path);
+    }
+
+    pub fn toggleNode(self: *State, id: []const u8) !void {
+        try toggleSet(self.allocator, &self.expanded_nodes, id);
+    }
+
+    pub fn isProjectCollapsed(self: *const State, path: []const u8) bool {
+        return self.collapsed_projects.contains(path);
+    }
+
+    pub fn isNodeExpanded(self: *const State, id: []const u8) bool {
+        return self.expanded_nodes.contains(id);
+    }
+
+    pub fn clearExpandedNodes(self: *State) void {
+        freeSet(self.allocator, &self.expanded_nodes);
+        self.expanded_nodes = .empty;
+    }
+
+    pub fn encode(self: *const State, allocator: std.mem.Allocator) ![]u8 {
+        var result: std.ArrayList(u8) = .empty;
+        errdefer result.deinit(allocator);
+        var iterator = self.expanded_nodes.keyIterator();
+        while (iterator.next()) |id| try result.writer(allocator).print("expanded\t{s}\n", .{id.*});
+        return result.toOwnedSlice(allocator);
+    }
+
+    pub fn decode(self: *State, data: []const u8) !void {
+        var lines = std.mem.splitScalar(u8, data, '\n');
+        while (lines.next()) |line| {
+            if (!std.mem.startsWith(u8, line, "expanded\t")) continue;
+            const id = line["expanded\t".len..];
+            if (id.len != 0 and !self.expanded_nodes.contains(id))
+                try self.expanded_nodes.put(self.allocator, try self.allocator.dupe(u8, id), {});
+        }
+    }
+};
+
+pub const Store = struct {
+    allocator: std.mem.Allocator,
+    path: []u8,
+
+    pub fn init(allocator: std.mem.Allocator) !Store {
+        const base = if (std.process.getEnvVarOwned(allocator, "GRAPHCODE_SUPPORT_DIR")) |value|
+            value
+        else |_| blk: {
+            const profile = try std.process.getEnvVarOwned(allocator, "USERPROFILE");
+            defer allocator.free(profile);
+            break :blk try std.fs.path.join(allocator, &.{ profile, ".graphcode" });
+        };
+        defer allocator.free(base);
+        try std.fs.cwd().makePath(base);
+        return .{
+            .allocator = allocator,
+            .path = try std.fs.path.join(allocator, &.{ base, "windows-sidebar-state.tsv" }),
+        };
+    }
+
+    pub fn deinit(self: *Store) void {
+        self.allocator.free(self.path);
+        self.* = undefined;
+    }
+
+    pub fn load(self: *Store, state: *State) !void {
+        const data = std.fs.cwd().readFileAlloc(self.allocator, self.path, 1024 * 1024) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => return err,
+        };
+        defer self.allocator.free(data);
+        try state.decode(data);
+    }
+
+    pub fn save(self: *Store, state: *const State) !void {
+        const data = try state.encode(self.allocator);
+        defer self.allocator.free(data);
+        const temp_path = try std.fmt.allocPrint(self.allocator, "{s}.tmp-{d}", .{ self.path, std.time.nanoTimestamp() });
+        defer self.allocator.free(temp_path);
+        var file = try std.fs.cwd().createFile(temp_path, .{ .truncate = true });
+        file.writeAll(data) catch |err| {
+            file.close();
+            std.fs.cwd().deleteFile(temp_path) catch {};
+            return err;
+        };
+        file.close();
+        std.os.windows.MoveFileEx(
+            temp_path,
+            self.path,
+            std.os.windows.MOVEFILE_REPLACE_EXISTING | std.os.windows.MOVEFILE_WRITE_THROUGH,
+        ) catch |err| {
+            std.fs.cwd().deleteFile(temp_path) catch {};
+            return err;
+        };
+    }
+};
+
+fn freeSet(allocator: std.mem.Allocator, set: *std.StringHashMapUnmanaged(void)) void {
+    var iterator = set.keyIterator();
+    while (iterator.next()) |key| allocator.free(key.*);
+    set.deinit(allocator);
+}
+
+fn toggleSet(allocator: std.mem.Allocator, set: *std.StringHashMapUnmanaged(void), key: []const u8) !void {
+    if (set.fetchRemove(key)) |removed| {
+        allocator.free(removed.key);
+    } else {
+        try set.put(allocator, try allocator.dupe(u8, key), {});
+    }
+}
+
 pub fn draw(
     hdc: c.HDC,
     model: *const GraphModel.Model,
@@ -14,21 +143,23 @@ pub fn draw(
     viewport_bottom: i32,
     update_version: []const u8,
     ingress_error: []const u8,
+    state: *const State,
+    hover_y: i32,
     allocator: std.mem.Allocator,
 ) void {
     const sidebar = rect(0, Tokens.header_height, Tokens.sidebar_width, 1200);
     fill(hdc, sidebar, Tokens.workspace_rail);
     drawText(hdc, allocator, "GRAPH", 18, Tokens.header_height + 20, 16, 0x00FFFFFF);
     drawText(hdc, allocator, "Projects", 18, Tokens.header_height + 54, 14, 0x00B8B8B8);
-    var rows = appendRows(allocator, model, inspection, scroll_offset) catch return;
+    var rows = appendRows(allocator, model, inspection, scroll_offset, state) catch return;
     defer rows.deinit(allocator);
     for (rows.items) |row| {
         switch (row.kind) {
             .local_heading => {
-                drawText(hdc, allocator, "v  LOCAL", 18, row.top, 10, 0x007A7A7A);
+                drawText(hdc, allocator, if (state.local_collapsed) ">  LOCAL" else "v  LOCAL", 18, row.top, 10, 0x007A7A7A);
             },
             .remote_heading => {
-                drawText(hdc, allocator, "v  REMOTE", 18, row.top, 10, 0x007A7A7A);
+                drawText(hdc, allocator, if (state.remote_collapsed) ">  REMOTE" else "v  REMOTE", 18, row.top, 10, 0x007A7A7A);
             },
             .project => {
                 const project = model.recent_projects.items[row.index];
@@ -43,10 +174,14 @@ pub fn draw(
                 const selected = if (model.selected_project_path) |selected_path|
                     std.mem.eql(u8, selected_path, path)
                 else false;
-                drawText(hdc, allocator, "v", 18, row.top, 9, 0x007A7A7A);
+                drawText(hdc, allocator, if (state.isProjectCollapsed(path)) ">" else "v", 18, row.top, 9, 0x007A7A7A);
                 drawText(hdc, allocator, if (summary.project.isRemote()) "R" else "L", 31, row.top + 1, 9, 0x007A7A7A);
                 drawText(hdc, allocator, summary.project.name, 44, row.top, 13,
                     if (selected) 0x00FFFFFF else 0x00D0D0D0);
+                if (hover_y >= row.top and hover_y < row.top + 24) {
+                    drawText(hdc, allocator, "+", 181, row.top, 13, 0x00B8B8B8);
+                    if (row.has_children) drawText(hdc, allocator, if (state.isProjectCollapsed(path)) ">" else "v", 204, row.top, 9, 0x00B8B8B8);
+                }
             },
             .loop => if (row.project_path) |path| if (model.graphFor(path)) |summary| {
                 if (row.index < summary.nodes.items.len) {
@@ -56,6 +191,8 @@ pub fn draw(
                     fill(hdc, rect(30 + indent, row.top - 2, 33 + indent, row.top + 17), loopAccent(node.loop_type));
                     drawText(hdc, allocator, node.title, 39 + indent, row.top, 11, 0x00E6E6E6);
                     drawText(hdc, allocator, compactState(node.state), 168, row.top, 9, stateColor(node.state));
+                    if (row.has_children and hover_y >= row.top and hover_y < row.top + 24)
+                        drawText(hdc, allocator, if (state.isNodeExpanded(node.id)) "v" else ">", 204, row.top, 9, 0x00B8B8B8);
                 }
             },
             .worktree => if (inspection) |value| {
@@ -68,17 +205,24 @@ pub fn draw(
                     if (WorktreeStatus.decision(entry) == .reclaimable) 0x0078D7A8 else 0x00FFCD7A);
             },
             .quick_chat_overview => {
-                drawText(hdc, allocator, "v", 18, row.top, 9, 0x007A7A7A);
+                drawText(hdc, allocator, if (state.chats_collapsed) ">" else "v", 18, row.top, 9, 0x007A7A7A);
                 drawText(hdc, allocator, "Quick Chats", 32, row.top, 13, 0x00E6E6E6);
+                if (hover_y >= row.top and hover_y < row.top + 24) {
+                    drawText(hdc, allocator, "+", 181, row.top, 13, 0x00B8B8B8);
+                    if (model.quick_chats.items.len != 0)
+                        drawText(hdc, allocator, if (state.chats_collapsed) ">" else "v", 204, row.top, 9, 0x00B8B8B8);
+                }
             },
             .quick_chat => if (row.index < model.quick_chats.items.len)
                 drawText(hdc, allocator, model.quick_chats.items[row.index].title, 24, row.top, 11, 0x00E6E6E6),
         }
     }
-    const layout = layoutFor(model, inspection);
-    drawText(hdc, allocator, "CHATS", 18, layout.quickChatHeadingTop() - scroll_offset, 10, 0x007A7A7A);
+    for (rows.items) |row| if (row.kind == .quick_chat_overview) {
+        drawText(hdc, allocator, "CHATS", 18, row.top - 32, 10, 0x007A7A7A);
+        break;
+    };
 
-    const section_y = sidebarSectionBottom(model, inspection) - scroll_offset;
+    const section_y = sidebarSectionBottom(model, inspection, state) - scroll_offset;
     if (model.attentionCount() != 0) {
         drawText(hdc, allocator, "Needs you", 18, section_y + 10, 11, 0x00FFCD7A);
         var attention_y = section_y + 30;
@@ -194,8 +338,9 @@ pub const Row = struct {
     top: i32,
     project_path: ?[]const u8 = null,
     depth: usize = 0,
+    has_children: bool = false,
 };
-const HierarchyItem = struct { index: usize, depth: usize };
+const HierarchyItem = struct { index: usize, depth: usize, has_children: bool };
 pub const Layout = struct {
     base: i32,
     project_count: usize,
@@ -244,50 +389,62 @@ pub fn appendRows(
     model: *const GraphModel.Model,
     inspection: ?*const WorktreeStatus.Inspection,
     scroll_offset: i32,
+    state: ?*const State,
 ) !std.ArrayList(Row) {
     var rows: std.ArrayList(Row) = .empty;
     var top: i32 = Tokens.header_height + 78 - scroll_offset;
+    const local_collapsed = if (state) |value| value.local_collapsed else false;
+    const remote_collapsed = if (state) |value| value.remote_collapsed else false;
+    const chats_collapsed = if (state) |value| value.chats_collapsed else false;
     if (hasLocalProjects(model)) {
         try rows.append(allocator, .{ .kind = .local_heading, .index = 0, .top = top });
         top += 24;
     }
-    for (model.recent_projects.items, 0..) |project, index| {
-        if (project.isRemote()) continue;
-        try rows.append(allocator, .{ .kind = .project, .index = index, .top = top, .project_path = project.path });
-        top += 24;
+    if (!local_collapsed) {
+        for (model.recent_projects.items, 0..) |project, index| {
+            if (project.isRemote()) continue;
+            try rows.append(allocator, .{ .kind = .project, .index = index, .top = top, .project_path = project.path });
+            top += 24;
+        }
     }
     if (hasRemoteProjects(model)) {
         try rows.append(allocator, .{ .kind = .remote_heading, .index = 0, .top = top });
         top += 24;
     }
-    for (model.recent_projects.items, 0..) |project, index| {
-        if (!project.isRemote()) continue;
-        try rows.append(allocator, .{ .kind = .project, .index = index, .top = top, .project_path = project.path });
-        top += 24;
+    if (!remote_collapsed) {
+        for (model.recent_projects.items, 0..) |project, index| {
+            if (!project.isRemote()) continue;
+            try rows.append(allocator, .{ .kind = .project, .index = index, .top = top, .project_path = project.path });
+            top += 24;
+        }
     }
     try rows.append(allocator, .{ .kind = .overview, .index = 0, .top = top + 24 });
     top += 62;
     if (model.graphs.items.len != 0 or model.graph != null) {
         if (model.graphs.items.len != 0) {
             for (model.graphs.items, 0..) |summary, graph_index| {
-                try rows.append(allocator, .{ .kind = .open_project, .index = graph_index, .top = top, .project_path = summary.project.path });
+                try rows.append(allocator, .{ .kind = .open_project, .index = graph_index, .top = top, .project_path = summary.project.path, .has_children = summary.nodes.items.len != 0 });
                 top += 24;
-                var hierarchy = try hierarchyItems(allocator, summary.nodes.items, summary.edges.items);
-                defer hierarchy.deinit(allocator);
-                for (hierarchy.items) |item| {
-                    try rows.append(allocator, .{ .kind = .loop, .index = item.index, .top = top, .project_path = summary.project.path, .depth = item.depth });
-                    top += 24;
+                if (state == null or !state.?.isProjectCollapsed(summary.project.path)) {
+                    var hierarchy = try hierarchyItems(allocator, summary.nodes.items, summary.edges.items, state);
+                    defer hierarchy.deinit(allocator);
+                    for (hierarchy.items) |item| {
+                        try rows.append(allocator, .{ .kind = .loop, .index = item.index, .top = top, .project_path = summary.project.path, .depth = item.depth, .has_children = item.has_children });
+                        top += 24;
+                    }
                 }
                 top += 38;
             }
         } else if (model.graph) |graph| {
-            try rows.append(allocator, .{ .kind = .open_project, .index = 0, .top = top, .project_path = graph.project.path });
+            try rows.append(allocator, .{ .kind = .open_project, .index = 0, .top = top, .project_path = graph.project.path, .has_children = graph.nodes.items.len != 0 });
             top += 24;
-            var hierarchy = try hierarchyItems(allocator, graph.nodes.items, graph.edges.items);
-            defer hierarchy.deinit(allocator);
-            for (hierarchy.items) |item| {
-                try rows.append(allocator, .{ .kind = .loop, .index = item.index, .top = top, .project_path = graph.project.path, .depth = item.depth });
-                top += 24;
+            if (state == null or !state.?.isProjectCollapsed(graph.project.path)) {
+                var hierarchy = try hierarchyItems(allocator, graph.nodes.items, graph.edges.items, state);
+                defer hierarchy.deinit(allocator);
+                for (hierarchy.items) |item| {
+                    try rows.append(allocator, .{ .kind = .loop, .index = item.index, .top = top, .project_path = graph.project.path, .depth = item.depth, .has_children = item.has_children });
+                    top += 24;
+                }
             }
             top += 38;
         }
@@ -299,12 +456,14 @@ pub fn appendRows(
             top += 34;
         }
     }
-    top = layoutFor(model, inspection).quickChatRowTop(0) - scroll_offset;
+    top += 42;
     try rows.append(allocator, .{ .kind = .quick_chat_overview, .index = 0, .top = top });
     top += 24;
-    for (model.quick_chats.items, 0..) |_, index| {
-        try rows.append(allocator, .{ .kind = .quick_chat, .index = index, .top = top });
-        top += 24;
+    if (!chats_collapsed) {
+        for (model.quick_chats.items, 0..) |_, index| {
+            try rows.append(allocator, .{ .kind = .quick_chat, .index = index, .top = top });
+            top += 24;
+        }
     }
     return rows;
 }
@@ -367,9 +526,10 @@ pub fn rowAt(
     inspection: ?*const WorktreeStatus.Inspection,
     scroll_offset: i32,
     viewport_bottom: i32,
+    state: ?*const State,
 ) ?Row {
     if (x < 0 or x >= Tokens.sidebar_width or y < Tokens.header_height or y >= viewport_bottom) return null;
-    var rows = appendRows(std.heap.page_allocator, model, inspection, scroll_offset) catch return null;
+    var rows = appendRows(std.heap.page_allocator, model, inspection, scroll_offset, state) catch return null;
     defer rows.deinit(std.heap.page_allocator);
     for (rows.items) |row| {
         const height: i32 = switch (row.kind) {
@@ -400,6 +560,7 @@ fn hierarchyItems(
     allocator: std.mem.Allocator,
     nodes: []const GraphModel.Node,
     edges: []const GraphModel.Edge,
+    state: ?*const State,
 ) !std.ArrayList(HierarchyItem) {
     var result: std.ArrayList(HierarchyItem) = .empty;
     errdefer result.deinit(allocator);
@@ -414,10 +575,10 @@ fn hierarchyItems(
                 break;
             }
         }
-        if (!incoming) try appendHierarchy(allocator, &result, visited, nodes, edges, index, 0);
+        if (!incoming) try appendHierarchy(allocator, &result, visited, nodes, edges, index, 0, state);
     }
     for (nodes, 0..) |_, index| {
-        if (!visited[index]) try appendHierarchy(allocator, &result, visited, nodes, edges, index, 0);
+        if (!visited[index]) try appendHierarchy(allocator, &result, visited, nodes, edges, index, 0, state);
     }
     return result;
 }
@@ -430,14 +591,49 @@ fn appendHierarchy(
     edges: []const GraphModel.Edge,
     index: usize,
     depth: usize,
+    state: ?*const State,
 ) !void {
     if (index >= nodes.len or visited[index]) return;
     visited[index] = true;
-    try result.append(allocator, .{ .index = index, .depth = depth });
+    var has_children = false;
     for (edges) |edge| {
-        if (!std.mem.eql(u8, edge.kind, "handoff") or !std.mem.eql(u8, edge.from, nodes[index].id)) continue;
+        if (std.mem.eql(u8, edge.kind, "handoff") and
+            std.mem.eql(u8, edge.from, nodes[index].id) and
+            GraphModel.findNodeIndexByID(nodes, edge.to) != null)
+        {
+            has_children = true;
+            break;
+        }
+    }
+    try result.append(allocator, .{ .index = index, .depth = depth, .has_children = has_children });
+    if (depth != 0 or has_children) {
+        if (state) |value| if (!value.isNodeExpanded(nodes[index].id)) {
+            markDescendantsVisited(visited, nodes, edges, index);
+            return;
+        };
+    }
+    for (edges) |edge| {
+        if (!std.mem.eql(u8, edge.kind, "handoff") or
+            !std.mem.eql(u8, edge.from, nodes[index].id)) continue;
         const child = GraphModel.findNodeIndexByID(nodes, edge.to) orelse continue;
-        try appendHierarchy(allocator, result, visited, nodes, edges, child, depth + 1);
+        try appendHierarchy(allocator, result, visited, nodes, edges, child, depth + 1, state);
+    }
+}
+
+fn markDescendantsVisited(
+    visited: []bool,
+    nodes: []const GraphModel.Node,
+    edges: []const GraphModel.Edge,
+    index: usize,
+) void {
+    if (index >= nodes.len) return;
+    for (edges) |edge| {
+        if (!std.mem.eql(u8, edge.kind, "handoff") or
+            !std.mem.eql(u8, edge.from, nodes[index].id)) continue;
+        const child = GraphModel.findNodeIndexByID(nodes, edge.to) orelse continue;
+        if (visited[child]) continue;
+        visited[child] = true;
+        markDescendantsVisited(visited, nodes, edges, child);
     }
 }
 
@@ -447,7 +643,7 @@ fn hierarchyPosition(
     edges: []const GraphModel.Edge,
     node_index: usize,
 ) !usize {
-    var hierarchy = try hierarchyItems(allocator, nodes, edges);
+    var hierarchy = try hierarchyItems(allocator, nodes, edges, null);
     defer hierarchy.deinit(allocator);
     for (hierarchy.items, 0..) |item, position| if (item.index == node_index) return position;
     return node_index;
@@ -457,19 +653,22 @@ pub fn worktreeSectionBottom(project_count: usize, worktree_count: usize) i32 {
     return worktreeRowTop(project_count, 0, worktree_count) + 10;
 }
 
-pub fn contentBottom(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection) i32 {
-    const section = sidebarSectionBottom(model, inspection);
+pub fn contentBottom(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection, state: ?*const State) i32 {
+    const section = sidebarSectionBottom(model, inspection, state);
     return if (model.attentionCount() == 0) section else section + 30 +
         @as(i32, @intCast(@min(model.attentionCount(), 4))) * 34;
 }
 
-pub fn sidebarSectionBottom(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection) i32 {
-    const layout = layoutFor(model, inspection);
-    return layout.quickChatRowTop(model.quick_chats.items.len + 1);
+pub fn sidebarSectionBottom(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection, state: ?*const State) i32 {
+    var rows = appendRows(std.heap.page_allocator, model, inspection, 0, state) catch return Tokens.header_height;
+    defer rows.deinit(std.heap.page_allocator);
+    if (rows.items.len == 0) return Tokens.header_height;
+    const last = rows.items[rows.items.len - 1];
+    return last.top + (if (last.kind == .worktree) @as(i32, 34) else 24);
 }
 
-pub fn maxScroll(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection, viewport_bottom: i32) i32 {
-    return @max(contentBottom(model, inspection) - viewport_bottom, 0);
+pub fn maxScroll(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection, viewport_bottom: i32, state: ?*const State) i32 {
+    return @max(contentBottom(model, inspection, state) - viewport_bottom, 0);
 }
 
 pub fn clampScroll(value: i32, maximum: i32) i32 {
@@ -560,7 +759,7 @@ test "shared sidebar layout routes every loop row after project rows and scroll"
     model.graph = graph;
     const layout = layoutFor(&model, null);
     for (0..2) |index| {
-        const row = rowAt(24, layout.loopTop(index) - 11, &model, null, 11, 700) orelse return error.TestUnexpectedResult;
+        const row = rowAt(24, layout.loopTop(index) - 11, &model, null, 11, 700, null) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(RowKind.loop, row.kind);
         try std.testing.expectEqual(index, row.index);
     }
@@ -579,13 +778,13 @@ test "multi-project rows share render and hit-test offsets with project identity
     _ = try model.updateFromFrame(remote);
     const local_top = sharedLoopTop(&model, 0, 0);
     const remote_top = sharedLoopTop(&model, 1, 0);
-    const local_row = rowAt(24, local_top + 4, &model, null, 0, 700) orelse return error.TestUnexpectedResult;
-    const remote_row = rowAt(24, remote_top + 4, &model, null, 0, 700) orelse return error.TestUnexpectedResult;
+    const local_row = rowAt(24, local_top + 4, &model, null, 0, 700, null) orelse return error.TestUnexpectedResult;
+    const remote_row = rowAt(24, remote_top + 4, &model, null, 0, 700, null) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("C:\\work\\local", local_row.project_path.?);
     try std.testing.expectEqualStrings("ssh://build/remote", remote_row.project_path.?);
     try std.testing.expectEqual(
         layoutFor(&model, null).quickChatRowTop(model.quick_chats.items.len + 1),
-        sidebarSectionBottom(&model, null),
+        sidebarSectionBottom(&model, null, null),
     );
 }
 
@@ -612,10 +811,10 @@ test "scroll-adjusted generated rows hit titles loops and worktrees" {
         .branch = try allocator.dupe(u8, "main"),
     });
     const scroll: i32 = 37;
-    var rows = try appendRows(allocator, &model, &inspection, scroll);
+    var rows = try appendRows(allocator, &model, &inspection, scroll, null);
     defer rows.deinit(allocator);
     for (rows.items) |row| {
-        const hit = rowAt(24, row.top + 4, &model, &inspection, scroll, 700) orelse
+        const hit = rowAt(24, row.top + 4, &model, &inspection, scroll, 700, null) orelse
             return error.TestUnexpectedResult;
         try std.testing.expectEqual(row.kind, hit.kind);
         if (row.kind == .project or row.kind == .open_project or row.kind == .loop)
@@ -663,10 +862,10 @@ test "sidebar scroll clamps overflow, shrink, and resize" {
         .path = @constCast("worktree"),
         .branch = @constCast("branch"),
     });
-    const short_max = maxScroll(&model, &inspection, 400);
-    const expected_short = sidebarSectionBottom(&model, &inspection) + 30 + 4 * 34 - 400;
+    const short_max = maxScroll(&model, &inspection, 400, null);
+    const expected_short = sidebarSectionBottom(&model, &inspection, null) + 30 + 4 * 34 - 400;
     try std.testing.expectEqual(expected_short, short_max);
-    const activity_only_max = maxScroll(&model, &inspection, 400);
+    const activity_only_max = maxScroll(&model, &inspection, 400, null);
     try std.testing.expectEqual(short_max, activity_only_max);
     var scroll: i32 = 0;
     for (0..10) |_| scroll = clampScroll(scroll + 40, short_max);
@@ -676,7 +875,7 @@ test "sidebar scroll clamps overflow, shrink, and resize" {
         std.testing.allocator.free(event.title);
         std.testing.allocator.free(event.state);
     }
-    try std.testing.expectEqual(short_max, maxScroll(&model, &inspection, 400));
+    try std.testing.expectEqual(short_max, maxScroll(&model, &inspection, 400, null));
     while (model.recent_projects.items.len > 1) {
         const project = model.recent_projects.pop() orelse break;
         std.testing.allocator.free(project.path);
@@ -694,8 +893,8 @@ test "sidebar scroll clamps overflow, shrink, and resize" {
         std.testing.allocator.free(node.worktree_branch);
     }
     inspection.entries.shrinkRetainingCapacity(2);
-    const reduced_max = maxScroll(&model, &inspection, 500);
-    const expected_reduced = @max(sidebarSectionBottom(&model, &inspection) + 30 + 1 * 34 - 500, 0);
+    const reduced_max = maxScroll(&model, &inspection, 500, null);
+    const expected_reduced = @max(sidebarSectionBottom(&model, &inspection, null) + 30 + 1 * 34 - 500, 0);
     try std.testing.expectEqual(expected_reduced, reduced_max);
     scroll = clampScroll(scroll, reduced_max);
     try std.testing.expectEqual(reduced_max, scroll);
@@ -710,7 +909,7 @@ test "sidebar without graph counts only static rendered content" {
         .path = try std.testing.allocator.dupe(u8, "project"),
         .name = try std.testing.allocator.dupe(u8, "Project"),
     });
-    const no_graph_max = maxScroll(&model, null, 100);
+    const no_graph_max = maxScroll(&model, null, 100, null);
     try std.testing.expectEqual(@as(i32, Tokens.header_height + 78 + 24 + 24 + 62 + 42 + 24 - 100), no_graph_max);
     try std.testing.expectEqual(@as(i32, 180), clampScroll(180, no_graph_max));
 }
@@ -718,10 +917,10 @@ test "sidebar without graph counts only static rendered content" {
 test "global Graph row remains pinned without an open project" {
     var model = GraphModel.Model.init(std.testing.allocator);
     defer model.deinit();
-    var rows = try appendRows(std.testing.allocator, &model, null, 0);
+    var rows = try appendRows(std.testing.allocator, &model, null, 0, null);
     defer rows.deinit(std.testing.allocator);
     try std.testing.expectEqual(RowKind.overview, rows.items[0].kind);
-    const graph_row = rowAt(24, rows.items[0].top + 4, &model, null, 0, 700) orelse
+    const graph_row = rowAt(24, rows.items[0].top + 4, &model, null, 0, 700, null) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(RowKind.overview, graph_row.kind);
 }
@@ -737,7 +936,7 @@ test "recent projects are grouped into local and remote sections" {
         .path = try std.testing.allocator.dupe(u8, "C:\\repo"),
         .name = try std.testing.allocator.dupe(u8, "Local"),
     });
-    var rows = try appendRows(std.testing.allocator, &model, null, 0);
+    var rows = try appendRows(std.testing.allocator, &model, null, 0, null);
     defer rows.deinit(std.testing.allocator);
     try std.testing.expectEqual(RowKind.local_heading, rows.items[0].kind);
     try std.testing.expectEqual(RowKind.project, rows.items[1].kind);
@@ -756,12 +955,88 @@ test "handoff edges derive stable nested loop order and depth" {
         .to = @constCast("child"),
         .kind = @constCast("handoff"),
     }};
-    var hierarchy = try hierarchyItems(std.testing.allocator, &nodes, &edges);
+    var hierarchy = try hierarchyItems(std.testing.allocator, &nodes, &edges, null);
     defer hierarchy.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), hierarchy.items[0].index);
     try std.testing.expectEqual(@as(usize, 0), hierarchy.items[0].depth);
     try std.testing.expectEqual(@as(usize, 0), hierarchy.items[1].index);
     try std.testing.expectEqual(@as(usize, 1), hierarchy.items[1].depth);
+}
+
+test "message and spawn edges do not define sidebar hierarchy" {
+    const nodes = [_]GraphModel.Node{
+        .{ .id = @constCast("first"), .title = @constCast("First"), .loop_type = @constCast("turnBased"), .state = @constCast("idle"), .activity = @constCast(""), .presence = @constCast("idle") },
+        .{ .id = @constCast("second"), .title = @constCast("Second"), .loop_type = @constCast("turnBased"), .state = @constCast("idle"), .activity = @constCast(""), .presence = @constCast("idle") },
+    };
+    const edges = [_]GraphModel.Edge{
+        .{ .from = @constCast("first"), .to = @constCast("second"), .kind = @constCast("message") },
+        .{ .from = @constCast("second"), .to = @constCast("first"), .kind = @constCast("spawn") },
+    };
+    var hierarchy = try hierarchyItems(std.testing.allocator, &nodes, &edges, null);
+    defer hierarchy.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), hierarchy.items.len);
+    try std.testing.expectEqual(@as(usize, 0), hierarchy.items[0].depth);
+    try std.testing.expect(!hierarchy.items[0].has_children);
+    try std.testing.expectEqual(@as(usize, 0), hierarchy.items[1].depth);
+    try std.testing.expect(!hierarchy.items[1].has_children);
+}
+
+test "sidebar groups and nested disclosures collapse independently and persist expansion" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    try model.recent_projects.append(.{
+        .path = try std.testing.allocator.dupe(u8, "C:\\local"),
+        .name = try std.testing.allocator.dupe(u8, "Local"),
+    });
+    try model.recent_projects.append(.{
+        .path = try std.testing.allocator.dupe(u8, "ssh://host/remote"),
+        .name = try std.testing.allocator.dupe(u8, "Remote"),
+    });
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+    state.local_collapsed = true;
+    var rows = try appendRows(std.testing.allocator, &model, null, 0, &state);
+    defer rows.deinit(std.testing.allocator);
+    try std.testing.expectEqual(RowKind.local_heading, rows.items[0].kind);
+    try std.testing.expectEqual(RowKind.remote_heading, rows.items[1].kind);
+    try std.testing.expectEqual(RowKind.project, rows.items[2].kind);
+    try std.testing.expectEqual(@as(usize, 1), rows.items[2].index);
+
+    try state.toggleNode("root");
+    const encoded = try state.encode(std.testing.allocator);
+    defer std.testing.allocator.free(encoded);
+    var restored = State.init(std.testing.allocator);
+    defer restored.deinit();
+    try restored.decode(encoded);
+    try std.testing.expect(restored.isNodeExpanded("root"));
+    try restored.toggleNode("root");
+    try std.testing.expect(!restored.isNodeExpanded("root"));
+}
+
+test "daemon hierarchy starts with only roots visible and reveals children by stable id" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    const frame =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\fixture","name":"Fixture"},"nodes":[{"id":"root","title":"Root","state":"running"},{"id":"child","title":"Child","state":"idle"}],"edges":[{"id":"edge","from":"root","to":"child","kind":"handoff"}]}}}
+    ;
+    _ = try model.updateFromFrame(frame);
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+    var collapsed = try appendRows(std.testing.allocator, &model, null, 0, &state);
+    defer collapsed.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), countRows(collapsed.items, .loop));
+    try state.toggleNode("root");
+    var expanded = try appendRows(std.testing.allocator, &model, null, 0, &state);
+    defer expanded.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), countRows(expanded.items, .loop));
+}
+
+fn countRows(rows: []const Row, kind: RowKind) usize {
+    var count: usize = 0;
+    for (rows) |row| if (row.kind == kind) {
+        count += 1;
+    };
+    return count;
 }
 
 test "quick chats remain selectable without an open graph or inspection" {
@@ -774,10 +1049,10 @@ test "quick chats remain selectable without an open graph or inspection" {
     });
     const layout = layoutFor(&model, null);
     try std.testing.expect(layout.quickChatHeadingTop() + 11 < layout.quickChatRowTop(0));
-    const overview = rowAt(24, layout.quickChatRowTop(0) + 4, &model, null, 0, 700) orelse
+    const overview = rowAt(24, layout.quickChatRowTop(0) + 4, &model, null, 0, 700, null) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(RowKind.quick_chat_overview, overview.kind);
-    const row = rowAt(24, layout.quickChatRowTop(1) + 4, &model, null, 0, 700) orelse
+    const row = rowAt(24, layout.quickChatRowTop(1) + 4, &model, null, 0, 700, null) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(RowKind.quick_chat, row.kind);
     try std.testing.expectEqual(@as(usize, 0), row.index);
@@ -785,8 +1060,8 @@ test "quick chats remain selectable without an open graph or inspection" {
         @as(i32, Tokens.header_height + 78 + 62 + 42),
         layout.quickChatRowTop(0),
     );
-    try std.testing.expect(rowAt(24, layout.quickChatHeadingTop() + 4, &model, null, 0, 700) == null);
-    try std.testing.expectEqual(layout.quickChatRowTop(2), sidebarSectionBottom(&model, null));
+    try std.testing.expect(rowAt(24, layout.quickChatHeadingTop() + 4, &model, null, 0, 700, null) == null);
+    try std.testing.expectEqual(layout.quickChatRowTop(2), sidebarSectionBottom(&model, null, null));
 }
 
 test "quick chat heading and rows stay distinct across graph layouts" {
