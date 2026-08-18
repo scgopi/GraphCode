@@ -222,6 +222,18 @@ Invoke-Native "Native dialog message-loop executable tests" {
     & $zig test src\NativeForms.zig -target x86_64-windows-msvc -lc -luser32 "-I$include"
   } finally { Pop-Location }
 }
+Invoke-Native "Jump palette executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\JumpPalette.zig -target x86_64-windows-msvc -lc -luser32 "-I$include"
+  } finally { Pop-Location }
+}
 Invoke-Native "Onboarding executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")

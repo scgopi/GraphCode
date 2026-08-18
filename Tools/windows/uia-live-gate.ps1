@@ -11,6 +11,7 @@ Add-Type -AssemblyName UIAutomationTypes
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows.Automation;
 public static class GraphCodeUiaGateState {
   public static volatile bool LiveObserved;
@@ -80,12 +81,36 @@ public static class GraphCodeUiaGateState {
   private static extern bool PostMessage(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
   [DllImport("user32.dll")]
   private static extern IntPtr SendMessage(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageW")]
+  private static extern IntPtr SendMessageText(
+    IntPtr window, uint message, UIntPtr wParam, StringBuilder lParam
+  );
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr childAfter, string className, string windowName);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   private static extern bool SetWindowText(IntPtr window, string text);
+  [DllImport("user32.dll")]
+  private static extern int GetDlgCtrlID(IntPtr window);
+  public static IntPtr FindChild(IntPtr parent, string className) {
+    return FindWindowEx(parent, IntPtr.Zero, className, null);
+  }
+  public static string[] GetListItems(IntPtr list) {
+    if (list == IntPtr.Zero) return new string[0];
+    int count = (int)SendMessage(list, 0x018B, UIntPtr.Zero, IntPtr.Zero);
+    var result = new string[count];
+    for (int index = 0; index < count; index++) {
+      int length = (int)SendMessage(list, 0x018A, (UIntPtr)index, IntPtr.Zero);
+      var text = new StringBuilder(length + 1);
+      SendMessageText(list, 0x0189, (UIntPtr)index, text);
+      result[index] = text.ToString();
+    }
+    return result;
+  }
   public static bool PostFixtureMutation(IntPtr window, uint mutation) {
     return PostMessage(window, 0x802A, (UIntPtr)mutation, IntPtr.Zero);
+  }
+  public static bool PostPaletteRefresh(IntPtr window) {
+    return PostMessage(window, 0x802B, UIntPtr.Zero, IntPtr.Zero);
   }
   public static bool PostTaggedExitCollision(IntPtr window) {
     return PostMessage(window, 0x0111, new UIntPtr(0x8000000000001008UL), IntPtr.Zero);
@@ -114,7 +139,10 @@ public static class GraphCodeUiaGateState {
   }
   public static bool SetFirstEditText(IntPtr parent, string text) {
     var edit = FindWindowEx(parent, IntPtr.Zero, "Edit", null);
-    return edit != IntPtr.Zero && SetWindowText(edit, text);
+    if (edit == IntPtr.Zero || !SetWindowText(edit, text)) return false;
+    ulong command = ((ulong)0x0300 << 16) | (uint)GetDlgCtrlID(edit);
+    SendMessage(parent, 0x0111, (UIntPtr)command, edit);
+    return true;
   }
 }
 "@ -ReferencedAssemblies @(
@@ -785,6 +813,91 @@ try {
   }
   Require ($null -eq $remainingRename) "Return did not submit and close the Rename Loop dialog"
 
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 14)) `
+    "jump palette fixture command was rejected"
+  $jumpPalette = $null
+  $jumpPaletteCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty, "Jump to loop"
+    ))
+  )
+  for ($index = 0; $index -lt 40 -and $null -eq $jumpPalette; $index++) {
+    Start-Sleep -Milliseconds 50
+    $jumpPalette = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $jumpPaletteCondition
+    )
+  }
+  Require ($null -ne $jumpPalette) "jump command did not open the native palette"
+  $jumpSearch = $jumpPalette.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ClassNameProperty, "Edit"
+    ))
+  )
+  $jumpSearchLabel = $jumpPalette.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty, "Search loops"
+    ))
+  )
+  Require (($null -ne $jumpSearch) -and ($null -ne $jumpSearchLabel)) `
+    "jump palette did not expose its visible search field"
+  Require (($jumpSearch.Current.BoundingRectangle.Width -gt 0) -and
+           ($jumpSearch.Current.BoundingRectangle.Height -gt 0)) `
+    "jump palette search field had empty bounds"
+  $jumpList = $jumpPalette.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ClassNameProperty, "ListBox"
+    ))
+  )
+  Require (($null -ne $jumpList) -and
+           ($jumpList.Current.BoundingRectangle.Width -gt 0) -and
+           ($jumpList.Current.BoundingRectangle.Height -gt 0)) `
+    "jump palette did not expose its visible ranked result list"
+  $jumpListHandle = [GraphCodeUiaGateState]::FindChild(
+    [IntPtr]$jumpPalette.Current.NativeWindowHandle, "ListBox"
+  )
+  $jumpNames = @([GraphCodeUiaGateState]::GetListItems($jumpListHandle))
+  Require ($jumpNames.Count -ge 2) "jump palette did not expose at least two ranked results"
+  Require (($jumpNames -match 'UIA loop A.*UIA project.*Goal.*succeeded').Count -ge 1) `
+    "jump palette omitted project, loop type, or state context for UIA loop A"
+  Require (($jumpNames -match 'UIA loop C.*Jump fixture.*Timed.*awaitingInput').Count -ge 1) `
+    "jump palette did not expose a contextual cross-project result"
+  $jumpWindow = [IntPtr]$jumpPalette.Current.NativeWindowHandle
+  Require ([GraphCodeUiaGateState]::SetFirstEditText($jumpWindow, "UIA loop B")) `
+    "jump palette rejected live query input"
+  Require ([GraphCodeUiaGateState]::PostPaletteRefresh($jumpWindow)) `
+    "jump palette rejected deterministic live-filter refresh"
+  Start-Sleep -Milliseconds 100
+  $filteredJumpNames = @([GraphCodeUiaGateState]::GetListItems($jumpListHandle))
+  Require (($filteredJumpNames.Count -eq 1) -and
+           ($filteredJumpNames[0] -match 'UIA loop B.*UIA project.*Proactive.*running')) `
+    "jump palette did not live-filter to the ranked keyboard destination ($($filteredJumpNames -join '|'))"
+  Require ([GraphCodeUiaGateState]::PostKeyboard($jumpWindow, 0x0D)) `
+    "jump palette rejected Return activation"
+  for ($index = 0; $index -lt 40; $index++) {
+    Start-Sleep -Milliseconds 50
+    $remainingJump = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $jumpPaletteCondition
+    )
+    if ($null -eq $remainingJump) { break }
+  }
+  Require ($null -eq $remainingJump) "Return did not activate and close the jump palette"
+  $loopsAfterJump = Find-FragmentById $root "loops" $rawWalker
+  $loopBAfterJump = @(Get-DirectChildren $loopsAfterJump $rawWalker |
+    Where-Object { $_.Current.Name -eq "UIA loop B" }) | Select-Object -First 1
+  Require ($null -ne $loopBAfterJump) "jump navigation did not retain the destination loop row"
+  $selectedAfterJump = $loopBAfterJump.GetCurrentPattern(
+    [System.Windows.Automation.SelectionItemPattern]::Pattern
+  ).Current.IsSelected
+  Require $selectedAfterJump "jump palette activation did not navigate to UIA loop B"
+
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 8)) "inline ingress-error fixture command was rejected"
   $inlineError = $null
   $inlineErrorCondition = New-Object System.Windows.Automation.PropertyCondition(
@@ -1117,6 +1230,7 @@ try {
     dynamicInvocationsPassed = $true
     compositeNavigationPassed = $true
     renameDialogPassed = $true
+    jumpPalettePassed = $true
     inlineIngressErrorPassed = $true
     openFolderPickerPassed = $true
     emptyOverviewPassed = $true

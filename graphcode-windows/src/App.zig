@@ -7,6 +7,7 @@ const CanvasLayoutStore = @import("CanvasLayoutStore.zig");
 const GraphContextMenu = @import("GraphContextMenu.zig");
 const Forms = @import("Forms.zig");
 const NativeForms = @import("NativeForms.zig");
+const JumpPalette = @import("JumpPalette.zig");
 const NativeDialogs = @import("WindowsNativeDialogs.zig");
 const Sidebar = @import("Sidebar.zig");
 const GraphModel = @import("GraphModel.zig");
@@ -784,7 +785,7 @@ pub const App = struct {
         const graph = self.model.graph orelse return false;
         if (index >= graph.nodes.items.len) return false;
         if (!self.replaceSelectionID(&self.selected_node_id, graph.nodes.items[index].id)) return false;
-        self.model.selected_index = index;
+        if (!self.model.setSelectedIndex(index)) return false;
         self.selection_initialized = true;
         self.clearEdgeSelection();
         return true;
@@ -1382,34 +1383,50 @@ pub const App = struct {
             self.setStatus("No graph is open");
             return;
         }
-        const query = NativeForms.jump(self.window.hwnd, self.allocator, "") catch {
-            self.setStatus("Unable to open jump form");
+        var entries = std.array_list.Managed(JumpPalette.Entry).init(self.allocator);
+        defer entries.deinit();
+        for (self.model.graphs.items) |graph| {
+            for (graph.nodes.items) |node| {
+                entries.append(.{
+                    .project_path = graph.project.path,
+                    .project_name = graph.project.name,
+                    .node_id = node.id,
+                    .title = node.title,
+                    .loop_type = node.loop_type,
+                    .state = node.state,
+                }) catch {
+                    self.setStatus("Unable to collect jump results");
+                    return;
+                };
+            }
+        }
+        const selection = JumpPalette.show(self.window.hwnd, self.allocator, entries.items) catch {
+            self.setStatus("Unable to open jump palette");
             return;
         } orelse return;
-        defer self.allocator.free(query);
-        const trimmed_query = Forms.validateJumpQuery(query) catch {
-            self.setStatus("Enter a jump query");
-            return;
-        };
-        const match = findJumpMatch(&self.model, trimmed_query) orelse {
-            self.setStatus("No matching loop");
-            return;
-        };
-        if (match.project_index >= self.model.graphs.items.len) return;
-        const project_path = self.allocator.dupe(u8, self.model.graphs.items[match.project_index].project.path) catch return;
-        defer self.allocator.free(project_path);
-        if (!self.selectProject(project_path) or !self.selectNodeIndex(match.node_index)) {
+        defer selection.deinit(self.allocator);
+        const project_index = for (self.model.graphs.items, 0..) |graph, index| {
+            if (std.mem.eql(u8, graph.project.path, selection.project_path)) break index;
+        } else {
             self.setStatus("Matching loop is no longer available");
             return;
-        }
+        };
+        const node_index = for (self.model.graphs.items[project_index].nodes.items, 0..) |node, index| {
+            if (std.mem.eql(u8, node.id, selection.node_id)) break index;
+        } else {
+            self.setStatus("Matching loop is no longer available");
+            return;
+        };
+        if (!self.selectProject(selection.project_path) or !self.selectNodeIndex(node_index)) return;
         self.surface = .project;
         self.workspace_controls.panel_visible = false;
         self.layoutWorkspace();
         self.layoutEmptyStateControls();
         self.sidebar_scroll = Sidebar.clampScroll(
-            Sidebar.loopRowTopForModel(&self.model, match.node_index) - 24,
+            Sidebar.loopRowTopForModel(&self.model, node_index) - 24,
             Sidebar.maxScroll(&self.model, if (self.worktree_inspection) |*value| value else null, 700),
         );
+        self.syncAccessibility();
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
@@ -2293,6 +2310,15 @@ pub const App = struct {
             ;
             _ = self.model.updateFromFrame(frame) catch return;
             self.deleteEdge(0);
+            return;
+        }
+        if (mutation == 14) {
+            const frame =
+                \\{"version":2,"kind":"event","sequence":52,"event":{"graphChanged":{"id":"uia-jump-graph","project":{"path":"C:\\GraphCode\\jump-fixture","name":"Jump fixture","remote":false},"nodes":[{"id":"jump-cross-project","title":"UIA loop C","loopType":"timeBased","state":"awaitingInput"}],"edges":[]}}}
+            ;
+            _ = self.model.updateFromFrame(frame) catch return;
+            _ = self.model.setSelectedID("11111111-1111-4111-8111-111111111111");
+            self.jumpToNode();
             return;
         }
         const dialog = if (self.worktree_dialog) |*value| value else return;
