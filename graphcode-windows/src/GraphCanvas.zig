@@ -364,6 +364,19 @@ pub fn paint(
         },
         .workspace => {},
     }
+    if (surface != .workspace and ingress_error.len != 0) {
+        const alert = inlineAlertBounds(graph_bounds);
+        fill(hdc, alert, 0x0034242A);
+        drawTextRect(
+            hdc,
+            allocator,
+            ingress_error,
+            rect(alert.left + 14, alert.top + 8, alert.right - 14, alert.bottom - 8),
+            11,
+            0x008080FF,
+            c.DT_LEFT | c.DT_VCENTER | c.DT_WORDBREAK,
+        );
+    }
     if (surface != .workspace) drawZoomControls(hdc, allocator, graph_bounds, state);
 
     _ = c.RestoreDC(hdc, saved);
@@ -378,6 +391,15 @@ pub fn paint(
                 client.right, client.bottom - workspace_height),
         );
     }
+}
+
+pub fn inlineAlertBounds(bounds: c.RECT) c.RECT {
+    return rect(
+        bounds.left + 24,
+        @max(bounds.top + 24, bounds.bottom - 94),
+        bounds.right - 24,
+        bounds.bottom - 38,
+    );
 }
 
 fn drawCompositeBreadcrumb(
@@ -649,6 +671,15 @@ test "workspace controls change graph render bounds" {
     try std.testing.expectEqual(@as(i32, Tokens.sidebar_width), shown.left);
     try std.testing.expectEqual(@as(i32, 0), hidden.left);
     try std.testing.expect(hidden.bottom > shown.bottom);
+}
+
+test "inline canvas alerts remain inside the active detail surface" {
+    const bounds = rect(Tokens.sidebar_width, Tokens.header_height, 1200, 800);
+    const alert = inlineAlertBounds(bounds);
+    try std.testing.expect(alert.left > bounds.left);
+    try std.testing.expect(alert.top > bounds.top);
+    try std.testing.expect(alert.right < bounds.right);
+    try std.testing.expect(alert.bottom < bounds.bottom);
 }
 
 fn header(

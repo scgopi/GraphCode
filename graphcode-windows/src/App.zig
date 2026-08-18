@@ -2236,6 +2236,10 @@ pub const App = struct {
             self.editSelectedNode();
             return;
         }
+        if (mutation == 8) {
+            self.setIngressError("Folder could not be opened");
+            return;
+        }
         const dialog = if (self.worktree_dialog) |*value| value else return;
         switch (mutation) {
             1 => {
@@ -2835,12 +2839,14 @@ pub const App = struct {
         const copy = self.allocator.dupe(u8, value) catch return;
         if (self.ingress_error.len != 0) self.allocator.free(self.ingress_error);
         self.ingress_error = copy;
+        self.syncAccessibility();
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
     fn clearIngressError(self: *App) void {
         if (self.ingress_error.len != 0) self.allocator.free(self.ingress_error);
         self.ingress_error = &.{};
+        self.syncAccessibility();
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
@@ -2934,6 +2940,26 @@ pub const App = struct {
             .quick_chats => for (self.model.quick_chats.items, 0..) |chat, index| {
                 self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-card", chat.id, chat.title, 4, GraphCanvas.quickChatCardBounds(index, canvas_rect, &self.canvas), false, false) catch return;
             },
+        }
+        if (self.ingress_error.len != 0 and self.surface != .workspace) {
+            const identity = self.allocator.dupe(u8, "canvas-alert:ingress") catch return;
+            owned_identities.append(identity) catch {
+                self.allocator.free(identity);
+                return;
+            };
+            const bounds = GraphCanvas.inlineAlertBounds(canvas_rect);
+            elements.append(.{
+                .identity = identity,
+                .name = self.ingress_error,
+                .parent = 4,
+                .selected = false,
+                .eligible = false,
+                .invokable = false,
+                .left = bounds.left,
+                .top = bounds.top,
+                .right = bounds.right,
+                .bottom = bounds.bottom,
+            }) catch return;
         }
         if (self.worktree_dialog == null) if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_FIXTURE_ROWS") catch null) |fixture| {
             defer self.allocator.free(fixture);

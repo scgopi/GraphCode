@@ -758,6 +758,23 @@ try {
   }
   Require ($null -eq $remainingRename) "Return did not submit and close the Rename Loop dialog"
 
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 8)) "inline ingress-error fixture command was rejected"
+  $inlineError = $null
+  $inlineErrorCondition = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::NameProperty, "Folder could not be opened"
+  )
+  for ($index = 0; $index -lt 40 -and $null -eq $inlineError; $index++) {
+    Start-Sleep -Milliseconds 50
+    $inlineError = $root.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $inlineErrorCondition
+    )
+  }
+  Require ($null -ne $inlineError) "canvas did not expose the scoped ingress error"
+  Require (($inlineError.Current.BoundingRectangle.Width -gt 0) -and
+           ($inlineError.Current.BoundingRectangle.Height -gt 0)) `
+    "inline ingress error had empty canvas bounds"
+
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 6)) "About dialog fixture command was rejected"
   $aboutDialog = $null
   $aboutWindowCondition = New-Object System.Windows.Automation.AndCondition(
@@ -857,6 +874,7 @@ try {
     dynamicInvocationsPassed = $true
     compositeNavigationPassed = $true
     renameDialogPassed = $true
+    inlineIngressErrorPassed = $true
     aboutDialogPassed = $true
     statusText = $statusTextAfter
     statusChanged = ($statusTextAfter -ne $initialStatus)
