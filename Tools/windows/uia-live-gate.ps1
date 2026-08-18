@@ -786,6 +786,38 @@ try {
   Require ((-not $openFolderButton.Current.IsOffscreen) -and
            (-not $emptyOverviewLoopButton.Current.IsOffscreen)) `
     "empty global graph actions were not visible"
+  Require ([GraphCodeUiaGateState]::PostCommand($shellWindow, 4601)) `
+    "empty global Open Folder command was rejected"
+  $folderPicker = $null
+  $folderPickerWindowCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty,
+      "Open GraphCode folder or Git repository"
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Window
+    ))
+  )
+  $folderPickerCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+    )),
+    $folderPickerWindowCondition
+  )
+  for ($index = 0; $index -lt 40 -and $null -eq $folderPicker; $index++) {
+    Start-Sleep -Milliseconds 50
+    $folderPicker = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $folderPickerCondition
+    )
+  }
+  Require ($null -ne $folderPicker) "Open Folder did not launch the native folder picker"
+  Require ([GraphCodeUiaGateState]::PostClose(
+    [IntPtr]$folderPicker.Current.NativeWindowHandle
+  )) "native folder picker rejected cancellation"
+  Start-Sleep -Milliseconds 200
+
   Require ([GraphCodeUiaGateState]::PostCommand($shellWindow, 4602)) `
     "empty global New Loop command was rejected"
   $nodeForm = $null
@@ -979,6 +1011,7 @@ try {
     compositeNavigationPassed = $true
     renameDialogPassed = $true
     inlineIngressErrorPassed = $true
+    openFolderPickerPassed = $true
     emptyOverviewPassed = $true
     emptyProjectPassed = $true
     remoteConnectionInfoPassed = $true

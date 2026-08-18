@@ -114,7 +114,7 @@ Statuses:
 
 | macOS surface | Required visible behavior | Windows evidence | Status |
 |---|---|---|---|
-| Open Folder | Native picker from Welcome and Add Folder menu | Native picker works from empty button/menu | Partial |
+| Open Folder | Native picker from Welcome and Add Folder menu | Welcome and File menu commands use the Windows folder-only File Open dialog with filesystem/path validation. The live UIA gate invokes the empty-state action, verifies the titled native picker, and cancels it safely | Validated |
 | Clone Repository sheet | Repository, location picker, derived folder, branch, depth, progress, inline failure, cancel | A purpose-built native dialog now provides HTTPS repository URL, destination browser, derived repository-folder hint, optional branch/depth, inline validation space, Clone/Cancel defaults, and standard keyboard traversal. Clone progress still appears in the application status rather than inside the sheet | Partial |
 | Add Remote Repository sheet | Server/user/port/path, explanation, validation progress, inline selectable error | A purpose-built native SSH dialog now provides host, user, default port, absolute path, explanatory copy, inline validation space, Connect/Cancel defaults, and standard keyboard traversal. Connection validation remains blocking after submission | Partial |
 | Remote Connection info | Read-only selectable connection sheet | Remote project context menus expose a dedicated read-only connection-information dialog with the encoded remote project identity and management guidance. The live UIA gate opens the native sheet, verifies both pieces of content, and closes it | Validated |
