@@ -232,6 +232,22 @@ struct SummaryStoreTests {
     }
   }
 
+  /// `Process` resolves `executableURL` as a path and never consults `PATH`, so handing it
+  /// the bare `claude` of `invocation` named a file in the working directory and threw at
+  /// launch — every rewrite on every backend, silently, since the feature shipped. Reusing
+  /// the launcher's own login shell rather than a second spelling of it: `-i` is what makes
+  /// `~/.zshrc` (and so `~/.local/bin/claude`) visible, and the prompt rides in as a
+  /// positional so the agent's own sentence can never become shell syntax.
+  @Test
+  func theBackendIsLaunchedThroughTheLaunchersLoginShellSoItsNameResolves() {
+    let launch = ZmxSessionLauncher.loginShellInvocation(
+      of: "claude", arguments: ["-p", "it's $HOME; rm -rf /", "--model", "haiku"])
+
+    #expect(Array(launch.prefix(5)) == ["/bin/zsh", "-i", "-l", "-c", "exec claude \"$@\""])
+    #expect(
+      Array(launch.dropFirst(5)) == ["graphcode", "-p", "it's $HOME; rm -rf /", "--model", "haiku"])
+  }
+
   @Test
   func theBeatCarriesTheFactsAndTheInstructionRefusesInvention() {
     let prompt = SummaryModelWriter.prompt(

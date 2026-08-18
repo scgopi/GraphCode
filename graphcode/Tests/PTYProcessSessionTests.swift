@@ -27,6 +27,37 @@ struct PTYProcessSessionTests {
     }
   }
 
+  /// A launch that throws used to keep the slave half of the PTY it had already opened.
+  /// `graphcoded` ran one such caller on every summary poll, so a machine left running
+  /// bled `/dev/ttys*` entries until `kern.tty.ptmx_max` (511) was gone and nothing on the
+  /// host — graphcode or otherwise — could open a terminal. Counted by path rather than by
+  /// raw descriptor count so a sibling suite spawning its own processes cannot move the
+  /// number a leak would move by exactly `attempts`.
+  @Test
+  func aLaunchThatFailsKeepsNoPTY() {
+    func openTerminalDescriptors() -> Int {
+      var count = 0
+      var path = [CChar](repeating: 0, count: Int(PATH_MAX))
+      for name in (try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd")) ?? [] {
+        guard let descriptor = Int32(name), fcntl(descriptor, F_GETPATH, &path) != -1 else {
+          continue
+        }
+        if String(cString: path).hasPrefix("/dev/ttys") { count += 1 }
+      }
+      return count
+    }
+
+    let attempts = 20
+    let before = openTerminalDescriptors()
+    for _ in 0..<attempts {
+      #expect(throws: (any Error).self) {
+        _ = try PTYProcessSession(executable: "/no/such/binary", arguments: [])
+      }
+    }
+
+    #expect(openTerminalDescriptors() - before < attempts)
+  }
+
   /// The full metric pipeline short of `GraphStore`: the evaluator's real login-shell
   /// invocation, then the parser that reads its last non-empty line.
   @Test
