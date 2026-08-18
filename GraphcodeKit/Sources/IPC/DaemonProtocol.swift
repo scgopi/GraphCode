@@ -17,6 +17,12 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
   /// dialled again is joined to nothing until it asks a second time. The daemon replies
   /// with one `.graphChanged` per project, which is exactly what `.openProject` produces,
   /// so the app needs no separate restore path.
+  ///
+  /// Asking for the whole set is also what identifies a client as a *sidebar*: from then
+  /// on the daemon joins it to any project another client opens, so a folder added by the
+  /// CLI (`graphcode status <folder>`, what an editor plugin drives) shows up in a running
+  /// app rather than only at its next launch. A one-shot CLI connection, which asks for
+  /// one named project and reads until that project's snapshot, is deliberately not one.
   case restoreOpenProjects
   /// Join the one always-resident global Orchestrator Graph. It arrives as an ordinary
   /// `.graphChanged` like any project's, distinguishable by its reserved

@@ -14,6 +14,9 @@ import Testing
 /// `LoopWorkspaceFeature`) replaced a cross-loop tab bar in the follow-up after that.
 @Suite
 struct AppFeatureTests {
+  // These have to be spelled the way `ProjectRegistry.canonicalize` leaves them, which
+  // for `/tmp` is unchanged: the daemon names a project by its resolved path, and
+  // selection now turns on matching that against the path the app asked for.
   private static let projectA = ProjectRef(path: "/tmp/project-a", name: "project-a")
   private static let projectB = ProjectRef(path: "/tmp/project-b", name: "project-b")
 
@@ -26,18 +29,54 @@ struct AppFeatureTests {
   @Test
   @MainActor
   func openingTwoDifferentProjectsAddsBothAndAutoSelectsTheSecond() async {
+    let sentCommands = SentCommandsBox()
     let store = TestStore(initialState: AppFeature.State()) {
       AppFeature()
+    } withDependencies: {
+      $0.orchestratorClient.send = { command in await sentCommands.append(command) }
     }
     store.exhaustivity = .off
 
+    // Each folder is asked for the way a human asks for one — the graph that comes back
+    // is the daemon answering *this* app, which is what earns the selection.
+    await store.send(.welcome(.recentProjectTapped(Self.projectA)))
     await store.send(.daemonEvent(.graphChanged(LoopGraph(project: Self.projectA))))
     #expect(store.state.projects.count == 1)
     #expect(store.state.selectedProjectPath == Self.projectA.path)
 
+    await store.send(.welcome(.recentProjectTapped(Self.projectB)))
     await store.send(.daemonEvent(.graphChanged(LoopGraph(project: Self.projectB))))
     #expect(store.state.projects.count == 2)
     #expect(store.state.selectedProjectPath == Self.projectB.path)
+  }
+
+  /// A project can arrive because *another* client opened it — `graphcode status
+  /// <folder>`, which is how an editor plugin adds one, joins every running sidebar to
+  /// the folder it persists. The row has to appear; the human's open terminal and their
+  /// place in the sidebar must not move for it.
+  @Test
+  @MainActor
+  func aProjectOpenedByAnotherClientAppearsWithoutStealingTheOpenWorkspace() async {
+    let node = LoopNode(title: "Research", checkDescription: "Sound?")
+    var state = AppFeature.State()
+    state.projects.append(
+      ProjectFeature.State(graph: LoopGraph(project: Self.projectA, nodes: [node])))
+    state.selectedProjectPath = Self.projectA.path
+    state.openLoop = LoopWorkspaceFeature.State(
+      node: node, layout: .defaultLayout(forNode: node.id), projectPath: Self.projectA.path,
+      projectName: Self.projectA.name)
+
+    let store = TestStore(initialState: state) {
+      AppFeature()
+    }
+    store.exhaustivity = .off
+
+    await store.send(.daemonEvent(.graphChanged(LoopGraph(project: Self.projectB))))
+
+    #expect(store.state.projects.count == 2)
+    #expect(store.state.projects[id: Self.projectB.path] != nil)
+    #expect(store.state.selectedProjectPath == Self.projectA.path)
+    #expect(store.state.openLoop?.node.id == node.id)
   }
 
   @Test

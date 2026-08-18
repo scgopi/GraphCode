@@ -13,6 +13,10 @@ import Foundation
 /// `connectionProjectPaths` tracks that set so a full disconnect can detach from every
 /// joined `GraphStore`, not just one.
 ///
+/// The open set is shared, not per-connection: whoever opens a folder — the app, the CLI,
+/// an editor plugin driving the CLI — adds it for everyone, so every attached sidebar is
+/// joined to it there and then (`joinSidebars`) instead of finding out at its next launch.
+///
 /// The registry also owns which projects the sidebar should show on next launch, kept in
 /// `open-projects.json` separately from the recents index. That separation is what gives
 /// the sidebar's context menu three distinct verbs: `.closeProject` drops a project from
@@ -23,6 +27,9 @@ public actor ProjectRegistry {
   private var stores: [String: GraphStore] = [:]
   private var connectionFileDescriptors: [UUID: Int32] = [:]
   private var connectionProjectPaths: [UUID: Set<String>] = [:]
+  /// Connections that asked for the whole open set (`.restoreOpenProjects`) rather than
+  /// one named project — see `sidebarSubscribers`.
+  private var sidebarConnections: Set<UUID> = []
   private let ensureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let terminateSession: (@Sendable (LoopNode, String?) -> Void)?
   private let evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)?
@@ -89,6 +96,7 @@ public actor ProjectRegistry {
     }
     connectionFileDescriptors.removeValue(forKey: id)
     connectionProjectPaths.removeValue(forKey: id)
+    sidebarConnections.remove(id)
     if connectionFileDescriptors.isEmpty { stopPresencePolling() }
   }
 
@@ -206,6 +214,10 @@ public actor ProjectRegistry {
       // paths were openable when they were added, and a project on an unmounted volume
       // has to come back when the volume does. Nothing is deleted from the stored set
       // either way — `close` is the only thing that removes from it.
+      // Asking for the whole open set is what marks a client as a sidebar: from here on
+      // it is joined to projects *other* clients open, so `graphcode status <new folder>`
+      // puts a row in a running app instead of one that only appears next launch.
+      sidebarConnections.insert(connectionID)
       for path in persistence.loadOpenProjects() where Self.isWellFormedProjectPath(path) {
         await open(path, for: connectionID, fileDescriptor: fileDescriptor)
       }
@@ -259,7 +271,30 @@ public actor ProjectRegistry {
     let project = await store.graph.project
     persistence.recordOpened(
       ProjectRef(path: project.path, name: project.name, lastOpenedAt: Date()))
-    rememberOpen(canonicalPath)
+    guard rememberOpen(canonicalPath) else { return }
+    await joinSidebars(to: store, at: canonicalPath, excluding: connectionID)
+  }
+
+  /// Joins every attached sidebar client to a project one of *them* — or the CLI, or a
+  /// plugin driving it — just added to the open set, so it arrives as an ordinary
+  /// `.graphChanged` snapshot.
+  ///
+  /// The open set is one shared list, not a per-connection view: `graphcode status
+  /// <folder>` persists the folder for everyone, and every sidebar restores the same set
+  /// at launch. Without this that shared list only reached a *running* app on relaunch,
+  /// which is precisely how a folder added from outside the app looked like it hadn't
+  /// been added at all.
+  ///
+  /// Only sidebars, and only on the open that was new. A one-shot CLI connection reads
+  /// frames until the `.graphChanged` for the project it named (`runAndPrintGraph`, and
+  /// the same loop in the remote python shim), so joining it to an unrelated project
+  /// would hand it another project's graph to print.
+  private func joinSidebars(to store: GraphStore, at path: String, excluding opener: UUID) async {
+    for id in sidebarConnections where id != opener {
+      guard let fileDescriptor = connectionFileDescriptors[id] else { continue }
+      connectionProjectPaths[id, default: []].insert(path)
+      await store.addConnection(id: id, fileDescriptor: fileDescriptor)
+    }
   }
 
   private func close(_ canonicalPath: String, for connectionID: UUID) async {
@@ -272,11 +307,18 @@ public actor ProjectRegistry {
 
   /// Append rather than insert-at-front: the sidebar should come back in the order it
   /// was built up, not most-recent-first — that's what the recents list is for.
-  private func rememberOpen(_ canonicalPath: String) {
+  ///
+  /// Returns whether this was the open that added the project, which is what tells
+  /// `open` there is news to push to the other sidebars: a re-open of something already
+  /// in the set (every restored project, every `graphcode status` on a folder the app is
+  /// already showing) is not.
+  @discardableResult
+  private func rememberOpen(_ canonicalPath: String) -> Bool {
     var open = persistence.loadOpenProjects()
-    guard !open.contains(canonicalPath) else { return }
+    guard !open.contains(canonicalPath) else { return false }
     open.append(canonicalPath)
     persistence.saveOpenProjects(open)
+    return true
   }
 
   // MARK: - The global Orchestrator Graph
@@ -404,7 +446,11 @@ public actor ProjectRegistry {
     return exists && isDirectory.boolValue
   }
 
-  private static func canonicalize(_ path: String) -> String {
+  /// The one spelling of a project's path — every store, every persisted entry and every
+  /// `.graphChanged` is keyed on it. Public because the app has to key on it too: a
+  /// project it asked for by the path a folder picker handed it comes back named by this,
+  /// and `/tmp` vs `/private/tmp` is enough to make the two look like different projects.
+  public static func canonicalize(_ path: String) -> String {
     guard path != LoopGraphScope.globalPath,
       RemoteProjectLocation.parse(projectPath: path) == nil
     else { return path }
