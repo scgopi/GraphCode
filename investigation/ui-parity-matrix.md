@@ -27,7 +27,7 @@ Statuses:
 | Help menu | GraphCode Basics and normal About entry | The live Help menu exposes GraphCode Basics, which reopens onboarding, and About GraphCode, which opens a native versioned product dialog. The populated UIA gate verifies the dialog identity, version text, and close behavior | Validated |
 | Update command | Check for Updates, disabled while checking/installing | Reachable from Help, immediately reports checking state, and is disabled while a check is active. In-app installation remains incomplete | Partial |
 | Tray lifecycle | Restore and exit without foreground daemon window | `TrayLive.Tests.ps1` exercises the physical icon, Open, close-to-hide, single-instance restore, Explorer recovery, popup contents, and visible Exit activation | Validated |
-| Connection failure presentation | Explicit visible failure without replacing normal navigation | Status text exists; project canvas also lacks the macOS inline connection banner | Partial |
+| Connection failure presentation | Explicit visible failure without replacing normal navigation | A persistent inline canvas banner now reports daemon unavailability while leaving sidebar and destination navigation intact; ingress errors take precedence when present. The live UIA gate forces the disconnected state and verifies the dedicated banner text and bounds | Validated |
 
 ## First-run and empty states
 

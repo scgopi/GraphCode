@@ -207,6 +207,7 @@ function Assert-FragmentLinks(
 $oldZmx = [Environment]::GetEnvironmentVariable("GRAPHCODE_ZMX")
 $oldCwd = [Environment]::GetEnvironmentVariable("GRAPHCODE_GATE_CWD")
 $oldGate = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_GATE")
+$oldConnectionFailure = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_CONNECTION_FAILURE")
 $oldUser = [Environment]::GetEnvironmentVariable("USERNAME")
 $oldFixture = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_FIXTURE_ROWS")
 $oldDaemonPipe = [Environment]::GetEnvironmentVariable("GRAPHCODE_DAEMON_PIPE")
@@ -229,6 +230,7 @@ try {
   if ($Zmx) { $env:GRAPHCODE_ZMX = $Zmx }
   $env:GRAPHCODE_GATE_CWD = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
   $env:GRAPHCODE_UIA_GATE = "1"
+  $env:GRAPHCODE_UIA_CONNECTION_FAILURE = "1"
   $env:USERNAME = "GraphCodeUIAGate"
   $env:GRAPHCODE_UIA_FIXTURE_ROWS = "C:\fixture-safe|safe,C:\fixture-unsafe|unsafe"
   $env:GRAPHCODE_DAEMON_PIPE = "\\.\pipe\graphcode-uia-gate-$PID"
@@ -268,6 +270,17 @@ try {
   $loops = Find-FragmentById $root "loops" $rawWalker
   $graph = Find-FragmentById $root "graph" $rawWalker
   Require (($null -ne $projects) -and ($null -ne $loops) -and ($null -ne $graph)) "missing Projects, Loops, or Graph fragments"
+  $connectionAlert = $root.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty,
+      "GraphCode daemon unavailable. Navigation remains available while reconnection continues."
+    ))
+  )
+  Require ($null -ne $connectionAlert) "connection failure did not expose its inline canvas banner"
+  Require (($connectionAlert.Current.BoundingRectangle.Width -gt 0) -and
+           ($connectionAlert.Current.BoundingRectangle.Height -gt 0)) `
+    "connection failure banner had empty bounds"
   $navigationIds = @("overview-destination", "quick-chats-destination")
   $canvasActionIds = @("canvas-primary-action", "zoom-out", "actual-size", "zoom-in", "fit-canvas")
   $projectRows = @(Get-DirectChildren $projects $rawWalker | Where-Object { $_.Current.AutomationId -match '^project-row-' })
@@ -298,7 +311,10 @@ try {
   }
   $null = Assert-FragmentLinks $loops $rawWalker $loopIds "RawView Loops"
   $null = Assert-FragmentLinks $loops $controlWalker $loopIds "ControlView Loops"
-  $projectCards = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.AutomationId -match '^canvas-card-' })
+  $projectCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^canvas-card-' -and
+    $_.Current.Name -in @("UIA loop A", "UIA loop B")
+  })
   Require (($projectCards.Count -eq 2) -and
            ((@($projectCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) "Graph did not expose synchronized project cards"
   foreach ($card in $projectCards) {
@@ -308,7 +324,7 @@ try {
     $null = $card.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
   }
   $projectCardIds = @($projectCards | ForEach-Object { $_.Current.AutomationId })
-  $graphChildIds = @($projectCardIds + $canvasActionIds)
+  $graphChildIds = @($projectCardIds + @($connectionAlert.Current.AutomationId) + $canvasActionIds)
   $null = Assert-FragmentLinks $graph $rawWalker $graphChildIds "RawView Graph"
   $null = Assert-FragmentLinks $graph $controlWalker $graphChildIds "ControlView Graph"
   $projectCards[1].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
@@ -342,12 +358,16 @@ try {
   }
   $surfaceActionPatterns["overview-destination"].Invoke()
   Start-Sleep -Milliseconds 150
-  $overviewCards = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.AutomationId -match '^canvas-card-' })
+  $overviewCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop '
+  })
   Require (($overviewCards.Count -eq 2) -and
            ((@($overviewCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) "Overview did not expose synchronized cards"
   $surfaceActionPatterns["quick-chats-destination"].Invoke()
   Start-Sleep -Milliseconds 150
-  $quickChatCards = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.AutomationId -match '^canvas-card-' })
+  $quickChatCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA chat '
+  })
   Require (($quickChatCards.Count -eq 2) -and
            ((@($quickChatCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA chat A|UIA chat B")) "Quick Chats did not expose synchronized cards: $(@($quickChatCards | ForEach-Object { $_.Current.Name }) -join '|')"
   $quickChatCardIds = @($quickChatCards | ForEach-Object { $_.Current.AutomationId })
@@ -367,7 +387,9 @@ try {
   Start-Sleep -Milliseconds 250
   $process.Refresh()
   Require (-not $process.HasExited) "dynamic project or loop invocation terminated the shell"
-  $workspaceCards = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.AutomationId -match '^canvas-card-' })
+  $workspaceCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop '
+  })
   Require (($workspaceCards.Count -eq 2) -and
            ((@($workspaceCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B") -and
            $workspaceCards[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected) `
@@ -1119,6 +1141,7 @@ try {
     initialFocusEventSource = $initialFocusSource
     focusFallbackSource = [GraphCodeUiaGateState]::FocusSourceAutomationId
     providerTeardownSafe = $retainedProviderSafe
+    connectionFailureBannerPassed = $true
   } | ConvertTo-Json -Compress
 } finally {
   if ($stressJob) {
@@ -1157,6 +1180,11 @@ try {
   else { $env:GRAPHCODE_GATE_CWD = $oldCwd }
   if ($null -eq $oldGate) { Remove-Item Env:GRAPHCODE_UIA_GATE -ErrorAction SilentlyContinue }
   else { $env:GRAPHCODE_UIA_GATE = $oldGate }
+  if ($null -eq $oldConnectionFailure) {
+    Remove-Item Env:GRAPHCODE_UIA_CONNECTION_FAILURE -ErrorAction SilentlyContinue
+  } else {
+    $env:GRAPHCODE_UIA_CONNECTION_FAILURE = $oldConnectionFailure
+  }
   if ($null -eq $oldUser) { Remove-Item Env:USERNAME -ErrorAction SilentlyContinue }
   else { $env:USERNAME = $oldUser }
   if ($null -eq $oldFixture) { Remove-Item Env:GRAPHCODE_UIA_FIXTURE_ROWS -ErrorAction SilentlyContinue }

@@ -2752,6 +2752,11 @@ pub const App = struct {
         return self.client.statusText();
     }
 
+    fn connectionFailureVisible(self: *const App) bool {
+        return self.client.connectionState() == .disconnected or
+            (envFlag("GRAPHCODE_UIA_GATE") and envFlag("GRAPHCODE_UIA_CONNECTION_FAILURE"));
+    }
+
     fn createEmptyStateControls(self: *App) void {
         self.empty_open_folder_button = createButton(
             self.window.hwnd,
@@ -2996,8 +3001,17 @@ pub const App = struct {
                 self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-card", chat.id, chat.title, 4, GraphCanvas.quickChatCardBounds(index, canvas_rect, &self.canvas), false, false) catch return;
             },
         }
-        if (self.ingress_error.len != 0 and self.surface != .workspace) {
-            const identity = self.allocator.dupe(u8, "canvas-alert:ingress") catch return;
+        const canvas_alert = if (self.ingress_error.len != 0)
+            self.ingress_error
+        else if (self.connectionFailureVisible())
+            GraphCanvas.connection_failure_message
+        else
+            "";
+        if (canvas_alert.len != 0 and self.surface != .workspace) {
+            const identity = self.allocator.dupe(
+                u8,
+                if (self.ingress_error.len != 0) "canvas-alert:ingress" else "canvas-alert:connection",
+            ) catch return;
             owned_identities.append(identity) catch {
                 self.allocator.free(identity);
                 return;
@@ -3005,7 +3019,7 @@ pub const App = struct {
             const bounds = GraphCanvas.inlineAlertBounds(canvas_rect);
             elements.append(.{
                 .identity = identity,
-                .name = self.ingress_error,
+                .name = canvas_alert,
                 .parent = 4,
                 .selected = false,
                 .eligible = false,
@@ -3449,7 +3463,7 @@ fn onWindowMessage(
             app.update_lock.lock();
             if (app.model.currentGraph()) |graph| app.canvas.syncNodeOffsets(graph.nodes.items);
             const offered_version = if (app.update_state.state == .available) app.update_version else "";
-            GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), offered_version, app.ingress_error, app.declared_entry_ids.items, app.kept_worktree_paths.items, app.allocator, &app.canvas, app.workspace_controls, app.surface);
+            GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), offered_version, app.ingress_error, app.connectionFailureVisible(), app.declared_entry_ids.items, app.kept_worktree_paths.items, app.allocator, &app.canvas, app.workspace_controls, app.surface);
             app.update_lock.unlock();
             if (app.workspace_controls.panel_visible or app.surface == .workspace) {
                 if (app.surface == .workspace) {

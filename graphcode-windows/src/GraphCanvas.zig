@@ -5,6 +5,7 @@ const Sidebar = @import("Sidebar.zig");
 const WorktreeStatus = @import("WorktreeStatus.zig");
 const WorkspaceControls = @import("WorkspaceControls.zig");
 const c = @import("Win32.zig").c;
+pub const connection_failure_message = "GraphCode daemon unavailable. Navigation remains available while reconnection continues.";
 
 pub const CanvasState = struct {
     const NodeOffset = struct { x: f32 = 0, y: f32 = 0 };
@@ -299,6 +300,7 @@ pub fn paint(
     status: []const u8,
     update_version: []const u8,
     ingress_error: []const u8,
+    connection_failed: bool,
     declared_entries: []const []const u8,
     kept_worktrees: []const []const u8,
     allocator: std.mem.Allocator,
@@ -364,13 +366,19 @@ pub fn paint(
         },
         .workspace => {},
     }
-    if (surface != .workspace and ingress_error.len != 0) {
+    const alert_text = if (ingress_error.len != 0)
+        ingress_error
+    else if (connection_failed)
+        connection_failure_message
+    else
+        "";
+    if (surface != .workspace and alert_text.len != 0) {
         const alert = inlineAlertBounds(graph_bounds);
         fill(hdc, alert, 0x0034242A);
         drawTextRect(
             hdc,
             allocator,
-            ingress_error,
+            alert_text,
             rect(alert.left + 14, alert.top + 8, alert.right - 14, alert.bottom - 8),
             11,
             0x008080FF,
