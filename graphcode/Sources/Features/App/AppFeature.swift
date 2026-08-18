@@ -36,6 +36,12 @@ struct AppFeature {
 
     var detailSelection: DetailSelection?
 
+    /// Folders this app has asked the daemon to open and hasn't seen come back yet —
+    /// what separates "I opened this" from "someone else did" when a project arrives.
+    /// Canonicalized on the way in, because the daemon names the project by the path it
+    /// resolved, not the one the picker handed us.
+    var pendingOpenPaths: Set<String> = []
+
     /// The selected *folder*, when the selection is one. Every caller that only ever
     /// deals in projects — opening one, closing one, following a node tap — keeps
     /// reading and writing selection through this; `nil` now also covers "Quick Chats",
@@ -332,6 +338,14 @@ struct AppFeature {
             } else {
               state.projects.append(ProjectFeature.State(graph: graph))
             }
+            // Selection follows only a project *this* app asked for. A folder can now
+            // also arrive because someone else opened it — `graphcode status <folder>`
+            // from a loop or an editor plugin joins every running sidebar to it — and
+            // that is a row appearing, not a reason to close the terminal a human is
+            // working in.
+            guard state.pendingOpenPaths.remove(path) != nil || graph.isGlobal else {
+              return .none
+            }
             state.selectedProjectPath = path
             state.openLoop = nil
             return .none
@@ -581,7 +595,11 @@ struct AppFeature {
         guard let path = state.openLoop?.projectPath else { return .none }
         return .send(.projects(.element(id: path, action: .nodeTapped(nodeID))))
 
-      case .openLoop, .welcome, .projects, .worktrees:
+      case .welcome(let welcomeAction):
+        recordPendingOpen(welcomeAction, into: &state)
+        return .none
+
+      case .openLoop, .projects, .worktrees:
         return .none
       }
     }
@@ -597,6 +615,28 @@ struct AppFeature {
 // The reducer's helpers — an extension so the type body stays inside the lint budget as
 // the state and actions above keep growing.
 extension AppFeature {
+  /// Notes that one of Welcome's four ways to open a folder — picked, recent, freshly
+  /// cloned, remote — has just sent an `.openProject`, so the snapshot it comes back as
+  /// is recognisable as this app's own doing (see the `graphChanged` handler). Every
+  /// case that sends one is listed here; a fifth would have to be added, which is why
+  /// the `switch` is exhaustive rather than a `default`.
+  private func recordPendingOpen(_ action: WelcomeFeature.Action, into state: inout State) {
+    let path: String?
+    switch action {
+    case .folderPickerResult(.success(let url)): path = url.path
+    case .recentProjectTapped(let project): path = project.path
+    case .cloneFinished(let clonedPath): path = clonedPath
+    case .remoteValidated(let projectPath): path = projectPath
+    case .binding, .openFolderButtonTapped, .folderPickerResult(.failure), .openProjectFailed,
+      .setOpenPanelPresented, .cloneRepositoryButtonTapped, .cloneLocationPicked, .cloneSubmitted,
+      .cloneCancelled, .cloneProgress, .cloneFailed, .addRemoteRepositoryButtonTapped,
+      .remoteConnectionRequested, .remoteSubmitted, .remoteCancelled, .remoteValidationFailed:
+      path = nil
+    }
+    guard let path else { return }
+    state.pendingOpenPaths.insert(ProjectRegistry.canonicalize(path))
+  }
+
   /// Steps the open workspace to another loop, in the order the sidebar draws them —
   /// every open project's nodes, flattened — wrapping at the ends and skipping blocked
   /// nodes, the same rule a direct `.nodeTapped` applies. With no workspace open it

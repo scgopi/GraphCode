@@ -23,6 +23,7 @@ struct ProjectRegistryTests {
   init() throws {
     for name in [
       "project-a", "project-b", "project-c", "project-d", "project-e", "project-f", "project-g",
+      "project-h", "project-i",
     ] {
       try FileManager.default.createDirectory(
         atPath: "/tmp/\(name)", withIntermediateDirectories: true)
@@ -343,11 +344,95 @@ struct ProjectRegistryTests {
     #expect(persistence.loadGraph(path: "/tmp/project-g") == nil)
   }
 
+  /// The bug this guards: a folder added from outside the app — `graphcode status
+  /// <folder>`, which is how an editor plugin adds one — was persisted into the open set
+  /// but reached no *running* app, so it appeared to have been ignored and only showed up
+  /// after a quit and relaunch, when the app asked for the whole set back.
+  @Test
+  func aProjectOpenedByAnotherClientReachesAnAlreadyRunningSidebar() async throws {
+    var fds: [Int32] = [0, 0]
+    #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+    let (daemonEnd, sidebarEnd) = (fds[0], fds[1])
+    defer {
+      close(daemonEnd)
+      close(sidebarEnd)
+    }
+
+    let (registry, _) = makeRegistryAndPersistence()
+    let sidebar = UUID()
+    let cli = UUID()
+
+    async let driver: Void = {
+      await registry.addConnection(id: sidebar, fileDescriptor: daemonEnd)
+      // The app's launch sequence, against an empty open set: nothing to restore, but
+      // this is what says "I am a sidebar" — the only thing that makes the open below
+      // any of its business.
+      await registry.handle(.restoreOpenProjects, connectionID: sidebar)
+      await registry.addConnection(id: cli, fileDescriptor: -1)
+      await registry.handle(.openProject(path: "/tmp/project-h"), connectionID: cli)
+    }()
+
+    let event = try JSONDecoder().decode(
+      DaemonEvent.self, from: try await readFrameOffThread(sidebarEnd))
+    guard case .graphChanged(let graph) = event else {
+      Issue.record("expected a graphChanged event, got \(event)")
+      return
+    }
+    #expect(URL(fileURLWithPath: graph.project.path).lastPathComponent == "project-h")
+
+    await driver
+  }
+
+  /// The other half of the same rule, and the reason it isn't simply "tell everyone":
+  /// `graphcode`'s own connection reads frames until the project it named comes back
+  /// (`runAndPrintGraph`), so a project someone else opened arriving on that socket would
+  /// be printed as if it were the answer.
+  @Test
+  func aOneShotCLIConnectionIsNotJoinedToProjectsItDidNotOpen() async throws {
+    var fds: [Int32] = [0, 0]
+    #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+    let (daemonEnd, cliEnd) = (fds[0], fds[1])
+    defer {
+      close(daemonEnd)
+      close(cliEnd)
+    }
+
+    let (registry, _) = makeRegistryAndPersistence()
+    let firstCLI = UUID()
+    let secondCLI = UUID()
+
+    async let driver: Void = {
+      await registry.addConnection(id: firstCLI, fileDescriptor: daemonEnd)
+      await registry.handle(.openProject(path: "/tmp/project-h"), connectionID: firstCLI)
+      await registry.addConnection(id: secondCLI, fileDescriptor: -1)
+      await registry.handle(.openProject(path: "/tmp/project-i"), connectionID: secondCLI)
+    }()
+
+    let event = try JSONDecoder().decode(
+      DaemonEvent.self, from: try await readFrameOffThread(cliEnd))
+    guard case .graphChanged(let graph) = event else {
+      Issue.record("expected a graphChanged event, got \(event)")
+      return
+    }
+    #expect(URL(fileURLWithPath: graph.project.path).lastPathComponent == "project-h")
+
+    await driver
+    #expect(!hasPendingBytes(cliEnd))
+  }
+
   /// Paths round-trip through `resolvingSymlinksInPath()`, so compare the leaf rather
   /// than assuming `/tmp` survives as written.
   private static func names(_ paths: [String]) -> [String] {
     paths.map { URL(fileURLWithPath: $0).lastPathComponent }
   }
+}
+
+/// Whether anything at all is waiting to be read — how "this socket was told nothing
+/// more" is asserted, without a timeout that would make the test slow when it passes.
+private func hasPendingBytes(_ fileDescriptor: Int32) -> Bool {
+  var byte: UInt8 = 0
+  let peeked = recv(fileDescriptor, &byte, 1, MSG_PEEK | MSG_DONTWAIT)
+  return peeked > 0
 }
 
 @Sendable
