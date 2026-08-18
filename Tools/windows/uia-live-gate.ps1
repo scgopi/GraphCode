@@ -955,6 +955,47 @@ try {
   )) "Delete All Loops confirmation rejected its safe No action"
   Start-Sleep -Milliseconds 200
 
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 13)) `
+    "Delete Edge fixture command was rejected"
+  $deleteEdgeDialog = $null
+  $deleteEdgeWindowCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty, "Delete Edge"
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Window
+    ))
+  )
+  $deleteEdgeCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+    )),
+    $deleteEdgeWindowCondition
+  )
+  for ($index = 0; $index -lt 40 -and $null -eq $deleteEdgeDialog; $index++) {
+    Start-Sleep -Milliseconds 50
+    $deleteEdgeDialog = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $deleteEdgeCondition
+    )
+  }
+  Require ($null -ne $deleteEdgeDialog) "Delete Edge did not open its confirmation"
+  $deleteEdgeContent = @($deleteEdgeDialog.FindAll(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    [System.Windows.Automation.Condition]::TrueCondition
+  ) | ForEach-Object { $_.Current.Name }) -join "`n"
+  Require (($deleteEdgeContent -match "Planner") -and ($deleteEdgeContent -match "Builder")) `
+    "Delete Edge confirmation omitted its endpoint loop names"
+  Require ($deleteEdgeContent -match "handoff graph connection") `
+    "Delete Edge confirmation omitted the connection kind and graph consequence"
+  Require ($deleteEdgeContent -match "loops themselves remain") `
+    "Delete Edge confirmation omitted the retained-loop consequence"
+  Require ([GraphCodeUiaGateState]::SendCommand(
+    [IntPtr]$deleteEdgeDialog.Current.NativeWindowHandle, 7
+  )) "Delete Edge confirmation rejected its safe No action"
+  Start-Sleep -Milliseconds 200
+
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 6)) "About dialog fixture command was rejected"
   $aboutDialog = $null
   $aboutWindowCondition = New-Object System.Windows.Automation.AndCondition(
@@ -1060,6 +1101,7 @@ try {
     emptyProjectPassed = $true
     remoteConnectionInfoPassed = $true
     deleteProjectLoopsPassed = $true
+    deleteEdgePassed = $true
     aboutDialogPassed = $true
     statusText = $statusTextAfter
     statusChanged = ($statusTextAfter -ne $initialStatus)

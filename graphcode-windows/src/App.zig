@@ -1537,7 +1537,21 @@ pub const App = struct {
         defer self.allocator.free(project_path);
         const edge_id = self.allocator.dupe(u8, edge.id) catch return;
         defer self.allocator.free(edge_id);
-        if (!GraphContextMenu.confirm(self.window.hwnd, "Delete Edge", "Delete this edge?")) return;
+        const source = if (GraphModel.findNodeIndexByID(graph.nodes.items, edge.from)) |node_index|
+            graph.nodes.items[node_index].title
+        else
+            edge.from;
+        const target = if (GraphModel.findNodeIndexByID(graph.nodes.items, edge.to)) |node_index|
+            graph.nodes.items[node_index].title
+        else
+            edge.to;
+        const message = std.fmt.allocPrint(
+            self.allocator,
+            "Delete the connection \"{s}\" -> \"{s}\"?\n\nThis removes the {s} graph connection. The loops themselves remain.",
+            .{ source, target, edge.kind },
+        ) catch return;
+        defer self.allocator.free(message);
+        if (!GraphContextMenu.confirm(self.window.hwnd, "Delete Edge", message)) return;
         const updated_graph = self.model.graph orelse return;
         const updated_index = GraphModel.findEdgeIndexByID(updated_graph.edges.items, edge_id) orelse return;
         self.client.sendDeleteEdge(project_path, updated_graph.edges.items[updated_index].id);
@@ -2271,6 +2285,14 @@ pub const App = struct {
         }
         if (mutation == 12) {
             self.deleteProjectLoops("C:\\GraphCode\\empty");
+            return;
+        }
+        if (mutation == 13) {
+            const frame =
+                \\{"version":2,"kind":"event","sequence":51,"event":{"graphChanged":{"project":{"path":"C:\\GraphCode\\empty","name":"Empty project"},"nodes":[{"id":"edge-source","title":"Planner","state":"idle"},{"id":"edge-target","title":"Builder","state":"idle"}],"edges":[{"id":"edge-delete","from":"edge-source","to":"edge-target","kind":"handoff"}]}}}
+            ;
+            _ = self.model.updateFromFrame(frame) catch return;
+            self.deleteEdge(0);
             return;
         }
         const dialog = if (self.worktree_dialog) |*value| value else return;
