@@ -22,9 +22,13 @@ extern fn gc_uia_set_status(provider: *NativeProvider, status: [*:0]const u8) c.
 extern fn gc_uia_update(
     provider: *NativeProvider,
     status: [*:0]const u8,
-    rows: ?[*]const [*:0]const u8,
+    identities: ?[*]const [*:0]const u8,
+    names: ?[*]const [*:0]const u8,
+    parents: ?[*]const c_int,
     selected: ?[*]const c_int,
     eligible: ?[*]const c_int,
+    invokable: ?[*]const c_int,
+    bounds: ?[*]const c_int,
     count: c_int,
     allow_reclaim: c_int,
     confirm_each_reclaim: c_int,
@@ -44,11 +48,32 @@ pub const NotificationKind = enum { status, @"error", focus, action };
 pub const Notification = struct { text: []const u8, kind: NotificationKind };
 pub const Announcement = struct { role: []const u8, name: []const u8, state: []const u8 };
 pub const WorktreeRow = struct { path: []const u8, selected: bool, eligible: bool };
+pub const DynamicElement = struct {
+    identity: []const u8,
+    name: []const u8,
+    parent: c_int,
+    selected: bool = false,
+    eligible: bool = false,
+    invokable: bool = true,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+};
 pub const uia_selection_command_tag: usize = 0xC000000000000000;
 pub const uia_selection_command_mask: usize = 0xC000000000000000;
 pub const uia_selection_operation_mask: usize = 0x3000000000000000;
 pub const uia_selection_operation_shift: u6 = 60;
 pub const uia_row_payload_mask: usize = 0x0FFFFFFFFFFFFFFF;
+pub const uia_open_overview_command: usize = 20;
+pub const uia_open_quick_chats_command: usize = 21;
+pub const uia_primary_canvas_action_command: usize = 22;
+pub const uia_zoom_out_command: usize = 23;
+pub const uia_actual_size_command: usize = 24;
+pub const uia_zoom_in_command: usize = 25;
+pub const uia_fit_command: usize = 26;
+pub const uia_dynamic_invoke_tag: usize = 0x8000000000000000;
+pub const uia_dynamic_invoke_mask: usize = 0xC000000000000000;
 
 pub fn worktreeIdentityPayload(path: []const u8) usize {
     var hash: u64 = 1469598103934665603;
@@ -121,33 +146,82 @@ pub const Provider = struct {
         rows: []const WorktreeRow,
         policy: WorktreeStatus.Policy,
     ) void {
+        var elements = self.allocator.alloc(DynamicElement, rows.len) catch return;
+        defer self.allocator.free(elements);
+        for (rows, 0..) |row, index| {
+            const top = 34 + @as(i32, @intCast(index * 34));
+            elements[index] = .{
+                .identity = row.path,
+                .name = row.path,
+                .parent = 3,
+                .selected = row.selected,
+                .eligible = row.eligible,
+                .invokable = false,
+                .left = 12,
+                .top = top,
+                .right = 232,
+                .bottom = top + 32,
+            };
+        }
+        self.syncElements(status, elements, policy);
+    }
+    pub fn syncElements(
+        self: *Provider,
+        status: []const u8,
+        elements: []const DynamicElement,
+        policy: WorktreeStatus.Policy,
+    ) void {
         if (!builtin.link_libc) return;
         const native = self.native_provider orelse return;
         const status_z = self.allocator.dupeZ(u8, status) catch return;
         defer self.allocator.free(status_z);
-        var names = self.allocator.alloc([*:0]const u8, rows.len) catch return;
+        var identities = self.allocator.alloc([*:0]const u8, elements.len) catch return;
+        defer self.allocator.free(identities);
+        var names = self.allocator.alloc([*:0]const u8, elements.len) catch return;
         defer self.allocator.free(names);
-        var selected = self.allocator.alloc(c_int, rows.len) catch return;
+        var parents = self.allocator.alloc(c_int, elements.len) catch return;
+        defer self.allocator.free(parents);
+        var selected = self.allocator.alloc(c_int, elements.len) catch return;
         defer self.allocator.free(selected);
-        var eligible = self.allocator.alloc(c_int, rows.len) catch return;
+        var eligible = self.allocator.alloc(c_int, elements.len) catch return;
         defer self.allocator.free(eligible);
-        var owned = self.allocator.alloc([:0]u8, rows.len) catch return;
-        defer self.allocator.free(owned);
-        for (owned) |*name| name.* = @constCast(&.{});
-        defer for (owned) |name| self.allocator.free(name);
-        for (rows, 0..) |row, index| {
-            owned[index] = self.allocator.dupeZ(u8, row.path) catch return;
-            names[index] = owned[index].ptr;
-            selected[index] = if (row.selected) 1 else 0;
-            eligible[index] = if (row.eligible) 1 else 0;
+        var invokable = self.allocator.alloc(c_int, elements.len) catch return;
+        defer self.allocator.free(invokable);
+        var bounds = self.allocator.alloc(c_int, elements.len * 4) catch return;
+        defer self.allocator.free(bounds);
+        var owned_identities = self.allocator.alloc([:0]u8, elements.len) catch return;
+        defer self.allocator.free(owned_identities);
+        var owned_names = self.allocator.alloc([:0]u8, elements.len) catch return;
+        defer self.allocator.free(owned_names);
+        for (owned_identities) |*value| value.* = @constCast(&.{});
+        for (owned_names) |*value| value.* = @constCast(&.{});
+        defer for (owned_identities) |value| self.allocator.free(value);
+        defer for (owned_names) |value| self.allocator.free(value);
+        for (elements, 0..) |element, index| {
+            owned_identities[index] = self.allocator.dupeZ(u8, element.identity) catch return;
+            owned_names[index] = self.allocator.dupeZ(u8, element.name) catch return;
+            identities[index] = owned_identities[index].ptr;
+            names[index] = owned_names[index].ptr;
+            parents[index] = element.parent;
+            selected[index] = if (element.selected) 1 else 0;
+            eligible[index] = if (element.eligible) 1 else 0;
+            invokable[index] = if (element.invokable) 1 else 0;
+            bounds[index * 4] = element.left;
+            bounds[index * 4 + 1] = element.top;
+            bounds[index * 4 + 2] = element.right;
+            bounds[index * 4 + 3] = element.bottom;
         }
         _ = gc_uia_update(
             native,
             status_z.ptr,
+            if (identities.len == 0) null else identities.ptr,
             if (names.len == 0) null else names.ptr,
+            if (parents.len == 0) null else parents.ptr,
             if (selected.len == 0) null else selected.ptr,
             if (eligible.len == 0) null else eligible.ptr,
-            @intCast(rows.len),
+            if (invokable.len == 0) null else invokable.ptr,
+            if (bounds.len == 0) null else bounds.ptr,
+            @intCast(elements.len),
             if (policy.allow_reclaim) 1 else 0,
             if (policy.confirm_each_reclaim) 1 else 0,
         );
@@ -190,8 +264,15 @@ pub fn defaultContract(allocator: std.mem.Allocator) !Provider {
     _ = try provider.add(.{ .id = "projects", .name = "Projects", .role = .list, .parent = sidebar, .focusable = true, .patterns = &.{ .selection, .scroll } });
     _ = try provider.add(.{ .id = "loops", .name = "Loops", .role = .list, .parent = sidebar, .focusable = true, .patterns = &.{ .selection, .scroll } });
     _ = try provider.add(.{ .id = "worktrees", .name = "Worktrees", .role = .list, .parent = sidebar, .focusable = true, .patterns = &.{ .selection, .scroll } });
-    _ = try provider.add(.{ .id = "graph", .name = "Graph", .role = .navigation, .parent = window });
-    _ = try provider.add(.{ .id = "graph-card", .name = "Graph card", .role = .card, .parent = 5, .focusable = true, .patterns = &.{ .selection, .invoke } });
+    const graph = try provider.add(.{ .id = "graph", .name = "Graph", .role = .navigation, .parent = window });
+    _ = try provider.add(.{ .id = "graph-card", .name = "Graph card", .role = .card, .parent = graph, .focusable = true, .patterns = &.{ .selection, .invoke } });
+    _ = try provider.add(.{ .id = "overview-destination", .name = "Open overview", .role = .button, .parent = sidebar, .focusable = true, .patterns = &.{.invoke} });
+    _ = try provider.add(.{ .id = "quick-chats-destination", .name = "Quick Chats", .role = .button, .parent = sidebar, .focusable = true, .patterns = &.{.invoke} });
+    _ = try provider.add(.{ .id = "canvas-primary-action", .name = "New Loop or Chat", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
+    _ = try provider.add(.{ .id = "zoom-out", .name = "Zoom out", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
+    _ = try provider.add(.{ .id = "actual-size", .name = "Actual size", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
+    _ = try provider.add(.{ .id = "zoom-in", .name = "Zoom in", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
+    _ = try provider.add(.{ .id = "fit-canvas", .name = "Fit canvas", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
     const menu = try provider.add(.{ .id = "actions", .name = "Actions", .role = .menu, .parent = window, .focusable = true, .patterns = &.{ .expand_collapse } });
     _ = try provider.add(.{ .id = "inspect-worktrees", .name = "Inspect worktrees", .role = .menu_item, .parent = menu, .patterns = &.{ .invoke } });
     _ = try provider.add(.{ .id = "reclaim-worktrees", .name = "Reclaim selected worktrees", .role = .menu_item, .parent = menu, .patterns = &.{ .invoke } });

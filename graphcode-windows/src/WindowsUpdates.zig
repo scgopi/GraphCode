@@ -12,10 +12,12 @@ pub const CheckResult = struct {
     channel: Channel,
     state: State,
     version: ?[]u8 = null,
+    release_url: ?[]u8 = null,
     message: ?[]u8 = null,
 
     pub fn deinit(self: *CheckResult, allocator: std.mem.Allocator) void {
         if (self.version) |value| allocator.free(value);
+        if (self.release_url) |value| allocator.free(value);
         if (self.message) |value| allocator.free(value);
         self.* = undefined;
     }
@@ -156,6 +158,7 @@ fn parseFeed(allocator: std.mem.Allocator, body: []const u8, channel: Channel, c
             .channel = channel,
             .state = if (selected.version.compare(installed) == .greater) .available else .up_to_date,
             .version = try allocator.dupe(u8, selected.release.tag_name),
+            .release_url = if (selected.release.html_url) |url| try allocator.dupe(u8, url) else null,
         };
     }
     return .{ .channel = channel, .state = .failed, .message = try allocator.dupe(u8, "No release found for selected channel") };
@@ -259,18 +262,20 @@ fn parseNumber(value: []const u8) !u64 {
 
 const Release = struct {
     tag_name: []const u8,
+    html_url: ?[]const u8 = null,
     prerelease: bool = false,
     draft: bool = false,
 };
 
 test "real update feed result follows stable and beta channels" {
     const stable =
-        \\[{"tag_name":"v2.0.0","prerelease":false,"draft":false},{"tag_name":"v3.0.0-beta","prerelease":true,"draft":false}]
+        \\[{"tag_name":"v2.0.0","html_url":"https://example.test/v2","prerelease":false,"draft":false},{"tag_name":"v3.0.0-beta","prerelease":true,"draft":false}]
     ;
     var stable_result = try parseFeed(std.testing.allocator, stable, .stable, "v1.0.0");
     defer stable_result.deinit(std.testing.allocator);
     try std.testing.expectEqual(State.available, stable_result.state);
     try std.testing.expectEqual(Channel.stable, stable_result.channel);
+    try std.testing.expectEqualStrings("https://example.test/v2", stable_result.release_url.?);
     var beta_result = try parseFeed(std.testing.allocator, stable, .beta, "v3.0.0-beta");
     defer beta_result.deinit(std.testing.allocator);
     try std.testing.expectEqual(State.up_to_date, beta_result.state);

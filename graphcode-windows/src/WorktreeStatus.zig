@@ -24,10 +24,27 @@ pub const FailureReason = enum {
     unpushed, not_landed, bound_running, safe,
 };
 
+pub const ResolveAction = enum { legacy, remove, ask, keep };
+
 pub const Policy = struct {
     /// Reclaim is opt-in; missing or malformed policy stays disabled.
     allow_reclaim: bool = false,
     confirm_each_reclaim: bool = true,
+    resolve_action: ResolveAction = .legacy,
+    notice_size_gb: u32 = 2,
+    notice_count: u32 = 8,
+
+    pub fn effectiveResolveAction(self: Policy) ResolveAction {
+        if (self.resolve_action != .legacy) return self.resolve_action;
+        if (!self.allow_reclaim) return .keep;
+        return if (self.confirm_each_reclaim) .ask else .remove;
+    }
+
+    pub fn applyResolveAction(self: *Policy, action: ResolveAction) void {
+        self.resolve_action = action;
+        self.allow_reclaim = action != .keep;
+        self.confirm_each_reclaim = action == .ask;
+    }
 };
 
 pub const PolicyParseError = error{MalformedPolicy};
@@ -66,10 +83,17 @@ pub fn policyPath(allocator: std.mem.Allocator, project_path: []const u8) ![]u8 
 }
 
 pub fn encodePolicy(allocator: std.mem.Allocator, policy: Policy) ![]u8 {
+    const action = policy.effectiveResolveAction();
     return std.fmt.allocPrint(
         allocator,
-        "{{\"allowReclaim\":{s},\"confirmEachReclaim\":{s}}}",
-        .{ if (policy.allow_reclaim) "true" else "false", if (policy.confirm_each_reclaim) "true" else "false" },
+        "{{\"allowReclaim\":{s},\"confirmEachReclaim\":{s},\"onResolveLanded\":\"{s}\",\"noticeSizeGB\":{d},\"noticeCount\":{d}}}",
+        .{
+            if (policy.allow_reclaim) "true" else "false",
+            if (policy.confirm_each_reclaim) "true" else "false",
+            @tagName(action),
+            policy.notice_size_gb,
+            policy.notice_count,
+        },
     );
 }
 
@@ -80,7 +104,7 @@ pub fn decodePolicy(bytes: []const u8) PolicyParseError!Policy {
         .object => |value| value,
         else => return error.MalformedPolicy,
     };
-    if (object.count() != 2) return error.MalformedPolicy;
+    if (object.count() != 2 and object.count() != 5) return error.MalformedPolicy;
     const allow_value = object.get("allowReclaim") orelse return error.MalformedPolicy;
     const confirm_value = object.get("confirmEachReclaim") orelse return error.MalformedPolicy;
     const allow_reclaim = switch (allow_value) {
@@ -91,7 +115,28 @@ pub fn decodePolicy(bytes: []const u8) PolicyParseError!Policy {
         .bool => |value| value,
         else => return error.MalformedPolicy,
     };
-    return .{ .allow_reclaim = allow_reclaim, .confirm_each_reclaim = confirm_each_reclaim };
+    var policy = Policy{ .allow_reclaim = allow_reclaim, .confirm_each_reclaim = confirm_each_reclaim };
+    if (object.count() == 5) {
+        const action_value = object.get("onResolveLanded") orelse return error.MalformedPolicy;
+        const action_text = switch (action_value) {
+            .string => |value| value,
+            else => return error.MalformedPolicy,
+        };
+        policy.resolve_action = std.meta.stringToEnum(ResolveAction, action_text) orelse return error.MalformedPolicy;
+        if (policy.resolve_action == .legacy) return error.MalformedPolicy;
+        const size_value = object.get("noticeSizeGB") orelse return error.MalformedPolicy;
+        const count_value = object.get("noticeCount") orelse return error.MalformedPolicy;
+        policy.notice_size_gb = switch (size_value) {
+            .integer => |value| if (value > 0 and value <= std.math.maxInt(u32)) @intCast(value) else return error.MalformedPolicy,
+            else => return error.MalformedPolicy,
+        };
+        policy.notice_count = switch (count_value) {
+            .integer => |value| if (value > 0 and value <= std.math.maxInt(u32)) @intCast(value) else return error.MalformedPolicy,
+            else => return error.MalformedPolicy,
+        };
+        policy.applyResolveAction(policy.resolve_action);
+    }
+    return policy;
 }
 
 pub fn loadPolicy(allocator: std.mem.Allocator, project_path: []const u8) Policy {
@@ -569,6 +614,20 @@ test "policy decoding fails closed and round trips explicit settings" {
     const decoded = try decodePolicy(encoded);
     try std.testing.expect(decoded.allow_reclaim);
     try std.testing.expect(!decoded.confirm_each_reclaim);
+    try std.testing.expectEqual(ResolveAction.remove, decoded.effectiveResolveAction());
+    try std.testing.expectEqual(@as(u32, 2), decoded.notice_size_gb);
+    try std.testing.expectEqual(@as(u32, 8), decoded.notice_count);
+
+    var ask = Policy{};
+    ask.applyResolveAction(.ask);
+    ask.notice_size_gb = 4;
+    ask.notice_count = 12;
+    const ask_encoded = try encodePolicy(std.testing.allocator, ask);
+    defer std.testing.allocator.free(ask_encoded);
+    const ask_decoded = try decodePolicy(ask_encoded);
+    try std.testing.expectEqual(ResolveAction.ask, ask_decoded.effectiveResolveAction());
+    try std.testing.expectEqual(@as(u32, 4), ask_decoded.notice_size_gb);
+    try std.testing.expectEqual(@as(u32, 12), ask_decoded.notice_count);
     try std.testing.expect(!canReclaim(.{ .path = @constCast("safe"), .branch = @constCast("main"), .pushed = true, .landed = true }, .{}, true));
 }
 

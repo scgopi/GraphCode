@@ -20,6 +20,7 @@ pub const Node = struct {
     stall_after_seconds: ?f64 = null,
     worktree_path: []u8 = @constCast(""),
     worktree_branch: []u8 = &.{},
+    subgraph_json: []u8 = &.{},
 };
 
 pub const ActivityEvent = struct {
@@ -910,6 +911,7 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
         .stall_after_seconds = node.stall_after_seconds,
         .worktree_path = try allocator.dupe(u8, node.worktree_path),
         .worktree_branch = try allocator.dupe(u8, node.worktree_branch),
+        .subgraph_json = try allocator.dupe(u8, node.subgraph_json),
     };
 }
 
@@ -949,24 +951,27 @@ fn decodeNodes(
         const start = indexOfByte(bytes, cursor, '{') orelse break;
         const end = findClosing(bytes, start, '{', '}') orelse break;
         const object = bytes[start .. end + 1];
+        const scalar_object = try withoutJsonObjectField(allocator, object, "subGraph");
+        defer allocator.free(scalar_object);
         try nodes.append(.{
-            .id = try duplicateJsonString(allocator, object, "id"),
-            .title = try duplicateJsonStringOr(allocator, object, "title", "Untitled"),
-            .loop_type = try duplicateJsonStringOr(allocator, object, "loopType", "turnBased"),
-            .state = try duplicateJsonStringOr(allocator, object, "state", "idle"),
-            .activity = try duplicateJsonStringOr(allocator, object, "activity", ""),
-            .presence = try duplicatePresence(allocator, object),
-            .goal_summary = try duplicateJsonStringOr(allocator, object, "summary", ""),
-            .goal_predicate = try duplicateJsonStringOr(allocator, object, "predicate", ""),
-            .metric_command = try duplicateJsonStringOr(allocator, object, "metricCommand", ""),
-            .metric_direction = try duplicateJsonStringOr(allocator, object, "metricDirection", ""),
-            .trigger_prompt = try duplicateJsonStringOr(allocator, object, "triggerPrompt", ""),
-            .check_description = try duplicateJsonStringOr(allocator, object, "checkDescription", ""),
-            .model_tier = try duplicateJsonStringOr(allocator, object, "modelTier", ""),
-            .poll_interval_seconds = jsonFloat(object, "pollIntervalSeconds"),
-            .stall_after_seconds = jsonFloat(object, "stallAfterSeconds"),
-            .worktree_path = try duplicateWorktreePath(allocator, object),
-            .worktree_branch = try duplicateWorktreeBranch(allocator, object),
+            .id = try duplicateJsonString(allocator, scalar_object, "id"),
+            .title = try duplicateJsonStringOr(allocator, scalar_object, "title", "Untitled"),
+            .loop_type = try duplicateJsonStringOr(allocator, scalar_object, "loopType", "turnBased"),
+            .state = try duplicateJsonStringOr(allocator, scalar_object, "state", "idle"),
+            .activity = try duplicateJsonStringOr(allocator, scalar_object, "activity", ""),
+            .presence = try duplicatePresence(allocator, scalar_object),
+            .goal_summary = try duplicateJsonStringOr(allocator, scalar_object, "summary", ""),
+            .goal_predicate = try duplicateJsonStringOr(allocator, scalar_object, "predicate", ""),
+            .metric_command = try duplicateJsonStringOr(allocator, scalar_object, "metricCommand", ""),
+            .metric_direction = try duplicateJsonStringOr(allocator, scalar_object, "metricDirection", ""),
+            .trigger_prompt = try duplicateJsonStringOr(allocator, scalar_object, "triggerPrompt", ""),
+            .check_description = try duplicateJsonStringOr(allocator, scalar_object, "checkDescription", ""),
+            .model_tier = try duplicateJsonStringOr(allocator, scalar_object, "modelTier", ""),
+            .poll_interval_seconds = jsonFloat(scalar_object, "pollIntervalSeconds"),
+            .stall_after_seconds = jsonFloat(scalar_object, "stallAfterSeconds"),
+            .worktree_path = try duplicateWorktreePath(allocator, scalar_object),
+            .worktree_branch = try duplicateWorktreeBranch(allocator, scalar_object),
+            .subgraph_json = try duplicateJsonObjectOrEmpty(allocator, object, "subGraph"),
         });
         cursor = end + 1;
     }
@@ -1030,6 +1035,62 @@ fn jsonFloat(object: []const u8, key: []const u8) ?f64 {
 
 fn duplicateJsonString(allocator: std.mem.Allocator, object: []const u8, key: []const u8) ![]u8 {
     return Wire.decodeJsonString(allocator, Wire.jsonString(object, key) orelse "");
+}
+
+fn duplicateJsonObjectOrEmpty(
+    allocator: std.mem.Allocator,
+    object: []const u8,
+    key: []const u8,
+) ![]u8 {
+    const needle = try std.fmt.allocPrint(allocator, "\"{s}\":", .{key});
+    defer allocator.free(needle);
+    const key_start = std.mem.indexOf(u8, object, needle) orelse return allocator.dupe(u8, "");
+    const value = std.mem.trimLeft(u8, object[key_start + needle.len ..], " \t\r\n");
+    if (value.len == 0 or value[0] != '{') return allocator.dupe(u8, "");
+    const end = findClosing(value, 0, '{', '}') orelse return allocator.dupe(u8, "");
+    return allocator.dupe(u8, value[0 .. end + 1]);
+}
+
+fn withoutJsonObjectField(
+    allocator: std.mem.Allocator,
+    object: []const u8,
+    key: []const u8,
+) ![]u8 {
+    const needle = try std.fmt.allocPrint(allocator, "\"{s}\":", .{key});
+    defer allocator.free(needle);
+    const key_start = std.mem.indexOf(u8, object, needle) orelse return allocator.dupe(u8, object);
+    const value_start = key_start + needle.len;
+    const value = std.mem.trimLeft(u8, object[value_start..], " \t\r\n");
+    if (value.len == 0 or value[0] != '{') return allocator.dupe(u8, object);
+    const value_offset = @intFromPtr(value.ptr) - @intFromPtr(object.ptr);
+    const end = findClosing(object, value_offset, '{', '}') orelse return allocator.dupe(u8, object);
+    return std.fmt.allocPrint(allocator, "{s}{s}", .{ object[0..key_start], object[end + 1 ..] });
+}
+
+pub fn subgraphNodeCount(subgraph_json: []const u8) usize {
+    const nodes_start = std.mem.indexOf(u8, subgraph_json, "\"nodes\":") orelse return 0;
+    const value = std.mem.trimLeft(u8, subgraph_json[nodes_start + "\"nodes\":".len ..], " \t\r\n");
+    if (value.len == 0 or value[0] != '[') return 0;
+    const end = findClosing(value, 0, '[', ']') orelse return 0;
+    var count: usize = 0;
+    var depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+    for (value[1..end]) |byte| {
+        if (in_string) {
+            if (escaped) escaped = false else if (byte == '\\') escaped = true else if (byte == '"') in_string = false;
+            continue;
+        }
+        if (byte == '"') {
+            in_string = true;
+        } else if (byte == '{') {
+            if (depth == 0) count += 1;
+            depth += 1;
+        } else if (byte == '}' and depth != 0) {
+            depth -= 1;
+        }
+    }
+    return count;
 }
 
 fn indexOfByte(bytes: []const u8, start: usize, byte: u8) ?usize {
@@ -1120,6 +1181,7 @@ fn freeNode(allocator: std.mem.Allocator, node: Node) void {
     allocator.free(node.model_tier);
     allocator.free(node.worktree_path);
     allocator.free(node.worktree_branch);
+    allocator.free(node.subgraph_json);
 }
 
 fn freeQuickChat(allocator: std.mem.Allocator, chat: QuickChat) void {
@@ -1619,4 +1681,28 @@ test "edge lookup is scoped to the selected project" {
     try std.testing.expect(model.findEdgeIndex("shared") == null);
     try std.testing.expect(model.selectProject("A"));
     try std.testing.expectEqual(@as(?usize, 0), model.findEdgeIndex("shared"));
+}
+
+test "composite subgraph payload preserves top-level child count" {
+    const payload =
+        \\{"nodes":[{"id":"a","title":"A","goal":{"summary":"nested"}},{"id":"b","title":"B"}],"edges":[{"from":"a","to":"b"}]}
+    ;
+    try std.testing.expectEqual(@as(usize, 2), subgraphNodeCount(payload));
+    try std.testing.expectEqual(@as(usize, 0), subgraphNodeCount("{}"));
+}
+
+test "real subGraph decoding preserves children without inheriting child scalar fields" {
+    var nodes = std.array_list.Managed(Node).init(std.testing.allocator);
+    defer {
+        for (nodes.items) |node| freeNode(std.testing.allocator, node);
+        nodes.deinit();
+    }
+    const payload =
+        \\[{"id":"parent","title":"Parent","loopType":"proactive","subGraph":{"nodes":[{"id":"child","title":"Child","worktreeBinding":{"path":"C:\\child","branch":"nested"}}],"edges":[]},"state":"idle"}]
+    ;
+    try decodeNodes(std.testing.allocator, payload, &nodes);
+    try std.testing.expectEqual(@as(usize, 1), nodes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), subgraphNodeCount(nodes.items[0].subgraph_json));
+    try std.testing.expectEqualStrings("", nodes.items[0].worktree_path);
+    try std.testing.expectEqualStrings("idle", nodes.items[0].state);
 }

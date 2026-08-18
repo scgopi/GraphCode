@@ -1,42 +1,172 @@
-# Windows UI parity matrix
+# Windows UI parity ledger
 
-This is a behavioral contract, not a SwiftUI translation plan.
+This is a source-derived completion ledger, not a requirements sketch. A row is
+`Validated` only when the Windows implementation exposes the same user-visible
+information and actions as macOS and has runtime evidence. Platform-native chrome may
+differ, but hiding a feature behind an undocumented shortcut or replacing a structured
+screen with raw protocol fields is not parity.
 
-| Feature | Current macOS surface | Required Windows behavior | Priority |
-|---|---|---|---:|
-| Project sidebar | `AppSidebarView`, project rows | Open/close projects, recent projects, state badges | P0 |
-| Global graph | `GraphOverview*` | All project lanes under one start node | P1 |
-| Project graph canvas | `ProjectCanvasView`, `Canvas*` | Pan, zoom, select, create, position nodes, render edges | P0 |
-| Node cards | `LoopCardView`, presentation/state helpers | State, presence, activity, backend, attention styling | P0 |
-| Create loop | `NodeDraftForm`, type/backend pickers | Create goal/turn/time/composite with validation | P0 |
-| Connect loops | connector handles, edge forms | Drag/create hand-off/message/spawn edges and conditions | P1 |
-| Loop workspace | `LoopWorkspace*` | Open a node into a terminal-first workspace | P0 |
-| Terminal attach | `GhosttyTerminalView` | Run `zmx attach`, close/recreate without ending session | P0 |
-| Terminal tabs | terminal layout domain + workspace views | Persist/reopen tabs | P1 |
-| Terminal splits | pane layout/workspace views | Multiple panes, resize, focus navigation | P1 |
-| Two simultaneous terminals | multiple panes/surfaces | Independent input, focus, resize, rendering | P0 architecture gate |
-| Quick chat | `QuickChatsCanvasView` | Ad-hoc persistent agent session | P2 |
-| Needs-you flow | attention rail/activity strip | Identify and navigate awaiting-input loops | P1 |
-| Downstream rail | workspace rail | Navigate graph descendants from a loop | P2 |
-| Jump palette | `JumpPalette*` | Keyboard navigation to projects/loops | P1 |
-| Context menus | project/worktree/canvas menus | Native menus for node/project actions | P1 |
-| Settings | `SettingsView` | Backend, permission, appearance, path settings | P1 |
-| Worktree management | worktree features/dialogs | Inspect/sweep worktrees and bindings | P2 |
-| Remote repository UI | welcome/remote forms | Defer until Windows remote transport is designed | Deferred |
-| Updates/install | Sparkle-like macOS flow | Native installer/update strategy | P2 |
-| Accessibility | SwiftUI/AppKit semantics | UIA names, roles, focus, terminal text exposure | P0 for release |
-| Keyboard/IME | AppKit/Ghostty integration | Native key layout, dead keys, IME composition | P0 architecture gate |
-| Clipboard/selection | Ghostty/AppKit | Copy/paste and mouse selection | P0 architecture gate |
-| DPI/theme | AppKit/SwiftUI | Per-monitor DPI, resize, dark/light theme | P0 |
+Statuses:
 
-## Minimum usable Windows shell
+- `Validated`: source mapping, automated coverage, and live walkthrough agree.
+- `Partial`: some behavior exists, but visible controls, state, or interaction is absent
+  or materially different.
+- `Missing`: no equivalent reachable Windows surface.
+- `Blocked`: requires a deliberate platform decision or unavailable dependency.
+- `Divergent`: Windows exposes a different product concept in the place where the macOS
+  surface belongs; it must be separated or redesigned before parity.
 
-1. Project list.
-2. One project canvas with node cards and edges.
-3. Create/open/stop/send actions through `graphcoded`.
-4. One terminal workspace attached to zmx.
-5. State/presence updates.
-6. Two terminal surfaces in one top-level window before committing to the compositor.
+## Application shell and navigation
 
-Tabs, arbitrary splits, remote SSH, worktree polish, updater, and full global-graph parity
-should follow only after the terminal-host gate passes.
+| macOS surface | Required visible behavior | Windows evidence | Status |
+|---|---|---|---|
+| Main split view | Persistent sidebar; detail switches among welcome, global graph, project canvas, Quick Chats canvas, and loop workspace | Explicit project, overview, Quick Chats, and workspace destinations now exist. Live stub walkthrough verified project → overview → full workspace → Show in Graph with the sidebar retained; destination-specific toolbar and accessibility semantics remain incomplete | Partial |
+| Window toolbar | Needs-you chip, worktree notice, jump field, contextual loop-panel toggle | The native header now exposes clickable needs-you and reclaimable-worktree chips, a visible Ctrl+P jump affordance, and a contextual loop-panel toggle alongside status. Focused hit-testing and a real populated fixture validate the controls; native focus/UIA semantics and macOS visual treatment remain incomplete | Partial |
+| Jump palette | Search field, ranked cross-project results, type/state/project context, mouse and keyboard selection | Ctrl+P and Ctrl+J now search every loaded project and rank exact ID, exact title, title prefix, and substring matches before switching project and selecting the loop. The modal still lacks a visible live result list with project/type/state context | Partial |
+| File/Loop/Terminal menus | Discoverable project, worktree, navigation, workspace, update, settings, and help commands with state-aware enablement | Startup menu replacement and UTF-16 corruption are fixed and the five readable runtime groups were probed; project-management and contextual parity remains incomplete | Partial |
+| Help menu | GraphCode Basics and normal About entry | Both entries are now present in the live Help menu | Partial |
+| Update command | Check for Updates, disabled while checking/installing | Reachable from Help, immediately reports checking state, and is disabled while a check is active. In-app installation remains incomplete | Partial |
+| Tray lifecycle | Restore and exit without foreground daemon window | `TrayLive.Tests.ps1` exercises the physical icon, Open, close-to-hide, single-instance restore, Explorer recovery, popup contents, and visible Exit activation | Validated |
+| Connection failure presentation | Explicit visible failure without replacing normal navigation | Status text exists; project canvas also lacks the macOS inline connection banner | Partial |
+
+## First-run and empty states
+
+| macOS surface | Required visible behavior | Windows evidence | Status |
+|---|---|---|---|
+| Four-page onboarding | Visual terminology tour, Skip/Back/Continue/Get Started, backend selection, reopen, persisted seen state | Custom rounded Win32 onboarding; all pages exercised and persistence verified | Validated |
+| No-project Welcome detail | Graph icon, pitch, explanatory copy, Open Folder action, inline error | Windows now matches the title, explanatory copy, centered icon treatment, and single Open Folder action; errors still use global status text | Partial |
+| Empty global graph | “Nothing running yet”, explanatory copy, Open Folder action, New Loop action | Dedicated overview empty copy now exposes both Open Folder and New Loop; New Loop targets the daemon's `graphcode://global` project when no folder is selected. Final live empty-overview command evidence remains pending | Partial |
+| Empty project canvas | Project-specific empty message and New Loop action | Dedicated “No loops yet” copy and New Loop action are implemented; final live empty-project evidence is still pending | Partial |
+| Empty Quick Chats canvas | Explanation of Quick Chats and New Chat action | Live walkthrough verified the dedicated explanation and New Chat action with corrected non-overlapping layout | Validated |
+
+## Sidebar
+
+| macOS surface | Required visible behavior | Windows evidence | Status |
+|---|---|---|---|
+| Graph row | Pinned global graph row with graph glyph | Generic “Open” row; no pinned Graph identity | Partial |
+| Quick Chats group | Selectable header, hover New Chat, disclosure, child rows | The header is now a selectable destination and child rows remain selectable; hover New Chat, disclosure, and context menus are still absent | Partial |
+| Local/remote sections | Group labels, independent collapse, folder/network glyphs | Recent projects are now reordered into explicit LOCAL and REMOTE sections while retaining stable original row identity and local/remote glyphs. Shared render, hit-test, scroll, open-graph, worktree, and accessibility offsets account for the inserted headings, with focused mixed-order coverage; independent collapse remains incomplete | Partial |
+| Project rows | Selection, folder type, hover New Loop, disclosure | Rows now show local/remote identity, expanded disclosure, project name, and selection styling. Hover New Loop and collapsible state remain absent | Partial |
+| Nested loop tree | Edge-derived hierarchy, persisted expansion, drag reorder of roots | Sidebar loop rows are now ordered by handoff roots and descendants, indented by derived depth, cycle-safe, and retain original stable node indices for selection and UIA bounds. Focused reordered-node coverage validates the hierarchy; disclosure persistence, collapse, and drag reordering of roots remain incomplete | Partial |
+| Loop row presentation | Type stripe, title, elapsed time, state indicator | Rows now show a loop-type stripe, title, and compact state indicator using the same semantic colors as workspace chrome. Elapsed time remains absent | Partial |
+| Project context menu | Move, worktrees, settings, Explorer, remote info, close, remove, delete loops/project | Recent and open sidebar project rows now expose Open, New Loop, Worktrees, Project Settings, Explorer or remote connection information, Close, Remove, and Delete All Loops actions. Move and filesystem Trash remain absent | Partial |
+| Loop context menu | Open, composite actions, rename, stop, delete | Sidebar and canvas loop rows now share stable-ID Open, Rename, Stop, and Delete actions. Composite-specific actions remain absent | Partial |
+| Recent projects | Reachable from Add Folder menu | Recent rows are shown directly under “Projects”, without Add Folder grouping or recent/open distinction | Partial |
+| Add Folder menu | Open Folder, Clone, Add Remote, recents | The restored File menu visibly exposes Open Folder, Clone Repository, and Add Remote Repository with shortcuts; a recent-folder submenu remains absent | Partial |
+| Sidebar update banner | Available version and click-to-install action | A persistent footer banner now shows the retained offered version and reopens the native update offer when clicked. A deterministic live fixture captured the banner and verified the click raises `GraphCode Update Available`; the offer still hands installation off to the verified release page | Partial |
+| Sidebar error footer | Persistent, scoped project-ingress error | Folder, clone, remote, and daemon-open failures now persist in a dedicated red sidebar footer independently of transient status. Successful project ingress clears it, and a deterministic live fixture verifies it stacks below the update offer; long-message wrapping and dedicated UIA semantics remain incomplete | Partial |
+| Needs-you section | Navigable list with reason/project and Stop action | Up to four entries now show title plus project context (or compact state fallback) with semantic attention coloring. Selection, explicit reason copy, and Stop context action remain incomplete | Partial |
+| Activity strip | Optional bottom strip, summary, attention-only filter, horizontally scrolling actionable events | The optional bottom strip now shows a recent-event count and state-colored event cards with compact state detail. Filtering, timestamps, scrolling, and click navigation remain incomplete | Partial |
+
+## Graph overview and project canvas
+
+| macOS surface | Required visible behavior | Windows evidence | Status |
+|---|---|---|---|
+| Cross-project global graph | Every open folder as a lane on one canvas | Windows renders every loaded graph summary as a lane; the real executable was exercised against the protocol stub and multi-project identity/layout has automated coverage | Partial |
+| Folder lanes/bands | Project caption, worktree chip, open/close and folder actions | Project-captioned bands and loop cards exist; worktree chips and lane actions remain absent | Partial |
+| Notebook grid | Grid pans and zooms with canvas | GDI grid pans and zooms with the same transform used by project, overview, and Quick Chats content | Partial |
+| Pan and anchored zoom | Pan, pointer-centered wheel/pinch zoom | Mouse pan and pointer-centered wheel zoom exist; no pinch/trackpad gesture evidence | Partial |
+| Zoom controls | Zoom out, actual size, zoom in, fit with shortcuts/help | Visible bottom-right controls provide zoom out, percentage/actual size, zoom in, and fit. Ctrl+-, Ctrl+0, Ctrl+=, and Ctrl+9 are represented in the View menu, and the live UIA provider exposes invokable controls with bounds. The real Quick Chats canvas was exercised from 100% to 110%; hover help and trackpad pinch evidence remain absent | Partial |
+| New Loop canvas button | Visible top-right add action | A live-validated top-right New Loop button is now present on non-empty project canvases and remains centered in the empty state | Validated |
+| Composite breadcrumb | Current group, project back action, loop count | Composite subgraph JSON is now preserved in the Windows model, selected proactive/composite cards show a native `Project > Group` breadcrumb with the authoritative top-level child count, and the card menu exposes Open Group alongside Pilot Once and Arm Schedule. Open Group provides a named group summary while retaining the parent graph. Rendering the nested child cards as a fully interactive secondary canvas and a dedicated Back control remain incomplete | Partial |
+| Canvas attention rail | Count/oldest context and Review action | Painted count banner with shortcut text; no click action or oldest age | Partial |
+| Node positioning | Persisted positions and direct card movement where supported | Project cards can be dragged directly, with movement transformed correctly at non-default zoom, shared geometry/hit testing updated during the drag, and capture-loss cancellation restoring the prior position. Offsets are keyed to stable node identity, remapped across daemon reorder, and atomically persisted under the configured GraphCode support directory. Focused reorder/reload regressions and a real physical drag capture validate the complete flow | Validated |
+| Connector handles | Hover handles and drag-to-connect | Always-hit-testable right edge supports drag; no visible hover handles or parent-create affordance | Partial |
+| Loop card identity | Loop-type stripe, title, state pill, entry/cycle role | Stripe is state-colored rather than type-colored; title/state text and START label only | Partial |
+| Loop card live detail | Goal/prompt/check line, progress, metric change, elapsed/backend/model/worktree metadata | Cards now prioritize goal, trigger, or check detail, retain current activity, and show model/worktree or metric metadata in compact secondary lines. Focused tests and a real goal-loop fixture validate the richer card; measured progress/change, elapsed time, backend identity, and token usage remain incomplete | Partial |
+| Loop card attention | Reason-aware amber presentation and primary action | NEEDS YOU label exists; no actionable button or reason-specific presentation | Partial |
+| Unwired card recovery | Explanation, Wire it up, Mark as entry | Cards with no inbound or outbound edge now show an explicit UNWIRED warning and recovery explanation. Their native context menu exposes Wire it up, which enters the existing drag-to-connect flow, and Mark as entry, which changes the card to START for the session. Focused role/action tests plus live menu and post-action captures validate the flow | Validated |
+| Worktree reclaim offer | Reclaim and Keep actions on resolved card | Safe resolved cards with a matching landed, clean, pushed worktree now expose separate Reclaim and Keep targets. Reclaim revalidates safety, names the worktree in a fail-closed confirmation, and uses the verified removal path; Keep suppresses the offer for the session. Focused geometry/safety tests and a real resolved-card fixture validate the offer; dedicated UIA descendants remain incomplete | Partial |
+| Composite card actions | Open Group, Pilot Once, Arm Schedule | Composite/proactive loop context menus now expose Pilot Once and Arm Schedule and route stable project/node identities to the authoritative daemon commands. Focused tests and a real native popup capture verify the actions; Open Group and composite drill-in remain absent | Partial |
+| Edge presentation | Kind style, fired state, cycle label | Project edges now use kind-specific solid/dotted/dashed styling and color, show condition plus fired count in a visible label, and retain selected-edge emphasis. Focused tests and a real-executable fired-message fixture verify the presentation; full cycle-guard wording and collision-free label layout for dense graphs remain incomplete | Partial |
+| Edge creation sheet | Kind/condition/transform/cycle controls with conditional validation | A guided native form now provides title-plus-ID endpoint selectors for generic creation, locked identities for drag/edit flows, kind/condition/transform controls, conditional transform/spawn fields, cycle guards, inline validation, keyboard traversal, and scrolling. Focused tests and a real-executable capture validate the form; teaching polish and macOS visual treatment remain different | Partial |
+| Node creation sheet | Loop-type teaching tiles, conditional fields, backend/model/branch pickers, recap, validation reason | A guided native form now hides internal metadata, provides loop-type/backend/model choices, type-specific fields, explanatory copy, descriptive checkbox accessibility, inline validation, keyboard traversal, and scrolling while preserving hidden wire values. Focused tests and a real-executable capture validate the form; teaching tiles, branch picker, recap, and macOS visual treatment remain incomplete | Partial |
+| Node update/rename | Dedicated rename prompt and safe typed updates | Rename now uses a dedicated single-title prompt, trims input, rejects empty titles, re-resolves stable node identity after the modal, and sends the authoritative rename command. A purpose-built typed update editor is still absent | Partial |
+| Delete confirmations | Named object, consequences, safe default | Loop deletion names the loop, explains removal of graph connections, and defaults to cancellation; edge deletion remains generic | Partial |
+| Canvas context menu | Folder actions on background; complete node/edge actions | Background offers Create Edge only; node menu adds non-macOS Message/Memo and omits composite/open-group actions | Partial |
+
+## Quick Chats
+
+| macOS surface | Required visible behavior | Windows evidence | Status |
+|---|---|---|---|
+| Quick Chats canvas | Band, cards, pan/zoom, add button, empty state | The real executable was exercised with two deterministic chats. The band, transformed cards, top-right New Chat action, bottom-right zoom controls, and 100% → 110% zoom transition were captured live. Context actions are wired, and the populated live UIA gate validates named, bounded, invokable Quick Chat cards | Partial |
+| Quick Chat cards | Title, chat identity, optional backend badge, open/rename/delete menu | A populated live fixture verified title/default-chat identity/optional backend rendering and direct opening (`openQuickChat` was observed by the protocol stub). Cards now expose Open Chat, Rename, and Delete Chat context actions | Validated |
+| Create chat | Visible New Chat controls | Empty and populated Quick Chats canvases now expose the New Chat action in the macOS placements; empty-state invocation is live-validated | Partial |
+| Rename chat | Single title prompt from row/card | Uses a dedicated single-title modal from the card/keyboard action, trims input, and rejects empty titles | Validated |
+| Delete chat | Named confirmation explaining session/scrollback deletion | Uses a named warning that explains terminal-session and scrollback removal, defaults to cancellation, and only sends deletion after confirmation | Validated |
+| Chat workspace | Opens a persistent terminal workspace | Session opens in terminal panel | Partial |
+
+## Loop terminal workspace
+
+| macOS surface | Required visible behavior | Windows evidence | Status |
+|---|---|---|---|
+| Workspace detail screen | Selected loop replaces canvas detail while sidebar remains | Selecting a sidebar or overview loop now replaces the canvas detail with the full terminal workspace while retaining the sidebar; live stub walkthrough verified the transition and Show in Graph return path | Partial |
+| Folder toolbar identity | Project name and local/remote identity | The workspace header now replaces the generic product title with the selected project name and a Local folder/Remote identity; live fixture capture verifies the native rendering | Partial |
+| Loop bar | Type stripe, title/state pill, live goal, pass trend, elapsed/usage, Stop, Show in graph | A native 46px workspace band now shows loop-type stripe, title, state, current activity, Stop for unresolved loops, and Show in graph. It reserves terminal geometry, remains visible when terminal initialization fails, and has focused hit-testing coverage. Pass trend, elapsed/usage, and dedicated UIA elements remain incomplete | Partial |
+| Tab pills | Named tabs, selection, state indicator, shortcuts, per-tab close | The native tab strip distinguishes agent, shell, and split tabs, paints selection, and supports menu/keyboard tab navigation. Per-tab state indicators, shortcut hints, and close affordances remain incomplete | Partial |
+| Split controls | Visible Split Right, Split Down, New Tab buttons | The terminal tab bar now renders distinct New Tab, Split R, and Split D controls wired to the same persistent workspace actions as the menu/shortcuts; geometry and routing have focused regression coverage | Partial |
+| Pane headers | agent/shell identity, backend/shell detail, focused state | Product-owned pane headers now distinguish agent and shell panes, label the zmx session detail, and draw an explicit focused-pane accent. Backend-specific detail and final side-by-side live evidence remain incomplete | Partial |
+| Mounted background tabs | Switching preserves live terminal surfaces | Covered by workspace implementation tests | Partial |
+| Right loop panel | Minimap, upstream/downstream, fired conditions, metric sparkline, branch/start/usage footer | The full workspace now reserves a native right rail with a selected-loop map, upstream/downstream cards, fired-edge coloring, edge conditions, branch/worktree identity, metric/goal detail, and model tier. Metric sparkline, start time, token usage, collapse control, and dedicated UIA children remain incomplete | Partial |
+| Show in Graph | Visible loop-bar and menu action | The restored Loop menu and native loop bar both expose Show in Graph; the live workspace walkthrough verified return to the selected graph card, and focused loop-bar hit testing covers the visible action | Partial |
+
+## Repository ingress
+
+| macOS surface | Required visible behavior | Windows evidence | Status |
+|---|---|---|---|
+| Open Folder | Native picker from Welcome and Add Folder menu | Native picker works from empty button/menu | Partial |
+| Clone Repository sheet | Repository, location picker, derived folder, branch, depth, progress, inline failure, cancel | A purpose-built native dialog now provides HTTPS repository URL, destination browser, derived repository-folder hint, optional branch/depth, inline validation space, Clone/Cancel defaults, and standard keyboard traversal. Clone progress still appears in the application status rather than inside the sheet | Partial |
+| Add Remote Repository sheet | Server/user/port/path, explanation, validation progress, inline selectable error | A purpose-built native SSH dialog now provides host, user, default port, absolute path, explanatory copy, inline validation space, Connect/Cancel defaults, and standard keyboard traversal. Connection validation remains blocking after submission | Partial |
+| Remote Connection info | Read-only selectable connection sheet | Remote project context menus now expose a dedicated read-only connection-information dialog with the encoded remote project identity and management guidance | Partial |
+
+## Settings and worktrees
+
+| macOS surface | Required visible behavior | Windows evidence | Status |
+|---|---|---|---|
+| Product Settings window | Backend, three permission pickers, model picker/auto toggle, activity, briefing, beta with explanatory copy | A dedicated dark native Settings window now provides named backend/model/permission choices, switches for model routing, activity, graph briefing, and beta releases, consequence copy, Save/Cancel, and Return/Escape behavior. Final live keyboard/UIA evidence remains pending | Partial |
+| Infrastructure diagnostics | If retained, separate advanced surface | Daemon pipe/support-directory overrides are now explicitly labeled “Advanced Connection Settings...” while the normal Settings command opens product settings | Validated |
+| Project Settings sheet | Resolve policy radio rows, safety explanation, size/count thresholds, immediate save | A purpose-built native Project Settings sheet now presents Remove/Ask/Keep radio rows with consequences, the safe-tier explanation, positive GB/count notice thresholds, and Done/Cancel keyboard semantics. The expanded policy format remains backward-compatible with the two legacy booleans, saves directly on Done without a separate shortcut, and is covered by policy round-trip tests plus a real-executable capture; per-keystroke immediate persistence remains different | Partial |
+| Worktree sweep sheet | Safe/look/in-use grouping, size summaries, default selections, reveal, inline destructive confirmation, recovery note | A dedicated native modal now opens from Worktrees after real inspection, labels Safe / Look Before Removing / In Use rows, preselects only fully safe rows, disables blocked rows, states the safety/reflog contract, and executes a revalidated safe batch removal. Presentation is capped at 20 rows and size totals, inline reveal, and dirty forced-removal confirmation remain incomplete | Partial |
+| Worktree notice chip | Threshold-driven titlebar and lane notice | A clickable titlebar chip now reports total or reclaimable worktrees and opens the scoped inspection flow. The real populated fixture validates the titlebar notice; configured size/count thresholds and per-lane notice chips remain incomplete | Partial |
+
+## Updates and dialogs
+
+| macOS surface | Required visible behavior | Windows evidence | Status |
+|---|---|---|---|
+| Available update alert | Install, Release Notes, Later | A successful update check now retains the offered version and authoritative release URL, presents a native available-update alert, and can open the verified GitHub release page for notes/download. Direct in-app Install and separately labeled Later remain incomplete | Partial |
+| Install progress | In-window progress indicator | Blocked on a publishable Windows installer asset and integrity/signing metadata. Every current upstream release contains only a macOS DMG (verified through the GitHub releases API on 2026-08-17), so an in-app Windows download cannot yet select or authenticate an installable artifact without inventing an unsafe source | Blocked |
+| Relaunch prompt | Relaunch Now/Later and session continuity explanation | Blocked with installation because there is no published Windows artifact to stage or relaunch into. The native tray lifecycle and zmx-backed sessions already preserve daemon/terminal continuity, but the updater cannot truthfully offer Relaunch Now until a signed Windows package exists | Blocked |
+| Install failure | Download in Browser/Cancel with reason | The Windows flow deliberately hands off to the verified browser download and reports browser-launch failure, but it does not yet attempt an in-app install first | Partial |
+| Loop rename | Title field, Return submits, explanatory text | Dedicated single-title modal with native dialog keyboard submission, trimmed validation, and stable-ID re-resolution | Partial |
+| Loop delete | Named loop and full consequence message | Names the loop, explains graph-connection removal, and defaults to cancellation | Validated |
+| Chat rename/delete | Dedicated prompts | Dedicated single-title rename modal and named fail-closed deletion warning are wired from card actions and shortcuts | Validated |
+| Project delete loops | Dedicated confirmation | Sidebar project menus now expose Delete All Loops with consequence copy, safe cancellation default, and a dedicated daemon command | Partial |
+| Project remove/trash | Distinct reversible remove and filesystem Trash choices | Remove from GraphCode is now distinct, confirmed, and explicitly preserves files. A separate filesystem Trash action remains absent | Partial |
+
+## Accessibility, input, and visual behavior
+
+| macOS surface | Required visible behavior | Windows evidence | Status |
+|---|---|---|---|
+| UI Automation tree | Names, roles, selection, invoke/toggle, focus, live status for every visible surface | The synchronized live C++ provider exposes stable project rows, loop rows, project/overview/Quick Chat cards, worktree rows, destinations, canvas primary action, zoom controls, policy actions, focus, selection-change events, and status. The live gate uses explicitly in-process deterministic fixtures to validate populated RawView/ControlView navigation, real bounds, observable Quick Chat/workspace invocation effects, tagged-command isolation, identity-preserving reorder/removal, events, concurrency, and teardown. Daemon-to-model UIA integration, embedded terminal text providers, and several remaining dialogs still need end-to-end evidence | Partial |
+| Keyboard discovery | Every shortcut represented by a menu item or visible hint where practical | Restored File, Loop, Terminal, View, and Help menus expose the primary project, graph, terminal, workspace, settings, update, and zoom commands with shortcut labels. Some context-only actions and canvas gestures still lack visible hints | Partial |
+| IME/dead keys/layouts | Native composition in forms and terminal | Winghostty gate covers terminal IME; generic EDIT controls cover forms | Partial |
+| Clipboard/selection | Terminal copy/paste and mouse selection | Winghostty terminal gates cover core behavior | Partial |
+| Per-monitor DPI | Layout and controls scale correctly across monitors | No complete live multi-DPI walkthrough recorded | Partial |
+| Dark visual language | Dark canvas/cards/sheets and legible state hierarchy | Main canvas, onboarding, product settings, and workspace chrome use the dark native language; several legacy graph/repository forms still use default Win32 controls | Partial |
+
+## Audit conclusion
+
+The Windows branch has substantial protocol, lifecycle, persistence, terminal, graph
+mutation, tray, and packaging behavior, but it does **not** currently have complete UI
+or screen parity. The previous parity statement conflated backend reachability with
+user-visible parity. The largest corrective work is:
+
+1. Restore and complete the application menu and navigation state model.
+2. Implement the sidebar, global graph, Quick Chats canvas, project canvas chrome, and
+   loop workspace as distinct application-owned surfaces.
+3. Replace raw protocol forms with structured node, edge, settings, repository, and
+   worktree screens.
+4. Implement the missing update, project-management, rename/delete, empty, and
+   connection-info states.
+5. Expand UI Automation and live walkthrough coverage to every row above before any
+   complete-parity claim.

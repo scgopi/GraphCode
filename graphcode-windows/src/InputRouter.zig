@@ -49,6 +49,10 @@ pub const Action = enum {
     toggle_rail,
     toggle_panel,
     toggle_activity,
+    zoom_out,
+    actual_size,
+    zoom_in,
+    fit_canvas,
 };
 
 pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
@@ -97,6 +101,10 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (ctrl and key == 'L' and shift) return .toggle_rail;
     if (ctrl and key == 'B' and shift) return .toggle_panel;
     if (ctrl and key == 'A' and shift) return .toggle_activity;
+    if (ctrl and !shift and key == 0xBD) return .zoom_out;
+    if (ctrl and !shift and key == '0') return .actual_size;
+    if (ctrl and !shift and key == 0xBB) return .zoom_in;
+    if (ctrl and !shift and key == '9') return .fit_canvas;
     return .none;
 }
 
@@ -149,6 +157,10 @@ pub fn commandText(allocator: std.mem.Allocator, action: Action) ![]u8 {
         .toggle_rail => allocator.dupe(u8, "Toggle workspace rail"),
         .toggle_panel => allocator.dupe(u8, "Toggle workspace panel"),
         .toggle_activity => allocator.dupe(u8, "Toggle activity"),
+        .zoom_out => allocator.dupe(u8, "Zoom out"),
+        .actual_size => allocator.dupe(u8, "Actual size"),
+        .zoom_in => allocator.dupe(u8, "Zoom in"),
+        .fit_canvas => allocator.dupe(u8, "Fit canvas"),
         .none => allocator.dupe(u8, ""),
     };
 }
@@ -208,4 +220,8 @@ test "parity shortcuts expose palette navigation quick chat and workspace contro
     try std.testing.expectEqual(Action.toggle_rail, keyAction('L', true, true));
     try std.testing.expectEqual(Action.toggle_panel, keyAction('B', true, true));
     try std.testing.expectEqual(Action.toggle_activity, keyAction('A', true, true));
+    try std.testing.expectEqual(Action.zoom_out, keyAction(0xBD, true, false));
+    try std.testing.expectEqual(Action.actual_size, keyAction('0', true, false));
+    try std.testing.expectEqual(Action.zoom_in, keyAction(0xBB, true, false));
+    try std.testing.expectEqual(Action.fit_canvas, keyAction('9', true, false));
 }

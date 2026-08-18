@@ -22,6 +22,7 @@ const State = struct {
     scroll_offset: i32 = 0,
     accepted: bool = false,
     closed: bool = false,
+    button_y: i32 = 565,
 };
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeWindowsDialog");
@@ -56,6 +57,11 @@ pub fn text(
         return err;
     };
     defer allocator.free(wide_title);
+    const window_height: i32 = if (labels.len <= 4)
+        @as(i32, @intCast(150 + labels.len * 52))
+    else
+        620;
+    state.button_y = window_height - 55;
     active_state = state;
     active_state.closed = false;
     active_state.accepted = false;
@@ -68,7 +74,7 @@ pub fn text(
         c.CW_USEDEFAULT,
         c.CW_USEDEFAULT,
         600,
-        620,
+        window_height,
         parent,
         null,
         c.GetModuleHandleW(null),
@@ -136,8 +142,8 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             for (active_state.labels[0..active_state.count], 0..) |label, index| {
                 createField(hwnd, &active_state, label, index);
             }
-            createButton(hwnd, "OK", ok_id, 490, 565);
-            createButton(hwnd, "Cancel", cancel_id, 400, 565);
+            createButton(hwnd, "OK", ok_id, 490, active_state.button_y);
+            createButton(hwnd, "Cancel", cancel_id, 400, active_state.button_y);
             return 0;
         },
         c.WM_VSCROLL => {

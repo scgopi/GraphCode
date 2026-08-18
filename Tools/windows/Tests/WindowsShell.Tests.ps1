@@ -31,6 +31,7 @@ function Assert-Contract([object] $condition, [string] $message) {
 
 $shellSource = Get-Content $shellScript -Raw
 $appSource = Get-Content (Join-Path $shellRoot "src\App.zig") -Raw
+$mainWindowSource = Get-Content (Join-Path $shellRoot "src\MainWindow.zig") -Raw
 $nativeFormsSource = Get-Content (Join-Path $shellRoot "src\NativeForms.zig") -Raw
 $inputSource = Get-Content (Join-Path $shellRoot "src\InputRouter.zig") -Raw
 if ($shellSource -match '(?m)^\s*Write-OwnedResourceMetrics\s*$') {
@@ -44,12 +45,20 @@ $restartBlock = [regex]::Match($shellSource,
   '(?s)GraphCode Windows shell restart smoke.*?Invoke-ShellProcess \$arguments "windows-shell:restart".*?\r?\n\s*}')
 Assert-Contract ($restartBlock.Success -and $restartBlock.Value -notmatch 'windows-shell:large-paste') `
   "restart path can satisfy large-paste phase"
-Assert-Contract ($appSource -match 'installWorktreeMenu' -and
+Assert-Contract ($mainWindowSource -match 'Project Worktree Policy' -and
+  $appSource -match '\.edit_worktree_policy => app\.handleAction\(\.edit_worktree_policy\)' -and
   $appSource -match 'NativeForms\.worktreePolicy') `
   "worktree policy editor is not reachable from the native shell"
-Assert-Contract ($nativeFormsSource -match 'BS_AUTOCHECKBOX' -and
-  $nativeFormsSource -match 'Confirm each reclaim') `
-  "worktree policy editor does not expose both native checkbox controls"
+Assert-Contract ($nativeFormsSource -match 'BS_AUTORADIOBUTTON' -and
+  $nativeFormsSource -match 'Remove: automatically remove safe landed worktrees' -and
+  $nativeFormsSource -match 'notice_size_gb' -and
+  $nativeFormsSource -match 'notice_count') `
+  "project settings does not expose resolve choices and notice thresholds"
+Assert-Contract ($nativeFormsSource -match 'worktreeSweep' -and
+  $nativeFormsSource -match 'SAFE TO REMOVE' -and
+  $nativeFormsSource -match 'LOOK BEFORE REMOVING' -and
+  $nativeFormsSource -match 'Remove Selected') `
+  "dedicated Worktree Sweep sheet is missing its safety tiers or removal action"
 Assert-Contract ($inputSource -match "ctrl and shift and key == 'I'.*inspect_worktrees") `
   "Inspect worktrees is not routed from Ctrl+Shift+I"
 
@@ -87,6 +96,7 @@ foreach ($path in @(
     "src\DaemonClient.zig",
     "src\GraphModel.zig",
     "src\GraphCanvas.zig",
+    "src\CanvasLayoutStore.zig",
     "src\CanvasInput.zig",
     "src\Sidebar.zig",
     "src\TerminalWorkspace.zig",
@@ -95,6 +105,7 @@ foreach ($path in @(
     "src\InputRouter.zig",
     "src\Forms.zig",
     "src\NativeForms.zig",
+    "src\WindowsOnboarding.zig",
     "src\Accessibility.zig",
     "src\DesignTokens.zig",
     "src\Wire.zig",
@@ -209,6 +220,19 @@ Invoke-Native "Native dialog message-loop executable tests" {
   Push-Location $shellRoot
   try {
     & $zig test src\NativeForms.zig -target x86_64-windows-msvc -lc -luser32 "-I$include"
+  } finally { Pop-Location }
+}
+Invoke-Native "Onboarding executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\WindowsOnboarding.zig -target x86_64-windows-msvc `
+      -lc -luser32 -lgdi32 "-I$include"
   } finally { Pop-Location }
 }
 Invoke-Native "Frame buffer executable tests" {

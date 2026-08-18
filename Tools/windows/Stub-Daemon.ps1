@@ -23,6 +23,7 @@ $nodeA = if ($env:GRAPHCODE_STUB_NODE_A) { $env:GRAPHCODE_STUB_NODE_A } else { "
 $nodeB = if ($env:GRAPHCODE_STUB_NODE_B) { $env:GRAPHCODE_STUB_NODE_B } else { "22222222-2222-4222-8222-222222222222" }
 $graphEvent = '{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"stub-graph","project":{"path":"graphcode://stub/project","name":"Stub project","remote":false},"nodes":[{"id":"' + $nodeA + '","title":"Stub node A","loopType":"turnBased","state":"running","activity":"stub","presence":{"presence":"busy","confidence":"reported"}},{"id":"' + $nodeB + '","title":"Stub node B","loopType":"turnBased","state":"idle","activity":"stub","presence":{"presence":"idle","confidence":"reported"}}],"edges":[]}}}'
 $recentProjects = '{"version":2,"kind":"response","requestID":"{0}","event":{"recentProjectsListed":[{"path":"graphcode://stub/project","name":"Stub project","remote":false}]}}'
+$quickChats = '{"version":2,"kind":"response","requestID":"{0}","event":{"quickChatsListed":[{"id":"33333333-3333-4333-8333-333333333333","title":"Stub quick chat","backend":"claudeCode","createdAt":0,"activity":{"sequence":1,"text":"ready","presence":{"presence":"idle","confidence":"reported"}}},{"id":"44444444-4444-4444-8444-444444444444","title":"Review notes","backend":"copilot","createdAt":1,"activity":null}]}}'
 $success = '{"version":2,"kind":"response","requestID":"{0}","success":true}'
 $hello = '{"version":2,"kind":"hello","supportedVersions":[1,2],"selectedVersion":2}'
 
@@ -141,6 +142,8 @@ try {
         if ($commandName) { $seenCommands.Add([string]$commandName) }
         $response = if ($commandName -eq "listRecentProjects") {
           $recentProjects.Replace("{0}", [string]$frame.requestID)
+        } elseif ($commandName -eq "listQuickChats") {
+          $quickChats.Replace("{0}", [string]$frame.requestID)
         } else {
           $success.Replace("{0}", [string]$frame.requestID)
         }

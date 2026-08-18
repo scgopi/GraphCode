@@ -1,6 +1,7 @@
 const std = @import("std");
-const NativeDialogs = @import("WindowsNativeDialogs.zig");
 const c = @import("Win32.zig").c;
+
+extern fn graphcode_pick_folder(owner: c.HWND, buffer: [*]u16, capacity: c.DWORD) callconv(.c) c_int;
 
 pub const CloneFields = struct {
     url: []const u8 = "",
@@ -124,8 +125,7 @@ pub const CloneProcess = struct {
     fn recordOutput(self: *CloneProcess, bytes: []const u8, is_stderr: bool, flush: bool) void {
         self.output_lock.lock();
         defer self.output_lock.unlock();
-        const pending = if (is_stderr) self.redaction_pending_stderr[0..self.redaction_pending_stderr_len]
-            else self.redaction_pending_stdout[0..self.redaction_pending_stdout_len];
+        const pending = if (is_stderr) self.redaction_pending_stderr[0..self.redaction_pending_stderr_len] else self.redaction_pending_stdout[0..self.redaction_pending_stdout_len];
         const combined_len = pending.len + bytes.len;
         const combined = self.allocator.alloc(u8, combined_len) catch return;
         defer self.allocator.free(combined);
@@ -419,8 +419,8 @@ pub fn validateRemoteConnection(allocator: std.mem.Allocator, fields: RemoteFiel
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Pipe;
     try child.spawn();
-    var out_thread = try std.Thread.spawn(.{}, drainPipeDiscard, .{ &child.stdout.? });
-    var err_thread = try std.Thread.spawn(.{}, drainPipeDiscard, .{ &child.stderr.? });
+    var out_thread = try std.Thread.spawn(.{}, drainPipeDiscard, .{&child.stdout.?});
+    var err_thread = try std.Thread.spawn(.{}, drainPipeDiscard, .{&child.stderr.?});
     out_thread.join();
     err_thread.join();
     switch (try child.wait()) {
@@ -469,34 +469,465 @@ pub fn cloneCommand(allocator: std.mem.Allocator, fields: CloneFields) ![]const 
 }
 
 pub fn openClone(parent: c.HWND, allocator: std.mem.Allocator, initial: CloneFields) !?CloneFields {
-    const values = initial.values();
-    const result = try NativeDialogs.text(parent, allocator, "Clone HTTPS repository", &.{
-        "HTTPS repository URL", "Destination (Unicode paths supported)",
-        "Branch (optional)", "Depth (optional)",
-    }, &values);
-    var fields = result orelse return null;
-    defer fields.deinit(allocator);
+    const result = try openRepositoryDialog(parent, allocator, .clone, initial.values());
+    const fields = result orelse return null;
     return .{
-        .url = try allocator.dupe(u8, fields.values[0]),
-        .destination = try allocator.dupe(u8, fields.values[1]),
-        .branch = try allocator.dupe(u8, fields.values[2]),
-        .depth = try allocator.dupe(u8, fields.values[3]),
+        .url = fields[0],
+        .destination = fields[1],
+        .branch = fields[2],
+        .depth = fields[3],
     };
 }
 
 pub fn openRemote(parent: c.HWND, allocator: std.mem.Allocator, initial: RemoteFields) !?RemoteFields {
-    const values = initial.values();
-    const result = try NativeDialogs.text(parent, allocator, "Add SSH repository", &.{
-        "Host", "User", "Port", "Absolute remote repository path",
-    }, &values);
-    var fields = result orelse return null;
-    defer fields.deinit(allocator);
+    const result = try openRepositoryDialog(parent, allocator, .remote, initial.values());
+    const fields = result orelse return null;
     return .{
-        .host = try allocator.dupe(u8, fields.values[0]),
-        .user = try allocator.dupe(u8, fields.values[1]),
-        .port = try allocator.dupe(u8, fields.values[2]),
-        .path = try allocator.dupe(u8, fields.values[3]),
+        .host = fields[0],
+        .user = fields[1],
+        .port = fields[2],
+        .path = fields[3],
     };
+}
+
+const DialogKind = enum { clone, remote };
+const repository_dialog_class = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeRepositoryIngressDialog");
+const clone_title = "Clone Repository";
+const clone_intro = "Enter an HTTPS repository URL and choose where GraphCode should create the local repository folder.";
+const remote_title = "Add SSH Repository";
+const remote_intro = "Connect to an existing Git repository over SSH. GraphCode validates the connection before saving it.";
+const id_url_or_host = 4101;
+const id_destination_or_user = 4102;
+const id_branch_or_port = 4103;
+const id_depth_or_path = 4104;
+const id_browse = 4110;
+const id_accept = 1;
+const id_cancel = 2;
+const em_setcuebanner = 0x1501;
+
+const RepositoryDialogState = struct {
+    allocator: std.mem.Allocator,
+    parent: c.HWND,
+    kind: DialogKind,
+    initial: [4][]const u8,
+    edits: [4]c.HWND = [_]c.HWND{null} ** 4,
+    error_label: c.HWND = null,
+    destination_hint: c.HWND = null,
+    accepted_values: [4][]u8 = [_][]u8{&.{}} ** 4,
+    clone_parent: ?[]u8 = null,
+    updating_destination: bool = false,
+    accepted: bool = false,
+    closed: bool = false,
+};
+
+var repository_dialog_active = false;
+var repository_dialog_state: RepositoryDialogState = undefined;
+
+fn openRepositoryDialog(
+    parent: c.HWND,
+    allocator: std.mem.Allocator,
+    kind: DialogKind,
+    initial: [4][]const u8,
+) !?[4][]u8 {
+    if (repository_dialog_active) return error.RepositoryDialogAlreadyOpen;
+    try registerRepositoryDialogClass();
+    repository_dialog_state = .{
+        .allocator = allocator,
+        .parent = parent,
+        .kind = kind,
+        .initial = initial,
+    };
+    repository_dialog_active = true;
+    errdefer repository_dialog_active = false;
+
+    const title = if (kind == .clone) clone_title else remote_title;
+    const wide_title = try wideZ(allocator, title);
+    defer allocator.free(wide_title);
+    const client_width: i32 = 640;
+    const client_height: i32 = if (kind == .clone) 500 else 478;
+    const style = c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU;
+    const ex_style = c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT;
+    var frame = c.RECT{ .left = 0, .top = 0, .right = client_width, .bottom = client_height };
+    _ = c.AdjustWindowRectEx(&frame, style, 0, ex_style);
+    const width = frame.right - frame.left;
+    const height = frame.bottom - frame.top;
+    var owner: c.RECT = undefined;
+    _ = c.GetWindowRect(parent, &owner);
+    const x = owner.left + @divTrunc((owner.right - owner.left) - width, 2);
+    const y = owner.top + @divTrunc((owner.bottom - owner.top) - height, 2);
+    const hwnd = c.CreateWindowExW(
+        ex_style,
+        repository_dialog_class.ptr,
+        wide_title.ptr,
+        style,
+        x,
+        y,
+        width,
+        height,
+        parent,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse {
+        repository_dialog_active = false;
+        return error.RepositoryDialogCreationFailed;
+    };
+    _ = c.EnableWindow(parent, 0);
+    _ = c.ShowWindow(hwnd, c.SW_SHOW);
+    _ = c.SetForegroundWindow(hwnd);
+    _ = c.SetFocus(repository_dialog_state.edits[0]);
+
+    var message: c.MSG = undefined;
+    while (!repository_dialog_state.closed) {
+        const code = c.GetMessageW(&message, null, 0, 0);
+        if (code <= 0) {
+            repository_dialog_state.closed = true;
+            break;
+        }
+        if (c.IsDialogMessageW(hwnd, &message) != 0) continue;
+        _ = c.TranslateMessage(&message);
+        _ = c.DispatchMessageW(&message);
+    }
+    _ = c.DestroyWindow(hwnd);
+    _ = c.EnableWindow(parent, 1);
+    _ = c.SetActiveWindow(parent);
+    if (repository_dialog_state.clone_parent) |path| allocator.free(path);
+    repository_dialog_active = false;
+    if (!repository_dialog_state.accepted) return null;
+    return repository_dialog_state.accepted_values;
+}
+
+fn registerRepositoryDialogClass() !void {
+    var klass: c.WNDCLASSW = std.mem.zeroes(c.WNDCLASSW);
+    klass.lpfnWndProc = @ptrCast(&repositoryDialogProc);
+    klass.hInstance = c.GetModuleHandleW(null);
+    klass.lpszClassName = repository_dialog_class.ptr;
+    klass.hCursor = c.LoadCursorW(null, @ptrFromInt(32512));
+    klass.hbrBackground = c.GetSysColorBrush(c.COLOR_WINDOW);
+    if (c.RegisterClassW(&klass) == 0 and c.GetLastError() != c.ERROR_CLASS_ALREADY_EXISTS)
+        return error.RepositoryDialogClassRegistrationFailed;
+}
+
+fn repositoryDialogProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
+    if (!repository_dialog_active) return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    switch (message) {
+        c.WM_CREATE => {
+            createRepositoryDialogControls(hwnd);
+            return 0;
+        },
+        c.WM_COMMAND => {
+            const command: u16 = @truncate(wparam);
+            const notification: u16 = @truncate(wparam >> 16);
+            if (command == id_accept) {
+                acceptRepositoryDialog();
+                return 0;
+            }
+            if (command == id_cancel) {
+                repository_dialog_state.closed = true;
+                return 0;
+            }
+            if (command == id_browse) {
+                browseCloneDestination(hwnd);
+                return 0;
+            }
+            if (repository_dialog_state.kind == .clone and notification == c.EN_CHANGE) {
+                if (command == id_url_or_host) updateCloneDestinationPresentation();
+                if (command == id_destination_or_user and !repository_dialog_state.updating_destination) {
+                    if (repository_dialog_state.clone_parent) |path| {
+                        repository_dialog_state.allocator.free(path);
+                        repository_dialog_state.clone_parent = null;
+                    }
+                }
+            }
+        },
+        c.WM_CLOSE => {
+            repository_dialog_state.closed = true;
+            return 0;
+        },
+        else => {},
+    }
+    return c.DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+fn createRepositoryDialogControls(hwnd: c.HWND) void {
+    const state = &repository_dialog_state;
+    const intro = if (state.kind == .clone) clone_intro else remote_intro;
+    _ = createStatic(hwnd, intro, 24, 20, 592, 42);
+    if (state.kind == .clone) {
+        createLabeledEdit(hwnd, 0, "Repository URL", "https://github.com/owner/repository.git", 78);
+        createLabeledEdit(hwnd, 1, "Destination folder", "C:\\Users\\you\\Source\\repository", 154);
+        _ = createButton(hwnd, "Browse…", id_browse, 508, 180, 108, 28, false);
+        state.destination_hint = createStatic(hwnd, "", 24, 214, 592, 20);
+        createLabeledEdit(hwnd, 2, "Branch (optional)", "Leave empty to use the repository default", 246);
+        createLabeledEdit(hwnd, 3, "Depth (optional)", "Leave empty for full history", 322);
+    } else {
+        createLabeledEdit(hwnd, 0, "Host", "git.example.com", 78);
+        createLabeledEdit(hwnd, 1, "User", "git", 154);
+        createLabeledEdit(hwnd, 2, "Port", "22", 230);
+        createLabeledEdit(hwnd, 3, "Absolute repository path", "/srv/git/repository.git", 306);
+    }
+    const button_y: i32 = if (state.kind == .clone) 446 else 424;
+    state.error_label = createStatic(hwnd, "", 24, button_y - 40, 392, 34);
+    _ = createButton(hwnd, "Cancel", id_cancel, 430, button_y, 88, 30, false);
+    _ = createButton(hwnd, if (state.kind == .clone) "Clone" else "Connect", id_accept, 528, button_y, 88, 30, true);
+    updateCloneDestinationPresentation();
+}
+
+fn createLabeledEdit(hwnd: c.HWND, index: usize, label: []const u8, cue: []const u8, y: i32) void {
+    _ = createStatic(hwnd, label, 24, y, 592, 20);
+    const width: i32 = if (repository_dialog_state.kind == .clone and index == 1) 472 else 592;
+    const edit = createControl(
+        hwnd,
+        c.WS_EX_CLIENTEDGE,
+        "EDIT",
+        repository_dialog_state.initial[index],
+        c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.ES_AUTOHSCROLL,
+        24,
+        y + 24,
+        width,
+        28,
+        id_url_or_host + index,
+    );
+    repository_dialog_state.edits[index] = edit;
+    const wide_cue = wideZ(repository_dialog_state.allocator, cue) catch return;
+    defer repository_dialog_state.allocator.free(wide_cue);
+    _ = c.SendMessageW(edit, em_setcuebanner, 1, @bitCast(@intFromPtr(wide_cue.ptr)));
+}
+
+fn createStatic(hwnd: c.HWND, text: []const u8, x: i32, y: i32, width: i32, height: i32) c.HWND {
+    return createControl(hwnd, 0, "STATIC", text, c.WS_CHILD | c.WS_VISIBLE | c.SS_LEFT, x, y, width, height, 0);
+}
+
+fn createButton(hwnd: c.HWND, text: []const u8, id: usize, x: i32, y: i32, width: i32, height: i32, default: bool) c.HWND {
+    return createControl(
+        hwnd,
+        0,
+        "BUTTON",
+        text,
+        c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | @as(c.LONG, if (default) 1 else 0),
+        x,
+        y,
+        width,
+        height,
+        id,
+    );
+}
+
+fn createControl(
+    hwnd: c.HWND,
+    ex_style: c.DWORD,
+    class: []const u8,
+    text: []const u8,
+    style: c.LONG,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    id: usize,
+) c.HWND {
+    const allocator = repository_dialog_state.allocator;
+    const wide_class = wideZ(allocator, class) catch return null;
+    defer allocator.free(wide_class);
+    const wide_text = wideZ(allocator, text) catch return null;
+    defer allocator.free(wide_text);
+    const control = c.CreateWindowExW(
+        ex_style,
+        wide_class.ptr,
+        wide_text.ptr,
+        @bitCast(style),
+        x,
+        y,
+        width,
+        height,
+        hwnd,
+        controlId(id),
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return null;
+    if (c.GetStockObject(c.DEFAULT_GUI_FONT)) |font|
+        _ = c.SendMessageW(control, c.WM_SETFONT, @intFromPtr(font), 1);
+    return control;
+}
+
+fn controlId(id: usize) c.HMENU {
+    if (id == 0) return null;
+    @setRuntimeSafety(false);
+    return @ptrFromInt(id);
+}
+
+fn acceptRepositoryDialog() void {
+    const allocator = repository_dialog_state.allocator;
+    const values = readRepositoryDialogValues(allocator) catch {
+        showRepositoryDialogError("Unable to read the dialog fields.");
+        return;
+    };
+    var owned_values = values;
+    if (repository_dialog_state.kind == .clone) {
+        validateClone(.{
+            .url = owned_values[0],
+            .destination = owned_values[1],
+            .branch = owned_values[2],
+            .depth = owned_values[3],
+        }) catch |err| {
+            showRepositoryDialogError(validationMessage(err));
+            freeDialogValues(allocator, &owned_values);
+            return;
+        };
+        const destination_exists = inspectDestination(owned_values[1]) catch {
+            showRepositoryDialogError("The destination folder cannot be used.");
+            freeDialogValues(allocator, &owned_values);
+            return;
+        };
+        if (destination_exists) {
+            showRepositoryDialogError("Choose a destination folder that does not already exist.");
+            freeDialogValues(allocator, &owned_values);
+            return;
+        }
+        const parent_path = std.fs.path.dirname(owned_values[1]) orelse ".";
+        var parent_dir = std.fs.cwd().openDir(parent_path, .{}) catch {
+            showRepositoryDialogError("The destination's parent folder does not exist.");
+            freeDialogValues(allocator, &owned_values);
+            return;
+        };
+        parent_dir.close();
+    } else {
+        validateRemote(.{
+            .host = owned_values[0],
+            .user = owned_values[1],
+            .port = owned_values[2],
+            .path = owned_values[3],
+        }) catch |err| {
+            showRepositoryDialogError(validationMessage(err));
+            freeDialogValues(allocator, &owned_values);
+            return;
+        };
+    }
+    repository_dialog_state.accepted_values = owned_values;
+    repository_dialog_state.accepted = true;
+    repository_dialog_state.closed = true;
+}
+
+fn readRepositoryDialogValues(allocator: std.mem.Allocator) ![4][]u8 {
+    var values: [4][]u8 = undefined;
+    var count: usize = 0;
+    errdefer for (values[0..count]) |value| allocator.free(value);
+    for (repository_dialog_state.edits, 0..) |edit, index| {
+        const raw = try readControlText(allocator, edit);
+        defer allocator.free(raw);
+        values[index] = try allocator.dupe(u8, std.mem.trim(u8, raw, " \t\r\n"));
+        count += 1;
+    }
+    return values;
+}
+
+fn freeDialogValues(allocator: std.mem.Allocator, values: *[4][]u8) void {
+    for (values) |value| allocator.free(value);
+}
+
+fn showRepositoryDialogError(message: []const u8) void {
+    setControlText(repository_dialog_state.error_label, message);
+    _ = c.ShowWindow(repository_dialog_state.error_label, c.SW_SHOW);
+}
+
+fn validationMessage(err: anyerror) []const u8 {
+    return switch (err) {
+        error.MissingRepositoryURL => "Enter the HTTPS repository URL.",
+        error.HTTPSRequired => "Repository URL must begin with https://.",
+        error.MissingDestination => "Choose or enter a destination folder.",
+        error.InvalidDestination => "The destination folder contains invalid characters.",
+        error.InvalidDepth => "Depth must be a whole number greater than zero.",
+        error.MissingRemoteField => "Enter the host, user, port, and repository path.",
+        error.AbsolutePathRequired => "Repository path must be absolute and begin with /.",
+        error.InvalidPort => "Port must be a number from 1 through 65535.",
+        error.InvalidSSHComponent => "Host, user, or path contains an invalid value.",
+        else => "Check the highlighted repository details and try again.",
+    };
+}
+
+fn browseCloneDestination(hwnd: c.HWND) void {
+    var wide_path: [32768]u16 = [_]u16{0} ** 32768;
+    const picked = graphcode_pick_folder(hwnd, &wide_path, wide_path.len);
+    if (picked <= 0) {
+        if (picked < 0) showRepositoryDialogError("The Windows folder picker could not be opened.");
+        return;
+    }
+    const end = std.mem.indexOfScalar(u16, &wide_path, 0) orelse wide_path.len;
+    const parent = std.unicode.utf16LeToUtf8Alloc(repository_dialog_state.allocator, wide_path[0..end]) catch {
+        showRepositoryDialogError("The selected folder name could not be read.");
+        return;
+    };
+    if (repository_dialog_state.clone_parent) |old| repository_dialog_state.allocator.free(old);
+    repository_dialog_state.clone_parent = parent;
+    updateCloneDestinationPresentation();
+}
+
+fn updateCloneDestinationPresentation() void {
+    if (repository_dialog_state.kind != .clone or repository_dialog_state.edits[0] == null) return;
+    const allocator = repository_dialog_state.allocator;
+    const url = readControlText(allocator, repository_dialog_state.edits[0]) catch return;
+    defer allocator.free(url);
+    const folder = deriveRepositoryFolderName(allocator, url) catch return;
+    defer allocator.free(folder);
+    const hint = std.fmt.allocPrint(allocator, "Repository folder: {s}", .{folder}) catch return;
+    defer allocator.free(hint);
+    setControlText(repository_dialog_state.destination_hint, hint);
+    if (repository_dialog_state.clone_parent) |parent| {
+        const destination = std.fs.path.join(allocator, &.{ parent, folder }) catch return;
+        defer allocator.free(destination);
+        repository_dialog_state.updating_destination = true;
+        setControlText(repository_dialog_state.edits[1], destination);
+        repository_dialog_state.updating_destination = false;
+    }
+}
+
+fn deriveRepositoryFolderName(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, url, " \t\r\n");
+    const suffix_end = std.mem.indexOfAny(u8, trimmed, "?#") orelse trimmed.len;
+    const without_suffix = std.mem.trimRight(u8, trimmed[0..suffix_end], "/");
+    const scheme = std.mem.indexOf(u8, without_suffix, "://") orelse return allocator.dupe(u8, "repository");
+    const slash = std.mem.lastIndexOfScalar(u8, without_suffix, '/') orelse return allocator.dupe(u8, "repository");
+    if (slash < scheme + 3) return allocator.dupe(u8, "repository");
+    var segment = without_suffix[slash + 1 ..];
+    if (std.mem.endsWith(u8, segment, ".git")) segment = segment[0 .. segment.len - 4];
+    var result = std.array_list.Managed(u8).init(allocator);
+    defer result.deinit();
+    for (segment) |byte| {
+        if (byte < 32 or std.mem.indexOfScalar(u8, "<>:\"/\\|?*", byte) != null)
+            try result.append('-')
+        else
+            try result.append(byte);
+    }
+    while (result.items.len != 0 and
+        (result.items[result.items.len - 1] == '.' or result.items[result.items.len - 1] == ' '))
+    {
+        _ = result.pop();
+    }
+    if (result.items.len == 0) return allocator.dupe(u8, "repository");
+    return result.toOwnedSlice();
+}
+
+fn readControlText(allocator: std.mem.Allocator, control: c.HWND) ![]u8 {
+    const length: usize = @intCast(c.GetWindowTextLengthW(control));
+    const wide = try allocator.alloc(u16, length + 1);
+    defer allocator.free(wide);
+    const copied = c.GetWindowTextW(control, wide.ptr, @intCast(wide.len));
+    return std.unicode.utf16LeToUtf8Alloc(allocator, wide[0..@intCast(copied)]);
+}
+
+fn setControlText(control: c.HWND, value: []const u8) void {
+    if (control == null) return;
+    const wide = wideZ(repository_dialog_state.allocator, value) catch return;
+    defer repository_dialog_state.allocator.free(wide);
+    _ = c.SetWindowTextW(control, wide.ptr);
+}
+
+fn wideZ(allocator: std.mem.Allocator, value: []const u8) ![]u16 {
+    const raw = try std.unicode.utf8ToUtf16LeAlloc(allocator, value);
+    defer allocator.free(raw);
+    const result = try allocator.alloc(u16, raw.len + 1);
+    @memcpy(result[0..raw.len], raw);
+    result[raw.len] = 0;
+    return result;
 }
 
 pub fn runClone(allocator: std.mem.Allocator, fields: CloneFields) !CloneStatus {
@@ -529,6 +960,33 @@ fn drainPipeDiscard(file: *std.fs.File) void {
     while ((file.read(&buffer) catch 0) != 0) {}
 }
 
+test "clone dialog derives safe destination folder names" {
+    const standard = try deriveRepositoryFolderName(std.testing.allocator, "https://example.test/org/GraphCode.git");
+    defer std.testing.allocator.free(standard);
+    try std.testing.expectEqualStrings("GraphCode", standard);
+
+    const sanitized = try deriveRepositoryFolderName(std.testing.allocator, "https://example.test/org/repo%20name.git?ref=main");
+    defer std.testing.allocator.free(sanitized);
+    try std.testing.expectEqualStrings("repo%20name", sanitized);
+
+    const fallback = try deriveRepositoryFolderName(std.testing.allocator, "https://example.test/");
+    defer std.testing.allocator.free(fallback);
+    try std.testing.expectEqualStrings("repository", fallback);
+}
+
+test "repository dialogs expose purpose-built copy and actionable validation" {
+    try std.testing.expect(std.mem.indexOf(u8, clone_intro, "HTTPS repository URL") != null);
+    try std.testing.expect(std.mem.indexOf(u8, remote_intro, "validates the connection") != null);
+    try std.testing.expectEqualStrings(
+        "Depth must be a whole number greater than zero.",
+        validationMessage(error.InvalidDepth),
+    );
+    try std.testing.expectEqualStrings(
+        "Repository path must be absolute and begin with /.",
+        validationMessage(error.AbsolutePathRequired),
+    );
+}
+
 test "clone validation and argv preserve HTTPS, Unicode, and option boundaries" {
     const fields = CloneFields{
         .url = "https://example.test/repo.git",
@@ -555,7 +1013,10 @@ test "SSH validation and reconnect command reject injection-shaped identities" {
 
 test "SSH validation argv uses one quoted remote command" {
     const args = try sshValidationArgs(std.testing.allocator, .{
-        .host = "build-box", .user = "dev", .port = "2222", .path = "/srv/граф",
+        .host = "build-box",
+        .user = "dev",
+        .port = "2222",
+        .path = "/srv/граф",
     });
     defer {
         for (args) |arg| std.testing.allocator.free(arg);
@@ -568,18 +1029,25 @@ test "SSH validation argv uses one quoted remote command" {
 
 test "SSH reconnect command quotes shell metacharacters and rejects newlines" {
     const command = try reconnectCommand(std.testing.allocator, .{
-        .host = "build-box", .user = "dev", .path = "/srv/a;$(touch p)'q",
+        .host = "build-box",
+        .user = "dev",
+        .path = "/srv/a;$(touch p)'q",
     });
     defer std.testing.allocator.free(command);
     try std.testing.expect(std.mem.indexOf(u8, command, "'/srv/a;$(touch p)'\\''q'") != null);
     try std.testing.expectError(error.InvalidSSHComponent, validateRemote(.{
-        .host = "build-box", .user = "dev\nwhoami", .path = "/repo",
+        .host = "build-box",
+        .user = "dev\nwhoami",
+        .path = "/repo",
     }));
 }
 
 test "remote URI percent-encodes path and brackets IPv6" {
     const uri = try remoteProjectURI(std.testing.allocator, .{
-        .host = "2001:db8::1", .user = "dev", .port = "2200", .path = "/repo name/#q?x%雪",
+        .host = "2001:db8::1",
+        .user = "dev",
+        .port = "2200",
+        .path = "/repo name/#q?x%雪",
     });
     defer std.testing.allocator.free(uri);
     try std.testing.expectEqualStrings("ssh://dev@[2001:db8::1]:2200/repo%20name/%23q%3Fx%25%E9%9B%AA", uri);
@@ -624,8 +1092,7 @@ test "redaction holds and removes an eight kilobyte split credential" {
 }
 
 test "clone output redacts hostile HTTPS credentials" {
-    const safe = try redactSecrets(std.testing.allocator,
-        "fatal: https://user:p@ss;token@example.test/repo.git?access_token=secret");
+    const safe = try redactSecrets(std.testing.allocator, "fatal: https://user:p@ss;token@example.test/repo.git?access_token=secret");
     defer std.testing.allocator.free(safe);
     try std.testing.expect(std.mem.indexOf(u8, safe, "user:p@ss") == null);
     try std.testing.expect(std.mem.indexOf(u8, safe, "<redacted>@example.test") != null);
@@ -668,7 +1135,8 @@ test "clone refuses non-empty destinations without deleting sentinels" {
     try sentinel.writeAll("keep");
     sentinel.close();
     try std.testing.expectError(error.DestinationAlreadyExists, CloneProcess.start(std.testing.allocator, .{
-        .url = "https://example.test/repo.git", .destination = path,
+        .url = "https://example.test/repo.git",
+        .destination = path,
     }));
     var kept = try std.fs.cwd().openFile("graphcode-clone-sentinel-regression\\keep.txt", .{});
     defer kept.close();

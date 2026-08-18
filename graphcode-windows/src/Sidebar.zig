@@ -11,6 +11,9 @@ pub fn draw(
     selected_worktree_path: []const u8,
     scroll_offset: i32,
     status: []const u8,
+    viewport_bottom: i32,
+    update_version: []const u8,
+    ingress_error: []const u8,
     allocator: std.mem.Allocator,
 ) void {
     const sidebar = rect(0, Tokens.header_height, Tokens.sidebar_width, 1200);
@@ -21,21 +24,36 @@ pub fn draw(
     defer rows.deinit(allocator);
     for (rows.items) |row| {
         switch (row.kind) {
+            .local_heading => {
+                drawText(hdc, allocator, "v  LOCAL", 18, row.top, 10, 0x007A7A7A);
+            },
+            .remote_heading => {
+                drawText(hdc, allocator, "v  REMOTE", 18, row.top, 10, 0x007A7A7A);
+            },
             .project => {
                 const project = model.recent_projects.items[row.index];
-                drawText(hdc, allocator, project.name, 24, row.top, 13, 0x00E6E6E6);
+                drawText(hdc, allocator, if (project.isRemote()) "R" else "L", 18, row.top + 1, 9, 0x007A7A7A);
+                drawText(hdc, allocator, project.name, 34, row.top, 13, 0x00E6E6E6);
             },
             .overview => drawText(hdc, allocator, "Open", 18, row.top, 14, 0x00B8B8B8),
             .open_project => if (row.project_path) |path| if (model.graphFor(path)) |summary| {
                 const selected = if (model.selected_project_path) |selected_path|
                     std.mem.eql(u8, selected_path, path)
                 else false;
-                drawText(hdc, allocator, summary.project.name, 24, row.top, 13,
+                drawText(hdc, allocator, "v", 18, row.top, 9, 0x007A7A7A);
+                drawText(hdc, allocator, if (summary.project.isRemote()) "R" else "L", 31, row.top + 1, 9, 0x007A7A7A);
+                drawText(hdc, allocator, summary.project.name, 44, row.top, 13,
                     if (selected) 0x00FFFFFF else 0x00D0D0D0);
             },
             .loop => if (row.project_path) |path| if (model.graphFor(path)) |summary| {
-                if (row.index < summary.nodes.items.len)
-                    drawText(hdc, allocator, summary.nodes.items[row.index].title, 36, row.top, 11, 0x00E6E6E6);
+                if (row.index < summary.nodes.items.len) {
+                    const node = summary.nodes.items[row.index];
+                    const indent = @as(i32, @intCast(row.depth * 12));
+                    if (row.depth != 0) drawText(hdc, allocator, ">", 28 + indent, row.top, 9, 0x006A6A6A);
+                    fill(hdc, rect(30 + indent, row.top - 2, 33 + indent, row.top + 17), loopAccent(node.loop_type));
+                    drawText(hdc, allocator, node.title, 39 + indent, row.top, 11, 0x00E6E6E6);
+                    drawText(hdc, allocator, compactState(node.state), 168, row.top, 9, stateColor(node.state));
+                }
             },
             .worktree => if (inspection) |value| {
                 const entry = value.entries.items[row.index];
@@ -46,24 +64,96 @@ pub fn draw(
                 drawText(hdc, allocator, reason(entry), 24, row.top + 14, 10,
                     if (WorktreeStatus.decision(entry) == .reclaimable) 0x0078D7A8 else 0x00FFCD7A);
             },
+            .quick_chat_overview => {
+                drawText(hdc, allocator, "v", 18, row.top, 9, 0x007A7A7A);
+                drawText(hdc, allocator, "Quick Chats", 32, row.top, 13, 0x00E6E6E6);
+            },
             .quick_chat => if (row.index < model.quick_chats.items.len)
                 drawText(hdc, allocator, model.quick_chats.items[row.index].title, 24, row.top, 11, 0x00E6E6E6),
         }
     }
     const layout = layoutFor(model, inspection);
-    drawText(hdc, allocator, "Quick Chats", 18, layout.quickChatHeadingTop() - scroll_offset, 11, 0x007A7A7A);
+    drawText(hdc, allocator, "CHATS", 18, layout.quickChatHeadingTop() - scroll_offset, 10, 0x007A7A7A);
 
     const section_y = sidebarSectionBottom(model, inspection) - scroll_offset;
     if (model.attentionCount() != 0) {
         drawText(hdc, allocator, "Needs you", 18, section_y + 10, 11, 0x00FFCD7A);
         var attention_y = section_y + 30;
-        for (model.attention.items[0..@min(model.attention.items.len, 4)]) |node| {
-            drawText(hdc, allocator, node.title, 24, attention_y, 11, 0x00E6E6E6);
-            attention_y += 19;
+        if (model.attention_entries.items.len != 0) {
+            for (model.attention_entries.items[0..@min(model.attention_entries.items.len, 4)]) |entry| {
+                drawText(hdc, allocator, entry.node.title, 24, attention_y, 11, 0x00E6E6E6);
+                drawText(hdc, allocator, attentionContext(model, entry), 24, attention_y + 15, 9, stateColor(entry.node.state));
+                attention_y += 34;
+            }
+        } else {
+            for (model.attention.items[0..@min(model.attention.items.len, 4)]) |node| {
+                drawText(hdc, allocator, node.title, 24, attention_y, 11, 0x00E6E6E6);
+                drawText(hdc, allocator, compactState(node.state), 24, attention_y + 15, 9, stateColor(node.state));
+                attention_y += 34;
+            }
         }
 
     }
-    drawText(hdc, allocator, status, 18, 700, 11, 0x00909090);
+    if (ingress_error.len != 0) {
+        const bounds = errorFooterRect(viewport_bottom);
+        fill(hdc, bounds, 0x00242448);
+        drawText(hdc, allocator, ingress_error, bounds.left + 10, bounds.top + 10, 10, 0x006060FF);
+    }
+    if (update_version.len != 0) {
+        const bounds = updateBannerRect(viewport_bottom, ingress_error.len != 0);
+        fill(hdc, bounds, 0x00352B1C);
+        drawText(hdc, allocator, "v", bounds.left + 10, bounds.top + 10, 14, 0x00FF840A);
+        drawText(hdc, allocator, "Update available", bounds.left + 30, bounds.top + 7, 12, 0x00F0F0F0);
+        const detail = std.fmt.allocPrint(allocator, "{s} · click to install", .{update_version}) catch null;
+        defer if (detail) |value| allocator.free(value);
+        drawText(hdc, allocator, detail orelse update_version, bounds.left + 30, bounds.top + 24, 10, 0x00909090);
+    }
+    const status_offset: i32 = 58 +
+        (if (ingress_error.len != 0) @as(i32, 50) else 0) +
+        (if (update_version.len != 0) @as(i32, 58) else 0);
+    drawText(hdc, allocator, status, 18, viewport_bottom - status_offset, 11, 0x00909090);
+}
+
+pub fn errorFooterRect(viewport_bottom: i32) c.RECT {
+    return rect(8, viewport_bottom - 84, Tokens.sidebar_width - 8, viewport_bottom - 42);
+}
+
+pub fn updateBannerRect(viewport_bottom: i32, has_error: bool) c.RECT {
+    const error_offset: i32 = if (has_error) 50 else 0;
+    return rect(8, viewport_bottom - 92 - error_offset, Tokens.sidebar_width - 8, viewport_bottom - 42 - error_offset);
+}
+
+pub fn updateBannerAt(x: i32, y: i32, viewport_bottom: i32, available: bool, has_error: bool) bool {
+    if (!available) return false;
+    const bounds = updateBannerRect(viewport_bottom, has_error);
+    return x >= bounds.left and x < bounds.right and y >= bounds.top and y < bounds.bottom;
+}
+
+fn loopAccent(loop_type: []const u8) u32 {
+    if (std.mem.eql(u8, loop_type, "goalBased")) return 0x0048C78E;
+    if (std.mem.eql(u8, loop_type, "timeBased")) return 0x00D6A649;
+    if (std.mem.eql(u8, loop_type, "composite")) return 0x00C77DFF;
+    return 0x007AB8FF;
+}
+
+fn compactState(state: []const u8) []const u8 {
+    if (std.mem.eql(u8, state, "succeeded")) return "done";
+    if (std.mem.eql(u8, state, "awaitingInput")) return "needs";
+    return state;
+}
+
+fn stateColor(state: []const u8) u32 {
+    if (std.mem.eql(u8, state, "failed") or std.mem.eql(u8, state, "stalled")) return 0x005F5FFF;
+    if (std.mem.eql(u8, state, "succeeded")) return 0x006BD58D;
+    if (std.mem.eql(u8, state, "blocked")) return 0x0049B8FF;
+    return 0x008E8E93;
+}
+
+fn attentionContext(model: *const GraphModel.Model, entry: GraphModel.AttentionEntry) []const u8 {
+    for (model.graphs.items) |graph| {
+        if (std.mem.eql(u8, graph.project.path, entry.project_path)) return graph.project.name;
+    }
+    return compactState(entry.node.state);
 }
 
 pub fn loopRowTop(project_count: usize, index: usize) i32 {
@@ -71,21 +161,42 @@ pub fn loopRowTop(project_count: usize, index: usize) i32 {
     return layout.loopTop(index);
 }
 
+pub fn loopRowTopForModel(model: *const GraphModel.Model, index: usize) i32 {
+    const layout = layoutFor(model, null);
+    const graph = model.currentGraph() orelse return layout.loopTop(index);
+    const position = hierarchyPosition(std.heap.page_allocator, graph.nodes.items, graph.edges.items, index) catch index;
+    return layout.loopTop(position);
+}
+
 pub fn worktreeRowTop(project_count: usize, loop_count: usize, index: usize) i32 {
     const layout = Layout{ .base = Tokens.header_height + 78, .project_count = project_count, .loop_count = loop_count, .worktree_count = 0 };
     return layout.worktreeTop(index);
 }
 
-pub const RowKind = enum { project, open_project, overview, loop, worktree, quick_chat };
+pub fn worktreeRowTopForModel(model: *const GraphModel.Model, loop_count: usize, index: usize) i32 {
+    const layout = Layout{
+        .base = Tokens.header_height + 78,
+        .project_count = model.recent_projects.items.len,
+        .project_heading_count = projectHeadingCount(model),
+        .loop_count = loop_count,
+        .worktree_count = 0,
+    };
+    return layout.worktreeTop(index);
+}
+
+pub const RowKind = enum { local_heading, remote_heading, project, open_project, overview, loop, worktree, quick_chat_overview, quick_chat };
 pub const Row = struct {
     kind: RowKind,
     index: usize,
     top: i32,
     project_path: ?[]const u8 = null,
+    depth: usize = 0,
 };
+const HierarchyItem = struct { index: usize, depth: usize };
 pub const Layout = struct {
     base: i32,
     project_count: usize,
+    project_heading_count: usize = 0,
     loop_count: usize,
     worktree_count: usize,
     quick_chat_count: usize = 0,
@@ -97,14 +208,14 @@ pub const Layout = struct {
         return self.base + @as(i32, @intCast(index * 24));
     }
     pub fn overviewTop(self: Layout) i32 {
-        return self.base + @as(i32, @intCast(self.project_count * 24)) + 24;
+        return self.base + self.projectSectionHeight() + 24;
     }
     pub fn loopTop(self: Layout, index: usize) i32 {
-        return self.base + @as(i32, @intCast(self.project_count * 24)) + 86 +
+        return self.base + self.projectSectionHeight() + 86 +
             @as(i32, @intCast(index * 24));
     }
     pub fn worktreeTop(self: Layout, index: usize) i32 {
-        return self.base + @as(i32, @intCast(self.project_count * 24)) + 140 +
+        return self.base + self.projectSectionHeight() + 140 +
             @as(i32, @intCast(self.loop_count * 24)) +
             @as(i32, @intCast(index * 34));
     }
@@ -112,7 +223,7 @@ pub const Layout = struct {
         return self.quickChatRowTop(0) - 32;
     }
     pub fn quickChatRowTop(self: Layout, index: usize) i32 {
-        const project_bottom = self.base + @as(i32, @intCast(self.project_count * 24));
+        const project_bottom = self.base + self.projectSectionHeight();
         const worktree_height: i32 = if (self.inspection_present)
             24 + @as(i32, @intCast(self.worktree_count * 34))
         else
@@ -120,9 +231,12 @@ pub const Layout = struct {
         const section_bottom = project_bottom + self.graph_section_height + worktree_height;
         return section_bottom + 42 + @as(i32, @intCast(index * 24));
     }
+    fn projectSectionHeight(self: Layout) i32 {
+        return @as(i32, @intCast((self.project_count + self.project_heading_count) * 24));
+    }
 };
 
-fn appendRows(
+pub fn appendRows(
     allocator: std.mem.Allocator,
     model: *const GraphModel.Model,
     inspection: ?*const WorktreeStatus.Inspection,
@@ -130,7 +244,21 @@ fn appendRows(
 ) !std.ArrayList(Row) {
     var rows: std.ArrayList(Row) = .empty;
     var top: i32 = Tokens.header_height + 78 - scroll_offset;
+    if (hasLocalProjects(model)) {
+        try rows.append(allocator, .{ .kind = .local_heading, .index = 0, .top = top });
+        top += 24;
+    }
     for (model.recent_projects.items, 0..) |project, index| {
+        if (project.isRemote()) continue;
+        try rows.append(allocator, .{ .kind = .project, .index = index, .top = top, .project_path = project.path });
+        top += 24;
+    }
+    if (hasRemoteProjects(model)) {
+        try rows.append(allocator, .{ .kind = .remote_heading, .index = 0, .top = top });
+        top += 24;
+    }
+    for (model.recent_projects.items, 0..) |project, index| {
+        if (!project.isRemote()) continue;
         try rows.append(allocator, .{ .kind = .project, .index = index, .top = top, .project_path = project.path });
         top += 24;
     }
@@ -141,9 +269,10 @@ fn appendRows(
             for (model.graphs.items, 0..) |summary, graph_index| {
                 try rows.append(allocator, .{ .kind = .open_project, .index = graph_index, .top = top, .project_path = summary.project.path });
                 top += 24;
-                for (summary.nodes.items, 0..) |node, node_index| {
-                    _ = node;
-                    try rows.append(allocator, .{ .kind = .loop, .index = node_index, .top = top, .project_path = summary.project.path });
+                var hierarchy = try hierarchyItems(allocator, summary.nodes.items, summary.edges.items);
+                defer hierarchy.deinit(allocator);
+                for (hierarchy.items) |item| {
+                    try rows.append(allocator, .{ .kind = .loop, .index = item.index, .top = top, .project_path = summary.project.path, .depth = item.depth });
                     top += 24;
                 }
                 top += 38;
@@ -151,9 +280,10 @@ fn appendRows(
         } else if (model.graph) |graph| {
             try rows.append(allocator, .{ .kind = .open_project, .index = 0, .top = top, .project_path = graph.project.path });
             top += 24;
-            for (graph.nodes.items, 0..) |node, node_index| {
-                _ = node;
-                try rows.append(allocator, .{ .kind = .loop, .index = node_index, .top = top, .project_path = graph.project.path });
+            var hierarchy = try hierarchyItems(allocator, graph.nodes.items, graph.edges.items);
+            defer hierarchy.deinit(allocator);
+            for (hierarchy.items) |item| {
+                try rows.append(allocator, .{ .kind = .loop, .index = item.index, .top = top, .project_path = graph.project.path, .depth = item.depth });
                 top += 24;
             }
             top += 38;
@@ -167,6 +297,8 @@ fn appendRows(
         }
     }
     top = layoutFor(model, inspection).quickChatRowTop(0) - scroll_offset;
+    try rows.append(allocator, .{ .kind = .quick_chat_overview, .index = 0, .top = top });
+    top += 24;
     for (model.quick_chats.items, 0..) |_, index| {
         try rows.append(allocator, .{ .kind = .quick_chat, .index = index, .top = top });
         top += 24;
@@ -191,6 +323,7 @@ pub fn layoutFor(model: *const GraphModel.Model, inspection: ?*const WorktreeSta
     return .{
         .base = Tokens.header_height + 78,
         .project_count = model.recent_projects.items.len,
+        .project_heading_count = projectHeadingCount(model),
         .loop_count = loop_count,
         .worktree_count = if (inspection) |value| value.entries.items.len else 0,
         .quick_chat_count = model.quick_chats.items.len,
@@ -202,7 +335,7 @@ pub fn layoutFor(model: *const GraphModel.Model, inspection: ?*const WorktreeSta
 
 pub fn sharedGraphTop(model: *const GraphModel.Model, graph_index: usize) i32 {
     var top = Tokens.header_height + 78 +
-        @as(i32, @intCast(model.recent_projects.items.len * 24)) + 36;
+        @as(i32, @intCast((model.recent_projects.items.len + projectHeadingCount(model)) * 24)) + 36;
     for (model.graphs.items[0..@min(graph_index, model.graphs.items.len)]) |summary| {
         top += 62 + @as(i32, @intCast(summary.nodes.items.len * 24));
     }
@@ -210,12 +343,15 @@ pub fn sharedGraphTop(model: *const GraphModel.Model, graph_index: usize) i32 {
 }
 
 pub fn sharedLoopTop(model: *const GraphModel.Model, graph_index: usize, node_index: usize) i32 {
-    return sharedGraphTop(model, graph_index) + 48 + @as(i32, @intCast(node_index * 24));
+    if (graph_index >= model.graphs.items.len) return sharedGraphTop(model, graph_index) + 48;
+    const graph = model.graphs.items[graph_index];
+    const position = hierarchyPosition(std.heap.page_allocator, graph.nodes.items, graph.edges.items, node_index) catch node_index;
+    return sharedGraphTop(model, graph_index) + 48 + @as(i32, @intCast(position * 24));
 }
 
 pub fn sharedWorktreeTop(model: *const GraphModel.Model, index: usize) i32 {
     var top = Tokens.header_height + 78 +
-        @as(i32, @intCast(model.recent_projects.items.len * 24)) + 36;
+        @as(i32, @intCast((model.recent_projects.items.len + projectHeadingCount(model)) * 24)) + 36;
     for (model.graphs.items) |summary| {
         top += 62 + @as(i32, @intCast(summary.nodes.items.len * 24));
     }
@@ -235,12 +371,84 @@ pub fn rowAt(
     defer rows.deinit(std.heap.page_allocator);
     for (rows.items) |row| {
         const height: i32 = switch (row.kind) {
-            .project, .open_project, .overview, .loop, .quick_chat => 24,
+            .local_heading, .remote_heading, .project, .open_project, .overview, .loop, .quick_chat_overview, .quick_chat => 24,
             .worktree => 34,
         };
         if (y >= row.top and y < row.top + height) return row;
     }
     return null;
+}
+
+fn hasLocalProjects(model: *const GraphModel.Model) bool {
+    for (model.recent_projects.items) |project| if (!project.isRemote()) return true;
+    return false;
+}
+
+fn hasRemoteProjects(model: *const GraphModel.Model) bool {
+    for (model.recent_projects.items) |project| if (project.isRemote()) return true;
+    return false;
+}
+
+fn projectHeadingCount(model: *const GraphModel.Model) usize {
+    return @as(usize, @intFromBool(hasLocalProjects(model))) +
+        @as(usize, @intFromBool(hasRemoteProjects(model)));
+}
+
+fn hierarchyItems(
+    allocator: std.mem.Allocator,
+    nodes: []const GraphModel.Node,
+    edges: []const GraphModel.Edge,
+) !std.ArrayList(HierarchyItem) {
+    var result: std.ArrayList(HierarchyItem) = .empty;
+    errdefer result.deinit(allocator);
+    const visited = try allocator.alloc(bool, nodes.len);
+    defer allocator.free(visited);
+    @memset(visited, false);
+    for (nodes, 0..) |node, index| {
+        var incoming = false;
+        for (edges) |edge| {
+            if (std.mem.eql(u8, edge.kind, "handoff") and std.mem.eql(u8, edge.to, node.id)) {
+                incoming = true;
+                break;
+            }
+        }
+        if (!incoming) try appendHierarchy(allocator, &result, visited, nodes, edges, index, 0);
+    }
+    for (nodes, 0..) |_, index| {
+        if (!visited[index]) try appendHierarchy(allocator, &result, visited, nodes, edges, index, 0);
+    }
+    return result;
+}
+
+fn appendHierarchy(
+    allocator: std.mem.Allocator,
+    result: *std.ArrayList(HierarchyItem),
+    visited: []bool,
+    nodes: []const GraphModel.Node,
+    edges: []const GraphModel.Edge,
+    index: usize,
+    depth: usize,
+) !void {
+    if (index >= nodes.len or visited[index]) return;
+    visited[index] = true;
+    try result.append(allocator, .{ .index = index, .depth = depth });
+    for (edges) |edge| {
+        if (!std.mem.eql(u8, edge.kind, "handoff") or !std.mem.eql(u8, edge.from, nodes[index].id)) continue;
+        const child = GraphModel.findNodeIndexByID(nodes, edge.to) orelse continue;
+        try appendHierarchy(allocator, result, visited, nodes, edges, child, depth + 1);
+    }
+}
+
+fn hierarchyPosition(
+    allocator: std.mem.Allocator,
+    nodes: []const GraphModel.Node,
+    edges: []const GraphModel.Edge,
+    node_index: usize,
+) !usize {
+    var hierarchy = try hierarchyItems(allocator, nodes, edges);
+    defer hierarchy.deinit(allocator);
+    for (hierarchy.items, 0..) |item, position| if (item.index == node_index) return position;
+    return node_index;
 }
 
 pub fn worktreeSectionBottom(project_count: usize, worktree_count: usize) i32 {
@@ -250,12 +458,12 @@ pub fn worktreeSectionBottom(project_count: usize, worktree_count: usize) i32 {
 pub fn contentBottom(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection) i32 {
     const section = sidebarSectionBottom(model, inspection);
     return if (model.attentionCount() == 0) section else section + 30 +
-        @as(i32, @intCast(@min(model.attentionCount(), 4))) * 19;
+        @as(i32, @intCast(@min(model.attentionCount(), 4))) * 34;
 }
 
 pub fn sidebarSectionBottom(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection) i32 {
     const layout = layoutFor(model, inspection);
-    return layout.quickChatRowTop(model.quick_chats.items.len);
+    return layout.quickChatRowTop(model.quick_chats.items.len + 1);
 }
 
 pub fn maxScroll(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection, viewport_bottom: i32) i32 {
@@ -374,7 +582,7 @@ test "multi-project rows share render and hit-test offsets with project identity
     try std.testing.expectEqualStrings("C:\\work\\local", local_row.project_path.?);
     try std.testing.expectEqualStrings("ssh://build/remote", remote_row.project_path.?);
     try std.testing.expectEqual(
-        layoutFor(&model, null).quickChatRowTop(model.quick_chats.items.len),
+        layoutFor(&model, null).quickChatRowTop(model.quick_chats.items.len + 1),
         sidebarSectionBottom(&model, null),
     );
 }
@@ -454,7 +662,7 @@ test "sidebar scroll clamps overflow, shrink, and resize" {
         .branch = @constCast("branch"),
     });
     const short_max = maxScroll(&model, &inspection, 400);
-    const expected_short = sidebarSectionBottom(&model, &inspection) + 30 + 4 * 19 - 400;
+    const expected_short = sidebarSectionBottom(&model, &inspection) + 30 + 4 * 34 - 400;
     try std.testing.expectEqual(expected_short, short_max);
     const activity_only_max = maxScroll(&model, &inspection, 400);
     try std.testing.expectEqual(short_max, activity_only_max);
@@ -485,10 +693,10 @@ test "sidebar scroll clamps overflow, shrink, and resize" {
     }
     inspection.entries.shrinkRetainingCapacity(2);
     const reduced_max = maxScroll(&model, &inspection, 500);
-    const expected_reduced = @max(sidebarSectionBottom(&model, &inspection) + 30 + 1 * 19 - 500, 0);
+    const expected_reduced = @max(sidebarSectionBottom(&model, &inspection) + 30 + 1 * 34 - 500, 0);
     try std.testing.expectEqual(expected_reduced, reduced_max);
     scroll = clampScroll(scroll, reduced_max);
-    try std.testing.expectEqual(@as(i32, 0), scroll);
+    try std.testing.expectEqual(reduced_max, scroll);
     try std.testing.expectEqual(@as(i32, 0), clampScroll(-50, reduced_max));
     inspection.entries.deinit();
 }
@@ -501,8 +709,46 @@ test "sidebar without graph counts only static rendered content" {
         .name = try std.testing.allocator.dupe(u8, "Project"),
     });
     const no_graph_max = maxScroll(&model, null, 100);
-    try std.testing.expectEqual(@as(i32, Tokens.header_height + 78 + 24 + 42 - 100), no_graph_max);
-    try std.testing.expectEqual(no_graph_max, clampScroll(80, no_graph_max));
+    try std.testing.expectEqual(@as(i32, Tokens.header_height + 78 + 24 + 24 + 42 + 24 - 100), no_graph_max);
+    try std.testing.expectEqual(no_graph_max, clampScroll(180, no_graph_max));
+}
+
+test "recent projects are grouped into local and remote sections" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    try model.recent_projects.append(.{
+        .path = try std.testing.allocator.dupe(u8, "ssh://host/repo"),
+        .name = try std.testing.allocator.dupe(u8, "Remote"),
+    });
+    try model.recent_projects.append(.{
+        .path = try std.testing.allocator.dupe(u8, "C:\\repo"),
+        .name = try std.testing.allocator.dupe(u8, "Local"),
+    });
+    var rows = try appendRows(std.testing.allocator, &model, null, 0);
+    defer rows.deinit(std.testing.allocator);
+    try std.testing.expectEqual(RowKind.local_heading, rows.items[0].kind);
+    try std.testing.expectEqual(RowKind.project, rows.items[1].kind);
+    try std.testing.expectEqual(@as(usize, 1), rows.items[1].index);
+    try std.testing.expectEqual(RowKind.remote_heading, rows.items[2].kind);
+    try std.testing.expectEqual(@as(usize, 0), rows.items[3].index);
+}
+
+test "handoff edges derive stable nested loop order and depth" {
+    const nodes = [_]GraphModel.Node{
+        .{ .id = @constCast("child"), .title = @constCast("Child"), .loop_type = @constCast("turnBased"), .state = @constCast("idle"), .activity = @constCast(""), .presence = @constCast("idle") },
+        .{ .id = @constCast("root"), .title = @constCast("Root"), .loop_type = @constCast("turnBased"), .state = @constCast("idle"), .activity = @constCast(""), .presence = @constCast("idle") },
+    };
+    const edges = [_]GraphModel.Edge{.{
+        .from = @constCast("root"),
+        .to = @constCast("child"),
+        .kind = @constCast("handoff"),
+    }};
+    var hierarchy = try hierarchyItems(std.testing.allocator, &nodes, &edges);
+    defer hierarchy.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), hierarchy.items[0].index);
+    try std.testing.expectEqual(@as(usize, 0), hierarchy.items[0].depth);
+    try std.testing.expectEqual(@as(usize, 0), hierarchy.items[1].index);
+    try std.testing.expectEqual(@as(usize, 1), hierarchy.items[1].depth);
 }
 
 test "quick chats remain selectable without an open graph or inspection" {
@@ -515,7 +761,10 @@ test "quick chats remain selectable without an open graph or inspection" {
     });
     const layout = layoutFor(&model, null);
     try std.testing.expect(layout.quickChatHeadingTop() + 11 < layout.quickChatRowTop(0));
-    const row = rowAt(24, layout.quickChatRowTop(0) + 4, &model, null, 0, 700) orelse
+    const overview = rowAt(24, layout.quickChatRowTop(0) + 4, &model, null, 0, 700) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(RowKind.quick_chat_overview, overview.kind);
+    const row = rowAt(24, layout.quickChatRowTop(1) + 4, &model, null, 0, 700) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(RowKind.quick_chat, row.kind);
     try std.testing.expectEqual(@as(usize, 0), row.index);
@@ -524,6 +773,7 @@ test "quick chats remain selectable without an open graph or inspection" {
         layout.quickChatRowTop(0),
     );
     try std.testing.expect(rowAt(24, layout.quickChatHeadingTop() + 4, &model, null, 0, 700) == null);
+    try std.testing.expectEqual(layout.quickChatRowTop(2), sidebarSectionBottom(&model, null));
 }
 
 test "quick chat heading and rows stay distinct across graph layouts" {
@@ -536,6 +786,22 @@ test "quick chat heading and rows stay distinct across graph layouts" {
         try std.testing.expect(layout.quickChatHeadingTop() + 11 < layout.quickChatRowTop(0));
         try std.testing.expectEqual(@as(i32, 24), layout.quickChatRowTop(1) - layout.quickChatRowTop(0));
     }
+}
+
+test "sidebar loop presentation preserves type and terminal states" {
+    try std.testing.expectEqual(@as(u32, 0x0048C78E), loopAccent("goalBased"));
+    try std.testing.expectEqualStrings("done", compactState("succeeded"));
+    try std.testing.expectEqualStrings("running", compactState("running"));
+    try std.testing.expectEqual(@as(u32, 0x005F5FFF), stateColor("failed"));
+}
+
+test "update banner is a bounded footer action" {
+    const bounds = updateBannerRect(700, false);
+    try std.testing.expect(updateBannerAt(bounds.left, bounds.top, 700, true, false));
+    try std.testing.expect(updateBannerAt(bounds.right - 1, bounds.bottom - 1, 700, true, false));
+    try std.testing.expect(!updateBannerAt(bounds.right, bounds.bottom - 1, 700, true, false));
+    try std.testing.expect(!updateBannerAt(bounds.left, bounds.top, 700, false, false));
+    try std.testing.expect(updateBannerRect(700, true).bottom < errorFooterRect(700).top);
 }
 
 fn rect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {

@@ -81,6 +81,9 @@ public static class GraphCodeUiaGateState {
   public static bool PostFixtureMutation(IntPtr window, uint mutation) {
     return PostMessage(window, 0x802A, (UIntPtr)mutation, IntPtr.Zero);
   }
+  public static bool PostTaggedExitCollision(IntPtr window) {
+    return PostMessage(window, 0x0111, new UIntPtr(0x8000000000001008UL), IntPtr.Zero);
+  }
   public static bool PostKeyboard(IntPtr window, uint key) {
     return PostMessage(window, 0x0100, (UIntPtr)key, IntPtr.Zero);
   }
@@ -183,6 +186,7 @@ $oldCwd = [Environment]::GetEnvironmentVariable("GRAPHCODE_GATE_CWD")
 $oldGate = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_GATE")
 $oldUser = [Environment]::GetEnvironmentVariable("USERNAME")
 $oldFixture = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_FIXTURE_ROWS")
+$oldDaemonPipe = [Environment]::GetEnvironmentVariable("GRAPHCODE_DAEMON_PIPE")
 $process = $null
 $status = $null
 $liveRegionEvent = $null
@@ -204,6 +208,7 @@ try {
   $env:GRAPHCODE_UIA_GATE = "1"
   $env:USERNAME = "GraphCodeUIAGate"
   $env:GRAPHCODE_UIA_FIXTURE_ROWS = "C:\fixture-safe|safe,C:\fixture-unsafe|unsafe"
+  $env:GRAPHCODE_DAEMON_PIPE = "\\.\pipe\graphcode-uia-gate-$PID"
   $policyDirectory = Join-Path $env:GRAPHCODE_GATE_CWD ".graphcode"
   $policyPath = Join-Path $policyDirectory "worktree-policy.json"
   $policyDirectoryExisted = Test-Path -LiteralPath $policyDirectory
@@ -235,6 +240,99 @@ try {
   $controlWalker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
   $rawRootChildren = @(Assert-FragmentLinks $root $rawWalker $expectedRootIds "RawView root")
   $controlRootChildren = @(Assert-FragmentLinks $root $controlWalker $expectedRootIds "ControlView root")
+
+  $projects = Find-FragmentById $root "projects" $rawWalker
+  $loops = Find-FragmentById $root "loops" $rawWalker
+  $graph = Find-FragmentById $root "graph" $rawWalker
+  Require (($null -ne $projects) -and ($null -ne $loops) -and ($null -ne $graph)) "missing Projects, Loops, or Graph fragments"
+  $navigationIds = @("overview-destination", "quick-chats-destination")
+  $canvasActionIds = @("canvas-primary-action", "zoom-out", "actual-size", "zoom-in", "fit-canvas")
+  $projectRows = @(Get-DirectChildren $projects $rawWalker | Where-Object { $_.Current.AutomationId -match '^project-row-' })
+  Require ($projectRows.Count -eq 3) "Projects did not expose grouped recent rows and the open project row"
+  Require ((@($projectRows | ForEach-Object { $_.Current.Name }) -join "|") -eq "Fixture local|Fixture remote|UIA project") "dynamic project row names were not synchronized"
+  foreach ($projectRow in $projectRows) {
+    Require (($projectRow.Current.BoundingRectangle.Width -gt 0) -and
+             ($projectRow.Current.BoundingRectangle.Height -gt 0)) "dynamic project row has empty bounds"
+  }
+  $null = $projects.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
+  $null = $projectRows[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+  $projectRowInvoke = $projectRows[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+  $projectRowIds = @($projectRows | ForEach-Object { $_.Current.AutomationId })
+  $projectChildIds = $projectRowIds + $navigationIds
+  $null = Assert-FragmentLinks $projects $rawWalker $projectChildIds "RawView Projects"
+  $null = Assert-FragmentLinks $projects $controlWalker $projectChildIds "ControlView Projects"
+  $loopRows = @(Get-DirectChildren $loops $rawWalker)
+  Require (($loopRows.Count -eq 2) -and
+           ((@($loopRows | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) "Loops did not expose synchronized dynamic rows"
+  $loopIds = @($loopRows | ForEach-Object { $_.Current.AutomationId })
+  $null = $loops.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
+  foreach ($row in $loopRows) {
+    $null = $row.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+    $null = $row.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+  }
+  $null = Assert-FragmentLinks $loops $rawWalker $loopIds "RawView Loops"
+  $null = Assert-FragmentLinks $loops $controlWalker $loopIds "ControlView Loops"
+  $projectCards = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.AutomationId -match '^canvas-card-' })
+  Require (($projectCards.Count -eq 2) -and
+           ((@($projectCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) "Graph did not expose synchronized project cards"
+  foreach ($card in $projectCards) {
+    Require (($card.Current.BoundingRectangle.Width -gt 0) -and
+             ($card.Current.BoundingRectangle.Height -gt 0)) "dynamic project card has empty bounds"
+    $null = $card.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+    $null = $card.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+  }
+  $projectCardIds = @($projectCards | ForEach-Object { $_.Current.AutomationId })
+  $graphChildIds = @($projectCardIds + $canvasActionIds)
+  $null = Assert-FragmentLinks $graph $rawWalker $graphChildIds "RawView Graph"
+  $null = Assert-FragmentLinks $graph $controlWalker $graphChildIds "ControlView Graph"
+  $surfaceActionPatterns = @{}
+  foreach ($id in @($navigationIds + $canvasActionIds)) {
+    $element = Find-FragmentById $root $id $rawWalker
+    Require ($null -ne $element) "missing $id fragment"
+    Require (($element.Current.BoundingRectangle.Width -gt 0) -and
+             ($element.Current.BoundingRectangle.Height -gt 0)) "$id has empty bounds"
+    $surfaceActionPatterns[$id] = $element.GetCurrentPattern(
+      [System.Windows.Automation.InvokePattern]::Pattern)
+  }
+  $surfaceActionPatterns["overview-destination"].Invoke()
+  Start-Sleep -Milliseconds 150
+  $overviewCards = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.AutomationId -match '^canvas-card-' })
+  Require (($overviewCards.Count -eq 2) -and
+           ((@($overviewCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) "Overview did not expose synchronized cards"
+  $surfaceActionPatterns["quick-chats-destination"].Invoke()
+  Start-Sleep -Milliseconds 150
+  $quickChatCards = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.AutomationId -match '^canvas-card-' })
+  Require (($quickChatCards.Count -eq 2) -and
+           ((@($quickChatCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA chat A|UIA chat B")) "Quick Chats did not expose synchronized cards: $(@($quickChatCards | ForEach-Object { $_.Current.Name }) -join '|')"
+  $quickChatCardIds = @($quickChatCards | ForEach-Object { $_.Current.AutomationId })
+  $quickChatCards[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 150
+  Require ((Find-FragmentById $root "status" $rawWalker).Current.Name -eq "Opening quick chat...") `
+    "Quick Chat invocation did not perform its expected action"
+  $surfaceActionPatterns["zoom-in"].Invoke()
+  $surfaceActionPatterns["actual-size"].Invoke()
+  $surfaceActionPatterns["zoom-out"].Invoke()
+  $surfaceActionPatterns["fit-canvas"].Invoke()
+  Start-Sleep -Milliseconds 250
+  $process.Refresh()
+  Require (-not $process.HasExited) "surface UIA actions terminated the shell"
+  $projectRowInvoke.Invoke()
+  $loopRows[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 250
+  $process.Refresh()
+  Require (-not $process.HasExited) "dynamic project or loop invocation terminated the shell"
+  $workspaceCards = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.AutomationId -match '^canvas-card-' })
+  Require (($workspaceCards.Count -eq 2) -and
+           ((@($workspaceCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B") -and
+           $workspaceCards[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected) `
+    "loop invocation did not transition to the selected workspace loop"
+  $surfaceActionPatterns["overview-destination"].Invoke()
+  Start-Sleep -Milliseconds 150
+  Require ([GraphCodeUiaGateState]::PostTaggedExitCollision($process.MainWindowHandle)) `
+    "tagged command collision message was rejected"
+  Start-Sleep -Milliseconds 150
+  $process.Refresh()
+  Require (-not $process.HasExited) "tagged UIA payload fell through to the Exit menu command"
 
   $worktrees = Find-FragmentById $root "worktrees" $rawWalker
   Require ($null -ne $worktrees) "missing Worktrees fragment"
@@ -452,7 +550,7 @@ try {
     Start-Sleep -Milliseconds 250
     $statusNoChangeLiveEvents = [GraphCodeUiaGateState]::LiveEvents
     $statusNoChangeNameEvents = [GraphCodeUiaGateState]::NamePropertyEvents
-    Require ($status.Current.Name -eq $initialStatus) "non-status sync changed status text"
+    Require ($status.Current.Name -eq $initialStatus) "non-status sync changed status text from '$initialStatus' to '$($status.Current.Name)'"
     Require ($statusNoChangeLiveEvents -eq 0) "non-status sync raised LiveRegionChanged"
     Require ($statusNoChangeNameEvents -eq 0) "non-status sync raised a status Name property change"
 
@@ -495,7 +593,7 @@ try {
   Require ($safeFocusRow.Current.Name -eq "C:\fixture-safe") "safe worktree provider became unavailable before focus"
   $safeFocusRow.SetFocus()
   $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-  Require ($focused.Current.AutomationId -eq $safeRowId) "focus source identity was not the safe worktree row"
+  Require ($focused.Current.AutomationId -eq $safeRowId) "focus source identity was '$($focused.Current.AutomationId)', expected '$safeRowId'"
   Require ((Get-RuntimeIdentity $focused) -eq (Get-RuntimeIdentity $safeFocusRow)) "focus runtime identity changed"
   for ($index = 0; $index -lt 20 -and -not [GraphCodeUiaGateState]::FocusObserved; $index++) {
     Start-Sleep -Milliseconds 50
@@ -596,6 +694,12 @@ try {
     togglePropertyEvents = [GraphCodeUiaGateState]::TogglePropertyEvents
     togglePropertySource = [GraphCodeUiaGateState]::TogglePropertySourceAutomationId
     actionPatterns = @($actions.Keys | Sort-Object)
+    surfaceActionPatterns = @($surfaceActionPatterns.Keys | Sort-Object)
+    dynamicProjectRows = $projectRowIds
+    dynamicLoopRows = $loopIds
+    dynamicProjectCards = $projectCardIds
+    dynamicQuickChatCards = $quickChatCardIds
+    dynamicInvocationsPassed = $true
     statusText = $statusTextAfter
     statusChanged = ($statusTextAfter -ne $initialStatus)
     statusNoChangeLiveEvents = $statusNoChangeLiveEvents
@@ -654,4 +758,6 @@ try {
   else { $env:USERNAME = $oldUser }
   if ($null -eq $oldFixture) { Remove-Item Env:GRAPHCODE_UIA_FIXTURE_ROWS -ErrorAction SilentlyContinue }
   else { $env:GRAPHCODE_UIA_FIXTURE_ROWS = $oldFixture }
+  if ($null -eq $oldDaemonPipe) { Remove-Item Env:GRAPHCODE_DAEMON_PIPE -ErrorAction SilentlyContinue }
+  else { $env:GRAPHCODE_DAEMON_PIPE = $oldDaemonPipe }
 }

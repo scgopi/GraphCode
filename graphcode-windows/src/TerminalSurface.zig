@@ -13,6 +13,29 @@ const input_queue_max_bytes: usize = 1024 * 1024;
 const input_write_timeout_ms: c.DWORD = 50;
 const max_surfaces: usize = 32;
 
+pub const ChromeAction = enum { new_tab, split_right, split_down };
+pub const LoopBarAction = enum { stop, show_graph };
+
+pub fn loopBarActionAt(left: i32, top: i32, right: i32, x: i32, y: i32, resolved: bool) ?LoopBarAction {
+    if (y < top or y >= top + Tokens.loop_bar_height) return null;
+    if (x >= right - 104 and x < right - 12) return .show_graph;
+    if (!resolved and x >= right - 196 and x < right - 112) return .stop;
+    _ = left;
+    return null;
+}
+
+fn chromeActionForBounds(origin_x: i32, origin_y: i32, width: i32, x: i32, y: i32) ?ChromeAction {
+    if (y < origin_y + 3 or y >= origin_y + Tokens.tab_bar_height - 3) return null;
+    const left = @max(origin_x, origin_x + width - 220);
+    if (x < left or x >= origin_x + width - 4) return null;
+    return switch (@divTrunc(x - left, 72)) {
+        0 => .new_tab,
+        1 => .split_right,
+        2 => .split_down,
+        else => null,
+    };
+}
+
 pub const WorkspaceKeyCallback = *const fn (
     context: ?*anyopaque,
     key: usize,
@@ -540,7 +563,7 @@ pub const Workspace = struct {
 
     pub fn selectTabAt(self: *Workspace, x: i32, y: i32) bool {
         if (y < self.layout_origin_y or y >= self.layout_origin_y + Tokens.tab_bar_height) return false;
-        if (x < self.layout_origin_x) return false;
+        if (x < self.layout_origin_x or x >= self.chromeControlsLeft()) return false;
         const index = @as(usize, @intCast(@divTrunc(x - self.layout_origin_x, 120)));
         if (index >= self.layout.tabs.items.len) return false;
         self.selectTab(index) catch return false;
@@ -603,6 +626,20 @@ pub const Workspace = struct {
         self.syncTopology();
     }
 
+    pub fn chromeActionAt(self: *const Workspace, x: i32, y: i32) ?ChromeAction {
+        return chromeActionForBounds(
+            self.layout_origin_x,
+            self.layout_origin_y,
+            self.layout_width,
+            x,
+            y,
+        );
+    }
+
+    fn chromeControlsLeft(self: *const Workspace) i32 {
+        return @max(self.layout_origin_x, self.layout_origin_x + self.layout_width - 220);
+    }
+
     /// Draws only product chrome. Winghostty remains responsible for terminal pixels;
     /// keeping this separate prevents renderer/provider lifetimes from leaking into the
     /// tab and pane model.
@@ -613,9 +650,12 @@ pub const Workspace = struct {
             .right = self.layout_origin_x + self.layout_width,
             .bottom = self.layout_origin_y + Tokens.tab_bar_height,
         };
+
         fillRect(hdc, tab_bar, Tokens.workspace_rail);
+        const controls_left = self.chromeControlsLeft();
         for (self.layout.tabs.items, 0..) |tab, index| {
             const left = self.layout_origin_x + @as(i32, @intCast(index)) * 120;
+            if (left + 112 > controls_left) break;
             const bounds = c.RECT{
                 .left = left,
                 .top = tab_bar.top + 4,
@@ -625,18 +665,81 @@ pub const Workspace = struct {
             fillRect(hdc, bounds, if (index == self.layout.selected_tab) 0x00345D8C else 0x00262626);
             drawUtf8(hdc, tabLabel(tab, index), bounds.left + 8, bounds.top + 5, 11, 0x00E6E6E6);
         }
+
+        const labels = [_][]const u8{ "New Tab", "Split R", "Split D" };
+        for (labels, 0..) |label, index| {
+            const left = controls_left + @as(i32, @intCast(index)) * 72;
+            const bounds = c.RECT{
+                .left = left,
+                .top = tab_bar.top + 3,
+                .right = left + 68,
+                .bottom = tab_bar.bottom - 3,
+            };
+            fillRect(hdc, bounds, 0x00262626);
+            drawUtf8(hdc, label, bounds.left + 7, bounds.top + 5, 10, 0x00D8D8D8);
+        }
         for (self.surfaces, 0..) |slot, index| {
             if (slot.surface == null) continue;
             const left = self.layout_origin_x + if (index == 0) 0 else @divTrunc(self.layout_width, 2);
+            const right = if (index == 0 and self.surfaces[1].surface != null)
+                self.layout_origin_x + @divTrunc(self.layout_width, 2)
+            else
+                self.layout_origin_x + self.layout_width;
+            const pane_top = self.layout_origin_y + Tokens.tab_bar_height;
+            fillRect(hdc, .{ .left = left, .top = pane_top, .right = right, .bottom = pane_top + Tokens.pane_header_height }, 0x00212124);
+            const launches_agent = if (self.layout.selectedConst()) |tab|
+                if (self.paneIndex(slot.session_name)) |pane_index|
+                    pane_index < tab.panes.items.len and tab.panes.items[pane_index].launches_agent
+                else
+                    false
+            else
+                false;
             drawUtf8(
                 hdc,
-                if (index == self.active_surface) "focused pane" else "pane",
+                if (launches_agent) "agent" else "shell",
                 left + 8,
-                self.layout_origin_y + Tokens.tab_bar_height + 5,
+                pane_top + 5,
                 10,
-                if (index == self.active_surface) 0x000A84FF else 0x008A8A8A,
+                if (index == self.active_surface) 0x00E6E6E6 else 0x008A8A8A,
             );
+            drawUtf8(hdc, "zmx session", left + 54, pane_top + 5, 9, 0x007A7A7A);
+            if (index == self.active_surface) {
+                fillRect(hdc, .{ .left = left, .top = pane_top + Tokens.pane_header_height - 2, .right = right, .bottom = pane_top + Tokens.pane_header_height }, Tokens.pane_focus_tint);
+            }
         }
+    }
+
+    pub fn paintLoopBar(
+        hdc: c.HDC,
+        allocator: std.mem.Allocator,
+        left: i32,
+        right: i32,
+        project_name: []const u8,
+        title: []const u8,
+        loop_type: []const u8,
+        state: []const u8,
+        activity: []const u8,
+        resolved: bool,
+    ) void {
+        const top = Tokens.header_height;
+        fillRect(hdc, .{ .left = left, .top = top, .right = right, .bottom = top + Tokens.loop_bar_height }, 0x00222226);
+        fillRect(hdc, .{
+            .left = left + 14,
+            .top = top + 11,
+            .right = left + 18,
+            .bottom = top + 35,
+        }, loopTypeAccent(loop_type));
+        drawUtf8(hdc, title, left + 27, top + 7, 13, 0x00F2F2F7);
+        drawUtf8(hdc, state, left + 190, top + 8, 10, stateAccent(state));
+        const live_line = if (activity.len != 0) activity else project_name;
+        drawUtf8(hdc, live_line, left + 27, top + 25, 10, 0x008E8E93);
+        if (!resolved) {
+            fillRect(hdc, .{ .left = right - 196, .top = top + 10, .right = right - 112, .bottom = top + 36 }, 0x00303035);
+            drawUtf8(hdc, "Stop loop", right - 184, top + 17, 10, 0x00D8D8DC);
+        }
+        drawUtf8(hdc, "Show in graph", right - 100, top + 17, 10, 0x008E8E93);
+        fillRect(hdc, .{ .left = left, .top = top + Tokens.loop_bar_height - 1, .right = right, .bottom = top + Tokens.loop_bar_height }, 0x00131315);
+        _ = allocator;
     }
 
     pub fn poll(self: *Workspace) void {
@@ -1535,6 +1638,20 @@ fn tabLabel(tab: WorkspaceLayout.Tab, index: usize) []const u8 {
     return "shell";
 }
 
+fn loopTypeAccent(loop_type: []const u8) u32 {
+    if (std.mem.eql(u8, loop_type, "goalBased")) return 0x0048C78E;
+    if (std.mem.eql(u8, loop_type, "timeBased")) return 0x00D6A649;
+    if (std.mem.eql(u8, loop_type, "composite")) return 0x00C77DFF;
+    return 0x007AB8FF;
+}
+
+fn stateAccent(state: []const u8) u32 {
+    if (std.mem.eql(u8, state, "failed") or std.mem.eql(u8, state, "stalled")) return 0x005F5FFF;
+    if (std.mem.eql(u8, state, "succeeded")) return 0x006BD58D;
+    if (std.mem.eql(u8, state, "blocked")) return 0x0049B8FF;
+    return 0x00C8C8CC;
+}
+
 fn appendOutput(slot: *Surface, bytes: []const u8) void {
     if (bytes.len >= slot.terminal_buffer.len) {
         @memcpy(&slot.terminal_buffer, bytes[bytes.len - slot.terminal_buffer.len ..]);
@@ -1659,4 +1776,18 @@ test "terminal input queue reports bounded overflow" {
 
 test "bounded input write rejects an invalid attach without blocking" {
     try std.testing.expectError(error.WriteFailed, writeInputBounded(c.INVALID_HANDLE_VALUE, "paste"));
+}
+
+test "workspace chrome actions occupy distinct visible buttons" {
+    try std.testing.expectEqual(ChromeAction.new_tab, chromeActionForBounds(220, 34, 800, 804, 44).?);
+    try std.testing.expectEqual(ChromeAction.split_right, chromeActionForBounds(220, 34, 800, 876, 44).?);
+    try std.testing.expectEqual(ChromeAction.split_down, chromeActionForBounds(220, 34, 800, 948, 44).?);
+    try std.testing.expectEqual(@as(?ChromeAction, null), chromeActionForBounds(220, 34, 800, 700, 44));
+}
+
+test "loop bar actions expose stop only for active loops" {
+    try std.testing.expectEqual(LoopBarAction.stop, loopBarActionAt(220, 34, 1200, 1010, 50, false).?);
+    try std.testing.expect(loopBarActionAt(220, 34, 1200, 1010, 50, true) == null);
+    try std.testing.expectEqual(LoopBarAction.show_graph, loopBarActionAt(220, 34, 1200, 1120, 50, false).?);
+    try std.testing.expect(loopBarActionAt(220, 34, 1200, 1120, 90, false) == null);
 }

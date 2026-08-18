@@ -3,9 +3,11 @@ const build_options = @import("build_options");
 const DaemonClient = @import("DaemonClient.zig").DaemonClient;
 const GraphCanvas = @import("GraphCanvas.zig");
 const CanvasInput = @import("CanvasInput.zig");
+const CanvasLayoutStore = @import("CanvasLayoutStore.zig");
 const GraphContextMenu = @import("GraphContextMenu.zig");
 const Forms = @import("Forms.zig");
 const NativeForms = @import("NativeForms.zig");
+const NativeDialogs = @import("WindowsNativeDialogs.zig");
 const Sidebar = @import("Sidebar.zig");
 const GraphModel = @import("GraphModel.zig");
 const InputRouter = @import("InputRouter.zig");
@@ -65,6 +67,74 @@ fn wheelRegion(x: i32, y: i32, bounds: InputBounds, controls: WorkspaceControls.
     return .none;
 }
 
+fn isResolvedLoopState(state: []const u8) bool {
+    return std.mem.eql(u8, state, "succeeded") or
+        std.mem.eql(u8, state, "failed") or
+        std.mem.eql(u8, state, "stalled") or
+        std.mem.eql(u8, state, "stopped");
+}
+
+fn workspaceGraph(model: *const GraphModel.Model) ?*const GraphModel.GraphSummary {
+    if (model.currentGraph()) |graph| if (graph.nodes.items.len != 0) return graph;
+    if (model.selected_project_path) |path| {
+        for (model.graphs.items) |*graph| {
+            if (std.mem.eql(u8, graph.project.path, path) and graph.nodes.items.len != 0) return graph;
+        }
+    }
+    for (model.graphs.items) |*graph| if (graph.nodes.items.len != 0) return graph;
+    return model.currentGraph();
+}
+
+const JumpMatch = struct {
+    project_index: usize,
+    node_index: usize,
+    score: u8,
+};
+
+fn findJumpMatch(model: *const GraphModel.Model, query: []const u8) ?JumpMatch {
+    var best: ?JumpMatch = null;
+    for (model.graphs.items, 0..) |graph, project_index| {
+        for (graph.nodes.items, 0..) |node, node_index| {
+            const score: u8 = if (std.ascii.eqlIgnoreCase(node.id, query))
+                0
+            else if (std.ascii.eqlIgnoreCase(node.title, query))
+                1
+            else if (asciiStartsWithIgnoreCase(node.title, query))
+                2
+            else if (asciiContainsIgnoreCase(node.title, query) or asciiContainsIgnoreCase(node.id, query))
+                3
+            else
+                continue;
+            if (best == null or score < best.?.score)
+                best = .{ .project_index = project_index, .node_index = node_index, .score = score };
+        }
+    }
+    return best;
+}
+
+fn asciiStartsWithIgnoreCase(value: []const u8, prefix: []const u8) bool {
+    return value.len >= prefix.len and std.ascii.eqlIgnoreCase(value[0..prefix.len], prefix);
+}
+
+fn asciiContainsIgnoreCase(value: []const u8, needle: []const u8) bool {
+    if (needle.len == 0 or needle.len > value.len) return false;
+    var index: usize = 0;
+    while (index + needle.len <= value.len) : (index += 1) {
+        if (std.ascii.eqlIgnoreCase(value[index .. index + needle.len], needle)) return true;
+    }
+    return false;
+}
+
+const UiaDynamicTarget = union(enum) {
+    recent_project: []const u8,
+    open_project: []const u8,
+    loop: struct {
+        project_path: []const u8,
+        index: usize,
+    },
+    quick_chat: []const u8,
+};
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     window: MainWindow.Window = .{},
@@ -87,7 +157,9 @@ pub const App = struct {
     sidebar_scroll: i32 = 0,
     workspace: ?*TerminalWorkspace.Workspace = null,
     navigation_cursor: Navigation.Cursor = .{},
-    workspace_controls: WorkspaceControls.State = .{},
+    workspace_controls: WorkspaceControls.State = .{ .panel_visible = false },
+    surface: GraphCanvas.Surface = .project,
+    canvas_layout_store: ?CanvasLayoutStore.Store = null,
     quick_chats_requested: bool = false,
     selected_quick_chat: ?usize = null,
     instance_mutex: c.HANDLE = null,
@@ -106,6 +178,9 @@ pub const App = struct {
     accepted_subscription: []const u8 = "",
     pending_project_path: []u8 = &.{},
     status_override: []u8 = &.{},
+    ingress_error: []u8 = &.{},
+    declared_entry_ids: std.array_list.Managed([]u8),
+    kept_worktree_paths: std.array_list.Managed([]u8),
     running: bool = true,
     exit_requested: bool = false,
     smoke: bool = false,
@@ -140,6 +215,8 @@ pub const App = struct {
     update_cancel: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     update_generation: u64 = 0,
     update_pending: bool = false,
+    update_version: []u8 = &.{},
+    update_release_url: []u8 = &.{},
     smoke_restart_index: ?usize = null,
     smoke_restart_session: []const u8 = &.{},
 
@@ -159,6 +236,8 @@ pub const App = struct {
             .client = client,
             .daemon = .{ .allocator = allocator },
             .model = GraphModel.Model.init(allocator),
+            .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+            .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
             .tray_test_hook_enabled = envFlag(tray_test_hook_environment),
             .accessibility = accessibility,
         };
@@ -220,14 +299,22 @@ pub const App = struct {
         if (self.pending_sent_path.len != 0) self.allocator.free(self.pending_sent_path);
         if (self.pending_previous_subscription.len != 0) self.allocator.free(self.pending_previous_subscription);
         if (self.status_override.len != 0) self.allocator.free(self.status_override);
+        if (self.ingress_error.len != 0) self.allocator.free(self.ingress_error);
+        for (self.declared_entry_ids.items) |id| self.allocator.free(id);
+        self.declared_entry_ids.deinit();
+        for (self.kept_worktree_paths.items) |path| self.allocator.free(path);
+        self.kept_worktree_paths.deinit();
         if (self.smoke_workspace_actions.len != 0) self.allocator.free(self.smoke_workspace_actions);
         if (self.smoke_restart_session.len != 0) self.allocator.free(self.smoke_restart_session);
         if (self.product_settings_store) |*store| store.deinit();
+        if (self.canvas_layout_store) |*store| store.deinit();
         if (self.product_settings) |*settings| settings.deinit();
         if (self.onboarding_store) |*store| store.deinit();
         if (self.clone_operation) |operation| operation.deinit();
         self.update_cancel.store(true, .release);
         if (self.update_thread) |thread| thread.join();
+        if (self.update_version.len != 0) self.allocator.free(self.update_version);
+        if (self.update_release_url.len != 0) self.allocator.free(self.update_release_url);
         self.allocator.destroy(self);
     }
 
@@ -252,7 +339,6 @@ pub const App = struct {
             );
         }
         if (self.daemon.status().len != 0) self.setStatus(self.daemon.status());
-        self.installWorktreeMenu();
         if (self.accessibility) |*provider| {
             if (!provider.attach(self.window.hwnd)) self.setStatus("Accessibility provider unavailable");
         }
@@ -268,6 +354,10 @@ pub const App = struct {
             self.workspace_controls.activity_enabled = settings.activity;
             self.update_state = WindowsUpdates.CheckState.configure(settings.beta);
         }
+        self.canvas_layout_store = CanvasLayoutStore.Store.init(self.allocator) catch null;
+        if (self.canvas_layout_store) |*store| {
+            store.load(&self.canvas) catch self.setStatus("Saved canvas positions could not be loaded");
+        }
         self.onboarding_store = Onboarding.Store.init(self.allocator) catch null;
         if (self.onboarding_store) |store| {
             const shell_test = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_REQUIRE_DAEMON") catch null;
@@ -276,8 +366,10 @@ pub const App = struct {
                 !envFlag(daemon_supervisor_test_hook_environment) and
                 (shell_test == null or !std.mem.eql(u8, shell_test.?, "1")))
             {
-                Onboarding.showFirstRun(self.window.hwnd, self.allocator, store) catch
-                    self.setStatus("First-run onboarding could not be shown");
+                const initial_backend = if (self.product_settings) |settings| settings.default_backend else "claudeCode";
+                if (Onboarding.showFirstRun(self.window.hwnd, self.allocator, store, initial_backend) catch null) |backend| {
+                    self.applyOnboardingBackend(backend);
+                }
             }
         }
         self.createEmptyStateControls();
@@ -285,6 +377,7 @@ pub const App = struct {
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_FIXTURE_ROWS")) |fixture| {
             defer self.allocator.free(fixture);
             self.installUiaFixture();
+            if (envFlag("GRAPHCODE_UIA_SHOW_SWEEP")) self.presentWorktreeSweep();
         } else |_| {}
         const uia_gate = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_GATE") catch null;
         defer if (uia_gate) |value| self.allocator.free(value);
@@ -294,7 +387,7 @@ pub const App = struct {
         if (self.workspace) |workspace| try workspace.startInputWorker();
         }
         self.layoutWorkspace();
-        self.requestUpdateCheck();
+        if (!envFlag("GRAPHCODE_UIA_UPDATE_AVAILABLE")) self.requestUpdateCheck();
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_REQUIRE_DAEMON")) |value| {
             defer self.allocator.free(value);
             self.require_smoke_contract = std.mem.eql(u8, value, "1");
@@ -375,6 +468,7 @@ pub const App = struct {
                         self.pending_rebind_path.len != 0 and
                         std.mem.eql(u8, incoming_project_path.?, graph.project.path);
                     if (accepted) {
+                        self.clearIngressError();
                         self.client.setSubscription(graph.project.path);
                         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
                         self.last_project_opened = self.allocator.dupe(u8, graph.project.path) catch {
@@ -450,6 +544,7 @@ pub const App = struct {
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .error_occurred => {
+                const ingress_failure = self.pending_rebind_path.len != 0;
                 if (self.pending_rebind_path.len != 0) {
                     if (self.client.protocolMode() == .v2) {
                         const request_id = self.pending_open_request_id orelse return;
@@ -484,8 +579,10 @@ pub const App = struct {
                     if (queued_v1) self.sendPendingOpen();
                 }
                 if (Wire.copyErrorMessage(self.allocator, frame) catch null) |message| {
+                    if (ingress_failure) self.setIngressError(message);
                     self.replaceStatus(message);
                 } else {
+                    if (ingress_failure) self.setIngressError("Daemon could not open the selected project");
                     self.setStatus("Daemon error");
                 }
             },
@@ -520,6 +617,9 @@ pub const App = struct {
 
     pub fn openProject(self: *App, path: []const u8) void {
         if (path.len == 0) return;
+        self.surface = .project;
+        self.workspace_controls.panel_visible = false;
+        self.layoutWorkspace();
         const previous = if (self.pending_rebind_path.len != 0)
             self.allocator.dupe(u8, self.pending_previous_subscription) catch {
                 self.setStatus("Unable to retain previous project subscription");
@@ -562,9 +662,11 @@ pub const App = struct {
     }
 
     pub fn openFolder(self: *App) void {
+        self.clearIngressError();
         var path: [32768]u16 = undefined;
         const picked = graphcode_pick_folder(self.window.hwnd, &path, path.len);
         if (picked < 0) {
+            self.setIngressError("Unable to open the folder picker");
             self.setStatus("Unable to open the folder picker");
             return;
         }
@@ -572,6 +674,7 @@ pub const App = struct {
         var length: usize = 0;
         while (length < path.len and path[length] != 0) : (length += 1) {}
         const utf8 = std.unicode.utf16LeToUtf8Alloc(self.allocator, path[0..length]) catch {
+            self.setIngressError("Unable to read the selected folder");
             self.setStatus("Unable to read the selected folder");
             return;
         };
@@ -580,7 +683,12 @@ pub const App = struct {
     }
 
     pub fn openGlobalOverview(self: *App) void {
-        self.client.sendOpenGlobalGraph();
+        self.surface = .overview;
+        self.workspace_controls.panel_visible = false;
+        self.layoutWorkspace();
+        self.layoutEmptyStateControls();
+        self.syncAccessibility();
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
     fn queueProject(self: *App, path: []const u8) void {
@@ -741,28 +849,47 @@ pub const App = struct {
         const index = self.selected_quick_chat orelse return;
         if (index >= self.model.quick_chats.items.len) return;
         const chat = self.model.quick_chats.items[index];
-        var draft = NativeForms.node(self.window.hwnd, self.allocator, .{ .title = chat.title }) catch {
+        var result = NativeDialogs.text(
+            self.window.hwnd,
+            self.allocator,
+            "Rename Quick Chat",
+            &.{"Title"},
+            &.{chat.title},
+        ) catch {
             self.setStatus("Unable to open quick chat rename form");
             return;
         } orelse return;
-        defer draft.deinit(self.allocator);
-        Forms.validateNode(draft) catch {
+        defer result.deinit(self.allocator);
+        const title_value = std.mem.trim(u8, result.values[0], " \t\r\n");
+        if (title_value.len == 0) {
             self.setStatus("Invalid quick chat title");
             return;
-        };
-        self.client.sendRenameQuickChat(chat.id, draft.title);
+        }
+        self.client.sendRenameQuickChat(chat.id, title_value);
     }
 
     fn deleteSelectedQuickChat(self: *App) void {
         const index = self.selected_quick_chat orelse return;
         if (index >= self.model.quick_chats.items.len) return;
-        self.client.sendDeleteQuickChat(self.model.quick_chats.items[index].id);
+        const chat = self.model.quick_chats.items[index];
+        const message = std.fmt.allocPrint(
+            self.allocator,
+            "Delete \"{s}\"?\n\nIts terminal session and scrollback will be removed. This cannot be undone.",
+            .{chat.title},
+        ) catch return;
+        defer self.allocator.free(message);
+        if (!GraphContextMenu.confirm(self.window.hwnd, "Delete Quick Chat", message)) return;
+        self.client.sendDeleteQuickChat(chat.id);
     }
 
     fn openQuickChat(self: *App, id: []const u8) void {
         for (self.model.quick_chats.items, 0..) |chat, index| {
             if (!std.mem.eql(u8, chat.id, id)) continue;
             self.selected_quick_chat = index;
+            self.surface = .workspace;
+            self.workspace_controls.panel_visible = true;
+            self.layoutWorkspace();
+            self.layoutEmptyStateControls();
             if (self.workspace) |workspace| {
                 if (std.process.getEnvVarOwned(self.allocator, "USERPROFILE")) |home| {
                     defer self.allocator.free(home);
@@ -802,7 +929,10 @@ pub const App = struct {
     }
 
     fn createNode(self: *App) void {
-        const current_path = self.currentProject() orelse return;
+        const current_path = self.currentProject() orelse if (self.surface == .overview)
+            "graphcode://global"
+        else
+            return;
         const path = self.allocator.dupe(u8, current_path) catch return;
         defer self.allocator.free(path);
         const settings = self.product_settings orelse return;
@@ -834,42 +964,49 @@ pub const App = struct {
         defer self.allocator.free(project_path);
         const node_id = self.allocator.dupe(u8, graph.nodes.items[index].id) catch return;
         defer self.allocator.free(node_id);
-        const node = graph.nodes.items[index];
-        var initial = Forms.NodeUpdate{
-            .goal_summary = if (node.goal_summary.len == 0) null else self.allocator.dupe(u8, node.goal_summary) catch null,
-            .goal_predicate = if (node.goal_predicate.len == 0) null else self.allocator.dupe(u8, node.goal_predicate) catch null,
-            .poll_interval_seconds = node.poll_interval_seconds,
-            .stall_after_seconds = node.stall_after_seconds,
-            .metric_command = if (node.metric_command.len == 0) null else self.allocator.dupe(u8, node.metric_command) catch null,
-            .metric_direction = if (node.metric_direction.len == 0) null else self.allocator.dupe(u8, node.metric_direction) catch null,
-            .trigger_prompt = if (node.trigger_prompt.len == 0) null else self.allocator.dupe(u8, node.trigger_prompt) catch null,
-            .check_description = if (node.check_description.len == 0) null else self.allocator.dupe(u8, node.check_description) catch null,
-            .model_tier = if (node.model_tier.len == 0) null else self.allocator.dupe(u8, node.model_tier) catch null,
-        };
-        defer initial.deinit(self.allocator);
-        var update = NativeForms.update(self.window.hwnd, self.allocator, initial) catch {
-            self.setStatus("Unable to open node form");
+        var result = NativeDialogs.text(
+            self.window.hwnd,
+            self.allocator,
+            "Rename Loop",
+            &.{"Title"},
+            &.{graph.nodes.items[index].title},
+        ) catch {
+            self.setStatus("Unable to open loop rename form");
             return;
         } orelse return;
-        defer update.deinit(self.allocator);
+        defer result.deinit(self.allocator);
+        const title_value = std.mem.trim(u8, result.values[0], " \t\r\n");
+        if (title_value.len == 0) {
+            self.setStatus("Loop title cannot be empty");
+            return;
+        }
         const updated_graph = self.model.graph orelse return;
         if (!std.mem.eql(u8, updated_graph.project.path, project_path)) return;
         const updated_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, node_id) orelse {
-            self.setStatus("Loop changed while editing");
+            self.setStatus("Loop changed while renaming");
             return;
         };
-        self.client.sendUpdateNodeForm(project_path, updated_graph.nodes.items[updated_index].id, update);
+        self.client.sendRenameNode(project_path, updated_graph.nodes.items[updated_index].id, title_value);
     }
 
     fn createEdge(self: *App) void {
         const graph = self.model.graph orelse return;
         if (graph.nodes.items.len < 2) return;
         const path = self.currentProject() orelse return;
-        var draft = NativeForms.edge(self.window.hwnd, self.allocator, .{
+        const endpoints = self.allocator.alloc(NativeForms.EdgeEndpoint, graph.nodes.items.len) catch {
+            self.setStatus("Unable to prepare edge endpoints");
+            return;
+        };
+        defer self.allocator.free(endpoints);
+        for (graph.nodes.items, endpoints) |node, *endpoint| endpoint.* = .{
+            .id = node.id,
+            .title = node.title,
+        };
+        var draft = NativeForms.edgeWithEndpoints(self.window.hwnd, self.allocator, .{
             .from = graph.nodes.items[0].id,
             .to = graph.nodes.items[1].id,
             .kind = "handoff",
-        }) catch {
+        }, endpoints, false) catch {
             self.setStatus("Unable to open edge form");
             return;
         } orelse return;
@@ -972,8 +1109,44 @@ pub const App = struct {
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
+    fn applyOnboardingBackend(self: *App, backend: Onboarding.Backend) void {
+        const store = if (self.product_settings_store) |*value| value else {
+            self.setStatus("Onboarding choice could not be saved");
+            return;
+        };
+        if (self.product_settings) |*settings| {
+            const replacement = self.allocator.dupe(u8, backend.value()) catch {
+                self.setStatus("Onboarding choice could not be saved");
+                return;
+            };
+            self.allocator.free(settings.default_backend);
+            settings.default_backend = replacement;
+            store.save(settings.*) catch self.setStatus("Onboarding choice could not be saved");
+            return;
+        }
+        var settings = ProductSettings.Settings.init(self.allocator) catch {
+            self.setStatus("Onboarding choice could not be saved");
+            return;
+        };
+        const replacement = self.allocator.dupe(u8, backend.value()) catch {
+            settings.deinit();
+            self.setStatus("Onboarding choice could not be saved");
+            return;
+        };
+        self.allocator.free(settings.default_backend);
+        settings.default_backend = replacement;
+        store.save(settings) catch {
+            settings.deinit();
+            self.setStatus("Onboarding choice could not be saved");
+            return;
+        };
+        self.product_settings = settings;
+    }
+
     fn cloneRepository(self: *App) void {
+        self.clearIngressError();
         const draft = RepositoryDialogs.openClone(self.window.hwnd, self.allocator, .{}) catch {
+            self.setIngressError("Unable to open clone repository dialog");
             self.setStatus("Unable to open clone repository dialog");
             return;
         } orelse return;
@@ -984,14 +1157,17 @@ pub const App = struct {
             self.allocator.free(draft.depth);
         }
         RepositoryDialogs.validateClone(draft) catch |err| {
+            self.setIngressError(@errorName(err));
             self.setStatus(@errorName(err));
             return;
         };
         if (self.clone_operation != null) {
+            self.setIngressError("A clone is already running");
             self.setStatus("A clone is already running");
             return;
         }
         self.clone_operation = RepositoryDialogs.CloneOperation.start(self.allocator, draft) catch {
+            self.setIngressError("Clone could not start");
             self.setStatus("Clone could not start");
             return;
         };
@@ -1006,7 +1182,9 @@ pub const App = struct {
     }
 
     pub fn checkForUpdates(self: *App) void {
-            self.requestUpdateCheck();
+        self.setStatus("Checking for updates...");
+        self.requestUpdateCheck();
+        self.updateNativeChrome();
     }
 
     fn requestUpdateCheck(self: *App) void {
@@ -1064,9 +1242,19 @@ pub const App = struct {
             var owned = result;
             owned.deinit(self.allocator);
         }
+        const version_copy = if (result.version) |value| self.allocator.dupe(u8, value) catch null else null;
+        const url_copy = if (result.release_url) |value| self.allocator.dupe(u8, value) catch null else null;
         self.update_lock.lock();
-        if (generation == self.update_generation and !self.update_cancel.load(.acquire))
+        if (generation == self.update_generation and !self.update_cancel.load(.acquire)) {
             self.update_state = .{ .channel = result.channel, .state = result.state };
+            if (self.update_version.len != 0) self.allocator.free(self.update_version);
+            if (self.update_release_url.len != 0) self.allocator.free(self.update_release_url);
+            self.update_version = version_copy orelse &.{};
+            self.update_release_url = url_copy orelse &.{};
+        } else {
+            if (version_copy) |value| self.allocator.free(value);
+            if (url_copy) |value| self.allocator.free(value);
+        }
         self.update_done = true;
         self.update_lock.unlock();
     }
@@ -1083,17 +1271,67 @@ pub const App = struct {
                 const pending = self.update_pending;
                 self.update_pending = false;
                 const label = self.update_state.label();
+                const available = self.update_state.state == .available;
+                const version = self.update_version;
+                const release_url = self.update_release_url;
                 self.update_lock.unlock();
                 if (pending) {
                     self.launchUpdateCheck();
                 } else {
                     self.setStatus(label);
+                    if (available) self.showAvailableUpdate(version, release_url);
                 }
             }
     }
 
+    fn showAvailableUpdate(self: *App, version: []const u8, release_url: []const u8) void {
+        const message = std.fmt.allocPrint(
+            self.allocator,
+            "GraphCode {s} is available.\n\nOpen the verified GitHub release page to review release notes and download the Windows package?",
+            .{if (version.len == 0) "update" else version},
+        ) catch return;
+        defer self.allocator.free(message);
+        const message_wide = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, message) catch return;
+        defer self.allocator.free(message_wide);
+        if (c.MessageBoxW(
+            self.window.hwnd,
+            message_wide.ptr,
+            std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Update Available").ptr,
+            c.MB_ICONINFORMATION | c.MB_YESNO | c.MB_DEFBUTTON1,
+        ) != c.IDYES) return;
+        const url = if (release_url.len != 0) release_url else "https://github.com/GraphCode/GraphCode/releases";
+        const url_wide = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, url) catch {
+            self.setStatus("Unable to encode the release URL");
+            return;
+        };
+        defer self.allocator.free(url_wide);
+        const result = c.ShellExecuteW(
+            self.window.hwnd,
+            std.unicode.utf8ToUtf16LeStringLiteral("open").ptr,
+            url_wide.ptr,
+            null,
+            null,
+            c.SW_SHOWNORMAL,
+        );
+        self.setStatus(if (@intFromPtr(result) <= 32) "Unable to open the release page" else "Opened the GraphCode release page");
+    }
+
+    fn showCurrentUpdateOffer(self: *App) void {
+        self.update_lock.lock();
+        const available = self.update_state.state == .available;
+        const version = if (available) self.allocator.dupe(u8, self.update_version) catch null else null;
+        const release_url = if (available) self.allocator.dupe(u8, self.update_release_url) catch null else null;
+        self.update_lock.unlock();
+        defer if (version) |value| self.allocator.free(value);
+        defer if (release_url) |value| self.allocator.free(value);
+        if (!available) return;
+        self.showAvailableUpdate(version orelse "", release_url orelse "");
+    }
+
     fn addRemoteRepository(self: *App) void {
+        self.clearIngressError();
         const draft = RepositoryDialogs.openRemote(self.window.hwnd, self.allocator, .{}) catch {
+            self.setIngressError("Unable to open SSH repository dialog");
             self.setStatus("Unable to open SSH repository dialog");
             return;
         } orelse return;
@@ -1104,18 +1342,22 @@ pub const App = struct {
             self.allocator.free(draft.path);
         }
         RepositoryDialogs.validateRemote(draft) catch |err| {
+            self.setIngressError(@errorName(err));
             self.setStatus(@errorName(err));
             return;
         };
         RepositoryDialogs.validateRemoteConnection(self.allocator, draft) catch |err| {
+            self.setIngressError(@errorName(err));
             self.setStatus(@errorName(err));
             return;
         };
         RepositoryDialogs.saveRemoteConfig(self.allocator, draft) catch {
+            self.setIngressError("SSH validated but remote configuration could not be saved");
             self.setStatus("SSH validated but remote configuration could not be saved");
             return;
         };
         const remote_path = RepositoryDialogs.remoteProjectURI(self.allocator, draft) catch {
+            self.setIngressError("Unable to encode remote repository");
             self.setStatus("Unable to encode remote repository");
             return;
         };
@@ -1126,12 +1368,10 @@ pub const App = struct {
     }
 
     fn jumpToNode(self: *App) void {
-        if (self.model.graph == null) {
+        if (self.model.graphs.items.len == 0) {
             self.setStatus("No graph is open");
             return;
         }
-        const current_id = self.allocator.dupe(u8, self.selected_node_id) catch return;
-        defer self.allocator.free(current_id);
         const query = NativeForms.jump(self.window.hwnd, self.allocator, "") catch {
             self.setStatus("Unable to open jump form");
             return;
@@ -1141,18 +1381,23 @@ pub const App = struct {
             self.setStatus("Enter a jump query");
             return;
         };
-        const graph = self.model.graph orelse {
-            self.setStatus("Graph closed while jumping");
-            return;
-        };
-        const current_index = if (current_id.len == 0) null else GraphModel.findNodeIndexByID(graph.nodes.items, current_id);
-        const next = Forms.jumpTo(graph.nodes.items, trimmed_query, current_index) orelse {
+        const match = findJumpMatch(&self.model, trimmed_query) orelse {
             self.setStatus("No matching loop");
             return;
         };
-        _ = self.selectNodeIndex(next);
+        if (match.project_index >= self.model.graphs.items.len) return;
+        const project_path = self.allocator.dupe(u8, self.model.graphs.items[match.project_index].project.path) catch return;
+        defer self.allocator.free(project_path);
+        if (!self.model.selectProject(project_path) or !self.selectNodeIndex(match.node_index)) {
+            self.setStatus("Matching loop is no longer available");
+            return;
+        }
+        self.surface = .project;
+        self.workspace_controls.panel_visible = false;
+        self.layoutWorkspace();
+        self.layoutEmptyStateControls();
         self.sidebar_scroll = Sidebar.clampScroll(
-            Sidebar.loopRowTop(self.model.recent_projects.items.len, next) - 24,
+            Sidebar.loopRowTopForModel(&self.model, match.node_index) - 24,
             Sidebar.maxScroll(&self.model, if (self.worktree_inspection) |*value| value else null, 700),
         );
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
@@ -1163,6 +1408,10 @@ pub const App = struct {
         const index = self.model.selectedIndex() orelse return;
         if (index >= graph.nodes.items.len) return;
         const workspace = if (self.workspace) |value| value else return;
+        self.surface = .workspace;
+        self.workspace_controls.panel_visible = true;
+        self.layoutWorkspace();
+        self.layoutEmptyStateControls();
         workspace.openNode(0, graph.nodes.items[index].id) catch {
             self.setStatus("Unable to open selected node");
         };
@@ -1188,7 +1437,13 @@ pub const App = struct {
         defer self.allocator.free(path);
         const node_id = self.allocator.dupe(u8, graph.nodes.items[index].id) catch return;
         defer self.allocator.free(node_id);
-        if (!GraphContextMenu.confirm(self.window.hwnd, "Delete Loop", "Delete this loop? This cannot be undone.")) return;
+        const message = std.fmt.allocPrint(
+            self.allocator,
+            "Delete \"{s}\"?\n\nThe loop and its graph connections will be removed. This cannot be undone.",
+            .{graph.nodes.items[index].title},
+        ) catch return;
+        defer self.allocator.free(message);
+        if (!GraphContextMenu.confirm(self.window.hwnd, "Delete Loop", message)) return;
         const updated_graph = self.model.graph orelse return;
         const updated_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, node_id) orelse return;
         self.client.sendDeleteNode(path, updated_graph.nodes.items[updated_index].id);
@@ -1267,6 +1522,55 @@ pub const App = struct {
         self.client.sendDeleteEdge(project_path, updated_graph.edges.items[updated_index].id);
     }
 
+    fn nodeIsDeclaredEntry(self: *const App, node_id: []const u8) bool {
+        for (self.declared_entry_ids.items) |id| if (std.mem.eql(u8, id, node_id)) return true;
+        return false;
+    }
+
+    fn nodeIsUnwired(self: *const App, node_id: []const u8) bool {
+        const graph = self.model.graph orelse return false;
+        for (graph.edges.items) |edge| {
+            if (std.mem.eql(u8, edge.from, node_id) or std.mem.eql(u8, edge.to, node_id)) return false;
+        }
+        return !self.nodeIsDeclaredEntry(node_id);
+    }
+
+    fn markSelectedNodeAsEntry(self: *App, index: usize) void {
+        const graph = self.model.graph orelse return;
+        if (index >= graph.nodes.items.len) return;
+        const id = graph.nodes.items[index].id;
+        if (!self.nodeIsDeclaredEntry(id)) {
+            const copy = self.allocator.dupe(u8, id) catch {
+                self.setStatus("Unable to remember the entry loop");
+                return;
+            };
+            self.declared_entry_ids.append(copy) catch {
+                self.allocator.free(copy);
+                self.setStatus("Unable to remember the entry loop");
+                return;
+            };
+        }
+        self.setStatus("Marked as an entry for this session");
+    }
+
+    fn beginWireSelectedNode(self: *App, index: usize) void {
+        const graph = self.model.graph orelse return;
+        if (index >= graph.nodes.items.len) return;
+        if (self.edge_drag_source_id.len != 0) self.allocator.free(self.edge_drag_source_id);
+        self.edge_drag_source_id = self.allocator.dupe(u8, graph.nodes.items[index].id) catch {
+            self.setStatus("Unable to start edge wiring");
+            return;
+        };
+        const bounds = GraphCanvas.nodeBounds(index, &self.canvas);
+        self.canvas.beginEdgeDrag(
+            self.edge_drag_source_id,
+            bounds.right,
+            @divTrunc(bounds.top + bounds.bottom, 2),
+        );
+        _ = c.SetCapture(self.window.hwnd);
+        self.setStatus("Choose a target loop to wire this entry");
+    }
+
     fn showNodeContextMenu(self: *App, index: usize, x: i32, y: i32) void {
         const graph = self.model.graph orelse return;
         if (index >= graph.nodes.items.len) return;
@@ -1274,9 +1578,17 @@ pub const App = struct {
         defer self.allocator.free(project_path);
         const node_id = self.allocator.dupe(u8, graph.nodes.items[index].id) catch return;
         defer self.allocator.free(node_id);
+        const composite = std.mem.eql(u8, graph.nodes.items[index].loop_type, "proactive") or
+            std.mem.eql(u8, graph.nodes.items[index].loop_type, "composite");
+        const unwired = self.nodeIsUnwired(graph.nodes.items[index].id);
         GraphContextMenu.show(
             self.window.hwnd,
-            .{ .node = .{ .project_path = project_path, .id = node_id } },
+            .{ .node = .{
+                .project_path = project_path,
+                .id = node_id,
+                .composite = composite,
+                .unwired = unwired,
+            } },
             x,
             y,
             self,
@@ -1301,11 +1613,70 @@ pub const App = struct {
         );
     }
 
+    fn showQuickChatContextMenu(self: *App, index: usize, x: i32, y: i32) void {
+        if (index >= self.model.quick_chats.items.len) return;
+        const id = self.allocator.dupe(u8, self.model.quick_chats.items[index].id) catch return;
+        defer self.allocator.free(id);
+        GraphContextMenu.show(
+            self.window.hwnd,
+            .{ .quick_chat = .{ .id = id } },
+            x,
+            y,
+            self,
+            &onContextAction,
+        );
+    }
+
     fn handleContextAction(self: *App, action: GraphContextMenu.Action, target: GraphContextMenu.Target) void {
         switch (target) {
+            .project => |stable| {
+                const selected = self.model.selectProject(stable.path);
+                if (selected) {
+                    self.surface = .project;
+                    self.workspace_controls.panel_visible = false;
+                    self.layoutWorkspace();
+                    self.layoutEmptyStateControls();
+                }
+                switch (action) {
+                    .open_project => if (!selected) self.openProject(stable.path),
+                    .new_project_loop => if (selected)
+                        self.createNode()
+                    else {
+                        self.openProject(stable.path);
+                        self.setStatus("Opening project; create a loop when loading completes");
+                    },
+                    .inspect_project_worktrees => if (selected) self.inspectWorktrees() else self.setStatus("Open the project before inspecting worktrees"),
+                    .project_settings => if (selected) self.editWorktreePolicy() else self.setStatus("Open the project before changing project settings"),
+                    .reveal_project => self.revealProjectPath(stable.path),
+                    .remote_project_info => self.showRemoteProjectInfo(stable.path),
+                    .close_project => {
+                        self.client.sendCloseProject(stable.path);
+                        self.setStatus("Closing project...");
+                    },
+                    .remove_project => {
+                        if (!GraphContextMenu.confirm(
+                            self.window.hwnd,
+                            "Remove Project",
+                            "Remove this project from GraphCode?\n\nThe folder and its files remain on disk. You can add it again later.",
+                        )) return;
+                        self.client.sendForgetProject(stable.path);
+                        self.setStatus("Removing project from GraphCode...");
+                    },
+                    .delete_project_loops => {
+                        if (!GraphContextMenu.confirm(
+                            self.window.hwnd,
+                            "Delete All Loops",
+                            "Delete every loop and graph connection for this project?\n\nThe project files remain on disk. This graph action cannot be undone.",
+                        )) return;
+                        self.client.sendDeleteProjectGraph(stable.path);
+                        self.setStatus("Deleting project loops...");
+                    },
+                    else => {},
+                }
+            },
             .node => |stable| {
+                if (!self.model.selectProject(stable.project_path)) return;
                 const graph = self.model.graph orelse return;
-                if (!std.mem.eql(u8, graph.project.path, stable.project_path)) return;
                 const index = GraphModel.findNodeIndexByID(graph.nodes.items, stable.id) orelse return;
                 if (!self.selectNodeIndex(index)) return;
                 switch (action) {
@@ -1315,6 +1686,17 @@ pub const App = struct {
                     .open_terminal => self.openSelectedNode(),
                     .message_node => self.sendSelectedNode(),
                     .memo_node => self.sendSelectedNode(),
+                    .open_composite => self.showCompositeGroup(graph.project.name, graph.nodes.items[index]),
+                    .pilot_composite => {
+                        self.client.sendPilotComposite(graph.project.path, graph.nodes.items[index].id);
+                        self.setStatus("Piloting composite once...");
+                    },
+                    .arm_composite => {
+                        self.client.sendArmComposite(graph.project.path, graph.nodes.items[index].id);
+                        self.setStatus("Arming composite schedule...");
+                    },
+                    .wire_node => self.beginWireSelectedNode(index),
+                    .mark_entry => self.markSelectedNodeAsEntry(index),
                     else => {},
                 }
             },
@@ -1330,12 +1712,99 @@ pub const App = struct {
                     else => {},
                 }
             },
+            .quick_chat => |stable| {
+                var index: usize = 0;
+                while (index < self.model.quick_chats.items.len and
+                    !std.mem.eql(u8, self.model.quick_chats.items[index].id, stable.id)) : (index += 1)
+                {}
+                if (index >= self.model.quick_chats.items.len) return;
+                self.selected_quick_chat = index;
+                switch (action) {
+                    .open_quick_chat => {
+                        self.client.sendOpenQuickChat(stable.id);
+                        self.setStatus("Opening quick chat...");
+                    },
+                    .rename_quick_chat => self.renameSelectedQuickChat(),
+                    .delete_quick_chat => self.deleteSelectedQuickChat(),
+                    else => {},
+                }
+            },
             .background => if (action == .create_edge) self.createEdge(),
         }
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
+    fn showCompositeGroup(self: *App, project_name: []const u8, node: GraphModel.Node) void {
+        const count = GraphModel.subgraphNodeCount(node.subgraph_json);
+        const message = std.fmt.allocPrint(
+            self.allocator,
+            "{s}  >  {s}\n\n{d} nested loop{s}\n\nThe parent graph remains available behind this group summary. Pilot Once and Arm Schedule operate on the authoritative nested workflow.",
+            .{ project_name, node.title, count, if (count == 1) "" else "s" },
+        ) catch return;
+        defer self.allocator.free(message);
+        const message_wide = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, message) catch return;
+        defer self.allocator.free(message_wide);
+        _ = c.MessageBoxW(
+            self.window.hwnd,
+            message_wide.ptr,
+            std.unicode.utf8ToUtf16LeStringLiteral("Composite Group").ptr,
+            c.MB_OK | c.MB_ICONINFORMATION,
+        );
+        self.setStatus("Composite group opened");
+    }
+
+    fn revealProjectPath(self: *App, path: []const u8) void {
+        const parameters = WorktreeStatus.explorerParameters(self.allocator, path) catch {
+            self.setStatus("Unable to prepare Explorer");
+            return;
+        };
+        defer self.allocator.free(parameters);
+        const wide_raw = std.unicode.utf8ToUtf16LeAlloc(self.allocator, parameters) catch {
+            self.setStatus("Unable to encode Explorer path");
+            return;
+        };
+        defer self.allocator.free(wide_raw);
+        const wide = self.allocator.alloc(u16, wide_raw.len + 1) catch return;
+        defer self.allocator.free(wide);
+        @memcpy(wide[0..wide_raw.len], wide_raw);
+        wide[wide_raw.len] = 0;
+        const result = c.ShellExecuteW(
+            self.window.hwnd,
+            std.unicode.utf8ToUtf16LeStringLiteral("open").ptr,
+            std.unicode.utf8ToUtf16LeStringLiteral("explorer.exe").ptr,
+            wide.ptr,
+            null,
+            c.SW_SHOWNORMAL,
+        );
+        self.setStatus(if (@intFromPtr(result) <= 32) "Unable to open Explorer" else "Opened project in Explorer");
+    }
+
+    fn showRemoteProjectInfo(self: *App, path: []const u8) void {
+        const message = std.fmt.allocPrint(
+            self.allocator,
+            "Remote project\n\n{s}\n\nThe SSH connection is managed by GraphCode and can be changed by removing and adding the remote project again.",
+            .{path},
+        ) catch return;
+        defer self.allocator.free(message);
+        const message_wide = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, message) catch return;
+        defer self.allocator.free(message_wide);
+        _ = c.MessageBoxW(
+            self.window.hwnd,
+            message_wide.ptr,
+            std.unicode.utf8ToUtf16LeStringLiteral("Remote Connection").ptr,
+            c.MB_OK | c.MB_ICONINFORMATION,
+        );
+    }
+
     fn inspectWorktrees(self: *App) void {
+        if (envFlag("GRAPHCODE_UIA_GATE") and envFlag("GRAPHCODE_UIA_SHOW_DIALOGS") and self.worktree_inspection != null) {
+            self.presentWorktreeSweep();
+            return;
+        }
+        self.inspectWorktreesImpl(true);
+    }
+
+    fn inspectWorktreesImpl(self: *App, show_sweep: bool) void {
         const current_graph = self.model.graph orelse {
             self.setStatus("Worktrees require a local filesystem project");
             return;
@@ -1395,9 +1864,112 @@ pub const App = struct {
             return;
         };
         self.replaceStatus(message);
+        if (show_sweep and !envFlag("GRAPHCODE_UIA_GATE")) self.presentWorktreeSweep();
+    }
+
+    fn presentWorktreeSweep(self: *App) void {
+        const graph = self.model.graph orelse return;
+        const inspection = self.worktree_inspection orelse return;
+        const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
+        defer self.allocator.free(project_path);
+        const project_name = self.allocator.dupe(u8, graph.project.name) catch return;
+        defer self.allocator.free(project_name);
+        const result = NativeForms.worktreeSweep(
+            self.window.hwnd,
+            self.allocator,
+            project_name,
+            inspection.entries.items,
+        ) catch {
+            self.setStatus("Unable to open Worktree Sweep");
+            return;
+        } orelse {
+            self.setStatus("Worktree Sweep cancelled");
+            return;
+        };
+        const current_graph = self.model.graph orelse {
+            self.setStatus("Project closed while Worktree Sweep was open");
+            return;
+        };
+        if (!std.mem.eql(u8, current_graph.project.path, project_path)) {
+            self.setStatus("Project changed while Worktree Sweep was open");
+            return;
+        }
+        const current_inspection = self.worktree_inspection orelse {
+            self.setStatus("Worktree inspection expired");
+            return;
+        };
+        if (!std.mem.eql(u8, current_inspection.project_path, project_path)) {
+            self.setStatus("Worktree inspection no longer matches this project");
+            return;
+        }
+        var selected = std.array_list.Managed([]const u8).init(self.allocator);
+        defer selected.deinit();
+        for (current_inspection.entries.items[0..@min(current_inspection.entries.items.len, result.count)], 0..) |entry, index| {
+            if (result.selected[index] and WorktreeStatus.decision(entry) == .reclaimable)
+                selected.append(entry.path) catch {
+                    self.setStatus("Unable to collect Worktree Sweep selection");
+                    return;
+                };
+        }
+        if (selected.items.len == 0) {
+            self.setStatus("No safe worktrees selected");
+            return;
+        }
+        var bindings = std.array_list.Managed(WorktreeStatus.Binding).init(self.allocator);
+        defer bindings.deinit();
+        for (current_graph.nodes.items) |node| if (node.worktree_path.len != 0) {
+            bindings.append(.{ .path = node.worktree_path }) catch {};
+        };
+        var explicit_policy = WorktreeStatus.Policy{};
+        explicit_policy.applyResolveAction(.remove);
+        const removed = WorktreeStatus.reclaimSelectedWithPolicy(
+            self.allocator,
+            project_path,
+            selected.items,
+            bindings.items,
+            explicit_policy,
+            true,
+        ) catch |err| {
+            self.setStatus(switch (err) {
+                error.UnsafeSelection => "Worktree Sweep blocked an unsafe selection",
+                error.GitFailed => "Worktree Sweep failed: git refused removal",
+                else => "Worktree Sweep failed",
+            });
+            return;
+        };
+        const message = std.fmt.allocPrint(self.allocator, "Worktree Sweep removed {d} worktrees", .{removed}) catch {
+            self.setStatus("Worktree Sweep complete");
+            return;
+        };
+        self.replaceStatus(message);
+        self.inspectWorktreesImpl(false);
     }
 
     fn installUiaFixture(self: *App) void {
+        const graph_frame =
+            \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"uia-graph","project":{"path":"C:\\GraphCode\\fixture","name":"UIA project","remote":false},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"UIA loop A","loopType":"goalBased","state":"succeeded","activity":"checking tests","presence":{"presence":"idle","confidence":"reported"},"goal":{"summary":"All tests pass","predicate":"swift test","metric":{"command":"coverage","direction":"maximize"}},"modelTier":"capable","worktreeBinding":{"path":"C:\\fixture-safe","branch":"feature/parity"}},{"id":"22222222-2222-4222-8222-222222222222","title":"UIA loop B","loopType":"proactive","state":"running","activity":"needs response","presence":{"presence":"awaitingInput","confidence":"reported"}}],"edges":[]}}}
+        ;
+        const chats_frame =
+            \\{"version":2,"kind":"event","sequence":2,"event":{"quickChatsListed":[{"id":"33333333-3333-4333-8333-333333333333","title":"UIA chat A","backend":"claudeCode","createdAt":0,"activity":null},{"id":"44444444-4444-4444-8444-444444444444","title":"UIA chat B","backend":"copilot","createdAt":1,"activity":null}]}}
+        ;
+        const projects_frame =
+            \\{"version":2,"kind":"event","sequence":3,"event":{"recentProjectsListed":[{"path":"C:\\GraphCode\\fixture","name":"Fixture local"},{"path":"ssh://builder/GraphCode","name":"Fixture remote"}]}}
+        ;
+        _ = self.model.updateFromFrame(graph_frame) catch {};
+        _ = self.model.updateFromFrame(chats_frame) catch {};
+        _ = self.model.updateFromFrame(projects_frame) catch {};
+        if (self.model.quick_chats.items.len == 0) {
+            self.model.quick_chats.append(.{
+                .id = self.allocator.dupe(u8, "33333333-3333-4333-8333-333333333333") catch return,
+                .title = self.allocator.dupe(u8, "UIA chat A") catch return,
+                .backend = self.allocator.dupe(u8, "claudeCode") catch return,
+            }) catch return;
+            self.model.quick_chats.append(.{
+                .id = self.allocator.dupe(u8, "44444444-4444-4444-8444-444444444444") catch return,
+                .title = self.allocator.dupe(u8, "UIA chat B") catch return,
+                .backend = self.allocator.dupe(u8, "copilot") catch return,
+            }) catch return;
+        }
         const project = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_GATE_CWD") catch
             self.allocator.dupe(u8, "C:\\GraphCode\\fixture") catch return;
         var inspection = WorktreeStatus.Inspection{
@@ -1425,6 +1997,19 @@ pub const App = struct {
         self.worktree_dialog = WorktreeDialog.Dialog.init(
             self.allocator, project, inspection.entries.items, .{ .allow_reclaim = true },
         ) catch null;
+        if (envFlag("GRAPHCODE_UIA_UPDATE_AVAILABLE")) {
+            self.update_lock.lock();
+            self.update_state.state = .available;
+            if (self.update_version.len != 0) self.allocator.free(self.update_version);
+            if (self.update_release_url.len != 0) self.allocator.free(self.update_release_url);
+            self.update_version = self.allocator.dupe(u8, "9.9.9-test") catch &.{};
+            self.update_release_url = self.allocator.dupe(u8, "https://github.com/GraphCode/GraphCode/releases/tag/v9.9.9-test") catch &.{};
+            self.update_lock.unlock();
+        }
+        if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_INGRESS_ERROR")) |message| {
+            defer self.allocator.free(message);
+            self.setIngressError(message);
+        } else |_| {}
         self.setStatus("UIA fixture inspection ready");
     }
 
@@ -1501,7 +2086,7 @@ pub const App = struct {
             return;
         };
         self.replaceStatus(message);
-        self.inspectWorktrees();
+        self.inspectWorktreesImpl(false);
     }
 
     pub fn selectWorktreeRow(self: *App, path: []const u8) bool {
@@ -1632,39 +2217,30 @@ pub const App = struct {
     }
 
     fn editWorktreePolicy(self: *App) void {
-        const dialog = if (self.worktree_dialog) |*value| value else {
-            self.setStatus("Inspect worktrees before editing policy");
+        const project_path = self.currentProject() orelse {
+            self.setStatus("Open a project before changing project settings");
             return;
         };
-        if (envFlag("GRAPHCODE_UIA_GATE")) {
-            self.setStatus("Worktree policy editor opened; Ctrl+Shift+S saves changes");
+        if (envFlag("GRAPHCODE_UIA_GATE") and !envFlag("GRAPHCODE_UIA_SHOW_DIALOGS")) {
+            self.setStatus("Project settings opened");
             return;
         }
-        const policy = NativeForms.worktreePolicy(self.window.hwnd, self.allocator, dialog.policy) catch {
+        const initial = if (self.worktree_dialog) |dialog|
+            dialog.policy
+        else
+            WorktreeStatus.loadPolicy(self.allocator, project_path);
+        const policy = NativeForms.worktreePolicy(self.window.hwnd, self.allocator, initial) catch {
             self.setStatus("Unable to open worktree policy editor");
             return;
         } orelse {
             self.setStatus("Worktree policy edit cancelled");
             return;
         };
-        dialog.setPolicy(policy);
-        self.setStatus("Worktree policy editor updated; Ctrl+Shift+S saves changes");
-    }
-
-    fn installWorktreeMenu(self: *App) void {
-        const menu = c.CreateMenu() orelse return;
-        const worktrees = c.CreatePopupMenu() orelse {
-            _ = c.DestroyMenu(menu);
+        self.saveWorktreePolicy(policy) catch {
+            self.setStatus("Unable to save project settings");
             return;
         };
-        _ = c.AppendMenuW(worktrees, c.MF_STRING, 6, std.unicode.utf8ToUtf16LeStringLiteral("Inspect worktrees\tCtrl+Shift+I").ptr);
-        _ = c.AppendMenuW(worktrees, c.MF_STRING, 7, std.unicode.utf8ToUtf16LeStringLiteral("Reclaim selected worktrees\tCtrl+Shift+W").ptr);
-        _ = c.AppendMenuW(worktrees, c.MF_STRING, 8, std.unicode.utf8ToUtf16LeStringLiteral("Reveal in Explorer\tCtrl+Shift+E").ptr);
-        _ = c.AppendMenuW(worktrees, c.MF_SEPARATOR, 0, null);
-        _ = c.AppendMenuW(worktrees, c.MF_STRING, 9, std.unicode.utf8ToUtf16LeStringLiteral("Edit worktree policy\tCtrl+Shift+P").ptr);
-        _ = c.AppendMenuW(worktrees, c.MF_STRING, 10, std.unicode.utf8ToUtf16LeStringLiteral("Save worktree policy\tCtrl+Shift+S").ptr);
-        _ = c.AppendMenuW(menu, c.MF_POPUP, @intFromPtr(worktrees), std.unicode.utf8ToUtf16LeStringLiteral("Worktrees").ptr);
-        if (c.SetMenu(self.window.hwnd, menu) == 0) _ = c.DestroyMenu(menu);
+        self.setStatus("Project settings saved");
     }
 
     fn saveCurrentWorktreePolicy(self: *App) void {
@@ -1733,6 +2309,62 @@ pub const App = struct {
         if (@intFromPtr(result) <= 32) self.setStatus("Unable to open Explorer") else self.setStatus("Opened selected worktree in Explorer");
     }
 
+    fn keepWorktreeOffer(self: *App, path: []const u8) void {
+        for (self.kept_worktree_paths.items) |kept| if (std.mem.eql(u8, kept, path)) return;
+        const copy = self.allocator.dupe(u8, path) catch {
+            self.setStatus("Unable to keep the worktree offer");
+            return;
+        };
+        self.kept_worktree_paths.append(copy) catch {
+            self.allocator.free(copy);
+            self.setStatus("Unable to keep the worktree offer");
+            return;
+        };
+        self.setStatus("Keeping the resolved worktree");
+    }
+
+    fn reclaimWorktreeOffer(self: *App, path: []const u8) void {
+        const graph = self.model.graph orelse return;
+        if (!graph.project.isLocalFilesystem()) return;
+        const inspection = self.worktree_inspection orelse return;
+        const entry = WorktreeStatus.selectedEntry(inspection.entries.items, path) orelse return;
+        if (WorktreeStatus.decision(entry) != .reclaimable) {
+            self.setStatus("This worktree is no longer safe to reclaim");
+            return;
+        }
+        const message = std.fmt.allocPrint(
+            self.allocator,
+            "Remove this landed, clean worktree?\n\n{s}\n\nThe branch history remains in git.",
+            .{path},
+        ) catch return;
+        defer self.allocator.free(message);
+        if (!GraphContextMenu.confirm(self.window.hwnd, "Reclaim Worktree", message)) return;
+        var bindings = std.array_list.Managed(WorktreeStatus.Binding).init(self.allocator);
+        defer bindings.deinit();
+        for (graph.nodes.items) |node| {
+            if (node.worktree_path.len != 0 and !std.mem.eql(u8, node.worktree_path, path))
+                bindings.append(.{ .path = node.worktree_path }) catch {};
+        }
+        const selected = [_][]const u8{path};
+        _ = WorktreeStatus.reclaimSelectedWithPolicy(
+            self.allocator,
+            graph.project.path,
+            &selected,
+            bindings.items,
+            .{ .allow_reclaim = true, .confirm_each_reclaim = false },
+            true,
+        ) catch |err| {
+            self.setStatus(switch (err) {
+                error.UnsafeSelection => "This worktree is no longer safe to reclaim",
+                error.GitFailed => "Git refused to remove the worktree",
+                else => "Unable to reclaim the worktree",
+            });
+            return;
+        };
+        self.setStatus("Resolved worktree reclaimed");
+        self.inspectWorktrees();
+    }
+
     fn moveWorktreeSelection(self: *App, delta: i32) void {
         const inspection = self.worktree_inspection orelse return;
         if (inspection.entries.items.len == 0) return;
@@ -1762,7 +2394,7 @@ pub const App = struct {
         var client: c.RECT = undefined;
         if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
         const loop_count = if (self.model.graph) |graph| graph.nodes.items.len else 0;
-        const top = Sidebar.worktreeRowTop(self.model.recent_projects.items.len, loop_count, index) - self.sidebar_scroll;
+        const top = Sidebar.worktreeRowTopForModel(&self.model, loop_count, index) - self.sidebar_scroll;
         const bottom = top + 34;
         const viewport_top = Tokens.header_height;
         const viewport_bottom = client.bottom - Tokens.workspace_height;
@@ -1810,9 +2442,14 @@ pub const App = struct {
             .clone_repository => self.cloneRepository(),
             .cancel_clone => self.cancelClone(),
             .remote_repository => self.addRemoteRepository(),
-            .onboarding => if (self.onboarding_store) |store|
-                Onboarding.showFirstRun(self.window.hwnd, self.allocator, store) catch
-                    self.setStatus("Unable to show onboarding"),
+            .onboarding => {
+                const initial_backend = if (self.product_settings) |settings| settings.default_backend else "claudeCode";
+                const backend = Onboarding.show(self.window.hwnd, self.allocator, initial_backend) catch {
+                    self.setStatus("Unable to show onboarding");
+                    return;
+                };
+                self.applyOnboardingBackend(backend);
+            },
             .cycle_attention => {
                 self.selectNextAttention();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
@@ -1860,7 +2497,11 @@ pub const App = struct {
             .select_previous_tab => if (self.workspace) |workspace| workspace.selectPreviousTab(),
             .select_next_tab => if (self.workspace) |workspace| workspace.selectNextTab(),
             .show_graph => {
+                self.surface = .project;
+                self.workspace_controls.panel_visible = false;
                 self.workspace_controls.apply(.show_graph);
+                self.layoutWorkspace();
+                self.layoutEmptyStateControls();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .toggle_rail => {
@@ -1871,6 +2512,11 @@ pub const App = struct {
             },
             .toggle_panel => {
                 self.workspace_controls.apply(.toggle_panel);
+                if (self.workspace_controls.panel_visible) {
+                    self.surface = .workspace;
+                } else if (self.surface == .workspace) {
+                    self.surface = .project;
+                }
                 self.layoutWorkspace();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
                 self.setStatus(if (self.workspace_controls.panel_visible) "Workspace panel shown" else "Workspace panel hidden");
@@ -1879,6 +2525,33 @@ pub const App = struct {
                 self.workspace_controls.apply(.toggle_activity);
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
                 self.setStatus(if (self.workspace_controls.activity_enabled) "Activity enabled" else "Activity disabled");
+            },
+            .zoom_out, .zoom_in => {
+                var client: c.RECT = undefined;
+                if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
+                const bounds = inputBounds(client.right, client.bottom, self.workspace_controls).canvas;
+                self.canvas.zoomBy(
+                    @divTrunc(bounds.left + bounds.right, 2),
+                    @divTrunc(bounds.top + bounds.bottom, 2),
+                    if (action == .zoom_in) 1.1 else 0.9,
+                );
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            },
+            .actual_size => {
+                self.canvas.actualSize();
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            },
+            .fit_canvas => {
+                var client: c.RECT = undefined;
+                if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
+                const bounds = inputBounds(client.right, client.bottom, self.workspace_controls).canvas;
+                const content = GraphCanvas.contentSize(&self.model, self.surface);
+                self.canvas.fit(
+                    .{ .left = bounds.left, .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom },
+                    content.width,
+                    content.height,
+                );
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .none => {},
         }
@@ -1933,11 +2606,19 @@ pub const App = struct {
         var client: c.RECT = undefined;
         if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
         if (self.workspace) |workspace| {
-            const panel_height = if (self.workspace_controls.panel_visible) Tokens.workspace_height else 0;
+            const full_workspace = self.surface == .workspace;
+            const activity_height = if (self.workspace_controls.activity_enabled) Tokens.activity_strip_height else 0;
+            const panel_height = if (full_workspace)
+                @max(0, client.bottom - Tokens.header_height - Tokens.loop_bar_height - activity_height)
+            else if (self.workspace_controls.panel_visible)
+                Tokens.workspace_height
+            else
+                0;
             workspace.resize(
                 if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
-                @max(0, client.bottom - panel_height),
-                @max(0, client.right - (if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0)),
+                if (full_workspace) Tokens.header_height + Tokens.loop_bar_height else @max(0, client.bottom - panel_height),
+                @max(0, client.right - (if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0) -
+                    (if (full_workspace) Tokens.loop_detail_width else 0)),
                 panel_height,
             );
         }
@@ -1956,8 +2637,8 @@ pub const App = struct {
         );
         self.empty_global_overview_button = createButton(
             self.window.hwnd,
-            "Open Global Overview",
-            MainWindow.empty_global_overview_id,
+            "New Loop",
+            MainWindow.empty_new_loop_id,
         );
         self.layoutEmptyStateControls();
     }
@@ -1965,19 +2646,62 @@ pub const App = struct {
     fn layoutEmptyStateControls(self: *App) void {
         var client: c.RECT = undefined;
         if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
-        const visible = self.model.graph == null;
-        const x = Tokens.sidebar_width + 48;
-        const y = Tokens.header_height + 160;
-        for ([_]c.HWND{ self.empty_open_folder_button, self.empty_global_overview_button }, 0..) |button, index| {
-            if (button == null) continue;
-            _ = c.ShowWindow(button, if (visible) c.SW_SHOW else c.SW_HIDE);
-            _ = c.SetWindowPos(button, null, x, y + @as(i32, @intCast(index * 42)), 220, 32, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+        const graph = self.model.graph;
+        const is_quick_chats = self.surface == .quick_chats;
+        const is_overview = self.surface == .overview;
+        const is_empty = if (is_quick_chats)
+            self.model.quick_chats.items.len == 0
+        else if (is_overview)
+            self.model.graphs.items.len == 0
+        else if (graph) |value|
+            value.nodes.items.len == 0
+        else
+            true;
+        const is_global = if (graph) |value| value.project.isGlobal() else false;
+        const content_left = if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0;
+        const content_right = client.right;
+        const x = content_left + @divTrunc((content_right - content_left) - 220, 2);
+        const bounds = GraphCanvas.renderBounds(client.right, client.bottom, self.workspace_controls);
+        const center_offset: i32 = if (!is_quick_chats and !is_overview and graph == null) -70 else -60;
+        const y = bounds.top + @divTrunc(bounds.bottom - bounds.top, 2) + center_offset + 106;
+        if (self.empty_open_folder_button != null) {
+            _ = c.ShowWindow(
+                self.empty_open_folder_button,
+                if (is_empty and !is_quick_chats and (is_overview or graph == null or is_global)) c.SW_SHOW else c.SW_HIDE,
+            );
+            _ = c.SetWindowPos(self.empty_open_folder_button, null, x, y, 220, 32, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+        }
+        if (self.empty_global_overview_button != null) {
+            setButtonText(self.empty_global_overview_button, if (is_quick_chats) "New Chat" else "New Loop");
+            const show_primary = is_quick_chats or is_overview or
+                (self.surface == .project and graph != null and !is_global);
+            const primary_x = if (is_empty) x else content_right - 140;
+            const primary_y = if (is_empty)
+                y + (if (is_global or is_overview) @as(i32, 42) else @as(i32, 0))
+            else
+                Tokens.header_height + 14;
+            _ = c.ShowWindow(
+                self.empty_global_overview_button,
+                if (show_primary) c.SW_SHOW else c.SW_HIDE,
+            );
+            _ = c.SetWindowPos(
+                self.empty_global_overview_button,
+                null,
+                primary_x,
+                primary_y,
+                if (is_empty) 220 else 120,
+                32,
+                c.SWP_NOZORDER | c.SWP_NOACTIVATE,
+            );
         }
     }
 
     fn createButton(parent: c.HWND, text: []const u8, id: usize) c.HWND {
-        const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.c_allocator, text) catch return null;
+        const raw = std.unicode.utf8ToUtf16LeAlloc(std.heap.c_allocator, text) catch return null;
+        defer std.heap.c_allocator.free(raw);
+        const wide = std.heap.c_allocator.allocSentinel(u16, raw.len, 0) catch return null;
         defer std.heap.c_allocator.free(wide);
+        @memcpy(wide[0..raw.len], raw);
         return c.CreateWindowExW(
             0,
             std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr,
@@ -1994,18 +2718,34 @@ pub const App = struct {
         );
     }
 
+    fn setButtonText(button: c.HWND, text: []const u8) void {
+        const raw = std.unicode.utf8ToUtf16LeAlloc(std.heap.c_allocator, text) catch return;
+        defer std.heap.c_allocator.free(raw);
+        const wide = std.heap.c_allocator.allocSentinel(u16, raw.len, 0) catch return;
+        defer std.heap.c_allocator.free(wide);
+        @memcpy(wide[0..raw.len], raw);
+        _ = c.SetWindowTextW(button, wide.ptr);
+    }
+
     fn controlId(value: usize) c.HMENU {
         @setRuntimeSafety(false);
         return @ptrFromInt(value);
     }
 
     fn updateNativeChrome(self: *App) void {
+        self.update_lock.lock();
+        const update_checking = self.update_thread != null and !self.update_done;
+        self.update_lock.unlock();
         MainWindow.updateMenu(self.window.hwnd, .{
             .has_project = self.model.graph != null,
             .can_worktrees = if (self.model.graph) |graph| graph.project.isLocalFilesystem() else false,
             .has_workspace = self.workspace != null and self.model.graph != null,
             .has_attention = self.model.attentionCount() != 0,
             .can_close_tab = if (self.workspace) |workspace| workspace.tabCount() > 1 else false,
+            .sidebar_visible = self.workspace_controls.rail_visible,
+            .workspace_visible = self.workspace_controls.panel_visible,
+            .activity_visible = self.workspace_controls.activity_enabled,
+            .update_checking = update_checking,
         });
         self.layoutEmptyStateControls();
     }
@@ -2027,25 +2767,214 @@ pub const App = struct {
         self.syncAccessibility();
     }
 
+    fn setIngressError(self: *App, value: []const u8) void {
+        const copy = self.allocator.dupe(u8, value) catch return;
+        if (self.ingress_error.len != 0) self.allocator.free(self.ingress_error);
+        self.ingress_error = copy;
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
+    }
+
+    fn clearIngressError(self: *App) void {
+        if (self.ingress_error.len != 0) self.allocator.free(self.ingress_error);
+        self.ingress_error = &.{};
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
+    }
+
     fn syncAccessibility(self: *App) void {
         const provider = if (self.accessibility) |*value| value else return;
-        var rows = std.array_list.Managed(Accessibility.WorktreeRow).init(self.allocator);
-        defer rows.deinit();
-        if (self.worktree_dialog) |dialog| {
-            for (dialog.rows.items) |row| {
-                rows.append(.{
-                    .path = row.entry.path,
-                    .selected = row.selected,
-                    .eligible = WorktreeStatus.decision(row.entry) == .reclaimable,
-                }) catch return;
+        var elements = std.array_list.Managed(Accessibility.DynamicElement).init(self.allocator);
+        defer elements.deinit();
+        var owned_identities = std.array_list.Managed([]u8).init(self.allocator);
+        defer {
+            for (owned_identities.items) |value| self.allocator.free(value);
+            owned_identities.deinit();
+        }
+        var client: c.RECT = undefined;
+        _ = c.GetClientRect(self.window.hwnd, &client);
+        const canvas_bounds = inputBounds(client.right, client.bottom, self.workspace_controls).canvas;
+        const canvas_rect = c.RECT{
+            .left = canvas_bounds.left,
+            .top = canvas_bounds.top,
+            .right = canvas_bounds.right,
+            .bottom = canvas_bounds.bottom,
+        };
+        var sidebar_rows = Sidebar.appendRows(
+            self.allocator,
+            &self.model,
+            if (self.worktree_inspection) |*value| value else null,
+            self.sidebar_scroll,
+        ) catch return;
+        defer sidebar_rows.deinit(self.allocator);
+        for (sidebar_rows.items) |row| {
+            const bounds = c.RECT{ .left = 12, .top = row.top - 3, .right = 232, .bottom = row.top + 23 };
+            switch (row.kind) {
+                .project => {
+                    const project = self.model.recent_projects.items[row.index];
+                    self.appendAccessibilityElement(&elements, &owned_identities, "project", project.path, project.name, 1, bounds, false, false) catch return;
+                },
+                .open_project => if (row.project_path) |path| if (self.model.graphFor(path)) |graph| {
+                    self.appendAccessibilityElement(&elements, &owned_identities, "open-project", path, graph.project.name, 1, bounds, self.model.selected_project_path != null and std.mem.eql(u8, self.model.selected_project_path.?, path), false) catch return;
+                },
+                .loop => if (row.project_path) |path| if (self.model.graphFor(path)) |graph| {
+                    if (row.index < graph.nodes.items.len) {
+                        const node = graph.nodes.items[row.index];
+                        const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ path, node.id }) catch return;
+                        defer self.allocator.free(key);
+                        self.appendAccessibilityElement(&elements, &owned_identities, "loop", key, node.title, 2, bounds, self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, node.id), false) catch return;
+                    }
+                },
+                .worktree => if (self.worktree_dialog) |dialog| {
+                    if (row.index < dialog.rows.items.len) {
+                        const worktree = dialog.rows.items[row.index];
+                        self.appendAccessibilityElement(&elements, &owned_identities, "worktree", worktree.entry.path, worktree.entry.path, 3, bounds, worktree.selected, WorktreeStatus.decision(worktree.entry) == .reclaimable) catch return;
+                    }
+                },
+                else => {},
             }
-        } else if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_FIXTURE_ROWS") catch null) |fixture| {
+        }
+        switch (self.surface) {
+            .project, .workspace => if (self.model.graph) |graph| {
+                for (graph.nodes.items, 0..) |node, index| {
+                    const bounds = GraphCanvas.nodeBounds(index, &self.canvas);
+                    const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ graph.project.path, node.id }) catch return;
+                    defer self.allocator.free(key);
+                    self.appendAccessibilityElement(&elements, &owned_identities, "project-card", key, node.title, 4, bounds, self.model.selected_index == index, false) catch return;
+                }
+            },
+            .overview => for (self.model.graphs.items, 0..) |graph, graph_index| {
+                for (graph.nodes.items, 0..) |node, node_index| {
+                    const bounds = GraphCanvas.overviewCardBounds(&self.model, graph_index, node_index, canvas_rect, &self.canvas);
+                    const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ graph.project.path, node.id }) catch return;
+                    defer self.allocator.free(key);
+                    self.appendAccessibilityElement(&elements, &owned_identities, "overview-card", key, node.title, 4, bounds, false, false) catch return;
+                }
+            },
+            .quick_chats => for (self.model.quick_chats.items, 0..) |chat, index| {
+                self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-card", chat.id, chat.title, 4, GraphCanvas.quickChatCardBounds(index, canvas_rect, &self.canvas), false, false) catch return;
+            },
+        }
+        if (self.worktree_dialog == null) if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_FIXTURE_ROWS") catch null) |fixture| {
             defer self.allocator.free(fixture);
             provider.syncStatus(self.status());
             return;
-        }
+        };
         const policy = if (self.worktree_dialog) |dialog| dialog.policy else WorktreeStatus.Policy{};
-        provider.syncWorktrees(self.status(), rows.items, policy);
+        provider.syncElements(self.status(), elements.items, policy);
+    }
+
+    fn appendAccessibilityElement(
+        self: *App,
+        elements: *std.array_list.Managed(Accessibility.DynamicElement),
+        owned_identities: *std.array_list.Managed([]u8),
+        kind: []const u8,
+        key: []const u8,
+        name: []const u8,
+        parent: c_int,
+        bounds: c.RECT,
+        selected: bool,
+        eligible: bool,
+    ) !void {
+        const identity = try std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ kind, key });
+        errdefer self.allocator.free(identity);
+        try owned_identities.append(identity);
+        try elements.append(.{
+            .identity = identity,
+            .name = name,
+            .parent = parent,
+            .selected = selected,
+            .eligible = eligible,
+            .invokable = parent != 3,
+            .left = bounds.left,
+            .top = bounds.top,
+            .right = bounds.right,
+            .bottom = bounds.bottom,
+        });
+    }
+
+    fn applyUiaDynamicInvoke(self: *App, payload: usize) bool {
+        var target: ?UiaDynamicTarget = null;
+        for (self.model.recent_projects.items) |project| {
+            const identity = std.fmt.allocPrint(self.allocator, "project:{s}", .{project.path}) catch return false;
+            defer self.allocator.free(identity);
+            if (Accessibility.worktreeIdentityPayload(identity) == payload) {
+                if (target != null) return false;
+                target = .{ .recent_project = project.path };
+            }
+        }
+        for (self.model.graphs.items) |graph| {
+            const project_identity = std.fmt.allocPrint(self.allocator, "open-project:{s}", .{graph.project.path}) catch return false;
+            defer self.allocator.free(project_identity);
+            if (Accessibility.worktreeIdentityPayload(project_identity) == payload) {
+                if (target != null) return false;
+                target = .{ .open_project = graph.project.path };
+            }
+            for (graph.nodes.items, 0..) |node, index| {
+                const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ graph.project.path, node.id }) catch return false;
+                defer self.allocator.free(key);
+                const sidebar_identity = std.fmt.allocPrint(self.allocator, "loop:{s}", .{key}) catch return false;
+                defer self.allocator.free(sidebar_identity);
+                const overview_identity = std.fmt.allocPrint(self.allocator, "overview-card:{s}", .{key}) catch return false;
+                defer self.allocator.free(overview_identity);
+                const project_card_identity = std.fmt.allocPrint(self.allocator, "project-card:{s}", .{key}) catch return false;
+                defer self.allocator.free(project_card_identity);
+                if (Accessibility.worktreeIdentityPayload(sidebar_identity) == payload or
+                    Accessibility.worktreeIdentityPayload(overview_identity) == payload or
+                    Accessibility.worktreeIdentityPayload(project_card_identity) == payload)
+                {
+                    if (target != null) return false;
+                    target = .{ .loop = .{ .project_path = graph.project.path, .index = index } };
+                }
+            }
+        }
+        for (self.model.quick_chats.items) |chat| {
+            const identity = std.fmt.allocPrint(self.allocator, "quick-chat-card:{s}", .{chat.id}) catch return false;
+            defer self.allocator.free(identity);
+            if (Accessibility.worktreeIdentityPayload(identity) == payload) {
+                if (target != null) return false;
+                target = .{ .quick_chat = chat.id };
+            }
+        }
+        const resolved = target orelse return false;
+        switch (resolved) {
+            .recent_project => |path| self.openProject(path),
+            .open_project => |path| {
+                if (self.model.selectProject(path)) {
+                    self.surface = .project;
+                    self.workspace_controls.panel_visible = false;
+                    self.layoutWorkspace();
+                    self.rebindWorkspace(path);
+                    self.syncAccessibility();
+                    _ = c.InvalidateRect(self.window.hwnd, null, 0);
+                }
+            },
+            .loop => |loop| self.openLoopFromAccessibility(loop.project_path, loop.index),
+            .quick_chat => |id| {
+                self.client.sendOpenQuickChat(id);
+                self.setStatus("Opening quick chat...");
+            },
+        }
+        return true;
+    }
+
+    fn openLoopFromAccessibility(self: *App, project_path: []const u8, index: usize) void {
+        if (!self.model.selectProject(project_path)) return;
+        const graph = self.model.graph orelse return;
+        if (index >= graph.nodes.items.len) return;
+        self.surface = .workspace;
+        self.workspace_controls.panel_visible = true;
+        self.layoutWorkspace();
+        self.layoutEmptyStateControls();
+        self.clearEdgeSelection();
+        self.rebindWorkspace(project_path);
+        _ = self.selectNodeIndex(index);
+        if (self.workspace) |workspace| {
+            workspace.openNode(0, graph.nodes.items[index].id) catch {
+                self.setStatus("Unable to open selected loop");
+            };
+            workspace.focus(0);
+        }
+        self.syncAccessibility();
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
     fn acquireSingleInstance(self: *App) !void {
@@ -2158,6 +3087,21 @@ fn onWindowMessage(
             return true;
         },
         c.WM_COMMAND => {
+            if ((wparam & Accessibility.uia_dynamic_invoke_mask) == Accessibility.uia_dynamic_invoke_tag) {
+                _ = app.applyUiaDynamicInvoke(wparam & Accessibility.uia_row_payload_mask);
+                result.* = 0;
+                return true;
+            }
+            if ((wparam & Accessibility.uia_selection_command_mask) == Accessibility.uia_selection_command_tag) {
+                const operation = (wparam & Accessibility.uia_selection_operation_mask) >>
+                    Accessibility.uia_selection_operation_shift;
+                _ = app.applyUiaWorktreeSelection(
+                    wparam & Accessibility.uia_row_payload_mask,
+                    operation,
+                );
+                result.* = 0;
+                return true;
+            }
             const command_id: u16 = @truncate(wparam);
             if (command_id == @as(u16, @truncate(TrayModule.command_exit))) {
                 app.exit_requested = true;
@@ -2171,14 +3115,6 @@ fn onWindowMessage(
                 result.* = 0;
                 return true;
             }
-            if ((wparam & Accessibility.uia_selection_command_mask) == Accessibility.uia_selection_command_tag) {
-                const operation = (wparam & Accessibility.uia_selection_operation_mask) >>
-                    Accessibility.uia_selection_operation_shift;
-                _ = app.applyUiaWorktreeSelection(
-                    wparam & Accessibility.uia_row_payload_mask,
-                    operation,
-                );
-            } else {
             const tray_command = @as(c.WPARAM, @intCast(@as(usize, @bitCast(wparam)) & 0xffff));
             if (tray_command == TrayModule.command_open) {
                 restoreShellWindow(hwnd);
@@ -2200,22 +3136,73 @@ fn onWindowMessage(
                 10 => app.saveCurrentWorktreePolicy(),
                 12 => app.toggleAllowReclaim(),
                 13 => app.toggleConfirmReclaim(),
+                Accessibility.uia_open_overview_command => app.openGlobalOverview(),
+                Accessibility.uia_open_quick_chats_command => {
+                    app.surface = .quick_chats;
+                    app.workspace_controls.panel_visible = false;
+                    app.layoutWorkspace();
+                    app.layoutEmptyStateControls();
+                    app.syncAccessibility();
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                },
+                Accessibility.uia_primary_canvas_action_command => {
+                    if (app.surface == .quick_chats) app.handleAction(.quick_chat) else app.handleAction(.create_node);
+                },
+                Accessibility.uia_zoom_out_command => {
+                    var client: c.RECT = undefined;
+                    _ = c.GetClientRect(hwnd, &client);
+                    const bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
+                    app.canvas.zoomBy(@divTrunc(bounds.left + bounds.right, 2), @divTrunc(bounds.top + bounds.bottom, 2), 0.9);
+                    app.syncAccessibility();
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                },
+                Accessibility.uia_actual_size_command => {
+                    app.canvas.actualSize();
+                    app.syncAccessibility();
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                },
+                Accessibility.uia_zoom_in_command => {
+                    var client: c.RECT = undefined;
+                    _ = c.GetClientRect(hwnd, &client);
+                    const bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
+                    app.canvas.zoomBy(@divTrunc(bounds.left + bounds.right, 2), @divTrunc(bounds.top + bounds.bottom, 2), 1.1);
+                    app.syncAccessibility();
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                },
+                Accessibility.uia_fit_command => {
+                    var client: c.RECT = undefined;
+                    _ = c.GetClientRect(hwnd, &client);
+                    const bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
+                    const content = GraphCanvas.contentSize(&app.model, app.surface);
+                    app.canvas.fit(
+                        .{ .left = bounds.left, .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom },
+                        content.width,
+                        content.height,
+                    );
+                    app.syncAccessibility();
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                },
                 else => if (wparam >= 1000 and wparam < 2000) {
                     _ = app.toggleWorktreeRow(@intCast(wparam - 1000));
                 },
             }
-            }
             const id: usize = @intCast(@as(u16, @truncate(wparam)));
             if (id == MainWindow.empty_open_folder_id) {
                 app.openFolder();
-            } else if (id == MainWindow.empty_global_overview_id) {
-                app.openGlobalOverview();
+            } else if (id == MainWindow.empty_new_loop_id) {
+                if (app.surface == .quick_chats) app.handleAction(.quick_chat) else app.handleAction(.create_node);
             } else if (MainWindow.commandFromId(id)) |command| {
                 switch (command) {
                     .open_folder => app.openFolder(),
+                    .clone_repository => app.handleAction(.clone_repository),
+                    .remote_repository => app.handleAction(.remote_repository),
+                    .new_quick_chat => app.handleAction(.quick_chat),
                     .open_global_overview => app.openGlobalOverview(),
                     .worktrees => app.handleAction(.inspect_worktrees),
                     .reclaim_worktrees => app.handleAction(.reclaim_worktrees),
+                    .reveal_worktree => app.handleAction(.reveal_worktree),
+                    .edit_worktree_policy => app.handleAction(.edit_worktree_policy),
+                    .save_worktree_policy => app.handleAction(.save_worktree_policy),
                     .exit => {
                         app.exit_requested = true;
                         app.update_cancel.store(true, .release);
@@ -2229,6 +3216,7 @@ fn onWindowMessage(
                     .create_node => app.handleAction(.create_node),
                     .create_edge => app.handleAction(.create_edge),
                     .stop_loop => app.handleAction(.stop_node),
+                    .show_graph => app.handleAction(.show_graph),
                     .new_tab => app.handleAction(.new_tab),
                     .close_tab => app.handleAction(.close_tab),
                     .split_right => app.handleAction(.split_horizontal),
@@ -2239,6 +3227,16 @@ fn onWindowMessage(
                     .focus_previous_pane => app.handleAction(.focus_previous_pane),
                     .reconnect => app.handleAction(.reconnect),
                     .settings => app.handleAction(.settings),
+                    .product_settings => app.handleAction(.product_settings),
+                    .toggle_sidebar => app.handleAction(.toggle_rail),
+                    .toggle_workspace => app.handleAction(.toggle_panel),
+                    .toggle_activity => app.handleAction(.toggle_activity),
+                    .zoom_out => app.handleAction(.zoom_out),
+                    .actual_size => app.handleAction(.actual_size),
+                    .zoom_in => app.handleAction(.zoom_in),
+                    .fit_canvas => app.handleAction(.fit_canvas),
+                    .onboarding => app.handleAction(.onboarding),
+                    .check_updates => app.checkForUpdates(),
                     .about => app.setStatus("GraphCode Windows — native Win32 shell"),
                 }
             }
@@ -2250,9 +3248,46 @@ fn onWindowMessage(
             var paint: c.PAINTSTRUCT = undefined;
             const hdc = c.BeginPaint(hwnd, &paint);
             const inspection = if (app.worktree_inspection) |*value| value else null;
-            GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), app.allocator, &app.canvas, app.workspace_controls);
-            if (app.workspace_controls.panel_visible) {
+            app.update_lock.lock();
+            if (app.model.currentGraph()) |graph| app.canvas.syncNodeOffsets(graph.nodes.items);
+            const offered_version = if (app.update_state.state == .available) app.update_version else "";
+            GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), offered_version, app.ingress_error, app.declared_entry_ids.items, app.kept_worktree_paths.items, app.allocator, &app.canvas, app.workspace_controls, app.surface);
+            app.update_lock.unlock();
+            if (app.workspace_controls.panel_visible or app.surface == .workspace) {
+                if (app.surface == .workspace) {
+                    if (workspaceGraph(&app.model)) |graph| {
+                        const index = app.model.selectedIndex() orelse 0;
+                        if (index < graph.nodes.items.len) {
+                            const node = graph.nodes.items[index];
+                            TerminalWorkspace.Workspace.paintLoopBar(
+                                hdc,
+                                app.allocator,
+                                if (app.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
+                                clientRight(hwnd) - Tokens.loop_detail_width,
+                                graph.project.name,
+                                node.title,
+                                node.loop_type,
+                                node.state,
+                                node.activity,
+                                isResolvedLoopState(node.state),
+                            );
+                        }
+                    }
+                }
                 if (app.workspace) |workspace| workspace.paintChrome(hdc);
+                if (app.surface == .workspace) {
+                    if (workspaceGraph(&app.model)) |graph| {
+                        const index = app.model.selectedIndex() orelse graph.nodes.items.len;
+                        GraphCanvas.paintLoopDetailRail(
+                            hdc,
+                            app.allocator,
+                            graph,
+                            index,
+                            clientRight(hwnd),
+                            clientBottom(hwnd),
+                        );
+                    }
+                }
             }
             _ = c.EndPaint(hwnd, &paint);
             result.* = 0;
@@ -2262,6 +3297,7 @@ fn onWindowMessage(
             app.layoutWorkspace();
             app.clampSidebarScroll();
             app.layoutEmptyStateControls();
+            app.syncAccessibility();
             result.* = 0;
             return true;
         },
@@ -2432,11 +3468,66 @@ fn onWindowMessage(
             }
             var client: c.RECT = undefined;
             _ = c.GetClientRect(hwnd, &client);
+            if (GraphCanvas.headerActionAt(
+                x,
+                y,
+                client.right,
+                app.model.attentionCount() != 0,
+                app.worktree_inspection != null,
+                app.model.currentGraph() != null,
+            )) |action| {
+                switch (action) {
+                    .review_attention => app.handleAction(.cycle_attention),
+                    .inspect_worktrees => app.inspectWorktrees(),
+                    .jump => app.handleAction(.jump_next),
+                    .toggle_panel => app.handleAction(.toggle_panel),
+                }
+                _ = c.InvalidateRect(hwnd, null, 0);
+                result.* = 0;
+                return true;
+            }
             const routing = inputBounds(client.right, client.bottom, app.workspace_controls);
-            const workspace_top = routing.workspace_top;
+            const workspace_top = if (app.surface == .workspace and app.workspace_controls.panel_visible)
+                Tokens.header_height
+            else
+                routing.workspace_top;
             const rail_left = routing.rail_left;
-            if (app.workspace_controls.panel_visible and x >= rail_left and y >= workspace_top) {
+            if ((app.workspace_controls.panel_visible or app.surface == .workspace) and x >= rail_left and y >= workspace_top) {
+                if (app.surface == .workspace) {
+                    if (workspaceGraph(&app.model)) |graph| {
+                        const index = app.model.selectedIndex() orelse graph.nodes.items.len;
+                        if (index < graph.nodes.items.len) {
+                            const node = graph.nodes.items[index];
+                        if (TerminalWorkspace.loopBarActionAt(
+                            rail_left,
+                            Tokens.header_height,
+                            client.right - Tokens.loop_detail_width,
+                            x,
+                            y,
+                            isResolvedLoopState(node.state),
+                        )) |action| {
+                            switch (action) {
+                                .stop => app.stopSelectedNode(),
+                                .show_graph => app.handleAction(.show_graph),
+                            }
+                            _ = c.InvalidateRect(hwnd, null, 0);
+                            result.* = 0;
+                            return true;
+                        }
+                        }
+                    }
+                }
                 if (app.workspace) |workspace| {
+                    if (workspace.chromeActionAt(x, y)) |action| {
+                        app.handleAction(switch (action) {
+                            .new_tab => .new_tab,
+                            .split_right => .split_horizontal,
+                            .split_down => .split_vertical,
+                        });
+                        _ = c.InvalidateRect(hwnd, null, 0);
+                        result.* = 0;
+                        return true;
+                    }
                     if (workspace.selectTabAt(x, y)) {
                         result.* = 0;
                         return true;
@@ -2445,50 +3536,137 @@ fn onWindowMessage(
             }
             if (x >= rail_left and y < workspace_top) {
                 const bounds = c.RECT{ .left = rail_left, .top = Tokens.header_height, .right = client.right, .bottom = workspace_top };
-                if (app.model.graph) |graph| {
-                    if (GraphCanvas.hitTestConnector(graph.nodes.items, x, y, &app.canvas, bounds)) |index| {
-                        if (app.edge_drag_source_id.len != 0) app.allocator.free(app.edge_drag_source_id);
-                        app.edge_drag_source_id = app.allocator.dupe(u8, graph.nodes.items[index].id) catch &.{};
-                        if (app.edge_drag_source_id.len != 0) {
-                            app.canvas.beginEdgeDrag(app.edge_drag_source_id, x, y);
+                if (app.surface != .workspace) {
+                    if (GraphCanvas.hitTestZoomControl(x, y, bounds)) |control| {
+                        const center_x = @divTrunc(bounds.left + bounds.right, 2);
+                        const center_y = @divTrunc(bounds.top + bounds.bottom, 2);
+                        switch (control) {
+                            .out => app.canvas.zoomBy(center_x, center_y, 0.9),
+                            .actual => app.canvas.actualSize(),
+                            .in => app.canvas.zoomBy(center_x, center_y, 1.1),
+                            .fit => {
+                                const content = GraphCanvas.contentSize(&app.model, app.surface);
+                                app.canvas.fit(bounds, content.width, content.height);
+                            },
+                        }
+                        app.syncAccessibility();
+                        _ = c.InvalidateRect(hwnd, null, 0);
+                        result.* = 0;
+                        return true;
+                    }
+                }
+                switch (app.surface) {
+                    .overview => {
+                        if (GraphCanvas.hitTestOverview(&app.model, x, y, &app.canvas, bounds)) |hit| {
+                            const graph = app.model.graphs.items[hit.graph_index];
+                            if (app.model.selectProject(graph.project.path)) {
+                                app.surface = .workspace;
+                                app.workspace_controls.panel_visible = true;
+                                app.layoutWorkspace();
+                                app.layoutEmptyStateControls();
+                                app.clearEdgeSelection();
+                                app.rebindWorkspace(graph.project.path);
+                                _ = app.selectNodeIndex(hit.node_index);
+                                if (app.workspace) |workspace| {
+                                    workspace.openNode(0, graph.nodes.items[hit.node_index].id) catch {
+                                        app.setStatus("Unable to open selected loop");
+                                    };
+                                    workspace.focus(0);
+                                }
+                            }
+                        } else {
+                            app.canvas.beginPan(x, y);
                             _ = c.SetCapture(hwnd);
                         }
-                    } else if (GraphCanvas.hitTest(graph.nodes.items, x, y, &app.canvas, bounds)) |index| {
-                        _ = app.selectNodeIndex(index);
                         _ = c.InvalidateRect(hwnd, null, 0);
-                    } else if (GraphCanvas.hitTestEdge(graph.nodes.items, graph.edges.items, x, y, &app.canvas, bounds)) |index| {
-                        _ = app.selectEdgeIndex(index);
+                    },
+                    .quick_chats => {
+                        if (GraphCanvas.hitTestQuickChat(app.model.quick_chats.items.len, x, y, &app.canvas, bounds)) |index| {
+                            app.client.sendOpenQuickChat(app.model.quick_chats.items[index].id);
+                            app.setStatus("Opening quick chat...");
+                        } else {
+                            app.canvas.beginPan(x, y);
+                            _ = c.SetCapture(hwnd);
+                        }
                         _ = c.InvalidateRect(hwnd, null, 0);
+                    },
+                    .project, .workspace => if (app.model.graph) |graph| {
+                        if (GraphCanvas.hitTestReclaimOffer(
+                            graph.nodes.items,
+                            if (app.worktree_inspection) |*value| value else null,
+                            app.kept_worktree_paths.items,
+                            x,
+                            y,
+                            &app.canvas,
+                        )) |hit| {
+                            const path = graph.nodes.items[hit.node_index].worktree_path;
+                            switch (hit.action) {
+                                .reclaim => app.reclaimWorktreeOffer(path),
+                                .keep => app.keepWorktreeOffer(path),
+                            }
+                            _ = c.InvalidateRect(hwnd, null, 0);
+                        } else if (GraphCanvas.hitTestConnector(graph.nodes.items, x, y, &app.canvas, bounds)) |index| {
+                            if (app.edge_drag_source_id.len != 0) app.allocator.free(app.edge_drag_source_id);
+                            app.edge_drag_source_id = app.allocator.dupe(u8, graph.nodes.items[index].id) catch &.{};
+                            if (app.edge_drag_source_id.len != 0) {
+                                app.canvas.beginEdgeDrag(app.edge_drag_source_id, x, y);
+                                _ = c.SetCapture(hwnd);
+                            }
+                        } else if (GraphCanvas.hitTest(graph.nodes.items, x, y, &app.canvas, bounds)) |index| {
+                            _ = app.selectNodeIndex(index);
+                            app.canvas.beginNodeDrag(graph.nodes.items[index].id, index, x, y);
+                            _ = c.SetCapture(hwnd);
+                            _ = c.InvalidateRect(hwnd, null, 0);
+                        } else if (GraphCanvas.hitTestEdge(graph.nodes.items, graph.edges.items, x, y, &app.canvas, bounds)) |index| {
+                            _ = app.selectEdgeIndex(index);
+                            _ = c.InvalidateRect(hwnd, null, 0);
+                        } else {
+                            app.clearSelection();
+                            app.canvas.beginPan(x, y);
+                            _ = c.SetCapture(hwnd);
+                        }
                     } else {
-                        app.clearSelection();
                         app.canvas.beginPan(x, y);
                         _ = c.SetCapture(hwnd);
-                    }
-                } else {
-                    app.canvas.beginPan(x, y);
-                    _ = c.SetCapture(hwnd);
+                    },
                 }
                 result.* = 0;
                 return true;
             }
             if (app.workspace_controls.rail_visible) {
+                app.update_lock.lock();
+                const update_available = app.update_state.state == .available;
+                app.update_lock.unlock();
+                if (Sidebar.updateBannerAt(x, y, routing.canvas.bottom, update_available, app.ingress_error.len != 0)) {
+                    app.showCurrentUpdateOffer();
+                    result.* = 0;
+                    return true;
+                }
                 if (Sidebar.rowAt(
                     x, y, &app.model, if (app.worktree_inspection) |*value| value else null,
                     app.sidebar_scroll, workspace_top,
                 )) |row| {
                     const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
                 switch (row.kind) {
+                    .local_heading, .remote_heading => {},
                     .project => app.openProject(app.model.recent_projects.items[row.index].path),
                     .open_project => if (row.project_path) |path| {
                         if (app.model.selectProject(path)) {
+                            app.surface = .project;
+                            app.workspace_controls.panel_visible = false;
+                            app.layoutWorkspace();
                             app.clearEdgeSelection();
                             app.rebindWorkspace(path);
                         }
                     },
-                    .overview => app.client.sendOpenGlobalGraph(),
+                    .overview => app.openGlobalOverview(),
                     .loop => if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
                         if (row.index < graph.nodes.items.len) {
                             if (!app.model.selectProject(path)) return true;
+                            app.surface = .workspace;
+                            app.workspace_controls.panel_visible = true;
+                            app.layoutWorkspace();
+                            app.layoutEmptyStateControls();
                             app.clearEdgeSelection();
                             app.rebindWorkspace(path);
                             const selected_graph = app.model.graph orelse return true;
@@ -2510,6 +3688,12 @@ fn onWindowMessage(
                         }
                         app.ensureWorktreeVisible(row.index);
                     },
+                    .quick_chat_overview => {
+                        app.surface = .quick_chats;
+                        app.workspace_controls.panel_visible = false;
+                        app.layoutWorkspace();
+                        app.layoutEmptyStateControls();
+                    },
                     .quick_chat => if (row.index < app.model.quick_chats.items.len) {
                         app.client.sendOpenQuickChat(app.model.quick_chats.items[row.index].id);
                         app.setStatus("Opening quick chat...");
@@ -2527,9 +3711,84 @@ fn onWindowMessage(
             const point = CanvasInput.decodeMouseMessage(lparam);
             var client: c.RECT = undefined;
             _ = c.GetClientRect(hwnd, &client);
-            const workspace_top = client.bottom - Tokens.workspace_height;
-            if (point.x >= Tokens.sidebar_width and point.y >= Tokens.header_height and point.y < workspace_top) {
-                const bounds = c.RECT{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = client.right, .bottom = workspace_top };
+            const routing = inputBounds(client.right, client.bottom, app.workspace_controls);
+            if (app.workspace_controls.rail_visible and point.x < routing.rail_left) {
+                const inspection = if (app.worktree_inspection) |*value| value else null;
+                if (Sidebar.rowAt(point.x, point.y, &app.model, inspection, app.sidebar_scroll, routing.canvas.bottom)) |row| {
+                    var project_path: ?[]const u8 = null;
+                    var remote = false;
+                    switch (row.kind) {
+                        .project => if (row.index < app.model.recent_projects.items.len) {
+                            const project = app.model.recent_projects.items[row.index];
+                            project_path = project.path;
+                            remote = project.isRemote();
+                        },
+                        .open_project => if (row.index < app.model.graphs.items.len) {
+                            const project = app.model.graphs.items[row.index].project;
+                            project_path = project.path;
+                            remote = project.isRemote();
+                        },
+                        else => {},
+                    }
+                    if (project_path) |path| {
+                        var screen = c.POINT{ .x = point.x, .y = point.y };
+                        _ = c.ClientToScreen(hwnd, &screen);
+                        GraphContextMenu.show(
+                            hwnd,
+                            .{ .project = .{ .path = path, .remote = remote } },
+                            screen.x,
+                            screen.y,
+                            app,
+                            &onContextAction,
+                        );
+                    } else switch (row.kind) {
+                        .loop => if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
+                            if (row.index < graph.nodes.items.len) {
+                                var screen = c.POINT{ .x = point.x, .y = point.y };
+                                _ = c.ClientToScreen(hwnd, &screen);
+                                GraphContextMenu.show(
+                                    hwnd,
+                                    .{ .node = .{ .project_path = path, .id = graph.nodes.items[row.index].id } },
+                                    screen.x,
+                                    screen.y,
+                                    app,
+                                    &onContextAction,
+                                );
+                            }
+                        },
+                        .quick_chat => if (row.index < app.model.quick_chats.items.len) {
+                            var screen = c.POINT{ .x = point.x, .y = point.y };
+                            _ = c.ClientToScreen(hwnd, &screen);
+                            GraphContextMenu.show(
+                                hwnd,
+                                .{ .quick_chat = .{ .id = app.model.quick_chats.items[row.index].id } },
+                                screen.x,
+                                screen.y,
+                                app,
+                                &onContextAction,
+                            );
+                        },
+                        else => {},
+                    }
+                }
+                result.* = 0;
+                return true;
+            }
+            if (point.x >= routing.canvas.left and point.y >= routing.canvas.top and point.y < routing.canvas.bottom) {
+                const bounds = c.RECT{ .left = routing.canvas.left, .top = routing.canvas.top, .right = routing.canvas.right, .bottom = routing.canvas.bottom };
+                if (app.surface == .quick_chats) {
+                    if (GraphCanvas.hitTestQuickChat(app.model.quick_chats.items.len, point.x, point.y, &app.canvas, bounds)) |index| {
+                        var screen = c.POINT{ .x = point.x, .y = point.y };
+                        _ = c.ClientToScreen(hwnd, &screen);
+                        app.showQuickChatContextMenu(index, screen.x, screen.y);
+                    }
+                    result.* = 0;
+                    return true;
+                }
+                if (app.surface != .project) {
+                    result.* = 0;
+                    return true;
+                }
                 var target: enum { background, node, edge } = .background;
                 var target_index: usize = 0;
                 if (app.model.graph) |graph| {
@@ -2555,6 +3814,17 @@ fn onWindowMessage(
             return true;
         },
         c.WM_LBUTTONUP => {
+            if (app.canvas.node_dragging) {
+                app.canvas.endNodeDrag();
+                if (app.canvas_layout_store) |*store| {
+                    store.save(&app.canvas) catch app.setStatus("Canvas position could not be saved");
+                }
+                _ = c.ReleaseCapture();
+                app.syncAccessibility();
+                _ = c.InvalidateRect(hwnd, null, 0);
+                result.* = 0;
+                return true;
+            }
             if (app.canvas.edge_dragging) {
                 const point = CanvasInput.decodeMouseMessage(lparam);
                 const source_id = app.copyEdgeDragSourceForDrop() orelse {
@@ -2583,12 +3853,19 @@ fn onWindowMessage(
             if (app.canvas.dragging) {
                 app.canvas.endPan();
                 _ = c.ReleaseCapture();
+                app.syncAccessibility();
             }
             result.* = 0;
             return true;
         },
         c.WM_MOUSEMOVE => {
-            if (app.canvas.edge_dragging) {
+            if (app.canvas.node_dragging) {
+                app.canvas.updateNodeDrag(mouseX(lparam), mouseY(lparam));
+                app.syncAccessibility();
+                _ = c.InvalidateRect(hwnd, null, 0);
+                result.* = 0;
+                return true;
+            } else if (app.canvas.edge_dragging) {
                 app.canvas.updateEdgeDrag(mouseX(lparam), mouseY(lparam));
                 _ = c.InvalidateRect(hwnd, null, 0);
                 result.* = 0;
@@ -2620,6 +3897,7 @@ fn onWindowMessage(
                 .canvas => app.canvas.zoomAt(x, y, delta),
                 .none => {},
             }
+            app.syncAccessibility();
             _ = c.InvalidateRect(hwnd, null, 0);
             result.* = 0;
             return true;
@@ -2716,6 +3994,27 @@ test "input routing bounds follow hidden workspace panel and rail" {
     try std.testing.expect(hidden.canvas.bottom > shown.canvas.bottom);
     try std.testing.expectEqual(WheelRegion.canvas, wheelRegion(20, 300, hidden, hidden_controls));
     try std.testing.expectEqual(WheelRegion.canvas, wheelRegion(600, 850, hidden, hidden_controls));
+}
+
+test "jump matching ranks exact results across projects" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"a","project":{"path":"A","name":"Alpha"},"nodes":[{"id":"loop-a","title":"Fix authentication","state":"running"}],"edges":[]}}}
+    );
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"b","project":{"path":"B","name":"Beta"},"nodes":[{"id":"loop-b","title":"Authentication audit","state":"idle"},{"id":"auth","title":"Unrelated","state":"idle"}],"edges":[]}}}
+    );
+
+    const exact_id = findJumpMatch(&model, "AUTH").?;
+    try std.testing.expectEqual(@as(usize, 1), exact_id.project_index);
+    try std.testing.expectEqual(@as(usize, 1), exact_id.node_index);
+    try std.testing.expectEqual(@as(u8, 0), exact_id.score);
+
+    const prefix = findJumpMatch(&model, "authentication").?;
+    try std.testing.expectEqual(@as(usize, 1), prefix.project_index);
+    try std.testing.expectEqual(@as(usize, 0), prefix.node_index);
+    try std.testing.expectEqual(@as(u8, 2), prefix.score);
 }
 
 fn runSmokeWorkspaceActions(self: *App) void {
