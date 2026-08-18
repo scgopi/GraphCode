@@ -116,9 +116,17 @@ public enum SummaryModelWriter {
     _ beat: SummaryBeat, backend: CLISessionBackendKind, workingDirectory: String?
   ) async -> SummaryBeat {
     let invocation = invocation(forBackend: backend, prompt: prompt(beat: beat))
+    // Through the launcher's login shell, not `Process`'s own launch. `Process` resolves
+    // `executableURL` as a path and never searches `PATH`, so the bare `claude` above named
+    // a file in the working directory: every rewrite on every backend threw at launch, and
+    // a failed rewrite is silent by design — exactly the "feature looks switched off"
+    // outcome `invocation` was written to prevent. It also leaked the PTY each throw had
+    // already opened, which is what exhausted `graphcoded`'s share of `kern.tty.ptmx_max`.
+    let launch = ZmxSessionLauncher.loginShellInvocation(
+      of: invocation[0], arguments: Array(invocation.dropFirst()))
     guard
       let session = try? PTYProcessSession(
-        executable: invocation[0], arguments: Array(invocation.dropFirst()),
+        executable: launch[0], arguments: Array(launch.dropFirst()),
         workingDirectory: workingDirectory)
     else { return beat }
     let outcome = await withTaskGroup(of: (Bool, String)?.self) { group in
