@@ -140,7 +140,7 @@ Statuses:
 | Loop rename | Title field, Return submits, explanatory text | The dedicated single-title modal explains where the title appears, prepopulates the current value, trims and validates submission, and re-resolves the stable loop ID after the modal. The populated UIA gate edits the native field and verifies Return submits and closes the dialog | Validated |
 | Loop delete | Named loop and full consequence message | Names the loop, explains graph-connection removal, and defaults to cancellation | Validated |
 | Chat rename/delete | Dedicated prompts | Dedicated single-title rename modal and named fail-closed deletion warning are wired from card actions and shortcuts | Validated |
-| Project delete loops | Dedicated confirmation | Sidebar project menus now expose Delete All Loops with consequence copy, safe cancellation default, and a dedicated daemon command | Partial |
+| Project delete loops | Dedicated confirmation | Sidebar project menus expose Delete All Loops through one fail-closed implementation with graph and filesystem consequence copy, safe cancellation default, and the dedicated daemon command. The live UIA gate verifies the native confirmation and cancellation path | Validated |
 | Project remove/trash | Distinct reversible remove and filesystem Trash choices | Remove from GraphCode is now distinct, confirmed, and explicitly preserves files. A separate filesystem Trash action remains absent | Partial |
 
 ## Accessibility, input, and visual behavior

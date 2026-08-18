@@ -1685,13 +1685,7 @@ pub const App = struct {
                         self.setStatus("Removing project from GraphCode...");
                     },
                     .delete_project_loops => {
-                        if (!GraphContextMenu.confirm(
-                            self.window.hwnd,
-                            "Delete All Loops",
-                            "Delete every loop and graph connection for this project?\n\nThe project files remain on disk. This graph action cannot be undone.",
-                        )) return;
-                        self.client.sendDeleteProjectGraph(stable.path);
-                        self.setStatus("Deleting project loops...");
+                        self.deleteProjectLoops(stable.path);
                     },
                     else => {},
                 }
@@ -1831,6 +1825,16 @@ pub const App = struct {
             std.unicode.utf8ToUtf16LeStringLiteral("Remote Connection").ptr,
             c.MB_OK | c.MB_ICONINFORMATION,
         );
+    }
+
+    fn deleteProjectLoops(self: *App, path: []const u8) void {
+        if (!GraphContextMenu.confirm(
+            self.window.hwnd,
+            "Delete All Loops",
+            "Delete every loop and graph connection for this project?\n\nThe project files remain on disk. This graph action cannot be undone.",
+        )) return;
+        self.client.sendDeleteProjectGraph(path);
+        self.setStatus("Deleting project loops...");
     }
 
     fn showAbout(self: *App) void {
@@ -2263,6 +2267,10 @@ pub const App = struct {
         }
         if (mutation == 11) {
             self.showRemoteProjectInfo("ssh://builder/GraphCode");
+            return;
+        }
+        if (mutation == 12) {
+            self.deleteProjectLoops("C:\\GraphCode\\empty");
             return;
         }
         const dialog = if (self.worktree_dialog) |*value| value else return;

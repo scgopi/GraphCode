@@ -98,6 +98,11 @@ public static class GraphCodeUiaGateState {
     SendMessage(window, 0x0100, (UIntPtr)0x0D, IntPtr.Zero);
     return true;
   }
+  public static bool SendCommand(IntPtr window, uint command) {
+    if (window == IntPtr.Zero) return false;
+    SendMessage(window, 0x0111, (UIntPtr)command, IntPtr.Zero);
+    return true;
+  }
   public static bool PostMouseClick(IntPtr window) {
     return PostMessage(window, 0x0201, UIntPtr.Zero, IntPtr.Zero);
   }
@@ -911,6 +916,45 @@ try {
   )) "Remote Connection sheet rejected close"
   Start-Sleep -Milliseconds 200
 
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 12)) `
+    "Delete All Loops fixture command was rejected"
+  $deleteLoopsDialog = $null
+  $deleteLoopsWindowCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty, "Delete All Loops"
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Window
+    ))
+  )
+  $deleteLoopsCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+    )),
+    $deleteLoopsWindowCondition
+  )
+  for ($index = 0; $index -lt 40 -and $null -eq $deleteLoopsDialog; $index++) {
+    Start-Sleep -Milliseconds 50
+    $deleteLoopsDialog = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $deleteLoopsCondition
+    )
+  }
+  Require ($null -ne $deleteLoopsDialog) "Delete All Loops did not open its confirmation"
+  $deleteLoopsContent = @($deleteLoopsDialog.FindAll(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    [System.Windows.Automation.Condition]::TrueCondition
+  ) | ForEach-Object { $_.Current.Name }) -join "`n"
+  Require ($deleteLoopsContent -match "every loop and graph connection") `
+    "Delete All Loops confirmation omitted graph consequences"
+  Require ($deleteLoopsContent -match "project files remain on disk") `
+    "Delete All Loops confirmation omitted filesystem consequences"
+  Require ([GraphCodeUiaGateState]::SendCommand(
+    [IntPtr]$deleteLoopsDialog.Current.NativeWindowHandle, 7
+  )) "Delete All Loops confirmation rejected its safe No action"
+  Start-Sleep -Milliseconds 200
+
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 6)) "About dialog fixture command was rejected"
   $aboutDialog = $null
   $aboutWindowCondition = New-Object System.Windows.Automation.AndCondition(
@@ -1015,6 +1059,7 @@ try {
     emptyOverviewPassed = $true
     emptyProjectPassed = $true
     remoteConnectionInfoPassed = $true
+    deleteProjectLoopsPassed = $true
     aboutDialogPassed = $true
     statusText = $statusTextAfter
     statusChanged = ($statusTextAfter -ne $initialStatus)
