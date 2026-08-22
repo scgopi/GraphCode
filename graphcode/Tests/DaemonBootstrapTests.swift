@@ -157,6 +157,42 @@ struct DaemonBootstrapTests {
       .write(to: url)
     #expect(DaemonBootstrap.launchAgentIsCurrent(at: url, expected: expected))
   }
+
+  @Test
+  func theLoadedCheckAsksLaunchdAboutThisUsersOwnAgent() {
+    // A domain target naming the wrong uid answers about someone else's login session,
+    // which on a shared machine is a probe that can only ever say "not loaded".
+    #expect(DaemonBootstrap.domainTarget == "gui/\(getuid())")
+    #expect(DaemonBootstrap.serviceTarget == "gui/\(getuid())/dev.graphcode.graphcoded")
+
+    var asked: [[String]] = []
+    _ = DaemonBootstrap.daemonIsLoaded { arguments in
+      asked.append(arguments)
+      return 0
+    }
+    #expect(asked == [["print", "gui/\(getuid())/dev.graphcode.graphcoded"]])
+  }
+
+  @Test
+  func anAgentLaunchdHasLostReadsAsNotLoaded() {
+    // The whole of issue #152: the stamp, the helpers and the plist all still say the
+    // install is good, so the only thing that can notice a daemon dropping out of
+    // launchd — a reboot the legacy-loaded agent did not survive — is a non-zero exit
+    // from `print`.
+    #expect(DaemonBootstrap.daemonIsLoaded { _ in 0 })
+    #expect(!DaemonBootstrap.daemonIsLoaded { _ in 113 })
+    #expect(!DaemonBootstrap.daemonIsLoaded { _ in -1 })
+  }
+
+  @Test
+  func launchctlReportsAMissingServiceAsAFailure() {
+    // Pins the exit-code contract the check above rests on against the real tool: a
+    // label no one has ever loaded must not come back as zero, or the self-heal is a
+    // branch that never runs.
+    #expect(
+      DaemonBootstrap.launchctlStatus(
+        ["print", "gui/\(getuid())/dev.graphcode.definitely-not-a-real-agent"]) != 0)
+  }
 }
 
 /// Anchors `Bundle(for:)` on the test bundle, which has no embedded helpers.
