@@ -15,6 +15,7 @@ page is the same information in one place.
 |---|---|
 | ⌘K | Jump to any loop by name, across every open project. ↑/↓ to choose, ⏎ to open |
 | ⌘⇧R | Review what needs you — works the attention queue oldest-first, from anywhere |
+| ⌥⌘← / ⌥⌘→ | Back / forward through the loops you have opened, in the order you opened them |
 | ⌘⇧] / ⌘⇧[ | Next / previous loop, in sidebar order across projects |
 | ⌥G | Show or hide the loop panel — the downstream rail with the one-hop minimap and metric sparkline |
 | ⌘= / ⌘− | Zoom the canvas in / out |
@@ -22,6 +23,12 @@ page is the same information in one place.
 | ⌘9 | Fit the whole graph |
 | ⌘O | Open a project folder (from the Welcome window) |
 | ⌘, | Settings |
+
+The two pairs answer different questions. ⌘⇧] / ⌘⇧[ walk the sidebar — what sits
+*beside* the loop you are on. ⌥⌘← / ⌥⌘→ walk your own trail: open A, then P in another
+project, then Q, and Back retraces Q → P → A regardless of where those loops live.
+Opening a loop after going back discards the forward trail, the way a browser does.
+Quick Chats count as places you have been. The trail survives quitting the app.
 
 ## Terminals
 

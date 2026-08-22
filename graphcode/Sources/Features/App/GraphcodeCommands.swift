@@ -49,6 +49,17 @@ struct GraphcodeCommands: Commands {
 
       Divider()
 
+      // Where you have been, as opposed to what sits beside what — the two below walk
+      // sidebar order, these walk the order loops were actually opened in.
+      Button("Back") { store.send(.historyBackTapped) }
+        .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+        .disabled(!store.loopHistory.canGoBack)
+      Button("Forward") { store.send(.historyForwardTapped) }
+        .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+        .disabled(!store.loopHistory.canGoForward)
+
+      Divider()
+
       Button("Next Loop") { store.send(.selectNextLoop) }
         .keyboardShortcut("]", modifiers: [.command, .shift])
       Button("Previous Loop") { store.send(.selectPreviousLoop) }

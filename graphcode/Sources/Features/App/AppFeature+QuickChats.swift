@@ -21,6 +21,7 @@ extension AppFeature {
         state.quickChats.append(chat)
         quickChatStore.save(Array(state.quickChats))
         openQuickChat(chat, &state)
+        recordVisit(.quickChat(id: chat.id), &state)
         return .none
 
       case .quickChatsTapped:
@@ -32,6 +33,7 @@ extension AppFeature {
         guard let chat = state.quickChats[id: id] else { return .none }
         guard state.openLoop?.node.id != id else { return .none }
         openQuickChat(chat, &state)
+        recordVisit(.quickChat(id: id), &state)
         return .none
 
       case .quickChatRenameRequested(let id):
@@ -100,7 +102,7 @@ extension AppFeature {
   /// node's id is the chat's, so the workspace attaches to the chat's own long-lived
   /// zmx session, scrollback and all. Home as the working directory — a chat belongs
   /// to no project on purpose.
-  private func openQuickChat(_ chat: QuickChat, _ state: inout State) {
+  func openQuickChat(_ chat: QuickChat, _ state: inout State) {
     let node = LoopNode(
       id: chat.id,
       title: chat.title,
