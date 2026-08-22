@@ -88,6 +88,9 @@ struct AppFeature {
     /// sidebar's help button asks for it again.
     var showingOnboarding = false
 
+    /// Where the workspace pane has been, for ⌥⌘← / ⌥⌘→ — see `AppFeature+History.swift`.
+    var loopHistory = LoopHistory()
+
     /// The loop ⌘⇧R landed on last, so pressing it again moves to the next one waiting
     /// instead of re-opening the same loop forever. View state only, and deliberately
     /// not persisted: a queue position is about this sitting, not about this graph.
@@ -201,6 +204,10 @@ struct AppFeature {
     /// across every open project. See `stepOpenLoop`.
     case selectNextLoop
     case selectPreviousLoop
+    /// ⌥⌘← / ⌥⌘→ — retrace the loops this human actually opened, in the order they
+    /// opened them. See `AppFeature+History.swift`.
+    case historyBackTapped
+    case historyForwardTapped
     /// The stop/kill affordance docs/05-orchestrator.md asks the monitor for.
     case stopNodeTapped(projectPath: String, nodeID: UUID)
     /// The first-launch terminology primer — see `OnboardingView`.
@@ -262,6 +269,7 @@ struct AppFeature {
   /// `TerminalSurfaceStore` — but a deleted loop, or a closed project, is never coming
   /// back, and its terminals shouldn't sit in the cache waiting to age out.
   @Dependency(\.terminalSurfaceClient) var terminalSurfaceClient
+  @Dependency(\.loopHistoryStore) var loopHistoryStore
 
   var body: some ReducerOf<Self> {
     Scope(state: \.welcome, action: \.welcome) {
@@ -273,6 +281,7 @@ struct AppFeature {
     quickChatsReducer
     jumpPaletteReducer
     updatesReducer
+    historyReducer
     // Before the main Reduce on purpose: its `.graphChanged` diff needs the previous
     // graph, which the main reducer replaces. See `AppFeature+Worktrees.swift`.
     AppWorktreesReducer()
@@ -280,34 +289,7 @@ struct AppFeature {
     Reduce { state, action in
       switch action {
       case .task:
-        state.quickChats = IdentifiedArray(uniqueElements: quickChatStore.load())
-        // Once, not every launch: the primer's value is on day one, and re-showing it
-        // to someone who has loops running would read as the app forgetting them.
-        if !UserDefaults.standard.bool(forKey: "hasSeenOnboarding") {
-          state.showingOnboarding = true
-        }
-        return .merge(
-          .run { send in
-            for await event in orchestratorClient.connect() {
-              await send(.daemonEvent(event))
-            }
-          }
-          .cancellable(id: CancelID.daemonSubscription),
-          .run { _ in try? await orchestratorClient.send(.listRecentProjects) },
-          // Without this the sidebar comes up empty on every launch even though the
-          // daemon has been persisting every project all along — the app just never
-          // asked for them back. Each restored project arrives as an ordinary
-          // `.graphChanged`, handled below.
-          .run { _ in try? await orchestratorClient.send(.restoreOpenProjects) },
-          // The global Orchestrator Graph is always resident, so the app joins it every
-          // launch rather than restoring it — it isn't a folder anyone opened, and its
-          // triggers have been running whether or not this window existed.
-          .run { _ in try? await orchestratorClient.send(.openGlobalGraph) },
-          // Quietly ask whether there's a newer build, so the sidebar banner can offer
-          // it without waiting for someone to open the menu. Silent on failure and on
-          // "up to date" — a launch must never raise an alert about updates.
-          .send(.checkForUpdatesInBackground)
-        )
+        return start(&state)
 
       case .daemonEvent(let event):
         switch event {
@@ -485,6 +467,11 @@ struct AppFeature {
         UserDefaults.standard.set(true, forKey: "hasSeenOnboarding")
         return .none
 
+      // Both handled by `historyReducer`, in `AppFeature+History.swift` — listed here
+      // only so this switch stays exhaustive.
+      case .historyBackTapped, .historyForwardTapped:
+        return .none
+
       // Every update action is handled by `updatesReducer`, in
       // `AppFeature+Updates.swift` — listed here only so this switch stays exhaustive.
       case .checkForUpdatesTapped, .checkForUpdatesInBackground, .updateFoundInBackground,
@@ -534,6 +521,7 @@ struct AppFeature {
           projectPath: path,
           projectName: state.projects[id: path]?.graph.project.name ?? path)
         state.selectedProjectPath = path
+        recordVisit(.loop(projectPath: path, nodeID: nodeID), &state)
         return .none
 
       // A loop's own primary Claude Code session exiting *is* its resolution — no
@@ -615,6 +603,47 @@ struct AppFeature {
 // The reducer's helpers — an extension so the type body stays inside the lint budget as
 // the state and actions above keep growing.
 extension AppFeature {
+
+  /// Everything a launch has to do: restore the app-local lists, decide whether the
+  /// primer is due, and open the daemon subscription the whole app hangs off.
+  ///
+  /// In the extension rather than the switch because the type body is at swiftlint's
+  /// limit, and this case was by some distance the longest one in it.
+  private func start(_ state: inout State) -> Effect<Action> {
+    state.quickChats = IdentifiedArray(uniqueElements: quickChatStore.load())
+    // Not validated against live graphs here: no project has arrived from the daemon
+    // yet, so every entry would look stale and the whole history would be thrown
+    // away on every launch. `LoopHistory.back(where:)` resolves lazily instead.
+    state.loopHistory = loopHistoryStore.load()
+    // Once, not every launch: the primer's value is on day one, and re-showing it
+    // to someone who has loops running would read as the app forgetting them.
+    if !UserDefaults.standard.bool(forKey: "hasSeenOnboarding") {
+      state.showingOnboarding = true
+    }
+    return .merge(
+      .run { send in
+        for await event in orchestratorClient.connect() {
+          await send(.daemonEvent(event))
+        }
+      }
+      .cancellable(id: CancelID.daemonSubscription),
+      .run { _ in try? await orchestratorClient.send(.listRecentProjects) },
+      // Without this the sidebar comes up empty on every launch even though the
+      // daemon has been persisting every project all along — the app just never
+      // asked for them back. Each restored project arrives as an ordinary
+      // `.graphChanged`, handled below.
+      .run { _ in try? await orchestratorClient.send(.restoreOpenProjects) },
+      // The global Orchestrator Graph is always resident, so the app joins it every
+      // launch rather than restoring it — it isn't a folder anyone opened, and its
+      // triggers have been running whether or not this window existed.
+      .run { _ in try? await orchestratorClient.send(.openGlobalGraph) },
+      // Quietly ask whether there's a newer build, so the sidebar banner can offer
+      // it without waiting for someone to open the menu. Silent on failure and on
+      // "up to date" — a launch must never raise an alert about updates.
+      .send(.checkForUpdatesInBackground)
+    )
+  }
+
   /// Notes that one of Welcome's four ways to open a folder — picked, recent, freshly
   /// cloned, remote — has just sent an `.openProject`, so the snapshot it comes back as
   /// is recognisable as this app's own doing (see the `graphChanged` handler). Every
