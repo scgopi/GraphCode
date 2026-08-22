@@ -12,13 +12,17 @@ import Foundation
 ///
 /// Re-runs only when the bundled binaries differ from what's installed, tracked by a stamp
 /// file. That makes app updates carry daemon updates without a reinstall, and makes
-/// ordinary launches cost one small file read.
+/// ordinary launches cost one small file read — plus one `launchctl print`, because a
+/// launch also has to answer the question no file on disk can: whether the daemon the
+/// stamp vouches for is actually loaded.
 public enum DaemonBootstrap {
   public enum Outcome: Equatable {
     /// Not a packaged build, so there was nothing to install.
     case notPackaged
     /// Already installed and current.
     case upToDate
+    /// Installed and current on disk, but launchd had lost the agent; it was loaded again.
+    case reloaded
     case installed
     case failed(String)
   }
@@ -81,7 +85,13 @@ public enum DaemonBootstrap {
     let expected = stamp(forHelpersIn: bundled)
     let current = try? String(contentsOf: stampURL, encoding: .utf8)
     if current == expected, helpersInstalled(), launchAgentIsCurrent() {
-      return .upToDate
+      // Everything a file can record is right. The one thing no file records is whether
+      // launchd still has the agent, and it routinely does not: an agent loaded the
+      // legacy way is not re-bootstrapped into the next login session, so a reboot or a
+      // logout leaves a correct install with no daemon behind it and nothing to say so.
+      if daemonIsLoaded() { return .upToDate }
+      reloadDaemon()
+      return .reloaded
     }
 
     do {
@@ -208,21 +218,47 @@ public enum DaemonBootstrap {
     try data.write(to: url, options: .atomic)
   }
 
-  /// Unload then load. The unload is what makes an app update actually take: without it,
-  /// launchd keeps running the daemon binary it already started, and the freshly installed
-  /// one never gets used.
+  static var domainTarget: String { "gui/\(getuid())" }
+  static var serviceTarget: String { "\(domainTarget)/\(label)" }
+
+  /// Whether launchd currently holds the agent in this login session.
+  ///
+  /// Asking the plist, the helpers or the stamp cannot answer this — all three describe
+  /// the disk, and the disk stays perfectly correct while the daemon is gone. `print`
+  /// exits non-zero with "Could not find service" when the label is absent from the
+  /// domain, which is the only durable signal there is.
+  static func daemonIsLoaded(probe: ([String]) -> Int32 = launchctlStatus) -> Bool {
+    probe(["print", serviceTarget]) == 0
+  }
+
+  /// Bootout then bootstrap. The teardown is what makes an app update actually take:
+  /// without it, launchd keeps running the daemon binary it already started, and the
+  /// freshly installed one never gets used.
+  ///
+  /// `bootstrap`/`bootout` rather than `load`/`unload` because the legacy pair registers
+  /// the agent only for the session it is run in — the reason a reboot could strand a
+  /// healthy install without a daemon. The legacy pair stays as a fallback for the case
+  /// where the modern one is refused.
   private static func reloadDaemon() {
-    launchctl(["unload", launchAgentURL.path])
-    launchctl(["load", launchAgentURL.path])
+    launchctl(["bootout", serviceTarget])
+    if launchctlStatus(["bootstrap", domainTarget, launchAgentURL.path]) != 0 {
+      launchctl(["unload", launchAgentURL.path])
+      launchctl(["load", launchAgentURL.path])
+    }
   }
 
   private static func launchctl(_ arguments: [String]) {
+    _ = launchctlStatus(arguments)
+  }
+
+  static func launchctlStatus(_ arguments: [String]) -> Int32 {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
     process.arguments = arguments
     process.standardOutput = FileHandle.nullDevice
     process.standardError = FileHandle.nullDevice
-    try? process.run()
+    do { try process.run() } catch { return -1 }
     process.waitUntilExit()
+    return process.terminationStatus
   }
 }
