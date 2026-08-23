@@ -205,6 +205,7 @@ struct ProjectCanvasView: View {
     return GeometryReader { proxy in
       ZStack {
         bandLayer(derived)
+        entryHandleLayer(derived)
         edgesLayer
         subGraphLinksLayer(derived.subGraph)
         nodesLayer(derived.attentionReasons, roles: derived.entryRoles, now: now)
@@ -336,6 +337,22 @@ struct ProjectCanvasView: View {
         entryPorts: entryPorts(derived),
         worktreeChip: worktreeChip,
         onWorktreeChipTapped: { store.send(.worktreeSweepTapped) })
+    }
+  }
+
+  /// The `+` on this canvas's origin dot — a second beginning in this folder, the twin
+  /// of the one the Graph view puts on every lane.
+  ///
+  /// It sits where the dot does, and only when there is one: `CanvasBandView` draws the
+  /// origin exactly when the canvas has entry ports. An empty canvas has no band at all,
+  /// and there the top-right New Loop is the way in.
+  @ViewBuilder
+  private func entryHandleLayer(_ derived: Derived) -> some View {
+    if let rect = bandRect(derived), !entryPorts(derived).isEmpty {
+      CanvasEntryHandle(help: "New loop in \(store.graph.project.name)") {
+        store.send(.addEntryLoopTapped)
+      }
+      .position(x: rect.minX + CanvasBand.originLane / 2, y: rect.midY)
     }
   }
 

@@ -132,6 +132,9 @@ struct ProjectFeature {
     /// to "does this start something" is its edges, and a stored flag would be a second
     /// answer free to disagree with them. See `CardEntryRole`.
     var declaredEntryIDs: Set<UUID> = []
+    /// Whether the open form was started from a lane's entry handle, so the loop it
+    /// creates joins `declaredEntryIDs` instead of reading as a loose one.
+    var draftDeclaresEntry = false
 
     /// The sidebar's display order for this project's loops, node ids first-to-last.
     /// Local UI state like `nodePositions`: the daemon's graph carries no ordering a
@@ -174,6 +177,9 @@ struct ProjectFeature {
     case binding(BindingAction<State>)
     case daemonEvent(DaemonEvent)
     case addNodeButtonTapped(parentBackend: CLISessionBackendKind?)
+    /// The lane's origin `+` on the Graph view: a top-level loop, declared an entry
+    /// because someone asked for a beginning rather than left one lying around.
+    case addEntryLoopTapped
     /// The + handle on a node card: opens the same form, and the created loop gets a
     /// hand-off edge from this node.
     case addChildNodeTapped(UUID)
@@ -315,6 +321,9 @@ struct ProjectFeature {
 
       case .addNodeButtonTapped(let parentBackend):
         return openNodeForm(&state, backend: parentBackend, parentNodeID: nil)
+
+      case .addEntryLoopTapped:
+        return openNodeForm(&state, backend: nil, parentNodeID: nil, declaresEntry: true)
 
       case .addChildNodeTapped(let parentID):
         // The child inherits its parent's backend, same rule as creating from within an
@@ -640,6 +649,11 @@ extension ProjectFeature {
     // graph never broadcasts a child floating unconnected.
     let parentNodeID = state.draftParentNodeID
     let custodial = state.draftParentIsCustodial
+    // Asked for from the entry handle, so it is a beginning on purpose — without this it
+    // would land as `.unwired`, which the canvas draws dimmed and dashed and offers to
+    // fix. See `CardEntryRole`.
+    if state.draftDeclaresEntry { state.declaredEntryIDs.insert(draft.id) }
+    state.draftDeclaresEntry = false
     state.draftParentNodeID = nil
     state.draftParentIsCustodial = false
     state.showingNewNodeForm = false
@@ -717,9 +731,10 @@ extension ProjectFeature {
 
   private func openNodeForm(
     _ state: inout State, backend: CLISessionBackendKind?, parentNodeID: UUID?,
-    custodial: Bool = false
+    custodial: Bool = false, declaresEntry: Bool = false
   ) -> Effect<Action> {
     state.draftID = UUID()
+    state.draftDeclaresEntry = declaresEntry
     state.draftLoopType = Self.rememberedLoopType
     state.draftTitle = ""
     state.draftCheck = ""
