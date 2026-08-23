@@ -33,10 +33,9 @@ struct ManageWorkspacesView: View {
       }
 
       HStack {
-        Button("New Workspace…") {
-          store.send(.workspaces(.manageDismissed))
-          store.send(.workspaces(.newRequested))
-        }
+        // No manual dismiss: `newRequested` closes Manage and raises the sheet after
+        // it has gone, the same hand-off Rename and Delete use.
+        Button("New Workspace…") { store.send(.workspaces(.newRequested)) }
         Spacer()
         Button("Done") { store.send(.workspaces(.manageDismissed)) }
           .keyboardShortcut(.defaultAction)

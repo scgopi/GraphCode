@@ -103,6 +103,11 @@ extension AppFeature {
     case starterBackendPicked(CLISessionBackendKind)
     case starterDismissed
     case renameRequested(Workspace)
+    /// The half that actually raises each sheet, sent once Manage has closed — see
+    /// `handOff`. Separate cases rather than a flag, so the order is visible in a test.
+    case newPresented
+    case renamePresented(Workspace)
+    case deletePresented(PendingDeletion)
     case renameDraftChanged(String)
     case renameConfirmed
     case renameCancelled
@@ -125,6 +130,27 @@ struct AppWorkspacesReducer: Reducer {
   @Dependency(\.workspaceClient) var workspaces
   @Dependency(\.updateClient) var updateClient
   @Dependency(\.openURL) var openURL
+  @Dependency(\.continuousClock) var clock
+
+  /// Closes Manage Workspaces, then raises the sheet the row asked for.
+  ///
+  /// A view presents one sheet at a time. Rename and Delete are rows *inside* Manage, so
+  /// flipping Manage off and the next sheet on in the same update left neither on screen:
+  /// Manage stayed put and nothing came up — the same trap `GraphOverviewView`'s form
+  /// hosts record, where a binding and its host changing together miss the transition.
+  ///
+  /// The wait is only paid when Manage is actually open, so the File menu and the
+  /// switcher still raise their sheets immediately.
+  private func handOff(
+    _ state: inout AppFeature.State, to action: AppFeature.Action
+  ) -> Effect<AppFeature.Action> {
+    let wasManaging = state.workspaces.isManaging
+    state.workspaces.isManaging = false
+    return .run { send in
+      if wasManaging { try? await clock.sleep(for: .milliseconds(280)) }
+      await send(action)
+    }
+  }
 
   var body: some Reducer<AppFeature.State, AppFeature.Action> {
     Reduce { state, action in
@@ -189,6 +215,9 @@ struct AppWorkspacesReducer: Reducer {
         return .run { [finish = workspaces.finishStarter] _ in finish() }
 
       case .workspaces(.newRequested):
+        return handOff(&state, to: .workspaces(.newPresented))
+
+      case .workspaces(.newPresented):
         state.workspaces.draftName = ""
         state.workspaces.problem = nil
         state.workspaces.isCreating = true
@@ -226,6 +255,9 @@ struct AppWorkspacesReducer: Reducer {
           state.workspaces.changeFailure = refusal.localizedDescription
           return .none
         }
+        return handOff(&state, to: .workspaces(.renamePresented(workspace)))
+
+      case .workspaces(.renamePresented(let workspace)):
         state.workspaces.renaming = workspace
         // Prefilled with the current name: renaming is usually a correction, not a
         // fresh start, and an empty field would make you retype what you had.
@@ -261,8 +293,15 @@ struct AppWorkspacesReducer: Reducer {
           state.workspaces.changeFailure = refusal.localizedDescription
           return .none
         }
-        state.workspaces.pendingDeletion = AppFeature.PendingDeletion(
-          workspace: workspace, contents: workspace.contents())
+        return handOff(
+          &state,
+          to: .workspaces(
+            .deletePresented(
+              AppFeature.PendingDeletion(
+                workspace: workspace, contents: workspace.contents()))))
+
+      case .workspaces(.deletePresented(let pending)):
+        state.workspaces.pendingDeletion = pending
         return .none
 
       case .workspaces(.deleteConfirmed):
