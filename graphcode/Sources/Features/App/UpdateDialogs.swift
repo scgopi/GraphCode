@@ -1,4 +1,5 @@
 import ComposableArchitecture
+import GraphcodeKit
 import SwiftUI
 
 /// Check for Updates' dialogs and the install-progress indicator, applied to `AppView`'s
@@ -7,6 +8,15 @@ import SwiftUI
 /// button's action, which is how the shipped Download button managed to do nothing (#35).
 struct UpdateDialogs: ViewModifier {
   let store: StoreOf<AppFeature>
+
+  /// "work", "work and oss", "work, oss and side" — named rather than counted, because
+  /// the answer someone needs is *which* windows are about to be quit.
+  static func list(_ workspaces: [Workspace]) -> String {
+    let names = workspaces.map(\.name)
+    guard let last = names.last else { return "" }
+    guard names.count > 1 else { return last }
+    return names.dropLast().joined(separator: ", ") + " and " + last
+  }
 
   func body(content: Content) -> some View {
     content
@@ -51,6 +61,33 @@ struct UpdateDialogs: ViewModifier {
           "GraphCode \(store.offeredUpdate?.version ?? "") is in Applications and "
             + "takes over on the next launch. Sessions keep running through a relaunch "
             + "— the daemon holds them, not the window.")
+      }
+      // Asked before the swap, not after: every workspace runs from the same copy in
+      // /Applications, so installing replaces the bundle underneath any other open
+      // window — which is then executing pages that are no longer on disk.
+      .confirmationDialog(
+        "Other workspaces are open",
+        isPresented: Binding(
+          get: { store.workspaces.othersOpenForUpdate != nil },
+          set: { if !$0 { store.send(.workspaces(.othersForUpdateDismissed)) } }
+        ),
+        titleVisibility: .visible,
+        presenting: store.workspaces.othersOpenForUpdate
+      ) { others in
+        Button("Quit \(others.count == 1 ? "It" : "Them") & Install") {
+          store.send(.workspaces(.quitOthersForUpdate))
+        }
+        Button("Install Anyway") { store.send(.workspaces(.updateWithoutQuittingOthers)) }
+        Button("Cancel", role: .cancel) {
+          store.send(.workspaces(.othersForUpdateDismissed))
+        }
+      } message: { others in
+        Text(
+          "\(UpdateDialogs.list(others)) \(others.count == 1 ? "is" : "are") open in "
+            + "\(others.count == 1 ? "another window" : "other windows"). Every workspace "
+            + "runs the same app, so installing replaces it for all of them. Quitting "
+            + "them first is the clean way — their loops keep running either way, since "
+            + "the daemon holds the sessions, not the window.")
       }
       .alert(
         "Couldn't install the update",

@@ -152,6 +152,21 @@ extension AppFeature {
         return .none
 
       case .updateInstallTapped:
+        guard state.offeredUpdate != nil, state.updateInstallProgress == nil
+        else { return .none }
+        // Every workspace runs from the same copy in /Applications, so installing swaps
+        // the bundle out from under any other open window — which then keeps running an
+        // old binary whose pages are no longer on disk. Ask first; `UpdateDialogs` offers
+        // to quit them, and either answer comes back as `.updateInstallConfirmed`.
+        let others = workspaceClient.otherOpen()
+        guard others.isEmpty else {
+          state.workspaces.othersOpenForUpdate = others
+          state.availableUpdate = nil
+          return .none
+        }
+        return .send(.updateInstallConfirmed)
+
+      case .updateInstallConfirmed:
         guard let update = state.offeredUpdate, state.updateInstallProgress == nil
         else { return .none }
         state.availableUpdate = nil

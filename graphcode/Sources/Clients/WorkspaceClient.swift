@@ -24,6 +24,11 @@ struct WorkspaceClient: Sendable {
   /// directory to the Trash. Throws `Workspace.DeletionRefusal` when it is not a
   /// workspace this may touch.
   var delete: @Sendable (Workspace) throws -> Void
+  /// Workspaces open in *other* instances right now. Asked before an update swaps the
+  /// bundle, since every workspace runs from the same copy in /Applications.
+  var otherOpen: @Sendable () -> [Workspace]
+  /// Asks those instances to quit, and waits — briefly — for them to actually go.
+  var quit: @Sendable ([Workspace]) async -> Void
 }
 
 extension WorkspaceClient: DependencyKey {
@@ -60,13 +65,35 @@ extension WorkspaceClient: DependencyKey {
       // copy of it. Recoverable for as long as they haven't emptied the Trash.
       var trashed: NSURL?
       try FileManager.default.trashItem(at: workspace.url, resultingItemURL: &trashed)
+    },
+    otherOpen: {
+      let current = Workspace.current
+      return Workspace.all()
+        .filter { $0.id != current.id }
+        .filter { runningInstance(of: $0) != nil }
+    },
+    quit: { workspaces in
+      let running = workspaces.compactMap(runningInstance(of:))
+      for application in running { application.terminate() }
+
+      // Waited on rather than fired and forgotten: the point is to have them gone
+      // *before* /Applications is replaced, since a running app whose bundle has been
+      // swapped underneath it is reading pages that no longer exist. Bounded, because a
+      // window that will not quit must not strand the update — the human already chose
+      // to go ahead.
+      let deadline = Date().addingTimeInterval(10)
+      while Date() < deadline, running.contains(where: { !$0.isTerminated }) {
+        try? await Task.sleep(for: .milliseconds(100))
+      }
     })
 
   static let testValue = WorkspaceClient(
     list: { [.default] },
     create: { Workspace(slug: $0, url: URL(fileURLWithPath: "/tmp/\($0)")) },
     open: { _ in },
-    delete: { _ in })
+    delete: { _ in },
+    otherOpen: { [] },
+    quit: { _ in })
 
   /// `zmx kill` per session, best effort: a name that is already gone exits non-zero and
   /// that is the healthy case, not something to abandon the deletion over.
