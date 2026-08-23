@@ -110,7 +110,8 @@ struct DaemonBootstrapTests {
     // Pointing launchd inside the app bundle would break the moment the app is replaced
     // or moved, and would keep a mounted disk image busy.
     let plist = DaemonBootstrap.launchAgentPlist(
-      daemonPath: "/Users/x/.graphcode/bin/graphcoded", supportDirectory: "/Users/x/.graphcode")
+      daemonPath: "/Users/x/.graphcode/bin/graphcoded", supportDirectory: "/Users/x/.graphcode",
+      workspace: .default)
 
     #expect(plist["Label"] as? String == "dev.graphcode.graphcoded")
     #expect(plist["ProgramArguments"] as? [String] == ["/Users/x/.graphcode/bin/graphcoded"])
@@ -130,7 +131,8 @@ struct DaemonBootstrapTests {
     // tells the user "Software from <a person they have never heard of> can run in the
     // background".
     let plist = DaemonBootstrap.launchAgentPlist(
-      daemonPath: "/Users/x/.graphcode/bin/graphcoded", supportDirectory: "/Users/x/.graphcode")
+      daemonPath: "/Users/x/.graphcode/bin/graphcoded", supportDirectory: "/Users/x/.graphcode",
+      workspace: .default)
 
     #expect(plist["AssociatedBundleIdentifiers"] as? [String] == ["dev.graphcode.app"])
   }
@@ -143,7 +145,8 @@ struct DaemonBootstrapTests {
     defer { try? FileManager.default.removeItem(at: directory) }
     let url = directory.appendingPathComponent("agent.plist")
     let expected = DaemonBootstrap.launchAgentPlist(
-      daemonPath: "/Users/x/.graphcode/bin/graphcoded", supportDirectory: "/Users/x/.graphcode")
+      daemonPath: "/Users/x/.graphcode/bin/graphcoded", supportDirectory: "/Users/x/.graphcode",
+      workspace: .default)
 
     #expect(!DaemonBootstrap.launchAgentIsCurrent(at: url, expected: expected))
 
@@ -156,6 +159,37 @@ struct DaemonBootstrapTests {
     try PropertyListSerialization.data(fromPropertyList: expected, format: .xml, options: 0)
       .write(to: url)
     #expect(DaemonBootstrap.launchAgentIsCurrent(at: url, expected: expected))
+  }
+
+  @Test
+  func theDefaultWorkspacesAgentIsUnchangedAndANamedOnesCarriesItsDirectory() {
+    // Two halves of one promise. launchd starts an agent with its own minimal
+    // environment, so a named workspace's daemon has to be *told* where to look or it
+    // computes `~/.graphcode` and serves the default workspace's graphs under the second
+    // workspace's label. And the default workspace must gain nothing at all: an extra key
+    // there would make `launchAgentIsCurrent` call every existing install stale and bounce
+    // a daemon that was running perfectly well.
+    let standard = DaemonBootstrap.launchAgentPlist(
+      daemonPath: "/Users/x/.graphcode/bin/graphcoded", supportDirectory: "/Users/x/.graphcode",
+      workspace: .default)
+    #expect(standard["EnvironmentVariables"] as? [String: String] == nil)
+    #expect(standard["Label"] as? String == "dev.graphcode.graphcoded")
+
+    let named = DaemonBootstrap.launchAgentPlist(
+      daemonPath: "/Users/x/.graphcode-work/bin/graphcoded",
+      supportDirectory: "/Users/x/.graphcode-work",
+      workspace: Workspace(slug: "work", url: URL(fileURLWithPath: "/Users/x/.graphcode-work")))
+    #expect(named["Label"] as? String == "dev.graphcode.graphcoded.work")
+    #expect(
+      named["EnvironmentVariables"] as? [String: String]
+        == ["GRAPHCODE_SUPPORT_DIR": "/Users/x/.graphcode-work"])
+    #expect(named["StandardOutPath"] as? String == "/Users/x/.graphcode-work/graphcoded.log")
+    // Still the app's own agent, whichever workspace it serves — this is what keeps
+    // macOS from naming the background item after the signing certificate.
+    #expect(named["AssociatedBundleIdentifiers"] as? [String] == ["dev.graphcode.app"])
+    #expect(
+      (try? PropertyListSerialization.data(fromPropertyList: named, format: .xml, options: 0))
+        != nil)
   }
 
   @Test

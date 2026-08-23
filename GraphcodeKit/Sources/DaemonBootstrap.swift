@@ -27,7 +27,10 @@ public enum DaemonBootstrap {
     case failed(String)
   }
 
-  private static let label = "dev.graphcode.graphcoded"
+  /// One agent per workspace, so that opening a second one installs a daemon of its own
+  /// instead of rewriting the first's. The default workspace keeps the bare label it has
+  /// always had — an existing install must not see its agent renamed.
+  static var label: String { Workspace.current.daemonLabel }
   private static let appBundleIdentifier = "dev.graphcode.app"
   /// `graphcode` here is the CLI, not the app — a different product that happens to share
   /// the name a human types. Shipping it matters: `~/.graphcode/bin` is what the README
@@ -167,11 +170,20 @@ public enum DaemonBootstrap {
 
   /// Built here rather than shipped as a template file: the two paths it needs are already
   /// known at runtime, and a template would be one more thing to keep in sync.
+  ///
+  /// `workspace` decides both the label and whether the daemon is told where to look.
+  /// launchd starts an agent with its own minimal environment, so a named workspace's
+  /// daemon inherits nothing from the app that installed it and would compute
+  /// `~/.graphcode` — serving the default workspace's graphs under the second
+  /// workspace's label. The default workspace passes no `EnvironmentVariables` at all,
+  /// which keeps its plist byte-for-byte what it has always been: anything else and
+  /// `launchAgentIsCurrent` would report every existing install as stale and bounce a
+  /// daemon that was running perfectly well.
   static func launchAgentPlist(
-    daemonPath: String, supportDirectory: String
+    daemonPath: String, supportDirectory: String, workspace: Workspace = .current
   ) -> [String: Any] {
-    [
-      "Label": label,
+    var plist: [String: Any] = [
+      "Label": workspace.daemonLabel,
       "ProgramArguments": [daemonPath],
       "RunAtLoad": true,
       "KeepAlive": true,
@@ -185,6 +197,10 @@ public enum DaemonBootstrap {
       // exactly what an app installing a legacy plist should set.
       "AssociatedBundleIdentifiers": [appBundleIdentifier],
     ]
+    if !workspace.isDefault {
+      plist["EnvironmentVariables"] = [SupportDirectory.environmentKey: supportDirectory]
+    }
+    return plist
   }
 
   static func currentLaunchAgentPlist() -> [String: Any] {

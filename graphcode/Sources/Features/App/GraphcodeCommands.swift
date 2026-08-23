@@ -33,6 +33,13 @@ struct GraphcodeCommands: Commands {
     // not about any loop.
     CommandGroup(after: .newItem) {
       Divider()
+      // Beside New Window rather than in a menu of its own: a workspace is the other
+      // thing "new" can mean here, and the one that opens a window you can put on a
+      // second screen.
+      Menu("Workspace") {
+        WorkspaceMenuItems(store: store)
+      }
+      Divider()
       Button("Worktrees…") {
         guard let path = focusedFolderPath else { return }
         store.send(.worktrees(.sweepRequested(projectPath: path)))
