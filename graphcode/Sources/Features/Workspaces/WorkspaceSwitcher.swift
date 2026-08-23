@@ -92,10 +92,24 @@ struct WorkspaceFooter: View {
 
   var body: some View {
     if store.workspaces.isWorthShowing {
-      // The rule above it, full width: without one the row reads as one more project at
-      // the end of the list rather than as the thing the whole list belongs to.
-      Divider().overlay(.white.opacity(0.09))
+      VStack(spacing: 0) {
+        // The rule above it, full width: without one the row reads as one more project
+        // at the end of the list rather than as the thing the whole list belongs to.
+        Divider().overlay(.white.opacity(0.09))
 
+        row
+      }
+      // Opaque, and this is the whole bug it fixes: a `safeAreaInset` reserves space but
+      // paints nothing, so with more loops than fit, rows scrolled *under* the footer and
+      // straight through it — the workspace name and its icon sitting on top of moving
+      // text, both illegible. The bar material rather than a flat colour, so it belongs
+      // to the same glass the sidebar is made of.
+      .background(.bar)
+    }
+  }
+
+  private var row: some View {
+    Group {
       Button {
         store.send(.workspaces(.switcherPresented(true)))
       } label: {

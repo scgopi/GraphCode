@@ -96,7 +96,15 @@ extension WorkspaceClient: DependencyKey {
     },
     starterInvitation: { WorkspaceStarter.pending() },
     applyDefaultBackend: { backend in
-      await MainActor.run { SettingsModel.shared.settings.defaultBackend = backend }
+      // The file first, and unconditionally: this runs moments after a new workspace's
+      // window opens, when nothing has necessarily read a setting yet, and routing the
+      // write through the live model made the pick depend on that model already
+      // existing. Six workspaces were created with the starter answered and not one
+      // settings.json was written.
+      GraphcodeSettingsStore.setDefaultBackend(backend)
+      // Then the live model, so the Settings pane shows the choice and its next save
+      // does not write back over it — the lesson `OnboardingView` records.
+      await MainActor.run { SettingsModel.shared.settings = GraphcodeSettingsStore.load() }
     },
     finishStarter: { WorkspaceStarter.clear() },
     otherOpen: {

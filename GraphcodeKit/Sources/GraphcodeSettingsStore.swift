@@ -25,6 +25,23 @@ public enum GraphcodeSettingsStore {
     return settings
   }
 
+  /// Changes one setting on disk, reading and writing in one step.
+  ///
+  /// Exists because the app's live `SettingsModel` is a singleton whose first touch in a
+  /// freshly launched instance may be the very effect trying to write through it — the
+  /// new-workspace starter's, which asks which agent runs this workspace's loops before
+  /// anything else has read a setting. Going straight to the file removes that ordering
+  /// from the answer: the pick lands whether or not anything has looked at settings yet,
+  /// and the caller syncs the live model afterwards.
+  @discardableResult
+  public static func setDefaultBackend(
+    _ backend: CLISessionBackendKind, to url: URL = GraphcodeSettingsStore.url
+  ) -> Bool {
+    var settings = load(from: url)
+    settings.defaultBackend = backend
+    return save(settings, to: url)
+  }
+
   @discardableResult
   public static func save(
     _ settings: GraphcodeSettings, to url: URL = GraphcodeSettingsStore.url
