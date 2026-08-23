@@ -163,9 +163,27 @@ public enum DaemonBootstrap {
     removexattr(url.path, "com.apple.quarantine", 0)
   }
 
-  static var launchAgentURL: URL {
+  static var launchAgentURL: URL { launchAgentURL(forLabel: label) }
+
+  static func launchAgentURL(forLabel label: String) -> URL {
     URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
       .appendingPathComponent("Library/LaunchAgents/\(label).plist")
+  }
+
+  /// Takes a workspace's daemon out of launchd and removes its agent — the first step of
+  /// deleting a workspace, and the one that cannot be skipped: the agent is `KeepAlive`,
+  /// so a daemon left loaded over a deleted directory is restarted by launchd and
+  /// recreates it.
+  ///
+  /// Refuses the default workspace outright. There is no path through the UI that asks
+  /// for this, and the cost of being wrong is an install whose daemon is gone.
+  public static func removeLaunchAgent(for workspace: Workspace) {
+    guard !workspace.isDefault else { return }
+    let url = launchAgentURL(forLabel: workspace.daemonLabel)
+    launchctl(["bootout", "\(domainTarget)/\(workspace.daemonLabel)"])
+    // The legacy pair as well, for an agent loaded by a build old enough to have used it.
+    launchctl(["unload", url.path])
+    try? FileManager.default.removeItem(at: url)
   }
 
   /// Built here rather than shipped as a template file: the two paths it needs are already

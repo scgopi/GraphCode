@@ -20,6 +20,10 @@ struct WorkspaceClient: Sendable {
   /// set of graphs and `zmx` session names, which is the failure `WorkspaceLock` exists
   /// to prevent.
   var open: @Sendable (Workspace) -> Void
+  /// Tears a workspace down: its daemon out of launchd, its `zmx` sessions ended, its
+  /// directory to the Trash. Throws `Workspace.DeletionRefusal` when it is not a
+  /// workspace this may touch.
+  var delete: @Sendable (Workspace) throws -> Void
 }
 
 extension WorkspaceClient: DependencyKey {
@@ -36,12 +40,46 @@ extension WorkspaceClient: DependencyKey {
       configuration.environment = [SupportDirectory.environmentKey: workspace.url.path]
       NSWorkspace.shared.openApplication(
         at: Bundle.main.bundleURL, configuration: configuration, completionHandler: nil)
+    },
+    delete: { workspace in
+      if let refusal = workspace.deletionRefusal() { throw refusal }
+
+      // Order matters. The agent is `KeepAlive`, so a daemon still loaded over a deleted
+      // directory is restarted by launchd and recreates it — the workspace comes back
+      // from the dead, empty. Take launchd out of it first.
+      DaemonBootstrap.removeLaunchAgent(for: workspace)
+
+      // Then the sessions. These are the running agents: `zmx` outlives every app, so a
+      // session missed here is a CLI left talking to a graph that no longer exists, for
+      // as long as the machine is up. Killed through *this* workspace's `zmx` binary
+      // because the one in the doomed directory is about to go — the server they both
+      // talk to is the same one either way.
+      endSessions(workspace.contents().sessionNames)
+
+      // Trash rather than delete: this is someone's work, and the directory is the only
+      // copy of it. Recoverable for as long as they haven't emptied the Trash.
+      var trashed: NSURL?
+      try FileManager.default.trashItem(at: workspace.url, resultingItemURL: &trashed)
     })
 
   static let testValue = WorkspaceClient(
     list: { [.default] },
     create: { Workspace(slug: $0, url: URL(fileURLWithPath: "/tmp/\($0)")) },
-    open: { _ in })
+    open: { _ in },
+    delete: { _ in })
+
+  /// `zmx kill` per session, best effort: a name that is already gone exits non-zero and
+  /// that is the healthy case, not something to abandon the deletion over.
+  private static func endSessions(_ names: [String]) {
+    guard ZmxLocator.isInstalled, !names.isEmpty else { return }
+    let process = Process()
+    process.executableURL = ZmxLocator.binaryURL
+    process.arguments = ["kill"] + names + ["--force"]
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    try? process.run()
+    process.waitUntilExit()
+  }
 
   /// The pid file names a process; this checks it is actually one of ours before
   /// activating it, since pids are reused and the recorded process may be long gone and

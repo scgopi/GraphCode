@@ -19,11 +19,32 @@ extension AppFeature {
     /// What is wrong with `draftName`, said while it is being typed rather than after
     /// Create is pressed.
     var problem: String?
+    /// The workspace a Delete confirmation is up for, with what it would take with it —
+    /// counted when the dialog opens, since the numbers come off disk.
+    var pendingDeletion: PendingDeletion?
+    /// A refusal or a failure from the last deletion attempt, shown as an alert. Distinct
+    /// from `problem`, which is about a name being typed.
+    var deletionFailure: String?
 
     /// Whether to name the workspace in the UI at all. A machine with one workspace has
     /// no ambiguity to resolve, and a permanent "Default" chip would be noise on every
     /// install that never uses this.
     var isWorthShowing: Bool { !current.isDefault || known.count > 1 }
+  }
+
+  /// One workspace and what deleting it costs, held while the confirmation is up.
+  struct PendingDeletion: Equatable {
+    var workspace: Workspace
+    var contents: Workspace.Contents
+
+    /// "2 projects and 14 loops" — the sentence the dialog needs, with the plurals right
+    /// and an empty workspace saying so rather than reading "0 projects and 0 loops".
+    var summary: String {
+      guard contents.projects > 0 || contents.loops > 0 else { return "It has nothing in it" }
+      let projects = "\(contents.projects) project\(contents.projects == 1 ? "" : "s")"
+      let loops = "\(contents.loops) loop\(contents.loops == 1 ? "" : "s")"
+      return "It holds \(projects) and \(loops)"
+    }
   }
 
   /// The workspace half of the app's actions, nested so the whole surface costs
@@ -37,6 +58,10 @@ extension AppFeature {
     case createConfirmed
     /// Raise (or launch) the instance that owns this workspace.
     case switchRequested(Workspace)
+    case deleteRequested(Workspace)
+    case deleteConfirmed
+    case deleteCancelled
+    case deletionFailureDismissed
   }
 }
 
@@ -86,6 +111,34 @@ struct AppWorkspacesReducer: Reducer {
       case .workspaces(.switchRequested(let workspace)):
         guard workspace.id != state.workspaces.current.id else { return .none }
         return .run { [open = workspaces.open] _ in open(workspace) }
+
+      case .workspaces(.deleteRequested(let workspace)):
+        if let refusal = workspace.deletionRefusal(current: state.workspaces.current) {
+          state.workspaces.deletionFailure = refusal.localizedDescription
+          return .none
+        }
+        state.workspaces.pendingDeletion = AppFeature.PendingDeletion(
+          workspace: workspace, contents: workspace.contents())
+        return .none
+
+      case .workspaces(.deleteConfirmed):
+        guard let pending = state.workspaces.pendingDeletion else { return .none }
+        state.workspaces.pendingDeletion = nil
+        do {
+          try workspaces.delete(pending.workspace)
+        } catch {
+          state.workspaces.deletionFailure = error.localizedDescription
+        }
+        state.workspaces.known = workspaces.list()
+        return .none
+
+      case .workspaces(.deleteCancelled):
+        state.workspaces.pendingDeletion = nil
+        return .none
+
+      case .workspaces(.deletionFailureDismissed):
+        state.workspaces.deletionFailure = nil
+        return .none
 
       default:
         return .none

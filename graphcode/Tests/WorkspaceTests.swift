@@ -154,6 +154,82 @@ struct WorkspaceTests {
   }
 
   @Test
+  func deletionIsRefusedForTheDefaultTheCurrentAndAnOpenWorkspace() {
+    let home = makeHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+    let work = Workspace(slug: "work", url: Workspace.url(forSlug: "work", home: home))
+    let other = Workspace(slug: "oss", url: Workspace.url(forSlug: "oss", home: home))
+    try? FileManager.default.createDirectory(at: work.url, withIntermediateDirectories: true)
+
+    // The default workspace is every existing install's whole state.
+    #expect(Workspace.default.deletionRefusal(current: work) == .isDefault)
+    // Deleting the workspace this window is using would pull its graphs out from under a
+    // live app.
+    #expect(work.deletionRefusal(current: work) == .isCurrent)
+    #expect(work.deletionRefusal(current: other) == nil)
+
+    // And the same thing one process away: another instance has it open.
+    WorkspaceLock.claim(work, pid: getpid())
+    #expect(work.deletionRefusal(current: other) == .isOpen(pid: getpid()))
+    WorkspaceLock.release(work, pid: getpid())
+    #expect(work.deletionRefusal(current: other) == nil)
+  }
+
+  @Test
+  func aWorkspacesContentsNameEverySessionItsDeletionMustEnd() throws {
+    // A session missed here is an agent left running against a workspace that no longer
+    // exists, for as long as the machine is up — zmx outlives every app. Extra tabs and
+    // splits are surfaces of their own, so the graphs alone are not the whole answer.
+    let home = makeHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+    let workspace = try Workspace.create(name: "work", home: home)
+
+    let node = LoopNode(title: "a loop")
+    var graph = LoopGraph(project: ProjectRef(path: "/tmp/project", name: "project"))
+    graph.nodes.append(node)
+    let projects = workspace.url.appendingPathComponent("projects", isDirectory: true)
+    try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+    try JSONEncoder().encode(graph)
+      .write(to: projects.appendingPathComponent("_tmp_project.json"))
+
+    let extraSurface = SurfaceRef(id: UUID(), launchesClaudeCode: false)
+    var layout = TerminalLayout.defaultLayout(forNode: node.id)
+    layout.tabs.append(TabLayout(primary: extraSurface))
+    let layouts = workspace.url.appendingPathComponent("terminal-layouts", isDirectory: true)
+    try FileManager.default.createDirectory(at: layouts, withIntermediateDirectories: true)
+    try JSONEncoder().encode(layout)
+      .write(to: layouts.appendingPathComponent("\(node.id.uuidString).json"))
+
+    let contents = workspace.contents()
+    #expect(contents.projects == 1)
+    #expect(contents.loops == 1)
+    #expect(contents.sessionNames.contains("graphcode-\(node.id.uuidString)"))
+    #expect(contents.sessionNames.contains("graphcode-\(extraSurface.id.uuidString)"))
+    #expect(contents.sessionNames.count == 2)
+  }
+
+  @Test
+  func aLiveClaimIsNotStolenByASecondProcess() {
+    // The test host launches the app, which claims the default workspace on the way up.
+    // Claiming unconditionally would have it overwrite a running window's pid, and once
+    // the host exited the workspace would read as free while that window still had it.
+    let home = makeHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+    let workspace = Workspace(slug: "work", url: home)
+
+    #expect(WorkspaceLock.claim(workspace, pid: getpid()))
+    #expect(!WorkspaceLock.claim(workspace, pid: 4242))
+    #expect(WorkspaceLock.holder(of: workspace) == getpid())
+
+    // A dead holder is no holder: a crashed app must not lock the workspace out forever.
+    WorkspaceLock.release(workspace, pid: getpid())
+    WorkspaceLock.claim(workspace, pid: 999_999)
+    #expect(WorkspaceLock.claim(workspace, pid: getpid()))
+    #expect(WorkspaceLock.holder(of: workspace) == getpid())
+    WorkspaceLock.release(workspace, pid: getpid())
+  }
+
+  @Test
   func aWorkspaceRecordsWhichProcessHasItOpen() {
     let home = makeHome()
     defer { try? FileManager.default.removeItem(at: home) }
@@ -166,7 +242,9 @@ struct WorkspaceTests {
 
     // A pid nothing is running under is not a claim — this is what a crashed app leaves
     // behind, and treating it as live would lock a workspace out until someone deleted a
-    // file they have never heard of.
+    // file they have never heard of. Released first because a claim is not stolen from a
+    // live holder; see `aLiveClaimIsNotStolenByASecondProcess`.
+    WorkspaceLock.release(workspace, pid: getpid())
     WorkspaceLock.claim(workspace, pid: 999_999)
     #expect(WorkspaceLock.holder(of: workspace) == nil)
 

@@ -84,6 +84,10 @@ graphs and its own `graphcoded`. Nothing is shared between them — a loop in on
 other — and the switcher at the foot of the sidebar says which one you are in. The CLI follows the
 same variable the app sets: `GRAPHCODE_SUPPORT_DIR=~/.graphcode-work graphcode status <project>`.
 
+**⌥⌘1 … ⌥⌘9** switch between them in menu order and **⌥⌘N** makes a new one. **Delete Workspace**,
+in the same menu, ends that workspace's terminal sessions, stops its daemon, and moves its folder to
+the Trash — the default workspace and whichever one you are in are never offered.
+
 ## Building from source
 
 Needs [mise](https://mise.jdx.dev) (Xcode, tuist, swiftlint, zig come through it) and the submodules.

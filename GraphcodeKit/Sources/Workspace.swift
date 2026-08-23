@@ -191,6 +191,76 @@ extension Workspace {
     return .success(workspace)
   }
 
+  /// What deleting this workspace would take with it — shown in the confirmation, and
+  /// the source of the `zmx` sessions that have to be ended before the directory goes.
+  ///
+  /// Session names come from the terminal layouts as well as the graphs: a loop's first
+  /// surface is named after the node, but its extra tabs and splits are surfaces of their
+  /// own, and a session missed here is an agent left running against a workspace that no
+  /// longer exists.
+  public struct Contents: Equatable, Sendable {
+    public var projects = 0
+    public var loops = 0
+    public var sessionNames: [String] = []
+  }
+
+  public func contents(fileManager: FileManager = .default) -> Contents {
+    var contents = Contents()
+    var surfaceIDs = Set<UUID>()
+
+    let projectsDirectory = url.appendingPathComponent("projects", isDirectory: true)
+    for name in (try? fileManager.contentsOfDirectory(atPath: projectsDirectory.path)) ?? []
+    where name.hasSuffix(".json") {
+      guard let data = try? Data(contentsOf: projectsDirectory.appendingPathComponent(name)),
+        let graph = try? JSONDecoder().decode(LoopGraph.self, from: data)
+      else { continue }
+      contents.projects += 1
+      contents.loops += graph.nodes.count
+      surfaceIDs.formUnion(graph.nodes.map(\.id))
+    }
+
+    let layoutsDirectory = url.appendingPathComponent("terminal-layouts", isDirectory: true)
+    for name in (try? fileManager.contentsOfDirectory(atPath: layoutsDirectory.path)) ?? []
+    where name.hasSuffix(".json") {
+      guard let data = try? Data(contentsOf: layoutsDirectory.appendingPathComponent(name)),
+        let layout = try? JSONDecoder().decode(TerminalLayout.self, from: data)
+      else { continue }
+      surfaceIDs.formUnion(layout.tabs.flatMap(\.surfaces).map(\.id))
+    }
+
+    contents.sessionNames = surfaceIDs.map { "\(SurfaceRef.zmxSessionPrefix)\($0.uuidString)" }
+      .sorted()
+    return contents
+  }
+
+  /// Why a workspace cannot be deleted right now.
+  public enum DeletionRefusal: Error, Equatable, LocalizedError {
+    case isDefault
+    case isCurrent
+    case isOpen(pid: Int32)
+
+    public var errorDescription: String? {
+      switch self {
+      case .isDefault:
+        return "The default workspace can't be deleted."
+      case .isCurrent:
+        return "This is the workspace you're in. Switch to another one first."
+      case .isOpen(let pid):
+        return "That workspace is open in another window (pid \(pid)). Quit it first."
+      }
+    }
+  }
+
+  /// The three questions asked before anything is torn down. Deleting the workspace a
+  /// window is *using* would pull its graphs out from under a live app; deleting one
+  /// another instance has open is the same thing, one process away.
+  public func deletionRefusal(current: Workspace = .current) -> DeletionRefusal? {
+    if isDefault { return .isDefault }
+    if id == current.id { return .isCurrent }
+    if let pid = WorkspaceLock.holder(of: self) { return .isOpen(pid: pid) }
+    return nil
+  }
+
   /// What is wrong with a typed name, or `nil` when nothing is — the form the sheet wants
   /// while someone is still typing, where a `Result` would have it destructure a success
   /// it has no use for yet.

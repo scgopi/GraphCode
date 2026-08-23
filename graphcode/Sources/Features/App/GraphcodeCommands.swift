@@ -37,7 +37,7 @@ struct GraphcodeCommands: Commands {
       // thing "new" can mean here, and the one that opens a window you can put on a
       // second screen.
       Menu("Workspace") {
-        WorkspaceMenuItems(store: store)
+        WorkspaceMenuItems(store: store, showsShortcuts: true)
       }
       Divider()
       Button("Worktrees…") {

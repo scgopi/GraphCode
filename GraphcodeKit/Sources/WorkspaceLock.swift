@@ -17,12 +17,22 @@ public enum WorkspaceLock {
     workspace.url.appendingPathComponent("app.pid")
   }
 
-  /// Records this process as the workspace's. Called after `SupportDirectory.prepare()`,
-  /// which is what guarantees the directory exists.
+  /// Records this process as the workspace's, unless a live process already holds it —
+  /// in which case that one is still the owner and this is the interloper.
+  ///
+  /// Claiming unconditionally looked simpler and was wrong: any second process that
+  /// touches a workspace (the test host launching the app, an instance started around the
+  /// guard) would overwrite the running app's claim with its own, and once *it* exited the
+  /// workspace would read as free while a real window was still using it.
+  ///
+  /// Returns whether the claim is now this process's.
+  @discardableResult
   public static func claim(
     _ workspace: Workspace = .current, pid: Int32 = ProcessInfo.processInfo.processIdentifier
-  ) {
+  ) -> Bool {
+    if let holder = holder(of: workspace), holder != pid { return false }
     try? Data("\(pid)\n".utf8).write(to: url(for: workspace), options: .atomic)
+    return true
   }
 
   /// Drops the claim, when the file still names this process. The guard matters on the
