@@ -30,6 +30,17 @@ struct WorkspaceClient: Sendable {
   var rename: @Sendable (Workspace, String) throws -> Workspace
   /// Workspaces open in *other* instances right now. Asked before an update swaps the
   /// bundle, since every workspace runs from the same copy in /Applications.
+  /// What each workspace holds and whether a window has it — for the switcher's rows,
+  /// keyed by workspace id.
+  var summarize: @Sendable ([Workspace]) -> [String: Workspace.Summary]
+  /// The invitation this workspace was opened with, if it has not been answered yet —
+  /// what raises the starter dialog. See `WorkspaceStarter`.
+  var starterInvitation: @Sendable () -> WorkspaceStarter.Invitation?
+  /// Applied the moment it is picked, like the tour's page: through `SettingsModel`, not
+  /// the store underneath it, or the Settings pane would keep showing the old value.
+  var applyDefaultBackend: @Sendable (CLISessionBackendKind) async -> Void
+  /// Answered — by choosing or by skipping. Either way the dialog does not come back.
+  var finishStarter: @Sendable () -> Void
   var otherOpen: @Sendable () -> [Workspace]
   /// Asks those instances to quit, and waits — briefly — for them to actually go.
   var quit: @Sendable ([Workspace]) async -> Void
@@ -38,7 +49,13 @@ struct WorkspaceClient: Sendable {
 extension WorkspaceClient: DependencyKey {
   static let liveValue = WorkspaceClient(
     list: { Workspace.all() },
-    create: { try Workspace.create(name: $0) },
+    create: { name in
+      let created = try Workspace.create(name: name)
+      // The creating workspace is the one that knows what to suggest: the agent this
+      // person is already using, read from *this* workspace's settings.
+      WorkspaceStarter.invite(created, suggesting: GraphcodeSettingsStore.load().defaultBackend)
+      return created
+    },
     open: { workspace in
       if let existing = runningInstance(of: workspace) {
         existing.activate()
@@ -74,6 +91,14 @@ extension WorkspaceClient: DependencyKey {
       if let refusal = workspace.refusal(for: .rename) { throw refusal }
       return try workspace.renamed(to: name)
     },
+    summarize: { workspaces in
+      Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0.summary()) })
+    },
+    starterInvitation: { WorkspaceStarter.pending() },
+    applyDefaultBackend: { backend in
+      await MainActor.run { SettingsModel.shared.settings.defaultBackend = backend }
+    },
+    finishStarter: { WorkspaceStarter.clear() },
     otherOpen: {
       let current = Workspace.current
       return Workspace.all()
@@ -103,6 +128,10 @@ extension WorkspaceClient: DependencyKey {
     rename: { workspace, name in
       Workspace(slug: name, url: workspace.url.deletingLastPathComponent())
     },
+    summarize: { _ in [:] },
+    starterInvitation: { nil },
+    applyDefaultBackend: { _ in },
+    finishStarter: {},
     otherOpen: { [] },
     quit: { _ in })
 

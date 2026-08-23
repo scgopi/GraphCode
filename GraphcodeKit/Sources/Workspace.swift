@@ -246,6 +246,31 @@ extension Workspace {
     }
   }
 
+  /// What a switcher row needs to say about a workspace it is not inside: how much is in
+  /// it, and whether a window has it open.
+  ///
+  /// Read from disk every time rather than cached. These are small JSON files, the list
+  /// is opened by a human gesture, and the alternative — a cache — would be wrong in the
+  /// one case that matters, which is another instance working while you look at the row.
+  public struct Summary: Equatable, Sendable {
+    public var projects = 0
+    public var loops = 0
+    public var isOpen = false
+
+    public init(projects: Int = 0, loops: Int = 0, isOpen: Bool = false) {
+      self.projects = projects
+      self.loops = loops
+      self.isOpen = isOpen
+    }
+  }
+
+  public func summary(fileManager: FileManager = .default) -> Summary {
+    let contents = contents(fileManager: fileManager)
+    return Summary(
+      projects: contents.projects, loops: contents.loops,
+      isOpen: WorkspaceLock.holder(of: self) != nil)
+  }
+
   /// Why a workspace cannot be changed right now.
   public enum Refusal: Error, Equatable, LocalizedError {
     case isDefault(Change)

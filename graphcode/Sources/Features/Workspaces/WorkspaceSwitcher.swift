@@ -2,12 +2,15 @@ import ComposableArchitecture
 import GraphcodeKit
 import SwiftUI
 
-/// The list of workspaces, as menu items — the same contents whether it is reached from
-/// the sidebar's foot or from the File menu.
+/// The list of workspaces as menu items — what `File ▸ Workspace` shows.
 ///
 /// Picking one raises the instance that has it open, or launches one. Picking the current
 /// workspace does nothing, so the row stays selectable-looking rather than dimmed: a
 /// checkmark says which one you are in.
+///
+/// Rename and Delete are *not* here. They were two submenus of this submenu, which put
+/// deleting a workspace four levels down a menu; they live in Manage Workspaces… now,
+/// where both verbs are one click from the workspace they act on.
 struct WorkspaceMenuItems: View {
   @Bindable var store: StoreOf<AppFeature>
   /// Only the menu bar's copy carries them. The same items also render in the sidebar's
@@ -34,24 +37,8 @@ struct WorkspaceMenuItems: View {
     Divider()
     Button("New Workspace…") { store.send(.workspaces(.newRequested)) }
       .modifier(NewWorkspaceShortcut(isEnabled: showsShortcuts))
-    if !changeable.isEmpty {
-      Menu("Rename Workspace") {
-        ForEach(changeable) { workspace in
-          Button("\(workspace.name)…") { store.send(.workspaces(.renameRequested(workspace))) }
-        }
-      }
-      Menu("Delete Workspace") {
-        ForEach(changeable) { workspace in
-          Button("\(workspace.name)…") { store.send(.workspaces(.deleteRequested(workspace))) }
-        }
-      }
-    }
-  }
-
-  /// Never the default, and never the one this window is using — the two `Workspace`
-  /// refuses anyway. Offering them and then explaining why not is worse than not offering.
-  private var changeable: [Workspace] {
-    store.workspaces.known.filter { !$0.isDefault && $0.id != store.workspaces.current.id }
+    Button("Manage Workspaces…") { store.send(.workspaces(.manageRequested)) }
+      .disabled(store.workspaces.known.count < 2)
   }
 }
 
@@ -105,8 +92,8 @@ struct WorkspaceFooter: View {
 
   var body: some View {
     if store.workspaces.isWorthShowing {
-      Menu {
-        WorkspaceMenuItems(store: store)
+      Button {
+        store.send(.workspaces(.switcherPresented(true)))
       } label: {
         HStack(spacing: 6) {
           Image(systemName: "square.stack.3d.up")
@@ -118,12 +105,129 @@ struct WorkspaceFooter: View {
         }
         .contentShape(.rect)
       }
-      .menuStyle(.borderlessButton)
-      .menuIndicator(.hidden)
+      .buttonStyle(.plain)
       .font(.caption)
       .foregroundStyle(.secondary)
       .padding(.horizontal, 12)
       .padding(.vertical, 6)
+      .popover(
+        isPresented: Binding(
+          get: { store.workspaces.isSwitcherPresented },
+          set: { store.send(.workspaces(.switcherPresented($0))) }),
+        arrowEdge: .top
+      ) {
+        WorkspaceSwitcherPanel(store: store)
+      }
     }
+  }
+}
+
+/// The switcher itself — a panel rather than a menu, because a menu row cannot say what
+/// is *in* a workspace.
+///
+/// Which is the whole point of it: switching workspaces from a bare list of names is a
+/// guess, and the two facts that make it a decision — how much is in there, and whether a
+/// window already has it — are both cheap to read from outside (`Workspace.summary`).
+struct WorkspaceSwitcherPanel: View {
+  @Bindable var store: StoreOf<AppFeature>
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 1) {
+      ForEach(Array(store.workspaces.known.enumerated()), id: \.element.id) { index, workspace in
+        row(workspace, index: index)
+      }
+
+      Divider().padding(.vertical, 5).padding(.horizontal, 8)
+
+      action("New Workspace…", systemImage: "plus") {
+        store.send(.workspaces(.switcherPresented(false)))
+        store.send(.workspaces(.newRequested))
+      }
+      action("Manage Workspaces…", systemImage: "pencil") {
+        store.send(.workspaces(.switcherPresented(false)))
+        store.send(.workspaces(.manageRequested))
+      }
+      .disabled(store.workspaces.known.count < 2)
+    }
+    .padding(6)
+    .frame(width: 300)
+  }
+
+  private func row(_ workspace: Workspace, index: Int) -> some View {
+    let isCurrent = workspace.id == store.workspaces.current.id
+    let summary = store.workspaces.summaries[workspace.id]
+    return Button {
+      store.send(.workspaces(.switcherPresented(false)))
+      store.send(.workspaces(.switchRequested(workspace)))
+    } label: {
+      HStack(spacing: 9) {
+        Circle()
+          .fill(WorkspaceSwitcherPanel.tint(for: workspace))
+          .frame(width: 7, height: 7)
+        VStack(alignment: .leading, spacing: 1) {
+          Text(workspace.name).font(.system(size: 13))
+          Text(WorkspaceSwitcherPanel.subtitle(summary, isCurrent: isCurrent))
+            .font(.system(size: 10, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.42))
+        }
+        Spacer(minLength: 8)
+        if index < 9 {
+          Text("⌥⌘\(index + 1)")
+            .font(.system(size: 10, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.35))
+        }
+      }
+      .padding(.vertical, 6)
+      .padding(.horizontal, 8)
+      .background(
+        isCurrent ? Color.white.opacity(0.08) : .clear,
+        in: RoundedRectangle(cornerRadius: 6)
+      )
+      .contentShape(.rect)
+    }
+    .buttonStyle(.plain)
+  }
+
+  private func action(
+    _ title: String, systemImage: String, perform: @escaping () -> Void
+  ) -> some View {
+    Button(action: perform) {
+      HStack(spacing: 9) {
+        Image(systemName: systemImage)
+          .font(.system(size: 11))
+          .frame(width: 7)
+        Text(title).font(.system(size: 13))
+        Spacer(minLength: 0)
+      }
+      .padding(.vertical, 6)
+      .padding(.horizontal, 8)
+      .contentShape(.rect)
+    }
+    .buttonStyle(.plain)
+  }
+
+  /// A stable colour per workspace, so the dot is worth glancing at: the same workspace
+  /// keeps the same one across launches and across windows. Hashed from the slug rather
+  /// than assigned by position — a list that reorders must not repaint every dot.
+  static func tint(for workspace: Workspace) -> Color {
+    guard !workspace.isDefault else { return Theme.paneFocusTint }
+    let palette: [Color] = [
+      Color(red: 0.847, green: 0.651, blue: 0.341),
+      Color(red: 0.616, green: 0.545, blue: 0.847),
+      Color(red: 0.435, green: 0.827, blue: 0.671),
+      Color(red: 0.898, green: 0.541, blue: 0.494),
+      Color(red: 0.435, green: 0.702, blue: 0.898),
+    ]
+    let hash = workspace.slug.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xffff }
+    return palette[hash % palette.count]
+  }
+
+  /// What the row says under the name. "not running" is the one worth naming outright:
+  /// switching to it means launching an instance, which takes a moment and a Dock tile.
+  static func subtitle(_ summary: Workspace.Summary?, isCurrent: Bool) -> String {
+    guard let summary else { return isCurrent ? "this window" : "—" }
+    let loops = "\(summary.loops) loop\(summary.loops == 1 ? "" : "s")"
+    if isCurrent { return "\(loops) · this window" }
+    return summary.isOpen ? "\(loops) · open" : "\(loops) · not running"
   }
 }

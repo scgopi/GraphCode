@@ -23,6 +23,19 @@ extension AppFeature {
     /// The workspace a Delete confirmation is up for, with what it would take with it —
     /// counted when the dialog opens, since the numbers come off disk.
     var pendingDeletion: PendingDeletion?
+    /// What each known workspace holds, keyed by id — the switcher's second line.
+    /// Refreshed with `known`, since both are read by the same gesture.
+    var summaries: [String: Workspace.Summary] = [:]
+    var isSwitcherPresented = false
+    /// Up when this launch owes someone the news that workspaces exist — see
+    /// `WorkspaceNews` for who that is. Carries the version so the badge can name it.
+    var news: String?
+    var isManaging = false
+    /// The invitation this workspace was opened with; `nil` once answered, and on every
+    /// workspace that predates the starter. See `WorkspaceStarter`.
+    var starter: WorkspaceStarter.Invitation?
+    /// The row selected in the starter — seeded from the invitation, applied on pick.
+    var starterBackend: CLISessionBackendKind = .claudeCode
     /// The workspace being renamed, and the name being typed for it. `nil` means the
     /// sheet is closed.
     var renaming: Workspace?
@@ -77,6 +90,18 @@ extension AppFeature {
     case createConfirmed
     /// Raise (or launch) the instance that owns this workspace.
     case switchRequested(Workspace)
+    case switcherPresented(Bool)
+    case manageRequested
+    case manageDismissed
+    /// Raises the starter if this workspace was opened with an unanswered invitation.
+    case starterChecked
+    /// Asked once per launch, alongside the starter — the two are mutually exclusive by
+    /// construction: the news is for the default workspace, the starter never is.
+    case newsChecked
+    case newsNotesTapped
+    case newsDismissed
+    case starterBackendPicked(CLISessionBackendKind)
+    case starterDismissed
     case renameRequested(Workspace)
     case renameDraftChanged(String)
     case renameConfirmed
@@ -98,13 +123,70 @@ struct AppWorkspacesReducer: Reducer {
   typealias Action = AppFeature.Action
 
   @Dependency(\.workspaceClient) var workspaces
+  @Dependency(\.updateClient) var updateClient
+  @Dependency(\.openURL) var openURL
 
   var body: some Reducer<AppFeature.State, AppFeature.Action> {
     Reduce { state, action in
       switch action {
       case .workspaces(.listRequested):
         state.workspaces.known = workspaces.list()
+        state.workspaces.summaries = workspaces.summarize(state.workspaces.known)
         return .none
+
+      case .workspaces(.switcherPresented(let isPresented)):
+        state.workspaces.isSwitcherPresented = isPresented
+        // Read on open, not on a timer: another instance may have created, deleted or
+        // started using a workspace since this window last looked.
+        guard isPresented else { return .none }
+        return .send(.workspaces(.listRequested))
+
+      case .workspaces(.manageRequested):
+        state.workspaces.isManaging = true
+        return .send(.workspaces(.listRequested))
+
+      case .workspaces(.manageDismissed):
+        state.workspaces.isManaging = false
+        return .none
+
+      case .workspaces(.starterChecked):
+        guard let invitation = workspaces.starterInvitation() else { return .none }
+        state.workspaces.starter = invitation
+        state.workspaces.starterBackend = invitation.suggestedBackend
+        return .none
+
+      case .workspaces(.newsChecked):
+        // Only in the default workspace. A workspace created since the upgrade has never
+        // known a GraphCode without them, and `UserDefaults` is per app — so without this
+        // every window on the machine would announce the same news.
+        guard state.workspaces.current.isDefault else { return .none }
+        let version = updateClient.currentVersion()
+        guard WorkspaceNews.announceIfNeeded(currentVersion: version) else { return .none }
+        state.workspaces.news = version
+        return .none
+
+      case .workspaces(.newsNotesTapped):
+        state.workspaces.news = nil
+        return .run { [openURL] _ in
+          await openURL(WorkspaceNews.releasesURL)
+        }
+
+      case .workspaces(.newsDismissed):
+        state.workspaces.news = nil
+        return .none
+
+      case .workspaces(.starterBackendPicked(let backend)):
+        // Applied on the pick rather than on the button, the same as the tour's page:
+        // there is no Save here, and a choice that only lands if you press the right
+        // button afterwards is a choice that gets lost.
+        state.workspaces.starterBackend = backend
+        return .run { [apply = workspaces.applyDefaultBackend] _ in await apply(backend) }
+
+      case .workspaces(.starterDismissed):
+        // Skip counts as answered: someone who dismissed this does not want it again on
+        // the next launch. Whatever is selected has already been applied.
+        state.workspaces.starter = nil
+        return .run { [finish = workspaces.finishStarter] _ in finish() }
 
       case .workspaces(.newRequested):
         state.workspaces.draftName = ""
