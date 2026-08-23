@@ -92,24 +92,37 @@ struct WorkspaceFooter: View {
 
   var body: some View {
     if store.workspaces.isWorthShowing {
+      // The rule above it, full width: without one the row reads as one more project at
+      // the end of the list rather than as the thing the whole list belongs to.
+      Divider().overlay(.white.opacity(0.09))
+
       Button {
         store.send(.workspaces(.switcherPresented(true)))
       } label: {
-        HStack(spacing: 6) {
+        HStack(spacing: 7) {
           Image(systemName: "square.stack.3d.up")
-            .imageScale(.small)
+            .font(.system(size: 12))
+            .foregroundStyle(.white.opacity(0.55))
+          // A project row's size, not two steps under it. This names the window you are
+          // in — on a second screen it is the only thing that does — and at `.caption`
+          // it was the smallest text in the sidebar.
           Text(store.workspaces.current.name)
+            .font(.system(size: 13))
+            .foregroundStyle(.white.opacity(0.8))
             .lineLimit(1)
             .truncationMode(.middle)
-          Spacer(minLength: 0)
+          Spacer(minLength: 4)
+          // Says it opens something. The row is a switcher, and a bare label invites
+          // nobody to click it.
+          Image(systemName: "chevron.up.chevron.down")
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.4))
         }
         .contentShape(.rect)
       }
       .buttonStyle(.plain)
-      .font(.caption)
-      .foregroundStyle(.secondary)
       .padding(.horizontal, 12)
-      .padding(.vertical, 6)
+      .padding(.vertical, 8)
       .popover(
         isPresented: Binding(
           get: { store.workspaces.isSwitcherPresented },
