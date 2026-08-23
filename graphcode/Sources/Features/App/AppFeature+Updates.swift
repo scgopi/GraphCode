@@ -43,6 +43,11 @@ extension AppFeature {
         // A second click while a check is in flight would just race two alerts; the
         // menu item is disabled on this flag, and this guard is the backstop.
         guard !state.isCheckingForUpdates else { return .none }
+        // Updates belong to the default workspace — every workspace is the same bundle
+        // in /Applications, so this is not per-workspace news. See
+        // `WorkspacesState.managesUpdates`; the menu item is disabled elsewhere and this
+        // is the backstop for it.
+        guard state.workspaces.managesUpdates else { return .none }
         state.isCheckingForUpdates = true
         return .run { send in
           do {
@@ -69,6 +74,11 @@ extension AppFeature {
         // and no auto-presented alert on success — the banner is the whole surface. A
         // check already running (the menu item, another launch tick) owns the result.
         guard !state.isCheckingForUpdates else { return .none }
+        // Updates belong to the default workspace — every workspace is the same bundle
+        // in /Applications, so this is not per-workspace news. See
+        // `WorkspacesState.managesUpdates`; the menu item is disabled elsewhere and this
+        // is the backstop for it.
+        guard state.workspaces.managesUpdates else { return .none }
         state.isCheckingForUpdates = true
         return .run { send in
           let current = updateClient.currentVersion()

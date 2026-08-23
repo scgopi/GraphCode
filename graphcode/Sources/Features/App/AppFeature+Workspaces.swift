@@ -12,8 +12,9 @@ extension AppFeature {
     /// by a human every few weeks, and the alternative is a directory watcher on `$HOME`.
     var known: [Workspace] = []
     /// Read once. A running app cannot change workspace — that is what launching another
-    /// instance is for — so this is fixed for the life of the process.
-    let current: Workspace = .current
+    /// instance is for — so this is fixed for the life of the process. A `var` only so a
+    /// test can state which workspace it is asking about.
+    var current: Workspace = .current
     var isCreating = false
     var draftName = ""
     /// What is wrong with `draftName`, said while it is being typed rather than after
@@ -25,6 +26,16 @@ extension AppFeature {
     /// A refusal or a failure from the last deletion attempt, shown as an alert. Distinct
     /// from `problem`, which is about a name being typed.
     var deletionFailure: String?
+
+    /// Whether this instance is the one that offers and installs app updates.
+    ///
+    /// Only the default workspace does. Every workspace is the same bundle in
+    /// `/Applications`, so an update is not per-workspace news — with three open, the
+    /// same banner appears three times and three windows race to swap one app. Worse,
+    /// `UpdateInstallClient.relaunch` reopens the app with no `GRAPHCODE_SUPPORT_DIR`:
+    /// a named workspace that updated itself would come back as the default one, which
+    /// reads as the update having thrown its projects away.
+    var managesUpdates: Bool { current.isDefault }
 
     /// Whether to name the workspace in the UI at all. A machine with one workspace has
     /// no ambiguity to resolve, and a permanent "Default" chip would be noise on every

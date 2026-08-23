@@ -193,8 +193,8 @@ struct AppSidebarView: View {
     VStack(spacing: 0) {
       // Hidden while an install is mid-flight (the progress overlay speaks then) or
       // already staged (the relaunch alert does).
-      if let update = store.offeredUpdate, store.updateInstallProgress == nil,
-        !store.isUpdateReadyToRelaunch
+      if store.workspaces.managesUpdates, let update = store.offeredUpdate,
+        store.updateInstallProgress == nil, !store.isUpdateReadyToRelaunch
       {
         SidebarUpdateBanner(version: update.version) {
           store.send(.updateBannerTapped)
