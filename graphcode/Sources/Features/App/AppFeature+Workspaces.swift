@@ -23,6 +23,9 @@ extension AppFeature {
     /// The workspace a Delete confirmation is up for, with what it would take with it —
     /// counted when the dialog opens, since the numbers come off disk.
     var pendingDeletion: PendingDeletion?
+    /// The other workspaces found open when Install was pressed, held while the app asks
+    /// what to do about them. `nil` means nothing is being asked.
+    var othersOpenForUpdate: [Workspace]?
     /// A refusal or a failure from the last deletion attempt, shown as an alert. Distinct
     /// from `problem`, which is about a name being typed.
     var deletionFailure: String?
@@ -73,6 +76,10 @@ extension AppFeature {
     case deleteConfirmed
     case deleteCancelled
     case deletionFailureDismissed
+    /// The three answers to "other workspaces are open" — see `UpdateDialogs`.
+    case quitOthersForUpdate
+    case updateWithoutQuittingOthers
+    case othersForUpdateDismissed
   }
 }
 
@@ -149,6 +156,24 @@ struct AppWorkspacesReducer: Reducer {
 
       case .workspaces(.deletionFailureDismissed):
         state.workspaces.deletionFailure = nil
+        return .none
+
+      case .workspaces(.quitOthersForUpdate):
+        guard let others = state.workspaces.othersOpenForUpdate else { return .none }
+        state.workspaces.othersOpenForUpdate = nil
+        // The install waits for them: `quit` returns once they have gone (or once it
+        // gives up on one), so the swap never lands under a live window.
+        return .run { [quit = workspaces.quit] send in
+          await quit(others)
+          await send(.updateInstallConfirmed)
+        }
+
+      case .workspaces(.updateWithoutQuittingOthers):
+        state.workspaces.othersOpenForUpdate = nil
+        return .send(.updateInstallConfirmed)
+
+      case .workspaces(.othersForUpdateDismissed):
+        state.workspaces.othersOpenForUpdate = nil
         return .none
 
       default:

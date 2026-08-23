@@ -83,6 +83,9 @@ struct UpdateInstallTests {
 
     await store.send(.updateAlertDismissed)
     await store.send(.updateInstallTapped)
+    // Install asks about other open workspaces first (there are none here), so the work
+    // starts on the action both answers arrive as.
+    await store.receive(\.updateInstallConfirmed)
     #expect(store.state.updateInstallProgress == 0)
     await store.receive(\.updateInstallFinished)
 

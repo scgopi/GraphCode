@@ -232,6 +232,8 @@ struct AppFeature {
     case updateAlertDismissed
     case updateNoticeDismissed
     case updateInstallTapped
+    /// Install, past the other-workspaces question — see `AppFeature+Workspaces`.
+    case updateInstallConfirmed
     /// Install re-checked the channel at the moment of consent and found a newer
     /// release than the one the alert offered — the state follows what is actually
     /// being installed, so the relaunch prompt names the right version.
@@ -269,6 +271,7 @@ struct AppFeature {
   @Dependency(\.quickChatStore) var quickChatStore
   @Dependency(\.updateClient) var updateClient
   @Dependency(\.updateInstallClient) var updateInstallClient
+  @Dependency(\.workspaceClient) var workspaceClient
   @Dependency(\.openURL) var openURL
   /// Only for the cases where a workspace goes away because the *loop* did. Merely
   /// switching to another loop leaves its surfaces alive on purpose — see
@@ -484,7 +487,8 @@ struct AppFeature {
       case .checkForUpdatesTapped, .checkForUpdatesInBackground, .updateFoundInBackground,
         .updateBannerTapped, .updateCheckCompleted, .updateDownloadTapped,
         .updateReleaseNotesTapped, .updateAlertDismissed, .updateNoticeDismissed,
-        .updateInstallTapped, .updateInstallResolved, .updateInstallProgressed,
+        .updateInstallTapped, .updateInstallConfirmed, .updateInstallResolved,
+        .updateInstallProgressed,
         .updateInstallFinished, .updateInstallFailureDismissed, .updateRelaunchTapped,
         .updateRelaunchDismissed:
         return .none
