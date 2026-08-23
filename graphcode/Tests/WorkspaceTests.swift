@@ -154,6 +154,69 @@ struct WorkspaceTests {
   }
 
   @Test
+  func renamingMovesTheDirectoryAndRetiresTheOldAgent() throws {
+    // The directory *is* the workspace, so a rename is a move — the graphs, layouts and
+    // session ids inside go with it untouched, because none of them names the workspace.
+    let home = makeHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+
+    let workspace = try Workspace.create(name: "work", home: home)
+    let projects = workspace.url.appendingPathComponent("projects", isDirectory: true)
+    try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+    try Data("{}".utf8).write(to: projects.appendingPathComponent("_tmp_project.json"))
+
+    let renamed = try workspace.renamed(to: "Client Work", home: home)
+
+    #expect(renamed.slug == "client-work")
+    #expect(renamed.daemonLabel == "dev.graphcode.graphcoded.client-work")
+    #expect(!FileManager.default.fileExists(atPath: workspace.url.path))
+    #expect(
+      FileManager.default.fileExists(
+        atPath: renamed.url.appendingPathComponent("projects/_tmp_project.json").path))
+  }
+
+  @Test
+  func aRenameIsRefusedByTheSameNameRulesAsACreate() throws {
+    let home = makeHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+
+    let work = try Workspace.create(name: "work", home: home)
+    _ = try Workspace.create(name: "oss", home: home)
+
+    // Onto a name already in use — which would otherwise be a move onto a live directory.
+    #expect(throws: Workspace.NameProblem.taken("oss")) {
+      try work.renamed(to: "OSS", home: home)
+    }
+    #expect(throws: Workspace.NameProblem.empty) {
+      try work.renamed(to: "///", home: home)
+    }
+    // Still where it was, under its own name.
+    #expect(FileManager.default.fileExists(atPath: work.url.path))
+  }
+
+  @Test
+  func bothChangesAreRefusedForTheDefaultTheCurrentAndAnOpenWorkspace() {
+    let home = makeHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+    let work = Workspace(slug: "work", url: Workspace.url(forSlug: "work", home: home))
+    let other = Workspace(slug: "oss", url: Workspace.url(forSlug: "oss", home: home))
+
+    // The refusal names what was asked, so one alert serves both.
+    #expect(
+      Workspace.default.refusal(for: .rename, current: work) == .isDefault(.rename))
+    #expect(
+      Workspace.default.refusal(for: .rename, current: work)?.errorDescription
+        == "The default workspace can't be renamed.")
+    #expect(
+      Workspace.default.refusal(for: .delete, current: work)?.errorDescription
+        == "The default workspace can't be deleted.")
+    // Renaming the workspace this window is using would move the directory it resolves
+    // every path through, out from under itself.
+    #expect(work.refusal(for: .rename, current: work) == .isCurrent(.rename))
+    #expect(work.refusal(for: .rename, current: other) == nil)
+  }
+
+  @Test
   func deletionIsRefusedForTheDefaultTheCurrentAndAnOpenWorkspace() {
     let home = makeHome()
     defer { try? FileManager.default.removeItem(at: home) }
@@ -162,17 +225,17 @@ struct WorkspaceTests {
     try? FileManager.default.createDirectory(at: work.url, withIntermediateDirectories: true)
 
     // The default workspace is every existing install's whole state.
-    #expect(Workspace.default.deletionRefusal(current: work) == .isDefault)
+    #expect(Workspace.default.refusal(for: .delete, current: work) == .isDefault(.delete))
     // Deleting the workspace this window is using would pull its graphs out from under a
     // live app.
-    #expect(work.deletionRefusal(current: work) == .isCurrent)
-    #expect(work.deletionRefusal(current: other) == nil)
+    #expect(work.refusal(for: .delete, current: work) == .isCurrent(.delete))
+    #expect(work.refusal(for: .delete, current: other) == nil)
 
     // And the same thing one process away: another instance has it open.
     WorkspaceLock.claim(work, pid: getpid())
-    #expect(work.deletionRefusal(current: other) == .isOpen(pid: getpid()))
+    #expect(work.refusal(for: .delete, current: other) == .isOpen(pid: getpid(), .delete))
     WorkspaceLock.release(work, pid: getpid())
-    #expect(work.deletionRefusal(current: other) == nil)
+    #expect(work.refusal(for: .delete, current: other) == nil)
   }
 
   @Test

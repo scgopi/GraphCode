@@ -21,9 +21,13 @@ struct WorkspaceClient: Sendable {
   /// to prevent.
   var open: @Sendable (Workspace) -> Void
   /// Tears a workspace down: its daemon out of launchd, its `zmx` sessions ended, its
-  /// directory to the Trash. Throws `Workspace.DeletionRefusal` when it is not a
-  /// workspace this may touch.
+  /// directory to the Trash. Throws `Workspace.Refusal` when it is not a workspace this
+  /// may touch.
   var delete: @Sendable (Workspace) throws -> Void
+  /// Moves a workspace to a new name, returning it. Same three refusals as `delete`, and
+  /// for the same reason: both change the directory a running app resolves its paths
+  /// through.
+  var rename: @Sendable (Workspace, String) throws -> Workspace
   /// Workspaces open in *other* instances right now. Asked before an update swaps the
   /// bundle, since every workspace runs from the same copy in /Applications.
   var otherOpen: @Sendable () -> [Workspace]
@@ -47,7 +51,7 @@ extension WorkspaceClient: DependencyKey {
         at: Bundle.main.bundleURL, configuration: configuration, completionHandler: nil)
     },
     delete: { workspace in
-      if let refusal = workspace.deletionRefusal() { throw refusal }
+      if let refusal = workspace.refusal(for: .delete) { throw refusal }
 
       // Order matters. The agent is `KeepAlive`, so a daemon still loaded over a deleted
       // directory is restarted by launchd and recreates it — the workspace comes back
@@ -65,6 +69,10 @@ extension WorkspaceClient: DependencyKey {
       // copy of it. Recoverable for as long as they haven't emptied the Trash.
       var trashed: NSURL?
       try FileManager.default.trashItem(at: workspace.url, resultingItemURL: &trashed)
+    },
+    rename: { workspace, name in
+      if let refusal = workspace.refusal(for: .rename) { throw refusal }
+      return try workspace.renamed(to: name)
     },
     otherOpen: {
       let current = Workspace.current
@@ -92,6 +100,9 @@ extension WorkspaceClient: DependencyKey {
     create: { Workspace(slug: $0, url: URL(fileURLWithPath: "/tmp/\($0)")) },
     open: { _ in },
     delete: { _ in },
+    rename: { workspace, name in
+      Workspace(slug: name, url: workspace.url.deletingLastPathComponent())
+    },
     otherOpen: { [] },
     quit: { _ in })
 

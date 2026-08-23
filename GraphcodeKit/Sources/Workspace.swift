@@ -233,32 +233,75 @@ extension Workspace {
     return contents
   }
 
-  /// Why a workspace cannot be deleted right now.
-  public enum DeletionRefusal: Error, Equatable, LocalizedError {
-    case isDefault
-    case isCurrent
-    case isOpen(pid: Int32)
+  /// What is being asked of a workspace, so a refusal can say so in words.
+  public enum Change: Equatable, Sendable {
+    case rename
+    case delete
+
+    var verb: String {
+      switch self {
+      case .rename: return "renamed"
+      case .delete: return "deleted"
+      }
+    }
+  }
+
+  /// Why a workspace cannot be changed right now.
+  public enum Refusal: Error, Equatable, LocalizedError {
+    case isDefault(Change)
+    case isCurrent(Change)
+    case isOpen(pid: Int32, Change)
 
     public var errorDescription: String? {
       switch self {
-      case .isDefault:
-        return "The default workspace can't be deleted."
-      case .isCurrent:
-        return "This is the workspace you're in. Switch to another one first."
-      case .isOpen(let pid):
+      case .isDefault(let change):
+        return "The default workspace can't be \(change.verb)."
+      case .isCurrent(let change):
+        return
+          "This is the workspace you're in — it can't be \(change.verb) from inside. "
+          + "Switch to another one first."
+      case .isOpen(let pid, _):
         return "That workspace is open in another window (pid \(pid)). Quit it first."
       }
     }
   }
 
-  /// The three questions asked before anything is torn down. Deleting the workspace a
-  /// window is *using* would pull its graphs out from under a live app; deleting one
-  /// another instance has open is the same thing, one process away.
-  public func deletionRefusal(current: Workspace = .current) -> DeletionRefusal? {
-    if isDefault { return .isDefault }
-    if id == current.id { return .isCurrent }
-    if let pid = WorkspaceLock.holder(of: self) { return .isOpen(pid: pid) }
+  /// The three questions asked before a workspace is touched. Both changes move or
+  /// remove the directory a running app resolves every path through, so doing either to
+  /// the workspace a window is *using* pulls its graphs out from under it — and doing it
+  /// to one another instance has open is the same thing, one process away.
+  public func refusal(for change: Change, current: Workspace = .current) -> Refusal? {
+    if isDefault { return .isDefault(change) }
+    if id == current.id { return .isCurrent(change) }
+    if let pid = WorkspaceLock.holder(of: self) { return .isOpen(pid: pid, change) }
     return nil
+  }
+
+  /// Moves this workspace to a new name: its directory, and with it every graph, layout
+  /// and session id inside.
+  ///
+  /// The old launch agent goes first — its label carries the old slug, and an agent left
+  /// loaded over a directory that has moved is `KeepAlive`, so launchd restarts a daemon
+  /// pointed at a path that is no longer there. Nothing installs the new one here: the
+  /// instance that next opens the workspace writes its agent and starts its daemon, the
+  /// same first-open path a freshly created workspace takes.
+  ///
+  /// What deliberately does *not* happen is any rewriting inside the directory. Graphs
+  /// key projects by the project's own path, layouts key surfaces by node id, and the
+  /// helpers in `bin/` are copies — none of it names the workspace. The exception worth
+  /// knowing about is a `zmx` session that was already running: its environment still
+  /// carries the old `GRAPHCODE_SUPPORT_DIR`, so the `graphcode` CLI inside it cannot
+  /// reach the graph until that session is restarted. The session itself survives.
+  @discardableResult
+  public func renamed(
+    to name: String, home: URL = URL(fileURLWithPath: NSHomeDirectory()),
+    fileManager: FileManager = .default
+  ) throws -> Workspace {
+    let destination = try Workspace.validate(name: name, home: home, fileManager: fileManager)
+      .get()
+    DaemonBootstrap.removeLaunchAgent(for: self)
+    try fileManager.moveItem(at: url, to: destination.url)
+    return destination
   }
 
   /// What is wrong with a typed name, or `nil` when nothing is — the form the sheet wants
