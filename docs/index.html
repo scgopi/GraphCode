@@ -301,6 +301,7 @@ description: Graph engineering for coding agents on macOS — loops connected on
     </div>
     <div class="nav-links">
       <a href="#loops">Loops</a>
+      <a href="#workspaces">Workspaces</a>
       <a href="#self">Self-improving</a>
       <a href="#hood">Under the hood</a>
       <a href="shortcuts.html">Docs</a>
@@ -481,10 +482,27 @@ description: Graph engineering for coding agents on macOS — loops connected on
   </div>
 </section>
 
+<section id="workspaces" class="section">
+  <div class="section-intro">
+    <div class="kicker">03 — WORKSPACES</div>
+    <h2>One window per line of work.</h2>
+    <p class="lede">A workspace is a whole second GraphCode — its own projects, loops and daemon, in its own window with its own Dock tile. ⌥⌘1…9 to switch, or put one on each screen. Nothing is shared between them — and a loop in one can still message a loop in the other, straight into its running session.</p>
+  </div>
+  <div class="demo-frame">
+    <div class="demo-bar">
+      <span class="demo-live"><span class="dot"></span>LIVE</span>
+      Workspaces · two windows, one message across
+    </div>
+    <video autoplay muted loop playsinline preload="metadata">
+      <source src="assets/workspaces.mp4" type="video/mp4">
+    </video>
+  </div>
+</section>
+
 <section class="section">
   <div class="two-col">
     <div>
-      <div class="kicker">03 — SESSIONS OUTLIVE EVERYTHING</div>
+      <div class="kicker">04 — SESSIONS OUTLIVE EVERYTHING</div>
       <h2>The daemon starts it at 3 a.m. You're in that same session at 9.</h2>
       <p class="lede" style="margin-bottom:20px;">Every loop is a <a href="https://zmx.sh">zmx</a> session — a PTY that survives quitting the app, restarting the daemon, or rebooting. Click a node and you attach to the terminal that did the work, live, with one scrollback.</p>
       <div class="checks">
@@ -517,7 +535,7 @@ description: Graph engineering for coding agents on macOS — loops connected on
 <section id="self" class="band">
   <div class="band-inner">
     <div class="section-intro">
-      <div class="kicker">04 — THE SELF-IMPROVING LOOP</div>
+      <div class="kicker">05 — THE SELF-IMPROVING LOOP</div>
       <h2>Try → get judged → remember → try again smarter → stop honestly.</h2>
       <p class="lede">A maker, a reviewer, and a guarded back-edge closing the cycle. The feature that lets a loop repeat is the same feature that bounds it — so "loop forever, spending tokens" can't be said by accident.</p>
     </div>
@@ -581,7 +599,7 @@ description: Graph engineering for coding agents on macOS — loops connected on
 
 <section class="section">
   <div class="section-intro" style="margin-bottom:40px;">
-    <div class="kicker">05 — THE GRAPH, LIVE</div>
+    <div class="kicker">06 — THE GRAPH, LIVE</div>
     <h2 style="margin:0;">A canvas you design, not a pile of terminals you babysit.</h2>
   </div>
   <div class="live-frame">
@@ -624,7 +642,7 @@ description: Graph engineering for coding agents on macOS — loops connected on
 <section id="hood" class="section">
   <div class="hood-grid">
     <div>
-      <div class="kicker">06 — UNDER THE HOOD</div>
+      <div class="kicker">07 — UNDER THE HOOD</div>
       <h2>Four pieces, one socket.</h2>
       <p class="lede">App and CLI are both clients speaking length-framed JSON over <span class="path">~/.graphcode/graphcoded.sock</span>. Validation lives in the daemon — a rule only one client enforces isn't a rule.</p>
       <div class="honesty">
