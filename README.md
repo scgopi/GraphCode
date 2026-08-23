@@ -72,6 +72,22 @@ Releases are Developer ID signed and notarized.
 State lives in `~/.graphcode/` — graphs, recents, layouts, the daemon socket and logs, and the installed
 binaries. **Nothing is ever written inside a project folder you open.**
 
+## Workspaces
+
+**File ▸ Workspace ▸ New Workspace…** opens a second GraphCode with projects, loops and terminal
+sessions entirely its own — for keeping unrelated lines of work apart when one sidebar of loops has
+grown past what you can monitor. It is a separate window with its own Dock tile, so it can live on a
+second screen.
+
+A workspace is a directory: `~/.graphcode-<name>`, beside the default `~/.graphcode`, with its own
+graphs and its own `graphcoded`. Nothing is shared between them — a loop in one is invisible in the
+other — and the switcher at the foot of the sidebar says which one you are in. The CLI follows the
+same variable the app sets: `GRAPHCODE_SUPPORT_DIR=~/.graphcode-work graphcode status <project>`.
+
+**⌥⌘1 … ⌥⌘9** switch between them in menu order and **⌥⌘N** makes a new one. **Delete Workspace**,
+in the same menu, ends that workspace's terminal sessions, stops its daemon, and moves its folder to
+the Trash — the default workspace and whichever one you are in are never offered.
+
 ## Building from source
 
 Needs [mise](https://mise.jdx.dev) (Xcode, tuist, swiftlint, zig come through it) and the submodules.

@@ -84,6 +84,10 @@ struct AppFeature {
     var worktreeStats: [String: WorktreeFolderStats] = [:]
     var projectSettingsPath: String?
 
+    /// Which workspace this instance is, and the others on the machine — see
+    /// `AppFeature+Workspaces.swift`.
+    var workspaces = WorkspacesState()
+
     /// Up on first launch (`.task` checks the persisted flag) and whenever the
     /// sidebar's help button asks for it again.
     var showingOnboarding = false
@@ -239,6 +243,8 @@ struct AppFeature {
     case updateRelaunchDismissed
     /// Worktree hygiene, one case for the whole surface — see `AppFeature+Worktrees.swift`.
     case worktrees(Worktrees)
+    /// Workspaces, likewise — see `AppFeature+Workspaces.swift`.
+    case workspaces(Workspaces)
     /// The Quick Chats section's actions — see `State.quickChats`.
     case newQuickChatTapped
     /// The Quick Chats header row: shows the chats' own canvas, the way a folder row
@@ -286,6 +292,7 @@ struct AppFeature {
     // graph, which the main reducer replaces. See `AppFeature+Worktrees.swift`.
     AppWorktreesReducer()
       .ifLet(\.worktreeSweep, action: \.worktrees.sweep) { WorktreeSweepFeature() }
+    AppWorkspacesReducer()
     Reduce { state, action in
       switch action {
       case .task:
@@ -587,7 +594,7 @@ struct AppFeature {
         recordPendingOpen(welcomeAction, into: &state)
         return .none
 
-      case .openLoop, .projects, .worktrees:
+      case .openLoop, .projects, .worktrees, .workspaces:
         return .none
       }
     }

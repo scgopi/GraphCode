@@ -30,6 +30,20 @@ project, then Q, and Back retraces Q → P → A regardless of where those loops
 Opening a loop after going back discards the forward trail, the way a browser does.
 Quick Chats count as places you have been. The trail survives quitting the app.
 
+## Workspaces
+
+A workspace is a separate set of projects and loops, in a window of its own — for keeping
+unrelated lines of work apart. **File ▸ Workspace** lists them.
+
+| Shortcut | Does |
+|---|---|
+| ⌥⌘1 … ⌥⌘9 | Switch to that workspace, in the order the menu lists them (⌥⌘1 is the default one). Raises its window, or opens it if it isn't running |
+| ⌥⌘N | New workspace — name it and it opens straight away |
+
+Deleting one is in the same menu, under **Delete Workspace**. It ends that workspace's
+terminal sessions, stops its daemon, and moves its folder to the Trash — a workspace that
+is currently open somewhere can't be deleted until that window is closed.
+
 ## Terminals
 
 Inside a loop's workspace, the panes are real terminals — these act on them:

@@ -31,6 +31,14 @@ struct AppView: View {
       }
     }
     .onReceive(CanvasClock.tick) { now = $0 }
+    // The titlebar is hidden, but the title still names the window in Mission Control
+    // and the Window menu — which is where two workspaces on two screens are told apart.
+    .navigationTitle(windowTitle)
+  }
+
+  private var windowTitle: String {
+    let workspace = store.workspaces.current
+    return workspace.isDefault ? "GraphCode" : "GraphCode — \(workspace.name)"
   }
 
   private var split: some View {
@@ -144,6 +152,52 @@ struct AppView: View {
       JumpPaletteView(store: store)
     }
     .task { await store.send(.task).finish() }
+    // Which workspaces exist decides whether the sidebar names this one at all, so the
+    // list is wanted before anything is drawn rather than when the switcher opens.
+    .task { store.send(.workspaces(.listRequested)) }
+    .sheet(
+      isPresented: Binding(
+        get: { store.workspaces.isCreating },
+        set: { if !$0 { store.send(.workspaces(.createCancelled)) } })
+    ) {
+      NewWorkspaceFormView(store: store)
+    }
+    // Another instance may have created or deleted one since this window last looked,
+    // and the File menu is built from this list — so it is refreshed whenever the window
+    // comes forward rather than only at launch.
+    .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification))
+    { _ in
+      store.send(.workspaces(.listRequested))
+    }
+    .confirmationDialog(
+      "Delete the “\(store.workspaces.pendingDeletion?.workspace.name ?? "")” workspace?",
+      isPresented: Binding(
+        get: { store.workspaces.pendingDeletion != nil },
+        set: { if !$0 { store.send(.workspaces(.deleteCancelled)) } }
+      ),
+      titleVisibility: .visible,
+      presenting: store.workspaces.pendingDeletion
+    ) { _ in
+      Button("Delete Workspace", role: .destructive) {
+        store.send(.workspaces(.deleteConfirmed))
+      }
+      Button("Cancel", role: .cancel) { store.send(.workspaces(.deleteCancelled)) }
+    } message: { pending in
+      Text(
+        "\(pending.summary). Its terminal sessions are ended and its daemon stopped; "
+          + "the folder moves to the Trash, where it stays recoverable.")
+    }
+    .alert(
+      "That workspace can't be deleted",
+      isPresented: Binding(
+        get: { store.workspaces.deletionFailure != nil },
+        set: { if !$0 { store.send(.workspaces(.deletionFailureDismissed)) } }
+      )
+    ) {
+      Button("OK", role: .cancel) { store.send(.workspaces(.deletionFailureDismissed)) }
+    } message: {
+      Text(store.workspaces.deletionFailure ?? "")
+    }
     .confirmationDialog(
       // Naming the loop matters here in a way it didn't on the canvas: from the sidebar
       // you may be several projects away from the thing you right-clicked.

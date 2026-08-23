@@ -209,6 +209,9 @@ struct AppSidebarView: View {
           .padding(8)
           .background(.thinMaterial)
       }
+      // Last, under everything: standing orientation rather than news. Two workspaces are
+      // two instances of one app, with one icon and no titlebar between them.
+      WorkspaceFooter(store: store)
     }
   }
 

@@ -41,6 +41,16 @@ public enum SupportDirectory {
   /// second `graphcoded` started with the same value, or it will sit there unconnected.
   public static let environmentKey = "GRAPHCODE_SUPPORT_DIR"
 
+  /// `~/.graphcode` — the default workspace's directory, whatever the override says.
+  ///
+  /// Deliberately *not* affected by `GRAPHCODE_SUPPORT_DIR`: `Workspace` discovers the
+  /// other workspaces by scanning this directory's siblings, and a scan root that moved
+  /// with the override would leave every named workspace unable to see any of the others.
+  public static var defaultURL: URL {
+    URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+      .appendingPathComponent(".graphcode", isDirectory: true)
+  }
+
   /// `~/.graphcode`, unless `GRAPHCODE_SUPPORT_DIR` says otherwise.
   public static var url: URL {
     let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
