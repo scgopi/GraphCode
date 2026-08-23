@@ -84,14 +84,36 @@ FileHandle.standardOutput.write(Data("graphcoded: listening on \(path)\n".utf8))
 // process just never lived long enough to run it.
 signal(SIGPIPE, SIG_IGN)
 
-signal(SIGTERM) { _ in
-  unlink(path)
-  exit(0)
+// Termination is handled on the main queue, not in signal context (#167). The handlers
+// this replaces called `exit(0)` from inside the signal handler itself, and `exit` is
+// not async-signal-safe: it runs atexit and runtime teardown after interrupting whatever
+// thread happened to be running — which can be a thread mid-`malloc` or mid-`write`,
+// holding exactly the locks teardown needs. An idle daemon died cleanly in milliseconds
+// every time; a busy one could deadlock until launchd's ExitTimeOut escalated to
+// SIGKILL, observed as `launchctl bootout` taking ~29 seconds while a workspace was
+// being deleted. A dispatch signal source delivers the signal as an ordinary work item,
+// where `exit` is just a function call.
+//
+// `SIG_IGN` first, so the default terminate-without-cleanup disposition can't win the
+// race before the sources are resumed.
+signal(SIGTERM, SIG_IGN)
+signal(SIGINT, SIG_IGN)
+
+func makeShutdownSource(for signalNumber: Int32) -> DispatchSourceSignal {
+  let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
+  source.setEventHandler {
+    unlink(path)
+    exit(0)
+  }
+  source.resume()
+  return source
 }
-signal(SIGINT) { _ in
-  unlink(path)
-  exit(0)
-}
+
+// Top-level lets, so the sources outlive this file's execution — a released source
+// stops delivering, and the signal falls back to the ignored disposition above, which
+// would make the daemon *unkillable* by SIGTERM instead of slow.
+let terminateSource = makeShutdownSource(for: SIGTERM)
+let interruptSource = makeShutdownSource(for: SIGINT)
 
 let registry = ProjectRegistry(persistenceDirectory: supportDirectory)
 
