@@ -46,9 +46,11 @@ and splits *inside* a loop, see [Terminals](#terminals).)
 | ⌥⌘1 … ⌥⌘9 | Switch to that workspace, in the order the menu lists them (⌥⌘1 is the default one). Raises its window, or opens it if it isn't running |
 | ⌥⌘N | New workspace — name it and it opens straight away |
 
-Deleting one is in the same menu, under **Delete Workspace**. It ends that workspace's
-terminal sessions, stops its daemon, and moves its folder to the Trash — a workspace that
-is currently open somewhere can't be deleted until that window is closed.
+**Rename Workspace** and **Delete Workspace** are in the same menu. A rename moves the
+workspace's folder and everything in it; a delete ends that workspace's terminal sessions,
+stops its daemon, and moves its folder to the Trash. Neither is offered for the default
+workspace or for the one you are in, and a workspace open in another window has to be
+closed first.
 
 ## Terminals
 

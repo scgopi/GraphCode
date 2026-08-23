@@ -84,9 +84,10 @@ graphs and its own `graphcoded`. Nothing is shared between them — a loop in on
 other — and the switcher at the foot of the sidebar says which one you are in. The CLI follows the
 same variable the app sets: `GRAPHCODE_SUPPORT_DIR=~/.graphcode-work graphcode status <project>`.
 
-**⌥⌘1 … ⌥⌘9** switch between them in menu order and **⌥⌘N** makes a new one. **Delete Workspace**,
-in the same menu, ends that workspace's terminal sessions, stops its daemon, and moves its folder to
-the Trash — the default workspace and whichever one you are in are never offered.
+**⌥⌘1 … ⌥⌘9** switch between them in menu order and **⌥⌘N** makes a new one. **Rename Workspace**
+moves its folder, taking its projects and loops with it; **Delete Workspace** ends that workspace's
+terminal sessions, stops its daemon, and moves its folder to the Trash. Neither is offered for the
+default workspace or for whichever one you are in.
 
 Not to be confused with a loop's **terminal workspace**, which is the tabs and splits inside one
 loop. A workspace holds projects; a terminal workspace holds panes.

@@ -23,12 +23,17 @@ extension AppFeature {
     /// The workspace a Delete confirmation is up for, with what it would take with it —
     /// counted when the dialog opens, since the numbers come off disk.
     var pendingDeletion: PendingDeletion?
+    /// The workspace being renamed, and the name being typed for it. `nil` means the
+    /// sheet is closed.
+    var renaming: Workspace?
+    var renameDraft = ""
     /// The other workspaces found open when Install was pressed, held while the app asks
     /// what to do about them. `nil` means nothing is being asked.
     var othersOpenForUpdate: [Workspace]?
-    /// A refusal or a failure from the last deletion attempt, shown as an alert. Distinct
-    /// from `problem`, which is about a name being typed.
-    var deletionFailure: String?
+    /// A refusal or a failure from the last rename or deletion, shown as an alert. One
+    /// channel for both: the refusal's own sentence already names which was refused.
+    /// Distinct from `problem`, which is about a name being typed.
+    var changeFailure: String?
 
     /// Whether this instance is the one that offers and installs app updates.
     ///
@@ -72,10 +77,14 @@ extension AppFeature {
     case createConfirmed
     /// Raise (or launch) the instance that owns this workspace.
     case switchRequested(Workspace)
+    case renameRequested(Workspace)
+    case renameDraftChanged(String)
+    case renameConfirmed
+    case renameCancelled
     case deleteRequested(Workspace)
     case deleteConfirmed
     case deleteCancelled
-    case deletionFailureDismissed
+    case changeFailureDismissed
     /// The three answers to "other workspaces are open" — see `UpdateDialogs`.
     case quitOthersForUpdate
     case updateWithoutQuittingOthers
@@ -130,9 +139,44 @@ struct AppWorkspacesReducer: Reducer {
         guard workspace.id != state.workspaces.current.id else { return .none }
         return .run { [open = workspaces.open] _ in open(workspace) }
 
+      case .workspaces(.renameRequested(let workspace)):
+        if let refusal = workspace.refusal(for: .rename, current: state.workspaces.current) {
+          state.workspaces.changeFailure = refusal.localizedDescription
+          return .none
+        }
+        state.workspaces.renaming = workspace
+        // Prefilled with the current name: renaming is usually a correction, not a
+        // fresh start, and an empty field would make you retype what you had.
+        state.workspaces.renameDraft = workspace.name
+        state.workspaces.problem = nil
+        return .none
+
+      case .workspaces(.renameDraftChanged(let name)):
+        state.workspaces.renameDraft = name
+        state.workspaces.problem =
+          name.isEmpty ? nil : Workspace.problem(name: name)?.localizedDescription
+        return .none
+
+      case .workspaces(.renameCancelled):
+        state.workspaces.renaming = nil
+        state.workspaces.problem = nil
+        return .none
+
+      case .workspaces(.renameConfirmed):
+        guard let workspace = state.workspaces.renaming else { return .none }
+        do {
+          _ = try workspaces.rename(workspace, state.workspaces.renameDraft)
+          state.workspaces.renaming = nil
+          state.workspaces.renameDraft = ""
+          state.workspaces.known = workspaces.list()
+        } catch {
+          state.workspaces.problem = error.localizedDescription
+        }
+        return .none
+
       case .workspaces(.deleteRequested(let workspace)):
-        if let refusal = workspace.deletionRefusal(current: state.workspaces.current) {
-          state.workspaces.deletionFailure = refusal.localizedDescription
+        if let refusal = workspace.refusal(for: .delete, current: state.workspaces.current) {
+          state.workspaces.changeFailure = refusal.localizedDescription
           return .none
         }
         state.workspaces.pendingDeletion = AppFeature.PendingDeletion(
@@ -145,7 +189,7 @@ struct AppWorkspacesReducer: Reducer {
         do {
           try workspaces.delete(pending.workspace)
         } catch {
-          state.workspaces.deletionFailure = error.localizedDescription
+          state.workspaces.changeFailure = error.localizedDescription
         }
         state.workspaces.known = workspaces.list()
         return .none
@@ -154,8 +198,8 @@ struct AppWorkspacesReducer: Reducer {
         state.workspaces.pendingDeletion = nil
         return .none
 
-      case .workspaces(.deletionFailureDismissed):
-        state.workspaces.deletionFailure = nil
+      case .workspaces(.changeFailureDismissed):
+        state.workspaces.changeFailure = nil
         return .none
 
       case .workspaces(.quitOthersForUpdate):

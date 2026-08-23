@@ -34,9 +34,14 @@ struct WorkspaceMenuItems: View {
     Divider()
     Button("New Workspace…") { store.send(.workspaces(.newRequested)) }
       .modifier(NewWorkspaceShortcut(isEnabled: showsShortcuts))
-    if !deletable.isEmpty {
+    if !changeable.isEmpty {
+      Menu("Rename Workspace") {
+        ForEach(changeable) { workspace in
+          Button("\(workspace.name)…") { store.send(.workspaces(.renameRequested(workspace))) }
+        }
+      }
       Menu("Delete Workspace") {
-        ForEach(deletable) { workspace in
+        ForEach(changeable) { workspace in
           Button("\(workspace.name)…") { store.send(.workspaces(.deleteRequested(workspace))) }
         }
       }
@@ -45,7 +50,7 @@ struct WorkspaceMenuItems: View {
 
   /// Never the default, and never the one this window is using — the two `Workspace`
   /// refuses anyway. Offering them and then explaining why not is worse than not offering.
-  private var deletable: [Workspace] {
+  private var changeable: [Workspace] {
     store.workspaces.known.filter { !$0.isDefault && $0.id != store.workspaces.current.id }
   }
 }

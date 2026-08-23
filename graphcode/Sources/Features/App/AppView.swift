@@ -162,6 +162,13 @@ struct AppView: View {
     ) {
       NewWorkspaceFormView(store: store)
     }
+    .sheet(
+      isPresented: Binding(
+        get: { store.workspaces.renaming != nil },
+        set: { if !$0 { store.send(.workspaces(.renameCancelled)) } })
+    ) {
+      RenameWorkspaceFormView(store: store)
+    }
     // Another instance may have created or deleted one since this window last looked,
     // and the File menu is built from this list — so it is refreshed whenever the window
     // comes forward rather than only at launch.
@@ -188,15 +195,15 @@ struct AppView: View {
           + "the folder moves to the Trash, where it stays recoverable.")
     }
     .alert(
-      "That workspace can't be deleted",
+      "That workspace can't be changed",
       isPresented: Binding(
-        get: { store.workspaces.deletionFailure != nil },
-        set: { if !$0 { store.send(.workspaces(.deletionFailureDismissed)) } }
+        get: { store.workspaces.changeFailure != nil },
+        set: { if !$0 { store.send(.workspaces(.changeFailureDismissed)) } }
       )
     ) {
-      Button("OK", role: .cancel) { store.send(.workspaces(.deletionFailureDismissed)) }
+      Button("OK", role: .cancel) { store.send(.workspaces(.changeFailureDismissed)) }
     } message: {
-      Text(store.workspaces.deletionFailure ?? "")
+      Text(store.workspaces.changeFailure ?? "")
     }
     .confirmationDialog(
       // Naming the loop matters here in a way it didn't on the canvas: from the sidebar
