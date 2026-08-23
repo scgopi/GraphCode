@@ -6,8 +6,12 @@ description: Every keyboard shortcut and mouse trick in GraphCode — the graph,
 # Keyboard shortcuts
 
 Everything here is also in the menu bar — **Loop** and **Terminal** are the two menus
-that appear once a workspace is open, and macOS draws each key beside its item. This
+that appear once a loop is open, and macOS draws each key beside its item. This
 page is the same information in one place.
+
+Two things in GraphCode are called a workspace, and this page keeps them apart. A
+**workspace** is a separate set of projects and loops in a window of its own. A loop's
+**terminal workspace** is the tabs and splits inside one loop.
 
 ## The graph
 
@@ -33,7 +37,9 @@ Quick Chats count as places you have been. The trail survives quitting the app.
 ## Workspaces
 
 A workspace is a separate set of projects and loops, in a window of its own — for keeping
-unrelated lines of work apart. **File ▸ Workspace** lists them.
+unrelated lines of work apart. Nothing is shared between them, and each gets its own Dock
+tile, so one can sit on a second screen. **File ▸ Workspace** lists them. (For the tabs
+and splits *inside* a loop, see [Terminals](#terminals).)
 
 | Shortcut | Does |
 |---|---|
@@ -46,12 +52,13 @@ is currently open somewhere can't be deleted until that window is closed.
 
 ## Terminals
 
-Inside a loop's workspace, the panes are real terminals — these act on them:
+A loop's **terminal workspace** is the pane area you get when you open it — real
+terminals, in tabs and splits. These act on them:
 
 | Shortcut | Does |
 |---|---|
 | ⌘T | New tab |
-| ⌘W | Close tab (a workspace always keeps its last one) |
+| ⌘W | Close tab (a loop always keeps its last one) |
 | ⌘1 … ⌘9 | Select that tab |
 | ⌘→ / ⌘← | Next / previous tab |
 | ⌘D | Split the pane right |

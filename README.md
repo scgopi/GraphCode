@@ -54,7 +54,7 @@ Releases are Developer ID signed and notarized.
    over SSH (key auth and zmx on the server; loops run there while this Mac steers them).
 2. **Create a loop** — ⊕ on the canvas. Write the prompt and hit Create; the type chooser explains what
    each kind hands off, and a goal's done check has a **Test** button that runs it as the daemon will.
-3. **Open it** — click the node for its terminal workspace: tabs, splits, ⌘K to jump to any loop, ⌘⇧R to walk
+3. **Open it** — click the node for that loop's terminal workspace: tabs, splits, ⌘K to jump to any loop, ⌘⇧R to walk
    the ones asking for you ([shortcuts](https://graphcode.app/shortcuts.html)). You attach to the live session.
 4. **Connect loops** — drag between nodes. An edge is a hand-off by default (fires when the source
    resolves); it can also be a message or a spawn, with a condition and a cycle guard.
@@ -87,6 +87,9 @@ same variable the app sets: `GRAPHCODE_SUPPORT_DIR=~/.graphcode-work graphcode s
 **⌥⌘1 … ⌥⌘9** switch between them in menu order and **⌥⌘N** makes a new one. **Delete Workspace**,
 in the same menu, ends that workspace's terminal sessions, stops its daemon, and moves its folder to
 the Trash — the default workspace and whichever one you are in are never offered.
+
+Not to be confused with a loop's **terminal workspace**, which is the tabs and splits inside one
+loop. A workspace holds projects; a terminal workspace holds panes.
 
 ## Building from source
 
