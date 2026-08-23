@@ -77,7 +77,11 @@ struct GraphcodeApp: App {
         Button("Check for Updates…") {
           Self.store.send(.checkForUpdatesTapped)
         }
-        .disabled(Self.store.isCheckingForUpdates || Self.store.updateInstallProgress != nil)
+        // Disabled outside the default workspace, the only one that updates the app —
+        // see `AppFeature.WorkspacesState.managesUpdates`.
+        .disabled(
+          !Self.store.workspaces.managesUpdates || Self.store.isCheckingForUpdates
+            || Self.store.updateInstallProgress != nil)
       }
       // Replacing rather than appending: the default "GraphCode Help" item asks AppKit
       // for a help book the app doesn't bundle, so it only ever showed "Help isn't
