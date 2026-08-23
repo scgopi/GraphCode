@@ -58,10 +58,56 @@ extension AppFeature {
     /// reads as the update having thrown its projects away.
     var managesUpdates: Bool { current.isDefault }
 
+    var presentation: Presentation? {
+      if let starter { return .starter(starter) }
+      if let news { return .news(news) }
+      if let pendingDeletion { return .delete(pendingDeletion) }
+      if isManaging { return .manage }
+      if isCreating { return .new }
+      if let renaming { return .rename(renaming) }
+      return nil
+    }
+
     /// Whether to name the workspace in the UI at all. A machine with one workspace has
     /// no ambiguity to resolve, and a permanent "Default" chip would be noise on every
     /// install that never uses this.
     var isWorthShowing: Bool { !current.isDefault || known.count > 1 }
+  }
+
+  /// Which workspace sheet is on screen. At most one, ever.
+  ///
+  /// SwiftUI honours **one** `.sheet` modifier per view: attach five and only the last is
+  /// really tracked, so the others' bindings stop dismissing what they opened. That is
+  /// what made Rename and Delete from Manage Workspaces misbehave — Manage would not
+  /// close, and the confirmation retried against a sheet that would not go, flickering
+  /// once a second. Derived from the fields below rather than replacing them, so the
+  /// reducer keeps saying what it means; the order is the priority when two are somehow
+  /// set at once.
+  enum Presentation: Equatable, Identifiable {
+    case starter(WorkspaceStarter.Invitation)
+    case news(String)
+    case manage
+    case new
+    case rename(Workspace)
+    /// The delete confirmation is a sheet case, not a `confirmationDialog`, for two
+    /// hard-won reasons. A dialog is a *different presentation primitive*: raising one
+    /// while the Manage sheet was mid-dismissal left AppKit deferring and re-attempting
+    /// it, which is how a dialog came back seconds after being dismissed. And a
+    /// `confirmationDialog` clears its binding *before* running the tapped button —
+    /// issue #35, documented in `UpdateDialogs` — so Delete read state its own dismissal
+    /// had already cleared and silently deleted nothing. Sheet buttons do neither.
+    case delete(PendingDeletion)
+
+    var id: String {
+      switch self {
+      case .starter: return "starter"
+      case .news: return "news"
+      case .manage: return "manage"
+      case .new: return "new"
+      case .rename(let workspace): return "rename-\(workspace.id)"
+      case .delete(let pending): return "delete-\(pending.workspace.id)"
+      }
+    }
   }
 
   /// One workspace and what deleting it costs, held while the confirmation is up.
@@ -103,16 +149,17 @@ extension AppFeature {
     case starterBackendPicked(CLISessionBackendKind)
     case starterDismissed
     case renameRequested(Workspace)
-    /// The half that actually raises each sheet, sent once Manage has closed — see
-    /// `handOff`. Separate cases rather than a flag, so the order is visible in a test.
-    case newPresented
-    case renamePresented(Workspace)
-    case deletePresented(PendingDeletion)
+    /// The single sheet was closed — by its own button, by Escape, or by a click
+    /// outside. Routed to whichever of them is up, so each keeps its own tidy-up.
+    case presentationDismissed
     case renameDraftChanged(String)
     case renameConfirmed
     case renameCancelled
     case deleteRequested(Workspace)
     case deleteConfirmed
+    /// The tear-down finished, off the main thread; `failure` is a refusal or error to
+    /// surface, `nil` on success either way the list is re-read.
+    case deleteFinished(failure: String?)
     case deleteCancelled
     case changeFailureDismissed
     /// The three answers to "other workspaces are open" — see `UpdateDialogs`.
@@ -130,27 +177,6 @@ struct AppWorkspacesReducer: Reducer {
   @Dependency(\.workspaceClient) var workspaces
   @Dependency(\.updateClient) var updateClient
   @Dependency(\.openURL) var openURL
-  @Dependency(\.continuousClock) var clock
-
-  /// Closes Manage Workspaces, then raises the sheet the row asked for.
-  ///
-  /// A view presents one sheet at a time. Rename and Delete are rows *inside* Manage, so
-  /// flipping Manage off and the next sheet on in the same update left neither on screen:
-  /// Manage stayed put and nothing came up — the same trap `GraphOverviewView`'s form
-  /// hosts record, where a binding and its host changing together miss the transition.
-  ///
-  /// The wait is only paid when Manage is actually open, so the File menu and the
-  /// switcher still raise their sheets immediately.
-  private func handOff(
-    _ state: inout AppFeature.State, to action: AppFeature.Action
-  ) -> Effect<AppFeature.Action> {
-    let wasManaging = state.workspaces.isManaging
-    state.workspaces.isManaging = false
-    return .run { send in
-      if wasManaging { try? await clock.sleep(for: .milliseconds(280)) }
-      await send(action)
-    }
-  }
 
   var body: some Reducer<AppFeature.State, AppFeature.Action> {
     Reduce { state, action in
@@ -215,13 +241,26 @@ struct AppWorkspacesReducer: Reducer {
         return .run { [finish = workspaces.finishStarter] _ in finish() }
 
       case .workspaces(.newRequested):
-        return handOff(&state, to: .workspaces(.newPresented))
-
-      case .workspaces(.newPresented):
+        // One update, no hand-off: the single `sheet(item:)` morphs `.manage` into
+        // `.new` itself when both flips land together. The 280ms wait this replaced was
+        // a guess at an animation, and the cancel guarding it could eat the very
+        // present it scheduled.
+        state.workspaces.isManaging = false
         state.workspaces.draftName = ""
         state.workspaces.problem = nil
         state.workspaces.isCreating = true
         return .none
+
+      case .workspaces(.presentationDismissed):
+        switch state.workspaces.presentation {
+        case .starter: return .send(.workspaces(.starterDismissed))
+        case .news: return .send(.workspaces(.newsDismissed))
+        case .manage: return .send(.workspaces(.manageDismissed))
+        case .new: return .send(.workspaces(.createCancelled))
+        case .rename: return .send(.workspaces(.renameCancelled))
+        case .delete: return .send(.workspaces(.deleteCancelled))
+        case .none: return .none
+        }
 
       case .workspaces(.draftNameChanged(let name)):
         state.workspaces.draftName = name
@@ -255,9 +294,7 @@ struct AppWorkspacesReducer: Reducer {
           state.workspaces.changeFailure = refusal.localizedDescription
           return .none
         }
-        return handOff(&state, to: .workspaces(.renamePresented(workspace)))
-
-      case .workspaces(.renamePresented(let workspace)):
+        state.workspaces.isManaging = false
         state.workspaces.renaming = workspace
         // Prefilled with the current name: renaming is usually a correction, not a
         // fresh start, and an empty field would make you retype what you had.
@@ -289,30 +326,38 @@ struct AppWorkspacesReducer: Reducer {
         return .none
 
       case .workspaces(.deleteRequested(let workspace)):
+        // Already asking about one: a second request while the confirmation is up is a
+        // double tap, not a new question.
+        guard state.workspaces.pendingDeletion == nil else { return .none }
         if let refusal = workspace.refusal(for: .delete, current: state.workspaces.current) {
           state.workspaces.changeFailure = refusal.localizedDescription
           return .none
         }
-        return handOff(
-          &state,
-          to: .workspaces(
-            .deletePresented(
-              AppFeature.PendingDeletion(
-                workspace: workspace, contents: workspace.contents()))))
-
-      case .workspaces(.deletePresented(let pending)):
-        state.workspaces.pendingDeletion = pending
+        state.workspaces.isManaging = false
+        state.workspaces.pendingDeletion = AppFeature.PendingDeletion(
+          workspace: workspace, contents: workspace.contents())
         return .none
 
       case .workspaces(.deleteConfirmed):
         guard let pending = state.workspaces.pendingDeletion else { return .none }
+        // Dismiss first, tear down after. The tear-down boots the workspace's daemon out
+        // of launchd, and `bootout` waits for the process to actually exit — which for a
+        // KeepAlive service that is slow to die means launchd's kill escalation, tens of
+        // seconds. Run synchronously in the reducer that froze the app with the
+        // confirmation still on screen: the state had cleared instantly, but a frozen
+        // sheet is indistinguishable from a stuck one. (The action log showed a
+        // 29-second gap after `deleteConfirmed`.)
         state.workspaces.pendingDeletion = nil
-        do {
-          try workspaces.delete(pending.workspace)
-        } catch {
-          state.workspaces.changeFailure = error.localizedDescription
+        return .run { [delete = workspaces.delete] send in
+          var failure: String?
+          do { try delete(pending.workspace) } catch { failure = error.localizedDescription }
+          await send(.workspaces(.deleteFinished(failure: failure)))
         }
+
+      case .workspaces(.deleteFinished(let failure)):
+        if let failure { state.workspaces.changeFailure = failure }
         state.workspaces.known = workspaces.list()
+        state.workspaces.summaries = workspaces.summarize(state.workspaces.known)
         return .none
 
       case .workspaces(.deleteCancelled):
