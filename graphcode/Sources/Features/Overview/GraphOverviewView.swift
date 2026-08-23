@@ -75,7 +75,10 @@ struct GraphOverviewView: View {
   /// directory for it to belong to.
   var body: some View {
     let derived = Derived(
-      overview: GraphOverview(graphs: store.projects.map(\.graph)),
+      overview: GraphOverview(
+        graphs: store.projects.map(\.graph),
+        declaredEntries: Dictionary(
+          uniqueKeysWithValues: store.projects.map { ($0.id, $0.declaredEntryIDs) })),
       attentionItems: store.attentionItems)
 
     return canvas(derived)
@@ -169,6 +172,9 @@ struct GraphOverviewView: View {
         startNodeLayer(overview)
         linksLayer(overview)
         loopsLayer(overview, reasons: derived.attentionReasons, now: now)
+        // Above the cards and the links, since the handle it reveals hangs below the
+        // origin dot and must not end up under a line drawn from it.
+        entryHandleLayer(overview)
       }
       .scaleEffect(transform.scale)
       .offset(liveOffset)

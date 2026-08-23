@@ -115,7 +115,7 @@ struct GraphOverview: Equatable {
 
   init() {}
 
-  init(graphs: [LoopGraph]) {
+  init(graphs: [LoopGraph], declaredEntries: [String: Set<UUID>] = [:]) {
     // The global graph's lane goes first — it's the one that dispatches into the others,
     // so reading top-to-bottom follows the direction work actually travels. Stable
     // partition rather than a sort, so the remaining folders keep sidebar order. A global
@@ -127,7 +127,8 @@ struct GraphOverview: Equatable {
 
     var laneTop = Metrics.laneTop
     for graph in lanes {
-      let lane = Self.layOutLane(graph, top: laneTop)
+      let lane = Self.layOutLane(
+        graph, top: laneTop, declaredEntries: declaredEntries[graph.project.path] ?? [])
       folders.append(lane.folder)
       loops.append(contentsOf: lane.loops)
       links.append(contentsOf: lane.links)
@@ -152,9 +153,11 @@ struct GraphOverview: Equatable {
     let links: [Link]
   }
 
-  private static func layOutLane(_ graph: LoopGraph, top: CGFloat) -> Lane {
+  private static func layOutLane(
+    _ graph: LoopGraph, top: CGFloat, declaredEntries: Set<UUID> = []
+  ) -> Lane {
     let path = graph.project.path
-    let roles = CardEntryRole.roles(in: graph)
+    let roles = CardEntryRole.roles(in: graph, declaredEntries: declaredEntries)
     var loops: [Loop] = []
     var links: [Link] = []
 
