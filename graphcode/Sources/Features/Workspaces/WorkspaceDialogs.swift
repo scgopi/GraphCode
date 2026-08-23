@@ -27,46 +27,32 @@ struct WorkspaceDialogs: ViewModifier {
       // landed. Mutually exclusive with the starter by construction: this is default-only
       // and the starter never is.
       .task { store.send(.workspaces(.newsChecked)) }
+      // ONE sheet modifier. A view honours only the last one attached, so the five this
+      // replaced were quietly fighting: Manage would not dismiss, and the delete
+      // confirmation retried against a sheet that would not go — a dialog flickering
+      // once a second. `WorkspacesState.presentation` is the single source for which is
+      // up, and it can only ever be one.
       .sheet(
-        isPresented: Binding(
-          get: { store.workspaces.news != nil },
-          set: { if !$0 { store.send(.workspaces(.newsDismissed)) } })
-      ) {
-        if let version = store.workspaces.news {
-          WorkspaceNewsView(store: store, version: version)
-        }
-      }
-      .sheet(
-        isPresented: Binding(
-          get: { store.workspaces.starter != nil },
-          set: { if !$0 { store.send(.workspaces(.starterDismissed)) } })
-      ) {
-        if let starter = store.workspaces.starter {
+        item: Binding(
+          get: { store.workspaces.presentation },
+          set: { if $0 == nil { store.send(.workspaces(.presentationDismissed)) } })
+      ) { presentation in
+        switch presentation {
+        case .starter(let invitation):
           WorkspaceStarterView(
             store: store, workspace: store.workspaces.current,
-            suggested: starter.suggestedBackend)
+            suggested: invitation.suggestedBackend)
+        case .news(let version):
+          WorkspaceNewsView(store: store, version: version)
+        case .manage:
+          ManageWorkspacesView(store: store)
+        case .new:
+          NewWorkspaceFormView(store: store)
+        case .rename:
+          RenameWorkspaceFormView(store: store)
+        case .delete(let pending):
+          DeleteWorkspaceConfirmView(store: store, pending: pending)
         }
-      }
-      .sheet(
-        isPresented: Binding(
-          get: { store.workspaces.isManaging },
-          set: { if !$0 { store.send(.workspaces(.manageDismissed)) } })
-      ) {
-        ManageWorkspacesView(store: store)
-      }
-      .sheet(
-        isPresented: Binding(
-          get: { store.workspaces.isCreating },
-          set: { if !$0 { store.send(.workspaces(.createCancelled)) } })
-      ) {
-        NewWorkspaceFormView(store: store)
-      }
-      .sheet(
-        isPresented: Binding(
-          get: { store.workspaces.renaming != nil },
-          set: { if !$0 { store.send(.workspaces(.renameCancelled)) } })
-      ) {
-        RenameWorkspaceFormView(store: store)
       }
       // Another instance may have created or deleted one since this window last looked,
       // and the File menu is built from this list — so it is refreshed whenever the window
@@ -75,24 +61,6 @@ struct WorkspaceDialogs: ViewModifier {
         NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
       ) { _ in
         store.send(.workspaces(.listRequested))
-      }
-      .confirmationDialog(
-        "Delete the “\(store.workspaces.pendingDeletion?.workspace.name ?? "")” workspace?",
-        isPresented: Binding(
-          get: { store.workspaces.pendingDeletion != nil },
-          set: { if !$0 { store.send(.workspaces(.deleteCancelled)) } }
-        ),
-        titleVisibility: .visible,
-        presenting: store.workspaces.pendingDeletion
-      ) { _ in
-        Button("Delete Workspace", role: .destructive) {
-          store.send(.workspaces(.deleteConfirmed))
-        }
-        Button("Cancel", role: .cancel) { store.send(.workspaces(.deleteCancelled)) }
-      } message: { pending in
-        Text(
-          "\(pending.summary). Its terminal sessions are ended and its daemon stopped; "
-            + "the folder moves to the Trash, where it stays recoverable.")
       }
       .alert(
         "That workspace can't be changed",

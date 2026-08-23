@@ -88,3 +88,43 @@ struct ManageWorkspacesView: View {
     }
   }
 }
+
+/// The delete confirmation, as a case of the window's one workspace sheet.
+///
+/// Not a `confirmationDialog`, deliberately — see `Presentation.delete` for the two
+/// failures that retired it: a window-modal dialog raised while the Manage sheet was
+/// mid-dismissal got deferred and re-attempted by AppKit (the dialog that came back after
+/// being dismissed), and a dialog's buttons run *after* its binding clears (#35), so
+/// Delete read a `pendingDeletion` its own dismissal had already nilled and deleted
+/// nothing. A sheet's buttons are plain buttons: what they read is what is there.
+struct DeleteWorkspaceConfirmView: View {
+  @Bindable var store: StoreOf<AppFeature>
+  let pending: AppFeature.PendingDeletion
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text("Delete the “\(pending.workspace.name)” workspace?")
+        .font(.headline)
+
+      Text(
+        "\(pending.summary). Its terminal sessions are ended and its daemon stopped; "
+          + "the folder moves to the Trash, where it stays recoverable."
+      )
+      .font(.system(size: 11.5))
+      .foregroundStyle(.white.opacity(0.65))
+      .fixedSize(horizontal: false, vertical: true)
+
+      HStack {
+        Spacer()
+        Button("Cancel") { store.send(.workspaces(.deleteCancelled)) }
+          .keyboardShortcut(.cancelAction)
+        // Destructive and deliberately not the default: ⏎ must not delete a workspace.
+        Button("Delete Workspace", role: .destructive) {
+          store.send(.workspaces(.deleteConfirmed))
+        }
+      }
+    }
+    .padding(24)
+    .frame(width: 420)
+  }
+}
