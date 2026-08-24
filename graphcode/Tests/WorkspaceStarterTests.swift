@@ -72,6 +72,41 @@ struct WorkspaceStarterTests {
     await store.send(.workspaces(.starterDismissed))
     #expect(store.state.workspaces.starter == nil)
     #expect(finished.value == 1)
+    // Dismissal re-applies what is on screen — idempotent here, load-bearing in the
+    // untapped case below.
+    #expect(applied.value == [.codex, .codex])
+  }
+
+  @Test
+  @MainActor
+  func startWorkingOverThePreselectionAppliesIt() async {
+    // The reported bug: the starter opened with Copilot preselected — a filled
+    // checkmark — and Start Working was pressed with no tap. Nothing was written, and
+    // the workspace ran on the built-in default while Settings said Claude Code.
+    // Tapping two rows in a row worked, because only taps applied. The dialog's exit
+    // applies whatever is selected now, so the checkmark is the answer.
+    let applied = LockIsolated<[CLISessionBackendKind]>([])
+    let store = TestStore(initialState: AppFeature.State()) {
+      AppFeature()
+    } withDependencies: {
+      $0.workspaceClient.starterInvitation = {
+        WorkspaceStarter.Invitation(suggestedBackend: .copilotCLI)
+      }
+      $0.workspaceClient.applyDefaultBackend = { backend in
+        applied.withValue { $0.append(backend) }
+      }
+      $0.workspaceClient.finishStarter = {}
+    }
+    store.exhaustivity = .off
+
+    await store.send(.workspaces(.starterChecked))
+    await store.send(.workspaces(.starterDismissed))
+    #expect(applied.value == [.copilotCLI])
+
+    // Answered is answered: a second dismissal (a late sheet callback, say) must not
+    // write again.
+    await store.send(.workspaces(.starterDismissed))
+    #expect(applied.value == [.copilotCLI])
   }
 
   @Test

@@ -235,10 +235,23 @@ struct AppWorkspacesReducer: Reducer {
         return .run { [apply = workspaces.applyDefaultBackend] _ in await apply(backend) }
 
       case .workspaces(.starterDismissed):
-        // Skip counts as answered: someone who dismissed this does not want it again on
-        // the next launch. Whatever is selected has already been applied.
+        // Every exit applies whatever is on screen — Start Working, Skip, and Escape
+        // alike — so the checkmark is never decoration. The version this replaced
+        // applied only on a *tap*: someone whose suggested agent was already the one
+        // they wanted pressed Start Working over a filled checkmark and got the
+        // built-in default instead, while tapping two rows in a row worked. A selected
+        // row plus the primary button is not "quietly": it is the answer.
+        //
+        // Skip counts as answered too: someone who dismissed this does not want it
+        // again on the next launch.
+        guard state.workspaces.starter != nil else { return .none }
         state.workspaces.starter = nil
-        return .run { [finish = workspaces.finishStarter] _ in finish() }
+        let backend = state.workspaces.starterBackend
+        return .run {
+          [apply = workspaces.applyDefaultBackend, finish = workspaces.finishStarter] _ in
+          await apply(backend)
+          finish()
+        }
 
       case .workspaces(.newRequested):
         // One update, no hand-off: the single `sheet(item:)` morphs `.manage` into
