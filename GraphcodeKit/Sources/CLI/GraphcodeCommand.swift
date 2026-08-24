@@ -92,7 +92,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
                            every interval instead of the prompt carrying /loop. Needs
                            "Daemon heartbeat" enabled in the app's Settings; the prompt
                            is then the bare task, no cadence in it
-      --backend <name>     claudeCode | copilotCLI | codex — default: run from inside a
+      --backend <name>     claudeCode | copilotCLI | codex | openCode — default: run from inside a
                            loop, the creating loop's backend; otherwise claudeCode
       --model <tier>       fast | standard | capable           (default: by loop type)
       --metric <cmd>       how the loop's performance is measured — fed into its prompt

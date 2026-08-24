@@ -82,6 +82,13 @@ public enum SessionTransplant {
         backend: .codex, sessionID: url.lastPathComponent,
         sourceWorkingDirectory: workingDirectory,
         files: ["rollout.jsonl": rollout])
+
+    case .openCode:
+      // OpenCode's conversations live in one SQLite database shared by every session on
+      // the machine, not in a file per session that can be lifted out. Its own
+      // `opencode export` could produce one, but nothing imports it back into a *fresh*
+      // identity, so an exported OpenCode loop starts fresh — as every Codex one does.
+      return nil
     }
   }
 
@@ -113,6 +120,7 @@ public enum SessionTransplant {
     case .claudeCode: return restoreClaude(artifact, forNodeID: nodeID, projectPath: projectPath)
     case .copilotCLI: return restoreCopilot(artifact, forNodeID: nodeID)
     case .codex: return restoreCodex(artifact, projectPath: projectPath)
+    case .openCode: return nil
     }
   }
 

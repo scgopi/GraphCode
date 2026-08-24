@@ -91,7 +91,8 @@ struct GhosttyTerminalView: NSViewRepresentable {
       return GhosttyTerminalNSView(
         command: command(briefingPath: briefingPath),
         workingDirectory: effectiveWorkingDirectory,
-        environment: sessionEnvironment(briefingPath: briefingPath))
+        environment: sessionEnvironment(
+          briefingPath: briefingPath, hooksFile: presenceHooksFile()))
     }
     apply(to: view)
     host.adopt(view)
@@ -186,15 +187,14 @@ struct GhosttyTerminalView: NSViewRepresentable {
     // here: this whole string is the remote zsh's `-c` script, and that shell's own
     // tilde expansion is the only thing that knows the remote home directory.
     if let briefingPath {
-      switch backend {
-      case .claudeCode:
+      if backend == .claudeCode {
         parts.append("--append-system-prompt-file \(briefingPath)")
-      case .copilotCLI, .codex:
+      } else if backend.briefingNeedsDirectoryGrant {
         parts.append("--add-dir \((briefingPath as NSString).deletingLastPathComponent)")
       }
     }
     if !prompt.isEmpty {
-      if backend == .copilotCLI { parts.append("--interactive") }
+      if let flag = backend.promptFlag { parts.append(flag) }
       parts.append(prompt)
     }
     return Self.interactiveLoginShell(parts)
@@ -265,12 +265,14 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// than on the command line because the pointer is prose — inside `"$VAR"` it needs no
   /// quoting and cannot break the shell string the command is joined into. Claude's
   /// prompt stays untouched: its briefing arrives via `--append-system-prompt-file`.
-  func sessionEnvironment(briefingPath: String?) -> [String: String] {
-    guard var prompt = initialPrompt else { return [:] }
+  func sessionEnvironment(briefingPath: String?, hooksFile: URL? = nil) -> [String: String] {
+    var environment = backend.presenceEnvironment(hooksFile: hooksFile)
+    guard var prompt = initialPrompt else { return environment }
     if backend != .claudeCode, let briefingPath {
       prompt = "\(SessionBriefing.pointer(toBriefingAt: briefingPath)) \(prompt)"
     }
-    return [Self.promptVariable: prompt]
+    environment[Self.promptVariable] = prompt
+    return environment
   }
 
   private func command(briefingPath: String?) -> [String] {

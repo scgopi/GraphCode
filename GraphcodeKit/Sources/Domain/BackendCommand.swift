@@ -16,6 +16,7 @@ extension CLISessionBackendKind {
     case .claudeCode: return "claude"
     case .copilotCLI: return "copilot"
     case .codex: return "codex"
+    case .openCode: return "opencode"
     }
   }
 
@@ -42,6 +43,11 @@ extension CLISessionBackendKind {
       // `-m` is real, but the valid model ids are not visible from `codex --help` and a
       // wrong one fails at launch. Passing nothing lets Codex's own default apply, which
       // is honest, where a guessed id would be a confident break.
+      return []
+    case .openCode:
+      // `-m` takes `provider/model`, and which providers a user has connected is theirs
+      // to know (`opencode auth list`), not something a tier can name. Passing nothing
+      // lets whatever `opencode` is configured to use apply.
       return []
     }
   }
@@ -108,6 +114,32 @@ extension CLISessionBackendKind {
       guard let briefingPath, let briefingDirectory else { return model + access + [prompt] }
       return model + access + ["--add-dir", briefingDirectory]
         + ["\(SessionBriefing.pointer(toBriefingAt: briefingPath)) \(prompt)"]
+    case .openCode:
+      // The prompt is the value of `--prompt`, the briefing a pointer inside it. No
+      // directory grant: OpenCode's `read` permission defaults to allow, and `--auto`
+      // approves everything not explicitly denied, so the briefing is readable as is.
+      guard let briefingPath else { return model + ["--prompt", prompt] }
+      return model
+        + ["--prompt", "\(SessionBriefing.pointer(toBriefingAt: briefingPath)) \(prompt)"]
+    }
+  }
+
+  /// The flag a backend's opening prompt rides behind, or `nil` for one that takes it
+  /// positionally. The app assembles a shell string rather than an argv and needs the
+  /// same answer `launchArguments` gives.
+  public var promptFlag: String? {
+    switch self {
+    case .claudeCode, .codex: return nil
+    case .copilotCLI: return "--interactive"
+    case .openCode: return "--prompt"
+    }
+  }
+
+  /// Whether a backend that verifies paths needs `--add-dir` for the briefing's folder.
+  public var briefingNeedsDirectoryGrant: Bool {
+    switch self {
+    case .claudeCode, .openCode: return false
+    case .copilotCLI, .codex: return true
     }
   }
 
@@ -136,6 +168,7 @@ extension CLISessionBackendKind {
     case .claudeCode: return settings.claudePermissionMode.arguments
     case .copilotCLI: return settings.copilotPermissions.arguments
     case .codex: return settings.codexApprovals.arguments
+    case .openCode: return settings.openCodePermissions.arguments
     }
   }
 
@@ -145,7 +178,32 @@ extension CLISessionBackendKind {
   /// (`GhosttyTerminalView.resumeCommand`) — so a backend gaining or losing resume
   /// support changes both paths together rather than one silently drifting.
   public var supportsResume: Bool {
-    self == .claudeCode || self == .copilotCLI
+    self == .claudeCode || self == .copilotCLI || self == .openCode
+  }
+
+  /// The argv that picks `sessionID` back up — `--resume` for Claude Code and Copilot,
+  /// `--session` for OpenCode, whose `--continue` would take the *last* session on the
+  /// machine rather than this loop's. Empty for a backend that can't resume.
+  public func resumeArguments(sessionID: String) -> [String] {
+    switch self {
+    case .claudeCode, .copilotCLI: return ["--resume", sessionID]
+    case .openCode: return ["--session", sessionID]
+    case .codex: return []
+    }
+  }
+
+  /// Environment a session needs for its reporting to reach graphcode — the fourth
+  /// shape of the `presenceArguments` problem. OpenCode takes no hook flag; its plugin
+  /// is named by a config file, and `OPENCODE_CONFIG` is the one route that *merges over*
+  /// the user's own config instead of replacing it (`OPENCODE_CONFIG_DIR` would drop
+  /// their providers and plugins on the floor — read off the config loader, not the docs).
+  public func presenceEnvironment(hooksFile: URL?) -> [String: String] {
+    switch self {
+    case .openCode:
+      return hooksFile.map { ["OPENCODE_CONFIG": $0.path] } ?? [:]
+    case .claudeCode, .copilotCLI, .codex:
+      return [:]
+    }
   }
 
   /// The argv that makes a backend's session observable — what graphcode adds so that
@@ -182,6 +240,10 @@ extension CLISessionBackendKind {
       // `zmx` path rather than a path to something graphcode wrote. Its other edge is
       // covered without asking Codex anything: see `ZmxSessionLauncher.codexPresence`.
       return zmxPath.map { ["-c", PresenceHooks.codexNotifyOverride(zmxPath: $0)] } ?? []
+    case .openCode:
+      // Reports through a plugin, which rides in the environment rather than the argv —
+      // see `presenceEnvironment`.
+      return []
     }
   }
 }
