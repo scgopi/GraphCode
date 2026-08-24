@@ -219,13 +219,16 @@ struct NodeDraftTests {
 
   @Test
   func theHostingMatrixMatchesTheSpikedCapabilities() {
-    // All three can host the two types that need nothing of the agent beyond a session:
+    // All four can host the two types that need nothing of the agent beyond a session:
     // a turn-based loop is judged by a human, and a goal's predicate is polled by the
     // daemon from outside.
-    #expect(CLISessionBackendKind.hosting(.turnBased) == [.claudeCode, .copilotCLI, .codex])
-    #expect(CLISessionBackendKind.hosting(.goalBased) == [.claudeCode, .copilotCLI, .codex])
+    #expect(
+      CLISessionBackendKind.hosting(.turnBased) == [.claudeCode, .copilotCLI, .codex, .openCode])
+    #expect(
+      CLISessionBackendKind.hosting(.goalBased) == [.claudeCode, .copilotCLI, .codex, .openCode])
     // Time-based needs the session to re-trigger itself, since graphcode holds no timer.
-    // Copilot gained that; Codex has no `/loop` equivalent in its CLI surface.
+    // Copilot gained that; Codex and OpenCode have no `/loop` equivalent in their CLI
+    // surfaces.
     #expect(CLISessionBackendKind.hosting(.timeBased) == [.claudeCode, .copilotCLI])
     // A composite still needs sub-agent fan-out, which only Claude Code has been shown
     // to do.

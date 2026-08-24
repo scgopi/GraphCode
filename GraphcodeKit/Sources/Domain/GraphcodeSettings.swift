@@ -204,6 +204,43 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
 
   public var codexApprovals: CodexApprovals
 
+  /// How much an OpenCode session may do without stopping to ask.
+  ///
+  /// One flag: `--auto` approves every permission not explicitly denied in the user's
+  /// own `opencode.json`, which is exactly the bargain an unattended loop needs — their
+  /// deny rules still hold, and nothing else stops to ask. OpenCode's own default asks
+  /// per tool, which leaves an unattended loop at a dialog nobody sees.
+  public enum OpenCodePermissions: String, Codable, CaseIterable, Sendable {
+    case ask
+    case auto
+
+    public var displayName: String {
+      switch self {
+      case .ask: return "Ask every time"
+      case .auto: return "Auto-approve (recommended)"
+      }
+    }
+
+    public var explanation: String {
+      switch self {
+      case .ask:
+        return "OpenCode's own default. An unattended loop will wait at the first prompt."
+      case .auto:
+        return "OpenCode's --auto: everything your own opencode.json doesn't deny is "
+          + "approved — what an unattended loop needs to run without a human at the pane."
+      }
+    }
+
+    public var arguments: [String] {
+      switch self {
+      case .ask: return []
+      case .auto: return ["--auto"]
+      }
+    }
+  }
+
+  public var openCodePermissions: OpenCodePermissions
+
   public var defaultBackend: CLISessionBackendKind {
     didSet {
       if !defaultBackend.isSpiked { defaultBackend = oldValue.isSpiked ? oldValue : .claudeCode }
@@ -320,6 +357,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   public init(
     defaultBackend: CLISessionBackendKind = .claudeCode,
     codexApprovals: CodexApprovals = .workspace,
+    openCodePermissions: OpenCodePermissions = .auto,
     claudePermissionMode: ClaudePermissionMode = .auto,
     copilotPermissions: CopilotPermissions = .allowEverything,
     briefsSessionsAboutTheGraph: Bool = true,
@@ -333,6 +371,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   ) {
     self.defaultBackend = defaultBackend.isSpiked ? defaultBackend : .claudeCode
     self.codexApprovals = codexApprovals
+    self.openCodePermissions = openCodePermissions
     self.claudePermissionMode = claudePermissionMode
     self.copilotPermissions = copilotPermissions
     self.briefsSessionsAboutTheGraph = briefsSessionsAboutTheGraph
@@ -356,6 +395,9 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     defaultBackend = storedBackend.isSpiked ? storedBackend : .claudeCode
     codexApprovals =
       try container.decodeIfPresent(CodexApprovals.self, forKey: .codexApprovals) ?? .workspace
+    openCodePermissions =
+      try container.decodeIfPresent(OpenCodePermissions.self, forKey: .openCodePermissions)
+      ?? .auto
     claudePermissionMode =
       try container.decodeIfPresent(ClaudePermissionMode.self, forKey: .claudePermissionMode)
       ?? .auto

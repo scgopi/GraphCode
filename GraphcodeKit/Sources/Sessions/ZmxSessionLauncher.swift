@@ -553,7 +553,8 @@ public enum ZmxSessionLauncher {
       ]
       + Self.loginShellInvocation(
         of: executable, arguments: arguments,
-        environment: Self.environment(forBackend: node.backend, briefingPath: briefingPath),
+        environment: Self.environment(
+          forBackend: node.backend, briefingPath: briefingPath, hooksFile: hooksFile),
         scriptSuffix: remoteHooksSuffix)
 
     // `zmx` types this command into the session's shell, and a tty in canonical mode
@@ -674,12 +675,15 @@ public enum ZmxSessionLauncher {
         hooksFile: hooksFile,
         sessionName: sessionName,
         zmxPath: reportingPath)
-      + ["--resume", sessionID]
+      + node.backend.resumeArguments(sessionID: sessionID)
     return [
       "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
     ]
       + Self.loginShellInvocation(
-        of: executable, arguments: resumeArgs, scriptSuffix: remoteHooksSuffix)
+        of: executable, arguments: resumeArgs,
+        environment: Self.environment(
+          forBackend: node.backend, briefingPath: nil, hooksFile: hooksFile),
+        scriptSuffix: remoteHooksSuffix)
   }
 
   /// Stands in for a remote session ID that this machine cannot know: the ID was written
@@ -714,14 +718,14 @@ public enum ZmxSessionLauncher {
     return paths
   }
 
-  /// Environment a session needs beyond what its shell provides. Nothing does, currently —
-  /// Copilot's briefing rides on its argv (see `CLISessionBackendKind.launchArguments`)
-  /// after the documented environment route turned out not to work. Kept because the
-  /// plumbing is the awkward part and the next backend will want it.
-  static func environment(forBackend backend: CLISessionBackendKind, briefingPath: String?)
-    -> [String: String]
-  {
-    [:]
+  /// Environment a session needs beyond what its shell provides. Copilot's briefing rides
+  /// on its argv (see `CLISessionBackendKind.launchArguments`) after the documented
+  /// environment route turned out not to work; OpenCode's presence plugin is the one
+  /// thing that genuinely has to travel this way (`presenceEnvironment`).
+  static func environment(
+    forBackend backend: CLISessionBackendKind, briefingPath: String?, hooksFile: URL? = nil
+  ) -> [String: String] {
+    backend.presenceEnvironment(hooksFile: hooksFile)
   }
 
   /// Whether the assembled command survives being typed into a terminal. Budgeted well

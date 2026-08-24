@@ -348,6 +348,7 @@ struct OnboardingBackendPage: View {
     case .claudeCode: return "Anthropic's agent — the reference backend, fully wired."
     case .copilotCLI: return "GitHub's agent CLI."
     case .codex: return "OpenAI's agent CLI."
+    case .openCode: return "The open-source agent CLI — any model provider."
     }
   }
 
