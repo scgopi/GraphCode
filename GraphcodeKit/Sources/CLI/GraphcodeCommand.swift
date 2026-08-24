@@ -52,14 +52,14 @@ public enum GraphcodeCommand: Equatable, Sendable {
     USAGE
       graphcode projects
       graphcode status <project-path>
-      graphcode node create <project-path> --title <t> --type <sketch|turn|goal|time|composite> [options]
+      graphcode node create <project-path> --title <t> --type <main|turn|goal|time|composite> [options]
       graphcode node stop <project-path> <node-id>
       graphcode node delete <project-path> <node-id>   removes it, its edges, session
                            and memory — irreversible; stop is the reversible verb
       graphcode node send <project-path> <node-id> [--follow-up] <message…>
       graphcode node update <project-path> <node-id> [options]
       graphcode node promote <project-path> <node-id> --type <goal|turn|time> [options]
-                           give a sketch a shape, keeping its session, edges and memory
+                           give a main loop a shape, keeping its session, edges and memory
       graphcode node memo <project-path> <node-id> <note…>
       graphcode node refine <project-path> <node-id> <playbook…|--file f|--rollback>
       graphcode node pilot <project-path> <node-id>     dry-run a composite
@@ -87,7 +87,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
       --goal <text>        required for --type goal
       --predicate <cmd>    optional stop condition for --type goal (exit 0 = met)
       --prompt <text>      required for --type time; put the cadence in it (/loop 1h …).
-                           For --type sketch it is the optional starting note
+                           For --type main it is the optional starting note
       --heartbeat <secs>   for --type time, experimental: the daemon delivers the prompt
                            every interval instead of the prompt carrying /loop. Needs
                            "Daemon heartbeat" enabled in the app's Settings; the prompt
@@ -129,8 +129,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
                            --predicate through promotion, the same rule update holds.
       --type turn          with --pause <every-turn|before-writes>  (default: every-turn)
       --type time          with --prompt <text> (required); put the cadence in it
-      Promotion is one-way: a sketch gains a shape, never the reverse, and only a
-      sketch can be promoted.
+      Promotion is one-way: a main loop gains a shape, never the reverse, and only a
+      main loop can be promoted.
 
     node memo appends a note to the loop's own memory log — what the next pass reads
     before starting. Record dead ends and decisions, not a transcript.
@@ -308,7 +308,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
 
     let loopType: LoopType
     switch rawType {
-    case "sketch": loopType = .sketch
+    // `sketch` too, because that is the word every graph on disk still serialises and
+    // what any script written before the rename still passes.
+    case "main", "sketch": loopType = .sketch
     case "turn", "turnBased": loopType = .turnBased
     case "goal", "goalBased": loopType = .goalBased
     case "time", "timeBased": loopType = .timeBased
@@ -530,7 +532,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
       guard let prompt = flags["prompt"] else { throw ParseError.missingArgument("--prompt") }
       return .timed(triggerPrompt: prompt)
 
-    // `sketch` and `composite` are refused by shape, not by the daemon: demotion is
+    // `main` and `composite` are refused by shape, not by the daemon: demotion is
     // unrepresentable and a composite is not one decision (see `SketchPromotion`).
     default:
       throw ParseError.invalidValue(argument: "--type", value: rawType)

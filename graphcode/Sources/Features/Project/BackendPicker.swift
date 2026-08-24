@@ -82,7 +82,7 @@ struct BackendPicker: View {
     case .sketch:
       // Unreachable while every spiked backend hosts a bare session, but the compiler
       // rightly wants the sentence written down.
-      return "\(name) can't host a sketch."
+      return "\(name) can't host a main loop."
     }
   }
 }

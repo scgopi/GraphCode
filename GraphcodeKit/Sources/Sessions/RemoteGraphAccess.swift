@@ -373,7 +373,7 @@ public enum RemoteGraphAccess {
             fail("missing --title")
         if not flags.get("type"):
             fail("missing --type")
-        types = {"sketch": "sketch",
+        types = {"main": "sketch", "sketch": "sketch",
                  "turn": "turnBased", "turnBased": "turnBased",
                  "goal": "goalBased", "goalBased": "goalBased",
                  "time": "timeBased", "timeBased": "timeBased",

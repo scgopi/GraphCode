@@ -54,7 +54,7 @@ struct NodeDraftForm: View {
     .padding(.bottom, 18)
     // Flexible on both axes so the sheet can be dragged larger — a fixed frame is what
     // pinned it. The ideal height grew with the chooser, which is a band and a rule
-    // taller now that Sketch sits above the grid.
+    // taller now that Main sits above the grid.
     .frame(minWidth: 520, idealWidth: 520, maxWidth: .infinity)
     .frame(minHeight: 560, idealHeight: 760, maxHeight: .infinity)
     .background(Theme.sheet)
@@ -114,7 +114,7 @@ struct NodeDraftForm: View {
       }
       if store.draftLoopType == .sketch {
         Text(
-          "Sketch loops don't cut a worktree by default — most of them read rather than "
+          "Main loops don't cut a worktree by default — most of them read rather than "
             + "write. Pick a branch here if this one will."
         )
         .font(.system(size: 11))

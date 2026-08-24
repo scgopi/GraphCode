@@ -837,7 +837,7 @@ public actor GraphStore {
       // instead of leaving the caller to discover promotion exists.
       announceError(
         node.loopType == .sketch
-          ? "update refused: nothing in it applies to a sketch loop — give it a shape "
+          ? "update refused: nothing in it applies to a main loop — give it a shape "
             + "first with `graphcode node promote`"
           : "update refused: nothing in it applies to a \(node.loopType) loop")
       return
@@ -886,7 +886,7 @@ public actor GraphStore {
     }
     guard node.loopType == .sketch else {
       announceError(
-        "promotion refused: \(node.title) already has a shape — only a sketch can be promoted")
+        "promotion refused: \(node.title) already has a shape — only a main loop can be promoted")
       return
     }
 
@@ -943,7 +943,7 @@ public actor GraphStore {
       promotedBy == nodeID
       ? "itself" : promotedBy.flatMap { graph.nodes[id: $0]?.title } ?? "a human"
     recordMemory(
-      nodeID, "promoted from sketch to \(promotion.targetType.rawValue) by \(promoter) — \(nudge)")
+      nodeID, "promoted from main to \(promotion.targetType.rawValue) by \(promoter) — \(nudge)")
     pendingNudges.append((nodeID, "[graphcode] \(nudge)"))
 
     // What creation does for the type, promotion does too: an unattended loop's session

@@ -1,7 +1,7 @@
 import GraphcodeKit
 import SwiftUI
 
-/// The four kinds of loop as tiles that explain themselves, with Sketch — the
+/// The four kinds of loop as tiles that explain themselves, with Main — the
 /// starting point that isn't yet any of them — banded above.
 ///
 /// It was a four-segment picker, and the problem with that wasn't the shape — it was
@@ -12,7 +12,7 @@ import SwiftUI
 /// teach.
 ///
 /// The axis the chooser is ordered on is how much you have to decide before the loop
-/// can start. Sketch demands nothing, so it sits above the grid as a full-width band —
+/// can start. Main demands nothing, so it sits above the grid as a full-width band —
 /// deliberately not a fifth tile: an orphan tile in a 2×2 rhythm reads as an
 /// afterthought, and a five-wide row shrinks every explanation to one truncated line.
 /// The labelled rule between them ("or commit to something") is the taxonomy lesson.
@@ -27,7 +27,7 @@ struct LoopTypeChooser: View {
 
   private let columns = [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)]
 
-  /// ⌘1 Sketch · ⌘2 Goal · ⌘3 Timed · ⌘4 Turn · ⌘5 Composite — `allCases` order, which
+  /// ⌘1 Main · ⌘2 Goal · ⌘3 Timed · ⌘4 Turn · ⌘5 Composite — `allCases` order, which
   /// the enum keeps in chooser order on purpose.
   private static let shortcuts = Dictionary(
     uniqueKeysWithValues: LoopType.allCases.enumerated().map { ($1, "\($0 + 1)") })

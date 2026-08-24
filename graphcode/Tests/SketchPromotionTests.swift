@@ -219,7 +219,7 @@ struct SketchPromotionTests {
     await store.handle(
       .promoteNode(byHuman.id, promotion: .goal(GoalSpec(summary: "c")), promotedBy: nil))
 
-    let promotions = entries.value.filter { $0.contains("promoted from sketch") }
+    let promotions = entries.value.filter { $0.contains("promoted from main") }
     #expect(promotions.contains { $0.contains("by itself") })
     #expect(promotions.contains { $0.contains("by Coordinator") })
     #expect(promotions.contains { $0.contains("by a human") })

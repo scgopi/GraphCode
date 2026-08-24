@@ -17,6 +17,11 @@
 public enum LoopType: String, Codable, CaseIterable, Sendable {
   /// The zero-commitment type: no goal, no cadence, no checkpoint. A bare session that
   /// works with you until you promote it or close it.
+  ///
+  /// Shown as "Main" everywhere a human reads it. The identifier and the raw value keep
+  /// the older word for the same reason `composite` serialises as `proactive`: every
+  /// graph on disk carries `sketch`, and a daemon or CLI in `~/.graphcode/bin` can be a
+  /// version behind the app that wrote it.
   case sketch
   case goalBased
   case timeBased
