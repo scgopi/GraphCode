@@ -50,7 +50,7 @@ extension LoopType {
   /// app admitting it had two vocabularies.
   var displayName: String {
     switch self {
-    case .sketch: "Sketch"
+    case .sketch: "Main"
     case .goalBased: "Goal"
     case .timeBased: "Timed"
     case .turnBased: "Turn"

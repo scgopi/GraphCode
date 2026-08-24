@@ -185,7 +185,7 @@ struct OnboardingReadingPage: View {
 }
 
 /// Page 3 — the four kinds, subtitled by what makes each one *stop*, with the edge
-/// lesson folded in underneath. Sketch shows above them as what it is: not a fifth
+/// lesson folded in underneath. Main shows above them as what it is: not a fifth
 /// kind, the place you start before the work has a shape.
 ///
 /// Two pages became one, which is what freed the room for page 2. The tiles are the
@@ -202,7 +202,7 @@ struct OnboardingLoopTypesPage: View {
         .font(.system(size: 25, weight: .bold))
         .tracking(-0.25)
       Text(
-        "They differ in what makes them stop — and a sketch is where you start "
+        "They differ in what makes them stop — and a main loop is where you start "
           + "before choosing one."
       )
       .font(.system(size: 14))

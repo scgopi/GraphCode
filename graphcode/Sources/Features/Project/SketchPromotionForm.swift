@@ -39,7 +39,7 @@ struct SketchPromotionForm: View {
           .font(.system(size: 16, weight: .semibold))
       }
       Text(
-        "Keep the session, add a shape — \(node?.title ?? "this sketch") stays "
+        "Keep the session, add a shape — \(node?.title ?? "this loop") stays "
           + "exactly where it is."
       )
       .font(.system(size: 12))
