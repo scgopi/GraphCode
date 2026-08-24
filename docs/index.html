@@ -69,6 +69,7 @@ description: Graph engineering for coding agents on macOS — loops connected on
   .nav-actions { display: flex; align-items: center; gap: 10px; }
   .btn-star { display: flex; align-items: center; gap: 8px; padding: 8px 13px; border: 1px solid var(--line4); border-radius: 8px; font-size: 13px; color: #d6d6d2; font-family: var(--mono); }
   .btn-star:hover { border-color: #4a4a52; color: #fff; }
+  .star-count { margin-left: 6px; padding: 1px 7px; border: 1px solid var(--line4); border-radius: 999px; font-size: 12px; opacity: .8; }
   .btn-star .star, .btn-ghost .star { color: var(--amber); }
   .btn-amber { padding: 9px 16px; background: var(--amber); color: #12100c; border-radius: 8px; font-size: 13px; font-weight: 600; }
   .btn-amber:hover { background: var(--amber-hi); color: #12100c; }
@@ -307,7 +308,7 @@ description: Graph engineering for coding agents on macOS — loops connected on
       <a href="shortcuts.html">Docs</a>
     </div>
     <div class="nav-actions">
-      <a class="btn-star" href="https://github.com/scgopi/GraphCode"><span class="star">★</span>Star</a>
+      <a class="btn-star" href="https://github.com/scgopi/GraphCode" target="_blank" rel="noopener"><span class="star">★</span>Star<span class="star-count" hidden></span></a>
       <a class="btn-amber" href="https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg">Download .dmg</a>
     </div>
   </div>
@@ -321,7 +322,7 @@ description: Graph engineering for coding agents on macOS — loops connected on
     <p class="hero-sub">A loop is an agent session that runs on repeat. GraphCode connects loops on a canvas — they run unattended, bounded, and still live, so you can attach to any one of them mid-run and steer.</p>
     <div class="hero-ctas">
       <a class="btn-primary" href="https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg">⬇ Download for macOS</a>
-      <a class="btn-ghost" href="https://github.com/scgopi/GraphCode"><span class="star">★</span> Star on GitHub</a>
+      <a class="btn-ghost" href="https://github.com/scgopi/GraphCode" target="_blank" rel="noopener"><span class="star">★</span> Star on GitHub<span class="star-count" hidden></span></a>
     </div>
     <div class="brew"><span class="prompt">$</span><span>brew install --cask scgopi/graphcode/graphcode</span><span class="caret"></span></div>
   </div>
@@ -402,7 +403,7 @@ description: Graph engineering for coding agents on macOS — loops connected on
   <div class="stats-grid">
     <div class="stat"><div class="stat-num">10+</div><div class="stat-desc">parallel live sessions, one canvas</div></div>
     <div class="stat"><div class="stat-num">0</div><div class="stat-desc">files written inside your project folder</div></div>
-    <div class="stat"><div class="stat-num">3</div><div class="stat-desc">backends: Claude Code, Copilot, Codex</div></div>
+    <div class="stat"><div class="stat-num">4</div><div class="stat-desc">backends: Claude Code, Copilot, Codex, OpenCode</div></div>
     <div class="stat"><div class="stat-num">∞</div><div class="stat-desc">reboots survived — sessions outlive the app</div></div>
   </div>
 </section>
@@ -682,7 +683,7 @@ description: Graph engineering for coding agents on macOS — loops connected on
       <p class="lede">Add a folder, write a goal — GraphCode names the loop for you. Connect a second with an edge. Then close the app; the loops won't notice.</p>
       <div class="cta-ctas">
         <a class="btn-primary" href="https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg">⬇ Download .dmg</a>
-        <a class="btn-ghost" href="https://github.com/scgopi/GraphCode"><span class="star">★</span> Star the repo</a>
+        <a class="btn-ghost" href="https://github.com/scgopi/GraphCode" target="_blank" rel="noopener"><span class="star">★</span> Star the repo<span class="star-count" hidden></span></a>
       </div>
       <div class="brew"><span class="prompt">$</span>brew install --cask scgopi/graphcode/graphcode</div>
       <div class="cta-fine">Developer ID signed &amp; notarized · requires Claude Code on your PATH</div>
@@ -702,5 +703,11 @@ description: Graph engineering for coding agents on macOS — loops connected on
   </div>
 </footer>
 
+<script>
+fetch("https://api.github.com/repos/scgopi/GraphCode")
+  .then(r => r.ok ? r.json() : Promise.reject())
+  .then(d => document.querySelectorAll(".star-count").forEach(el => { el.textContent = d.stargazers_count.toLocaleString(); el.hidden = false; }))
+  .catch(() => {});
+</script>
 </body>
 </html>

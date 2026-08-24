@@ -85,6 +85,8 @@ public enum SummaryModelWriter {
       return ["copilot", "-p", prompt] + model
     case .codex:
       return ["codex", "exec", prompt] + model
+    case .openCode:
+      return ["opencode", "run", prompt] + model
     }
   }
 

@@ -75,6 +75,16 @@ struct SettingsView: View {
           .font(.caption2)
           .foregroundStyle(.secondary)
           .fixedSize(horizontal: false, vertical: true)
+
+        Picker("OpenCode", selection: $model.settings.openCodePermissions) {
+          ForEach(GraphcodeSettings.OpenCodePermissions.allCases, id: \.self) { mode in
+            Text(mode.displayName).tag(mode)
+          }
+        }
+        Text(model.settings.openCodePermissions.explanation)
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
       } header: {
         Text("Permissions")
       } footer: {

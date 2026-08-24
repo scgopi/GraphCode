@@ -252,7 +252,8 @@ extension GhosttyTerminalView {
     .joined(separator: " ")
     if !presence.isEmpty { parts.append(presence) }
     if let remoteSettingsPath { parts.append("--settings \"\(remoteSettingsPath)\"") }
-    parts.append("--resume \"$\(ZmxSessionLauncher.remoteResumeIDVariable)\"")
+    parts += backend.resumeArguments(
+      sessionID: "\"$\(ZmxSessionLauncher.remoteResumeIDVariable)\"")
     return Self.interactiveLoginShell(parts)
   }
 

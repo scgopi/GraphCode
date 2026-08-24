@@ -28,6 +28,12 @@ public enum PresenceHooks {
     directory.appendingPathComponent("\(backend.rawValue).json")
   }
 
+  /// OpenCode's reporter, a plugin rather than a hook script, kept beside the config
+  /// that names it — see `OpenCodePresencePlugin`.
+  public static var openCodePluginFile: URL {
+    directory.appendingPathComponent("opencode-presence.js")
+  }
+
   /// The `PreToolUse` reporter, kept as a file next to the settings that name it: it is a
   /// dozen lines of `case` and `sed`, and `zmx` types a launch command into a tty capped
   /// at `MAX_CANON` — the same reason the settings themselves travel by path.
@@ -63,7 +69,9 @@ public enum PresenceHooks {
         ("Stop", .idle),
         ("SessionEnd", .absent),
       ]
-    case .copilotCLI, .codex:
+    case .copilotCLI, .codex, .openCode:
+      // OpenCode reports through a plugin, not through a hooks table — see
+      // `OpenCodePresencePlugin`.
       return nil
     }
   }
@@ -298,6 +306,9 @@ public enum PresenceHooks {
     sessionsDirectory: String? = nil, activityScriptPath: String? = nil,
     usageScriptPath: String? = nil
   ) -> String? {
+    if backend == .openCode {
+      return OpenCodePresencePlugin.config(pluginPath: openCodePluginFile.path)
+    }
     guard let events = events(forBackend: backend) else { return nil }
     let sessions = sessionsDirectory ?? localSessionsExpression
     let script = activityScriptPath ?? localActivityScriptExpression
@@ -346,6 +357,13 @@ public enum PresenceHooks {
         .write(to: activityScriptFile, atomically: true, encoding: .utf8)
       try? usageScript(zmxPath: ZmxLocator.binaryURL.path)
         .write(to: usageScriptFile, atomically: true, encoding: .utf8)
+      if backend == .openCode {
+        // Not best-effort: the config names this file, and OpenCode reports a plugin it
+        // cannot load as an error in the session. No plugin means no config.
+        try OpenCodePresencePlugin.source(
+          zmxPath: ZmxLocator.binaryURL.path, sessionsDirectory: SessionIDStore.directory.path
+        ).write(to: openCodePluginFile, atomically: true, encoding: .utf8)
+      }
       try json.write(to: url, atomically: true, encoding: .utf8)
       return url
     } catch {

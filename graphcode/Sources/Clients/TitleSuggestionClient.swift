@@ -85,6 +85,7 @@ extension TitleSuggestionClient: DependencyKey {
     case .claudeCode: command = "exec claude -p \"$\(promptVariable)\""
     case .copilotCLI: command = "exec copilot -p \"$\(promptVariable)\""
     case .codex: command = "exec codex exec \"$\(promptVariable)\""
+    case .openCode: command = "exec opencode run \"$\(promptVariable)\""
     }
     return ["/bin/zsh", "-i", "-l", "-c", command]
   }
