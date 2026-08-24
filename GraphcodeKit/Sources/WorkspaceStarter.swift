@@ -19,9 +19,12 @@ import Foundation
 public enum WorkspaceStarter {
   /// What the creating workspace passes on to the new one.
   public struct Invitation: Codable, Equatable, Sendable {
-    /// Preselected in the dialog. Not applied on its own: a workspace whose starter was
-    /// never answered keeps whatever `GraphcodeSettings` defaults to, so the suggestion
-    /// can never quietly become the setting.
+    /// Preselected in the dialog, and applied when the dialog closes with it still
+    /// selected. An earlier rule — "the suggestion can never quietly become the
+    /// setting" — applied it only on a tap, which made the preselection's checkmark a
+    /// lie: Start Working over the suggested row kept the built-in default. The one
+    /// case that keeps the old rule is a workspace whose starter never opened at all
+    /// (created before this shipped): no dialog, no suggestion, no write.
     public var suggestedBackend: CLISessionBackendKind
 
     public init(suggestedBackend: CLISessionBackendKind) {
