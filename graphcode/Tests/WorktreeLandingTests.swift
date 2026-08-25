@@ -78,6 +78,46 @@ struct WorktreeLandingTests {
   }
 
   @Test
+  func theCountOfUnlandedCommitsIsReportedAsMeasured() async {
+    // The row says how much is at stake, so the number has to be the real one — a
+    // clamped count read "1 commit not in main" on a branch with four.
+    let (result, _) = await reading([
+      "cherry main refs/heads/feat": "+ a\n+ b\n+ c\n+ d",
+      "merge-base main refs/heads/feat": "base0",
+      "rev-parse refs/heads/feat": "tip0",
+      "rev-parse refs/heads/feat^{tree}": "tree0",
+      "commit-tree tree0 -p base0 -m graphcode-landed-probe": "probe0",
+      "cherry main probe0": "+ probe0",
+    ])
+
+    #expect(result.commitsNotLanded == 4)
+    #expect(!result.landed)
+  }
+
+  @Test
+  func theNearerOfTwoBasesIsTheOneReported() async {
+    // Local `main` is behind, so it sees more outstanding than `origin/main` does.
+    // Neither says landed; the honest number is the smaller one.
+    let (result, _) = await reading(
+      bases: ["main", "refs/remotes/origin/main"],
+      [
+        "cherry main refs/heads/feat": "+ a\n+ b\n+ c",
+        "merge-base main refs/heads/feat": "base0",
+        "rev-parse refs/heads/feat": "tip0",
+        "rev-parse refs/heads/feat^{tree}": "tree0",
+        "commit-tree tree0 -p base0 -m graphcode-landed-probe": "probe0",
+        "cherry main probe0": "+ probe0",
+        "cherry refs/remotes/origin/main refs/heads/feat": "+ c",
+        "merge-base refs/remotes/origin/main refs/heads/feat": "base1",
+        "commit-tree tree0 -p base1 -m graphcode-landed-probe": "probe1",
+        "cherry refs/remotes/origin/main probe1": "+ probe1",
+      ])
+
+    #expect(result.commitsNotLanded == 1)
+    #expect(!result.landed)
+  }
+
+  @Test
   func aStaleLocalDefaultBranchIsNotTheLastWord() async {
     // The PR merged on the forge an hour ago; nobody has fetched since. Local `main`
     // says unmerged, `origin/main` says merged, and merged is the truth.
