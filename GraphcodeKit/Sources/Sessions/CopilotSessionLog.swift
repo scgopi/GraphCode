@@ -182,6 +182,18 @@ public enum CopilotSessionLog {
     return lines
   }
 
+  /// Whether the session named `name` has recorded a user message containing `text` —
+  /// how a typed-in first pass proves it actually landed (`ZmxSessionLauncher`). Copilot
+  /// writes a `user.message` event the moment a message is submitted, so absence after a
+  /// sensible wait means the keystrokes went somewhere else: a trust dialog, a composer
+  /// that was not up yet.
+  static func hasUserMessage(containing text: String, inSessionNamed name: String) -> Bool {
+    guard let directory = directory(forSessionNamed: name) else { return false }
+    let needle = text.prefix(80)
+    return tailLines(ofLogAt: directory.appendingPathComponent("events.jsonl"))
+      .contains { $0.contains("\"user.message\"") && $0.contains(needle) }
+  }
+
   /// What this node's Copilot session is doing, or `nil` when nothing says.
   ///
   /// Local only, deliberately. The remote twin of this would have to carry a JSON record
