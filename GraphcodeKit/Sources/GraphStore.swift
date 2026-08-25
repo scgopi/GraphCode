@@ -669,6 +669,15 @@ public actor GraphStore {
   /// **Nothing changed, nothing sent.** And when something *has* changed this notifies
   /// clients without going through `broadcast()`, because that persists the graph — a
   /// write per tick, forever, of the one field that is deliberately never restored.
+  /// How many of this graph's loops are running right now, sub-graphs included — what
+  /// `ProjectRegistry` sums to decide whether the machine should be kept awake
+  /// (`AwakeAssertion`). Only `.running`: a loop parked on a human's answer is not work
+  /// in flight, and holding a sleepless machine overnight for one is the opposite of the
+  /// point.
+  public func runningLoopCount() -> Int {
+    graph.nodesAtAnyDepth.count { $0.state == .running }
+  }
+
   public func pollPresence() async {
     guard !connections.isEmpty, onReadPresence != nil else { return }
     // Both, and in this order, because they are one answer to a human: the pill says a

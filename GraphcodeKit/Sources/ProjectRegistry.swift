@@ -42,6 +42,8 @@ public actor ProjectRegistry {
   private let readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)?
   /// Non-nil only while at least one client is attached — see `startPresencePolling`.
   private var presencePoller: Task<Void, Never>?
+  /// Runs only while the sleep assertion is held — see `refreshAwakeAssertion`.
+  private var awakeRecheck: Task<Void, Never>?
 
   /// These default to the real `ZmxSessionLauncher`/`ShellPredicateEvaluator` closures —
   /// every `GraphStore` this registry creates gets them, so an unattended node's session
@@ -170,7 +172,10 @@ public actor ProjectRegistry {
   /// The registry outlives the daemon in practice, but a `Task` holding only a weak
   /// `self` would otherwise keep waking every minute after the registry it sweeps for is
   /// gone — the same reason `GraphStore` cancels its goal pollers here.
-  deinit { remoteSweeper?.cancel() }
+  deinit {
+    remoteSweeper?.cancel()
+    awakeRecheck?.cancel()
+  }
 
   /// `ensureSession` is fire-and-forget by contract (`CLISessionBackend.ensureSession`
   /// spawns a detached task), so this returns well before the dials it started finish and
@@ -181,6 +186,41 @@ public actor ProjectRegistry {
     for (path, store) in stores where RemoteProjectLocation.parse(projectPath: path) != nil {
       await store.ensureUnattendedSessionsAlive()
     }
+  }
+
+  /// Takes or drops the sleep assertion to match what is running right now
+  /// (`AwakeAssertion`), across every open project.
+  ///
+  /// Called on every graph change rather than on a timer, because a graph change is
+  /// exactly when the answer can differ. The one thing a graph change cannot notice is
+  /// the *setting* being switched off while loops keep running, which is why holding the
+  /// assertion also starts a slow re-check — and only while it is held, so a daemon with
+  /// this switched off, or with nothing running, still keeps no timer at all.
+  private func refreshAwakeAssertion() async {
+    var running = 0
+    for store in stores.values { running += await store.runningLoopCount() }
+    let enabled = GraphcodeSettingsStore.load().keepsMacAwakeWhileLoopsRun
+    let shouldHold = AwakeAssertion.shouldStayAwake(runningLoops: running, enabled: enabled)
+    await AwakeAssertion.shared.apply(shouldHold: shouldHold, runningLoops: running)
+    if shouldHold { startAwakeRecheck() } else { stopAwakeRecheck() }
+  }
+
+  static let awakeRecheckInterval: Duration = .seconds(60)
+
+  private func startAwakeRecheck() {
+    guard awakeRecheck == nil else { return }
+    awakeRecheck = Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(for: Self.awakeRecheckInterval)
+        guard !Task.isCancelled else { return }
+        await self?.refreshAwakeAssertion()
+      }
+    }
+  }
+
+  private func stopAwakeRecheck() {
+    awakeRecheck?.cancel()
+    awakeRecheck = nil
   }
 
   /// Sequential rather than concurrent across projects: each store's poll already spawns
@@ -366,7 +406,12 @@ public actor ProjectRegistry {
     }
     let newStore = GraphStore(
       graph: graph,
-      onGraphChanged: { updatedGraph in persistence.saveGraph(updatedGraph) },
+      onGraphChanged: { [weak self] updatedGraph in
+        persistence.saveGraph(updatedGraph)
+        // Every state change is a chance for the last running loop to have stopped, or
+        // the first to have started — see `refreshAwakeAssertion`.
+        Task { await self?.refreshAwakeAssertion() }
+      },
       onEnsureSession: ensureSession,
       onTerminateSession: terminateSession,
       onEvaluatePredicate: evaluatePredicate,
