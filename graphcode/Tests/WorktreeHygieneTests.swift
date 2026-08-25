@@ -15,12 +15,13 @@ struct WorktreeHygieneTests {
   }
 
   private func facts(
-    notLanded: Int = 0, dirty: Int = 0, pushed: Bool = true, prunable: Bool = false,
-    locked: Bool = false, size: Int64? = 100
+    notLanded: Int = 0, squashLanded: Bool = false, dirty: Int = 0, pushed: Bool = true,
+    prunable: Bool = false, locked: Bool = false, size: Int64? = 100
   ) -> WorktreeGitFacts {
     WorktreeGitFacts(
-      defaultBranch: "main", commitsNotLanded: notLanded, dirtyFileCount: dirty,
-      pushed: pushed, prunable: prunable, locked: locked, sizeBytes: size)
+      defaultBranch: "main", commitsNotLanded: notLanded, squashLanded: squashLanded,
+      dirtyFileCount: dirty, pushed: pushed, prunable: prunable, locked: locked,
+      sizeBytes: size)
   }
 
   private func node(
@@ -30,11 +31,44 @@ struct WorktreeHygieneTests {
   }
 
   @Test
-  func landedCleanPushedAndUnboundIsSafe() {
+  func landedCleanAndUnboundIsSafe() {
     let assessment = WorktreeAssessment(ref: ref(), facts: facts(), binding: .none)
 
     #expect(assessment.tier == .safeToRemove)
-    #expect(assessment.summary == "landed in main · clean tree · no loop bound")
+    #expect(assessment.summary == "merged into main · clean tree · no loop bound")
+  }
+
+  @Test
+  func aSquashMergedBranchIsSafeAndSaysSo() {
+    // `git cherry` counts every commit of a squash-merged PR as unlanded — the whole
+    // branch arrived upstream as one combined patch that matches none of them.
+    let assessment = WorktreeAssessment(
+      ref: ref(), facts: facts(notLanded: 3, squashLanded: true), binding: .none)
+
+    #expect(assessment.facts.landed)
+    #expect(assessment.tier == .safeToRemove)
+    #expect(assessment.summary == "squash-merged into main · clean tree · no loop bound")
+  }
+
+  @Test
+  func aMergedBranchWhoseRemoteIsGoneIsStillSafe() {
+    // The forge deletes the branch on merge, so `@{upstream}` has read "gone" — and
+    // unpushed — ever since. Nothing is lost by removing it: every commit has an
+    // equivalent in main.
+    let assessment = WorktreeAssessment(ref: ref(), facts: facts(pushed: false), binding: .none)
+
+    #expect(assessment.tier == .safeToRemove)
+    #expect(!assessment.summary.contains("not pushed"))
+  }
+
+  @Test
+  func aMergedWorktreeSaysMergedEvenWhenSomethingElseIsWrong() {
+    // The complaint this answers: a merged PR whose directory has build residue read
+    // as "1 file uncommitted" and never mentioned the merge at all.
+    let dirty = WorktreeAssessment(ref: ref(), facts: facts(dirty: 1), binding: .none)
+
+    #expect(dirty.tier == .lookBeforeRemoving)
+    #expect(dirty.summary == "merged into main · 1 file uncommitted")
   }
 
   @Test
@@ -47,8 +81,8 @@ struct WorktreeHygieneTests {
       WorktreeAssessment(ref: ref(), facts: facts(dirty: 2), binding: .none).tier
         == .lookBeforeRemoving)
     #expect(
-      WorktreeAssessment(ref: ref(), facts: facts(pushed: false), binding: .none).tier
-        == .lookBeforeRemoving)
+      WorktreeAssessment(ref: ref(), facts: facts(notLanded: 1, pushed: false), binding: .none)
+        .tier == .lookBeforeRemoving)
     #expect(
       WorktreeAssessment(
         ref: ref(), facts: facts(), binding: .stopped(loopTitle: "looper")
@@ -103,10 +137,11 @@ struct WorktreeHygieneTests {
 
     let onlyBound = WorktreeAssessment(
       ref: ref(), facts: facts(), binding: .stopped(loopTitle: "looper"))
-    #expect(onlyBound.summary == "merged · but a stopped loop still points here")
+    #expect(onlyBound.summary == "merged into main · a stopped loop still points here")
 
-    let unpushed = WorktreeAssessment(ref: ref(), facts: facts(pushed: false), binding: .none)
-    #expect(unpushed.summary == "not pushed")
+    let unpushed = WorktreeAssessment(
+      ref: ref(), facts: facts(notLanded: 1, pushed: false), binding: .none)
+    #expect(unpushed.summary == "1 commit not in main · not pushed")
   }
 
   @Test

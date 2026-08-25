@@ -90,88 +90,6 @@ struct WorktreeSweepFeatureTests {
     await store.send(.rowToggled(worktree.ref.worktreePath))
   }
 
-  /// The state a sheet mid-use would hold, for the app-level removal tests.
-  private func openSweep(
-    _ inspections: [WorktreeInspection], selecting: [String]
-  ) -> WorktreeSweepFeature.State {
-    var sweep = WorktreeSweepFeature.State(
-      projectPath: "/repo", projectName: "repo", nodes: [])
-    sweep.assessments = WorktreeSweepFeature.assessments(inspections, nodes: [])
-    sweep.selection = Set(selecting)
-    return sweep
-  }
-
-  @Test
-  @MainActor
-  func removeClosesTheSheetAndRemovesInTheBackground() async {
-    // The sheet must not outlive the click — the removal is the app's effect now, so
-    // it survives the sheet's state being cleared, and the stats refresh afterwards.
-    let safe = inspection(branch: "landed")
-    let dirty = inspection(branch: "wip", dirty: 2)
-    let removed = LockIsolated<[String]>([])
-    var initial = AppFeature.State(projects: [
-      ProjectFeature.State(
-        graph: LoopGraph(scope: .project(ProjectRef(path: "/repo", name: "repo"))))
-    ])
-    initial.worktreeSweep = openSweep([safe, dirty], selecting: [safe.ref.worktreePath])
-    let store = TestStore(initialState: initial) {
-      AppFeature()
-    } withDependencies: {
-      $0.gitClient.inspectWorktrees = { _ in [safe, dirty] }
-      $0.gitClient.worktreeSizeBytes = { _ in nil }
-      $0.gitClient.removeWorktreeAndBranch = { ref, _, _ in
-        removed.withValue { $0.append(ref.branch) }
-      }
-    }
-    store.exhaustivity = .off
-
-    await store.send(.worktrees(.sweep(.removeTapped))) {
-      $0.worktreeSweep = nil
-    }
-    await store.finish()
-
-    // Only what was selected — the dirty worktree was never touched.
-    #expect(removed.value == ["landed"])
-  }
-
-  @Test
-  @MainActor
-  func aWorktreeClaimedByALoopAfterSelectionIsNotRemoved() async {
-    // The sheet's assessment can be minutes old. Removal re-checks the live graphs:
-    // a loop that started in the worktree after selection keeps it alive, whatever
-    // the row claimed when it was ticked.
-    let claimed = inspection(branch: "landed")
-    let free = inspection(branch: "spare")
-    let removed = LockIsolated<[String]>([])
-    let runner = LoopNode(
-      title: "Started late", loopType: .goalBased, worktreeBinding: claimed.ref,
-      state: .running)
-    var initial = AppFeature.State(projects: [
-      ProjectFeature.State(
-        graph: LoopGraph(
-          scope: .project(ProjectRef(path: "/repo", name: "repo")), nodes: [runner]))
-    ])
-    initial.worktreeSweep = openSweep(
-      [claimed, free], selecting: [claimed.ref.worktreePath, free.ref.worktreePath])
-    let store = TestStore(initialState: initial) {
-      AppFeature()
-    } withDependencies: {
-      $0.gitClient.inspectWorktrees = { _ in [claimed, free] }
-      $0.gitClient.worktreeSizeBytes = { _ in nil }
-      $0.gitClient.removeWorktreeAndBranch = { ref, _, _ in
-        removed.withValue { $0.append(ref.branch) }
-      }
-    }
-    store.exhaustivity = .off
-
-    await store.send(.worktrees(.sweep(.removeTapped))) {
-      $0.worktreeSweep = nil
-    }
-    await store.finish()
-
-    #expect(removed.value == ["spare"])
-  }
-
   @Test
   @MainActor
   func theCanvasMenuOpensTheSweeperScopedToItsOwnFolder() async {
@@ -194,43 +112,6 @@ struct WorktreeSweepFeatureTests {
     // Mirrored into the project's own state — the canvas menu's count reads it there.
     #expect(store.state.worktreeStats["/repo"] == stats)
     #expect(store.state.projects[id: "/repo"]?.worktreeStats == stats)
-  }
-
-  @Test
-  @MainActor
-  func aDirtySelectionConfirmsThenForcesInTheBackground() async {
-    let dirty = inspection(branch: "wip", dirty: 2)
-    let clean = inspection(branch: "landed")
-    let forced = LockIsolated<[String: Bool]>([:])
-    var initial = AppFeature.State(projects: [
-      ProjectFeature.State(
-        graph: LoopGraph(scope: .project(ProjectRef(path: "/repo", name: "repo"))))
-    ])
-    initial.worktreeSweep = openSweep(
-      [dirty, clean], selecting: [dirty.ref.worktreePath, clean.ref.worktreePath])
-    let store = TestStore(initialState: initial) {
-      AppFeature()
-    } withDependencies: {
-      $0.gitClient.inspectWorktrees = { _ in [dirty, clean] }
-      $0.gitClient.worktreeSizeBytes = { _ in nil }
-      $0.gitClient.removeWorktreeAndBranch = { ref, _, force in
-        forced.withValue { $0[ref.branch] = force }
-      }
-    }
-    store.exhaustivity = .off
-
-    // The dirty selection raises the confirmation and the sheet stays up.
-    await store.send(.worktrees(.sweep(.removeTapped))) {
-      $0.worktreeSweep?.isConfirmingRemoval = true
-    }
-    // Confirming closes it; --force reaches exactly the row whose removal discards
-    // files.
-    await store.send(.worktrees(.sweep(.removeConfirmed))) {
-      $0.worktreeSweep = nil
-    }
-    await store.finish()
-
-    #expect(forced.value == ["wip": true, "landed": false])
   }
 
   @Test

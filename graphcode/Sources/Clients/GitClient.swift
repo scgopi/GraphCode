@@ -85,6 +85,7 @@ extension GitClient: DependencyKey {
       let blocks = parseWorktreeBlocks(output)
         .filter { resolvedPath($0.path) != repoPath }
       let defaultBranch = await discoverDefaultBranch(repositoryPath)
+      let bases = await landingBases(defaultBranch, repositoryPath: repositoryPath)
       // Concurrent, bounded: serial inspection scaled linearly with the backlog — the
       // repositories that need the sweeper most were the ones it was slowest on. Six
       // at a time keeps the process count civil (each inspection is up to three gits).
@@ -101,7 +102,8 @@ extension GitClient: DependencyKey {
               id: block.branch ?? block.path, repositoryPath: repositoryPath,
               worktreePath: block.path, branch: block.branch ?? "")
             let facts = await gitFacts(
-              for: block, defaultBranch: defaultBranch, repositoryPath: repositoryPath)
+              for: block, defaultBranch: defaultBranch, bases: bases,
+              repositoryPath: repositoryPath)
             return (index, WorktreeInspection(ref: ref, facts: facts))
           }
         }
@@ -141,7 +143,7 @@ extension GitClient: DependencyKey {
       }
       // A detached worktree has no ref to delete; its ref travels with an empty branch.
       guard !worktree.branch.isEmpty else { return }
-      // `-D`, not `-d`: the landed check was `git cherry`, which counts squash merges —
+      // `-D`, not `-d`: the landed check counts squash merges (`WorktreeLanding`) —
       // exactly the branches `-d` would refuse. A branch that is already gone shouldn't
       // fail a removal that succeeded.
       _ = try? await run("git", ["-C", worktree.repositoryPath, "branch", "-D", worktree.branch])
@@ -420,6 +422,18 @@ private func discoverDefaultBranch(_ repositoryPath: String) async -> String {
   return current.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
+/// The refs this repository's worktrees are measured as landed against, read once per
+/// inspection rather than per worktree.
+private func landingBases(_ defaultBranch: String, repositoryPath: String) async -> [String] {
+  func tip(_ ref: String) async -> String? {
+    try? await run("git", ["-C", repositoryPath, "rev-parse", "--verify", "--quiet", ref])
+  }
+  return WorktreeLanding.bases(
+    defaultBranch: defaultBranch,
+    localTip: await tip("refs/heads/\(defaultBranch)"),
+    remoteTip: await tip("refs/remotes/origin/\(defaultBranch)"))
+}
+
 /// Reads one worktree's signals. Every read fails toward the cautious answer — an
 /// unreadable status counts as dirty, a failed cherry as unlanded, a missing upstream
 /// as unpushed — so a git hiccup can only move a worktree *out* of the safe tier.
@@ -428,20 +442,23 @@ private func discoverDefaultBranch(_ repositoryPath: String) async -> String {
 /// "nothing on disk to lose" was once assumed for these, and a pruned registration is
 /// exactly the case where deleting the branch would orphan unlanded commits.
 private func gitFacts(
-  for block: WorktreeBlock, defaultBranch: String, repositoryPath: String
+  for block: WorktreeBlock, defaultBranch: String, bases: [String], repositoryPath: String
 ) async -> WorktreeGitFacts {
-  // Cherry against the branch when there is one, the recorded HEAD when detached —
+  // Measured against the branch when there is one, the recorded HEAD when detached —
   // both answer "does anything here exist only in this worktree".
   let tip = block.branch.map { "refs/heads/\($0)" } ?? block.head
-  let cherry = await tip.asyncFlatMap { tip in
-    try? await run("git", ["-C", repositoryPath, "cherry", defaultBranch, tip])
-  }
-  let commitsNotLanded = (cherry ?? "+").split(separator: "\n")
-    .filter { $0.hasPrefix("+") }.count
+  let landing =
+    await tip.asyncFlatMap { tip in
+      await WorktreeLanding.reading(tip: tip, bases: bases) { arguments in
+        try? await run("git", ["-C", repositoryPath] + arguments)
+      }
+    } ?? WorktreeLandedReading(commitsNotLanded: 1, squashLanded: false)
+  let commitsNotLanded = landing.commitsNotLanded
 
   if block.prunable {
     return WorktreeGitFacts(
-      defaultBranch: defaultBranch, commitsNotLanded: commitsNotLanded, dirtyFileCount: 0,
+      defaultBranch: defaultBranch, commitsNotLanded: commitsNotLanded,
+      squashLanded: landing.squashLanded, dirtyFileCount: 0,
       pushed: true, prunable: true, locked: block.locked)
   }
   let status = try? await run("git", ["-C", block.path, "status", "--porcelain"])
@@ -452,6 +469,7 @@ private func gitFacts(
     ahead.flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } == 0
   return WorktreeGitFacts(
     defaultBranch: defaultBranch, commitsNotLanded: commitsNotLanded,
+    squashLanded: landing.squashLanded,
     dirtyFileCount: dirtyFileCount, pushed: pushed, prunable: false, locked: block.locked,
     sizeBytes: nil)
 }

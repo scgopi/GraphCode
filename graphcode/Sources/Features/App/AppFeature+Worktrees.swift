@@ -33,8 +33,14 @@ extension AppFeature {
     case statsReloadRequested(projectPath: String)
     /// The one gate every removal passes through, *at removal time*: candidates whose
     /// worktree is bound to a currently-running loop — in any open project — are
-    /// dropped here, whatever a snapshot claimed when they were selected.
-    case performRemovals(projectPath: String, candidates: [WorktreeRemovalCandidate])
+    /// dropped here, whatever a snapshot claimed when they were selected. `blocked`
+    /// carries what the caller already refused to attempt, so one report covers both.
+    case performRemovals(
+      projectPath: String, candidates: [WorktreeRemovalCandidate], blocked: [String])
+    /// Every removal reports back, even when it worked: a removal that git refused
+    /// used to be swallowed whole, and a sweeper that closes on a click it did not
+    /// carry out is indistinguishable from one that did.
+    case removalsFinished(projectPath: String, failures: [String])
     case settingsRequested(projectPath: String)
     case settingsDismissed
   }
@@ -126,21 +132,23 @@ struct AppWorktreesReducer: Reducer {
         guard let path else { return .none }
         return reloadStats(path, nodes: allNodes(in: state))
 
-      // Remove closes the sheet and the removal happens back here, in the background —
-      // a child effect would die with the sheet's state the moment it nils. The child
-      // reducer ran first: if it raised the discard confirmation, nothing happens yet.
+      // Remove keeps the sheet up and does the work back here, in the background — a
+      // child effect would die with the sheet's state the moment it nils, and the sheet
+      // is where the answer has to land. The child reducer ran first: if it raised the
+      // discard confirmation, nothing happens yet.
       //
       // The sheet's assessments can be minutes old, so nothing is removed off them
       // directly: the effect re-inspects git (fresh dirtiness, fresh prunability;
       // vanished rows drop out) and routes through `.performRemovals`, where bindings
-      // are re-read from the *live* graphs. `force` alone survives from the click —
-      // it is the human's consent, not a measurement.
+      // are re-read from the *live* graphs.
       case .worktrees(.sweep(.removeTapped)), .worktrees(.sweep(.removeConfirmed)):
-        guard let sweep = state.worktreeSweep, !sweep.isConfirmingRemoval else { return .none }
+        guard let sweep = state.worktreeSweep, !sweep.isConfirmingRemoval, !sweep.isRemoving
+        else { return .none }
         let doomed = sweep.selected
         guard !doomed.isEmpty else { return .none }
         let path = sweep.projectPath
-        state.worktreeSweep = nil
+        state.worktreeSweep?.failure = nil
+        state.worktreeSweep?.isRemoving = true
         return .run { [gitClient, remoteGitClient] send in
           let fresh: [WorktreeInspection]
           if let location = RemoteProjectLocation.parse(projectPath: path) {
@@ -150,37 +158,74 @@ struct AppWorktreesReducer: Reducer {
           }
           let freshByPath = Dictionary(
             uniqueKeysWithValues: fresh.map { ($0.ref.worktreePath, $0) })
-          let candidates = doomed.compactMap { assessment -> WorktreeRemovalCandidate? in
-            guard let current = freshByPath[assessment.ref.worktreePath] else { return nil }
-            return WorktreeRemovalCandidate(
-              ref: current.ref,
-              prunable: current.facts.prunable,
-              force: assessment.removalDiscardsFiles)
+          var candidates: [WorktreeRemovalCandidate] = []
+          var blocked: [String] = []
+          for assessment in doomed {
+            guard let current = freshByPath[assessment.ref.worktreePath] else { continue }
+            // Forcing is decided on what git says *now*; consent is what the human gave
+            // to the sheet. A worktree that has grown uncommitted files since the list
+            // was built would fail an unforced removal without a word, so it is refused
+            // out loud instead.
+            let needsForce = !current.facts.prunable && !current.facts.clean
+            guard !needsForce || assessment.removalDiscardsFiles else {
+              blocked.append(
+                "\(current.ref.displayName): uncommitted files appeared since this list "
+                  + "was built — reopen Worktrees and confirm the discard")
+              continue
+            }
+            candidates.append(
+              WorktreeRemovalCandidate(
+                ref: current.ref, prunable: current.facts.prunable, force: needsForce))
           }
-          await send(.worktrees(.performRemovals(projectPath: path, candidates: candidates)))
+          await send(
+            .worktrees(
+              .performRemovals(projectPath: path, candidates: candidates, blocked: blocked)))
         }
 
-      case .worktrees(.performRemovals(let path, let candidates)):
+      case .worktrees(.performRemovals(let path, let candidates, let blocked)):
         // The removal-time binding check, against every open project's current graph.
         let occupied = Set(
           allNodes(in: state).filter { !$0.isResolved }
             .compactMap(\.worktreeBinding?.worktreePath))
+        let claimed = candidates.filter { occupied.contains($0.ref.worktreePath) }
         let cleared = candidates.filter { !occupied.contains($0.ref.worktreePath) }
-        guard !cleared.isEmpty else { return .none }
+        let refused =
+          blocked
+          + claimed.map { "\($0.ref.displayName): a loop is running in it now" }
+        guard !cleared.isEmpty else {
+          return .send(.worktrees(.removalsFinished(projectPath: path, failures: refused)))
+        }
         return .run { [gitClient, remoteGitClient] send in
+          var failures = refused
           for candidate in cleared {
-            // Failures are quiet by design — the stats reload tells the truth either
-            // way, and whatever survived is there on reopen.
-            if let location = RemoteProjectLocation.parse(projectPath: path) {
-              try? await remoteGitClient.removeWorktreeAndBranch(
-                location, candidate.ref, candidate.prunable, candidate.force)
-            } else {
-              try? await gitClient.removeWorktreeAndBranch(
-                candidate.ref, candidate.prunable, candidate.force)
+            do {
+              if let location = RemoteProjectLocation.parse(projectPath: path) {
+                try await remoteGitClient.removeWorktreeAndBranch(
+                  location, candidate.ref, candidate.prunable, candidate.force)
+              } else {
+                try await gitClient.removeWorktreeAndBranch(
+                  candidate.ref, candidate.prunable, candidate.force)
+              }
+            } catch {
+              failures.append("\(candidate.ref.displayName): \(Self.reason(error))")
             }
           }
-          await send(.worktrees(.statsReloadRequested(projectPath: path)))
+          await send(.worktrees(.removalsFinished(projectPath: path, failures: failures)))
         }
+
+      case .worktrees(.removalsFinished(let path, let failures)):
+        let reload = reloadStats(path, nodes: allNodes(in: state))
+        guard state.worktreeSweep?.projectPath == path else { return reload }
+        state.worktreeSweep?.isRemoving = false
+        guard !failures.isEmpty else {
+          state.worktreeSweep = nil
+          return reload
+        }
+        // The sheet stays up with the reason on it, and re-reads git so the rows agree
+        // with what is actually still there.
+        state.worktreeSweep?.failure = failures.joined(separator: "\n")
+        state.worktreeSweep?.selection = []
+        return .merge(reload, .send(.worktrees(.sweep(.task))))
 
       // Selecting a folder re-reads its worktrees — the one moment a worktree created
       // outside the app (a terminal's `git worktree add`, a loop's own plumbing) gets
@@ -241,12 +286,30 @@ struct AppWorktreesReducer: Reducer {
           .worktrees(
             .performRemovals(
               projectPath: path,
-              candidates: [WorktreeRemovalCandidate(ref: ref, prunable: false, force: false)])))
+              candidates: [WorktreeRemovalCandidate(ref: ref, prunable: false, force: false)],
+              blocked: [])))
 
       default:
         return .none
       }
     }
+  }
+}
+
+/// The reducer's helpers, in an extension so the reducer body stays the only thing
+/// in the type.
+extension AppWorktreesReducer {
+  /// Git's own words for why a removal failed, without the Swift error wrapper around
+  /// them — "contains modified or untracked files" is the whole answer, and the rest of
+  /// `GitClientError`'s description is noise on a sheet.
+  static func reason(_ error: any Error) -> String {
+    guard case .commandFailed(_, _, let output) = error as? GitClientError else {
+      return String(describing: error)
+    }
+    let lines = output.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+    let message = lines.first { !$0.isEmpty && !$0.hasPrefix("hint:") } ?? ""
+    guard !message.isEmpty else { return String(describing: error) }
+    return message.hasPrefix("fatal: ") ? String(message.dropFirst("fatal: ".count)) : message
   }
 
   /// The global graph is not a folder — it has nothing to sweep.
@@ -396,7 +459,8 @@ struct AppWorktreesReducer: Reducer {
               candidates: [
                 WorktreeRemovalCandidate(
                   ref: inspection.ref, prunable: inspection.facts.prunable, force: false)
-              ])))
+              ],
+              blocked: [])))
       case .ask:
         await send(
           .projects(

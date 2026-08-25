@@ -39,7 +39,8 @@ struct WorktreeSweepView: View {
         Text(failure)
           .font(.system(size: 11))
           .foregroundStyle(Color(red: 1.0, green: 0.541, blue: 0.502))
-          .lineLimit(3)
+          .lineLimit(6)
+          .fixedSize(horizontal: false, vertical: true)
       }
       Divider().overlay(.white.opacity(0.08))
       footer
@@ -222,11 +223,8 @@ struct WorktreeSweepView: View {
     return assessment.ref.worktreePath
   }
 
-  /// A detached worktree has no branch to name, so its folder stands in.
   private func rowTitle(_ assessment: WorktreeAssessment) -> String {
-    assessment.ref.branch.isEmpty
-      ? (assessment.ref.worktreePath as NSString).lastPathComponent
-      : assessment.ref.branch
+    assessment.ref.displayName
   }
 
   private func rowContext(_ assessment: WorktreeAssessment) -> String? {
@@ -293,21 +291,28 @@ struct WorktreeSweepView: View {
       }
     } else {
       HStack(spacing: 12) {
+        if store.isRemoving { ProgressView().controlSize(.small) }
         Text(footerSummary)
           .font(.system(size: 12))
           .foregroundStyle(.white.opacity(0.62))
         Spacer()
         Button("Cancel") { dismiss() }
           .keyboardShortcut(.cancelAction)
-        Button("Remove \(store.selected.count)") { store.send(.removeTapped) }
-          .keyboardShortcut(.defaultAction)
-          .disabled(store.selected.isEmpty)
+          .disabled(store.isRemoving)
+        Button(store.isRemoving ? "Removing…" : "Remove \(store.selected.count)") {
+          store.send(.removeTapped)
+        }
+        .keyboardShortcut(.defaultAction)
+        .disabled(store.selected.isEmpty || store.isRemoving)
       }
     }
   }
 
   private var footerSummary: String {
     let count = store.selected.count
+    guard !store.isRemoving else {
+      return "Removing \(count == 1 ? "1 worktree" : "\(count) worktrees")…"
+    }
     guard count > 0 else { return "Nothing selected" }
     let what = count == 1 ? "1 worktree" : "\(count) worktrees"
     guard store.selectedBytes > 0 else { return "Removes \(what)" }
