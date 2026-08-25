@@ -50,16 +50,20 @@ public enum WorktreeLanding {
   public static func reading(
     tip: String, bases: [String], git: Git
   ) async -> WorktreeLandedReading {
-    var best = WorktreeLandedReading(commitsNotLanded: 1, squashLanded: false)
+    // Optional, not a seeded 1: seeding the accumulator with the failure value made
+    // `min` clamp every real count down to it, so a four-commit branch reported "1
+    // commit not in main". The fallback belongs to a read that failed, not to a read
+    // that succeeded and returned four.
+    var fewest: Int?
     for base in bases {
       let notLanded = notLandedCount(await git(["cherry", base, tip]))
       if notLanded == 0 { return WorktreeLandedReading(commitsNotLanded: 0, squashLanded: false) }
       if await isSquashLanded(tip: tip, base: base, git: git) {
         return WorktreeLandedReading(commitsNotLanded: notLanded, squashLanded: true)
       }
-      best.commitsNotLanded = min(best.commitsNotLanded, notLanded)
+      fewest = min(fewest ?? notLanded, notLanded)
     }
-    return best
+    return WorktreeLandedReading(commitsNotLanded: fewest ?? 1, squashLanded: false)
   }
 
   /// A failed or missing `cherry` counts as one commit not landed: every read here
