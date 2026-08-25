@@ -1234,10 +1234,86 @@ public enum ZmxSessionLauncher {
       DialLog.record(session: name, dial: "ensure", event: "resume-dead")
       SessionIDStore.remove(forNodeID: node.id)
     }
+    // Noted *before* the launch: the first pass below waits for a Copilot session
+    // directory that was not already there, which is how it tells a session it just
+    // started from one this ensure found already running.
+    let copilotSessionBefore =
+      firstPassMessage(for: node) != nil
+      ? CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent : nil
     await atomicCheckOrRun(
       checkArguments: checkArgs, runArguments: runArgs,
       zmxPath: zmxPath, workingDirectory: wd,
       logFragment: DialLog.fragment(session: name, dial: "ensure", event: "fresh"))
+    await kickOffFirstPass(
+      of: node, sessionNamed: name, projectPath: projectPath, after: copilotSessionBefore)
+  }
+
+  /// The message that gives a Copilot time-based loop the pass its schedule will not give
+  /// it for another whole interval, or `nil` for a node that needs no such thing.
+  ///
+  /// `/loop` is an alias of Copilot's `/every`, and `/every` submits its prompt *after*
+  /// the interval has elapsed — documented behaviour, not a bug in it. So an hourly loop
+  /// arms correctly and then does nothing for an hour, which from the outside is
+  /// indistinguishable from a loop that never started. The directive stays the thing the
+  /// session opens with (it must lead its message to be a command at all, see
+  /// `SessionPrompt`); this types the same task in afterwards as ordinary input.
+  ///
+  /// Nothing to do for a heartbeat node — the daemon holds that timer and drives the
+  /// first beat itself — or for any backend whose recurrence is not a scheduler.
+  static func firstPassMessage(for node: LoopNode) -> String? {
+    guard node.backend == .copilotCLI, node.loopType == .timeBased,
+      node.heartbeatIntervalSeconds == nil, let prompt = node.sessionPrompt
+    else { return nil }
+    return SessionPrompt.firstPass(of: prompt)
+  }
+
+  /// Types that first pass in, once the session it belongs to is actually there to
+  /// receive it.
+  ///
+  /// Gated on a *new* Copilot session directory rather than on the launch returning: an
+  /// ensure whose session already existed launched nothing, and typing the task into a
+  /// loop already running it is a second pass nobody asked for. Waiting for the directory
+  /// is also what keeps the keystrokes out of a CLI that has not drawn its composer yet,
+  /// where they are simply lost.
+  ///
+  /// Detached because the wait is seconds long and `start` is on the ensure path, which
+  /// has other nodes to get to.
+  private static func kickOffFirstPass(
+    of node: LoopNode, sessionNamed name: String, projectPath: String?, after previous: String?
+  ) async {
+    guard let message = firstPassMessage(for: node) else { return }
+    Task {
+      guard await FirstPassTickets.shared.claim(node.id) else { return }
+      defer { Task { await FirstPassTickets.shared.release(node.id) } }
+      let deadline = Date().addingTimeInterval(firstPassWaitSeconds)
+      while Date() < deadline {
+        let current = CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent
+        if let current, current != previous {
+          // The directory appears as Copilot opens its session, a moment before its
+          // composer can take input. The settle is the same forgiveness `resume` gets.
+          try? await Task.sleep(for: .seconds(firstPassSettleSeconds))
+          _ = await send(message, to: node, projectPath: projectPath)
+          return
+        }
+        try? await Task.sleep(for: .seconds(firstPassPollSeconds))
+      }
+    }
+  }
+
+  /// How long to wait for a launched Copilot session to appear before giving up on its
+  /// first pass. Generous: the loop is still correctly armed either way, so the cost of
+  /// waiting too long is nothing and the cost of giving up early is an idle hour.
+  static let firstPassWaitSeconds: TimeInterval = 90
+  static let firstPassPollSeconds: TimeInterval = 0.5
+  static let firstPassSettleSeconds: TimeInterval = 3
+
+  /// One first-pass message per node at a time. Two ensure ticks that both see a fresh
+  /// session would otherwise type the task in twice.
+  private actor FirstPassTickets {
+    static let shared = FirstPassTickets()
+    private var claimed: Set<UUID> = []
+    func claim(_ id: UUID) -> Bool { claimed.insert(id).inserted }
+    func release(_ id: UUID) { claimed.remove(id) }
   }
 
   /// How long a resumed session has to still be there before its launch counts as taken.

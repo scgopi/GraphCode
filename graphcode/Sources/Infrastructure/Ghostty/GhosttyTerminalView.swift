@@ -158,6 +158,13 @@ struct GhosttyTerminalView: NSViewRepresentable {
   ) -> [String]? {
     guard var parts = launchPrefix(settings: settings) else { return nil }
     let prompt = initialPrompt == nil ? "" : "\"$\(Self.promptVariable)\""
+    // `/loop` lives behind Copilot's experimental flag, so a time-based node opened from
+    // here rather than by the daemon would arm nothing at all without it — the same
+    // parity this whole method exists for, since which path starts a session is a race.
+    let opening = initialPrompt ?? ""
+    if backend == .copilotCLI, SessionPrompt.firstPass(of: opening) != nil {
+      parts.append("--experimental")
+    }
     // Presence reporting, from the same place the daemon gets it (`PresenceHooks`). It
     // matters most here: a turn-based loop's session only ever starts from this view, so
     // without it the one loop type a human watches most closely would be the one that
