@@ -321,6 +321,14 @@ public enum NodeMemory {
       + "carry out everything it says."
   }
 
+  /// What points a waking session at its own digest. Self-contained rather than a
+  /// "…, then:" joiner, because `SessionPrompt` may put it on either side of the prompt:
+  /// a time-based node's prompt is the `/loop …` directive, which stops being a command
+  /// the moment anything precedes it (issue #179).
+  public static func wakePointer(toDigestAt path: String) -> String {
+    "Read your loop memory at \(path) before starting."
+  }
+
   /// Removes a node's memory directory — called when the node itself is deleted, the
   /// same moment its session is torn down. A log for a loop that no longer exists is
   /// not history, it's litter.
