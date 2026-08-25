@@ -149,6 +149,19 @@ struct SettingsView: View {
         .fixedSize(horizontal: false, vertical: true)
 
         Toggle(
+          "Keep this Mac awake while loops run (experimental)",
+          isOn: $model.settings.keepsMacAwakeWhileLoopsRun)
+        Text(
+          "The daemon holds the same idle-sleep assertion as `caffeinate -i` while any "
+            + "loop is running, and drops it the moment the last one stops. Unattended "
+            + "loops stop stalling on a machine that went to sleep. It does not keep the "
+            + "display on, and it does not override closing the lid or choosing Sleep."
+        )
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+
+        Toggle(
           "Export and import loops",
           isOn: $model.settings.sharesLoops)
         Text(

@@ -347,6 +347,13 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// heartbeat loops immediately without restarting anything.
   public var daemonHeartbeatEnabled: Bool
 
+  /// Whether `graphcoded` keeps the Mac awake while any loop is running
+  /// (`AwakeAssertion`). Off by default and deliberately so: a background process that
+  /// quietly stops a machine sleeping is a thing to opt into, not to inherit from an
+  /// update. Read fresh whenever the answer is recomputed, so switching it off drops the
+  /// assertion without restarting anything.
+  public var keepsMacAwakeWhileLoopsRun: Bool
+
   // There is deliberately no window-opacity setting here any more. graphcode used to own
   // one and apply it as `NSWindow.alphaValue`, which fades the whole window — terminal
   // text included — rather than only the background behind it. Ghostty already has
@@ -367,6 +374,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     summarisesLoops: Bool = false,
     summaryUsesModel: Bool = false,
     daemonHeartbeatEnabled: Bool = false,
+    keepsMacAwakeWhileLoopsRun: Bool = false,
     worktreePolicies: [String: WorktreeHygienePolicy] = [:]
   ) {
     self.defaultBackend = defaultBackend.isSpiked ? defaultBackend : .claudeCode
@@ -381,6 +389,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     self.summarisesLoops = summarisesLoops
     self.summaryUsesModel = summaryUsesModel
     self.daemonHeartbeatEnabled = daemonHeartbeatEnabled
+    self.keepsMacAwakeWhileLoopsRun = keepsMacAwakeWhileLoopsRun
     self.worktreePolicies = worktreePolicies
   }
 
@@ -429,6 +438,10 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       try container.decodeIfPresent(Bool.self, forKey: .summaryUsesModel) ?? false
     daemonHeartbeatEnabled =
       try container.decodeIfPresent(Bool.self, forKey: .daemonHeartbeatEnabled) ?? false
+    // Absent means nobody has asked for it, which is the default. An update must never
+    // start holding a power assertion on a machine whose owner did not choose that.
+    keepsMacAwakeWhileLoopsRun =
+      try container.decodeIfPresent(Bool.self, forKey: .keepsMacAwakeWhileLoopsRun) ?? false
     worktreePolicies =
       try container.decodeIfPresent(
         [String: WorktreeHygienePolicy].self, forKey: .worktreePolicies) ?? [:]
