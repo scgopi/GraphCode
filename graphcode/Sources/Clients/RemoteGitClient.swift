@@ -39,6 +39,7 @@ extension RemoteGitClient: DependencyKey {
       let blocks = parseWorktreeBlocks(output)
         .filter { RemoteProjectLocation.normalizedPath($0.path) != repositoryPath }
       let defaultBranch = await discoverDefaultBranch(location)
+      let bases = await remoteLandingBases(defaultBranch, location: location)
       var inspections = [WorktreeInspection?](repeating: nil, count: blocks.count)
       await withTaskGroup(of: (Int, WorktreeInspection)?.self) { group in
         var next = 0
@@ -52,7 +53,7 @@ extension RemoteGitClient: DependencyKey {
               id: block.branch ?? block.path, repositoryPath: location.projectPath,
               worktreePath: block.path, branch: block.branch ?? "")
             let facts = await remoteGitFacts(
-              for: block, defaultBranch: defaultBranch, location: location)
+              for: block, defaultBranch: defaultBranch, bases: bases, location: location)
             return (index, WorktreeInspection(ref: ref, facts: facts))
           }
         }
@@ -261,21 +262,41 @@ private func discoverDefaultBranch(_ location: RemoteProjectLocation) async -> S
   return current.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
+/// `landingBases`, one SSH round trip per ref rather than a local `git`.
+private func remoteLandingBases(
+  _ defaultBranch: String, location: RemoteProjectLocation
+) async -> [String] {
+  let quoted = RemoteProjectLocation.shellQuoted
+  func tip(_ ref: String) async -> String? {
+    try? await runSSH(
+      location, "git -C \(quoted(location.remotePath)) rev-parse --verify --quiet \(ref)")
+  }
+  return WorktreeLanding.bases(
+    defaultBranch: defaultBranch,
+    localTip: await tip("refs/heads/\(defaultBranch)"),
+    remoteTip: await tip("refs/remotes/origin/\(defaultBranch)"))
+}
+
 private func remoteGitFacts(
-  for block: WorktreeBlock, defaultBranch: String, location: RemoteProjectLocation
+  for block: WorktreeBlock, defaultBranch: String, bases: [String],
+  location: RemoteProjectLocation
 ) async -> WorktreeGitFacts {
   let quoted = RemoteProjectLocation.shellQuoted
   let repoPath = location.remotePath
   let tip = block.branch.map { "refs/heads/\($0)" } ?? block.head
-  let cherry = await tip.asyncFlatMap { tip in
-    try? await runSSH(location, "git -C \(quoted(repoPath)) cherry \(defaultBranch) \(tip)")
-  }
-  let commitsNotLanded = (cherry ?? "+").split(separator: "\n")
-    .filter { $0.hasPrefix("+") }.count
+  let landing =
+    await tip.asyncFlatMap { tip in
+      await WorktreeLanding.reading(tip: tip, bases: bases) { arguments in
+        let command = arguments.map(quoted).joined(separator: " ")
+        return try? await runSSH(location, "git -C \(quoted(repoPath)) \(command)")
+      }
+    } ?? WorktreeLandedReading(commitsNotLanded: 1, squashLanded: false)
+  let commitsNotLanded = landing.commitsNotLanded
 
   if block.prunable {
     return WorktreeGitFacts(
-      defaultBranch: defaultBranch, commitsNotLanded: commitsNotLanded, dirtyFileCount: 0,
+      defaultBranch: defaultBranch, commitsNotLanded: commitsNotLanded,
+      squashLanded: landing.squashLanded, dirtyFileCount: 0,
       pushed: true, prunable: true, locked: block.locked)
   }
   let status = try? await runSSH(location, "git -C \(quoted(block.path)) status --porcelain")
@@ -285,6 +306,7 @@ private func remoteGitFacts(
   let pushed = ahead.flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } == 0
   return WorktreeGitFacts(
     defaultBranch: defaultBranch, commitsNotLanded: commitsNotLanded,
+    squashLanded: landing.squashLanded,
     dirtyFileCount: dirtyFileCount, pushed: pushed, prunable: false, locked: block.locked,
     sizeBytes: nil)
 }

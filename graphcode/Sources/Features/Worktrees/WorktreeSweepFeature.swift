@@ -24,6 +24,9 @@ struct WorktreeSweepFeature {
     /// Up while the "this discards uncommitted files" confirmation is showing — the
     /// gate between selecting a dirty worktree and actually forcing it away.
     var isConfirmingRemoval = false
+    /// Up from the click until every removal has answered. The sheet stays on screen
+    /// for it: git can refuse a removal, and that refusal has nowhere else to land.
+    var isRemoving = false
     /// Worktree paths whose `git worktree unlock` is in flight — their button is
     /// disabled so a double click can't race two unlocks.
     var unlocking: Set<String> = []
@@ -60,9 +63,9 @@ struct WorktreeSweepFeature {
     case rowToggled(String)
     case allSafeToggled
     /// Remove doesn't remove here: this scope only decides whether the discard
-    /// confirmation must intervene. `AppWorktreesReducer` intercepts the same actions,
-    /// closes the sheet, and runs the removal in the background — the sheet must not
-    /// outlive the click, and a child effect would die with the sheet's state.
+    /// confirmation must intervene. `AppWorktreesReducer` intercepts the same actions
+    /// and runs the removal — it is the only scope that can see every project's loops,
+    /// and a child effect would die with the sheet's state.
     case removeTapped
     /// The dirty-selection confirmation's two exits.
     case removeConfirmed
@@ -148,7 +151,8 @@ struct WorktreeSweepFeature {
         return .none
 
       case .rowToggled(let id):
-        guard let assessment = state.assessments?.first(where: { $0.id == id }),
+        guard !state.isRemoving,
+          let assessment = state.assessments?.first(where: { $0.id == id }),
           assessment.isRemovable
         else { return .none }
         if state.selection.contains(id) {
@@ -171,6 +175,7 @@ struct WorktreeSweepFeature {
         // Losing uncommitted files is the one cost a click alone must not carry —
         // the confirmation names it before anything is forced. A clean selection
         // passes straight through to the parent's interception.
+        guard !state.isRemoving else { return .none }
         if state.selected.contains(where: \.removalDiscardsFiles) {
           state.isConfirmingRemoval = true
         }

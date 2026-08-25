@@ -2,15 +2,17 @@ import Foundation
 
 /// What git can say about one worktree, read once and carried as plain values.
 ///
-/// `commitsNotLanded` comes from `git cherry` against the default branch, so squash and
-/// rebase merges count as landed. `git branch --merged` alone would call almost every
-/// reclaimable worktree unmerged on a squash-merge repo — the safe group would come back
-/// empty exactly where the feature is needed most.
+/// Whether the work landed is two readings, not one, because `git cherry` alone answers
+/// wrongly for a squash-merged PR of more than one commit — see `WorktreeLanding`, which
+/// is where both are taken.
 public struct WorktreeGitFacts: Codable, Equatable, Sendable {
   /// The branch `commitsNotLanded` was measured against, for the row's summary line.
   public var defaultBranch: String
   /// Patches on this branch with no equivalent in the default branch.
   public var commitsNotLanded: Int
+  /// The branch's whole diff is in the default branch as one squashed commit — the
+  /// merge `commitsNotLanded` cannot see.
+  public var squashLanded: Bool
   /// Staged, unstaged **and untracked** files — untracked included, because that is
   /// where a half-finished experiment lives.
   public var dirtyFileCount: Int
@@ -24,12 +26,13 @@ public struct WorktreeGitFacts: Codable, Equatable, Sendable {
   public var locked: Bool
   public var sizeBytes: Int64?
 
-  public var landed: Bool { commitsNotLanded == 0 }
+  public var landed: Bool { commitsNotLanded == 0 || squashLanded }
   public var clean: Bool { dirtyFileCount == 0 }
 
   public init(
     defaultBranch: String,
     commitsNotLanded: Int,
+    squashLanded: Bool = false,
     dirtyFileCount: Int,
     pushed: Bool,
     prunable: Bool = false,
@@ -38,6 +41,7 @@ public struct WorktreeGitFacts: Codable, Equatable, Sendable {
   ) {
     self.defaultBranch = defaultBranch
     self.commitsNotLanded = commitsNotLanded
+    self.squashLanded = squashLanded
     self.dirtyFileCount = dirtyFileCount
     self.pushed = pushed
     self.prunable = prunable
@@ -109,7 +113,11 @@ public struct WorktreeAssessment: Identifiable, Equatable, Sendable {
     // Locked means a human action stands between here and removal (`git worktree
     // unlock`) — that is "look before removing" by definition, however clean it is.
     if facts.locked { return .lookBeforeRemoving }
-    if facts.landed && facts.clean && facts.pushed, case .none = binding {
+    // Not `pushed`: once the work has landed, every commit on the branch already has an
+    // equivalent in the default branch, so an unpushed tip is nothing left to lose. It
+    // is also the *normal* state of a merged PR — the forge deletes the remote branch,
+    // and `@{upstream}` has answered "gone" ever since.
+    if facts.landed && facts.clean, case .none = binding {
       return .safeToRemove
     }
     return .lookBeforeRemoving
@@ -126,7 +134,18 @@ public struct WorktreeAssessment: Identifiable, Equatable, Sendable {
   /// case the sweeper confirms before forcing.
   public var removalDiscardsFiles: Bool { !facts.prunable && !facts.clean }
 
+  /// How the branch's work reached the default branch, said plainly — this is the line
+  /// that has to answer "but that PR is merged" before anything else on the row does.
+  public var mergedPhrase: String {
+    facts.squashLanded
+      ? "squash-merged into \(facts.defaultBranch)"
+      : "merged into \(facts.defaultBranch)"
+  }
+
   /// The mono summary line under the branch name — what you'd lose, in its own words.
+  /// A landed branch says so first, whatever else is wrong with the directory: leading
+  /// with "1 file uncommitted" on a merged PR is what makes the sweeper look like it
+  /// never noticed the merge.
   public var summary: String {
     if facts.prunable {
       guard !facts.landed else { return "stale admin file · nothing on disk to lose" }
@@ -136,10 +155,12 @@ public struct WorktreeAssessment: Identifiable, Equatable, Sendable {
     }
     if binding.isRunning { return "a loop is running in it" }
     if tier == .safeToRemove {
-      return "landed in \(facts.defaultBranch) · clean tree · no loop bound"
+      return "\(mergedPhrase) · clean tree · no loop bound"
     }
     var reasons: [String] = []
-    if facts.commitsNotLanded > 0 {
+    if facts.landed {
+      reasons.append(mergedPhrase)
+    } else {
       let unit = facts.commitsNotLanded == 1 ? "commit" : "commits"
       reasons.append("\(facts.commitsNotLanded) \(unit) not in \(facts.defaultBranch)")
     }
@@ -147,14 +168,11 @@ public struct WorktreeAssessment: Identifiable, Equatable, Sendable {
       let unit = facts.dirtyFileCount == 1 ? "file" : "files"
       reasons.append("\(facts.dirtyFileCount) \(unit) uncommitted")
     }
-    if !facts.pushed { reasons.append("not pushed") }
+    // Only when the work is still only here: a merged branch whose remote copy the
+    // forge deleted is "not pushed" too, and saying so reads as a reason to keep it.
+    if !facts.pushed && !facts.landed { reasons.append("not pushed") }
     if facts.locked { reasons.append("locked") }
-    if case .stopped = binding {
-      reasons =
-        reasons.isEmpty
-        ? ["merged · but a stopped loop still points here"]
-        : reasons + ["a stopped loop still points here"]
-    }
+    if case .stopped = binding { reasons.append("a stopped loop still points here") }
     return reasons.joined(separator: " · ")
   }
 }
