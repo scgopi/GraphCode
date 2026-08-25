@@ -81,6 +81,27 @@ public enum DaemonBootstrap {
     }
   }
 
+  /// The bundle's helper stamp when it no longer matches the one this workspace
+  /// installed from it — a bundle replaced underneath a running app, which is what a
+  /// `brew upgrade`, a DMG dragged over /Applications, or an install whose relaunch was
+  /// declined all leave behind. `nil` when they agree, or when there is nothing packaged
+  /// to compare.
+  ///
+  /// Deliberately only the three `stat`s the stamp is made of: no launchctl probe, no
+  /// copy, no daemon reload. This is asked every time a window comes forward, and none of
+  /// `installIfNeeded`'s work is work to repeat on activation — nor would it be *correct*
+  /// there. Installing the new helpers under an app whose own code was swapped on disk
+  /// leaves a new daemon serving an old window, which is a worse pairing than the stale
+  /// one it replaced. The answer belongs to the human as a relaunch prompt; the relaunch
+  /// is what runs the bootstrap, on both halves at once.
+  public static func changedBundleStamp() -> String? {
+    guard let bundled = bundledHelperDirectory() else { return nil }
+    let expected = stamp(forHelpersIn: bundled)
+    guard !expected.isEmpty else { return nil }
+    let installed = try? String(contentsOf: stampURL, encoding: .utf8)
+    return expected == installed ? nil : expected
+  }
+
   @discardableResult
   public static func installIfNeeded() -> Outcome {
     guard let bundled = bundledHelperDirectory() else { return .notPackaged }

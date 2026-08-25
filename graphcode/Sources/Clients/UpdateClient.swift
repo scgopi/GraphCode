@@ -1,5 +1,6 @@
 import Dependencies
 import Foundation
+import GraphcodeKit
 
 /// Asks GitHub what releases exist, and answers what this build is and which channel it
 /// follows. All of it lives here rather than in the reducer so a test can hand the check
@@ -13,6 +14,11 @@ struct UpdateClient: Sendable {
   /// prereleases, "stable" pins a beta build to stables. Interpreting it (including
   /// ignoring garbage) is `UpdateChannel.channel(for:override:)`'s job.
   var channelOverride: @Sendable () -> String?
+  /// The helper stamp of a bundle that has been replaced underneath this running app —
+  /// a `brew upgrade`, a DMG dragged over /Applications, an install whose relaunch was
+  /// declined. `nil` while the app and its installed helpers still come from the same
+  /// bundle. See `DaemonBootstrap.changedBundleStamp`.
+  var swappedBundleStamp: @Sendable () -> String?
 }
 
 enum UpdateCheckFailure: Error, LocalizedError, Equatable {
@@ -44,7 +50,8 @@ extension UpdateClient: DependencyKey {
     },
     channelOverride: {
       UserDefaults.standard.string(forKey: "updateChannel")
-    })
+    },
+    swappedBundleStamp: { DaemonBootstrap.changedBundleStamp() })
 
   private static func fetch<Value: Decodable>(_ path: String) async throws -> Value {
     guard let url = URL(string: "https://api.github.com/repos/scgopi/GraphCode/\(path)")
@@ -65,7 +72,8 @@ extension UpdateClient: DependencyKey {
     latestRelease: { throw UpdateCheckFailure.requestFailed(status: 0) },
     allReleases: { throw UpdateCheckFailure.requestFailed(status: 0) },
     currentVersion: { "0.0.0" },
-    channelOverride: { nil })
+    channelOverride: { nil },
+    swappedBundleStamp: { nil })
 }
 
 extension DependencyValues {

@@ -15,6 +15,27 @@ import Foundation
 /// read `offeredUpdate` (kept until the next check) rather than `availableUpdate` (the
 /// presentation, already nil by then). That was #35 — shipped builds whose Download
 /// button did nothing.
+/// A copy of GraphCode in /Applications that has changed since this window opened —
+/// `brew upgrade`, a DMG dragged over it, an install whose relaunch was declined.
+///
+/// It matters past cosmetics because the helpers are installed and the daemon reloaded by
+/// `DaemonBootstrap.installIfNeeded()` at *launch*: until this window is relaunched it
+/// runs an old build over an old `graphcoded`, silently. The stamp is kept rather than a
+/// flag so declining answers for that swap and not for every activation after it.
+struct BundleSwap: Equatable {
+  var pending: String?
+  var acknowledged: String?
+
+  @CasePathable
+  enum Action: Equatable {
+    /// Sent whenever the window comes forward. Three `stat`s and no daemon work — see
+    /// `DaemonBootstrap.changedBundleStamp` for why this is not `installIfNeeded`.
+    case checkRequested
+    case checked(String?)
+    case relaunchDismissed
+  }
+}
+
 extension AppFeature {
   /// A completed check's one-sentence outcome, for the alert that reports it. Only the
   /// "nothing to do" outcomes land here — an actual update gets the richer alert driven
@@ -243,8 +264,31 @@ extension AppFeature {
         state.updateInstallFailure = nil
         return .none
 
+      case .bundleSwap(.checkRequested):
+        // Nothing to ask while an install is mid-flight or a relaunch is already being
+        // offered — both end in the relaunch this would be asking for.
+        guard state.updateInstallProgress == nil, !state.isUpdateReadyToRelaunch,
+          state.bundleSwap.pending == nil
+        else { return .none }
+        return .run { send in
+          await send(.bundleSwap(.checked(updateClient.swappedBundleStamp())))
+        }
+
+      case .bundleSwap(.checked(let stamp)):
+        // Only a swap this window has not already been told about: "Later" answers for
+        // that bundle, not for every time the app is brought forward afterwards.
+        guard let stamp, stamp != state.bundleSwap.acknowledged else { return .none }
+        state.bundleSwap.pending = stamp
+        return .none
+
+      case .bundleSwap(.relaunchDismissed):
+        state.bundleSwap.acknowledged = state.bundleSwap.pending
+        state.bundleSwap.pending = nil
+        return .none
+
       case .updateRelaunchTapped:
         state.isUpdateReadyToRelaunch = false
+        state.bundleSwap.pending = nil
         return .run { _ in await updateInstallClient.relaunch() }
 
       case .updateRelaunchDismissed:
