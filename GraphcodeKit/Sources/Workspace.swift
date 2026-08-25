@@ -108,6 +108,13 @@ extension Workspace {
   /// live in one workspace's directory — making every other workspace write into it,
   /// which is the coupling this feature exists to avoid — and would go stale the moment
   /// someone moved a directory by hand. The directory *is* the record.
+  ///
+  /// Ordered oldest first, which is to say the order they were created in — the default
+  /// workspace, then each named one behind it. Alphabetical is what this was, and it put
+  /// a workspace created today in the middle of the list, moving every ⌥⌘<n> after it:
+  /// the numbers are a habit and a habit cannot survive a list that reshuffles. Creation
+  /// order only ever appends. A rename keeps its place too, since `moveItem` carries the
+  /// creation date with the directory.
   public static func all(
     home: URL = URL(fileURLWithPath: NSHomeDirectory()),
     fileManager: FileManager = .default
@@ -116,15 +123,24 @@ extension Workspace {
     // would hide the whole result set.
     let entries =
       (try? fileManager.contentsOfDirectory(
-        at: home, includingPropertiesForKeys: [.isDirectoryKey], options: [])) ?? []
+        at: home, includingPropertiesForKeys: [.isDirectoryKey, .creationDateKey],
+        options: [])) ?? []
 
     let named =
       entries
       .filter { $0.lastPathComponent.hasPrefix(directoryPrefix) }
       .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? true }
-      .map { workspace(for: $0, home: home) }
+      .map { (workspace: workspace(for: $0, home: home), created: creationDate(of: $0)) }
 
-    var found = [Workspace.default] + named.sorted { $0.slug < $1.slug }
+    // Slug breaks a tie rather than leaving `sorted` to decide: two directories created
+    // in the same second are ordinary on a restore from backup, and an order that is
+    // stable between two calls is the whole point of this.
+    let ordered = named.sorted {
+      $0.created == $1.created
+        ? $0.workspace.slug < $1.workspace.slug : $0.created < $1.created
+    }
+
+    var found = [Workspace.default] + ordered.map(\.workspace)
     // The current workspace may be somewhere the scan can't see it — a developer's
     // `GRAPHCODE_SUPPORT_DIR=/tmp/…`, say. A switcher that omits where you already are
     // reads as a bug.
@@ -133,6 +149,13 @@ extension Workspace {
       found.append(current)
     }
     return found
+  }
+
+  /// A directory with no readable creation date sorts to the end rather than the front:
+  /// the unknown case is a directory the scan could not stat, and putting it first would
+  /// renumber every workspace behind it.
+  private static func creationDate(of url: URL) -> Date {
+    (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantFuture
   }
 
   /// Turns what a human typed into something that is safe as a directory suffix, as a

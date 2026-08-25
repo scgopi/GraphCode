@@ -42,7 +42,7 @@ struct WorkspaceNewsView: View {
           "rectangle.split.2x1", "Make one from File ▸ Workspace",
           "It opens in its own window, with its own Dock tile.")
         item(
-          "list.bullet", "Switch with ⌥⌘1 … ⌥⌘9",
+          "list.bullet", "Switch with ⌥⌘1 … ⌥⌘9, or ⌘` for the next one",
           "Or from the workspace name at the foot of the sidebar.")
         item(
           "arrow.up.to.line", "Nothing moved",

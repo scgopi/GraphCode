@@ -41,9 +41,16 @@ unrelated lines of work apart. Nothing is shared between them, and each gets its
 tile, so one can sit on a second screen. **File ▸ Workspace** lists them. (For the tabs
 and splits *inside* a loop, see [Terminals](#terminals).)
 
+The list is in the order the workspaces were created — Default first, then each one
+behind it — and both the numbers and ⌘` walk it. Creating a workspace only ever adds to
+the end, so ⌥⌘3 stays the workspace it was yesterday; renaming one leaves it where it
+is too.
+
 | Shortcut | Does |
 |---|---|
-| ⌥⌘1 … ⌥⌘9 | Switch to that workspace, in the order the menu lists them (⌥⌘1 is the default one). Raises its window, or opens it if it isn't running |
+| ⌥⌘1 … ⌥⌘9 | Switch to that workspace. Raises its window, or opens it if it isn't running |
+| ⌘` | Next workspace, wrapping round at the end |
+| ⌘⇧` | Previous workspace |
 | ⌥⌘N | New workspace — name it and it opens straight away |
 
 **Rename Workspace** and **Delete Workspace** are in the same menu. A rename moves the
