@@ -199,19 +199,15 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
       let note = firstInstruction?.trimmingCharacters(in: .whitespaces) ?? ""
       return note.isEmpty ? nil : note
     case .timeBased:
-      guard let interval = effectiveHeartbeatInterval, interval > 0 else {
-        return triggerPrompt
-      }
-      let task = heartbeatTask ?? ""
+      guard let interval = heartbeatIntervalSeconds, interval > 0, let task = triggerPrompt
+      else { return triggerPrompt }
       // The heartbeat counterpart of the /loop directive: the session is told who
       // holds the timer, so it neither schedules its own cadence (double-driving)
-      // nor exits believing one pass was the whole job. It opens by *doing* rather
-      // than waiting — a fresh loop's first pass belongs to creation, exactly as a
-      // goal-based loop's does, not to the far end of the first interval.
-      return "Run one pass of this task now: \(task) Then stay in the session — every "
-        + "\(Int(interval))s you will receive a [graphcode] heartbeat message, and each "
-        + "one is your cue to run the next pass. Do not schedule your own /loop, wakeup, "
-        + "or cron for it — the orchestrator holds the timer."
+      // nor exits believing one pass was the whole job.
+      return "Every \(Int(interval))s you will receive a [graphcode] heartbeat message. "
+        + "Each one is your cue to run one pass of this task, then wait for the next: "
+        + "\(task) Do not schedule your own /loop, wakeup, or cron for it — the "
+        + "orchestrator holds the timer. Stay in the session between heartbeats."
     case .goalBased: return goal?.sessionPrompt
     case .turnBased:
       return Self.turnBasedPrompt(
@@ -249,37 +245,6 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     parts.append(pause)
     if !criterion.isEmpty { parts.append("Each turn is verified against this: \(criterion)") }
     return parts.isEmpty ? nil : parts.joined(separator: " ")
-  }
-
-  /// The cadence the daemon drives this loop on, or `nil` when the session owns it.
-  ///
-  /// The stored `heartbeatIntervalSeconds` — the experiment's explicit opt-in — wins
-  /// where present. What the derivation adds is Copilot: its in-session `/loop` never
-  /// worked as a cadence (the directive's scheduled prompts arrive as system-shaped
-  /// messages the agent does not treat as work, where a *typed* message — the goal-based
-  /// delivery — demonstrably does), so a Copilot time loop's interval is read out of the
-  /// directive it was created with and the daemon holds the timer. Derived rather than
-  /// migrated, so every existing Copilot time loop heals on update with its graph
-  /// untouched.
-  public var effectiveHeartbeatInterval: Double? {
-    if let interval = heartbeatIntervalSeconds, interval > 0 { return interval }
-    guard backend == .copilotCLI, loopType == .timeBased, let prompt = triggerPrompt
-    else { return nil }
-    return SessionPrompt.interval(of: prompt)
-  }
-
-  /// Whether the daemon's timer for this node is the Copilot derivation above rather
-  /// than the experiment's opt-in — the one cadence that must keep beating with the
-  /// experiment toggle off, because for Copilot it is not an experiment but the only
-  /// delivery that works.
-  public var hasDerivedHeartbeat: Bool {
-    heartbeatIntervalSeconds == nil && effectiveHeartbeatInterval != nil
-  }
-
-  /// The bare task a heartbeat pass runs: the prompt with its `/loop` directive
-  /// unwrapped when it carries one, verbatim otherwise.
-  public var heartbeatTask: String? {
-    triggerPrompt.map { SessionPrompt.firstPass(of: $0) ?? $0 }
   }
 
   /// The tier this node actually runs on: the human's pin if there is one, otherwise

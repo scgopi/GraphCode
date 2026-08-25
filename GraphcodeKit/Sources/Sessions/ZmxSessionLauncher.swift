@@ -1280,7 +1280,7 @@ public enum ZmxSessionLauncher {
   /// first beat itself — or for any backend whose recurrence is not a scheduler.
   static func firstPassMessage(for node: LoopNode) -> String? {
     guard node.backend == .copilotCLI, node.loopType == .timeBased,
-      node.effectiveHeartbeatInterval == nil, let prompt = node.sessionPrompt
+      node.heartbeatIntervalSeconds == nil, let prompt = node.sessionPrompt
     else { return nil }
     return SessionPrompt.firstPass(of: prompt)
   }

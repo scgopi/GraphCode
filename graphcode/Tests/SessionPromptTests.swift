@@ -121,58 +121,11 @@ struct SessionPromptTests {
         title: "Poll", loopType: type, triggerPrompt: prompt,
         heartbeatIntervalSeconds: heartbeat, backend: backend)
     }
-    // A parseable interval means the daemon holds the cadence and delivers the first
-    // pass itself — the kickoff exists only for a directive whose interval it cannot
-    // read, where the session is still on its own.
-    #expect(ZmxSessionLauncher.firstPassMessage(for: node()) == nil)
-    #expect(ZmxSessionLauncher.firstPassMessage(for: node(prompt: "/loop soon Check")) == "Check")
+    #expect(ZmxSessionLauncher.firstPassMessage(for: node()) == "Check")
     #expect(ZmxSessionLauncher.firstPassMessage(for: node(heartbeat: 900)) == nil)
     #expect(ZmxSessionLauncher.firstPassMessage(for: node(backend: .claudeCode)) == nil)
     #expect(
       ZmxSessionLauncher.firstPassMessage(for: node(type: .sketch, prompt: "poke about")) == nil)
-  }
-
-  /// The user-visible difference this pins: a goal-based loop's task lands as a typed
-  /// user message and Copilot works on it at creation; `/every`'s scheduled prompts
-  /// arrive system-shaped and it does not. So a Copilot time loop's cadence is the
-  /// daemon's — derived from the directive it was created with, no migration — and its
-  /// session opens by doing, not by scheduling.
-  @Test
-  func aCopilotTimeLoopIsDaemonDrivenByDerivation() {
-    let copilot = LoopNode(
-      title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 1h Check the queue",
-      backend: .copilotCLI)
-    #expect(copilot.effectiveHeartbeatInterval == 3600)
-    #expect(copilot.hasDerivedHeartbeat)
-    #expect(copilot.heartbeatTask == "Check the queue")
-    let opening = copilot.sessionPrompt ?? ""
-    #expect(opening.contains("Run one pass of this task now: Check the queue"))
-    #expect(!opening.contains("/loop 1h"))
-
-    // Claude Code's /loop works as a command; its model is untouched.
-    let claude = LoopNode(
-      title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 1h Check the queue",
-      backend: .claudeCode)
-    #expect(claude.effectiveHeartbeatInterval == nil)
-    #expect(claude.sessionPrompt == "/loop 1h Check the queue")
-
-    // The experiment's explicit opt-in still wins over the derivation.
-    let explicit = LoopNode(
-      title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 1h Check",
-      heartbeatIntervalSeconds: 900, backend: .copilotCLI)
-    #expect(explicit.effectiveHeartbeatInterval == 900)
-    #expect(!explicit.hasDerivedHeartbeat)
-  }
-
-  @Test
-  func theDirectiveIntervalVocabularyMatchesTheDialog() {
-    #expect(SessionPrompt.interval(of: "/loop 90s go") == 90)
-    #expect(SessionPrompt.interval(of: "/every 30m go") == 1800)
-    #expect(SessionPrompt.interval(of: "/loop 2h go") == 7200)
-    #expect(SessionPrompt.interval(of: "/loop 3d go") == 259_200)
-    #expect(SessionPrompt.interval(of: "/loop 45 go") == 2700)
-    #expect(SessionPrompt.interval(of: "/loop soon go") == nil)
-    #expect(SessionPrompt.interval(of: "just prose") == nil)
   }
 
   /// The marker is what stops the opening pass repeating, and it records *which* session

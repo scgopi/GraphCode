@@ -1975,7 +1975,7 @@ public actor GraphStore {
   /// the session on every beat, so the timer itself holds no authority anything else
   /// would need revoking.
   private func armHeartbeat(for node: LoopNode) {
-    guard node.loopType == .timeBased, let interval = node.effectiveHeartbeatInterval,
+    guard node.loopType == .timeBased, let interval = node.heartbeatIntervalSeconds,
       interval > 0, onDeliverMessage != nil
     else { return }
     heartbeatTimers[node.id]?.cancel()
@@ -2002,17 +2002,13 @@ public actor GraphStore {
   /// was the double-driving this experiment must not reintroduce. Skips are silent; a
   /// heartbeat that logged every beat would turn the memory log into a metronome.
   public func deliverHeartbeat(_ nodeID: UUID) async {
+    guard onHeartbeatEnabled?() == true else { return }
     guard let node = graph.nodes[id: nodeID], node.loopType == .timeBased, !node.isResolved,
-      let interval = node.effectiveHeartbeatInterval, interval > 0
+      let interval = node.heartbeatIntervalSeconds, interval > 0
     else {
       cancelHeartbeat(nodeID)
       return
     }
-    // The Settings toggle gates the *experiment* — loops that opted in explicitly. A
-    // derived Copilot cadence beats regardless: for that backend the daemon's typed
-    // message is not an experiment but the only delivery that works, and a toggle
-    // nobody associated with Copilot silencing every Copilot time loop is a trap.
-    guard node.hasDerivedHeartbeat || onHeartbeatEnabled?() == true else { return }
     guard MessageBus.deliverability(to: node) == nil else { return }
     let presence: Presence?
     if let onReadPresence {
@@ -2021,7 +2017,7 @@ public actor GraphStore {
       presence = node.presence?.presence
     }
     guard presence != .busy else { return }
-    let task = node.heartbeatTask ?? ""
+    let task = node.triggerPrompt ?? ""
     _ = await deliverToSession(
       node, "[graphcode] Heartbeat — run one pass of your task now: \(task)")
   }
