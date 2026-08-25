@@ -127,4 +127,25 @@ struct SessionPromptTests {
     #expect(
       ZmxSessionLauncher.firstPassMessage(for: node(type: .sketch, prompt: "poke about")) == nil)
   }
+
+  /// The marker is what stops the opening pass repeating, and it records *which* session
+  /// was served rather than the fact of serving: a daemon restart over the same Copilot
+  /// session must send nothing, while a new session — a new directory — is always owed
+  /// its own pass.
+  @Test
+  func theFirstPassMarkerIsPerSessionAndForgottenWithIt() throws {
+    let base = URL(fileURLWithPath: NSTemporaryDirectory())
+      .appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: base) }
+    let node = UUID()
+
+    #expect(NodeMemory.firstPassMarker(projectPath: "/tmp/p", nodeID: node, baseURL: base) == nil)
+    NodeMemory.recordFirstPass("session-a", projectPath: "/tmp/p", nodeID: node, baseURL: base)
+    #expect(
+      NodeMemory.firstPassMarker(projectPath: "/tmp/p", nodeID: node, baseURL: base)
+        == "session-a")
+
+    NodeMemory.clearFirstPass(projectPath: "/tmp/p", nodeID: node, baseURL: base)
+    #expect(NodeMemory.firstPassMarker(projectPath: "/tmp/p", nodeID: node, baseURL: base) == nil)
+  }
 }

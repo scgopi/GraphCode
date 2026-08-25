@@ -329,6 +329,44 @@ public enum NodeMemory {
     "Read your loop memory at \(path) before starting."
   }
 
+  static let firstPassFileName = "FIRST-PASS.txt"
+
+  /// Which of this node's sessions has already been given its opening pass
+  /// (`ZmxSessionLauncher.kickOffFirstPass`), identified by the Copilot session directory
+  /// it was typed into.
+  ///
+  /// Persisted rather than held in memory because the thing it must not do is repeat: the
+  /// daemon restarts, ensure ticks run again, and a task typed twice is a loop that did
+  /// its work twice. A *new* Copilot session has a new directory and so is never mistaken
+  /// for one already served.
+  public static func firstPassMarker(
+    projectPath: String, nodeID: UUID, baseURL: URL = SupportDirectory.url
+  ) -> String? {
+    let url = directory(forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
+      .appendingPathComponent(firstPassFileName)
+    return (try? String(contentsOf: url, encoding: .utf8))?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  public static func recordFirstPass(
+    _ marker: String, projectPath: String, nodeID: UUID, baseURL: URL = SupportDirectory.url
+  ) {
+    let directory = directory(forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
+    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try? Data(marker.utf8).write(
+      to: directory.appendingPathComponent(firstPassFileName), options: .atomic)
+  }
+
+  /// Forgotten when the session is torn down: the next one is a new session and has had
+  /// no pass of its own.
+  public static func clearFirstPass(
+    projectPath: String, nodeID: UUID, baseURL: URL = SupportDirectory.url
+  ) {
+    try? FileManager.default.removeItem(
+      at: directory(forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
+        .appendingPathComponent(firstPassFileName))
+  }
+
   /// Removes a node's memory directory — called when the node itself is deleted, the
   /// same moment its session is torn down. A log for a loop that no longer exists is
   /// not history, it's litter.
