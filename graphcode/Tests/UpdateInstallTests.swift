@@ -241,12 +241,13 @@ struct UpdateInstallTests {
     #expect(store.state.isUpdateReadyToRelaunch)
   }
 
-  /// The relaunch after an install used `open` with no `-n` and a flat `sleep 1`. `open`
+  /// The fallback relauncher, used only when LaunchServices refuses the open outright.
+  /// It still must not repeat the two mistakes the original had: `open` without `-n`
   /// *activates* an app that is already running rather than starting one (`man open`),
-  /// and after an install there usually is one — a second workspace kept open with
-  /// "Install Anyway", or this very process, still shutting down. Whatever was alive came
-  /// forward, the default workspace never came back, and Relaunch Now read as a button
-  /// that did nothing.
+  /// and a flat `sleep 1` is a race against however long termination takes.
+  ///
+  /// The primary path no longer spawns a child at all — a terminating app's RunningBoard
+  /// job takes its children with it, which is why the app quit and nothing came back.
   @Test
   func theRelaunchWaitsForThisProcessAndStartsANewInstance() {
     let script = UpdateInstallClient.relaunchScript(
