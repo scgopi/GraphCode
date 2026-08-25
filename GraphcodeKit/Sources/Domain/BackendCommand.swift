@@ -99,13 +99,21 @@ extension CLISessionBackendKind {
       // why the directories are granted explicitly rather than trusted to the tool flag.
       let access = settings.copilotPermissions.readableDirectories(
         workspacePaths + [briefingDirectory].compactMap { $0 })
-      guard let briefingPath else { return model + access + ["--interactive", prompt] }
+      // `/loop` — an alias of `/every` — is behind Copilot's experimental flag, so
+      // without this the directive a time-based node opens with is not a command at all
+      // and the session reads it as prose: no schedule, one pass, then idle. Passed only
+      // for a prompt that actually is one, so an ordinary Copilot session keeps the
+      // CLI's own defaults.
+      let experimental = SessionPrompt.firstPass(of: prompt) != nil ? ["--experimental"] : []
+      guard let briefingPath else {
+        return model + access + experimental + ["--interactive", prompt]
+      }
       // And the preamble telling it the briefing is there to read. See
       // `SessionBriefing.pointer` for why the tidier env-var route was abandoned.
       // Ordered by `SessionPrompt`, not concatenated: a time-based node's prompt is the
       // `/loop …` directive itself, and Copilot is the one backend that both hosts that
       // loop type and receives its briefing as a preamble (issue #179).
-      return model + access
+      return model + access + experimental
         + [
           "--interactive",
           SessionPrompt.composed(

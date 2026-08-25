@@ -1,6 +1,7 @@
 import AppKit
 import Dependencies
 import Foundation
+import GraphcodeKit
 
 /// Downloads a release DMG, verifies what it carries, and swaps it into /Applications —
 /// the drag the browser flow asks the human to do, done by the app on its own behalf.
@@ -62,10 +63,44 @@ extension UpdateInstallClient: DependencyKey {
       // there is never a moment with two instances competing to be the zmx leader.
       let reopen = Process()
       reopen.executableURL = URL(fileURLWithPath: "/bin/sh")
-      reopen.arguments = ["-c", "sleep 1; /usr/bin/open \"\(installedApp.path)\""]
+      reopen.arguments = [
+        "-c",
+        relaunchScript(
+          pid: ProcessInfo.processInfo.processIdentifier, appPath: installedApp.path,
+          workspace: .current),
+      ]
       try? reopen.run()
       await MainActor.run { NSApplication.shared.terminate(nil) }
     })
+
+  /// The detached shell that brings the app back once this process is gone.
+  ///
+  /// Both halves are there for a failure the obvious one-liner had. `open` without `-n`
+  /// *activates* an instance that is already running rather than starting one (`man
+  /// open`), and after an install there is very often one: a second workspace the human
+  /// kept open with "Install Anyway", or this very process, still shutting down. Either
+  /// swallowed the relaunch — whatever window was alive came forward, the default
+  /// workspace never came back, and Relaunch Now read as a button that did nothing.
+  ///
+  /// And the wait was a flat `sleep 1`, which is a race against however long termination
+  /// actually takes rather than a wait for it. Polling the pid ends the moment the
+  /// process is gone and gives up after ten seconds, because a relaunch that never fires
+  /// is worse than one that fires a beat early.
+  ///
+  /// The workspace is named explicitly rather than left to whatever the launched app
+  /// inherits. Only the default workspace installs updates (`WorkspacesState
+  /// .managesUpdates`), so today this always resolves to `env -u` — but a relaunch that
+  /// silently depends on that gating is one edit away from reopening someone's named
+  /// workspace as the default one, which reads as the update having thrown their
+  /// projects away.
+  static func relaunchScript(pid: Int32, appPath: String, workspace: Workspace) -> String {
+    let key = SupportDirectory.environmentKey
+    let named = workspace.isDefault ? "" : " --env \"\(key)=\(workspace.url.path)\""
+    return """
+      for _ in $(seq 1 100); do kill -0 \(pid) 2>/dev/null || break; sleep 0.1; done
+      env -u \(key) /usr/bin/open -n\(named) "\(appPath)"
+      """
+  }
 
   /// Tests never touch the network or /Applications — override with a fixture.
   static let testValue = UpdateInstallClient(

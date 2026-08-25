@@ -65,4 +65,66 @@ struct SessionPromptTests {
       SessionPrompt.composed(preamble: "Read the file.", prompt: "/loop 1h Triage.")
         == "/loop 1h Triage. Read the file.")
   }
+
+  /// Copilot's `/loop` is an alias of `/every`, which submits its prompt only *after* the
+  /// interval has elapsed. An hourly loop therefore arms correctly and then does nothing
+  /// for an hour, which reads as a loop that never started — so the same task is typed in
+  /// as an ordinary message to give it the pass the schedule will not.
+  @Test
+  func theFirstPassIsTheTaskWithoutTheDirectiveThatSchedulesIt() {
+    #expect(
+      SessionPrompt.firstPass(of: "/loop 1h Triage new issues") == "Triage new issues")
+    #expect(
+      SessionPrompt.firstPass(of: "/every 30m Check the queue") == "Check the queue")
+    // Everything past the interval, pointers included: the first pass reads the same
+    // briefing and memory every scheduled pass will.
+    #expect(
+      SessionPrompt.firstPass(of: "/loop 1h Triage. Read the briefing at /tmp/a/AGENTS.md.")
+        == "Triage. Read the briefing at /tmp/a/AGENTS.md.")
+  }
+
+  @Test
+  func aPromptThatIsNotADirectiveHasNoFirstPass() {
+    #expect(SessionPrompt.firstPass(of: "fix the failing test") == nil)
+    // A prompt opening with a path is not a command to be unwrapped.
+    #expect(SessionPrompt.firstPass(of: "/tmp/x is broken") == nil)
+    // An interval with no task behind it schedules nothing worth repeating.
+    #expect(SessionPrompt.firstPass(of: "/loop 1h") == nil)
+    #expect(SessionPrompt.firstPass(of: "/loop 1h   ") == nil)
+  }
+
+  /// `/loop` is behind Copilot's experimental flag. Without it the directive is not a
+  /// command at all and the session reads it as prose — the same silence issue #179
+  /// produced by a different route.
+  @Test
+  func aCopilotLoopDirectiveAsksForTheExperimentalCommands() {
+    let looping = CLISessionBackendKind.copilotCLI.launchArguments(
+      prompt: "/loop 1h Check the queue", tier: .standard)
+    #expect(looping.contains("--experimental"))
+
+    // An ordinary session keeps the CLI's own defaults.
+    let ordinary = CLISessionBackendKind.copilotCLI.launchArguments(
+      prompt: "fix the failing test", tier: .standard)
+    #expect(!ordinary.contains("--experimental"))
+  }
+
+  /// The first pass belongs only to a node whose *session* holds the timer. A heartbeat
+  /// node's daemon drives every pass including the first, and typing a task in as well
+  /// would double it.
+  @Test
+  func onlyASchedulingCopilotNodeGetsAFirstPass() {
+    func node(
+      backend: CLISessionBackendKind = .copilotCLI, type: LoopType = .timeBased,
+      prompt: String = "/loop 1h Check", heartbeat: Double? = nil
+    ) -> LoopNode {
+      LoopNode(
+        title: "Poll", loopType: type, triggerPrompt: prompt,
+        heartbeatIntervalSeconds: heartbeat, backend: backend)
+    }
+    #expect(ZmxSessionLauncher.firstPassMessage(for: node()) == "Check")
+    #expect(ZmxSessionLauncher.firstPassMessage(for: node(heartbeat: 900)) == nil)
+    #expect(ZmxSessionLauncher.firstPassMessage(for: node(backend: .claudeCode)) == nil)
+    #expect(
+      ZmxSessionLauncher.firstPassMessage(for: node(type: .sketch, prompt: "poke about")) == nil)
+  }
 }

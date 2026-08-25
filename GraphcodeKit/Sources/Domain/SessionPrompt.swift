@@ -27,6 +27,30 @@ public enum SessionPrompt {
     prompt.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/")
   }
 
+  /// The recurring directives a session's own scheduler understands. Copilot's `/loop`
+  /// is an alias of `/every`; both take an interval and then the prompt to submit.
+  static let recurringDirectives = ["/loop", "/every"]
+
+  /// The task inside a `/loop <interval> …` directive — everything the schedule will
+  /// submit, without the directive that schedules it. `nil` when the prompt is not one.
+  ///
+  /// What it is for: `/every` submits its prompt *after* the first interval elapses, so
+  /// arming an hourly loop does nothing at all for an hour. Sending this text as an
+  /// ordinary message gives the session the pass now that the schedule will not give
+  /// until later (`ZmxSessionLauncher`).
+  public static func firstPass(of prompt: String) -> String? {
+    let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+    for directive in recurringDirectives where trimmed.hasPrefix("\(directive) ") {
+      let afterDirective = trimmed.dropFirst(directive.count).drop { $0 == " " }
+      // The interval is one token; everything past it is the prompt the schedule carries.
+      guard let interval = afterDirective.firstIndex(of: " ") else { return nil }
+      let task = afterDirective[afterDirective.index(after: interval)...]
+        .trimmingCharacters(in: .whitespaces)
+      return task.isEmpty ? nil : task
+    }
+    return nil
+  }
+
   /// `prompt` with `preamble` on whichever side keeps a leading directive leading.
   public static func composed(preamble: String, prompt: String) -> String {
     guard opensWithDirective(prompt) else { return "\(preamble) \(prompt)" }

@@ -1,5 +1,6 @@
 import ComposableArchitecture
 import Foundation
+import GraphcodeKit
 import Testing
 
 @testable import graphcode
@@ -238,5 +239,40 @@ struct UpdateInstallTests {
     #expect(store.state.offeredUpdate?.version == "0.1.16-beta3")
     #expect(store.state.offeredUpdate != offered)
     #expect(store.state.isUpdateReadyToRelaunch)
+  }
+
+  /// The relaunch after an install used `open` with no `-n` and a flat `sleep 1`. `open`
+  /// *activates* an app that is already running rather than starting one (`man open`),
+  /// and after an install there usually is one — a second workspace kept open with
+  /// "Install Anyway", or this very process, still shutting down. Whatever was alive came
+  /// forward, the default workspace never came back, and Relaunch Now read as a button
+  /// that did nothing.
+  @Test
+  func theRelaunchWaitsForThisProcessAndStartsANewInstance() {
+    let script = UpdateInstallClient.relaunchScript(
+      pid: 4242, appPath: "/Applications/graphcode.app", workspace: .default)
+
+    // Waits on the pid rather than guessing how long termination takes.
+    #expect(script.contains("kill -0 4242"))
+    #expect(!script.contains("sleep 1;"))
+    // And asks for an instance of its own, whatever else is running.
+    #expect(script.contains("/usr/bin/open -n \"/Applications/graphcode.app\""))
+  }
+
+  /// Only the default workspace installs updates, so this always resolves to `env -u`
+  /// today — but a relaunch that silently depends on that gating is one edit away from
+  /// reopening someone's named workspace as the default one, which reads as the update
+  /// having thrown their projects away.
+  @Test
+  func theRelaunchNamesTheWorkspaceItIsComingBackTo() {
+    let defaulted = UpdateInstallClient.relaunchScript(
+      pid: 1, appPath: "/Applications/graphcode.app", workspace: .default)
+    #expect(defaulted.contains("env -u GRAPHCODE_SUPPORT_DIR"))
+    #expect(!defaulted.contains("--env"))
+
+    let named = UpdateInstallClient.relaunchScript(
+      pid: 1, appPath: "/Applications/graphcode.app",
+      workspace: Workspace(slug: "work", url: URL(fileURLWithPath: "/Users/x/.graphcode-work")))
+    #expect(named.contains("--env \"GRAPHCODE_SUPPORT_DIR=/Users/x/.graphcode-work\""))
   }
 }
