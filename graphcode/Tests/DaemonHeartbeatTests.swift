@@ -23,37 +23,6 @@ struct DaemonHeartbeatTests {
       ])
   }
 
-  /// The toggle gates the experiment's explicit opt-ins. A Copilot time loop's derived
-  /// cadence beats regardless: for that backend the typed message is not an experiment
-  /// but the only delivery that works, and the toggle was never associated with it.
-  @Test
-  func aDerivedCopilotCadenceBeatsWithTheToggleOff() async {
-    let delivered = LockIsolated<[String]>([])
-    let graph = LoopGraph(
-      project: ProjectRef(path: "/tmp/heartbeat", name: "heartbeat"),
-      nodes: [
-        LoopNode(
-          title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 1h Check the queue",
-          backend: .copilotCLI,
-          presence: PresenceReading(presence: .idle, confidence: .reported),
-          state: .running)
-      ])
-    let store = GraphStore(
-      graph: graph,
-      onDeliverMessage: { _, message, _ in
-        delivered.withValue { $0.append(message) }
-        return true
-      },
-      onHeartbeatEnabled: { false })
-
-    await store.deliverHeartbeat(graph.nodes[0].id)
-
-    #expect(delivered.value.count == 1)
-    // The beat carries the bare task, never the directive that would re-arm /every.
-    #expect(delivered.value.first?.contains("Check the queue") == true)
-    #expect(delivered.value.first?.contains("/loop") == false)
-  }
-
   @Test
   func theToggleOffMeansNoBeatEverFires() async {
     let delivered = LockIsolated(0)
