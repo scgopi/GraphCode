@@ -1003,11 +1003,18 @@ public enum ZmxSessionLauncher {
   /// cannot become Python syntax; the whole command is neutered with `|| true` because
   /// a failed seed must never block the launch it precedes.
   static func copilotTrustSeedScript(forRemotePath remotePath: String) -> String {
+    // Real config files open with `// …` comment lines Copilot writes above the JSON, so
+    // a plain `json.load` fails — and, `|| true`d, failed silently for as long as this
+    // script existed. The comment header is stripped for parsing and restored on write.
     let program =
       "import json,os,sys; p=os.path.expanduser('~/.copilot/config.json'); "
-      + "c=json.load(open(p)) if os.path.exists(p) else {}; "
+      + "r=open(p).read() if os.path.exists(p) else ''; "
+      + "h=[l for l in r.splitlines() if l.strip().startswith('//')]; "
+      + "b='\\n'.join(l for l in r.splitlines() if not l.strip().startswith('//')); "
+      + "c=json.loads(b) if b.strip() else {}; "
       + "f=c.get('trustedFolders') or []; t=sys.argv[1]; "
-      + "(t in f) or (f.append(t), c.update(trustedFolders=f), json.dump(c, open(p,'w')))"
+      + "(t in f) or (f.append(t), c.update(trustedFolders=f), "
+      + "open(p,'w').write('\\n'.join(h+[json.dumps(c)])+'\\n'))"
     return quotedCommand(["python3", "-c", program, remotePath]) + " 2>/dev/null || true"
   }
 
@@ -1239,6 +1246,12 @@ public enum ZmxSessionLauncher {
       DialLog.record(session: name, dial: "ensure", event: "resume-dead")
       SessionIDStore.remove(forNodeID: node.id)
     }
+    // The local half of the trust seed the remote ensure has always done: without it a
+    // fresh unattended Copilot parks its opening prompt behind the folder-trust dialog
+    // and swallows anything typed at it — the first pass included (`CopilotTrust`).
+    if node.backend == .copilotCLI, let directory = wd {
+      CopilotTrust.ensureTrusted(directory: directory)
+    }
     // Noted *before* the launch: the first pass below waits for a Copilot session
     // directory that was not already there, which is how it tells a session it just
     // started from one this ensure found already running.
@@ -1324,15 +1337,37 @@ public enum ZmxSessionLauncher {
         DialLog.record(session: name, dial: "first-pass", event: "no-session")
         return
       }
-      let delivered = await send(message, to: node, projectPath: projectPath)
-      if delivered {
+      // Sent, then *verified*: a `zmx send` reports only that the keystrokes reached
+      // the PTY, and a Copilot mid-boot — or parked at a dialog the trust seed could
+      // not prevent — swallows them whole. The `user.message` event Copilot writes on
+      // submission is the proof the pass became a turn; absent, the send is repeated.
+      var attempt = 0
+      var confirmed = false
+      while attempt < firstPassAttempts, !confirmed {
+        attempt += 1
+        guard await send(message, to: node, projectPath: projectPath) else { break }
+        let verifyDeadline = Date().addingTimeInterval(firstPassVerifySeconds)
+        while Date() < verifyDeadline, !confirmed {
+          confirmed = CopilotSessionLog.hasUserMessage(containing: message, inSessionNamed: name)
+          if !confirmed { try? await Task.sleep(for: .seconds(firstPassPollSeconds)) }
+        }
+      }
+      if confirmed {
         NodeMemory.recordFirstPass(session, projectPath: projectPath, nodeID: node.id)
       }
       DialLog.record(
         session: name, dial: "first-pass",
-        event: delivered ? (observed == nil ? "sent-unobserved" : "sent") : "undelivered")
+        event: confirmed
+          ? (attempt > 1 ? "sent-after-retry" : "sent")
+          : (attempt > 0 ? "undelivered" : "send-failed"))
     }
   }
+
+  /// The verification window per attempt is generous next to the instant write Copilot
+  /// actually does, and the attempt count is small: three swallowed sends in a row means
+  /// something structural, not something a fourth send fixes.
+  static let firstPassAttempts = 3
+  static let firstPassVerifySeconds: TimeInterval = 10
 
   /// Long enough for a cold `copilot` to open its session, short enough that a pass sent
   /// without ever seeing one is still early in the interval it is standing in for.
