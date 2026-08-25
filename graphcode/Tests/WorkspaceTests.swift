@@ -148,9 +148,49 @@ struct WorkspaceTests {
     #expect(slugs.contains("work"))
     #expect(slugs.contains("oss"))
     #expect(!slugs.contains("ssh"))
-    // The default first, then alphabetical — a list that reorders itself between openings
-    // is a list nobody can build a habit on.
-    #expect(slugs.prefix(3) == ["", "oss", "work"])
+    // The default first, then the order they were made in — issue #175. Alphabetical is
+    // what this was, and it is why "oss" used to arrive in front of a "work" that had
+    // been ⌥⌘2 for a month.
+    #expect(slugs.prefix(3) == ["", "work", "oss"])
+  }
+
+  @Test
+  func creatingAWorkspaceOnlyEverAddsToTheEndOfTheList() throws {
+    // The whole reason #175 is a bug and not a preference: ⌥⌘<n> is muscle memory, and
+    // alphabetical order re-pointed those keys at different workspaces every time a name
+    // sorted early. Dates are set explicitly rather than trusted to the order the
+    // directories were made — the assertion is about the sort, not about the filesystem's
+    // timestamp resolution.
+    let home = makeHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+
+    for (name, day) in [("work", 1.0), ("zebra", 2.0), ("alpha", 3.0)] {
+      let workspace = try Workspace.create(name: name, home: home)
+      try FileManager.default.setAttributes(
+        [.creationDate: Date(timeIntervalSince1970: day * 86_400)],
+        ofItemAtPath: workspace.url.path)
+    }
+
+    #expect(Workspace.all(home: home).map(\.slug).prefix(4) == ["", "work", "zebra", "alpha"])
+  }
+
+  @Test
+  func renamingAWorkspaceKeepsItsPlaceInTheList() throws {
+    // `moveItem` carries the creation date across, so the one gesture that changes a
+    // workspace's name does not change which number switches to it.
+    let home = makeHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+
+    let first = try Workspace.create(name: "work", home: home)
+    try FileManager.default.setAttributes(
+      [.creationDate: Date(timeIntervalSince1970: 86_400)], ofItemAtPath: first.url.path)
+    let second = try Workspace.create(name: "oss", home: home)
+    try FileManager.default.setAttributes(
+      [.creationDate: Date(timeIntervalSince1970: 172_800)], ofItemAtPath: second.url.path)
+
+    _ = try first.renamed(to: "zzz last", home: home)
+
+    #expect(Workspace.all(home: home).map(\.slug).prefix(3) == ["", "zzz-last", "oss"])
   }
 
   @Test

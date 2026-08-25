@@ -393,6 +393,7 @@ struct OnboardingWorkspacesPage: View {
         fact("Separate", "projects, loops, terminal layouts, agent default")
         fact("Shared", "the app itself, and nothing else")
         fact("Make one", "File ▸ Workspace ▸ New Workspace…   ⌥⌘N")
+        fact("Switch", "⌥⌘1 … ⌥⌘9, or ⌘` for the next one")
       }
       .frame(width: 440, alignment: .leading)
       .padding(.top, 12)

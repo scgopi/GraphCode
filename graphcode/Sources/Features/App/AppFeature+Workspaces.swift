@@ -136,6 +136,9 @@ extension AppFeature {
     case createConfirmed
     /// Raise (or launch) the instance that owns this workspace.
     case switchRequested(Workspace)
+    /// ⌘` and ⌘⇧` — the workspace `offset` places along from this one in creation order,
+    /// wrapping at both ends.
+    case cycleRequested(offset: Int)
     case switcherPresented(Bool)
     case manageRequested
     case manageDismissed
@@ -301,6 +304,20 @@ struct AppWorkspacesReducer: Reducer {
       case .workspaces(.switchRequested(let workspace)):
         guard workspace.id != state.workspaces.current.id else { return .none }
         return .run { [open = workspaces.open] _ in open(workspace) }
+
+      case .workspaces(.cycleRequested(let offset)):
+        // Re-read rather than cycling `known`: this is a keystroke, not a menu being
+        // opened, so nothing has necessarily refreshed the list since launch — and a
+        // workspace another instance created since then is one ⌘` would skip over.
+        let known = workspaces.list()
+        state.workspaces.known = known
+        guard known.count > 1,
+          let index = known.firstIndex(where: { $0.id == state.workspaces.current.id })
+        else { return .none }
+        // `%` keeps a negative dividend negative in Swift, so ⌘⇧` at the head of the
+        // list would index -1 without the extra `+ known.count`.
+        let next = known[((index + offset) % known.count + known.count) % known.count]
+        return .send(.workspaces(.switchRequested(next)))
 
       case .workspaces(.renameRequested(let workspace)):
         if let refusal = workspace.refusal(for: .rename, current: state.workspaces.current) {

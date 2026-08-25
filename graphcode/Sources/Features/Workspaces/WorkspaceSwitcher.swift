@@ -35,6 +35,16 @@ struct WorkspaceMenuItems: View {
       .modifier(WorkspaceShortcut(index: showsShortcuts ? index : nil))
     }
     Divider()
+    // ⌘` walks the same list the rows above are numbered in, which is the point of it:
+    // ⌥⌘<n> is for the workspace you can name, ⌘` for the next one along when you have
+    // more of them than you have fingers.
+    Button("Next Workspace") { store.send(.workspaces(.cycleRequested(offset: 1))) }
+      .modifier(CycleShortcut(isEnabled: showsShortcuts, isBackwards: false))
+      .disabled(store.workspaces.known.count < 2)
+    Button("Previous Workspace") { store.send(.workspaces(.cycleRequested(offset: -1))) }
+      .modifier(CycleShortcut(isEnabled: showsShortcuts, isBackwards: true))
+      .disabled(store.workspaces.known.count < 2)
+    Divider()
     Button("New Workspace…") { store.send(.workspaces(.newRequested)) }
       .modifier(NewWorkspaceShortcut(isEnabled: showsShortcuts))
     Button("Manage Workspaces…") { store.send(.workspaces(.manageRequested)) }
@@ -53,6 +63,24 @@ private struct WorkspaceShortcut: ViewModifier {
   func body(content: Content) -> some View {
     if let index, index < 9, let key = KeyEquivalent(exactly: index + 1) {
       content.keyboardShortcut(key, modifiers: [.command, .option])
+    } else {
+      content
+    }
+  }
+}
+
+/// ⌘` and ⌘⇧`, the pair macOS spends on cycling a single app's windows.
+///
+/// Taking them is safe here and is the only binding that would read as native: a
+/// workspace is a separate *instance*, each with one window, so the system's own ⌘`
+/// has nothing to cycle within any of them.
+private struct CycleShortcut: ViewModifier {
+  let isEnabled: Bool
+  let isBackwards: Bool
+
+  func body(content: Content) -> some View {
+    if isEnabled {
+      content.keyboardShortcut("`", modifiers: isBackwards ? [.command, .shift] : [.command])
     } else {
       content
     }
