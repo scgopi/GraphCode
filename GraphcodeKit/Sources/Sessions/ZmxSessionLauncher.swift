@@ -419,6 +419,11 @@ public enum ZmxSessionLauncher {
       return
     }
     SessionIDStore.remove(forNodeID: node.id)
+    // The next session is a new one and has had no opening pass of its own
+    // (`kickOffFirstPass`).
+    if let projectPath {
+      NodeMemory.clearFirstPass(projectPath: projectPath, nodeID: node.id)
+    }
     guard ZmxLocator.isInstalled else { return }
     guard
       let session = try? PTYProcessSession(
@@ -1267,43 +1272,71 @@ public enum ZmxSessionLauncher {
     return SessionPrompt.firstPass(of: prompt)
   }
 
-  /// Types that first pass in, once the session it belongs to is actually there to
-  /// receive it.
+  /// Types that first pass in, once the session it belongs to is there to receive it.
   ///
-  /// Gated on a *new* Copilot session directory rather than on the launch returning: an
-  /// ensure whose session already existed launched nothing, and typing the task into a
-  /// loop already running it is a second pass nobody asked for. Waiting for the directory
-  /// is also what keeps the keystrokes out of a CLI that has not drawn its composer yet,
-  /// where they are simply lost.
+  /// Two things had to change after the first attempt shipped and the pass still did not
+  /// arrive. It waited for a *new* Copilot session directory and did nothing at all if
+  /// none appeared — but which process launches a node's session is a race (the daemon if
+  /// it got there first, the app's terminal view if the node was opened before it did,
+  /// `GhosttyTerminalView.agentCommand`), and a session the ensure found already running
+  /// produces no new directory. And a probe that finds nothing must still send: the loop
+  /// is armed either way, so the cost of not sending is an idle interval and the cost of
+  /// sending is one pass — which is the pass being asked for.
   ///
-  /// Detached because the wait is seconds long and `start` is on the ensure path, which
-  /// has other nodes to get to.
+  /// What stops it repeating is the marker (`NodeMemory.firstPassMarker`), which records
+  /// the session that was served rather than the fact of serving: a new Copilot session
+  /// has a new directory and is never mistaken for one already given its pass, and a
+  /// daemon restart over the same session sends nothing.
+  ///
+  /// Every branch is written to the dial log, because the failure this replaces was
+  /// invisible from outside — the loop simply sat there, and nothing said whether the
+  /// message had been skipped, timed out, or refused.
   private static func kickOffFirstPass(
     of node: LoopNode, sessionNamed name: String, projectPath: String?, after previous: String?
   ) async {
-    guard let message = firstPassMessage(for: node) else { return }
+    guard let message = firstPassMessage(for: node), let projectPath else { return }
     Task {
       guard await FirstPassTickets.shared.claim(node.id) else { return }
       defer { Task { await FirstPassTickets.shared.release(node.id) } }
       let deadline = Date().addingTimeInterval(firstPassWaitSeconds)
-      while Date() < deadline {
+      var observed: String?
+      while Date() < deadline, observed == nil {
         let current = CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent
         if let current, current != previous {
-          // The directory appears as Copilot opens its session, a moment before its
-          // composer can take input. The settle is the same forgiveness `resume` gets.
-          try? await Task.sleep(for: .seconds(firstPassSettleSeconds))
-          _ = await send(message, to: node, projectPath: projectPath)
-          return
+          observed = current
+        } else {
+          try? await Task.sleep(for: .seconds(firstPassPollSeconds))
         }
-        try? await Task.sleep(for: .seconds(firstPassPollSeconds))
       }
+      // The session this pass would belong to: the one that just appeared, the one that
+      // was already running when the ensure found it, or — when Copilot's own state
+      // directory tells us nothing — the node itself, served once.
+      let session = observed ?? previous ?? "unknown"
+      guard NodeMemory.firstPassMarker(projectPath: projectPath, nodeID: node.id) != session
+      else {
+        DialLog.record(session: name, dial: "first-pass", event: "already-served")
+        return
+      }
+      // The directory appears as Copilot opens its session, a moment before its composer
+      // can take input. The settle is the same forgiveness `resume` gets.
+      try? await Task.sleep(for: .seconds(firstPassSettleSeconds))
+      guard await sessionExists(node) else {
+        DialLog.record(session: name, dial: "first-pass", event: "no-session")
+        return
+      }
+      let delivered = await send(message, to: node, projectPath: projectPath)
+      if delivered {
+        NodeMemory.recordFirstPass(session, projectPath: projectPath, nodeID: node.id)
+      }
+      DialLog.record(
+        session: name, dial: "first-pass",
+        event: delivered ? (observed == nil ? "sent-unobserved" : "sent") : "undelivered")
     }
   }
 
-  /// How long to wait for a launched Copilot session to appear before giving up on its
-  /// first pass. Generous: the loop is still correctly armed either way, so the cost of
-  /// waiting too long is nothing and the cost of giving up early is an idle hour.
-  static let firstPassWaitSeconds: TimeInterval = 90
+  /// Long enough for a cold `copilot` to open its session, short enough that a pass sent
+  /// without ever seeing one is still early in the interval it is standing in for.
+  static let firstPassWaitSeconds: TimeInterval = 45
   static let firstPassPollSeconds: TimeInterval = 0.5
   static let firstPassSettleSeconds: TimeInterval = 3
 
