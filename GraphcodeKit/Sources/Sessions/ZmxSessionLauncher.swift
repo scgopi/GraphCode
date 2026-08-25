@@ -503,8 +503,9 @@ public enum ZmxSessionLauncher {
       wakePath = wakeFile?.path
     }
     let promptWithMemory =
-      wakePath.map { "Read your loop memory at \($0) before starting. Then: \(singleLine)" }
-      ?? singleLine
+      wakePath.map {
+        SessionPrompt.composed(preamble: NodeMemory.wakePointer(toDigestAt: $0), prompt: singleLine)
+      } ?? singleLine
     // Both the executable and the shape of its arguments come from the node's backend —
     // `claude` takes its prompt positionally and its briefing via `--append-system-prompt`,
     // `copilot` takes both together as `--interactive <prompt>`. Model tier is applied
@@ -586,8 +587,9 @@ public enum ZmxSessionLauncher {
       // The file carries the *unflattened* prompt — a file has no newline hazard, so a
       // pasted multi-line goal survives verbatim where the typed line had to collapse it.
       let filePrompt =
-        wakePath.map { "Read your loop memory at \($0) before starting. Then: \(prompt)" }
-        ?? prompt
+        wakePath.map {
+          SessionPrompt.composed(preamble: NodeMemory.wakePointer(toDigestAt: $0), prompt: prompt)
+        } ?? prompt
       guard let projectPath,
         let promptFile = NodeMemory.writePrompt(
           filePrompt, projectPath: projectPath, nodeID: node.id)

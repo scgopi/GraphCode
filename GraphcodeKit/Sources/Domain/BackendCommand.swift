@@ -102,9 +102,14 @@ extension CLISessionBackendKind {
       guard let briefingPath else { return model + access + ["--interactive", prompt] }
       // And the preamble telling it the briefing is there to read. See
       // `SessionBriefing.pointer` for why the tidier env-var route was abandoned.
+      // Ordered by `SessionPrompt`, not concatenated: a time-based node's prompt is the
+      // `/loop …` directive itself, and Copilot is the one backend that both hosts that
+      // loop type and receives its briefing as a preamble (issue #179).
       return model + access
         + [
-          "--interactive", "\(SessionBriefing.pointer(toBriefingAt: briefingPath)) \(prompt)",
+          "--interactive",
+          SessionPrompt.composed(
+            preamble: SessionBriefing.pointer(toBriefingAt: briefingPath), prompt: prompt),
         ]
     case .codex:
       // Same shape as Claude Code — an interactive TUI taking its prompt positionally —
@@ -113,14 +118,21 @@ extension CLISessionBackendKind {
       let access = settings.codexApprovals.writableDirectories(workspacePaths)
       guard let briefingPath, let briefingDirectory else { return model + access + [prompt] }
       return model + access + ["--add-dir", briefingDirectory]
-        + ["\(SessionBriefing.pointer(toBriefingAt: briefingPath)) \(prompt)"]
+        + [
+          SessionPrompt.composed(
+            preamble: SessionBriefing.pointer(toBriefingAt: briefingPath), prompt: prompt)
+        ]
     case .openCode:
       // The prompt is the value of `--prompt`, the briefing a pointer inside it. No
       // directory grant: OpenCode's `read` permission defaults to allow, and `--auto`
       // approves everything not explicitly denied, so the briefing is readable as is.
       guard let briefingPath else { return model + ["--prompt", prompt] }
       return model
-        + ["--prompt", "\(SessionBriefing.pointer(toBriefingAt: briefingPath)) \(prompt)"]
+        + [
+          "--prompt",
+          SessionPrompt.composed(
+            preamble: SessionBriefing.pointer(toBriefingAt: briefingPath), prompt: prompt),
+        ]
     }
   }
 

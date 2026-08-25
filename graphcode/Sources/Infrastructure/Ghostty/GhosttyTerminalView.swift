@@ -260,8 +260,9 @@ struct GhosttyTerminalView: NSViewRepresentable {
     remoteLocation == nil ? workingDirectory : nil
   }
 
-  /// What rides into the session through the environment: the opening prompt, prefixed
-  /// for Copilot and Codex with the pointer at the briefing file. In the env var rather
+  /// What rides into the session through the environment: the opening prompt, carrying
+  /// for Copilot and Codex the pointer at the briefing file — on whichever side keeps a
+  /// leading `/loop` directive leading (`SessionPrompt`). In the env var rather
   /// than on the command line because the pointer is prose — inside `"$VAR"` it needs no
   /// quoting and cannot break the shell string the command is joined into. Claude's
   /// prompt stays untouched: its briefing arrives via `--append-system-prompt-file`.
@@ -269,7 +270,8 @@ struct GhosttyTerminalView: NSViewRepresentable {
     var environment = backend.presenceEnvironment(hooksFile: hooksFile)
     guard var prompt = initialPrompt else { return environment }
     if backend != .claudeCode, let briefingPath {
-      prompt = "\(SessionBriefing.pointer(toBriefingAt: briefingPath)) \(prompt)"
+      prompt = SessionPrompt.composed(
+        preamble: SessionBriefing.pointer(toBriefingAt: briefingPath), prompt: prompt)
     }
     environment[Self.promptVariable] = prompt
     return environment

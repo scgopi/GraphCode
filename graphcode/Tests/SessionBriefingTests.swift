@@ -200,10 +200,12 @@ struct SessionBriefingTests {
       #expect(granted.contains { $0.contains("briefings") })
     }
 
+    // The node polls, so its prompt is a `/loop` directive and the pointer trails it —
+    // see `theLoopDirectiveKeepsTheFrontOfACopilotPrompt`.
     let interactive = try #require(arguments.firstIndex(of: "--interactive"))
     let opening = arguments[interactive + 1]
     #expect(opening.contains(".md"))
-    #expect(opening.hasSuffix("/loop 1h Check"))
+    #expect(opening.hasPrefix("/loop 1h Check"))
   }
 
   @Test
