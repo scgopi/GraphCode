@@ -51,6 +51,40 @@ public enum SessionPrompt {
     return nil
   }
 
+  /// The interval a `/loop <interval> …` directive names, in seconds — `nil` when the
+  /// prompt is not a directive or its interval token is unreadable. Same vocabulary the
+  /// creation dialog accepts: `90s`, `30m`, `2h`, `3d`, and a bare number is minutes.
+  public static func interval(of prompt: String) -> Double? {
+    let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+    for directive in recurringDirectives where trimmed.hasPrefix("\(directive) ") {
+      let afterDirective = trimmed.dropFirst(directive.count).drop { $0 == " " }
+      let token = afterDirective.prefix { $0 != " " }.lowercased()
+      guard !token.isEmpty else { return nil }
+      let scale: Double
+      let digits: Substring
+      switch token.last {
+      case "s":
+        scale = 1
+        digits = token.dropLast()
+      case "m":
+        scale = 60
+        digits = token.dropLast()
+      case "h":
+        scale = 3600
+        digits = token.dropLast()
+      case "d":
+        scale = 86400
+        digits = token.dropLast()
+      default:
+        scale = 60
+        digits = token[...]
+      }
+      guard let value = Double(digits), value > 0 else { return nil }
+      return value * scale
+    }
+    return nil
+  }
+
   /// `prompt` with `preamble` on whichever side keeps a leading directive leading.
   public static func composed(preamble: String, prompt: String) -> String {
     guard opensWithDirective(prompt) else { return "\(preamble) \(prompt)" }
