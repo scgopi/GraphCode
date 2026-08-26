@@ -178,6 +178,28 @@ struct SummaryBoardTests {
     #expect(await store.graph.nodes.first?.board?.pass == 2)
   }
 
+  /// **The memo must not outlive the loops it is about.** It is keyed by node id and only
+  /// ever written to; without a prune, every loop ever created leaves an entry behind and a
+  /// daemon that runs for weeks accumulates one per deletion. Small each — and the PTY leak
+  /// this path already had was one descriptor each.
+  @Test
+  func theAttemptMemoIsPrunedWhenALoopIsDeleted() async {
+    let composer = Composer()
+    let doomed = node("A", passes: 3)
+    let store = store([doomed, node("B", passes: 3)], composer: composer)
+    let descriptor = await attach(to: store)
+    defer { close(descriptor) }
+
+    await store.pollPresence()
+    #expect(await store.boardAttempts.count == 2)
+
+    await store.handle(.deleteNode(doomed.id))
+    await store.pollPresence()
+
+    #expect(await store.boardAttempts.keys.contains(doomed.id) == false)
+    #expect(await store.boardAttempts.count == 1)
+  }
+
   // MARK: - The type's own bounds
 
   @Test

@@ -89,7 +89,11 @@ public actor GraphStore {
   /// In memory rather than in the graph file, deliberately: it is a record of what was
   /// *spent*, not of what a loop is, and re-drawing one pass after a daemon restart is a
   /// far better failure than persisting a refusal for ever.
-  private var boardAttempts: [UUID: Int] = [:]
+  ///
+  /// Pruned to the graph's own nodes on every sweep. A deleted loop's entry would otherwise
+  /// outlive it, and `graphcoded` runs for weeks — which is precisely how the PTY leak this
+  /// path already had turned "one descriptor" into an exhausted host.
+  private(set) var boardAttempts: [UUID: Int] = [:]
   /// How many composites deep this store sits: 0 at the project root, 1 inside the
   /// first composite, and so on — see `runInSubGraph`, which increments it.
   ///
@@ -676,6 +680,10 @@ public actor GraphStore {
       return cleared
     }
     let path = graph.project.path
+    // Before anything else, so a graph that has lost half its loops does not keep paying
+    // for them in memory.
+    let living = Set(graph.nodes.map(\.id))
+    boardAttempts = boardAttempts.filter { living.contains($0.key) }
     let candidates =
       graph.nodes
       .compactMap { node -> (node: LoopNode, summary: LoopSummary, behind: Int)? in

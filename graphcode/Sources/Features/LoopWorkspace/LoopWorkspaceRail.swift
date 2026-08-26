@@ -118,7 +118,8 @@ struct LoopWorkspaceRail: View {
   /// to it (the argument that already keeps the cost rollup out of the sidebar).
   static func hasContent(
     node: LoopNode, graph: LoopGraph,
-    summarising: Bool = LoopSummaryPresentation.isProducing
+    summarising: Bool = LoopSummaryPresentation.isProducing,
+    drawing: Bool = SummaryBoardPresentation.isDrawing
   ) -> Bool {
     graph.edges.contains { $0.from == node.id || $0.to == node.id }
       || node.metricHistory.count >= 2
@@ -129,7 +130,7 @@ struct LoopWorkspaceRail: View {
       // A loop wired to nothing whose run has been drawn has the one thing the rail is
       // widest for. Its own switch, so the board's absence is never inferred from the
       // beats' — see `SummaryBoardPresentation.hasContent`.
-      || SummaryBoardPresentation.hasContent(node: node)
+      || SummaryBoardPresentation.hasContent(node: node, drawing: drawing)
   }
 
   /// How many loops this one hands off to — what the loop bar's control counts.
