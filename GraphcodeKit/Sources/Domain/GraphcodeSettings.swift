@@ -329,6 +329,27 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// the derived beat exactly as it was — see `SummaryModelWriter`.
   public var summaryUsesModel: Bool
 
+  /// Whether a small model draws each finished pass — the summary rail's *picture*.
+  ///
+  /// **Off by default, experimental, and meaningless with `summarisesLoops` off.** The rail
+  /// above it says what a loop is doing in a sentence; this says it in a shape, when the
+  /// work had one. On, the end of a pass sends that pass's beats to the fast tier and asks
+  /// for a Mermaid flowchart or a Markdown table, which graphcode parses and draws natively
+  /// (`MermaidBoardParser`) rather than through a web view it does not ship.
+  ///
+  /// Its own switch rather than a mode of `summaryUsesModel`, and the reason is what the two
+  /// buy. That one spends a call to improve a sentence already on screen — the failure mode
+  /// is a worse sentence. This one spends a call to draw a claim about the *shape* of a run,
+  /// which is a larger claim than a sentence makes and is wrong in a way that looks
+  /// authoritative: a flowchart of work that had no flow reads as fact. So it is opt-in on
+  /// its own terms, the composer is told to answer `NONE` and expected to (most passes are),
+  /// and the Mermaid it produced is always one click from being read as text.
+  ///
+  /// One call per *finished pass* of a working loop, at most `SummaryBoardComposer.maxPerTick`
+  /// loops a tick — not one per beat, which is what `summaryUsesModel` costs and what makes
+  /// this the cheaper of the two on a busy graph.
+  public var visualisesSummaries: Bool
+
   /// Whether the daemon may drive time-based loops on its own timer — the experiment
   /// that tests the *opposite* of this project's founding cadence decision.
   ///
@@ -373,6 +394,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     sharesLoops: Bool = true,
     summarisesLoops: Bool = false,
     summaryUsesModel: Bool = false,
+    visualisesSummaries: Bool = false,
     daemonHeartbeatEnabled: Bool = false,
     keepsMacAwakeWhileLoopsRun: Bool = false,
     worktreePolicies: [String: WorktreeHygienePolicy] = [:]
@@ -388,6 +410,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     self.sharesLoops = sharesLoops
     self.summarisesLoops = summarisesLoops
     self.summaryUsesModel = summaryUsesModel
+    self.visualisesSummaries = visualisesSummaries
     self.daemonHeartbeatEnabled = daemonHeartbeatEnabled
     self.keepsMacAwakeWhileLoopsRun = keepsMacAwakeWhileLoopsRun
     self.worktreePolicies = worktreePolicies
@@ -436,6 +459,11 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     // money on a machine whose owner only asked to see what their loops were doing.
     summaryUsesModel =
       try container.decodeIfPresent(Bool.self, forKey: .summaryUsesModel) ?? false
+    // Absent means nobody has opted in. Never inferred from either switch above it: the
+    // reading is free, the rewrite is a sentence, and this draws a shape — three different
+    // prices, so three different answers.
+    visualisesSummaries =
+      try container.decodeIfPresent(Bool.self, forKey: .visualisesSummaries) ?? false
     daemonHeartbeatEnabled =
       try container.decodeIfPresent(Bool.self, forKey: .daemonHeartbeatEnabled) ?? false
     // Absent means nobody has asked for it, which is the default. An update must never
