@@ -101,6 +101,12 @@ private enum PlatformPathAlgorithms {
     guard !isRootPath(path, windows: windows) else {
       throw PlatformPathError.rootPath(path)
     }
+    // Lexically, before any symlink resolution. `standardizedFileURL` resolves `/tmp`
+    // first, so `/tmp/..` lands on `/private` — a real directory that is not the root
+    // and would therefore be accepted, when what was named reduces to `/`.
+    if !windows, RemoteProjectLocation.normalizedPath(path) == "/" {
+      throw PlatformPathError.rootPath(path)
+    }
 
     let canonical: String
     if windows {

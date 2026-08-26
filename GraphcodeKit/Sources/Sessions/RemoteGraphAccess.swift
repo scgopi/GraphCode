@@ -220,7 +220,7 @@ public enum RemoteGraphAccess {
               atomic_write(generation_path, str(current_generation).encode("ascii"))
           finally:
               fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-    """
+      """
     return [
       "python3", "-c", program, String(length), sha256,
       bridgeStatePath, bridgeStateGenerationPath,
