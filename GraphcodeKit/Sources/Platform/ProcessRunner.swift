@@ -453,11 +453,12 @@ private final class PlatformProcess: @unchecked Sendable {
     #elseif canImport(Darwin)
       var status: Int32 = 0
       while waitpid(processID, &status, 0) == -1, errno == EINTR {}
-      if WIFEXITED(status) {
-        return Int32(WEXITSTATUS(status))
+      if status & 0x7f == 0 {
+        return (status >> 8) & 0xff
       }
-      if WIFSIGNALED(status) {
-        return 128 + Int32(WTERMSIG(status))
+      let terminatingSignal = status & 0x7f
+      if terminatingSignal != 0, terminatingSignal != 0x7f {
+        return 128 + terminatingSignal
       }
       return 1
     #else
@@ -721,9 +722,9 @@ private final class PlatformProcess: @unchecked Sendable {
         throw ProcessRunnerError.launchFailed("Could not open /dev/null")
       }
 
-      var actions = posix_spawn_file_actions_t()
+      var actions: posix_spawn_file_actions_t?
       guard posix_spawn_file_actions_init(&actions) == 0 else {
-        if nullInput >= 0 { _ = close(nullInput) }
+        if nullInput >= 0 { _ = Darwin.close(nullInput) }
         throw ProcessRunnerError.launchFailed("posix_spawn file actions initialization failed")
       }
       defer { posix_spawn_file_actions_destroy(&actions) }
@@ -741,7 +742,7 @@ private final class PlatformProcess: @unchecked Sendable {
         try? outputPipe.fileHandleForWriting.close()
         try? errorPipe.fileHandleForReading.close()
         try? errorPipe.fileHandleForWriting.close()
-        if nullInput >= 0 { _ = close(nullInput) }
+        if nullInput >= 0 { _ = Darwin.close(nullInput) }
       }
       guard posix_spawn_file_actions_adddup2(&actions, inputRead, STDIN_FILENO) == 0,
         posix_spawn_file_actions_adddup2(&actions, outputWrite, STDOUT_FILENO) == 0,
@@ -771,7 +772,7 @@ private final class PlatformProcess: @unchecked Sendable {
         }
       }
 
-      var attributes = posix_spawnattr_t()
+      var attributes: posix_spawnattr_t?
       guard posix_spawnattr_init(&attributes) == 0 else {
         closePipes()
         throw ProcessRunnerError.launchFailed("posix_spawn attributes initialization failed")
@@ -786,8 +787,8 @@ private final class PlatformProcess: @unchecked Sendable {
       }
 
       let arguments = [request.executable.path] + request.arguments
-      let argv = arguments.map { strdupString($0) } + [nil]
-      let environment =
+      var argv = arguments.map { strdupString($0) } + [nil]
+      var environment =
         request.environment.keys.sorted().map {
           strdupString("\($0)=\(request.environment[$0] ?? "")")
         } + [nil]
@@ -820,7 +821,7 @@ private final class PlatformProcess: @unchecked Sendable {
       }
 
       if nullInput >= 0 {
-        _ = close(nullInput)
+        _ = Darwin.close(nullInput)
       }
       try? inputPipe?.fileHandleForReading.close()
       try? outputPipe.fileHandleForWriting.close()

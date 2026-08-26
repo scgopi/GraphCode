@@ -244,7 +244,7 @@ import Foundation
 
     public func sendFrame(_ data: Data) async throws {
       guard acceptsWrites else { return }
-      try await withCheckedThrowingContinuation { continuation in
+      try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
         writeQueue.async {
           self.stateLock.lock()
           let closed = self.isClosed

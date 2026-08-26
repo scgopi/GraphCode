@@ -125,6 +125,13 @@ struct ProjectCanvasView: View {
     .sheet(item: $store.pendingEdge) { _ in
       edgeForm
     }
+    .sheet(
+      isPresented: Binding(
+        get: { store.nodePendingPromotion != nil },
+        set: { if !$0 { store.send(.promotionCancelled) } })
+    ) {
+      SketchPromotionForm(store: store)
+    }
     // The delete confirmation is deliberately *not* here — it's hosted by `AppView`, so
     // it can also present for a deletion started from the sidebar while this canvas
     // isn't the visible detail pane. See `AppFeature.State.pendingLoopDeletion`.
@@ -198,6 +205,7 @@ struct ProjectCanvasView: View {
     return GeometryReader { proxy in
       ZStack {
         bandLayer(derived)
+        entryHandleLayer(derived)
         edgesLayer
         subGraphLinksLayer(derived.subGraph)
         nodesLayer(derived.attentionReasons, roles: derived.entryRoles, now: now)
@@ -272,6 +280,17 @@ struct ProjectCanvasView: View {
       Button("Project Settings…") { store.send(.projectSettingsTapped) }
       Button("Open in Finder") { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
     }
+    // The whole-canvas counterparts to a card's Export Loop…/Import Loops Here…:
+    // everything on this canvas as one bundle, and an import that lands beside the
+    // existing loops rather than under one of them. Behind the same experiments
+    // switch as the card's items.
+    if SettingsModel.shared.settings.sharesLoops {
+      Divider()
+      if !store.canvasGraph.nodes.isEmpty {
+        Button("Export All Loops…") { store.send(.exportGraphRequested) }
+      }
+      Button("Import Loops…") { store.send(.importLoopsRequested(asChildOf: nil)) }
+    }
   }
 
   private var worktreesMenuTitle: String {
@@ -318,6 +337,22 @@ struct ProjectCanvasView: View {
         entryPorts: entryPorts(derived),
         worktreeChip: worktreeChip,
         onWorktreeChipTapped: { store.send(.worktreeSweepTapped) })
+    }
+  }
+
+  /// The `+` on this canvas's origin dot — a second beginning in this folder, the twin
+  /// of the one the Graph view puts on every lane.
+  ///
+  /// It sits where the dot does, and only when there is one: `CanvasBandView` draws the
+  /// origin exactly when the canvas has entry ports. An empty canvas has no band at all,
+  /// and there the top-right New Loop is the way in.
+  @ViewBuilder
+  private func entryHandleLayer(_ derived: Derived) -> some View {
+    if let rect = bandRect(derived), !entryPorts(derived).isEmpty {
+      CanvasEntryHandle(help: "New loop in \(store.graph.project.name)") {
+        store.send(.addEntryLoopTapped)
+      }
+      .position(x: rect.minX + CanvasBand.originLane / 2, y: rect.midY)
     }
   }
 

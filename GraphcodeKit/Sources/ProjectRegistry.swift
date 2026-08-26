@@ -32,6 +32,10 @@ public struct ProjectRegistryCommandResult: Equatable, Sendable {
 /// `connectionProjectPaths` tracks that set so a full disconnect can detach from every
 /// joined `GraphStore`, not just one.
 ///
+/// The open set is shared, not per-connection: whoever opens a folder — the app, the CLI,
+/// an editor plugin driving the CLI — adds it for everyone, so every attached sidebar is
+/// joined to it there and then (`joinSidebars`) instead of finding out at its next launch.
+///
 /// The registry also owns which projects the sidebar should show on next launch, kept in
 /// `open-projects.json` separately from the recents index. That separation is what gives
 /// the sidebar's context menu three distinct verbs: `.closeProject` drops a project from
@@ -45,6 +49,9 @@ public actor ProjectRegistry {
   private var stores: [String: GraphStore] = [:]
   private var connections: [UUID: DaemonConnectionChannel] = [:]
   private var connectionProjectPaths: [UUID: Set<String>] = [:]
+  /// Connections that asked for the whole open set (`.restoreOpenProjects`) rather than
+  /// one named project — see `sidebarSubscribers`.
+  private var sidebarConnections: Set<UUID> = []
   private let ensureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let terminateSession: (@Sendable (LoopNode, String?) -> Void)?
   private let startQuickChat: (@Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>)?
@@ -52,13 +59,17 @@ public actor ProjectRegistry {
   private let quickChatExists: (@Sendable (LoopNode, String?) async -> Bool)?
   private let enumerateQuickChatSessions: (@Sendable () async -> [UUID])?
   private let evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)?
+  private let checkPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)?
   private let deliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)?
   private let captureScript: (@Sendable (ShellPredicate) async -> String?)?
   private let readUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)?
   private let readActivity: (@Sendable (LoopNode, String?) async -> String?)?
+  private let readSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)?
   private let readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)?
   /// Non-nil only while at least one client is attached — see `startPresencePolling`.
   private var presencePoller: Task<Void, Never>?
+  /// Runs only while the sleep assertion is held — see `refreshAwakeAssertion`.
+  private var awakeRecheck: Task<Void, Never>?
 
   /// Quick Chats are session-backed records too. Reusing the GraphStore launcher
   /// closures keeps their zmx identity stable (the chat UUID is the LoopNode UUID)
@@ -97,6 +108,8 @@ public actor ProjectRegistry {
       CLISessionBackend.terminateSession,
     evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)? = ShellPredicateEvaluator
       .evaluate,
+    checkPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)? =
+      ShellPredicateEvaluator.check,
     deliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)? =
       CLISessionBackend.deliverMessage,
     captureScript: (@Sendable (ShellPredicate) async -> String?)? = ShellPredicateEvaluator.capture,
@@ -104,6 +117,8 @@ public actor ProjectRegistry {
       CLISessionBackend.readUsage,
     readActivity: (@Sendable (LoopNode, String?) async -> String?)? =
       CLISessionBackend.readActivity,
+    readSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)? =
+      CLISessionBackend.readSummary,
     readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)? =
       CLISessionBackend.readPresence,
     startQuickChat: (@Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>)? = nil,
@@ -119,10 +134,12 @@ public actor ProjectRegistry {
     self.ensureSession = ensureSession
     self.terminateSession = terminateSession
     self.evaluatePredicate = evaluatePredicate
+    self.checkPredicate = checkPredicate
     self.deliverMessage = deliverMessage
     self.captureScript = captureScript
     self.readUsage = readUsage
     self.readActivity = readActivity
+    self.readSummary = readSummary
     self.readPresence = readPresence
     self.startQuickChat = startQuickChat ?? { node, path in
       let result = await CLISessionBackend.backend(for: node).startResult(node, path)
@@ -192,6 +209,7 @@ public actor ProjectRegistry {
     }
     let channel = connections.removeValue(forKey: id)
     connectionProjectPaths.removeValue(forKey: id)
+    sidebarConnections.remove(id)
     if connections.isEmpty { stopPresencePolling() }
     try? await channel?.close()
   }
@@ -266,7 +284,10 @@ public actor ProjectRegistry {
   /// The registry outlives the daemon in practice, but a `Task` holding only a weak
   /// `self` would otherwise keep waking every minute after the registry it sweeps for is
   /// gone — the same reason `GraphStore` cancels its goal pollers here.
-  deinit { remoteSweeper?.cancel() }
+  deinit {
+    remoteSweeper?.cancel()
+    awakeRecheck?.cancel()
+  }
 
   /// `ensureSession` is fire-and-forget by contract (`CLISessionBackend.ensureSession`
   /// spawns a detached task), so this returns well before the dials it started finish and
@@ -277,6 +298,41 @@ public actor ProjectRegistry {
     for (path, store) in stores where RemoteProjectLocation.parse(projectPath: path) != nil {
       await store.ensureUnattendedSessionsAlive()
     }
+  }
+
+  /// Takes or drops the sleep assertion to match what is running right now
+  /// (`AwakeAssertion`), across every open project.
+  ///
+  /// Called on every graph change rather than on a timer, because a graph change is
+  /// exactly when the answer can differ. The one thing a graph change cannot notice is
+  /// the *setting* being switched off while loops keep running, which is why holding the
+  /// assertion also starts a slow re-check — and only while it is held, so a daemon with
+  /// this switched off, or with nothing running, still keeps no timer at all.
+  private func refreshAwakeAssertion() async {
+    var running = 0
+    for store in stores.values { running += await store.runningLoopCount() }
+    let enabled = GraphcodeSettingsStore.load().keepsMacAwakeWhileLoopsRun
+    let shouldHold = AwakeAssertion.shouldStayAwake(runningLoops: running, enabled: enabled)
+    await AwakeAssertion.shared.apply(shouldHold: shouldHold, runningLoops: running)
+    if shouldHold { startAwakeRecheck() } else { stopAwakeRecheck() }
+  }
+
+  static let awakeRecheckInterval: Duration = .seconds(60)
+
+  private func startAwakeRecheck() {
+    guard awakeRecheck == nil else { return }
+    awakeRecheck = Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(for: Self.awakeRecheckInterval)
+        guard !Task.isCancelled else { return }
+        await self?.refreshAwakeAssertion()
+      }
+    }
+  }
+
+  private func stopAwakeRecheck() {
+    awakeRecheck?.cancel()
+    awakeRecheck = nil
   }
 
   /// Sequential rather than concurrent across projects: each store's poll already spawns
@@ -367,6 +423,10 @@ public actor ProjectRegistry {
       // paths were openable when they were added, and a project on an unmounted volume
       // has to come back when the volume does. Nothing is deleted from the stored set
       // either way — `close` is the only thing that removes from it.
+      // Asking for the whole open set is what marks a client as a sidebar: from here on
+      // it is joined to projects *other* clients open, so `graphcode status <new folder>`
+      // puts a row in a running app instead of one that only appears next launch.
+      sidebarConnections.insert(connectionID)
       for path in persistence.loadOpenProjects()
       where Self.isWellFormedProjectPath(path, platformPaths: platformPaths) {
         await open(
@@ -399,6 +459,18 @@ public actor ProjectRegistry {
       let canonicalPath = Self.canonicalize(path, platformPaths: platformPaths)
       _ = await close(canonicalPath, for: connectionID)
       persistence.forgetProject(path: canonicalPath)
+      // The graph is the only handle on every loop's detached session, so its deletion
+      // has to end them first — dropping it with the sessions alive left every agent in
+      // the project running forever with nothing pointing at it. Read from the resident
+      // store when there is one, else straight from disk: going through
+      // `store(forProjectPath:)` would run its load-time `ensureUnattendedSessions`,
+      // *starting* sessions on the way to killing them. Memory goes with each loop, the
+      // same as single-node deletion.
+      let graph = await stores[canonicalPath]?.graph ?? persistence.loadGraph(path: canonicalPath)
+      for node in graph?.nodesAtAnyDepth ?? [] {
+        terminateSession?(node, canonicalPath)
+        NodeMemory.remove(projectPath: canonicalPath, nodeID: node.id)
+      }
       // Drop the in-memory store too, or a later reopen would resurrect the graph we
       // just deleted from the one still sitting in `stores`.
       stores.removeValue(forKey: canonicalPath)
@@ -556,8 +628,31 @@ public actor ProjectRegistry {
     let project = snapshot.project
     persistence.recordOpened(
       ProjectRef(path: project.path, name: project.name, lastOpenedAt: Date()))
-    rememberOpen(canonicalPath)
+    guard rememberOpen(canonicalPath) else { return snapshot }
+    await joinSidebars(to: store, at: canonicalPath, excluding: connectionID)
     return snapshot
+  }
+
+  /// Joins every attached sidebar client to a project one of *them* — or the CLI, or a
+  /// plugin driving it — just added to the open set, so it arrives as an ordinary
+  /// `.graphChanged` snapshot.
+  ///
+  /// The open set is one shared list, not a per-connection view: `graphcode status
+  /// <folder>` persists the folder for everyone, and every sidebar restores the same set
+  /// at launch. Without this that shared list only reached a *running* app on relaunch,
+  /// which is precisely how a folder added from outside the app looked like it hadn't
+  /// been added at all.
+  ///
+  /// Only sidebars, and only on the open that was new. A one-shot CLI connection reads
+  /// frames until the `.graphChanged` for the project it named (`runAndPrintGraph`, and
+  /// the same loop in the remote python shim), so joining it to an unrelated project
+  /// would hand it another project's graph to print.
+  private func joinSidebars(to store: GraphStore, at path: String, excluding opener: UUID) async {
+    for id in sidebarConnections where id != opener {
+      guard let channel = connections[id] else { continue }
+      connectionProjectPaths[id, default: []].insert(path)
+      _ = await store.addConnection(id: id, channel: channel)
+    }
   }
 
   private func close(_ canonicalPath: String, for connectionID: UUID) async -> LoopGraph? {
@@ -572,11 +667,18 @@ public actor ProjectRegistry {
 
   /// Append rather than insert-at-front: the sidebar should come back in the order it
   /// was built up, not most-recent-first — that's what the recents list is for.
-  private func rememberOpen(_ canonicalPath: String) {
+  ///
+  /// Returns whether this was the open that added the project, which is what tells
+  /// `open` there is news to push to the other sidebars: a re-open of something already
+  /// in the set (every restored project, every `graphcode status` on a folder the app is
+  /// already showing) is not.
+  @discardableResult
+  private func rememberOpen(_ canonicalPath: String) -> Bool {
     var open = persistence.loadOpenProjects()
-    guard !open.contains(canonicalPath) else { return }
+    guard !open.contains(canonicalPath) else { return false }
     open.append(canonicalPath)
     persistence.saveOpenProjects(open)
+    return true
   }
 
   // MARK: - The global Orchestrator Graph
@@ -628,7 +730,12 @@ public actor ProjectRegistry {
     }
     let newStore = GraphStore(
       graph: graph,
-      onGraphChanged: { updatedGraph in persistence.saveGraph(updatedGraph) },
+      onGraphChanged: { [weak self] updatedGraph in
+        persistence.saveGraph(updatedGraph)
+        // Every state change is a chance for the last running loop to have stopped, or
+        // the first to have started — see `refreshAwakeAssertion`.
+        Task { await self?.refreshAwakeAssertion() }
+      },
       onGraphEvent: { event in
         guard case .graphChanged(let updatedGraph) = event else { return [:] }
         return replayStore.append(
@@ -638,10 +745,12 @@ public actor ProjectRegistry {
       onEnsureSession: ensureSession,
       onTerminateSession: terminateSession,
       onEvaluatePredicate: evaluatePredicate,
+      onCheckPredicate: checkPredicate,
       onDeliverMessage: deliverMessage,
       onCaptureScript: captureScript,
       onReadUsage: readUsage,
       onReadActivity: readActivity,
+      onReadSummary: readSummary,
       onReadPresence: readPresence,
       onSpawnIntoProject: spawnIntoProject,
       // The node memory log (`NodeMemory`): episode records in, whole directory out
@@ -652,7 +761,14 @@ public actor ProjectRegistry {
       },
       onRemoveMemory: { nodeID in
         NodeMemory.remove(projectPath: path, nodeID: nodeID)
-      })
+      },
+      onRefinePlaybook: { nodeID, text in
+        NodeMemory.refinePlaybook(text, projectPath: path, nodeID: nodeID)
+      },
+      onRollbackPlaybook: { nodeID in
+        NodeMemory.rollbackPlaybook(projectPath: path, nodeID: nodeID)
+      },
+      onHeartbeatEnabled: { GraphcodeSettingsStore.load().daemonHeartbeatEnabled })
     stores[path] = newStore
     // Only on first load of this project — a time-based node's session outlives the app
     // but not a reboot, so something has to restart it, and this is the moment the
@@ -712,7 +828,11 @@ public actor ProjectRegistry {
     return exists && isDirectory.boolValue
   }
 
-  private static func canonicalize(
+  /// The one spelling of a project's path — every store, every persisted entry and every
+  /// `.graphChanged` is keyed on it. Public because the app has to key on it too: a
+  /// project it asked for by the path a folder picker handed it comes back named by this,
+  /// and `/tmp` vs `/private/tmp` is enough to make the two look like different projects.
+  public static func canonicalize(
     _ path: String,
     platformPaths: any PlatformPaths = CurrentPlatformPaths.value
   ) -> String {

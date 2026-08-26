@@ -58,6 +58,7 @@ extension CLISessionBackendKind {
     case .claudeCode: return "Claude Code"
     case .copilotCLI: return "Copilot CLI"
     case .codex: return "Codex"
+    case .openCode: return "OpenCode"
     }
   }
 
@@ -136,6 +137,34 @@ extension CLISessionBackendKind {
         supportsMCP: true,
         supportsMidSessionInput: true,
         supportsInSessionRecurrence: false)
+
+    case .openCode:
+      // Spiked against OpenCode 1.18.21 — every entry read off `opencode --help` and its
+      // plugin SDK, and every uncertain one left false.
+      //
+      // `opencode [project] --prompt <text>` opens the TUI already running the prompt,
+      // which is graphcode's session model (`opencode run` is the headless shape it
+      // deliberately doesn't use). `--auto` is the unattended permission mode, `-m
+      // provider/model` picks a model, and `-s <id>` resumes. MCP is first-class
+      // (`opencode mcp`). It's a TUI in a PTY, so `zmx send` can type into it.
+      //
+      // `supportsHooks` is true and is the interesting row: OpenCode has no hook *flags*
+      // but a plugin API whose events cover both edges of a turn (`session.status`,
+      // `session.idle`), tool calls (`tool.execute.before`) and permission prompts
+      // (`permission.asked`). graphcode ships a plugin through `OPENCODE_CONFIG`, which
+      // merges over the user's own config rather than replacing it — verified in the
+      // source, not assumed (`PresenceHooks.openCodePlugin`).
+      //
+      // Sub-agents exist inside the TUI (`@agent` mentions) but not as anything a
+      // composite could lean on from outside, and there is no `/loop` equivalent.
+      return BackendCapabilities(
+        supportsGoalMode: true,
+        supportsHooks: true,
+        supportsStructuredOutput: false,
+        supportsSubAgents: false,
+        supportsMCP: true,
+        supportsMidSessionInput: true,
+        supportsInSessionRecurrence: false)
     }
   }
 
@@ -149,7 +178,7 @@ extension CLISessionBackendKind {
   /// (`GhosttyTerminalView.command`), so a loop labelled Codex opened a Claude Code
   /// session. Silently running a different agent than the one the picker says is worse
   /// than refusing, so this now gates every loop type.
-  /// All three, now that Codex has an adapter and a row read off its real CLI (issue #1).
+  /// All four, now that Codex and OpenCode have adapters and rows read off their real CLIs.
   /// Kept as a property rather than deleted: the *concept* is what stopped Codex being
   /// claimed as working for months, and the next backend added will need it again.
   public var isSpiked: Bool { true }
@@ -161,6 +190,9 @@ extension CLISessionBackendKind {
     // Nothing graphcode can't actually launch may host anything.
     guard isSpiked else { return false }
     switch loopType {
+    case .sketch:
+      // A bare session — the least demanding type. Every launchable backend hosts it.
+      return true
     case .turnBased:
       return true
     case .goalBased:

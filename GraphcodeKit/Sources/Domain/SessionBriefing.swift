@@ -44,8 +44,37 @@ public enum SessionBriefing {
   /// The briefing for a node in `projectPath`'s graph, or `nil` when there's no path to
   /// tell it about — every command the briefing describes takes one, so a briefing
   /// without it would describe commands the session can't run.
-  public static func text(projectPath: String?) -> String? {
+  public static func text(
+    projectPath: String?, settings: GraphcodeSettings = GraphcodeSettingsStore.load()
+  ) -> String? {
     guard let projectPath, !projectPath.isEmpty else { return nil }
+    // The daemon-heartbeat experiment flips the *default* for time-based loops, and
+    // the briefing has to teach whichever model is current — an agent following
+    // yesterday's cadence-in-prompt guidance under today's default would make loops
+    // the human just said they no longer want by default.
+    let timeBullet =
+      settings.daemonHeartbeatEnabled
+      ? """
+      - `--type time --heartbeat <seconds> --prompt <the bare task>` — for work that never
+        finishes because it repeats: watching, polling, monitoring, anything phrased as
+        "every hour", "keep checking", "each morning". Also starts immediately.
+        **The daemon drives it**: a heartbeat is typed into the session each interval, and
+        the prompt is the bare task — no `/loop`, no cron, no self-scheduling. Only when
+        the loop must own its own cadence (self-pacing, a complex schedule), omit
+        `--heartbeat` and write the directive into the prompt (`/loop 1h …`) instead.
+        Do not reach for this for one-off work: "check the build" is a goal, "check the
+        build every hour" is time-based.
+      """
+      : """
+      - `--type time --prompt <prompt carrying its own cadence>` — for work that never
+        finishes because it repeats: watching, polling, monitoring, anything phrased as
+        "every hour", "keep checking", "each morning". Also starts immediately.
+        **The cadence goes inside the prompt**, as a directive the session runs on itself
+        (`/loop 1h Check for new reports`, `/schedule …`) — graphcode holds no timer of its
+        own, so a time-based loop whose prompt carries no cadence just runs once and stops.
+        Do not reach for this for one-off work: "check the build" is a goal, "check the
+        build every hour" is time-based.
+      """
     return """
       # You are a loop in a graphcode graph
 
@@ -63,6 +92,12 @@ public enum SessionBriefing {
       graphcode node create \(projectPath) --title <title> --type goal --goal <what done looks like>
       ```
 
+      A **node is a loop** — the cards on graphcode's canvas are loops, and the CLI calls
+      them nodes. A request to create a "child node", "child loop", "sub-loop", "subagent
+      loop", or a "node" of any kind is a request for this command, whatever the word.
+      Run from inside your session, the CLI already attributes the new loop to you as its
+      creator, so making a child needs nothing beyond the create itself.
+
       ## Choosing the loop type
 
       Choose by **what decides the loop is finished**. This matters more than it looks:
@@ -73,14 +108,7 @@ public enum SessionBriefing {
         finishes the goal. Add `--predicate <shell command>` only when a command can
         actually decide it (exit 0 means met, e.g. a test run); without one, finishing the
         work is what resolves it.
-      - `--type time --prompt <prompt carrying its own cadence>` — for work that never
-        finishes because it repeats: watching, polling, monitoring, anything phrased as
-        "every hour", "keep checking", "each morning". Also starts immediately.
-        **The cadence goes inside the prompt**, as a directive the session runs on itself
-        (`/loop 1h Check for new reports`, `/schedule …`) — graphcode holds no timer of its
-        own, so a time-based loop whose prompt carries no cadence just runs once and stops.
-        Do not reach for this for one-off work: "check the build" is a goal, "check the
-        build every hour" is time-based.
+      \(timeBullet.trimmingCharacters(in: .whitespacesAndNewlines))
       - `--type turn --check <what a human verifies>` — for work a **human** must review
         each turn before it continues. **A turn-based loop does not start on its own**:
         nothing runs until a person opens its terminal. Create one only when a human really
@@ -94,7 +122,7 @@ public enum SessionBriefing {
       | "spin up five loops and have each say hello" | `goal` ×5 | Nobody needs to approve a greeting, and it ends when it has been said. Turn-based ones would never even run. |
       | "fix each of these five issues" | `goal` ×5, `--predicate` if a test proves it | The work decides when it is done. |
       | "fix these five, I want to review each fix" | `turn` ×5 | You have been told a human stands between turns. |
-      | "watch for new issues every hour and triage them" | `time` ×1 | It recurs; the cadence goes in the prompt. One watcher that fans out beats five identical watchers. |
+      | "watch for new issues every hour and triage them" | `time` ×1 | It recurs. One watcher that fans out beats five identical watchers. |
 
       `graphcode status \(projectPath)` lists the loops that already exist. Check it before
       creating any, so you extend the graph rather than duplicating it.
@@ -110,7 +138,9 @@ public enum SessionBriefing {
       you", "stop, I already fixed that file". `graphcode status \(projectPath)` shows
       every loop's id. A target that isn't live gets the message staged into its
       memory instead — it reads it at its next wake, and the command tells you which
-      happened. If you were created by another loop, your memory log's first entry is
+      happened. Add `--follow-up` (first word after the id) when the message can wait:
+      the target is not interrupted mid-turn — it hears it when it next goes idle,
+      from its memory otherwise. If you were created by another loop, your memory log's first entry is
       the exact command for reporting results back to it. For recurring communication,
       an edge is still the right tool: a `message` edge fires automatically when you
       finish, a `handoff` sequences the other loop after you. This command is the
@@ -130,6 +160,53 @@ public enum SessionBriefing {
       Record decisions, dead ends, and constraints ("approach X fails because Y") — not
       a transcript, and nothing the code or git history already says. Your node id is
       the suffix of `$ZMX_SESSION` after `graphcode-`.
+
+      Memos record what happened; your **playbook** records how to do this job. It rides
+      into every wake ahead of the history, so when a pass teaches you a better method —
+      an order of operations, a check worth running first, a tool that works here —
+      rewrite it (whole document, small evidence-backed changes):
+
+      ```sh
+      graphcode node refine \(projectPath) <your-node-id> <playbook text>
+      ```
+
+      `--file <path>` sends a multi-line document; `--rollback` restores the previous
+      version (the old one is always snapshotted). Refine your method freely — your
+      goal, predicate, and budget stay out of reach regardless.
+
+      ## Project skills
+
+      Your playbook is yours; a **skill** is for every loop in this project. Check the
+      project's skill library before working something out from scratch (Claude Code
+      loads `.claude/skills/` automatically). When your work produces a method another
+      loop could reuse — a build recipe, a verification sequence, a workaround with a
+      why — distill it into a skill in your backend's native format: for Claude Code,
+      `.claude/skills/<name>/SKILL.md`, a short markdown recipe with a one-line
+      description. When a goal loop resolves with its session still live, graphcode
+      asks it this once; one-off work should not become a skill.
+
+      ## The rest of the CLI
+
+      Rarer verbs, one line each — like everything above, they take the project path:
+
+      - `graphcode node stop \(projectPath) <node-id>` pauses a loop reversibly.
+        `node delete` also erases its edges, session, and memory — irreversible, so
+        reach for stop unless deletion is exactly what was asked for.
+      - `graphcode node update \(projectPath) <node-id> --goal|--prompt|--check|--model …`
+        edits a loop in place; a loop may not change its own `--predicate` or
+        `--budget`. For a composite loop, `node pilot` dry-runs it and `node arm` arms
+        it afterwards.
+      - `graphcode edge create \(projectPath) <from-id> <to-id> --kind handoff|message|spawn`
+        wires loops: `handoff` sequences the target after you finish, `message` sends it
+        your result, `spawn` has your finish create it.
+      - `graphcode node export \(projectPath) <node-id> --output <file.zip>` packages a
+        loop and its descendants for sharing, and `graphcode node import \(projectPath)
+        <file.zip> [--as-child-of <node-id>]` splices a bundle in with fresh identities.
+        Both stay off until "Export and import loops" is enabled in the app's Settings —
+        the command says so when it is not.
+      - `graphcode projects` lists every project, `graphcode usage \(projectPath)` totals
+        a graph's token spend, and the reserved path `graphcode://global` addresses the
+        app-wide global graph wherever a project path is accepted.
 
       If `graphcode` is not on your `PATH`, it is at `\(installedCLIPath)`.
 

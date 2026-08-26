@@ -45,10 +45,18 @@ public actor GraphStore {
   private let onEnsureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let onTerminateSession: (@Sendable (LoopNode, String?) -> Void)?
   private let onEvaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)?
+  /// `onEvaluatePredicate` with the evidence kept: pass/fail plus the run's output tail
+  /// (`ShellPredicateEvaluator.check`). Goal polling prefers this when wired, so a
+  /// failing stop condition can tell the session *why* it isn't done; the plain hook
+  /// stays for the `until`-guard and for every test that stubs a bare yes/no.
+  private let onCheckPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)?
   private let onDeliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)?
   private let onCaptureScript: (@Sendable (ShellPredicate) async -> String?)?
   private let onReadUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)?
   private let onReadActivity: (@Sendable (LoopNode, String?) async -> String?)?
+  /// What a working session has narrated, folded into `LoopNode.summary`. `nil` when
+  /// nothing produces beats — no reader wired, or the human has left the producer off.
+  private let onReadSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)?
   private let onReadPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)?
   /// Cross-graph `.spawn`. `GraphStore` owns exactly one graph and cannot reach another,
   /// so it hands the request up to `ProjectRegistry`, which is the layer that knows every
@@ -62,6 +70,17 @@ public actor GraphStore {
   private let onAppendMemory: (@Sendable (UUID, String) -> Void)?
   /// Tears a deleted node's memory down alongside its session.
   private let onRemoveMemory: (@Sendable (UUID) -> Void)?
+  /// Replaces a node's playbook, snapshotting the old one (`NodeMemory.refinePlaybook`).
+  /// Returns whether the write happened — refinement is the one memory write whose
+  /// failure the author must hear about, since they will work *from* it next wake.
+  private let onRefinePlaybook: (@Sendable (UUID, String) -> Bool)?
+  /// Restores the previous playbook, consuming a snapshot (`NodeMemory.rollbackPlaybook`).
+  private let onRollbackPlaybook: (@Sendable (UUID) -> Bool)?
+  /// Whether the daemon-heartbeat experiment is on, read fresh at every gate — creation,
+  /// and every tick — so flipping the Settings toggle applies immediately. `nil` (tests
+  /// that don't care, and any client that never wires it) means off, which is the
+  /// experiment's default.
+  private let onHeartbeatEnabled: (@Sendable () -> Bool)?
   /// How many composites deep this store sits: 0 at the project root, 1 inside the
   /// first composite, and so on — see `runInSubGraph`, which increments it.
   ///
@@ -73,13 +92,36 @@ public actor GraphStore {
   static let maxSubGraphDepth = 6
   static let maxNodesPerGraph = 50
   private var goalPollers: [UUID: Task<Void, Never>] = [:]
+  /// The experiment's timers — one per heartbeat-driven time loop, alive whether the
+  /// Settings toggle is on or off. The *tick* checks the toggle, not the arming: a
+  /// timer that skips its beat costs one closure call a minute, and it means flipping
+  /// the experiment on mid-run starts existing heartbeat loops beating without anyone
+  /// re-arming anything.
+  private var heartbeatTimers: [UUID: Task<Void, Never>] = [:]
+  /// Workspace fingerprint at the last *failing* predicate run, per node — what
+  /// `GoalSpec.skipsUnchangedWorkspace` compares against. In-memory on purpose: a
+  /// daemon restart forgetting these costs one extra predicate run, and persisting a
+  /// cache whose whole point is skipping work would be work.
+  private var failedPredicateFingerprints: [UUID: String] = [:]
+  /// The failure tail last relayed to each node's session, so an unchanged failure is
+  /// never repeated at it poll after poll.
+  private var lastPredicateFeedback: [UUID: String] = [:]
+  /// `node send --follow-up` messages waiting for their target to finish its current
+  /// turn — drained whenever the store settles (`drainAndBroadcast`) and on each
+  /// presence poll. The content is in the target's memory log from the moment it was
+  /// queued, so losing this queue to a restart delays the message to the next wake
+  /// rather than dropping it.
+  private var pendingFollowUps: [(nodeID: UUID, text: String)] = []
 
   /// A poller holds `self` weakly, so a store going away already stops it *doing*
   /// anything — but the task itself keeps sleeping in its loop forever. That was
   /// harmless while every store outlived the process; `runInSubGraph` builds one per
   /// command and throws it away, so without this a goal loop inside a composite leaks a
   /// sleeping task every time anything addresses that sub-graph.
-  deinit { for poller in goalPollers.values { poller.cancel() } }
+  deinit {
+    for poller in goalPollers.values { poller.cancel() }
+    for timer in heartbeatTimers.values { timer.cancel() }
+  }
   /// Guarded edges whose re-fire is waiting on an `until` predicate — see
   /// `fireOutgoingEdges`, drained by `handle` before it broadcasts.
   private var pendingCycleReentries: [UUID] = []
@@ -95,6 +137,11 @@ public actor GraphStore {
   /// Best-effort: the same fact is always in the memory log first, so a session that
   /// couldn't be reached reads it at its next wake instead.
   private var pendingNudges: [(nodeID: UUID, text: String)] = []
+  /// Words for a session whose node just *resolved* — the distill-a-skill ask. Its own
+  /// queue because `MessageBus.deliverability` reads the very state resolution wrote,
+  /// so the ordinary nudge drain would drop every one of these; this drain types into
+  /// the PTY directly and lets an exited session fail the send harmlessly.
+  private var pendingResolutionNudges: [(nodeID: UUID, text: String)] = []
   /// Messages the orchestrator declined to deliver, newest last. Surfaced so an
   /// undelivered message is visible rather than silently dropped.
   public private(set) var undeliveredMessages:
@@ -115,14 +162,19 @@ public actor GraphStore {
     onEnsureSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
     onTerminateSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
     onEvaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)? = nil,
+    onCheckPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)? = nil,
     onDeliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)? = nil,
     onCaptureScript: (@Sendable (ShellPredicate) async -> String?)? = nil,
     onReadUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)? = nil,
     onReadActivity: (@Sendable (LoopNode, String?) async -> String?)? = nil,
+    onReadSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)? = nil,
     onReadPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)? = nil,
     onSpawnIntoProject: (@Sendable (String, NodeDraft) -> Void)? = nil,
     onAppendMemory: (@Sendable (UUID, String) -> Void)? = nil,
     onRemoveMemory: (@Sendable (UUID) -> Void)? = nil,
+    onRefinePlaybook: (@Sendable (UUID, String) -> Bool)? = nil,
+    onRollbackPlaybook: (@Sendable (UUID) -> Bool)? = nil,
+    onHeartbeatEnabled: (@Sendable () -> Bool)? = nil,
     subGraphDepth: Int = 0
   ) {
     self.graph = graph
@@ -133,14 +185,19 @@ public actor GraphStore {
     self.onEnsureSession = onEnsureSession
     self.onTerminateSession = onTerminateSession
     self.onEvaluatePredicate = onEvaluatePredicate
+    self.onCheckPredicate = onCheckPredicate
     self.onDeliverMessage = onDeliverMessage
     self.onCaptureScript = onCaptureScript
     self.onReadUsage = onReadUsage
     self.onReadActivity = onReadActivity
+    self.onReadSummary = onReadSummary
     self.onReadPresence = onReadPresence
     self.onSpawnIntoProject = onSpawnIntoProject
     self.onAppendMemory = onAppendMemory
     self.onRemoveMemory = onRemoveMemory
+    self.onRefinePlaybook = onRefinePlaybook
+    self.onRollbackPlaybook = onRollbackPlaybook
+    self.onHeartbeatEnabled = onHeartbeatEnabled
   }
 
   private func recordMemory(_ nodeID: UUID, _ entry: String) {
@@ -316,6 +373,17 @@ public actor GraphStore {
           "node creation refused: draft is invalid",
           broadcastErrors: broadcastErrors)
       }
+      // The experiment's gate: a heartbeat loop created while the toggle is off would
+      // sit silent looking broken, and refusal-with-a-pointer is the export precedent.
+      if let interval = draft.heartbeatIntervalSeconds, interval > 0,
+        onHeartbeatEnabled?() != true
+      {
+        return await reject(
+          "heartbeat loops need the Daemon heartbeat experiment enabled in Settings "
+            + "(daemonHeartbeatEnabled in ~/.graphcode/settings.json)",
+          broadcastErrors: broadcastErrors)
+      }
+
       var node = draft.makeNode()
       // A goal loop is born `.running`, which is right on a project canvas and a lie in a
       // sub-graph: nothing here has a session until the composite is piloted. Unfixed,
@@ -355,6 +423,7 @@ public actor GraphStore {
       if node.loopType == .goalBased {
         armGoalPoller(for: node)
       }
+      armHeartbeat(for: node)
 
     case .createEdge(let from, let to, let spec):
       // Duplicates are scoped per kind, not per pair: a `.handoff` and a `.message`
@@ -389,8 +458,8 @@ public actor GraphStore {
         resolveNode(nodeID, succeeded: false)
       }
 
-    case .messageNode(let nodeID, let text, let from):
-      await deliverAdHocMessage(to: nodeID, text: text, from: from)
+    case .messageNode(let nodeID, let text, let from, let followUp):
+      await deliverAdHocMessage(to: nodeID, text: text, from: from, followUp: followUp ?? false)
 
     case .renameNode(let nodeID, let title):
       renameNode(nodeID, to: title)
@@ -398,8 +467,17 @@ public actor GraphStore {
     case .updateNode(let nodeID, let update):
       updateNode(nodeID, with: update)
 
+    case .promoteNode(let nodeID, let promotion, let promotedBy):
+      promoteNode(nodeID, promotion: promotion, promotedBy: promotedBy)
+
     case .memoNode(let nodeID, let text, let from):
       memoNode(nodeID, text: text, from: from)
+
+    case .refineNode(let nodeID, let text, let from):
+      refineNode(nodeID, text: text, from: from)
+
+    case .rollbackRefinement(let nodeID, let from):
+      rollbackRefinement(nodeID, from: from)
 
     case .deleteNode(let nodeID):
       deleteNode(nodeID)
@@ -423,6 +501,9 @@ public actor GraphStore {
     case .armComposite(let nodeID):
       armComposite(nodeID)
 
+    case .importNodes(let request):
+      importNodes(request)
+
     case .refreshUsage:
       // The same command polls all three labels: they come off one session, over one
       // channel, and a second command on its own timer would triple the subprocess count
@@ -432,6 +513,7 @@ public actor GraphStore {
       // asking it against last tick's readings would describe the wrong ones.
       await refreshPresence()
       await refreshActivity()
+      await refreshSummary()
     }
 
     // Guarded re-fires need an `until` predicate answered first, which means a
@@ -496,10 +578,13 @@ public actor GraphStore {
       onEnsureSession: nil,
       onTerminateSession: onTerminateSession,
       onEvaluatePredicate: onEvaluatePredicate,
+      onCheckPredicate: onCheckPredicate,
       onDeliverMessage: onDeliverMessage,
       onCaptureScript: onCaptureScript,
       onAppendMemory: onAppendMemory,
       onRemoveMemory: onRemoveMemory,
+      onRefinePlaybook: onRefinePlaybook,
+      onRollbackPlaybook: onRollbackPlaybook,
       subGraphDepth: subGraphDepth + 1)
     let result = await child.handle(command, broadcastErrors: broadcastErrors)
     graph.nodes[id: nodeID]?.subGraph = await child.graph
@@ -606,6 +691,80 @@ public actor GraphStore {
     return changed
   }
 
+  /// Asks each unresolved session what it has narrated, and folds it into the node's own
+  /// bounded store.
+  ///
+  /// **Not guarded on `busy`, unlike `refreshActivity`, and that was a real bug.** A
+  /// turn's last beats are written and *then* the session goes idle, so the closing
+  /// narration always landed after the final busy poll and was never read: the terminal
+  /// showed a finished turn while the rail sat on a beat from minutes earlier. Activity
+  /// can be guarded that way because a quiet session genuinely has no current tool call. A
+  /// summary is the account of what happened, and the end of a turn is the part of it a
+  /// human coming back most wants.
+  ///
+  /// What keeps that cheap is `TranscriptFreshness`: a quiet loop costs one `stat` and no
+  /// read at all, because its transcript has not moved since the last poll.
+  ///
+  /// **Unlike `activity`, a nil reading does not clear the field.** The two say different
+  /// things: `activity` is the tool call happening *now*, and a session between calls is
+  /// genuinely doing none, so blanking it is the honest answer. A summary is the account
+  /// of a run — the last thing a loop was doing is exactly what a human coming back wants
+  /// on screen, and blanking it the moment the session goes quiet would empty the rail at
+  /// precisely the moment it is most worth reading.
+  ///
+  /// **An *empty* reading is different from no reading, and it is what turns the feature
+  /// off.** `nil` means nothing new was read — a quiet transcript, a remote loop, a
+  /// backend with nothing to say — and the node keeps what it has. An empty one is the
+  /// reader saying it will not be narrating this node at all, which is what
+  /// `CLISessionBackend` answers when the human has switched the producer off, and the
+  /// node's summary goes with it. Without that, switching the experiment off left every
+  /// card showing a beat frozen at the moment it was switched, outranking the live
+  /// activity line it had been standing in for. Resolved loops are swept too, which is why
+  /// this loop is over every node.
+  ///
+  /// **Asked concurrently, unlike the other two readings.** Those are file reads and a
+  /// `stat`, and a queue of them is nothing; this one may have the optional model pass
+  /// behind it, which is a subprocess with a timeout on it. Sequentially that is one
+  /// timeout *per loop* on a tick that presence rides on, so a canvas of six loops could
+  /// stop reporting state for a minute over a caption. One task each bounds the whole
+  /// sweep at a single timeout however many loops there are.
+  @discardableResult
+  private func refreshSummary() async -> Bool {
+    guard let onReadSummary else { return false }
+    let path = graph.project.path
+    // A resolved loop is asked only while it still carries a summary to clear. Its session
+    // is over, so a reading can tell it nothing new — but finding that out costs a
+    // directory walk per backend, and Codex's is over every rollout on the machine.
+    let nodes = graph.nodes.filter { !$0.isResolved || $0.summary != nil }
+    let readings = await withTaskGroup(of: (UUID, SummaryReading?).self) { group in
+      for node in nodes {
+        group.addTask { (node.id, await onReadSummary(node, path)) }
+      }
+      var collected: [UUID: SummaryReading] = [:]
+      for await (id, reading) in group {
+        guard let reading else { continue }
+        collected[id] = reading
+      }
+      return collected
+    }
+    var changed = false
+    for node in nodes {
+      guard let reading = readings[node.id] else { continue }
+      guard !reading.isEmpty else {
+        guard graph.nodes[id: node.id]?.summary != nil else { continue }
+        graph.nodes[id: node.id]?.summary = nil
+        changed = true
+        continue
+      }
+      guard !node.isResolved else { continue }
+      let merged = (graph.nodes[id: node.id]?.summary ?? LoopSummary()).merging(reading)
+      guard graph.nodes[id: node.id]?.summary != merged else { continue }
+      graph.nodes[id: node.id]?.summary = merged
+      changed = true
+    }
+    return changed
+  }
+
   /// Asks each session what it is doing, the third reading on the same channel and the
   /// same trip as the other two.
   ///
@@ -661,6 +820,15 @@ public actor GraphStore {
   /// **Nothing changed, nothing sent.** And when something *has* changed this notifies
   /// clients without going through `broadcast()`, because that persists the graph — a
   /// write per tick, forever, of the one field that is deliberately never restored.
+  /// How many of this graph's loops are running right now, sub-graphs included — what
+  /// `ProjectRegistry` sums to decide whether the machine should be kept awake
+  /// (`AwakeAssertion`). Only `.running`: a loop parked on a human's answer is not work
+  /// in flight, and holding a sleepless machine overnight for one is the opposite of the
+  /// point.
+  public func runningLoopCount() -> Int {
+    graph.nodesAtAnyDepth.count { $0.state == .running }
+  }
+
   public func pollPresence() async {
     guard !connections.isEmpty, onReadPresence != nil else { return }
     // Both, and in this order, because they are one answer to a human: the pill says a
@@ -669,6 +837,10 @@ public actor GraphStore {
     // whenever that happened to be.
     var changed = await refreshPresence()
     if await refreshActivity() { changed = true }
+    if await refreshSummary() { changed = true }
+    // The poll that just learned a target went idle is the natural moment to hand it
+    // what was waiting on exactly that.
+    await drainPendingFollowUps()
     guard changed else { return }
     let event = DaemonEvent.graphChanged(graph)
     let envelopes = onGraphEvent?(event) ?? [:]
@@ -765,6 +937,21 @@ public actor GraphStore {
         goal.metricDirection = direction
         sessionFacing.append("for your metric, \(direction.displayName)")
       }
+      // Session-facing like the metric is: the budget was written into the opening
+      // prompt, and a loop pacing itself against the old number would be pacing
+      // against a lie.
+      if let budget = update.tokenBudget {
+        goal.tokenBudget = budget > 0 ? budget : nil
+        sessionFacing.append(
+          goal.tokenBudget.map { "token budget: \($0)" } ?? "the token budget was removed")
+      }
+      if let skips = update.skipsUnchangedWorkspace {
+        goal.skipsUnchangedWorkspace = skips
+        observerSide.append(
+          skips
+            ? "predicate skips re-runs while the tree is unchanged"
+            : "predicate runs every poll")
+      }
       node.goal = goal
 
     case .timeBased:
@@ -777,6 +964,21 @@ public actor GraphStore {
         node.triggerPrompt = trimmed
         sessionFacing.append("prompt is now: \(trimmed)")
       }
+      if let interval = update.heartbeatIntervalSeconds {
+        // Setting an interval needs the experiment on; *clearing* one never does —
+        // turning the toggle off must not strand a loop with a cadence nobody can
+        // remove.
+        if interval > 0, onHeartbeatEnabled?() != true {
+          announceError(
+            "update refused: heartbeats need the Daemon heartbeat experiment enabled "
+              + "in Settings")
+          return
+        }
+        node.heartbeatIntervalSeconds = interval > 0 ? interval : nil
+        sessionFacing.append(
+          node.heartbeatIntervalSeconds.map { "the daemon now drives you every \(Int($0))s" }
+            ?? "the daemon heartbeat was removed — own your cadence again")
+      }
 
     case .turnBased:
       if let check = update.checkDescription {
@@ -784,7 +986,7 @@ public actor GraphStore {
         sessionFacing.append("each turn is now verified against: \(check)")
       }
 
-    case .composite:
+    case .sketch, .composite:
       break
     }
 
@@ -793,7 +995,13 @@ public actor GraphStore {
       observerSide.append("model tier: \(tier.rawValue) (next launch)")
     }
     guard !sessionFacing.isEmpty || !observerSide.isEmpty else {
-      announceError("update refused: nothing in it applies to a \(node.loopType) loop")
+      // A sketch's refusal answers the obvious next question — "then what does?" —
+      // instead of leaving the caller to discover promotion exists.
+      announceError(
+        node.loopType == .sketch
+          ? "update refused: nothing in it applies to a main loop — give it a shape "
+            + "first with `graphcode node promote`"
+          : "update refused: nothing in it applies to a \(node.loopType) loop")
       return
     }
     graph.nodes[id: nodeID] = node
@@ -804,6 +1012,10 @@ public actor GraphStore {
     if node.loopType == .goalBased, !node.isResolved {
       cancelGoalPoller(nodeID)
       armGoalPoller(for: node)
+    }
+    if node.loopType == .timeBased, !node.isResolved {
+      cancelHeartbeat(nodeID)
+      armHeartbeat(for: node)
     }
 
     let author = update.updatedBy.flatMap { graph.nodes[id: $0]?.title } ?? "a human"
@@ -816,6 +1028,95 @@ public actor GraphStore {
           "[graphcode] Your instructions were revised: "
             + sessionFacing.joined(separator: "; ")
         ))
+    }
+  }
+
+  /// Gives a sketch a shape — `GraphCommand.promoteNode`.
+  ///
+  /// A mutation on the existing node, deliberately not a create + delete: the id is the
+  /// zmx session name, the memory key, and every edge's endpoint, so keeping it is what
+  /// makes "keep the session, add a shape" literally true. Only `loopType` and the one
+  /// field the new type needs change.
+  ///
+  /// The live session (if any) is nudged the same way `updateNode` nudges — its
+  /// transcript is the loop's context now, and a shape it was never told about would
+  /// make the canvas lie about what the loop is doing.
+  private func promoteNode(_ nodeID: UUID, promotion: SketchPromotion, promotedBy: UUID?) {
+    guard var node = graph.nodes[id: nodeID] else {
+      announceError("no loop \(nodeID) in this graph")
+      return
+    }
+    guard node.loopType == .sketch else {
+      announceError(
+        "promotion refused: \(node.title) already has a shape — only a main loop can be promoted")
+      return
+    }
+
+    let nudge: String
+    switch promotion {
+    case .goal(var spec):
+      spec.summary = spec.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !spec.summary.isEmpty else {
+        announceError("promotion refused: a goal loop needs what done looks like")
+        return
+      }
+      // `updateNode`'s one rule with teeth, held at the other doorway: promotion is the
+      // only other command through which a loop could hand itself a stop condition, and
+      // a self-set predicate is a verifier inside the verified. Summary-only
+      // self-promotion stays allowed — prose states the goal, it doesn't pass it.
+      if spec.effectivePredicate != nil, promotedBy == nodeID {
+        announceError("promotion refused: \(node.title) may not set its own stop condition")
+        recordMemory(nodeID, "promotion refused: a loop may not set its own stop condition")
+        return
+      }
+      node.loopType = .goalBased
+      node.goal = spec
+      // What creation gives a goal loop, promotion gives it too: born `.running`,
+      // because its session works toward the goal with no human turn in between.
+      node.state = .running
+      nudge = "You are now a goal loop. Work toward this and stop when it's met: \(spec.summary)"
+
+    case .turn(let beforeWritesOnly):
+      node.loopType = .turnBased
+      node.pausesBeforeWritesOnly = beforeWritesOnly
+      nudge =
+        beforeWritesOnly
+        ? "You are now a turn-based loop. Stop for a human's review before anything that "
+          + "changes files or state; reading and reasoning can run straight through."
+        : "You are now a turn-based loop. Work in turns, stopping after each one for a "
+          + "human's review before you continue."
+
+    case .timed(let prompt):
+      let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else {
+        announceError("promotion refused: a time-based loop needs a cadence to run on")
+        return
+      }
+      node.loopType = .timeBased
+      node.triggerPrompt = trimmed
+      nudge = "You are now a time-based loop. Adopt this cadence by running it now: \(trimmed)"
+    }
+
+    graph.nodes[id: nodeID] = node
+    // Attributed the way `updateNode` attributes: the promoter's title when the command
+    // came from inside a loop, "a human" otherwise — except a self-promotion, which is
+    // worth naming as what it is rather than as a peer that happens to share the id.
+    let promoter =
+      promotedBy == nodeID
+      ? "itself" : promotedBy.flatMap { graph.nodes[id: $0]?.title } ?? "a human"
+    recordMemory(
+      nodeID, "promoted from main to \(promotion.targetType.rawValue) by \(promoter) — \(nudge)")
+    pendingNudges.append((nodeID, "[graphcode] \(nudge)"))
+
+    // What creation does for the type, promotion does too: an unattended loop's session
+    // must exist whether or not anyone has the app open, and a goal loop's stop
+    // condition needs its poller.
+    if node.runsUnattended {
+      ensureSession(node)
+    }
+    if node.loopType == .goalBased {
+      cancelGoalPoller(nodeID)
+      armGoalPoller(for: node)
     }
   }
 
@@ -836,6 +1137,91 @@ public actor GraphStore {
     // note names its author, the way a message edge does.
     let sender = senderID.flatMap { $0 == nodeID ? nil : graph.nodes[id: $0]?.title }
     recordMemory(nodeID, "note\(sender.map { " (from \($0))" } ?? ""): \(trimmed)")
+  }
+
+  /// Replaces a node's playbook — `graphcode node refine`. Refusals are said out loud
+  /// because the author will *work from* this document next wake: a refinement that
+  /// silently didn't land is a loop following a playbook it believes it replaced.
+  ///
+  /// Note what is deliberately *not* guarded: a loop refining itself. Self-refinement
+  /// is the feature — the verifier-stays-outside rule protects the stop condition
+  /// (goal, predicate, budget), and the playbook is method, not verdict.
+  private func refineNode(_ nodeID: UUID, text: String, from senderID: UUID?) {
+    guard graph.nodes[id: nodeID] != nil else {
+      announceError("playbook not refined: no loop \(nodeID) in this graph")
+      return
+    }
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      announceError("playbook not refined: empty text — to undo, use node refine --rollback")
+      return
+    }
+    guard trimmed.utf8.count <= NodeMemory.maxPlaybookBytes else {
+      announceError(
+        "playbook not refined: \(trimmed.utf8.count) bytes is over the "
+          + "\(NodeMemory.maxPlaybookBytes)-byte bound — a playbook is distilled method, "
+          + "not a transcript; move history to node memo instead")
+      return
+    }
+    guard let onRefinePlaybook, onRefinePlaybook(nodeID, trimmed) else {
+      announceError("playbook not refined: the write failed")
+      return
+    }
+    let sender = senderID.flatMap { $0 == nodeID ? nil : graph.nodes[id: $0]?.title }
+    recordMemory(
+      nodeID,
+      "playbook refined\(sender.map { " by \($0)" } ?? "") (\(trimmed.utf8.count) bytes) "
+        + "— next wake works from the new version")
+  }
+
+  /// Restores the playbook's previous version — the undo half of `refineNode`.
+  private func rollbackRefinement(_ nodeID: UUID, from senderID: UUID?) {
+    guard graph.nodes[id: nodeID] != nil else {
+      announceError("playbook not rolled back: no loop \(nodeID) in this graph")
+      return
+    }
+    guard let onRollbackPlaybook, onRollbackPlaybook(nodeID) else {
+      announceError("playbook not rolled back: no earlier version to restore")
+      return
+    }
+    let sender = senderID.flatMap { $0 == nodeID ? nil : graph.nodes[id: $0]?.title }
+    recordMemory(nodeID, "playbook rolled back\(sender.map { " by \($0)" } ?? "")")
+  }
+
+  // MARK: - Import
+
+  /// Splices an export bundle's loops into this graph — the daemon half of
+  /// `graphcode node import` and the canvas's Import Loops…, with the merge itself in
+  /// `GraphImportPlanner` so it stays testable without a store.
+  ///
+  /// Memory restoration goes through `recordMemory` like every other episode record,
+  /// which is what keeps this store unaware of where memory lives on disk. Entries
+  /// arrive already timestamped from their source loop; re-stamping on append is fine
+  /// because the original line, timestamp included, is the entry's text.
+  private func importNodes(_ request: GraphImportRequest) {
+    let arriving = request.snapshot.nodes.count
+    guard graph.nodes.count + arriving <= Self.maxNodesPerGraph else {
+      announceError(
+        "import refused: \(arriving) arriving loops would exceed this graph's limit "
+          + "of \(Self.maxNodesPerGraph) (currently \(graph.nodes.count))")
+      return
+    }
+    if let parent = request.asChildOf, graph.nodes[id: parent] == nil {
+      announceError("import refused: no loop \(parent) in this graph to import under")
+      return
+    }
+    guard let plan = GraphImportPlanner.merge(request, into: graph) else {
+      announceError("import refused: the bundle contains no loops")
+      return
+    }
+    graph = plan.mergedGraph
+    for (oldID, entries) in request.memoryByNodeID {
+      guard let newID = plan.idMapping[oldID] else { continue }
+      for entry in entries {
+        recordMemory(newID, entry)
+      }
+      recordMemory(newID, "imported into \(graph.project.path) with a fresh identity")
+    }
   }
 
   // MARK: - Deletion
@@ -861,6 +1247,11 @@ public actor GraphStore {
     graph.edges.removeAll { $0.from == node.id || $0.to == node.id }
     graph.nodes.remove(id: node.id)
     cancelGoalPoller(node.id)
+    cancelHeartbeat(node.id)
+    // The summary reader keeps one modification date per node so a quiet transcript costs
+    // a `stat` and no read; a deleted loop should not keep one for the life of the daemon.
+    let deletedID = node.id
+    Task { await TranscriptFreshness.shared.forget(deletedID) }
     for targetID in downstream {
       unblockIfStillIdle(targetID)
     }
@@ -870,6 +1261,16 @@ public actor GraphStore {
     // memory goes the same way — a log for a loop that no longer exists is litter.
     terminateSession(node)
     onRemoveMemory?(node.id)
+
+    // A composite's workers live in its sub-graph, on this node rather than in
+    // `graph.nodes` — the same blind spot `requestStop` covers when stopping, and the
+    // sessions `pilotComposite` and `spawnInstance` started for them are just as real.
+    // Killed rather than asked, unlike a stop: the nodes cease to exist with their
+    // parent, so there is nothing left for a polite stop request to resolve.
+    for worker in node.subGraph?.nodesAtAnyDepth ?? [] {
+      terminateSession(worker)
+      onRemoveMemory?(worker.id)
+    }
   }
 
   /// The fan-out descendants of a node — the loops it created, theirs, and so on,
@@ -944,6 +1345,9 @@ public actor GraphStore {
     }
     graph.nodes[id: node.id]?.state = .stopped
     cancelGoalPoller(node.id)
+    // The experiment's clean-stop dividend: a heartbeat loop's cadence dies here, with
+    // the timer — no typed request needed for a schedule the agent never owned.
+    cancelHeartbeat(node.id)
     recordMemory(
       node.id,
       asked
@@ -987,11 +1391,27 @@ public actor GraphStore {
     return false
   }
 
-  private func resolveNode(_ nodeID: UUID, succeeded: Bool) {
-    guard graph.nodes[id: nodeID] != nil else { return }
+  /// `sessionMayStillBeLive` is true only for predicate-driven resolutions: the goal
+  /// poller proved the goal met while the session runs on, which is the one moment an
+  /// agent is both finished and present. The other resolution paths
+  /// (`nodeCheckApproved`, composite roll-up) fire *because* the session ended, so
+  /// there is nobody left to speak to.
+  private func resolveNode(
+    _ nodeID: UUID, succeeded: Bool, sessionMayStillBeLive: Bool = false
+  ) {
+    guard let node = graph.nodes[id: nodeID] else { return }
     graph.nodes[id: nodeID]?.state = succeeded ? .succeeded : .failed
     cancelGoalPoller(nodeID)
     recordMemory(nodeID, "resolved: \(succeeded ? "succeeded" : "failed")")
+    // Skill distillation rides resolution: a goal loop that just succeeded is the one
+    // agent holding a proven method in context. Its own queue rather than
+    // `pendingNudges`, because the state written above is exactly what
+    // `MessageBus.deliverability` reads — a resolved node is "not live" to the graph
+    // while its PTY is still very much there (the `requestStop` ordering lesson).
+    // Success only: a failed loop's method is not a recipe.
+    if succeeded, sessionMayStillBeLive, node.loopType == .goalBased {
+      pendingResolutionNudges.append((nodeID, MessageBus.distillSkillRequest))
+    }
     fireOutgoingEdges(from: nodeID, sourceSucceeded: succeeded)
   }
 
@@ -1373,6 +1793,13 @@ public actor GraphStore {
       else { continue }
       _ = await deliverToSession(target, text)
     }
+    while !pendingResolutionNudges.isEmpty {
+      let (nodeID, text) = pendingResolutionNudges.removeFirst()
+      guard let target = graph.nodes[id: nodeID],
+        target.backend.capabilities.supportsMidSessionInput
+      else { continue }
+      _ = await deliverToSession(target, text)
+    }
   }
 
   /// One loop telling another something, now — `graphcode node send`'s half of the
@@ -1384,7 +1811,9 @@ public actor GraphStore {
   /// every connection, which the app shows as its error banner and the CLI prints —
   /// the whole point of the message was that a peer be told something, and pretending
   /// it landed is the one wrong answer.
-  private func deliverAdHocMessage(to nodeID: UUID, text: String, from senderID: UUID?) async {
+  private func deliverAdHocMessage(
+    to nodeID: UUID, text: String, from senderID: UUID?, followUp: Bool = false
+  ) async {
     guard let target = graph.nodes[id: nodeID] else {
       announceError("message not delivered: no loop \(nodeID) in this graph")
       return
@@ -1398,6 +1827,17 @@ public actor GraphStore {
     // its source — the target should know who's talking without guessing.
     let sender = senderID.flatMap { graph.nodes[id: $0]?.title }
     let message = "[graphcode] \(sender.map { "\($0): " } ?? "")\(trimmed)"
+
+    // `--follow-up`: the sender chose deference over immediacy. A live target keeps its
+    // current turn uninterrupted and hears this when it next goes idle; the memory log
+    // gets it first, the way every deferred word does (`pendingNudges`), so a queue
+    // lost to a daemon restart delays the message to the next wake instead of
+    // dropping it.
+    if followUp, deliversLater(to: target) {
+      recordMemory(nodeID, "follow-up staged: \(message)")
+      pendingFollowUps.append((nodeID: nodeID, text: message))
+      return
+    }
 
     // Not live, or the transport failed — stage rather than drop. The refusal used to
     // be final, which was designed before loops had memory, and its sharpest edge was
@@ -1419,6 +1859,51 @@ public actor GraphStore {
           + "it will read it when it next wakes")
       return
     }
+  }
+
+  /// Whether a follow-up to this node should wait rather than type now. Mid-turn and
+  /// mid-check both qualify — deferring to a busy agent is the flag's entire meaning —
+  /// while an idle session gets ordinary immediate delivery and a dead one gets the
+  /// ordinary staged-to-memory path.
+  private func deliversLater(to target: LoopNode) -> Bool {
+    switch MessageBus.deliverability(to: target) {
+    case .targetBusyWithACheck: return true
+    case nil: return target.presence?.presence != .idle
+    default: return false
+    }
+  }
+
+  /// Delivers queued follow-ups whose targets have finished their turn. Called wherever
+  /// the store settles, and from the presence poll — the reading that says "idle" is
+  /// the reading this waits for. A target that resolved or died is simply dropped from
+  /// the queue: its memory log has carried the message since it was staged.
+  private func drainPendingFollowUps() async {
+    guard !pendingFollowUps.isEmpty else { return }
+    var remaining: [(nodeID: UUID, text: String)] = []
+    for pending in pendingFollowUps {
+      guard let node = graph.nodes[id: pending.nodeID], !node.isResolved else { continue }
+      switch MessageBus.deliverability(to: node) {
+      case .targetBusyWithACheck:
+        remaining.append(pending)
+        continue
+      case .some:
+        continue
+      case nil:
+        break
+      }
+      let presence: Presence?
+      if let onReadPresence {
+        presence = await onReadPresence(node, graph.project.path).presence
+      } else {
+        presence = node.presence?.presence
+      }
+      guard presence == .idle else {
+        remaining.append(pending)
+        continue
+      }
+      _ = await deliverToSession(node, pending.text)
+    }
+    pendingFollowUps = remaining
   }
 
   private func announceError(_ message: String) {
@@ -1456,11 +1941,13 @@ public actor GraphStore {
   /// about work that is running in a perfectly ordinary session the whole time.
   private func armGoalPoller(for node: LoopNode) {
     guard let goal = node.goal else { return }
-    // Two independent reasons to poll: a predicate to evaluate, or a stall bound to
-    // enforce. A goal stated only in prose still deserves "this should have finished by
-    // now" if its author gave it a bound.
-    let hasPredicate = goal.effectivePredicate != nil && onEvaluatePredicate != nil
-    guard hasPredicate || goal.stallAfterSeconds != nil else { return }
+    // Three independent reasons to poll: a predicate to evaluate, a stall bound to
+    // enforce, or a token budget to hold the line on. A goal stated only in prose still
+    // deserves "this should have finished by now" if its author gave it a bound.
+    let hasPredicate =
+      goal.effectivePredicate != nil && (onEvaluatePredicate != nil || onCheckPredicate != nil)
+    let hasBudget = goal.tokenBudget != nil && onReadUsage != nil
+    guard hasPredicate || goal.stallAfterSeconds != nil || hasBudget else { return }
     goalPollers[node.id]?.cancel()
     let nodeID = node.id
     let interval = max(1, goal.pollIntervalSeconds)
@@ -1475,6 +1962,11 @@ public actor GraphStore {
 
   private func cancelGoalPoller(_ nodeID: UUID) {
     goalPollers.removeValue(forKey: nodeID)?.cancel()
+    // The caches ride the poller's lifecycle: a resolved node needs neither, and an
+    // update that changed the predicate must not skip the new command on the old
+    // tree's fingerprint or suppress its first failure as "already relayed".
+    failedPredicateFingerprints.removeValue(forKey: nodeID)
+    lastPredicateFeedback.removeValue(forKey: nodeID)
   }
 
   /// One poll. Called on the timer in production and directly from tests, so the
@@ -1499,20 +1991,118 @@ public actor GraphStore {
       return
     }
 
+    // The budget is checked before the predicate for the same reason the stall bound
+    // is: a loop that has blown its bound gets no further evaluations spent on it.
+    if await enforceTokenBudget(nodeID, goal: goal) {
+      await drainAndBroadcast()
+      return
+    }
+
     // No machine predicate means polling has nothing to ask. Such a node resolves only
     // when its session exits — checked here, not just where the poller is armed, so an
     // evaluator can never resolve a goal whose author never gave it a testable one.
     guard let predicate = goal.effectivePredicate else { return }
-    guard let onEvaluatePredicate,
-      await onEvaluatePredicate(
+    let shellPredicate = ShellPredicate(
+      command: predicate, workingDirectory: node.worktreeBinding?.worktreePath)
+
+    var fingerprint: String?
+    if goal.skipsUnchangedWorkspace, let onCaptureScript {
+      fingerprint = await onCaptureScript(
         ShellPredicate(
-          command: predicate, workingDirectory: node.worktreeBinding?.worktreePath))
-    else { return }
+          command: Self.workspaceFingerprintCommand,
+          workingDirectory: node.worktreeBinding?.worktreePath ?? graph.project.path))
+      // Same tree the predicate already failed against — running it again buys the
+      // same answer at full price. A missing fingerprint (not a git repo, capture not
+      // wired) falls through to a real run: skipping is the optimisation, never the rule.
+      if let fingerprint, failedPredicateFingerprints[nodeID] == fingerprint { return }
+    }
+
+    let outcome: PredicateOutcome
+    if let onCheckPredicate {
+      guard let checked = await onCheckPredicate(shellPredicate) else { return }
+      outcome = checked
+    } else if let onEvaluatePredicate {
+      outcome = PredicateOutcome(passed: await onEvaluatePredicate(shellPredicate))
+    } else {
+      return
+    }
     // Re-check: an await means the graph could have moved under us (the node deleted,
     // or its session exited and resolved it) while the predicate was running.
     guard let current = graph.nodes[id: nodeID], !current.isResolved else { return }
-    resolveNode(nodeID, succeeded: true)
-    await drainAndBroadcast()
+    if outcome.passed {
+      resolveNode(nodeID, succeeded: true, sessionMayStillBeLive: true)
+      await drainAndBroadcast()
+      return
+    }
+    if let fingerprint { failedPredicateFingerprints[nodeID] = fingerprint }
+    await relayPredicateFailure(to: current, predicate: predicate, outcome: outcome)
+  }
+
+  /// `HEAD` plus the dirty file list, hashed — what `GoalSpec.skipsUnchangedWorkspace`
+  /// means by "unchanged". Exits non-zero outside a git repository so the capture
+  /// returns nil and the skip never applies where "the tree changed" has no meaning.
+  static let workspaceFingerprintCommand =
+    "git rev-parse --verify HEAD >/dev/null 2>&1 || exit 1; "
+    + "{ git rev-parse HEAD; git status --porcelain; } 2>/dev/null | cksum"
+
+  /// Ends the loop when its reported usage has crossed its budget; returns whether it
+  /// did. Reads usage fresh rather than trusting the last panel-open refresh — the
+  /// nodes that pay this subprocess are exactly the ones whose author asked for the
+  /// bound. A backend that reports nothing can never exhaust a budget: the sample
+  /// stays nil and nil is "not reported", not zero — and not infinity either.
+  private func enforceTokenBudget(_ nodeID: UUID, goal: GoalSpec) async -> Bool {
+    guard let budget = goal.tokenBudget, budget > 0 else { return false }
+    guard let node = graph.nodes[id: nodeID] else { return false }
+    if let onReadUsage, let sample = await onReadUsage(node, graph.project.path) {
+      graph.nodes[id: nodeID]?.usage = sample
+    }
+    guard let current = graph.nodes[id: nodeID], !current.isResolved,
+      let used = current.usage?.totalTokens, used >= budget
+    else { return false }
+
+    // The same stop-by-request contract `requestStop` holds: only the loop can cancel
+    // the cadence it set up, so it is told to stop — with the arithmetic, so the
+    // instruction reads as enforcement rather than a change of heart. No kill fallback
+    // here: an unreachable session is spending nothing *right now*, and its next wake
+    // reads the exhaustion from memory.
+    var asked = false
+    if MessageBus.deliverability(to: current) == nil {
+      asked = await deliverToSession(
+        current, MessageBus.budgetExhaustedRequest(used: used, budget: budget))
+    }
+    graph.nodes[id: nodeID]?.state = .stalled
+    cancelGoalPoller(nodeID)
+    recordMemory(
+      nodeID,
+      "budget exhausted: \(used) of \(budget) tokens spent"
+        + (asked ? " — its session was asked to stop" : ""))
+    fireOutgoingEdges(from: nodeID, sourceSucceeded: false)
+    return true
+  }
+
+  /// Tells a session that believes it is finished why the daemon disagrees — the
+  /// half of a machine stop condition that a bare exit status threw away. Deliberately
+  /// narrow: only an *idle* session is told (a busy one is still working and will be
+  /// judged again next poll), and only when the failure changed since it was last told,
+  /// so a predicate failing the same way every minute costs one message, not sixty.
+  private func relayPredicateFailure(
+    to node: LoopNode, predicate: String, outcome: PredicateOutcome
+  ) async {
+    let tail = outcome.outputTail.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !tail.isEmpty, lastPredicateFeedback[node.id] != tail else { return }
+    let presence: Presence?
+    if let onReadPresence {
+      presence = await onReadPresence(node, graph.project.path).presence
+    } else {
+      presence = node.presence?.presence
+    }
+    guard presence == .idle, MessageBus.deliverability(to: node) == nil else { return }
+    let message =
+      "[graphcode] Goal not met yet: `\(predicate)` still exits non-zero. "
+      + "Its output ends with: \(tail)"
+    guard await deliverToSession(node, message) else { return }
+    lastPredicateFeedback[node.id] = tail
+    recordMemory(node.id, "predicate feedback: \(tail)")
   }
 
   /// The same settle-then-tell sequence `handle` ends with, for the paths that mutate
@@ -1524,6 +2114,7 @@ public actor GraphStore {
     await drainPendingCycleReentries()
     await drainPendingHandoffDeliveries()
     await drainPendingNudges()
+    await drainPendingFollowUps()
     if errors.isEmpty {
       await broadcast()
     }
@@ -1558,6 +2149,61 @@ public actor GraphStore {
     fireOutgoingEdges(from: nodeID, sourceSucceeded: false)
   }
 
+  // MARK: - Daemon heartbeat (experimental)
+
+  /// Arms the experiment's timer for a heartbeat-driven time loop. The counterpart of
+  /// `armGoalPoller` in shape and in restraint: the timer only ever *asks* whether a
+  /// tick should fire — `deliverHeartbeat` re-checks the Settings toggle, the node, and
+  /// the session on every beat, so the timer itself holds no authority anything else
+  /// would need revoking.
+  private func armHeartbeat(for node: LoopNode) {
+    guard node.loopType == .timeBased, let interval = node.heartbeatIntervalSeconds,
+      interval > 0, onDeliverMessage != nil
+    else { return }
+    heartbeatTimers[node.id]?.cancel()
+    let nodeID = node.id
+    let beat = max(10, interval)
+    heartbeatTimers[nodeID] = Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(for: .seconds(beat))
+        guard !Task.isCancelled else { return }
+        await self?.deliverHeartbeat(nodeID)
+      }
+    }
+  }
+
+  private func cancelHeartbeat(_ nodeID: UUID) {
+    heartbeatTimers.removeValue(forKey: nodeID)?.cancel()
+  }
+
+  /// One tick. Called on the timer in production and directly from tests, the
+  /// `evaluateGoal` pattern.
+  ///
+  /// Missed ticks coalesce by construction: a busy session is *skipped*, never queued —
+  /// the next beat arrives on schedule, and an agent mid-pass hearing "start a pass"
+  /// was the double-driving this experiment must not reintroduce. Skips are silent; a
+  /// heartbeat that logged every beat would turn the memory log into a metronome.
+  public func deliverHeartbeat(_ nodeID: UUID) async {
+    guard onHeartbeatEnabled?() == true else { return }
+    guard let node = graph.nodes[id: nodeID], node.loopType == .timeBased, !node.isResolved,
+      let interval = node.heartbeatIntervalSeconds, interval > 0
+    else {
+      cancelHeartbeat(nodeID)
+      return
+    }
+    guard MessageBus.deliverability(to: node) == nil else { return }
+    let presence: Presence?
+    if let onReadPresence {
+      presence = await onReadPresence(node, graph.project.path).presence
+    } else {
+      presence = node.presence?.presence
+    }
+    guard presence != .busy else { return }
+    let task = node.triggerPrompt ?? ""
+    _ = await deliverToSession(
+      node, "[graphcode] Heartbeat — run one pass of your task now: \(task)")
+  }
+
   // MARK: - Time-based session liveness
 
   /// Makes sure every unattended node in this graph — time-based and goal-based — has
@@ -1581,6 +2227,7 @@ public actor GraphStore {
         guard !node.isResolved else { continue }
         armGoalPoller(for: node)
       }
+      if !node.isResolved { armHeartbeat(for: node) }
       ensureSession(node)
     }
   }

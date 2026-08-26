@@ -41,6 +41,23 @@ public struct GoalSpec: Codable, Equatable, Sendable {
   public var metricCommand: String?
   /// Which way `metricCommand`'s number should move. Defaults to `.maximize`.
   public var metricDirection: MetricDirection
+  /// How many tokens (input + output, as the backend reports them) this loop may spend
+  /// before the orchestrator ends it — docs/08-quality-and-token-budgets.md's budget,
+  /// finally enforced rather than reviewed after the fact. `nil` means unbounded, which
+  /// stays the default: a budget is a bound the author chose, never one invented.
+  ///
+  /// Enforcement shares `UsageSample`'s honesty rule: usage is *reported* by the
+  /// backend's hooks, never estimated, so a loop whose backend reports nothing can
+  /// never blow this bound. The budget is only as real as the reporting — the poller
+  /// acts on what was reported, and stays silent about what wasn't.
+  public var tokenBudget: Int?
+  /// When true, the poller skips re-running the predicate while the working tree is
+  /// unchanged (same `HEAD`, same dirty files) since the last failing run. Off by
+  /// default with reason: plenty of predicates watch things *outside* the tree — a CI
+  /// run, a deployed endpoint — and skipping those would wait on a change that never
+  /// comes. Opt in exactly when the predicate is a function of the tree (a test suite,
+  /// a lint) and expensive enough that docs/08's conservative-polling stance applies.
+  public var skipsUnchangedWorkspace: Bool
 
   public init(
     summary: String,
@@ -48,7 +65,9 @@ public struct GoalSpec: Codable, Equatable, Sendable {
     pollIntervalSeconds: Double = 60,
     stallAfterSeconds: Double? = nil,
     metricCommand: String? = nil,
-    metricDirection: MetricDirection = .maximize
+    metricDirection: MetricDirection = .maximize,
+    tokenBudget: Int? = nil,
+    skipsUnchangedWorkspace: Bool = false
   ) {
     self.summary = summary
     self.predicate = predicate
@@ -56,6 +75,8 @@ public struct GoalSpec: Codable, Equatable, Sendable {
     self.stallAfterSeconds = stallAfterSeconds
     self.metricCommand = metricCommand
     self.metricDirection = metricDirection
+    self.tokenBudget = tokenBudget
+    self.skipsUnchangedWorkspace = skipsUnchangedWorkspace
   }
 
   /// Non-empty predicate or nil — an all-whitespace field is a human leaving it blank,
@@ -95,12 +116,17 @@ public struct GoalSpec: Codable, Equatable, Sendable {
         "Measure your performance with this command (\(metricDirection.displayName)): "
           + "\(metric) — run it as you work; the orchestrator samples it each pass.")
     }
+    if let budget = tokenBudget, budget > 0 {
+      // Told to the session for the same reason the metric is: a loop that doesn't know
+      // its budget can't pace itself toward it — it can only be surprised by it.
+      parts.append("Token budget: \(budget) — the orchestrator ends this loop if it spends more.")
+    }
     return parts.joined(separator: " ")
   }
 
   private enum CodingKeys: String, CodingKey {
     case summary, predicate, pollIntervalSeconds, stallAfterSeconds
-    case metricCommand, metricDirection
+    case metricCommand, metricDirection, tokenBudget, skipsUnchangedWorkspace
   }
 
   /// Hand-written for the same reason `LoopEdge`'s is: a field added after a graph was
@@ -115,5 +141,8 @@ public struct GoalSpec: Codable, Equatable, Sendable {
     metricCommand = try container.decodeIfPresent(String.self, forKey: .metricCommand)
     metricDirection =
       try container.decodeIfPresent(MetricDirection.self, forKey: .metricDirection) ?? .maximize
+    tokenBudget = try container.decodeIfPresent(Int.self, forKey: .tokenBudget)
+    skipsUnchangedWorkspace =
+      try container.decodeIfPresent(Bool.self, forKey: .skipsUnchangedWorkspace) ?? false
   }
 }

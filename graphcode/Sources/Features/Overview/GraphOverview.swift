@@ -96,33 +96,26 @@ struct GraphOverview: Equatable {
 
   // MARK: - Layout
 
+  /// The lane's own furniture. Everything about where a *card* goes lives in `LaneLayout`
+  /// instead, which is what a folder's canvas lays itself out with too.
   enum Metrics {
-    static let card = LoopCardView.Metrics.size
+    static let card = LaneLayout.Metrics.card
     static let startNodeLane: CGFloat = 60
     /// Every band starts at the same x and is the same width, however few loops are in
     /// it. Ragged lanes read as a collage; aligned ones read as a table of projects.
-    static let bandX: CGFloat = startNodeLane + 20
-    /// Clear of the attention rail, which floats over the canvas's top-left corner.
-    static let laneTop: CGFloat = 62
+    static let bandX = LaneLayout.Metrics.bandX
+    static let laneTop = LaneLayout.Metrics.laneTop
     static let laneGap: CGFloat = 24
-    static let columnGap: CGFloat = 40
-    static let rowGap: CGFloat = 24
-    static let columns = 4
-
-    static let columnWidth = card.width + columnGap
-    static let rowHeight = card.height + rowGap
-    static let bandWidth =
-      CanvasBand.padding * 2 + CanvasBand.originLane + CGFloat(columns) * card.width
-      + CGFloat(columns - 1) * columnGap
+    static let rowGap = LaneLayout.Metrics.rowGap
+    static let bandWidth = LaneLayout.Metrics.bandWidth
     /// The first card's centre, inside the band and below the caption.
-    static let firstLoopX =
-      bandX + CanvasBand.padding + CanvasBand.originLane + card.width / 2
-    static let firstRowInset = CanvasBand.captionHeight + CanvasBand.padding + card.height / 2
+    static let firstLoopX = LaneLayout.Metrics.firstLoopX
+    static let firstRowInset = LaneLayout.Metrics.firstRowInset
   }
 
   init() {}
 
-  init(graphs: [LoopGraph]) {
+  init(graphs: [LoopGraph], declaredEntries: [String: Set<UUID>] = [:]) {
     // The global graph's lane goes first — it's the one that dispatches into the others,
     // so reading top-to-bottom follows the direction work actually travels. Stable
     // partition rather than a sort, so the remaining folders keep sidebar order. A global
@@ -134,7 +127,8 @@ struct GraphOverview: Equatable {
 
     var laneTop = Metrics.laneTop
     for graph in lanes {
-      let lane = Self.layOutLane(graph, top: laneTop)
+      let lane = Self.layOutLane(
+        graph, top: laneTop, declaredEntries: declaredEntries[graph.project.path] ?? [])
       folders.append(lane.folder)
       loops.append(contentsOf: lane.loops)
       links.append(contentsOf: lane.links)
@@ -159,96 +153,28 @@ struct GraphOverview: Equatable {
     let links: [Link]
   }
 
-  /// How many hand-offs from a beginning each loop sits — its column.
-  ///
-  /// Capped by the walk itself rather than by a visited set: a cycle would otherwise
-  /// raise its own depth forever, and the column is clamped to the lane's width anyway.
-  private static func depths(in graph: LoopGraph, from starts: [UUID]) -> [UUID: Int] {
-    var depths = Dictionary(uniqueKeysWithValues: starts.map { ($0, 0) })
-    var frontier = starts
-    while let current = frontier.popLast() {
-      let next = (depths[current] ?? 0) + 1
-      guard next < Metrics.columns else { continue }
-      for edge in graph.edges where edge.from == current {
-        guard (depths[edge.to] ?? -1) < next else { continue }
-        depths[edge.to] = next
-        frontier.append(edge.to)
-      }
-    }
-    return depths
-  }
-
-  private static func layOutLane(_ graph: LoopGraph, top: CGFloat) -> Lane {
+  private static func layOutLane(
+    _ graph: LoopGraph, top: CGFloat, declaredEntries: Set<UUID> = []
+  ) -> Lane {
     let path = graph.project.path
-    let roles = CardEntryRole.roles(in: graph)
+    let roles = CardEntryRole.roles(in: graph, declaredEntries: declaredEntries)
     var loops: [Loop] = []
     var links: [Link] = []
-    var positions: [UUID: CGPoint] = [:]
 
-    // Entry points first, then everything else, each group keeping its own order.
-    //
-    // Position is what makes the rail mean anything: a rail down the lane's leading edge
-    // with a 12pt stub to each port only reaches cards in the first column, and an entry
-    // sitting three columns right would need a connector long enough to read as an edge —
-    // which is exactly what a rail must not imply. Laying the roots out first also makes
-    // the lane read left-to-right in the direction work actually travels.
-    // Laid out by *depth from a beginning* rather than in graph order: everything
-    // nothing hands off to goes in column 0, one per row, and each chain flows right
-    // along its own row.
-    //
-    // Filling rows left-to-right put all four rootless cards of a real graph side by
-    // side, which hid the origin's fan behind them — cards draw over the lines, so the
-    // connectors showed only in the gaps and read as one card chained to the next. A
-    // column of beginnings is also how the graph reads: down the left is where work
-    // starts, across is where it goes.
-    let hangsOffOrigin: (LoopNode) -> Bool = {
-      roles[$0.id] == .entry || roles[$0.id] == .unwired
-    }
-    let starts = Array(graph.nodes).filter(hangsOffOrigin)
-    let depths = Self.depths(in: graph, from: starts.map(\.id))
-
-    var slots: [UUID: (column: Int, row: Int)] = [:]
-    var takenRows: Set<Int> = []
-    var occupied: Set<String> = []
-
-    func place(_ node: LoopNode, preferring row: Int) {
-      guard slots[node.id] == nil else { return }
-      let column = min(depths[node.id] ?? 0, Metrics.columns - 1)
-      var candidate = row
-      while occupied.contains("\(column)-\(candidate)") { candidate += 1 }
-      slots[node.id] = (column, candidate)
-      occupied.insert("\(column)-\(candidate)")
-      takenRows.insert(candidate)
-      // Walk this chain onward on the same row, so a hand-off reads as one line of work.
-      for edge in graph.edges where edge.from == node.id {
-        guard let next = graph.nodes[id: edge.to] else { continue }
-        place(next, preferring: candidate)
-      }
-    }
-
-    var nextRow = 0
-    for node in starts {
-      while takenRows.contains(nextRow) { nextRow += 1 }
-      place(node, preferring: nextRow)
-    }
-    // Whatever a walk from a beginning never reached: a closed cycle, which has none.
-    for node in graph.nodes where slots[node.id] == nil {
-      while takenRows.contains(nextRow) { nextRow += 1 }
-      place(node, preferring: nextRow)
-    }
+    // The shared layout, offset to this lane's own top — the same placement a folder's
+    // own canvas gets, so the two views can't drift on what a graph looks like.
+    let layout = LaneLayout(
+      graph: graph, roles: roles,
+      origin: CGPoint(x: Metrics.firstLoopX, y: top + Metrics.firstRowInset))
+    let positions = layout.positions
 
     for node in graph.nodes {
-      guard let slot = slots[node.id] else { continue }
-      let position = CGPoint(
-        x: Metrics.firstLoopX + CGFloat(slot.column) * Metrics.columnWidth,
-        y: top + Metrics.firstRowInset + CGFloat(slot.row) * Metrics.rowHeight)
-      positions[node.id] = position
+      guard let position = positions[node.id] else { continue }
       loops.append(
         Loop(
           node: node, projectPath: path, position: position,
           entryRole: roles[node.id] ?? .interior))
     }
-    let rowCount = max((slots.values.map(\.row).max() ?? 0) + 1, 1)
 
     for edge in graph.edges {
       guard let from = positions[edge.from], let to = positions[edge.to] else { continue }
@@ -261,7 +187,7 @@ struct GraphOverview: Equatable {
     // An empty folder still gets a band one row tall — that is how the overview says
     // "this folder has no loops yet", and collapsing it to its caption would leave a
     // sliver jammed against the lane below.
-    let rows = graph.nodes.isEmpty ? 1 : rowCount
+    let rows = graph.nodes.isEmpty ? 1 : layout.rowCount
     let height =
       CanvasBand.captionHeight + CanvasBand.padding * 2 + CGFloat(rows) * Metrics.card.height
       + CGFloat(rows - 1) * Metrics.rowGap
@@ -299,17 +225,5 @@ struct GraphOverview: Equatable {
     // The kind-independent reading of the word: a lane is speaking about a folder, and a
     // folder has no loop type for `idle` to mean "scheduled" against.
     return "\(loops) · \(matching) \(state.displayWord(for: .goalBased).lowercased())"
-  }
-}
-
-extension Array {
-  /// Fixed-width rows for the lane layout. `chunked(into:)` isn't in the standard
-  /// library and the alternative — index arithmetic inline in the layout — is where
-  /// off-by-one row bugs live.
-  fileprivate func chunked(into size: Int) -> [[Element]] {
-    guard size > 0 else { return isEmpty ? [] : [self] }
-    return stride(from: 0, to: count, by: size).map {
-      Array(self[$0..<Swift.min($0 + size, count)])
-    }
   }
 }

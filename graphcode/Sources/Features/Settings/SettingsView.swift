@@ -19,8 +19,11 @@ struct SettingsView: View {
   /// nothing is worse than no tab.
   var body: some View {
     sessions
-      .frame(width: 460)
+      // Resizable both ways: 560 is the width the window opens at, and the floor
+      // sits at 480 — the grouped form's captions wrap, so narrow just means taller.
+      .frame(minWidth: 480, idealWidth: 560, maxWidth: .infinity)
       .padding(.vertical, 4)
+      .background(SettingsWindowResizability())
   }
 
   private var sessions: some View {
@@ -72,6 +75,16 @@ struct SettingsView: View {
           .font(.caption2)
           .foregroundStyle(.secondary)
           .fixedSize(horizontal: false, vertical: true)
+
+        Picker("OpenCode", selection: $model.settings.openCodePermissions) {
+          ForEach(GraphcodeSettings.OpenCodePermissions.allCases, id: \.self) { mode in
+            Text(mode.displayName).tag(mode)
+          }
+        }
+        Text(model.settings.openCodePermissions.explanation)
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
       } header: {
         Text("Permissions")
       } footer: {
@@ -105,6 +118,64 @@ struct SettingsView: View {
 
       Section {
         Toggle("Show the activity strip", isOn: $model.settings.showsActivityStrip)
+        Toggle(
+          "Summarise what loops are doing (experimental)",
+          isOn: $model.settings.summarisesLoops)
+        Text(
+          "What each loop is doing, at the top of its rail, read from the session's own "
+            + "transcript. Costs nothing."
+        )
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+
+        Toggle(
+          "Let a model write the summaries (experimental)",
+          isOn: $model.settings.summaryUsesModel
+        )
+        .disabled(!model.settings.summarisesLoops)
+        Text("One short call to your backend's CLI per change. The part that costs money.")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+
+        Toggle(
+          "Daemon heartbeat (experimental)",
+          isOn: $model.settings.daemonHeartbeatEnabled)
+        Text(
+          "The daemon drives time-based loops on its own timer. On, new timed loops "
+            + "default to the heartbeat (pick \"Itself, with /loop\" in the form, or "
+            + "omit --heartbeat in the CLI, for the classic model). Off, existing "
+            + "heartbeat loops fall silent immediately; nothing is ever converted."
+        )
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+
+        Toggle(
+          "Keep this Mac awake while loops run (experimental)",
+          isOn: $model.settings.keepsMacAwakeWhileLoopsRun)
+        Text(
+          "The daemon holds the same idle-sleep assertion as `caffeinate -i` while any "
+            + "loop is running, and drops it the moment the last one stops. Unattended "
+            + "loops stop stalling on a machine that went to sleep. It does not keep the "
+            + "display on, and it does not override closing the lid or choosing Sleep."
+        )
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+
+        Toggle(
+          "Export and import loops",
+          isOn: $model.settings.sharesLoops)
+        Text(
+          "Right-click a loop — on the canvas or in the sidebar — to package it, its "
+            + "child loops and their session memory into a zip, and to import such a "
+            + "bundle back in. Also enables the CLI's export/import verbs."
+        )
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
       } footer: {
         Text(
           "A strip along the window's bottom listing passes, hand-offs and state changes "
@@ -147,6 +218,40 @@ struct SettingsView: View {
     .formStyle(.grouped)
   }
 
+}
+
+/// Makes the Settings window actually resizable, because the SwiftUI spelling doesn't.
+///
+/// `.windowResizability(.contentMinSize)` on the `Settings` scene is silently ignored
+/// here: the window materialises with styleMask 32771 — titled + closable +
+/// fullSizeContentView, no `.resizable` bit — measured on macOS 26.5 with the modifier
+/// in place. So the bit is set the AppKit way, from a zero-sized view that rides in the
+/// content's background purely to get its hands on the window.
+///
+/// Setting it once is not enough: SwiftUI re-asserts the scene's styleMask after the
+/// window appears and strips the bit again (also measured). Hence the observation —
+/// whenever the bit goes missing it is re-inserted, one hop later so the mask isn't
+/// mutated from inside its own change notification. Content min/max sizes are left
+/// alone: SwiftUI derives those from the `.frame` above and they are already right —
+/// the mask is the only thing it gets wrong.
+private struct SettingsWindowResizability: NSViewRepresentable {
+  final class HookView: NSView {
+    private var observation: NSKeyValueObservation?
+
+    override func viewDidMoveToWindow() {
+      super.viewDidMoveToWindow()
+      observation = nil
+      guard let window else { return }
+      window.styleMask.insert(.resizable)
+      observation = window.observe(\.styleMask) { window, _ in
+        guard !window.styleMask.contains(.resizable) else { return }
+        DispatchQueue.main.async { window.styleMask.insert(.resizable) }
+      }
+    }
+  }
+
+  func makeNSView(context: Context) -> NSView { HookView() }
+  func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 #Preview {

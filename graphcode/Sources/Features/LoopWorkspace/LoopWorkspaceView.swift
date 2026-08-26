@@ -17,13 +17,26 @@ struct LoopWorkspaceView: View {
       workspace
       // Never drawn empty, whatever the toggle says — see `LoopWorkspaceRail.hasContent`.
       if store.isRailVisible && railHasContent {
-        LoopWorkspaceRail(node: store.node, graph: store.graph, now: now) { targetID in
+        LoopWorkspaceRail(
+          node: store.node, graph: store.graph, now: now,
+          width: railWidth,
+          isSummaryFolded: store.isSummaryFolded,
+          seenBeatID: store.seenBeatID,
+          onSummaryFoldToggled: { store.send(.summaryFoldToggled) },
+          onSummaryAnswerTapped: { store.send(.summaryAnswerTapped) }
+        ) { targetID in
           store.send(.railTargetTapped(targetID))
         }
+        .overlay(alignment: .leading) { railResizeHandle }
+      } else if LoopSummaryPresentation.hasContent(node: store.node) {
+        // Hidden is not gone: 26 points keeps the loop's state dot and the word, and the
+        // ask still gets through. See `SummaryGutter`.
+        SummaryGutter(node: store.node, now: now) { store.send(.railToggled) }
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .onReceive(CanvasClock.tick) { now = $0 }
+    .onDisappear { store.send(.workspaceLeft) }
     // The folder header goes in the toolbar, not in the `VStack` above, and the pane
     // does *not* claim the titlebar inset. Both were tried: `.ignoresSafeArea(.top)`
     // does slide content up into the band, but whatever lands there is drawn under the
@@ -32,6 +45,53 @@ struct LoopWorkspaceView: View {
     // into that band, and it puts the folder name level with the window controls while
     // the tab strip keeps the row below to itself.
     .toolbar { folderToolbar }
+  }
+
+  /// The rail's width mid-drag, before it is committed to the reducer on release.
+  @State private var dragWidth: CGFloat?
+
+  /// Whether the resize cursor is currently pushed — see `railResizeHandle`.
+  @State private var isOverRailEdge = false
+
+  private var railWidth: CGFloat { dragWidth ?? store.railWidth }
+
+  /// The rail's leading edge, as a grab handle.
+  ///
+  /// Six points of transparent hit area over the hairline the rail already draws, rather
+  /// than a visible splitter: the seam is the affordance, and a second line beside the
+  /// first would read as a border that had been drawn twice. Dragging left widens, which
+  /// is what the sign flip is for — a right-hand panel grows as the pointer moves away
+  /// from its edge.
+  private var railResizeHandle: some View {
+    Rectangle()
+      .fill(.clear)
+      .frame(width: 6)
+      .contentShape(Rectangle())
+      // `push`/`pop` is a stack, and the pop only arrives if the pointer leaves the way it
+      // came. Hiding the rail with ⌥G mid-hover, or switching to the canvas, takes the
+      // handle out from under the cursor with no exit — and the resize arrows then follow
+      // the pointer around the whole app until something else pushes over them.
+      .onHover { inside in
+        guard inside != isOverRailEdge else { return }
+        isOverRailEdge = inside
+        if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+      }
+      .onDisappear {
+        guard isOverRailEdge else { return }
+        isOverRailEdge = false
+        NSCursor.pop()
+      }
+      .gesture(
+        DragGesture(minimumDistance: 1)
+          .onChanged { value in
+            dragWidth = LoopWorkspaceRail.clamped(store.railWidth - value.translation.width)
+          }
+          .onEnded { value in
+            let settled = LoopWorkspaceRail.clamped(store.railWidth - value.translation.width)
+            dragWidth = nil
+            store.send(.railWidthChanged(settled))
+          }
+      )
   }
 
   /// Whether this loop gives the rail anything to say — see `LoopWorkspaceRail`.
@@ -169,7 +229,7 @@ struct LoopWorkspaceView: View {
     switch store.node.loopType {
     case .timeBased: return "Loop"
     case .goalBased: return "Goal"
-    case .turnBased, .composite: return "Claude Code"
+    case .sketch, .turnBased, .composite: return "Claude Code"
     }
   }
 
@@ -251,7 +311,15 @@ struct LoopWorkspaceView: View {
       // are told so and stop drawing entirely — without that they render frames nobody
       // can see, at the same thread priority as the pane you're actually looking at.
       isVisible: tab.id == store.layout.selectedTabID,
-      onFocusRequested: { store.send(.paneFocused(tabID: tab.id, surfaceID: ref.id)) }
+      onFocusRequested: { store.send(.paneFocused(tabID: tab.id, surfaceID: ref.id)) },
+      // Only the agent pane lingers after its process exits (it holds the loop's
+      // resolution, so `.primarySurfaceExited` leaves it mounted) — which left the
+      // "Press any key to close" screen with no key that did anything. The keypress is
+      // the human agreeing the loop is over: the workspace closes and the node goes
+      // with it. A plain shell's exit already closes its pane, so it has no screen to
+      // acknowledge.
+      onExitAcknowledged: ref.launchesClaudeCode
+        ? { store.send(.primaryExitAcknowledged) } : nil
     ) { succeeded in
       if ref.launchesClaudeCode {
         store.send(.primarySurfaceExited(succeeded: succeeded))

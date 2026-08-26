@@ -207,3 +207,31 @@ struct DaemonSocketClientTests {
     #expect(!DaemonSocketClient.isTransient(FramedMessageIO.IOError.connectionClosed))
   }
 }
+
+/// The contract the daemon's broadcast loop rests on: a write to a socket whose peer
+/// has gone must come back as a *thrown error*, so `GraphStore.send` can drop the dead
+/// connection. It is only an error if the process survives long enough to see it —
+/// `graphcoded` ignores `SIGPIPE` and sets `SO_NOSIGPIPE` on every accepted socket for
+/// exactly that reason, after the daemon was found dying with exit status -13 under a
+/// client that stopped reading and then vanished. `scripts/daemon-sigpipe-probe.py`
+/// reproduces that end to end against a built binary; this pins the layer below it.
+@Suite
+struct ClosedPeerWriteTests {
+  @Test
+  func writingToAClosedPeerThrowsRatherThanReportingSuccess() throws {
+    var pair: [Int32] = [0, 0]
+    #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
+    var enabled: Int32 = 1
+    setsockopt(
+      pair[0], SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
+    close(pair[1])
+
+    // Large enough that the write cannot vanish into a socket buffer that no longer
+    // has a reader behind it.
+    let payload = Data(repeating: 0x41, count: 256 * 1024)
+    #expect(throws: FramedMessageIO.IOError.self) {
+      try FramedMessageIO.writeFrame(payload, to: pair[0])
+    }
+    close(pair[0])
+  }
+}

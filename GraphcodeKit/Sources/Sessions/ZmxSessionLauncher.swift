@@ -626,6 +626,11 @@ public enum ZmxSessionLauncher {
       return
     }
     SessionIDStore.remove(forNodeID: node.id)
+    // The next session is a new one and has had no opening pass of its own
+    // (`kickOffFirstPass`).
+    if let projectPath {
+      NodeMemory.clearFirstPass(projectPath: projectPath, nodeID: node.id)
+    }
     guard ZmxLocator.isInstalled else { return }
     guard
       let session = try? PTYProcessSession(
@@ -710,8 +715,9 @@ public enum ZmxSessionLauncher {
       wakePath = wakeFile?.path
     }
     let promptWithMemory =
-      wakePath.map { "Read your loop memory at \($0) before starting. Then: \(singleLine)" }
-      ?? singleLine
+      wakePath.map {
+        SessionPrompt.composed(preamble: NodeMemory.wakePointer(toDigestAt: $0), prompt: singleLine)
+      } ?? singleLine
     // Both the executable and the shape of its arguments come from the node's backend —
     // `claude` takes its prompt positionally and its briefing via `--append-system-prompt`,
     // `copilot` takes both together as `--interactive <prompt>`. Model tier is applied
@@ -760,7 +766,8 @@ public enum ZmxSessionLauncher {
       ]
       + Self.loginShellInvocation(
         of: executable, arguments: arguments,
-        environment: Self.environment(forBackend: node.backend, briefingPath: briefingPath),
+        environment: Self.environment(
+          forBackend: node.backend, briefingPath: briefingPath, hooksFile: hooksFile),
         scriptSuffix: remoteHooksSuffix)
 
     // `zmx` types this command into the session's shell, and a tty in canonical mode
@@ -792,8 +799,9 @@ public enum ZmxSessionLauncher {
       // The file carries the *unflattened* prompt — a file has no newline hazard, so a
       // pasted multi-line goal survives verbatim where the typed line had to collapse it.
       let filePrompt =
-        wakePath.map { "Read your loop memory at \($0) before starting. Then: \(prompt)" }
-        ?? prompt
+        wakePath.map {
+          SessionPrompt.composed(preamble: NodeMemory.wakePointer(toDigestAt: $0), prompt: prompt)
+        } ?? prompt
       guard let projectPath,
         let promptFile = NodeMemory.writePrompt(
           filePrompt, projectPath: projectPath, nodeID: node.id)
@@ -881,12 +889,15 @@ public enum ZmxSessionLauncher {
         hooksFile: hooksFile,
         sessionName: sessionName,
         zmxPath: reportingPath)
-      + ["--resume", sessionID]
+      + node.backend.resumeArguments(sessionID: sessionID)
     return [
       "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
     ]
       + Self.loginShellInvocation(
-        of: executable, arguments: resumeArgs, scriptSuffix: remoteHooksSuffix)
+        of: executable, arguments: resumeArgs,
+        environment: Self.environment(
+          forBackend: node.backend, briefingPath: nil, hooksFile: hooksFile),
+        scriptSuffix: remoteHooksSuffix)
   }
 
   /// Stands in for a remote session ID that this machine cannot know: the ID was written
@@ -921,14 +932,14 @@ public enum ZmxSessionLauncher {
     return paths
   }
 
-  /// Environment a session needs beyond what its shell provides. Nothing does, currently —
-  /// Copilot's briefing rides on its argv (see `CLISessionBackendKind.launchArguments`)
-  /// after the documented environment route turned out not to work. Kept because the
-  /// plumbing is the awkward part and the next backend will want it.
-  static func environment(forBackend backend: CLISessionBackendKind, briefingPath: String?)
-    -> [String: String]
-  {
-    [:]
+  /// Environment a session needs beyond what its shell provides. Copilot's briefing rides
+  /// on its argv (see `CLISessionBackendKind.launchArguments`) after the documented
+  /// environment route turned out not to work; OpenCode's presence plugin is the one
+  /// thing that genuinely has to travel this way (`presenceEnvironment`).
+  static func environment(
+    forBackend backend: CLISessionBackendKind, briefingPath: String?, hooksFile: URL? = nil
+  ) -> [String: String] {
+    backend.presenceEnvironment(hooksFile: hooksFile)
   }
 
   /// Whether the assembled command survives being typed into a terminal. Budgeted well
@@ -1030,12 +1041,19 @@ public enum ZmxSessionLauncher {
     // running. This used to run per ensure, which was once at load and once per node
     // created; the liveness sweep dials every minute, and a `python3` per loop per
     // minute to rewrite files nothing will re-read is pure cost.
+    // Copilot has no hooks to bank its own resume ID, so the ensure banks it from the
+    // session-state directory while the session is alive — the `&& { … } || { … }` is
+    // safe only because the bank fragment always exits 0 (`remoteIDBankFragment`); a
+    // fragment that could fail would send an alive tick into the create branch.
+    let bank =
+      node.backend == .copilotCLI
+      ? " && { " + CopilotSessionLog.remoteIDBankFragment(forNodeID: node.id) + "; }" : ""
     let script =
       "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { "
       + deliveryFragment(
         delivery, ifSessionMissing: check,
         bridgeStateGeneration: bridgeState.map(\.generation))
-      + "\(check) >/dev/null 2>&1 || { " + trustSeed + hooksWrite
+      + "\(check) >/dev/null 2>&1\(bank) || { " + trustSeed + hooksWrite
       + "\(create); }; }"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
   }
@@ -1111,14 +1129,19 @@ public enum ZmxSessionLauncher {
     forNode node: LoopNode, freshRun: String, at location: RemoteProjectLocation,
     settings: GraphcodeSettings
   ) -> String {
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    let log = { (event: String) in
+      DialLog.fragment(session: name, dial: "ensure", event: event) + "; "
+    }
     guard
       let resumeArgv = resumeArguments(
         forNode: node, sessionID: remoteResumeIDPlaceholder,
         projectPath: location.projectPath, settings: settings)
-    else { return freshRun }
+    else { return log("fresh") + freshRun }
     let resume = remoteQuotedCommand(["zmx"] + resumeArgv)
     let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: node.id)
-    return resumeOrFreshScript(idFile: idFile, resume: resume, fresh: freshRun)
+    return resumeOrFreshScript(
+      idFile: idFile, resume: log("resume") + resume, fresh: log("fresh") + freshRun)
   }
 
   /// The consume-then-attempt shape both resumers share: read the banked ID, remove it
@@ -1215,11 +1238,18 @@ public enum ZmxSessionLauncher {
   /// cannot become Python syntax; the whole command is neutered with `|| true` because
   /// a failed seed must never block the launch it precedes.
   static func copilotTrustSeedScript(forRemotePath remotePath: String) -> String {
+    // Real config files open with `// …` comment lines Copilot writes above the JSON, so
+    // a plain `json.load` fails — and, `|| true`d, failed silently for as long as this
+    // script existed. The comment header is stripped for parsing and restored on write.
     let program =
       "import json,os,sys; p=os.path.expanduser('~/.copilot/config.json'); "
-      + "c=json.load(open(p)) if os.path.exists(p) else {}; "
+      + "r=open(p).read() if os.path.exists(p) else ''; "
+      + "h=[l for l in r.splitlines() if l.strip().startswith('//')]; "
+      + "b='\\n'.join(l for l in r.splitlines() if not l.strip().startswith('//')); "
+      + "c=json.loads(b) if b.strip() else {}; "
       + "f=c.get('trustedFolders') or []; t=sys.argv[1]; "
-      + "(t in f) or (f.append(t), c.update(trustedFolders=f), json.dump(c, open(p,'w')))"
+      + "(t in f) or (f.append(t), c.update(trustedFolders=f), "
+      + "open(p,'w').write('\\n'.join(h+[json.dumps(c)])+'\\n'))"
     return quotedCommand(["python3", "-c", program, remotePath]) + " 2>/dev/null || true"
   }
 
@@ -1513,34 +1543,255 @@ public enum ZmxSessionLauncher {
         let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
         return CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent
       }()
+    guard let runArgs = arguments(forNode: node, projectPath: projectPath) else { return }
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     if let sessionID,
       let resumeArgs = resumeArguments(
         forNode: node, sessionID: sessionID, projectPath: projectPath)
     {
       await atomicCheckOrRun(
         checkArguments: checkArgs, runArguments: resumeArgs,
-        zmxPath: zmxPath, workingDirectory: wd)
-      return
+        zmxPath: zmxPath, workingDirectory: wd,
+        logFragment: DialLog.fragment(session: name, dial: "ensure", event: "resume"))
+      // `zmx run -d` reports that the *session* exists, not that what it launched
+      // survived: `claude --resume` against a transcript its retention expired dies
+      // within a second, taking the session with it, and the ensure returns 0 having
+      // achieved nothing. Nothing else notices — the card keeps saying `running` while
+      // the loop is gone, and the next ensure retries the same dead ID, because
+      // (unlike the remote path) the local one never consumed it. So look again, and
+      // only if the session really failed to survive is the ID treated as dead: it is
+      // dropped and the fresh launch runs. A resume that took is left alone, and its
+      // `SessionStart` hook has already rebanked the same ID.
+      guard
+        await sessionDiedImmediately(
+          checkArguments: checkArgs, zmxPath: zmxPath, workingDirectory: wd)
+      else { return }
+      DialLog.record(session: name, dial: "ensure", event: "resume-dead")
+      SessionIDStore.remove(forNodeID: node.id)
     }
-
-    guard let runArgs = arguments(forNode: node, projectPath: projectPath) else { return }
+    // The local half of the trust seed the remote ensure has always done: without it a
+    // fresh unattended Copilot parks its opening prompt behind the folder-trust dialog
+    // and swallows anything typed at it — the first pass included (`CopilotTrust`).
+    if node.backend == .copilotCLI, let directory = wd {
+      CopilotTrust.ensureTrusted(directory: directory)
+    }
+    // Noted *before* the launch: the first pass below waits for a Copilot session
+    // directory that was not already there, which is how it tells a session it just
+    // started from one this ensure found already running.
+    let copilotSessionBefore =
+      firstPassMessage(for: node) != nil
+      ? CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent : nil
     await atomicCheckOrRun(
       checkArguments: checkArgs, runArguments: runArgs,
-      zmxPath: zmxPath, workingDirectory: wd)
+      zmxPath: zmxPath, workingDirectory: wd,
+      logFragment: DialLog.fragment(session: name, dial: "ensure", event: "fresh"))
+    await kickOffFirstPass(
+      of: node, sessionNamed: name, projectPath: projectPath, after: copilotSessionBefore)
   }
 
+  /// The message that gives a Copilot time-based loop the pass its schedule will not give
+  /// it for another whole interval, or `nil` for a node that needs no such thing.
+  ///
+  /// `/loop` is an alias of Copilot's `/every`, and `/every` submits its prompt *after*
+  /// the interval has elapsed — documented behaviour, not a bug in it. So an hourly loop
+  /// arms correctly and then does nothing for an hour, which from the outside is
+  /// indistinguishable from a loop that never started. The directive stays the thing the
+  /// session opens with (it must lead its message to be a command at all, see
+  /// `SessionPrompt`); this types the same task in afterwards as ordinary input.
+  ///
+  /// Nothing to do for a heartbeat node — the daemon holds that timer and drives the
+  /// first beat itself — or for any backend whose recurrence is not a scheduler.
+  static func firstPassMessage(for node: LoopNode) -> String? {
+    guard node.backend == .copilotCLI, node.loopType == .timeBased,
+      node.heartbeatIntervalSeconds == nil, let prompt = node.sessionPrompt
+    else { return nil }
+    return SessionPrompt.firstPass(of: prompt)
+  }
+
+  /// Types that first pass in, once the session it belongs to is there to receive it.
+  ///
+  /// Two things had to change after the first attempt shipped and the pass still did not
+  /// arrive. It waited for a *new* Copilot session directory and did nothing at all if
+  /// none appeared — but which process launches a node's session is a race (the daemon if
+  /// it got there first, the app's terminal view if the node was opened before it did,
+  /// `GhosttyTerminalView.agentCommand`), and a session the ensure found already running
+  /// produces no new directory. And a probe that finds nothing must still send: the loop
+  /// is armed either way, so the cost of not sending is an idle interval and the cost of
+  /// sending is one pass — which is the pass being asked for.
+  ///
+  /// What stops it repeating is the marker (`NodeMemory.firstPassMarker`), which records
+  /// the session that was served rather than the fact of serving: a new Copilot session
+  /// has a new directory and is never mistaken for one already given its pass, and a
+  /// daemon restart over the same session sends nothing.
+  ///
+  /// Every branch is written to the dial log, because the failure this replaces was
+  /// invisible from outside — the loop simply sat there, and nothing said whether the
+  /// message had been skipped, timed out, or refused.
+  private static func kickOffFirstPass(
+    of node: LoopNode, sessionNamed name: String, projectPath: String?, after previous: String?
+  ) async {
+    guard let message = firstPassMessage(for: node), let projectPath else { return }
+    Task {
+      guard await FirstPassTickets.shared.claim(node.id) else { return }
+      defer { Task { await FirstPassTickets.shared.release(node.id) } }
+      let deadline = Date().addingTimeInterval(firstPassWaitSeconds)
+      var observed: String?
+      while Date() < deadline, observed == nil {
+        let current = CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent
+        if let current, current != previous {
+          observed = current
+        } else {
+          try? await Task.sleep(for: .seconds(firstPassPollSeconds))
+        }
+      }
+      // The session this pass would belong to: the one that just appeared, the one that
+      // was already running when the ensure found it, or — when Copilot's own state
+      // directory tells us nothing — the node itself, served once.
+      let session = observed ?? previous ?? "unknown"
+      guard NodeMemory.firstPassMarker(projectPath: projectPath, nodeID: node.id) != session
+      else {
+        DialLog.record(session: name, dial: "first-pass", event: "already-served")
+        return
+      }
+      guard await sessionExists(node) else {
+        DialLog.record(session: name, dial: "first-pass", event: "no-session")
+        return
+      }
+      // The directory appears as Copilot opens its session, well before its composer can
+      // take input — a fixed settle here made delivery flaky: type during boot and the
+      // keystrokes are eaten, landing the pass a retry cycle late or not at all. The
+      // signal that boot is over is the session's own scrollback echoing the opening
+      // prompt: Copilot renders it only once the UI that also owns the composer is up.
+      // A session that never shows it still gets the send — the timeout is a pause, not
+      // a veto — and says so in the dial log.
+      let ready = await waitUntilScrollbackShows(
+        message, sessionNamed: name, deadline: Date().addingTimeInterval(firstPassReadySeconds))
+      if !ready { DialLog.record(session: name, dial: "first-pass", event: "not-ready") }
+      // Sent, then *verified*: a `zmx send` reports only that the keystrokes reached
+      // the PTY, and a Copilot mid-boot — or parked at a dialog the trust seed could
+      // not prevent — swallows them whole. The `user.message` event Copilot writes on
+      // submission is the proof the pass became a turn; absent, the send is repeated.
+      var attempt = 0
+      var confirmed = false
+      while attempt < firstPassAttempts, !confirmed {
+        attempt += 1
+        guard await send(message, to: node, projectPath: projectPath) else { break }
+        let verifyDeadline = Date().addingTimeInterval(firstPassVerifySeconds)
+        while Date() < verifyDeadline, !confirmed {
+          confirmed = CopilotSessionLog.hasUserMessage(containing: message, inSessionNamed: name)
+          if !confirmed { try? await Task.sleep(for: .seconds(firstPassPollSeconds)) }
+        }
+      }
+      if confirmed {
+        NodeMemory.recordFirstPass(session, projectPath: projectPath, nodeID: node.id)
+      }
+      DialLog.record(
+        session: name, dial: "first-pass",
+        event: confirmed
+          ? (attempt > 1 ? "sent-after-retry" : "sent")
+          : (attempt > 0 ? "undelivered" : "send-failed"))
+    }
+  }
+
+  /// The verification window per attempt is generous next to the instant write Copilot
+  /// actually does, and the attempt count is small: three swallowed sends in a row means
+  /// something structural, not something a fourth send fixes.
+  static let firstPassAttempts = 3
+  static let firstPassVerifySeconds: TimeInterval = 6
+  static let firstPassReadySeconds: TimeInterval = 30
+
+  /// Polls the session's scrollback until `text` has been rendered in it. Whitespace is
+  /// collapsed out of both sides before matching, because the terminal wraps long lines
+  /// wherever its width dictates — the one guarantee is the characters, not the layout.
+  private static func waitUntilScrollbackShows(
+    _ text: String, sessionNamed name: String, deadline: Date
+  ) async -> Bool {
+    while Date() < deadline {
+      if let scrollback = sessionScrollback(named: name),
+        scrollbackShows(text, in: scrollback)
+      {
+        return true
+      }
+      try? await Task.sleep(for: .seconds(firstPassPollSeconds))
+    }
+    return false
+  }
+
+  static func scrollbackShows(_ text: String, in scrollback: String) -> Bool {
+    let needle = String(text.filter { !$0.isWhitespace }.prefix(48))
+    guard !needle.isEmpty else { return false }
+    return scrollback.filter { !$0.isWhitespace }.contains(needle)
+  }
+
+  /// `zmx history <name>` — the session's rendered scrollback. A plain pipe rather than
+  /// a PTY: history is a one-shot dump, and this is read on a poll.
+  private static func sessionScrollback(named name: String) -> String? {
+    let process = Process()
+    process.executableURL = ZmxLocator.binaryURL
+    process.arguments = ["history", name]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = FileHandle.nullDevice
+    do { try process.run() } catch { return nil }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else { return nil }
+    return String(decoding: data, as: UTF8.self)
+  }
+
+  /// Long enough for a cold `copilot` to open its session, short enough that a pass sent
+  /// without ever seeing one is still early in the interval it is standing in for.
+  static let firstPassWaitSeconds: TimeInterval = 45
+  static let firstPassPollSeconds: TimeInterval = 0.5
+  static let firstPassSettleSeconds: TimeInterval = 3
+
+  /// One first-pass message per node at a time. Two ensure ticks that both see a fresh
+  /// session would otherwise type the task in twice.
+  private actor FirstPassTickets {
+    static let shared = FirstPassTickets()
+    private var claimed: Set<UUID> = []
+    func claim(_ id: UUID) -> Bool { claimed.insert(id).inserted }
+    func release(_ id: UUID) { claimed.remove(id) }
+  }
+
+  /// How long a resumed session has to still be there before its launch counts as taken.
+  /// Long enough that a dying `claude --resume` is already gone, short enough that a
+  /// genuinely dead ID costs one of these per ensure rather than a wasted minute.
+  /// Public because the app's launch path makes the same judgement with the same number
+  /// (`GhosttyTerminalView.localResumeOrFreshCommand`).
+  public static let resumeSettleSeconds: UInt64 = 5
+
+  private static func sessionDiedImmediately(
+    checkArguments: [String], zmxPath: String, workingDirectory: String?
+  ) async -> Bool {
+    try? await Task.sleep(for: .seconds(resumeSettleSeconds))
+    guard
+      let session = try? PTYProcessSession(
+        executable: zmxPath, arguments: checkArguments, workingDirectory: workingDirectory)
+    else { return false }
+    return await session.waitUntilFinished() == false
+  }
+
+  /// `logFragment` rides inside the run branch, so an ensure whose check found the
+  /// session alive records nothing — the dial log holds decisions, not ticks.
   private static func atomicCheckOrRun(
     checkArguments: [String], runArguments: [String],
-    zmxPath: String, workingDirectory: String?
+    zmxPath: String, workingDirectory: String?, logFragment: String? = nil
   ) async {
     let check = quotedCommand([zmxPath] + checkArguments)
     let run = quotedCommand([zmxPath] + runArguments)
     #if os(Windows)
+      // `logFragment` is POSIX shell — `mkdir -p`, `wc`, `printf`, `$HOME` — so it cannot
+      // ride inside a `cmd.exe` script. Windows ensures therefore run unlogged rather
+      // than with a fragment quoted into something that would not execute; the Swift-side
+      // `DialLog.record` is the path to route this through when it is wired up.
       let script = "\(check) >NUL 2>&1 || \(run)"
       let executable = "cmd.exe"
       let arguments = ["/d", "/s", "/c", script]
     #else
-      let script = "\(check) >/dev/null 2>&1 || \(run)"
+      let script =
+        logFragment.map { "\(check) >/dev/null 2>&1 || { \($0); \(run); }" }
+        ?? "\(check) >/dev/null 2>&1 || \(run)"
       let executable = "/bin/sh"
       let arguments = ["-c", script]
     #endif

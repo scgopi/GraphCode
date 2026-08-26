@@ -25,9 +25,17 @@ public struct NodeUpdate: Codable, Equatable, Sendable {
   /// `.goalBased`: new metric command (`GoalSpec.metricCommand`). Empty string clears.
   public var metricCommand: String?
   public var metricDirection: MetricDirection?
+  /// `.goalBased`: new token budget (`GoalSpec.tokenBudget`). Non-positive clears it.
+  public var tokenBudget: Int?
+  /// `.goalBased`: whether the predicate skips re-running against an unchanged tree
+  /// (`GoalSpec.skipsUnchangedWorkspace`).
+  public var skipsUnchangedWorkspace: Bool?
   /// `.timeBased`: new opening prompt. Reaches a live session only as a nudge; the
   /// session that already ran its old prompt keeps its cadence until relaunched.
   public var triggerPrompt: String?
+  /// `.timeBased`: new daemon-heartbeat interval (`LoopNode.heartbeatIntervalSeconds`).
+  /// Non-positive clears it, returning the loop to prompt-owned cadence.
+  public var heartbeatIntervalSeconds: Double?
   /// `.turnBased`: new per-turn criterion.
   public var checkDescription: String?
   /// Takes effect at the session's next launch — the daemon never restarts a live
@@ -45,7 +53,10 @@ public struct NodeUpdate: Codable, Equatable, Sendable {
     stallAfterSeconds: Double? = nil,
     metricCommand: String? = nil,
     metricDirection: MetricDirection? = nil,
+    tokenBudget: Int? = nil,
+    skipsUnchangedWorkspace: Bool? = nil,
     triggerPrompt: String? = nil,
+    heartbeatIntervalSeconds: Double? = nil,
     checkDescription: String? = nil,
     modelTier: ModelTier? = nil,
     updatedBy: UUID? = nil
@@ -56,7 +67,10 @@ public struct NodeUpdate: Codable, Equatable, Sendable {
     self.stallAfterSeconds = stallAfterSeconds
     self.metricCommand = metricCommand
     self.metricDirection = metricDirection
+    self.tokenBudget = tokenBudget
+    self.skipsUnchangedWorkspace = skipsUnchangedWorkspace
     self.triggerPrompt = triggerPrompt
+    self.heartbeatIntervalSeconds = heartbeatIntervalSeconds
     self.checkDescription = checkDescription
     self.modelTier = modelTier
     self.updatedBy = updatedBy
@@ -66,13 +80,18 @@ public struct NodeUpdate: Codable, Equatable, Sendable {
   public var isEmpty: Bool {
     goalSummary == nil && goalPredicate == nil && pollIntervalSeconds == nil
       && stallAfterSeconds == nil && metricCommand == nil && metricDirection == nil
-      && triggerPrompt == nil && checkDescription == nil && modelTier == nil
+      && tokenBudget == nil && skipsUnchangedWorkspace == nil
+      && triggerPrompt == nil && heartbeatIntervalSeconds == nil
+      && checkDescription == nil && modelTier == nil
   }
 
   /// Whether this update touches what decides the loop is finished. The one edit a loop
   /// may not make to *itself*: the verifier stays outside the verified, for the same
-  /// reason maker and critic are separate sessions.
+  /// reason maker and critic are separate sessions. The budget counts: raising or
+  /// clearing it is loosening the bound the loop runs under, and there is no honest way
+  /// to allow tightening while refusing the reverse without the refusal reading as
+  /// arbitrary.
   public var touchesStopCondition: Bool {
-    goalPredicate != nil
+    goalPredicate != nil || tokenBudget != nil
   }
 }

@@ -19,10 +19,10 @@ struct OnboardingView: View {
 
   @State private var page = 0
   @State private var selectedBackend = SettingsModel.shared.settings.defaultBackend
-  /// Four, and the count is checked: the edge lesson folded into the types page to make
+  /// Five, and the count is checked: the edge lesson folded into the types page to make
   /// room for "How to read a loop", and a page silently lost in that merge would be a
   /// tour that stops teaching something without anyone noticing.
-  static let pageCount = 4
+  static let pageCount = 5
 
   var body: some View {
     VStack(spacing: 0) {
@@ -41,6 +41,10 @@ struct OnboardingView: View {
         case 0: OnboardingWelcomePage()
         case 1: OnboardingReadingPage()
         case 2: OnboardingLoopTypesPage()
+        // Before the agent page, not after it: the tour ends on the one choice that
+        // configures something, and "where work lives" reads better just ahead of
+        // "what runs it".
+        case 3: OnboardingWorkspacesPage()
         default: OnboardingBackendPage(selection: $selectedBackend)
         }
       }

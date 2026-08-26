@@ -24,6 +24,12 @@ struct WorktreeSweepFeature {
     /// Up while the "this discards uncommitted files" confirmation is showing — the
     /// gate between selecting a dirty worktree and actually forcing it away.
     var isConfirmingRemoval = false
+    /// Up from the click until every removal has answered. The sheet stays on screen
+    /// for it: git can refuse a removal, and that refusal has nowhere else to land.
+    var isRemoving = false
+    /// Worktree paths whose `git worktree unlock` is in flight — their button is
+    /// disabled so a double click can't race two unlocks.
+    var unlocking: Set<String> = []
     var failure: String?
 
     var id: String { projectPath }
@@ -57,13 +63,18 @@ struct WorktreeSweepFeature {
     case rowToggled(String)
     case allSafeToggled
     /// Remove doesn't remove here: this scope only decides whether the discard
-    /// confirmation must intervene. `AppWorktreesReducer` intercepts the same actions,
-    /// closes the sheet, and runs the removal in the background — the sheet must not
-    /// outlive the click, and a child effect would die with the sheet's state.
+    /// confirmation must intervene. `AppWorktreesReducer` intercepts the same actions
+    /// and runs the removal — it is the only scope that can see every project's loops,
+    /// and a child effect would die with the sheet's state.
     case removeTapped
     /// The dirty-selection confirmation's two exits.
     case removeConfirmed
     case removeCancelled
+    /// A locked row's Unlock button — `git worktree unlock`, run here in the child:
+    /// unlike a removal, the sheet stays open to show the row become removable.
+    case unlockTapped(String)
+    case unlockSucceeded(id: String)
+    case unlockFailed(id: String, String)
   }
 
   @Dependency(\.gitClient) var gitClient
@@ -140,7 +151,8 @@ struct WorktreeSweepFeature {
         return .none
 
       case .rowToggled(let id):
-        guard let assessment = state.assessments?.first(where: { $0.id == id }),
+        guard !state.isRemoving,
+          let assessment = state.assessments?.first(where: { $0.id == id }),
           assessment.isRemovable
         else { return .none }
         if state.selection.contains(id) {
@@ -163,6 +175,7 @@ struct WorktreeSweepFeature {
         // Losing uncommitted files is the one cost a click alone must not carry —
         // the confirmation names it before anything is forced. A clean selection
         // passes straight through to the parent's interception.
+        guard !state.isRemoving else { return .none }
         if state.selected.contains(where: \.removalDiscardsFiles) {
           state.isConfirmingRemoval = true
         }
@@ -170,6 +183,45 @@ struct WorktreeSweepFeature {
 
       case .removeConfirmed, .removeCancelled:
         state.isConfirmingRemoval = false
+        return .none
+
+      case .unlockTapped(let id):
+        guard let assessment = state.assessments?.first(where: { $0.id == id }),
+          assessment.facts.locked, !state.unlocking.contains(id)
+        else { return .none }
+        state.unlocking.insert(id)
+        let repositoryPath = state.projectPath
+        let worktreePath = assessment.ref.worktreePath
+        return .run { [gitClient, remoteGitClient] send in
+          do {
+            if let location = RemoteProjectLocation.parse(projectPath: repositoryPath) {
+              try await remoteGitClient.unlockWorktree(location, worktreePath)
+            } else {
+              try await gitClient.unlockWorktree(repositoryPath, worktreePath)
+            }
+            await send(.unlockSucceeded(id: id))
+          } catch {
+            await send(.unlockFailed(id: id, String(describing: error)))
+          }
+        }
+
+      case .unlockSucceeded(let id):
+        state.unlocking.remove(id)
+        guard var assessments = state.assessments,
+          let index = assessments.firstIndex(where: { $0.id == id })
+        else { return .none }
+        assessments[index].facts.locked = false
+        state.assessments = assessments
+        // The unlock was this row's own button — selecting it is what makes "unlock,
+        // then delete" one gesture short of done. Remove still asks about dirty files.
+        if assessments[index].isRemovable {
+          state.selection.insert(id)
+        }
+        return .none
+
+      case .unlockFailed(let id, let message):
+        state.unlocking.remove(id)
+        state.failure = message
         return .none
 
       }

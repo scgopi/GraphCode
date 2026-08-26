@@ -43,7 +43,7 @@ let graphcodeKitTarget: Target = .target(
     "Sessions/PresenceHooks.swift",
     "Sessions/ZmxLocator.swift",
   ])
-let graphcodedExclude = ["DarwinMain.swift"]
+let graphcodedExclude: [String] = []
 let platformTestTargets: [Target] = [
   .testTarget(
     name: "GraphcodeWindowsProductionTests",
@@ -66,6 +66,10 @@ let platformTestTargets: [Target] = []
 
 let package = Package(
   name: "GraphcodeProduction",
+  // Only consulted by the Apple toolchain; the Windows build ignores it. Without it
+  // SwiftPM assumes macOS 10.13 and the shared sources fail to build there on APIs the
+  // Xcode app has always had, since that project sets its own far higher target.
+  platforms: [.macOS(.v13)],
   products: [
     .library(name: "GraphcodeKit", targets: ["GraphcodeKit"]),
     .executable(name: "graphcoded", targets: ["graphcoded"]),

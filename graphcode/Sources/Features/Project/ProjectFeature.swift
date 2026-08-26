@@ -1,6 +1,8 @@
+import AppKit
 import ComposableArchitecture
 import Foundation
 import GraphcodeKit
+import UniformTypeIdentifiers
 
 /// One open project's graph canvas — one of possibly several the sidebar shows at once
 /// (multi-project sidebar follow-up to Phase 4, docs/07-roadmap.md#phase-4--projects).
@@ -54,15 +56,28 @@ struct ProjectFeature {
     /// Collapsed by default — a metric is off the path for the common goal loop, and a
     /// command field sitting open invites people to fill it in because it is there.
     var isMetricExpanded = false
+    /// The goal's optional token budget (`GoalSpec.tokenBudget`), kept as typed so a
+    /// half-edited number never round-trips into a different one. Parsed at draft
+    /// assembly (`parsedBudget`); anything that isn't a positive integer travels as
+    /// "no budget". Its row collapses for the same reason the metric's does.
+    var draftBudget = ""
+    var isBudgetExpanded = false
     /// What pressing **Test** on the done check found, and whether one is in flight.
     var doneCheckOutcome: DoneCheckOutcome?
     var isTestingDoneCheck = false
     /// `.turnBased`: what the session is asked to do, and where it pauses.
     var draftFirstInstruction = ""
     var draftPausesBeforeWritesOnly = false
+    /// `.sketch`: the optional starting note. Its own field rather than sharing
+    /// `draftFirstInstruction`, so flipping between types never carries text across.
+    var draftSketchNote = ""
     /// `.timeBased`: how often, and what to do each time. GraphCode composes the `/loop`
     /// directive from the two — see `ProjectFeature.State.composedTriggerPrompt`.
     var draftInterval: IntervalChoice = .hourly
+    /// `.timeBased`, experimental: the daemon holds the timer instead of the prompt
+    /// carrying /loop. Offered by the form only while the Settings toggle is on;
+    /// always defaults off, per loop — enabling the experiment converts nothing.
+    var draftUsesHeartbeat = false
     var draftCustomInterval = ""
     var draftTimedTask = ""
     var draftStopAfter = ""
@@ -78,6 +93,9 @@ struct ProjectFeature {
     /// hangs off. Creation then also draws a hand-off edge from it — see
     /// `createNodeConfirmed`.
     var draftParentNodeID: UUID?
+    /// Whether the open form makes a custody child (`.newChildLoopTapped`) rather
+    /// than a handed-off one (`.addChildNodeTapped`).
+    var draftParentIsCustodial = false
     /// Worktrees already present in this project's repository, loaded when the form
     /// opens. Empty for a folder that isn't a git repo — the picker then only offers
     /// "None" and "New branch", and creating one simply fails and reports why.
@@ -100,11 +118,24 @@ struct ProjectFeature {
     var nodePendingRename: UUID?
     var draftRenameTitle = ""
 
+    /// Set while a sketch's promotion form is up: which sketch, which shape it is
+    /// taking, and the one field that shape asks for. Flat fields to match how the
+    /// rename prompt and the creation form's `draft*` fields already work here.
+    var nodePendingPromotion: UUID?
+    var promotionTarget: LoopType = .goalBased
+    var promotionGoal = ""
+    var promotionPausesBeforeWritesOnly = false
+    var promotionInterval: IntervalChoice = .hourly
+    var promotionCustomInterval = ""
+
     /// Loops a human said really are a beginning, despite having no edges — the answer
     /// to a card's "Mark as entry". View state, not graph state: the graph's own answer
     /// to "does this start something" is its edges, and a stored flag would be a second
     /// answer free to disagree with them. See `CardEntryRole`.
     var declaredEntryIDs: Set<UUID> = []
+    /// Whether the open form was started from a lane's entry handle, so the loop it
+    /// creates joins `declaredEntryIDs` instead of reading as a loose one.
+    var draftDeclaresEntry = false
 
     /// The sidebar's display order for this project's loops, node ids first-to-last.
     /// Local UI state like `nodePositions`: the daemon's graph carries no ordering a
@@ -135,14 +166,7 @@ struct ProjectFeature {
 
     init(graph: LoopGraph) {
       self.graph = graph
-      var positions: [UUID: CGPoint] = [:]
-      var taken = Set<CGPoint>()
-      for node in graph.nodes {
-        let position = ProjectFeature.nextFreePosition(avoiding: taken)
-        positions[node.id] = position
-        taken.insert(position)
-      }
-      self.nodePositions = positions
+      self.nodePositions = LaneLayout.positions(forCanvas: graph)
       self.sidebarNodeOrder = graph.nodes.map(\.id)
     }
   }
@@ -154,9 +178,18 @@ struct ProjectFeature {
     case binding(BindingAction<State>)
     case daemonEvent(DaemonEvent)
     case addNodeButtonTapped(parentBackend: CLISessionBackendKind?)
+    /// The lane's origin `+` on the Graph view: a top-level loop, declared an entry
+    /// because someone asked for a beginning rather than left one lying around.
+    case addEntryLoopTapped
     /// The + handle on a node card: opens the same form, and the created loop gets a
     /// hand-off edge from this node.
     case addChildNodeTapped(UUID)
+    /// The context menus' "New Child Loop…": a *custody* child — `createdBy` set, the
+    /// daemon draws the already-fired link, the loop starts now. Distinct from
+    /// `.addChildNodeTapped` (the + handle), which wires an unfired hand-off that
+    /// sequences the new loop *after* the parent — under a long-running parent that
+    /// meant a loop blocked indefinitely while its session already ran.
+    case newChildLoopTapped(UUID)
     case createNodeConfirmed
     case cancelNewNodeForm
     case nodeTapped(UUID)
@@ -188,6 +221,10 @@ struct ProjectFeature {
     case renameTitleChanged(String)
     case renameNodeConfirmed
     case renameNodeCancelled
+    /// "Promote to…" on a sketch card: opens the one-field form for the chosen target.
+    case promoteNodeRequested(UUID, to: LoopType)
+    case promotionConfirmed
+    case promotionCancelled
     case deleteEdgeTapped(UUID)
     /// The sidebar dropped a drag-to-reorder: the moved ids in their new order, which
     /// take the front of `sidebarNodeOrder`; ids not in the list keep their relative
@@ -210,11 +247,31 @@ struct ProjectFeature {
     /// they open are hosted by `AppView`, so `AppWorktreesReducer` intercepts both.
     case worktreeSweepTapped
     case projectSettingsTapped
+    /// Export Loop… on a card: the loop and everything descended from it — child
+    /// loops, sub-loops, session memory — packaged into a zip the save panel names.
+    case exportNodeRequested(UUID)
+    /// Export All Loops… on the canvas background: the whole graph as one bundle.
+    case exportGraphRequested
+    /// Import Loops… — from a card the bundle arrives as that loop's children; from
+    /// the canvas background (`nil`) it arrives beside everything else.
+    case importLoopsRequested(asChildOf: UUID?)
+    /// The sidebar folder row's Export All Loops…: always the *whole project's* graph,
+    /// unlike `exportGraphRequested`, which exports whatever canvas is showing — a
+    /// folder row means the folder, whether or not its canvas is parked inside a
+    /// composite.
+    case projectExportRequested
+    /// The sidebar folder row's Import Loops…: lands at the project's top level for
+    /// the same reason — the folder was named, not the composite its canvas happens
+    /// to be drilled into.
+    case projectImportRequested
   }
 
   @Dependency(\.gitClient) var gitClient
   /// Names an untitled loop after creation — see `createNodeConfirmed`.
   @Dependency(\.titleSuggestionClient) var titleSuggestionClient
+  /// Where every project's node names are registered, so a suggested name can be
+  /// checked against all of them — not just this project's.
+  @Dependency(\.loopTitleDirectory) var loopTitleDirectory
 
   @Dependency(\.orchestratorClient) var orchestratorClient
 
@@ -229,20 +286,13 @@ struct ProjectFeature {
         switch event {
         case .graphChanged(let newGraph):
           state.connectionError = nil
-          // Slots are taken by what's *there*, not by how many there are. Indexing by
-          // count meant deleting a loop freed its position but shifted the counter back,
-          // so the next node landed exactly on top of an existing card — four loops
-          // rendering as one, with the rest hidden underneath.
-          var taken = Set(state.nodePositions.values)
-          // Composites' contents get slots too, or a drilled-in canvas draws every card
-          // at the same unplaced point. Positions are keyed by node id and ids are unique
-          // across the whole tree, so one flat table serves every level.
-          for node in newGraph.nodes.flatMap({ [$0] + ($0.subGraph?.nodes ?? []) })
-          where state.nodePositions[node.id] == nil {
-            let position = Self.nextFreePosition(avoiding: taken)
-            taken.insert(position)
-            state.nodePositions[node.id] = position
-          }
+          loopTitleDirectory.register(newGraph.project.path, newGraph)
+          // Every card placed again from the graph that just arrived, rather than only the
+          // ones that are new. Slots handed out at arrival time made the canvas a record of
+          // the order loops turned up in: a hand-off drawn between two cards the layout had
+          // no reason to put near each other ran behind whatever sat between them, and
+          // wiring a graph up changed nothing about how it looked. See `LaneLayout`.
+          state.nodePositions = LaneLayout.positions(forCanvas: newGraph)
           state.graph = newGraph
           // An offer only makes sense while its loop exists, stays resolved, and still
           // points at the worktree — a restarted or deleted loop takes it with it.
@@ -267,11 +317,16 @@ struct ProjectFeature {
           state.connectionError = message
         case .recentProjectsListed:
           break  // Not this feature's concern — AppFeature routes this to `welcome`.
+        case .quickChatsListed, .quickChatChanged, .quickChatDeleted, .quickChatActivity:
+          break  // Quick chats belong to no project — AppFeature owns them.
         }
         return .none
 
       case .addNodeButtonTapped(let parentBackend):
         return openNodeForm(&state, backend: parentBackend, parentNodeID: nil)
+
+      case .addEntryLoopTapped:
+        return openNodeForm(&state, backend: nil, parentNodeID: nil, declaresEntry: true)
 
       case .addChildNodeTapped(let parentID):
         // The child inherits its parent's backend, same rule as creating from within an
@@ -279,85 +334,17 @@ struct ProjectFeature {
         return openNodeForm(
           &state, backend: state.graph.nodes[id: parentID]?.backend, parentNodeID: parentID)
 
+      case .newChildLoopTapped(let parentID):
+        return openNodeForm(
+          &state, backend: state.graph.nodes[id: parentID]?.backend, parentNodeID: parentID,
+          custodial: true)
+
       case .cancelNewNodeForm:
         state.showingNewNodeForm = false
         return .none
 
       case .createNodeConfirmed:
-        let draft = state.draft
-        // `isValid` carries the same rules the daemon enforces, so an incomplete form
-        // simply doesn't submit — the Create button is disabled on it too, and this is
-        // the backstop for the keyboard shortcut path.
-        guard draft.isValid else { return .none }
-        let projectPath = state.graph.project.path
-        // A form opened from a node card's + handle also wires the new loop up: a
-        // default hand-off edge from the parent, created right after the node so the
-        // graph never broadcasts a child floating unconnected.
-        let parentNodeID = state.draftParentNodeID
-        state.draftParentNodeID = nil
-        state.showingNewNodeForm = false
-        // Inside a composite, the same commands are addressed at its sub-graph. This is
-        // the app half of "add loops inside" — the step the dialog's own strip promises.
-        let insideComposite = state.openCompositeID
-        // **Create & open**, honoured: a composite made from the project canvas opens
-        // straight away, which is what its button has always said it would do. Only from
-        // the top level — a composite created inside another would otherwise take the
-        // canvas somewhere the human didn't ask to go.
-        if draft.loopType == .composite, insideComposite == nil {
-          state.openCompositeID = draft.id
-        }
-        // A loop created from the form switches to itself once its broadcast lands —
-        // see `pendingCreatedNodeID`. Not composites: opening their sub-graph canvas
-        // (above) already is the switch. Not inside a composite either: the drilled-in
-        // canvas the human is looking at is where the new card appears, and workspace
-        // opening (`AppFeature`'s `.nodeTapped`) only reaches top-level nodes anyway.
-        if draft.loopType != .composite, insideComposite == nil {
-          state.pendingCreatedNodeID = draft.id
-        }
-
-        // Creating the worktree is the app's job, not the daemon's: `GitClient` lives
-        // here, and a failure needs somewhere to be shown. If it fails, the node is
-        // still created — unbound rather than not at all — since losing the loop over a
-        // branch that already exists would be the more annoying outcome.
-        let request = state.newWorktreeRequest
-        return .run { send in
-          var resolved = draft
-          if let request {
-            do {
-              resolved.worktree = try await gitClient.createWorktree(
-                request.repositoryPath, request.worktreePath, request.branch)
-            } catch {
-              await send(.worktreeCreationFailed(String(describing: error)))
-            }
-          }
-          func addressed(_ command: GraphCommand) -> GraphCommand {
-            insideComposite.map { .subGraphCommand(nodeID: $0, command: command) } ?? command
-          }
-          try? await orchestratorClient.send(
-            .graphCommand(projectPath: projectPath, command: addressed(.createNode(resolved))))
-          if let parentNodeID {
-            try? await orchestratorClient.send(
-              .graphCommand(
-                projectPath: projectPath,
-                command: addressed(
-                  .createEdge(from: parentNodeID, to: draft.id, spec: EdgeSpec()))))
-          }
-
-          // A blank title creates the node as "New Loop" and asks the loop's own
-          // backend for a real one — after creation, so a slow (or absent) CLI never
-          // holds the node itself hostage. The rename can target the node because the
-          // draft's id *is* the node's id (see `NodeDraft.id`); no answer just means
-          // the fallback name stays.
-          guard draft.title.trimmingCharacters(in: .whitespaces).isEmpty,
-            let basis = [draft.checkDescription, draft.triggerPrompt, draft.goal?.summary]
-              .compactMap({ $0 })
-              .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
-            let title = await titleSuggestionClient.suggest(draft.effectiveBackend, basis)
-          else { return }
-          try? await orchestratorClient.send(
-            .graphCommand(
-              projectPath: projectPath, command: addressed(.renameNode(draft.id, title: title))))
-        }
+        return confirmCreateNode(&state)
 
       case .worktreeCreationFailed(let message):
         state.connectionError = "Couldn't create worktree: \(message)"
@@ -397,18 +384,7 @@ struct ProjectFeature {
         return .none
 
       case .doneCheckTestTapped:
-        let command = state.draftPredicate.trimmingCharacters(in: .whitespaces)
-        guard !command.isEmpty, !state.isTestingDoneCheck else { return .none }
-        state.isTestingDoneCheck = true
-        state.doneCheckOutcome = nil
-        let directory = state.graph.project.path
-        return .run { send in
-          let result = await ShellPredicateEvaluator.probe(
-            ShellPredicate(command: command, workingDirectory: directory))
-          await send(
-            .doneCheckTested(
-              passed: result?.passed ?? false, duration: result?.duration ?? 0))
-        }
+        return runDoneCheckTest(&state)
 
       case .doneCheckTested(let passed, let duration):
         state.isTestingDoneCheck = false
@@ -418,6 +394,47 @@ struct ProjectFeature {
       case .markAsEntryTapped(let nodeID):
         state.declaredEntryIDs.insert(nodeID)
         return .none
+
+      case .exportNodeRequested(let nodeID):
+        // Whichever graph actually holds the loop: a canvas card drilled into a
+        // composite lives in the sub-graph, while the sidebar names top-level loops
+        // regardless of where the canvas is parked — resolving against the canvas
+        // alone made the sidebar's Export a silent no-op whenever a composite was
+        // open. Memory paths are keyed by the *project*, the same at any depth.
+        let graph =
+          state.canvasGraph.nodes[id: nodeID] != nil ? state.canvasGraph : state.graph
+        guard let node = graph.nodes[id: nodeID] else { return .none }
+        return exportBundle(
+          from: graph, projectPath: state.graph.project.path,
+          nodeIDs: [nodeID], suggestedName: node.title)
+
+      case .exportGraphRequested:
+        return exportBundle(
+          from: state.canvasGraph, projectPath: state.graph.project.path,
+          nodeIDs: nil, suggestedName: state.graph.project.name)
+
+      case .importLoopsRequested(let parentID):
+        // Route into the open composite only when the named parent actually lives
+        // there (or none was named — a background import targets what you're looking
+        // at). A sidebar right-click can name a top-level loop while the canvas is
+        // inside a composite, and that import belongs at the top level.
+        let compositeID: UUID? =
+          if let parentID {
+            state.canvasGraph.nodes[id: parentID] != nil ? state.openCompositeID : nil
+          } else {
+            state.openCompositeID
+          }
+        return importLoops(
+          projectPath: state.graph.project.path, asChildOf: parentID, into: compositeID)
+
+      case .projectExportRequested:
+        return exportBundle(
+          from: state.graph, projectPath: state.graph.project.path,
+          nodeIDs: nil, suggestedName: state.graph.project.name)
+
+      case .projectImportRequested:
+        return importLoops(
+          projectPath: state.graph.project.path, asChildOf: nil, into: nil)
 
       case .reviewAttentionTapped:
         // Oldest first: the loop that has been waiting longest is the one to answer,
@@ -445,15 +462,24 @@ struct ProjectFeature {
       case .deleteNodeConfirmed:
         guard let nodeID = state.nodePendingDeletion else { return .none }
         state.nodePendingDeletion = nil
-        // Local canvas layout is this feature's own, so it's cleaned up here rather
-        // than waiting for the daemon's broadcast — otherwise a recreated node could
-        // inherit the dead one's position.
-        state.nodePositions[nodeID] = nil
+        // The card keeps its place until the broadcast lands, at which point the whole
+        // canvas is laid out again without it. Dropping the position here instead would
+        // teleport a card that is still on screen to the canvas origin for a frame.
         let projectPath = state.graph.project.path
         return .run { _ in
           try? await orchestratorClient.send(
             .graphCommand(projectPath: projectPath, command: .deleteNode(nodeID)))
         }
+
+      case .promoteNodeRequested(let nodeID, let target):
+        return openPromotionForm(&state, nodeID: nodeID, target: target)
+
+      case .promotionCancelled:
+        state.nodePendingPromotion = nil
+        return .none
+
+      case .promotionConfirmed:
+        return confirmPromotion(&state)
 
       case .renameNodeRequested(let nodeID):
         guard let node = state.graph.nodes[id: nodeID] else { return .none }
@@ -526,18 +552,193 @@ struct ProjectFeature {
 }
 
 extension ProjectFeature {
+  /// The loop type the form opens on: the last one a loop was actually created with.
+  ///
+  /// Set at creation rather than at selection — browsing the chooser is not a
+  /// preference, pressing Create is. App-side `UserDefaults` like the other UI
+  /// memories (`hasSeenOnboarding`, the rail width): which type someone reaches for
+  /// is not a setting the daemon or another machine has any use for.
+  static let lastLoopTypeKey = "lastCreatedLoopType"
+
+  static var rememberedLoopType: LoopType {
+    loopType(remembered: UserDefaults.standard.string(forKey: lastLoopTypeKey))
+  }
+
+  /// No remembered choice lands on Sketch — the type that demands nothing decided
+  /// yet, which is the honest opening for someone who hasn't expressed a preference.
+  /// Landing on any committed type puts a whole form in front of a person who never
+  /// picked it. A stored value nothing can decode (an old build's spelling, a
+  /// hand-edited defaults write) gets the same treatment as none.
+  ///
+  /// Composite is filtered on read as well as never written: the key is app-wide and
+  /// only form-creates update it, so one composite made months ago in another project
+  /// owned every project's form until the next form-create — the "why does this keep
+  /// opening on Composite" report. Values written by older builds are exactly why the
+  /// write-side skip alone isn't enough.
+  static func loopType(remembered raw: String?) -> LoopType {
+    let remembered = raw.flatMap(LoopType.init(rawValue:))
+    return remembered == .composite ? .sketch : (remembered ?? .sketch)
+  }
+
+  /// Resets the promotion form's one field and opens it for the chosen target — only
+  /// ever for a sketch; anything already shaped has nothing to promote.
+  private func openPromotionForm(
+    _ state: inout State, nodeID: UUID, target: LoopType
+  ) -> Effect<Action> {
+    guard state.graph.nodes[id: nodeID]?.loopType == .sketch else { return .none }
+    state.nodePendingPromotion = nodeID
+    state.promotionTarget = target
+    state.promotionGoal = ""
+    state.promotionPausesBeforeWritesOnly = false
+    state.promotionInterval = .hourly
+    state.promotionCustomInterval = ""
+    return .none
+  }
+
+  /// Sends the promotion the form currently means; a nil `promotion` (empty required
+  /// field) leaves the form up, matching the disabled Promote button beside it.
+  private func confirmPromotion(_ state: inout State) -> Effect<Action> {
+    guard let nodeID = state.nodePendingPromotion, let promotion = state.promotion
+    else { return .none }
+    state.nodePendingPromotion = nil
+    // `promotedBy: nil` — a human in the app, the same attribution the form's other
+    // commands carry.
+    return send(state, .promoteNode(nodeID, promotion: promotion, promotedBy: nil))
+  }
+
   /// Resets the draft fields and opens the node form — the shared half of
   /// `.addNodeButtonTapped` and `.addChildNodeTapped`.
   ///
-  /// Goal-based by default, matching `LoopType`'s own ordering and the segmented
-  /// control's first segment: a loop that starts itself and knows when it is finished
-  /// is what most work wants, where the old turn-based default made a loop that sits
-  /// idle until a human opens it — surprising as the *default* outcome of Create.
+  /// The type defaults to whatever was chosen last (`rememberedLoopType`): someone who
+  /// always makes goal loops shouldn't re-pick Goal every time. Goal-based before
+  /// anything has been created, because a loop that starts itself and knows when it is
+  /// finished is what most work wants, where the old turn-based default made a loop
+  /// that sits idle until a human opens it — surprising as the *default* outcome of
+  /// Create.
+  /// Runs the form's done check exactly the way `graphcoded` will — same evaluator,
+  /// same shell, same directory (`GoalDraftFields.testButton`).
+  private func runDoneCheckTest(_ state: inout State) -> Effect<Action> {
+    let command = state.draftPredicate.trimmingCharacters(in: .whitespaces)
+    guard !command.isEmpty, !state.isTestingDoneCheck else { return .none }
+    state.isTestingDoneCheck = true
+    state.doneCheckOutcome = nil
+    let directory = state.graph.project.path
+    return .run { send in
+      let result = await ShellPredicateEvaluator.probe(
+        ShellPredicate(command: command, workingDirectory: directory))
+      await send(
+        .doneCheckTested(
+          passed: result?.passed ?? false, duration: result?.duration ?? 0))
+    }
+  }
+
+  /// The Create button's whole handler — in the trailing extension beside
+  /// `openNodeForm` and the rest of the form's helpers, and for the same reason.
+  private func confirmCreateNode(_ state: inout State) -> Effect<Action> {
+    let draft = state.draft
+    // `isValid` carries the same rules the daemon enforces, so an incomplete form
+    // simply doesn't submit — the Create button is disabled on it too, and this is
+    // the backstop for the keyboard shortcut path.
+    guard draft.isValid else { return .none }
+    // Composite is deliberately not remembered: creating one is a rare, structural
+    // act, and the *next* loop is almost never another composite — remembering it
+    // made the heaviest type the default everywhere (see `loopType(remembered:)`).
+    if draft.loopType != .composite {
+      UserDefaults.standard.set(draft.loopType.rawValue, forKey: Self.lastLoopTypeKey)
+    }
+    let projectPath = state.graph.project.path
+    // A form opened from a node card's + handle also wires the new loop up: a
+    // default hand-off edge from the parent, created right after the node so the
+    // graph never broadcasts a child floating unconnected.
+    let parentNodeID = state.draftParentNodeID
+    let custodial = state.draftParentIsCustodial
+    // Asked for from the entry handle, so it is a beginning on purpose — without this it
+    // would land as `.unwired`, which the canvas draws dimmed and dashed and offers to
+    // fix. See `CardEntryRole`.
+    if state.draftDeclaresEntry { state.declaredEntryIDs.insert(draft.id) }
+    state.draftDeclaresEntry = false
+    state.draftParentNodeID = nil
+    state.draftParentIsCustodial = false
+    state.showingNewNodeForm = false
+    // Inside a composite, the same commands are addressed at its sub-graph. This is
+    // the app half of "add loops inside" — the step the dialog's own strip promises.
+    let insideComposite = state.openCompositeID
+    // **Create & open**, honoured: a composite made from the project canvas opens
+    // straight away, which is what its button has always said it would do. Only from
+    // the top level — a composite created inside another would otherwise take the
+    // canvas somewhere the human didn't ask to go.
+    if draft.loopType == .composite, insideComposite == nil {
+      state.openCompositeID = draft.id
+    }
+    // A loop created from the form switches to itself once its broadcast lands —
+    // see `pendingCreatedNodeID`. Not composites: opening their sub-graph canvas
+    // (above) already is the switch. Not inside a composite either: the drilled-in
+    // canvas the human is looking at is where the new card appears, and workspace
+    // opening (`AppFeature`'s `.nodeTapped`) only reaches top-level nodes anyway.
+    if draft.loopType != .composite, insideComposite == nil {
+      state.pendingCreatedNodeID = draft.id
+    }
+
+    // Creating the worktree is the app's job, not the daemon's: `GitClient` lives
+    // here, and a failure needs somewhere to be shown. If it fails, the node is
+    // still created — unbound rather than not at all — since losing the loop over a
+    // branch that already exists would be the more annoying outcome.
+    let request = state.newWorktreeRequest
+    return .run { send in
+      var resolved = draft
+      // A custody child carries its parent on the draft; the daemon draws the
+      // fired-at-birth link and writes the report-back memo, exactly as it does
+      // for a CLI-created child. No separate edge command, so nothing blocks.
+      if custodial, let parentNodeID { resolved.createdBy = parentNodeID }
+      if let request {
+        do {
+          resolved.worktree = try await gitClient.createWorktree(
+            request.repositoryPath, request.worktreePath, request.branch)
+        } catch {
+          await send(.worktreeCreationFailed(String(describing: error)))
+        }
+      }
+      func addressed(_ command: GraphCommand) -> GraphCommand {
+        insideComposite.map { .subGraphCommand(nodeID: $0, command: command) } ?? command
+      }
+      try? await orchestratorClient.send(
+        .graphCommand(projectPath: projectPath, command: addressed(.createNode(resolved))))
+      if let parentNodeID, !custodial {
+        try? await orchestratorClient.send(
+          .graphCommand(
+            projectPath: projectPath,
+            command: addressed(
+              .createEdge(from: parentNodeID, to: draft.id, spec: EdgeSpec()))))
+      }
+
+      // A blank title creates the node as "New Loop" and asks the loop's own
+      // backend for a real one — after creation, so a slow (or absent) CLI never
+      // holds the node itself hostage. The rename can target the node because the
+      // draft's id *is* the node's id (see `NodeDraft.id`); no answer just means
+      // the fallback name stays.
+      guard draft.title.trimmingCharacters(in: .whitespaces).isEmpty,
+        let basis = [
+          draft.checkDescription, draft.triggerPrompt, draft.goal?.summary,
+          draft.firstInstruction,
+        ]
+        .compactMap({ $0 })
+        .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
+        let title = await titleSuggestionClient.suggest(
+          draft.effectiveBackend, basis, loopTitleDirectory.allTitles())
+      else { return }
+      try? await orchestratorClient.send(
+        .graphCommand(
+          projectPath: projectPath, command: addressed(.renameNode(draft.id, title: title))))
+    }
+  }
+
   private func openNodeForm(
-    _ state: inout State, backend: CLISessionBackendKind?, parentNodeID: UUID?
+    _ state: inout State, backend: CLISessionBackendKind?, parentNodeID: UUID?,
+    custodial: Bool = false, declaresEntry: Bool = false
   ) -> Effect<Action> {
     state.draftID = UUID()
-    state.draftLoopType = .goalBased
+    state.draftDeclaresEntry = declaresEntry
+    state.draftLoopType = Self.rememberedLoopType
     state.draftTitle = ""
     state.draftCheck = ""
     state.draftPrompt = ""
@@ -546,11 +747,21 @@ extension ProjectFeature {
     state.draftMetric = ""
     state.draftMetricDirection = .maximize
     state.isMetricExpanded = false
+    state.draftBudget = ""
+    state.isBudgetExpanded = false
     state.doneCheckOutcome = nil
     state.isTestingDoneCheck = false
     state.draftFirstInstruction = ""
     state.draftPausesBeforeWritesOnly = false
+    state.draftSketchNote = ""
     state.draftInterval = .hourly
+    // While the experiment is on, the daemon heartbeat is the *default* for new timed
+    // loops — the /loop skill runs only when a person explicitly picks "Itself, with
+    // /loop" in the form. The toggle governing a default rather than mere availability
+    // is a deliberate, user-directed reversal of the earlier converts-nothing stance;
+    // existing loops are still never converted. Same settings read the defaultBackend
+    // line below already does.
+    state.draftUsesHeartbeat = GraphcodeSettingsStore.load().daemonHeartbeatEnabled
     state.draftCustomInterval = ""
     state.draftTimedTask = ""
     state.draftStopAfter = ""
@@ -564,6 +775,7 @@ extension ProjectFeature {
     state.draftWorktree = .none
     state.draftBranch = ""
     state.draftParentNodeID = parentNodeID
+    state.draftParentIsCustodial = custodial
     state.showingNewNodeForm = true
     let repositoryPath = state.graph.project.path
     return .run { send in
@@ -584,31 +796,69 @@ extension ProjectFeature {
     }
   }
 
-  /// Simple grid layout for freshly synced nodes — real layout (force-directed,
-  /// draggable repositioning) is future work; this just needs nodes to not overlap.
-  /// The first grid slot nothing is sitting on.
-  ///
-  /// Deliberately not "the nth slot for the nth node": positions are removed when a loop
-  /// is deleted, so a counter drifts out of step with the grid and starts handing out
-  /// slots that are already occupied. Cards stacked pixel-perfectly on top of each other
-  /// don't look like a layout bug — they look like the graph lost its nodes.
-  ///
-  /// Terminates because the grid is unbounded and `taken` is finite.
-  static func nextFreePosition(avoiding taken: Set<CGPoint>) -> CGPoint {
-    var index = 0
-    while true {
-      let candidate = gridPosition(index)
-      if !taken.contains(candidate) { return candidate }
-      index += 1
+  /// Open panel → bundle → daemon import, shared by every Import Loops… entry point:
+  /// a card (parent set, lands under it), the canvas background (parent nil, lands in
+  /// whatever graph the canvas shows), and the sidebar folder row (parent and
+  /// composite both nil — the folder was named, so the project's top level is where
+  /// the loops belong).
+  private func importLoops(
+    projectPath: String, asChildOf parentID: UUID?, into compositeID: UUID?
+  ) -> Effect<Action> {
+    .run { _ in
+      let request = await MainActor.run { () -> GraphImportRequest? in
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.zip]
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose a GraphCode export bundle"
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        guard let bundle = GraphExportBundle.readFromZip(at: url.path) else { return nil }
+        // Re-identifies and installs any carried sessions under the fresh ids, so
+        // an imported loop resumes its exported conversation on first open.
+        return bundle.preparedImportRequest(asChildOf: parentID, projectPath: projectPath)
+      }
+      guard let request else { return }
+      let command = GraphCommand.importNodes(request)
+      try? await orchestratorClient.send(
+        .graphCommand(
+          projectPath: projectPath,
+          command: compositeID.map { .subGraphCommand(nodeID: $0, command: command) }
+            ?? command))
     }
   }
 
-  /// Simple grid layout for freshly synced nodes — real layout (force-directed,
-  /// draggable repositioning) is future work; this just needs nodes to not overlap.
-  static func gridPosition(_ index: Int) -> CGPoint {
-    let columns = 3
-    let column = index % columns
-    let row = index / columns
-    return CGPoint(x: 160 + CGFloat(column) * 260, y: 140 + CGFloat(row) * 200)
+  /// Save panel → bundle → zip, shared by the card's Export Loop… (`nodeIDs` names the
+  /// loop, descendants ride along) and the background's Export All Loops… (`nil`).
+  ///
+  /// Export is read-only, so unlike import it never goes near the daemon: the graph in
+  /// hand is the daemon's own latest broadcast, and memory logs are read straight off
+  /// disk. The finished zip is revealed in Finder — that reveal *is* the success
+  /// feedback, pointing at the file the user is about to go share.
+  private func exportBundle(
+    from graph: LoopGraph, projectPath: String, nodeIDs: [UUID]?, suggestedName: String
+  ) -> Effect<Action> {
+    .run { _ in
+      await MainActor.run {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.zip]
+        panel.nameFieldStringValue =
+          suggestedName.replacingOccurrences(of: "/", with: "-") + ".zip"
+        panel.message = "Export loops as a shareable bundle"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let persistence = ProjectPersistence(baseDirectory: SupportDirectory.url)
+        let bundle: GraphExportBundle? =
+          if let nodeIDs {
+            persistence.createExportBundle(
+              for: nodeIDs, from: graph, projectPath: projectPath, createdBy: NSUserName())
+          } else {
+            persistence.createFullGraphExportBundle(
+              for: graph, projectPath: projectPath, createdBy: NSUserName())
+          }
+        guard let bundle, bundle.writeToZip(at: url.path) != nil else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+      }
+    }
   }
+
 }

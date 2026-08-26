@@ -124,6 +124,17 @@ extension AppSidebarView {
     Button("Close") { store.send(.projectCloseTapped(project.id)) }
     Button("Remove from GraphCode") { store.send(.projectRemoveTapped(project.id)) }
     Divider()
+    // The folder-level counterparts to a loop row's Export/Import: everything in this
+    // folder as one bundle, and an import that lands at the folder's top level —
+    // regardless of where its canvas happens to be parked. Behind the same
+    // experiments switch as every other export/import surface.
+    if sharesLoops {
+      if !project.graph.nodes.isEmpty {
+        Button("Export All Loops…") { send(.projectExportRequested, to: project.id) }
+      }
+      Button("Import Loops…") { send(.projectImportRequested, to: project.id) }
+      Divider()
+    }
     Button("Delete Loops…", role: .destructive) { projectPendingLoopDeletion = project }
     Button("Delete \"\(project.graph.project.name)\"…", role: .destructive) {
       projectPendingDelete = project
@@ -142,6 +153,15 @@ extension AppSidebarView {
   func nodeMenu(for node: LoopNode, in projectPath: String) -> some View {
     Button("Open Terminal") { send(.nodeTapped(node.id), to: projectPath) }
 
+    // Selects the project first: the creation sheet presents from that project's
+    // canvas, and a form opened on a canvas that isn't showing opens nowhere.
+    if !node.isResolved {
+      Button("New Child Loop…") {
+        store.send(.projectHeaderTapped(projectPath))
+        send(.newChildLoopTapped(node.id), to: projectPath)
+      }
+    }
+
     if node.loopType == .composite {
       Button("Pilot Once…") { send(.pilotCompositeTapped(node.id), to: projectPath) }
       Button("Arm Schedule") { send(.armCompositeTapped(node.id), to: projectPath) }
@@ -155,6 +175,15 @@ extension AppSidebarView {
     }
 
     Divider()
+
+    if sharesLoops {
+      Button("Export Loop…") { send(.exportNodeRequested(node.id), to: projectPath) }
+      Button("Import Loops Here…") {
+        send(.importLoopsRequested(asChildOf: node.id), to: projectPath)
+      }
+
+      Divider()
+    }
 
     Button("Delete Loop…", role: .destructive) {
       send(.deleteNodeRequested(node.id), to: projectPath)
@@ -183,7 +212,7 @@ extension AppSidebarView {
 
   /// This project's top-level rows, in the human's arrangement (`sidebarNodeOrder`).
   func orderedRootNodes(in project: ProjectFeature.State) -> [LoopNode] {
-    let roots = project.graph.startAnchors.compactMap { project.graph.nodes[id: $0] }
+    let roots = project.graph.sidebarRoots.compactMap { project.graph.nodes[id: $0] }
     let order = project.sidebarNodeOrder
     return roots.sorted { a, b in
       (order.firstIndex(of: a.id) ?? .max) < (order.firstIndex(of: b.id) ?? .max)

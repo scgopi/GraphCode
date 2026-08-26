@@ -36,6 +36,12 @@ struct AppFeature {
 
     var detailSelection: DetailSelection?
 
+    /// Folders this app has asked the daemon to open and hasn't seen come back yet —
+    /// what separates "I opened this" from "someone else did" when a project arrives.
+    /// Canonicalized on the way in, because the daemon names the project by the path it
+    /// resolved, not the one the picker handed us.
+    var pendingOpenPaths: Set<String> = []
+
     /// The selected *folder*, when the selection is one. Every caller that only ever
     /// deals in projects — opening one, closing one, following a node tap — keeps
     /// reading and writing selection through this; `nil` now also covers "Quick Chats",
@@ -78,9 +84,16 @@ struct AppFeature {
     var worktreeStats: [String: WorktreeFolderStats] = [:]
     var projectSettingsPath: String?
 
+    /// Which workspace this instance is, and the others on the machine — see
+    /// `AppFeature+Workspaces.swift`.
+    var workspaces = WorkspacesState()
+
     /// Up on first launch (`.task` checks the persisted flag) and whenever the
     /// sidebar's help button asks for it again.
     var showingOnboarding = false
+
+    /// Where the workspace pane has been, for ⌥⌘← / ⌥⌘→ — see `AppFeature+History.swift`.
+    var loopHistory = LoopHistory()
 
     /// The loop ⌘⇧R landed on last, so pressing it again moves to the next one waiting
     /// instead of re-opening the same loop forever. View state only, and deliberately
@@ -103,6 +116,9 @@ struct AppFeature {
     var updateInstallProgress: Double?
     var updateInstallFailure: String?
     var isUpdateReadyToRelaunch = false
+    /// A bundle replaced underneath this running app — see `BundleSwap` in
+    /// `AppFeature+Updates.swift`.
+    var bundleSwap = BundleSwap()
 
     /// State changes seen since launch, for the activity strip — see
     /// `AppFeature+Activity.swift`. Bounded, and deliberately not persisted.
@@ -195,6 +211,10 @@ struct AppFeature {
     /// across every open project. See `stepOpenLoop`.
     case selectNextLoop
     case selectPreviousLoop
+    /// ⌥⌘← / ⌥⌘→ — retrace the loops this human actually opened, in the order they
+    /// opened them. See `AppFeature+History.swift`.
+    case historyBackTapped
+    case historyForwardTapped
     /// The stop/kill affordance docs/05-orchestrator.md asks the monitor for.
     case stopNodeTapped(projectPath: String, nodeID: UUID)
     /// The first-launch terminology primer — see `OnboardingView`.
@@ -210,11 +230,20 @@ struct AppFeature {
     /// The sidebar update banner — re-presents the offer alert the banner stands for.
     case updateBannerTapped
     case updateCheckCompleted(Result<AvailableUpdate?, any Error>)
+    /// A bundle replaced underneath this running window — asked on activation, answered
+    /// with a relaunch prompt. See `BundleSwap.Action`.
+    case bundleSwap(BundleSwap.Action)
     case updateDownloadTapped
     case updateReleaseNotesTapped
     case updateAlertDismissed
     case updateNoticeDismissed
     case updateInstallTapped
+    /// Install, past the other-workspaces question — see `AppFeature+Workspaces`.
+    case updateInstallConfirmed
+    /// Install re-checked the channel at the moment of consent and found a newer
+    /// release than the one the alert offered — the state follows what is actually
+    /// being installed, so the relaunch prompt names the right version.
+    case updateInstallResolved(AvailableUpdate)
     case updateInstallProgressed(Double)
     case updateInstallFinished(Result<String, any Error>)
     case updateInstallFailureDismissed
@@ -222,6 +251,8 @@ struct AppFeature {
     case updateRelaunchDismissed
     /// Worktree hygiene, one case for the whole surface — see `AppFeature+Worktrees.swift`.
     case worktrees(Worktrees)
+    /// Workspaces, likewise — see `AppFeature+Workspaces.swift`.
+    case workspaces(Workspaces)
     /// The Quick Chats section's actions — see `State.quickChats`.
     case newQuickChatTapped
     /// The Quick Chats header row: shows the chats' own canvas, the way a folder row
@@ -246,12 +277,14 @@ struct AppFeature {
   @Dependency(\.quickChatStore) var quickChatStore
   @Dependency(\.updateClient) var updateClient
   @Dependency(\.updateInstallClient) var updateInstallClient
+  @Dependency(\.workspaceClient) var workspaceClient
   @Dependency(\.openURL) var openURL
   /// Only for the cases where a workspace goes away because the *loop* did. Merely
   /// switching to another loop leaves its surfaces alive on purpose — see
   /// `TerminalSurfaceStore` — but a deleted loop, or a closed project, is never coming
   /// back, and its terminals shouldn't sit in the cache waiting to age out.
   @Dependency(\.terminalSurfaceClient) var terminalSurfaceClient
+  @Dependency(\.loopHistoryStore) var loopHistoryStore
 
   var body: some ReducerOf<Self> {
     Scope(state: \.welcome, action: \.welcome) {
@@ -263,41 +296,16 @@ struct AppFeature {
     quickChatsReducer
     jumpPaletteReducer
     updatesReducer
+    historyReducer
     // Before the main Reduce on purpose: its `.graphChanged` diff needs the previous
     // graph, which the main reducer replaces. See `AppFeature+Worktrees.swift`.
     AppWorktreesReducer()
       .ifLet(\.worktreeSweep, action: \.worktrees.sweep) { WorktreeSweepFeature() }
+    AppWorkspacesReducer()
     Reduce { state, action in
       switch action {
       case .task:
-        state.quickChats = IdentifiedArray(uniqueElements: quickChatStore.load())
-        // Once, not every launch: the primer's value is on day one, and re-showing it
-        // to someone who has loops running would read as the app forgetting them.
-        if !UserDefaults.standard.bool(forKey: "hasSeenOnboarding") {
-          state.showingOnboarding = true
-        }
-        return .merge(
-          .run { send in
-            for await event in orchestratorClient.connect() {
-              await send(.daemonEvent(event))
-            }
-          }
-          .cancellable(id: CancelID.daemonSubscription),
-          .run { _ in try? await orchestratorClient.send(.listRecentProjects) },
-          // Without this the sidebar comes up empty on every launch even though the
-          // daemon has been persisting every project all along — the app just never
-          // asked for them back. Each restored project arrives as an ordinary
-          // `.graphChanged`, handled below.
-          .run { _ in try? await orchestratorClient.send(.restoreOpenProjects) },
-          // The global Orchestrator Graph is always resident, so the app joins it every
-          // launch rather than restoring it — it isn't a folder anyone opened, and its
-          // triggers have been running whether or not this window existed.
-          .run { _ in try? await orchestratorClient.send(.openGlobalGraph) },
-          // Quietly ask whether there's a newer build, so the sidebar banner can offer
-          // it without waiting for someone to open the menu. Silent on failure and on
-          // "up to date" — a launch must never raise an alert about updates.
-          .send(.checkForUpdatesInBackground)
-        )
+        return start(&state)
 
       case .daemonEvent(let event):
         switch event {
@@ -328,6 +336,14 @@ struct AppFeature {
             } else {
               state.projects.append(ProjectFeature.State(graph: graph))
             }
+            // Selection follows only a project *this* app asked for. A folder can now
+            // also arrive because someone else opened it — `graphcode status <folder>`
+            // from a loop or an editor plugin joins every running sidebar to it — and
+            // that is a row appearing, not a reason to close the terminal a human is
+            // working in.
+            guard state.pendingOpenPaths.remove(path) != nil || graph.isGlobal else {
+              return .none
+            }
             state.selectedProjectPath = path
             state.openLoop = nil
             return .none
@@ -355,6 +371,11 @@ struct AppFeature {
 
         case .errorOccurred(let message):
           state.welcome.errorMessage = message
+          return .none
+
+        // Only the Windows shell learns about quick chats from the daemon; this app owns
+        // them locally through `quickChatStore`, so the broadcast is redundant here.
+        case .quickChatsListed, .quickChatChanged, .quickChatDeleted, .quickChatActivity:
           return .none
         }
 
@@ -467,13 +488,21 @@ struct AppFeature {
         UserDefaults.standard.set(true, forKey: "hasSeenOnboarding")
         return .none
 
+      // Both handled by `historyReducer`, in `AppFeature+History.swift` — listed here
+      // only so this switch stays exhaustive.
+      case .historyBackTapped, .historyForwardTapped:
+        return .none
+
       // Every update action is handled by `updatesReducer`, in
       // `AppFeature+Updates.swift` — listed here only so this switch stays exhaustive.
       case .checkForUpdatesTapped, .checkForUpdatesInBackground, .updateFoundInBackground,
         .updateBannerTapped, .updateCheckCompleted, .updateDownloadTapped,
+        .bundleSwap,
         .updateReleaseNotesTapped, .updateAlertDismissed, .updateNoticeDismissed,
-        .updateInstallTapped, .updateInstallProgressed, .updateInstallFinished,
-        .updateInstallFailureDismissed, .updateRelaunchTapped, .updateRelaunchDismissed:
+        .updateInstallTapped, .updateInstallConfirmed, .updateInstallResolved,
+        .updateInstallProgressed,
+        .updateInstallFinished, .updateInstallFailureDismissed, .updateRelaunchTapped,
+        .updateRelaunchDismissed:
         return .none
 
       // Every Quick Chats action is handled by `quickChatsReducer`, in
@@ -499,8 +528,13 @@ struct AppFeature {
         // now its recurrence runs inside an ordinary interactive session (see
         // `LoopNode.triggerPrompt`), so there's a real terminal to attach to — which is
         // the point, since watching and steering a running loop is most of its value.
+        // A blocked node with a *live session* still opens: creation starts an
+        // unattended child's session before a follow-up hand-off edge marks it
+        // blocked, so blocked-but-running is a state people actually meet — and a
+        // terminal that exists must be reachable. What stays gated is the blocked
+        // node with no session, where opening would *start* sequenced work early.
         guard let node = state.projects[id: path]?.graph.nodes[id: nodeID],
-          node.state != .blocked
+          node.state != .blocked || node.presenceShowsLiveSession
         else { return .none }
         let layout = terminalLayoutStore.load(forNode: nodeID) ?? .defaultLayout(forNode: nodeID)
         state.openLoop = LoopWorkspaceFeature.State(
@@ -510,6 +544,7 @@ struct AppFeature {
           projectPath: path,
           projectName: state.projects[id: path]?.graph.project.name ?? path)
         state.selectedProjectPath = path
+        recordVisit(.loop(projectPath: path, nodeID: nodeID), &state)
         return .none
 
       // A loop's own primary Claude Code session exiting *is* its resolution — no
@@ -527,6 +562,30 @@ struct AppFeature {
         return .run { _ in
           try? await orchestratorClient.send(
             .graphCommand(projectPath: projectPath, command: command))
+        }
+
+      // The keypress on the agent pane's "Press any key to close" screen. The session
+      // was already resolved when it exited (above) — this is the human dismissing what
+      // remains, so the workspace closes *and* the node leaves the graph. Deleting via
+      // the daemon rather than locally, the same way the sidebar's delete does: the
+      // resulting broadcast is what removes the card everywhere, and `GraphStore` also
+      // kills the loop's zmx session. Closed here as well rather than waiting for that
+      // broadcast, so the dead pane goes away even with the daemon unreachable.
+      case .openLoop(.primaryExitAcknowledged):
+        guard let id = state.openLoop?.node.id, let projectPath = state.openLoop?.projectPath
+        else { return .none }
+        // A chat is not a node in any graph — there is nothing to delete, and the chat
+        // itself should outlive its session. Just put the dead terminal away.
+        guard !state.isQuickChat(id) else {
+          closeOpenWorkspace(&state)
+          state.detailSelection = .quickChats
+          return .none
+        }
+        closeOpenWorkspace(&state)
+        state.selectedProjectPath = projectPath
+        return .run { _ in
+          try? await orchestratorClient.send(
+            .graphCommand(projectPath: projectPath, command: .deleteNode(id)))
         }
 
       case .openLoop(.stopLoopTapped):
@@ -547,7 +606,11 @@ struct AppFeature {
         guard let path = state.openLoop?.projectPath else { return .none }
         return .send(.projects(.element(id: path, action: .nodeTapped(nodeID))))
 
-      case .openLoop, .welcome, .projects, .worktrees:
+      case .welcome(let welcomeAction):
+        recordPendingOpen(welcomeAction, into: &state)
+        return .none
+
+      case .openLoop, .projects, .worktrees, .workspaces:
         return .none
       }
     }
@@ -563,6 +626,69 @@ struct AppFeature {
 // The reducer's helpers — an extension so the type body stays inside the lint budget as
 // the state and actions above keep growing.
 extension AppFeature {
+
+  /// Everything a launch has to do: restore the app-local lists, decide whether the
+  /// primer is due, and open the daemon subscription the whole app hangs off.
+  ///
+  /// In the extension rather than the switch because the type body is at swiftlint's
+  /// limit, and this case was by some distance the longest one in it.
+  private func start(_ state: inout State) -> Effect<Action> {
+    state.quickChats = IdentifiedArray(uniqueElements: quickChatStore.load())
+    // Not validated against live graphs here: no project has arrived from the daemon
+    // yet, so every entry would look stale and the whole history would be thrown
+    // away on every launch. `LoopHistory.back(where:)` resolves lazily instead.
+    state.loopHistory = loopHistoryStore.load()
+    // Once, not every launch: the primer's value is on day one, and re-showing it
+    // to someone who has loops running would read as the app forgetting them.
+    if !UserDefaults.standard.bool(forKey: "hasSeenOnboarding") {
+      state.showingOnboarding = true
+    }
+    return .merge(
+      .run { send in
+        for await event in orchestratorClient.connect() {
+          await send(.daemonEvent(event))
+        }
+      }
+      .cancellable(id: CancelID.daemonSubscription),
+      .run { _ in try? await orchestratorClient.send(.listRecentProjects) },
+      // Without this the sidebar comes up empty on every launch even though the
+      // daemon has been persisting every project all along — the app just never
+      // asked for them back. Each restored project arrives as an ordinary
+      // `.graphChanged`, handled below.
+      .run { _ in try? await orchestratorClient.send(.restoreOpenProjects) },
+      // The global Orchestrator Graph is always resident, so the app joins it every
+      // launch rather than restoring it — it isn't a folder anyone opened, and its
+      // triggers have been running whether or not this window existed.
+      .run { _ in try? await orchestratorClient.send(.openGlobalGraph) },
+      // Quietly ask whether there's a newer build, so the sidebar banner can offer
+      // it without waiting for someone to open the menu. Silent on failure and on
+      // "up to date" — a launch must never raise an alert about updates.
+      .send(.checkForUpdatesInBackground)
+    )
+  }
+
+  /// Notes that one of Welcome's four ways to open a folder — picked, recent, freshly
+  /// cloned, remote — has just sent an `.openProject`, so the snapshot it comes back as
+  /// is recognisable as this app's own doing (see the `graphChanged` handler). Every
+  /// case that sends one is listed here; a fifth would have to be added, which is why
+  /// the `switch` is exhaustive rather than a `default`.
+  private func recordPendingOpen(_ action: WelcomeFeature.Action, into state: inout State) {
+    let path: String?
+    switch action {
+    case .folderPickerResult(.success(let url)): path = url.path
+    case .recentProjectTapped(let project): path = project.path
+    case .cloneFinished(let clonedPath): path = clonedPath
+    case .remoteValidated(let projectPath): path = projectPath
+    case .binding, .openFolderButtonTapped, .folderPickerResult(.failure), .openProjectFailed,
+      .setOpenPanelPresented, .cloneRepositoryButtonTapped, .cloneLocationPicked, .cloneSubmitted,
+      .cloneCancelled, .cloneProgress, .cloneFailed, .addRemoteRepositoryButtonTapped,
+      .remoteConnectionRequested, .remoteSubmitted, .remoteCancelled, .remoteValidationFailed:
+      path = nil
+    }
+    guard let path else { return }
+    state.pendingOpenPaths.insert(ProjectRegistry.canonicalize(path))
+  }
+
   /// Steps the open workspace to another loop, in the order the sidebar draws them —
   /// every open project's nodes, flattened — wrapping at the ends and skipping blocked
   /// nodes, the same rule a direct `.nodeTapped` applies. With no workspace open it

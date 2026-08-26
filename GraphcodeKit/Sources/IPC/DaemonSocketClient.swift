@@ -206,6 +206,7 @@ public struct DaemonSocketClient: Sendable {
   /// needs no cancellation plumbing. Without it a caller waiting on an event the daemon
   /// never sends — because nothing it sent would cause one — blocks forever with no
   /// output at all, which is exactly how `status` used to hang.
+
   public func send(_ command: DaemonCommand) throws {
     let data = try JSONEncoder().encode(command)
     #if canImport(Darwin)

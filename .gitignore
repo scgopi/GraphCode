@@ -1,5 +1,9 @@
 # Tuist
 .build/
+# and as a symlink: a worktree that shares the primary checkout's build directory has
+# `.build` as a link, which `.build/` does not match — it then reads as an untracked
+# file forever, and worktree hygiene calls the whole directory dirty because of it.
+.build
 *.xcodeproj
 *.xcworkspace
 Derived/
@@ -42,7 +46,7 @@ zig-out/
 # site (index.md + _config.yml) is the one carve-out: ignore docs/ contents, not the
 # directory, so the site files can be re-included.
 /docs/*
-!/docs/index.md
+!/docs/index.html
 !/docs/shortcuts.md
 !/docs/_config.yml
 !/docs/_layouts/

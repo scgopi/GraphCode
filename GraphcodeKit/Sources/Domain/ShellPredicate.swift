@@ -18,3 +18,20 @@ public struct ShellPredicate: Equatable, Sendable {
     self.workingDirectory = workingDirectory
   }
 }
+
+/// A predicate run that kept its evidence: did it hold, and what the command printed on
+/// the way to that answer. The exit status alone was enough for resolving a goal, but a
+/// *failing* stop condition has one more job — telling the session *why* it isn't done
+/// yet — and by the time anyone wants the output, the run that produced it is gone.
+public struct PredicateOutcome: Equatable, Sendable {
+  public let passed: Bool
+  /// The last stretch of combined stdout+stderr, bounded at the evaluator so a chatty
+  /// test suite can't turn a nudge into a transcript. Empty when the command printed
+  /// nothing worth relaying.
+  public let outputTail: String
+
+  public init(passed: Bool, outputTail: String = "") {
+    self.passed = passed
+    self.outputTail = outputTail
+  }
+}

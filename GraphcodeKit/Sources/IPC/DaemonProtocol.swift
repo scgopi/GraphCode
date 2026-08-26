@@ -17,6 +17,12 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
   /// dialled again is joined to nothing until it asks a second time. The daemon replies
   /// with one `.graphChanged` per project, which is exactly what `.openProject` produces,
   /// so the app needs no separate restore path.
+  ///
+  /// Asking for the whole set is also what identifies a client as a *sidebar*: from then
+  /// on the daemon joins it to any project another client opens, so a folder added by the
+  /// CLI (`graphcode status <folder>`, what an editor plugin drives) shows up in a running
+  /// app rather than only at its next launch. A one-shot CLI connection, which asks for
+  /// one named project and reads until that project's snapshot, is deliberately not one.
   case restoreOpenProjects
   /// Join the one always-resident global Orchestrator Graph. It arrives as an ordinary
   /// `.graphChanged` like any project's, distinguishable by its reserved
@@ -81,9 +87,33 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// summary, prompt, check) are nudged into a live session and recorded in the node's
   /// memory for its next wake. A loop may not change its *own* stop condition.
   case updateNode(UUID, update: NodeUpdate)
+  /// Give a sketch a shape — goal, turn or timed — keeping everything else it is:
+  /// same id, same session, same edges, same memory. A mutation on the existing node,
+  /// never a create + delete, so anything keyed on the node's id survives untouched.
+  /// Refused for any node that isn't a sketch; demotion has no wire shape at all
+  /// (`SketchPromotion` carries no `.sketch` case).
+  ///
+  /// `promotedBy` is attributed the way `updateNode`'s `updatedBy` is (`ZMX_SESSION`,
+  /// honest-by-default) — and enforces the same rule with teeth: a goal promotion that
+  /// carries a predicate is refused when the promoter is the promoted, because a
+  /// promotion is the one other doorway through which a loop could hand itself its own
+  /// stop condition. Optional so frames from clients that predate the field decode as
+  /// an unattributed promotion rather than failing.
+  case promoteNode(UUID, promotion: SketchPromotion, promotedBy: UUID?)
   /// Append a learned note to a node's memory log (`NodeMemory`) — what `graphcode
   /// node memo` rides on. `from` is attributed the same way `messageNode`'s is.
   case memoNode(UUID, text: String, from: UUID?)
+  /// Replace a node's playbook — its refinable supplemental prompt
+  /// (`NodeMemory.refinePlaybook`), what `graphcode node refine` rides on. The
+  /// continual-harness counterpart to `memoNode`: a memo appends one fact to the log,
+  /// a refinement rewrites the *method* the next wake reads. A loop may refine itself
+  /// — that is the point — because the things refinement must never touch (the goal,
+  /// the predicate, the budget, the briefing) live elsewhere and keep their own
+  /// guards. `from` is attributed the same way `memoNode`'s is.
+  case refineNode(UUID, text: String, from: UUID?)
+  /// Restore the playbook's previous version, consuming one snapshot — the undo that
+  /// makes whole-document refinement safe.
+  case rollbackRefinement(UUID, from: UUID?)
   /// Type a message into a node's live session, right now — the ad-hoc counterpart to
   /// a `.message` edge, sharing its transport and its deliverability rules
   /// (`MessageBus`). This is what `graphcode node send` rides on, and its reason to
@@ -92,7 +122,12 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// something. `from` is the sending loop when the CLI could attribute it
   /// (`ZMX_SESSION`, the same mechanism as `NodeDraft.createdBy`), so the target sees
   /// who's talking; nil from a human's shell.
-  case messageNode(UUID, text: String, from: UUID?)
+  ///
+  /// `followUp` is `node send --follow-up`: don't interrupt — stage the message to the
+  /// target's memory and type it in when the target next goes idle, rather than
+  /// mid-turn. Optional so frames from clients that predate the flag decode as the
+  /// immediate send they always were.
+  case messageNode(UUID, text: String, from: UUID?, followUp: Bool?)
   /// Removes the node, every edge touching it, and its detached session. Irreversible
   /// — the app confirms before sending this.
   case deleteNode(UUID)
@@ -116,6 +151,9 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// polled: it costs a subprocess per session, and nobody needs it except while the
   /// usage panel is open.
   case refreshUsage
+  /// Splice loops read out of an export bundle into this graph — see
+  /// `GraphImportRequest` for why the daemon, not the client, performs the merge.
+  case importNodes(GraphImportRequest)
 }
 
 /// What `graphcoded` pushes back — to the client that sent a command and to every

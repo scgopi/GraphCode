@@ -219,13 +219,16 @@ struct NodeDraftTests {
 
   @Test
   func theHostingMatrixMatchesTheSpikedCapabilities() {
-    // All three can host the two types that need nothing of the agent beyond a session:
+    // All four can host the two types that need nothing of the agent beyond a session:
     // a turn-based loop is judged by a human, and a goal's predicate is polled by the
     // daemon from outside.
-    #expect(CLISessionBackendKind.hosting(.turnBased) == [.claudeCode, .copilotCLI, .codex])
-    #expect(CLISessionBackendKind.hosting(.goalBased) == [.claudeCode, .copilotCLI, .codex])
+    #expect(
+      CLISessionBackendKind.hosting(.turnBased) == [.claudeCode, .copilotCLI, .codex, .openCode])
+    #expect(
+      CLISessionBackendKind.hosting(.goalBased) == [.claudeCode, .copilotCLI, .codex, .openCode])
     // Time-based needs the session to re-trigger itself, since graphcode holds no timer.
-    // Copilot gained that; Codex has no `/loop` equivalent in its CLI surface.
+    // Copilot gained that; Codex and OpenCode have no `/loop` equivalent in their CLI
+    // surfaces.
     #expect(CLISessionBackendKind.hosting(.timeBased) == [.claudeCode, .copilotCLI])
     // A composite still needs sub-agent fan-out, which only Claude Code has been shown
     // to do.
@@ -330,5 +333,49 @@ struct NodeDraftTests {
     #expect(
       BackendPicker.unsupportedReason(backend: .codex, loopType: .timeBased)
         .contains("run once and stop"))
+  }
+
+  @Test
+  func aSketchDraftIsValidWhileCompletelyEmpty() {
+    // The regression guard for the whole idea: `⏎` on an untouched dialog is a
+    // complete action. No goal, no worktree, no prompt — it opens quiet and waits.
+    let draft = NodeDraft(title: "", loopType: .sketch)
+    #expect(draft.isValid)
+
+    let node = draft.makeNode()
+    #expect(node.goal == nil)
+    #expect(node.worktreeBinding == nil)
+    #expect(node.sessionPrompt == nil)
+    #expect(node.state == .idle)
+    #expect(!node.runsUnattended)
+  }
+
+  @Test
+  func aSketchOpensWithItsStartingNoteWhenThereIsOne() {
+    let node = NodeDraft(
+      title: "", loopType: .sketch,
+      firstInstruction: "where does the usage cap get read from?"
+    ).makeNode()
+    #expect(node.sessionPrompt == "where does the usage cap get read from?")
+    // Whitespace is not a note.
+    #expect(
+      NodeDraft(title: "", loopType: .sketch, firstInstruction: "   ")
+        .makeNode().sessionPrompt == nil)
+  }
+
+  @Test
+  func everyBackendHostsASketch() {
+    // A bare session is the least demanding type — nothing to refuse over.
+    for backend in CLISessionBackendKind.allCases {
+      #expect(backend.canHost(.sketch))
+    }
+  }
+
+  @Test
+  func theChooserOrdersTypesByCommitmentSketchFirst() {
+    // `allCases` is the chooser's order and the ⌘1–⌘5 shortcut order; a reshuffle
+    // silently rebinds every shortcut.
+    #expect(
+      LoopType.allCases == [.sketch, .goalBased, .timeBased, .turnBased, .composite])
   }
 }

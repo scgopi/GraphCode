@@ -269,7 +269,7 @@ public enum RemoteGraphAccess {
       --predicate <cmd>      optional stop condition for --type goal (exit 0 = met)
       --prompt <text>        required for --type time or turn; a time loop's cadence
                              goes inside it (/loop 1h ...)
-      --backend <name>       claudeCode | copilotCLI | codex
+      --backend <name>       claudeCode | copilotCLI | codex | openCode
       --model <tier>         fast | standard | capable
       --metric <cmd>         performance measure; last stdout line must be a number
       --direction <d>        minimize | maximize (default: maximize)
@@ -569,7 +569,8 @@ public enum RemoteGraphAccess {
             fail("missing --title")
         if not flags.get("type"):
             fail("missing --type")
-        types = {"turn": "turnBased", "turnBased": "turnBased",
+        types = {"main": "sketch", "sketch": "sketch",
+                 "turn": "turnBased", "turnBased": "turnBased",
                  "goal": "goalBased", "goalBased": "goalBased",
                  "time": "timeBased", "timeBased": "timeBased",
                  "composite": "proactive", "proactive": "proactive"}
@@ -590,7 +591,7 @@ public enum RemoteGraphAccess {
             draft["checkDescription"] = flags["check"]
         if flags.get("prompt"):
             draft["triggerPrompt"] = flags["prompt"]
-            if loop_type == "turnBased":
+            if loop_type in ("turnBased", "sketch"):
                 draft["firstInstruction"] = flags["prompt"]
         if flags.get("goal"):
             direction = flags.get("direction", "maximize")
@@ -604,7 +605,7 @@ public enum RemoteGraphAccess {
                 goal["metricCommand"] = flags["metric"]
             draft["goal"] = goal
         if flags.get("backend"):
-            if flags["backend"] not in ("claudeCode", "copilotCLI", "codex"):
+            if flags["backend"] not in ("claudeCode", "copilotCLI", "codex", "openCode"):
                 fail("invalid value for --backend: %s" % flags["backend"])
             draft["backend"] = flags["backend"]
         if flags.get("model"):
@@ -682,6 +683,10 @@ public enum RemoteGraphAccess {
         elif subverb == "delete":
             run_and_print(project, [graph_command(project, {"deleteNode": {"_0": node_id}})])
         else:
+            follow_up = False
+            if subverb == "send" and arguments and arguments[0] == "--follow-up":
+                follow_up = True
+                arguments.pop(0)
             text = " ".join(arguments).strip()
             if not text:
                 fail("missing %s" % ("message" if subverb == "send" else "note"))
@@ -690,8 +695,11 @@ public enum RemoteGraphAccess {
             if sender:
                 payload["from"] = sender
             if subverb == "send":
+                if follow_up:
+                    payload["followUp"] = True
                 run_with_verdict(project, graph_command(project, {"messageNode": payload}),
-                                 "delivered")
+                                 "accepted — typed in when the loop next goes idle"
+                                 if follow_up else "delivered")
             else:
                 run_with_verdict(project, graph_command(project, {"memoNode": payload}),
                                  "noted")

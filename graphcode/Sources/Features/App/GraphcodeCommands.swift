@@ -33,6 +33,13 @@ struct GraphcodeCommands: Commands {
     // not about any loop.
     CommandGroup(after: .newItem) {
       Divider()
+      // Beside New Window rather than in a menu of its own: a workspace is the other
+      // thing "new" can mean here, and the one that opens a window you can put on a
+      // second screen.
+      Menu("Workspace") {
+        WorkspaceMenuItems(store: store, showsShortcuts: true)
+      }
+      Divider()
       Button("Worktrees…") {
         guard let path = focusedFolderPath else { return }
         store.send(.worktrees(.sweepRequested(projectPath: path)))
@@ -46,6 +53,17 @@ struct GraphcodeCommands: Commands {
       Button("Review What Needs You") { store.send(.reviewAttentionTapped) }
         .keyboardShortcut("r", modifiers: [.command, .shift])
         .disabled(store.attentionItems.isEmpty)
+
+      Divider()
+
+      // Where you have been, as opposed to what sits beside what — the two below walk
+      // sidebar order, these walk the order loops were actually opened in.
+      Button("Back") { store.send(.historyBackTapped) }
+        .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+        .disabled(!store.loopHistory.canGoBack)
+      Button("Forward") { store.send(.historyForwardTapped) }
+        .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+        .disabled(!store.loopHistory.canGoForward)
 
       Divider()
 

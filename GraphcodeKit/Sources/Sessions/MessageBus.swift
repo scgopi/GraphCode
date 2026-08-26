@@ -57,6 +57,34 @@ public enum MessageBus {
     + "— and do not start another pass. Stop where you are, say where you got to, and "
     + "stay in the session: the loop is what stops, not you. Do not exit or quit."
 
+  /// The stop request a blown token budget sends (`GraphStore.evaluateGoal`). Same
+  /// instruction as `stopRequest` — only the loop can cancel its own cadence — prefixed
+  /// with the *why*, because "stop" with no reason reads as a human's change of mind
+  /// and this one is arithmetic the loop can verify against its own usage.
+  public static func budgetExhaustedRequest(used: Int, budget: Int) -> String {
+    "[graphcode] Token budget exhausted: this loop has spent \(used) of its "
+      + "\(budget)-token budget. Stop this loop now: turn off any recurring schedule "
+      + "you set up for it — a /loop, a scheduled wakeup, a cron entry — and do not "
+      + "start another pass. Stop where you are, say where you got to, and stay in the "
+      + "session: the loop is what stops, not you. Do not exit or quit."
+  }
+
+  /// Typed into a goal loop's still-live session the moment it resolves successfully —
+  /// the one moment the method that worked is fully in context and the loop has nothing
+  /// left to do with it. The ask is to write into the *backend's* native skill format
+  /// inside the project (agents write to the project all the time; graphcode itself
+  /// never does), so the next loop's backend picks it up with no graphcode runtime in
+  /// between: the graph curates, the backend executes.
+  ///
+  /// "If" is load-bearing: a one-off fix distilled into a skill is library pollution,
+  /// and the judgement of reusability belongs to the agent that did the work.
+  public static let distillSkillRequest =
+    "[graphcode] Goal met. Before you finish: if the method that got you here would be "
+    + "reusable by another loop in this project, distill it into a project skill in "
+    + "your backend's native format (for Claude Code: .claude/skills/<name>/SKILL.md, "
+    + "a short markdown recipe with a one-line description). If it was one-off work, "
+    + "skip this."
+
   /// What actually gets typed into the target. The edge's transform decides the content;
   /// a `.script` transform runs to produce it, which is docs/08's "a script is cheaper
   /// than reasoning through the steps every time" applied to a hand-off.

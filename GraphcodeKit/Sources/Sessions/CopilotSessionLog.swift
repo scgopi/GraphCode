@@ -182,6 +182,35 @@ public enum CopilotSessionLog {
     return lines
   }
 
+  /// Whether the session named `name` has recorded a user message containing `text` —
+  /// how a typed-in first pass proves it actually landed (`ZmxSessionLauncher`). Copilot
+  /// writes a `user.message` event the moment a message is submitted, so absence after a
+  /// sensible wait means the keystrokes went somewhere else: a trust dialog, a composer
+  /// that was not up yet.
+  static func hasUserMessage(containing text: String, inSessionNamed name: String) -> Bool {
+    guard let directory = directory(forSessionNamed: name) else { return false }
+    return lines(
+      tailLines(ofLogAt: directory.appendingPathComponent("events.jsonl")),
+      containUserMessage: text)
+  }
+
+  /// The match itself, on lines already read — split out so a test can hand it fixture
+  /// records. The needle is matched in its *JSON-escaped* form as well as raw: the log
+  /// stores the message inside a JSON string, so a task containing quotes or a backslash
+  /// never appears verbatim, and a verifier matching only the raw text re-sent a pass
+  /// that had landed — the duplicate the verification exists to prevent.
+  static func lines(_ lines: [Substring], containUserMessage text: String) -> Bool {
+    var needles = [String(text.prefix(80))]
+    if let data = try? JSONSerialization.data(withJSONObject: [text]),
+      let encoded = String(data: data, encoding: .utf8), encoded.count > 4
+    {
+      needles.append(String(encoded.dropFirst(2).dropLast(2).prefix(80)))
+    }
+    return lines.contains { line in
+      line.contains("\"user.message\"") && needles.contains { line.contains($0) }
+    }
+  }
+
   /// What this node's Copilot session is doing, or `nil` when nothing says.
   ///
   /// Local only, deliberately. The remote twin of this would have to carry a JSON record
@@ -197,6 +226,115 @@ public enum CopilotSessionLog {
       let directory = directory(forSessionNamed: name)
     else { return nil }
     return lastActivity(inLogAt: directory.appendingPathComponent("events.jsonl"))
+  }
+
+  /// Every beat in an event log's tail, oldest first.
+  ///
+  /// Copilot's `assistant.message` is the narration — the sentence it writes alongside the
+  /// `toolRequests` it is about to make — and `user.message` is the pass boundary. Tool
+  /// calls come through `phrase(forTool:arguments:)` unchanged, which means a beat's
+  /// evidence prefers Copilot's own `description` exactly as the card's live line does.
+  public static func beats(inLogAt url: URL) -> [SummaryBeat] {
+    var builder = builder(inLogAt: url)
+    return builder.beats()
+  }
+
+  /// The same read, as the reading the store merges — see `ClaudeSessionLog.reading`.
+  static func reading(inLogAt url: URL, metricSamples: [MetricSample]) -> SummaryReading {
+    var builder = builder(inLogAt: url)
+    return SummaryBeatBuilder.reading(
+      from: builder.beats(), turns: builder.userTurns(), metricSamples: metricSamples)
+  }
+
+  private static func builder(inLogAt url: URL) -> SummaryBeatBuilder {
+    builder(forLines: SummaryBeatBuilder.tailLines(of: url))
+  }
+
+  /// The same read over lines from anywhere — see `ClaudeSessionLog.builder(forLines:)`.
+  static func builder(forLines lines: [Data]) -> SummaryBeatBuilder {
+    var builder = SummaryBeatBuilder()
+    for line in lines {
+      guard let object = try? JSONSerialization.jsonObject(with: line),
+        let event = object as? [String: Any],
+        let type = event["type"] as? String
+      else { continue }
+      let data = event["data"] as? [String: Any] ?? [:]
+      let at =
+        SummaryBeatBuilder.date(fromTimestamp: event["timestamp"] ?? data["timestamp"]) ?? Date()
+      switch type {
+      case "user.message":
+        builder.noteUserTurn(at: at)
+      case "assistant.message":
+        builder.noteNarration(data["content"] as? String ?? "", at: at)
+      case "tool.execution_start":
+        guard let name = data["toolName"] as? String,
+          let phrase = phrase(
+            forTool: name, arguments: data["arguments"] as? [String: Any] ?? [:])
+        else { continue }
+        builder.noteTool(phrase, at: at)
+      // Copilot marks its turn boundaries outright, which is why its presence reader was
+      // the one that never had to infer them.
+      case "assistant.turn_end":
+        builder.noteTurnEnd()
+      default:
+        continue
+      }
+    }
+    return builder
+  }
+
+  /// The remote script's half: the same directory walk `remotePresenceInvocation` does —
+  /// Copilot's session-state directories are named by uuid and identified by the `--name`
+  /// graphcode launched them with — then the event log inside it.
+  ///
+  /// The filter is a keep-list rather than a drop-list, because Copilot's event log is the
+  /// one that carries whole tool *outputs* in a record type of its own: four event types
+  /// make beats and the rest is bytes over a network for nothing.
+  static func remoteSummaryInvocation(
+    forNode node: LoopNode, at location: RemoteProjectLocation, since stamp: String?
+  ) -> [String] {
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    let find =
+      "F=''; for d in $(ls -t \"$HOME/.copilot/session-state/\" 2>/dev/null); do "
+      + "if grep -qx 'name: \(name)' \"$HOME/.copilot/session-state/$d/workspace.yaml\" 2>/dev/null; "
+      + "then F=\"$HOME/.copilot/session-state/$d/events.jsonl\"; break; fi; done"
+    let keep =
+      "grep -aE '\"type\":\"(user\\.message|assistant\\.message|tool\\.execution_start"
+      + "|assistant\\.turn_end)\"'"
+    let script = RemoteTranscriptProbe.script(
+      findingFileWith: find, filter: keep, since: stamp)
+    return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+  }
+
+  static func remoteSummary(
+    of node: LoopNode, at location: RemoteProjectLocation, metricSamples: [MetricSample]
+  ) async -> SummaryReading? {
+    let stamp = await TranscriptFreshness.shared.remoteStamp(forNode: node.id)
+    let reply = await RemoteTranscriptProbe.run(
+      remoteSummaryInvocation(forNode: node, at: location, since: stamp))
+    guard case .lines(let newStamp, let lines) = reply else { return nil }
+    await TranscriptFreshness.shared.recordRemoteStamp(newStamp, forNode: node.id)
+    var builder = builder(forLines: lines)
+    let reading = SummaryBeatBuilder.reading(
+      from: builder.beats(), turns: builder.userTurns(), metricSamples: metricSamples)
+    return reading.isEmpty ? nil : reading
+  }
+
+  /// What this node's Copilot session has been doing, or `nil` when nothing says. A remote
+  /// loop's log is fetched over the same multiplexed ssh connection its presence is —
+  /// see `RemoteTranscriptProbe`.
+  public static func summary(of node: LoopNode, projectPath: String? = nil) async
+    -> SummaryReading?
+  {
+    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+      return await remoteSummary(of: node, at: remote, metricSamples: node.metricHistory)
+    }
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    guard let directory = directory(forSessionNamed: name) else { return nil }
+    let log = directory.appendingPathComponent("events.jsonl")
+    guard await TranscriptFreshness.shared.hasChanged(log, forNode: node.id) else { return nil }
+    let reading = reading(inLogAt: log, metricSamples: node.metricHistory)
+    return reading.isEmpty ? nil : reading
   }
 
   /// The last event in a log that says anything about what the session is doing.
@@ -246,6 +384,36 @@ public enum CopilotSessionLog {
   }
 
   // MARK: - Remote
+
+  /// Banks a live remote Copilot session's resume ID into
+  /// `~/.graphcode/sessions/<node>.id` — the file every restorer already reads — from
+  /// the outside, because Copilot has no hooks to bank it itself the way Claude's
+  /// `SessionStart` does. Without this, a remote host reboot found nothing banked and
+  /// every Copilot loop restarted its goal from scratch (observed 2026-08-13, the
+  /// first dial-logged incident).
+  ///
+  /// The ID is the session-state directory's basename, found by the `--name` graphcode
+  /// launched the session with — the same directory walk `remotePresenceInvocation`
+  /// does, done here in the ensure's *alive* branch. The `[ -s ]` guard keeps the walk
+  /// off the healthy tick once banked: it runs once per session lifetime. History line
+  /// before pointer, same order and format as `PresenceHooks.captureSessionID`, and
+  /// the whole fragment is silenced and `|| true`d so a banking failure can never turn
+  /// an alive tick into the create branch.
+  public static func remoteIDBankFragment(forNodeID nodeID: UUID) -> String {
+    let name = SurfaceRef(id: nodeID, launchesClaudeCode: true).zmxSessionName
+    let sessions = PresenceHooks.remoteSessionsExpression
+    let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: nodeID)
+    let historyFile = "\(sessions)/\"\(nodeID.uuidString).history\""
+    let logged = DialLog.fragment(session: name, dial: "bank", event: "copilot-id")
+    return "{ [ -s \(idFile) ] || { gc_sid=''; "
+      + "for gc_d in $(ls -t \"$HOME/.copilot/session-state/\" 2>/dev/null); do "
+      + "if grep -qx 'name: \(name)' "
+      + "\"$HOME/.copilot/session-state/$gc_d/workspace.yaml\" 2>/dev/null; then "
+      + "gc_sid=\"$gc_d\"; break; fi; done; "
+      + "if [ -n \"$gc_sid\" ]; then mkdir -p \(sessions); "
+      + "printf '%s %s %s\\n' \"$(date +%s)\" \"$gc_sid\" \"$PWD\" >> \(historyFile); "
+      + "printf '%s' \"$gc_sid\" > \(idFile); \(logged); fi; }; } 2>/dev/null || true"
+  }
 
   static func remotePresenceInvocation(
     forNode node: LoopNode, at location: RemoteProjectLocation

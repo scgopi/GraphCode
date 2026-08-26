@@ -31,6 +31,14 @@ struct AppView: View {
       }
     }
     .onReceive(CanvasClock.tick) { now = $0 }
+    // The titlebar is hidden, but the title still names the window in Mission Control
+    // and the Window menu — which is where two workspaces on two screens are told apart.
+    .navigationTitle(windowTitle)
+  }
+
+  private var windowTitle: String {
+    let workspace = store.workspaces.current
+    return workspace.isDefault ? "GraphCode" : "GraphCode — \(workspace.name)"
   }
 
   private var split: some View {
@@ -144,6 +152,7 @@ struct AppView: View {
       JumpPaletteView(store: store)
     }
     .task { await store.send(.task).finish() }
+    .modifier(WorkspaceDialogs(store: store))
     .confirmationDialog(
       // Naming the loop matters here in a way it didn't on the canvas: from the sidebar
       // you may be several projects away from the thing you right-clicked.

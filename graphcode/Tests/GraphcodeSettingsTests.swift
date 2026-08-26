@@ -45,8 +45,8 @@ struct GraphcodeSettingsTests {
     #expect(settings.defaultBackend == .copilotCLI)
     #expect(settings.defaultModelTier == .capable)
     let draft = NodeDraft(
-      title: "Ship", loopType: .goalBased, backend: settings.defaultBackend,
-      modelTier: settings.defaultModelTier, goal: GoalSpec(summary: "Tests pass"))
+      title: "Ship", loopType: .goalBased, goal: GoalSpec(summary: "Tests pass"),
+      backend: settings.defaultBackend, modelTier: settings.defaultModelTier)
     #expect(draft.backend == .copilotCLI)
     #expect(draft.modelTier == .capable)
   }
@@ -105,6 +105,15 @@ struct GraphcodeSettingsTests {
       CLISessionBackendKind.copilotCLI.launchArguments(
         prompt: "go", tier: .standard, settings: loose
       ).contains("--yolo"))
+
+    // Autopilot rides on top of YOLO's permissions rather than replacing them (issue
+    // #86) — both flags have to reach the command line, and the default stays plain
+    // `--yolo`.
+    let autopilot = GraphcodeSettings(copilotPermissions: .yoloAutopilot)
+    let args = CLISessionBackendKind.copilotCLI.launchArguments(
+      prompt: "go", tier: .standard, settings: autopilot)
+    #expect(args.contains("--yolo") && args.contains("--autopilot"))
+    #expect(GraphcodeSettings().copilotPermissions == .allowEverything)
   }
 
   @Test
@@ -112,7 +121,7 @@ struct GraphcodeSettingsTests {
     // Codex was withheld while it had no adapter — making it the default would have set
     // every new loop to something that never starts. It has one now (issue #1).
     #expect(
-      CLISessionBackendKind.offerableAsDefault == [.claudeCode, .copilotCLI, .codex])
+      CLISessionBackendKind.offerableAsDefault == [.claudeCode, .copilotCLI, .codex, .openCode])
     #expect(GraphcodeSettings(defaultBackend: .codex).defaultBackend == .codex)
   }
 

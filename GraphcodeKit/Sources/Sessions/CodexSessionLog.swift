@@ -190,6 +190,125 @@ public enum CodexSessionLog {
     return nil
   }
 
+  /// Every beat in a rollout's tail, oldest first.
+  ///
+  /// Codex narrates in two places and both are used: `agent_reasoning` carries a bolded
+  /// header over a paragraph — the header *is* an intent beat, which is why
+  /// `SummaryBeatBuilder.condense` prefers it — and `agent_message` is what it says out
+  /// loud when it has something to report. `user_message` is the pass boundary.
+  ///
+  /// Tool calls come through `phrase(forRecord:)` unchanged, so a beat's evidence names
+  /// exactly what the card's live line would have.
+  public static func beats(inRolloutAt url: URL) -> [SummaryBeat] {
+    var builder = builder(inRolloutAt: url)
+    return builder.beats()
+  }
+
+  /// The same read, as the reading the store merges — see `ClaudeSessionLog.reading`.
+  static func reading(inRolloutAt url: URL, metricSamples: [MetricSample]) -> SummaryReading {
+    var builder = builder(inRolloutAt: url)
+    return SummaryBeatBuilder.reading(
+      from: builder.beats(), turns: builder.userTurns(), metricSamples: metricSamples)
+  }
+
+  private static func builder(inRolloutAt url: URL) -> SummaryBeatBuilder {
+    builder(forLines: SummaryBeatBuilder.tailLines(of: url))
+  }
+
+  /// The same read over lines from anywhere — see `ClaudeSessionLog.builder(forLines:)`.
+  static func builder(forLines lines: [Data]) -> SummaryBeatBuilder {
+    var builder = SummaryBeatBuilder()
+    for line in lines {
+      guard let object = try? JSONSerialization.jsonObject(with: line),
+        let record = object as? [String: Any],
+        let payload = record["payload"] as? [String: Any]
+      else { continue }
+      let at = SummaryBeatBuilder.date(fromTimestamp: record["timestamp"]) ?? Date()
+      switch record["type"] as? String {
+      case "event_msg":
+        switch payload["type"] as? String {
+        case "user_message":
+          builder.noteUserTurn(at: at)
+        case "agent_reasoning", "agent_message":
+          builder.noteNarration(payload["text"] as? String ?? "", at: at)
+        // Codex's own end-of-turn event, the one its `notify` hook fires on.
+        case "task_complete":
+          builder.noteTurnEnd()
+        default:
+          continue
+        }
+      case "response_item":
+        guard let phrase = phrase(forRecord: payload) else { continue }
+        builder.noteTool(phrase, at: at)
+      default:
+        continue
+      }
+    }
+    return builder
+  }
+
+  /// The remote script's half: the same match on the directory the session opened in that
+  /// `rollout(forWorkingDirectory:)` makes locally, expressed as a walk over the newest
+  /// rollouts. Codex has no `--name`, so the working directory is the only handle either
+  /// side has on which rollout is whose.
+  ///
+  /// Only the header of each candidate is read — `session_meta` is always the first line,
+  /// which is why the local reader reads 64 KB and stops.
+  static func remoteSummaryInvocation(
+    forNode node: LoopNode, at location: RemoteProjectLocation, workingDirectory: String,
+    since stamp: String?
+  ) -> [String] {
+    let quoted = RemoteProjectLocation.shellQuoted(workingDirectory)
+    let find =
+      "W=\(quoted); F=''; "
+      + "for f in $(ls -t \"$HOME\"/.codex/sessions/*/*/*/rollout-*.jsonl 2>/dev/null | head -40); do "
+      + "if head -c 65536 \"$f\" 2>/dev/null | grep -q \"\\\"cwd\\\":\\\"$W\\\"\"; then F=\"$f\"; break; fi; done"
+    let script = RemoteTranscriptProbe.script(
+      findingFileWith: find,
+      filter: "grep -avE '\"(function_call_output|custom_tool_call_output)\"'", since: stamp)
+    return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+  }
+
+  static func remoteSummary(
+    of node: LoopNode, at location: RemoteProjectLocation, workingDirectory: String,
+    metricSamples: [MetricSample]
+  ) async -> SummaryReading? {
+    let stamp = await TranscriptFreshness.shared.remoteStamp(forNode: node.id)
+    let reply = await RemoteTranscriptProbe.run(
+      remoteSummaryInvocation(
+        forNode: node, at: location, workingDirectory: workingDirectory, since: stamp))
+    guard case .lines(let newStamp, let lines) = reply else { return nil }
+    await TranscriptFreshness.shared.recordRemoteStamp(newStamp, forNode: node.id)
+    var builder = builder(forLines: lines)
+    let reading = SummaryBeatBuilder.reading(
+      from: builder.beats(), turns: builder.userTurns(), metricSamples: metricSamples)
+    return reading.isEmpty ? nil : reading
+  }
+
+  /// What this node's Codex session has been doing, or `nil` when nothing says. A remote
+  /// loop's rollout is fetched over the same multiplexed ssh connection every other
+  /// reading uses — see `RemoteTranscriptProbe`.
+  public static func summary(of node: LoopNode, projectPath: String? = nil) async
+    -> SummaryReading?
+  {
+    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+      // The node's own worktree if it has one, and otherwise the folder the project
+      // names on that host. `ZmxSessionLauncher.workingDirectory` is the local answer and
+      // cannot be used here: it checks the path exists, and a remote one never does.
+      let directory = node.worktreeBinding?.worktreePath ?? remote.remotePath
+      return await remoteSummary(
+        of: node, at: remote, workingDirectory: directory, metricSamples: node.metricHistory)
+    }
+    guard
+      let directory = ZmxSessionLauncher.workingDirectory(
+        forNode: node, projectPath: projectPath),
+      let rollout = rollout(forWorkingDirectory: directory),
+      await TranscriptFreshness.shared.hasChanged(rollout, forNode: node.id)
+    else { return nil }
+    let reading = reading(inRolloutAt: rollout, metricSamples: node.metricHistory)
+    return reading.isEmpty ? nil : reading
+  }
+
   /// What this node's Codex session is doing, or `nil` when nothing says.
   ///
   /// Local only, for the reason `CopilotSessionLog.activity` is: the rollout lives on

@@ -48,14 +48,23 @@ extension ProjectFeature.State {
       loopType: draftLoopType,
       checkDescription: draftLoopType == .turnBased ? draftCheck : nil,
       triggerPrompt: composedTriggerPrompt,
-      firstInstruction: draftLoopType == .turnBased ? draftFirstInstruction : nil,
+      heartbeatIntervalSeconds: draftLoopType == .timeBased && draftUsesHeartbeat
+        ? draftHeartbeatSeconds : nil,
+      firstInstruction: {
+        switch draftLoopType {
+        case .turnBased: return draftFirstInstruction
+        case .sketch: return draftSketchNote.isEmpty ? nil : draftSketchNote
+        case .goalBased, .timeBased, .composite: return nil
+        }
+      }(),
       pausesBeforeWritesOnly: draftLoopType == .turnBased && draftPausesBeforeWritesOnly,
       goal: draftLoopType == .goalBased
         ? GoalSpec(
           summary: draftGoal,
           predicate: draftPredicate.isEmpty ? nil : draftPredicate,
           metricCommand: draftMetric.isEmpty ? nil : draftMetric,
-          metricDirection: draftMetricDirection)
+          metricDirection: draftMetricDirection,
+          tokenBudget: parsedBudget)
         : nil,
       backend: draftBackend,
       modelTier: draftModelTier,
@@ -65,6 +74,15 @@ extension ProjectFeature.State {
         if case .existing(let ref) = draftWorktree { return ref }
         return nil
       }())
+  }
+
+  /// The budget field as a number, or nil — a blank field, a typo, or a zero all mean
+  /// "no budget", never a budget of garbage. Mirrors `GoalSpec.effectivePredicate`'s
+  /// reading of an all-whitespace field.
+  var parsedBudget: Int? {
+    guard let value = Int(draftBudget.trimmingCharacters(in: .whitespaces)), value > 0
+    else { return nil }
+    return value
   }
 
   /// What a timed loop's session actually opens with, composed rather than typed.
@@ -81,20 +99,96 @@ extension ProjectFeature.State {
     case .timeBased:
       let task = draftTimedTask.trimmingCharacters(in: .whitespaces)
       guard !task.isEmpty else { return nil }
+      // Heartbeat mode: the daemon holds the timer, so the prompt is the bare task —
+      // `LoopNode.sessionPrompt` wraps it in the who-holds-the-timer framing at
+      // launch. No /loop, and no "Stop after": a heartbeat loop runs until stopped.
+      if draftUsesHeartbeat { return task }
       var directive = "/loop \(draftInterval.directiveValue(custom: draftCustomInterval)) \(task)"
       let stop = draftStopAfter.trimmingCharacters(in: .whitespaces)
       if !stop.isEmpty { directive += " Stop after \(stop)." }
       return directive
     case .composite:
       return "Intended schedule: \(draftSchedule.summary(at: draftScheduleTime))"
-    case .goalBased, .turnBased:
+    case .sketch, .goalBased, .turnBased:
       return nil
     }
   }
 
   /// The mono line the dialog shows under the interval control, so what will be written
   /// is visible before it is written.
-  var triggerPreview: String { composedTriggerPrompt ?? "" }
+  var triggerPreview: String {
+    if draftLoopType == .timeBased, draftUsesHeartbeat,
+      !draftTimedTask.trimmingCharacters(in: .whitespaces).isEmpty
+    {
+      let interval = draftInterval.directiveValue(custom: draftCustomInterval)
+      return "[graphcode] heartbeat every \(interval) — the daemon holds the timer"
+    }
+    return composedTriggerPrompt ?? ""
+  }
+
+  /// The form's interval as the seconds `LoopNode.heartbeatIntervalSeconds` stores.
+  /// A custom value nobody can parse falls back to an hour, the same forgiveness
+  /// `IntervalChoice.directiveValue` shows a blank one — the /loop path hands garbage
+  /// to an agent that can interpret it, but a timer needs a number.
+  var draftHeartbeatSeconds: Double {
+    switch draftInterval {
+    case .quarterHour: return 900
+    case .hourly: return 3600
+    case .sixHourly: return 21600
+    case .daily: return 86400
+    case .custom:
+      return Self.seconds(fromInterval: draftCustomInterval) ?? 3600
+    }
+  }
+
+  /// "90s", "30m", "2h", "3d" — bare digits count as minutes, matching what people
+  /// type into the /loop field today.
+  static func seconds(fromInterval text: String) -> Double? {
+    let trimmed = text.trimmingCharacters(in: .whitespaces).lowercased()
+    guard !trimmed.isEmpty else { return nil }
+    let digits =
+      trimmed.hasSuffix("s") || trimmed.hasSuffix("m") || trimmed.hasSuffix("h")
+        || trimmed.hasSuffix("d") ? String(trimmed.dropLast()) : trimmed
+    guard let value = Double(digits), value > 0 else { return nil }
+    switch trimmed.last {
+    case "s": return value
+    case "h": return value * 3600
+    case "d": return value * 86400
+    default: return value * 60
+    }
+  }
+
+  /// What the promotion form currently means — nil while its one required field is
+  /// empty. Computed like `draft`, so there is exactly one definition of it.
+  ///
+  /// A timed promotion asks only for the cadence; the work it repeats is what the
+  /// session is already doing, seeded by the sketch's own note when there is one.
+  var promotion: SketchPromotion? {
+    switch promotionTarget {
+    case .goalBased:
+      let summary = promotionGoal.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !summary.isEmpty else { return nil }
+      return .goal(GoalSpec(summary: summary))
+    case .turnBased:
+      return .turn(pausesBeforeWritesOnly: promotionPausesBeforeWritesOnly)
+    case .timeBased:
+      let note =
+        nodePendingPromotion
+        .flatMap { graph.nodes[id: $0]?.firstInstruction }?
+        .trimmingCharacters(in: .whitespaces) ?? ""
+      let task = note.isEmpty ? "Carry on with what this session has been doing." : note
+      let cadence = promotionInterval.directiveValue(custom: promotionCustomInterval)
+      return .timed(triggerPrompt: "/loop \(cadence) \(task)")
+    case .sketch, .composite:
+      return nil
+    }
+  }
+
+  /// The composed `/loop` line the promotion form shows before it is written.
+  var promotionTriggerPreview: String {
+    guard promotionTarget == .timeBased, case .timed(let prompt)? = promotion else { return "" }
+    return prompt
+  }
 
   /// The `git worktree add` to run before creating the node, if the human asked for a
   /// new branch. The worktree lands next to the repository rather than inside it, so

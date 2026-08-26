@@ -2,6 +2,25 @@ import ComposableArchitecture
 import GraphcodeKit
 import SwiftUI
 
+/// A sketch's one field — the shortest form in the app. `⏎` on an untouched dialog is
+/// a valid, complete action; that is the point of the type. No done check, no cadence,
+/// no name field: the loop names itself from the first exchange, and the starting note
+/// seeds that name when there is one.
+struct SketchDraftFields: View {
+  @Bindable var store: StoreOf<ProjectFeature>
+
+  var body: some View {
+    DraftField(
+      label: "Starting note", qualifier: "optional — leave it blank and it opens quiet",
+      help: "No done check, no cadence — it works with you until you promote it or close it."
+    ) {
+      DraftProseField(
+        placeholder: "e.g. where does the usage cap get read from?",
+        text: $store.draftSketchNote)
+    }
+  }
+}
+
 /// A goal loop's fields: what done looks like, optionally how to check it, optionally
 /// how to score it.
 ///
@@ -34,23 +53,19 @@ struct GoalDraftFields: View {
 
       if store.isMetricExpanded {
         metricFields
-      } else {
-        Button {
-          store.isMetricExpanded = true
-        } label: {
-          Text("+ Track a progress metric")
-            .font(.system(size: 11.5))
-            .foregroundStyle(.white.opacity(0.6))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 8)
-            .padding(.horizontal, 9)
-            .overlay {
-              RoundedRectangle(cornerRadius: 8)
-                .stroke(
-                  .white.opacity(0.14), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-            }
+      }
+      if store.isBudgetExpanded {
+        budgetFields
+      }
+      if !store.isMetricExpanded || !store.isBudgetExpanded {
+        HStack(spacing: 8) {
+          if !store.isMetricExpanded {
+            expander("+ Track a progress metric") { store.isMetricExpanded = true }
+          }
+          if !store.isBudgetExpanded {
+            expander("+ Cap its token spend") { store.isBudgetExpanded = true }
+          }
         }
-        .buttonStyle(.plain)
       }
 
       DraftField(label: "Name", qualifier: "optional") {
@@ -58,6 +73,23 @@ struct GoalDraftFields: View {
           placeholder: "the loop names itself once it starts", text: $store.draftTitle)
       }
     }
+  }
+
+  private func expander(_ title: String, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+      Text(title)
+        .font(.system(size: 11.5))
+        .foregroundStyle(.white.opacity(0.6))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 8)
+        .padding(.horizontal, 9)
+        .overlay {
+          RoundedRectangle(cornerRadius: 8)
+            .stroke(
+              .white.opacity(0.14), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+        }
+    }
+    .buttonStyle(.plain)
   }
 
   private var metricFields: some View {
@@ -75,6 +107,16 @@ struct GoalDraftFields: View {
       }
       .pickerStyle(.segmented)
       .labelsHidden()
+    }
+  }
+
+  private var budgetFields: some View {
+    DraftField(
+      label: "Token budget", qualifier: "optional",
+      help: "Stopped once its backend reports this many tokens spent (input + output). "
+        + "Reported, never estimated — a backend that reports nothing is never stopped."
+    ) {
+      DraftTextField(placeholder: "200000", text: $store.draftBudget, isMono: true)
     }
   }
 
@@ -151,6 +193,22 @@ struct TimedDraftFields: View {
           text: $store.draftTimedTask)
       }
 
+      if SettingsModel.shared.settings.daemonHeartbeatEnabled {
+        DraftField(
+          label: "Driven by", qualifier: "experimental",
+          help: "Heartbeat (the default while the experiment is on): the daemon wakes "
+            + "the loop each interval and holds the timer; stopping the loop stops the "
+            + "timer. Pick /loop to have the loop schedule itself instead."
+        ) {
+          Picker("", selection: $store.draftUsesHeartbeat) {
+            Text("Itself, with /loop").tag(false)
+            Text("Daemon heartbeat").tag(true)
+          }
+          .pickerStyle(.segmented)
+          .labelsHidden()
+        }
+      }
+
       if !store.triggerPreview.isEmpty {
         HStack(spacing: 8) {
           Text("will run")
@@ -166,11 +224,13 @@ struct TimedDraftFields: View {
         .background(Theme.draftField, in: RoundedRectangle(cornerRadius: 8))
       }
 
-      DraftField(
-        label: "Stop after", qualifier: "optional",
-        help: "Left empty, it keeps running until you stop it."
-      ) {
-        DraftTextField(placeholder: "20 runs, or 3 days", text: $store.draftStopAfter)
+      if !store.draftUsesHeartbeat {
+        DraftField(
+          label: "Stop after", qualifier: "optional",
+          help: "Left empty, it keeps running until you stop it."
+        ) {
+          DraftTextField(placeholder: "20 runs, or 3 days", text: $store.draftStopAfter)
+        }
       }
 
       DraftField(label: "Name", qualifier: "optional") {
@@ -352,13 +412,22 @@ struct NodeDraftRecap: View {
 
   private var sentence: String {
     switch draft.loopType {
+    case .sketch:
+      return
+        "Opens a session\(location) and waits for you. Nothing is scheduled and nothing "
+        + "resolves on its own — it works with you until you promote it or close it."
     case .goalBased:
       let check =
         draft.goal?.effectivePredicate == nil
         ? "resolves when its session finishes"
         : "resolves itself when the done check passes"
-      return "Starts now\(location), works toward the goal, and \(check)."
+      let cap = draft.goal?.tokenBudget.map { " Stops if it spends more than \($0) tokens." } ?? ""
+      return "Starts now\(location), works toward the goal, and \(check).\(cap)"
     case .timeBased:
+      if draft.heartbeatIntervalSeconds != nil {
+        return "Starts now\(location); the daemon wakes it each interval until you "
+          + "stop it — stopping also stops the timer."
+      }
       return "Starts now\(location) and runs again on its own until you stop it."
     case .turnBased:
       return

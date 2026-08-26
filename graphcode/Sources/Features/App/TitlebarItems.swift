@@ -116,9 +116,14 @@ struct SidebarUpdateBanner: View {
       .padding(.vertical, 7)
       .padding(.horizontal, 10)
       .frame(maxWidth: .infinity, alignment: .leading)
-      .background(Self.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+      // Two layers, and the opaque one is load-bearing. A 12% tint over the sidebar's own
+      // translucency let whatever sat behind the window read straight through the banner,
+      // and 10.5pt secondary text over a moving background is text nobody can read. The
+      // tint keeps its accent; `surface` is what stops the room showing through it.
+      .background(Self.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 8))
+      .background(Self.surface, in: RoundedRectangle(cornerRadius: 8))
       .overlay {
-        RoundedRectangle(cornerRadius: 8).stroke(Self.accent.opacity(0.3), lineWidth: 1)
+        RoundedRectangle(cornerRadius: 8).stroke(Self.accent.opacity(0.45), lineWidth: 1)
       }
     }
     .buttonStyle(.plain)
@@ -126,6 +131,9 @@ struct SidebarUpdateBanner: View {
   }
 
   private static let accent = Color(red: 0.039, green: 0.518, blue: 1.0)  // #0A84FF
+  /// Fully opaque, and a shade lighter than the sidebar it sits on so the banner still
+  /// reads as a raised control rather than a painted-over rectangle.
+  private static let surface = Color(red: 0.145, green: 0.149, blue: 0.161)
 }
 
 /// The ⌘K affordance, in the titlebar where a search field belongs.

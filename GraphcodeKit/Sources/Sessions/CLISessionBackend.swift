@@ -63,6 +63,11 @@ public struct CLISessionBackend: Sendable {
   public var terminateResult: @Sendable (LoopNode, String?) async -> Result<Void, CLISessionError>
   public var exists: @Sendable (LoopNode, String?) async -> Bool
   public var enumerate: @Sendable () async -> [UUID]
+  /// The beats this session has narrated, or `nil` when the backend has no transcript to
+  /// read, the loop is remote, or the human hasn't switched the producer on. Folded into
+  /// `LoopNode.summary` by `GraphStore`, never written straight onto the node — see
+  /// `LoopSummary.merge` for why the store has the last word.
+  public var summary: @Sendable (LoopNode, String?) async -> SummaryReading?
 
   public init(
     kind: CLISessionBackendKind,
@@ -72,6 +77,7 @@ public struct CLISessionBackend: Sendable {
     presence: @escaping @Sendable (LoopNode, String?) async -> PresenceReading,
     usage: @escaping @Sendable (LoopNode, String?) async -> UsageSample?,
     activity: @escaping @Sendable (LoopNode, String?) async -> String? = { _, _ in nil },
+    summary: @escaping @Sendable (LoopNode, String?) async -> SummaryReading? = { _, _ in nil },
     startResult: (@Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>)? = nil,
     terminateResult: (@Sendable (LoopNode, String?) async -> Result<Void, CLISessionError>)? = nil,
     exists: (@Sendable (LoopNode, String?) async -> Bool)? = nil
@@ -94,6 +100,7 @@ public struct CLISessionBackend: Sendable {
     }
     self.exists = exists ?? { _, _ in false }
     self.enumerate = enumerate ?? { [] }
+    self.summary = summary
   }
 }
 
@@ -135,6 +142,10 @@ extension CLISessionBackend {
           return await CopilotSessionLog.presence(of: node, projectPath: projectPath)
         case .codex:
           return await ZmxSessionLauncher.codexPresence(of: node, projectPath: projectPath)
+        case .openCode:
+          // Its plugin writes the same labels Claude Code's hooks do, so the same reader
+          // serves both — see `OpenCodePresencePlugin`.
+          return await ZmxSessionLauncher.presence(of: node, projectPath: projectPath)
         }
       },
       usage: { node, projectPath in
@@ -152,7 +163,43 @@ extension CLISessionBackend {
           return await CopilotSessionLog.activity(of: node, projectPath: projectPath)
         case .codex:
           return await CodexSessionLog.activity(of: node, projectPath: projectPath)
+        case .openCode:
+          return await ZmxSessionLauncher.activity(of: node, projectPath: projectPath)
         }
+      },
+      // Every backend narrates before it acts, and all three write that narration to disk
+      // — so the summary rail costs three tail reads and no tokens. See
+      // `SummaryBeatBuilder` for why there is no model in this path.
+      //
+      // **Gated here rather than in `GraphStore`.** The setting is about whether graphcode
+      // watches a session this closely at all, which is a property of the reading, not of
+      // the graph; and keeping the store policy-free is what lets its tests inject a
+      // reader without a settings file on disk.
+      summary: { node, projectPath in
+        let settings = GraphcodeSettingsStore.load()
+        // An empty reading rather than `nil`: the store reads that as "this node carries
+        // no summary" and clears one it already has, which is what switching the
+        // experiment off has to mean. `nil` would leave the last beat on every card.
+        guard settings.summarisesLoops else { return SummaryReading(beats: []) }
+        let reading: SummaryReading?
+        switch kind {
+        case .claudeCode:
+          reading = await ClaudeSessionLog.summary(of: node, projectPath: projectPath)
+        case .copilotCLI:
+          reading = await CopilotSessionLog.summary(of: node, projectPath: projectPath)
+        case .codex:
+          reading = await CodexSessionLog.summary(of: node, projectPath: projectPath)
+        case .openCode:
+          // OpenCode keeps its transcript in SQLite rather than a file to tail; nothing
+          // narrates a beat yet, and a nil reading leaves the card without a rail rather
+          // than with one that guesses.
+          reading = nil
+        }
+        // The optional second pass, which is the only part of this that costs anything.
+        // Off, `applied` returns what it was given untouched.
+        guard let reading else { return nil }
+        return await SummaryModelWriter.applied(
+          to: reading, node: node, projectPath: projectPath, settings: settings)
       },
       startResult: { node, projectPath in
         await ZmxSessionLauncher.startResult(node, projectPath: projectPath)
@@ -239,6 +286,12 @@ extension CLISessionBackend {
   public static let readActivity: @Sendable (LoopNode, String?) async -> String? = {
     node, path in
     await backend(for: node).activity(node, path)
+  }
+
+  /// The summary-reading hook `GraphStore` is wired with.
+  public static let readSummary: @Sendable (LoopNode, String?) async -> SummaryReading? = {
+    node, path in
+    await backend(for: node).summary(node, path)
   }
 
   /// The presence-reading hook `GraphStore` is wired with. The last missing link in a

@@ -63,6 +63,16 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     nodes.contains { $0.id == nodeID || ($0.subGraph?.containsAtAnyDepth(nodeID) ?? false) }
   }
 
+  /// Every node in this graph and, recursively, inside any composite's sub-graph.
+  ///
+  /// The enumeration counterpart to `containsAtAnyDepth`, for teardown: a piloted
+  /// composite's workers have real sessions and memory of their own, so anything that
+  /// discards loops wholesale has to be able to visit them without knowing how deep
+  /// the nesting goes.
+  public var nodesAtAnyDepth: [LoopNode] {
+    nodes.flatMap { [$0] + ($0.subGraph?.nodesAtAnyDepth ?? []) }
+  }
+
   /// A structural copy with brand-new identities throughout — same loops, same wiring,
   /// nothing shared with the original.
   ///
@@ -163,9 +173,14 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   }
 
   /// Returned in `nodes` order, so the canvas's lines don't reshuffle between renders.
+  ///
+  /// Sketches are excluded before roots are picked: a sketch is not a graph beginning,
+  /// and a fresh one — edgeless by construction — would otherwise claim an entry port
+  /// the moment it was created.
   public var startAnchors: [UUID] {
     let targeted = Set(edges.map(\.to))
-    let entries = nodes.map(\.id).filter { !targeted.contains($0) }
+    let entries = nodes.filter { $0.loopType != .sketch }.map(\.id)
+      .filter { !targeted.contains($0) }
 
     var anchored = Set(entries)
     // Walk out from the entry points; whatever the walk never reaches is a cycle-only
@@ -178,7 +193,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
         frontier.append(edge.to)
       }
     }
-    for node in nodes where !reached.contains(node.id) {
+    for node in nodes where !reached.contains(node.id) && node.loopType != .sketch {
       anchored.insert(node.id)
       var frontier = [node.id]
       reached.insert(node.id)
@@ -190,6 +205,20 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
       }
     }
     return nodes.map(\.id).filter(anchored.contains)
+  }
+
+  /// The sidebar's top-level rows: `startAnchors`, then any sketch nothing points at.
+  ///
+  /// A sketch is deliberately never a canvas entry port — that is what `startAnchors`
+  /// excludes it for — but a row is not a port: a loop the sidebar cannot show is a
+  /// loop that effectively doesn't exist. Untargeted sketches append after the anchored
+  /// roots, the sidebar's echo of the canvas's "sketches sit below the lanes"; a sketch
+  /// something points at already lists as that node's child.
+  public var sidebarRoots: [UUID] {
+    let targeted = Set(edges.map(\.to))
+    let sketches = nodes.filter { $0.loopType == .sketch && !targeted.contains($0.id) }
+      .map(\.id)
+    return startAnchors + sketches
   }
 
   // MARK: - Coding

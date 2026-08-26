@@ -28,6 +28,19 @@ struct LoopWorkspaceFeature {
     /// `@State` because the *toggle* lives in the window toolbar, which `AppView` owns —
     /// and a control and the thing it controls cannot hold the answer separately.
     var isRailVisible = LoopWorkspaceRail.loadVisible()
+    /// How wide the rail is, after any drag on its edge. Persisted like its visibility:
+    /// someone who widened it to read beats did not mean only this session.
+    var railWidth = LoopWorkspaceRail.loadWidth()
+    /// Whether the summary section is collapsed to one line. Persisted beside the rail's
+    /// own visibility, and for the same reason: both are choices about how much of the
+    /// window a person wants back, and neither should have to be remade every launch.
+    var isSummaryFolded = LoopWorkspaceRail.loadSummaryFolded()
+    /// The newest beat that was on screen when this workspace was last left — what the
+    /// rail's `SINCE YOU LOOKED` hairline is drawn against.
+    ///
+    /// Per window rather than on the node: "since *you* looked" is a fact about a person
+    /// at a screen, and the daemon writing it would answer for every window at once.
+    var seenBeatID: String?
     var layout: TerminalLayout
     // The project folder every surface without its own worktree binding should open
     // in — a loop's shells shouldn't land in the app's own launch directory (usually
@@ -55,12 +68,29 @@ struct LoopWorkspaceFeature {
     case focusPreviousPane
     case paneClosed(tabID: UUID, surfaceID: UUID)
     case primarySurfaceExited(succeeded: Bool)
+    /// A keypress on the agent pane's "Process exited. Press any key to close." screen —
+    /// the human agreeing the loop is over. Declared here (the surface is this feature's
+    /// to wire) and handled by `AppFeature`, which owns both the workspace's dismissal
+    /// and the daemon connection the deletion goes out on.
+    case primaryExitAcknowledged
     /// The loop bar's Stop loop and Show in graph, and the right rail's downstream rows.
     /// All three are `AppFeature`'s to carry out — stopping talks to the daemon, and both
     /// of the others change what the whole window is showing — so they are declared here
     /// and handled up there, the way `.nodeTapped` already is.
     /// ⌥G, and the toolbar's trailing panel toggle.
     case railToggled
+    /// The rail's leading edge was dragged. Sent once, on release — a per-frame action
+    /// would put a reducer run and a `UserDefaults` write behind every pixel.
+    case railWidthChanged(CGFloat)
+    /// The summary section's header row.
+    case summaryFoldToggled
+    /// The amber block's `Answer it` — the question is in the terminal, so this is a
+    /// request for the keyboard to go there.
+    case summaryAnswerTapped
+    /// This workspace stopped being the one on screen. The moment everything it was
+    /// showing counts as seen — done on the way *out* so that coming back is what shows
+    /// the hairline, which is the whole point of it.
+    case workspaceLeft
     case stopLoopTapped
     case showInGraphTapped
     case railTargetTapped(UUID)
@@ -188,7 +218,34 @@ struct LoopWorkspaceFeature {
         LoopWorkspaceRail.saveVisible(state.isRailVisible)
         return .none
 
-      case .stopLoopTapped, .showInGraphTapped, .railTargetTapped:
+      case .railWidthChanged(let width):
+        state.railWidth = LoopWorkspaceRail.clamped(width)
+        LoopWorkspaceRail.saveWidth(state.railWidth)
+        return .none
+
+      case .summaryFoldToggled:
+        state.isSummaryFolded.toggle()
+        LoopWorkspaceRail.saveSummaryFolded(state.isSummaryFolded)
+        return .none
+
+      case .summaryAnswerTapped:
+        // The agent's own tab, and its own pane within it. A question was asked in that
+        // terminal and answering it means typing there — anything else would be a second
+        // place to answer from, which is the inbox the rail exists instead of.
+        guard
+          let tab = state.layout.tabs.first(where: {
+            $0.surfaces.contains(where: \.launchesClaudeCode)
+          })
+        else { return .none }
+        state.layout.selectedTabID = tab.id
+        guard let surface = tab.surfaces.first(where: \.launchesClaudeCode) else { return .none }
+        return .send(.paneFocused(tabID: tab.id, surfaceID: surface.id))
+
+      case .workspaceLeft:
+        state.seenBeatID = state.node.summary?.current?.id
+        return .none
+
+      case .stopLoopTapped, .showInGraphTapped, .railTargetTapped, .primaryExitAcknowledged:
         // Handled by `AppFeature`'s parent `Reduce` — see the actions' own doc comment.
         return .none
       }

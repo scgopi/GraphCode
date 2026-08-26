@@ -25,6 +25,14 @@ struct GraphcodeApp: App {
     unsetenv("ZMX_SESSION")
     AgentEnvironment.scrubInheritedAgentIdentity()
     SupportDirectory.prepare()
+    // Records this instance as the one holding this workspace, so opening the same
+    // workspace again raises this window instead of starting a second app over one set
+    // of graphs and `zmx` session names. Released on the way out; a crash leaves a pid
+    // nothing is running under, which reads the same as no claim at all.
+    WorkspaceLock.claim()
+    NotificationCenter.default.addObserver(
+      forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+    ) { _ in WorkspaceLock.release() }
     // A packaged app carries `graphcoded` and `zmx` inside it, so dragging it to
     // /Applications is the whole installation — this is what puts them in place and starts
     // the daemon. No-op for a build run from Xcode, which has no bundled helpers, so a
@@ -69,12 +77,28 @@ struct GraphcodeApp: App {
         Button("Check for Updates…") {
           Self.store.send(.checkForUpdatesTapped)
         }
-        .disabled(Self.store.isCheckingForUpdates || Self.store.updateInstallProgress != nil)
+        // Disabled outside the default workspace, the only one that updates the app —
+        // see `AppFeature.WorkspacesState.managesUpdates`.
+        .disabled(
+          !Self.store.workspaces.managesUpdates || Self.store.isCheckingForUpdates
+            || Self.store.updateInstallProgress != nil)
       }
-      CommandGroup(after: .help) {
+      // Replacing rather than appending: the default "GraphCode Help" item asks AppKit
+      // for a help book the app doesn't bundle, so it only ever showed "Help isn't
+      // available". The docs site is the help, and ⌘? goes there instead.
+      CommandGroup(replacing: .help) {
+        Link("GraphCode Help", destination: URL(string: "https://graphcode.app")!)
+          .keyboardShortcut("?", modifiers: .command)
+        Link(
+          "Keyboard Shortcuts",
+          destination: URL(string: "https://graphcode.app/shortcuts")!)
         Button("GraphCode Basics") {
           Self.store.send(.onboardingRequested)
         }
+        Divider()
+        Link(
+          "Report an Issue…",
+          destination: URL(string: "https://github.com/scgopi/GraphCode/issues/new")!)
       }
       // The Loop and Terminal menus. Every shortcut in them already worked as an
       // invisible zero-size button; a menu item is the half that tells anyone so.
@@ -86,5 +110,9 @@ struct GraphcodeApp: App {
     Settings {
       SettingsView()
     }
+    // Settings scenes default to `.contentSize`, which pins the window to its content
+    // and leaves it un-resizable. Min-size keeps the form's own minimum as the floor
+    // while letting anyone drag it larger.
+    .windowResizability(.contentMinSize)
   }
 }

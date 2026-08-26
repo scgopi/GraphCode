@@ -74,7 +74,17 @@ public final class PTYProcessSession: @unchecked Sendable {
     self.events = stream
     self.eventContinuation = continuation
 
-    try process.run()
+    do {
+      try process.run()
+    } catch {
+      // A launch that never happened still allocated a PTY pair, and the slave half is
+      // ours alone to close — leaving it open pins a `/dev/ttys*` for the lifetime of the
+      // process, which for `graphcoded` means until the machine reboots. `kern.tty.ptmx_max`
+      // is 511, so a caller whose launch reliably fails exhausts the host's PTYs outright.
+      close(slave)
+      continuation.finish()
+      throw error
+    }
     // The child has its own copy of the slave fd now; close ours so EOF on the
     // master side is detectable once the child exits.
     close(slave)

@@ -61,6 +61,10 @@ struct GhosttyTerminalView: NSViewRepresentable {
   var isVisible: Bool = true
   /// The user clicked into this surface. See `GhosttyTerminalNSView.onFocusRequested`.
   var onFocusRequested: (() -> Void)?
+  /// The user pressed a key on the "Process exited. Press any key to close." screen.
+  /// See `GhosttyTerminalNSView.onExitAcknowledged`. `nil` for a plain-shell pane, whose
+  /// exit closes the pane outright (`.paneClosed`) so the screen never lingers.
+  var onExitAcknowledged: (() -> Void)?
   let onProcessExited: (Bool) -> Void
 
   /// Carries `initialPrompt` into the shell as a variable instead of interpolating it
@@ -87,7 +91,8 @@ struct GhosttyTerminalView: NSViewRepresentable {
       return GhosttyTerminalNSView(
         command: command(briefingPath: briefingPath),
         workingDirectory: effectiveWorkingDirectory,
-        environment: sessionEnvironment(briefingPath: briefingPath))
+        environment: sessionEnvironment(
+          briefingPath: briefingPath, hooksFile: presenceHooksFile()))
     }
     apply(to: view)
     host.adopt(view)
@@ -113,6 +118,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
     view.isActive = isActive
     view.isVisible = isVisible
     view.onFocusRequested = onFocusRequested
+    view.onExitAcknowledged = onExitAcknowledged
     view.onProcessExited = onProcessExited
   }
 
@@ -152,6 +158,13 @@ struct GhosttyTerminalView: NSViewRepresentable {
   ) -> [String]? {
     guard var parts = launchPrefix(settings: settings) else { return nil }
     let prompt = initialPrompt == nil ? "" : "\"$\(Self.promptVariable)\""
+    // `/loop` lives behind Copilot's experimental flag, so a time-based node opened from
+    // here rather than by the daemon would arm nothing at all without it — the same
+    // parity this whole method exists for, since which path starts a session is a race.
+    let opening = initialPrompt ?? ""
+    if backend == .copilotCLI, SessionPrompt.mentionsRecurrence(opening) {
+      parts.append("--experimental")
+    }
     // Presence reporting, from the same place the daemon gets it (`PresenceHooks`). It
     // matters most here: a turn-based loop's session only ever starts from this view, so
     // without it the one loop type a human watches most closely would be the one that
@@ -181,15 +194,14 @@ struct GhosttyTerminalView: NSViewRepresentable {
     // here: this whole string is the remote zsh's `-c` script, and that shell's own
     // tilde expansion is the only thing that knows the remote home directory.
     if let briefingPath {
-      switch backend {
-      case .claudeCode:
+      if backend == .claudeCode {
         parts.append("--append-system-prompt-file \(briefingPath)")
-      case .copilotCLI, .codex:
+      } else if backend.briefingNeedsDirectoryGrant {
         parts.append("--add-dir \((briefingPath as NSString).deletingLastPathComponent)")
       }
     }
     if !prompt.isEmpty {
-      if backend == .copilotCLI { parts.append("--interactive") }
+      if let flag = backend.promptFlag { parts.append(flag) }
       parts.append(prompt)
     }
     return Self.interactiveLoginShell(parts)
@@ -255,17 +267,21 @@ struct GhosttyTerminalView: NSViewRepresentable {
     remoteLocation == nil ? workingDirectory : nil
   }
 
-  /// What rides into the session through the environment: the opening prompt, prefixed
-  /// for Copilot and Codex with the pointer at the briefing file. In the env var rather
+  /// What rides into the session through the environment: the opening prompt, carrying
+  /// for Copilot and Codex the pointer at the briefing file — on whichever side keeps a
+  /// leading `/loop` directive leading (`SessionPrompt`). In the env var rather
   /// than on the command line because the pointer is prose — inside `"$VAR"` it needs no
   /// quoting and cannot break the shell string the command is joined into. Claude's
   /// prompt stays untouched: its briefing arrives via `--append-system-prompt-file`.
-  func sessionEnvironment(briefingPath: String?) -> [String: String] {
-    guard var prompt = initialPrompt else { return [:] }
+  func sessionEnvironment(briefingPath: String?, hooksFile: URL? = nil) -> [String: String] {
+    var environment = backend.presenceEnvironment(hooksFile: hooksFile)
+    guard var prompt = initialPrompt else { return environment }
     if backend != .claudeCode, let briefingPath {
-      prompt = "\(SessionBriefing.pointer(toBriefingAt: briefingPath)) \(prompt)"
+      prompt = SessionPrompt.composed(
+        preamble: SessionBriefing.pointer(toBriefingAt: briefingPath), prompt: prompt)
     }
-    return [Self.promptVariable: prompt]
+    environment[Self.promptVariable] = prompt
+    return environment
   }
 
   private func command(briefingPath: String?) -> [String] {
@@ -289,7 +305,72 @@ struct GhosttyTerminalView: NSViewRepresentable {
     // `zmx attach <name>` with no trailing command spawns a login shell directly — no
     // wrapper needed for a plain-shell surface.
     var command = [ZmxLocator.binaryURL.path, "attach", sessionName]
-    if launchesClaudeCode { command += agentCommand }
+    guard launchesClaudeCode else { return command }
+    if let resuming = localResumeOrFreshCommand(agentLaunch: agentCommand) {
+      return resuming
+    }
+    command += agentCommand
     return command
+  }
+
+  /// Opening a loop whose session is gone used to start the agent **fresh**, prompt and
+  /// all, because this was the one launch path that could not resume — `agentCommand`
+  /// carries `sessionPrompt`, and only the daemon knew about `SessionIDStore`.
+  ///
+  /// That asymmetry cost a real conversation (2026-08-11). Something killed the zmx
+  /// server — an app update replaces the `zmx` binary and reloads the daemon — and with
+  /// no local liveness sweep nothing brought the sessions back. Opening the loops
+  /// created fresh sessions here, whose `SessionStart` hooks rebanked their IDs over the
+  /// ones holding days of work; the transcripts survived on disk with nothing pointing
+  /// at them. Every reboot afterwards faithfully resumed the near-empty replacements.
+  ///
+  /// So this path resumes too, and the two launchers now make the same choice from the
+  /// same banked ID. The check-then-launch is one `/bin/sh` script rather than an argv
+  /// because the decision has to be made *here*, on the machine, at the moment the pane
+  /// opens: whether a session exists, and whether the resume survived, are both facts
+  /// only the shell holding the terminal can see.
+  ///
+  /// Deliberately *not* consuming the ID up front, which is what the remote path does:
+  /// there, one restorer owns the loop, and here the daemon's ensure may be running the
+  /// same resume concurrently. Two consumers racing on one `rm` is how the loser falls
+  /// through to a fresh launch — the very failure this exists to end. It is dropped only
+  /// once a resume has been *seen* to fail, which is also the check the daemon makes.
+  ///
+  /// `nil` for a backend that cannot resume, or a node with nothing banked: both take
+  /// the ordinary fresh launch.
+  func localResumeOrFreshCommand(agentLaunch: [String]) -> [String]? {
+    let settings = GraphcodeSettingsStore.load()
+    guard let nodeID = SurfaceRef.nodeID(fromZmxSessionName: sessionName),
+      SessionIDStore.load(forNodeID: nodeID) != nil,
+      let resumeLaunch = resumeCommand(
+        settings: settings, hooksFile: presenceHooksFile(), remoteSettingsPath: nil)
+    else { return nil }
+    let zmx = ZmxLocator.binaryURL.path
+    let quoted = RemoteProjectLocation.shellQuoted
+    let idFile = quoted(SessionIDStore.file(forNodeID: nodeID).path)
+    let attach = ZmxSessionLauncher.quotedCommand([zmx, "attach", sessionName])
+    let resume = ZmxSessionLauncher.quotedCommand(
+      [zmx, "attach", sessionName] + resumeLaunch)
+    let fresh = ZmxSessionLauncher.quotedCommand([zmx, "attach", sessionName] + agentLaunch)
+    let exists = ZmxSessionLauncher.quotedCommand([zmx, "get", sessionName])
+    // A live session is joined as it always was — the resume argv would be ignored by
+    // `zmx attach` anyway, and building it costs a settings read nobody needs.
+    let idVariable = ZmxSessionLauncher.remoteResumeIDVariable
+    let settle = ZmxSessionLauncher.resumeSettleSeconds
+    let log = { (event: String) in
+      DialLog.fragment(session: self.sessionName, dial: "open", event: event) + "; "
+    }
+    let joined = "\(exists) >/dev/null 2>&1 && { \(log("attach-live"))exec \(attach); }; "
+    let read = "\(idVariable)=$(cat \(idFile) 2>/dev/null); "
+    let attempt =
+      "if [ -n \"$\(idVariable)\" ]; then export \(idVariable); \(log("resume"))"
+      + "gc_t0=$(date +%s); "
+      + resume + "; gc_rc=$?; "
+    let verdict =
+      "[ $(($(date +%s) - gc_t0)) -ge \(settle) ] && exit \"$gc_rc\"; rm -f \(idFile); "
+      + log("resume-dead")
+      + #"printf '\033[1;33m── Resume did not take; starting fresh. ──\033[0m\r\n'; fi; "#
+    let script = joined + read + attempt + verdict + log("fresh") + "exec \(fresh)"
+    return ["/bin/sh", "-c", script]
   }
 }

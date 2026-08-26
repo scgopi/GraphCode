@@ -23,6 +23,17 @@ public enum ShellPredicateEvaluator {
     await run(predicate)?.succeeded ?? false
   }
 
+  /// The `evaluate` answer with its evidence still attached: pass/fail plus the tail of
+  /// what the command printed, stderr included — a failing test suite says *why* on
+  /// stderr, and a nudge built from a silenced stream would relay nothing. `nil` when
+  /// the command couldn't be run at all, which callers must treat as "not yet", the
+  /// same rule `evaluate` holds.
+  public static let check: @Sendable (ShellPredicate) async -> PredicateOutcome? = { predicate in
+    guard let result = await run(predicate, mergeStderr: true) else { return nil }
+    let trimmed = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+    return PredicateOutcome(passed: result.succeeded, outputTail: String(trimmed.suffix(600)))
+  }
+
   /// Same mechanism, but the *output* is the answer rather than the exit status — a
   /// `.script` payload transform on an edge, where docs/08's "use scripts for
   /// deterministic work" means the script produces the hand-off content itself.
@@ -58,7 +69,9 @@ public enum ShellPredicateEvaluator {
   /// pipe output readable after exit, and nothing here needs a terminal — the command
   /// is a predicate or metric script, not an interactive session. The pipe also ends
   /// the PTY's `^D\b\b` prelude garbling single-line output.
-  private static func run(_ predicate: ShellPredicate) async -> (succeeded: Bool, output: String)? {
+  private static func run(
+    _ predicate: ShellPredicate, mergeStderr: Bool = false
+  ) async -> (succeeded: Bool, output: String)? {
     let trimmed = predicate.command.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return nil }
 
@@ -77,7 +90,7 @@ public enum ShellPredicateEvaluator {
 
     let stdout = Pipe()
     process.standardOutput = stdout
-    process.standardError = FileHandle.nullDevice
+    process.standardError = mergeStderr ? stdout as Any : FileHandle.nullDevice as Any
     process.standardInput = FileHandle.nullDevice
 
     // Reader and exit are joined by a group, not sequenced: reading after exit

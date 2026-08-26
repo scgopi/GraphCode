@@ -1,6 +1,7 @@
 import AppKit
 import Dependencies
 import Foundation
+import GraphcodeKit
 
 /// Downloads a release DMG, verifies what it carries, and swaps it into /Applications —
 /// the drag the browser flow asks the human to do, done by the app on its own behalf.
@@ -58,14 +59,89 @@ extension UpdateInstallClient: DependencyKey {
       try? await run("/usr/bin/hdiutil", ["detach", mountPoint.path, "-force"])
     },
     relaunch: {
-      // A detached shell outlives this process and reopens the app *after* it exits, so
-      // there is never a moment with two instances competing to be the zmx leader.
-      let reopen = Process()
-      reopen.executableURL = URL(fileURLWithPath: "/bin/sh")
-      reopen.arguments = ["-c", "sleep 1; /usr/bin/open \"\(installedApp.path)\""]
-      try? reopen.run()
+      // Started through LaunchServices rather than as a child of this process, and that
+      // is the whole point. A GUI app launched by LaunchServices runs inside its own
+      // RunningBoard job, and the processes it spawns belong to that job: when the app
+      // goes, they are killed with it. The relaunch used to be a `/bin/sh` child holding
+      // a `sleep` — exactly the thing that gets reaped — so the app quit and nothing came
+      // back. (It is why Sparkle ships a separate helper *app* for this rather than
+      // forking one.) LaunchServices spawns the successor under launchd instead, where
+      // this process dying cannot reach it.
+      //
+      // `createsNewApplicationInstance` because `open` semantics apply here too: without
+      // it a second workspace's window is merely activated and no new instance starts.
+      let configuration = NSWorkspace.OpenConfiguration()
+      configuration.createsNewApplicationInstance = true
+      configuration.activates = true
+      // The workspace this window belongs to, named rather than inherited — the default
+      // one is the absence of the variable, so it is set only for a named workspace,
+      // matching how `WorkspaceClient.open` starts one.
+      let workspace = Workspace.current
+      if !workspace.isDefault {
+        configuration.environment = [SupportDirectory.environmentKey: workspace.url.path]
+      }
+      // Dropped before the successor starts, not on the way out: `claim` declines while
+      // a live process still holds the file, so a successor that launches first would
+      // never record itself and the workspace would read as free with a window open on
+      // it. The `willTerminate` release still runs and is a no-op by then — it only
+      // deletes a claim that still names this process.
+      WorkspaceLock.release()
+      let launched = await withCheckedContinuation { continuation in
+        NSWorkspace.shared.openApplication(at: installedApp, configuration: configuration) {
+          application, _ in
+          continuation.resume(returning: application != nil)
+        }
+      }
+      // Only once the successor is actually running: terminating first would race the
+      // launch request against this process's own death.
+      if !launched {
+        // Nothing to lose by trying the old way if LaunchServices refused outright.
+        let reopen = Process()
+        reopen.executableURL = URL(fileURLWithPath: "/bin/sh")
+        reopen.arguments = [
+          "-c",
+          relaunchScript(
+            pid: ProcessInfo.processInfo.processIdentifier, appPath: installedApp.path,
+            workspace: workspace),
+        ]
+        try? reopen.run()
+      }
       await MainActor.run { NSApplication.shared.terminate(nil) }
     })
+
+  /// The fallback relauncher, for the case where LaunchServices refuses the open
+  /// outright: a detached shell that brings the app back once this process is gone.
+  ///
+  /// Second choice, not first — a child process is exactly what a terminating app's
+  /// RunningBoard job takes with it, which is the failure the LaunchServices path above
+  /// exists to avoid. Kept because a refused open leaves nothing else to try.
+  ///
+  /// Both halves are there for a failure the obvious one-liner had. `open` without `-n`
+  /// *activates* an instance that is already running rather than starting one (`man
+  /// open`), and after an install there is very often one: a second workspace the human
+  /// kept open with "Install Anyway", or this very process, still shutting down. Either
+  /// swallowed the relaunch — whatever window was alive came forward, the default
+  /// workspace never came back, and Relaunch Now read as a button that did nothing.
+  ///
+  /// And the wait was a flat `sleep 1`, which is a race against however long termination
+  /// actually takes rather than a wait for it. Polling the pid ends the moment the
+  /// process is gone and gives up after ten seconds, because a relaunch that never fires
+  /// is worse than one that fires a beat early.
+  ///
+  /// The workspace is named explicitly rather than left to whatever the launched app
+  /// inherits. Only the default workspace installs updates (`WorkspacesState
+  /// .managesUpdates`), so today this always resolves to `env -u` — but a relaunch that
+  /// silently depends on that gating is one edit away from reopening someone's named
+  /// workspace as the default one, which reads as the update having thrown their
+  /// projects away.
+  static func relaunchScript(pid: Int32, appPath: String, workspace: Workspace) -> String {
+    let key = SupportDirectory.environmentKey
+    let named = workspace.isDefault ? "" : " --env \"\(key)=\(workspace.url.path)\""
+    return """
+      for _ in $(seq 1 100); do kill -0 \(pid) 2>/dev/null || break; sleep 0.1; done
+      env -u \(key) /usr/bin/open -n\(named) "\(appPath)"
+      """
+  }
 
   /// Tests never touch the network or /Applications — override with a fixture.
   static let testValue = UpdateInstallClient(

@@ -1,0 +1,279 @@
+import Foundation
+import GraphcodeKit
+import Testing
+
+@testable import graphcode
+
+/// What the summary section says in each of the four states the design names, and what
+/// the card does with a beat.
+///
+/// Tested as a value rather than through the view, the way `LoopCardPresentationTests` is:
+/// the judgements here are which state wins, where the "since you looked" line falls, and
+/// whether the rail can appear empty. None of that needs pixels.
+@Suite
+struct LoopSummarySectionTests {
+  private func beat(
+    _ pass: Int, _ text: String, kind: BeatKind = .reading, at seconds: Int,
+    endsTurn: Bool = false
+  ) -> SummaryBeat {
+    SummaryBeat(
+      id: "p\(pass)-\(seconds)", at: Date(timeIntervalSince1970: Double(seconds)), pass: pass,
+      kind: kind, text: text, endsTurn: endsTurn)
+  }
+
+  private func node(
+    summary: LoopSummary?, state: LoopState = .running, presence: Presence? = .busy
+  ) -> LoopNode {
+    var node = LoopNode(title: "Usage", loopType: .goalBased, state: state)
+    node.summary = summary
+    if let presence {
+      node.presence = PresenceReading(presence: presence, confidence: .reported)
+    }
+    return node
+  }
+
+  private let now = Date(timeIntervalSince1970: 1000)
+
+  @Test
+  func aSessionThatHasNotSpokenYetIsHonestAboutIt() {
+    let presentation = LoopSummaryPresentation(node: node(summary: nil), now: now)
+
+    #expect(presentation.mode == .starting)
+    #expect(presentation.text == "Getting its bearings")
+    #expect(presentation.evidence == "first beat lands in a moment")
+  }
+
+  @Test
+  func theCurrentBeatIsTheOnlyThingAtFullSize() {
+    let summary = LoopSummary(beats: [
+      beat(7, "Traced totalTokens", at: 100),
+      beat(7, "Found the double count", kind: .found, at: 200),
+      beat(7, "Working out why cached tokens double-count", at: 940),
+    ])
+
+    let presentation = LoopSummaryPresentation(node: node(summary: summary), now: now)
+
+    #expect(presentation.mode == .working)
+    #expect(presentation.text == "Working out why cached tokens double-count")
+    #expect(presentation.elapsed == "1m")
+    // Chronological, oldest first — the rail reads in the same direction as the terminal
+    // beside it, with the newest at the foot. The current beat is not repeated among them.
+    #expect(presentation.receding.map(\.text) == ["Traced totalTokens", "Found the double count"])
+    #expect(presentation.pass == 7)
+  }
+
+  /// The one rule the rail must not break: attention has exactly one source of truth, and
+  /// it is not the summary.
+  @Test
+  func askingIsReadOffTheLoopsStateNotOffItsBeats() {
+    let summary = LoopSummary(beats: [beat(2, "Reading the probe", at: 900)])
+
+    let asking = LoopSummaryPresentation(
+      node: node(summary: summary, state: .awaitingInput), now: now)
+    #expect(asking.mode == .asking)
+    #expect(asking.kind == .asking)
+    // The beat is still the text — a question is just what the loop is doing now.
+    #expect(asking.text == "Reading the probe")
+
+    let working = LoopSummaryPresentation(node: node(summary: summary), now: now)
+    #expect(working.mode == .working)
+  }
+
+  /// The second fault reported from a live loop: `DOING NOW` over `THINKING`, on an agent
+  /// that had delivered its final output.
+  ///
+  /// Presence still said busy — it is a reading, and the hook behind it can be a poll
+  /// late or not have fired at all. The record the beat came from says the turn ended, and
+  /// that outranks it.
+  @Test
+  func aTurnTheTranscriptSaysIsOverIsNotStillHappening() {
+    let answered = LoopSummary(beats: [
+      beat(4, "Running the release build", at: 100),
+      beat(4, "Shipped. 0.1.37-beta1 is live", kind: .thinking, at: 900, endsTurn: true),
+    ])
+    // Presence is `.busy` on this node — the default in `node(…)` — and it loses.
+    let presentation = LoopSummaryPresentation(node: node(summary: answered), now: now)
+
+    #expect(presentation.mode == .working)
+    #expect(presentation.isLive == false)
+
+    // Mid-turn, with the same presence, it is live.
+    let working = LoopSummary(beats: [beat(4, "Running the release build", at: 900)])
+    #expect(LoopSummaryPresentation(node: node(summary: working), now: now).isLive == true)
+  }
+
+  /// Oldest at the top, so the newest finished pass sits against the divider for the pass
+  /// the loop is on — the direction the beats under it and the terminal beside it run.
+  @Test
+  func finishedPassesReadOldestFirst() {
+    let summary = LoopSummary(
+      beats: [beat(7, "Working on it", at: 900)],
+      passes: [
+        PassSummary(pass: 4, text: "four"), PassSummary(pass: 5, text: "five"),
+        PassSummary(pass: 6, text: "six"),
+      ], currentPass: 7)
+
+    let presentation = LoopSummaryPresentation(node: node(summary: summary), now: now)
+
+    #expect(presentation.passes.map(\.pass) == [4, 5, 6])
+    #expect(presentation.pass == 7)
+    // Six named passes is the cap, and everything before them is a number.
+    #expect(LoopSummary.maxPassSummaries == 6)
+    #expect(presentation.earlierPasses == 3)
+  }
+
+  /// The fault this caught in the field: an amber block and an `Answer it` button over a
+  /// loop that had asked nothing.
+  ///
+  /// `displayState` turns a *running* loop into `.awaitingInput` as soon as its session's
+  /// presence says so, and Claude Code reports that for any `Notification` — including
+  /// finishing a turn and sitting at an empty prompt. `LoopCardPresentation` has always
+  /// taken its word from `displayState` and its affordance from `state`; the rail must
+  /// make the same split or it offers an answer to a question nobody asked.
+  @Test
+  func aSessionQuietAtItsPromptIsNotAskingAnything() {
+    let summary = LoopSummary(beats: [beat(3, "Clean. Rebuilding Release", at: 900)])
+    let quiet = node(summary: summary, state: .running, presence: .awaitingInput)
+
+    // The graph's own state still says running, so nothing is being asked.
+    #expect(quiet.displayState == .awaitingInput)
+    #expect(LoopSummaryPresentation(node: quiet, now: now).mode == .working)
+    // And it is not live, so the section says LAST DID rather than claiming the present.
+    #expect(LoopSummaryPresentation(node: quiet, now: now).isLive == false)
+
+    // A loop the graph really has parked on a human still wears amber.
+    let asking = node(summary: summary, state: .awaitingInput, presence: .awaitingInput)
+    #expect(LoopSummaryPresentation(node: asking, now: now).mode == .asking)
+    // And the gutter the rail collapses to makes the same split, or hiding the rail would
+    // reintroduce the false alarm at 26 points wide.
+    #expect(SummaryGutter(node: quiet, now: now, onTapped: {}).label == "SUMMARY")
+    #expect(SummaryGutter(node: asking, now: now, onTapped: {}).label == "ASKS YOU")
+  }
+
+  @Test
+  func aResolvedLoopBecomesTheAccountOfItsRun() {
+    var resolved = node(
+      summary: LoopSummary(beats: [beat(7, "Cached reads no longer double-count", at: 900)]),
+      state: .succeeded, presence: nil)
+    resolved.metricHistory = (0..<7).map {
+      MetricSample(
+        value: 1400 - Double($0) * 50, recordedAt: Date(timeIntervalSince1970: Double($0)))
+    }
+
+    let presentation = LoopSummaryPresentation(node: resolved, now: now)
+
+    #expect(presentation.mode == .resolved)
+    #expect(presentation.kind == .done)
+    #expect(presentation.text == "Cached reads no longer double-count")
+    #expect(presentation.evidence?.hasPrefix("7 passes · 1.4k → 1.1k · ") == true)
+  }
+
+  @Test
+  func theHairlineFallsWhereTheWindowLastLeftOff() {
+    let summary = LoopSummary(beats: [
+      beat(7, "oldest", at: 100), beat(7, "middle", at: 200), beat(7, "newest", at: 300),
+    ])
+
+    // Left when "oldest" was current: the two after it are unseen.
+    let returning = LoopSummaryPresentation(
+      node: node(summary: summary), now: now, seenBeatID: "p7-100")
+    #expect(returning.unseen == 2)
+    // Only one of them is a *row*: "newest" is the block under them, not a row above it.
+    // Counting rows off `unseen` drew the hairline above "oldest" — the one beat the
+    // human had demonstrably read.
+    #expect(returning.unseenRows == 1)
+
+    // Back after only the current beat changed: no row is unseen, and the section puts
+    // the hairline at the foot rather than dropping it.
+    let justOne = LoopSummaryPresentation(
+      node: node(summary: summary), now: now, seenBeatID: "p7-200")
+    #expect(justOne.unseen == 1)
+    #expect(justOne.unseenRows == 0)
+
+    // Never left: no hairline at all rather than a section marked all-new.
+    let first = LoopSummaryPresentation(node: node(summary: summary), now: now)
+    #expect(first.unseen == 0)
+    #expect(first.unseenRows == 0)
+  }
+
+  /// The rail is draggable now that a beat is prose rather than a chip, and the stored
+  /// width has to survive both a hand that overshoots and a defaults file with nothing in
+  /// it — a rail 8 points wide is one nobody can get back.
+  @Test
+  func theRailsWidthIsBoundedWhateverItIsHanded() {
+    #expect(LoopWorkspaceRail.clamped(40) == LoopWorkspaceRail.minimumWidth)
+    #expect(LoopWorkspaceRail.clamped(4000) == LoopWorkspaceRail.maximumWidth)
+    #expect(LoopWorkspaceRail.clamped(300) == 300)
+    #expect(LoopWorkspaceRail.defaultWidth >= LoopWorkspaceRail.minimumWidth)
+    #expect(LoopWorkspaceRail.defaultWidth <= LoopWorkspaceRail.maximumWidth)
+  }
+
+  /// A rail must never render an empty section — the argument that already keeps blank
+  /// chrome out of the rail entirely.
+  @Test
+  func aLoopWithNothingToSayDrawsNoSection() {
+    #expect(
+      LoopSummaryPresentation.hasContent(node: node(summary: nil), producing: true) == false)
+    #expect(
+      LoopSummaryPresentation.hasContent(node: node(summary: LoopSummary()), producing: true)
+        == false)
+    #expect(
+      LoopSummaryPresentation.hasContent(
+        node: node(summary: LoopSummary(beats: [beat(1, "Reading", at: 1)])), producing: true)
+        == true)
+  }
+
+  /// Switching the producer off has to empty the rail *now*, not at the next poll.
+  ///
+  /// The daemon clears the node itself, and until that lands — or on a graph file written
+  /// by a build that cleared nothing — the beats are still there. A section drawn from
+  /// them is a reading from a feature the human has switched off, expanded or folded, and
+  /// the gutter that survives hiding the rail is drawn from the same answer.
+  @Test
+  func nothingIsDrawnFromBeatsLeftBehindByAProducerThatIsOff() {
+    let stale = node(summary: LoopSummary(beats: [beat(3, "Reading the probe", at: 1)]))
+
+    #expect(LoopSummaryPresentation.hasContent(node: stale, producing: false) == false)
+    #expect(
+      LoopWorkspaceRail.hasContent(
+        node: stale, graph: LoopGraph(scope: LoopGraphScope(projectPath: "/tmp/p", name: "p")),
+        summarising: false) == false)
+
+    // And the card goes back to the line it had before the experiment was ever switched on.
+    var card = stale
+    card.activity = "reading UsageProbe.swift"
+    #expect(
+      LoopCardPresentation(node: card, summarising: false).liveLine == "reading UsageProbe.swift")
+  }
+
+  // MARK: - The card
+
+  @Test
+  func theCardsLiveLinePrefersTheNewestBeat() {
+    var node = node(summary: LoopSummary(beats: [beat(7, "Working out the double count", at: 1)]))
+    node.activity = "reading UsageProbe.swift"
+    node.metricHistory = [
+      MetricSample(value: 1, recordedAt: Date()), MetricSample(value: 2, recordedAt: Date()),
+    ]
+
+    #expect(
+      LoopCardPresentation(node: node, summarising: true).liveLine
+        == "pass 2 · Working out the double count")
+  }
+
+  /// With the producer off there is no summary, and the card says exactly what it said
+  /// before this feature existed.
+  @Test
+  func theCardFallsBackWhenNothingIsSummarising() {
+    var node = node(summary: nil)
+    node.activity = "reading UsageProbe.swift"
+    #expect(LoopCardPresentation(node: node).liveLine == "reading UsageProbe.swift")
+
+    var handed = LoopNode(
+      title: "Usage", loopType: .goalBased,
+      goal: GoalSpec(summary: "tokens per request under 1.2k", metricCommand: "./m.sh"),
+      state: .running)
+    handed.summary = nil
+    #expect(LoopCardPresentation(node: handed).liveLine == "tokens per request under 1.2k")
+  }
+}

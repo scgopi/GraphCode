@@ -17,8 +17,43 @@ public enum SessionIDStore {
     SupportDirectory.url.appendingPathComponent("sessions", isDirectory: true)
   }
 
-  static func file(forNodeID nodeID: UUID) -> URL {
+  /// Public because the app's own launch path reads this file too — see
+  /// `GhosttyTerminalView.localResumeOrFreshCommand`, which resumes rather than
+  /// re-prompting when a loop is opened with its session gone.
+  public static func file(forNodeID nodeID: UUID) -> URL {
     directory.appendingPathComponent("\(nodeID.uuidString).id")
+  }
+
+  /// Every ID this node has ever banked, appended one line per session start as
+  /// `<epoch> <session-id> <cwd>`.
+  ///
+  /// The pointer is last-writer-wins by design — a new session for a node *is* the
+  /// node's session now. What that cannot survive is a session started against a
+  /// conversation the node had already moved on from: the pointer swings to a transcript
+  /// with nothing in it, and the one that holds the work is unreachable, with nothing on
+  /// disk recording that it ever existed. Recovering a real case of this (2026-08-11)
+  /// meant reading transcript sizes and birth times out of `~/.claude/projects` and
+  /// guessing — forensics, not a supported operation.
+  ///
+  /// Append-only and never read by the launcher: this exists so a human (or a repair
+  /// command) can see what the pointer used to be. Truncation is deliberately absent —
+  /// a line per session start is a handful of bytes a week.
+  public static func historyFile(forNodeID nodeID: UUID) -> URL {
+    directory.appendingPathComponent("\(nodeID.uuidString).history")
+  }
+
+  /// The IDs banked for this node, newest last, as `(sessionID, cwd)`. Empty when the
+  /// node predates the history or nothing was ever recorded.
+  public static func history(forNodeID nodeID: UUID) -> [(
+    sessionID: String, workingDirectory: String
+  )] {
+    guard let text = try? String(contentsOf: historyFile(forNodeID: nodeID), encoding: .utf8)
+    else { return [] }
+    return text.split(separator: "\n").compactMap { line in
+      let fields = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
+      guard fields.count >= 2 else { return nil }
+      return (String(fields[1]), fields.count > 2 ? String(fields[2]) : "")
+    }
   }
 
   public static func save(_ sessionID: String, forNodeID nodeID: UUID) {

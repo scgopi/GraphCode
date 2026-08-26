@@ -145,7 +145,7 @@ private actor AppDaemonConnection {
         Task {
           while token.value == nil { await Task.yield() }
           if let readerID = token.value {
-            await endReader(readerID)
+            await self.endReader(readerID)
           }
         }
       }
@@ -234,7 +234,10 @@ private actor AppDaemonConnection {
         // These are the public join commands used by app startup. Coalesce each with
         // reconnect rejoin so concurrent startup sends cannot duplicate a join.
         try await sendJoin(command, on: connection)
-      case .listRecentProjects:
+      case .listRecentProjects, .listQuickChats, .createQuickChat, .openQuickChat,
+        .renameQuickChat, .deleteQuickChat:
+        // Quick chats hang off no project, so they need no rejoin — the raw path is the
+        // same one `listRecentProjects` takes.
         try await sendRaw(command, on: connection)
       case .openProject, .closeProject, .forgetProject, .deleteProjectGraph, .graphCommand:
         try await ensureRejoined(connection)

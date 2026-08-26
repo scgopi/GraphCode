@@ -54,6 +54,12 @@ extension ProjectCanvasView {
   @ViewBuilder
   private func nodeMenu(for node: LoopNode) -> some View {
     Button("Open Terminal") { store.send(.nodeTapped(node.id)) }
+    // The + handle's verb, findable where every other loop verb lives. Hidden on a
+    // resolved loop: its hand-off edges have already fired, so a child created now
+    // would wait on a parent that can never release it.
+    if !node.isResolved {
+      Button("New Child Loop…") { store.send(.newChildLoopTapped(node.id)) }
+    }
     if node.loopType == .composite {
       // First, because it is the step everything else depends on: a composite with
       // nothing inside can be piloted and armed and still do nothing at all.
@@ -64,6 +70,23 @@ extension ProjectCanvasView {
       Button("Arm Schedule") { store.send(.armCompositeTapped(node.id)) }
         .disabled(!node.pilotState.canArm)
     }
+    if node.loopType == .sketch {
+      // The reason the type is worth having: a sketch that turned out to matter keeps
+      // its session and gains a shape — each target asks for exactly one thing.
+      Menu("Promote to…") {
+        Section("Keep the session, add a shape") {
+          Button("Goal — asks for a done check") {
+            store.send(.promoteNodeRequested(node.id, to: .goalBased))
+          }
+          Button("Turn — asks where to pause") {
+            store.send(.promoteNodeRequested(node.id, to: .turnBased))
+          }
+          Button("Timed — asks for a cadence") {
+            store.send(.promoteNodeRequested(node.id, to: .timeBased))
+          }
+        }
+      }
+    }
     // Available on a resolved loop too: a finished loop is still something you read the
     // graph by, and its name is what you read.
     Button("Rename…") { store.send(.renameNodeRequested(node.id)) }
@@ -71,6 +94,16 @@ extension ProjectCanvasView {
       Button("Stop Loop") { store.send(.stopNodeTapped(node.id)) }
     }
     Divider()
+    // Export packages this loop and everything descended from it — child loops,
+    // sub-loops, session memory — into a zip another graph can import; Import splices
+    // a bundle's loops in underneath this one. See `GraphExportBundle`. Behind the
+    // experiments switch: a right-click verb that writes files and splices loops into
+    // graphs is one a person should choose, not find.
+    if SettingsModel.shared.settings.sharesLoops {
+      Button("Export Loop…") { store.send(.exportNodeRequested(node.id)) }
+      Button("Import Loops Here…") { store.send(.importLoopsRequested(asChildOf: node.id)) }
+      Divider()
+    }
     Button("Delete Loop…", role: .destructive) {
       store.send(.deleteNodeRequested(node.id))
     }

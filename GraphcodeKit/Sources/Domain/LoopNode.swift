@@ -30,6 +30,14 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// fires headlessly. It also means cron and self-pacing work without graphcode
   /// modelling either, and nothing here inspects or validates the prompt.
   public var triggerPrompt: String?
+  /// `.timeBased`, experimental: the daemon drives this loop instead — a `[graphcode]`
+  /// heartbeat typed into its session every interval (`GraphStore.deliverHeartbeat`),
+  /// active only while `GraphcodeSettings.daemonHeartbeatEnabled` is on. When set,
+  /// `triggerPrompt` is the bare task with no `/loop` directive: exactly one of the two
+  /// cadence models drives a given loop, never both. `nil` — every loop that predates
+  /// the experiment, and every loop whose author didn't opt in — means the prompt owns
+  /// the cadence as it always has.
+  public var heartbeatIntervalSeconds: Double?
   /// `.turnBased`: what the session is actually asked to do.
   ///
   /// Without this the type had no task field at all — a turn-based session opened
@@ -75,6 +83,17 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// line then says what the loop was *handed* instead. That fallback is honest and is
   /// what shipped before this field existed.
   public var activity: String?
+  /// The loop's narration — what it has been trying to do, in beats, bounded.
+  ///
+  /// `activity` is one phrase about one tool call and is replaced every time the call
+  /// changes; this is the story around it, and the two are read off different halves of
+  /// the same session. Kept on the node rather than in a side store because it is exactly
+  /// as small as `metricHistory` (three beats and three pass lines, by construction — see
+  /// `LoopSummary`) and every surface that wants it already has a node.
+  ///
+  /// `nil` until the summary producer is switched on in Settings, which is where it stays
+  /// for anyone who never turns the experiment on.
+  public var summary: LoopSummary?
   /// What the session is doing right now, as last read off its own label store
   /// (`PresenceHooks` writes it, `ZmxSessionLauncher.presence` reads it).
   ///
@@ -113,6 +132,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     loopType: LoopType = .turnBased,
     checkDescription: String? = nil,
     triggerPrompt: String? = nil,
+    heartbeatIntervalSeconds: Double? = nil,
     firstInstruction: String? = nil,
     pausesBeforeWritesOnly: Bool = false,
     goal: GoalSpec? = nil,
@@ -123,6 +143,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     pilotState: PilotState = .notPiloted,
     usage: UsageSample? = nil,
     activity: String? = nil,
+    summary: LoopSummary? = nil,
     presence: PresenceReading? = nil,
     metricHistory: [MetricSample] = [],
     createdBy: UUID? = nil,
@@ -134,6 +155,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.loopType = loopType
     self.checkDescription = checkDescription
     self.triggerPrompt = triggerPrompt
+    self.heartbeatIntervalSeconds = heartbeatIntervalSeconds
     self.firstInstruction = firstInstruction
     self.pausesBeforeWritesOnly = pausesBeforeWritesOnly
     self.goal = goal
@@ -144,6 +166,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.pilotState = pilotState
     self.usage = usage
     self.activity = activity
+    self.summary = summary
     self.presence = presence
     self.metricHistory = metricHistory
     self.createdBy = createdBy
@@ -170,7 +193,34 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// sequence, so a person opening it is what should begin it.
   public var sessionPrompt: String? {
     switch loopType {
-    case .timeBased: return triggerPrompt
+    case .sketch:
+      // The starting note, when there is one. A blank note means the session opens
+      // quiet and waits — asking nothing up front is what the type is for.
+      let note = firstInstruction?.trimmingCharacters(in: .whitespaces) ?? ""
+      return note.isEmpty ? nil : note
+    case .timeBased:
+      // Copilot's `/every` submits its first prompt only after the interval elapses, so
+      // a directive-led opening armed correctly and then sat idle — and the typed
+      // first-pass workaround raced the composer. The reliable channel is the opening
+      // prompt itself, so for Copilot it carries both halves as prose: run the task
+      // now, then arm your own `/every`. The session still owns the cadence; graphcode
+      // holds no timer. Other backends keep the directive verbatim — Claude Code's
+      // `/loop` runs its first iteration itself.
+      if backend == .copilotCLI, heartbeatIntervalSeconds == nil, let prompt = triggerPrompt,
+        let recurrence = SessionPrompt.recurrence(of: prompt)
+      {
+        return "Run this task now: \(recurrence.task) Then schedule it to repeat with: "
+          + "/every \(recurrence.interval) \(recurrence.task)"
+      }
+      guard let interval = heartbeatIntervalSeconds, interval > 0, let task = triggerPrompt
+      else { return triggerPrompt }
+      // The heartbeat counterpart of the /loop directive: the session is told who
+      // holds the timer, so it neither schedules its own cadence (double-driving)
+      // nor exits believing one pass was the whole job.
+      return "Every \(Int(interval))s you will receive a [graphcode] heartbeat message. "
+        + "Each one is your cue to run one pass of this task, then wait for the next: "
+        + "\(task) Do not schedule your own /loop, wakeup, or cron for it — the "
+        + "orchestrator holds the timer. Stay in the session between heartbeats."
     case .goalBased: return goal?.sessionPrompt
     case .turnBased:
       return Self.turnBasedPrompt(
@@ -242,6 +292,16 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// downstream edges are waiting on. This is the presentation of that fact, not a
   /// revision of it.
   ///
+  /// Whether the last presence reading says a session actually exists to attach to.
+  /// `nil` and `.unknown` count as no: opening is what could *start* a session, and a
+  /// gate deciding whether that's safe must not treat "don't know" as "yes".
+  public var presenceShowsLiveSession: Bool {
+    switch presence?.presence {
+    case .busy, .idle, .awaitingInput: return true
+    case .absent, .unknown, nil: return false
+    }
+  }
+
   /// A backend that reports nothing leaves `presence` nil and this returns `state`
   /// untouched, which is exactly the behaviour every surface had before presence existed.
   public var displayState: LoopState {
@@ -273,6 +333,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     case id, title, loopType, checkDescription, triggerPrompt, goal, backend, modelTier
     case worktreeBinding, subGraph, pilotState, usage, metricHistory, createdBy
     case state, createdAt, activity, presence, firstInstruction, pausesBeforeWritesOnly
+    case summary, heartbeatIntervalSeconds
   }
 
   /// Hand-written for the same reason `LoopEdge`'s is: `ProjectPersistence.loadGraph`
@@ -285,6 +346,8 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     loopType = try container.decodeIfPresent(LoopType.self, forKey: .loopType) ?? .turnBased
     checkDescription = try container.decodeIfPresent(String.self, forKey: .checkDescription)
     triggerPrompt = try container.decodeIfPresent(String.self, forKey: .triggerPrompt)
+    heartbeatIntervalSeconds =
+      try container.decodeIfPresent(Double.self, forKey: .heartbeatIntervalSeconds)
     firstInstruction = try container.decodeIfPresent(String.self, forKey: .firstInstruction)
     // Absent from graphs saved before the field existed. Those loops paused after every
     // turn, which is what `false` says.
@@ -299,6 +362,10 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     pilotState = try container.decodeIfPresent(PilotState.self, forKey: .pilotState) ?? .notPiloted
     usage = try container.decodeIfPresent(UsageSample.self, forKey: .usage)
     activity = try container.decodeIfPresent(String.self, forKey: .activity)
+    // Unlike `presence` and `activity`, this survives a reload: pass summaries are the
+    // account of a run, and a resolved loop's is the thing worth reading after the fact.
+    // It is bounded by construction, so a graph file cannot grow on it.
+    summary = try container.decodeIfPresent(LoopSummary.self, forKey: .summary)
     presence = try container.decodeIfPresent(PresenceReading.self, forKey: .presence)
     metricHistory =
       try container.decodeIfPresent([MetricSample].self, forKey: .metricHistory) ?? []

@@ -13,10 +13,11 @@ import Testing
 @Suite
 struct OnboardingViewTests {
   @Test
-  func thereAreStillFourPages() {
-    // The edge lesson folded into the types page to make room for "How to read a loop".
-    // A fifth page is a different tour; a third is a page silently lost in a merge.
-    #expect(OnboardingView.pageCount == 4)
+  func thereAreStillFivePages() {
+    // Four until workspaces landed, which added "One window per line of work" ahead of
+    // the agent page. A sixth is a different tour; a fourth is a page silently lost in
+    // a merge.
+    #expect(OnboardingView.pageCount == 5)
   }
 
   @Test

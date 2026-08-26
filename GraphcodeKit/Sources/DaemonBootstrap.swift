@@ -14,18 +14,26 @@ import Foundation
 ///
 /// Re-runs only when the bundled binaries differ from what's installed, tracked by a stamp
 /// file. That makes app updates carry daemon updates without a reinstall, and makes
-/// ordinary launches cost one small file read.
+/// ordinary launches cost one small file read — plus one `launchctl print`, because a
+/// launch also has to answer the question no file on disk can: whether the daemon the
+/// stamp vouches for is actually loaded.
 public enum DaemonBootstrap {
   public enum Outcome: Equatable {
     /// Not a packaged build, so there was nothing to install.
     case notPackaged
     /// Already installed and current.
     case upToDate
+    /// Installed and current on disk, but launchd had lost the agent; it was loaded again.
+    case reloaded
     case installed
     case failed(String)
   }
 
-  private static let label = "dev.graphcode.graphcoded"
+  /// One agent per workspace, so that opening a second one installs a daemon of its own
+  /// instead of rewriting the first's. The default workspace keeps the bare label it has
+  /// always had — an existing install must not see its agent renamed.
+  static var label: String { Workspace.current.daemonLabel }
+  private static let appBundleIdentifier = "dev.graphcode.app"
   /// `graphcode` here is the CLI, not the app — a different product that happens to share
   /// the name a human types. Shipping it matters: `~/.graphcode/bin` is what the README
   /// tells people to put on their PATH, and without this a drag-to-Applications install
@@ -75,16 +83,41 @@ public enum DaemonBootstrap {
     }
   }
 
+  /// The bundle's helper stamp when it no longer matches the one this workspace
+  /// installed from it — a bundle replaced underneath a running app, which is what a
+  /// `brew upgrade`, a DMG dragged over /Applications, or an install whose relaunch was
+  /// declined all leave behind. `nil` when they agree, or when there is nothing packaged
+  /// to compare.
+  ///
+  /// Deliberately only the three `stat`s the stamp is made of: no launchctl probe, no
+  /// copy, no daemon reload. This is asked every time a window comes forward, and none of
+  /// `installIfNeeded`'s work is work to repeat on activation — nor would it be *correct*
+  /// there. Installing the new helpers under an app whose own code was swapped on disk
+  /// leaves a new daemon serving an old window, which is a worse pairing than the stale
+  /// one it replaced. The answer belongs to the human as a relaunch prompt; the relaunch
+  /// is what runs the bootstrap, on both halves at once.
+  public static func changedBundleStamp() -> String? {
+    guard let bundled = bundledHelperDirectory() else { return nil }
+    let expected = stamp(forHelpersIn: bundled)
+    guard !expected.isEmpty else { return nil }
+    let installed = try? String(contentsOf: stampURL, encoding: .utf8)
+    return expected == installed ? nil : expected
+  }
+
   @discardableResult
   public static func installIfNeeded() -> Outcome {
     guard let bundled = bundledHelperDirectory() else { return .notPackaged }
 
     let expected = stamp(forHelpersIn: bundled)
     let current = try? String(contentsOf: stampURL, encoding: .utf8)
-    if current == expected, FileManager.default.fileExists(atPath: launchAgentURL.path),
-      helpersInstalled()
-    {
-      return .upToDate
+    if current == expected, helpersInstalled(), launchAgentIsCurrent() {
+      // Everything a file can record is right. The one thing no file records is whether
+      // launchd still has the agent, and it routinely does not: an agent loaded the
+      // legacy way is not re-bootstrapped into the next login session, so a reboot or a
+      // logout leaves a correct install with no daemon behind it and nothing to say so.
+      if daemonIsLoaded() { return .upToDate }
+      reloadDaemon()
+      return .reloaded
     }
 
     do {
@@ -153,54 +186,137 @@ public enum DaemonBootstrap {
     removexattr(url.path, "com.apple.quarantine", 0)
   }
 
-  static var launchAgentURL: URL {
+  static var launchAgentURL: URL { launchAgentURL(forLabel: label) }
+
+  static func launchAgentURL(forLabel label: String) -> URL {
     URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
       .appendingPathComponent("Library/LaunchAgents/\(label).plist")
   }
 
+  /// Takes a workspace's daemon out of launchd and removes its agent — the first step of
+  /// deleting a workspace, and the one that cannot be skipped: the agent is `KeepAlive`,
+  /// so a daemon left loaded over a deleted directory is restarted by launchd and
+  /// recreates it.
+  ///
+  /// Refuses the default workspace outright. There is no path through the UI that asks
+  /// for this, and the cost of being wrong is an install whose daemon is gone.
+  public static func removeLaunchAgent(for workspace: Workspace) {
+    guard !workspace.isDefault else { return }
+    let url = launchAgentURL(forLabel: workspace.daemonLabel)
+    launchctl(["bootout", "\(domainTarget)/\(workspace.daemonLabel)"])
+    // The legacy pair as well, for an agent loaded by a build old enough to have used it.
+    launchctl(["unload", url.path])
+    try? FileManager.default.removeItem(at: url)
+  }
+
   /// Built here rather than shipped as a template file: the two paths it needs are already
   /// known at runtime, and a template would be one more thing to keep in sync.
+  ///
+  /// `workspace` decides both the label and whether the daemon is told where to look.
+  /// launchd starts an agent with its own minimal environment, so a named workspace's
+  /// daemon inherits nothing from the app that installed it and would compute
+  /// `~/.graphcode` — serving the default workspace's graphs under the second
+  /// workspace's label. The default workspace passes no `EnvironmentVariables` at all,
+  /// which keeps its plist byte-for-byte what it has always been: anything else and
+  /// `launchAgentIsCurrent` would report every existing install as stale and bounce a
+  /// daemon that was running perfectly well.
   static func launchAgentPlist(
-    daemonPath: String, supportDirectory: String
+    daemonPath: String, supportDirectory: String, workspace: Workspace = .current
   ) -> [String: Any] {
-    [
-      "Label": label,
+    var plist: [String: Any] = [
+      "Label": workspace.daemonLabel,
       "ProgramArguments": [daemonPath],
       "RunAtLoad": true,
       "KeepAlive": true,
       "StandardOutPath": "\(supportDirectory)/graphcoded.log",
       "StandardErrorPath": "\(supportDirectory)/graphcoded.err.log",
+      // `graphcoded` is a bare signed executable, not a bundle, so it carries no name of
+      // its own. Without this key macOS has nothing to call the agent and falls back to
+      // the only name it can read — the one on the signing certificate — which is how
+      // Login Items and the "can run in the background" notification came to announce a
+      // stranger's personal name to every user. `launchd.plist(5)` names this key as
+      // exactly what an app installing a legacy plist should set.
+      "AssociatedBundleIdentifiers": [appBundleIdentifier],
     ]
+    if !workspace.isDefault {
+      plist["EnvironmentVariables"] = [SupportDirectory.environmentKey: supportDirectory]
+    }
+    return plist
+  }
+
+  static func currentLaunchAgentPlist() -> [String: Any] {
+    launchAgentPlist(
+      daemonPath: SupportDirectory.binDirectory.appendingPathComponent("graphcoded").path,
+      supportDirectory: SupportDirectory.url.path)
+  }
+
+  /// Whether the installed agent is the one this build would write.
+  ///
+  /// The check this replaced only asked whether the file existed, which meant a change to
+  /// the agent itself reached a machine solely as a side effect of its helper binaries
+  /// changing in the same release. Comparing the content makes an agent-only fix — the
+  /// naming key above — land on the next launch, and does the same for the next one.
+  static func launchAgentIsCurrent(
+    at url: URL = launchAgentURL, expected: [String: Any] = currentLaunchAgentPlist()
+  ) -> Bool {
+    guard let data = try? Data(contentsOf: url),
+      let installed = try? PropertyListSerialization.propertyList(from: data, format: nil)
+        as? [String: Any]
+    else { return false }
+    return NSDictionary(dictionary: installed).isEqual(to: expected)
   }
 
   private static func writeLaunchAgent() throws {
     let url = launchAgentURL
     try FileManager.default.createDirectory(
       at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    let plist = launchAgentPlist(
-      daemonPath: SupportDirectory.binDirectory.appendingPathComponent("graphcoded").path,
-      supportDirectory: SupportDirectory.url.path)
     let data = try PropertyListSerialization.data(
-      fromPropertyList: plist, format: .xml, options: 0)
+      fromPropertyList: currentLaunchAgentPlist(), format: .xml, options: 0)
     try data.write(to: url, options: .atomic)
   }
 
-  /// Unload then load. The unload is what makes an app update actually take: without it,
-  /// launchd keeps running the daemon binary it already started, and the freshly installed
-  /// one never gets used.
+  static var domainTarget: String { "gui/\(getuid())" }
+  static var serviceTarget: String { "\(domainTarget)/\(label)" }
+
+  /// Whether launchd currently holds the agent in this login session.
+  ///
+  /// Asking the plist, the helpers or the stamp cannot answer this — all three describe
+  /// the disk, and the disk stays perfectly correct while the daemon is gone. `print`
+  /// exits non-zero with "Could not find service" when the label is absent from the
+  /// domain, which is the only durable signal there is.
+  static func daemonIsLoaded(probe: ([String]) -> Int32 = launchctlStatus) -> Bool {
+    probe(["print", serviceTarget]) == 0
+  }
+
+  /// Bootout then bootstrap. The teardown is what makes an app update actually take:
+  /// without it, launchd keeps running the daemon binary it already started, and the
+  /// freshly installed one never gets used.
+  ///
+  /// `bootstrap`/`bootout` rather than `load`/`unload` because the legacy pair registers
+  /// the agent only for the session it is run in — the reason a reboot could strand a
+  /// healthy install without a daemon. The legacy pair stays as a fallback for the case
+  /// where the modern one is refused.
   private static func reloadDaemon() {
-    launchctl(["unload", launchAgentURL.path])
-    launchctl(["load", launchAgentURL.path])
+    launchctl(["bootout", serviceTarget])
+    if launchctlStatus(["bootstrap", domainTarget, launchAgentURL.path]) != 0 {
+      launchctl(["unload", launchAgentURL.path])
+      launchctl(["load", launchAgentURL.path])
+    }
   }
 
   private static func launchctl(_ arguments: [String]) {
+    _ = launchctlStatus(arguments)
+  }
+
+  static func launchctlStatus(_ arguments: [String]) -> Int32 {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
     process.arguments = arguments
     process.standardOutput = FileHandle.nullDevice
     process.standardError = FileHandle.nullDevice
-    try? process.run()
+    do { try process.run() } catch { return -1 }
     process.waitUntilExit()
+    return process.terminationStatus
   }
 }
 

@@ -246,7 +246,8 @@ struct MessageAndSpawnTests {
     let sender = await store.graph.nodes[0]
     let target = await store.graph.nodes[1]
 
-    await store.handle(.messageNode(target.id, text: "the API changed", from: sender.id))
+    await store.handle(
+      .messageNode(target.id, text: "the API changed", from: sender.id, followUp: nil))
 
     #expect(delivered.value.count == 1)
     #expect(delivered.value[0].nodeTitle == "Review")
@@ -259,7 +260,7 @@ struct MessageAndSpawnTests {
     let store = await messagePair(targetState: .running, delivered: delivered)
     let target = await store.graph.nodes[1]
 
-    await store.handle(.messageNode(target.id, text: "wrap it up", from: nil))
+    await store.handle(.messageNode(target.id, text: "wrap it up", from: nil, followUp: nil))
 
     #expect(delivered.value == [Delivery(nodeTitle: "Review", text: "[graphcode] wrap it up")])
   }
@@ -272,7 +273,7 @@ struct MessageAndSpawnTests {
     let store = await messagePair(targetState: .awaitingInput, delivered: delivered)
     let target = await store.graph.nodes[1]
 
-    await store.handle(.messageNode(target.id, text: "hello?", from: nil))
+    await store.handle(.messageNode(target.id, text: "hello?", from: nil, followUp: nil))
 
     #expect(delivered.value.isEmpty)
   }
@@ -283,7 +284,7 @@ struct MessageAndSpawnTests {
     let store = await messagePair(targetState: .running, delivered: delivered)
     let target = await store.graph.nodes[1]
 
-    await store.handle(.messageNode(target.id, text: "   ", from: nil))
+    await store.handle(.messageNode(target.id, text: "   ", from: nil, followUp: nil))
 
     #expect(delivered.value.isEmpty)
   }

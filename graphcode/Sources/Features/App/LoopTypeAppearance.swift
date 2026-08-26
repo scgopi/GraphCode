@@ -7,26 +7,40 @@ import SwiftUI
 /// `LoopState.presenceColor` does: `GraphcodeKit` is linked into the plain `graphcoded`
 /// daemon and stays free of SwiftUI.
 ///
-/// **Colour is never the only signal.** Every card already spells the type out, and the
-/// glyph below is a second non-colour channel. That matters here: four hues that stay
-/// mutually distinguishable under *every* kind of colour blindness don't exist within one
-/// lightness band — validated, not assumed, and the run is recorded below — so the
-/// palette is only legitimate alongside the label and glyph that travel with it.
+/// **Colour is not always backed by a second signal.** A card spells the type out in its
+/// meta row, but a sidebar row carries only the stripe — so on that surface the hue is
+/// the whole channel. That matters here: four hues that stay mutually distinguishable
+/// under *every* kind of colour blindness don't exist within one lightness band —
+/// validated, not assumed, and the run is recorded below.
 ///
 /// The hues are the data-viz reference palette's dark-surface steps. Against this app's
 /// canvas they pass the lightness band, the chroma floor, adjacent-pair CVD separation
 /// (worst ΔE 8.4, protan), the normal-vision floor (worst ΔE 19.3), and 3:1 contrast.
 /// Under all-pairs rather than adjacent, magenta and aqua collapse for deuteranopes
-/// (ΔE 1.6) — which is exactly what the label and glyph are for.
+/// (ΔE 1.6) — which is what the card's label is for, and why the sidebar leans on
+/// `Main` being the one kind that is legible by lightness alone.
 ///
 /// Blue and orange are deliberately absent. Both are spoken for elsewhere on the same
 /// card and would say two things at once: blue is a running loop's presence dot, orange
 /// is "needs attention" on the border and the attention label.
 extension LoopType {
-  /// The kind's colour. Used for the card's edge stripe and its glyph — never for text,
-  /// which keeps its own ink so the colour beside it is what carries identity.
+  /// The kind's colour. Used for the card's edge stripe and entry port, the sidebar
+  /// row's stripe, and the card's glow — never for text, which keeps its own ink so the
+  /// colour beside it is what carries identity.
   var accent: Color {
     switch self {
+    // Still the colourless slot — the four committed types keep the saturated ones — but
+    // the brightest value in the palette rather than the dimmest. It used to be a mid
+    // grey chosen to read as *provisional*, which stopped being true when the type
+    // became Main: this is where work starts, not a half-finished poke.
+    //
+    // Lightness is what carries it. At L* 86.8 it sits clear above the four hues' band
+    // (L* 53.6–61.0), where the old grey sat *inside* it at L* 55.8 — worst-case CVD
+    // separation goes from ΔE 9.1 to 20.6, and contrast against the card from 3.8:1 to
+    // 9.9:1. Achromatic-against-chromatic is the one distinction no dichromacy erodes,
+    // which is what the sidebar's colour-only row needs. Kept off pure white so the
+    // card's own title still outranks its chrome.
+    case .sketch: Color(red: 0.827, green: 0.855, blue: 0.890)  // near-white  #d3dae3
     case .goalBased: Color(red: 0.098, green: 0.620, blue: 0.439)  // aqua  #199e70
     case .timeBased: Color(red: 0.788, green: 0.522, blue: 0.000)  // yellow #c98500
     case .turnBased: Color(red: 0.835, green: 0.318, blue: 0.506)  // magenta #d55181
@@ -46,6 +60,7 @@ extension LoopType {
   /// app admitting it had two vocabularies.
   var displayName: String {
     switch self {
+    case .sketch: "Main"
     case .goalBased: "Goal"
     case .timeBased: "Timed"
     case .turnBased: "Turn"
@@ -53,11 +68,19 @@ extension LoopType {
     }
   }
 
-  /// A glyph that says what the kind *does*, so the distinction survives without colour:
-  /// a goal-based loop runs at a target, a time-based one at a clock, a turn-based one
-  /// waits for a person, and a composite one is a stack of loops rather than a session.
+  /// A glyph that says what the kind *does*: a goal-based loop runs at a target, a
+  /// time-based one at a clock, a turn-based one waits for a person, and a composite one
+  /// is a stack of loops rather than a session. Main is the exception — nothing is added
+  /// to it, so it gets the house rather than a mechanism it doesn't have.
+  ///
+  /// Nothing reads this today. The card dropped the glyph channel when it went state-first
+  /// (`LoopCardView`) and the sidebar row draws a stripe, so both are down to colour plus,
+  /// on the card only, the label. Kept because the set is still the right answer if a
+  /// surface ever wants a second channel back — but it is not one now, and `accent` is
+  /// sized on the assumption that it isn't.
   var glyph: String {
     switch self {
+    case .sketch: "house"
     case .goalBased: "target"
     case .timeBased: "clock"
     case .turnBased: "person"

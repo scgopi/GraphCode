@@ -6,8 +6,12 @@ description: Every keyboard shortcut and mouse trick in GraphCode — the graph,
 # Keyboard shortcuts
 
 Everything here is also in the menu bar — **Loop** and **Terminal** are the two menus
-that appear once a workspace is open, and macOS draws each key beside its item. This
+that appear once a loop is open, and macOS draws each key beside its item. This
 page is the same information in one place.
+
+Two things in GraphCode are called a workspace, and this page keeps them apart. A
+**workspace** is a separate set of projects and loops in a window of its own. A loop's
+**terminal workspace** is the tabs and splits inside one loop.
 
 ## The graph
 
@@ -15,6 +19,7 @@ page is the same information in one place.
 |---|---|
 | ⌘K | Jump to any loop by name, across every open project. ↑/↓ to choose, ⏎ to open |
 | ⌘⇧R | Review what needs you — works the attention queue oldest-first, from anywhere |
+| ⌥⌘← / ⌥⌘→ | Back / forward through the loops you have opened, in the order you opened them |
 | ⌘⇧] / ⌘⇧[ | Next / previous loop, in sidebar order across projects |
 | ⌥G | Show or hide the loop panel — the downstream rail with the one-hop minimap and metric sparkline |
 | ⌘= / ⌘− | Zoom the canvas in / out |
@@ -23,14 +28,46 @@ page is the same information in one place.
 | ⌘O | Open a project folder (from the Welcome window) |
 | ⌘, | Settings |
 
+The two pairs answer different questions. ⌘⇧] / ⌘⇧[ walk the sidebar — what sits
+*beside* the loop you are on. ⌥⌘← / ⌥⌘→ walk your own trail: open A, then P in another
+project, then Q, and Back retraces Q → P → A regardless of where those loops live.
+Opening a loop after going back discards the forward trail, the way a browser does.
+Quick Chats count as places you have been. The trail survives quitting the app.
+
+## Workspaces
+
+A workspace is a separate set of projects and loops, in a window of its own — for keeping
+unrelated lines of work apart. Nothing is shared between them, and each gets its own Dock
+tile, so one can sit on a second screen. **File ▸ Workspace** lists them. (For the tabs
+and splits *inside* a loop, see [Terminals](#terminals).)
+
+The list is in the order the workspaces were created — Default first, then each one
+behind it — and both the numbers and ⌘` walk it. Creating a workspace only ever adds to
+the end, so ⌥⌘3 stays the workspace it was yesterday; renaming one leaves it where it
+is too.
+
+| Shortcut | Does |
+|---|---|
+| ⌥⌘1 … ⌥⌘9 | Switch to that workspace. Raises its window, or opens it if it isn't running |
+| ⌘` | Next workspace, wrapping round at the end |
+| ⌘⇧` | Previous workspace |
+| ⌥⌘N | New workspace — name it and it opens straight away |
+
+**Rename Workspace** and **Delete Workspace** are in the same menu. A rename moves the
+workspace's folder and everything in it; a delete ends that workspace's terminal sessions,
+stops its daemon, and moves its folder to the Trash. Neither is offered for the default
+workspace or for the one you are in, and a workspace open in another window has to be
+closed first.
+
 ## Terminals
 
-Inside a loop's workspace, the panes are real terminals — these act on them:
+A loop's **terminal workspace** is the pane area you get when you open it — real
+terminals, in tabs and splits. These act on them:
 
 | Shortcut | Does |
 |---|---|
 | ⌘T | New tab |
-| ⌘W | Close tab (a workspace always keeps its last one) |
+| ⌘W | Close tab (a loop always keeps its last one) |
 | ⌘1 … ⌘9 | Select that tab |
 | ⌘→ / ⌘← | Next / previous tab |
 | ⌘D | Split the pane right |

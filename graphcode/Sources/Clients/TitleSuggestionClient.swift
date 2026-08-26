@@ -2,16 +2,20 @@ import Dependencies
 import Foundation
 import GraphcodeKit
 
-/// Asks a loop's own backend for a one-word title when the human left the form's title
-/// blank — `claude -p` / `copilot -p` / `codex exec`, the headless print-mode shape of
-/// each CLI, so nothing here opens a session or touches the loop's actual work.
+/// Asks a loop's own backend for a one-or-two-word title when the human left the form's
+/// title blank — `claude -p` / `copilot -p` / `codex exec`, the headless print-mode
+/// shape of each CLI, so nothing here opens a session or touches the loop's actual work.
 ///
 /// Fire-and-forget by design: the node is already created as "New Loop" by the time this
 /// runs, and a `renameNode` follows only if an answer arrives. A backend that is slow,
 /// missing, or confused costs nothing but the fallback name staying.
 struct TitleSuggestionClient: Sendable {
-  /// A short title for `prompt`, or `nil` when the backend can't produce one.
-  var suggest: @Sendable (_ backend: CLISessionBackendKind, _ prompt: String) async -> String?
+  /// A short title for `prompt` that is not in `taken` — every node name the app knows
+  /// across every open project (`LoopTitleDirectory`) — or `nil` when the backend can't
+  /// produce one.
+  var suggest:
+    @Sendable (_ backend: CLISessionBackendKind, _ prompt: String, _ taken: Set<String>)
+      async -> String?
 }
 
 extension TitleSuggestionClient: DependencyKey {
@@ -25,18 +29,48 @@ extension TitleSuggestionClient: DependencyKey {
   /// prompt containing quotes, `$`, or backticks can't break out of the command.
   private static let promptVariable = "GRAPHCODE_TITLE_PROMPT"
 
-  static let liveValue = TitleSuggestionClient { backend, prompt in
+  static let liveValue = TitleSuggestionClient { backend, prompt, taken in
     guard let invocation = invocation(for: backend) else { return nil }
-    let instruction = """
-      Reply with a single word (no punctuation, no quotes) that names this task, \
-      and nothing else: \(prompt)
-      """
-    let output = await run(invocation, environment: [promptVariable: instruction])
-    return output.flatMap(sanitize)
+    let output = await run(
+      invocation, environment: [promptVariable: instruction(for: prompt, taken: taken)])
+    return output.flatMap { accept($0, taken: taken) }
   }
 
   /// Reducer tests have no CLI to call and should not discover that by hanging.
-  static let testValue = TitleSuggestionClient { _, _ in nil }
+  static let testValue = TitleSuggestionClient { _, _, _ in nil }
+
+  /// Bounds how many taken names ride into the instruction. Any graph that outgrows it
+  /// still gets the hard guarantee from `accept`; the instruction just stops naming
+  /// every single one.
+  private static let takenNamesListed = 100
+
+  /// As precise as possible, preferring two words — a single word is allowed when it
+  /// alone names the task, never more than two — and none of the names any canvas
+  /// already shows. The model is told, and `accept` enforces what telling cannot
+  /// guarantee.
+  static func instruction(for prompt: String, taken: Set<String>) -> String {
+    var instruction = """
+      Reply with the most precise name you can for this task. Prefer two words; use \
+      a single word only when it alone names the task precisely. Never more than two \
+      words, no punctuation, no quotes — and nothing else.
+      """
+    let listed = taken.sorted().prefix(takenNamesListed)
+    if !listed.isEmpty {
+      instruction += " These names are already taken; do not reuse any of them: "
+      instruction += listed.joined(separator: ", ") + "."
+    }
+    return instruction + " The task: \(prompt)"
+  }
+
+  /// `sanitize`, then the guarantee the instruction alone cannot make: a name some
+  /// canvas already shows is refused outright — case-insensitively, since two loops
+  /// named "Deploy" and "deploy" are the same collision to a human — and the fallback
+  /// name stays.
+  static func accept(_ output: String, taken: Set<String>) -> String? {
+    guard let name = sanitize(output) else { return nil }
+    let collides = taken.contains { $0.caseInsensitiveCompare(name) == .orderedSame }
+    return collides ? nil : name
+  }
 
   /// The headless print-mode invocation for each backend — the shape that answers on
   /// stdout and exits, as opposed to the interactive sessions loops actually run in
@@ -51,6 +85,7 @@ extension TitleSuggestionClient: DependencyKey {
     case .claudeCode: command = "exec claude -p \"$\(promptVariable)\""
     case .copilotCLI: command = "exec copilot -p \"$\(promptVariable)\""
     case .codex: command = "exec codex exec \"$\(promptVariable)\""
+    case .openCode: command = "exec opencode run \"$\(promptVariable)\""
     }
     return ["/bin/zsh", "-i", "-l", "-c", command]
   }
@@ -102,19 +137,23 @@ extension TitleSuggestionClient: DependencyKey {
     return String(data: data, encoding: .utf8)
   }
 
-  /// One clean word out of whatever the model printed. `codex exec` wraps its answer in
-  /// log lines, and any model can get chatty — the *last* non-empty line is the answer
-  /// far more reliably than the first, and one token of it is all that was asked for.
-  private static func sanitize(_ output: String) -> String? {
+  /// One clean name — at most two words — out of whatever the model printed. `codex
+  /// exec` wraps its answer in log lines, and any model can get chatty — the *last*
+  /// non-empty line is the answer far more reliably than the first, and two tokens of
+  /// it are all that was asked for.
+  static func sanitize(_ output: String) -> String? {
     let lastLine =
       output
       .components(separatedBy: .newlines)
       .map { $0.trimmingCharacters(in: .whitespaces) }
       .last { !$0.isEmpty }
-    guard let word = lastLine?.split(separator: " ").first else { return nil }
-    let cleaned = word.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-    guard !cleaned.isEmpty, cleaned.count <= 30 else { return nil }
-    return cleaned
+    let words = (lastLine ?? "").split(separator: " ").prefix(2)
+      .map { $0.trimmingCharacters(in: CharacterSet.alphanumerics.inverted) }
+      .filter { !$0.isEmpty }
+    guard !words.isEmpty else { return nil }
+    let name = words.joined(separator: " ")
+    guard name.count <= 30 else { return nil }
+    return name
   }
 }
 

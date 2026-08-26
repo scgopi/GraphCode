@@ -30,6 +30,19 @@ func fail(_ message: String, code: Int32 = ExitCode.usage) -> Never {
   exit(code)
 }
 
+/// Export/import can be switched off; the CLI honours the same switch the app's menus
+/// do (`GraphcodeSettings.sharesLoops`), read from the same file, so a script can't
+/// reach a surface the Settings screen says doesn't exist.
+func requireLoopSharing() {
+  guard !GraphcodeSettingsStore.load().sharesLoops else { return }
+  fail(
+    """
+    export/import is switched off on this machine. Turn on "Export and import loops" \
+    in GraphCode's Settings, or set "sharesLoops": true in \
+    \(GraphcodeSettingsStore.url.path).
+    """)
+}
+
 let command: GraphcodeCommand
 do {
   command = try GraphcodeCommand.parse(Array(CommandLine.arguments.dropFirst()))
@@ -42,6 +55,13 @@ do {
 if case .help = command {
   print(GraphcodeCommand.helpText)
   exit(0)
+}
+
+// Before dialling the daemon: a refusal on policy has nothing to ask a daemon about,
+// and should read the same whether or not one is running.
+switch command {
+case .exportNode, .exportGraph, .importNodes: requireLoopSharing()
+default: break
 }
 
 let client: DaemonSocketClient
@@ -148,7 +168,7 @@ do {
       projectPath: projectPath,
       [.graphCommand(projectPath: projectPath, command: .deleteNode(nodeID))])
 
-  case .sendMessage(let projectPath, let nodeID, let text):
+  case .sendMessage(let projectPath, let nodeID, let text, let followUp):
     // Attributed the same way `node create` attributes `createdBy`: run from inside a
     // loop, ZMX_SESSION names the sender, and the target sees who's talking.
     let sender = SurfaceRef.nodeID(
@@ -158,7 +178,7 @@ do {
     try client.send(
       .graphCommand(
         projectPath: projectPath,
-        command: .messageNode(nodeID, text: text, from: sender)))
+        command: .messageNode(nodeID, text: text, from: sender, followUp: followUp)))
     // Delivery is judged and attempted before the daemon broadcasts, so the first event
     // back is the verdict: an error means it did not land, the graph means it did.
     let verdict = try client.waitForEvent { event in
@@ -168,7 +188,9 @@ do {
       }
     }
     if case .errorOccurred(let message) = verdict { fail(message) }
-    print("delivered")
+    // A follow-up to a busy loop is accepted, not typed: it's in the loop's memory now
+    // and its session hears it when it next goes idle — "delivered" would overclaim.
+    print(followUp ? "accepted — typed in when the loop next goes idle" : "delivered")
 
   case .updateNode(let projectPath, let nodeID, let update):
     // Attributed like `node create`/`node send`: run from inside a loop, ZMX_SESSION
@@ -195,6 +217,30 @@ do {
       print(GraphcodeCommand.render(graph))
     }
 
+  case .promoteNode(let projectPath, let nodeID, let promotion):
+    // Attributed like `node update` attributes `updatedBy` — which is also what lets
+    // the daemon refuse a loop handing itself a stop condition through promotion.
+    let promoter = SurfaceRef.nodeID(
+      fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
+    try client.send(.openProject(path: projectPath))
+    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try client.send(
+      .graphCommand(
+        projectPath: projectPath,
+        command: .promoteNode(nodeID, promotion: promotion, promotedBy: promoter)))
+    // Same verdict pattern as `update`: a refusal arrives as an error, an applied
+    // promotion as the changed graph.
+    let promoteVerdict = try client.waitForEvent { event in
+      switch event {
+      case .graphChanged, .errorOccurred: return true
+      default: return false
+      }
+    }
+    if case .errorOccurred(let message) = promoteVerdict { fail(message) }
+    if case .graphChanged(let graph) = promoteVerdict {
+      print(GraphcodeCommand.render(graph))
+    }
+
   case .memoNode(let projectPath, let nodeID, let text):
     let author = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
@@ -211,6 +257,40 @@ do {
     }
     if case .errorOccurred(let message) = memoVerdict { fail(message) }
     print("noted")
+
+  case .refineNode(let projectPath, let nodeID, let text):
+    let refiner = SurfaceRef.nodeID(
+      fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
+    try client.send(.openProject(path: projectPath))
+    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try client.send(
+      .graphCommand(
+        projectPath: projectPath, command: .refineNode(nodeID, text: text, from: refiner)))
+    let refineVerdict = try client.waitForEvent { event in
+      switch event {
+      case .graphChanged, .errorOccurred: return true
+      default: return false
+      }
+    }
+    if case .errorOccurred(let message) = refineVerdict { fail(message) }
+    print("refined — the next wake works from the new playbook")
+
+  case .rollbackRefinement(let projectPath, let nodeID):
+    let requester = SurfaceRef.nodeID(
+      fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
+    try client.send(.openProject(path: projectPath))
+    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try client.send(
+      .graphCommand(
+        projectPath: projectPath, command: .rollbackRefinement(nodeID, from: requester)))
+    let rollbackVerdict = try client.waitForEvent { event in
+      switch event {
+      case .graphChanged, .errorOccurred: return true
+      default: return false
+      }
+    }
+    if case .errorOccurred(let message) = rollbackVerdict { fail(message) }
+    print("rolled back to the previous playbook")
 
   case .pilotComposite(let projectPath, let nodeID):
     try runAndPrintGraph(
@@ -233,6 +313,89 @@ do {
     }
     if case .graphChanged(let graph) = event {
       print(GraphcodeCommand.renderUsage(graph))
+    }
+
+  case .exportNode(let projectPath, let nodeID, let output, let includeChildren):
+    try client.send(.openProject(path: projectPath))
+    let opened = try client.waitForEvent {
+      if case .graphChanged = $0 { return true } else { return false }
+    }
+    guard case .graphChanged(let graph) = opened else { fail("Could not load graph") }
+
+    let persistence = ProjectPersistence(baseDirectory: SupportDirectory.url)
+    guard
+      let bundle = persistence.createExportBundle(
+        for: [nodeID],
+        from: graph,
+        projectPath: projectPath,
+        includeChildren: includeChildren,
+        createdBy: ProcessInfo.processInfo.environment["USER"]
+      )
+    else { fail("Could not create export bundle") }
+
+    guard let zipPath = bundle.writeToZip(at: output) else {
+      fail("Could not write ZIP file to \(output)")
+    }
+
+    print("Exported to \(zipPath)")
+    print("Nodes: \(bundle.manifest.contents.nodeIDs.count)")
+    print("Memory logs: \(bundle.memoryByNodeID.count)")
+
+  case .exportGraph(let projectPath, let output):
+    try client.send(.openProject(path: projectPath))
+    let opened = try client.waitForEvent {
+      if case .graphChanged = $0 { return true } else { return false }
+    }
+    guard case .graphChanged(let graph) = opened else { fail("Could not load graph") }
+
+    let persistence = ProjectPersistence(baseDirectory: SupportDirectory.url)
+    let bundle = persistence.createFullGraphExportBundle(
+      for: graph,
+      projectPath: projectPath,
+      createdBy: ProcessInfo.processInfo.environment["USER"]
+    )
+
+    guard let zipPath = bundle.writeToZip(at: output) else {
+      fail("Could not write ZIP file to \(output)")
+    }
+
+    print("Exported full graph to \(zipPath)")
+    print("Nodes: \(bundle.manifest.contents.nodeIDs.count)")
+    print("Edges: \(graph.edges.count)")
+    print("Memory logs: \(bundle.memoryByNodeID.count)")
+
+  case .importNodes(let projectPath, let fromZip, let asChildOf):
+    guard let bundle = GraphExportBundle.readFromZip(at: fromZip) else {
+      fail("couldn't read an export bundle from \(fromZip)")
+    }
+
+    // Re-identified here so any carried sessions install under the fresh ids before
+    // the request goes out; the daemon still performs the graph merge — it owns the
+    // live graph, and a client that wrote the graph file itself had its import
+    // clobbered by the daemon's next save. Same verdict pattern as `node send`: an
+    // error event means refused, the changed graph means it landed.
+    guard
+      let request = bundle.preparedImportRequest(asChildOf: asChildOf, projectPath: projectPath)
+    else { fail("the bundle contains no loops") }
+    try client.send(.openProject(path: projectPath))
+    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try client.send(
+      .graphCommand(projectPath: projectPath, command: .importNodes(request)))
+    let verdict = try client.waitForEvent { event in
+      switch event {
+      case .graphChanged, .errorOccurred: return true
+      default: return false
+      }
+    }
+    if case .errorOccurred(let message) = verdict { fail(message) }
+    if case .graphChanged(let graph) = verdict {
+      let resumable = bundle.sessionsByNodeID.values.filter { $0.backend.supportsResume }
+      print(
+        "imported \(bundle.graphSnapshot.nodes.count) loop(s) "
+          + "and \(bundle.graphSnapshot.edges.count) edge(s) with fresh identities"
+          + (resumable.isEmpty
+            ? "" : "; \(resumable.count) will resume their exported conversations"))
+      print(GraphcodeCommand.render(graph))
     }
   }
 } catch DaemonSocketClient.ClientError.timedOut {

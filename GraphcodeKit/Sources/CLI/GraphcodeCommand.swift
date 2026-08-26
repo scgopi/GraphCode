@@ -20,12 +20,24 @@ public enum GraphcodeCommand: Equatable, Sendable {
   case createEdge(projectPath: String, from: UUID, to: UUID, spec: EdgeSpec)
   case stopNode(projectPath: String, nodeID: UUID)
   case deleteNode(projectPath: String, nodeID: UUID)
-  case sendMessage(projectPath: String, nodeID: UUID, text: String)
+  case sendMessage(projectPath: String, nodeID: UUID, text: String, followUp: Bool = false)
   case updateNode(projectPath: String, nodeID: UUID, update: NodeUpdate)
+  /// Give a sketch a shape — the CLI half of the canvas's "Promote to…" menu. The
+  /// promoter's identity is attributed at execution (`ZMX_SESSION`), not parsed here,
+  /// matching how `updateNode` fills `updatedBy`.
+  case promoteNode(projectPath: String, nodeID: UUID, promotion: SketchPromotion)
   case memoNode(projectPath: String, nodeID: UUID, text: String)
+  /// Replace the loop's playbook (`NodeMemory.refinePlaybook`) — trailing words, or a
+  /// whole file via `--file` since a playbook is a multi-line document and argv words
+  /// arrive flattened. `--rollback` restores the previous version instead.
+  case refineNode(projectPath: String, nodeID: UUID, text: String)
+  case rollbackRefinement(projectPath: String, nodeID: UUID)
   case pilotComposite(projectPath: String, nodeID: UUID)
   case armComposite(projectPath: String, nodeID: UUID)
   case usage(projectPath: String)
+  case exportNode(projectPath: String, nodeID: UUID, output: String, includeChildren: Bool = false)
+  case exportGraph(projectPath: String, output: String)
+  case importNodes(projectPath: String, fromZip: String, asChildOf: UUID? = nil)
 
   public enum ParseError: Error, Equatable {
     case unknownCommand(String)
@@ -40,17 +52,27 @@ public enum GraphcodeCommand: Equatable, Sendable {
     USAGE
       graphcode projects
       graphcode status <project-path>
-      graphcode node create <project-path> --title <t> --type <turn|goal|time|composite> [options]
+      graphcode node create <project-path> --title <t> --type <main|turn|goal|time|composite> [options]
       graphcode node stop <project-path> <node-id>
       graphcode node delete <project-path> <node-id>   removes it, its edges, session
                            and memory — irreversible; stop is the reversible verb
-      graphcode node send <project-path> <node-id> <message…>
+      graphcode node send <project-path> <node-id> [--follow-up] <message…>
       graphcode node update <project-path> <node-id> [options]
+      graphcode node promote <project-path> <node-id> --type <goal|turn|time> [options]
+                           give a main loop a shape, keeping its session, edges and memory
       graphcode node memo <project-path> <node-id> <note…>
+      graphcode node refine <project-path> <node-id> <playbook…|--file f|--rollback>
       graphcode node pilot <project-path> <node-id>     dry-run a composite
       graphcode node arm <project-path> <node-id>       arm it (needs a pilot first)
       graphcode edge create <project-path> <from-id> <to-id> [--kind <k>] [--condition <c>]
       graphcode usage <project-path>
+      graphcode node export <project-path> <node-id> [--output file.zip] [--no-children]
+                           packages the loop and everything descended from it — child
+                           loops, sub-loops, session memory — into a shareable zip
+      graphcode graph export <project-path> [--output file.zip]
+      graphcode node import <project-path> <file.zip> [--as-child-of <parent-id>]
+                           splices a bundle's loops in with fresh identities; name a
+                           parent to hang them under an existing loop
 
     The reserved path graphcode://global addresses the always-resident global graph —
     the app's pinned "Graph" row — which every other verb accepts wherever
@@ -64,24 +86,59 @@ public enum GraphcodeCommand: Equatable, Sendable {
       --check <text>       what a human verifies each turn; optional
       --goal <text>        required for --type goal
       --predicate <cmd>    optional stop condition for --type goal (exit 0 = met)
-      --prompt <text>      required for --type time; put the cadence in it (/loop 1h …)
-      --backend <name>     claudeCode | copilotCLI | codex — default: run from inside a
+      --prompt <text>      required for --type time; put the cadence in it (/loop 1h …).
+                           For --type main it is the optional starting note
+      --heartbeat <secs>   for --type time, experimental: the daemon delivers the prompt
+                           every interval instead of the prompt carrying /loop. Needs
+                           "Daemon heartbeat" enabled in the app's Settings; the prompt
+                           is then the bare task, no cadence in it
+      --backend <name>     claudeCode | copilotCLI | codex | openCode — default: run from inside a
                            loop, the creating loop's backend; otherwise claudeCode
       --model <tier>       fast | standard | capable           (default: by loop type)
       --metric <cmd>       how the loop's performance is measured — fed into its prompt
                            so it can score itself as it works, and sampled by graphcoded
                            once per cycle pass (last stdout line must be a number)
       --direction <d>      minimize | maximize                 (default: maximize)
+      --budget <tokens>    for --type goal: end the loop once its backend reports this
+                           many tokens spent (input + output). Reported, never
+                           estimated — a loop whose backend reports nothing is never
+                           stopped by a budget
+      --skip-unchanged     for --type goal: don't re-run the predicate while HEAD and
+                           the dirty file list are unchanged since its last failure.
+                           Only for predicates that depend on the tree — one that
+                           watches CI or a deploy would never be re-asked
 
     UPDATE OPTIONS (node update; pass only what changes)
       --goal, --predicate, --prompt, --check, --model, --metric, --direction as above
       --poll <seconds>     how often the predicate is polled
       --stall <seconds>    stall bound; 0 clears it
-      A loop may not change its own --predicate: the verifier stays outside the
-      verified. Session-facing changes reach a live session as a [graphcode] notice.
+      --budget <tokens>    token budget; 0 clears it
+      --heartbeat <secs>   daemon heartbeat interval; 0 returns cadence to the prompt
+      --skip-unchanged <true|false>
+      A loop may not change its own --predicate or --budget: the verifier stays outside
+      the verified. Session-facing changes reach a live session as a [graphcode] notice.
+
+    SEND OPTIONS (node send)
+      --follow-up          first word after the id: don't interrupt — the message is
+                           staged to the loop's memory and typed into its session when
+                           it next goes idle, instead of mid-turn
+
+    PROMOTE OPTIONS (node promote; each target asks for its one decision)
+      --type goal          with --goal <text> (required); --predicate, --metric,
+                           --direction as above. A loop may not set its own
+                           --predicate through promotion, the same rule update holds.
+      --type turn          with --pause <every-turn|before-writes>  (default: every-turn)
+      --type time          with --prompt <text> (required); put the cadence in it
+      Promotion is one-way: a main loop gains a shape, never the reverse, and only a
+      main loop can be promoted.
 
     node memo appends a note to the loop's own memory log — what the next pass reads
     before starting. Record dead ends and decisions, not a transcript.
+
+    node refine replaces the loop's playbook — its own distilled method, carried into
+    every wake ahead of the history. Whole document each time (--file for multi-line);
+    the old version is snapshotted, --rollback restores it. A loop may refine itself;
+    it still may not touch its goal, predicate, or budget.
 
     EDGE OPTIONS
       --kind <k>           handoff | message | spawn           (default: handoff)
@@ -137,10 +194,25 @@ public enum GraphcodeCommand: Equatable, Sendable {
     case "usage":
       return .usage(projectPath: try take(&arguments, name: "project-path"))
 
+    case "graph":
+      let verb = try take(&arguments, name: "graph subcommand")
+      guard verb == "export" else { throw ParseError.unknownCommand("graph \(verb)") }
+      let path = try take(&arguments, name: "project-path")
+      let flags = parseFlags(arguments)
+      if flags["help"] != nil { throw HelpRequested() }
+      let output = flags["output"] ?? "\(path.split(separator: "/").last ?? "graph").zip"
+      return .exportGraph(projectPath: path, output: output)
+
     case "node":
       let verb = try take(&arguments, name: "node subcommand")
       let path = try take(&arguments, name: "project-path")
       switch verb {
+      case "export":
+        return try parseNodeExport(&arguments, projectPath: path)
+
+      case "import":
+        return try parseNodeImport(&arguments, projectPath: path)
+
       case "create":
         var into: UUID?
         if let raw = parseFlags(arguments)["into"] {
@@ -150,7 +222,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
           into = id
         }
         return .createNode(projectPath: path, draft: try parseDraft(arguments), into: into)
-      case "stop", "delete", "pilot", "arm", "send", "update", "memo":
+      case "stop", "delete", "pilot", "arm", "send", "update", "memo", "promote", "refine":
         let raw = try take(&arguments, name: "node-id")
         guard let nodeID = UUID(uuidString: raw) else {
           throw ParseError.invalidValue(argument: "node-id", value: raw)
@@ -159,13 +231,23 @@ public enum GraphcodeCommand: Equatable, Sendable {
         case "pilot": return .pilotComposite(projectPath: path, nodeID: nodeID)
         case "arm": return .armComposite(projectPath: path, nodeID: nodeID)
         case "delete": return .deleteNode(projectPath: path, nodeID: nodeID)
+        case "promote":
+          return .promoteNode(
+            projectPath: path, nodeID: nodeID, promotion: try parsePromotion(arguments))
         case "send":
+          // `--follow-up` is recognised only as the first word after the id, so it can
+          // still be *sent* by putting it anywhere later in the message.
+          var followUp = false
+          if arguments.first == "--follow-up" {
+            followUp = true
+            arguments.removeFirst()
+          }
           // Everything after the id is the message — joined rather than flagged, so
           // `graphcode node send <path> <id> tests are green, ship it` needs no quoting
           // gymnastics from the agent typing it.
           let text = arguments.joined(separator: " ").trimmingCharacters(in: .whitespaces)
           guard !text.isEmpty else { throw ParseError.missingArgument("message") }
-          return .sendMessage(projectPath: path, nodeID: nodeID, text: text)
+          return .sendMessage(projectPath: path, nodeID: nodeID, text: text, followUp: followUp)
         case "update":
           return .updateNode(projectPath: path, nodeID: nodeID, update: try parseUpdate(arguments))
         case "memo":
@@ -173,6 +255,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
           let text = arguments.joined(separator: " ").trimmingCharacters(in: .whitespaces)
           guard !text.isEmpty else { throw ParseError.missingArgument("note") }
           return .memoNode(projectPath: path, nodeID: nodeID, text: text)
+        case "refine":
+          return try parseRefine(arguments, projectPath: path, nodeID: nodeID)
         default: return .stopNode(projectPath: path, nodeID: nodeID)
         }
       default:
@@ -224,6 +308,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
 
     let loopType: LoopType
     switch rawType {
+    // `sketch` too, because that is the word every graph on disk still serialises and
+    // what any script written before the rename still passes.
+    case "main", "sketch": loopType = .sketch
     case "turn", "turnBased": loopType = .turnBased
     case "goal", "goalBased": loopType = .goalBased
     case "time", "timeBased": loopType = .timeBased
@@ -261,19 +348,39 @@ public enum GraphcodeCommand: Equatable, Sendable {
       metricDirection = parsed
     }
 
+    var tokenBudget: Int?
+    if let raw = flags["budget"] {
+      guard let value = Int(raw), value > 0 else {
+        throw ParseError.invalidValue(argument: "--budget", value: raw)
+      }
+      tokenBudget = value
+    }
+    let skipsUnchanged = try parseSkipUnchanged(flags) ?? false
+
+    var heartbeat: Double?
+    if let raw = flags["heartbeat"] {
+      guard let value = Double(raw), value > 0 else {
+        throw ParseError.invalidValue(argument: "--heartbeat", value: raw)
+      }
+      heartbeat = value
+    }
+
     let draft = NodeDraft(
       title: title,
       loopType: loopType,
       checkDescription: flags["check"],
       triggerPrompt: flags["prompt"],
+      heartbeatIntervalSeconds: loopType == .timeBased ? heartbeat : nil,
       // A turn-based loop needs something to do. `--prompt` is what a caller already
       // types for a timed loop's opening instruction, so it means the same thing here
       // rather than making them learn a second flag for the same idea.
-      firstInstruction: loopType == .turnBased ? flags["prompt"] : nil,
+      // A sketch's `--prompt` is its optional starting note, the same reuse.
+      firstInstruction: loopType == .turnBased || loopType == .sketch ? flags["prompt"] : nil,
       goal: flags["goal"].map {
         GoalSpec(
           summary: $0, predicate: flags["predicate"],
-          metricCommand: flags["metric"], metricDirection: metricDirection)
+          metricCommand: flags["metric"], metricDirection: metricDirection,
+          tokenBudget: tokenBudget, skipsUnchangedWorkspace: skipsUnchanged)
       },
       backend: backend,
       modelTier: modelTier)
@@ -319,6 +426,21 @@ public enum GraphcodeCommand: Equatable, Sendable {
       modelTier = parsed
     }
 
+    var tokenBudget: Int?
+    if let raw = flags["budget"] {
+      guard let value = Int(raw) else {
+        throw ParseError.invalidValue(argument: "--budget", value: raw)
+      }
+      tokenBudget = value
+    }
+    var heartbeat: Double?
+    if let raw = flags["heartbeat"] {
+      guard let value = Double(raw) else {
+        throw ParseError.invalidValue(argument: "--heartbeat", value: raw)
+      }
+      heartbeat = value
+    }
+
     let update = NodeUpdate(
       goalSummary: flags["goal"],
       goalPredicate: flags["predicate"],
@@ -326,11 +448,95 @@ public enum GraphcodeCommand: Equatable, Sendable {
       stallAfterSeconds: stallAfterSeconds,
       metricCommand: flags["metric"],
       metricDirection: metricDirection,
+      tokenBudget: tokenBudget,
+      skipsUnchangedWorkspace: try parseSkipUnchanged(flags),
       triggerPrompt: flags["prompt"],
+      heartbeatIntervalSeconds: heartbeat,
       checkDescription: flags["check"],
       modelTier: modelTier)
     guard !update.isEmpty else { throw ParseError.missingArgument("an option to change") }
     return update
+  }
+
+  /// `node refine`'s three spellings: `--rollback` restores the previous playbook,
+  /// `--file <path>` sends a file's contents (a playbook is a multi-line document, and
+  /// joined argv words arrive as one line), and trailing words send exactly what was
+  /// typed. The file is read *here*, on the caller's machine, because the daemon may be
+  /// serving a remote project whose filesystem has no such path.
+  private static func parseRefine(
+    _ arguments: [String], projectPath: String, nodeID: UUID
+  ) throws -> GraphcodeCommand {
+    if arguments.first == "--rollback" {
+      return .rollbackRefinement(projectPath: projectPath, nodeID: nodeID)
+    }
+    if arguments.first == "--file" {
+      guard arguments.count >= 2 else { throw ParseError.missingArgument("file path") }
+      guard let text = try? String(contentsOfFile: arguments[1], encoding: .utf8),
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      else {
+        throw ParseError.invalidValue(argument: "--file", value: arguments[1])
+      }
+      return .refineNode(projectPath: projectPath, nodeID: nodeID, text: text)
+    }
+    let text = arguments.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+    guard !text.isEmpty else { throw ParseError.missingArgument("playbook text") }
+    return .refineNode(projectPath: projectPath, nodeID: nodeID, text: text)
+  }
+
+  /// `--skip-unchanged` — bare or `true` opts in, `false` opts back out, absent means
+  /// "leave it alone" (create's caller defaults that to off).
+  private static func parseSkipUnchanged(_ flags: [String: String]) throws -> Bool? {
+    guard let raw = flags["skip-unchanged"] else { return nil }
+    switch raw {
+    case "", "true": return true
+    case "false": return false
+    default: throw ParseError.invalidValue(argument: "--skip-unchanged", value: raw)
+    }
+  }
+
+  /// The one decision each target type needs — the same vocabulary `node create`
+  /// already taught: `--goal`/`--predicate`/`--metric`/`--direction` for goal,
+  /// `--prompt` for time. Turn's decision is where to pause, which create never asks
+  /// (`--pause every-turn|before-writes`), defaulting to every turn like the app's form.
+  private static func parsePromotion(_ arguments: [String]) throws -> SketchPromotion {
+    let flags = parseFlags(arguments)
+    if flags["help"] != nil { throw HelpRequested() }
+    guard let rawType = flags["type"] else { throw ParseError.missingArgument("--type") }
+
+    switch rawType {
+    case "goal", "goalBased":
+      guard let summary = flags["goal"] else { throw ParseError.missingArgument("--goal") }
+      var metricDirection = MetricDirection.maximize
+      if let raw = flags["direction"] {
+        guard let parsed = MetricDirection(rawValue: raw) else {
+          throw ParseError.invalidValue(argument: "--direction", value: raw)
+        }
+        metricDirection = parsed
+      }
+      return .goal(
+        GoalSpec(
+          summary: summary, predicate: flags["predicate"],
+          metricCommand: flags["metric"], metricDirection: metricDirection))
+
+    case "turn", "turnBased":
+      switch flags["pause"] {
+      case nil, "every-turn":
+        return .turn(pausesBeforeWritesOnly: false)
+      case "before-writes":
+        return .turn(pausesBeforeWritesOnly: true)
+      case .some(let raw):
+        throw ParseError.invalidValue(argument: "--pause", value: raw)
+      }
+
+    case "time", "timeBased":
+      guard let prompt = flags["prompt"] else { throw ParseError.missingArgument("--prompt") }
+      return .timed(triggerPrompt: prompt)
+
+    // `main` and `composite` are refused by shape, not by the daemon: demotion is
+    // unrepresentable and a composite is not one decision (see `SketchPromotion`).
+    default:
+      throw ParseError.invalidValue(argument: "--type", value: rawType)
+    }
   }
 
   /// `--name value` pairs. Bare positional arguments are ignored here; every caller has
@@ -417,8 +623,11 @@ extension GraphcodeCommand {
     guard let usage = graph.usage else {
       return """
         \(graph.project.name): no usage reported (0/\(coverage.total) loops)
-          Usage is reported by the backend, never estimated — install a hook that runs
-          `zmx set "$ZMX_SESSION" usage=inputTokens=…,outputTokens=…,costUSD=…`
+          Usage is reported by the backend, never estimated. Claude Code loops report it
+          automatically at each turn end (graphcode's own Stop hook); a loop that has
+          not finished a turn since that hook was installed has nothing to report yet.
+          Other backends need a hook running
+          `zmx set "$ZMX_SESSION" usage=input.<tokens>_output.<tokens>`
         """
     }
     var lines = ["\(graph.project.name): \(coverage.reporting)/\(coverage.total) loops reporting"]
@@ -447,5 +656,45 @@ extension GraphcodeCommand {
       return "incomplete loop: a turn-based node needs --check, a goal-based one --goal, "
         + "a time-based one --prompt, and the backend must be able to host that type"
     }
+  }
+}
+
+/// The export/import verbs' parsing, split from the enum body the way `render` would
+/// be next: `parseVerb` was over its length budget and the type over its own the day
+/// these verbs landed, and each new verb after this should follow suit rather than
+/// growing either.
+extension GraphcodeCommand {
+  fileprivate static func parseNodeExport(
+    _ arguments: inout [String], projectPath: String
+  ) throws -> GraphcodeCommand {
+    let raw = try take(&arguments, name: "node-id")
+    guard let nodeID = UUID(uuidString: raw) else {
+      throw ParseError.invalidValue(argument: "node-id", value: raw)
+    }
+    let flags = parseFlags(arguments)
+    if flags["help"] != nil { throw HelpRequested() }
+    let output = flags["output"] ?? "\(nodeID.uuidString).zip"
+    // Children ride along by default — an exported coordinator without the loops it
+    // fanned out isn't the workflow the human meant to share. `--children` is still
+    // accepted as a no-op from when it was opt-in.
+    let includeChildren = flags["no-children"] == nil
+    return .exportNode(
+      projectPath: projectPath, nodeID: nodeID, output: output, includeChildren: includeChildren)
+  }
+
+  fileprivate static func parseNodeImport(
+    _ arguments: inout [String], projectPath: String
+  ) throws -> GraphcodeCommand {
+    let zipPath = try take(&arguments, name: "zip-file")
+    let flags = parseFlags(arguments)
+    if flags["help"] != nil { throw HelpRequested() }
+    var asChildOf: UUID?
+    if let raw = flags["as-child-of"] {
+      guard let id = UUID(uuidString: raw) else {
+        throw ParseError.invalidValue(argument: "--as-child-of", value: raw)
+      }
+      asChildOf = id
+    }
+    return .importNodes(projectPath: projectPath, fromZip: zipPath, asChildOf: asChildOf)
   }
 }

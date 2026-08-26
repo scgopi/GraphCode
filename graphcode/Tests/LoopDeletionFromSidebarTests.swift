@@ -114,8 +114,8 @@ struct LoopDeletionFromSidebarTests {
       node: node, layout: .defaultLayout(forNode: node.id), projectPath: Self.project.path,
       projectName: Self.project.name)
     // A second project that is *already* open. (A graph for a project the app has never
-    // seen is a different case entirely — that's "project opened", which deliberately
-    // switches away from whatever was showing.)
+    // seen is a different case entirely — that's "project opened", which switches away
+    // from whatever was showing when this app is the one that asked for it.)
     let other = ProjectRef(path: "/tmp/other", name: "other")
     let otherGraph = LoopGraph(project: other, nodes: [LoopNode(title: "Elsewhere")])
     state.projects.append(ProjectFeature.State(graph: otherGraph))

@@ -26,6 +26,25 @@ extension GraphOverviewView {
     }
   }
 
+  /// A `+` at each lane's origin, revealed when the pointer comes near it: a top-level
+  /// loop in *that* folder, which the origin then draws a line to like any other
+  /// beginning. The same handle the folder's own canvas puts on its origin dot.
+  ///
+  /// The one create the Graph view was missing. A card's `+` continues a chain and the
+  /// top-right New Loop lands in the global graph, so starting a *new* chain in a
+  /// particular folder meant crossing to that folder's canvas first.
+  /// Only on lanes that *have* an origin dot: `CanvasBandView` draws one exactly when a
+  /// lane has entry ports, and a `+` floating where no dot is reads as a stray control.
+  /// A lane whose loops are all in a cycle keeps the top-right New Loop.
+  func entryHandleLayer(_ overview: GraphOverview) -> some View {
+    ForEach(overview.tetheredFolders) { folder in
+      CanvasEntryHandle(help: "New loop in \(folder.name)") {
+        store.send(.projects(.element(id: folder.path, action: .addEntryLoopTapped)))
+      }
+      .position(folder.originPosition)
+    }
+  }
+
   @ViewBuilder
   func startNodeLayer(_ overview: GraphOverview) -> some View {
     if let center = overview.startNode {
@@ -171,18 +190,67 @@ extension GraphOverviewView {
     )
     .contentShape(Rectangle())
     .onTapGesture { open(loop) }
-    .contextMenu {
-      Button("Open Terminal") { open(loop) }
-      Button("Reveal in \(folderName(loop.projectPath))") {
-        store.send(.projectHeaderTapped(loop.projectPath))
-      }
-      if !node.isResolved {
-        Divider()
-        Button("Stop Loop", role: .destructive) {
-          store.send(.stopNodeTapped(projectPath: loop.projectPath, nodeID: node.id))
-        }
+    .contextMenu { loopMenu(loop) }
+  }
+
+  /// The same verbs the sidebar offers on a loop row, in the same order — a loop should
+  /// answer to the same menu wherever you right-click it, and until now this one stopped
+  /// at Open, Reveal and Stop.
+  ///
+  /// All of them work from here without switching folders first. Export and Import run
+  /// their own panels straight from the reducer; Rename and Delete present from
+  /// `AppView`, which hosts those two dialogs for the whole window; and the creation
+  /// sheet has a host per folder mounted on this view already (`nodeFormHosts`), which is
+  /// what the sidebar has to select a project to get.
+  ///
+  /// What stays out is what the overview cannot show you the consequences of: rewiring,
+  /// and drilling into a composite's sub-graph. Reveal is the answer to both.
+  @ViewBuilder
+  private func loopMenu(_ loop: GraphOverview.Loop) -> some View {
+    let node = loop.node
+    Button("Open Terminal") { open(loop) }
+    if !node.isResolved {
+      Button("New Child Loop…") { send(.newChildLoopTapped(node.id), to: loop.projectPath) }
+    }
+    if node.loopType == .composite {
+      Button("Pilot Once…") { send(.pilotCompositeTapped(node.id), to: loop.projectPath) }
+      Button("Arm Schedule") { send(.armCompositeTapped(node.id), to: loop.projectPath) }
+        .disabled(!node.pilotState.canArm)
+    }
+    Button("Rename…") { send(.renameNodeRequested(node.id), to: loop.projectPath) }
+    if !node.isResolved {
+      Button("Stop Loop") {
+        store.send(.stopNodeTapped(projectPath: loop.projectPath, nodeID: node.id))
       }
     }
+
+    Divider()
+
+    Button("Reveal in \(folderName(loop.projectPath))") {
+      store.send(.projectHeaderTapped(loop.projectPath))
+    }
+
+    Divider()
+
+    // Behind the experiments switch, exactly as on a folder's canvas and in the sidebar:
+    // a right-click verb that writes files and splices loops into graphs is one a person
+    // should choose, not find. Read inline like the folder canvas's menu does — the
+    // sidebar's outline is the one place that cannot (see `AppSidebarView.sharesLoops`).
+    if SettingsModel.shared.settings.sharesLoops {
+      Button("Export Loop…") { send(.exportNodeRequested(node.id), to: loop.projectPath) }
+      Button("Import Loops Here…") {
+        send(.importLoopsRequested(asChildOf: node.id), to: loop.projectPath)
+      }
+      Divider()
+    }
+
+    Button("Delete Loop…", role: .destructive) {
+      send(.deleteNodeRequested(node.id), to: loop.projectPath)
+    }
+  }
+
+  private func send(_ action: ProjectFeature.Action, to projectPath: String) {
+    store.send(.projects(.element(id: projectPath, action: action)))
   }
 
 }

@@ -75,12 +75,18 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     case allowTools
     /// Copilot's `--yolo`: tools, paths, and URLs all approved.
     case allowEverything
+    /// `--yolo` plus `--autopilot`: same permissions, and Copilot keeps prompting itself
+    /// to continue instead of stopping at its first reply (issue #86). An addition, not
+    /// the new default — autopilot changes how far a session runs, which is a choice a
+    /// human should make deliberately.
+    case yoloAutopilot
 
     public var displayName: String {
       switch self {
       case .ask: return "Ask every time"
       case .allowTools: return "Allow tools only"
       case .allowEverything: return "YOLO (recommended)"
+      case .yoloAutopilot: return "YOLO + Autopilot"
       }
     }
 
@@ -95,6 +101,9 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       case .allowEverything:
         return "Copilot's --yolo: tools, paths, and URLs all approved — what an "
           + "unattended loop needs to run without a human at the pane."
+      case .yoloAutopilot:
+        return "Everything YOLO approves, and Copilot continues its own work "
+          + "(--autopilot) instead of stopping at the first reply."
       }
     }
 
@@ -105,6 +114,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       // `--yolo` and `--allow-all` are the same flag; emitted under the name Copilot
       // itself promotes, so what appears in `ps` matches what its docs say.
       case .allowEverything: return ["--yolo"]
+      case .yoloAutopilot: return ["--yolo", "--autopilot"]
       }
     }
 
@@ -194,6 +204,43 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
 
   public var codexApprovals: CodexApprovals
 
+  /// How much an OpenCode session may do without stopping to ask.
+  ///
+  /// One flag: `--auto` approves every permission not explicitly denied in the user's
+  /// own `opencode.json`, which is exactly the bargain an unattended loop needs — their
+  /// deny rules still hold, and nothing else stops to ask. OpenCode's own default asks
+  /// per tool, which leaves an unattended loop at a dialog nobody sees.
+  public enum OpenCodePermissions: String, Codable, CaseIterable, Sendable {
+    case ask
+    case auto
+
+    public var displayName: String {
+      switch self {
+      case .ask: return "Ask every time"
+      case .auto: return "Auto-approve (recommended)"
+      }
+    }
+
+    public var explanation: String {
+      switch self {
+      case .ask:
+        return "OpenCode's own default. An unattended loop will wait at the first prompt."
+      case .auto:
+        return "OpenCode's --auto: everything your own opencode.json doesn't deny is "
+          + "approved — what an unattended loop needs to run without a human at the pane."
+      }
+    }
+
+    public var arguments: [String] {
+      switch self {
+      case .ask: return []
+      case .auto: return ["--auto"]
+      }
+    }
+  }
+
+  public var openCodePermissions: OpenCodePermissions
+
   public var defaultBackend: CLISessionBackendKind {
     didSet {
       if !defaultBackend.isSpiked { defaultBackend = oldValue.isSpiked ? oldValue : .claudeCode }
@@ -243,6 +290,77 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// Whether this installation should receive pre-release updates.
   public var betaUpdates: Bool
 
+  /// Whether graphcode narrates what loops are doing — the summary rail's *producer*.
+  ///
+  /// **Off by default, and experimental.** Off, nothing reads a session's transcript, no
+  /// node carries a `summary`, the rail shows no section and the card's live line falls
+  /// back to what the loop was handed, exactly as it did before this existed. On, each
+  /// working loop's transcript tail is read once per poll and folded into
+  /// `LoopNode.summary`.
+  ///
+  /// It was on by default for exactly one release (0.1.37) and is opt-in again. The
+  /// reading is cheap — a tail of a file the app already reads, no model, no subprocess —
+  /// but a beat is a *claim* about what an agent is trying to do, and a claim that is
+  /// confidently wrong is worse than the scrollback it replaces. A feature that makes
+  /// claims on every loop's behalf earns its default rather than being handed one.
+  ///
+  /// Deliberately distinct from hiding the rail. Hiding is a view, and this is the
+  /// reading: the design's own division, kept because the two would otherwise be one
+  /// switch that quietly does two things.
+  public var summarisesLoops: Bool
+
+  /// Whether the export/import surfaces are offered at all — the context-menu items on
+  /// loop cards, sidebar loop and folder rows, the canvas background's counterparts,
+  /// and the CLI's `node export` / `graph export` / `node import` verbs.
+  ///
+  /// **On by default** since 0.1.40, after one release opt-in. It earns the default the
+  /// summary rail couldn't (`summarisesLoops`): every surface is a menu item that does
+  /// nothing until deliberately clicked — no claims made on a loop's behalf, no tokens
+  /// spent, nothing running unattended. Off, none of those surfaces appear and the CLI
+  /// verbs refuse with a pointer here; bundles already exported remain ordinary zips,
+  /// importable again the moment this is back on. A settings file that explicitly says
+  /// `false` — anyone who tried the experiment and turned it off — is preserved.
+  public var sharesLoops: Bool
+
+  /// Whether a small model may rewrite the current beat, on top of the free reading.
+  ///
+  /// **Off by default, and meaningless with `summarisesLoops` off.** The rail works
+  /// without this: the beat is the agent's own sentence, taken off its transcript for
+  /// nothing. What a model buys is the last edit — the design's plain past tense, ten
+  /// words, tools turned back into intent — and it is the one part of the feature that
+  /// costs money, so it is the one part behind its own switch.
+  ///
+  /// One `claude -p` / `copilot -p` / `codex exec` per *changed* beat of a *working* loop,
+  /// at the fast tier, over one sentence and one line of evidence. It is its own process,
+  /// so its tokens never land on the loop's own budget line, and every failure path leaves
+  /// the derived beat exactly as it was — see `SummaryModelWriter`.
+  public var summaryUsesModel: Bool
+
+  /// Whether the daemon may drive time-based loops on its own timer — the experiment
+  /// that tests the *opposite* of this project's founding cadence decision.
+  ///
+  /// **Off by default, and experimental.** Off, recurrence lives where it always has:
+  /// inside the loop's own prompt as a `/loop` directive the agent runs on itself, and
+  /// the daemon holds no timers (`GraphStore`'s header explains the headless-timer
+  /// failure that decision came from). On, a time-based loop created with a heartbeat
+  /// interval is *ticked by the daemon*: a `[graphcode] heartbeat` typed into its
+  /// session each interval, missed ticks coalescing (a busy session is skipped, not
+  /// queued), and stopping the loop cancels the timer instead of asking the session to
+  /// dismantle its own cadence.
+  ///
+  /// Both models coexist deliberately — a heartbeat loop's prompt carries no `/loop`,
+  /// an ordinary time loop's timer never exists — so the experiment can be judged
+  /// side by side. Read fresh at every tick, so flipping this off silences existing
+  /// heartbeat loops immediately without restarting anything.
+  public var daemonHeartbeatEnabled: Bool
+
+  /// Whether `graphcoded` keeps the Mac awake while any loop is running
+  /// (`AwakeAssertion`). Off by default and deliberately so: a background process that
+  /// quietly stops a machine sleeping is a thing to opt into, not to inherit from an
+  /// update. Read fresh whenever the answer is recomputed, so switching it off drops the
+  /// assertion without restarting anything.
+  public var keepsMacAwakeWhileLoopsRun: Bool
+
   // There is deliberately no window-opacity setting here any more. graphcode used to own
   // one and apply it as `NSWindow.alphaValue`, which fades the whole window — terminal
   // text included — rather than only the background behind it. Ghostty already has
@@ -254,23 +372,35 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     defaultBackend: CLISessionBackendKind = .claudeCode,
     defaultModelTier: ModelTier = .standard,
     codexApprovals: CodexApprovals = .workspace,
+    openCodePermissions: OpenCodePermissions = .auto,
     claudePermissionMode: ClaudePermissionMode = .auto,
     copilotPermissions: CopilotPermissions = .allowEverything,
     briefsSessionsAboutTheGraph: Bool = true,
     autoSelectsModel: Bool = false,
     showsActivityStrip: Bool = false,
     betaUpdates: Bool = false,
+    sharesLoops: Bool = true,
+    summarisesLoops: Bool = false,
+    summaryUsesModel: Bool = false,
+    daemonHeartbeatEnabled: Bool = false,
+    keepsMacAwakeWhileLoopsRun: Bool = false,
     worktreePolicies: [String: WorktreeHygienePolicy] = [:]
   ) {
     self.defaultBackend = defaultBackend.isSpiked ? defaultBackend : .claudeCode
     self.defaultModelTier = defaultModelTier
     self.codexApprovals = codexApprovals
+    self.openCodePermissions = openCodePermissions
     self.claudePermissionMode = claudePermissionMode
     self.copilotPermissions = copilotPermissions
     self.briefsSessionsAboutTheGraph = briefsSessionsAboutTheGraph
     self.autoSelectsModel = autoSelectsModel
     self.showsActivityStrip = showsActivityStrip
     self.betaUpdates = betaUpdates
+    self.sharesLoops = sharesLoops
+    self.summarisesLoops = summarisesLoops
+    self.summaryUsesModel = summaryUsesModel
+    self.daemonHeartbeatEnabled = daemonHeartbeatEnabled
+    self.keepsMacAwakeWhileLoopsRun = keepsMacAwakeWhileLoopsRun
     self.worktreePolicies = worktreePolicies
   }
 
@@ -287,6 +417,9 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       try container.decodeIfPresent(ModelTier.self, forKey: .defaultModelTier) ?? .standard
     codexApprovals =
       try container.decodeIfPresent(CodexApprovals.self, forKey: .codexApprovals) ?? .workspace
+    openCodePermissions =
+      try container.decodeIfPresent(OpenCodePermissions.self, forKey: .openCodePermissions)
+      ?? .auto
     claudePermissionMode =
       try container.decodeIfPresent(ClaudePermissionMode.self, forKey: .claudePermissionMode)
       ?? .auto
@@ -304,6 +437,26 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       try container.decodeIfPresent(Bool.self, forKey: .showsActivityStrip) ?? false
     betaUpdates =
       try container.decodeIfPresent(Bool.self, forKey: .betaUpdates) ?? false
+    // Absent takes the new default — on. An explicit `false`, written by anyone who
+    // tried the experiment and switched it off, is preserved; flipping a recorded
+    // choice under someone is what the migration comments above never do.
+    sharesLoops =
+      try container.decodeIfPresent(Bool.self, forKey: .sharesLoops) ?? true
+    // Absent means nobody has opted in, which is the default again. A person who switched
+    // it on has `true` in their file — including anyone whose 0.1.37 install wrote the
+    // then-default out — and that is preserved.
+    summarisesLoops =
+      try container.decodeIfPresent(Bool.self, forKey: .summarisesLoops) ?? false
+    // Never inferred from `summarisesLoops`: turning the rail on must not start spending
+    // money on a machine whose owner only asked to see what their loops were doing.
+    summaryUsesModel =
+      try container.decodeIfPresent(Bool.self, forKey: .summaryUsesModel) ?? false
+    daemonHeartbeatEnabled =
+      try container.decodeIfPresent(Bool.self, forKey: .daemonHeartbeatEnabled) ?? false
+    // Absent means nobody has asked for it, which is the default. An update must never
+    // start holding a power assertion on a machine whose owner did not choose that.
+    keepsMacAwakeWhileLoopsRun =
+      try container.decodeIfPresent(Bool.self, forKey: .keepsMacAwakeWhileLoopsRun) ?? false
     worktreePolicies =
       try container.decodeIfPresent(
         [String: WorktreeHygienePolicy].self, forKey: .worktreePolicies) ?? [:]

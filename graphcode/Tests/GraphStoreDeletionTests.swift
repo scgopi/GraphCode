@@ -92,6 +92,37 @@ struct GraphStoreDeletionTests {
   }
 
   @Test
+  func deletingACompositeEndsItsSubGraphWorkersSessions() async {
+    // A piloted composite's workers have real sessions, but their nodes live in the
+    // composite's sub-graph rather than in `graph.nodes` — so the plain deletion walk
+    // never saw them, and deleting a running composite orphaned every worker session.
+    // Nested composites included: the inner worker is two levels down.
+    let innerWorker = LoopNode(
+      title: "Deep worker", loopType: .timeBased, triggerPrompt: "/loop 1h deep")
+    let inner = LoopNode(
+      title: "Inner", loopType: .composite,
+      subGraph: LoopGraph(
+        project: ProjectRef(path: "inner", name: "inner"),
+        nodes: [innerWorker]))
+    let worker = LoopNode(
+      title: "Worker", loopType: .timeBased, triggerPrompt: "/loop 1h Check")
+    let composite = LoopNode(
+      title: "Routine", loopType: .composite,
+      subGraph: LoopGraph(
+        project: ProjectRef(path: "sub", name: "sub"),
+        nodes: [worker, inner]),
+      pilotState: .piloted)
+    let killed = LockIsolated<Set<UUID>>([])
+    let store = GraphStore(
+      graph: LoopGraph(project: ProjectRef(path: "/tmp/p", name: "p"), nodes: [composite]),
+      onTerminateSession: { node, _ in _ = killed.withValue { $0.insert(node.id) } })
+
+    await store.handle(.deleteNode(composite.id))
+
+    #expect(killed.value == [composite.id, worker.id, inner.id, innerWorker.id])
+  }
+
+  @Test
   func deletingAnEdgeUnblocksItsTarget() async {
     let store = GraphStore()
     await store.handle(
