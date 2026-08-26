@@ -28,6 +28,21 @@ struct SummaryBeatBuilder {
 
   private var pass = 0
   private var open: Open?
+  /// The newest narration **in full**, before `condense` reduces it to a beat.
+  private var latestRaw: String?
+  /// The full text of the narration that ended the most recent turn — the agent's actual
+  /// answer for that pass.
+  ///
+  /// A beat is one condensed sentence, which is the right size for the rail and far too
+  /// small for anything to be *drawn* from: a session whose answer was a table of four
+  /// findings narrates it as "Four files exceed their limits", and a composer told to
+  /// invent nothing correctly refuses to draw a table it cannot see. Measured against the
+  /// fast tier, not supposed — the same run drew a table when handed the findings and
+  /// answered `NONE` when handed the beats.
+  ///
+  /// Kept in memory and never merged into `LoopSummary`, so nothing about this reaches a
+  /// graph file; `GraphStore` holds it for exactly as long as the node is alive.
+  private var closing: String?
   private var closed: [SummaryBeat] = []
   private var turns: [Date] = []
 
@@ -50,9 +65,15 @@ struct SummaryBeatBuilder {
   /// shift.
   mutating func noteNarration(_ raw: String, at date: Date) {
     guard let text = Self.condense(raw) else { return }
+    latestRaw = String(raw.prefix(Self.maxClosing))
     close()
     open = Open(at: date, pass: max(pass, 1), text: text)
   }
+
+  /// How much of an answer is worth carrying. Enough for a table of a dozen rows or a plan
+  /// with a branch in it; short of a whole essay, which would put more in the composer's
+  /// prompt than the summary it is meant to be drawing.
+  static let maxClosing = 1_500
 
   /// One tool call, in the phrase its backend reader already speaks — `"editing
   /// Foo.swift"`, `"running make check"`.
@@ -70,12 +91,19 @@ struct SummaryBeatBuilder {
   /// beat, which starts un-ended, so this cannot stick to a session that went back to
   /// work.
   mutating func noteTurnEnd() {
+    // The narration this turn ended on is the pass's answer — the thing a person would
+    // have read. Taken here rather than at `close()` because only a turn ending makes a
+    // narration final; everything before it is the agent thinking aloud mid-run.
+    closing = latestRaw
     if open != nil {
       open?.endsTurn = true
     } else if let last = closed.indices.last {
       closed[last] = closed[last].endingTurn()
     }
   }
+
+  /// What the session last said in full, or nothing when this window saw no turn end.
+  func closingAnswer() -> String? { closing }
 
   mutating func noteTool(_ phrase: String, at date: Date) {
     let clean = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -484,7 +512,8 @@ struct SummaryBeatBuilder {
   /// its last beat is whatever the tail read happened to open on, which is not what that
   /// pass ended up doing. A pass is summarised from the turn that opened it or not at all.
   static func reading(
-    from beats: [SummaryBeat], turns: [Date] = [], metricSamples: [MetricSample] = []
+    from beats: [SummaryBeat], turns: [Date] = [], metricSamples: [MetricSample] = [],
+    closing: String? = nil
   ) -> SummaryReading {
     guard let newest = beats.map(\.pass).max() else { return SummaryReading(beats: []) }
     let partial = turns.count < newest ? beats.map(\.pass).min() : nil
@@ -498,6 +527,6 @@ struct SummaryBeatBuilder {
       .sorted { $0.pass < $1.pass }
     return SummaryReading(
       beats: beats.filter { $0.pass == newest }, finishedPasses: finished, turns: turns,
-      passEndedAt: endedAt, metricSamples: metricSamples)
+      passEndedAt: endedAt, metricSamples: metricSamples, closing: closing)
   }
 }

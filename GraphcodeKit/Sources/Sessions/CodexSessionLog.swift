@@ -208,7 +208,8 @@ public enum CodexSessionLog {
   static func reading(inRolloutAt url: URL, metricSamples: [MetricSample]) -> SummaryReading {
     var builder = builder(inRolloutAt: url)
     return SummaryBeatBuilder.reading(
-      from: builder.beats(), turns: builder.userTurns(), metricSamples: metricSamples)
+      from: builder.beats(), turns: builder.userTurns(), metricSamples: metricSamples,
+      closing: builder.closingAnswer())
   }
 
   private static func builder(inRolloutAt url: URL) -> SummaryBeatBuilder {
@@ -281,7 +282,8 @@ public enum CodexSessionLog {
     await TranscriptFreshness.shared.recordRemoteStamp(newStamp, forNode: node.id)
     var builder = builder(forLines: lines)
     let reading = SummaryBeatBuilder.reading(
-      from: builder.beats(), turns: builder.userTurns(), metricSamples: metricSamples)
+      from: builder.beats(), turns: builder.userTurns(), metricSamples: metricSamples,
+      closing: builder.closingAnswer())
     return reading.isEmpty ? nil : reading
   }
 

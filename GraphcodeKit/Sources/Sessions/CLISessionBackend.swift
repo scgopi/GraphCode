@@ -268,7 +268,9 @@ extension CLISessionBackend {
   /// only for *which CLI is invoked to write it*, which `SummaryBoardComposer` takes off the
   /// node. An adapter method here would be four identical implementations.
   public static let composeBoard:
-    @Sendable (LoopNode, LoopSummary, String?) async -> SummaryBoard? = { node, summary, path in
-      await SummaryBoardComposer.compose(node: node, summary: summary, projectPath: path)
+    @Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard? = {
+      node, summary, closing, path in
+      await SummaryBoardComposer.compose(
+        node: node, summary: summary, closing: closing, projectPath: path)
     }
 }

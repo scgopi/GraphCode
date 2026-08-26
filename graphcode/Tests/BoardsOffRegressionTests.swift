@@ -59,7 +59,7 @@ struct BoardsOffRegressionTests {
     let store = GraphStore(
       graph: graph([node("A", passes: 4), node("B", passes: 7)]),
       onReadPresence: { _, _ in PresenceReading(presence: .busy, confidence: .reported) },
-      onComposeBoard: { _, _, _ in await probe.compose() },
+      onComposeBoard: { _, _, _, _ in await probe.compose() },
       onBoardsEnabled: { false })
     let descriptor = open("/dev/null", O_WRONLY)
     await store.addConnection(id: UUID(), fileDescriptor: descriptor)
@@ -83,7 +83,7 @@ struct BoardsOffRegressionTests {
       graph: graph([node("A", passes: 4)]),
       onGraphChanged: { _ in writes.record() },
       onReadPresence: { _, _ in PresenceReading(presence: .busy, confidence: .reported) },
-      onComposeBoard: { _, _, _ in nil },
+      onComposeBoard: { _, _, _, _ in nil },
       onBoardsEnabled: { false })
     let descriptor = open("/dev/null", O_WRONLY)
     await store.addConnection(id: UUID(), fileDescriptor: descriptor)

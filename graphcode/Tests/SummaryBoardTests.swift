@@ -26,6 +26,8 @@ struct SummaryBoardTests {
     return node
   }
 
+  private func at(_ seconds: Int) -> Date { Date(timeIntervalSince1970: Double(seconds)) }
+
   private func graph(_ nodes: [LoopNode]) -> LoopGraph {
     var graph = LoopGraph(scope: LoopGraphScope(projectPath: "/tmp/p", name: "p"))
     for node in nodes { graph.nodes.append(node) }
@@ -45,8 +47,11 @@ struct SummaryBoardTests {
 
     func answer(_ title: String, with board: SummaryBoard?) { answers[title] = board }
 
-    func compose(_ node: LoopNode, _ summary: LoopSummary) -> SummaryBoard? {
+    private(set) var closings: [String?] = []
+
+    func compose(_ node: LoopNode, _ summary: LoopSummary, _ closing: String?) -> SummaryBoard? {
       asked.append(node.title)
+      closings.append(closing)
       guard let answer = answers[node.title] else {
         return SummaryBoardTests.flow(pass: summary.currentPass)
       }
@@ -71,7 +76,9 @@ struct SummaryBoardTests {
     GraphStore(
       graph: graph(nodes),
       onReadPresence: { _, _ in PresenceReading(presence: .busy, confidence: .reported) },
-      onComposeBoard: { node, summary, _ in await composer.compose(node, summary) },
+      onComposeBoard: { node, summary, closing, _ in
+        await composer.compose(node, summary, closing)
+      },
       onBoardsEnabled: enabled)
   }
 
@@ -198,6 +205,90 @@ struct SummaryBoardTests {
 
     #expect(await store.boardAttempts.keys.contains(doomed.id) == false)
     #expect(await store.boardAttempts.count == 1)
+  }
+
+  // MARK: - What the composer is actually given
+
+  /// **The bug the first release shipped with.** The composer was handed `LoopSummary` and
+  /// nothing else — beats condensed to sixteen words each — so a session whose *answer* was
+  /// a table of findings offered it "Four files exceed their limits" and it correctly
+  /// refused to draw a table it could not see. Measured against the fast tier: the same run
+  /// answered `NONE` on the beats and drew the table on the answer.
+  @Test
+  func theClosingAnswerIsCapturedWhenATurnEnds() {
+    var builder = SummaryBeatBuilder()
+    builder.noteUserTurn(at: Date(timeIntervalSince1970: 0))
+    builder.noteNarration("Reading the lint output to see what it flags.", at: at(1))
+    builder.noteTool("reading swiftlint.log", at: at(1))
+    #expect(builder.closingAnswer() == nil, "nothing has ended a turn yet")
+
+    let answer = """
+      Four files are over their limits:
+
+      | File | Actual | Limit |
+      |---|---|---|
+      | RemoteSessionResumeTests.swift | 438 | 400 |
+      """
+    builder.noteNarration(answer, at: at(2))
+    builder.noteTurnEnd()
+
+    #expect(builder.closingAnswer() == answer)
+    // Threaded exactly as the backend readers thread it — the builder holds the answer and
+    // the reading is handed it, so a reader that forgot to pass it carries nothing.
+    let reading = SummaryBeatBuilder.reading(
+      from: builder.beats(), turns: builder.userTurns(), closing: builder.closingAnswer())
+    #expect(reading.closing == answer)
+  }
+
+  /// A page of the agent's own output, so it is capped before it is carried anywhere.
+  @Test
+  func theClosingAnswerIsCapped() {
+    var builder = SummaryBeatBuilder()
+    builder.noteNarration(String(repeating: "a", count: 9_000), at: at(1))
+    builder.noteTurnEnd()
+    #expect(builder.closingAnswer()?.count == SummaryBeatBuilder.maxClosing)
+  }
+
+  @Test
+  func theAnswerReachesThePromptAndTheComposer() async {
+    let composer = Composer()
+    let store = store([node("A", passes: 3)], composer: composer)
+    let descriptor = await attach(to: store)
+    defer { close(descriptor) }
+
+    await store.pollPresence()
+    // Nothing has fed this store a reading, so there is no answer to pass on — the point is
+    // that the parameter exists and is threaded, not that this fixture has one.
+    #expect(await composer.closings.count == 1)
+
+    let written = SummaryBoardComposer.prompt(
+      node: node("A", passes: 3), summary: LoopSummary(currentPass: 3),
+      closing: "| File | Lines |\n|---|---|\n| a.swift | 438 |")
+    #expect(written.contains("What it said when it finished, in full:"))
+    #expect(written.contains("| a.swift | 438 |"))
+  }
+
+  /// **It must not reach the graph file.** A beat is a sentence and has always been stored;
+  /// this is raw session output, and a loop has to cost the same bytes on disk as it did
+  /// before boards existed.
+  @Test
+  func theClosingAnswerIsNeverPersisted() throws {
+    let reading = SummaryBeatBuilder.reading(
+      from: [
+        SummaryBeat(
+          id: "b", at: at(1), pass: 1, kind: .found, text: "Found four", endsTurn: true)
+      ],
+      turns: [at(0)], closing: "a page of the agent's own output")
+
+    var node = LoopNode(title: "A")
+    node.summary = LoopSummary().merging(reading)
+
+    let object = try #require(
+      try JSONSerialization.jsonObject(with: JSONEncoder().encode(node)) as? [String: Any])
+    let encoded = try #require(String(data: JSONEncoder().encode(node), encoding: .utf8))
+    #expect(!encoded.contains("a page of the agent's own output"))
+    let summary = object["summary"] as? [String: Any]
+    #expect(summary?["closing"] == nil)
   }
 
   // MARK: - The type's own bounds

@@ -73,7 +73,8 @@ public actor GraphStore {
   private let onHeartbeatEnabled: (@Sendable () -> Bool)?
   /// Draws one finished pass (`SummaryBoardComposer`). `nil` when nothing composes boards,
   /// which is every test that did not ask for one.
-  private let onComposeBoard: (@Sendable (LoopNode, LoopSummary, String?) async -> SummaryBoard?)?
+  private let onComposeBoard:
+    (@Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?)?
   /// Whether the human has the picture switched on, asked fresh at every tick — so
   /// switching it off empties the boards on the next poll without restarting anything, the
   /// same contract `onHeartbeatEnabled` has.
@@ -94,6 +95,13 @@ public actor GraphStore {
   /// outlive it, and `graphcoded` runs for weeks — which is precisely how the PTY leak this
   /// path already had turned "one descriptor" into an exhausted host.
   private(set) var boardAttempts: [UUID: Int] = [:]
+  /// What each node's session last said in full, from the newest reading that saw a turn
+  /// end — the composer's only view of the work itself rather than of a sentence about it.
+  ///
+  /// In memory beside `boardAttempts`, and pruned with it: this is a page of the agent's
+  /// own output, and persisting it would put a slice of every session into a graph file
+  /// that has never held one. A daemon restart costs the next turn's answer, nothing more.
+  private var lastClosing: [UUID: String] = [:]
   /// How many composites deep this store sits: 0 at the project root, 1 inside the
   /// first composite, and so on — see `runInSubGraph`, which increments it.
   ///
@@ -186,7 +194,7 @@ public actor GraphStore {
     onRollbackPlaybook: (@Sendable (UUID) -> Bool)? = nil,
     onHeartbeatEnabled: (@Sendable () -> Bool)? = nil,
     onComposeBoard: (
-      @Sendable (LoopNode, LoopSummary, String?) async -> SummaryBoard?
+      @Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?
     )? = nil,
     onBoardsEnabled: (@Sendable () -> Bool)? = nil,
     subGraphDepth: Int = 0
@@ -638,6 +646,9 @@ public actor GraphStore {
         continue
       }
       guard !node.isResolved else { continue }
+      if let closing = reading.closing, !closing.isEmpty {
+        lastClosing[node.id] = closing
+      }
       let merged = (graph.nodes[id: node.id]?.summary ?? LoopSummary()).merging(reading)
       guard graph.nodes[id: node.id]?.summary != merged else { continue }
       graph.nodes[id: node.id]?.summary = merged
@@ -677,6 +688,7 @@ public actor GraphStore {
       // Forgotten along with the boards, so switching the experiment back on draws the
       // current pass rather than waiting for the next one.
       boardAttempts.removeAll()
+      lastClosing.removeAll()
       return cleared
     }
     let path = graph.project.path
@@ -684,6 +696,7 @@ public actor GraphStore {
     // for them in memory.
     let living = Set(graph.nodes.map(\.id))
     boardAttempts = boardAttempts.filter { living.contains($0.key) }
+    lastClosing = lastClosing.filter { living.contains($0.key) }
     let candidates =
       graph.nodes
       .compactMap { node -> (node: LoopNode, summary: LoopSummary, behind: Int)? in
@@ -701,7 +714,11 @@ public actor GraphStore {
     let drawn = await withTaskGroup(of: (UUID, SummaryBoard?).self) { group in
       for candidate in candidates {
         group.addTask {
-          (candidate.node.id, await onComposeBoard(candidate.node, candidate.summary, path))
+          (
+            candidate.node.id,
+            await onComposeBoard(
+              candidate.node, candidate.summary, self.lastClosing[candidate.node.id], path)
+          )
         }
       }
       var collected: [UUID: SummaryBoard] = [:]

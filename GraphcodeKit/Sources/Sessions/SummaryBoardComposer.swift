@@ -54,7 +54,9 @@ public enum SummaryBoardComposer {
   /// The Mermaid subset asked for is exactly the one `MermaidBoardParser` reads. Asking for
   /// syntax the renderer cannot draw would show as an empty rail, which reads as the
   /// feature being broken rather than as the model being ambitious.
-  public static func prompt(node: LoopNode, summary: LoopSummary) -> String {
+  public static func prompt(
+    node: LoopNode, summary: LoopSummary, closing: String? = nil
+  ) -> String {
     var lines = [
       "You are labelling one coding session for a small status panel. Decide which of",
       "three answers fits, then write it. Reply with the answer and nothing else — no",
@@ -136,6 +138,19 @@ public enum SummaryBoardComposer {
         lines.append("- \(beat.kind.rawValue): \(beat.text)\(evidence)")
       }
     }
+    // **The only part of this prompt that is the work rather than a sentence about it.**
+    //
+    // Everything above is `LoopSummary` — beats condensed to sixteen words each, which is
+    // the right size for the rail and too small to draw anything from. A session whose
+    // answer was a table of four findings narrates it as "Four files exceed their limits",
+    // and a composer told to invent nothing then correctly refuses to draw the table it
+    // cannot see. Measured, not supposed: the same run drew a table when handed the
+    // findings and answered NONE when handed the beats.
+    if let closing, !closing.isEmpty {
+      lines.append("")
+      lines.append("What it said when it finished, in full:")
+      lines.append(closing)
+    }
     return lines.joined(separator: "\n")
   }
 
@@ -158,10 +173,12 @@ public enum SummaryBoardComposer {
   /// node already carries untouched: a pass that could not be drawn must not blank the
   /// board drawn for the pass before it.
   public static func compose(
-    node: LoopNode, summary: LoopSummary, projectPath: String?, now: Date = Date()
+    node: LoopNode, summary: LoopSummary, closing: String? = nil, projectPath: String?,
+    now: Date = Date()
   ) async -> SummaryBoard? {
     let invocation = SummaryModelWriter.invocation(
-      forBackend: node.backend, prompt: prompt(node: node, summary: summary))
+      forBackend: node.backend,
+      prompt: prompt(node: node, summary: summary, closing: closing))
     // Through the launcher's login shell, for the reason `SummaryModelWriter.rewrite`
     // records: `Process` never searches `PATH`, so a bare `claude` throws at launch and
     // leaks the PTY it had already opened.
