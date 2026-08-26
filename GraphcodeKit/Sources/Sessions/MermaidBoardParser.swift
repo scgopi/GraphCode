@@ -34,9 +34,25 @@ public enum MermaidBoardParser {
   public static func board(fromReply reply: String, pass: Int, now: Date = Date())
     -> SummaryBoard?
   {
-    guard let block = lastBlock(in: reply) else { return nil }
-    if let flow = flow(from: block, pass: pass, now: now) { return flow }
-    return table(from: block, pass: pass, now: now)
+    for candidate in candidates(in: reply) {
+      if let flow = flow(from: candidate, pass: pass, now: now) { return flow }
+      if let table = table(from: candidate, pass: pass, now: now) { return table }
+    }
+    return nil
+  }
+
+  /// Where a diagram might be, best first.
+  ///
+  /// The last fenced block still wins — a CLI in print mode puts banners first and a model
+  /// asked for one diagram sometimes shows its working. But the reply is now also tried
+  /// whole, because this parser is pointed at the *agent's own answer* as well as at a
+  /// composer's, and an answer that ends in a fenced snippet of Swift would otherwise hide
+  /// the Markdown table sitting above it.
+  static func candidates(in reply: String) -> [String] {
+    var seen: Set<String> = []
+    return ([lastBlock(in: reply)].compactMap { $0 } + [reply])
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty && seen.insert($0).inserted }
   }
 
   // MARK: - Fences
