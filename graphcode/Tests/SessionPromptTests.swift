@@ -148,4 +148,38 @@ struct SessionPromptTests {
     NodeMemory.clearFirstPass(projectPath: "/tmp/p", nodeID: node, baseURL: base)
     #expect(NodeMemory.firstPassMarker(projectPath: "/tmp/p", nodeID: node, baseURL: base) == nil)
   }
+
+  /// The verifier reads Copilot's `events.jsonl`, where the message lives inside a JSON
+  /// string — a task with quotes never appears verbatim. Matching only the raw text made
+  /// the verifier re-send a pass that had landed, which is the duplicate it exists to
+  /// prevent.
+  @Test
+  func theDeliveryVerifierMatchesTheLogsEscapedForm() {
+    let landed: [Substring] = [
+      #"{"type":"user.message","data":{"content":"run "make check" and report"}}"#
+    ]
+    #expect(
+      CopilotSessionLog.lines(landed, containUserMessage: #"run "make check" and report"#))
+    #expect(!CopilotSessionLog.lines(landed, containUserMessage: "an entirely different task"))
+    // A non-user event never counts, however similar its payload reads.
+    let tool: [Substring] = [
+      #"{"type":"tool.execution_start","data":{"description":"run "make check" and report"}}"#
+    ]
+    #expect(!CopilotSessionLog.lines(tool, containUserMessage: #"run "make check" and report"#))
+  }
+
+  /// The readiness probe matches against rendered scrollback, which wraps lines wherever
+  /// the terminal's width dictates — the characters survive, the layout does not.
+  @Test
+  func theReadinessProbeSeesTextAcrossWrappedLines() {
+    let wrapped = """
+        ❯ say hi to the team and then summar
+      ise what changed overnight
+      """
+    #expect(
+      ZmxSessionLauncher.scrollbackShows(
+        "say hi to the team and then summarise what changed overnight", in: wrapped))
+    #expect(!ZmxSessionLauncher.scrollbackShows("a task that never rendered", in: wrapped))
+    #expect(!ZmxSessionLauncher.scrollbackShows("   ", in: wrapped))
+  }
 }

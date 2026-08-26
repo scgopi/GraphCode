@@ -189,9 +189,26 @@ public enum CopilotSessionLog {
   /// that was not up yet.
   static func hasUserMessage(containing text: String, inSessionNamed name: String) -> Bool {
     guard let directory = directory(forSessionNamed: name) else { return false }
-    let needle = text.prefix(80)
-    return tailLines(ofLogAt: directory.appendingPathComponent("events.jsonl"))
-      .contains { $0.contains("\"user.message\"") && $0.contains(needle) }
+    return lines(
+      tailLines(ofLogAt: directory.appendingPathComponent("events.jsonl")),
+      containUserMessage: text)
+  }
+
+  /// The match itself, on lines already read — split out so a test can hand it fixture
+  /// records. The needle is matched in its *JSON-escaped* form as well as raw: the log
+  /// stores the message inside a JSON string, so a task containing quotes or a backslash
+  /// never appears verbatim, and a verifier matching only the raw text re-sent a pass
+  /// that had landed — the duplicate the verification exists to prevent.
+  static func lines(_ lines: [Substring], containUserMessage text: String) -> Bool {
+    var needles = [String(text.prefix(80))]
+    if let data = try? JSONSerialization.data(withJSONObject: [text]),
+      let encoded = String(data: data, encoding: .utf8), encoded.count > 4
+    {
+      needles.append(String(encoded.dropFirst(2).dropLast(2).prefix(80)))
+    }
+    return lines.contains { line in
+      line.contains("\"user.message\"") && needles.contains { line.contains($0) }
+    }
   }
 
   /// What this node's Copilot session is doing, or `nil` when nothing says.
