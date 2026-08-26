@@ -154,6 +154,19 @@ public enum SummaryBoardComposer {
     return lines.joined(separator: "\n")
   }
 
+  /// The agent's own diagram, when its answer contains one this build can draw.
+  ///
+  /// Deliberately strict about `isDrawable`: a single box, or a one-row table, is not worth
+  /// the rail's space and falls through to the composer, which may still find a shape in
+  /// the pass as a whole.
+  static func drawnByTheAgent(_ closing: String?, pass: Int, now: Date) -> SummaryBoard? {
+    guard let closing, !closing.isEmpty else { return nil }
+    guard let board = MermaidBoardParser.board(fromReply: closing, pass: pass, now: now),
+      board.isDrawable
+    else { return nil }
+    return board
+  }
+
   /// Whether the reply is the composer declining. Checked before parsing rather than left
   /// to it: a bare `NONE` parses to nothing anyway, but a model that answers
   /// "NONE — this pass was a single edit" would otherwise be read as a malformed diagram
@@ -176,6 +189,16 @@ public enum SummaryBoardComposer {
     node: LoopNode, summary: LoopSummary, closing: String? = nil, projectPath: String?,
     now: Date = Date()
   ) async -> SummaryBoard? {
+    // **The free path, tried first.** When the agent has already written a Mermaid block or
+    // a Markdown table, that *is* the board: rendering it costs nothing, takes no time, and
+    // is exactly what the session said rather than a model's restatement of it. Handing it
+    // to a model to be written again spends a call to introduce drift.
+    //
+    // The same split the rest of this feature makes — the free reading first, the paid call
+    // only for what the free one cannot answer.
+    if let drawn = drawnByTheAgent(closing, pass: summary.currentPass, now: now) {
+      return drawn
+    }
     let invocation = SummaryModelWriter.invocation(
       forBackend: node.backend,
       prompt: prompt(node: node, summary: summary, closing: closing))

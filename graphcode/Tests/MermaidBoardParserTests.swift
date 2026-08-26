@@ -246,6 +246,27 @@ struct MermaidBoardParserTests {
     #expect(parsed.nodes.count == 2)
   }
 
+  /// The parser is pointed at the agent's own answer as well as at a composer's reply, and
+  /// an answer that ends in a fenced snippet would otherwise hide the table above it.
+  @Test
+  func aTableOutsideAFenceIsFoundEvenWhenSomethingElseIsFencedBelowIt() throws {
+    let parsed = try #require(
+      board(
+        """
+        | File | Lines |
+        |---|---|
+        | a.swift | 438 |
+        | b.swift | 12 |
+
+        ```swift
+        let x = 1
+        ```
+        """))
+
+    #expect(parsed.form == .table)
+    #expect(parsed.table?.rows.count == 2)
+  }
+
   @Test
   func anUnclosedFenceIsStillAnAnswer() throws {
     let parsed = try #require(

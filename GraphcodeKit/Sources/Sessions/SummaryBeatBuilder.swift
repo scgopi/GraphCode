@@ -30,8 +30,8 @@ struct SummaryBeatBuilder {
   private var open: Open?
   /// The newest narration **in full**, before `condense` reduces it to a beat.
   private var latestRaw: String?
-  /// The full text of the narration that ended the most recent turn — the agent's actual
-  /// answer for that pass.
+  /// The full text of the narration that ended each turn, by the pass it belonged to — the
+  /// agent's actual answer for that pass.
   ///
   /// A beat is one condensed sentence, which is the right size for the rail and far too
   /// small for anything to be *drawn* from: a session whose answer was a table of four
@@ -42,7 +42,7 @@ struct SummaryBeatBuilder {
   ///
   /// Kept in memory and never merged into `LoopSummary`, so nothing about this reaches a
   /// graph file; `GraphStore` holds it for exactly as long as the node is alive.
-  private var closing: String?
+  private var closings: [Int: String] = [:]
   private var closed: [SummaryBeat] = []
   private var turns: [Date] = []
 
@@ -64,8 +64,11 @@ struct SummaryBeatBuilder {
   /// The agent saying what it is about to do. Closes whatever beat was open: this is the
   /// shift.
   mutating func noteNarration(_ raw: String, at date: Date) {
-    guard let text = Self.condense(raw) else { return }
+    // **Before the guard, not after.** `condense` refuses anything that is not a sentence,
+    // and an answer that is nothing but a table or a fenced diagram is exactly that — so
+    // capturing after the guard dropped the very answers worth drawing.
     latestRaw = String(raw.prefix(Self.maxClosing))
+    guard let text = Self.condense(raw) else { return }
     close()
     open = Open(at: date, pass: max(pass, 1), text: text)
   }
@@ -91,10 +94,14 @@ struct SummaryBeatBuilder {
   /// beat, which starts un-ended, so this cannot stick to a session that went back to
   /// work.
   mutating func noteTurnEnd() {
-    // The narration this turn ended on is the pass's answer — the thing a person would
+    // The narration this turn ended on is that pass's answer — the thing a person would
     // have read. Taken here rather than at `close()` because only a turn ending makes a
     // narration final; everything before it is the agent thinking aloud mid-run.
-    closing = latestRaw
+    //
+    // **Keyed by pass rather than kept in one slot.** A single slot is overwritten by every
+    // subsequent turn, so one "thanks" from a human replaced a diagram with "Anything
+    // else?" — measured against a real transcript, not supposed.
+    if let latestRaw { closings[open?.pass ?? max(pass, 1)] = latestRaw }
     if open != nil {
       open?.endsTurn = true
     } else if let last = closed.indices.last {
@@ -102,8 +109,20 @@ struct SummaryBeatBuilder {
     }
   }
 
-  /// What the session last said in full, or nothing when this window saw no turn end.
-  func closingAnswer() -> String? { closing }
+  /// The answer of the pass that most recently **finished**, or the current one when this
+  /// window has seen only a single pass.
+  ///
+  /// The finished pass and not the newest, because that is the pass a board is composed
+  /// for: by the time `currentPass` advances far enough to make a loop a candidate, the
+  /// work worth drawing is behind the boundary and the new pass may hold nothing but a
+  /// greeting.
+  ///
+  /// Call after `beats()`, which closes the open beat — the pass numbers here are counted
+  /// from what has been closed.
+  func closingAnswer() -> String? {
+    let newest = closed.map(\.pass).max() ?? open?.pass ?? 1
+    return closings[newest - 1] ?? closings[newest]
+  }
 
   mutating func noteTool(_ phrase: String, at date: Date) {
     let clean = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -182,7 +201,7 @@ struct SummaryBeatBuilder {
   /// at ten. Rephrasing into the design's past tense would mean generating a sentence the
   /// session never said, which is the one thing a derived beat must not do.
   static func condense(_ raw: String) -> String? {
-    var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    var text = prose(of: raw).trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty else { return nil }
     if let header = boldHeader(of: text) { text = header }
     // Before the sentence is cut, so a link's own dots and slashes cannot be mistaken for
@@ -197,6 +216,30 @@ struct SummaryBeatBuilder {
 
   /// `**Planning code mode inspection**` → `Planning code mode inspection`, but only when
   /// the whole first line is one.
+  /// The narration with its fenced blocks and table rows removed.
+  ///
+  /// A beat is one sentence about intent. Run over an answer that *is* a table, the sentence
+  /// picked was the header row — real rails showed `| File | Actual | Limit |` where a
+  /// sentence belongs — and over a bare diagram it was the word `Mermaid`. Neither is a
+  /// claim about what the agent is doing; both are the shape of the answer leaking into the
+  /// summary of it. An answer with no prose in it makes no beat at all, which is correct:
+  /// the beat before it still stands, and the answer itself is carried separately for the
+  /// board to draw.
+  static func prose(of raw: String) -> String {
+    var kept: [String] = []
+    var insideFence = false
+    for line in raw.components(separatedBy: .newlines) {
+      let trimmed = line.trimmingCharacters(in: .whitespaces)
+      if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+        insideFence.toggle()
+        continue
+      }
+      guard !insideFence, !trimmed.hasPrefix("|") else { continue }
+      kept.append(line)
+    }
+    return kept.joined(separator: "\n")
+  }
+
   static func boldHeader(of text: String) -> String? {
     guard let line = text.split(separator: "\n").first else { return nil }
     let trimmed = line.trimmingCharacters(in: .whitespaces)
