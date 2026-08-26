@@ -35,6 +35,22 @@ struct LoopWorkspaceFeature {
     /// own visibility, and for the same reason: both are choices about how much of the
     /// window a person wants back, and neither should have to be remade every launch.
     var isSummaryFolded = LoopWorkspaceRail.loadSummaryFolded()
+    /// Whether the board section is collapsed to its header. Persisted separately from the
+    /// summary's fold: they answer different questions, and someone who wants the sentence
+    /// and not the diagram — or the diagram and not the sentence — is not being perverse.
+    var isBoardFolded = LoopWorkspaceRail.loadBoardFolded()
+    /// Whether a rail width has ever been committed by a drag on this machine.
+    ///
+    /// What lets a board open the rail wider without ever overruling a width somebody
+    /// chose. Read once at open rather than on every render — it only changes here, in
+    /// `railWidthChanged`, and a `UserDefaults` read per body pass would be one per pointer
+    /// event during a drag.
+    var hasCustomRailWidth = LoopWorkspaceRail.hasStoredWidth()
+    /// Whether the board has the workspace to itself. Deliberately *not* persisted: a cover
+    /// over the terminal is a thing you open to look at something, and a window that
+    /// relaunched with the terminal hidden behind a diagram would be a window that looked
+    /// broken.
+    var isBoardExpanded = false
     /// The newest beat that was on screen when this workspace was last left — what the
     /// rail's `SINCE YOU LOOKED` hairline is drawn against.
     ///
@@ -84,6 +100,10 @@ struct LoopWorkspaceFeature {
     case railWidthChanged(CGFloat)
     /// The summary section's header row.
     case summaryFoldToggled
+    /// The board section's header row.
+    case boardFoldToggled
+    /// The board section's expand button, and the cover's own close.
+    case boardExpandToggled
     /// The amber block's `Answer it` — the question is in the terminal, so this is a
     /// request for the keyboard to go there.
     case summaryAnswerTapped
@@ -221,11 +241,22 @@ struct LoopWorkspaceFeature {
       case .railWidthChanged(let width):
         state.railWidth = LoopWorkspaceRail.clamped(width)
         LoopWorkspaceRail.saveWidth(state.railWidth)
+        // From here on the width is theirs, and a board arriving never moves it again.
+        state.hasCustomRailWidth = true
         return .none
 
       case .summaryFoldToggled:
         state.isSummaryFolded.toggle()
         LoopWorkspaceRail.saveSummaryFolded(state.isSummaryFolded)
+        return .none
+
+      case .boardFoldToggled:
+        state.isBoardFolded.toggle()
+        LoopWorkspaceRail.saveBoardFolded(state.isBoardFolded)
+        return .none
+
+      case .boardExpandToggled:
+        state.isBoardExpanded.toggle()
         return .none
 
       case .summaryAnswerTapped:

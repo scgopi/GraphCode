@@ -94,6 +94,17 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// `nil` until the summary producer is switched on in Settings, which is where it stays
   /// for anyone who never turns the experiment on.
   public var summary: LoopSummary?
+  /// The same run, drawn — a Mermaid flowchart or a table, composed once per finished pass
+  /// and rendered natively by the rail (`SummaryBoard`).
+  ///
+  /// Beside `summary` rather than inside it because the two are produced by different
+  /// things at different prices: a beat is read off the transcript for nothing, every poll;
+  /// a board is a model call, at a pass boundary, only if someone switched that on. Folding
+  /// them together would mean a summary that costs money to merge.
+  ///
+  /// `nil` for anyone who never turns the experiment on, and cleared within a poll of it
+  /// being turned off.
+  public var board: SummaryBoard?
   /// What the session is doing right now, as last read off its own label store
   /// (`PresenceHooks` writes it, `ZmxSessionLauncher.presence` reads it).
   ///
@@ -144,6 +155,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     usage: UsageSample? = nil,
     activity: String? = nil,
     summary: LoopSummary? = nil,
+    board: SummaryBoard? = nil,
     presence: PresenceReading? = nil,
     metricHistory: [MetricSample] = [],
     createdBy: UUID? = nil,
@@ -167,6 +179,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.usage = usage
     self.activity = activity
     self.summary = summary
+    self.board = board
     self.presence = presence
     self.metricHistory = metricHistory
     self.createdBy = createdBy
@@ -333,7 +346,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     case id, title, loopType, checkDescription, triggerPrompt, goal, backend, modelTier
     case worktreeBinding, subGraph, pilotState, usage, metricHistory, createdBy
     case state, createdAt, activity, presence, firstInstruction, pausesBeforeWritesOnly
-    case summary, heartbeatIntervalSeconds
+    case summary, board, heartbeatIntervalSeconds
   }
 
   /// Hand-written for the same reason `LoopEdge`'s is: `ProjectPersistence.loadGraph`
@@ -366,6 +379,9 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     // account of a run, and a resolved loop's is the thing worth reading after the fact.
     // It is bounded by construction, so a graph file cannot grow on it.
     summary = try container.decodeIfPresent(LoopSummary.self, forKey: .summary)
+    // Survives a reload for the reason above, and one more: it cost a model call, and a
+    // picture that has to be paid for again on every relaunch is a picture nobody keeps.
+    board = try container.decodeIfPresent(SummaryBoard.self, forKey: .board)
     presence = try container.decodeIfPresent(PresenceReading.self, forKey: .presence)
     metricHistory =
       try container.decodeIfPresent([MetricSample].self, forKey: .metricHistory) ?? []

@@ -22,8 +22,13 @@ struct LoopWorkspaceRail: View {
   /// The newest beat this window had on screen when it was last left — see
   /// `LoopWorkspaceFeature.seenBeatID`.
   let seenBeatID: String?
+  /// Whether the board section is collapsed to its header. Per window and persisted,
+  /// beside the summary's own fold.
+  let isBoardFolded: Bool
   let onSummaryFoldToggled: () -> Void
   let onSummaryAnswerTapped: () -> Void
+  let onBoardFoldToggled: () -> Void
+  let onBoardExpanded: () -> Void
   let onTargetTapped: (UUID) -> Void
 
   /// The handoff's number, and now the floor rather than the fixed size. Below this the
@@ -31,10 +36,40 @@ struct LoopWorkspaceRail: View {
   static let minimumWidth: CGFloat = 212
   /// Half a 1280pt window is already more than a summary needs; past this the terminal —
   /// the pane someone is actually working in — is the thing being taken from.
-  static let maximumWidth: CGFloat = 520
+  ///
+  /// Raised from 520 when boards arrived. A sentence stops needing width at 520; a diagram
+  /// does not, and a person who drags the rail out to read one has said plainly which of
+  /// the two panes they want.
+  static let maximumWidth: CGFloat = 760
   /// Wider than the 212 the design specified, because the section that arrived after it
   /// carries prose rather than chips and rows of three.
   static let defaultWidth: CGFloat = 280
+
+  /// What the rail opens at when the loop carries a board — and *only* when nobody has ever
+  /// dragged the rail themselves (`hasStoredWidth`).
+  ///
+  /// A diagram is not prose: 280 points is four boxes across before it starts scrolling
+  /// sideways, which is the width at which a flowchart stops being worth drawing. 460 fits
+  /// a five-box layer at full size and still leaves two thirds of a 1280pt window to the
+  /// terminal. It is a default and nothing more — the drag handle is unchanged, and the
+  /// moment a width is chosen it wins over this for ever.
+  static let boardWidth: CGFloat = 460
+
+  /// Whether a width has ever been committed by a drag. What keeps `boardWidth` from
+  /// overruling a choice somebody actually made.
+  static func hasStoredWidth() -> Bool {
+    UserDefaults.standard.double(forKey: widthDefaultsKey) > 0
+  }
+
+  static let boardFoldedDefaultsKey = "loopBoardSectionFolded"
+
+  static func loadBoardFolded() -> Bool {
+    UserDefaults.standard.bool(forKey: boardFoldedDefaultsKey)
+  }
+
+  static func saveBoardFolded(_ folded: Bool) {
+    UserDefaults.standard.set(folded, forKey: boardFoldedDefaultsKey)
+  }
 
   static let visibleDefaultsKey = "loopWorkspaceRailVisible"
 
@@ -83,7 +118,8 @@ struct LoopWorkspaceRail: View {
   /// to it (the argument that already keeps the cost rollup out of the sidebar).
   static func hasContent(
     node: LoopNode, graph: LoopGraph,
-    summarising: Bool = LoopSummaryPresentation.isProducing
+    summarising: Bool = LoopSummaryPresentation.isProducing,
+    drawing: Bool = SummaryBoardPresentation.isDrawing
   ) -> Bool {
     graph.edges.contains { $0.from == node.id || $0.to == node.id }
       || node.metricHistory.count >= 2
@@ -91,6 +127,10 @@ struct LoopWorkspaceRail: View {
       // anything — and that narration is the reason to open the rail at all. With the
       // producer off it is not narrating, whatever a previous switch-on left on the node.
       || LoopSummaryPresentation.hasContent(node: node, producing: summarising)
+      // A loop wired to nothing whose run has been drawn has the one thing the rail is
+      // widest for. Its own switch, so the board's absence is never inferred from the
+      // beats' — see `SummaryBoardPresentation.hasContent`.
+      || SummaryBoardPresentation.hasContent(node: node, drawing: drawing)
   }
 
   /// How many loops this one hands off to — what the loop bar's control counts.
@@ -120,6 +160,14 @@ struct LoopWorkspaceRail: View {
         LoopSummarySection(
           node: node, now: now, isFolded: isSummaryFolded, seenBeatID: seenBeatID,
           onToggleFold: onSummaryFoldToggled, onAnswer: onSummaryAnswerTapped)
+      }
+      // Under the sentence and above the graph. The order is the order of the questions:
+      // what is it doing, what shape did that have, where does it sit. A diagram above the
+      // beat would put the account of a finished pass over the thing happening now.
+      if SummaryBoardPresentation.hasContent(node: node) {
+        SummaryBoardSection(
+          node: node, isFolded: isBoardFolded, onToggleFold: onBoardFoldToggled,
+          onExpand: onBoardExpanded)
       }
       section("THIS LOOP") {
         RailMinimap(node: node, upstream: inbound, downstream: outbound.map(\.target))

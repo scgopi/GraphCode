@@ -71,6 +71,29 @@ public actor GraphStore {
   /// that don't care, and any client that never wires it) means off, which is the
   /// experiment's default.
   private let onHeartbeatEnabled: (@Sendable () -> Bool)?
+  /// Draws one finished pass (`SummaryBoardComposer`). `nil` when nothing composes boards,
+  /// which is every test that did not ask for one.
+  private let onComposeBoard: (@Sendable (LoopNode, LoopSummary, String?) async -> SummaryBoard?)?
+  /// Whether the human has the picture switched on, asked fresh at every tick — so
+  /// switching it off empties the boards on the next poll without restarting anything, the
+  /// same contract `onHeartbeatEnabled` has.
+  private let onBoardsEnabled: (@Sendable () -> Bool)?
+  /// The newest pass each node has already been *asked* about, drawn or not.
+  ///
+  /// Without this, `NONE` — the answer the composer is told to give for a thin pass, and
+  /// the answer most passes get — would leave the node's board stamped with an older pass
+  /// and make it a candidate again on the very next tick. One declined pass would become a
+  /// model call every fifteen seconds for as long as the loop stayed on it, which is the
+  /// one cost this whole path promises to bound.
+  ///
+  /// In memory rather than in the graph file, deliberately: it is a record of what was
+  /// *spent*, not of what a loop is, and re-drawing one pass after a daemon restart is a
+  /// far better failure than persisting a refusal for ever.
+  ///
+  /// Pruned to the graph's own nodes on every sweep. A deleted loop's entry would otherwise
+  /// outlive it, and `graphcoded` runs for weeks — which is precisely how the PTY leak this
+  /// path already had turned "one descriptor" into an exhausted host.
+  private(set) var boardAttempts: [UUID: Int] = [:]
   /// How many composites deep this store sits: 0 at the project root, 1 inside the
   /// first composite, and so on — see `runInSubGraph`, which increments it.
   ///
@@ -162,6 +185,10 @@ public actor GraphStore {
     onRefinePlaybook: (@Sendable (UUID, String) -> Bool)? = nil,
     onRollbackPlaybook: (@Sendable (UUID) -> Bool)? = nil,
     onHeartbeatEnabled: (@Sendable () -> Bool)? = nil,
+    onComposeBoard: (
+      @Sendable (LoopNode, LoopSummary, String?) async -> SummaryBoard?
+    )? = nil,
+    onBoardsEnabled: (@Sendable () -> Bool)? = nil,
     subGraphDepth: Int = 0
   ) {
     self.graph = graph
@@ -183,6 +210,8 @@ public actor GraphStore {
     self.onRefinePlaybook = onRefinePlaybook
     self.onRollbackPlaybook = onRollbackPlaybook
     self.onHeartbeatEnabled = onHeartbeatEnabled
+    self.onComposeBoard = onComposeBoard
+    self.onBoardsEnabled = onBoardsEnabled
   }
 
   private func recordMemory(_ nodeID: UUID, _ entry: String) {
@@ -375,6 +404,9 @@ public actor GraphStore {
       await refreshPresence()
       await refreshActivity()
       await refreshSummary()
+      // After the summary, never beside it: a board is drawn *from* the merged summary, so
+      // a pass that ended this tick has to be counted before it can be drawn.
+      await refreshBoards()
     }
 
     // Guarded re-fires need an `until` predicate answered first, which means a
@@ -614,6 +646,80 @@ public actor GraphStore {
     return changed
   }
 
+  /// Draws the passes that have ended since the last tick — the only reading here that
+  /// costs money, and the only one that is allowed to skip work it could do.
+  ///
+  /// Three rules, and they are the whole of the bounding:
+  ///
+  /// 1. **Off means empty.** Asked fresh every tick, so switching the experiment off drops
+  ///    every board within a poll rather than leaving pictures on nodes for a feature
+  ///    nobody has switched on — the same clearing `refreshSummary` does for beats.
+  /// 2. **A pass is drawn once.** `SummaryBoard.pass` records which pass a board describes,
+  ///    and a node whose summary has not moved past it is not a candidate. This is what
+  ///    turns "once per pass" from an intention into a property.
+  /// 3. **At most `maxPerTick` a tick.** These are subprocesses with timeouts on them, run
+  ///    concurrently, and a graph where ten loops finish together must not put ten CLI
+  ///    processes on one poll — the poll every state dot in the app rides on. The rest are
+  ///    drawn next tick; the candidate list is sorted by how far behind each board is, so
+  ///    nothing waits indefinitely behind a loop that keeps finishing passes.
+  ///
+  /// A loop with no finished pass is never a candidate. A board is an account of work that
+  /// happened, and a session thirty seconds into its first pass has none to account for.
+  @discardableResult
+  private func refreshBoards() async -> Bool {
+    guard let onComposeBoard else { return false }
+    guard onBoardsEnabled?() != false else {
+      var cleared = false
+      for node in graph.nodes where node.board != nil {
+        graph.nodes[id: node.id]?.board = nil
+        cleared = true
+      }
+      // Forgotten along with the boards, so switching the experiment back on draws the
+      // current pass rather than waiting for the next one.
+      boardAttempts.removeAll()
+      return cleared
+    }
+    let path = graph.project.path
+    // Before anything else, so a graph that has lost half its loops does not keep paying
+    // for them in memory.
+    let living = Set(graph.nodes.map(\.id))
+    boardAttempts = boardAttempts.filter { living.contains($0.key) }
+    let candidates =
+      graph.nodes
+      .compactMap { node -> (node: LoopNode, summary: LoopSummary, behind: Int)? in
+        guard let summary = node.summary, !summary.passes.isEmpty else { return nil }
+        let settled = max(node.board?.pass ?? 0, boardAttempts[node.id] ?? 0)
+        let behind = summary.currentPass - settled
+        guard behind > 0 else { return nil }
+        return (node, summary, behind)
+      }
+      .sorted { ($0.behind, $0.node.id.uuidString) > ($1.behind, $1.node.id.uuidString) }
+      .prefix(SummaryBoardComposer.maxPerTick)
+    guard !candidates.isEmpty else { return false }
+    for candidate in candidates { boardAttempts[candidate.node.id] = candidate.summary.currentPass }
+
+    let drawn = await withTaskGroup(of: (UUID, SummaryBoard?).self) { group in
+      for candidate in candidates {
+        group.addTask {
+          (candidate.node.id, await onComposeBoard(candidate.node, candidate.summary, path))
+        }
+      }
+      var collected: [UUID: SummaryBoard] = [:]
+      for await (id, board) in group {
+        guard let board else { continue }
+        collected[id] = board
+      }
+      return collected
+    }
+    var changed = false
+    for (id, board) in drawn {
+      guard graph.nodes[id: id]?.board != board else { continue }
+      graph.nodes[id: id]?.board = board
+      changed = true
+    }
+    return changed
+  }
+
   /// Asks each session what it is doing, the third reading on the same channel and the
   /// same trip as the other two.
   ///
@@ -687,6 +793,9 @@ public actor GraphStore {
     var changed = await refreshPresence()
     if await refreshActivity() { changed = true }
     if await refreshSummary() { changed = true }
+    // After the summary and never beside it: a board is drawn *from* the merged summary,
+    // so a pass that ended on this tick has to be counted before it can be drawn.
+    if await refreshBoards() { changed = true }
     // The poll that just learned a target went idle is the natural moment to hand it
     // what was waiting on exactly that.
     await drainPendingFollowUps()

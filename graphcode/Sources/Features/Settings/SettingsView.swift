@@ -136,6 +136,21 @@ struct SettingsView: View {
           .fixedSize(horizontal: false, vertical: true)
 
         Toggle(
+          "Visualise what loops did (experimental)",
+          isOn: $model.settings.visualisesSummaries
+        )
+        .disabled(!model.settings.summarisesLoops)
+        Text(
+          "Draws each finished pass as a flowchart or a table, under the summary in the "
+            + "loop's rail. One short call to your backend's CLI per pass — not per "
+            + "change — and most passes are drawn as nothing, because most passes have no "
+            + "shape worth a diagram. The Mermaid is copyable."
+        )
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+
+        Toggle(
           "Daemon heartbeat (experimental)",
           isOn: $model.settings.daemonHeartbeatEnabled)
         Text(

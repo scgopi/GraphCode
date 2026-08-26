@@ -259,4 +259,16 @@ extension CLISessionBackend {
     node, path in
     await backend(for: node).presence(node, path)
   }
+
+  /// The board-composing hook `GraphStore` is wired with.
+  ///
+  /// Not on `CLISessionBackend` itself, unlike every reading beside it, and the reason is
+  /// what it reads: a board is composed from `LoopSummary` — a value the store already
+  /// holds — rather than from anything in the session's own transcript. The backend matters
+  /// only for *which CLI is invoked to write it*, which `SummaryBoardComposer` takes off the
+  /// node. An adapter method here would be four identical implementations.
+  public static let composeBoard:
+    @Sendable (LoopNode, LoopSummary, String?) async -> SummaryBoard? = { node, summary, path in
+      await SummaryBoardComposer.compose(node: node, summary: summary, projectPath: path)
+    }
 }

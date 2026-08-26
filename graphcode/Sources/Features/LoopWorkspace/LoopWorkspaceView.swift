@@ -22,8 +22,11 @@ struct LoopWorkspaceView: View {
           width: railWidth,
           isSummaryFolded: store.isSummaryFolded,
           seenBeatID: store.seenBeatID,
+          isBoardFolded: store.isBoardFolded,
           onSummaryFoldToggled: { store.send(.summaryFoldToggled) },
-          onSummaryAnswerTapped: { store.send(.summaryAnswerTapped) }
+          onSummaryAnswerTapped: { store.send(.summaryAnswerTapped) },
+          onBoardFoldToggled: { store.send(.boardFoldToggled) },
+          onBoardExpanded: { store.send(.boardExpandToggled) }
         ) { targetID in
           store.send(.railTargetTapped(targetID))
         }
@@ -35,6 +38,7 @@ struct LoopWorkspaceView: View {
       }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .overlay { expandedBoard }
     .onReceive(CanvasClock.tick) { now = $0 }
     .onDisappear { store.send(.workspaceLeft) }
     // The folder header goes in the toolbar, not in the `VStack` above, and the pane
@@ -53,7 +57,35 @@ struct LoopWorkspaceView: View {
   /// Whether the resize cursor is currently pushed — see `railResizeHandle`.
   @State private var isOverRailEdge = false
 
-  private var railWidth: CGFloat { dragWidth ?? store.railWidth }
+  /// The rail's width this frame.
+  ///
+  /// Three answers in priority order, and the middle one is the whole of the board's claim
+  /// on the window: a drag in progress wins; failing that, a loop carrying a diagram opens
+  /// the rail at `boardWidth` **only while nobody has ever set a width themselves**; failing
+  /// that, the stored width. A diagram needs room a sentence does not, and 280 points is
+  /// four boxes across — but a default is all this is, and one drag retires it for good.
+  private var railWidth: CGFloat {
+    if let dragWidth { return dragWidth }
+    guard !store.hasCustomRailWidth, boardIsShowing else { return store.railWidth }
+    return LoopWorkspaceRail.boardWidth
+  }
+
+  private var boardIsShowing: Bool {
+    !store.isBoardFolded && SummaryBoardPresentation.hasContent(node: store.node)
+  }
+
+  /// The board over the panes — see `ExpandedBoardView`. Only ever over a board that is
+  /// actually drawable, so the cover cannot open onto nothing if the diagram is cleared
+  /// while it is up.
+  @ViewBuilder
+  private var expandedBoard: some View {
+    if store.isBoardExpanded, let board = store.node.board, board.isDrawable {
+      ExpandedBoardView(node: store.node, board: board) {
+        store.send(.boardExpandToggled)
+      }
+      .transition(.opacity)
+    }
+  }
 
   /// The rail's leading edge, as a grab handle.
   ///

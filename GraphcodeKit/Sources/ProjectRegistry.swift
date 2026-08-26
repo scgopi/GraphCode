@@ -40,6 +40,7 @@ public actor ProjectRegistry {
   private let readActivity: (@Sendable (LoopNode, String?) async -> String?)?
   private let readSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)?
   private let readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)?
+  private let composeBoard: (@Sendable (LoopNode, LoopSummary, String?) async -> SummaryBoard?)?
   /// Non-nil only while at least one client is attached — see `startPresencePolling`.
   private var presencePoller: Task<Void, Never>?
   /// Runs only while the sleep assertion is held — see `refreshAwakeAssertion`.
@@ -69,7 +70,9 @@ public actor ProjectRegistry {
     readSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)? =
       CLISessionBackend.readSummary,
     readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)? =
-      CLISessionBackend.readPresence
+      CLISessionBackend.readPresence,
+    composeBoard: (@Sendable (LoopNode, LoopSummary, String?) async -> SummaryBoard?)? =
+      CLISessionBackend.composeBoard
   ) {
     persistence = ProjectPersistence(baseDirectory: persistenceDirectory)
     self.ensureSession = ensureSession
@@ -82,6 +85,7 @@ public actor ProjectRegistry {
     self.readActivity = readActivity
     self.readSummary = readSummary
     self.readPresence = readPresence
+    self.composeBoard = composeBoard
   }
 
   // MARK: - Connections
@@ -438,7 +442,15 @@ public actor ProjectRegistry {
       onRollbackPlaybook: { nodeID in
         NodeMemory.rollbackPlaybook(projectPath: path, nodeID: nodeID)
       },
-      onHeartbeatEnabled: { GraphcodeSettingsStore.load().daemonHeartbeatEnabled })
+      onHeartbeatEnabled: { GraphcodeSettingsStore.load().daemonHeartbeatEnabled },
+      onComposeBoard: composeBoard,
+      onBoardsEnabled: {
+        let settings = GraphcodeSettingsStore.load()
+        // Both, and in this order: a board is drawn from the summary, so the picture is
+        // meaningless without the reading that feeds it. Switching the rail off takes the
+        // boards with it rather than leaving pictures of a run nothing is narrating.
+        return settings.summarisesLoops && settings.visualisesSummaries
+      })
     stores[path] = newStore
     // Only on first load of this project — a time-based node's session outlives the app
     // but not a reboot, so something has to restart it, and this is the moment the
