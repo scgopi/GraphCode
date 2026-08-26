@@ -286,54 +286,6 @@ enum BoardArrow {
   }
 }
 
-// MARK: - Table
-
-private struct TableBoardView: View {
-  let board: SummaryBoard
-  let ceiling: CGFloat?
-
-  var body: some View {
-    if let table = board.table {
-      // Horizontally scrollable rather than squeezed: five columns at the rail's folded
-      // width is 40 points each, which is a column of ellipses.
-      ScrollView([.horizontal, .vertical]) {
-        Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 0) {
-          GridRow {
-            ForEach(Array(table.headers.enumerated()), id: \.offset) { _, header in
-              Text(header)
-                .font(.system(size: 9.5, weight: .bold))
-                .tracking(0.5)
-                .foregroundStyle(.white.opacity(0.45))
-            }
-          }
-          .padding(.vertical, 5)
-          // Ruled, not striped. A `GridRow` background is applied to each *cell*, not across
-          // the row, so alternating fills came out as a ragged block behind each piece of
-          // text rather than as a band — worse than the plain rules it was meant to improve
-          // on.
-          ForEach(Array(table.normalisedRows.enumerated()), id: \.offset) { _, row in
-            Divider().overlay(.white.opacity(0.07)).gridCellUnsizedAxes(.horizontal)
-            GridRow {
-              ForEach(Array(row.enumerated()), id: \.offset) { column, cell in
-                Text(cell)
-                  .font(.system(size: 11, design: column == 0 ? .default : .monospaced))
-                  .foregroundStyle(.white.opacity(column == 0 ? 0.85 : 0.65))
-                  .fixedSize(horizontal: false, vertical: true)
-              }
-            }
-            .padding(.vertical, 5)
-          }
-        }
-        .padding(.horizontal, 2)
-      }
-      .scrollBounceBehavior(.basedOnSize)
-      .frame(maxHeight: ceiling ?? .infinity)
-    } else {
-      BoardSourceView(source: board.source)
-    }
-  }
-}
-
 // MARK: - Fallback
 
 /// What a board looks like when this build cannot draw it: its own source, as code.
@@ -360,6 +312,11 @@ struct BoardSourceView: View {
 }
 
 enum BoardPalette {
+  /// The same green a succeeded card wears, and the same red the app already uses for a
+  /// failure — a verdict in a table must not invent its own vocabulary.
+  static let affirm = Color(red: 0.188, green: 0.820, blue: 0.345)  // #30d158
+  static let deny = Color(red: 1.0, green: 0.271, blue: 0.227)  // #ff453a
+
   /// The same #16161a `RailMinimap` sits on, so the two panels in one rail read as one
   /// surface rather than two.
   static let surface = Color(red: 0.086, green: 0.086, blue: 0.102)

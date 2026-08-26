@@ -258,8 +258,20 @@ struct MermaidBoardParserTests {
 
     #expect(parsed.nodes.count == 2)
   }
+}
 
-  // MARK: - Tables
+/// The other half of the subset: a Markdown table, and the separator row that says which
+/// way each column reads.
+///
+/// Its own suite rather than more of the one above — they share no fixture, and the flow
+/// cases are the ones with the syntax in them.
+@Suite
+struct MermaidTableParserTests {
+
+  private func board(_ reply: String, pass: Int = 3) -> SummaryBoard? {
+    MermaidBoardParser.board(
+      fromReply: reply, pass: pass, now: Date(timeIntervalSince1970: 0))
+  }
 
   @Test
   func aMarkdownTableBecomesRowsAndColumns() throws {
@@ -307,5 +319,39 @@ struct MermaidBoardParserTests {
   @Test
   func aTableWithNoRowsIsNotABoard() {
     #expect(board("| A | B |\n|---|---|\n|  |  |") == nil)
+  }
+
+  /// The separator row's colons are the author saying which way a column reads. The parser
+  /// has always had to look at that row to know it *was* a separator; until boards could
+  /// draw a table properly it threw the answer away.
+
+  @Test
+  func theSeparatorRowsColonsAreRead() {
+    #expect(
+      MermaidBoardParser.alignments(ofSeparator: "|---|:---|---:|:---:|")
+        == [.unspecified, .leading, .trailing, .center])
+  }
+
+  @Test
+  func aParsedTableCarriesItsAlignmentsThrough() throws {
+    let board = try #require(
+      MermaidBoardParser.board(
+        fromReply: """
+          | File | Lines |
+          |:---|---:|
+          | a.swift | 438 |
+          | b.swift | 12 |
+          """, pass: 1))
+    #expect(board.table?.alignments == [.leading, .trailing])
+  }
+
+  /// A board written before alignments existed still draws — the list is padded to the
+  /// header count on the way in rather than trusted to match.
+  @Test
+  func aTableWithoutAlignmentsStillDecodes() throws {
+    let json = Data(#"{"headers":["A","B"],"rows":[["1","2"]]}"#.utf8)
+    let decoded = try JSONDecoder().decode(BoardTable.self, from: json)
+    #expect(decoded.alignments == [.unspecified, .unspecified])
+    #expect(decoded.alignment(ofColumn: 5) == .unspecified)
   }
 }

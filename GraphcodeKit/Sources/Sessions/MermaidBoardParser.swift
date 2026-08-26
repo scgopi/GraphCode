@@ -312,8 +312,10 @@ public enum MermaidBoardParser {
     }
     guard !body.isEmpty else { return nil }
     let board = SummaryBoard(
-      form: .table, table: BoardTable(headers: headers, rows: body), source: block,
-      pass: pass, composedAt: now)
+      form: .table,
+      table: BoardTable(
+        headers: headers, rows: body, alignments: alignments(ofSeparator: rows[1])),
+      source: block, pass: pass, composedAt: now)
     return board.isDrawable ? board : nil
   }
 
@@ -323,6 +325,22 @@ public enum MermaidBoardParser {
     if text.hasSuffix("|") { text = String(text.dropLast()) }
     return text.components(separatedBy: "|").map {
       $0.trimmingCharacters(in: .whitespaces)
+    }
+  }
+
+  /// `|---|---:|:--:|` — what the author asked for, per column.
+  ///
+  /// A leading colon means left, a trailing one means right, both mean centre, neither
+  /// means the author did not say and the renderer should decide from the content.
+  static func alignments(ofSeparator row: String) -> [BoardColumnAlignment] {
+    cells(of: row).map { cell in
+      let rule = cell.trimmingCharacters(in: .whitespaces)
+      switch (rule.hasPrefix(":"), rule.hasSuffix(":")) {
+      case (true, true): return .center
+      case (false, true): return .trailing
+      case (true, false): return .leading
+      case (false, false): return .unspecified
+      }
     }
   }
 

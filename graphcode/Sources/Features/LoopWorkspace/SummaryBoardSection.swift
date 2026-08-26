@@ -76,6 +76,9 @@ struct SummaryBoardSection: View {
       Spacer(minLength: 0)
       if let board = presentation.board, !isFolded {
         iconButton("doc.on.doc", help: "Copy the Mermaid") { copy(board.source) }
+        if board.form == .flow {
+          iconButton("square.and.arrow.down", help: "Export for Excalidraw") { export(board) }
+        }
         iconButton("arrow.up.left.and.arrow.down.right", help: "Fill the window", action: onExpand)
       }
       Image(systemName: isFolded ? "chevron.down" : "chevron.up")
@@ -117,6 +120,39 @@ struct SummaryBoardSection: View {
     let pasteboard = NSPasteboard.general
     pasteboard.clearContents()
     pasteboard.setString("```mermaid\n\(source)\n```", forType: .string)
+  }
+
+  /// The same diagram, somewhere it can be rearranged by hand.
+  ///
+  /// **Flow boards only.** A table has no geometry to export — it is rows and columns, and
+  /// Excalidraw has no table. Copying the Markdown is what a table is portable *as*, so the
+  /// button is simply absent rather than present and disappointing.
+  ///
+  /// A save panel rather than a fixed location: this is a file the human is going to open
+  /// somewhere else, so where it lands is theirs to choose.
+  private func export(_ board: SummaryBoard) {
+    let panel = NSSavePanel()
+    panel.nameFieldStringValue = "\(fileStem(board)).excalidraw"
+    panel.allowedContentTypes = []
+    panel.canCreateDirectories = true
+    panel.title = String(localized: "Export for Excalidraw")
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    // Written from the same layout the rail is drawing, so what lands in the file is what
+    // is on screen rather than a second interpretation of the Mermaid.
+    guard
+      let data = try? BoardExcalidrawExport.data(
+        for: board, layout: BoardLayout(board: board))
+    else { return }
+    try? data.write(to: url)
+  }
+
+  private func fileStem(_ board: SummaryBoard) -> String {
+    let name = board.title ?? node.title
+    let safe = name.unicodeScalars.map {
+      CharacterSet.alphanumerics.contains($0) ? Character($0) : "-"
+    }
+    let stem = String(safe).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    return stem.isEmpty ? "board" : stem
   }
 }
 

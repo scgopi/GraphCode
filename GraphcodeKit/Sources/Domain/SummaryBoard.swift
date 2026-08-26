@@ -76,13 +76,57 @@ public struct BoardEdge: Codable, Equatable, Sendable, Identifiable {
   }
 }
 
+/// Which way a column's cells sit, taken from the separator row's colons — `|---:|` is
+/// right, `|:---:|` is centre, `|---|` says nothing.
+///
+/// Markdown has carried this since the syntax existed and the parser has always read it;
+/// until boards learned to draw a table properly it read it only to check the row was a
+/// separator, and threw the answer away. A number column that the author right-aligned and
+/// the renderer left-aligned is the author being overruled by an oversight.
+public enum BoardColumnAlignment: String, Codable, Sendable {
+  case unspecified
+  case leading
+  case center
+  case trailing
+}
+
 public struct BoardTable: Codable, Equatable, Sendable {
   public let headers: [String]
   public let rows: [[String]]
+  /// One per header. Short or missing lists are padded with `.unspecified` on read, so a
+  /// board written before this existed still draws.
+  public let alignments: [BoardColumnAlignment]
 
-  public init(headers: [String], rows: [[String]]) {
+  public init(
+    headers: [String], rows: [[String]], alignments: [BoardColumnAlignment] = []
+  ) {
     self.headers = headers
     self.rows = rows
+    self.alignments =
+      alignments.count == headers.count
+      ? alignments
+      : Array(
+        (alignments + Array(repeating: .unspecified, count: headers.count))
+          .prefix(headers.count))
+  }
+
+  /// A hand-written decoder for the reason every other one here is hand-written: a graph
+  /// file that fails to decode is a graph the app reports as having no loops in it.
+  private enum CodingKeys: String, CodingKey {
+    case headers, rows, alignments
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let headers = try container.decodeIfPresent([String].self, forKey: .headers) ?? []
+    let rows = try container.decodeIfPresent([[String]].self, forKey: .rows) ?? []
+    let alignments =
+      try container.decodeIfPresent([BoardColumnAlignment].self, forKey: .alignments) ?? []
+    self.init(headers: headers, rows: rows, alignments: alignments)
+  }
+
+  public func alignment(ofColumn index: Int) -> BoardColumnAlignment {
+    index < alignments.count ? alignments[index] : .unspecified
   }
 
   /// Rows padded and clipped to the header count, so the renderer can index a row by
@@ -162,7 +206,8 @@ public struct SummaryBoard: Codable, Equatable, Sendable {
         headers: Array($0.headers.prefix(Self.maxColumns)),
         rows: Array($0.rows.prefix(Self.maxRows)).map { row in
           Array(row.prefix(Self.maxColumns))
-        })
+        },
+        alignments: Array($0.alignments.prefix(Self.maxColumns)))
     }
     self.source = source
     self.pass = pass
