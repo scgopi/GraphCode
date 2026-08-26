@@ -199,6 +199,19 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
       let note = firstInstruction?.trimmingCharacters(in: .whitespaces) ?? ""
       return note.isEmpty ? nil : note
     case .timeBased:
+      // Copilot's `/every` submits its first prompt only after the interval elapses, so
+      // a directive-led opening armed correctly and then sat idle — and the typed
+      // first-pass workaround raced the composer. The reliable channel is the opening
+      // prompt itself, so for Copilot it carries both halves as prose: run the task
+      // now, then arm your own `/every`. The session still owns the cadence; graphcode
+      // holds no timer. Other backends keep the directive verbatim — Claude Code's
+      // `/loop` runs its first iteration itself.
+      if backend == .copilotCLI, heartbeatIntervalSeconds == nil, let prompt = triggerPrompt,
+        let recurrence = SessionPrompt.recurrence(of: prompt)
+      {
+        return "Run this task now: \(recurrence.task) Then schedule it to repeat with: "
+          + "/every \(recurrence.interval) \(recurrence.task)"
+      }
       guard let interval = heartbeatIntervalSeconds, interval > 0, let task = triggerPrompt
       else { return triggerPrompt }
       // The heartbeat counterpart of the /loop directive: the session is told who
