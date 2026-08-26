@@ -1330,13 +1330,20 @@ public enum ZmxSessionLauncher {
         DialLog.record(session: name, dial: "first-pass", event: "already-served")
         return
       }
-      // The directory appears as Copilot opens its session, a moment before its composer
-      // can take input. The settle is the same forgiveness `resume` gets.
-      try? await Task.sleep(for: .seconds(firstPassSettleSeconds))
       guard await sessionExists(node) else {
         DialLog.record(session: name, dial: "first-pass", event: "no-session")
         return
       }
+      // The directory appears as Copilot opens its session, well before its composer can
+      // take input — a fixed settle here made delivery flaky: type during boot and the
+      // keystrokes are eaten, landing the pass a retry cycle late or not at all. The
+      // signal that boot is over is the session's own scrollback echoing the opening
+      // prompt: Copilot renders it only once the UI that also owns the composer is up.
+      // A session that never shows it still gets the send — the timeout is a pause, not
+      // a veto — and says so in the dial log.
+      let ready = await waitUntilScrollbackShows(
+        message, sessionNamed: name, deadline: Date().addingTimeInterval(firstPassReadySeconds))
+      if !ready { DialLog.record(session: name, dial: "first-pass", event: "not-ready") }
       // Sent, then *verified*: a `zmx send` reports only that the keystrokes reached
       // the PTY, and a Copilot mid-boot — or parked at a dialog the trust seed could
       // not prevent — swallows them whole. The `user.message` event Copilot writes on
@@ -1367,7 +1374,47 @@ public enum ZmxSessionLauncher {
   /// actually does, and the attempt count is small: three swallowed sends in a row means
   /// something structural, not something a fourth send fixes.
   static let firstPassAttempts = 3
-  static let firstPassVerifySeconds: TimeInterval = 10
+  static let firstPassVerifySeconds: TimeInterval = 6
+  static let firstPassReadySeconds: TimeInterval = 30
+
+  /// Polls the session's scrollback until `text` has been rendered in it. Whitespace is
+  /// collapsed out of both sides before matching, because the terminal wraps long lines
+  /// wherever its width dictates — the one guarantee is the characters, not the layout.
+  private static func waitUntilScrollbackShows(
+    _ text: String, sessionNamed name: String, deadline: Date
+  ) async -> Bool {
+    while Date() < deadline {
+      if let scrollback = sessionScrollback(named: name),
+        scrollbackShows(text, in: scrollback)
+      {
+        return true
+      }
+      try? await Task.sleep(for: .seconds(firstPassPollSeconds))
+    }
+    return false
+  }
+
+  static func scrollbackShows(_ text: String, in scrollback: String) -> Bool {
+    let needle = String(text.filter { !$0.isWhitespace }.prefix(48))
+    guard !needle.isEmpty else { return false }
+    return scrollback.filter { !$0.isWhitespace }.contains(needle)
+  }
+
+  /// `zmx history <name>` — the session's rendered scrollback. A plain pipe rather than
+  /// a PTY: history is a one-shot dump, and this is read on a poll.
+  private static func sessionScrollback(named name: String) -> String? {
+    let process = Process()
+    process.executableURL = ZmxLocator.binaryURL
+    process.arguments = ["history", name]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = FileHandle.nullDevice
+    do { try process.run() } catch { return nil }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else { return nil }
+    return String(decoding: data, as: UTF8.self)
+  }
 
   /// Long enough for a cold `copilot` to open its session, short enough that a pass sent
   /// without ever seeing one is still early in the interval it is standing in for.
