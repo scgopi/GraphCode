@@ -200,12 +200,14 @@ struct SessionBriefingTests {
       #expect(granted.contains { $0.contains("briefings") })
     }
 
-    // The node polls, so its prompt is a `/loop` directive and the pointer trails it —
-    // see `theLoopDirectiveKeepsTheFrontOfACopilotPrompt`.
+    // A Copilot time loop opens as prose — run now, then arm /every — so the briefing
+    // pointer leads it, and the raw directive never fronts the message.
     let interactive = try #require(arguments.firstIndex(of: "--interactive"))
     let opening = arguments[interactive + 1]
     #expect(opening.contains(".md"))
-    #expect(opening.hasPrefix("/loop 1h Check"))
+    #expect(opening.contains("Run this task now: Check"))
+    #expect(opening.contains("/every 1h Check"))
+    #expect(!opening.hasPrefix("/loop"))
   }
 
   @Test

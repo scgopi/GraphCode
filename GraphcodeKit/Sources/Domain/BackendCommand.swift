@@ -104,7 +104,7 @@ extension CLISessionBackendKind {
       // and the session reads it as prose: no schedule, one pass, then idle. Passed only
       // for a prompt that actually is one, so an ordinary Copilot session keeps the
       // CLI's own defaults.
-      let experimental = SessionPrompt.firstPass(of: prompt) != nil ? ["--experimental"] : []
+      let experimental = SessionPrompt.mentionsRecurrence(prompt) ? ["--experimental"] : []
       guard let briefingPath else {
         return model + access + experimental + ["--interactive", prompt]
       }

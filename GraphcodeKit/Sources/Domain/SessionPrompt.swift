@@ -51,6 +51,30 @@ public enum SessionPrompt {
     return nil
   }
 
+  /// The recurrence a `/loop <interval> <task>` directive describes — the interval token
+  /// exactly as written and the task behind it — or `nil` for anything else. The token
+  /// stays a string because its consumer repeats it back to the agent verbatim.
+  public static func recurrence(of prompt: String) -> (interval: String, task: String)? {
+    let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+    for directive in recurringDirectives where trimmed.hasPrefix("\(directive) ") {
+      let afterDirective = trimmed.dropFirst(directive.count).drop { $0 == " " }
+      let interval = afterDirective.prefix { $0 != " " }
+      let task = afterDirective.dropFirst(interval.count)
+        .trimmingCharacters(in: .whitespaces)
+      guard !interval.isEmpty, !task.isEmpty else { return nil }
+      return (String(interval), task)
+    }
+    return nil
+  }
+
+  /// Whether the prompt involves a recurring directive at all — leading or mentioned —
+  /// which is what decides Copilot's `--experimental` flag: the session needs `/every`
+  /// available whether the directive opens the message or the message asks the agent to
+  /// arm it.
+  public static func mentionsRecurrence(_ prompt: String) -> Bool {
+    recurringDirectives.contains { prompt.contains($0) }
+  }
+
   /// `prompt` with `preamble` on whichever side keeps a leading directive leading.
   public static func composed(preamble: String, prompt: String) -> String {
     guard opensWithDirective(prompt) else { return "\(preamble) \(prompt)" }

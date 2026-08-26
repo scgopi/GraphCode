@@ -162,7 +162,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
     // here rather than by the daemon would arm nothing at all without it — the same
     // parity this whole method exists for, since which path starts a session is a race.
     let opening = initialPrompt ?? ""
-    if backend == .copilotCLI, SessionPrompt.firstPass(of: opening) != nil {
+    if backend == .copilotCLI, SessionPrompt.mentionsRecurrence(opening) {
       parts.append("--experimental")
     }
     // Presence reporting, from the same place the daemon gets it (`PresenceHooks`). It

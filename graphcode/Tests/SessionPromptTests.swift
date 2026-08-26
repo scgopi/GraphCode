@@ -121,11 +121,56 @@ struct SessionPromptTests {
         title: "Poll", loopType: type, triggerPrompt: prompt,
         heartbeatIntervalSeconds: heartbeat, backend: backend)
     }
-    #expect(ZmxSessionLauncher.firstPassMessage(for: node()) == "Check")
+    // A directive-shaped prompt now opens as prose that runs the task and arms /every
+    // itself, so the typed kickoff is dormant across the board — kept only as the belt
+    // for a future prompt shape the prose composition doesn't cover.
+    #expect(ZmxSessionLauncher.firstPassMessage(for: node()) == nil)
+    #expect(ZmxSessionLauncher.firstPassMessage(for: node(prompt: "/loop soon Check")) == nil)
     #expect(ZmxSessionLauncher.firstPassMessage(for: node(heartbeat: 900)) == nil)
     #expect(ZmxSessionLauncher.firstPassMessage(for: node(backend: .claudeCode)) == nil)
     #expect(
       ZmxSessionLauncher.firstPassMessage(for: node(type: .sketch, prompt: "poke about")) == nil)
+  }
+
+  /// The user-shaped fix: `/every` submits its first prompt only after the interval, so
+  /// the opening message — the one channel that always lands — carries both halves as
+  /// prose. Run now, then arm your own recurrence. The session still owns the cadence.
+  @Test
+  func aCopilotTimeLoopOpensByRunningNowAndArmingItsOwnEvery() {
+    let copilot = LoopNode(
+      title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 15m say hi",
+      backend: .copilotCLI)
+    #expect(
+      copilot.sessionPrompt
+        == "Run this task now: say hi Then schedule it to repeat with: /every 15m say hi")
+
+    // Claude Code's /loop runs its first iteration itself; its directive is untouched.
+    let claude = LoopNode(
+      title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 15m say hi",
+      backend: .claudeCode)
+    #expect(claude.sessionPrompt == "/loop 15m say hi")
+
+    // The token is repeated back verbatim, whatever it is — a bad one still runs its
+    // first pass, and the agent surfaces the bad /every where a silent directive never
+    // surfaced anything.
+    let odd = LoopNode(
+      title: "Poll", loopType: .timeBased, triggerPrompt: "/loop soon say hi",
+      backend: .copilotCLI)
+    #expect(
+      odd.sessionPrompt
+        == "Run this task now: say hi Then schedule it to repeat with: /every soon say hi")
+  }
+
+  @Test
+  func recurrenceExtractionKeepsTheTokenVerbatim() {
+    let parsed = SessionPrompt.recurrence(of: "/every 30m check the queue")
+    #expect(parsed?.interval == "30m")
+    #expect(parsed?.task == "check the queue")
+    #expect(SessionPrompt.recurrence(of: "/loop 1h") == nil)
+    #expect(SessionPrompt.recurrence(of: "plain prose") == nil)
+    // The experimental flag follows any mention, prose included.
+    #expect(SessionPrompt.mentionsRecurrence("Run now. Then: /every 15m say hi"))
+    #expect(!SessionPrompt.mentionsRecurrence("fix the failing test"))
   }
 
   /// The marker is what stops the opening pass repeating, and it records *which* session
