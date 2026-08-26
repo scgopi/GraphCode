@@ -40,7 +40,8 @@ public actor ProjectRegistry {
   private let readActivity: (@Sendable (LoopNode, String?) async -> String?)?
   private let readSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)?
   private let readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)?
-  private let composeBoard: (@Sendable (LoopNode, LoopSummary, String?) async -> SummaryBoard?)?
+  private let composeBoard:
+    (@Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?)?
   /// Non-nil only while at least one client is attached — see `startPresencePolling`.
   private var presencePoller: Task<Void, Never>?
   /// Runs only while the sleep assertion is held — see `refreshAwakeAssertion`.
@@ -71,7 +72,7 @@ public actor ProjectRegistry {
       CLISessionBackend.readSummary,
     readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)? =
       CLISessionBackend.readPresence,
-    composeBoard: (@Sendable (LoopNode, LoopSummary, String?) async -> SummaryBoard?)? =
+    composeBoard: (@Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?)? =
       CLISessionBackend.composeBoard
   ) {
     persistence = ProjectPersistence(baseDirectory: persistenceDirectory)

@@ -243,7 +243,8 @@ public enum CopilotSessionLog {
   static func reading(inLogAt url: URL, metricSamples: [MetricSample]) -> SummaryReading {
     var builder = builder(inLogAt: url)
     return SummaryBeatBuilder.reading(
-      from: builder.beats(), turns: builder.userTurns(), metricSamples: metricSamples)
+      from: builder.beats(), turns: builder.userTurns(), metricSamples: metricSamples,
+      closing: builder.closingAnswer())
   }
 
   private static func builder(inLogAt url: URL) -> SummaryBeatBuilder {
@@ -316,7 +317,8 @@ public enum CopilotSessionLog {
     await TranscriptFreshness.shared.recordRemoteStamp(newStamp, forNode: node.id)
     var builder = builder(forLines: lines)
     let reading = SummaryBeatBuilder.reading(
-      from: builder.beats(), turns: builder.userTurns(), metricSamples: metricSamples)
+      from: builder.beats(), turns: builder.userTurns(), metricSamples: metricSamples,
+      closing: builder.closingAnswer())
     return reading.isEmpty ? nil : reading
   }
 

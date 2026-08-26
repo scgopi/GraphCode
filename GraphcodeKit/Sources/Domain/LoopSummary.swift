@@ -146,16 +146,26 @@ public struct SummaryReading: Equatable, Sendable {
   /// The loop's metric series, unchanged. The store matches samples to passes by *when*
   /// they were taken, so nothing here has to know how the passes are numbered.
   public var metricSamples: [MetricSample]
+  /// What the session last said in full, when this window saw a turn end.
+  ///
+  /// **Deliberately not merged into `LoopSummary`.** A beat is a condensed sentence and
+  /// that is the right size for the rail; this is the raw answer, and it exists for exactly
+  /// one reader — `SummaryBoardComposer`, which cannot draw a table it was never shown.
+  /// Keeping it on the *reading* rather than the store means it never reaches a graph file,
+  /// so a loop costs the same bytes on disk as it did before boards existed.
+  public var closing: String?
 
   public init(
     beats: [SummaryBeat], finishedPasses: [PassSummary] = [], turns: [Date] = [],
-    passEndedAt: [Int: Date] = [:], metricSamples: [MetricSample] = []
+    passEndedAt: [Int: Date] = [:], metricSamples: [MetricSample] = [],
+    closing: String? = nil
   ) {
     self.beats = beats
     self.finishedPasses = finishedPasses
     self.turns = turns
     self.passEndedAt = passEndedAt
     self.metricSamples = metricSamples
+    self.closing = closing
   }
 
   public var isEmpty: Bool { beats.isEmpty && finishedPasses.isEmpty }
