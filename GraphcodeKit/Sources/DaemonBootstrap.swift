@@ -105,6 +105,11 @@ public enum DaemonBootstrap {
   @discardableResult
   public static func installIfNeeded() -> Outcome {
     guard let bundled = bundledHelperDirectory() else { return .notPackaged }
+    // Whatever this workspace's own outcome, carry the update to the workspaces nobody
+    // has opened (#199) — off the main thread, because a stale sibling daemon that
+    // predates its SIGTERM handler can take launchd's full escalation (~29s, #167) to
+    // die, and app launch must not wait on it.
+    defer { DispatchQueue.global().async { refreshClosedSiblingWorkspaces(from: bundled) } }
 
     let expected = stamp(forHelpersIn: bundled)
     let current = try? String(contentsOf: stampURL, encoding: .utf8)
@@ -141,9 +146,61 @@ public enum DaemonBootstrap {
     }
   }
 
-  private static func installHelpers(from bundled: URL) throws {
+  /// Brings every workspace this app is *not* running to the bundled helpers (#199).
+  ///
+  /// `installIfNeeded` acts on the current workspace only, and each workspace's daemon
+  /// is respawned from its own `bin` — so a workspace whose window was never opened
+  /// after an update kept an old daemon running old code under `KeepAlive` forever,
+  /// which is how a leak fixed months ago goes on leaking under a new version's name.
+  ///
+  /// A workspace with a live app instance (`WorkspaceLock.holder`) is skipped: installing
+  /// new helpers under a running window makes the new-daemon/old-window pairing
+  /// `changedBundleStamp` exists to prevent, and that instance updates itself at its own
+  /// relaunch. A workspace directory with no launch agent has no daemon to serve and is
+  /// left alone too.
+  static func refreshClosedSiblingWorkspaces(from bundled: URL) {
+    let expected = stamp(forHelpersIn: bundled)
+    guard !expected.isEmpty else { return }
+    let current = Workspace.current
+    for workspace in Workspace.all() where workspace.id != current.id {
+      guard WorkspaceLock.holder(of: workspace) == nil else { continue }
+      let agentURL = launchAgentURL(forLabel: workspace.daemonLabel)
+      guard FileManager.default.fileExists(atPath: agentURL.path) else { continue }
+      let binDirectory = workspace.url.appendingPathComponent("bin", isDirectory: true)
+      let stampFile = workspace.url.appendingPathComponent("installed-helpers.txt")
+      let installed = try? String(contentsOf: stampFile, encoding: .utf8)
+      if installed == expected, helpersInstalled(in: binDirectory) { continue }
+      do {
+        try installHelpers(from: bundled, to: binDirectory)
+        let plist = launchAgentPlist(
+          daemonPath: binDirectory.appendingPathComponent("graphcoded").path,
+          supportDirectory: workspace.url.path, workspace: workspace)
+        if !launchAgentIsCurrent(at: agentURL, expected: plist) {
+          let data = try PropertyListSerialization.data(
+            fromPropertyList: plist, format: .xml, options: 0)
+          try data.write(to: agentURL, options: .atomic)
+        }
+        // The reload matters most on the release that introduces the staleness timer:
+        // a sibling daemon older than the timer would never notice its binary changed.
+        // Once every daemon carries the timer this is a minute of immediacy, no more.
+        reloadDaemon(
+          serviceTarget: "\(domainTarget)/\(workspace.daemonLabel)", agentURL: agentURL)
+        try expected.write(to: stampFile, atomically: true, encoding: .utf8)
+      } catch {
+        // The sibling's own directory, so the report is found next to the daemon it
+        // concerns — same reasoning as `installIfNeeded`'s log.
+        let report =
+          "\(Date().ISO8601Format())  sibling helper refresh failed: \(error)\n"
+        let log = workspace.url.appendingPathComponent("bootstrap.err.log")
+        try? report.write(to: log, atomically: true, encoding: .utf8)
+      }
+    }
+  }
+
+  static func installHelpers(
+    from bundled: URL, to destination: URL = SupportDirectory.binDirectory
+  ) throws {
     let fileManager = FileManager.default
-    let destination = SupportDirectory.binDirectory
     try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
 
     for name in helpers {
@@ -295,10 +352,14 @@ public enum DaemonBootstrap {
   /// healthy install without a daemon. The legacy pair stays as a fallback for the case
   /// where the modern one is refused.
   private static func reloadDaemon() {
+    reloadDaemon(serviceTarget: serviceTarget, agentURL: launchAgentURL)
+  }
+
+  private static func reloadDaemon(serviceTarget: String, agentURL: URL) {
     launchctl(["bootout", serviceTarget])
-    if launchctlStatus(["bootstrap", domainTarget, launchAgentURL.path]) != 0 {
-      launchctl(["unload", launchAgentURL.path])
-      launchctl(["load", launchAgentURL.path])
+    if launchctlStatus(["bootstrap", domainTarget, agentURL.path]) != 0 {
+      launchctl(["unload", agentURL.path])
+      launchctl(["load", agentURL.path])
     }
   }
 
