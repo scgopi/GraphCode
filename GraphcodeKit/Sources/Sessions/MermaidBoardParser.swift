@@ -353,24 +353,36 @@ public enum MermaidBoardParser {
   /// containing a pipe — legal, if rare — parses as a one-row table, and a board that
   /// draws the wrong form is worse than one that draws nothing.
   static func table(from block: String, pass: Int, now: Date) -> SummaryBoard? {
-    let rows =
-      block
-      .components(separatedBy: .newlines)
+    let lines = block.components(separatedBy: .newlines)
       .map { $0.trimmingCharacters(in: .whitespaces) }
-      .filter { $0.hasPrefix("|") }
-    guard rows.count >= 3 else { return nil }
-    let headers = cells(of: rows[0])
-    guard !headers.isEmpty, isSeparator(rows[1]), cells(of: rows[1]).count == headers.count
+    // **The first table, not every pipe in the reply.** Filtering the whole block for lines
+    // beginning with `|` reads two tables under one heading as one table, with the second
+    // one's header and `---` separator drawn as data rows. A real answer has two tables in
+    // it often enough — a summary and then a breakdown — and the merged grid was the
+    // confidently-wrong drawing this feature is meant not to produce.
+    guard
+      let start = lines.indices.dropLast().first(where: { index in
+        let header = lines[index]
+        guard header.hasPrefix("|") else { return false }
+        let separator = lines[index + 1]
+        return separator.hasPrefix("|") && isSeparator(separator)
+          && cells(of: separator).count == cells(of: header).count
+      })
     else { return nil }
-    let body = rows.dropFirst(2).map { cells(of: $0) }.filter { row in
-      row.contains { !$0.isEmpty }
-    }
+    let headers = cells(of: lines[start])
+    guard !headers.isEmpty else { return nil }
+    let rows = Array(lines[(start + 2)...].prefix { $0.hasPrefix("|") })
+    let body = rows.map { cells(of: $0) }.filter { row in row.contains { !$0.isEmpty } }
     guard !body.isEmpty else { return nil }
     let board = SummaryBoard(
       form: .table,
       table: BoardTable(
-        headers: headers, rows: body, alignments: alignments(ofSeparator: rows[1])),
-      source: block, pass: pass, composedAt: now)
+        headers: headers, rows: body,
+        alignments: alignments(ofSeparator: lines[start + 1])),
+      // The table alone rather than the answer it sat in. This is what the header's copy
+      // button puts on the pasteboard, and prose above a table is not part of the table.
+      source: (Array(lines[start...(start + 1)]) + rows).joined(separator: "\n"),
+      pass: pass, composedAt: now)
     return board.isDrawable ? board : nil
   }
 
@@ -400,7 +412,28 @@ public enum MermaidBoardParser {
     }
     if escaped { current.append("\\") }
     cells.append(current)
-    return cells.map { $0.trimmingCharacters(in: .whitespaces) }
+    return cells.map { unemphasised($0.trimmingCharacters(in: .whitespaces)) }
+  }
+
+  /// A cell without its Markdown emphasis — `**461**` is the number 461, and `` `.dmg` ``
+  /// is `.dmg`.
+  ///
+  /// The rail draws a table in its own type, so the markers have nothing to render *as*:
+  /// left in, they printed literally in a 100-point column, and they cost the column its
+  /// meaning as well as its looks — `**461**` is not a number, so a column an agent
+  /// bolded lost its right alignment and its bars. Agents bold the figure that moved in
+  /// almost every table they write.
+  static func unemphasised(_ text: String) -> String {
+    var body = text
+    for marker in ["**", "__", "`"] {
+      body = body.replacingOccurrences(of: marker, with: "")
+    }
+    if body.count > 1, let first = body.first, let last = body.last, first == last,
+      first == "*" || first == "_"
+    {
+      body = String(body.dropFirst().dropLast())
+    }
+    return body.trimmingCharacters(in: .whitespaces)
   }
 
   /// `|---|---:|:--:|` — what the author asked for, per column.

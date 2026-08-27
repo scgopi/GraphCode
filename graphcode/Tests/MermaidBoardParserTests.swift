@@ -440,12 +440,73 @@ struct MermaidTableParserTests {
           | plain | none |
           """, pass: 1))
     #expect(board.table?.headers == ["Command", "Note"])
-    #expect(board.table?.rows == [["`a | b`", "pipes"], ["plain", "none"]])
+    #expect(board.table?.rows == [["a | b", "pipes"], ["plain", "none"]])
   }
 
   /// A backslash that is not escaping a pipe is kept — a Windows path is not syntax.
   @Test
   func aBackslashThatIsNotAnEscapeSurvives() {
     #expect(MermaidBoardParser.cells(of: #"| C:\dir | windows |"#) == [#"C:\dir"#, "windows"])
+  }
+
+  /// Two tables in one answer are two tables. Read as one, the second one's header and
+  /// `---` row were drawn as data — a grid whose rows come from different tables, under a
+  /// heading belonging to only one of them.
+  @Test
+  func onlyTheFirstTableInAnAnswerIsDrawn() throws {
+    let board = try #require(
+      MermaidBoardParser.board(
+        fromReply: """
+          Downloads are up.
+
+          | Metric | Now |
+          |---|---:|
+          | Total | 461 |
+          | Stable | 307 |
+
+          And by version:
+
+          | Version | Count |
+          |---|---:|
+          | v0.1.43 | 20 |
+          """, pass: 1))
+    #expect(board.table?.headers == ["Metric", "Now"])
+    #expect(board.table?.rows == [["Total", "461"], ["Stable", "307"]])
+    #expect(board.source == "| Metric | Now |\n|---|---:|\n| Total | 461 |\n| Stable | 307 |")
+  }
+
+  /// The prose a table sat in is not part of the table — the copy button puts this on the
+  /// pasteboard.
+  @Test
+  func aTablesSourceIsTheTableAndNothingAroundIt() throws {
+    let board = try #require(
+      MermaidBoardParser.board(
+        fromReply: """
+          Here is what I found, and I will fix it next:
+
+          | File | Lines |
+          |---|---:|
+          | A.swift | 438 |
+
+          Let me know.
+          """, pass: 1))
+    #expect(board.source == "| File | Lines |\n|---|---:|\n| A.swift | 438 |")
+  }
+
+  /// An agent bolds the figure that moved. Left in, the markers printed literally *and*
+  /// cost the column its alignment, because `**461**` is not a number.
+  @Test
+  func aCellKeepsItsValueAndLosesItsMarkdownEmphasis() throws {
+    let board = try #require(
+      MermaidBoardParser.board(
+        fromReply: """
+          | Metric | Now | Note |
+          |---|---:|---|
+          | Stable `.dmg` | **461** | *climbing* |
+          | Beta | 154 | __steady__ |
+          """, pass: 1))
+    #expect(board.table?.headers == ["Metric", "Now", "Note"])
+    #expect(
+      board.table?.rows == [["Stable .dmg", "461", "climbing"], ["Beta", "154", "steady"]])
   }
 }

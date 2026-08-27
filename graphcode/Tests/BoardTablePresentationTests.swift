@@ -117,4 +117,21 @@ struct BoardTablePresentationTests {
     #expect(BoardTablePresentation.number(from: "3 files") == nil)
     #expect(BoardTablePresentation.number(from: "") == nil)
   }
+
+  /// A table is Markdown wherever it is pasted; a Mermaid fence around one makes every
+  /// reader draw it as a failed diagram.
+  @Test
+  func aTableIsCopiedAsMarkdownAndAFlowAsMermaid() {
+    let table = SummaryBoard(
+      form: .table, table: BoardTable(headers: ["A"], rows: [["1"]]),
+      source: "| A |\n|---|\n| 1 |", pass: 1)
+    #expect(SummaryBoardSection.pasteboardText(for: table) == "| A |\n|---|\n| 1 |")
+
+    let flow = SummaryBoard(
+      form: .flow, nodes: [BoardNode(id: "A", text: "One"), BoardNode(id: "B", text: "Two")],
+      edges: [BoardEdge(from: "A", to: "B")], source: "flowchart TD\n  A --> B", pass: 1)
+    #expect(
+      SummaryBoardSection.pasteboardText(for: flow)
+        == "```mermaid\nflowchart TD\n  A --> B\n```")
+  }
 }
