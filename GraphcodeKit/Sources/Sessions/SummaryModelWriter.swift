@@ -172,8 +172,6 @@ public enum SummaryModelWriter {
       newest, backend: node.backend,
       workingDirectory: ZmxSessionLauncher.workingDirectory(
         forNode: node, projectPath: projectPath))
-    var beats = reading.beats
-    beats[beats.count - 1] = rewritten
-    return SummaryReading(beats: beats, finishedPasses: reading.finishedPasses)
+    return reading.replacingNewestBeat(with: rewritten)
   }
 }

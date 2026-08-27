@@ -169,6 +169,19 @@ public struct SummaryReading: Equatable, Sendable {
   }
 
   public var isEmpty: Bool { beats.isEmpty && finishedPasses.isEmpty }
+
+  /// The same reading with its newest beat swapped for a better-written one.
+  ///
+  /// A method rather than a fresh `SummaryReading(beats:finishedPasses:)` at the call site,
+  /// because rebuilding this type from two of its six fields silently drops the other four.
+  /// That is not hypothetical: it dropped `closing`, and `closing` is what a board is drawn
+  /// from — so every loop lost its diagram whenever the model rewrote a sentence.
+  public func replacingNewestBeat(with beat: SummaryBeat) -> SummaryReading {
+    guard !beats.isEmpty else { return self }
+    var reading = self
+    reading.beats[reading.beats.count - 1] = beat
+    return reading
+  }
 }
 
 /// A loop's narration, bounded by construction: the current beat, the two before it, one
