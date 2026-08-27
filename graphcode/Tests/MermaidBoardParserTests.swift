@@ -375,4 +375,77 @@ struct MermaidTableParserTests {
     #expect(decoded.alignments == [.unspecified, .unspecified])
     #expect(decoded.alignment(ofColumn: 5) == .unspecified)
   }
+
+  /// `A --> B & C` is Mermaid's fan-out, and a diagram an agent wrote uses it freely.
+  /// Read as one node it produced a box labelled `Fix] & C[Test` — mermaid syntax drawn
+  /// as if it were a label, which is the confidently-wrong rendering boards exist to avoid.
+  @Test
+  func anAmpersandFansOutToEveryNodeOnTheOtherSide() throws {
+    let board = try #require(
+      MermaidBoardParser.board(
+        fromReply: """
+          ```mermaid
+          flowchart TD
+            A[Read issue] --> B[Fix] & C[Test]
+            B & C --> D[Ship]
+          ```
+          """, pass: 1))
+    #expect(board.nodes.map(\.id) == ["A", "B", "C", "D"])
+    #expect(board.nodes.map(\.text) == ["Read issue", "Fix", "Test", "Ship"])
+    #expect(
+      board.edges.map { "\($0.from)\($0.to)" } == ["AB", "AC", "BD", "CD"])
+  }
+
+  /// The label the arrow carries belongs to every edge the fan-out makes.
+  @Test
+  func aFannedOutLinkKeepsItsLabelOnEveryEdge() throws {
+    let board = try #require(
+      MermaidBoardParser.board(
+        fromReply: """
+          ```mermaid
+          flowchart TD
+            A{Ready?} -->|yes| B[Build] & C[Test]
+          ```
+          """, pass: 1))
+    #expect(board.edges.count == 2)
+    #expect(board.edges.allSatisfy { $0.label == "yes" })
+  }
+
+  /// An `&` inside a label is text. Splitting there would cut a box in half.
+  @Test
+  func anAmpersandInsideALabelIsNotAFanOut() throws {
+    let board = try #require(
+      MermaidBoardParser.board(
+        fromReply: """
+          ```mermaid
+          flowchart TD
+            A[Cut & paste] --> B["Copy & keep"]
+          ```
+          """, pass: 1))
+    #expect(board.nodes.map(\.text) == ["Cut & paste", "Copy & keep"])
+    #expect(board.edges.count == 1)
+  }
+
+  /// Markdown says `\|` is a pipe in a cell, not the end of one — and a coding session
+  /// writes them: a shell pipeline, an `A | B` type. Split on, the row gained a column
+  /// the table has no header for and the cell was cut in two.
+  @Test
+  func anEscapedPipeStaysInsideItsCell() throws {
+    let board = try #require(
+      MermaidBoardParser.board(
+        fromReply: """
+          | Command | Note |
+          |---|---|
+          | `a \\| b` | pipes |
+          | plain | none |
+          """, pass: 1))
+    #expect(board.table?.headers == ["Command", "Note"])
+    #expect(board.table?.rows == [["`a | b`", "pipes"], ["plain", "none"]])
+  }
+
+  /// A backslash that is not escaping a pipe is kept — a Windows path is not syntax.
+  @Test
+  func aBackslashThatIsNotAnEscapeSurvives() {
+    #expect(MermaidBoardParser.cells(of: #"| C:\dir | windows |"#) == [#"C:\dir"#, "windows"])
+  }
 }

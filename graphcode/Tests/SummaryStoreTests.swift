@@ -302,6 +302,33 @@ struct SummaryStoreTests {
     #expect(deduped == reading)
   }
 
+  /// A rewritten sentence must not cost the reading everything else it carries.
+  ///
+  /// The whole board feature rides on `closing`: it is the agent's own answer, the only
+  /// field a diagram can be drawn from, and it was being dropped on exactly the poll a
+  /// board is composed on — every loop in a nineteen-loop graph read `closing: nil`, so
+  /// nothing was ever drawn.
+  @Test
+  func rewritingTheNewestBeatKeepsEverythingElseTheReadingCarries() {
+    let reading = SummaryReading(
+      beats: [beat(1, "Reading the probe", at: 1), beat(1, "Editing the parser", at: 2)],
+      finishedPasses: [PassSummary(pass: 1, text: "did pass 1")],
+      turns: [Date(timeIntervalSince1970: 5)],
+      passEndedAt: [1: Date(timeIntervalSince1970: 9)],
+      metricSamples: [MetricSample(value: 42, recordedAt: Date(timeIntervalSince1970: 7))],
+      closing: "| File | Lines |\n|---|---|\n| A.swift | 12 |")
+    let rewritten = reading.replacingNewestBeat(
+      with: beat(1, "Tightening the parser", at: 2))
+
+    #expect(rewritten.beats.last?.text == "Tightening the parser")
+    #expect(rewritten.beats.first == reading.beats.first)
+    #expect(rewritten.finishedPasses == reading.finishedPasses)
+    #expect(rewritten.turns == reading.turns)
+    #expect(rewritten.passEndedAt == reading.passEndedAt)
+    #expect(rewritten.metricSamples == reading.metricSamples)
+    #expect(rewritten.closing == reading.closing)
+  }
+
   /// A quiet loop must cost a `stat` and no read, or dropping the `busy` guard would put
   /// a tail parse per idle loop on every poll.
   @Test
