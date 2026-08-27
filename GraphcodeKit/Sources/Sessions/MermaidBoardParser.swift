@@ -172,34 +172,73 @@ public enum MermaidBoardParser {
     var nodes: [BoardNode] = []
     var edges: [BoardEdge] = []
     var cursor = text.startIndex
-    var previous: BoardNode?
+    /// The nodes on the left of the link being read. A *list* rather than one node because
+    /// of `&`: `A --> B & C` is two edges, and both start at whatever preceded the arrow.
+    var previous: [BoardNode] = []
     /// The link whose right-hand node has not been read yet. An edge can only be emitted
     /// once *both* its ends are known, and the link that joins them is the one before the
     /// node being read — not the one the loop is currently on.
     var pending: LinkMatch?
 
-    func close(with node: BoardNode) {
-      nodes.append(node)
-      if let from = previous, let pending {
-        edges.append(
-          BoardEdge(from: from.id, to: node.id, label: pending.label, style: pending.style))
+    func close(with side: [BoardNode]) {
+      nodes.append(contentsOf: side)
+      if let pending {
+        for from in previous {
+          for to in side {
+            edges.append(
+              BoardEdge(from: from.id, to: to.id, label: pending.label, style: pending.style))
+          }
+        }
       }
-      previous = node
+      previous = side
     }
 
     for link in links {
       // A segment that holds no identifier breaks the chain rather than silently joining
       // the boxes either side of it.
-      if let node = parseNodeToken(String(text[cursor..<link.range.lowerBound])) {
-        close(with: node)
-      } else {
-        previous = nil
-      }
+      let side = parseNodeTokens(String(text[cursor..<link.range.lowerBound]))
+      if side.isEmpty { previous = [] } else { close(with: side) }
       pending = link
       cursor = link.range.upperBound
     }
-    if let tail = parseNodeToken(String(text[cursor...])) { close(with: tail) }
+    let tail = parseNodeTokens(String(text[cursor...]))
+    if !tail.isEmpty { close(with: tail) }
     return (nodes, edges)
+  }
+
+  /// One side of a link — usually one node, and every node in it when the side is a `&`
+  /// list. Mermaid joins every node on one side to every node on the other, which is how
+  /// a fan-out is written in one line, and it is common enough in a diagram an agent wrote
+  /// that reading it as a single node produced a box labelled `Fix] & C[Test`.
+  static func parseNodeTokens(_ segment: String) -> [BoardNode] {
+    fanOutParts(of: segment).compactMap { parseNodeToken($0) }
+  }
+
+  /// Split on `&`, but only where it separates nodes: inside a label — `A[Cut & paste]`,
+  /// or an `&nbsp;` — it is text, and splitting there would cut a box in half.
+  static func fanOutParts(of segment: String) -> [String] {
+    guard segment.contains("&") else { return [segment] }
+    var parts: [String] = []
+    var current = ""
+    var depth = 0
+    var quoted = false
+    for character in segment {
+      if character == "\"" { quoted.toggle() }
+      if !quoted {
+        if "[({".contains(character) {
+          depth += 1
+        } else if "])}".contains(character) {
+          depth = max(0, depth - 1)
+        } else if character == "&", depth == 0 {
+          parts.append(current)
+          current = ""
+          continue
+        }
+      }
+      current.append(character)
+    }
+    parts.append(current)
+    return parts
   }
 
   struct LinkMatch {
@@ -335,13 +374,33 @@ public enum MermaidBoardParser {
     return board.isDrawable ? board : nil
   }
 
+  /// The cells of one row, with `\\|` read as Markdown means it: a literal pipe inside a
+  /// cell rather than the end of one. Agents write it often — a shell pipeline, a Swift
+  /// `A | B` — and splitting there gave the row more columns than the table has.
   static func cells(of row: String) -> [String] {
     var text = row
     if text.hasPrefix("|") { text = String(text.dropFirst()) }
-    if text.hasSuffix("|") { text = String(text.dropLast()) }
-    return text.components(separatedBy: "|").map {
-      $0.trimmingCharacters(in: .whitespaces)
+    if text.hasSuffix("|"), !text.hasSuffix("\\|") { text = String(text.dropLast()) }
+    var cells: [String] = []
+    var current = ""
+    var escaped = false
+    for character in text {
+      if escaped {
+        if character != "|" { current.append("\\") }
+        current.append(character)
+        escaped = false
+      } else if character == "\\" {
+        escaped = true
+      } else if character == "|" {
+        cells.append(current)
+        current = ""
+      } else {
+        current.append(character)
+      }
     }
+    if escaped { current.append("\\") }
+    cells.append(current)
+    return cells.map { $0.trimmingCharacters(in: .whitespaces) }
   }
 
   /// `|---|---:|:--:|` — what the author asked for, per column.
