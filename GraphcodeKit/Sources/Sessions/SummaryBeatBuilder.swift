@@ -67,7 +67,7 @@ struct SummaryBeatBuilder {
     // **Before the guard, not after.** `condense` refuses anything that is not a sentence,
     // and an answer that is nothing but a table or a fenced diagram is exactly that — so
     // capturing after the guard dropped the very answers worth drawing.
-    latestRaw = String(raw.prefix(Self.maxClosing))
+    latestRaw = Self.clipped(raw)
     guard let text = Self.condense(raw) else { return }
     close()
     open = Open(at: date, pass: max(pass, 1), text: text)
@@ -76,7 +76,39 @@ struct SummaryBeatBuilder {
   /// How much of an answer is worth carrying. Enough for a table of a dozen rows or a plan
   /// with a branch in it; short of a whole essay, which would put more in the composer's
   /// prompt than the summary it is meant to be drawing.
-  static let maxClosing = 1_500
+  ///
+  /// **Raised from 1,500 because the two ends of this disagreed.** A closing answer is cut
+  /// from the *front* and `MermaidBoardParser` prefers the *last* fenced block, so an agent
+  /// that explained itself and then drew the diagram — the commonest shape there is — had
+  /// the diagram cut off and the explanation kept. Four thousand characters covers the long
+  /// tail of real answers; past that the cut is honest rather than silent, because
+  /// `clipped` refuses to end inside a fence.
+  static let maxClosing = 4_000
+
+  /// An answer cut to `maxClosing`, on a line boundary, never inside a fenced block.
+  ///
+  /// A cut mid-fence leaves an opening ``` with no closing one, which `lastBlock` reads as a
+  /// diagram that ran out of budget and draws as far as it got — half a flowchart presented
+  /// as the whole of one. Dropping the unterminated block loses the diagram, which is the
+  /// honest outcome: nothing is drawn, and the rail says so.
+  static func clipped(_ raw: String) -> String {
+    guard raw.count > maxClosing else { return raw }
+    var kept = String(raw.prefix(maxClosing))
+    if let boundary = kept.lastIndex(of: "\n") { kept = String(kept[..<boundary]) }
+    let lines = kept.components(separatedBy: .newlines)
+    let fences = lines.filter { line in
+      let trimmed = line.trimmingCharacters(in: .whitespaces)
+      return trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~")
+    }
+    guard fences.count % 2 == 1 else { return kept }
+    guard
+      let opening = lines.lastIndex(where: { line in
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~")
+      })
+    else { return kept }
+    return lines[..<opening].joined(separator: "\n")
+  }
 
   /// One tool call, in the phrase its backend reader already speaks — `"editing
   /// Foo.swift"`, `"running make check"`.

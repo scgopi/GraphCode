@@ -124,4 +124,37 @@ struct ClosingAnswerTests {
       SummaryBeatBuilder.condense("Here is the gate:\n\n```mermaid\nflowchart TD\n```")
         == "Here is the gate")
   }
+
+  /// **The two ends of the cap disagreed.** An answer is cut from the front and the parser
+  /// prefers the *last* fenced block, so an agent that explained itself and then drew the
+  /// diagram — which is what an agent asked for a diagram does — had the diagram cut off
+  /// and the explanation kept. Four thousand characters is what covers that shape.
+  @Test
+  func aLongAnswerKeepsTheDiagramItEndsWith() {
+    var builder = SummaryBeatBuilder()
+    let diagram = "```mermaid\nflowchart TD\n  A[One] --> B[Two]\n```"
+    let answer =
+      String(repeating: "Explaining the work in some detail. ", count: 90) + "\n\n"
+      + diagram
+    #expect(answer.count < SummaryBeatBuilder.maxClosing)
+    builder.noteNarration(answer, at: at(1))
+    builder.noteTurnEnd()
+
+    let kept = builder.closingAnswer()
+    #expect(kept?.hasSuffix("```") == true)
+    #expect(MermaidBoardParser.board(fromReply: kept ?? "", pass: 1)?.nodes.count == 2)
+  }
+
+  /// Half a flowchart drawn as a whole one is worse than no flowchart: a cut that lands
+  /// inside a fence drops the fence rather than leaving it hanging open.
+  @Test
+  func aCutThatLandsInsideAFenceDropsTheFence() {
+    let prose = String(repeating: "Line of explanation.\n", count: 260)
+    let clipped = SummaryBeatBuilder.clipped(
+      prose + "```mermaid\nflowchart TD\n" + String(repeating: "  A --> B\n", count: 400) + "```")
+    #expect(clipped.count <= SummaryBeatBuilder.maxClosing)
+    #expect(!clipped.contains("```"))
+    // And it stops on a line boundary rather than mid-sentence.
+    #expect(clipped.hasSuffix("Line of explanation."))
+  }
 }

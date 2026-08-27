@@ -270,6 +270,51 @@ struct SummaryBoardTests {
     let decoded = try JSONDecoder().decode(LoopNode.self, from: data)
     #expect(decoded.board == board)
   }
+  /// **The busiest loops were the only ones never eligible.** A pass *line* is built from
+  /// beats read out of a 512KB tail, so a session whose current pass fills that window has
+  /// no older pass in it to summarise and `passes` stays empty however long it runs — while
+  /// `currentPass`, counted from turns and carried across polls, says forty. Requiring the
+  /// lines meant a loop with a shape worth drawing was skipped for being too busy.
+  @Test
+  func aLoopWhoseWindowHoldsNoPassLineIsStillDrawnOnceItHasFinishedAPass() async {
+    let composer = Composer()
+    var node = LoopNode(title: "Heavy", loopType: .goalBased, state: .running)
+    node.summary = LoopSummary(
+      beats: [
+        SummaryBeat(
+          id: "heavy-b", at: Date(timeIntervalSince1970: 10), pass: 40, kind: .editing,
+          text: "Editing the thing")
+      ],
+      passes: [], currentPass: 40)
+    let store = store([node], composer: composer)
+    let descriptor = await attach(to: store)
+    defer { close(descriptor) }
+
+    await store.pollPresence()
+    #expect(await composer.asked == ["Heavy"])
+    #expect(await store.graph.nodes.first?.board != nil)
+  }
+
+  /// A loop on its first pass has finished nothing, and a board is an account of work that
+  /// happened.
+  @Test
+  func aLoopOnItsFirstPassIsNotACandidate() async {
+    let composer = Composer()
+    var node = LoopNode(title: "New", loopType: .goalBased, state: .running)
+    node.summary = LoopSummary(
+      beats: [
+        SummaryBeat(
+          id: "new-b", at: Date(timeIntervalSince1970: 10), pass: 1, kind: .reading,
+          text: "Reading the goal")
+      ],
+      passes: [], currentPass: 1)
+    let store = store([node], composer: composer)
+    let descriptor = await attach(to: store)
+    defer { close(descriptor) }
+
+    await store.pollPresence()
+    #expect(await composer.asked.isEmpty)
+  }
 }
 
 /// A `Bool` two isolation domains can share. The store reads the switch from its own actor
