@@ -146,8 +146,10 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   /// Where the graph actually begins: nothing hands off to these, and they hand off to
   /// something. Returned in `nodes` order so the canvas doesn't reshuffle between
   /// renders.
+  public var sequencingEdges: [LoopEdge] { edges.filter { $0.kind.blocksTarget } }
+
   public var entryPoints: [UUID] {
-    let targeted = Set(edges.map(\.to))
+    let targeted = Set(sequencingEdges.map(\.to))
     let loose = unwiredNodeIDs
     return nodes.map(\.id).filter { !targeted.contains($0) && !loose.contains($0) }
   }
@@ -163,7 +165,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     var reached = Set(entryPoints)
     var frontier = entryPoints
     while let current = frontier.popLast() {
-      for edge in edges where edge.from == current && !reached.contains(edge.to) {
+      for edge in sequencingEdges where edge.from == current && !reached.contains(edge.to) {
         reached.insert(edge.to)
         frontier.append(edge.to)
       }
@@ -178,7 +180,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   /// and a fresh one — edgeless by construction — would otherwise claim an entry port
   /// the moment it was created.
   public var startAnchors: [UUID] {
-    let targeted = Set(edges.map(\.to))
+    let targeted = Set(sequencingEdges.map(\.to))
     let entries = nodes.filter { $0.loopType != .sketch }.map(\.id)
       .filter { !targeted.contains($0) }
 
@@ -188,7 +190,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     var reached = anchored
     var frontier = entries
     while let current = frontier.popLast() {
-      for edge in edges where edge.from == current && !reached.contains(edge.to) {
+      for edge in sequencingEdges where edge.from == current && !reached.contains(edge.to) {
         reached.insert(edge.to)
         frontier.append(edge.to)
       }
@@ -198,7 +200,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
       var frontier = [node.id]
       reached.insert(node.id)
       while let current = frontier.popLast() {
-        for edge in edges where edge.from == current && !reached.contains(edge.to) {
+        for edge in sequencingEdges where edge.from == current && !reached.contains(edge.to) {
           reached.insert(edge.to)
           frontier.append(edge.to)
         }

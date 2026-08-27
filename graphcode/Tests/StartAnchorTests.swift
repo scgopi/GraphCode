@@ -182,4 +182,82 @@ struct StartAnchorTests {
       nodes: [worker, sketch], edges: [LoopEdge(from: worker.id, to: sketch.id)])
     #expect(child.sidebarRoots == [worker.id])
   }
+
+  // MARK: - Only a handoff is a sequencing edge (#194)
+
+  /// **The orchestrator shape, and the bug it exposed.** A parent hands off to each child
+  /// and each child messages its result back — the pattern graphcode itself teaches, since
+  /// a child's memory is seeded at birth with the `node send <parent>` route.
+  ///
+  /// Counting the `message` return edges as sequencing made the parent "targeted", so the
+  /// whole component had no entry point and the canvas drew `cycle · no entry point` over
+  /// a graph with an obvious root. `EdgeKind.blocksTarget` had said the right rule since
+  /// the edge specs went in — "also what cycle traversal follows" — and this was the one
+  /// place that never asked it.
+  @Test
+  func aReportBackMessageDoesNotMakeTheParentTargeted() {
+    let parent = node("Orchestrator")
+    let children = (1...3).map { node("child \($0)") }
+    let wiring = children.flatMap { child in
+      [
+        LoopEdge(from: parent.id, to: child.id, kind: .handoff),
+        LoopEdge(from: child.id, to: parent.id, kind: .message),
+      ]
+    }
+    let subject = graph(nodes: [parent] + children, edges: wiring)
+
+    #expect(subject.entryPoints == [parent.id])
+    #expect(subject.cycleOnlyNodeIDs.isEmpty)
+    #expect(subject.startAnchors == [parent.id])
+  }
+
+  /// The other half of the same rule: a genuine sequencing cycle must still be one. Two
+  /// handoffs closing a ring have no entry point, and saying so is the honest answer —
+  /// `startAnchors` still picks one so nothing floats free of the start marker.
+  @Test
+  func aRingOfHandoffsIsStillACycleWithNoEntryPoint() {
+    let first = node("first")
+    let second = node("second")
+    let subject = graph(
+      nodes: [first, second],
+      edges: [
+        LoopEdge(from: first.id, to: second.id, kind: .handoff),
+        LoopEdge(from: second.id, to: first.id, kind: .handoff),
+      ])
+
+    #expect(subject.entryPoints.isEmpty)
+    #expect(subject.cycleOnlyNodeIDs == Set([first.id, second.id]))
+    #expect(subject.startAnchors.count == 1)
+  }
+
+  /// A consequence worth pinning rather than discovering. Neither kind gates its target —
+  /// a `message` peer runs concurrently and a `spawn` target is a template waiting on
+  /// nothing — so both ends of such a pair are beginnings, and the canvas draws two entry
+  /// ports. Consistent with `EdgeKind.blocksTarget`, and a visible change from when every
+  /// edge counted.
+  @Test
+  func aPairWiredOnlyByANonSequencingEdgeHasTwoBeginnings() {
+    for kind in [EdgeKind.message, .spawn] {
+      let from = node("from")
+      let to = node("to")
+      let subject = graph(
+        nodes: [from, to], edges: [LoopEdge(from: from.id, to: to.id, kind: kind)])
+
+      #expect(subject.entryPoints == [from.id, to.id], "\(kind)")
+      #expect(subject.cycleOnlyNodeIDs.isEmpty, "\(kind)")
+    }
+  }
+
+  /// And the one place that must keep counting every kind. A loop reachable only by a
+  /// `message` is wired to something — calling it loose would put it in the starburst of
+  /// accidents that `unwiredNodeIDs` exists to separate out.
+  @Test
+  func aNodeWiredOnlyByAMessageIsNotLoose() {
+    let from = node("from")
+    let to = node("to")
+    let subject = graph(
+      nodes: [from, to], edges: [LoopEdge(from: from.id, to: to.id, kind: .message)])
+
+    #expect(subject.unwiredNodeIDs.isEmpty)
+  }
 }
