@@ -700,7 +700,15 @@ public actor GraphStore {
     let candidates =
       graph.nodes
       .compactMap { node -> (node: LoopNode, summary: LoopSummary, behind: Int)? in
-        guard let summary = node.summary, !summary.passes.isEmpty else { return nil }
+        // A finished pass, by either account. `passes` is the pass *lines*, which a heavy
+        // loop never has: they are built from beats read out of a 512KB tail, and a session
+        // whose single pass fills that window has no older pass in it to summarise. Its
+        // `currentPass` still counts the turns, and a loop on pass 40 has plainly finished
+        // some — so the busiest loops in a graph, which are the ones with a shape worth
+        // drawing, were the only ones never eligible to be drawn.
+        guard let summary = node.summary,
+          summary.currentPass > 1 || !summary.passes.isEmpty
+        else { return nil }
         let settled = max(node.board?.pass ?? 0, boardAttempts[node.id] ?? 0)
         let behind = summary.currentPass - settled
         guard behind > 0 else { return nil }

@@ -191,4 +191,111 @@ struct BoardLayoutTests {
       ).nodes.isEmpty)
     #expect(BoardLayout(board: board([], nodes: [BoardNode(id: "A", text: "A")])).nodes.isEmpty)
   }
+
+  /// An arrow that skips a layer crosses whatever sits in the layer it skipped — and the
+  /// boxes are drawn *over* the arrows, so it does not read as a crossing, it reads as an
+  /// arrow that is not there. `C -->|no| F` beside `C --> E --> F` is the shape every
+  /// branch-and-rejoin diagram has.
+  @Test
+  func anArrowThatWouldCrossABoxGoesRoundItInstead() throws {
+    let layout = BoardLayout(
+      board: board([("A", "B"), ("B", "C"), ("A", "C")]))
+    let skipping = try #require(layout.edges.first { $0.edge.from == "A" && $0.edge.to == "C" })
+    let straight = try #require(layout.edges.first { $0.edge.from == "A" && $0.edge.to == "B" })
+
+    #expect(!skipping.waypoints.isEmpty)
+    #expect(straight.waypoints.isEmpty)
+
+    // And the way it goes round is outside every box, rather than between two of them.
+    let boxes = layout.nodes.map(\.frame)
+    for point in skipping.waypoints {
+      #expect(!boxes.contains { $0.insetBy(dx: -1, dy: -1).contains(point) })
+    }
+  }
+
+  /// The detour runs on the opposite side from the lane a retry climbs, so a board with
+  /// both does not draw them on one line.
+  @Test
+  func aDetourAndAFeedbackArrowUseOppositeSides() throws {
+    let layout = BoardLayout(
+      board: SummaryBoard(
+        form: .flow,
+        nodes: ["A", "B", "C"].map { BoardNode(id: $0, text: $0) },
+        edges: [
+          BoardEdge(from: "A", to: "B"), BoardEdge(from: "B", to: "C"),
+          BoardEdge(from: "A", to: "C"), BoardEdge(from: "C", to: "A", label: "no"),
+        ], source: "", pass: 1))
+    let detour = try #require(layout.edges.first { $0.edge.from == "A" && $0.edge.to == "C" })
+    let feedback = try #require(layout.edges.first { $0.edge.from == "C" && $0.edge.to == "A" })
+    let boxes = layout.nodes.reduce(CGRect.null) { $0.union($1.frame) }
+
+    #expect(detour.waypoints.contains { $0.x < boxes.minX })
+    #expect(feedback.waypoints.contains { $0.x > boxes.maxX })
+  }
+
+  /// Two detours are two lanes, and two labels that are not on one point.
+  @Test
+  func twoDetoursGetTheirOwnLanesAndTheirOwnLabelHeights() throws {
+    let layout = BoardLayout(
+      board: SummaryBoard(
+        form: .flow,
+        nodes: ["A", "B", "C", "D"].map { BoardNode(id: $0, text: $0) },
+        edges: [
+          BoardEdge(from: "A", to: "B"), BoardEdge(from: "B", to: "C"),
+          BoardEdge(from: "C", to: "D"),
+          BoardEdge(from: "A", to: "D", label: "fast path"),
+          BoardEdge(from: "B", to: "D", label: "skip"),
+        ], source: "", pass: 1))
+    let first = try #require(layout.edges.first { $0.edge.from == "A" && $0.edge.to == "D" })
+    let second = try #require(layout.edges.first { $0.edge.from == "B" && $0.edge.to == "D" })
+
+    #expect(first.labelPoint.x != second.labelPoint.x)
+    #expect(first.labelPoint.y != second.labelPoint.y)
+  }
+
+  /// `A --> A` parsed from the first day and drew nothing: a self-edge is a cycle, so it
+  /// was routed out to the feedback lane and landed under whichever real feedback arrow was
+  /// already there. It belongs on its own box.
+  @Test
+  func aSelfEdgeLoopsAroundItsOwnBox() throws {
+    let layout = BoardLayout(
+      board: SummaryBoard(
+        form: .flow,
+        nodes: ["A", "B"].map { BoardNode(id: $0, text: $0) },
+        edges: [BoardEdge(from: "A", to: "B"), BoardEdge(from: "A", to: "A", label: "retry")],
+        source: "", pass: 1))
+    let loop = try #require(layout.edges.first { $0.edge.from == "A" && $0.edge.to == "A" })
+    let box = try #require(layout.nodes.first { $0.id == "A" }).frame
+    let other = try #require(layout.nodes.first { $0.id == "B" }).frame
+
+    #expect(!loop.waypoints.isEmpty)
+    // It starts on its own box and ends on its own box.
+    #expect(abs(loop.start.x - box.maxX) < 0.5)
+    #expect(abs(loop.end.y - box.minY) < 0.5)
+    // And stays beside that box rather than travelling the board.
+    for point in loop.waypoints + [loop.start, loop.end] {
+      #expect(point.x < box.maxX + 3 * BoardLayout.feedbackInset)
+      #expect(!other.contains(point))
+    }
+  }
+
+  /// The geometry test under the routing: a straight run either passes through a box or it
+  /// does not, and a sampled line would miss a narrow one.
+  @Test
+  func aStraightRunKnowsWhetherItCrossesABox() {
+    let box = CGRect(x: 40, y: 40, width: 20, height: 20)
+    #expect(
+      BoardLayout.segment(
+        from: CGPoint(x: 50, y: 0), to: CGPoint(x: 50, y: 100), crosses: box))
+    #expect(
+      !BoardLayout.segment(
+        from: CGPoint(x: 10, y: 0), to: CGPoint(x: 10, y: 100), crosses: box))
+    // Ends short of it, and starts past it.
+    #expect(
+      !BoardLayout.segment(
+        from: CGPoint(x: 50, y: 0), to: CGPoint(x: 50, y: 30), crosses: box))
+    #expect(
+      !BoardLayout.segment(
+        from: CGPoint(x: 50, y: 70), to: CGPoint(x: 50, y: 100), crosses: box))
+  }
 }
