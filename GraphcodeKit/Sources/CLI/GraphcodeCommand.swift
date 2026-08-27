@@ -35,6 +35,11 @@ public enum GraphcodeCommand: Equatable, Sendable {
   case pilotComposite(projectPath: String, nodeID: UUID)
   case armComposite(projectPath: String, nodeID: UUID)
   case usage(projectPath: String)
+  /// Kill `zmx` sessions no graph node in any workspace owns anymore — the on-demand
+  /// recovery for PTY exhaustion (#197). No project path: orphanhood is a machine-wide
+  /// question, and scoping it to one project is exactly the mistake that kills live
+  /// sessions.
+  case reap(dryRun: Bool)
   case exportNode(projectPath: String, nodeID: UUID, output: String, includeChildren: Bool = false)
   case exportGraph(projectPath: String, output: String)
   case importNodes(projectPath: String, fromZip: String, asChildOf: UUID? = nil)
@@ -66,6 +71,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode node arm <project-path> <node-id>       arm it (needs a pilot first)
       graphcode edge create <project-path> <from-id> <to-id> [--kind <k>] [--condition <c>]
       graphcode usage <project-path>
+      graphcode reap [--dry-run]   kill zmx sessions no loop in any workspace owns —
+                           the recovery for "cannot allocate any more pty devices"
       graphcode node export <project-path> <node-id> [--output file.zip] [--no-children]
                            packages the loop and everything descended from it — child
                            loops, sub-loops, session memory — into a shareable zip
@@ -193,6 +200,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
 
     case "usage":
       return .usage(projectPath: try take(&arguments, name: "project-path"))
+
+    case "reap":
+      return .reap(dryRun: parseFlags(arguments)["dry-run"] != nil)
 
     case "graph":
       let verb = try take(&arguments, name: "graph subcommand")

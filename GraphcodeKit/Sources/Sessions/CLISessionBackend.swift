@@ -188,11 +188,17 @@ extension CLISessionBackend {
   /// into a silent runtime failure a user has to debug. All three current backends are
   /// spiked, so nothing reaches this today — it exists for the next backend added to the
   /// enum before anyone has run its CLI.
+  ///
+  /// `terminate` is the one real operation: the session name is backend-independent
+  /// (`graphcode-<node id>`), so killing it guesses nothing about the CLI — and a no-op
+  /// here leaked the PTY of any node that ever reached this stub on delete (#196).
   public static func unspiked(_ kind: CLISessionBackendKind) -> CLISessionBackend {
     CLISessionBackend(
       kind: kind,
       launch: { _, _ in },
-      terminate: { _, _ in },
+      terminate: { node, projectPath in
+        await ZmxSessionLauncher.kill(node, projectPath: projectPath)
+      },
       sendInput: { _, _, _ in false },
       presence: { _, _ in PresenceReading(presence: .absent, confidence: .reported) },
       usage: { _, _ in nil }

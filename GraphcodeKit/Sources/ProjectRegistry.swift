@@ -87,6 +87,20 @@ public actor ProjectRegistry {
     self.readSummary = readSummary
     self.readPresence = readPresence
     self.composeBoard = composeBoard
+    // The reap half of the two-phase kill (`CondemnedSessions`): once at startup, for a
+    // delete whose daemon died between condemning a session and confirming it dead, and
+    // then on a timer for kills `zmx` failed transiently. Gated the way the remote sweep
+    // is — a registry wired without real sessions (tests) must spawn no processes.
+    if ensureSession != nil {
+      condemnedReaper = Task {
+        await ZmxSessionLauncher.reapCondemnedSessions()
+        while !Task.isCancelled {
+          try? await Task.sleep(for: Self.condemnedReapInterval)
+          guard !Task.isCancelled else { return }
+          await ZmxSessionLauncher.reapCondemnedSessions()
+        }
+      }
+    }
   }
 
   // MARK: - Connections
@@ -158,7 +172,14 @@ public actor ProjectRegistry {
   /// the host's existing `ControlMaster` connection.
   static let remoteLivenessSweepInterval: Duration = .seconds(60)
 
+  /// Generous next to the remote sweep's minute: on a healthy machine the condemned
+  /// list is empty and a tick is one file read, but a tick that finds work spawns
+  /// processes, and a session that survived three confirmed kill attempts is not going
+  /// to die to a faster clock.
+  static let condemnedReapInterval: Duration = .seconds(300)
+
   private var remoteSweeper: Task<Void, Never>?
+  private var condemnedReaper: Task<Void, Never>?
 
   /// Started by the first remote project this daemon loads and left running: a store is
   /// never removed for being idle, and the sweep costs nothing on a tick where no project
@@ -179,6 +200,7 @@ public actor ProjectRegistry {
   /// gone — the same reason `GraphStore` cancels its goal pollers here.
   deinit {
     remoteSweeper?.cancel()
+    condemnedReaper?.cancel()
     awakeRecheck?.cancel()
   }
 
