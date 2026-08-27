@@ -75,7 +75,7 @@ struct SummaryBoardSection: View {
       }
       Spacer(minLength: 0)
       if let board = presentation.board, !isFolded {
-        iconButton("doc.on.doc", help: "Copy the Mermaid") { copy(board.source) }
+        iconButton("doc.on.doc", help: copyHelp(board)) { copy(board) }
         if board.form == .flow {
           iconButton("square.and.arrow.down", help: "Export for Excalidraw") { export(board) }
         }
@@ -116,10 +116,27 @@ struct SummaryBoardSection: View {
   /// The source, not a rendering. A board's whole portability is that it is Mermaid — it
   /// pastes into a pull request, an issue or anywhere else that draws one, and graphcode
   /// happens to be a place that draws it natively.
-  private func copy(_ source: String) {
+  private func copy(_ board: SummaryBoard) {
     let pasteboard = NSPasteboard.general
     pasteboard.clearContents()
-    pasteboard.setString("```mermaid\n\(source)\n```", forType: .string)
+    pasteboard.setString(Self.pasteboardText(for: board), forType: .string)
+  }
+
+  /// What a board is portable *as*, which is not one answer for both forms.
+  ///
+  /// A flow is Mermaid and belongs in a fenced `mermaid` block, where a pull request or an
+  /// issue draws it. A table is GitHub-flavoured Markdown and is already a table anywhere
+  /// it is pasted — wrapping it in a Mermaid fence made it render as a failed diagram in
+  /// every one of those places.
+  static func pasteboardText(for board: SummaryBoard) -> String {
+    switch board.form {
+    case .flow: return "```mermaid\n\(board.source)\n```"
+    case .table: return board.source
+    }
+  }
+
+  private func copyHelp(_ board: SummaryBoard) -> LocalizedStringKey {
+    board.form == .flow ? "Copy the Mermaid" : "Copy the Markdown"
   }
 
   /// The same diagram, somewhere it can be rearranged by hand.
