@@ -425,12 +425,83 @@ public enum ZmxSessionLauncher {
       NodeMemory.clearFirstPass(projectPath: projectPath, nodeID: node.id)
     }
     guard ZmxLocator.isInstalled else { return }
-    guard
-      let session = try? PTYProcessSession(
-        executable: ZmxLocator.binaryURL.path,
-        arguments: killArguments(forNode: node))
-    else { return }
-    _ = await session.waitUntilFinished()
+    // Condemned *before* the first attempt: the caller usually drops the graph node —
+    // the only other handle on this session — right after this, and a kill that misses
+    // with no record leaks a PTY until reboot (#196). The name is absolved only once
+    // a successful `zmx ls` confirms the session gone; anything less is reaped later.
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    await CondemnedSessions.shared.condemn(name)
+    if await killConfirmingDeath(sessionNamed: name) {
+      await CondemnedSessions.shared.absolve(name)
+    }
+  }
+
+  /// `zmx kill`, then proof: `zmx kill` exits 0 whether or not anything died, and
+  /// `zmx get` exits 1 both for absence and for a timeout against a live busy session.
+  /// A successful `zmx ls` that contains no row for the name is the only unambiguous
+  /// confirmation. Retried a few times — three misses in a row means something
+  /// structural, which is what the condemned list's later reap is for.
+  static func killConfirmingDeath(sessionNamed name: String) async -> Bool {
+    for attempt in 1...killAttempts {
+      guard runZmx(["kill", name]) != nil else { return false }
+      if sessionNamedState(name) == .absent { return true }
+      if attempt < killAttempts {
+        try? await Task.sleep(for: .seconds(killRetrySeconds))
+      }
+    }
+    return sessionNamedState(name) == .absent
+  }
+
+  static let killAttempts = 3
+  static let killRetrySeconds: TimeInterval = 0.5
+
+  /// Retries every recorded kill until each session is confirmed gone — the backstop
+  /// for a kill the delete itself could not land: run at daemon startup (a delete whose
+  /// daemon died mid-kill) and on a timer (a `zmx` that answered in error). A tick with
+  /// nothing condemned costs one file read and no processes.
+  public static func reapCondemnedSessions() async {
+    guard ZmxLocator.isInstalled else { return }
+    for name in await CondemnedSessions.shared.names() {
+      if await killConfirmingDeath(sessionNamed: name) {
+        await CondemnedSessions.shared.absolve(name)
+      }
+    }
+  }
+
+  private enum SessionNamedState {
+    case present
+    case absent
+    case unknown
+  }
+
+  private static func sessionNamedState(_ name: String) -> SessionNamedState {
+    guard let result = runZmx(["ls"]), result.status == 0 else { return .unknown }
+    let exists = result.output.split(separator: "\n").contains { line in
+      line.split(whereSeparator: \.isWhitespace).contains("name=\(name)")
+    }
+    return exists ? .present : .absent
+  }
+
+  private struct ZmxResult {
+    let status: Int32
+    let output: String
+  }
+
+  /// Kill and confirmation must still work on a machine that has exhausted its PTYs,
+  /// so these one-shot commands use pipes rather than `PTYProcessSession`.
+  private static func runZmx(_ arguments: [String]) -> ZmxResult? {
+    let process = Process()
+    process.executableURL = ZmxLocator.binaryURL
+    process.arguments = arguments
+    let output = Pipe()
+    process.standardOutput = output
+    process.standardError = FileHandle.nullDevice
+    do { try process.run() } catch { return nil }
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    return ZmxResult(
+      status: process.terminationStatus,
+      output: String(data: data, encoding: .utf8) ?? "")
   }
 
   /// `zmx get <name>` exits 0 when the session exists and 1 when it doesn't — the check

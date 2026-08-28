@@ -64,6 +64,33 @@ case .exportNode, .exportGraph, .importNodes: requireLoopSharing()
 default: break
 }
 
+// Also before the daemon: reap reads graphs from disk and talks to zmx directly, and
+// the machine that needs it most — out of PTYs, daemon flailing — may not have a
+// daemon to dial.
+if case .reap(let dryRun) = command {
+  final class Box: @unchecked Sendable { var report = OrphanedSessionReaper.Report() }
+  let box = Box()
+  let semaphore = DispatchSemaphore(value: 0)
+  Task {
+    box.report = await OrphanedSessionReaper.reap(dryRun: dryRun)
+    semaphore.signal()
+  }
+  semaphore.wait()
+  let report = box.report
+  if let aborted = report.aborted { fail(aborted) }
+  if report.orphans.isEmpty {
+    print("no orphaned sessions")
+  } else if dryRun {
+    for orphan in report.orphans { print("orphan\t\(orphan)") }
+    print("\(report.orphans.count) orphaned session(s) — run `graphcode reap` to kill them")
+  } else {
+    for name in report.reaped { print("reaped\t\(name)") }
+    for name in report.survived { print("survived\t\(name) — kill it by hand: zmx kill \(name)") }
+    print("freed \(report.reaped.count) of \(report.orphans.count) orphaned session(s)")
+  }
+  exit(report.survived.isEmpty ? 0 : 1)
+}
+
 let client: DaemonSocketClient
 do {
   client = try DaemonSocketClient()
@@ -301,6 +328,9 @@ do {
     try runAndPrintGraph(
       projectPath: projectPath,
       [.graphCommand(projectPath: projectPath, command: .armComposite(nodeID))])
+
+  case .reap:
+    break  // handled before the daemon dial above
 
   case .usage(let projectPath):
     // Refresh first: usage is pulled on demand rather than polled, so printing without
