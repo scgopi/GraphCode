@@ -1,6 +1,9 @@
 import Foundation
+import GhosttyKit
 import GraphcodeKit
 import Testing
+
+@testable import graphcode
 
 /// A remote session's browser sign-in: the loopback callback port is read out of the
 /// clicked URL and forwarded into the machine the session runs on, so `az login`,
@@ -69,6 +72,36 @@ struct AuthPortForwardingTests {
     // gh names the destination itself; a trailing one would be read as the command.
     #expect(invocation.last != "dev-widget-x5jq4w")
     #expect(invocation.contains("ExitOnForwardFailure=yes"))
+  }
+
+  /// Drives `GhosttyRuntime.handleAction` with a real C action struct, the way
+  /// libghostty does. App-targeted so no surface (and no runtime) is needed.
+  private func linkOpenHandled(
+    _ url: String, kind: ghostty_action_open_url_kind_e = GHOSTTY_ACTION_OPEN_URL_KIND_UNKNOWN
+  ) -> Bool {
+    url.withCString { pointer in
+      var action = ghostty_action_s()
+      action.tag = GHOSTTY_ACTION_OPEN_URL
+      action.action.open_url = ghostty_action_open_url_s(
+        kind: kind, url: pointer, len: UInt(url.utf8.count))
+      var target = ghostty_target_s()
+      target.tag = GHOSTTY_TARGET_APP
+      return GhosttyRuntime.handleAction(target: target, action: action)
+    }
+  }
+
+  @Test
+  func onlySchemeCarryingUnknownURLsAreIntercepted() {
+    // ⌘⇧-click on a local folder's surface must not regress: a clicked *file path*
+    // (Ghostty hands over a bare absolute path for resolved links) and the
+    // editor-opening scrollback kinds return false, so libghostty's own opener runs
+    // exactly as it did before interception existed.
+    #expect(!linkOpenHandled("/Users/dev/notes.txt"))
+    #expect(!linkOpenHandled("https://example.com/dump", kind: GHOSTTY_ACTION_OPEN_URL_KIND_TEXT))
+    #expect(!linkOpenHandled("https://example.com/dump", kind: GHOSTTY_ACTION_OPEN_URL_KIND_HTML))
+    // A real link is ours — the interception the forwarder rides on. A test-only
+    // scheme, so the open attempt resolves to no application.
+    #expect(linkOpenHandled("x-graphcode-test://sign-in"))
   }
 
   @Test
