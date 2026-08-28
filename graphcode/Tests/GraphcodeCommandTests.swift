@@ -342,6 +342,11 @@ struct GraphcodeCommandTests {
     }
   }
 
+}
+
+// Trailing tests live out here for the same reason every other type at the size
+// budget keeps helpers in an extension — Swift Testing discovers them all the same.
+extension GraphcodeCommandTests {
   /// Asking a subcommand for help used to fail with "missing project-path" — the one
   /// moment a caller admits they don't know the arguments was the one moment they had to
   /// supply them.

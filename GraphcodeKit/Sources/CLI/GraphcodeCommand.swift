@@ -352,10 +352,12 @@ public enum GraphcodeCommand: Equatable, Sendable {
   }
 
   private static func parseDraft(_ arguments: [String]) throws -> NodeDraft {
-    try validateFlags(arguments, allowed: [
-      "help", "title", "type", "into", "check", "goal", "predicate", "prompt",
-      "heartbeat", "backend", "model", "metric", "direction", "budget", "skip-unchanged",
-    ])
+    try validateFlags(
+      arguments,
+      allowed: [
+        "help", "title", "type", "into", "check", "goal", "predicate", "prompt",
+        "heartbeat", "backend", "model", "metric", "direction", "budget", "skip-unchanged",
+      ])
     let flags = parseFlags(arguments)
     if flags["help"] != nil { throw HelpRequested() }
     guard let title = flags["title"] else { throw ParseError.missingArgument("--title") }
@@ -449,10 +451,12 @@ public enum GraphcodeCommand: Equatable, Sendable {
   /// The partial edit `node update` sends — only the flags present travel, so the
   /// daemon can tell "leave alone" (absent) from "clear" (empty string / 0).
   private static func parseUpdate(_ arguments: [String]) throws -> NodeUpdate {
-    try validateFlags(arguments, allowed: [
-      "help", "goal", "predicate", "poll", "stall", "metric", "direction", "budget",
-      "heartbeat", "check", "model", "skip-unchanged", "prompt",
-    ])
+    try validateFlags(
+      arguments,
+      allowed: [
+        "help", "goal", "predicate", "poll", "stall", "metric", "direction", "budget",
+        "heartbeat", "check", "model", "skip-unchanged", "prompt",
+      ])
     let flags = parseFlags(arguments)
     if flags["help"] != nil { throw HelpRequested() }
 
@@ -558,9 +562,11 @@ public enum GraphcodeCommand: Equatable, Sendable {
   /// `--prompt` for time. Turn's decision is where to pause, which create never asks
   /// (`--pause every-turn|before-writes`), defaulting to every turn like the app's form.
   private static func parsePromotion(_ arguments: [String]) throws -> SketchPromotion {
-    try validateFlags(arguments, allowed: [
-      "help", "type", "goal", "predicate", "metric", "direction", "pause", "prompt",
-    ])
+    try validateFlags(
+      arguments,
+      allowed: [
+        "help", "type", "goal", "predicate", "metric", "direction", "pause", "prompt",
+      ])
     let flags = parseFlags(arguments)
     if flags["help"] != nil { throw HelpRequested() }
     guard let rawType = flags["type"] else { throw ParseError.missingArgument("--type") }
