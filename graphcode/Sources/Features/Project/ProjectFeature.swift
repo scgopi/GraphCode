@@ -800,19 +800,24 @@ extension ProjectFeature {
     projectPath: String, asChildOf parentID: UUID?, into compositeID: UUID?
   ) -> Effect<Action> {
     .run { _ in
-      let request = await MainActor.run { () -> GraphImportRequest? in
+      let bundle = await MainActor.run { () -> GraphExportBundle? in
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.zip]
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.message = "Choose a GraphCode export bundle"
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
-        guard let bundle = GraphExportBundle.readFromZip(at: url.path) else { return nil }
-        // Re-identifies and installs any carried sessions under the fresh ids, so
-        // an imported loop resumes its exported conversation on first open.
-        return bundle.preparedImportRequest(asChildOf: parentID, projectPath: projectPath)
+        return GraphExportBundle.readFromZip(at: url.path)
       }
-      guard let request else { return }
+      // Re-identifies and installs any carried sessions under the fresh ids — on this
+      // machine, or delivered over ssh for a remote project — so an imported loop
+      // resumes its exported conversation. Off the main actor: a remote delivery is
+      // ssh round-trips, and the panel is long dismissed by now.
+      guard
+        let request = await bundle?.preparedImportRequest(
+          asChildOf: parentID, projectPath: projectPath
+        )?.request
+      else { return }
       let command = GraphCommand.importNodes(request)
       try? await orchestratorClient.send(
         .graphCommand(

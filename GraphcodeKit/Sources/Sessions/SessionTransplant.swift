@@ -103,17 +103,18 @@ public enum SessionTransplant {
   /// project would otherwise leave two loops banked against one conversation, both
   /// appending to it.
   ///
-  /// Returns the fresh session id, or nil when nothing was installed (remote target,
-  /// empty artifact, unwritable destination). Codex returns nil by design — its
-  /// rollout is installed for `codex`'s own history pickers, but nothing is banked
-  /// because nothing graphcode launches can resume it.
+  /// Returns the fresh session id, or nil when nothing was installed (remote target —
+  /// which `restoreRemote` handles instead — empty artifact, unwritable destination).
+  /// Codex returns nil by design — its rollout is installed for `codex`'s own history
+  /// pickers, but nothing is banked because nothing graphcode launches can resume it.
   @discardableResult
   public static func restore(
     _ artifact: Artifact, forNodeID nodeID: UUID, projectPath: String
   ) -> String? {
     guard !artifact.files.isEmpty else { return nil }
     // A remote project's sessions live on the remote machine; state written into this
-    // Mac's home directory would never be found there.
+    // Mac's home directory would never be found there. `restoreRemote` is the path
+    // that reaches that machine.
     guard RemoteProjectLocation.parse(projectPath: projectPath) == nil else { return nil }
 
     switch artifact.backend {
@@ -154,6 +155,117 @@ public enum SessionTransplant {
     }
     SessionIDStore.save(freshID, forNodeID: nodeID)
     return freshID
+  }
+
+  // MARK: - Remote restore
+
+  /// The remote twin of `restore`: installs the exported session on the host the
+  /// imported loop will actually run on, and banks the fresh id at the exact file the
+  /// daemon's ensure resume branch consumes (`PresenceHooks.remoteSessionIDExpression`)
+  /// — so the first ensure after import runs `--resume` against the delivered
+  /// transcript instead of starting fresh.
+  ///
+  /// Runs *before* the import command is sent, like the local restore: the node does
+  /// not exist in any graph yet, so no ensure can race a half-delivered transcript.
+  /// The transfer is one local pipeline — `tar` of the rewritten files piped into the
+  /// host's own untar over the ssh dial — because the transcript is arbitrary bytes at
+  /// transcript size: megabytes don't fit in an argv, and a PTY-backed runner would
+  /// mangle them in transit. The id file is written last, only after the untar
+  /// succeeded, so a delivery that died mid-transfer banks nothing and the loop falls
+  /// through to today's fresh start.
+  ///
+  /// Codex and OpenCode return nil for the same reasons they bank nothing locally.
+  @discardableResult
+  public static func restoreRemote(
+    _ artifact: Artifact, forNodeID nodeID: UUID, at location: RemoteProjectLocation
+  ) async -> String? {
+    guard !artifact.files.isEmpty else { return nil }
+    let freshID = UUID().uuidString.lowercased()
+    guard
+      let script = remoteInstallScript(
+        for: artifact, freshID: freshID, nodeID: nodeID, at: location)
+    else { return nil }
+    var staged: [String: Data] = [:]
+    switch artifact.backend {
+    case .claudeCode:
+      guard let transcript = artifact.files["transcript.jsonl"] else { return nil }
+      staged["\(freshID).jsonl"] =
+        rewriting(transcript, replacing: artifact.sessionID, with: freshID)
+    case .copilotCLI:
+      for (relativePath, data) in artifact.files {
+        staged[relativePath] = rewriting(data, replacing: artifact.sessionID, with: freshID)
+      }
+    case .codex, .openCode:
+      return nil
+    }
+    guard await deliver(files: staged, remoteScript: script, at: location) else { return nil }
+    return freshID
+  }
+
+  /// What the remote host runs while the tar stream arrives on its stdin: make the
+  /// destination, untar into it, then bank the fresh id. One script, ordered so the
+  /// bank write cannot precede the bytes it points at.
+  ///
+  /// Claude's destination is the slug of the session's *resolved* working directory,
+  /// and only the remote host can resolve its own paths (`/tmp` is `/private/tmp` on a
+  /// Mac and itself on Linux) — so the slug is computed there, with the same
+  /// every-non-alphanumeric-becomes-`-` rule `claudeProjectSlug` applies locally.
+  static func remoteInstallScript(
+    for artifact: Artifact, freshID: String, nodeID: UUID, at location: RemoteProjectLocation
+  ) -> String? {
+    let bank =
+      "printf %s '\(freshID)' > \"$HOME/.graphcode/sessions/\(nodeID.uuidString).id\""
+    switch artifact.backend {
+    case .claudeCode:
+      let repo = RemoteProjectLocation.shellQuoted(location.remotePath)
+      return "set -e; slug=$(cd \(repo) && printf %s \"$(pwd -P)\" "
+        + "| LC_ALL=C tr -c '[:alnum:]' '-'); "
+        + "dir=\"$HOME/.claude/projects/$slug\"; "
+        + "mkdir -p \"$dir\" \"$HOME/.graphcode/sessions\"; "
+        + "tar -xf - -C \"$dir\"; \(bank)"
+    case .copilotCLI:
+      return "set -e; dir=\"$HOME/.copilot/session-state/\(freshID)\"; "
+        + "mkdir -p \"$dir\" \"$HOME/.graphcode/sessions\"; "
+        + "tar -xf - -C \"$dir\"; \(bank)"
+    case .codex, .openCode:
+      return nil
+    }
+  }
+
+  /// Stages the files in a temporary directory and streams them to the host as one
+  /// `tar | ssh` pipeline. The pipeline's exit status is the ssh side's, which is the
+  /// remote script's — `set -e` there turns any failed step into a failed delivery.
+  private static func deliver(
+    files: [String: Data], remoteScript: String, at location: RemoteProjectLocation
+  ) async -> Bool {
+    let staging = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-transplant-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: staging) }
+    for (relativePath, data) in files {
+      guard write(data, to: staging.appendingPathComponent(relativePath)) else { return false }
+    }
+    RemoteProjectLocation.prepareControlSocketDirectory()
+    let pipeline =
+      "tar -C \(RemoteProjectLocation.shellQuoted(staging.path)) -cf - . | "
+      + location.sshCommandLine(remoteCommand: remoteScript)
+    return await runShell(pipeline)
+  }
+
+  private static func runShell(_ script: String) async -> Bool {
+    await withCheckedContinuation { continuation in
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: "/bin/sh")
+      process.arguments = ["-c", script]
+      process.standardOutput = FileHandle.nullDevice
+      process.standardError = FileHandle.nullDevice
+      process.terminationHandler = { continuation.resume(returning: $0.terminationStatus == 0) }
+      do {
+        try process.run()
+      } catch {
+        process.terminationHandler = nil
+        continuation.resume(returning: false)
+      }
+    }
   }
 
   private static func restoreCodex(_ artifact: Artifact, projectPath: String) -> String? {
