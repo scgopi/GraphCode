@@ -23,12 +23,16 @@ enum FeatureRamps {
 
   enum Feature: String {
     case codespaces
+    case starAsk
 
     /// What answers when no ramps.json has ever been fetched (and when the fetch
     /// fails): beta installs opted into rough edges, stable waits for the ramp.
     var defaultPercents: [String: Int] {
       switch self {
       case .codespaces: return ["beta": 100, "stable": 0]
+      // On everywhere by default: the ask exists to reach the installed base, and the
+      // ramp is here as the kill switch rather than as a rollout.
+      case .starAsk: return ["beta": 100, "stable": 100]
       }
     }
   }

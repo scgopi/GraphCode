@@ -30,6 +30,8 @@ struct AppFeature {
 
   @ObservableState
   struct State: Equatable {
+    /// The one-time GitHub star ask — see `AppFeature+StarAsk.swift`.
+    var starAsk = StarAskState()
     var welcome = WelcomeFeature.State()
     var projects: IdentifiedArrayOf<ProjectFeature.State> = []
     var openLoop: LoopWorkspaceFeature.State?
@@ -229,6 +231,8 @@ struct AppFeature {
     case updateFoundInBackground(AvailableUpdate?)
     /// The sidebar update banner — re-presents the offer alert the banner stands for.
     case updateBannerTapped
+    /// The sidebar star ask — see `AppFeature+StarAsk.swift`.
+    case starAsk(StarAsk.Action)
     case updateCheckCompleted(Result<AvailableUpdate?, any Error>)
     /// A bundle replaced underneath this running window — asked on activation, answered
     /// with a relaunch prompt. See `BundleSwap.Action`.
@@ -301,6 +305,9 @@ struct AppFeature {
     // graph, which the main reducer replaces. See `AppFeature+Worktrees.swift`.
     AppWorktreesReducer()
       .ifLet(\.worktreeSweep, action: \.worktrees.sweep) { WorktreeSweepFeature() }
+    // Before the main Reduce for the same reason: its resolution count comes from
+    // diffing against the previous graph.
+    StarAskReducer()
     AppWorkspacesReducer()
     Reduce { state, action in
       switch action {
@@ -408,16 +415,7 @@ struct AppFeature {
         else { return .none }
         removeFromSidebar(&state, path: path)
         state.welcome.recentProjects.removeAll { $0.path == path }
-        return .run { send in
-          try? await orchestratorClient.send(.deleteProjectGraph(path: path))
-          try? await orchestratorClient.send(.forgetProject(path: path))
-          do {
-            try FileManager.default.trashItem(
-              at: URL(fileURLWithPath: path), resultingItemURL: nil)
-          } catch {
-            await send(.projectDeleteFromDiskFailed(String(describing: error)))
-          }
-        }
+        return deleteProjectFromDisk(path: path)
 
       case .projectDeleteFromDiskFailed(let message):
         state.welcome.errorMessage = "Couldn't move the folder to the Trash: \(message)"
@@ -486,6 +484,11 @@ struct AppFeature {
       // Both handled by `historyReducer`, in `AppFeature+History.swift` — listed here
       // only so this switch stays exhaustive.
       case .historyBackTapped, .historyForwardTapped:
+        return .none
+
+      // Handled by `StarAskReducer`, in `AppFeature+StarAsk.swift` — listed here only so
+      // this switch stays exhaustive.
+      case .starAsk:
         return .none
 
       // Every update action is handled by `updatesReducer`, in
@@ -621,6 +624,24 @@ struct AppFeature {
 // The reducer's helpers — an extension so the type body stays inside the lint budget as
 // the state and actions above keep growing.
 extension AppFeature {
+
+  /// Deleting a folder: the graph and the recents entry go through the orchestrator,
+  /// the folder itself to the Trash — never `removeItem`, so a mistaken tap is
+  /// recoverable from the Finder.
+  ///
+  /// In the extension rather than the switch for the reason above.
+  func deleteProjectFromDisk(path: String) -> Effect<Action> {
+    .run { send in
+      try? await orchestratorClient.send(.deleteProjectGraph(path: path))
+      try? await orchestratorClient.send(.forgetProject(path: path))
+      do {
+        try FileManager.default.trashItem(
+          at: URL(fileURLWithPath: path), resultingItemURL: nil)
+      } catch {
+        await send(.projectDeleteFromDiskFailed(String(describing: error)))
+      }
+    }
+  }
 
   /// Everything a launch has to do: restore the app-local lists, decide whether the
   /// primer is due, and open the daemon subscription the whole app hangs off.

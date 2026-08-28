@@ -205,6 +205,15 @@ struct AppSidebarView: View {
           store.send(.updateBannerTapped)
         }
         .padding(8)
+      } else if store.starAsk.isEarned {
+        // Second in line behind the update banner on purpose: news the user asked for
+        // outranks an ask aimed at them, and two stacked banners is a wall.
+        SidebarStarBanner(resolvedLoopCount: store.starAsk.resolvedLoopCount) {
+          store.send(.starAsk(.tapped))
+        } onDismiss: {
+          store.send(.starAsk(.dismissed))
+        }
+        .padding(8)
       }
       if let errorMessage = store.welcome.errorMessage {
         Text(errorMessage)

@@ -136,6 +136,68 @@ struct SidebarUpdateBanner: View {
   private static let surface = Color(red: 0.145, green: 0.149, blue: 0.161)
 }
 
+/// The sidebar's one-time ask to star the project, in the same slot and shape as
+/// `SidebarUpdateBanner` — amber rather than blue, because unlike an update this one
+/// wants something from the human.
+///
+/// It only appears once `StarAskState.isEarned` is true (three loops resolved on this
+/// machine), and it says so: the subtitle is the work the app has already done, not a
+/// pitch. Tapping opens the repository, the × retires it, and either way it never comes
+/// back — an ask that repeats is a nag.
+struct SidebarStarBanner: View {
+  let resolvedLoopCount: Int
+  let action: () -> Void
+  let onDismiss: () -> Void
+
+  var body: some View {
+    HStack(spacing: 6) {
+      Button(action: action) {
+        HStack(spacing: 8) {
+          Image(systemName: "star.fill")
+            .font(.system(size: 14))
+            .foregroundStyle(Self.accent)
+          VStack(alignment: .leading, spacing: 1) {
+            Text("Star GraphCode on GitHub")
+              .font(.system(size: 12, weight: .semibold))
+              .foregroundStyle(.white.opacity(0.92))
+            Text("\(resolvedLoopCount) loops resolved here · a star helps")
+              .font(.system(size: 10.5))
+              .foregroundStyle(.white.opacity(0.55))
+              .lineLimit(1)
+          }
+          Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .help("Open the GraphCode repository on GitHub")
+
+      Button(action: onDismiss) {
+        Image(systemName: "xmark")
+          .font(.system(size: 9, weight: .bold))
+          .foregroundStyle(.white.opacity(0.42))
+      }
+      .buttonStyle(.plain)
+      .help("Don't ask again")
+    }
+    .padding(.vertical, 7)
+    .padding(.horizontal, 10)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    // Two layers for the same reason the update banner has two: the tint alone lets the
+    // desktop read straight through the sidebar's glass, and 10.5pt secondary text over
+    // a moving background is text nobody can read.
+    .background(Self.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 8))
+    .background(Self.surface, in: RoundedRectangle(cornerRadius: 8))
+    .overlay {
+      RoundedRectangle(cornerRadius: 8).stroke(Self.accent.opacity(0.45), lineWidth: 1)
+    }
+  }
+
+  /// The attention orange every surface in this app that wants a human already wears.
+  private static let accent = Color(red: 1.0, green: 0.624, blue: 0.039)  // #FF9F0A
+  private static let surface = Color(red: 0.145, green: 0.149, blue: 0.161)
+}
+
 /// The ⌘K affordance, in the titlebar where a search field belongs.
 ///
 /// A shortcut nobody can see is a shortcut nobody uses. This is the discoverable half of
