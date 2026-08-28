@@ -70,6 +70,14 @@ struct AppView: View {
     ) {
       RemoteRepositoryFormView(store: store.scope(state: \.welcome, action: \.welcome))
     }
+    .sheet(
+      isPresented: Binding(
+        get: { store.welcome.codespaceDraft != nil },
+        set: { if !$0 { store.send(.welcome(.codespaceCancelled)) } }
+      )
+    ) {
+      CodespaceFormView(store: store.scope(state: \.welcome, action: \.welcome))
+    }
     // The window's own backdrop, and the glass every `Theme` scrim is layered over —
     // this is what makes the whole window translucent rather than only the sidebar.
     // A material here (rather than a color) is what lets the window sample the desktop

@@ -64,22 +64,35 @@ public actor RemoteSocketForwarder {
 
   /// The `ssh -N -R` line itself, with the remote socket path assembled around the
   /// `$H` the pre-dial captured — which is why this is a shell line and not an argv.
-  static func forwardCommandLine(for location: RemoteProjectLocation, localSocketPath: String)
+  /// Public for the tests that pin the codespace/ssh split of the dial.
+  public static func forwardCommandLine(
+    for location: RemoteProjectLocation, localSocketPath: String
+  )
     -> String
   {
-    var argv = [
-      "/usr/bin/ssh", "-N",
+    var argv: [String]
+    if location.isCodespace {
+      // gh names the destination itself; `-N` and the forward ride through as
+      // ssh-flags, past the `--`.
+      argv = [GhLocator.executablePath, "codespace", "ssh", "-c", location.host, "--"]
+    } else {
+      argv = ["/usr/bin/ssh"]
+    }
+    argv += [
+      "-N",
       "-o", "ExitOnForwardFailure=yes", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
       "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3",
     ]
-    if let port = location.port { argv += ["-p", String(port)] }
-    let quoted =
+    if !location.isCodespace, let port = location.port { argv += ["-p", String(port)] }
+    var quoted =
       argv.map(RemoteProjectLocation.shellQuoted) + [
         "-R",
         "\"$H\""
           + RemoteProjectLocation.shellQuoted("/.graphcode/graphcoded.sock:" + localSocketPath),
-        RemoteProjectLocation.shellQuoted(location.sshDestination),
       ]
+    if !location.isCodespace {
+      quoted.append(RemoteProjectLocation.shellQuoted(location.sshDestination))
+    }
     return quoted.joined(separator: " ")
   }
 }

@@ -658,15 +658,18 @@ extension AppFeature {
       // Quietly ask whether there's a newer build, so the sidebar banner can offer
       // it without waiting for someone to open the menu. Silent on failure and on
       // "up to date" — a launch must never raise an alert about updates.
+      // Ramps refresh once per launch, silently — the cached copy answers reads
+      // until this lands, and a failure keeps the last good configuration.
+      .run { _ in await FeatureRamps.refresh() },
       .send(.checkForUpdatesInBackground)
     )
   }
 
-  /// Notes that one of Welcome's four ways to open a folder — picked, recent, freshly
-  /// cloned, remote — has just sent an `.openProject`, so the snapshot it comes back as
-  /// is recognisable as this app's own doing (see the `graphChanged` handler). Every
-  /// case that sends one is listed here; a fifth would have to be added, which is why
-  /// the `switch` is exhaustive rather than a `default`.
+  /// Notes that one of Welcome's five ways to open a folder — picked, recent, freshly
+  /// cloned, remote, codespace — has just sent an `.openProject`, so the snapshot it
+  /// comes back as is recognisable as this app's own doing (see the `graphChanged`
+  /// handler). Every case that sends one is listed here; a sixth would have to be
+  /// added, which is why the `switch` is exhaustive rather than a `default`.
   private func recordPendingOpen(_ action: WelcomeFeature.Action, into state: inout State) {
     let path: String?
     switch action {
@@ -674,10 +677,14 @@ extension AppFeature {
     case .recentProjectTapped(let project): path = project.path
     case .cloneFinished(let clonedPath): path = clonedPath
     case .remoteValidated(let projectPath): path = projectPath
+    case .codespaceValidated(let projectPath): path = projectPath
     case .binding, .openFolderButtonTapped, .folderPickerResult(.failure), .openProjectFailed,
       .setOpenPanelPresented, .cloneRepositoryButtonTapped, .cloneLocationPicked, .cloneSubmitted,
       .cloneCancelled, .cloneProgress, .cloneFailed, .addRemoteRepositoryButtonTapped,
-      .remoteConnectionRequested, .remoteSubmitted, .remoteCancelled, .remoteValidationFailed:
+      .remoteConnectionRequested, .remoteSubmitted, .remoteCancelled, .remoteValidationFailed,
+      .addCodespaceButtonTapped, .codespacesLoaded, .codespaceRepositorySuggestionsLoaded,
+      .codespaceListRetryTapped, .codespaceSelected, .codespaceSubmitted,
+      .codespaceValidationFailed, .codespaceCancelled:
       path = nil
     }
     guard let path else { return }

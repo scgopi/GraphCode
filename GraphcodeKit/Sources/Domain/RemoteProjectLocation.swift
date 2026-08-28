@@ -20,21 +20,45 @@ public struct RemoteProjectLocation: Equatable, Sendable {
   public var port: Int?
   /// Absolute path of the repository on the remote machine.
   public var remotePath: String
+  /// A GitHub Codespace rather than a host ssh can dial directly: `host` holds the
+  /// codespace *name*, user and port are meaningless (GitHub's tunnel decides both),
+  /// and every invocation goes through `gh codespace ssh`, which owns auth, key
+  /// setup, and starting a stopped codespace. Everything above the dial — sessions,
+  /// reconnects, presence — is byte-identical to any other remote host.
+  public var isCodespace: Bool
 
-  public init(user: String? = nil, host: String, port: Int? = nil, remotePath: String) {
+  public init(
+    user: String? = nil, host: String, port: Int? = nil, remotePath: String,
+    isCodespace: Bool = false
+  ) {
     self.user = user
     self.host = host
     self.port = port
     self.remotePath = remotePath
+    self.isCodespace = isCodespace
   }
 
   /// The reserved scheme. A path with this prefix is a remote project everywhere a
   /// project path travels.
   public static let scheme = "ssh"
 
+  /// The Codespace variant's scheme: `codespace://<name>/absolute/path` — same
+  /// "the path is the identity" rule, with the codespace name where a hostname
+  /// would be, so the same folder in a codespace and on a server never collide.
+  public static let codespaceScheme = "codespace"
+
   /// Parses a project path, returning `nil` for anything that isn't a remote one —
   /// which is the branch every existing call site takes for ordinary folders.
   public static func parse(projectPath: String) -> RemoteProjectLocation? {
+    if projectPath.hasPrefix("\(codespaceScheme)://") {
+      guard let components = URLComponents(string: projectPath),
+        components.scheme == codespaceScheme,
+        let name = components.host, SafeArgument.isSafeSSHComponent(name),
+        components.user == nil, components.port == nil,
+        !components.path.isEmpty, components.path.hasPrefix("/")
+      else { return nil }
+      return RemoteProjectLocation(host: name, remotePath: components.path, isCodespace: true)
+    }
     guard projectPath.hasPrefix("\(scheme)://"),
       let components = URLComponents(string: projectPath),
       components.scheme == scheme,
@@ -48,7 +72,9 @@ public struct RemoteProjectLocation: Equatable, Sendable {
 
   /// The path string this location travels as — `parse`'s inverse.
   public var projectPath: String {
-    "\(Self.scheme)://\(authority)\(remotePath)"
+    isCodespace
+      ? "\(Self.codespaceScheme)://\(host)\(remotePath)"
+      : "\(Self.scheme)://\(authority)\(remotePath)"
   }
 
   /// An absolute remote path reduced to the one spelling git will print for it, so two
@@ -119,7 +145,24 @@ public struct RemoteProjectLocation: Equatable, Sendable {
   /// `ControlPersist` keeps the master up between ticks; a dead master is redialed by
   /// whichever command comes next. If the socket directory is missing ssh just warns and
   /// dials directly, so this degrades to the old behaviour, never to a failure.
+  ///
+  /// A Codespace dials through `gh codespace ssh -c <name> -- <ssh-flags> <command>`
+  /// instead — everything after `--` reaches gh's underlying ssh untouched, so the
+  /// keepalive posture carries over. `ControlMaster` deliberately does not: gh opens a
+  /// fresh tunnel on a random local port per run and exits with it, so a persisted
+  /// master would rarely be matched again (`%C` hashes the port) and each one left
+  /// behind would sit on a dead tunnel — orphans, not multiplexing.
   public func sshInvocation(remoteCommand: String, interactive: Bool = false) -> [String] {
+    if isCodespace {
+      var invocation = [GhLocator.executablePath, "codespace", "ssh", "-c", host, "--"]
+      if interactive { invocation.append("-t") }
+      invocation += [
+        "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+        "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3",
+      ]
+      invocation.append(remoteCommand)
+      return invocation
+    }
     var invocation = ["/usr/bin/ssh"]
     if interactive { invocation.append("-t") }
     invocation += [
