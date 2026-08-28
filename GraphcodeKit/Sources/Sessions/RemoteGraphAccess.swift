@@ -173,6 +173,13 @@ public enum RemoteGraphAccess {
       graphcode node send <project-path> <node-id> <message...>
       graphcode node memo <project-path> <node-id> <note...>
 
+    SAFETY
+      Use `graphcode projects` to discover paths and `graphcode status` before retrying.
+      `node stop` is reversible; `node delete` removes the node, edges, memory and
+      session irreversibly. `--help` and `-h` only print help. The machine-wide
+      `graphcode reap` recovery runs on the Mac, not this remote host: use it only there,
+      and run `graphcode reap --dry-run` before the destructive form.
+
     NODE OPTIONS
       --into <composite-id>  create inside that composite's sub-graph
       --check <text>         what a human verifies each turn (--type turn)

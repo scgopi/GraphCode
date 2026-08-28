@@ -46,6 +46,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
 
   public enum ParseError: Error, Equatable {
     case unknownCommand(String)
+    case unknownOption(String)
     case missingArgument(String)
     case invalidValue(argument: String, value: String)
     case invalidDraft
@@ -71,8 +72,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode node arm <project-path> <node-id>       arm it (needs a pilot first)
       graphcode edge create <project-path> <from-id> <to-id> [--kind <k>] [--condition <c>]
       graphcode usage <project-path>
-      graphcode reap [--dry-run]   kill zmx sessions no loop in any workspace owns —
-                           the recovery for "cannot allocate any more pty devices"
+      graphcode reap [--dry-run]   recover suspected orphaned zmx sessions when PTYs
+                           cannot be allocated or deleted loops leave sessions behind
       graphcode node export <project-path> <node-id> [--output file.zip] [--no-children]
                            packages the loop and everything descended from it — child
                            loops, sub-loops, session memory — into a shareable zip
@@ -84,6 +85,18 @@ public enum GraphcodeCommand: Equatable, Sendable {
     The reserved path graphcode://global addresses the always-resident global graph —
     the app's pinned "Graph" row — which every other verb accepts wherever
     <project-path> appears.
+
+    RECOVERY AND SAFETY
+      Use `graphcode projects` to discover project paths and `status` to inspect state
+      before retrying a command. `GRAPHCODE_SUPPORT_DIR` selects the workspace for
+      ordinary commands; `reap` is the exception: it reads every discovered workspace
+      on this machine and queries zmx directly, so it also works when graphcoded is down.
+      `graphcode reap --dry-run` is read-only and must be run first. Plain `reap` kills
+      sessions that have no owner in any persisted graph, quick-chat store, or terminal
+      layout; attached sessions are protected. Do not use reap for ordinary cleanup.
+      `node stop` is reversible; `node delete` removes the node, edges, memory, and
+      session irreversibly. `--help` and `-h` only print this help and never execute a
+      command. Unknown options are errors; do not guess flag spellings.
 
     NODE OPTIONS
       --into <composite-id>  create this loop *inside* that composite's sub-graph rather
@@ -162,6 +175,17 @@ public enum GraphcodeCommand: Equatable, Sendable {
 
     Everything talks to graphcoded, not to the app, so these work whether or not a
     window is open.
+
+    COMMON WORKFLOWS
+      graphcode projects
+      graphcode status <project-path>
+      graphcode node send <project-path> <node-id> --follow-up <message…>
+                           stage work without interrupting an active turn
+      graphcode node pilot <project-path> <composite-id>
+      graphcode node arm <project-path> <composite-id>
+                           pilot before arming a proactive routine
+      graphcode reap --dry-run
+                           inspect suspected PTY orphans before any kill
     """
 
   public static func parse(_ arguments: [String]) throws -> GraphcodeCommand {
@@ -193,23 +217,29 @@ public enum GraphcodeCommand: Equatable, Sendable {
       return .help
 
     case "projects":
+      try validateFlags(arguments, allowed: [])
       return .listProjects
 
     case "status":
-      return .status(projectPath: try take(&arguments, name: "project-path"))
+      let path = try take(&arguments, name: "project-path")
+      try validateFlags(arguments, allowed: [])
+      return .status(projectPath: path)
 
     case "usage":
-      return .usage(projectPath: try take(&arguments, name: "project-path"))
+      let path = try take(&arguments, name: "project-path")
+      try validateFlags(arguments, allowed: [])
+      return .usage(projectPath: path)
 
     case "reap":
       if arguments.contains(where: isHelpFlag) { throw HelpRequested() }
-      let flags = parseFlags(arguments)
+      let flags = try parseReapFlags(arguments)
       return .reap(dryRun: flags["dry-run"] != nil)
 
     case "graph":
       let verb = try take(&arguments, name: "graph subcommand")
       guard verb == "export" else { throw ParseError.unknownCommand("graph \(verb)") }
       let path = try take(&arguments, name: "project-path")
+      try validateFlags(arguments, allowed: ["help", "output"])
       let flags = parseFlags(arguments)
       if flags["help"] != nil { throw HelpRequested() }
       let output = flags["output"] ?? "\(path.split(separator: "/").last ?? "graph").zip"
@@ -240,9 +270,15 @@ public enum GraphcodeCommand: Equatable, Sendable {
           throw ParseError.invalidValue(argument: "node-id", value: raw)
         }
         switch verb {
-        case "pilot": return .pilotComposite(projectPath: path, nodeID: nodeID)
-        case "arm": return .armComposite(projectPath: path, nodeID: nodeID)
-        case "delete": return .deleteNode(projectPath: path, nodeID: nodeID)
+        case "pilot":
+          try validateFlags(arguments, allowed: [])
+          return .pilotComposite(projectPath: path, nodeID: nodeID)
+        case "arm":
+          try validateFlags(arguments, allowed: [])
+          return .armComposite(projectPath: path, nodeID: nodeID)
+        case "delete":
+          try validateFlags(arguments, allowed: [])
+          return .deleteNode(projectPath: path, nodeID: nodeID)
         case "promote":
           return .promoteNode(
             projectPath: path, nodeID: nodeID, promotion: try parsePromotion(arguments))
@@ -269,7 +305,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
           return .memoNode(projectPath: path, nodeID: nodeID, text: text)
         case "refine":
           return try parseRefine(arguments, projectPath: path, nodeID: nodeID)
-        default: return .stopNode(projectPath: path, nodeID: nodeID)
+        default:
+          try validateFlags(arguments, allowed: [])
+          return .stopNode(projectPath: path, nodeID: nodeID)
         }
       default:
         throw ParseError.unknownCommand("node \(verb)")
@@ -281,6 +319,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
       let path = try take(&arguments, name: "project-path")
       let from = try takeUUID(&arguments, name: "from-id")
       let to = try takeUUID(&arguments, name: "to-id")
+      try validateFlags(arguments, allowed: ["help", "kind", "condition", "into"])
       let flags = parseFlags(arguments)
       if flags["help"] != nil { throw HelpRequested() }
       var spec = EdgeSpec()
@@ -313,6 +352,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
   }
 
   private static func parseDraft(_ arguments: [String]) throws -> NodeDraft {
+    try validateFlags(arguments, allowed: [
+      "help", "title", "type", "into", "check", "goal", "predicate", "prompt",
+      "heartbeat", "backend", "model", "metric", "direction", "budget", "skip-unchanged",
+    ])
     let flags = parseFlags(arguments)
     if flags["help"] != nil { throw HelpRequested() }
     guard let title = flags["title"] else { throw ParseError.missingArgument("--title") }
@@ -406,6 +449,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
   /// The partial edit `node update` sends — only the flags present travel, so the
   /// daemon can tell "leave alone" (absent) from "clear" (empty string / 0).
   private static func parseUpdate(_ arguments: [String]) throws -> NodeUpdate {
+    try validateFlags(arguments, allowed: [
+      "help", "goal", "predicate", "poll", "stall", "metric", "direction", "budget",
+      "heartbeat", "check", "model", "skip-unchanged", "prompt",
+    ])
     let flags = parseFlags(arguments)
     if flags["help"] != nil { throw HelpRequested() }
 
@@ -511,6 +558,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
   /// `--prompt` for time. Turn's decision is where to pause, which create never asks
   /// (`--pause every-turn|before-writes`), defaulting to every turn like the app's form.
   private static func parsePromotion(_ arguments: [String]) throws -> SketchPromotion {
+    try validateFlags(arguments, allowed: [
+      "help", "type", "goal", "predicate", "metric", "direction", "pause", "prompt",
+    ])
     let flags = parseFlags(arguments)
     if flags["help"] != nil { throw HelpRequested() }
     guard let rawType = flags["type"] else { throw ParseError.missingArgument("--type") }
@@ -572,6 +622,20 @@ public enum GraphcodeCommand: Equatable, Sendable {
       }
     }
     return flags
+  }
+
+  private static func parseReapFlags(_ arguments: [String]) throws -> [String: String] {
+    for argument in arguments where argument.hasPrefix("--") {
+      guard argument == "--dry-run" else { throw ParseError.unknownOption(argument) }
+    }
+    return parseFlags(arguments)
+  }
+
+  private static func validateFlags(_ arguments: [String], allowed: Set<String>) throws {
+    for argument in arguments where argument.hasPrefix("--") {
+      let name = String(argument.dropFirst(2))
+      guard allowed.contains(name) else { throw ParseError.unknownOption(argument) }
+    }
   }
 
   /// Positional arguments only — never the trailing words of `node send`/`node memo`,
@@ -662,6 +726,7 @@ extension GraphcodeCommand {
   public static func describe(_ error: ParseError) -> String {
     switch error {
     case .unknownCommand(let name): return "unknown command: \(name)"
+    case .unknownOption(let name): return "unknown option: \(name)"
     case .missingArgument(let name): return "missing \(name)"
     case .invalidValue(let argument, let value): return "invalid value for \(argument): \(value)"
     case .invalidDraft:
@@ -683,6 +748,7 @@ extension GraphcodeCommand {
     guard let nodeID = UUID(uuidString: raw) else {
       throw ParseError.invalidValue(argument: "node-id", value: raw)
     }
+    try validateFlags(arguments, allowed: ["help", "output", "no-children", "children"])
     let flags = parseFlags(arguments)
     if flags["help"] != nil { throw HelpRequested() }
     let output = flags["output"] ?? "\(nodeID.uuidString).zip"
@@ -698,6 +764,7 @@ extension GraphcodeCommand {
     _ arguments: inout [String], projectPath: String
   ) throws -> GraphcodeCommand {
     let zipPath = try take(&arguments, name: "zip-file")
+    try validateFlags(arguments, allowed: ["help", "as-child-of"])
     let flags = parseFlags(arguments)
     if flags["help"] != nil { throw HelpRequested() }
     var asChildOf: UUID?

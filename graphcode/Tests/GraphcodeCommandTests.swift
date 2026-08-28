@@ -358,6 +358,19 @@ struct GraphcodeCommandTests {
   }
 
   @Test
+  func unknownOptionsAreRefusedBeforeMutatingCommandsRun() {
+    #expect(throws: GraphcodeCommand.ParseError.unknownOption("--dryrun")) {
+      try GraphcodeCommand.parse(["reap", "--dryrun"])
+    }
+    #expect(throws: GraphcodeCommand.ParseError.unknownOption("--titlle")) {
+      try GraphcodeCommand.parse([
+        "node", "create", "/tmp/p", "--titlle", "Research", "--type", "turn",
+        "--prompt", "Read",
+      ])
+    }
+  }
+
+  @Test
   func helpAmongTheFlagsShowsHelpRatherThanReportingAMissingTitle() throws {
     #expect(try GraphcodeCommand.parse(["node", "create", "/tmp/p", "--help"]) == .help)
     #expect(
