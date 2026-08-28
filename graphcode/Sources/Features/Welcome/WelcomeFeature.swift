@@ -437,7 +437,6 @@ struct WelcomeFeature {
     }
   }
 
-
   /// Ask the daemon to open a folder, and *say so* when it can't be reached. This was a
   /// silent `try?` — on a machine where the daemon never came up (a fresh install whose
   /// bootstrap failed, say), Add Folder did nothing at all, with no error anywhere to

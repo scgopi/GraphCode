@@ -128,15 +128,25 @@ struct CopilotBackendTests {
     let node = LoopNode(
       title: "Ship", loopType: .goalBased, goal: GoalSpec(summary: "Tests pass"),
       backend: .codex)
-    let arguments = try #require(ZmxSessionLauncher.arguments(forNode: node))
+    // Settings passed explicitly: the parameter's default reads the *user's* settings
+    // file, so the test asserted on whoever ran it. It also predated Codex YOLO
+    // becoming the default (547368f) and pinned the old guarded argv — asserting the
+    // stale expectation red on every machine since.
+    let arguments = try #require(
+      ZmxSessionLauncher.arguments(forNode: node, settings: GraphcodeSettings()))
 
     #expect(arguments.contains(#"exec codex "$@""#))
-    // Codex splits "when do I stop to ask" from "what may I touch", and a session given
-    // only the first never asks *and* cannot write — indistinguishable from a hung loop.
-    let approval = try #require(arguments.firstIndex(of: "--ask-for-approval"))
-    #expect(arguments[approval + 1] == "never")
-    let sandbox = try #require(arguments.firstIndex(of: "--sandbox"))
-    #expect(arguments[sandbox + 1] == "workspace-write")
+    #expect(arguments.contains("--dangerously-bypass-approvals-and-sandbox"))
+    // The guarded mode still splits "when do I stop to ask" from "what may I touch" —
+    // a session given only the first never asks *and* cannot write, indistinguishable
+    // from a hung loop.
+    let guarded = try #require(
+      ZmxSessionLauncher.arguments(
+        forNode: node, settings: GraphcodeSettings(codexApprovals: .workspace)))
+    let approval = try #require(guarded.firstIndex(of: "--ask-for-approval"))
+    #expect(guarded[approval + 1] == "never")
+    let sandbox = try #require(guarded.firstIndex(of: "--sandbox"))
+    #expect(guarded[sandbox + 1] == "workspace-write")
     // No `--model`: valid ids aren't discoverable from its help, and a guess fails at
     // launch, so its own default applies.
     #expect(!arguments.contains("--model"))
