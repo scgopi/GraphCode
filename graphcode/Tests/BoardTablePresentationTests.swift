@@ -134,4 +134,17 @@ struct BoardTablePresentationTests {
       SummaryBoardSection.pasteboardText(for: flow)
         == "```mermaid\nflowchart TD\n  A --> B\n```")
   }
+
+  /// `| | |` over a `|---|---|` is a label-and-value layout, not a table missing its
+  /// headings — the band and its rule would draw as an empty stripe above the first row.
+  @Test
+  func aTableWithNoHeadingsDrawsNoHeadingRow() {
+    let unnamed = BoardTablePresentation(
+      table: BoardTable(headers: ["", ""], rows: [["Loop", "Beta6 Release"]]))
+    #expect(!unnamed.hasHeaders)
+
+    let named = BoardTablePresentation(
+      table: BoardTable(headers: ["File", ""], rows: [["A.swift", "438"]]))
+    #expect(named.hasHeaders)
+  }
 }

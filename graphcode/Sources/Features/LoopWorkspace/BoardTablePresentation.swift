@@ -51,6 +51,14 @@ struct BoardTablePresentation: Equatable {
   let columns: [Column]
   let rows: [[Cell]]
 
+  /// Whether this table has a heading row worth drawing.
+  ///
+  /// `| | |` over a `|---|---|` is how an agent writes a two-column layout when the columns
+  /// need no names — a label beside a value. Drawing the band anyway leaves an empty stripe
+  /// and a rule above the first row, which reads as a header that failed to load rather than
+  /// as one nobody wrote.
+  var hasHeaders: Bool { columns.contains { !$0.header.isEmpty } }
+
   /// Below this a numeric column is a pair of figures to read, not a series to compare.
   static let minimumRowsForBars = 3
 
