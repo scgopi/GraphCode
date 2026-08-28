@@ -133,15 +133,9 @@ public enum DaemonBootstrap {
       // Written somewhere a human (or a bug report) can find: the app has no console,
       // and a bootstrap that failed silently is how a machine ends up looking
       // "corrupted" with nothing to say why.
-      let report = "\(Date().ISO8601Format())  helper install failed: \(error)\n"
-      let log = SupportDirectory.url.appendingPathComponent("bootstrap.err.log")
-      if let handle = try? FileHandle(forWritingTo: log) {
-        _ = try? handle.seekToEnd()
-        try? handle.write(contentsOf: Data(report.utf8))
-        try? handle.close()
-      } else {
-        try? report.write(to: log, atomically: true, encoding: .utf8)
-      }
+      appendReport(
+        "\(Date().ISO8601Format())  helper install failed: \(error)\n",
+        to: SupportDirectory.url.appendingPathComponent("bootstrap.err.log"))
       return .failed("\(error)")
     }
   }
@@ -162,6 +156,11 @@ public enum DaemonBootstrap {
     let expected = stamp(forHelpersIn: bundled)
     guard !expected.isEmpty else { return }
     let current = Workspace.current
+    // An instance pointed somewhere the workspace scan would never find — a
+    // `GRAPHCODE_SUPPORT_DIR=/tmp/…` test daemon, a `~/.graphcode.dev` — is isolated by
+    // intent. Before this feature it touched nothing outside its own directory, and a
+    // refresh from it would break exactly that isolation.
+    guard isStandardWorkspaceDirectory(current.url) else { return }
     for workspace in Workspace.all() where workspace.id != current.id {
       guard WorkspaceLock.holder(of: workspace) == nil else { continue }
       let agentURL = launchAgentURL(forLabel: workspace.daemonLabel)
@@ -170,6 +169,12 @@ public enum DaemonBootstrap {
       let stampFile = workspace.url.appendingPathComponent("installed-helpers.txt")
       let installed = try? String(contentsOf: stampFile, encoding: .utf8)
       if installed == expected, helpersInstalled(in: binDirectory) { continue }
+      // Direction matters: any packaged copy that gets launched runs this — an old DMG
+      // still sitting in ~/Downloads included — and "different" alone would let it
+      // rewrite every closed workspace *backward* and bounce their daemons, ping-ponging
+      // versions with each alternating launch. Helper modification times come from the
+      // build, so newest-wins is version order without inventing a version file.
+      if stampRegresses(from: installed, to: expected) { continue }
       do {
         try installHelpers(from: bundled, to: binDirectory)
         let plist = launchAgentPlist(
@@ -188,12 +193,55 @@ public enum DaemonBootstrap {
         try expected.write(to: stampFile, atomically: true, encoding: .utf8)
       } catch {
         // The sibling's own directory, so the report is found next to the daemon it
-        // concerns — same reasoning as `installIfNeeded`'s log.
-        let report =
-          "\(Date().ISO8601Format())  sibling helper refresh failed: \(error)\n"
-        let log = workspace.url.appendingPathComponent("bootstrap.err.log")
-        try? report.write(to: log, atomically: true, encoding: .utf8)
+        // concerns — same reasoning, and the same append, as `installIfNeeded`'s log:
+        // a failure here recurs every launch until the stamp lands, and each report
+        // must not erase the one before it.
+        appendReport(
+          "\(Date().ISO8601Format())  sibling helper refresh failed: \(error)\n",
+          to: workspace.url.appendingPathComponent("bootstrap.err.log"))
       }
+    }
+  }
+
+  /// Whether `url` is a workspace directory the scan in `Workspace.all` would find on
+  /// its own: the default `~/.graphcode`, or a `~/.graphcode-<slug>` sibling. Anything
+  /// else reached this process only through `GRAPHCODE_SUPPORT_DIR`.
+  static func isStandardWorkspaceDirectory(
+    _ url: URL, home: URL = URL(fileURLWithPath: NSHomeDirectory())
+  ) -> Bool {
+    let standardized = url.standardizedFileURL
+    guard standardized.deletingLastPathComponent().path == home.standardizedFileURL.path
+    else { return false }
+    let name = standardized.lastPathComponent
+    return name == ".graphcode" || name.hasPrefix(Workspace.directoryPrefix)
+  }
+
+  /// Whether replacing helpers stamped `installed` with ones stamped `expected` would
+  /// move a workspace *backward*. Judged by the newest modification time each stamp
+  /// records: those come from the build, so a strictly older bundle reads strictly
+  /// older. An unreadable stamp on either side regresses nothing — a workspace with no
+  /// stamp is simply behind.
+  static func stampRegresses(from installed: String?, to expected: String) -> Bool {
+    guard let installed,
+      let theirs = newestModification(inStamp: installed),
+      let mine = newestModification(inStamp: expected)
+    else { return false }
+    return mine < theirs
+  }
+
+  static func newestModification(inStamp stamp: String) -> Int? {
+    stamp.split(separator: "\n")
+      .compactMap { line in Int(line.split(separator: ":").last ?? "") }
+      .max()
+  }
+
+  static func appendReport(_ report: String, to log: URL) {
+    if let handle = try? FileHandle(forWritingTo: log) {
+      _ = try? handle.seekToEnd()
+      try? handle.write(contentsOf: Data(report.utf8))
+      try? handle.close()
+    } else {
+      try? report.write(to: log, atomically: true, encoding: .utf8)
     }
   }
 
@@ -225,8 +273,17 @@ public enum DaemonBootstrap {
       // malware". It looked fine on the build machine only because its quarantine was
       // already marked approved. Clearing the xattr is the install step Finder would
       // have performed had a human dragged the helper out themselves.
-      let staged = destination.appendingPathComponent("\(name).new")
+      //
+      // Staged under this process's pid, because two refreshers can meet in one bin:
+      // after an update relaunches every open workspace, each relaunched instance sees
+      // the same closed siblings stale and refreshes them concurrently — closed
+      // workspaces have no `WorkspaceLock` to serialize on. A shared staging name let
+      // one refresher delete the file another was about to rename, leaving a workspace
+      // with a written stamp and no daemon. Per-pid names cannot collide; the loser of
+      // the final rename merely throws, and the defer clears its leftover.
+      let staged = destination.appendingPathComponent("\(name).new.\(getpid())")
       try? fileManager.removeItem(at: staged)
+      defer { try? fileManager.removeItem(at: staged) }
       try fileManager.copyItem(at: bundled.appendingPathComponent(name), to: staged)
       clearQuarantine(staged)
       try? fileManager.removeItem(at: target)

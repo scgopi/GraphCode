@@ -4,10 +4,12 @@ import Foundation
 ///
 /// `graphcoded` compares this at runtime against what it recorded at launch to notice
 /// that `DaemonBootstrap` swapped a new binary underneath it. The install always stages
-/// a copy and renames it into place, so an update lands as a fresh inode; size rides
-/// along as the belt, the same reasoning as `DaemonBootstrap.stamp`. Modification time
-/// is deliberately absent — the two stat fields that matter are portable across the
-/// Darwin and Linux builds, and a rename never preserves the inode anyway.
+/// a copy and renames it into place, and the rename changes which inode the path names
+/// — so an update is always a fresh inode, with size riding along as the belt, the same
+/// reasoning as `DaemonBootstrap.stamp`. Modification time is deliberately absent: a
+/// backup tool touching the file must not read as an update. The device number can
+/// legitimately change across an unmount/remount, which costs one clean restart that
+/// re-records and converges — never a flap.
 public struct ExecutableIdentity: Equatable, Sendable {
   public let device: Int
   public let inode: Int

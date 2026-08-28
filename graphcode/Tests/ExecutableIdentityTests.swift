@@ -61,3 +61,36 @@ struct SiblingHelperInstallTests {
     #expect(DaemonBootstrap.helpersInstalled(in: destination))
   }
 }
+
+/// The two guards that keep the sibling refresh from doing harm: an isolated instance
+/// must not reach outside its directory, and an older packaged copy must never move a
+/// workspace backward.
+@Suite
+struct SiblingRefreshGuardTests {
+  @Test
+  func onlyTheDefaultAndDashSiblingsAreStandard() {
+    let home = URL(fileURLWithPath: "/Users/someone")
+    func standard(_ name: String) -> Bool {
+      DaemonBootstrap.isStandardWorkspaceDirectory(
+        home.appendingPathComponent(name), home: home)
+    }
+    #expect(standard(".graphcode"))
+    #expect(standard(".graphcode-work"))
+    #expect(!standard(".graphcode.dev"))
+    #expect(
+      !DaemonBootstrap.isStandardWorkspaceDirectory(
+        URL(fileURLWithPath: "/tmp/gc-e2e"), home: home))
+  }
+
+  @Test
+  func anOlderBundleNeverRegressesASibling() {
+    let old = "graphcoded:100:1000\nzmx:200:1500\ngraphcode:300:1200"
+    let new = "graphcoded:110:2000\nzmx:200:1500\ngraphcode:310:2000"
+    #expect(DaemonBootstrap.stampRegresses(from: new, to: old))
+    #expect(!DaemonBootstrap.stampRegresses(from: old, to: new))
+    // No stamp on the sibling is simply behind, and an unparsable one blocks nothing.
+    #expect(!DaemonBootstrap.stampRegresses(from: nil, to: new))
+    #expect(!DaemonBootstrap.stampRegresses(from: "garbage", to: new))
+    #expect(DaemonBootstrap.newestModification(inStamp: new) == 2000)
+  }
+}
