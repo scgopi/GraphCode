@@ -2,6 +2,8 @@ import Foundation
 
 #if canImport(Darwin)
   import Darwin
+#else
+  import Glibc
 #endif
 
 /// A short-lived client for `graphcoded`'s socket — what the `graphcode` CLI talks
@@ -90,12 +92,19 @@ public struct DaemonSocketClient: Sendable {
       throw ClientError.daemonNotRunning
     }
 
-    let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+    #if canImport(Darwin)
+      let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+    #else
+      // Glibc imports SOCK_STREAM as the `__socket_type` enum, not an Int32.
+      let descriptor = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+    #endif
     guard descriptor >= 0 else { throw ClientError.connectionFailed(errno: errno) }
 
     var address = sockaddr_un()
     address.sun_family = sa_family_t(AF_UNIX)
-    address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+    #if canImport(Darwin)
+      address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+    #endif
     withUnsafeMutablePointer(to: &address.sun_path) { field in
       field.withMemoryRebound(
         to: CChar.self, capacity: MemoryLayout.size(ofValue: field.pointee)
@@ -127,7 +136,7 @@ public struct DaemonSocketClient: Sendable {
   private static func applyReceiveTimeout(_ timeout: TimeInterval, to descriptor: Int32) {
     var interval = timeval(
       tv_sec: Int(timeout),
-      tv_usec: Int32((timeout - timeout.rounded(.down)) * 1_000_000))
+      tv_usec: suseconds_t((timeout - timeout.rounded(.down)) * 1_000_000))
     setsockopt(
       descriptor, SOL_SOCKET, SO_RCVTIMEO, &interval, socklen_t(MemoryLayout<timeval>.size))
     applyNoSignal(to: descriptor)

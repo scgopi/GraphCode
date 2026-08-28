@@ -1,5 +1,10 @@
-import Darwin
 import Foundation
+
+#if canImport(Darwin)
+  import Darwin
+#else
+  import Glibc
+#endif
 
 /// One event out of a running PTY-backed process: either a chunk of raw output, or a
 /// terminal lifecycle transition. See docs/04-cli-backends.md.
@@ -40,6 +45,9 @@ public final class PTYProcessSession: @unchecked Sendable {
   ) throws {
     var master: Int32 = 0
     var slave: Int32 = 0
+    // Portable as-is: Glibc's module includes pty.h, and glibc ≥ 2.34 ships openpty
+    // in libc proper, so no libutil link is needed on Linux. The POSIX pt* trio is
+    // not an option — stdlib.h's feature-macro guards keep it out of Swift's Glibc.
     guard openpty(&master, &slave, nil, nil, nil) == 0 else {
       throw SessionError.failedToOpenPTY
     }
