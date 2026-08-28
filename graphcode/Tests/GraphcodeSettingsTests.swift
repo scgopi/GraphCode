@@ -19,6 +19,7 @@ struct GraphcodeSettingsTests {
     let settings = GraphcodeSettings()
     #expect(settings.defaultBackend == .claudeCode)
     #expect(settings.claudePermissionMode == .auto)
+    #expect(settings.codexApprovals == .yolo)
     #expect(settings.copilotPermissions == .allowEverything)
     #expect(settings.briefsSessionsAboutTheGraph)
   }
