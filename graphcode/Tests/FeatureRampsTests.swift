@@ -36,7 +36,8 @@ struct FeatureRampsTests {
 
   @Test
   func rampsJSONDecodesAndDrivesTheDecision() throws {
-    // The exact shape docs/ramps.json ships — beta on, stable off.
+    // docs/ramps.json's shape, holding stable off — the kill-switch posture, which a
+    // fetched file must impose over any baked default.
     let json = #"{ "features": { "codespaces": { "beta": 100, "stable": 0 } } }"#
     let configuration = try JSONDecoder().decode(
       FeatureRamps.Configuration.self, from: Data(json.utf8))
@@ -51,12 +52,13 @@ struct FeatureRampsTests {
 
   @Test
   func missingConfigurationFallsBackToTheBakedDefaults() {
-    // Before any fetch (and after a failed one): beta has the feature, stable waits.
+    // Before any fetch (and after a failed one): the shipped state answers — fully
+    // ramped on both channels since 0.1.54-beta3.
     let id = UUID().uuidString
     #expect(
       FeatureRamps.isEnabled(.codespaces, configuration: nil, channel: "beta", installID: id))
     #expect(
-      !FeatureRamps.isEnabled(.codespaces, configuration: nil, channel: "stable", installID: id))
+      FeatureRamps.isEnabled(.codespaces, configuration: nil, channel: "stable", installID: id))
     // A fetched file that omits a channel falls back per-channel, not per-file.
     let partial = FeatureRamps.Configuration(features: ["codespaces": ["stable": 100]])
     #expect(

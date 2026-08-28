@@ -25,10 +25,12 @@ enum FeatureRamps {
     case codespaces
 
     /// What answers when no ramps.json has ever been fetched (and when the fetch
-    /// fails): beta installs opted into rough edges, stable waits for the ramp.
+    /// fails). Kept in step with the *shipped* ramp state: a feature ramped fully on
+    /// moves its default up too, so an offline first launch isn't the one place it's
+    /// missing — the fetched file stays the kill switch either way.
     var defaultPercents: [String: Int] {
       switch self {
-      case .codespaces: return ["beta": 100, "stable": 0]
+      case .codespaces: return ["beta": 100, "stable": 100]
       }
     }
   }

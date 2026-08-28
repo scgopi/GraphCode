@@ -1,5 +1,5 @@
 {
   "features": {
-    "codespaces": { "beta": 100, "stable": 0 }
+    "codespaces": { "beta": 100, "stable": 100 }
   }
 }
