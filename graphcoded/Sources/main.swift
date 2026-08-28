@@ -115,6 +115,35 @@ func makeShutdownSource(for signalNumber: Int32) -> DispatchSourceSignal {
 let terminateSource = makeShutdownSource(for: SIGTERM)
 let interruptSource = makeShutdownSource(for: SIGINT)
 
+// Notice the binary being swapped underneath this process and get out of its way
+// (#199). `DaemonBootstrap` boots a stale daemon out only from the app, at launch, for
+// the current workspace — every path that misses that call (an update whose relaunch
+// never happened, a workspace whose window stays closed) left an old daemon running old
+// code under `KeepAlive` indefinitely; the pre-0.1.44 PTY leak survived weeks of
+// upgrades exactly this way. The install lands a fresh inode, so one `stat` a minute
+// answers the question, and exiting cleanly is enough: `KeepAlive` respawns the path,
+// which is now the new binary. A launch identity that cannot be read (a relative
+// argv[0] from a hand launch) disables the check rather than arming a wrong one, and a
+// transient unreadable tick — the rename window mid-install — is skipped, not obeyed.
+func makeStalenessTimer() -> DispatchSourceTimer? {
+  let executablePath = CommandLine.arguments[0]
+  guard let launchIdentity = ExecutableIdentity.of(path: executablePath) else { return nil }
+  let timer = DispatchSource.makeTimerSource(queue: .main)
+  timer.schedule(deadline: .now() + 60, repeating: 60)
+  timer.setEventHandler {
+    guard let current = ExecutableIdentity.of(path: executablePath), current != launchIdentity
+    else { return }
+    FileHandle.standardOutput.write(
+      Data("graphcoded: binary replaced on disk; exiting for launchd to start the new one\n".utf8))
+    unlink(path)
+    exit(0)
+  }
+  timer.resume()
+  return timer
+}
+
+let stalenessTimer = makeStalenessTimer()
+
 let registry = ProjectRegistry(persistenceDirectory: supportDirectory)
 
 /// Bridges a blocking socket read onto a background queue so the `Task` awaiting it
