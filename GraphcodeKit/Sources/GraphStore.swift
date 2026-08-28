@@ -1203,6 +1203,23 @@ public actor GraphStore {
       }
       recordMemory(newID, "imported into \(graph.project.path) with a fresh identity")
     }
+    // What creation gives an unattended loop, import gives it too: a session, its goal
+    // poller, its heartbeat, and a state that says so. Landing everything `.idle` and
+    // starting nothing read as "dormant until opened", but wasn't: every ensure path
+    // treats an unresolved unattended node as one that should be alive, so on a remote
+    // project the liveness sweep started imported loops within a minute anyway — with
+    // no poller to ever resolve them, a card still claiming IDLE, and a pane that
+    // could only say "waiting for graphcoded". Sub-graph imports stay template-idle
+    // the same way created ones do: the child store's ensure hook is deliberately nil,
+    // and piloting is what starts those.
+    for newID in plan.idMapping.values {
+      guard let node = graph.nodes[id: newID], node.runsUnattended, !node.isResolved
+      else { continue }
+      if subGraphDepth == 0 { graph.nodes[id: newID]?.state = .running }
+      ensureSession(node)
+      if node.loopType == .goalBased { armGoalPoller(for: node) }
+      armHeartbeat(for: node)
+    }
   }
 
   // MARK: - Deletion

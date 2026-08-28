@@ -189,9 +189,11 @@ public enum GraphImportPlanner {
 
   /// A structural copy under a new id, keeping the fields that are the loop's history.
   ///
-  /// `state` lands `.idle` for every type: an imported loop has no session yet, and a
-  /// card that said RUNNING the moment it arrived would be claiming work nobody
-  /// started. Opening the loop (or a goal poller resolving it) takes it from there.
+  /// A resolved loop keeps its verdict: the bundle *is* the loop's history, and a
+  /// succeeded loop reborn `.idle` looked unstarted to every ensure path — on a remote
+  /// project the liveness sweep re-ran finished work on a host nobody was watching.
+  /// Everything else lands `.idle`, and the daemon starts the unattended ones the
+  /// moment they arrive (`GraphStore.importNodes`), exactly as `createNode` would.
   /// `presence`/`activity` stay nil for the same reason they aren't persisted.
   private static func reIdentify(
     _ node: LoopNode, as newID: UUID, identities: [UUID: UUID]
@@ -215,6 +217,7 @@ public enum GraphImportPlanner {
       loopType: node.loopType,
       checkDescription: node.checkDescription,
       triggerPrompt: node.triggerPrompt,
+      heartbeatIntervalSeconds: node.heartbeatIntervalSeconds,
       firstInstruction: node.firstInstruction,
       pausesBeforeWritesOnly: node.pausesBeforeWritesOnly,
       goal: node.goal,
@@ -231,7 +234,7 @@ public enum GraphImportPlanner {
       // Custody only survives when the custodian came along in the same bundle;
       // otherwise the reference would dangle at a node the target graph never had.
       createdBy: node.createdBy.flatMap { identities[$0] },
-      state: .idle,
+      state: node.isResolved ? node.state : .idle,
       createdAt: Date()
     )
   }
