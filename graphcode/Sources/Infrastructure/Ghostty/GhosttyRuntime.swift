@@ -1,5 +1,6 @@
 import AppKit
 import GhosttyKit
+import GraphcodeKit
 import os
 
 /// The one process-wide `ghostty_app_t`. There's exactly one of these for the whole
@@ -59,7 +60,9 @@ final class GhosttyRuntime: @unchecked Sendable {
       userdata: nil,
       supports_selection_clipboard: false,
       wakeup_cb: { _ in GhosttyRuntime.wakeup() },
-      action_cb: { _, _, _ in false },
+      action_cb: { _, target, action in
+        GhosttyRuntime.handleAction(target: target, action: action)
+      },
       read_clipboard_cb: { userdata, _, state in
         GhosttyRuntime.readClipboard(userdata, state: state)
       },
@@ -140,6 +143,41 @@ final class GhosttyRuntime: @unchecked Sendable {
   private static func view(from userdata: UnsafeMutableRawPointer?) -> GhosttyTerminalNSView? {
     guard let userdata else { return nil }
     return Unmanaged<GhosttyTerminalNSView>.fromOpaque(userdata).takeUnretainedValue()
+  }
+
+  /// The one action graphcode handles: a ⌘-clicked link. Everything else returns
+  /// false and libghostty's defaults apply — the same posture as before, just no
+  /// longer for URLs, because who opens a link is where remote sign-ins are won.
+  ///
+  /// A CLI in a remote session (`az login`, `claude`, `codex login`) prints an auth
+  /// URL whose OAuth callback is a localhost port on *that* machine; the browser is
+  /// on this one. Before opening the browser, any loopback port the URL names
+  /// (`AuthCallbackPorts` — the URL's own authority, or a `redirect_uri` parameter)
+  /// is forwarded into the clicked surface's remote host, so the redirect the
+  /// provider makes lands on the CLI that is waiting for it.
+  ///
+  /// May be called off the main thread; `remoteLocation` is a plain property written
+  /// on main during `apply` — a torn read costs one un-forwarded click, not a crash.
+  private static func handleAction(
+    target: ghostty_target_s, action: ghostty_action_s
+  ) -> Bool {
+    guard action.tag == GHOSTTY_ACTION_OPEN_URL else { return false }
+    let openUrl = action.action.open_url
+    guard let urlPointer = openUrl.url, openUrl.len > 0 else { return false }
+    let urlString = String(
+      decoding: UnsafeRawBufferPointer(start: urlPointer, count: Int(openUrl.len)),
+      as: UTF8.self)
+    // Not parseable as a URL — let libghostty's own opener have its chance.
+    guard let url = URL(string: urlString) else { return false }
+    if target.tag == GHOSTTY_TARGET_SURFACE, let surface = target.target.surface,
+      let location = view(from: ghostty_surface_userdata(surface))?.remoteLocation
+    {
+      for port in AuthCallbackPorts.extract(fromURLString: urlString) {
+        Task { await RemoteAuthPortForwarder.shared.ensureForwarding(port: port, to: location) }
+      }
+    }
+    DispatchQueue.main.async { NSWorkspace.shared.open(url) }
+    return true
   }
 
   private static func readClipboard(

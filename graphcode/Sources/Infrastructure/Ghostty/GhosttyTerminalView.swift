@@ -117,6 +117,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
   private func apply(to view: GhosttyTerminalNSView) {
     view.isActive = isActive
     view.isVisible = isVisible
+    view.remoteLocation = remoteLocation
     view.onFocusRequested = onFocusRequested
     view.onExitAcknowledged = onExitAcknowledged
     view.onProcessExited = onProcessExited
