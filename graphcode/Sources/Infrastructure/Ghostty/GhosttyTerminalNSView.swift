@@ -1,5 +1,6 @@
 import AppKit
 import GhosttyKit
+import GraphcodeKit
 
 /// A real terminal surface, rendered by `GhosttyKit` itself — not a placeholder. This
 /// is graphcode's own integration, adapted from the pattern in
@@ -37,6 +38,12 @@ final class GhosttyTerminalNSView: NSView {
   /// panes coming up at once whichever one happened to win the race would report itself
   /// as the user's choice. A click is the only signal that can't be anything else.
   var onFocusRequested: (() -> Void)?
+
+  /// Where this surface's session actually runs, when that is another machine — what
+  /// lets a ⌘-clicked sign-in link carry its localhost callback home first (see
+  /// `GhosttyRuntime.handleAction`). Pushed by `GhosttyTerminalView.apply` like the
+  /// other view-owned state; read from the action callback's thread, torn-read benign.
+  var remoteLocation: RemoteProjectLocation?
 
   private var markedText: String = ""
 
