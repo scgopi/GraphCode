@@ -108,23 +108,40 @@ extension GraphExportBundle {
 
   /// The full client half of an import: re-identify the snapshot here (so the fresh
   /// ids are known before anything is sent), install each carried session under its
-  /// loop's fresh id, and hand back the request the daemon should splice verbatim.
+  /// loop's fresh id, and hand back the request the daemon should splice verbatim —
+  /// plus how many of those sessions were actually installed, so the caller can say
+  /// "N will resume" and mean it.
   ///
   /// Session installation happens client-side on purpose: transcripts run to
   /// megabytes and belong on disk, not inside a socket frame — and every path they're
   /// written to (`~/.claude`, `~/.copilot`, `~/.graphcode/sessions`) is read fresh at
-  /// launch time, so there is no daemon-held copy to race.
+  /// launch time, so there is no daemon-held copy to race. A remote target gets the
+  /// same installation on *its* disk, delivered over the ssh dial
+  /// (`SessionTransplant.restoreRemote`) — which is why this is async, and why it must
+  /// finish before the import command is sent: the daemon ensures an imported loop's
+  /// session the moment it arrives, and the resume id has to already be banked on the
+  /// host by then.
   public func preparedImportRequest(
     asChildOf parent: UUID? = nil, projectPath: String
-  ) -> GraphImportRequest? {
+  ) async -> (request: GraphImportRequest, resumingSessions: Int)? {
     guard
       let (request, idMapping) = GraphImportPlanner.reIdentified(
         importRequest(asChildOf: parent))
     else { return nil }
+    let remote = RemoteProjectLocation.parse(projectPath: projectPath)
+    var resuming = 0
     for (oldID, artifact) in sessionsByNodeID {
       guard let newID = idMapping[oldID] else { continue }
-      SessionTransplant.restore(artifact, forNodeID: newID, projectPath: projectPath)
+      let installed: String?
+      if let remote {
+        installed = await SessionTransplant.restoreRemote(
+          artifact, forNodeID: newID, at: remote)
+      } else {
+        installed = SessionTransplant.restore(
+          artifact, forNodeID: newID, projectPath: projectPath)
+      }
+      if installed != nil { resuming += 1 }
     }
-    return request
+    return (request, resuming)
   }
 }

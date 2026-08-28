@@ -403,10 +403,23 @@ do {
     // the request goes out; the daemon still performs the graph merge — it owns the
     // live graph, and a client that wrote the graph file itself had its import
     // clobbered by the daemon's next save. Same verdict pattern as `node send`: an
-    // error event means refused, the changed graph means it landed.
-    guard
-      let request = bundle.preparedImportRequest(asChildOf: asChildOf, projectPath: projectPath)
-    else { fail("the bundle contains no loops") }
+    // error event means refused, the changed graph means it landed. Async behind a
+    // semaphore, the `reap` pattern: a remote target's sessions are delivered over
+    // ssh, and the delivery has to finish before the daemon can ensure the loops.
+    final class PreparedBox: @unchecked Sendable {
+      var value: (request: GraphImportRequest, resumingSessions: Int)?
+    }
+    let box = PreparedBox()
+    let prepared = DispatchSemaphore(value: 0)
+    Task {
+      box.value = await bundle.preparedImportRequest(
+        asChildOf: asChildOf, projectPath: projectPath)
+      prepared.signal()
+    }
+    prepared.wait()
+    guard let (request, resumingSessions) = box.value else {
+      fail("the bundle contains no loops")
+    }
     try client.send(.openProject(path: projectPath))
     _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
     try client.send(
@@ -419,17 +432,13 @@ do {
     }
     if case .errorOccurred(let message) = verdict { fail(message) }
     if case .graphChanged(let graph) = verdict {
-      // A remote target gets no transplants — the sessions live on the remote host, so
-      // `SessionTransplant.restore` skips them — and promising a resume there would be
-      // a lie the loop's fresh first pass immediately exposes.
-      let resumable =
-        RemoteProjectLocation.parse(projectPath: projectPath) == nil
-        ? bundle.sessionsByNodeID.values.filter { $0.backend.supportsResume } : []
+      // The count of sessions actually installed — on this machine or, for a remote
+      // target, delivered to the host over ssh — not of sessions the bundle carried.
       print(
         "imported \(bundle.graphSnapshot.nodes.count) loop(s) "
           + "and \(bundle.graphSnapshot.edges.count) edge(s) with fresh identities"
-          + (resumable.isEmpty
-            ? "" : "; \(resumable.count) will resume their exported conversations"))
+          + (resumingSessions == 0
+            ? "" : "; \(resumingSessions) will resume their exported conversations"))
       print(GraphcodeCommand.render(graph))
     }
   }
