@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 
@@ -56,6 +57,34 @@ struct PTYProcessSessionTests {
     }
 
     #expect(openTerminalDescriptors() - before < attempts)
+  }
+
+  /// A timeout must not leave the master behind when a child ignores SIGTERM. The
+  /// production path closes the master immediately and escalates to SIGKILL so a stuck
+  /// summary or probe cannot consume one PTY on every pass.
+  @Test
+  func terminatingAStuckProcessClosesTheMasterPTY() async throws {
+    func openMasterDescriptors() -> Int {
+      var count = 0
+      var path = [CChar](repeating: 0, count: Int(PATH_MAX))
+      for name in (try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd")) ?? [] {
+        guard let descriptor = Int32(name), fcntl(descriptor, F_GETPATH, &path) != -1 else {
+          continue
+        }
+        if String(cString: path) == "/dev/ptmx" { count += 1 }
+      }
+      return count
+    }
+
+    let before = openMasterDescriptors()
+    let session = try PTYProcessSession(
+      executable: "/bin/sh", arguments: ["-c", "trap '' TERM; sleep 30"])
+    try await Task.sleep(for: .milliseconds(100))
+    session.terminate()
+    let result = await session.waitCollectingOutput()
+
+    #expect(!result.succeeded)
+    #expect(openMasterDescriptors() == before)
   }
 
   /// The full metric pipeline short of `GraphStore`: the evaluator's real login-shell

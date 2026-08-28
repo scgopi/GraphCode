@@ -25,8 +25,39 @@ public final class PTYProcessSession: @unchecked Sendable {
   public let events: AsyncStream<PTYSessionEvent>
 
   private let process: Process
-  private let masterHandle: FileHandle
+  private let master: MasterHandle
   private let eventContinuation: AsyncStream<PTYSessionEvent>.Continuation
+
+  /// `Process.terminationHandler` may outlive the session and Foundation can retain the
+  /// process while that callback is installed. Keep fd closure independent of ARC and
+  /// idempotent so both `terminate()` and the natural-exit callback can safely call it.
+  private final class MasterHandle: @unchecked Sendable {
+    let fileHandle: FileHandle
+    private let lock = NSLock()
+    private var closed = false
+
+    init(fileDescriptor: Int32) {
+      fileHandle = FileHandle(fileDescriptor: fileDescriptor, closeOnDealloc: true)
+    }
+
+    var isClosed: Bool {
+      lock.lock()
+      defer { lock.unlock() }
+      return closed
+    }
+
+    func close() {
+      lock.lock()
+      guard !closed else {
+        lock.unlock()
+        return
+      }
+      closed = true
+      lock.unlock()
+      fileHandle.readabilityHandler = nil
+      fileHandle.closeFile()
+    }
+  }
 
   public enum SessionError: Error, Equatable {
     case failedToOpenPTY
@@ -44,9 +75,9 @@ public final class PTYProcessSession: @unchecked Sendable {
       throw SessionError.failedToOpenPTY
     }
 
-    let masterHandle = FileHandle(fileDescriptor: master, closeOnDealloc: true)
+    let masterHandle = MasterHandle(fileDescriptor: master)
     let slaveHandle = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
-    self.masterHandle = masterHandle
+    self.master = masterHandle
 
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executable)
@@ -82,6 +113,7 @@ public final class PTYProcessSession: @unchecked Sendable {
       // process, which for `graphcoded` means until the machine reboots. `kern.tty.ptmx_max`
       // is 511, so a caller whose launch reliably fails exhausts the host's PTYs outright.
       close(slave)
+      masterHandle.close()
       continuation.finish()
       throw error
     }
@@ -89,7 +121,7 @@ public final class PTYProcessSession: @unchecked Sendable {
     // master side is detectable once the child exits.
     close(slave)
 
-    masterHandle.readabilityHandler = { handle in
+    masterHandle.fileHandle.readabilityHandler = { handle in
       let data = handle.availableData
       guard !data.isEmpty else { return }
       if let text = String(data: data, encoding: .utf8) {
@@ -97,9 +129,10 @@ public final class PTYProcessSession: @unchecked Sendable {
       }
     }
 
-    process.terminationHandler = { process in
+    process.terminationHandler = { [weak masterHandle] process in
+      guard let masterHandle else { return }
       // Detach the async reader first so the drain below is the only consumer left.
-      masterHandle.readabilityHandler = nil
+      masterHandle.fileHandle.readabilityHandler = nil
       // Termination is observed on a different queue than readability, so a process
       // that writes and immediately exits usually beats the reader to the finish line —
       // whatever is still in the PTY buffer was dropped here, and the stream closed
@@ -109,30 +142,47 @@ public final class PTYProcessSession: @unchecked Sendable {
       // kernel buffer by the time this handler runs, so a non-blocking drain to
       // EOF/EAGAIN is complete — and non-blocking matters, because a grandchild that
       // inherited the slave fd could otherwise wedge this handler forever.
-      let descriptor = masterHandle.fileDescriptor
-      let flags = fcntl(descriptor, F_GETFL)
-      _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK)
-      var buffer = [UInt8](repeating: 0, count: 4096)
-      while true {
-        let count = read(descriptor, &buffer, buffer.count)
-        guard count > 0 else { break }
-        if let text = String(bytes: buffer[0..<count], encoding: .utf8) {
-          continuation.yield(.output(text))
+      if !masterHandle.isClosed {
+        let descriptor = masterHandle.fileHandle.fileDescriptor
+        let flags = fcntl(descriptor, F_GETFL)
+        _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK)
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+          let count = read(descriptor, &buffer, buffer.count)
+          guard count > 0 else { break }
+          if let text = String(bytes: buffer[0..<count], encoding: .utf8) {
+            continuation.yield(.output(text))
+          }
         }
       }
+      masterHandle.close()
       continuation.yield(.terminated(succeeded: process.terminationStatus == 0))
       continuation.finish()
+      process.terminationHandler = nil
     }
+  }
+
+  deinit {
+    process.terminationHandler = nil
+    master.close()
+    if process.isRunning { process.terminate() }
+    eventContinuation.finish()
   }
 
   public func sendInput(_ text: String) {
     guard let data = text.data(using: .utf8) else { return }
-    masterHandle.write(data)
+    try? master.fileHandle.write(contentsOf: data)
   }
 
   public func terminate() {
+    master.close()
     if process.isRunning {
       process.terminate()
+      let processID = process.processIdentifier
+      DispatchQueue.global().asyncAfter(deadline: .now() + 1) { [weak process] in
+        guard process?.isRunning == true else { return }
+        _ = kill(processID, SIGKILL)
+      }
     }
   }
 
