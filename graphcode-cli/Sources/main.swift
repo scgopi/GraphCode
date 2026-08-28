@@ -419,7 +419,12 @@ do {
     }
     if case .errorOccurred(let message) = verdict { fail(message) }
     if case .graphChanged(let graph) = verdict {
-      let resumable = bundle.sessionsByNodeID.values.filter { $0.backend.supportsResume }
+      // A remote target gets no transplants — the sessions live on the remote host, so
+      // `SessionTransplant.restore` skips them — and promising a resume there would be
+      // a lie the loop's fresh first pass immediately exposes.
+      let resumable =
+        RemoteProjectLocation.parse(projectPath: projectPath) == nil
+        ? bundle.sessionsByNodeID.values.filter { $0.backend.supportsResume } : []
       print(
         "imported \(bundle.graphSnapshot.nodes.count) loop(s) "
           + "and \(bundle.graphSnapshot.edges.count) edge(s) with fresh identities"
