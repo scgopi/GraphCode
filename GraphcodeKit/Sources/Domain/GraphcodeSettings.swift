@@ -154,16 +154,19 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   public enum CodexApprovals: String, Codable, CaseIterable, Sendable {
     /// Codex's own default: it decides when to ask, and a human answers.
     case ask
-    /// graphcode's default — never stops to ask, and may write inside its workspace.
+    /// Never stops to ask, and may write inside its workspace.
     case workspace
     /// `--dangerously-bypass-approvals-and-sandbox`, which is exactly what it says.
     case unsandboxed
+    /// Codex's YOLO mode: bypass approvals and the sandbox entirely.
+    case yolo
 
     public var displayName: String {
       switch self {
       case .ask: return "Ask when unsure"
       case .workspace: return "Workspace (recommended)"
       case .unsandboxed: return "No sandbox"
+      case .yolo: return "YOLO (recommended)"
       }
     }
 
@@ -176,6 +179,9 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       case .unsandboxed:
         return "Skips every approval and the sandbox entirely — a loop can do anything "
           + "you can, anywhere."
+      case .yolo:
+        return "Codex's --dangerously-bypass-approvals-and-sandbox: a loop can do anything "
+          + "you can, anywhere."
       }
     }
 
@@ -184,6 +190,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       case .ask: return []
       case .workspace: return ["--ask-for-approval", "never", "--sandbox", "workspace-write"]
       case .unsandboxed: return ["--dangerously-bypass-approvals-and-sandbox"]
+      case .yolo: return ["--dangerously-bypass-approvals-and-sandbox"]
       }
     }
 
@@ -384,7 +391,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
 
   public init(
     defaultBackend: CLISessionBackendKind = .claudeCode,
-    codexApprovals: CodexApprovals = .workspace,
+    codexApprovals: CodexApprovals = .yolo,
     openCodePermissions: OpenCodePermissions = .auto,
     claudePermissionMode: ClaudePermissionMode = .auto,
     copilotPermissions: CopilotPermissions = .allowEverything,
@@ -426,7 +433,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       ?? .claudeCode
     defaultBackend = storedBackend.isSpiked ? storedBackend : .claudeCode
     codexApprovals =
-      try container.decodeIfPresent(CodexApprovals.self, forKey: .codexApprovals) ?? .workspace
+      try container.decodeIfPresent(CodexApprovals.self, forKey: .codexApprovals) ?? .yolo
     openCodePermissions =
       try container.decodeIfPresent(OpenCodePermissions.self, forKey: .openCodePermissions)
       ?? .auto
