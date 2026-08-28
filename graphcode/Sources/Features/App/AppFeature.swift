@@ -100,6 +100,12 @@ struct AppFeature {
     /// not persisted: a queue position is about this sitting, not about this graph.
     var lastReviewedNodeID: UUID?
 
+    /// The explanation up for a tap `.nodeTapped` refused — a blocked unattended loop
+    /// with no session to attach to (see `LoopNode.opensOnHumanTap`). A tap that does
+    /// nothing at all is indistinguishable from a broken canvas; this is the alert
+    /// that says why instead.
+    var blockedLoopNotice: BlockedLoopNotice?
+
     /// ⌘K's jump palette — see `AppFeature+JumpPalette.swift`.
     var isJumpPresented = false
     var jumpQuery = ""
@@ -217,6 +223,8 @@ struct AppFeature {
     case historyForwardTapped
     /// The stop/kill affordance docs/05-orchestrator.md asks the monitor for.
     case stopNodeTapped(projectPath: String, nodeID: UUID)
+    /// Dismisses the "why didn't that open" alert — see `State.blockedLoopNotice`.
+    case blockedLoopNoticeDismissed
     /// The first-launch terminology primer — see `OnboardingView`.
     case onboardingRequested
     case onboardingDismissed
@@ -518,28 +526,10 @@ struct AppFeature {
           .projects(.element(id: path, action: .addNodeButtonTapped(parentBackend: parentBackend))))
 
       case .projects(.element(id: let path, action: .nodeTapped(let nodeID))):
-        // Every loop type opens the same way. A time-based node used to be excluded
-        // because it only existed as a headless `claude -p` the daemon fired on a timer;
-        // now its recurrence runs inside an ordinary interactive session (see
-        // `LoopNode.triggerPrompt`), so there's a real terminal to attach to — which is
-        // the point, since watching and steering a running loop is most of its value.
-        // A blocked node with a *live session* still opens: creation starts an
-        // unattended child's session before a follow-up hand-off edge marks it
-        // blocked, so blocked-but-running is a state people actually meet — and a
-        // terminal that exists must be reachable. What stays gated is the blocked
-        // node with no session, where opening would *start* sequenced work early.
-        guard let node = state.projects[id: path]?.graph.nodes[id: nodeID],
-          node.state != .blocked || node.presenceShowsLiveSession
-        else { return .none }
-        let layout = terminalLayoutStore.load(forNode: nodeID) ?? .defaultLayout(forNode: nodeID)
-        state.openLoop = LoopWorkspaceFeature.State(
-          node: node,
-          graph: state.projects[id: path]?.graph ?? LoopGraph(scope: .global),
-          layout: layout,
-          projectPath: path,
-          projectName: state.projects[id: path]?.graph.project.name ?? path)
-        state.selectedProjectPath = path
-        recordVisit(.loop(projectPath: path, nodeID: nodeID), &state)
+        return openNode(nodeID, in: path, &state)
+
+      case .blockedLoopNoticeDismissed:
+        state.blockedLoopNotice = nil
         return .none
 
       // A loop's own primary Claude Code session exiting *is* its resolution — no
@@ -684,16 +674,46 @@ extension AppFeature {
     state.pendingOpenPaths.insert(ProjectRegistry.canonicalize(path))
   }
 
+  /// `.nodeTapped`'s body. Every loop type opens the same way. A time-based node used
+  /// to be excluded because it only existed as a headless `claude -p` the daemon fired
+  /// on a timer; now its recurrence runs inside an ordinary interactive session (see
+  /// `LoopNode.triggerPrompt`), so there's a real terminal to attach to — which is
+  /// the point, since watching and steering a running loop is most of its value.
+  /// The blocked-node rule is `LoopNode.opensOnHumanTap` — blocked attended loops
+  /// and blocked-but-live ones open, a blocked unattended loop with no session
+  /// doesn't. The refusal raises the notice alert rather than doing nothing: a
+  /// silent dead click reads as a broken canvas, not a rule (#194 follow-up).
+  private func openNode(_ nodeID: UUID, in path: String, _ state: inout State) -> Effect<Action> {
+    guard let node = state.projects[id: path]?.graph.nodes[id: nodeID]
+    else { return .none }
+    guard node.opensOnHumanTap else {
+      state.blockedLoopNotice = BlockedLoopNotice(
+        node: node, graph: state.projects[id: path]?.graph)
+      return .none
+    }
+    let layout = terminalLayoutStore.load(forNode: nodeID) ?? .defaultLayout(forNode: nodeID)
+    state.openLoop = LoopWorkspaceFeature.State(
+      node: node,
+      graph: state.projects[id: path]?.graph ?? LoopGraph(scope: .global),
+      layout: layout,
+      projectPath: path,
+      projectName: state.projects[id: path]?.graph.project.name ?? path)
+    state.selectedProjectPath = path
+    recordVisit(.loop(projectPath: path, nodeID: nodeID), &state)
+    return .none
+  }
+
   /// Steps the open workspace to another loop, in the order the sidebar draws them —
-  /// every open project's nodes, flattened — wrapping at the ends and skipping blocked
-  /// nodes, the same rule a direct `.nodeTapped` applies. With no workspace open it
-  /// lands on the first (or last) loop, so the shortcut also *opens* a loop from a
-  /// canvas. Routes through `.nodeTapped` rather than setting `openLoop` itself, so
-  /// keyboard and click cannot come to open a workspace two different ways.
+  /// every open project's nodes, flattened — wrapping at the ends and skipping loops a
+  /// tap couldn't open (`LoopNode.opensOnHumanTap`, the same rule a direct
+  /// `.nodeTapped` applies). With no workspace open it lands on the first (or last)
+  /// loop, so the shortcut also *opens* a loop from a canvas. Routes through
+  /// `.nodeTapped` rather than setting `openLoop` itself, so keyboard and click cannot
+  /// come to open a workspace two different ways.
   private func stepOpenLoop(_ state: State, by offset: Int) -> Effect<Action> {
     let loops = state.projects.flatMap { project in
       project.graph.nodes
-        .filter { $0.state != .blocked }
+        .filter(\.opensOnHumanTap)
         .map { (projectPath: project.id, nodeID: $0.id) }
     }
     guard !loops.isEmpty else { return .none }
@@ -782,5 +802,26 @@ extension AppFeature {
     if state.selectedProjectPath == path {
       state.selectedProjectPath = state.projects.first?.id
     }
+  }
+}
+
+/// What the alert for a refused loop tap says — built at the moment of refusal, so it
+/// can name the upstream loops the graph is actually waiting on. Top-level rather than
+/// nested in `AppFeature`, which is at swiftlint's body-length limit.
+struct BlockedLoopNotice: Equatable {
+  var title: String
+  var message: String
+
+  init(node: LoopNode, graph: LoopGraph?) {
+    title = "“\(node.title)” is waiting its turn"
+    let upstream = graph?.unfiredUpstreamTitles(of: node.id) ?? []
+    let waitingOn =
+      upstream.isEmpty
+      ? "a hand-off that hasn't fired yet"
+      : upstream.map { "“\($0)”" }.joined(separator: " and ") + " to finish"
+    // "Released", not "its session starts": firing unblocks the loop and stages the
+    // hand-off nudge, but the daemon relaunches a dead unattended session at boot and
+    // on the liveness sweep, not at the moment of firing — don't promise more.
+    message = "It's waiting on \(waitingOn) — the hand-off will release it automatically."
   }
 }

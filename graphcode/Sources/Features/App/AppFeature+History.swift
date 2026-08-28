@@ -63,9 +63,9 @@ extension AppFeature {
   /// launch, and a history that erased itself on a transient miss would be worse than
   /// no history.
   ///
-  /// The blocked-node rule is the one `.nodeTapped` applies, repeated rather than shared
-  /// because the two differ in what they do when it fails: a tap on a blocked loop is
-  /// ignored, a Back onto one keeps walking.
+  /// The blocked-node rule is the one `.nodeTapped` applies
+  /// (`LoopNode.opensOnHumanTap`); the two differ only in what they do when it fails —
+  /// a tap on a gated loop raises the notice alert, a Back onto one keeps walking.
   private func canResolve(_ state: State) -> (LoopVisit) -> Bool {
     { visit in
       switch visit {
@@ -73,7 +73,7 @@ extension AppFeature {
         guard let node = state.projects[id: projectPath]?.graph.nodes[id: nodeID] else {
           return false
         }
-        return node.state != .blocked || node.presenceShowsLiveSession
+        return node.opensOnHumanTap
       case .quickChat(let id):
         return state.quickChats[id: id] != nil
       }

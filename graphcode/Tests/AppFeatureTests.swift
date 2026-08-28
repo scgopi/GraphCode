@@ -161,27 +161,8 @@ struct AppFeatureTests {
     #expect(store.state.projects[id: Self.projectA.path]?.graph.nodes.count == 1)
   }
 
-  @Test
-  @MainActor
-  func blockedNodeCannotBeOpened() async {
-    var blockedNode = LoopNode(title: "Implement", checkDescription: "Correct?")
-    blockedNode.state = .blocked
-    var state = AppFeature.State()
-    state.projects.append(
-      ProjectFeature.State(graph: LoopGraph(project: Self.projectA, nodes: [blockedNode])))
-    state.selectedProjectPath = Self.projectA.path
-
-    let store = TestStore(initialState: state) {
-      AppFeature()
-    } withDependencies: {
-      $0.terminalLayoutStore = makeTerminalLayoutStore()
-    }
-    store.exhaustivity = .off
-
-    await store.send(
-      .projects(.element(id: Self.projectA.path, action: .nodeTapped(blockedNode.id))))
-    #expect(store.state.openLoop == nil)
-  }
+  // The blocked-loop open gate itself — both sides of it, and the refusal notice — is
+  // covered in `BlockedLoopGateTests`.
 
   @Test
   @MainActor
@@ -406,13 +387,16 @@ struct AppFeatureTests {
   }
 
   /// ⇧⌘]/⇧⌘[ walk the same flattened list the sidebar draws — across projects, skipping
-  /// blocked loops, wrapping at the ends — and go through `.nodeTapped` rather than a
-  /// path of their own, so what the shortcut opens is exactly what a click would.
+  /// loops a tap couldn't open (`opensOnHumanTap`), wrapping at the ends — and go
+  /// through `.nodeTapped` rather than a path of their own, so what the shortcut opens
+  /// is exactly what a click would. The gated loop here is unattended: a blocked
+  /// *turn-based* loop opens on a tap now, so it is no longer skipped.
   @Test
   @MainActor
-  func loopCycleShortcutStepsAcrossProjectsSkippingBlockedLoops() async {
+  func loopCycleShortcutStepsAcrossProjectsSkippingGatedLoops() async {
     let first = LoopNode(title: "First", checkDescription: "c")
-    var blocked = LoopNode(title: "Blocked", checkDescription: "c")
+    var blocked = LoopNode(
+      title: "Blocked", loopType: .goalBased, goal: GoalSpec(summary: "g"))
     blocked.state = .blocked
     let last = LoopNode(title: "Last", checkDescription: "c")
     var state = AppFeature.State()

@@ -228,6 +228,9 @@ struct AppView: View {
     // The sweeper and a folder's settings — same hosting rule, own modifier for the
     // same type-checker reason. See `WorktreeDialogs`.
     .modifier(WorktreeDialogs(store: store))
+    // Why a tap on a gated loop did nothing — same hosting rule again: the tap can
+    // come from the sidebar or ⇧⌘] while any detail pane is up.
+    .modifier(BlockedLoopDialog(store: store))
   }
 
   /// Folders past their worktree notice threshold, for the titlebar chip. Policies
@@ -338,6 +341,27 @@ struct AppView: View {
 
   private func selectedProjectStore(_ path: String) -> StoreOf<ProjectFeature>? {
     store.scope(state: \.projects[id: path], action: \.projects[id: path])
+  }
+}
+
+/// The one alert `.nodeTapped`'s refusal raises — see `BlockedLoopNotice`.
+/// A modifier of its own for the dialog chain's type-checker reason, like the rest.
+private struct BlockedLoopDialog: ViewModifier {
+  let store: StoreOf<AppFeature>
+
+  func body(content: Content) -> some View {
+    content
+      .alert(
+        store.blockedLoopNotice?.title ?? "",
+        isPresented: Binding(
+          get: { store.blockedLoopNotice != nil },
+          set: { if !$0 { store.send(.blockedLoopNoticeDismissed) } }
+        )
+      ) {
+        Button("OK") { store.send(.blockedLoopNoticeDismissed) }
+      } message: {
+        Text(store.blockedLoopNotice?.message ?? "")
+      }
   }
 }
 
