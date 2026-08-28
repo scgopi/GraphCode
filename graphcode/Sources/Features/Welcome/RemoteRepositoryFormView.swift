@@ -20,7 +20,12 @@ struct RemoteRepositoryFormView: View {
       Text(isInspecting ? "Remote Connection" : "Add Remote Repository").font(.headline)
 
       Form {
-        if isInspecting {
+        if store.remoteDraft?.inspectsCodespace == true {
+          // A codespace's dial is `gh codespace ssh -c <name>` — there is no user or
+          // port of ours to show, and pretending ssh's defaults were them would lie.
+          LabeledContent("Codespace") { value(\.server) }
+          LabeledContent("Path") { value(\.remotePath) }
+        } else if isInspecting {
           LabeledContent("Server") { value(\.server) }
           LabeledContent("User") { value(\.user) }
           LabeledContent("Port") { value(\.port) }

@@ -235,6 +235,22 @@ struct AppSidebarView: View {
       } label: {
         Label("Add Remote Repository…", systemImage: "network")
       }
+      // A GitHub Codespace — the same remote model with `gh` as the dial. The open
+      // local projects ride along so an empty codespace list can offer creating one
+      // for a repository already being worked in.
+      Button {
+        store.send(
+          .welcome(
+            .addCodespaceButtonTapped(
+              localProjectPaths: store.projects
+                .filter {
+                  !$0.graph.isGlobal
+                    && RemoteProjectLocation.parse(projectPath: $0.id) == nil
+                }
+                .map(\.id))))
+      } label: {
+        Label("Add Codespace…", systemImage: "cloud")
+      }
       if !store.welcome.recentProjects.isEmpty {
         Divider()
         ForEach(store.welcome.recentProjects) { project in

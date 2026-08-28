@@ -21,12 +21,16 @@ extension RemoteRepositoryClient: DependencyKey {
     // otherwise read as "not a repository", which sends someone debugging the wrong
     // thing. BatchMode in `sshInvocation` means a password-only host fails here, fast —
     // key auth is a requirement, not a preference, since nothing later has a tty either.
+    let reachFailure =
+      location.isCodespace
+      ? "Can't reach the codespace — check it still exists and that "
+        + "`gh codespace ssh -c \(location.host)` works from a terminal. Stopped "
+        + "codespaces are started by the connection, but only while gh is signed in "
+        + "with the `codespace` scope."
+      : "Can't reach \(location.sshDestination) — check the host, and that key "
+        + "authentication works (`ssh \(location.sshDestination)` from a terminal)."
     let checks: [(command: String, failure: String)] = [
-      (
-        "true",
-        "Can't reach \(location.sshDestination) — check the host, and that key "
-          + "authentication works (`ssh \(location.sshDestination)` from a terminal)."
-      ),
+      ("true", reachFailure),
       (
         "test -d \(quoted(location.remotePath))",
         "\(location.remotePath) doesn't exist on \(location.host)."
@@ -34,6 +38,13 @@ extension RemoteRepositoryClient: DependencyKey {
       (
         "git -C \(quoted(location.remotePath)) rev-parse --is-inside-work-tree",
         "\(location.remotePath) isn't a git repository."
+      ),
+      (
+        // Before the login-shell checks: they run through `zsh -l -i`, so on a host
+        // without zsh they all fail with a message blaming the wrong tool.
+        "command -v zsh",
+        "zsh isn't installed on \(location.host) — remote sessions launch through "
+          + "it. Install it there and try again."
       ),
       (
         location.remoteLoginShellCommand("command -v zmx"),

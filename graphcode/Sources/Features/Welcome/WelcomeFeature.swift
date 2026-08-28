@@ -84,6 +84,9 @@ struct WelcomeFeature {
     /// its `ssh://` path, so changing a field here would name a different project rather
     /// than edit this one.
     var inspectedProjectPath: String?
+    /// The inspected project is a codespace — `server` holds its name, and the user
+    /// and port rows have nothing true to say (gh's tunnel owns both).
+    var inspectsCodespace = false
 
     var isInspecting: Bool { inspectedProjectPath != nil }
 
@@ -95,7 +98,8 @@ struct WelcomeFeature {
         port: location.port.map(String.init) ?? "22",
         user: location.user ?? "",
         remotePath: location.remotePath,
-        inspectedProjectPath: projectPath)
+        inspectedProjectPath: projectPath,
+        inspectsCodespace: location.isCodespace)
     }
 
     /// The location the fields currently describe, or `nil` while they don't describe
@@ -123,6 +127,43 @@ struct WelcomeFeature {
     var canSubmit: Bool { location != nil && !isValidating && !isInspecting }
   }
 
+  /// What the add-codespace sheet is collecting: gh's list, one pick, and the path the
+  /// repository lives at inside it. Validation is the remote form's — a codespace that
+  /// passes is one whose sessions can start — with `gh codespace ssh` as the dial.
+  struct CodespaceDraft: Equatable {
+    /// `nil` while `gh codespace list` is still running.
+    var codespaces: [Codespace]?
+    /// Why the list couldn't load — gh missing, or gh's own words (which carry the
+    /// fix when the token lacks the `codespace` scope).
+    var listFailure: String?
+    var selectedName: String?
+    var remotePath = ""
+    /// `owner/repo` for the open local projects, so an empty list can offer "create
+    /// one for the repository you're already working in".
+    var repositorySuggestions: [String] = []
+    var isValidating = false
+    var failureMessage: String?
+
+    var selected: Codespace? {
+      guard let selectedName, let codespaces else { return nil }
+      return codespaces.first { $0.name == selectedName }
+    }
+
+    /// Same normalization rules as the remote form's `location`; the name reaches
+    /// `gh -c` as an argument, so it passes the same door check a hostname does.
+    var location: RemoteProjectLocation? {
+      let path = remotePath.trimmingCharacters(in: .whitespaces)
+      guard let name = selectedName, SafeArgument.isSafeSSHComponent(name),
+        path.hasPrefix("/")
+      else { return nil }
+      return RemoteProjectLocation(
+        host: name, remotePath: RemoteProjectLocation.normalizedPath(path),
+        isCodespace: true)
+    }
+
+    var canSubmit: Bool { location != nil && !isValidating }
+  }
+
   @ObservableState
   struct State: Equatable {
     var recentProjects: [ProjectRef] = []
@@ -130,6 +171,7 @@ struct WelcomeFeature {
     var errorMessage: String?
     var cloneDraft: CloneDraft?
     var remoteDraft: RemoteDraft?
+    var codespaceDraft: CodespaceDraft?
     /// The clone sheet's own folder picker, for choosing `locationPath`. A sibling of
     /// `isOpenPanelPresented` rather than a reuse of it: that one's `fileImporter`
     /// opens a project, and a location pick must not.
@@ -156,6 +198,15 @@ struct WelcomeFeature {
     case remoteCancelled
     case remoteValidated(projectPath: String)
     case remoteValidationFailed(String)
+    case addCodespaceButtonTapped(localProjectPaths: [String])
+    case codespacesLoaded(Result<[Codespace], CodespaceClient.Failure>)
+    case codespaceRepositorySuggestionsLoaded([String])
+    case codespaceListRetryTapped
+    case codespaceSelected(String)
+    case codespaceSubmitted
+    case codespaceValidated(projectPath: String)
+    case codespaceValidationFailed(String)
+    case codespaceCancelled
   }
 
   /// Remembers the last clone location across launches, so a burst of clones doesn't
@@ -166,11 +217,14 @@ struct WelcomeFeature {
   private enum CancelID {
     case clone
     case remoteValidation
+    case codespaceList
+    case codespaceValidation
   }
 
   @Dependency(\.orchestratorClient) var orchestratorClient
   @Dependency(\.gitClient) var gitClient
   @Dependency(\.remoteRepositoryClient) var remoteRepositoryClient
+  @Dependency(\.codespaceClient) var codespaceClient
 
   var body: some ReducerOf<Self> {
     BindingReducer()
@@ -184,6 +238,10 @@ struct WelcomeFeature {
 
       case .binding(\.remoteDraft):
         state.remoteDraft?.failureMessage = nil
+        return .none
+
+      case .binding(\.codespaceDraft):
+        state.codespaceDraft?.failureMessage = nil
         return .none
 
       case .binding:
@@ -331,8 +389,93 @@ struct WelcomeFeature {
       case .remoteCancelled:
         state.remoteDraft = nil
         return .cancel(id: CancelID.remoteValidation)
+
+      case .addCodespaceButtonTapped(let localProjectPaths):
+        state.codespaceDraft = CodespaceDraft()
+        return .merge(
+          loadCodespaces(),
+          .run { send in
+            await send(
+              .codespaceRepositorySuggestionsLoaded(
+                codespaceClient.githubRepositories(localProjectPaths)))
+          }
+        )
+
+      case .codespacesLoaded(.success(let codespaces)):
+        state.codespaceDraft?.codespaces = codespaces
+        state.codespaceDraft?.listFailure = nil
+        return .none
+
+      case .codespacesLoaded(.failure(let failure)):
+        state.codespaceDraft?.listFailure = failure.message
+        return .none
+
+      case .codespaceRepositorySuggestionsLoaded(let repositories):
+        state.codespaceDraft?.repositorySuggestions = repositories
+        return .none
+
+      case .codespaceListRetryTapped:
+        guard state.codespaceDraft != nil else { return .none }
+        state.codespaceDraft?.codespaces = nil
+        state.codespaceDraft?.listFailure = nil
+        return loadCodespaces()
+
+      case .codespaceSelected(let name):
+        guard var draft = state.codespaceDraft else { return .none }
+        draft.selectedName = name
+        draft.failureMessage = nil
+        // Prefill only when the human hasn't typed a path of their own — switching
+        // picks refreshes a default, never overwrites an edit for another codespace
+        // of the same repository.
+        let defaults = (draft.codespaces ?? []).map(\.defaultWorkspacePath)
+        if draft.remotePath.isEmpty || defaults.contains(draft.remotePath) {
+          draft.remotePath = draft.selected?.defaultWorkspacePath ?? ""
+        }
+        state.codespaceDraft = draft
+        return .none
+
+      case .codespaceSubmitted:
+        guard var draft = state.codespaceDraft, let location = draft.location,
+          draft.canSubmit
+        else { return .none }
+        draft.isValidating = true
+        draft.failureMessage = nil
+        state.codespaceDraft = draft
+        return .run { send in
+          if let failure = await remoteRepositoryClient.validate(location) {
+            await send(.codespaceValidationFailed(failure))
+          } else {
+            await send(.codespaceValidated(projectPath: location.projectPath))
+          }
+        }
+        .cancellable(id: CancelID.codespaceValidation, cancelInFlight: true)
+
+      case .codespaceValidated(let projectPath):
+        // Same as a validated remote: the codespace:// path is the project's identity.
+        state.codespaceDraft = nil
+        return .run { _ in
+          try? await orchestratorClient.send(.openProject(path: projectPath))
+        }
+
+      case .codespaceValidationFailed(let message):
+        state.codespaceDraft?.isValidating = false
+        state.codespaceDraft?.failureMessage = message
+        return .none
+
+      case .codespaceCancelled:
+        state.codespaceDraft = nil
+        return .merge(
+          .cancel(id: CancelID.codespaceList),
+          .cancel(id: CancelID.codespaceValidation))
       }
     }
+  }
+
+  private func loadCodespaces() -> Effect<Action> {
+    .run { send in
+      await send(.codespacesLoaded(codespaceClient.list()))
+    }
+    .cancellable(id: CancelID.codespaceList, cancelInFlight: true)
   }
 
   /// Ask the daemon to open a folder, and *say so* when it can't be reached. This was a
