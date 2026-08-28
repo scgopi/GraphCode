@@ -144,7 +144,9 @@ func makeStalenessTimer() -> DispatchSourceTimer? {
 
 let stalenessTimer = makeStalenessTimer()
 
-let registry = ProjectRegistry(persistenceDirectory: supportDirectory)
+let registry = ProjectRegistry(
+  persistenceDirectory: supportDirectory,
+  reapCondemnedSessions: true)
 
 /// Bridges a blocking socket read onto a background queue so the `Task` awaiting it
 /// never blocks Swift concurrency's cooperative thread pool — the whole connection

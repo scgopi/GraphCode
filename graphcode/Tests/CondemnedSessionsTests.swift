@@ -69,6 +69,15 @@ struct OrphanedSessionReaperTests {
   }
 
   @Test
+  func skipsUnreachableAndIncompleteRows() {
+    let listing = """
+      name=graphcode-\(id1.uuidString) err=Timeout status=unreachable
+      name=graphcode-\(id2.uuidString) pid=101
+      """
+    #expect(OrphanedSessionReaper.candidates(fromZmxList: listing).isEmpty)
+  }
+
+  @Test
   func aLiveNodeOrAnAttachedClientIsNeverAnOrphan() {
     let owned = OrphanedSessionReaper.Candidate(
       name: "graphcode-\(id1.uuidString)", id: id1, clients: 0)
@@ -107,6 +116,50 @@ struct OrphanedSessionReaperTests {
     #expect(live == [id1, id2, workerID, chatID])
   }
 
+  @Test
+  func liveIDsIncludeEverySurfaceInTerminalLayouts() throws {
+    let workspace = FileManager.default.temporaryDirectory
+      .appendingPathComponent("reap-ws-\(UUID().uuidString)")
+    let extraSurfaceID = UUID()
+    let projects = workspace.appendingPathComponent("projects", isDirectory: true)
+    try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+    let graph = LoopGraph(
+      project: ProjectRef(path: "/tmp/p", name: "p"),
+      nodes: [LoopNode(id: id1, title: "owner")])
+    try JSONEncoder().encode(graph)
+      .write(to: projects.appendingPathComponent("_tmp_p.json"))
+    let tab = TabLayout(primary: SurfaceRef(id: extraSurfaceID, launchesClaudeCode: false))
+    TerminalLayoutStore(baseDirectory: workspace).save(
+      TerminalLayout(tabs: [tab], selectedTabID: tab.id), forNode: id1)
+
+    let live = try #require(
+      OrphanedSessionReaper.liveSessionIDs(workspaceDirectories: [workspace]))
+    #expect(live == [id1, extraSurfaceID])
+  }
+
+  @Test
+  func aDeletedNodesStaleLayoutKeepsNoSessionsLive() throws {
+    let workspace = FileManager.default.temporaryDirectory
+      .appendingPathComponent("reap-ws-\(UUID().uuidString)")
+    let extraSurfaceID = UUID()
+    let tab = TabLayout(primary: SurfaceRef(id: extraSurfaceID, launchesClaudeCode: false))
+    TerminalLayoutStore(baseDirectory: workspace).save(
+      TerminalLayout(tabs: [tab], selectedTabID: tab.id), forNode: id1)
+
+    let live = try #require(
+      OrphanedSessionReaper.liveSessionIDs(workspaceDirectories: [workspace]))
+    #expect(live.isEmpty)
+  }
+
+  @Test
+  func currentOverrideDirectoryJoinsDiscoveredWorkspacesOnce() {
+    let defaultWorkspace = URL(fileURLWithPath: "/tmp/.graphcode")
+    let override = URL(fileURLWithPath: "/tmp/.graphcode.dev")
+    let directories = OrphanedSessionReaper.workspaceDirectoriesForReap(
+      discovered: [defaultWorkspace, override], current: override)
+    #expect(directories == [defaultWorkspace, override])
+  }
+
   /// A graph this build cannot decode still owns its sessions. Refusing to answer is
   /// what keeps the reap from shooting them.
   @Test
@@ -116,6 +169,24 @@ struct OrphanedSessionReaperTests {
     let projects = workspace.appendingPathComponent("projects", isDirectory: true)
     try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
     try Data("not a graph".utf8).write(to: projects.appendingPathComponent("_tmp_p.json"))
+    #expect(OrphanedSessionReaper.liveSessionIDs(workspaceDirectories: [workspace]) == nil)
+  }
+
+  @Test
+  func anUndecodableLayoutAbortsTheCount() throws {
+    let workspace = FileManager.default.temporaryDirectory
+      .appendingPathComponent("reap-ws-\(UUID().uuidString)")
+    let projects = workspace.appendingPathComponent("projects", isDirectory: true)
+    try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+    let graph = LoopGraph(
+      project: ProjectRef(path: "/tmp/p", name: "p"),
+      nodes: [LoopNode(id: id1, title: "owner")])
+    try JSONEncoder().encode(graph)
+      .write(to: projects.appendingPathComponent("_tmp_p.json"))
+    let layouts = workspace.appendingPathComponent("terminal-layouts", isDirectory: true)
+    try FileManager.default.createDirectory(at: layouts, withIntermediateDirectories: true)
+    try Data("not a layout".utf8).write(
+      to: layouts.appendingPathComponent("\(id1.uuidString).json"))
     #expect(OrphanedSessionReaper.liveSessionIDs(workspaceDirectories: [workspace]) == nil)
   }
 }

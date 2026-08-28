@@ -73,7 +73,8 @@ public actor ProjectRegistry {
     readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)? =
       CLISessionBackend.readPresence,
     composeBoard: (@Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?)? =
-      CLISessionBackend.composeBoard
+      CLISessionBackend.composeBoard,
+    reapCondemnedSessions: Bool = false
   ) {
     persistence = ProjectPersistence(baseDirectory: persistenceDirectory)
     self.ensureSession = ensureSession
@@ -89,9 +90,10 @@ public actor ProjectRegistry {
     self.composeBoard = composeBoard
     // The reap half of the two-phase kill (`CondemnedSessions`): once at startup, for a
     // delete whose daemon died between condemning a session and confirming it dead, and
-    // then on a timer for kills `zmx` failed transiently. Gated the way the remote sweep
-    // is — a registry wired without real sessions (tests) must spawn no processes.
-    if ensureSession != nil {
+    // then on a timer for kills `zmx` failed transiently. This is explicit rather than
+    // inferred from injected session closures: tests commonly provide non-nil stubs and
+    // must never touch the user's real zmx.
+    if reapCondemnedSessions {
       condemnedReaper = Task {
         await ZmxSessionLauncher.reapCondemnedSessions()
         while !Task.isCancelled {

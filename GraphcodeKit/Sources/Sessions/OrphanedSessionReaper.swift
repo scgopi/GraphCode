@@ -9,10 +9,11 @@ import Foundation
 ///
 /// "Owned" is computed the wide way, because the session namespace is machine-wide while
 /// every other record is narrower: node ids from every project graph of *every*
-/// workspace (sub-graph workers included), plus the app's quick chats — a session whose
-/// node lives in a workspace this process was not launched for is not an orphan. Two
-/// further rails: only names shaped `graphcode-<uuid>` are considered at all, and a
-/// session with a client attached is someone's open terminal, never reaped.
+/// workspace (sub-graph workers included), the app's quick chats, and every persisted
+/// terminal layout — a session whose surface lives in a workspace this process was not
+/// launched for is not an orphan. Two further rails: only names shaped
+/// `graphcode-<uuid>` are considered at all, and a session with a client attached is
+/// someone's open terminal, never reaped.
 public enum OrphanedSessionReaper {
   public struct Candidate: Equatable, Sendable {
     public let name: String
@@ -34,12 +35,14 @@ public enum OrphanedSessionReaper {
   static func candidates(fromZmxList output: String) -> [Candidate] {
     output.split(separator: "\n").compactMap { line in
       var name: String?
-      var clients = 0
+      var clients: Int?
+      var hasError = false
       for token in line.split(whereSeparator: \.isWhitespace) {
         if token.hasPrefix("name=") { name = String(token.dropFirst("name=".count)) }
-        if token.hasPrefix("clients=") { clients = Int(token.dropFirst("clients=".count)) ?? 0 }
+        if token.hasPrefix("clients=") { clients = Int(token.dropFirst("clients=".count)) }
+        if token.hasPrefix("err=") { hasError = true }
       }
-      guard let name, name.hasPrefix("graphcode-"),
+      guard !hasError, let clients, let name, name.hasPrefix("graphcode-"),
         let id = UUID(uuidString: String(name.dropFirst("graphcode-".count)))
       else { return nil }
       return Candidate(name: name, id: id, clients: clients)
@@ -51,14 +54,16 @@ public enum OrphanedSessionReaper {
   }
 
   /// Every session id something on this machine still points at, or `nil` when a graph
-  /// file refused to decode. `nil` rather than skipping the file: a graph this build
-  /// cannot read still owns its sessions, and a reap that cannot see them would kill
-  /// them. Refusing to guess is the whole difference between a reap and a sweep.
+  /// or terminal layout refused to decode. `nil` rather than skipping the file: state
+  /// this build cannot read still owns its sessions, and a reap that cannot see them
+  /// would kill them. Refusing to guess is the whole difference between a reap and a
+  /// sweep.
   static func liveSessionIDs(
-    workspaceDirectories: [URL] = Workspace.all().map(\.url)
+    workspaceDirectories: [URL] = workspaceDirectoriesForReap()
   ) -> Set<UUID>? {
     var live: Set<UUID> = []
     for directory in workspaceDirectories {
+      var workspaceLive: Set<UUID> = []
       let projects = directory.appendingPathComponent("projects", isDirectory: true)
       let graphFiles =
         (try? FileManager.default.contentsOfDirectory(
@@ -68,11 +73,41 @@ public enum OrphanedSessionReaper {
         guard let data = try? Data(contentsOf: file),
           let graph = try? JSONDecoder().decode(LoopGraph.self, from: data)
         else { return nil }
-        live.formUnion(graph.nodesAtAnyDepth.map(\.id))
+        workspaceLive.formUnion(graph.nodesAtAnyDepth.map(\.id))
       }
-      live.formUnion(QuickChatStore(baseDirectory: directory).load().map(\.id))
+      workspaceLive.formUnion(QuickChatStore(baseDirectory: directory).load().map(\.id))
+
+      let layouts = directory.appendingPathComponent("terminal-layouts", isDirectory: true)
+      let layoutFiles =
+        (try? FileManager.default.contentsOfDirectory(
+          at: layouts, includingPropertiesForKeys: nil))?
+        .filter { $0.pathExtension == "json" } ?? []
+      for file in layoutFiles {
+        guard let ownerID = UUID(uuidString: file.deletingPathExtension().lastPathComponent),
+          workspaceLive.contains(ownerID)
+        else { continue }
+        guard let data = try? Data(contentsOf: file),
+          let layout = try? JSONDecoder().decode(TerminalLayout.self, from: data)
+        else { return nil }
+        workspaceLive.formUnion(layout.tabs.flatMap(\.surfaces).map(\.id))
+      }
+      live.formUnion(workspaceLive)
     }
     return live
+  }
+
+  /// `Workspace.all()` discovers the default and named `.graphcode-*` directories. A
+  /// development instance can instead point `GRAPHCODE_SUPPORT_DIR` at an arbitrary
+  /// directory such as `.graphcode.dev`; include the directory this process actually
+  /// uses as well, without scanning unrelated dot-directories in the home folder.
+  static func workspaceDirectoriesForReap(
+    discovered: [URL] = Workspace.all().map(\.url),
+    current: URL = SupportDirectory.url
+  ) -> [URL] {
+    var seen = Set<String>()
+    return (discovered + [current]).filter {
+      seen.insert($0.standardizedFileURL.path).inserted
+    }
   }
 
   public static func reap(dryRun: Bool) async -> Report {
@@ -86,7 +121,8 @@ public enum OrphanedSessionReaper {
       return report
     }
     guard let live = liveSessionIDs() else {
-      report.aborted = "a graph file failed to decode — refusing to guess which sessions it owns"
+      report.aborted =
+        "a graph or terminal layout failed to decode — refusing to guess which sessions it owns"
       return report
     }
     let found = orphans(among: candidates(fromZmxList: listing), live: live)
@@ -116,6 +152,6 @@ public enum OrphanedSessionReaper {
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
     guard process.terminationStatus == 0 else { return nil }
-    return String(decoding: data, as: UTF8.self)
+    return String(data: data, encoding: .utf8)
   }
 }
