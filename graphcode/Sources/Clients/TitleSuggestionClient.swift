@@ -79,12 +79,17 @@ extension TitleSuggestionClient: DependencyKey {
   /// `-i` as well as `-l` for the reason every other launch site gives (see
   /// `GhosttyTerminalView.agentCommand`): the agent's `PATH` usually comes from
   /// `~/.zshrc`, which zsh reads only when interactive.
-  private static func invocation(for backend: CLISessionBackendKind) -> [String]? {
+  static func invocation(for backend: CLISessionBackendKind) -> [String]? {
     let command: String
     switch backend {
     case .claudeCode: command = "exec claude -p \"$\(promptVariable)\""
     case .copilotCLI: command = "exec copilot -p \"$\(promptVariable)\""
-    case .codex: command = "exec codex exec \"$\(promptVariable)\""
+    // This is a separate headless process, so it does not inherit the permission flags
+    // from the loop session. Without Codex's unattended flag it can stop at an approval
+    // prompt and the new loop remains named "New Loop" forever.
+    case .codex:
+      command =
+        "exec codex exec --dangerously-bypass-approvals-and-sandbox \"$\(promptVariable)\""
     case .openCode: command = "exec opencode run \"$\(promptVariable)\""
     }
     return ["/bin/zsh", "-i", "-l", "-c", command]
