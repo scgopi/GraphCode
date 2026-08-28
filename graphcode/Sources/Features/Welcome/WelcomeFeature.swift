@@ -127,43 +127,6 @@ struct WelcomeFeature {
     var canSubmit: Bool { location != nil && !isValidating && !isInspecting }
   }
 
-  /// What the add-codespace sheet is collecting: gh's list, one pick, and the path the
-  /// repository lives at inside it. Validation is the remote form's — a codespace that
-  /// passes is one whose sessions can start — with `gh codespace ssh` as the dial.
-  struct CodespaceDraft: Equatable {
-    /// `nil` while `gh codespace list` is still running.
-    var codespaces: [Codespace]?
-    /// Why the list couldn't load — gh missing, or gh's own words (which carry the
-    /// fix when the token lacks the `codespace` scope).
-    var listFailure: String?
-    var selectedName: String?
-    var remotePath = ""
-    /// `owner/repo` for the open local projects, so an empty list can offer "create
-    /// one for the repository you're already working in".
-    var repositorySuggestions: [String] = []
-    var isValidating = false
-    var failureMessage: String?
-
-    var selected: Codespace? {
-      guard let selectedName, let codespaces else { return nil }
-      return codespaces.first { $0.name == selectedName }
-    }
-
-    /// Same normalization rules as the remote form's `location`; the name reaches
-    /// `gh -c` as an argument, so it passes the same door check a hostname does.
-    var location: RemoteProjectLocation? {
-      let path = remotePath.trimmingCharacters(in: .whitespaces)
-      guard let name = selectedName, SafeArgument.isSafeSSHComponent(name),
-        path.hasPrefix("/")
-      else { return nil }
-      return RemoteProjectLocation(
-        host: name, remotePath: RemoteProjectLocation.normalizedPath(path),
-        isCodespace: true)
-    }
-
-    var canSubmit: Bool { location != nil && !isValidating }
-  }
-
   @ObservableState
   struct State: Equatable {
     var recentProjects: [ProjectRef] = []
@@ -392,7 +355,10 @@ struct WelcomeFeature {
 
       case .addCodespaceButtonTapped(let localProjectPaths):
         state.codespaceDraft = CodespaceDraft()
-        return .merge(
+        // Sequenced, not merged: the suggestions only matter once the list has
+        // answered (they render in its empty state), and a fixed order keeps the
+        // flow deterministic.
+        return .concatenate(
           loadCodespaces(),
           .run { send in
             await send(
@@ -471,12 +437,6 @@ struct WelcomeFeature {
     }
   }
 
-  private func loadCodespaces() -> Effect<Action> {
-    .run { send in
-      await send(.codespacesLoaded(codespaceClient.list()))
-    }
-    .cancellable(id: CancelID.codespaceList, cancelInFlight: true)
-  }
 
   /// Ask the daemon to open a folder, and *say so* when it can't be reached. This was a
   /// silent `try?` — on a machine where the daemon never came up (a fresh install whose
@@ -494,5 +454,53 @@ struct WelcomeFeature {
               + "(\(String(describing: error))). Try quitting and reopening GraphCode."))
       }
     }
+  }
+}
+
+// The codespace half lives in the extension — the reducer above is at the struct-size
+// budget, and these are exactly the "trailing helpers" the lint rule wants out of it.
+extension WelcomeFeature {
+  /// What the add-codespace sheet is collecting: gh's list, one pick, and the path the
+  /// repository lives at inside it. Validation is the remote form's — a codespace that
+  /// passes is one whose sessions can start — with `gh codespace ssh` as the dial.
+  struct CodespaceDraft: Equatable {
+    /// `nil` while `gh codespace list` is still running.
+    var codespaces: [Codespace]?
+    /// Why the list couldn't load — gh missing, or gh's own words (which carry the
+    /// fix when the token lacks the `codespace` scope).
+    var listFailure: String?
+    var selectedName: String?
+    var remotePath = ""
+    /// `owner/repo` for the open local projects, so an empty list can offer "create
+    /// one for the repository you're already working in".
+    var repositorySuggestions: [String] = []
+    var isValidating = false
+    var failureMessage: String?
+
+    var selected: Codespace? {
+      guard let selectedName, let codespaces else { return nil }
+      return codespaces.first { $0.name == selectedName }
+    }
+
+    /// Same normalization rules as the remote form's `location`; the name reaches
+    /// `gh -c` as an argument, so it passes the same door check a hostname does.
+    var location: RemoteProjectLocation? {
+      let path = remotePath.trimmingCharacters(in: .whitespaces)
+      guard let name = selectedName, SafeArgument.isSafeSSHComponent(name),
+        path.hasPrefix("/")
+      else { return nil }
+      return RemoteProjectLocation(
+        host: name, remotePath: RemoteProjectLocation.normalizedPath(path),
+        isCodespace: true)
+    }
+
+    var canSubmit: Bool { location != nil && !isValidating }
+  }
+
+  func loadCodespaces() -> Effect<Action> {
+    .run { send in
+      await send(.codespacesLoaded(codespaceClient.list()))
+    }
+    .cancellable(id: CancelID.codespaceList, cancelInFlight: true)
   }
 }

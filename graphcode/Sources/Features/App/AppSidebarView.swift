@@ -26,6 +26,11 @@ struct AppSidebarView: View {
   /// here as data and the toggle still propagates through `AppView`'s re-render.
   var sharesLoops: Bool = SettingsModel.shared.settings.sharesLoops
 
+  /// Whether the add menu offers Add Codespace… — the `codespaces` ramp
+  /// (`FeatureRamps`), read once at construction for the same reason as
+  /// `sharesLoops`. A ramp change applies from the next re-render.
+  var offersCodespaces: Bool = FeatureRamps.isEnabled(.codespaces)
+
   // Several of the stored properties and the selection type below are not `private`
   // because the project/node row machinery lives in `AppSidebarView+Rows.swift`, and
   // Swift scopes `private` to a file — same arrangement as `ProjectCanvasView`'s drag
@@ -237,19 +242,10 @@ struct AppSidebarView: View {
       }
       // A GitHub Codespace — the same remote model with `gh` as the dial. The open
       // local projects ride along so an empty codespace list can offer creating one
-      // for a repository already being worked in.
-      Button {
-        store.send(
-          .welcome(
-            .addCodespaceButtonTapped(
-              localProjectPaths: store.projects
-                .filter {
-                  !$0.graph.isGlobal
-                    && RemoteProjectLocation.parse(projectPath: $0.id) == nil
-                }
-                .map(\.id))))
-      } label: {
-        Label("Add Codespace…", systemImage: "cloud")
+      // for a repository already being worked in. Behind the `codespaces` ramp:
+      // beta first, prod when ramps.json says so.
+      if offersCodespaces {
+        addCodespaceItem
       }
       if !store.welcome.recentProjects.isEmpty {
         Divider()
@@ -497,6 +493,28 @@ struct AppSidebarView: View {
           }
         }
       }
+    }
+  }
+}
+
+extension AppSidebarView {
+  /// The add menu's codespace entry, out of the struct body for the same budget
+  /// reason the row machinery lives in `+Rows`. The open local projects ride along
+  /// so an empty codespace list can offer creating one for a repository already
+  /// being worked in.
+  var addCodespaceItem: some View {
+    Button {
+      store.send(
+        .welcome(
+          .addCodespaceButtonTapped(
+            localProjectPaths: store.projects
+              .filter {
+                !$0.graph.isGlobal
+                  && RemoteProjectLocation.parse(projectPath: $0.id) == nil
+              }
+              .map(\.id))))
+    } label: {
+      Label("Add Codespace…", systemImage: "cloud")
     }
   }
 }

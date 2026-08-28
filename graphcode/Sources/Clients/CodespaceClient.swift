@@ -47,9 +47,11 @@ extension CodespaceClient: DependencyKey {
             message: "The GitHub CLI isn't installed — codespaces are reached through it. "
               + "`brew install gh`, then `gh auth login`, and try again."))
       }
+      // `--limit`: the default is 30, and the truncation is silent — a 31st codespace
+      // would simply never appear in the picker.
       let result = await run(
         GhLocator.executablePath,
-        ["codespace", "list", "--json", "name,displayName,repository,state"])
+        ["codespace", "list", "--limit", "500", "--json", "name,displayName,repository,state"])
       guard result.status == 0 else {
         let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
         return .failure(Failure(message: stderr.isEmpty ? "gh codespace list failed." : stderr))
@@ -86,13 +88,18 @@ extension CodespaceClient: DependencyKey {
 
   /// `owner/repo` from any of the ways a GitHub origin is written — https, scp-ish
   /// `git@`, or `ssh://` — and `nil` for an origin that isn't github.com, which is a
-  /// repository no codespace link can be made for, not an error.
+  /// repository no codespace link can be made for, not an error. Anchored to the
+  /// start (hosts are case-insensitive, the slug's case is kept): a bare substring
+  /// match would take `notgithub.com` too.
   static func githubRepository(fromOriginURL origin: String) -> String? {
-    var slug: Substring?
-    if let range = origin.range(of: "github.com/") ?? origin.range(of: "github.com:") {
-      slug = origin[range.upperBound...]
-    }
-    guard var slug else { return nil }
+    let origin = origin.trimmingCharacters(in: .whitespacesAndNewlines)
+    let lowered = origin.lowercased()
+    let prefixes = [
+      "https://github.com/", "http://github.com/",
+      "ssh://git@github.com/", "git://github.com/", "git@github.com:",
+    ]
+    guard let prefix = prefixes.first(where: lowered.hasPrefix) else { return nil }
+    var slug = origin.dropFirst(prefix.count)
     if slug.hasSuffix(".git") { slug = slug.dropLast(4) }
     let parts = slug.split(separator: "/")
     guard parts.count == 2,

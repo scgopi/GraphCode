@@ -26,7 +26,8 @@ extension RemoteRepositoryClient: DependencyKey {
       ? "Can't reach the codespace — check it still exists and that "
         + "`gh codespace ssh -c \(location.host)` works from a terminal. Stopped "
         + "codespaces are started by the connection, but only while gh is signed in "
-        + "with the `codespace` scope."
+        + "with the `codespace` scope — and the codespace image needs an SSH server "
+        + "(the default image has one; minimal devcontainers add the sshd feature)."
       : "Can't reach \(location.sshDestination) — check the host, and that key "
         + "authentication works (`ssh \(location.sshDestination)` from a terminal)."
     let checks: [(command: String, failure: String)] = [

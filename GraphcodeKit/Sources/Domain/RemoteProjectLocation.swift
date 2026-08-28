@@ -148,10 +148,10 @@ public struct RemoteProjectLocation: Equatable, Sendable {
   ///
   /// A Codespace dials through `gh codespace ssh -c <name> -- <ssh-flags> <command>`
   /// instead — everything after `--` reaches gh's underlying ssh untouched, so the
-  /// keepalive posture carries over. `ControlMaster` deliberately does not: each gh run
-  /// opens its own tunnel to the codespace and exits with it, so a persisted master
-  /// would outlive the tunnel it multiplexes over and hand every later invocation a
-  /// dead connection.
+  /// keepalive posture carries over. `ControlMaster` deliberately does not: gh opens a
+  /// fresh tunnel on a random local port per run and exits with it, so a persisted
+  /// master would rarely be matched again (`%C` hashes the port) and each one left
+  /// behind would sit on a dead tunnel — orphans, not multiplexing.
   public func sshInvocation(remoteCommand: String, interactive: Bool = false) -> [String] {
     if isCodespace {
       var invocation = [GhLocator.executablePath, "codespace", "ssh", "-c", host, "--"]

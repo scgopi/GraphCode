@@ -200,15 +200,41 @@ struct CodespaceTests {
     for origin in [
       "https://github.com/dev/widget.git",
       "https://github.com/dev/widget",
+      "https://GitHub.com/dev/widget.git",
       "git@github.com:dev/widget.git",
       "ssh://git@github.com/dev/widget.git",
     ] {
       #expect(CodespaceClient.githubRepository(fromOriginURL: origin) == expected)
     }
-    // Not GitHub, not a repository slug, or option-shaped — no link to offer.
+    // Not GitHub (including a host that merely *contains* github.com), not a
+    // repository slug, or option-shaped — no link to offer.
     #expect(CodespaceClient.githubRepository(fromOriginURL: "https://gitlab.com/dev/widget") == nil)
+    #expect(
+      CodespaceClient.githubRepository(fromOriginURL: "https://notgithub.com/dev/widget") == nil)
     #expect(CodespaceClient.githubRepository(fromOriginURL: "https://github.com/dev") == nil)
     #expect(CodespaceClient.githubRepository(fromOriginURL: "git@github.com:-x/widget") == nil)
+  }
+
+  // MARK: - Reconnect
+
+  @Test
+  func aCodespaceSurfaceRetriesGhsFlattenedExitCode() throws {
+    // gh runs ssh but reports every nonzero exit as its own 1 — ssh's 255 included —
+    // so a codespace dial that only retried 255 would never retry at all. Exit 0
+    // still closes the pane like a clean shell exit.
+    let view = GhosttyTerminalView(
+      surfaceID: UUID(), sessionName: "graphcode-s", launchesClaudeCode: false,
+      initialPrompt: nil, workingDirectory: location.projectPath,
+      projectPath: location.projectPath, onProcessExited: { _ in })
+    let script = try #require(view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
+    #expect(script.contains(#"[ "$gc_rc" -ne 255 ] && [ "$gc_rc" -ne 1 ]"#))
+
+    // A plain ssh remote keeps the strict contract: only 255 retries.
+    let sshLocation = RemoteProjectLocation(user: "dev", host: "box", remotePath: "/srv/repo")
+    let sshScript = try #require(
+      view.remoteCommand(at: sshLocation, settings: GraphcodeSettings()).last)
+    #expect(!sshScript.contains(#"[ "$gc_rc" -ne 255 ] && [ "$gc_rc" -ne 1 ]"#))
+    #expect(sshScript.contains(#"[ "$gc_rc" -ne 255 ] && exit "$gc_rc""#))
   }
 
   // MARK: - Connection info

@@ -64,7 +64,10 @@ public actor RemoteSocketForwarder {
 
   /// The `ssh -N -R` line itself, with the remote socket path assembled around the
   /// `$H` the pre-dial captured — which is why this is a shell line and not an argv.
-  static func forwardCommandLine(for location: RemoteProjectLocation, localSocketPath: String)
+  /// Public for the tests that pin the codespace/ssh split of the dial.
+  public static func forwardCommandLine(
+    for location: RemoteProjectLocation, localSocketPath: String
+  )
     -> String
   {
     var argv: [String]

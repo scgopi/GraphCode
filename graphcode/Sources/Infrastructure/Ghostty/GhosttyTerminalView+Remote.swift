@@ -43,7 +43,11 @@ extension GhosttyTerminalView {
       remoteCommand: location.remoteLoginShellCommand(script), interactive: true)
     let reconnect = location.sshCommandLine(
       remoteCommand: location.remoteLoginShellCommand(reconnectScript), interactive: true)
-    return ["/bin/sh", "-c", SSHReconnectLoop.script(connect: connect, reconnect: reconnect)]
+    return [
+      "/bin/sh", "-c",
+      SSHReconnectLoop.script(
+        connect: connect, reconnect: reconnect, retriesExitOne: location.isCodespace),
+    ]
   }
 
   /// An agent surface's connect and reconnect scripts, built from fragments computed
