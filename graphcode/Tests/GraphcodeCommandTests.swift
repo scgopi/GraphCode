@@ -353,6 +353,8 @@ struct GraphcodeCommandTests {
     #expect(try GraphcodeCommand.parse(["usage", "-h"]) == .help)
     #expect(try GraphcodeCommand.parse(["edge", "create", "--help"]) == .help)
     #expect(try GraphcodeCommand.parse(["node", "send", "--help"]) == .help)
+    #expect(try GraphcodeCommand.parse(["reap", "--help"]) == .help)
+    #expect(try GraphcodeCommand.parse(["reap", "-h"]) == .help)
   }
 
   @Test

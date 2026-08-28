@@ -202,7 +202,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
       return .usage(projectPath: try take(&arguments, name: "project-path"))
 
     case "reap":
-      return .reap(dryRun: parseFlags(arguments)["dry-run"] != nil)
+      if arguments.contains(where: isHelpFlag) { throw HelpRequested() }
+      let flags = parseFlags(arguments)
+      return .reap(dryRun: flags["dry-run"] != nil)
 
     case "graph":
       let verb = try take(&arguments, name: "graph subcommand")
