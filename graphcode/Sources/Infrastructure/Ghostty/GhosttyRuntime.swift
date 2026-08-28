@@ -158,17 +158,25 @@ final class GhosttyRuntime: @unchecked Sendable {
   ///
   /// May be called off the main thread; `remoteLocation` is a plain property written
   /// on main during `apply` — a torn read costs one un-forwarded click, not a crash.
-  private static func handleAction(
+  ///
+  /// Everything that is not a scheme-carrying `.unknown` URL returns false, keeping
+  /// libghostty's opener byte-identical to pre-interception behavior: `.text`/`.html`
+  /// come from scrollback dumps and open in an editor there, and a clicked *file
+  /// path* (Ghostty resolves `./relative` links to bare absolute paths) parses as a
+  /// scheme-less `URL` that `NSWorkspace` won't open but `/usr/bin/open` will. Both
+  /// click gestures land here — ⇧ only bypasses a TUI's mouse capture — so these
+  /// guards are what keep ⌘⇧-click on local folders exactly as it was.
+  static func handleAction(
     target: ghostty_target_s, action: ghostty_action_s
   ) -> Bool {
     guard action.tag == GHOSTTY_ACTION_OPEN_URL else { return false }
     let openUrl = action.action.open_url
+    guard openUrl.kind == GHOSTTY_ACTION_OPEN_URL_KIND_UNKNOWN else { return false }
     guard let urlPointer = openUrl.url, openUrl.len > 0 else { return false }
     let urlString = String(
       decoding: UnsafeRawBufferPointer(start: urlPointer, count: Int(openUrl.len)),
       as: UTF8.self)
-    // Not parseable as a URL — let libghostty's own opener have its chance.
-    guard let url = URL(string: urlString) else { return false }
+    guard let url = URL(string: urlString), url.scheme != nil else { return false }
     if target.tag == GHOSTTY_TARGET_SURFACE, let surface = target.target.surface,
       let location = view(from: ghostty_surface_userdata(surface))?.remoteLocation
     {
