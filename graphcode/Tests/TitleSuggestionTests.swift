@@ -28,6 +28,13 @@ struct TitleSuggestionTests {
   }
 
   @Test
+  func codexTitleSuggestionsRunWithoutAnApprovalPrompt() throws {
+    let invocation = try #require(TitleSuggestionClient.invocation(for: .codex))
+    let command = try #require(invocation.last)
+    #expect(command.contains("codex exec --dangerously-bypass-approvals-and-sandbox"))
+  }
+
+  @Test
   func aTakenNameIsRefusedWhateverItsCase() {
     #expect(TitleSuggestionClient.accept("Deploy", taken: ["deploy"]) == nil)
     #expect(TitleSuggestionClient.accept("Deploy", taken: ["Research"]) == "Deploy")

@@ -267,8 +267,7 @@ struct SessionBriefingTests {
     let codex = try #require(
       ZmxSessionLauncher.arguments(
         forNode: node(backend: .codex), projectPath: Self.project, settings: defaults))
-    let approval = try #require(codex.firstIndex(of: "--ask-for-approval"))
-    #expect(codex[approval + 1] == "never")
+    #expect(codex.contains("--dangerously-bypass-approvals-and-sandbox"))
   }
 
   @Test
@@ -287,6 +286,10 @@ struct SessionBriefingTests {
     let copilot = CLISessionBackendKind.copilotCLI.launchArguments(
       prompt: "go", tier: .standard, settings: GraphcodeSettings())
     #expect(copilot.contains("--yolo"))
+
+    let codex = CLISessionBackendKind.codex.launchArguments(
+      prompt: "go", tier: .standard, settings: GraphcodeSettings())
+    #expect(codex.contains("--dangerously-bypass-approvals-and-sandbox"))
   }
 
   @Test
