@@ -315,6 +315,27 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     }
   }
 
+  /// Whether a human's tap may open this loop's workspace right now — the one rule
+  /// behind every gesture that opens a loop (a card tap, a sidebar row, ⇧⌘]'s walk,
+  /// history's Back), so click and keyboard cannot come to disagree.
+  ///
+  /// Three ways to qualify, in the order they decide:
+  /// - Not `.blocked`: nothing is holding it, opening is plainly fine.
+  /// - A live session: creation starts an unattended child's session before a
+  ///   follow-up hand-off edge marks it blocked, and a terminal that exists must be
+  ///   reachable.
+  /// - Attended: a turn-based or sketch loop only ever runs because a human opened
+  ///   it, so the human's tap *is* the authorization the hand-off was guarding.
+  ///   Refusing it left a hand-off-wired child unreachable by every gesture the app
+  ///   has, silently, until its parent resolved (#194's orchestration shape).
+  ///
+  /// What stays gated: a blocked *unattended* loop with no session, where opening
+  /// would start sequenced work the graph says must wait — and the daemon would start
+  /// it itself the moment the hand-off fires anyway.
+  public var opensOnHumanTap: Bool {
+    state != .blocked || presenceShowsLiveSession || !runsUnattended
+  }
+
   /// A backend that reports nothing leaves `presence` nil and this returns `state`
   /// untouched, which is exactly the behaviour every surface had before presence existed.
   public var displayState: LoopState {

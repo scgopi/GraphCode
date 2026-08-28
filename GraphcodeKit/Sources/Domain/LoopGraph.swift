@@ -148,6 +148,14 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   /// renders.
   public var sequencingEdges: [LoopEdge] { edges.filter { $0.kind.blocksTarget } }
 
+  /// The titles of the loops a node is still waiting on — the sources of its unfired
+  /// sequencing edges, in `nodes` order. What a surface names when it has to say *why*
+  /// a blocked loop is blocked, rather than leaving the state word to explain itself.
+  public func unfiredUpstreamTitles(of nodeID: UUID) -> [String] {
+    let sources = Set(sequencingEdges.filter { $0.to == nodeID && !$0.fired }.map(\.from))
+    return nodes.filter { sources.contains($0.id) }.map(\.title)
+  }
+
   public var entryPoints: [UUID] {
     let targeted = Set(sequencingEdges.map(\.to))
     let loose = unwiredNodeIDs

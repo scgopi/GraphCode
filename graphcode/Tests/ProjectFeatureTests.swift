@@ -417,6 +417,9 @@ struct ProjectFeatureTests {
     #expect(!node(.unknown).presenceShowsLiveSession)
     #expect(!node(nil).presenceShowsLiveSession)
   }
+
+  // The full open gate built on this reading — `opensOnHumanTap`, per loop type, and
+  // the refusal notice — is covered in `BlockedLoopGateTests`.
 }
 
 private actor SentGraphCommandsBox {

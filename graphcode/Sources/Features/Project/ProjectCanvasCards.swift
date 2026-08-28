@@ -23,10 +23,11 @@ extension ProjectCanvasView {
   /// The card itself is `LoopCardView`, shared with the Graph overview — see there for
   /// what it draws. What stays here is what only a project's own canvas has: the tap
   /// that opens the loop, the context menu, and the hover-revealed connector handle.
+  @ViewBuilder
   private func nodeCard(
     for node: LoopNode, reason: AttentionReason?, role: CardEntryRole, now: Date
   ) -> some View {
-    LoopCardView(
+    let card = LoopCardView(
       node: node,
       reason: reason,
       now: now,
@@ -49,6 +50,23 @@ extension ProjectCanvasView {
     }
     .contextMenu { nodeMenu(for: node) }
     // The hover-revealed + handle is `HoverRevealingCard`'s job — see `nodesLayer`.
+    // A blocked card's pill says *that* it waits; hovering says on *what*, before a
+    // click has to find out.
+    if let waiting = blockedHelp(for: node) {
+      card.help(waiting)
+    } else {
+      card
+    }
+  }
+
+  private func blockedHelp(for node: LoopNode) -> String? {
+    guard node.state == .blocked else { return nil }
+    let upstream = store.canvasGraph.unfiredUpstreamTitles(of: node.id)
+    guard !upstream.isEmpty else {
+      return "Blocked — waiting on a hand-off that hasn't fired yet"
+    }
+    return "Blocked — waiting on "
+      + upstream.map { "“\($0)”" }.joined(separator: " and ") + " to finish"
   }
 
   @ViewBuilder
