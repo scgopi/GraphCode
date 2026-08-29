@@ -189,8 +189,18 @@ final class GhosttyTerminalNSView: NSView {
   ///
   /// One implementation for both callers on purpose: the size and the scale are two halves
   /// of the same fact, and the bug this fixes was them being updated in different places.
+  ///
+  /// Degenerate sizes are dropped rather than forwarded: SwiftUI lays a remounting view
+  /// out at a near-zero frame before the real one arrives, and pushing that through
+  /// libghostty resizes the session's PTY to a 1×1 grid. Reflowing to one column erases
+  /// the alternate screen — there is no scrollback to reflow from — so a full-screen TUI
+  /// (opencode) that diffs against its own last frame comes back to a black pane the
+  /// moment the real size lands, because to the TUI nothing changed. The session logs
+  /// show these `resize rows=1 cols=1` blips at exactly the switch-back moments.
+  /// 32pt can't fit a legible terminal, so nothing real is ever suppressed.
   private func syncSurfaceSize() {
     guard let surface else { return }
+    guard bounds.width >= 32, bounds.height >= 32 else { return }
     let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
     ghostty_surface_set_size(
       surface, UInt32(bounds.width * scale), UInt32(bounds.height * scale))
