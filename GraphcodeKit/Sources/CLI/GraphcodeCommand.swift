@@ -86,6 +86,11 @@ public enum GraphcodeCommand: Equatable, Sendable {
     the app's pinned "Graph" row — which every other verb accepts wherever
     <project-path> appears.
 
+    A loop created with --into lives inside its composite's sub-graph, but its id is
+    still unique across the whole tree: node stop/delete/send/update/memo/refine and
+    edge create accept it as-is, paired with the project path of the graph the
+    composite belongs to.
+
     RECOVERY AND SAFETY
       Use `graphcode projects` to discover project paths and `status` to inspect state
       before retrying a command. `GRAPHCODE_SUPPORT_DIR` selects the workspace for
