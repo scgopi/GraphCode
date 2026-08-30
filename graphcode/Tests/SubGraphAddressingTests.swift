@@ -16,6 +16,7 @@ import Testing
 struct SubGraphAddressingTests {
   private func storeWithComposite(
     subNodes: [LoopNode] = [],
+    onCheckPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)? = nil,
     onAppendMemory: (@Sendable (UUID, String) -> Void)? = nil,
     onRefinePlaybook: (@Sendable (UUID, String) -> Bool)? = nil,
     onDeliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)? = nil,
@@ -29,6 +30,7 @@ struct SubGraphAddressingTests {
     let store = GraphStore(
       graph: LoopGraph(
         project: ProjectRef(path: "/tmp/p", name: "p"), nodes: [composite]),
+      onCheckPredicate: onCheckPredicate,
       onDeliverMessage: onDeliverMessage,
       onAppendMemory: onAppendMemory,
       onRefinePlaybook: onRefinePlaybook,
@@ -165,5 +167,151 @@ struct SubGraphAddressingTests {
     await store.handle(.memoNode(worker.id, text: "   ", from: nil))
 
     #expect(errors.value == ["memo not recorded: empty note"])
+  }
+
+  @Test
+  func anUpdateRoutesIntoAChildLoop() async {
+    let worker = LoopNode(title: "Worker", loopType: .turnBased, checkDescription: "?")
+    let (store, compositeID) = storeWithComposite(subNodes: [worker])
+
+    await store.handle(
+      .updateNode(worker.id, update: NodeUpdate(checkDescription: "reviewed?")))
+
+    #expect(
+      await store.graph.nodes[id: compositeID]?.subGraph?.nodes[id: worker.id]?
+        .checkDescription == "reviewed?")
+  }
+
+  @Test
+  func aChildLoopCanBeStoppedByItsOwnId() async {
+    let worker = LoopNode(title: "Worker", loopType: .turnBased, checkDescription: "?")
+    let (store, compositeID) = storeWithComposite(subNodes: [worker])
+
+    await store.handle(.stopNode(worker.id))
+
+    #expect(
+      await store.graph.nodes[id: compositeID]?.subGraph?.nodes[id: worker.id]?.state
+        == .stopped)
+  }
+
+  @Test
+  func aChildLoopCanBePromotedByItsOwnId() async {
+    let seedling = LoopNode(title: "Seedling", loopType: .sketch)
+    let (store, compositeID) = storeWithComposite(subNodes: [seedling])
+
+    await store.handle(
+      .promoteNode(
+        seedling.id,
+        promotion: .goal(GoalSpec(summary: "done means the changelog is written")),
+        promotedBy: nil))
+
+    let promoted = await store.graph.nodes[id: compositeID]?.subGraph?.nodes[id: seedling.id]
+    #expect(promoted?.loopType == .goalBased)
+    #expect(promoted?.state == .running)
+  }
+
+  @Test
+  func anEdgeFromATopLevelLoopToAChildLoopIsRefusedAsASpan() async throws {
+    // No edge may span two graphs. Refused out loud — the caller is waiting for an
+    // answer, and silence reads as a timeout, not a refusal.
+    let worker = LoopNode(title: "Worker", loopType: .turnBased, checkDescription: "?")
+    let errors = LockIsolated<[String]>([])
+    let (store, _) = storeWithComposite(
+      subNodes: [worker],
+      onAnnounceError: { message in errors.withValue { $0.append(message) } })
+    await store.handle(.createNode(NodeDraft(title: "Outside", loopType: .turnBased)))
+    let outsideID = try #require(await store.graph.nodes.last?.id)
+
+    await store.handle(.createEdge(from: outsideID, to: worker.id, spec: EdgeSpec()))
+
+    #expect(errors.value.count == 1)
+    #expect(errors.value.first?.hasPrefix("edge refused: an edge may not span two graphs") == true)
+  }
+
+  @Test
+  func anEdgeToAnUnknownLoopIsRefusedByName() async throws {
+    let outside = LoopNode(title: "Outside", loopType: .turnBased, checkDescription: "?")
+    let errors = LockIsolated<[String]>([])
+    let (store, _) = storeWithComposite(
+      onAnnounceError: { message in errors.withValue { $0.append(message) } })
+    await store.handle(.createNode(NodeDraft(title: "Outside", loopType: .turnBased)))
+    let outsideID = try #require(await store.graph.nodes.last?.id)
+    let missing = UUID()
+
+    await store.handle(.createEdge(from: outsideID, to: missing, spec: EdgeSpec()))
+
+    #expect(errors.value == ["edge refused: no loop \(missing) in this graph"])
+  }
+
+  // MARK: - Recurrence for sub-graph loops
+
+  // A per-command child store cannot hold a timer — one armed there would die with the
+  // store, which is how a `--poll` change on a child was silently inert. Recurrence is
+  // now armed on the project store and ticks into the sub-graph by descent.
+
+  @Test
+  func aPilotedChildsGoalIsPolledFromTheProjectStore() async throws {
+    let polls = LockIsolated(0)
+    let worker = LoopNode(
+      title: "Worker", loopType: .goalBased,
+      goal: GoalSpec(summary: "ship it", predicate: "true", pollIntervalSeconds: 1))
+    let (store, compositeID) = storeWithComposite(
+      subNodes: [worker],
+      onCheckPredicate: { _ in
+        polls.withValue { $0 += 1 }
+        return PredicateOutcome(passed: false)
+      })
+
+    await store.handle(.pilotComposite(compositeID))
+    #expect(await store.graph.nodes[id: compositeID]?.pilotState == .piloted)
+    try await Task.sleep(for: .seconds(1.6))
+
+    #expect(polls.value >= 1)
+  }
+
+  @Test
+  func anUpdateToAChildsPollIntervalReachesTheProjectStoresPoller() async throws {
+    // The regression: the re-arm used to land in the ephemeral child store and die
+    // with it, so a `--poll` change was silently ignored. The poller here was armed by
+    // the pilot at the default 60s; the routed update must replace it with a 1s one.
+    let polls = LockIsolated(0)
+    let worker = LoopNode(
+      title: "Worker", loopType: .goalBased,
+      goal: GoalSpec(summary: "ship it", predicate: "true", pollIntervalSeconds: 60))
+    let (store, compositeID) = storeWithComposite(
+      subNodes: [worker],
+      onCheckPredicate: { _ in
+        polls.withValue { $0 += 1 }
+        return PredicateOutcome(passed: false)
+      })
+    await store.handle(.pilotComposite(compositeID))
+
+    await store.handle(
+      .updateNode(worker.id, update: NodeUpdate(pollIntervalSeconds: 1)))
+    try await Task.sleep(for: .seconds(1.6))
+
+    #expect(polls.value >= 1)
+  }
+
+  @Test
+  func anUnpilotedChildsGoalIsNeverPolled() async throws {
+    // A template's goal resolving would mark work done that never ran, so recurrence
+    // handed up from a child store is gated on its composite having been piloted.
+    let polls = LockIsolated(0)
+    let worker = LoopNode(
+      title: "Worker", loopType: .goalBased,
+      goal: GoalSpec(summary: "ship it", predicate: "true", pollIntervalSeconds: 1))
+    let (store, _) = storeWithComposite(
+      subNodes: [worker],
+      onCheckPredicate: { _ in
+        polls.withValue { $0 += 1 }
+        return PredicateOutcome(passed: false)
+      })
+
+    await store.handle(
+      .updateNode(worker.id, update: NodeUpdate(pollIntervalSeconds: 1)))
+    try await Task.sleep(for: .seconds(1.6))
+
+    #expect(polls.value == 0)
   }
 }

@@ -115,6 +115,12 @@ public actor GraphStore {
   /// (b) nesting beyond `maxSubGraphDepth` is refused outright, so a runaway agent
   /// can't stack composites forever.
   private let subGraphDepth: Int
+  /// Where this store hands poller/heartbeat arm-and-cancel requests when it is too
+  /// ephemeral to own them — every sub-graph store, which is built per command and
+  /// whose timers would die with it. `nil` at the project root, which owns recurrence
+  /// for its own loops directly and for sub-graph loops via the descent in
+  /// `evaluateGoalDescending`/`deliverHeartbeatDescending`.
+  private let recurrence: RecurrenceSink?
   static let maxSubGraphDepth = 6
   static let maxNodesPerGraph = 50
   private var goalPollers: [UUID: Task<Void, Never>] = [:]
@@ -124,14 +130,14 @@ public actor GraphStore {
   /// the experiment on mid-run starts existing heartbeat loops beating without anyone
   /// re-arming anything.
   private var heartbeatTimers: [UUID: Task<Void, Never>] = [:]
-  /// Workspace fingerprint at the last *failing* predicate run, per node — what
-  /// `GoalSpec.skipsUnchangedWorkspace` compares against. In-memory on purpose: a
-  /// daemon restart forgetting these costs one extra predicate run, and persisting a
-  /// cache whose whole point is skipping work would be work.
-  private var failedPredicateFingerprints: [UUID: String] = [:]
-  /// The failure tail last relayed to each node's session, so an unchanged failure is
-  /// never repeated at it poll after poll.
-  private var lastPredicateFeedback: [UUID: String] = [:]
+  /// Workspace fingerprints at the last *failing* predicate run, and the failure tail
+  /// last relayed to each node's session — what `GoalSpec.skipsUnchangedWorkspace`
+  /// compares against and what keeps an unchanged failure from being repeated every
+  /// poll. In-memory on purpose: a daemon restart forgetting these costs one extra
+  /// predicate run, and persisting a cache whose whole point is skipping work would be
+  /// work. Shared with sub-graph stores (which are built per command and would
+  /// otherwise forget both between one-shot evaluations) via `goalCache`.
+  private let goalCache: GoalEvaluationCache
   /// `node send --follow-up` messages waiting for their target to finish its current
   /// turn — drained whenever the store settles (`drainAndBroadcast`) and on each
   /// presence poll. The content is in the target's memory log from the moment it was
@@ -140,10 +146,10 @@ public actor GraphStore {
   private var pendingFollowUps: [(nodeID: UUID, text: String)] = []
 
   /// A poller holds `self` weakly, so a store going away already stops it *doing*
-  /// anything — but the task itself keeps sleeping in its loop forever. That was
-  /// harmless while every store outlived the process; `runInSubGraph` builds one per
-  /// command and throws it away, so without this a goal loop inside a composite leaks a
-  /// sleeping task every time anything addresses that sub-graph.
+  /// anything — but the task itself keeps sleeping in its loop forever. Harmless for
+  /// the long-lived project store; sub-graph stores are built per command and hold no
+  /// timers at all (recurrence for their loops is forwarded up), so this deinit is a
+  /// backstop rather than a leak fix.
   deinit {
     for poller in goalPollers.values { poller.cancel() }
     for timer in heartbeatTimers.values { timer.cancel() }
@@ -203,6 +209,8 @@ public actor GraphStore {
       @Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?
     )? = nil,
     onBoardsEnabled: (@Sendable () -> Bool)? = nil,
+    goalCache: GoalEvaluationCache? = nil,
+    recurrence: RecurrenceSink? = nil,
     subGraphDepth: Int = 0
   ) {
     self.graph = graph
@@ -227,6 +235,8 @@ public actor GraphStore {
     self.onHeartbeatEnabled = onHeartbeatEnabled
     self.onComposeBoard = onComposeBoard
     self.onBoardsEnabled = onBoardsEnabled
+    self.goalCache = goalCache ?? GoalEvaluationCache()
+    self.recurrence = recurrence
   }
 
   private func recordMemory(_ nodeID: UUID, _ entry: String) {
@@ -351,12 +361,27 @@ public actor GraphStore {
       armHeartbeat(for: node)
 
     case .createEdge(let from, let to, let spec):
+      guard from != to else { return }
+      // Refused out loud rather than dropped: routing has already sent pairs that
+      // share a sub-graph down into it, so an endpoint missing from this graph's own
+      // nodes is either a loop inside a composite — and no edge may span two graphs,
+      // not even a sub-graph and its parent — or a loop that exists nowhere. Either
+      // way the caller is waiting for an answer, and silence reads as a timeout, not
+      // a refusal. (A duplicate of the same kind still collapses quietly, as before.)
+      guard graph.nodes[id: from] != nil, graph.nodes[id: to] != nil else {
+        let missing = graph.nodes[id: from] == nil ? from : to
+        announceError(
+          graph.containsAtAnyDepth(missing)
+            ? "edge refused: an edge may not span two graphs — \(missing) lives inside "
+              + "a composite, so both of its endpoints must share that sub-graph"
+            : "edge refused: no loop \(missing) in this graph")
+        return
+      }
       // Duplicates are scoped per kind, not per pair: a `.handoff` and a `.message`
       // between the same two loops are different relationships (one sequences them,
       // one lets them talk mid-flight), so both are allowed to exist at once. Two
       // edges of the *same* kind between the same pair still collapse to one.
-      guard from != to, graph.nodes[id: from] != nil, graph.nodes[id: to] != nil,
-        !graph.edges.contains(where: { $0.from == from && $0.to == to && $0.kind == spec.kind })
+      guard !graph.edges.contains(where: { $0.from == from && $0.to == to && $0.kind == spec.kind })
       else { return }
       // A guard that bounds nothing would turn a cycle into an unattended infinite loop
       // spending tokens forever. Refused outright rather than silently dropped, so the
@@ -513,7 +538,7 @@ public actor GraphStore {
     // Built fresh per command rather than cached: the sub-graph lives on the parent
     // node, which is the persisted source of truth, so a long-lived child store would
     // just be a copy that can drift from it.
-    let errors = SubGraphErrorSink()
+    let effects = SubGraphEffects()
     let child = GraphStore(
       graph: subGraph,
       // Deliberately *not* forwarded. A loop inside a composite is a template with no
@@ -533,14 +558,18 @@ public actor GraphStore {
       onRemoveMemory: onRemoveMemory,
       onRefinePlaybook: onRefinePlaybook,
       onRollbackPlaybook: onRollbackPlaybook,
-      onAnnounceError: errors.append,
+      onAnnounceError: effects.errors.append,
+      goalCache: goalCache,
+      recurrence: effects.recurrence,
       subGraphDepth: subGraphDepth + 1)
     await child.handle(command)
-    // Re-announced before the write-back and roll-up below, so a client sees the
-    // refusal ahead of the broadcast it would otherwise time out against.
-    for message in errors.drained {
+    // Settled before the write-back and roll-up below, so a client sees the refusal
+    // ahead of the broadcast it would otherwise time out against, and an update's
+    // re-armed poller is in place before anyone sees the graph it belongs to.
+    for message in effects.errors.drained {
       announceError(message)
     }
+    processRecurrence(effects.recurrence)
     graph.nodes[id: nodeID]?.subGraph = await child.graph
     rollUpComposite(nodeID)
   }
@@ -584,6 +613,11 @@ public actor GraphStore {
       for child in subGraph.nodes where child.runsUnattended {
         ensureSession(child)
       }
+      // The pilot is also the moment the composite's loops become real, so it is the
+      // moment their recurrence becomes real: a goal child's stop condition and a time
+      // child's cadence are armed here on this store, keyed by the child's id, ticking
+      // into the sub-graph by descent (a per-command child store cannot hold a timer).
+      armRecurrence(for: subGraph.nodes)
     }
     graph.nodes[id: nodeID]?.pilotState = .piloted
     await refreshUsage()
@@ -1356,10 +1390,15 @@ public actor GraphStore {
     // `graph.nodes` — the same blind spot `requestStop` covers when stopping, and the
     // sessions `pilotComposite` and `spawnInstance` started for them are just as real.
     // Killed rather than asked, unlike a stop: the nodes cease to exist with their
-    // parent, so there is nothing left for a polite stop request to resolve.
+    // parent, so there is nothing left for a polite stop request to resolve. Their
+    // recurrence is cancelled here too — the pollers and heartbeats live on the
+    // project store keyed by the workers' own ids, and a deleted loop must not keep
+    // being polled.
     for worker in node.subGraph?.nodesAtAnyDepth ?? [] {
       terminateSession(worker)
       onRemoveMemory?(worker.id)
+      cancelGoalPoller(worker.id)
+      cancelHeartbeat(worker.id)
     }
   }
 
@@ -1602,11 +1641,14 @@ public actor GraphStore {
     if instance.runsUnattended { ensureSession(instance) }
     if instance.loopType == .goalBased { armGoalPoller(for: instance) }
     // A composite's work is its sub-graph's, so instantiating one has to start what's
-    // inside it — otherwise the spawn produces a node that merely looks busy.
+    // inside it — otherwise the spawn produces a node that merely looks busy. The
+    // instance is armed rather than awaiting a pilot, so its loops' recurrence starts
+    // with them.
     if let subGraph = instance.subGraph {
       for child in subGraph.nodes where child.runsUnattended {
         ensureSession(child)
       }
+      armRecurrence(for: subGraph.nodes)
     }
   }
 
@@ -2045,6 +2087,14 @@ public actor GraphStore {
   /// headlessly, leaving nothing to attach to. This one only asks an outside question
   /// about work that is running in a perfectly ordinary session the whole time.
   private func armGoalPoller(for node: LoopNode) {
+    // A sub-graph store is built per command; a timer armed here dies with it, so the
+    // request is handed up to the store that owns recurrence for this loop. The parent
+    // applies the pilot gate — an unpiloted composite's loops are templates, and a
+    // poller that resolved a template's goal would mark work done that never ran.
+    if subGraphDepth > 0 {
+      recurrence?.append(.armGoalPoller(node))
+      return
+    }
     guard let goal = node.goal else { return }
     // Three independent reasons to poll: a predicate to evaluate, a stall bound to
     // enforce, or a token budget to hold the line on. A goal stated only in prose still
@@ -2060,18 +2110,150 @@ public actor GraphStore {
       while !Task.isCancelled {
         try? await Task.sleep(for: .seconds(interval))
         guard !Task.isCancelled else { return }
-        await self?.evaluateGoal(nodeID)
+        await self?.evaluateGoalDescending(nodeID)
       }
     }
   }
 
   private func cancelGoalPoller(_ nodeID: UUID) {
+    if subGraphDepth > 0 {
+      recurrence?.append(.cancelGoalPoller(nodeID))
+      return
+    }
     goalPollers.removeValue(forKey: nodeID)?.cancel()
     // The caches ride the poller's lifecycle: a resolved node needs neither, and an
     // update that changed the predicate must not skip the new command on the old
     // tree's fingerprint or suppress its first failure as "already relayed".
-    failedPredicateFingerprints.removeValue(forKey: nodeID)
-    lastPredicateFeedback.removeValue(forKey: nodeID)
+    goalCache.clear(for: nodeID)
+  }
+
+  // MARK: - Recurrence for sub-graph loops
+
+  /// One poller tick, wherever the loop lives. Pollers are armed here on the project
+  /// store — including for loops inside composites, which per-command sub-graph stores
+  /// cannot hold — so the tick descends into the owning sub-graph when the id names no
+  /// loop of this graph's own.
+  private func evaluateGoalDescending(_ nodeID: UUID) async {
+    if graph.nodes[id: nodeID] != nil {
+      await evaluateGoal(nodeID)
+      return
+    }
+    guard let owner = graph.nodes.first(where: { $0.subGraph?.containsAtAnyDepth(nodeID) == true }),
+      let subGraph = owner.subGraph
+    else {
+      // The loop is gone from the tree; nothing left to tick at.
+      cancelGoalPoller(nodeID)
+      return
+    }
+    let effects = SubGraphEffects()
+    let child = subGraphStore(for: subGraph, effects: effects)
+    await child.evaluateGoalDescending(nodeID)
+    await settle(child: child, ownerID: owner.id, effects: effects)
+  }
+
+  /// The heartbeat timer's descent — same shape, same reasoning, see
+  /// `evaluateGoalDescending`.
+  private func deliverHeartbeatDescending(_ nodeID: UUID) async {
+    if graph.nodes[id: nodeID] != nil {
+      await deliverHeartbeat(nodeID)
+      return
+    }
+    guard let owner = graph.nodes.first(where: { $0.subGraph?.containsAtAnyDepth(nodeID) == true }),
+      let subGraph = owner.subGraph
+    else {
+      cancelHeartbeat(nodeID)
+      return
+    }
+    let effects = SubGraphEffects()
+    let child = subGraphStore(for: subGraph, effects: effects)
+    await child.deliverHeartbeatDescending(nodeID)
+    await settle(child: child, ownerID: owner.id, effects: effects)
+  }
+
+  /// A child store built for one tick of recurrence — the same construction
+  /// `runInSubGraph` uses, sharing the goal cache so a one-shot evaluation inherits the
+  /// fingerprints and failure tails of every evaluation before it. Without the shared
+  /// cache, a failing predicate would be relayed to the session afresh on every poll.
+  private func subGraphStore(for subGraph: LoopGraph, effects: SubGraphEffects) -> GraphStore {
+    GraphStore(
+      graph: subGraph,
+      onTerminateSession: onTerminateSession,
+      onEvaluatePredicate: onEvaluatePredicate,
+      onCheckPredicate: onCheckPredicate,
+      onDeliverMessage: onDeliverMessage,
+      onCaptureScript: onCaptureScript,
+      onReadUsage: onReadUsage,
+      onReadPresence: onReadPresence,
+      onAppendMemory: onAppendMemory,
+      onRemoveMemory: onRemoveMemory,
+      onRefinePlaybook: onRefinePlaybook,
+      onRollbackPlaybook: onRollbackPlaybook,
+      onAnnounceError: effects.errors.append,
+      goalCache: goalCache,
+      recurrence: effects.recurrence,
+      subGraphDepth: subGraphDepth + 1)
+  }
+
+  /// Writes a tick's mutations back into the persisted tree, rolls the composite up,
+  /// and settles what the child handed up — errors re-announced, recurrence applied.
+  private func settle(child: GraphStore, ownerID: UUID, effects: SubGraphEffects) async {
+    for message in effects.errors.drained {
+      announceError(message)
+    }
+    processRecurrence(effects.recurrence)
+    graph.nodes[id: ownerID]?.subGraph = await child.graph
+    rollUpComposite(ownerID)
+    await drainAndBroadcast()
+  }
+
+  /// Applies the recurrence requests a child store handed up, in order — an update's
+  /// cancel-then-rearm must land as a pair or a `--poll` change kills its own poller.
+  /// At depth this store is itself a per-command child, so requests keep travelling up.
+  private func processRecurrence(_ sink: RecurrenceSink) {
+    for request in sink.drained {
+      if subGraphDepth > 0 {
+        recurrence?.append(request)
+        continue
+      }
+      switch request {
+      case .armGoalPoller(let node):
+        guard pilotedCompositeDirectlyContains(node.id) else { continue }
+        armGoalPoller(for: node)
+      case .armHeartbeat(let node):
+        guard pilotedCompositeDirectlyContains(node.id) else { continue }
+        armHeartbeat(for: node)
+      case .cancelGoalPoller(let nodeID):
+        cancelGoalPoller(nodeID)
+      case .cancelHeartbeat(let nodeID):
+        cancelHeartbeat(nodeID)
+      }
+    }
+  }
+
+  /// Whether the composite whose sub-graph *directly* holds `nodeID` has been piloted
+  /// or armed — the gate on recurrence handed up from a child store. A piloted outer
+  /// composite does not make an unpiloted inner one live: its loops have no sessions.
+  private func pilotedCompositeDirectlyContains(_ nodeID: UUID) -> Bool {
+    func search(_ nodes: some Collection<LoopNode>) -> Bool {
+      for node in nodes {
+        guard let sub = node.subGraph else { continue }
+        if sub.nodes.contains(where: { $0.id == nodeID }) {
+          return node.pilotState == .piloted || node.pilotState == .armed
+        }
+        if search(sub.nodes) { return true }
+      }
+      return false
+    }
+    return search(graph.nodes)
+  }
+
+  /// Arms recurrence for the loops a piloted or armed composite brought live — its
+  /// direct children only, since piloting starts sessions one level at a time.
+  private func armRecurrence(for children: some Collection<LoopNode>) {
+    for child in children where child.runsUnattended && !child.isResolved {
+      if child.loopType == .goalBased { armGoalPoller(for: child) }
+      if child.loopType == .timeBased { armHeartbeat(for: child) }
+    }
   }
 
   /// One poll. Called on the timer in production and directly from tests, so the
@@ -2119,7 +2301,7 @@ public actor GraphStore {
       // Same tree the predicate already failed against — running it again buys the
       // same answer at full price. A missing fingerprint (not a git repo, capture not
       // wired) falls through to a real run: skipping is the optimisation, never the rule.
-      if let fingerprint, failedPredicateFingerprints[nodeID] == fingerprint { return }
+      if let fingerprint, goalCache.fingerprint(for: nodeID) == fingerprint { return }
     }
 
     let outcome: PredicateOutcome
@@ -2139,7 +2321,7 @@ public actor GraphStore {
       await drainAndBroadcast()
       return
     }
-    if let fingerprint { failedPredicateFingerprints[nodeID] = fingerprint }
+    if let fingerprint { goalCache.setFingerprint(fingerprint, for: nodeID) }
     await relayPredicateFailure(to: current, predicate: predicate, outcome: outcome)
   }
 
@@ -2194,7 +2376,7 @@ public actor GraphStore {
     to node: LoopNode, predicate: String, outcome: PredicateOutcome
   ) async {
     let tail = outcome.outputTail.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !tail.isEmpty, lastPredicateFeedback[node.id] != tail else { return }
+    guard !tail.isEmpty, goalCache.feedback(for: node.id) != tail else { return }
     let presence: Presence?
     if let onReadPresence {
       presence = await onReadPresence(node, graph.project.path).presence
@@ -2206,7 +2388,7 @@ public actor GraphStore {
       "[graphcode] Goal not met yet: `\(predicate)` still exits non-zero. "
       + "Its output ends with: \(tail)"
     guard await deliverToSession(node, message) else { return }
-    lastPredicateFeedback[node.id] = tail
+    goalCache.setFeedback(tail, for: node.id)
     recordMemory(node.id, "predicate feedback: \(tail)")
   }
 
@@ -2241,6 +2423,12 @@ public actor GraphStore {
   /// the session on every beat, so the timer itself holds no authority anything else
   /// would need revoking.
   private func armHeartbeat(for node: LoopNode) {
+    // Forwarded up for the same reason the goal poller is: a per-command store cannot
+    // own a timer. The parent applies the same pilot gate on receipt.
+    if subGraphDepth > 0 {
+      recurrence?.append(.armHeartbeat(node))
+      return
+    }
     guard node.loopType == .timeBased, let interval = node.effectiveHeartbeatInterval,
       interval > 0, onDeliverMessage != nil
     else { return }
@@ -2251,12 +2439,16 @@ public actor GraphStore {
       while !Task.isCancelled {
         try? await Task.sleep(for: .seconds(beat))
         guard !Task.isCancelled else { return }
-        await self?.deliverHeartbeat(nodeID)
+        await self?.deliverHeartbeatDescending(nodeID)
       }
     }
   }
 
   private func cancelHeartbeat(_ nodeID: UUID) {
+    if subGraphDepth > 0 {
+      recurrence?.append(.cancelHeartbeat(nodeID))
+      return
+    }
     heartbeatTimers.removeValue(forKey: nodeID)?.cancel()
   }
 
@@ -2315,6 +2507,23 @@ public actor GraphStore {
       if !node.isResolved { armHeartbeat(for: node) }
       ensureSession(node)
     }
+    armPilotedSubGraphRecurrence(graph.nodes)
+  }
+
+  /// The boot-time half of the pilot's arming. Pollers and heartbeats are in-memory,
+  /// so a daemon restart drops every piloted composite's recurrence along with the
+  /// top-level loops'; this re-arms it for the loops whose composite is still piloted
+  /// or armed. Sessions are not re-ensued here beyond what the loop above already did
+  /// — child sessions reattach to their `zmx` names, and the liveness sweep is the
+  /// place that restarts the ones it cannot reach.
+  private func armPilotedSubGraphRecurrence(_ nodes: some Collection<LoopNode>) {
+    for node in nodes {
+      guard let sub = node.subGraph else { continue }
+      if node.pilotState == .piloted || node.pilotState == .armed {
+        armRecurrence(for: sub.nodes)
+      }
+      armPilotedSubGraphRecurrence(sub.nodes)
+    }
   }
 
   /// The session half of `ensureUnattendedSessions`, for the repeating remote liveness
@@ -2369,12 +2578,67 @@ public actor GraphStore {
     }
   }
 
+  /// Predicate-evaluation state shared between a project store and every sub-graph
+  /// store it builds: which workspace fingerprint each node's predicate last failed
+  /// against, and which failure tail each session was last told. The project store
+  /// owns the box for the life of the graph; per-command sub-graph stores borrow it so
+  /// a one-shot evaluation inherits what every evaluation before it learned — without
+  /// that, a failing predicate would be relayed to the session afresh on every poll.
+  /// Public only because `GraphStore.init` takes it; there is nothing to call.
+  public final class GoalEvaluationCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fingerprints: [UUID: String] = [:]
+    private var feedback: [UUID: String] = [:]
+
+    func fingerprint(for nodeID: UUID) -> String? {
+      lock.lock()
+      defer { lock.unlock() }
+      return fingerprints[nodeID]
+    }
+
+    func setFingerprint(_ value: String, for nodeID: UUID) {
+      lock.lock()
+      defer { lock.unlock() }
+      fingerprints[nodeID] = value
+    }
+
+    func feedback(for nodeID: UUID) -> String? {
+      lock.lock()
+      defer { lock.unlock() }
+      return feedback[nodeID]
+    }
+
+    func setFeedback(_ value: String, for nodeID: UUID) {
+      lock.lock()
+      defer { lock.unlock() }
+      feedback[nodeID] = value
+    }
+
+    /// A node's poller ended — resolved, updated, stopped, or deleted. Its next
+    /// predicate run starts the caches fresh, and its next wake may hear the failure
+    /// again even if it was told before.
+    func clear(for nodeID: UUID) {
+      lock.lock()
+      defer { lock.unlock() }
+      fingerprints[nodeID] = nil
+      feedback[nodeID] = nil
+    }
+  }
+
+  /// What one pass through a sub-graph store hands back to the store that ran it.
+  /// Both channels are buffered rather than forwarded inline: the child writes from its
+  /// own isolation, and the parent settles both — errors first, then recurrence —
+  /// before its `graphChanged` broadcast, which is the order a one-shot CLI client
+  /// (waiting for whichever event arrives first) needs to see.
+  private final class SubGraphEffects: @unchecked Sendable {
+    let errors = SubGraphErrorSink()
+    let recurrence = RecurrenceSink()
+  }
+
   /// Errors a sub-graph store raises while handling one command, held until the parent
   /// can re-announce them on its own connections. Written from the child's isolation,
-  /// read from the parent's — hence the lock. Buffered rather than forwarded inline so
-  /// the parent announces the child's refusals *before* its `graphChanged` broadcast,
-  /// which is the order a one-shot CLI client (waiting for whichever event arrives
-  /// first) needs to see a refusal instead of a graph that never changed.
+  /// read from the parent's — hence the lock. A child owns no connections of its own,
+  /// so without this hop its refusals were said to nobody.
   private final class SubGraphErrorSink: @unchecked Sendable {
     private let lock = NSLock()
     private var messages: [String] = []
@@ -2388,7 +2652,45 @@ public actor GraphStore {
     var drained: [String] {
       lock.lock()
       defer { lock.unlock() }
-      return messages
+      let taken = messages
+      messages = []
+      return taken
+    }
+  }
+
+  /// A poller or heartbeat a sub-graph store was asked to arm or cancel. Sub-graph
+  /// stores are built per command and hold no timers — a timer armed there would die
+  /// with the store, leaving a `--poll` change or a new goal loop silently inert — so
+  /// the request travels up to the project store, which owns recurrence for the whole
+  /// tree and ticks into sub-graphs by descent. Public only because `GraphStore.init`
+  /// takes the sink.
+  public enum RecurrenceRequest: Sendable {
+    case armGoalPoller(LoopNode)
+    case armHeartbeat(LoopNode)
+    case cancelGoalPoller(UUID)
+    case cancelHeartbeat(UUID)
+  }
+
+  /// Where those requests queue while the child handles its command. Written from the
+  /// child's isolation, drained in order by the parent — the order matters, because an
+  /// update re-arms by cancelling and then arming. Public only because
+  /// `GraphStore.init` takes it; there is nothing to call from outside.
+  public final class RecurrenceSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var requests: [RecurrenceRequest] = []
+
+    func append(_ request: RecurrenceRequest) {
+      lock.lock()
+      defer { lock.unlock() }
+      requests.append(request)
+    }
+
+    var drained: [RecurrenceRequest] {
+      lock.lock()
+      defer { lock.unlock() }
+      let taken = requests
+      requests = []
+      return taken
     }
   }
 }
