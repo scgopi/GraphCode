@@ -80,11 +80,14 @@ extension CLISessionBackendKind {
   public func launchArguments(
     prompt: String?, tier: ModelTier, briefingPath: String? = nil,
     settings: GraphcodeSettings = GraphcodeSettings(), workspacePaths: [String] = [],
-    hooksFile: URL? = nil, sessionName: String? = nil, zmxPath: String? = nil
+    hooksFile: URL? = nil, sessionName: String? = nil, zmxPath: String? = nil,
+    sessionsDirectory: String? = nil
   ) -> [String] {
     let model =
       modelArguments(for: tier) + permissionArguments(settings)
-      + presenceArguments(hooksFile: hooksFile, sessionName: sessionName, zmxPath: zmxPath)
+      + presenceArguments(
+        hooksFile: hooksFile, sessionName: sessionName, zmxPath: zmxPath,
+        sessionsDirectory: sessionsDirectory)
     guard let prompt, !prompt.isEmpty else { return model }
     let briefingDirectory = (briefingPath as NSString?)?.deletingLastPathComponent
     switch self {
@@ -198,17 +201,16 @@ extension CLISessionBackendKind {
   /// (`GhosttyTerminalView.resumeCommand`) — so a backend gaining or losing resume
   /// support changes both paths together rather than one silently drifting.
   public var supportsResume: Bool {
-    self == .claudeCode || self == .copilotCLI || self == .openCode
+    self == .claudeCode || self == .copilotCLI || self == .codex || self == .openCode
   }
 
-  /// The argv that picks `sessionID` back up — `--resume` for Claude Code and Copilot,
-  /// `--session` for OpenCode, whose `--continue` would take the *last* session on the
-  /// machine rather than this loop's. Empty for a backend that can't resume.
+  /// The argv that picks `sessionID` back up. OpenCode's `--session` and Codex's
+  /// `resume <id>` both name the exact conversation rather than selecting the last one.
   public func resumeArguments(sessionID: String) -> [String] {
     switch self {
     case .claudeCode, .copilotCLI: return ["--resume", sessionID]
+    case .codex: return ["resume", sessionID]
     case .openCode: return ["--session", sessionID]
-    case .codex: return []
     }
   }
 
@@ -247,7 +249,8 @@ extension CLISessionBackendKind {
   /// Empty when the handle isn't available, which leaves presence at the heuristic: what
   /// every session did before any of this existed.
   public func presenceArguments(
-    hooksFile: URL?, sessionName: String? = nil, zmxPath: String? = nil
+    hooksFile: URL?, sessionName: String? = nil, zmxPath: String? = nil,
+    sessionsDirectory: String? = nil
   ) -> [String] {
     switch self {
     case .claudeCode:
@@ -259,7 +262,13 @@ extension CLISessionBackendKind {
       // it — just somewhere to write, which is why this is the one backend that takes the
       // `zmx` path rather than a path to something graphcode wrote. Its other edge is
       // covered without asking Codex anything: see `ZmxSessionLauncher.codexPresence`.
-      return zmxPath.map { ["-c", PresenceHooks.codexNotifyOverride(zmxPath: $0)] } ?? []
+      return zmxPath.map {
+        [
+          "-c",
+          PresenceHooks.codexNotifyOverride(
+            zmxPath: $0, sessionsDirectory: sessionsDirectory),
+        ]
+      } ?? []
     case .openCode:
       // Reports through a plugin, which rides in the environment rather than the argv —
       // see `presenceEnvironment`.

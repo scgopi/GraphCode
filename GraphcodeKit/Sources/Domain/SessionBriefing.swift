@@ -60,8 +60,8 @@ public enum SessionBriefing {
         "every hour", "keep checking", "each morning". Also starts immediately.
         **The daemon drives it**: a heartbeat is typed into the session each interval, and
         the prompt is the bare task — no `/loop`, no cron, no self-scheduling. Only when
-        the loop must own its own cadence (self-pacing, a complex schedule), omit
-        `--heartbeat` and write the directive into the prompt (`/loop 1h …`) instead.
+        the loop must own its own cadence (self-pacing, a complex schedule), use a backend
+        with in-session recurrence and omit `--heartbeat`.
         Do not reach for this for one-off work: "check the build" is a goal, "check the
         build every hour" is time-based.
       """
@@ -70,8 +70,10 @@ public enum SessionBriefing {
         finishes because it repeats: watching, polling, monitoring, anything phrased as
         "every hour", "keep checking", "each morning". Also starts immediately.
         **The cadence goes inside the prompt**, as a directive the session runs on itself
-        (`/loop 1h Check for new reports`, `/schedule …`) — graphcode holds no timer of its
-        own, so a time-based loop whose prompt carries no cadence just runs once and stops.
+        (`/loop 1h Check for new reports`, `/schedule …`). Codex and OpenCode cannot own
+        that schedule: for them, use `--heartbeat <seconds>` with a bare task, or a leading
+        `/loop` or `/every` with a simple `s`, `m`, `h`, or `d` interval that graphcode can
+        convert into daemon recurrence.
         Do not reach for this for one-off work: "check the build" is a goal, "check the
         build every hour" is time-based.
       """

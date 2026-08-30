@@ -5,9 +5,8 @@ import Testing
 
 /// Where the preambles graphcode wraps around a session's opening prompt are allowed to
 /// sit. Every backend reads a leading `/` as a command and anything else as prose, and a
-/// time-based node's prompt *is* a command — the `/loop …` directive that makes the
-/// session re-trigger itself, since graphcode holds no timer of its own. A preamble in
-/// front of it is not a preamble, it is a silently disabled loop type (issue #179).
+/// time-based node whose session owns recurrence uses the `/loop …` command. A preamble
+/// in front of it is not a preamble, it is a silently disabled loop type (issue #179).
 @Suite
 struct SessionPromptTests {
   /// Copilot is the backend that both hosts time-based loops and takes its briefing as a
@@ -171,6 +170,20 @@ struct SessionPromptTests {
     // The experimental flag follows any mention, prose included.
     #expect(SessionPrompt.mentionsRecurrence("Run now. Then: /every 15m say hi"))
     #expect(!SessionPrompt.mentionsRecurrence("fix the failing test"))
+  }
+
+  @Test
+  func daemonIntervalsAcceptOnlyPositiveFiniteSimpleDurations() {
+    #expect(SessionPrompt.intervalSeconds("90s") == 90)
+    #expect(SessionPrompt.intervalSeconds("30m") == 1800)
+    #expect(SessionPrompt.intervalSeconds("2h") == 7200)
+    #expect(SessionPrompt.intervalSeconds("3d") == 259_200)
+    #expect(SessionPrompt.intervalSeconds("45") == 2700)
+    #expect(SessionPrompt.intervalSeconds("soon") == nil)
+    #expect(SessionPrompt.intervalSeconds("0") == nil)
+    #expect(SessionPrompt.intervalSeconds("inf") == nil)
+    #expect(SessionPrompt.intervalSeconds("1w") == nil)
+    #expect(SessionPrompt.intervalSeconds("1h30m") == nil)
   }
 
   /// The marker is what stops the opening pass repeating, and it records *which* session

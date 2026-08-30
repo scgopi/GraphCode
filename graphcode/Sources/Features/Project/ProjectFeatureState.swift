@@ -48,7 +48,7 @@ extension ProjectFeature.State {
       loopType: draftLoopType,
       checkDescription: draftLoopType == .turnBased ? draftCheck : nil,
       triggerPrompt: composedTriggerPrompt,
-      heartbeatIntervalSeconds: draftLoopType == .timeBased && draftUsesHeartbeat
+      heartbeatIntervalSeconds: draftLoopType == .timeBased && effectiveDraftUsesHeartbeat
         ? draftHeartbeatSeconds : nil,
       firstInstruction: {
         switch draftLoopType {
@@ -101,7 +101,7 @@ extension ProjectFeature.State {
       // Heartbeat mode: the daemon holds the timer, so the prompt is the bare task —
       // `LoopNode.sessionPrompt` wraps it in the who-holds-the-timer framing at
       // launch. No /loop, and no "Stop after": a heartbeat loop runs until stopped.
-      if draftUsesHeartbeat { return task }
+      if effectiveDraftUsesHeartbeat { return task }
       var directive = "/loop \(draftInterval.directiveValue(custom: draftCustomInterval)) \(task)"
       let stop = draftStopAfter.trimmingCharacters(in: .whitespaces)
       if !stop.isEmpty { directive += " Stop after \(stop)." }
@@ -116,13 +116,23 @@ extension ProjectFeature.State {
   /// The mono line the dialog shows under the interval control, so what will be written
   /// is visible before it is written.
   var triggerPreview: String {
-    if draftLoopType == .timeBased, draftUsesHeartbeat,
-      !draftTimedTask.trimmingCharacters(in: .whitespaces).isEmpty
-    {
+    let showsHeartbeat =
+      draftLoopType == .timeBased && effectiveDraftUsesHeartbeat
+      && !draftTimedTask.trimmingCharacters(in: .whitespaces).isEmpty
+    if showsHeartbeat {
       let interval = draftInterval.directiveValue(custom: draftCustomInterval)
       return "[graphcode] heartbeat every \(interval) — the daemon holds the timer"
     }
     return composedTriggerPrompt ?? ""
+  }
+
+  var draftRequiresDaemonHeartbeat: Bool {
+    let capabilities = draftBackend.capabilities
+    return capabilities.supportsDaemonRecurrence && !capabilities.supportsInSessionRecurrence
+  }
+
+  var effectiveDraftUsesHeartbeat: Bool {
+    draftUsesHeartbeat || draftRequiresDaemonHeartbeat
   }
 
   /// The form's interval as the seconds `LoopNode.heartbeatIntervalSeconds` stores.
@@ -148,7 +158,7 @@ extension ProjectFeature.State {
     let digits =
       trimmed.hasSuffix("s") || trimmed.hasSuffix("m") || trimmed.hasSuffix("h")
         || trimmed.hasSuffix("d") ? String(trimmed.dropLast()) : trimmed
-    guard let value = Double(digits), value > 0 else { return nil }
+    guard let value = Double(digits), value.isFinite, value > 0 else { return nil }
     switch trimmed.last {
     case "s": return value
     case "h": return value * 3600

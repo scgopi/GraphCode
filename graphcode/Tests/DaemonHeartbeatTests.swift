@@ -141,6 +141,53 @@ struct DaemonHeartbeatTests {
   }
 
   @Test
+  func codexAndOpenCodeUseDaemonCadenceWhenTheToggleIsOff() async {
+    for backend in [CLISessionBackendKind.codex, .openCode] {
+      let node = LoopNode(
+        title: "Watcher", loopType: .timeBased,
+        triggerPrompt: "/loop 30m check reports", backend: backend, state: .running)
+      let delivered = LockIsolated(0)
+      let graph = LoopGraph(
+        project: ProjectRef(path: "/tmp/heartbeat", name: "heartbeat"), nodes: [node])
+      let store = GraphStore(
+        graph: graph,
+        onDeliverMessage: { _, _, _ in
+          delivered.withValue { $0 += 1 }
+          return true
+        },
+        onHeartbeatEnabled: { false })
+
+      #expect(node.effectiveHeartbeatInterval == 1800)
+      #expect(node.sessionPrompt?.contains("Run one pass") == true)
+      await store.deliverHeartbeat(node.id)
+      #expect(delivered.value == 1)
+    }
+  }
+
+  @Test
+  func explicitCodexAndOpenCodeHeartbeatsIgnoreTheToggle() async {
+    for backend in [CLISessionBackendKind.codex, .openCode] {
+      let draft = NodeDraft(
+        title: "Watcher", loopType: .timeBased,
+        triggerPrompt: "check reports", heartbeatIntervalSeconds: 300, backend: backend)
+      let delivered = LockIsolated(0)
+      let store = GraphStore(
+        onDeliverMessage: { _, _, _ in
+          delivered.withValue { $0 += 1 }
+          return true
+        },
+        onHeartbeatEnabled: { false })
+
+      await store.handle(.createNode(draft))
+      #expect(await store.graph.nodes.count == 1)
+      if let node = await store.graph.nodes.first {
+        await store.deliverHeartbeat(node.id)
+      }
+      #expect(delivered.value == 1)
+    }
+  }
+
+  @Test
   func settingAnIntervalNeedsTheExperimentButClearingNeverDoes() async {
     // Turning the toggle off must not strand a loop with a cadence nobody can remove.
     let graph = heartbeatGraph()
@@ -179,6 +226,12 @@ struct DaemonHeartbeatTests {
       try GraphcodeCommand.parse([
         "node", "create", "/tmp/p", "--title", "W", "--type", "time",
         "--prompt", "check", "--heartbeat", "-5",
+      ])
+    }
+    #expect(throws: GraphcodeCommand.ParseError.self) {
+      try GraphcodeCommand.parse([
+        "node", "create", "/tmp/p", "--title", "W", "--type", "time",
+        "--prompt", "check", "--heartbeat", "inf",
       ])
     }
   }

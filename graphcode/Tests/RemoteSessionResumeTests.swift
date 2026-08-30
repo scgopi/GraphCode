@@ -323,13 +323,23 @@ struct RemoteSessionResumeTests {
   }
 
   @Test
-  func aCodexNodeHasNoResumeToOffer() {
-    // Codex has no `--resume` graphcode has spiked, so the remote ensure keeps the
-    // single fresh-launch branch rather than inventing a flag.
-    #expect(
+  func aCodexNodeUsesItsResumeSubcommand() throws {
+    let arguments = try #require(
       ZmxSessionLauncher.resumeArguments(
-        forNode: goalNode(.codex), sessionID: "abc-123", projectPath: location.projectPath)
-        == nil)
+        forNode: goalNode(.codex), sessionID: "abc-123", projectPath: location.projectPath))
+    #expect(arguments.contains { $0.contains("resume") })
+    #expect(arguments.contains("abc-123"))
+  }
+
+  @Test
+  func aRemoteCodexEnsureBanksTheRolloutID() throws {
+    let invocation = try #require(
+      ZmxSessionLauncher.remoteEnsureInvocation(
+        forNode: goalNode(.codex), at: location))
+    let command = try #require(invocation.last)
+    #expect(command.contains("notify="))
+    #expect(command.contains("thread-id"))
+    #expect(command.contains(".graphcode/sessions"))
   }
 
   // MARK: - One ensure per node

@@ -259,6 +259,25 @@ struct ProjectFeatureTests {
 
   @Test
   @MainActor
+  func codexAndOpenCodeDraftsAlwaysUseDaemonCadence() {
+    for backend in [CLISessionBackendKind.codex, .openCode] {
+      var state = ProjectFeature.State(graph: LoopGraph(project: Self.testProject))
+      state.draftLoopType = .timeBased
+      state.draftBackend = backend
+      state.draftTimedTask = "check reports"
+      state.draftInterval = .quarterHour
+      state.draftUsesHeartbeat = false
+      state.draftStopAfter = "20 runs"
+
+      #expect(state.draftRequiresDaemonHeartbeat)
+      #expect(state.effectiveDraftUsesHeartbeat)
+      #expect(state.draft.triggerPrompt == "check reports")
+      #expect(state.draft.heartbeatIntervalSeconds == 900)
+    }
+  }
+
+  @Test
+  @MainActor
   func customIntervalsParseIntoSecondsWithAnHonestFallback() {
     #expect(ProjectFeature.State.seconds(fromInterval: "90s") == 90)
     #expect(ProjectFeature.State.seconds(fromInterval: "30m") == 1800)
@@ -267,6 +286,7 @@ struct ProjectFeatureTests {
     // Bare digits are minutes, matching what people type into the /loop field.
     #expect(ProjectFeature.State.seconds(fromInterval: "45") == 2700)
     #expect(ProjectFeature.State.seconds(fromInterval: "tomorrow") == nil)
+    #expect(ProjectFeature.State.seconds(fromInterval: "inf") == nil)
 
     var state = ProjectFeature.State(graph: LoopGraph(project: Self.testProject))
     state.draftLoopType = .timeBased

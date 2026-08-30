@@ -169,8 +169,10 @@ struct TimedDraftFields: View {
     VStack(alignment: .leading, spacing: 14) {
       DraftField(
         label: "How often?",
-        help: "GraphCode writes the /loop directive for you — you don't have to know "
-          + "the syntax."
+        help: store.draftRequiresDaemonHeartbeat
+          ? "GraphCode's daemon holds the timer for this backend."
+          : "GraphCode writes the /loop directive for you — you don't have to know "
+            + "the syntax."
       ) {
         VStack(alignment: .leading, spacing: 8) {
           Picker("", selection: $store.draftInterval) {
@@ -193,7 +195,17 @@ struct TimedDraftFields: View {
           text: $store.draftTimedTask)
       }
 
-      if SettingsModel.shared.settings.daemonHeartbeatEnabled {
+      if store.draftRequiresDaemonHeartbeat {
+        DraftField(
+          label: "Driven by",
+          help: "This backend cannot schedule its own session, so GraphCode delivers "
+            + "each pass on the selected interval."
+        ) {
+          Text("Daemon heartbeat")
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(.white.opacity(0.78))
+        }
+      } else if SettingsModel.shared.settings.daemonHeartbeatEnabled {
         DraftField(
           label: "Driven by", qualifier: "experimental",
           help: "Heartbeat (the default while the experiment is on): the daemon wakes "
@@ -224,7 +236,7 @@ struct TimedDraftFields: View {
         .background(Theme.draftField, in: RoundedRectangle(cornerRadius: 8))
       }
 
-      if !store.draftUsesHeartbeat {
+      if !store.effectiveDraftUsesHeartbeat {
         DraftField(
           label: "Stop after", qualifier: "optional",
           help: "Left empty, it keeps running until you stop it."

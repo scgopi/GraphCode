@@ -286,6 +286,10 @@ public enum PresenceHooks {
 
   public static let remoteUsageScriptExpression = "\"$HOME/.graphcode/hooks/usage.sh\""
 
+  public static let remoteOpenCodeConfigPath = "$HOME/.graphcode/hooks/openCode.json"
+  public static let remoteOpenCodePluginExpression =
+    "\"$HOME/.graphcode/hooks/opencode-presence.js\""
+
   /// The remote twin of `SessionIDStore.file(forNodeID:)` — the file the remote
   /// `SessionStart` hook wrote, as a shell expression the ensure dial can `cat`.
   ///
@@ -304,10 +308,11 @@ public enum PresenceHooks {
   public static func json(
     forBackend backend: CLISessionBackendKind, zmxPath: String,
     sessionsDirectory: String? = nil, activityScriptPath: String? = nil,
-    usageScriptPath: String? = nil
+    usageScriptPath: String? = nil, openCodePluginPath: String? = nil
   ) -> String? {
     if backend == .openCode {
-      return OpenCodePresencePlugin.config(pluginPath: openCodePluginFile.path)
+      return OpenCodePresencePlugin.config(
+        pluginPath: openCodePluginPath ?? openCodePluginFile.path)
     }
     guard let events = events(forBackend: backend) else { return nil }
     let sessions = sessionsDirectory ?? localSessionsExpression
@@ -393,7 +398,21 @@ public enum PresenceHooks {
   /// launch still passes `--settings`; if the file has never once been written the
   /// launch fails visibly in the loop's own terminal, which beats silently running an
   /// unobservable session.
-  public static func remoteWriteFragment() -> String? {
+  public static func remoteWriteFragment(
+    forBackend backend: CLISessionBackendKind = .claudeCode
+  ) -> String? {
+    if backend == .openCode {
+      let source = OpenCodePresencePlugin.remoteSource(zmxPath: "zmx")
+      let configPrefix = "{\"plugin\":[\""
+      let configSuffix = "/.graphcode/hooks/opencode-presence.js\"]}"
+      return "{ mkdir -p \"$HOME/.graphcode/hooks\""
+        + " && printf '%s' \(singleQuoted(source))"
+        + " > \(remoteOpenCodePluginExpression)"
+        + " && printf '%s%s%s' \(singleQuoted(configPrefix)) \"$HOME\""
+        + " \(singleQuoted(configSuffix)) > \"\(remoteOpenCodeConfigPath)\"; }"
+        + " 2>/dev/null || true"
+    }
+    guard backend == .claudeCode else { return nil }
     guard
       let json = json(
         forBackend: .claudeCode, zmxPath: "zmx",
@@ -429,10 +448,20 @@ public enum PresenceHooks {
   /// invented field outright ("unknown configuration field") and accepts this one.
   ///
   /// The value is TOML, parsed by Codex out of one argv element. Codex appends its event
-  /// JSON as a further argument, which `sh -c` puts in `$0` and this ignores.
-  public static func codexNotifyOverride(zmxPath: String) -> String {
+  /// JSON as a further argument, which `sh -c` puts in `$0`; its thread ID is persisted
+  /// under the node ID so only that node can resume it after the zmx session disappears.
+  public static func codexNotifyOverride(
+    zmxPath: String, sessionsDirectory: String? = nil
+  ) -> String {
+    let sessions = sessionsDirectory ?? localSessionsExpression
     let script =
-      "\(singleQuoted(zmxPath)) set \"$ZMX_SESSION\" presence=idle >/dev/null 2>&1; exit 0"
+      "i=$(printf '%s' \"$0\"|sed -n "
+      + "'s/.*\"thread-id\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p'); "
+      + "n=\"${ZMX_SESSION#\(SurfaceRef.zmxSessionPrefix)}\"; d=\(sessions); "
+      + "if [ -n \"$i\" ]&&[ \"$n\" != \"$ZMX_SESSION\" ];then mkdir -p \"$d\"; "
+      + "printf '%s %s %s\\n' \"$(date +%s)\" \"$i\" \"$PWD\" "
+      + ">>\"$d/$n.history\" 2>/dev/null; printf %s \"$i\">\"$d/$n.id\"; fi; "
+      + "\(singleQuoted(zmxPath)) set \"$ZMX_SESSION\" presence=idle >/dev/null 2>&1; exit 0"
     return "notify=[\"/bin/sh\",\"-c\",\(tomlString(script))]"
   }
 

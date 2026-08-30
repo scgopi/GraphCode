@@ -105,6 +105,20 @@ struct RemoteSessionLaunchTests {
   }
 
   @Test
+  func aRemoteCodexMessageClearsItsIdleLabelAfterSubmission() throws {
+    let node = LoopNode(
+      title: "Watcher", loopType: .timeBased, triggerPrompt: "/loop 5m Check",
+      backend: .codex)
+    let invocation = ZmxSessionLauncher.remoteSendInvocation(
+      "[graphcode] Heartbeat", toNode: node, at: location)
+    let remoteCommand = try #require(invocation.last)
+
+    let clear = try #require(remoteCommand.range(of: "presence="))
+    #expect(remoteCommand[..<clear.lowerBound].contains("sleep 0.4"))
+    #expect(remoteCommand[..<clear.lowerBound].contains("set"))
+  }
+
+  @Test
   func aLargeRemoteMessageIsChunkedIntoTheSameRoundTrip() throws {
     // The remote host's PTY queue is no bigger than ours, so an oversized single write
     // vanishes there the same way — the chunks ride the one ssh dial, drain beats

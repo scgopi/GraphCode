@@ -416,7 +416,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
 
     var heartbeat: Double?
     if let raw = flags["heartbeat"] {
-      guard let value = Double(raw), value > 0 else {
+      guard let value = Double(raw), value.isFinite, value > 0 else {
         throw ParseError.invalidValue(argument: "--heartbeat", value: raw)
       }
       heartbeat = value
@@ -498,7 +498,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
     }
     var heartbeat: Double?
     if let raw = flags["heartbeat"] {
-      guard let value = Double(raw) else {
+      guard let value = Double(raw), value.isFinite else {
         throw ParseError.invalidValue(argument: "--heartbeat", value: raw)
       }
       heartbeat = value

@@ -109,7 +109,9 @@ struct OpenCodeBackendTests {
     #expect(CLISessionBackendKind.openCode.supportsResume)
     #expect(
       CLISessionBackendKind.claudeCode.resumeArguments(sessionID: "abc") == ["--resume", "abc"])
-    #expect(CLISessionBackendKind.codex.resumeArguments(sessionID: "abc").isEmpty)
+    #expect(CLISessionBackendKind.codex.supportsResume)
+    #expect(
+      CLISessionBackendKind.codex.resumeArguments(sessionID: "abc") == ["resume", "abc"])
   }
 
   @Test
@@ -147,12 +149,28 @@ struct OpenCodeBackendTests {
   }
 
   @Test
-  func itHostsEveryLoopTypeButRecurringAndComposite() {
+  func aRemoteLaunchWritesAndLoadsItsPresencePlugin() throws {
+    let remoteNode = LoopNode(
+      title: "Ship it", loopType: .goalBased, goal: GoalSpec(summary: "Tests pass"),
+      backend: .openCode, state: .running)
+    let location = RemoteProjectLocation(
+      user: "dev", host: "build-box", remotePath: "/home/dev/widget")
+    let invocation = try #require(
+      ZmxSessionLauncher.remoteEnsureInvocation(forNode: remoteNode, at: location))
+    let command = try #require(invocation.last)
+
+    #expect(command.contains("opencode-presence.js"))
+    #expect(command.contains("OPENCODE_CONFIG"))
+    #expect(command.contains("$HOME/.graphcode/hooks/openCode.json"))
+    #expect(command.contains("process.env.HOME"))
+  }
+
+  @Test
+  func itHostsEveryLoopTypeButComposite() {
     #expect(CLISessionBackendKind.openCode.canHost(.goalBased))
     #expect(CLISessionBackendKind.openCode.canHost(.turnBased))
     #expect(CLISessionBackendKind.openCode.canHost(.sketch))
-    // No `/loop` equivalent, and no sub-agent fan-out reachable from outside the TUI.
-    #expect(!CLISessionBackendKind.openCode.canHost(.timeBased))
+    #expect(CLISessionBackendKind.openCode.canHost(.timeBased))
     #expect(!CLISessionBackendKind.openCode.canHost(.composite))
     #expect(CLISessionBackendKind.offerableAsDefault.contains(.openCode))
   }

@@ -25,13 +25,10 @@ public struct BackendCapabilities: Codable, Equatable, Sendable {
   /// Can the *session itself* re-trigger its own work on a cadence — Claude Code's
   /// `/loop` and `/schedule`?
   ///
-  /// This is what a time-based loop is actually built on: graphcode holds no interval of
-  /// its own and deliberately never inspects the prompt (`LoopNode.triggerPrompt`), so
-  /// the recurrence has to live inside the agent. A backend without it can still be
-  /// handed a `/loop …` prompt — it will simply do the work once and stop, which looks
-  /// like a broken schedule rather than an unsupported one. Hence its own capability
-  /// rather than being inferred from something adjacent.
+  /// A time-based loop may instead use graphcode's daemon cadence, represented by
+  /// `supportsDaemonRecurrence`. A backend with neither capability cannot host one.
   public var supportsInSessionRecurrence: Bool
+  public var supportsDaemonRecurrence: Bool
 
   public init(
     supportsGoalMode: Bool = false,
@@ -40,7 +37,8 @@ public struct BackendCapabilities: Codable, Equatable, Sendable {
     supportsSubAgents: Bool = false,
     supportsMCP: Bool = false,
     supportsMidSessionInput: Bool = false,
-    supportsInSessionRecurrence: Bool = false
+    supportsInSessionRecurrence: Bool = false,
+    supportsDaemonRecurrence: Bool = false
   ) {
     self.supportsGoalMode = supportsGoalMode
     self.supportsHooks = supportsHooks
@@ -49,6 +47,7 @@ public struct BackendCapabilities: Codable, Equatable, Sendable {
     self.supportsMCP = supportsMCP
     self.supportsMidSessionInput = supportsMidSessionInput
     self.supportsInSessionRecurrence = supportsInSessionRecurrence
+    self.supportsDaemonRecurrence = supportsDaemonRecurrence
   }
 }
 
@@ -126,9 +125,8 @@ extension CLISessionBackendKind {
       // some form (`--dangerously-bypass-hook-trust` implies a trust store for them), but
       // nothing in its help describes a lifecycle hook that could report presence the way
       // Claude Code's do, so presence stays heuristic. Sub-agent fan-out and a
-      // `/loop`-equivalent aren't visible in the CLI surface at all; if either exists it
-      // will be inside the TUI, and a capability claimed on a hunch is exactly what
-      // `isSpiked` exists to prevent.
+      // `/loop` equivalent aren't visible in the CLI surface, so recurrence is provided
+      // by graphcode's daemon rather than claimed as an in-session feature.
       return BackendCapabilities(
         supportsGoalMode: true,
         supportsHooks: false,
@@ -136,7 +134,8 @@ extension CLISessionBackendKind {
         supportsSubAgents: false,
         supportsMCP: true,
         supportsMidSessionInput: true,
-        supportsInSessionRecurrence: false)
+        supportsInSessionRecurrence: false,
+        supportsDaemonRecurrence: true)
 
     case .openCode:
       // Spiked against OpenCode 1.18.21 — every entry read off `opencode --help` and its
@@ -156,7 +155,7 @@ extension CLISessionBackendKind {
       // source, not assumed (`PresenceHooks.openCodePlugin`).
       //
       // Sub-agents exist inside the TUI (`@agent` mentions) but not as anything a
-      // composite could lean on from outside, and there is no `/loop` equivalent.
+      // composite could lean on from outside. Recurrence is provided by graphcode's daemon.
       return BackendCapabilities(
         supportsGoalMode: true,
         supportsHooks: true,
@@ -164,7 +163,8 @@ extension CLISessionBackendKind {
         supportsSubAgents: false,
         supportsMCP: true,
         supportsMidSessionInput: true,
-        supportsInSessionRecurrence: false)
+        supportsInSessionRecurrence: false,
+        supportsDaemonRecurrence: true)
     }
   }
 
@@ -201,7 +201,7 @@ extension CLISessionBackendKind {
       // The cadence lives inside the session, so this needs a backend whose agent can
       // re-trigger its own work. Without that a `/loop …` prompt runs once and stops,
       // which reads as a broken schedule rather than an unsupported one.
-      return capabilities.supportsInSessionRecurrence
+      return capabilities.supportsInSessionRecurrence || capabilities.supportsDaemonRecurrence
     case .composite:
       return capabilities.supportsSubAgents
     }
