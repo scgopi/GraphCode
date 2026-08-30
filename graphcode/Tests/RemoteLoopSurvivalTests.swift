@@ -51,6 +51,8 @@ struct RemoteLoopSurvivalTests {
     #expect(remoteCommand.contains(ZmxSessionLauncher.remoteProbeMarker))
     #expect(remoteCommand.contains("'get'"))
     #expect(remoteCommand.contains("presence"))
+    #expect(remoteCommand.contains("'ls'"))
+    #expect(!remoteCommand.contains("history"))
     #expect(
       remoteCommand.contains(SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName))
   }

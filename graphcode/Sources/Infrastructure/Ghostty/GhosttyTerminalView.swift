@@ -325,7 +325,9 @@ struct GhosttyTerminalView: NSViewRepresentable {
     // Unattended Codex sessions are started by graphcoded. Attaching with the agent
     // command as well creates a race where zmx run types that command into Codex.
     if defersCodexLaunchToDaemon {
-      return command
+      return ZmxSessionLauncher.waitingAttachCommand(
+        zmxPath: ZmxLocator.binaryURL.path, sessionName: sessionName,
+        executable: backend.executableName)
     }
     if let resuming = localResumeOrFreshCommand(agentLaunch: agentCommand) {
       return resuming
