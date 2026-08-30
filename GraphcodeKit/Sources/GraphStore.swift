@@ -66,6 +66,11 @@ public actor GraphStore {
   private let onRefinePlaybook: (@Sendable (UUID, String) -> Bool)?
   /// Restores the previous playbook, consuming a snapshot (`NodeMemory.rollbackPlaybook`).
   private let onRollbackPlaybook: (@Sendable (UUID) -> Bool)?
+  /// Receives an error raised in a sub-graph store — `runInSubGraph` hands the child
+  /// a sink it drains and re-announces on the parent, whose connections are the ones
+  /// clients actually listen on. A child owns none of its own, so without this every
+  /// refusal inside a composite was said to nobody.
+  private let onAnnounceError: (@Sendable (String) -> Void)?
   /// Whether the daemon-heartbeat experiment is on, read fresh at every gate — creation,
   /// and every tick — so flipping the Settings toggle applies immediately. `nil` (tests
   /// that don't care, and any client that never wires it) means off, which is the
@@ -192,6 +197,7 @@ public actor GraphStore {
     onRemoveMemory: (@Sendable (UUID) -> Void)? = nil,
     onRefinePlaybook: (@Sendable (UUID, String) -> Bool)? = nil,
     onRollbackPlaybook: (@Sendable (UUID) -> Bool)? = nil,
+    onAnnounceError: (@Sendable (String) -> Void)? = nil,
     onHeartbeatEnabled: (@Sendable () -> Bool)? = nil,
     onComposeBoard: (
       @Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?
@@ -217,6 +223,7 @@ public actor GraphStore {
     self.onRemoveMemory = onRemoveMemory
     self.onRefinePlaybook = onRefinePlaybook
     self.onRollbackPlaybook = onRollbackPlaybook
+    self.onAnnounceError = onAnnounceError
     self.onHeartbeatEnabled = onHeartbeatEnabled
     self.onComposeBoard = onComposeBoard
     self.onBoardsEnabled = onBoardsEnabled
@@ -266,6 +273,13 @@ public actor GraphStore {
   // MARK: - Commands
 
   public func handle(_ command: GraphCommand) async {
+    // A loop inside a composite addresses itself by its own id — its briefing tells it
+    // to `node memo <project> <its-own-id>`, and ids are unique across the whole tree,
+    // so a caller has no reason to know how deep its target sits (the same rule
+    // `runInSubGraph` already honours for already-wrapped commands). A command whose
+    // target names no top-level loop but lives inside a sub-graph is wrapped for the
+    // composite that holds it rather than refused by a lookup that never looked down.
+    let command = routeIntoSubGraph(command) ?? command
     switch command {
     case .createNode(var draft):
       // A child inherits its creator's backend unless one was named: a Copilot loop
@@ -428,6 +442,45 @@ public actor GraphStore {
 
   // MARK: - Composites
 
+  /// Wraps a command whose target loop lives inside a composite's sub-graph, for
+  /// dispatch through `runInSubGraph` — `nil` when the command needs no routing.
+  ///
+  /// Node commands used to resolve their target against this graph's own nodes only,
+  /// which locked a composite's children out of the CLI: `node memo`, `node refine`,
+  /// `node send`, `node delete`, `edge create` all answered "no loop <id> in this
+  /// graph" for a child that plainly existed, and a piloted loop told to memo or
+  /// refine itself could never succeed. The owner searched for here is the *top-level*
+  /// composite holding the target; `runInSubGraph` and the child store's own routing
+  /// descend the rest of the way, one hop each, so nesting costs nothing extra here.
+  ///
+  /// A command naming a loop that exists nowhere still returns `nil`: the command's
+  /// own guard then refuses it with the message a caller expects.
+  private func routeIntoSubGraph(_ command: GraphCommand) -> GraphCommand? {
+    func subGraphOwner(of target: UUID) -> UUID? {
+      guard graph.nodes[id: target] == nil,
+        let owner = graph.nodes.first(where: { $0.subGraph?.containsAtAnyDepth(target) == true })
+      else { return nil }
+      return owner.id
+    }
+    switch command {
+    case .createEdge(let from, let to, _):
+      // An edge lives in the graph holding both of its endpoints, so only a pair that
+      // shares one sub-graph can be routed there; anything else is refused below, as
+      // it always was.
+      guard from != to, let ownerID = subGraphOwner(of: from), subGraphOwner(of: to) == ownerID
+      else { return nil }
+      return .subGraphCommand(nodeID: ownerID, command: command)
+    case .nodeCheckApproved(let id), .nodeCheckRejected(let id), .renameNode(let id, _),
+      .updateNode(let id, _), .promoteNode(let id, _, _), .memoNode(let id, _, _),
+      .refineNode(let id, _, _), .rollbackRefinement(let id, _), .messageNode(let id, _, _, _),
+      .deleteNode(let id), .stopNode(let id):
+      guard let ownerID = subGraphOwner(of: id) else { return nil }
+      return .subGraphCommand(nodeID: ownerID, command: command)
+    default:
+      return nil
+    }
+  }
+
   /// Runs a command against a composite node's sub-graph, then rolls the result up.
   ///
   /// The nested graph is orchestrated by a real `GraphStore` — the same type, the same
@@ -460,6 +513,7 @@ public actor GraphStore {
     // Built fresh per command rather than cached: the sub-graph lives on the parent
     // node, which is the persisted source of truth, so a long-lived child store would
     // just be a copy that can drift from it.
+    let errors = SubGraphErrorSink()
     let child = GraphStore(
       graph: subGraph,
       // Deliberately *not* forwarded. A loop inside a composite is a template with no
@@ -479,8 +533,14 @@ public actor GraphStore {
       onRemoveMemory: onRemoveMemory,
       onRefinePlaybook: onRefinePlaybook,
       onRollbackPlaybook: onRollbackPlaybook,
+      onAnnounceError: errors.append,
       subGraphDepth: subGraphDepth + 1)
     await child.handle(command)
+    // Re-announced before the write-back and roll-up below, so a client sees the
+    // refusal ahead of the broadcast it would otherwise time out against.
+    for message in errors.drained {
+      announceError(message)
+    }
     graph.nodes[id: nodeID]?.subGraph = await child.graph
     rollUpComposite(nodeID)
   }
@@ -1961,6 +2021,7 @@ public actor GraphStore {
     for id in connections.keys {
       send(.errorOccurred(message), to: id)
     }
+    onAnnounceError?(message)
   }
 
   private func unblockIfStillIdle(_ nodeID: UUID) {
@@ -2305,6 +2366,29 @@ public actor GraphStore {
       // accumulate failed broadcast attempts.
       connections.removeValue(forKey: connectionID)
       return
+    }
+  }
+
+  /// Errors a sub-graph store raises while handling one command, held until the parent
+  /// can re-announce them on its own connections. Written from the child's isolation,
+  /// read from the parent's — hence the lock. Buffered rather than forwarded inline so
+  /// the parent announces the child's refusals *before* its `graphChanged` broadcast,
+  /// which is the order a one-shot CLI client (waiting for whichever event arrives
+  /// first) needs to see a refusal instead of a graph that never changed.
+  private final class SubGraphErrorSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var messages: [String] = []
+
+    func append(_ message: String) {
+      lock.lock()
+      defer { lock.unlock() }
+      messages.append(message)
+    }
+
+    var drained: [String] {
+      lock.lock()
+      defer { lock.unlock() }
+      return messages
     }
   }
 }
