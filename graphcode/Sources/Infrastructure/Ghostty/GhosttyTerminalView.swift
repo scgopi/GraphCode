@@ -300,7 +300,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
     return environment
   }
 
-  private func command(briefingPath: String?) -> [String] {
+  func command(briefingPath: String?) -> [String] {
     // A remote project's surfaces live on the remote host, local zmx or not.
     if let location = remoteLocation {
       return remoteCommand(at: location, settings: GraphcodeSettingsStore.load())
@@ -322,13 +322,13 @@ struct GhosttyTerminalView: NSViewRepresentable {
     // wrapper needed for a plain-shell surface.
     var command = [ZmxLocator.binaryURL.path, "attach", sessionName]
     guard launchesClaudeCode else { return command }
-    if let resuming = localResumeOrFreshCommand(agentLaunch: agentCommand) {
-      return resuming
-    }
     // Unattended Codex sessions are started by graphcoded. Attaching with the agent
     // command as well creates a race where zmx run types that command into Codex.
     if defersCodexLaunchToDaemon {
       return command
+    }
+    if let resuming = localResumeOrFreshCommand(agentLaunch: agentCommand) {
+      return resuming
     }
     command += agentCommand
     return command
