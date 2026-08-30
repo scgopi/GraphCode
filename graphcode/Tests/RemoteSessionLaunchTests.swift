@@ -21,14 +21,18 @@ struct RemoteSessionLaunchTests {
     #expect(invocation.first == "/usr/bin/ssh")
     let remoteCommand = try #require(invocation.last)
     // Login shell for the remote PATH, cd into the repository, then the create-only
-    // pair: `zmx get || zmx run`, detached, under the same session name the app
+    // pair: the alive check `|| zmx run`, detached, under the same session name the app
     // attaches to. The whole script is single-quote wrapped by the login-shell layer,
     // so assertions here are on content, not exact escaping —
     // `hostileTextSurvivesShellQuoting` pins the escaping itself.
     #expect(remoteCommand.hasPrefix("exec zsh -l -i -c '"))
     #expect(remoteCommand.contains("cd "))
     #expect(remoteCommand.contains("/home/dev/widget"))
-    #expect(remoteCommand.contains("'get'"))
+    #expect(remoteCommand.contains("ls 2>/dev/null"))
+    // The check is husk-aware (#215): a session whose task has ended must fail it, or
+    // a dead loop could never be woken — the husk is the session that check asks about.
+    #expect(remoteCommand.contains("ended="))
+    #expect(remoteCommand.contains("err="))
     #expect(remoteCommand.contains("||"))
     #expect(remoteCommand.contains("run"))
     #expect(
@@ -39,9 +43,9 @@ struct RemoteSessionLaunchTests {
     // round-trips here was the composer bug — the app's attach created the session in
     // the seconds between them, and the daemon's late `zmx run` typed the entire
     // launch command into the live agent's input bar.
-    let get = try #require(remoteCommand.range(of: "'get'"))
+    let check = try #require(remoteCommand.range(of: "ls 2>/dev/null"))
     let run = try #require(remoteCommand.range(of: "'run'"))
-    #expect(get.lowerBound < run.lowerBound)
+    #expect(check.lowerBound < run.lowerBound)
   }
 
   @Test
@@ -63,26 +67,31 @@ struct RemoteSessionLaunchTests {
     // the launch.
     #expect(remoteCommand.contains("|| true"))
     // And the seed runs before the launch it clears the way for — but *behind* the
-    // existence check, which is what keeps the liveness sweep's healthy tick a bare
-    // `zmx get` rather than a `python3` per minute against an already-trusted folder.
-    let get = try #require(remoteCommand.range(of: "'get'"))
+    // alive check, which is what keeps the liveness sweep's healthy tick a bare
+    // `zmx ls` rather than a `python3` per minute against an already-trusted folder.
+    let check = try #require(remoteCommand.range(of: "ls 2>/dev/null"))
     let seed = try #require(remoteCommand.range(of: "trustedFolders"))
     let run = try #require(remoteCommand.range(of: "'run'"))
-    #expect(get.lowerBound < seed.lowerBound)
+    #expect(check.lowerBound < seed.lowerBound)
     #expect(seed.lowerBound < run.lowerBound)
   }
 
   @Test
-  func aRemoteClaudeLaunchIsUntouchedByTrustSeeding() throws {
-    // The seed is Copilot-scoped: Claude's remote script must not carry it. (python3
-    // itself now appears for every backend — the delivery fragment rides on it.)
+  func aRemoteClaudeLaunchSeedsItsOwnTrustAndNeverCopilots() throws {
+    // Claude Code has its own first-run trust dialog, which a fresh unattended `claude`
+    // answers by exiting 1 (#215) — so the ensure carries Claude's seed too, its own
+    // `~/.claude.json` shape, never Copilot's.
     let node = LoopNode(
-      title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"))
+      title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"),
+      backend: .claudeCode)
     let invocation = try #require(
       ZmxSessionLauncher.remoteEnsureInvocation(forNode: node, at: location))
     let remoteCommand = try #require(invocation.last)
 
+    #expect(remoteCommand.contains("hasTrustDialogAccepted"))
+    #expect(remoteCommand.contains(".claude.json"))
     #expect(!remoteCommand.contains("trustedFolders"))
+    #expect(remoteCommand.contains("|| true"))
   }
 
   @Test
@@ -183,10 +192,10 @@ struct RemoteSessionLaunchTests {
     // Never load-bearing: a failed delivery degrades to an unbriefed session, not a
     // blocked launch.
     #expect(remoteCommand.contains("|| true"))
-    let get = try #require(remoteCommand.range(of: "'get'"))
+    let check = try #require(remoteCommand.range(of: "ls 2>/dev/null"))
     let deliver = try #require(remoteCommand.range(of: "b64decode"))
     let run = try #require(remoteCommand.range(of: "'run'"))
-    #expect(get.lowerBound < deliver.lowerBound)
+    #expect(check.lowerBound < deliver.lowerBound)
     #expect(deliver.lowerBound < run.lowerBound)
   }
 

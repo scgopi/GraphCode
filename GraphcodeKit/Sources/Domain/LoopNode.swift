@@ -368,7 +368,8 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     guard state == .running, let presence = presence?.presence else { return state }
     switch presence {
     case .busy: return .running
-    case .idle, .absent: return hasActiveDependents ? .waiting : .idle
+    case .idle: return hasActiveDependents ? .waiting : .idle
+    case .absent: return displayStateForAbsentSession
     // The combination `Presence` was written for: running in the graph, waiting on a
     // human in its session.
     case .awaitingInput: return .awaitingInput
@@ -376,6 +377,29 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     // the only honest thing left to show, exactly as if no reading existed.
     case .unknown: return state
     }
+  }
+
+  /// How long after a node's creation an `absent` presence reading is still allowed to
+  /// look like ordinary quiet. A freshly created loop's session takes a moment to exist
+  /// (the ensure is fired, not awaited, and a remote one crosses ssh first), so the
+  /// first poll of a young node can read `absent` while the launch is still in flight;
+  /// past this grace an absent session on an unattended loop is not quiet — it is a
+  /// session that exited with nobody watching, issue #215's silent death.
+  public static let absentSessionGraceSeconds: TimeInterval = 60
+
+  /// A `.running` unattended loop whose session is *gone* is a dead loop, and IDLE is
+  /// the one word it must not show: nothing is waiting for work, there is no work and
+  /// no loop to do it — that is the `failed` the graph would record if anyone had seen
+  /// the exit. Attended (turn-based) loops stay IDLE: a human owns those sessions, and
+  /// the pane they open is the place the exit shows. A loop others are still waiting
+  /// on shows `waiting` either way — that word is about the dependents, and their edge
+  /// is the graph's business, not the presence poll's.
+  private var displayStateForAbsentSession: LoopState {
+    guard runsUnattended, !hasActiveDependents else {
+      return hasActiveDependents ? .waiting : .idle
+    }
+    let grace = Date().addingTimeInterval(-Self.absentSessionGraceSeconds)
+    return createdAt < grace ? .failed : .idle
   }
 
   /// Whether this node has finished for good. Used to stop a resolved goal from being
