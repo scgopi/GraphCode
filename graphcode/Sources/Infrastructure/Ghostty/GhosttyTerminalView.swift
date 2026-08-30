@@ -325,8 +325,18 @@ struct GhosttyTerminalView: NSViewRepresentable {
     if let resuming = localResumeOrFreshCommand(agentLaunch: agentCommand) {
       return resuming
     }
+    // Unattended Codex sessions are started by graphcoded. Attaching with the agent
+    // command as well creates a race where zmx run types that command into Codex.
+    if defersCodexLaunchToDaemon {
+      return command
+    }
     command += agentCommand
     return command
+  }
+
+  var defersCodexLaunchToDaemon: Bool {
+    backend == .codex && launchesClaudeCode
+      && (loopType == .goalBased || loopType == .timeBased)
   }
 
   /// Opening a loop whose session is gone used to start the agent **fresh**, prompt and
