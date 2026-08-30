@@ -16,12 +16,12 @@ struct WorktreeHygieneTests {
 
   private func facts(
     notLanded: Int = 0, squashLanded: Bool = false, dirty: Int = 0, pushed: Bool = true,
-    prunable: Bool = false, locked: Bool = false, size: Int64? = 100
+    prunable: Bool = false, locked: Bool = false, submodules: Bool = false, size: Int64? = 100
   ) -> WorktreeGitFacts {
     WorktreeGitFacts(
       defaultBranch: "main", commitsNotLanded: notLanded, squashLanded: squashLanded,
       dirtyFileCount: dirty, pushed: pushed, prunable: prunable, locked: locked,
-      sizeBytes: size)
+      hasSubmodules: submodules, sizeBytes: size)
   }
 
   private func node(
@@ -158,6 +158,21 @@ struct WorktreeHygieneTests {
     // However clean, a lock needs a human first — never the preselected tier.
     #expect(locked.tier == .lookBeforeRemoving)
     #expect(locked.summary.contains("locked"))
+  }
+
+  @Test
+  func submodulesChangeTheRemovalMechanicsNotTheTier() {
+    // Initialized submodules make git refuse a plain removal, so they travel as a
+    // fact for removal to force with. They are not a safety signal: a pristine
+    // checkout is restorable from upstream, the worktree stays safe and selectable,
+    // and — the part that must hold — removing one never reads as discarding files,
+    // so no confirmation stands in the way.
+    let withSubmodules = WorktreeAssessment(
+      ref: ref(), facts: facts(submodules: true), binding: .none)
+
+    #expect(withSubmodules.tier == .safeToRemove)
+    #expect(withSubmodules.isRemovable)
+    #expect(!withSubmodules.removalDiscardsFiles)
   }
 
   @Test

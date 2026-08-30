@@ -24,6 +24,11 @@ public struct WorktreeGitFacts: Codable, Equatable, Sendable {
   public var prunable: Bool
   /// `git worktree lock` — git refuses removal even with `--force`.
   public var locked: Bool
+  /// Initialized submodule checkouts inside the worktree. Git refuses to remove
+  /// such a worktree even when the tree is clean, so removal needs `--force` —
+  /// bookkeeping, not discard: a pristine submodule checkout is restorable from
+  /// upstream, which is why this does not by itself demand the confirmation.
+  public var hasSubmodules: Bool
   public var sizeBytes: Int64?
 
   public var landed: Bool { commitsNotLanded == 0 || squashLanded }
@@ -37,6 +42,7 @@ public struct WorktreeGitFacts: Codable, Equatable, Sendable {
     pushed: Bool,
     prunable: Bool = false,
     locked: Bool = false,
+    hasSubmodules: Bool = false,
     sizeBytes: Int64? = nil
   ) {
     self.defaultBranch = defaultBranch
@@ -46,6 +52,7 @@ public struct WorktreeGitFacts: Codable, Equatable, Sendable {
     self.pushed = pushed
     self.prunable = prunable
     self.locked = locked
+    self.hasSubmodules = hasSubmodules
     self.sizeBytes = sizeBytes
   }
 }
