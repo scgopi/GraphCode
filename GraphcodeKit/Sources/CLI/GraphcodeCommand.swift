@@ -120,7 +120,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
                            once per cycle pass (last stdout line must be a number)
       --direction <d>      minimize | maximize                 (default: maximize)
       --budget <tokens>    for --type goal: end the loop once its backend reports this
-                           many tokens spent (input + output). Reported, never
+                           many tokens spent — input + output + every cache-read and
+                           cache-creation token the API metered. On Claude Code each
+                           turn re-meters the whole context as cache reads, so a
+                           budget burns per turn, not per hour. Reported, never
                            estimated — a loop whose backend reports nothing is never
                            stopped by a budget
       --skip-unchanged     for --type goal: while the session is busy, don't re-run
@@ -135,7 +138,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
       --goal, --predicate, --prompt, --check, --model, --metric, --direction as above
       --poll <seconds>     how often the predicate is polled
       --stall <seconds>    stall bound; 0 clears it
-      --budget <tokens>    token budget; 0 clears it
+      --budget <tokens>    token budget, counted as at creation; 0 clears it
       --heartbeat <secs>   daemon heartbeat interval; 0 returns cadence to the prompt
       --skip-unchanged <true|false>
       A loop may not change its own --predicate or --budget: the verifier stays outside
@@ -684,7 +687,13 @@ extension GraphcodeCommand {
       if let exitCode = node.presence?.exitCode {
         line += "  ← session exited (\(exitCode))"
       } else if let reason = AttentionRollup.reason(for: node) {
-        line += "  ← \(reason.displayName)"
+        // Stalled is two different endings — a blown budget and a blown deadline — and
+        // only memory told them apart. The graph records which one it was; print it.
+        if let why = node.stallReason, !why.isEmpty {
+          line += "  ← \(reason.displayName): \(why)"
+        } else {
+          line += "  ← \(reason.displayName)"
+        }
       }
       lines.append(line)
     }
