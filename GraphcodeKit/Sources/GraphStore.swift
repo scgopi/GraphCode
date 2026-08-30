@@ -127,6 +127,11 @@ public actor GraphStore {
   /// The failure tail last relayed to each node's session, so an unchanged failure is
   /// never repeated at it poll after poll.
   private var lastPredicateFeedback: [UUID: String] = [:]
+  /// The fingerprint whose unchanged tree has already bought an idle loop its one
+  /// re-awake (see `evaluateGoal`'s skip path). Cleared with the poller like the other
+  /// two caches; a new failing run at a new fingerprint naturally leaves it stale, and
+  /// stale here means one more notice the next freeze is allowed to spend.
+  private var reawakenedFingerprints: [UUID: String] = [:]
   /// `node send --follow-up` messages waiting for their target to finish its current
   /// turn — drained whenever the store settles (`drainAndBroadcast`) and on each
   /// presence poll. The content is in the target's memory log from the moment it was
@@ -2006,11 +2011,13 @@ public actor GraphStore {
 
   private func cancelGoalPoller(_ nodeID: UUID) {
     goalPollers.removeValue(forKey: nodeID)?.cancel()
-    // The caches ride the poller's lifecycle: a resolved node needs neither, and an
-    // update that changed the predicate must not skip the new command on the old
-    // tree's fingerprint or suppress its first failure as "already relayed".
+    // The caches ride the poller's lifecycle: a resolved node needs none of them, and
+    // an update that changed the predicate must not skip the new command on the old
+    // tree's fingerprint, suppress its first failure as "already relayed", or count
+    // the old tree's re-awake as spent.
     failedPredicateFingerprints.removeValue(forKey: nodeID)
     lastPredicateFeedback.removeValue(forKey: nodeID)
+    reawakenedFingerprints.removeValue(forKey: nodeID)
   }
 
   /// One poll. Called on the timer in production and directly from tests, so the
@@ -2056,9 +2063,36 @@ public actor GraphStore {
           command: Self.workspaceFingerprintCommand,
           workingDirectory: node.worktreeBinding?.worktreePath ?? graph.project.path))
       // Same tree the predicate already failed against — running it again buys the
-      // same answer at full price. A missing fingerprint (not a git repo, capture not
-      // wired) falls through to a real run: skipping is the optimisation, never the rule.
-      if let fingerprint, failedPredicateFingerprints[nodeID] == fingerprint { return }
+      // same answer at full price *while the session is busy*: its next write is what
+      // would change the tree, and until it does the answer cannot. A missing
+      // fingerprint (not a git repo, capture not wired) falls through to a real run:
+      // skipping is the optimisation, never the rule.
+      //
+      // An idle session flips the case, and there the skip is a deadlock: a goal loop
+      // is the only writer of its own tree, and it only writes once woken — so
+      // "waiting for the tree to change" waits on the loop that is asleep (issue #217
+      // item 13). Idle plus unchanged is therefore wake-worthy, once per frozen tree:
+      // the predicate runs again — the only path on which an external watcher's change
+      // is ever seen — and the relay below re-delivers the failure even if it reads
+      // the same as the last one, because the session that already heard it heard it
+      // before its turn left the tree unmoved. After that the skip holds again until
+      // the tree moves: re-delivering every poll would be a full agent turn a minute,
+      // the unbounded spend the failure-tail dedup exists to prevent.
+      if let fingerprint, failedPredicateFingerprints[nodeID] == fingerprint {
+        let presence: Presence?
+        if let onReadPresence {
+          presence = await onReadPresence(node, graph.project.path).presence
+        } else {
+          presence = node.presence?.presence
+        }
+        // A nil presence stays skipped: the relay only ever tells a session it can see
+        // idle, so falling through would pay the predicate's price for a wake that can
+        // never land. Such a loop's exits are its stall bound and its human.
+        guard presence == .idle else { return }
+        guard reawakenedFingerprints[nodeID] != fingerprint else { return }
+        reawakenedFingerprints[nodeID] = fingerprint
+        lastPredicateFeedback.removeValue(forKey: nodeID)
+      }
     }
 
     let outcome: PredicateOutcome

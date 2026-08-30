@@ -58,12 +58,16 @@ public struct GoalSpec: Codable, Equatable, Sendable {
   /// never blow this bound. The budget is only as real as the reporting — the poller
   /// acts on what was reported, and stays silent about what wasn't.
   public var tokenBudget: Int?
-  /// When true, the poller skips re-running the predicate while the working tree is
-  /// unchanged (same `HEAD`, same dirty files) since the last failing run. Off by
-  /// default with reason: plenty of predicates watch things *outside* the tree — a CI
-  /// run, a deployed endpoint — and skipping those would wait on a change that never
-  /// comes. Opt in exactly when the predicate is a function of the tree (a test suite,
-  /// a lint) and expensive enough that docs/08's conservative-polling stance applies.
+  /// When true, the poller skips re-running the predicate while the session is busy
+  /// and the working tree is unchanged (same `HEAD`, same dirty files) since the last
+  /// failing run. An idle session on that unchanged tree gets one more predicate run
+  /// and one more failure relay — a goal loop is the only writer of its own tree and
+  /// only writes once woken, so gating the wake on a tree change would strand it —
+  /// after which polls stay quiet until the tree moves again. Off by default with
+  /// reason: plenty of predicates watch things *outside* the tree — a CI run, a
+  /// deployed endpoint — and the skip buys them least. Opt in when the predicate is a
+  /// function of the tree (a test suite, a lint) and expensive enough that docs/08's
+  /// conservative-polling stance applies.
   public var skipsUnchangedWorkspace: Bool
 
   public init(
