@@ -125,11 +125,11 @@ public enum GraphcodeCommand: Equatable, Sendable {
                            stopped by a budget
       --skip-unchanged     for --type goal: while the session is busy, don't re-run
                            the predicate while HEAD and the dirty file list are
-                           unchanged since its last failure. Once the session goes
-                           idle the predicate is re-run and a failure re-delivered
-                           even on an unchanged tree — the loop is the only writer
-                           of its own tree, so waiting on a change would wait on
-                           the loop itself
+                           unchanged since its last failure. An idle session gets
+                           one more predicate run and failure notice per unchanged
+                           tree, then polls stay quiet until the tree changes —
+                           the loop is the only writer of its own tree, so waiting
+                           on a change would wait on the loop itself
 
     UPDATE OPTIONS (node update; pass only what changes)
       --goal, --predicate, --prompt, --check, --model, --metric, --direction as above
@@ -746,6 +746,15 @@ extension GraphcodeCommand {
     }
   }
 
+  /// The one sentence both create and update print: what the flag actually skips, and
+  /// the one-notice-per-frozen-tree bound that keeps an idle loop from being stranded
+  /// or woken into an agent turn every poll.
+  static let skipUnchangedAdvice =
+    "warning: --skip-unchanged spares the predicate only while the session is busy; "
+    + "an idle session on an unchanged tree gets one more predicate run and one more "
+    + "failure notice, then polls stay quiet until the tree changes — the loop is the "
+    + "only writer of its own tree"
+
   /// Advice printed at `node create` time for the flag combination a first-time user
   /// reached for and got stranded by (issue #217 item 13): `--skip-unchanged` on a goal
   /// loop with a predicate. The flag's name invites reading it as "the daemon handles
@@ -757,12 +766,29 @@ extension GraphcodeCommand {
     guard draft.loopType == .goalBased, let goal = draft.goal,
       goal.skipsUnchangedWorkspace, goal.effectivePredicate != nil
     else { return [] }
-    return [
-      "warning: --skip-unchanged only spares the predicate while the loop's session is "
-        + "busy; once the session goes idle the predicate is re-run and a failure "
-        + "re-delivered even on an unchanged tree, because the loop is the only writer "
-        + "of its own tree"
-    ]
+    return [skipUnchangedAdvice]
+  }
+
+  /// The same advice for `node update --skip-unchanged true`, judged against the node
+  /// as the update will leave it — the flag only matters on a goal loop whose predicate
+  /// survives the update. Best-effort by design: a node the client cannot see at the
+  /// top level (a sub-graph child — issue #217 item 15) warns nobody rather than
+  /// warning wrongly.
+  public static func updateWarnings(
+    for update: NodeUpdate, currentNode: LoopNode?
+  ) -> [String] {
+    guard update.skipsUnchangedWorkspace == true, let node = currentNode,
+      node.loopType == .goalBased
+    else { return [] }
+    let predicateAfter: String?
+    if let raw = update.goalPredicate {
+      let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+      predicateAfter = trimmed.isEmpty ? nil : trimmed
+    } else {
+      predicateAfter = node.goal?.effectivePredicate
+    }
+    guard predicateAfter != nil else { return [] }
+    return [skipUnchangedAdvice]
   }
 }
 

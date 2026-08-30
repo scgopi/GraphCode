@@ -159,11 +159,12 @@ struct PredicateFeedbackTests {
   }
 
   @Test
-  func anIdleLoopOnAnUnchangedTreeIsWokenNotSkipped() async {
+  func anIdleLoopOnAnUnchangedTreeIsWokenOnceNotEveryPoll() async {
     // The stranding from issue #217 item 13: a goal loop is the only writer of its
     // tree, and it only writes once woken — so gating the wake on a tree change waits
-    // on the loop that is asleep. Idle plus unchanged is wake-worthy: the predicate
-    // runs again and the failure is re-delivered even though nothing moved.
+    // on the loop that is asleep. Idle plus unchanged is wake-worthy, but bounded:
+    // one re-delivery per frozen tree, because every further one is a full agent turn
+    // — the spend the failure-tail dedup exists to prevent.
     let evaluated = LockIsolated(0)
     let delivered = LockIsolated(0)
     let graph = goalGraph(presence: .idle, skipsUnchanged: true)
@@ -182,9 +183,65 @@ struct PredicateFeedbackTests {
     await store.evaluateGoal(graph.nodes[0].id)
     await store.evaluateGoal(graph.nodes[0].id)
     await store.evaluateGoal(graph.nodes[0].id)
+    await store.evaluateGoal(graph.nodes[0].id)
 
-    #expect(evaluated.value == 3)
+    #expect(evaluated.value == 2)
+    #expect(delivered.value == 2)
+  }
+
+  @Test
+  func aTreeChangeBuysOneMoreWakeOnTheNextFreeze() async {
+    // The bound is per frozen tree, not per loop: each failing run at a new
+    // fingerprint leaves the idle loop one more notice it may be given if the tree
+    // freezes again — that is what keeps "skip until changed" from becoming "skip
+    // until stopped".
+    let fingerprint = LockIsolated("tree-1")
+    let evaluated = LockIsolated(0)
+    let delivered = LockIsolated(0)
+    let graph = goalGraph(presence: .idle, skipsUnchanged: true)
+    let store = GraphStore(
+      graph: graph,
+      onCheckPredicate: { _ in
+        evaluated.withValue { $0 += 1 }
+        return PredicateOutcome(passed: false, outputTail: "no")
+      },
+      onDeliverMessage: { _, _, _ in
+        delivered.withValue { $0 += 1 }
+        return true
+      },
+      onCaptureScript: { _ in fingerprint.value })
+
+    await store.evaluateGoal(graph.nodes[0].id)  // first failing run: told
+    await store.evaluateGoal(graph.nodes[0].id)  // idle on tree-1: its one wake
+    await store.evaluateGoal(graph.nodes[0].id)  // skip holds
+    fingerprint.setValue("tree-2")
+    await store.evaluateGoal(graph.nodes[0].id)  // tree moved: re-run; same tail, not told
+    await store.evaluateGoal(graph.nodes[0].id)  // idle on tree-2: one more wake
+    await store.evaluateGoal(graph.nodes[0].id)  // skip holds again
+
+    #expect(evaluated.value == 4)
     #expect(delivered.value == 3)
+  }
+
+  @Test
+  func aPresencelessSessionStaysSkippedRatherThanPayingForAWakeThatCannotLand() async {
+    // The relay only ever tells a session it can see idle; with no presence reading
+    // no wake can land, so the skip holds instead of spending predicate runs on one.
+    // Such a loop's exits are its stall bound and its human.
+    let evaluated = LockIsolated(0)
+    let graph = goalGraph(presence: nil, skipsUnchanged: true)
+    let store = GraphStore(
+      graph: graph,
+      onCheckPredicate: { _ in
+        evaluated.withValue { $0 += 1 }
+        return PredicateOutcome(passed: false, outputTail: "no")
+      },
+      onCaptureScript: { _ in "tree-1" })
+
+    await store.evaluateGoal(graph.nodes[0].id)
+    await store.evaluateGoal(graph.nodes[0].id)
+
+    #expect(evaluated.value == 1)
   }
 
   @Test
@@ -253,5 +310,21 @@ struct PredicateFeedbackTests {
       return
     }
     #expect(GraphcodeCommand.createWarnings(for: unwarnedDraft).isEmpty)
+  }
+
+  @Test
+  func theUpdateWarningFiresWhenSkipUnchangedIsTurnedOnForAPredicatedGoalLoop() throws {
+    let graph = goalGraph()
+    let parsed = try GraphcodeCommand.parse([
+      "node", "update", "/tmp/p", UUID().uuidString, "--skip-unchanged", "true",
+    ])
+    guard case .updateNode(_, _, let nodeUpdate) = parsed else {
+      Issue.record("expected updateNode, got \(parsed)")
+      return
+    }
+    #expect(
+      GraphcodeCommand.updateWarnings(for: nodeUpdate, currentNode: graph.nodes[0]).count == 1)
+    // Best-effort: a node the client cannot see (a sub-graph child) warns nobody.
+    #expect(GraphcodeCommand.updateWarnings(for: nodeUpdate, currentNode: nil).isEmpty)
   }
 }

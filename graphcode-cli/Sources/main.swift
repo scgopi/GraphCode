@@ -231,7 +231,18 @@ do {
     attributed.updatedBy = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
     try client.send(.openProject(path: projectPath))
-    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    let opened = try client.waitForEvent {
+      if case .graphChanged = $0 { return true } else { return false }
+    }
+    // The same advice `node create` prints — turning the flag on from `update` is the
+    // same surprise. Best-effort: the node must be visible at the top level.
+    if case .graphChanged(let graph) = opened {
+      for warning in GraphcodeCommand.updateWarnings(
+        for: attributed, currentNode: graph.nodes.first(where: { $0.id == nodeID }))
+      {
+        FileHandle.standardError.write(Data("\(warning)\n".utf8))
+      }
+    }
     try client.send(
       .graphCommand(
         projectPath: projectPath, command: .updateNode(nodeID, update: attributed)))
