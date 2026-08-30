@@ -119,6 +119,123 @@ struct ZmxSessionLauncherTests {
     #expect(check.last == ZmxSessionLauncher.arguments(forNode: node)?[1])
   }
 
+  // MARK: - Husk-aware session state (issue #215)
+
+  // A session whose task has ended is not a session a keystroke can reach: `zmx run`'s
+  // wrapper shell stays at its prompt, so the session answers `zmx get` forever and a
+  // send into it "succeeds" — the "delivered" that no one received. Every gate now
+  // judges the task inside, read off the `zmx ls` line zmx prints for the session.
+
+  private func lsLine(name: String, fields: String = "") -> String {
+    "name=\(name)\tpid=4242\tclients=0\tcreated=1756400000\(fields)"
+  }
+
+  @Test
+  func aLiveTaskIsAlive() {
+    let output = lsLine(name: "graphcode-a") + "\tpresence=idle activity=editing Foo.swift\n"
+    #expect(
+      ZmxSessionLauncher.parseSessionTaskState(lsOutput: output, sessionName: "graphcode-a")
+        == .alive)
+  }
+
+  @Test
+  func anEndedTaskIsExitedWithZmxCaughtExitCode() {
+    // The shape `zmx ls` prints for a completed task: `ended=<ts>\texit_code=<n>`.
+    let output = lsLine(name: "graphcode-a", fields: "\tended=1756400100\texit_code=1")
+    #expect(
+      ZmxSessionLauncher.parseSessionTaskState(lsOutput: output, sessionName: "graphcode-a")
+        == .exited(exitCode: 1))
+  }
+
+  @Test
+  func anEndedTaskWithNoExitCodeIsStillExited() {
+    let output = lsLine(name: "graphcode-a", fields: "\tended=1756400100")
+    #expect(
+      ZmxSessionLauncher.parseSessionTaskState(lsOutput: output, sessionName: "graphcode-a")
+        == .exited(exitCode: nil))
+  }
+
+  @Test
+  func aMissingRowIsAbsent() {
+    #expect(
+      ZmxSessionLauncher.parseSessionTaskState(lsOutput: "", sessionName: "graphcode-a")
+        == .absent)
+    #expect(
+      ZmxSessionLauncher.parseSessionTaskState(
+        lsOutput: lsLine(name: "graphcode-b") + "\n", sessionName: "graphcode-a")
+        == .absent)
+  }
+
+  @Test
+  func anUnreachableSessionIsAbsentNotAlive() {
+    // zmx prints an error row for a session whose daemon it cannot reach — as good as
+    // gone, and never a reason to believe a keystroke would land.
+    let output = "name=graphcode-a\terr=ConnectionRefused\tstatus=cleaning up\n"
+    #expect(
+      ZmxSessionLauncher.parseSessionTaskState(lsOutput: output, sessionName: "graphcode-a")
+        == .absent)
+  }
+
+  @Test
+  func aSessionNameIsNeverFoundInsideAnotherSessionsName() {
+    // Substring matching would read `graphcode-a` alive while only `graphcode-AB`
+    // exists — one loop wearing another's liveness.
+    let output = lsLine(name: "graphcode-AB") + "\n"
+    #expect(
+      ZmxSessionLauncher.parseSessionTaskState(lsOutput: output, sessionName: "graphcode-a")
+        == .absent)
+  }
+
+  @Test
+  func textThatMerelyContainsEndedDoesNotReadAsAHusk() {
+    // The `ended=` field is tab-preceded; a prompt or command that merely contains the
+    // text — no tab — must not turn a live session into a husk, or the ensure would
+    // re-type the launch command into a running agent.
+    let output =
+      lsLine(name: "graphcode-a", fields: "\tcmd=zmx run 'the report ended=ok'")
+      + "\tattached labels\n"
+    #expect(
+      ZmxSessionLauncher.parseSessionTaskState(lsOutput: output, sessionName: "graphcode-a")
+        == .alive)
+  }
+
+  @Test
+  func theShellAliveCheckFiltersHusksAndMatchesTheExactName() {
+    let node = Self.node(prompt: "/loop 1h Check")
+    let command = ZmxSessionLauncher.aliveCheckCommand(zmxPath: "/usr/local/bin/zmx", forNode: node)
+    let name = "graphcode-\(node.id.uuidString)"
+
+    // Husk rows (ended=) and error rows (err=) are filtered before the name is matched,
+    // and the name is matched tab-terminated so a prefix of another session's name
+    // cannot pass.
+    #expect(command.contains("ls 2>/dev/null"))
+    #expect(command.contains("grep -v -e $'\\tended=' -e $'\\terr='"))
+    #expect(command.contains("grep -q"))
+    #expect(command.contains("name=\(name)\t"))
+    #expect(command.contains("'/usr/local/bin/zmx'"))
+  }
+
+  @Test
+  func theRemoteSeedPreTrustsClaudeCodesFolder() {
+    // Issue #215's fix on the remote path: a fresh unattended `claude` exits 1 on its
+    // trust dialog, so the create branch seeds `hasTrustDialogAccepted` before it runs.
+    let node = LoopNode(
+      title: "Remote", loopType: .goalBased, goal: GoalSpec(summary: "work"),
+      backend: .claudeCode)
+    var remote = node
+    remote.backend = .copilotCLI
+    let location = RemoteProjectLocation(
+      host: "box", port: nil, remotePath: "/srv/repo", isCodespace: false)
+
+    let claude = ZmxSessionLauncher.remoteEnsureInvocation(forNode: node, at: location) ?? []
+    let script = claude.last ?? ""
+    #expect(script.contains("hasTrustDialogAccepted"))
+    #expect(script.contains("~/.claude.json"))
+
+    let copilot = ZmxSessionLauncher.remoteEnsureInvocation(forNode: remote, at: location) ?? []
+    #expect(!(copilot.last ?? "").contains("hasTrustDialogAccepted"))
+  }
+
   @Test
   func opensInTheProjectWhenTheNodeHasNoWorktree() {
     // `graphcoded`'s own directory is `/` under launchd, so falling through to nil ran

@@ -241,19 +241,21 @@ struct RemoteSessionResumeTests {
   }
 
   @Test
-  func theExistenceCheckStillGuardsBothBranches() throws {
+  func theAliveCheckStillGuardsBothBranches() throws {
     // The create-only property the one-shell ensure exists for: a live session must not
-    // be relaunched *or* resumed. Both are behind the same `zmx get`.
+    // be relaunched *or* resumed. Both are behind the same alive check — which, unlike
+    // raw existence, a husk does not pass (#215): a session whose task has ended has to
+    // fall through to the run, or a dead loop could never be woken.
     let node = goalNode()
     let invocation = try #require(
       ZmxSessionLauncher.remoteEnsureInvocation(forNode: node, at: location))
     let remoteCommand = try #require(invocation.last)
 
-    let get = try #require(remoteCommand.range(of: "'get'"))
+    let check = try #require(remoteCommand.range(of: "ls 2>/dev/null"))
     let resume = try #require(remoteCommand.range(of: "--resume"))
     let run = try #require(remoteCommand.range(of: "'run'"))
-    #expect(get.lowerBound < resume.lowerBound)
-    #expect(get.lowerBound < run.lowerBound)
+    #expect(check.lowerBound < resume.lowerBound)
+    #expect(check.lowerBound < run.lowerBound)
     #expect(remoteCommand.contains("||"))
   }
 
@@ -303,9 +305,9 @@ struct RemoteSessionResumeTests {
     #expect(remoteCommand.contains(".history"))
     #expect(remoteCommand.contains("[ -s"))
     #expect(remoteCommand.contains("bank copilot-id"))
-    // The bank rides the alive branch: behind the existence check, before the create —
+    // The bank rides the alive branch: behind the alive check, before the create —
     // and it must always exit 0, or an alive tick would fall into the create branch.
-    let check = try #require(remoteCommand.range(of: "'get'"))
+    let check = try #require(remoteCommand.range(of: "ls 2>/dev/null"))
     let bank = try #require(remoteCommand.range(of: "session-state"))
     let run = try #require(remoteCommand.range(of: "'run'"))
     #expect(check.upperBound <= bank.lowerBound)

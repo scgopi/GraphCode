@@ -80,7 +80,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
     let host = TerminalSurfaceHostView()
     if launchesClaudeCode, backend == .claudeCode, remoteLocation == nil {
       if let workingDirectory {
-        ClaudeTrust.ensureTrusted(directory: workingDirectory)
+        ClaudeCodeTrust.ensureTrusted(directory: workingDirectory)
       }
     }
     let view = TerminalSurfaceStore.shared.surface(for: surfaceID) {

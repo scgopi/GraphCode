@@ -35,7 +35,6 @@ public actor ProjectRegistry {
   private let evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)?
   private let checkPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)?
   private let deliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)?
-  private let recoverSession: (@Sendable (LoopNode, String?) async -> Bool)?
   private let captureScript: (@Sendable (ShellPredicate) async -> String?)?
   private let readUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)?
   private let readActivity: (@Sendable (LoopNode, String?) async -> String?)?
@@ -64,8 +63,6 @@ public actor ProjectRegistry {
       ShellPredicateEvaluator.check,
     deliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)? =
       CLISessionBackend.deliverMessage,
-    recoverSession: (@Sendable (LoopNode, String?) async -> Bool)? =
-      CLISessionBackend.recoverSession,
     captureScript: (@Sendable (ShellPredicate) async -> String?)? = ShellPredicateEvaluator.capture,
     readUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)? =
       CLISessionBackend.readUsage,
@@ -85,7 +82,6 @@ public actor ProjectRegistry {
     self.evaluatePredicate = evaluatePredicate
     self.checkPredicate = checkPredicate
     self.deliverMessage = deliverMessage
-    self.recoverSession = recoverSession
     self.captureScript = captureScript
     self.readUsage = readUsage
     self.readActivity = readActivity
@@ -450,7 +446,6 @@ public actor ProjectRegistry {
       onEvaluatePredicate: evaluatePredicate,
       onCheckPredicate: checkPredicate,
       onDeliverMessage: deliverMessage,
-      onRecoverSession: recoverSession,
       onCaptureScript: captureScript,
       onReadUsage: readUsage,
       onReadActivity: readActivity,
