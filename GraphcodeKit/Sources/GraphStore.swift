@@ -130,13 +130,13 @@ public actor GraphStore {
   /// the experiment on mid-run starts existing heartbeat loops beating without anyone
   /// re-arming anything.
   private var heartbeatTimers: [UUID: Task<Void, Never>] = [:]
-  /// Workspace fingerprints at the last *failing* predicate run, and the failure tail
-  /// last relayed to each node's session — what `GoalSpec.skipsUnchangedWorkspace`
-  /// compares against and what keeps an unchanged failure from being repeated every
-  /// poll. In-memory on purpose: a daemon restart forgetting these costs one extra
-  /// predicate run, and persisting a cache whose whole point is skipping work would be
-  /// work. Shared with sub-graph stores (which are built per command and would
-  /// otherwise forget both between one-shot evaluations) via `goalCache`.
+  /// Workspace fingerprints at the last *failing* predicate run, the failure tail
+  /// last relayed to each node's session, and the fingerprint whose unchanged tree
+  /// has already bought an idle loop its one re-awake. In-memory on purpose: a daemon
+  /// restart forgetting these costs one extra predicate run, and persisting a cache
+  /// whose whole point is skipping work would be work. Shared with sub-graph stores
+  /// (which are built per command and would otherwise forget all three between
+  /// one-shot evaluations) via `goalCache`.
   private let goalCache: GoalEvaluationCache
   /// `node send --follow-up` messages waiting for their target to finish its current
   /// turn — drained whenever the store settles (`drainAndBroadcast`) and on each
@@ -589,7 +589,7 @@ public actor GraphStore {
     case .failed, .stalled:
       resolveNode(nodeID, succeeded: false)
     case .idle, .running, .awaitingInput, .blocked, .waiting, .stopped:
-      graph.nodes[id: nodeID]?.state = rolled
+      setNodeState(nodeID, rolled)
     }
   }
 
@@ -605,7 +605,7 @@ public actor GraphStore {
       node.subGraph != nil
     else { return }
     graph.nodes[id: nodeID]?.pilotState = .piloting
-    graph.nodes[id: nodeID]?.state = .running
+    setNodeState(nodeID, .running)
 
     // Start every unattended loop inside the composite. That *is* the pilot: real
     // sessions, real output, real cost — just not wired to the recurring trigger yet.
@@ -631,7 +631,7 @@ public actor GraphStore {
       node.pilotState.canArm
     else { return }
     graph.nodes[id: nodeID]?.pilotState = .armed
-    graph.nodes[id: nodeID]?.state = .running
+    setNodeState(nodeID, .running)
   }
 
   // MARK: - Usage
@@ -1341,7 +1341,7 @@ public actor GraphStore {
     for newID in plan.idMapping.values {
       guard let node = graph.nodes[id: newID], node.runsUnattended, !node.isResolved
       else { continue }
-      if subGraphDepth == 0 { graph.nodes[id: newID]?.state = .running }
+      if subGraphDepth == 0 { setNodeState(newID, .running) }
       ensureSession(node)
       if node.loopType == .goalBased { armGoalPoller(for: node) }
       armHeartbeat(for: node)
@@ -1471,7 +1471,7 @@ public actor GraphStore {
     if MessageBus.deliverability(to: node) == nil {
       asked = await deliverToSession(node, MessageBus.stopRequest)
     }
-    graph.nodes[id: node.id]?.state = .stopped
+    setNodeState(node.id, .stopped)
     cancelGoalPoller(node.id)
     // The experiment's clean-stop dividend: a heartbeat loop's cadence dies here, with
     // the timer — no typed request needed for a schedule the agent never owned.
@@ -1528,7 +1528,7 @@ public actor GraphStore {
     _ nodeID: UUID, succeeded: Bool, sessionMayStillBeLive: Bool = false
   ) {
     guard let node = graph.nodes[id: nodeID] else { return }
-    graph.nodes[id: nodeID]?.state = succeeded ? .succeeded : .failed
+    setNodeState(nodeID, succeeded ? .succeeded : .failed)
     cancelGoalPoller(nodeID)
     recordMemory(nodeID, "resolved: \(succeeded ? "succeeded" : "failed")")
     // Skill distillation rides resolution: a goal loop that just succeeded is the one
@@ -1712,7 +1712,7 @@ public actor GraphStore {
     let reentry = graph.edges[id: edge.id]?.fireCount ?? 0
     let bound = edge.cycleGuard?.maxIterations.map { " of \($0)" } ?? ""
     for nodeID in members {
-      graph.nodes[id: nodeID]?.state = .idle
+      setNodeState(nodeID, .idle)
       cancelGoalPoller(nodeID)
       recordMemory(nodeID, "cycle re-entry \(reentry)\(bound): pass restarting")
     }
@@ -2072,7 +2072,7 @@ public actor GraphStore {
     let stillBlocked = graph.edges.contains {
       $0.to == nodeID && $0.kind.blocksTarget && !$0.fired
     }
-    graph.nodes[id: nodeID]?.state = stillBlocked ? .blocked : .idle
+    setNodeState(nodeID, stillBlocked ? .blocked : .idle)
   }
 
   // MARK: - Goal-based stop-condition polling
@@ -2121,9 +2121,10 @@ public actor GraphStore {
       return
     }
     goalPollers.removeValue(forKey: nodeID)?.cancel()
-    // The caches ride the poller's lifecycle: a resolved node needs neither, and an
-    // update that changed the predicate must not skip the new command on the old
-    // tree's fingerprint or suppress its first failure as "already relayed".
+    // The caches ride the poller's lifecycle: a resolved node needs none of them, and
+    // an update that changed the predicate must not skip the new command on the old
+    // tree's fingerprint, suppress its first failure as "already relayed", or count
+    // the old tree's re-awake as spent.
     goalCache.clear(for: nodeID)
   }
 
@@ -2299,9 +2300,36 @@ public actor GraphStore {
           command: Self.workspaceFingerprintCommand,
           workingDirectory: node.worktreeBinding?.worktreePath ?? graph.project.path))
       // Same tree the predicate already failed against — running it again buys the
-      // same answer at full price. A missing fingerprint (not a git repo, capture not
-      // wired) falls through to a real run: skipping is the optimisation, never the rule.
-      if let fingerprint, goalCache.fingerprint(for: nodeID) == fingerprint { return }
+      // same answer at full price *while the session is busy*: its next write is what
+      // would change the tree, and until it does the answer cannot. A missing
+      // fingerprint (not a git repo, capture not wired) falls through to a real run:
+      // skipping is the optimisation, never the rule.
+      //
+      // An idle session flips the case, and there the skip is a deadlock: a goal loop
+      // is the only writer of its own tree, and it only writes once woken — so
+      // "waiting for the tree to change" waits on the loop that is asleep (issue #217
+      // item 13). Idle plus unchanged is therefore wake-worthy, once per frozen tree:
+      // the predicate runs again — the only path on which an external watcher's change
+      // is ever seen — and the relay below re-delivers the failure even if it reads
+      // the same as the last one, because the session that already heard it heard it
+      // before its turn left the tree unmoved. After that the skip holds again until
+      // the tree moves: re-delivering every poll would be a full agent turn a minute,
+      // the unbounded spend the failure-tail dedup exists to prevent.
+      if let fingerprint, goalCache.fingerprint(for: nodeID) == fingerprint {
+        let presence: Presence?
+        if let onReadPresence {
+          presence = await onReadPresence(node, graph.project.path).presence
+        } else {
+          presence = node.presence?.presence
+        }
+        // A nil presence stays skipped: the relay only ever tells a session it can see
+        // idle, so falling through would pay the predicate's price for a wake that can
+        // never land. Such a loop's exits are its stall bound and its human.
+        guard presence == .idle else { return }
+        guard goalCache.reawakened(for: nodeID) != fingerprint else { return }
+        goalCache.setReawakened(fingerprint, for: nodeID)
+        goalCache.clearFeedback(for: nodeID)
+      }
     }
 
     let outcome: PredicateOutcome
@@ -2337,6 +2365,9 @@ public actor GraphStore {
   /// nodes that pay this subprocess are exactly the ones whose author asked for the
   /// bound. A backend that reports nothing can never exhaust a budget: the sample
   /// stays nil and nil is "not reported", not zero — and not infinity either.
+  ///
+  /// The why lands on the node (`LoopNode.stallReason`) as well as in memory: `.stalled`
+  /// alone left every surface reading the same for a blown budget and a blown deadline.
   private func enforceTokenBudget(_ nodeID: UUID, goal: GoalSpec) async -> Bool {
     guard let budget = goal.tokenBudget, budget > 0 else { return false }
     guard let node = graph.nodes[id: nodeID] else { return false }
@@ -2358,6 +2389,7 @@ public actor GraphStore {
         current, MessageBus.budgetExhaustedRequest(used: used, budget: budget))
     }
     graph.nodes[id: nodeID]?.state = .stalled
+    graph.nodes[id: nodeID]?.stallReason = "budget exhausted: \(used) of \(budget) tokens spent"
     cancelGoalPoller(nodeID)
     recordMemory(
       nodeID,
@@ -2404,12 +2436,23 @@ public actor GraphStore {
     broadcast()
   }
 
+  /// Every state write outside the two stall paths goes through here. `stallReason`
+  /// describes the stall that set it — carrying it into a later `.running` or `.idle`
+  /// would show a why for a stall the node has left, and a future stall path that
+  /// forgets to write a fresh reason would then inherit the old one. Clearing on the
+  /// way out makes that impossible: only the stall sites leave a reason behind.
+  private func setNodeState(_ nodeID: UUID, _ state: LoopState) {
+    graph.nodes[id: nodeID]?.state = state
+    if state != .stalled { graph.nodes[id: nodeID]?.stallReason = nil }
+  }
+
   /// A stalled loop is terminal, and its downstream edges fire as if it failed. Leaving
   /// them unfired would be tidier in theory but deadlocks the rest of the graph in
   /// practice — every node waiting on a stalled one would sit blocked forever with no
   /// way to proceed, which is worse than telling them the upstream didn't work out.
   private func markStalled(_ nodeID: UUID) {
     graph.nodes[id: nodeID]?.state = .stalled
+    graph.nodes[id: nodeID]?.stallReason = "stall bound exceeded without resolving"
     cancelGoalPoller(nodeID)
     recordMemory(nodeID, "stalled: exceeded its stall bound without resolving")
     fireOutgoingEdges(from: nodeID, sourceSucceeded: false)
@@ -2580,15 +2623,17 @@ public actor GraphStore {
 
   /// Predicate-evaluation state shared between a project store and every sub-graph
   /// store it builds: which workspace fingerprint each node's predicate last failed
-  /// against, and which failure tail each session was last told. The project store
-  /// owns the box for the life of the graph; per-command sub-graph stores borrow it so
-  /// a one-shot evaluation inherits what every evaluation before it learned — without
-  /// that, a failing predicate would be relayed to the session afresh on every poll.
-  /// Public only because `GraphStore.init` takes it; there is nothing to call.
+  /// against, which failure tail each session was last told, and which frozen tree
+  /// has already spent its one idle re-awake. The project store owns the box for the
+  /// life of the graph; per-command sub-graph stores borrow it so a one-shot
+  /// evaluation inherits what every evaluation before it learned — without that, a
+  /// failing predicate would be relayed to the session afresh on every poll. Public
+  /// only because `GraphStore.init` takes it; there is nothing to call.
   public final class GoalEvaluationCache: @unchecked Sendable {
     private let lock = NSLock()
     private var fingerprints: [UUID: String] = [:]
     private var feedback: [UUID: String] = [:]
+    private var reawakened: [UUID: String] = [:]
 
     func fingerprint(for nodeID: UUID) -> String? {
       lock.lock()
@@ -2614,6 +2659,27 @@ public actor GraphStore {
       feedback[nodeID] = value
     }
 
+    func reawakened(for nodeID: UUID) -> String? {
+      lock.lock()
+      defer { lock.unlock() }
+      return reawakened[nodeID]
+    }
+
+    func setReawakened(_ value: String, for nodeID: UUID) {
+      lock.lock()
+      defer { lock.unlock() }
+      reawakened[nodeID] = value
+    }
+
+    /// Forgets only the last-relayed tail — the idle re-awake uses it to let a
+    /// failure that reads the same be told once more. The fingerprint and the
+    /// re-awake marker stay: the skip must keep holding around this one delivery.
+    func clearFeedback(for nodeID: UUID) {
+      lock.lock()
+      defer { lock.unlock() }
+      feedback[nodeID] = nil
+    }
+
     /// A node's poller ended — resolved, updated, stopped, or deleted. Its next
     /// predicate run starts the caches fresh, and its next wake may hear the failure
     /// again even if it was told before.
@@ -2622,6 +2688,7 @@ public actor GraphStore {
       defer { lock.unlock() }
       fingerprints[nodeID] = nil
       feedback[nodeID] = nil
+      reawakened[nodeID] = nil
     }
   }
 
