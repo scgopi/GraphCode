@@ -188,7 +188,7 @@ extension GraphOverviewView {
                 id: node.id,
                 hasSubmodules:
                   store.projects[id: loop.projectPath]?.worktreeReclaimOffers[node.id]?
-                    .facts.hasSubmodules == true))))
+                  .facts.hasSubmodules == true))))
       },
       onKeep: {
         store.send(
