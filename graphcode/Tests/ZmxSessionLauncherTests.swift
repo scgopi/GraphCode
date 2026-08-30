@@ -232,6 +232,10 @@ struct ZmxSessionLauncherTests {
     #expect(command.last?.contains("until") == true)
     #expect(command.last?.contains("cmd=.*codex") == true)
     #expect(command.last?.contains("exec '/usr/local/bin/zmx' attach 'graphcode-a'") == true)
+    // A session the daemon never creates must not be polled at 10 Hz forever: the wait
+    // gives up after a minute with a message instead of spinning.
+    #expect(command.last?.contains("-ge 600") == true)
+    #expect(command.last?.contains("exit 1") == true)
   }
 
   @Test

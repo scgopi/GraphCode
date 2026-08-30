@@ -496,10 +496,12 @@ public enum ZmxSessionLauncher {
     zmxPath: String, sessionName: String, executable: String?
   ) -> String {
     let name = RemoteProjectLocation.shellQuoted("name=\(sessionName)\t")
-    var command = RemoteProjectLocation.shellQuoted(zmxPath)
+    var command =
+      RemoteProjectLocation.shellQuoted(zmxPath)
       + " ls 2>/dev/null | grep -v -e $'\\tended=' -e $'\\terr=' | grep -q " + name
     if let executable {
-      command += " && " + RemoteProjectLocation.shellQuoted(zmxPath)
+      command +=
+        " && " + RemoteProjectLocation.shellQuoted(zmxPath)
         + " ls 2>/dev/null | grep -v -e $'\\tended=' -e $'\\terr=' | grep -q "
         + RemoteProjectLocation.shellQuoted("name=\(sessionName)\t.*cmd=.*\(executable)")
     }
@@ -511,9 +513,18 @@ public enum ZmxSessionLauncher {
   ) -> [String] {
     let check = daemonReadyCheckCommand(
       zmxPath: zmxPath, sessionName: sessionName, executable: executable)
-    let attach = RemoteProjectLocation.shellQuoted(zmxPath)
+    let attach =
+      RemoteProjectLocation.shellQuoted(zmxPath)
       + " attach " + RemoteProjectLocation.shellQuoted(sessionName)
-    return ["/bin/zsh", "-i", "-l", "-c", "until \(check); do sleep 0.1; done; exec \(attach)"]
+    // The cap is for a session the daemon never creates — a launch that failed, a loop
+    // deleted mid-wait. Unbounded, the pane polls `zmx ls` twenty times a second
+    // forever; bounded, it says so and gives up after a minute.
+    let script =
+      "tries=0; until \(check); do tries=$((tries+1)); "
+      + "if [ \"$tries\" -ge 600 ]; then "
+      + "echo \"graphcode: '\(sessionName)' never became ready to attach\"; exit 1; fi; "
+      + "sleep 0.1; done; exec \(attach)"
+    return ["/bin/zsh", "-i", "-l", "-c", script]
   }
 
   /// Kills the session behind an id that isn't a graph node — a quick chat. Public
@@ -1343,8 +1354,11 @@ public enum ZmxSessionLauncher {
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     let check = quotedCommand(["zmx", "ls"])
     let read = quotedCommand(["zmx", "get", name, label])
+    // The pattern is a fixed string, so the tab must be a real one: `grep -F` never
+    // interprets a `\t` escape, and the two characters would match nothing — every
+    // probe would read an existing session as absent.
     let script =
-      "gc_row=$(\(check) 2>/dev/null | grep -F \(quotedCommand(["name=\(name)\\t"])) | head -1); "
+      "gc_row=$(\(check) 2>/dev/null | grep -F \(quotedCommand(["name=\(name)\t"])) | head -1); "
       + "if [ -z \"$gc_row\" ] || printf '%s' \"$gc_row\" | grep -q $'\\terr='; then "
       + "echo '\(remoteProbeMarker) absent'; "
       + "elif printf '%s' \"$gc_row\" | grep -q $'\\tended='; then "

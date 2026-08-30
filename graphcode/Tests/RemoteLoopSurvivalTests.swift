@@ -53,6 +53,11 @@ struct RemoteLoopSurvivalTests {
     #expect(remoteCommand.contains("presence"))
     #expect(remoteCommand.contains("'ls'"))
     #expect(!remoteCommand.contains("history"))
+    // `grep -F` never interprets escapes: the name pattern's tab has to be a real one.
+    // A literal `\t` would match no row and every probe would report absent.
+    let sessionName = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    #expect(remoteCommand.contains("name=\(sessionName)\t'"))
+    #expect(!remoteCommand.contains("'name=\(sessionName)\\t'"))
     #expect(
       remoteCommand.contains(SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName))
   }
