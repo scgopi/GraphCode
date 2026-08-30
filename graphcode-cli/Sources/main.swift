@@ -163,6 +163,10 @@ do {
     attributed.createdBy =
       SurfaceRef.nodeID(
         fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
+    // On stderr so stdout stays the rendered graph a script may be parsing.
+    for warning in GraphcodeCommand.createWarnings(for: attributed) {
+      FileHandle.standardError.write(Data("\(warning)\n".utf8))
+    }
     // Named a composite, and the very same command is addressed at its sub-graph
     // instead — which is what makes the CLI able to build one at all. Without this
     // there was no surface anywhere that could put a loop inside a composite, so the

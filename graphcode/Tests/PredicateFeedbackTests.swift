@@ -159,6 +159,56 @@ struct PredicateFeedbackTests {
   }
 
   @Test
+  func anIdleLoopOnAnUnchangedTreeIsWokenNotSkipped() async {
+    // The stranding from issue #217 item 13: a goal loop is the only writer of its
+    // tree, and it only writes once woken — so gating the wake on a tree change waits
+    // on the loop that is asleep. Idle plus unchanged is wake-worthy: the predicate
+    // runs again and the failure is re-delivered even though nothing moved.
+    let evaluated = LockIsolated(0)
+    let delivered = LockIsolated(0)
+    let graph = goalGraph(presence: .idle, skipsUnchanged: true)
+    let store = GraphStore(
+      graph: graph,
+      onCheckPredicate: { _ in
+        evaluated.withValue { $0 += 1 }
+        return PredicateOutcome(passed: false, outputTail: "no")
+      },
+      onDeliverMessage: { _, _, _ in
+        delivered.withValue { $0 += 1 }
+        return true
+      },
+      onCaptureScript: { _ in "tree-1" })
+
+    await store.evaluateGoal(graph.nodes[0].id)
+    await store.evaluateGoal(graph.nodes[0].id)
+    await store.evaluateGoal(graph.nodes[0].id)
+
+    #expect(evaluated.value == 3)
+    #expect(delivered.value == 3)
+  }
+
+  @Test
+  func anIdleLoopOnAnUnchangedTreeStillNoticesThePredicatePassing() async {
+    // The other half of the same deadlock: with the tree frozen, the only way a
+    // CI-watching predicate ever goes green is on a poll the skip used to eat.
+    let evaluated = LockIsolated(0)
+    let graph = goalGraph(presence: .idle, skipsUnchanged: true)
+    let store = GraphStore(
+      graph: graph,
+      onCheckPredicate: { _ in
+        evaluated.withValue { $0 += 1 }
+        return PredicateOutcome(passed: evaluated.value > 1, outputTail: "no")
+      },
+      onDeliverMessage: { _, _, _ in true },
+      onCaptureScript: { _ in "tree-1" })
+
+    await store.evaluateGoal(graph.nodes[0].id)
+    await store.evaluateGoal(graph.nodes[0].id)
+
+    #expect(await store.graph.nodes[0].state == .succeeded)
+  }
+
+  @Test
   func theCLIParsesSkipUnchanged() throws {
     let create = try GraphcodeCommand.parse([
       "node", "create", "/tmp/p", "--title", "S", "--type", "goal",
@@ -178,5 +228,30 @@ struct PredicateFeedbackTests {
       return
     }
     #expect(nodeUpdate.skipsUnchangedWorkspace == false)
+  }
+
+  @Test
+  func theCreateWarningFiresOnlyForSkipUnchangedPairedWithAPredicate() throws {
+    let warned = try GraphcodeCommand.parse([
+      "node", "create", "/tmp/p", "--title", "S", "--type", "goal",
+      "--goal", "done", "--predicate", "make test", "--skip-unchanged",
+    ])
+    guard case .createNode(_, let warnedDraft, _) = warned else {
+      Issue.record("expected createNode, got \(warned)")
+      return
+    }
+    let warnings = GraphcodeCommand.createWarnings(for: warnedDraft)
+    #expect(warnings.count == 1)
+    #expect(warnings[0].contains("idle"))
+
+    let unwarned = try GraphcodeCommand.parse([
+      "node", "create", "/tmp/p", "--title", "S", "--type", "goal",
+      "--goal", "done", "--predicate", "make test",
+    ])
+    guard case .createNode(_, let unwarnedDraft, _) = unwarned else {
+      Issue.record("expected createNode, got \(unwarned)")
+      return
+    }
+    #expect(GraphcodeCommand.createWarnings(for: unwarnedDraft).isEmpty)
   }
 }

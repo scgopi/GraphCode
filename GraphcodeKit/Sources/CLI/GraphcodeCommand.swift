@@ -123,10 +123,13 @@ public enum GraphcodeCommand: Equatable, Sendable {
                            many tokens spent (input + output). Reported, never
                            estimated — a loop whose backend reports nothing is never
                            stopped by a budget
-      --skip-unchanged     for --type goal: don't re-run the predicate while HEAD and
-                           the dirty file list are unchanged since its last failure.
-                           Only for predicates that depend on the tree — one that
-                           watches CI or a deploy would never be re-asked
+      --skip-unchanged     for --type goal: while the session is busy, don't re-run
+                           the predicate while HEAD and the dirty file list are
+                           unchanged since its last failure. Once the session goes
+                           idle the predicate is re-run and a failure re-delivered
+                           even on an unchanged tree — the loop is the only writer
+                           of its own tree, so waiting on a change would wait on
+                           the loop itself
 
     UPDATE OPTIONS (node update; pass only what changes)
       --goal, --predicate, --prompt, --check, --model, --metric, --direction as above
@@ -741,6 +744,25 @@ extension GraphcodeCommand {
       return "incomplete loop: a turn-based node needs --check, a goal-based one --goal, "
         + "a time-based one --prompt, and the backend must be able to host that type"
     }
+  }
+
+  /// Advice printed at `node create` time for the flag combination a first-time user
+  /// reached for and got stranded by (issue #217 item 13): `--skip-unchanged` on a goal
+  /// loop with a predicate. The flag's name invites reading it as "the daemon handles
+  /// idle polls", when what it does is skip re-runs while the session is busy — the
+  /// loop itself is the only writer of the tree the skip was watching. The poller now
+  /// wakes an idle loop on an unchanged tree, so this is advisory rather than a
+  /// refusal, but the contract is worth saying out loud where the flag is typed.
+  public static func createWarnings(for draft: NodeDraft) -> [String] {
+    guard draft.loopType == .goalBased, let goal = draft.goal,
+      goal.skipsUnchangedWorkspace, goal.effectivePredicate != nil
+    else { return [] }
+    return [
+      "warning: --skip-unchanged only spares the predicate while the loop's session is "
+        + "busy; once the session goes idle the predicate is re-run and a failure "
+        + "re-delivered even on an unchanged tree, because the loop is the only writer "
+        + "of its own tree"
+    ]
   }
 }
 

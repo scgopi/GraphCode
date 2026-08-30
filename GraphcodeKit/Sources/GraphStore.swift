@@ -2056,9 +2056,28 @@ public actor GraphStore {
           command: Self.workspaceFingerprintCommand,
           workingDirectory: node.worktreeBinding?.worktreePath ?? graph.project.path))
       // Same tree the predicate already failed against — running it again buys the
-      // same answer at full price. A missing fingerprint (not a git repo, capture not
-      // wired) falls through to a real run: skipping is the optimisation, never the rule.
-      if let fingerprint, failedPredicateFingerprints[nodeID] == fingerprint { return }
+      // same answer at full price *while the session is busy*: its next write is what
+      // would change the tree, and until it does the answer cannot. A missing
+      // fingerprint (not a git repo, capture not wired) falls through to a real run:
+      // skipping is the optimisation, never the rule.
+      //
+      // An idle session flips the case, and there the skip is a deadlock: a goal loop
+      // is the only writer of its own tree, and it only writes once woken — so
+      // "waiting for the tree to change" waits on the loop that is asleep (issue #217
+      // item 13). Idle plus unchanged is wake-worthy instead: the predicate runs again
+      // — the only path on which an external watcher's change is ever seen — and the
+      // relay below re-delivers even a failure identical to the last one, because the
+      // session that already heard it heard it before its turn left the tree unmoved.
+      if let fingerprint, failedPredicateFingerprints[nodeID] == fingerprint {
+        let presence: Presence?
+        if let onReadPresence {
+          presence = await onReadPresence(node, graph.project.path).presence
+        } else {
+          presence = node.presence?.presence
+        }
+        guard presence == .idle else { return }
+        lastPredicateFeedback.removeValue(forKey: nodeID)
+      }
     }
 
     let outcome: PredicateOutcome
