@@ -397,13 +397,77 @@ public enum ZmxSessionLauncher {
   /// Whether the node has a live session at all. Internal rather than private because
   /// `CopilotSessionLog` needs the same liveness gate before it trusts a log tail: a
   /// killed session's log still ends at whatever it was doing.
+  ///
+  /// "Live" means the *task inside* the session, not the session itself. A session
+  /// whose command has ended still answers `zmx get` forever — `zmx run`'s wrapper
+  /// shell stays at its prompt, so the session exists, answers existence checks, and
+  /// swallows anything typed at it (issue #215's `node send` that reported "delivered"
+  /// into a session whose `claude` had exited). Only a running task is a session a
+  /// keystroke can reach.
   static func sessionExists(_ node: LoopNode) async -> Bool {
-    guard
-      let session = try? PTYProcessSession(
-        executable: ZmxLocator.binaryURL.path,
-        arguments: existenceCheckArguments(forNode: node))
-    else { return false }
-    return await session.waitUntilFinished()
+    await sessionTaskState(node) == .alive
+  }
+
+  /// What is actually inside the node's zmx session: a running task (`alive`), a
+  /// completed one (`exited`, with the exit code when zmx caught it), or no session at
+  /// all (`absent`). One `zmx ls`, the same cost as the `zmx get` existence check it
+  /// replaces, and the one answer both the send gate and the create-only ensure need —
+  /// an ensure keyed on `zmx get` could never revive a husk, because the husk *is* the
+  /// session that check asks about.
+  static func sessionTaskState(_ node: LoopNode) async -> SessionTaskState {
+    guard ZmxLocator.isInstalled, let result = runZmx(["ls"]), result.status == 0 else {
+      return .absent
+    }
+    return parseSessionTaskState(
+      lsOutput: result.output,
+      sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName)
+  }
+
+  enum SessionTaskState: Equatable {
+    case alive
+    case exited(exitCode: Int?)
+    case absent
+  }
+
+  /// Parses the `zmx ls` line for one session into a `SessionTaskState`. Internal so
+  /// tests can hold the real output shapes.
+  ///
+  /// `ended=` is tab-preceded in the ls line (`…\tcmd=…\tended=<ts>\texit_code=<n>`) and
+  /// printed only for a completed task — a live task and an interactive shell never
+  /// print it. Matching on the tab keeps a prompt or command that merely *contains* the
+  /// text (a pasted goal, say) from counting as a completed task; the same is why the
+  /// name is matched as a whole token, so `graphcode-A` is never found inside
+  /// `graphcode-AB`'s line.
+  static func parseSessionTaskState(lsOutput: String, sessionName: String) -> SessionTaskState {
+    let line = lsOutput.split(separator: "\n").first { line in
+      line.split(whereSeparator: \.isWhitespace).contains("name=\(sessionName)")
+    }
+    guard let line else { return .absent }
+    // An error row (`…\tname=…\terr=ConnectionRefused\tstatus=cleaning up`) is zmx
+    // reporting a session it cannot reach — the daemon behind it is gone, which is as
+    // absent as a missing row, and counts as neither alive nor exited.
+    guard line.range(of: "\terr=") == nil else { return .absent }
+    guard line.range(of: "\tended=") != nil else { return .alive }
+    var exitCode: Int?
+    if let range = line.range(of: "\texit_code=") {
+      let digits = line[range.upperBound...].prefix { $0.isNumber }
+      exitCode = Int(digits)
+    }
+    return .exited(exitCode: exitCode)
+  }
+
+  /// The shell-level form of the same judgement `sessionTaskState` makes — the check
+  /// half of every create-only ensure (`atomicCheckOrRun`, the remote ensure, the
+  /// remote send's gate). `zmx get <name>` exits 0 for a husk, so a check keyed on it
+  /// believed every dead session alive and nothing could ever be woken (#215); the ls
+  /// pipeline exits 0 only when the session is listed *and* its task has not ended.
+  /// The name token is matched tab-terminated, the field order `zmx ls` prints, so a
+  /// prefix of another session's name cannot pass.
+  static func aliveCheckCommand(zmxPath: String, forNode node: LoopNode) -> String {
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    return RemoteProjectLocation.shellQuoted(zmxPath)
+      + " ls 2>/dev/null | grep -v -e $'\\tended=' -e $'\\terr=' | grep -q "
+      + RemoteProjectLocation.shellQuoted("name=\(name)\t")
   }
 
   /// Kills the session behind an id that isn't a graph node — a quick chat. Public
@@ -504,11 +568,12 @@ public enum ZmxSessionLauncher {
       output: String(data: data, encoding: .utf8) ?? "")
   }
 
-  /// `zmx get <name>` exits 0 when the session exists and 1 when it doesn't — the check
-  /// that stops `ensureUnattendedSessions()` from re-sending a prompt into a loop that's
-  /// already running. `zmx run` is *not* idempotent: against a live session it types the
-  /// command in again, which would either land as text in the running Claude's input or
-  /// queue a second `claude` behind the first.
+  /// `zmx get <name>` exits 0 when the session exists and 1 when it doesn't — raw
+  /// existence, which a husk (a session whose task has ended, its wrapper shell still
+  /// at the prompt) passes. That is the right answer only for "is there a session
+  /// record to interrogate"; every gate that decides whether a keystroke can reach an
+  /// agent — sends, presence, the create-only ensures — now asks `sessionTaskState` or
+  /// `aliveCheckCommand` instead, which treat an ended task as what it is (issue #215).
   static func existenceCheckArguments(forNode node: LoopNode) -> [String] {
     ["get", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName]
   }
@@ -904,7 +969,11 @@ public enum ZmxSessionLauncher {
       let zmxArguments = arguments(
         forNode: node, projectPath: location.projectPath, settings: settings)
     else { return nil }
-    let check = quotedCommand(["zmx"] + existenceCheckArguments(forNode: node))
+    // The remote twin of the local alive check: raw existence (`zmx get`) answers for a
+    // husk too — the wrapper shell stays at its prompt after the command inside exits —
+    // so an ensure keyed on it could never revive a dead remote loop (#215). Only a
+    // listed session whose task has not ended counts as alive here.
+    let check = aliveCheckCommand(zmxPath: "zmx", forNode: node)
     let run = remoteQuotedCommand(["zmx"] + zmxArguments)
     // Copilot only, and remote only: an unattended Copilot queues its `--interactive`
     // goal behind a per-session folder-trust dialog that nobody is present to answer,
@@ -915,9 +984,16 @@ public enum ZmxSessionLauncher {
     // (the `trustedFolders` list in `~/.copilot/config.json`, schema read off a real
     // "remember this folder" answer), and any failure — no python3, malformed config —
     // falls back to today's behaviour: the dialog, answerable by opening the loop.
-    let trustSeed =
-      node.backend == .copilotCLI
-      ? copilotTrustSeedScript(forRemotePath: location.remotePath) + "; " : ""
+    // Claude Code's twin is its first-run trust dialog, which a fresh unattended
+    // `claude` answers by exiting 1 (issue #215); the seed and its `~/.claude.json`
+    // shape are `claudeTrustSeedScript`'s.
+    let trustSeed: String = {
+      switch node.backend {
+      case .copilotCLI: return copilotTrustSeedScript(forRemotePath: location.remotePath) + "; "
+      case .claudeCode: return claudeTrustSeedScript(forRemotePath: location.remotePath) + "; "
+      case .codex, .openCode: return ""
+      }
+    }()
     let hooksWrite =
       PresenceHooks.remoteWriteFragment(forBackend: node.backend)
       .map { $0 + "; " } ?? ""
@@ -1124,6 +1200,25 @@ public enum ZmxSessionLauncher {
     return quotedCommand(["python3", "-c", program, remotePath]) + " 2>/dev/null || true"
   }
 
+  /// Claude Code's twin of the Copilot seed above (`remoteEnsureInvocation`): a fresh
+  /// unattended `claude` stops on its first-run trust dialog and exits 1 when nobody
+  /// answers (issue #215), and the only record of the answer is
+  /// `projects[<path>].hasTrustDialogAccepted = true` in `~/.claude.json` — the same
+  /// consent the human gave by pointing the loop there. Plain JSON, no comment header,
+  /// and `~/.claude.json` already exists on any host Claude Code has been used on, so
+  /// the seed reads, adds the one key, writes back — additive and idempotent, a path
+  /// argument rather than interpolation, and `|| true` for the same reason: a failed
+  /// seed falls back to the dialog, answerable by opening the loop.
+  static func claudeTrustSeedScript(forRemotePath remotePath: String) -> String {
+    let program =
+      "import json,os,sys; p=os.path.expanduser('~/.claude.json'); "
+      + "c=json.load(open(p)) if os.path.exists(p) and open(p).read(1) else {}; "
+      + "e=c.setdefault('projects',{}).setdefault(sys.argv[1],{}); "
+      + "(e.get('hasTrustDialogAccepted') is True) or e.update(hasTrustDialogAccepted=True); "
+      + "open(p,'w').write(json.dumps(c))"
+    return quotedCommand(["python3", "-c", program, remotePath]) + " 2>/dev/null || true"
+  }
+
   /// One argv as one shell-safe string — each argument quoted, so a prompt containing
   /// quotes, `$(…)`, or `;` stays one word through the remote shell exactly as it does
   /// through zmx's own quoting locally. Public because the app's remote *attach* is
@@ -1135,8 +1230,11 @@ public enum ZmxSessionLauncher {
   /// The remote twin of the local text-then-Enter delivery, in one ssh round-trip:
   /// type, give the composer its beat, then the Enter as its own keystroke — the same
   /// paste-heuristic dance the local path does, run on the host that owns the session.
-  /// `zmx send` into a session that doesn't exist exits non-zero, so a dead remote
-  /// loop reports failure and the caller stages the message, exactly like local.
+  /// `zmx send` into a session that doesn't exist exits non-zero — but into a session
+  /// whose *task* has ended it exits 0, typing the message at the husk's shell prompt
+  /// and reporting a delivery nobody received (#215). So the whole delivery is gated on
+  /// the same alive check the remote ensure uses, and a dead remote loop reports
+  /// failure and the caller stages the message, exactly like local.
   static func remoteSendInvocation(
     _ text: String, toNode node: LoopNode, at location: RemoteProjectLocation
   ) -> [String] {
@@ -1151,7 +1249,9 @@ public enum ZmxSessionLauncher {
     let clearCodexPresence =
       node.backend == .codex
       ? " && " + quotedCommand(["zmx", "set", sessionName, "presence="]) : ""
-    let script = "\(sends) && sleep 0.4 && \(submit)\(clearCodexPresence)"
+    let script =
+      aliveCheckCommand(zmxPath: "zmx", forNode: node)
+      + " >/dev/null 2>&1 && { \(sends) && sleep 0.4 && \(submit)\(clearCodexPresence); }"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
   }
 
@@ -1314,14 +1414,18 @@ public enum ZmxSessionLauncher {
     guard ZmxLocator.isInstalled else { return }
 
     let zmxPath = ZmxLocator.binaryURL.path
-    let checkArgs = existenceCheckArguments(forNode: node)
+    let aliveCheck = aliveCheckCommand(zmxPath: zmxPath, forNode: node)
     let wd = workingDirectory(forNode: node, projectPath: projectPath)
 
-    // Same atomic check-or-create as the remote path (`remoteEnsureInvocation`):
-    // `zmx get` and `zmx run` in one shell, joined by `||`, so the app's own
+    // Same atomic check-or-create as the remote path (`remoteEnsureInvocation`): an
+    // alive-check and `zmx run` in one shell, joined by `||`, so the app's own
     // `zmx attach` cannot slip in between and create the session first. Without
     // this, a `zmx run` that loses the race types the entire launch command into
     // the now-live agent's input — the `/bin/zsh -i` leak in the Copilot input bar.
+    // The check is husk-aware (`aliveCheckCommand`): a session whose task ended is
+    // no session a keystroke can reach, so the run branch relaunches it — this is
+    // what lets an ensure, a send, or the sweep wake a loop that died unattended
+    // (issue #215), which a `zmx get` check could never do.
     let sessionID: String? =
       SessionIDStore.load(forNodeID: node.id)
       ?? {
@@ -1340,30 +1444,35 @@ public enum ZmxSessionLauncher {
         forNode: node, sessionID: sessionID, projectPath: projectPath)
     {
       await atomicCheckOrRun(
-        checkArguments: checkArgs, runArguments: resumeArgs,
+        checkCommand: aliveCheck, runArguments: resumeArgs,
         zmxPath: zmxPath, workingDirectory: wd,
         logFragment: DialLog.fragment(session: name, dial: "ensure", event: "resume"))
       // `zmx run -d` reports that the *session* exists, not that what it launched
       // survived: `claude --resume` against a transcript its retention expired dies
-      // within a second, taking the session with it, and the ensure returns 0 having
-      // achieved nothing. Nothing else notices — the card keeps saying `running` while
+      // within a second — and the wrapper shell it was typed with stays behind, a
+      // husk that answers `zmx get` — so the ensure returns 0 having achieved
+      // nothing. Nothing else notices — the card keeps saying `running` while
       // the loop is gone, and the next ensure retries the same dead ID, because
       // (unlike the remote path) the local one never consumed it. So look again, and
       // only if the session really failed to survive is the ID treated as dead: it is
       // dropped and the fresh launch runs. A resume that took is left alone, and its
       // `SessionStart` hook has already rebanked the same ID.
-      guard
-        await sessionDiedImmediately(
-          checkArguments: checkArgs, zmxPath: zmxPath, workingDirectory: wd)
-      else { return }
+      guard await sessionDiedImmediately(node: node) else { return }
       DialLog.record(session: name, dial: "ensure", event: "resume-dead")
       SessionIDStore.remove(forNodeID: node.id)
     }
     // The local half of the trust seed the remote ensure has always done: without it a
     // fresh unattended Copilot parks its opening prompt behind the folder-trust dialog
     // and swallows anything typed at it — the first pass included (`CopilotTrust`).
-    if node.backend == .copilotCLI, let directory = wd {
-      CopilotTrust.ensureTrusted(directory: directory)
+    // Claude Code has its own first-run dialog of the same shape ("Is this a project you
+    // created or one you trust?"), which a fresh unattended `claude` exits 1 on — same
+    // seed, its own config file (`ClaudeCodeTrust`, issue #215).
+    if let directory = wd {
+      switch node.backend {
+      case .copilotCLI: CopilotTrust.ensureTrusted(directory: directory)
+      case .claudeCode: ClaudeCodeTrust.ensureTrusted(directory: directory)
+      case .codex, .openCode: break
+      }
     }
     // Noted *before* the launch: the first pass below waits for a Copilot session
     // directory that was not already there, which is how it tells a session it just
@@ -1372,7 +1481,7 @@ public enum ZmxSessionLauncher {
       firstPassMessage(for: node) != nil
       ? CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent : nil
     await atomicCheckOrRun(
-      checkArguments: checkArgs, runArguments: runArgs,
+      checkCommand: aliveCheck, runArguments: runArgs,
       zmxPath: zmxPath, workingDirectory: wd,
       logFragment: DialLog.fragment(session: name, dial: "ensure", event: "fresh"))
     await kickOffFirstPass(
@@ -1551,28 +1660,30 @@ public enum ZmxSessionLauncher {
   /// (`GhosttyTerminalView.localResumeOrFreshCommand`).
   public static let resumeSettleSeconds: UInt64 = 5
 
-  private static func sessionDiedImmediately(
-    checkArguments: [String], zmxPath: String, workingDirectory: String?
-  ) async -> Bool {
+  /// A resume that failed is not always a session that vanished: `claude --resume`
+  /// against a dead transcript exits, and the wrapper shell `zmx run` typed it with
+  /// stays at its prompt — a husk that answers `zmx get` and once read as a resume that
+  /// took. Judged by `sessionTaskState`, so both the vanished session and the husk
+  /// count as the death they are.
+  private static func sessionDiedImmediately(node: LoopNode) async -> Bool {
     try? await Task.sleep(for: .seconds(resumeSettleSeconds))
-    guard
-      let session = try? PTYProcessSession(
-        executable: zmxPath, arguments: checkArguments, workingDirectory: workingDirectory)
-    else { return false }
-    return await session.waitUntilFinished() == false
+    return await sessionTaskState(node) != .alive
   }
 
   /// `logFragment` rides inside the run branch, so an ensure whose check found the
   /// session alive records nothing — the dial log holds decisions, not ticks.
+  ///
+  /// The check is the alive command (`aliveCheckCommand`), not raw existence: a session
+  /// whose task has ended must fall through to the run, or a dead loop could never be
+  /// woken — the husk answered every `zmx get` (#215).
   private static func atomicCheckOrRun(
-    checkArguments: [String], runArguments: [String],
+    checkCommand: String, runArguments: [String],
     zmxPath: String, workingDirectory: String?, logFragment: String? = nil
   ) async {
-    let check = quotedCommand([zmxPath] + checkArguments)
     let run = quotedCommand([zmxPath] + runArguments)
     let script =
-      logFragment.map { "\(check) >/dev/null 2>&1 || { \($0); \(run); }" }
-      ?? "\(check) >/dev/null 2>&1 || \(run)"
+      logFragment.map { "\(checkCommand) >/dev/null 2>&1 || { \($0); \(run); }" }
+      ?? "\(checkCommand) >/dev/null 2>&1 || \(run)"
     guard
       let session = try? PTYProcessSession(
         executable: "/bin/zsh", arguments: ["-c", script],

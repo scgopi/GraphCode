@@ -90,8 +90,8 @@ struct DialLogTests {
     let remoteCommand = try #require(invocation.last)
     #expect(remoteCommand.contains("ensure resume"))
     #expect(remoteCommand.contains("ensure fresh"))
-    // Both live behind the existence check: a healthy sweep tick logs nothing.
-    let check = try #require(remoteCommand.range(of: "'get'"))
+    // Both live behind the alive check: a healthy sweep tick logs nothing.
+    let check = try #require(remoteCommand.range(of: "ls 2>/dev/null"))
     let resume = try #require(remoteCommand.range(of: "ensure resume"))
     #expect(check.upperBound <= resume.lowerBound)
   }

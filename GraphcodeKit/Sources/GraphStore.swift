@@ -1882,6 +1882,22 @@ public actor GraphStore {
       return
     }
     guard await deliverToSession(target, message) else {
+      // The transport can also fail because the session died after the graph last
+      // looked — a goal loop whose agent exited on its very first turn had no session
+      // left to type into, and (before sessions that answer while dead stopped passing
+      // the send gate) even a "delivered" that nobody received (issue #215). An
+      // unattended loop is the daemon's to keep alive, so a failed delivery is the
+      // moment to do exactly that: the ensure is create-only and husk-aware, so it
+      // relaunches precisely the dead case, the settle is the fresh session's boot
+      // beat, and the retry lands the message that would otherwise have sat staged
+      // until a wake that a dead loop has no way to know about. Attended loops stay
+      // human-timed — a turn-based session is respawned by a human opening it, not by
+      // a message arriving.
+      if target.runsUnattended, !target.isResolved {
+        ensureSession(target)
+        try? await Task.sleep(for: Self.respawnedSessionSettle)
+        if await deliverToSession(target, message) { return }
+      }
       recordMemory(nodeID, "while you were away: \(message)")
       announceError(
         "delivery to \(target.title)'s session failed — message staged to its memory; "
@@ -1889,6 +1905,12 @@ public actor GraphStore {
       return
     }
   }
+
+  /// Long enough for a relaunched session to exist and start its agent's boot, short
+  /// enough that the send's own chunk beats dominate the retry's latency. The retry is
+  /// still best-effort: a session slow to accept input fails it and the message is
+  /// staged, exactly as before.
+  static let respawnedSessionSettle: Duration = .seconds(3)
 
   /// Whether a follow-up to this node should wait rather than type now. Mid-turn and
   /// mid-check both qualify — deferring to a busy agent is the flag's entire meaning —

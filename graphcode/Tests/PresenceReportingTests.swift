@@ -314,7 +314,47 @@ struct PresenceReportingTests {
 
   @Test
   func aVanishedSessionIsNotWorkEither() {
+    // Within the boot grace a young loop's first poll can legitimately find no session
+    // — the ensure is fired, not awaited — so it reads as quiet, not dead.
     #expect(node(.running, .absent).displayState == .idle)
+  }
+
+  @Test
+  func aGoneSessionOnAnUnattendedLoopPastTheGraceIsFailed() {
+    // Issue #215: a goal loop whose agent exited on its first turn showed IDLE — the
+    // one word it must not show, since nothing is waiting for work. Past the boot
+    // grace, `absent` is a session that died unattended, and FAILED is the word the
+    // graph would have used had anyone seen the exit.
+    let dead = LoopNode(
+      title: "Fix the top crash", loopType: .goalBased,
+      goal: GoalSpec(summary: "Crash rate under 1%"),
+      presence: PresenceReading(presence: .absent, confidence: .reported), state: .running,
+      createdAt: Date().addingTimeInterval(-LoopNode.absentSessionGraceSeconds - 5))
+    #expect(dead.displayState == .failed)
+  }
+
+  @Test
+  func anAttendedLoopWithAGoneSessionStaysIdle() {
+    // A turn-based loop is a human's session — the pane they open is where its exit
+    // shows; the presence poll does not overrule that.
+    let attended = LoopNode(
+      title: "Sketch", loopType: .turnBased, triggerPrompt: "hi",
+      presence: PresenceReading(presence: .absent, confidence: .reported), state: .running,
+      createdAt: Date().addingTimeInterval(-LoopNode.absentSessionGraceSeconds - 5))
+    #expect(attended.displayState == .idle)
+  }
+
+  @Test
+  func aLoopOthersWaitOnShowsWaitingEvenWhenGone() {
+    // The waiting word is about the dependents, whose edges are the graph's business.
+    let dead = LoopNode(
+      title: "Fix the top crash", loopType: .goalBased,
+      goal: GoalSpec(summary: "Crash rate under 1%"),
+      presence: PresenceReading(presence: .absent, confidence: .reported), state: .running,
+      createdAt: Date().addingTimeInterval(-LoopNode.absentSessionGraceSeconds - 5))
+    var waiting = dead
+    waiting.hasActiveDependents = true
+    #expect(waiting.displayState == .waiting)
   }
 
   @Test
