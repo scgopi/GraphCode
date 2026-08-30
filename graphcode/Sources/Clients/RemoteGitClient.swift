@@ -304,11 +304,19 @@ private func remoteGitFacts(
   let ahead = try? await runSSH(
     location, "git -C \(quoted(block.path)) rev-list --count @{upstream}..HEAD")
   let pushed = ahead.flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } == 0
+  // One more round trip per worktree, and only git can say it — the remote host's
+  // file system is not reachable from here. `submodule status` marks uninitialized
+  // entries with `-`; any other line is a populated checkout git would refuse to
+  // remove without `--force`.
+  let submoduleStatus = try? await runSSH(
+    location, "git -C \(quoted(block.path)) submodule status")
+  let hasSubmodules =
+    submoduleStatus?.split(separator: "\n").contains { !$0.hasPrefix("-") } ?? false
   return WorktreeGitFacts(
     defaultBranch: defaultBranch, commitsNotLanded: commitsNotLanded,
     squashLanded: landing.squashLanded,
     dirtyFileCount: dirtyFileCount, pushed: pushed, prunable: false, locked: block.locked,
-    sizeBytes: nil)
+    hasSubmodules: hasSubmodules, sizeBytes: nil)
 }
 
 private func appendRemovedBranchRecord(branch: String, tip: String, path: String, host: String) {

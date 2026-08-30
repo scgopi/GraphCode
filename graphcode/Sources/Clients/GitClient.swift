@@ -467,11 +467,26 @@ private func gitFacts(
     "git", ["-C", block.path, "rev-list", "--count", "@{upstream}..HEAD"])
   let pushed =
     ahead.flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } == 0
+  let hasSubmodules = await worktreeHasInitializedSubmodules(block.path)
   return WorktreeGitFacts(
     defaultBranch: defaultBranch, commitsNotLanded: commitsNotLanded,
     squashLanded: landing.squashLanded,
     dirtyFileCount: dirtyFileCount, pushed: pushed, prunable: false, locked: block.locked,
-    sizeBytes: nil)
+    hasSubmodules: hasSubmodules, sizeBytes: nil)
+}
+
+/// Whether any of the worktree's submodules is initialized — the state git's
+/// "working trees containing submodules cannot be moved or removed" refusal is
+/// about. `git submodule status` marks uninitialized entries with `-`; any other
+/// line means a checkout is populated. The `.gitmodules` check keeps repositories
+/// without submodules at zero extra git calls, and an unreadable status answers
+/// no: git then refuses the removal itself and the sheet carries its words.
+private func worktreeHasInitializedSubmodules(_ worktreePath: String) async -> Bool {
+  guard FileManager.default.fileExists(
+    atPath: (worktreePath as NSString).appendingPathComponent(".gitmodules"))
+  else { return false }
+  let status = try? await run("git", ["-C", worktreePath, "submodule", "status"])
+  return status?.split(separator: "\n").contains { !$0.hasPrefix("-") } ?? false
 }
 
 extension Optional {
