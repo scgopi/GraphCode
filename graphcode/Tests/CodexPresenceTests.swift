@@ -30,6 +30,9 @@ struct CodexPresenceTests {
     // Same session-owned label store the other two backends report into, so one reader
     // serves all three.
     #expect(override.contains(#"$ZMX_SESSION"#))
+    #expect(override.contains("thread-id"))
+    #expect(override.contains(".history"))
+    #expect(override.contains(".id"))
   }
 
   @Test
@@ -63,11 +66,27 @@ struct CodexPresenceTests {
 
   @Test
   func nowhereToReportMeansNoFlagRatherThanABrokenOne() {
-    // A remote session, or a machine with no zmx: the override would name a binary that
-    // isn't there, and Codex would run it once per turn forever.
+    // A machine with no zmx cannot accept a presence or resume-ID report.
     #expect(
       CLISessionBackendKind.codex.presenceArguments(
         hooksFile: nil, sessionName: "graphcode-A", zmxPath: nil) == [])
+  }
+
+  @Test
+  func aRemoteOverrideUsesTheRemoteBinaryAndSessionBank() throws {
+    let node = LoopNode(
+      title: "Ship it", loopType: .goalBased, goal: GoalSpec(summary: "Tests pass"),
+      backend: .codex, state: .running)
+    let location = RemoteProjectLocation(
+      user: "dev", host: "build-box", remotePath: "/home/dev/widget")
+    let invocation = try #require(
+      ZmxSessionLauncher.remoteEnsureInvocation(forNode: node, at: location))
+    let command = try #require(invocation.last)
+
+    #expect(command.contains("notify="))
+    #expect(command.contains("thread-id"))
+    #expect(command.contains("$HOME/.graphcode/sessions"))
+    #expect(!command.contains(ZmxLocator.binaryURL.path))
   }
 
   @Test

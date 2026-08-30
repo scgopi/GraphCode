@@ -609,11 +609,13 @@ public enum ZmxSessionLauncher {
     // by the ensure script (`remoteEnsureInvocation`) and referenced as a `$HOME` path
     // only the remote shell can mint, via `scriptSuffix` below.
     let hooksFile = remote == nil ? PresenceHooks.write(forBackend: node.backend) : nil
-    // Codex needs no file, only somewhere to report to. Nil for a remote session for the
-    // same reason: it would name a binary at this machine's path on a host that has its
-    // own.
     let reportingPath =
-      remote == nil && ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil
+      remote != nil ? "zmx" : (ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil)
+    let sessionsDirectory =
+      remote != nil ? PresenceHooks.remoteSessionsExpression : nil
+    let remoteEnvironmentPath =
+      remote != nil && node.backend == .openCode
+      ? PresenceHooks.remoteOpenCodeConfigPath : nil
     let remoteHooksSuffix =
       remote != nil && node.backend == .claudeCode
       ? " --settings \"\(PresenceHooks.remotePathExpression)\"" : ""
@@ -623,7 +625,8 @@ public enum ZmxSessionLauncher {
       workspacePaths: paths,
       hooksFile: hooksFile,
       sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
-      zmxPath: reportingPath)
+      zmxPath: reportingPath,
+      sessionsDirectory: sessionsDirectory)
     let command =
       [
         "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
@@ -631,7 +634,8 @@ public enum ZmxSessionLauncher {
       + Self.loginShellInvocation(
         of: executable, arguments: arguments,
         environment: Self.environment(
-          forBackend: node.backend, briefingPath: briefingPath, hooksFile: hooksFile),
+          forBackend: node.backend, briefingPath: briefingPath, hooksFile: hooksFile,
+          remoteHooksPath: remoteEnvironmentPath),
         scriptSuffix: remoteHooksSuffix)
 
     // `zmx` types this command into the session's shell, and a tty in canonical mode
@@ -651,13 +655,18 @@ public enum ZmxSessionLauncher {
         workspacePaths: Self.workspacePaths(forNode: node, projectPath: projectPath),
         hooksFile: hooksFile,
         sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
-        zmxPath: reportingPath)
+        zmxPath: reportingPath,
+        sessionsDirectory: sessionsDirectory)
       let unbriefedCommand =
         [
           "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
         ]
         + Self.loginShellInvocation(
-          of: executable, arguments: unbriefed, scriptSuffix: remoteHooksSuffix)
+          of: executable, arguments: unbriefed,
+          environment: Self.environment(
+            forBackend: node.backend, briefingPath: nil, hooksFile: hooksFile,
+            remoteHooksPath: remoteEnvironmentPath),
+          scriptSuffix: remoteHooksSuffix)
       if Self.fitsInATypedCommandLine(unbriefedCommand) { return unbriefedCommand }
 
       // The file carries the *unflattened* prompt — a file has no newline hazard, so a
@@ -685,13 +694,18 @@ public enum ZmxSessionLauncher {
           + [promptDirectory],
         hooksFile: hooksFile,
         sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
-        zmxPath: reportingPath)
+        zmxPath: reportingPath,
+        sessionsDirectory: sessionsDirectory)
       let pointeredCommand =
         [
           "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
         ]
         + Self.loginShellInvocation(
-          of: executable, arguments: pointered, scriptSuffix: remoteHooksSuffix)
+          of: executable, arguments: pointered,
+          environment: Self.environment(
+            forBackend: node.backend, briefingPath: briefingPath, hooksFile: hooksFile,
+            remoteHooksPath: remoteEnvironmentPath),
+          scriptSuffix: remoteHooksSuffix)
       if Self.fitsInATypedCommandLine(pointeredCommand) { return pointeredCommand }
       // Deep support-directory paths can push briefing plus pointer past the line even
       // now; the pointer is the one part that cannot be given up, so the briefing goes.
@@ -702,12 +716,17 @@ public enum ZmxSessionLauncher {
           + [promptDirectory],
         hooksFile: hooksFile,
         sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
-        zmxPath: reportingPath)
+        zmxPath: reportingPath,
+        sessionsDirectory: sessionsDirectory)
       return [
         "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
       ]
         + Self.loginShellInvocation(
-          of: executable, arguments: pointeredUnbriefed, scriptSuffix: remoteHooksSuffix)
+          of: executable, arguments: pointeredUnbriefed,
+          environment: Self.environment(
+            forBackend: node.backend, briefingPath: nil, hooksFile: hooksFile,
+            remoteHooksPath: remoteEnvironmentPath),
+          scriptSuffix: remoteHooksSuffix)
     }
     return command
   }
@@ -735,7 +754,12 @@ public enum ZmxSessionLauncher {
     let tier = node.effectiveModelTier(autoSelecting: settings.autoSelectsModel)
     let hooksFile = remote == nil ? PresenceHooks.write(forBackend: node.backend) : nil
     let reportingPath =
-      remote == nil && ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil
+      remote != nil ? "zmx" : (ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil)
+    let sessionsDirectory =
+      remote != nil ? PresenceHooks.remoteSessionsExpression : nil
+    let remoteEnvironmentPath =
+      remote != nil && node.backend == .openCode
+      ? PresenceHooks.remoteOpenCodeConfigPath : nil
     let remoteHooksSuffix =
       remote != nil && node.backend == .claudeCode
       ? " --settings \"\(PresenceHooks.remotePathExpression)\"" : ""
@@ -752,7 +776,8 @@ public enum ZmxSessionLauncher {
         workspacePaths: Self.workspacePaths(forNode: node, projectPath: projectPath),
         hooksFile: hooksFile,
         sessionName: sessionName,
-        zmxPath: reportingPath)
+        zmxPath: reportingPath,
+        sessionsDirectory: sessionsDirectory)
       + node.backend.resumeArguments(sessionID: sessionID)
     return [
       "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
@@ -760,7 +785,8 @@ public enum ZmxSessionLauncher {
       + Self.loginShellInvocation(
         of: executable, arguments: resumeArgs,
         environment: Self.environment(
-          forBackend: node.backend, briefingPath: nil, hooksFile: hooksFile),
+          forBackend: node.backend, briefingPath: nil, hooksFile: hooksFile,
+          remoteHooksPath: remoteEnvironmentPath),
         scriptSuffix: remoteHooksSuffix)
   }
 
@@ -801,9 +827,13 @@ public enum ZmxSessionLauncher {
   /// environment route turned out not to work; OpenCode's presence plugin is the one
   /// thing that genuinely has to travel this way (`presenceEnvironment`).
   static func environment(
-    forBackend backend: CLISessionBackendKind, briefingPath: String?, hooksFile: URL? = nil
+    forBackend backend: CLISessionBackendKind, briefingPath: String?, hooksFile: URL? = nil,
+    remoteHooksPath: String? = nil
   ) -> [String: String] {
-    backend.presenceEnvironment(hooksFile: hooksFile)
+    if backend == .openCode, let remoteHooksPath {
+      return ["OPENCODE_CONFIG": remoteHooksPath]
+    }
+    return backend.presenceEnvironment(hooksFile: hooksFile)
   }
 
   /// Whether the assembled command survives being typed into a terminal. Budgeted well
@@ -889,8 +919,8 @@ public enum ZmxSessionLauncher {
       node.backend == .copilotCLI
       ? copilotTrustSeedScript(forRemotePath: location.remotePath) + "; " : ""
     let hooksWrite =
-      node.backend == .claudeCode
-      ? (PresenceHooks.remoteWriteFragment().map { $0 + "; " } ?? "") : ""
+      PresenceHooks.remoteWriteFragment(forBackend: node.backend)
+      .map { $0 + "; " } ?? ""
     let delivery =
       remoteDeliveryScript(forNode: node, at: location, settings: settings)
       .map { $0 + "; " } ?? ""
@@ -906,9 +936,14 @@ public enum ZmxSessionLauncher {
     // session-state directory while the session is alive — the `&& { … } || { … }` is
     // safe only because the bank fragment always exits 0 (`remoteIDBankFragment`); a
     // fragment that could fail would send an alive tick into the create branch.
-    let bank =
-      node.backend == .copilotCLI
-      ? " && { " + CopilotSessionLog.remoteIDBankFragment(forNodeID: node.id) + "; }" : ""
+    let bank: String = {
+      switch node.backend {
+      case .copilotCLI:
+        return " && { " + CopilotSessionLog.remoteIDBankFragment(forNodeID: node.id) + "; }"
+      case .claudeCode, .codex, .openCode:
+        return ""
+      }
+    }()
     let script =
       "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { "
       + deliveryFragment(delivery, ifSessionMissing: check)
@@ -1113,7 +1148,10 @@ public enum ZmxSessionLauncher {
       .map { quotedCommand(["zmx", "send", sessionName, $0]) }
       .joined(separator: " && sleep 0.15 && ")
     let submit = quotedCommand(["zmx"] + submitArguments(forNode: node))
-    let script = "\(sends) && sleep 0.4 && \(submit)"
+    let clearCodexPresence =
+      node.backend == .codex
+      ? " && " + quotedCommand(["zmx", "set", sessionName, "presence="]) : ""
+    let script = "\(sends) && sleep 0.4 && \(submit)\(clearCodexPresence)"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
   }
 
@@ -1287,9 +1325,13 @@ public enum ZmxSessionLauncher {
     let sessionID: String? =
       SessionIDStore.load(forNodeID: node.id)
       ?? {
-        guard node.backend == .copilotCLI else { return nil }
-        let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
-        return CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent
+        switch node.backend {
+        case .copilotCLI:
+          let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+          return CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent
+        case .claudeCode, .codex, .openCode:
+          return nil
+        }
       }()
     guard let runArgs = arguments(forNode: node, projectPath: projectPath) else { return }
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
@@ -1351,7 +1393,7 @@ public enum ZmxSessionLauncher {
   /// first beat itself — or for any backend whose recurrence is not a scheduler.
   static func firstPassMessage(for node: LoopNode) -> String? {
     guard node.backend == .copilotCLI, node.loopType == .timeBased,
-      node.heartbeatIntervalSeconds == nil, let prompt = node.sessionPrompt
+      node.effectiveHeartbeatInterval == nil, let prompt = node.sessionPrompt
     else { return nil }
     return SessionPrompt.firstPass(of: prompt)
   }

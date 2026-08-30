@@ -385,7 +385,7 @@ struct BriefingCadenceGuidanceTests {
     let off = try #require(
       SessionBriefing.text(projectPath: "/tmp/p", settings: GraphcodeSettings()))
     #expect(off.contains("The cadence goes inside the prompt"))
-    #expect(!off.contains("--heartbeat"))
+    #expect(off.contains("--heartbeat <seconds>"))
 
     let on = try #require(
       SessionBriefing.text(

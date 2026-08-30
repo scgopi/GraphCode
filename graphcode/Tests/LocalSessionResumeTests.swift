@@ -72,13 +72,18 @@ struct LocalSessionResumeTests {
   }
 
   @Test
-  func aBackendThatCannotResumeIsUnaffected() {
+  func codexResumesFromItsSessionID() throws {
     let nodeID = UUID()
     let view = surface(nodeID: nodeID, backend: .codex)
-    let command = withBankedID("abc-123", forNode: nodeID) {
-      view.localResumeOrFreshCommand(agentLaunch: ["codex", "the prompt"])
+    let command = try withBankedID("abc-123", forNode: nodeID) {
+      try #require(view.localResumeOrFreshCommand(agentLaunch: ["codex", "the prompt"])?.last)
     }
-    #expect(command == nil)
+    #expect(command.contains("resume"))
+    #expect(command.contains(#""$GRAPHCODE_RESUME_ID""#))
+    #expect(command.contains("the prompt"))
+    let resume = try #require(command.range(of: "resume"))
+    let fallback = try #require(command.range(of: "the prompt"))
+    #expect(resume.upperBound < fallback.lowerBound)
   }
 
   // MARK: - A resume that does not take

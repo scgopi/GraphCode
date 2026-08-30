@@ -134,7 +134,19 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     case .goalBased:
       return !(goal?.summary ?? "").trimmingCharacters(in: .whitespaces).isEmpty
     case .timeBased:
-      return !(triggerPrompt ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+      let prompt = (triggerPrompt ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !prompt.isEmpty else { return false }
+      if let heartbeatIntervalSeconds,
+        !heartbeatIntervalSeconds.isFinite || heartbeatIntervalSeconds <= 0
+      {
+        return false
+      }
+      let capabilities = effectiveBackend.capabilities
+      guard capabilities.supportsDaemonRecurrence && !capabilities.supportsInSessionRecurrence
+      else { return true }
+      if heartbeatIntervalSeconds != nil { return true }
+      guard let recurrence = SessionPrompt.recurrence(of: prompt) else { return false }
+      return SessionPrompt.intervalSeconds(recurrence.interval) != nil
     case .composite:
       // Its *contents* are still not required — a composite is built by editing its
       // sub-graph after creation, and demanding a populated one at creation time would

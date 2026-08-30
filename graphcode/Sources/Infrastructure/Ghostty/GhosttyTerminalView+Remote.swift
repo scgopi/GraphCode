@@ -102,11 +102,11 @@ extension GhosttyTerminalView {
     guard
       let agentLaunch = agentCommand(
         settings: settings, briefingPath: briefingPath,
-        remoteSettingsPath: backend == .claudeCode ? PresenceHooks.remotePathExpression : nil)
+        remoteSettingsPath: remotePresenceSettingsPath, isRemote: true)
     else { return nil }
     let markerWrite = RemoteBootMarker.writeFragment(forSessionName: sessionName)
     let hooksWrite =
-      (backend == .claudeCode ? PresenceHooks.remoteWriteFragment() : nil)
+      PresenceHooks.remoteWriteFragment(forBackend: backend)
       .map { $0 + " && " } ?? ""
     var promptExport = ""
     if let prompt = sessionEnvironment(briefingPath: briefingPath)[Self.promptVariable] {
@@ -208,8 +208,7 @@ extension GhosttyTerminalView {
     var script = preparation + "{ "
     let nodeID = SurfaceRef.nodeID(fromZmxSessionName: sessionName)
     let resumeLaunch = resumeCommand(
-      settings: settings,
-      remoteSettingsPath: backend == .claudeCode ? PresenceHooks.remotePathExpression : nil)
+      settings: settings, remoteSettingsPath: remotePresenceSettingsPath, isRemote: true)
     if let nodeID, let resumeLaunch {
       let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: nodeID)
       let attempt =
@@ -243,22 +242,32 @@ extension GhosttyTerminalView {
   /// machine wrote. A resumed local session needs them for the same reason a fresh one
   /// does: without them the loop reports IDLE for as long as it runs.
   func resumeCommand(
-    settings: GraphcodeSettings, hooksFile: URL? = nil, remoteSettingsPath: String?
+    settings: GraphcodeSettings, hooksFile: URL? = nil, remoteSettingsPath: String?,
+    isRemote: Bool = false
   ) -> [String]? {
     guard backend.supportsResume, var parts = launchPrefix(settings: settings) else {
       return nil
     }
     let presence = backend.presenceArguments(
       hooksFile: hooksFile, sessionName: nil,
-      zmxPath: ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil
+      zmxPath: isRemote ? "zmx" : (ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil),
+      sessionsDirectory: isRemote ? PresenceHooks.remoteSessionsExpression : nil
     )
     .map(PresenceHooks.singleQuoted)
     .joined(separator: " ")
     if !presence.isEmpty { parts.append(presence) }
-    if let remoteSettingsPath { parts.append("--settings \"\(remoteSettingsPath)\"") }
+    addRemotePresenceSettings(remoteSettingsPath, to: &parts)
     parts += backend.resumeArguments(
       sessionID: "\"$\(ZmxSessionLauncher.remoteResumeIDVariable)\"")
     return Self.interactiveLoginShell(parts)
+  }
+
+  private var remotePresenceSettingsPath: String? {
+    switch backend {
+    case .claudeCode: return PresenceHooks.remotePathExpression
+    case .openCode: return PresenceHooks.remoteOpenCodeConfigPath
+    case .copilotCLI, .codex: return nil
+    }
   }
 
   /// The remote twin of `briefingFile`: the `~/`-relative path the briefing is

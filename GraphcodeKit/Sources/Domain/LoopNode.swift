@@ -217,15 +217,27 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
       // first-pass workaround raced the composer. The reliable channel is the opening
       // prompt itself, so for Copilot it carries both halves as prose: run the task
       // now, then arm your own `/every`. The session still owns the cadence; graphcode
-      // holds no timer. Other backends keep the directive verbatim — Claude Code's
-      // `/loop` runs its first iteration itself.
+      // holds no timer. Claude Code keeps the directive verbatim — its `/loop` runs the
+      // first iteration itself.
       if backend == .copilotCLI, heartbeatIntervalSeconds == nil, let prompt = triggerPrompt,
         let recurrence = SessionPrompt.recurrence(of: prompt)
       {
         return "Run this task now: \(recurrence.task) Then schedule it to repeat with: "
           + "/every \(recurrence.interval) \(recurrence.task)"
       }
-      guard let interval = heartbeatIntervalSeconds, interval > 0, let task = triggerPrompt
+      if backend.capabilities.supportsDaemonRecurrence,
+        let interval = effectiveHeartbeatInterval,
+        interval.isFinite,
+        interval > 0
+      {
+        let task = heartbeatTask ?? ""
+        return "Run one pass of this task now: \(task) Then stay in the session — every "
+          + "\(Int(interval))s you will receive a [graphcode] heartbeat message, and each "
+          + "one is your cue to run the next pass. Do not schedule your own /loop, wakeup, "
+          + "or cron for it — the orchestrator holds the timer."
+      }
+      guard let interval = heartbeatIntervalSeconds, interval.isFinite, interval > 0,
+        let task = triggerPrompt
       else { return triggerPrompt }
       // The heartbeat counterpart of the /loop directive: the session is told who
       // holds the timer, so it neither schedules its own cadence (double-driving)
@@ -241,6 +253,20 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
         beforeWritesOnly: pausesBeforeWritesOnly)
     case .composite: return nil
     }
+  }
+
+  public var effectiveHeartbeatInterval: Double? {
+    if let interval = heartbeatIntervalSeconds, interval.isFinite, interval > 0 {
+      return interval
+    }
+    guard backend.capabilities.supportsDaemonRecurrence, loopType == .timeBased,
+      let prompt = triggerPrompt, let recurrence = SessionPrompt.recurrence(of: prompt)
+    else { return nil }
+    return SessionPrompt.intervalSeconds(recurrence.interval)
+  }
+
+  public var heartbeatTask: String? {
+    triggerPrompt.map { SessionPrompt.firstPass(of: $0) ?? $0 }
   }
 
   /// What a turn-based session opens with: work in turns, stop for review, and here is

@@ -9,10 +9,9 @@ import Foundation
 /// in front is what a preamble usually means, and for prose it is right.
 ///
 /// It is wrong for exactly one prompt shape, and that shape is a whole loop type. A
-/// time-based node's prompt *is* a slash command — `/loop 1h …`, the directive that makes
-/// the session re-trigger itself, since graphcode holds no timer of its own
-/// (`ZmxSessionLauncher`). Buried mid-message it is literal text: no schedule is created,
-/// the loop runs exactly one pass and sits `idle` forever. Copilot hosts time-based loops
+/// time-based node whose session owns recurrence has a slash-command prompt — `/loop 1h
+/// …`. Buried mid-message it is literal text: no schedule is created, the loop runs
+/// exactly one pass and sits `idle` forever. Copilot hosts this form of time-based loop
 /// and receives its briefing as a preamble, so it got both halves of that and never armed
 /// recurrence at all (issue #179).
 ///
@@ -65,6 +64,20 @@ public enum SessionPrompt {
       return (String(interval), task)
     }
     return nil
+  }
+
+  public static func intervalSeconds(_ interval: String) -> Double? {
+    let trimmed = interval.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard !trimmed.isEmpty else { return nil }
+    let number =
+      trimmed.last.map { "smhd".contains($0) ? String(trimmed.dropLast()) : trimmed } ?? trimmed
+    guard let value = Double(number), value.isFinite, value > 0 else { return nil }
+    switch trimmed.last {
+    case "s": return value
+    case "h": return value * 3600
+    case "d": return value * 86400
+    default: return value * 60
+    }
   }
 
   /// Whether the prompt involves a recurring directive at all — leading or mentioned —

@@ -383,17 +383,19 @@ struct RemoteLoopSurvivalTests {
   }
 
   @Test
-  func copilotRestoreResumesWithoutANameAndCodexCannotResume() {
-    // Copilot's `--name` and `--resume` are mutually exclusive; Codex has no resume at
-    // all, so its restore goes straight to the fresh launch.
+  func copilotAndCodexRestoreWithTheirOwnResumeSyntax() {
+    // Copilot's `--name` and `--resume` are mutually exclusive. Codex resumes through
+    // its subcommand and the notifier banks the next thread ID under this remote node.
     let copilot = agentSurface(backend: .copilotCLI)
       .resumeCommand(settings: GraphcodeSettings(), remoteSettingsPath: nil)?
       .joined(separator: " ")
     #expect(copilot?.contains(#"--resume "$GRAPHCODE_RESUME_ID""#) == true)
     #expect(copilot?.contains("--name") == false)
     let codex = agentSurface(backend: .codex)
-      .resumeCommand(settings: GraphcodeSettings(), remoteSettingsPath: nil)
-    #expect(codex == nil)
+      .resumeCommand(settings: GraphcodeSettings(), remoteSettingsPath: nil, isRemote: true)?
+      .joined(separator: " ")
+    #expect(codex?.contains(#"resume "$GRAPHCODE_RESUME_ID""#) == true)
+    #expect(codex?.contains("$HOME/.graphcode/sessions") == true)
   }
 
   // MARK: - Remote presence hooks

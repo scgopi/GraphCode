@@ -155,7 +155,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// precisely so the expansion happens there.
   func agentCommand(
     settings: GraphcodeSettings = GraphcodeSettingsStore.load(), briefingPath: String? = nil,
-    hooksFile: URL? = nil, remoteSettingsPath: String? = nil
+    hooksFile: URL? = nil, remoteSettingsPath: String? = nil, isRemote: Bool = false
   ) -> [String]? {
     guard var parts = launchPrefix(settings: settings) else { return nil }
     let prompt = initialPrompt == nil ? "" : "\"$\(Self.promptVariable)\""
@@ -175,14 +175,15 @@ struct GhosttyTerminalView: NSViewRepresentable {
     let presence =
       backend.presenceArguments(
         hooksFile: hooksFile, sessionName: sessionName,
-        zmxPath: ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil
+        zmxPath: isRemote ? "zmx" : (ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil),
+        sessionsDirectory: isRemote ? PresenceHooks.remoteSessionsExpression : nil
       )
       .map(PresenceHooks.singleQuoted)
       .joined(separator: " ")
     if !presence.isEmpty { parts.append(presence) }
     // Double-quoted, not `singleQuoted`: the `$HOME` inside must expand when the remote
     // shell evaluates this script.
-    if let remoteSettingsPath { parts.append("--settings \"\(remoteSettingsPath)\"") }
+    addRemotePresenceSettings(remoteSettingsPath, to: &parts)
     // The briefing, delivered the same per-backend way `BackendCommand.launchArguments`
     // delivers it for a daemon-started session — before this, only daemon-started loops
     // knew they could fan out, and a turn-based loop (which only ever starts here) asked
@@ -228,6 +229,15 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// fresh launches cannot diverge on how the shell resolves the agent.
   static func interactiveLoginShell(_ parts: [String]) -> [String] {
     ["/bin/zsh", "-i", "-l", "-c", parts.joined(separator: " ")]
+  }
+
+  func addRemotePresenceSettings(_ path: String?, to parts: inout [String]) {
+    guard let path else { return }
+    if backend == .claudeCode {
+      parts.append("--settings \"\(path)\"")
+    } else if backend == .openCode {
+      parts.insert(contentsOf: ["env", "OPENCODE_CONFIG=\"\(path)\""], at: 1)
+    }
   }
 
   /// Where the graph briefing for this session landed, or `nil` when it shouldn't get

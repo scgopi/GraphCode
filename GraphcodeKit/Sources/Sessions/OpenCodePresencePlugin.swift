@@ -27,8 +27,18 @@ import Foundation
 /// arrives with a `parentID` — which is why every reading is filtered to the session the
 /// loop itself opened, exactly as `SubagentStop` is left out of Claude Code's hooks.
 enum OpenCodePresencePlugin {
+  static func remoteSource(zmxPath: String) -> String {
+    source(
+      zmxPath: zmxPath,
+      sessionsDirectoryExpression: #"join(process.env.HOME ?? "", ".graphcode", "sessions")"#)
+  }
+
   /// The plugin source, with the paths only this machine can know baked in.
   static func source(zmxPath: String, sessionsDirectory: String) -> String {
+    source(zmxPath: zmxPath, sessionsDirectoryExpression: jsString(sessionsDirectory))
+  }
+
+  private static func source(zmxPath: String, sessionsDirectoryExpression: String) -> String {
     """
     // Written by graphcode. Reports what this session is doing, for its card in the graph.
     import { spawnSync } from "node:child_process"
@@ -36,7 +46,7 @@ enum OpenCodePresencePlugin {
     import { join } from "node:path"
 
     const ZMX = \(jsString(zmxPath))
-    const SESSIONS = \(jsString(sessionsDirectory))
+    const SESSIONS = \(sessionsDirectoryExpression)
     const PREFIX = \(jsString(SurfaceRef.zmxSessionPrefix))
 
     export const GraphcodePresence = async ({ directory }) => {

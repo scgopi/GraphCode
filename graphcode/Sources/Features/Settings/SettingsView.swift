@@ -157,7 +157,8 @@ struct SettingsView: View {
           "The daemon drives time-based loops on its own timer. On, new timed loops "
             + "default to the heartbeat (pick \"Itself, with /loop\" in the form, or "
             + "omit --heartbeat in the CLI, for the classic model). Off, existing "
-            + "heartbeat loops fall silent immediately; nothing is ever converted."
+            + "experimental heartbeat loops fall silent immediately; nothing is ever "
+            + "converted. Codex and OpenCode always use daemon recurrence."
         )
         .font(.caption2)
         .foregroundStyle(.secondary)

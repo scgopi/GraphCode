@@ -198,12 +198,10 @@ struct NodeDraftTests {
         #expect(backend.isSpiked)
       }
     }
-    // Codex has no `/loop` equivalent, so the pairing is refused all the way through to
-    // the draft — the same path an unspiked backend used to take for every type.
-    #expect(!CLISessionBackendKind.codex.canHost(.timeBased))
+    #expect(CLISessionBackendKind.codex.canHost(.timeBased))
     #expect(
-      !NodeDraft(
-        title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 1h", backend: .codex
+      NodeDraft(
+        title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 1h Check", backend: .codex
       ).isValid)
   }
 
@@ -226,10 +224,9 @@ struct NodeDraftTests {
       CLISessionBackendKind.hosting(.turnBased) == [.claudeCode, .copilotCLI, .codex, .openCode])
     #expect(
       CLISessionBackendKind.hosting(.goalBased) == [.claudeCode, .copilotCLI, .codex, .openCode])
-    // Time-based needs the session to re-trigger itself, since graphcode holds no timer.
-    // Copilot gained that; Codex and OpenCode have no `/loop` equivalent in their CLI
-    // surfaces.
-    #expect(CLISessionBackendKind.hosting(.timeBased) == [.claudeCode, .copilotCLI])
+    #expect(
+      CLISessionBackendKind.hosting(.timeBased)
+        == [.claudeCode, .copilotCLI, .codex, .openCode])
     // A composite still needs sub-agent fan-out, which only Claude Code has been shown
     // to do.
     #expect(CLISessionBackendKind.hosting(.composite) == [.claudeCode])
@@ -304,6 +301,34 @@ struct NodeDraftTests {
   }
 
   @Test
+  func daemonOnlyBackendsRequireARealDaemonCadence() {
+    for backend in [CLISessionBackendKind.codex, .openCode] {
+      for prompt in ["check reports", "/loop tomorrow check reports", "/schedule daily check"] {
+        #expect(
+          !NodeDraft(
+            title: "Poll", loopType: .timeBased, triggerPrompt: prompt, backend: backend
+          ).isValid,
+          "\(backend.rawValue) accepted \(prompt)")
+      }
+      #expect(
+        NodeDraft(
+          title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 30m check reports",
+          backend: backend
+        ).isValid)
+      #expect(
+        NodeDraft(
+          title: "Poll", loopType: .timeBased, triggerPrompt: "check reports",
+          heartbeatIntervalSeconds: 1800, backend: backend
+        ).isValid)
+      #expect(
+        !NodeDraft(
+          title: "Poll", loopType: .timeBased, triggerPrompt: "check reports",
+          heartbeatIntervalSeconds: .infinity, backend: backend
+        ).isValid)
+    }
+  }
+
+  @Test
   func aCompositeCarriesTheScheduleItIsIntendedFor() {
     // Nothing runs at creation, so this is a statement of intent — but one the composite
     // should still be holding when someone comes back to arm it.
@@ -323,16 +348,14 @@ struct NodeDraftTests {
     // The rule `BackendPicker.onChange` applied, now that the dialog draws the note
     // itself: an impossible pairing left selected is a form that refuses to submit
     // without saying which field is at fault.
-    #expect(!CLISessionBackendKind.codex.canHost(.timeBased))
-    #expect(CLISessionBackendKind.hosting(.timeBased).first == .claudeCode)
+    #expect(CLISessionBackendKind.codex.canHost(.timeBased))
+    #expect(CLISessionBackendKind.hosting(.timeBased).contains(.codex))
     // And the note the dialog shows for it is the picker's own sentence, not a second
     // version of the same refusal.
     #expect(
       BackendPicker.unsupportedReason(backend: .codex, loopType: .timeBased)
         == BackendPicker.unsupportedReason(backend: .codex, loopType: .timeBased))
-    #expect(
-      BackendPicker.unsupportedReason(backend: .codex, loopType: .timeBased)
-        .contains("run once and stop"))
+    #expect(CLISessionBackendKind.openCode.canHost(.timeBased))
   }
 
   @Test

@@ -290,6 +290,7 @@ public actor GraphStore {
       // The experiment's gate: a heartbeat loop created while the toggle is off would
       // sit silent looking broken, and refusal-with-a-pointer is the export precedent.
       if let interval = draft.heartbeatIntervalSeconds, interval > 0,
+        !draft.effectiveBackend.capabilities.supportsDaemonRecurrence,
         onHeartbeatEnabled?() != true
       {
         announceError(
@@ -946,10 +947,17 @@ public actor GraphStore {
         sessionFacing.append("prompt is now: \(trimmed)")
       }
       if let interval = update.heartbeatIntervalSeconds {
+        guard interval.isFinite else {
+          announceError("update refused: a heartbeat interval must be finite")
+          return
+        }
         // Setting an interval needs the experiment on; *clearing* one never does —
         // turning the toggle off must not strand a loop with a cadence nobody can
         // remove.
-        if interval > 0, onHeartbeatEnabled?() != true {
+        if interval > 0,
+          !node.backend.capabilities.supportsDaemonRecurrence,
+          onHeartbeatEnabled?() != true
+        {
           announceError(
             "update refused: heartbeats need the Daemon heartbeat experiment enabled "
               + "in Settings")
@@ -969,6 +977,16 @@ public actor GraphStore {
 
     case .sketch, .composite:
       break
+    }
+
+    let capabilities = node.backend.capabilities
+    if node.loopType == .timeBased, capabilities.supportsDaemonRecurrence,
+      !capabilities.supportsInSessionRecurrence, node.effectiveHeartbeatInterval == nil
+    {
+      announceError(
+        "update refused: \(node.backend.displayName) needs a positive heartbeat or a "
+          + "leading /loop or /every directive with a parseable interval")
+      return
     }
 
     if let tier = update.modelTier {
@@ -1075,7 +1093,20 @@ public actor GraphStore {
       }
       node.loopType = .timeBased
       node.triggerPrompt = trimmed
-      nudge = "You are now a time-based loop. Adopt this cadence by running it now: \(trimmed)"
+      let capabilities = node.backend.capabilities
+      if capabilities.supportsDaemonRecurrence && !capabilities.supportsInSessionRecurrence {
+        guard node.effectiveHeartbeatInterval != nil else {
+          announceError(
+            "promotion refused: \(node.backend.displayName) needs a leading /loop or "
+              + "/every directive with a parseable interval")
+          return
+        }
+        nudge =
+          "You are now a time-based loop. The daemon owns your cadence; run one pass now: "
+          + "\(node.heartbeatTask ?? trimmed)"
+      } else {
+        nudge = "You are now a time-based loop. Adopt this cadence by running it now: \(trimmed)"
+      }
     }
 
     graph.nodes[id: nodeID] = node
@@ -1099,6 +1130,7 @@ public actor GraphStore {
       cancelGoalPoller(nodeID)
       armGoalPoller(for: node)
     }
+    if node.loopType == .timeBased { armHeartbeat(for: node) }
   }
 
   /// A learned note into a node's memory log — `graphcode node memo`, the agent-written
@@ -2126,7 +2158,7 @@ public actor GraphStore {
   /// the session on every beat, so the timer itself holds no authority anything else
   /// would need revoking.
   private func armHeartbeat(for node: LoopNode) {
-    guard node.loopType == .timeBased, let interval = node.heartbeatIntervalSeconds,
+    guard node.loopType == .timeBased, let interval = node.effectiveHeartbeatInterval,
       interval > 0, onDeliverMessage != nil
     else { return }
     heartbeatTimers[node.id]?.cancel()
@@ -2153,13 +2185,14 @@ public actor GraphStore {
   /// was the double-driving this experiment must not reintroduce. Skips are silent; a
   /// heartbeat that logged every beat would turn the memory log into a metronome.
   public func deliverHeartbeat(_ nodeID: UUID) async {
-    guard onHeartbeatEnabled?() == true else { return }
     guard let node = graph.nodes[id: nodeID], node.loopType == .timeBased, !node.isResolved,
-      let interval = node.heartbeatIntervalSeconds, interval > 0
+      let interval = node.effectiveHeartbeatInterval, interval > 0
     else {
       cancelHeartbeat(nodeID)
       return
     }
+    guard node.backend.capabilities.supportsDaemonRecurrence || onHeartbeatEnabled?() == true
+    else { return }
     guard MessageBus.deliverability(to: node) == nil else { return }
     let presence: Presence?
     if let onReadPresence {
@@ -2168,7 +2201,7 @@ public actor GraphStore {
       presence = node.presence?.presence
     }
     guard presence != .busy else { return }
-    let task = node.triggerPrompt ?? ""
+    let task = node.heartbeatTask ?? ""
     _ = await deliverToSession(
       node, "[graphcode] Heartbeat — run one pass of your task now: \(task)")
   }
