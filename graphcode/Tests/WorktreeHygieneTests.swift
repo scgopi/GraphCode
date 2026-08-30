@@ -118,6 +118,37 @@ struct WorktreeHygieneTests {
   }
 
   @Test
+  func theDefaultBranchIsNeverACleanupCandidate() {
+    // `main` checked out in a linked worktree reads as landed against itself, clean
+    // and pushed — every signal the safe tier asks for. But the removal path deletes
+    // the branch too, so the offer would be deleting the trunk.
+    let main = WorktreeAssessment(ref: ref("main"), facts: facts(), binding: .none)
+
+    #expect(main.tier == .lookBeforeRemoving)
+    #expect(!main.isRemovable)
+    #expect(main.summary == "the default branch · never offered for removal")
+  }
+
+  @Test
+  func theDefaultBranchIsNotSafeEvenWhenPrunable() {
+    // The stale-admin-file rule would read main as "nothing on disk to lose", and
+    // the removal would still `branch -D` the trunk.
+    let pruned = WorktreeAssessment(
+      ref: ref("main"), facts: facts(prunable: true, size: nil), binding: .none)
+
+    #expect(pruned.tier == .lookBeforeRemoving)
+    #expect(!pruned.isRemovable)
+  }
+
+  @Test
+  func aDefaultBranchWithARunningLoopStillReadsInUse() {
+    let main = WorktreeAssessment(
+      ref: ref("main"), facts: facts(), binding: .running(loopTitle: "Release"))
+
+    #expect(main.tier == .inUse)
+  }
+
+  @Test
   func aLockedWorktreeIsNotRemovable() {
     // git refuses a locked removal even with --force; a checkbox would offer a
     // silent failure.
