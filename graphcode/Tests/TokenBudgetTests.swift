@@ -40,6 +40,20 @@ struct TokenBudgetTests {
     #expect(delivered.value.count == 1)
     #expect(delivered.value[0].contains("110 of its 100-token budget"))
     #expect(remembered.value.contains { $0.contains("budget exhausted: 110 of 100") })
+    // The why travels with the node, not only into memory — a bare STALLED gave a blown
+    // budget and a blown deadline the same face (issue #217).
+    #expect(await store.graph.nodes[0].stallReason == "budget exhausted: 110 of 100 tokens spent")
+  }
+
+  @Test
+  func statusRendersTheBudgetWhyInsteadOfABareStalled() async {
+    let graph = budgetGraph()
+    let store = GraphStore(graph: graph, onReadUsage: { _, _ in UsageSample(inputTokens: 200) })
+
+    await store.evaluateGoal(graph.nodes[0].id)
+
+    let rendered = GraphcodeCommand.render(await store.graph)
+    #expect(rendered.contains("← Stalled: budget exhausted: 200 of 100 tokens spent"))
   }
 
   @Test
@@ -130,10 +144,27 @@ struct TokenBudgetTests {
       goal: GoalSpec(summary: "done", tokenBudget: 5000))
     let prompt = try #require(node.sessionPrompt)
     #expect(prompt.contains("Token budget: 5000"))
+    // The counting is stated to the session too: a loop pacing itself against the
+    // API's cache-read metering must know that is what the orchestrator counts.
+    #expect(prompt.contains("cache reads included"))
 
     let unbounded = LoopNode(
       title: "Sweep", loopType: .goalBased, goal: GoalSpec(summary: "done"))
     #expect(try #require(unbounded.sessionPrompt).contains("Token budget") == false)
+  }
+
+  @Test
+  func theHelpTextKeepsTheUpdateBudgetLineInSyncWithTheCreateOne() {
+    let lines = GraphcodeCommand.helpText.split(separator: "\n")
+    let budgetLines = lines.filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("--budget") }
+    // Exactly two flag lines: the create section owns the counting statement, and the
+    // update line must point at it rather than carry a copy that can drift apart.
+    #expect(budgetLines.count == 2)
+    #expect(budgetLines[0].contains("for --type goal"))
+    #expect(budgetLines[1].contains("counted as at creation"))
+    // The counting itself stays stated: cache reads are what makes a budget burn fast.
+    #expect(GraphcodeCommand.helpText.contains("cache-read"))
+    #expect(GraphcodeCommand.helpText.contains("cache-creation"))
   }
 
   @Test
