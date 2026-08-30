@@ -482,8 +482,9 @@ private func gitFacts(
 /// without submodules at zero extra git calls, and an unreadable status answers
 /// no: git then refuses the removal itself and the sheet carries its words.
 private func worktreeHasInitializedSubmodules(_ worktreePath: String) async -> Bool {
-  guard FileManager.default.fileExists(
-    atPath: (worktreePath as NSString).appendingPathComponent(".gitmodules"))
+  guard
+    FileManager.default.fileExists(
+      atPath: (worktreePath as NSString).appendingPathComponent(".gitmodules"))
   else { return false }
   let status = try? await run("git", ["-C", worktreePath, "submodule", "status"])
   return status?.split(separator: "\n").contains { !$0.hasPrefix("-") } ?? false
