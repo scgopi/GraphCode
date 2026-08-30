@@ -134,6 +134,13 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// handoff, and custody has to be: stopping or deleting a parent takes its spawned
   /// descendants with it, while a drawn edge to a peer must never be caught in that.
   public let createdBy: UUID?
+  /// Why the loop is `.stalled`, when the graph knows. A budget exhaustion and a stall
+  /// bound both land in the same terminal state, and both wrote their reason only to
+  /// the loop's memory log — every surface then showed a bare STALLED and a human had
+  /// to open memory to learn whether to raise a number or kill a stuck loop. Set by
+  /// `GraphStore` at the moment of the stall; `nil` for loops stalled before the field
+  /// existed, and for stalls whose cause the graph had nothing to say about.
+  public var stallReason: String?
   public var state: LoopState
   public var createdAt: Date
 
@@ -159,6 +166,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     presence: PresenceReading? = nil,
     metricHistory: [MetricSample] = [],
     createdBy: UUID? = nil,
+    stallReason: String? = nil,
     state: LoopState = .idle,
     createdAt: Date = Date()
   ) {
@@ -183,6 +191,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.presence = presence
     self.metricHistory = metricHistory
     self.createdBy = createdBy
+    self.stallReason = stallReason
     self.state = state
     self.createdAt = createdAt
   }
@@ -421,7 +430,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     case id, title, loopType, checkDescription, triggerPrompt, goal, backend, modelTier
     case worktreeBinding, subGraph, pilotState, usage, metricHistory, createdBy
     case state, createdAt, activity, presence, firstInstruction, pausesBeforeWritesOnly
-    case summary, board, heartbeatIntervalSeconds
+    case summary, board, heartbeatIntervalSeconds, stallReason
   }
 
   /// Hand-written for the same reason `LoopEdge`'s is: `ProjectPersistence.loadGraph`
@@ -461,6 +470,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     metricHistory =
       try container.decodeIfPresent([MetricSample].self, forKey: .metricHistory) ?? []
     createdBy = try container.decodeIfPresent(UUID.self, forKey: .createdBy)
+    stallReason = try container.decodeIfPresent(String.self, forKey: .stallReason)
     state = try container.decodeIfPresent(LoopState.self, forKey: .state) ?? .idle
     createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
   }

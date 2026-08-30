@@ -2094,6 +2094,9 @@ public actor GraphStore {
   /// nodes that pay this subprocess are exactly the ones whose author asked for the
   /// bound. A backend that reports nothing can never exhaust a budget: the sample
   /// stays nil and nil is "not reported", not zero — and not infinity either.
+  ///
+  /// The why lands on the node (`LoopNode.stallReason`) as well as in memory: `.stalled`
+  /// alone left every surface reading the same for a blown budget and a blown deadline.
   private func enforceTokenBudget(_ nodeID: UUID, goal: GoalSpec) async -> Bool {
     guard let budget = goal.tokenBudget, budget > 0 else { return false }
     guard let node = graph.nodes[id: nodeID] else { return false }
@@ -2115,6 +2118,7 @@ public actor GraphStore {
         current, MessageBus.budgetExhaustedRequest(used: used, budget: budget))
     }
     graph.nodes[id: nodeID]?.state = .stalled
+    graph.nodes[id: nodeID]?.stallReason = "budget exhausted: \(used) of \(budget) tokens spent"
     cancelGoalPoller(nodeID)
     recordMemory(
       nodeID,
@@ -2167,6 +2171,7 @@ public actor GraphStore {
   /// way to proceed, which is worse than telling them the upstream didn't work out.
   private func markStalled(_ nodeID: UUID) {
     graph.nodes[id: nodeID]?.state = .stalled
+    graph.nodes[id: nodeID]?.stallReason = "stall bound exceeded without resolving"
     cancelGoalPoller(nodeID)
     recordMemory(nodeID, "stalled: exceeded its stall bound without resolving")
     fireOutgoingEdges(from: nodeID, sourceSucceeded: false)

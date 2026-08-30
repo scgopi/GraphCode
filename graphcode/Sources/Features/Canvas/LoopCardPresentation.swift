@@ -83,6 +83,11 @@ struct LoopCardPresentation: Equatable {
   /// goal, prompt or check the loop was created with — less immediate, and never wrong.
   /// The newest beat outranks both, when there is one.
   ///
+  /// One reading outranks them all: a `.stalled` loop that knows why it stalled says so.
+  /// The pill already said STALLED; without the reason on the same card, a budget that
+  /// simply needs raising looks identical to a loop that ground to a halt, and the why
+  /// sat only in the loop's memory log.
+  ///
   /// A beat is the sentence the session wrote about what it is *trying* to do; `activity`
   /// is the tool call it happens to be inside. "Working out why cached tokens get counted
   /// twice" is worth more on a card than "reading UsageProbe.swift", and it is the same
@@ -94,6 +99,7 @@ struct LoopCardPresentation: Equatable {
   /// switched the reading off — while the live activity line it outranks sat unread
   /// underneath it. With the producer off this is exactly what shipped before.
   private static func liveLine(_ node: LoopNode, summarising: Bool) -> String? {
+    if node.displayState == .stalled, let why = collapsed(node.stallReason) { return why }
     let passes = node.metricHistory.count
     if summarising, let beat = node.summary?.current?.text, !beat.isEmpty {
       return passes > 0 ? "pass \(passes) · \(beat)" : beat
