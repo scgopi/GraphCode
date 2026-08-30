@@ -154,6 +154,20 @@ struct TokenBudgetTests {
   }
 
   @Test
+  func theHelpTextKeepsTheUpdateBudgetLineInSyncWithTheCreateOne() {
+    let lines = GraphcodeCommand.helpText.split(separator: "\n")
+    let budgetLines = lines.filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("--budget") }
+    // Exactly two flag lines: the create section owns the counting statement, and the
+    // update line must point at it rather than carry a copy that can drift apart.
+    #expect(budgetLines.count == 2)
+    #expect(budgetLines[0].contains("for --type goal"))
+    #expect(budgetLines[1].contains("counted as at creation"))
+    // The counting itself stays stated: cache reads are what makes a budget burn fast.
+    #expect(GraphcodeCommand.helpText.contains("cache-read"))
+    #expect(GraphcodeCommand.helpText.contains("cache-creation"))
+  }
+
+  @Test
   func theCLIParsesBudgetOnCreateAndUpdate() throws {
     let create = try GraphcodeCommand.parse([
       "node", "create", "/tmp/p", "--title", "Sweep", "--type", "goal",

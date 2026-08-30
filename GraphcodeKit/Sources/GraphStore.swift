@@ -500,7 +500,7 @@ public actor GraphStore {
     case .failed, .stalled:
       resolveNode(nodeID, succeeded: false)
     case .idle, .running, .awaitingInput, .blocked, .waiting, .stopped:
-      graph.nodes[id: nodeID]?.state = rolled
+      setNodeState(nodeID, rolled)
     }
   }
 
@@ -516,7 +516,7 @@ public actor GraphStore {
       node.subGraph != nil
     else { return }
     graph.nodes[id: nodeID]?.pilotState = .piloting
-    graph.nodes[id: nodeID]?.state = .running
+    setNodeState(nodeID, .running)
 
     // Start every unattended loop inside the composite. That *is* the pilot: real
     // sessions, real output, real cost — just not wired to the recurring trigger yet.
@@ -537,7 +537,7 @@ public actor GraphStore {
       node.pilotState.canArm
     else { return }
     graph.nodes[id: nodeID]?.pilotState = .armed
-    graph.nodes[id: nodeID]?.state = .running
+    setNodeState(nodeID, .running)
   }
 
   // MARK: - Usage
@@ -1247,7 +1247,7 @@ public actor GraphStore {
     for newID in plan.idMapping.values {
       guard let node = graph.nodes[id: newID], node.runsUnattended, !node.isResolved
       else { continue }
-      if subGraphDepth == 0 { graph.nodes[id: newID]?.state = .running }
+      if subGraphDepth == 0 { setNodeState(newID, .running) }
       ensureSession(node)
       if node.loopType == .goalBased { armGoalPoller(for: node) }
       armHeartbeat(for: node)
@@ -1372,7 +1372,7 @@ public actor GraphStore {
     if MessageBus.deliverability(to: node) == nil {
       asked = await deliverToSession(node, MessageBus.stopRequest)
     }
-    graph.nodes[id: node.id]?.state = .stopped
+    setNodeState(node.id, .stopped)
     cancelGoalPoller(node.id)
     // The experiment's clean-stop dividend: a heartbeat loop's cadence dies here, with
     // the timer — no typed request needed for a schedule the agent never owned.
@@ -1429,7 +1429,7 @@ public actor GraphStore {
     _ nodeID: UUID, succeeded: Bool, sessionMayStillBeLive: Bool = false
   ) {
     guard let node = graph.nodes[id: nodeID] else { return }
-    graph.nodes[id: nodeID]?.state = succeeded ? .succeeded : .failed
+    setNodeState(nodeID, succeeded ? .succeeded : .failed)
     cancelGoalPoller(nodeID)
     recordMemory(nodeID, "resolved: \(succeeded ? "succeeded" : "failed")")
     // Skill distillation rides resolution: a goal loop that just succeeded is the one
@@ -1610,7 +1610,7 @@ public actor GraphStore {
     let reentry = graph.edges[id: edge.id]?.fireCount ?? 0
     let bound = edge.cycleGuard?.maxIterations.map { " of \($0)" } ?? ""
     for nodeID in members {
-      graph.nodes[id: nodeID]?.state = .idle
+      setNodeState(nodeID, .idle)
       cancelGoalPoller(nodeID)
       recordMemory(nodeID, "cycle re-entry \(reentry)\(bound): pass restarting")
     }
@@ -1969,7 +1969,7 @@ public actor GraphStore {
     let stillBlocked = graph.edges.contains {
       $0.to == nodeID && $0.kind.blocksTarget && !$0.fired
     }
-    graph.nodes[id: nodeID]?.state = stillBlocked ? .blocked : .idle
+    setNodeState(nodeID, stillBlocked ? .blocked : .idle)
   }
 
   // MARK: - Goal-based stop-condition polling
@@ -2163,6 +2163,16 @@ public actor GraphStore {
     await drainPendingNudges()
     await drainPendingFollowUps()
     broadcast()
+  }
+
+  /// Every state write outside the two stall paths goes through here. `stallReason`
+  /// describes the stall that set it — carrying it into a later `.running` or `.idle`
+  /// would show a why for a stall the node has left, and a future stall path that
+  /// forgets to write a fresh reason would then inherit the old one. Clearing on the
+  /// way out makes that impossible: only the stall sites leave a reason behind.
+  private func setNodeState(_ nodeID: UUID, _ state: LoopState) {
+    graph.nodes[id: nodeID]?.state = state
+    if state != .stalled { graph.nodes[id: nodeID]?.stallReason = nil }
   }
 
   /// A stalled loop is terminal, and its downstream edges fire as if it failed. Leaving
