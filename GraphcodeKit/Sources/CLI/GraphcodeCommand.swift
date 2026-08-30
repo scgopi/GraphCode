@@ -678,7 +678,9 @@ extension GraphcodeCommand {
     }
     for node in graph.nodes {
       var line = "  \(node.id)  \(node.displayState)  \(node.loopType)  \(node.title)"
-      if let reason = AttentionRollup.reason(for: node) {
+      if let exitCode = node.presence?.exitCode {
+        line += "  ← session exited (\(exitCode))"
+      } else if let reason = AttentionRollup.reason(for: node) {
         line += "  ← \(reason.displayName)"
       }
       lines.append(line)

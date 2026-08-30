@@ -318,6 +318,25 @@ struct PresenceReportingTests {
   }
 
   @Test
+  func aNonzeroBackendExitIsSurfacedAsFailureWithoutResolvingTheLoop() {
+    var exited = node(.running, .idle)
+    exited.presence = PresenceReading(presence: .idle, confidence: .scanned, exitCode: 1)
+
+    #expect(exited.displayState == .failed)
+    #expect(exited.state == .running)
+    #expect(!exited.presenceShowsLiveSession)
+  }
+
+  @Test
+  func zmxTaskCompletionMarkersExposeTheLastExitCode() {
+    #expect(ZmxSessionLauncher.parseTaskExitCode("ZMX_TASK_COMPLETED:1") == 1)
+    #expect(
+      ZmxSessionLauncher.parseTaskExitCode(
+        "old ZMX_TASK_COMPLETED:0\nnew ZMX_TASK_COMPLETED:17") == 17)
+    #expect(ZmxSessionLauncher.parseTaskExitCode("still running") == nil)
+  }
+
+  @Test
   func aQuietSessionWithActiveDependentsIsWaiting() {
     #expect(node(.running, .idle, activeDependents: true).displayState == .waiting)
     #expect(node(.running, .absent, activeDependents: true).displayState == .waiting)
@@ -364,6 +383,13 @@ struct PresenceReportingTests {
 
     #expect(idleDecoded.presence?.presence == .idle)
     #expect(idleDecoded.displayState == .idle)
+
+    var exited = node(.running, .idle)
+    exited.presence = PresenceReading(presence: .idle, confidence: .scanned, exitCode: 1)
+    let exitDecoded = try JSONDecoder().decode(
+      LoopNode.self, from: JSONEncoder().encode(exited))
+    #expect(exitDecoded.presence?.exitCode == 1)
+    #expect(exitDecoded.displayState == .failed)
   }
 
   // MARK: - Remote Copilot event-log presence

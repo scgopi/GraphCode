@@ -335,6 +335,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// `nil` and `.unknown` count as no: opening is what could *start* a session, and a
   /// gate deciding whether that's safe must not treat "don't know" as "yes".
   public var presenceShowsLiveSession: Bool {
+    if presence?.exitCode != nil { return false }
     switch presence?.presence {
     case .busy, .idle, .awaitingInput: return true
     case .absent, .unknown, nil: return false
@@ -366,6 +367,9 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// untouched, which is exactly the behaviour every surface had before presence existed.
   public var displayState: LoopState {
     guard state == .running, let presence = presence?.presence else { return state }
+    if let exitCode = self.presence?.exitCode {
+      return exitCode == 0 ? .idle : .failed
+    }
     switch presence {
     case .busy: return .running
     case .idle, .absent: return hasActiveDependents ? .waiting : .idle

@@ -41,6 +41,7 @@ public actor GraphStore {
   /// stays for the `until`-guard and for every test that stubs a bare yes/no.
   private let onCheckPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)?
   private let onDeliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)?
+  private let onRecoverSession: (@Sendable (LoopNode, String?) async -> Bool)?
   private let onCaptureScript: (@Sendable (ShellPredicate) async -> String?)?
   private let onReadUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)?
   private let onReadActivity: (@Sendable (LoopNode, String?) async -> String?)?
@@ -182,6 +183,7 @@ public actor GraphStore {
     onEvaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)? = nil,
     onCheckPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)? = nil,
     onDeliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)? = nil,
+    onRecoverSession: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
     onCaptureScript: (@Sendable (ShellPredicate) async -> String?)? = nil,
     onReadUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)? = nil,
     onReadActivity: (@Sendable (LoopNode, String?) async -> String?)? = nil,
@@ -207,6 +209,7 @@ public actor GraphStore {
     self.onEvaluatePredicate = onEvaluatePredicate
     self.onCheckPredicate = onCheckPredicate
     self.onDeliverMessage = onDeliverMessage
+    self.onRecoverSession = onRecoverSession
     self.onCaptureScript = onCaptureScript
     self.onReadUsage = onReadUsage
     self.onReadActivity = onReadActivity
@@ -474,6 +477,7 @@ public actor GraphStore {
       onEvaluatePredicate: onEvaluatePredicate,
       onCheckPredicate: onCheckPredicate,
       onDeliverMessage: onDeliverMessage,
+      onRecoverSession: onRecoverSession,
       onCaptureScript: onCaptureScript,
       onAppendMemory: onAppendMemory,
       onRemoveMemory: onRemoveMemory,
@@ -1882,6 +1886,13 @@ public actor GraphStore {
       return
     }
     guard await deliverToSession(target, message) else {
+      if let onRecoverSession, await onRecoverSession(target, graph.project.path),
+        await deliverToSession(target, message)
+      {
+        graph.nodes[id: nodeID]?.presence = nil
+        recordMemory(nodeID, "session restarted to deliver: \(message)")
+        return
+      }
       recordMemory(nodeID, "while you were away: \(message)")
       announceError(
         "delivery to \(target.title)'s session failed — message staged to its memory; "

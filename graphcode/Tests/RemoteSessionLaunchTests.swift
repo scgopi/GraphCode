@@ -73,16 +73,20 @@ struct RemoteSessionLaunchTests {
   }
 
   @Test
-  func aRemoteClaudeLaunchIsUntouchedByTrustSeeding() throws {
-    // The seed is Copilot-scoped: Claude's remote script must not carry it. (python3
-    // itself now appears for every backend — the delivery fragment rides on it.)
+  func aRemoteClaudeLaunchSeedsFolderTrustFirst() throws {
     let node = LoopNode(
       title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"))
     let invocation = try #require(
       ZmxSessionLauncher.remoteEnsureInvocation(forNode: node, at: location))
     let remoteCommand = try #require(invocation.last)
 
-    #expect(!remoteCommand.contains("trustedFolders"))
+    #expect(remoteCommand.contains("hasTrustDialogAccepted"))
+    #expect(remoteCommand.contains("/home/dev/widget"))
+    let get = try #require(remoteCommand.range(of: "'get'"))
+    let seed = try #require(remoteCommand.range(of: "hasTrustDialogAccepted"))
+    let run = try #require(remoteCommand.range(of: "'run'"))
+    #expect(get.lowerBound < seed.lowerBound)
+    #expect(seed.lowerBound < run.lowerBound)
   }
 
   @Test
@@ -98,10 +102,23 @@ struct RemoteSessionLaunchTests {
     #expect(invocation.first == "/usr/bin/ssh")
     let remoteCommand = try #require(invocation.last)
     #expect(remoteCommand.contains("send"))
+    #expect(remoteCommand.contains("ZMX_TASK_COMPLETED"))
     #expect(remoteCommand.contains("task done"))
     #expect(remoteCommand.contains("sleep"))
     #expect(
       remoteCommand.contains(SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName))
+  }
+
+  @Test
+  func aRemoteCompletedTaskCarriesItsExitCode() {
+    let status = ZmxSessionLauncher.parseRemoteStatus(
+      succeeded: true, output: "graphcode-status: exited 1")
+    #expect(status == .exited(code: 1))
+    let reading = ZmxSessionLauncher.presenceReading(
+      from: status,
+      liveWithoutLabel: PresenceReading(presence: .idle, confidence: .heuristic))
+    #expect(reading.exitCode == 1)
+    #expect(reading.confidence == .scanned)
   }
 
   @Test

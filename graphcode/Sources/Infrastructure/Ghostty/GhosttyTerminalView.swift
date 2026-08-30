@@ -78,6 +78,11 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// view showing it.
   func makeNSView(context: Context) -> TerminalSurfaceHostView {
     let host = TerminalSurfaceHostView()
+    if launchesClaudeCode, backend == .claudeCode, remoteLocation == nil {
+      if let workingDirectory {
+        ClaudeTrust.ensureTrusted(directory: workingDirectory)
+      }
+    }
     let view = TerminalSurfaceStore.shared.surface(for: surfaceID) {
       // A remote surface needs the daemon's socket present on its host before the
       // delivered CLI can reach the graph — same forward the daemon's own launches

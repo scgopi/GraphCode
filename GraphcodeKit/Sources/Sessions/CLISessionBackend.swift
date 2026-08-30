@@ -239,6 +239,10 @@ extension CLISessionBackend {
     await backend(for: node).sendInput(node, text, path)
   }
 
+  public static let recoverSession: @Sendable (LoopNode, String?) async -> Bool = { node, path in
+    await ZmxSessionLauncher.restart(node, projectPath: path)
+  }
+
   /// The usage-reading hook `GraphStore` is wired with.
   public static let readUsage: @Sendable (LoopNode, String?) async -> UsageSample? = {
     node, path in

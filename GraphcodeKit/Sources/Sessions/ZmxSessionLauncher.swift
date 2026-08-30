@@ -272,6 +272,7 @@ public enum ZmxSessionLauncher {
     }
     guard ZmxLocator.isInstalled, !text.isEmpty else { return false }
     guard await sessionExists(node) else { return false }
+    guard await taskExitCode(of: node) == nil else { return false }
     // Typed in PTY-queue-sized pieces rather than one write — see `maxSendChunkBytes`
     // for what a single oversized write silently does. The pieces just accumulate in
     // the composer, exactly as the text and the later `\r` already do; nothing is
@@ -318,13 +319,46 @@ public enum ZmxSessionLauncher {
       let session = try? PTYProcessSession(
         executable: ZmxLocator.binaryURL.path,
         arguments: presenceLabelArguments(forNode: node))
-    else { return PresenceReading(presence: .idle, confidence: .heuristic) }
+    else {
+      return await exitedReading(of: node)
+        ?? PresenceReading(presence: .idle, confidence: .heuristic)
+    }
 
     let (succeeded, output) = await session.waitCollectingOutput()
+    if succeeded, let reported = parsePresenceLabel(output), reported == .busy {
+      return PresenceReading(presence: reported, confidence: .reported)
+    }
+    if let exited = await exitedReading(of: node) { return exited }
     guard succeeded, let reported = parsePresenceLabel(output) else {
       return PresenceReading(presence: .idle, confidence: .heuristic)
     }
     return PresenceReading(presence: reported, confidence: .reported)
+  }
+
+  static func parseTaskExitCode(_ output: String) -> Int? {
+    guard let marker = output.range(of: "ZMX_TASK_COMPLETED:", options: .backwards) else {
+      return nil
+    }
+    let suffix = output[marker.upperBound...]
+    let digits = suffix.prefix(while: \.isNumber)
+    return digits.isEmpty ? nil : Int(digits)
+  }
+
+  static func taskExitCode(of node: LoopNode) async -> Int? {
+    guard
+      let session = try? PTYProcessSession(
+        executable: ZmxLocator.binaryURL.path,
+        arguments: [
+          "history", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
+        ])
+    else { return nil }
+    let (succeeded, output) = await session.waitCollectingOutput()
+    return succeeded ? parseTaskExitCode(output) : nil
+  }
+
+  static func exitedReading(of node: LoopNode) async -> PresenceReading? {
+    guard let code = await taskExitCode(of: node) else { return nil }
+    return PresenceReading(presence: .idle, confidence: .scanned, exitCode: code)
   }
 
   /// Codex's presence, which is read the other way up from everyone else's.
@@ -434,6 +468,36 @@ public enum ZmxSessionLauncher {
     if await killConfirmingDeath(sessionNamed: name) {
       await CondemnedSessions.shared.absolve(name)
     }
+  }
+
+  static func restart(_ node: LoopNode, projectPath: String? = nil) async -> Bool {
+    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+      switch await remoteStatus(of: node, label: "presence", at: remote) {
+      case .absent, .exited: break
+      case .live, .unreachable: return false
+      }
+      guard await runRemoteRetrying(remoteKillInvocation(forNode: node, at: remote)) else {
+        return false
+      }
+      await startRemote(node, at: remote)
+      if case .live = await remoteStatus(of: node, label: "presence", at: remote) {
+        return true
+      }
+      return false
+    }
+    guard ZmxLocator.isInstalled else { return false }
+    let exists = await sessionExists(node)
+    if exists {
+      guard await taskExitCode(of: node) != nil else { return false }
+      guard
+        let session = try? PTYProcessSession(
+          executable: ZmxLocator.binaryURL.path,
+          arguments: killArguments(forNode: node)),
+        await session.waitUntilFinished()
+      else { return false }
+    }
+    await start(node, projectPath: projectPath)
+    return await sessionExists(node)
   }
 
   /// `zmx kill`, then proof: `zmx kill` exits 0 whether or not anything died, and
@@ -906,18 +970,19 @@ public enum ZmxSessionLauncher {
     else { return nil }
     let check = quotedCommand(["zmx"] + existenceCheckArguments(forNode: node))
     let run = remoteQuotedCommand(["zmx"] + zmxArguments)
-    // Copilot only, and remote only: an unattended Copilot queues its `--interactive`
-    // goal behind a per-session folder-trust dialog that nobody is present to answer,
-    // so a fresh remote Copilot loop booted to an idle screen with its goal parked
-    // forever (`--yolo` does not cover folder trust — measured). Pre-trusting the one
-    // repository the loop was pointed at, on the host it runs on, is the same consent
-    // the human gave by creating the loop there. The write is additive and idempotent
-    // (the `trustedFolders` list in `~/.copilot/config.json`, schema read off a real
-    // "remember this folder" answer), and any failure — no python3, malformed config —
-    // falls back to today's behaviour: the dialog, answerable by opening the loop.
-    let trustSeed =
-      node.backend == .copilotCLI
-      ? copilotTrustSeedScript(forRemotePath: location.remotePath) + "; " : ""
+    // Folder trust is outside both Claude's permission mode and Copilot's `--yolo`.
+    // Pre-trusting only the repository explicitly added to the graph keeps an unattended
+    // launch from parking its opening goal behind a dialog nobody is present to answer.
+    let trustSeed: String = {
+      switch node.backend {
+      case .claudeCode:
+        return claudeTrustSeedScript(forRemotePath: location.remotePath) + "; "
+      case .copilotCLI:
+        return copilotTrustSeedScript(forRemotePath: location.remotePath) + "; "
+      case .codex, .openCode:
+        return ""
+      }
+    }()
     let hooksWrite =
       PresenceHooks.remoteWriteFragment(forBackend: node.backend)
       .map { $0 + "; " } ?? ""
@@ -1124,6 +1189,16 @@ public enum ZmxSessionLauncher {
     return quotedCommand(["python3", "-c", program, remotePath]) + " 2>/dev/null || true"
   }
 
+  static func claudeTrustSeedScript(forRemotePath remotePath: String) -> String {
+    let program =
+      "import json,os,sys; p=os.path.expanduser('~/.claude.json'); "
+      + "c=json.load(open(p)) if os.path.exists(p) else {}; t=sys.argv[1]; "
+      + "ps=c.get('projects') or {}; pr=ps.get(t) or {}; "
+      + "pr['hasTrustDialogAccepted']=True; ps[t]=pr; c['projects']=ps; "
+      + "open(p,'w').write(json.dumps(c)+'\\n')"
+    return quotedCommand(["python3", "-c", program, remotePath]) + " 2>/dev/null || true"
+  }
+
   /// One argv as one shell-safe string — each argument quoted, so a prompt containing
   /// quotes, `$(…)`, or `;` stays one word through the remote shell exactly as it does
   /// through zmx's own quoting locally. Public because the app's remote *attach* is
@@ -1135,8 +1210,8 @@ public enum ZmxSessionLauncher {
   /// The remote twin of the local text-then-Enter delivery, in one ssh round-trip:
   /// type, give the composer its beat, then the Enter as its own keystroke — the same
   /// paste-heuristic dance the local path does, run on the host that owns the session.
-  /// `zmx send` into a session that doesn't exist exits non-zero, so a dead remote
-  /// loop reports failure and the caller stages the message, exactly like local.
+  /// A missing session or one whose backend task already exited reports failure, so the
+  /// caller can recover it instead of typing into the stale shell left behind.
   static func remoteSendInvocation(
     _ text: String, toNode node: LoopNode, at location: RemoteProjectLocation
   ) -> [String] {
@@ -1151,7 +1226,11 @@ public enum ZmxSessionLauncher {
     let clearCodexPresence =
       node.backend == .codex
       ? " && " + quotedCommand(["zmx", "set", sessionName, "presence="]) : ""
-    let script = "\(sends) && sleep 0.4 && \(submit)\(clearCodexPresence)"
+    let history = quotedCommand(["zmx", "history", sessionName])
+    let liveBackend =
+      "! \(history) 2>/dev/null | tail -c 4096 | "
+      + "grep -Eq 'ZMX_TASK_COMPLETED:[0-9]+'"
+    let script = "\(liveBackend) && \(sends) && sleep 0.4 && \(submit)\(clearCodexPresence)"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
   }
 
@@ -1175,6 +1254,7 @@ public enum ZmxSessionLauncher {
   enum RemoteSessionStatus: Equatable {
     case unreachable
     case absent
+    case exited(code: Int)
     case live(label: String?)
   }
 
@@ -1196,9 +1276,13 @@ public enum ZmxSessionLauncher {
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     let check = quotedCommand(["zmx", "get", name])
     let read = quotedCommand(["zmx", "get", name, label])
+    let history = quotedCommand(["zmx", "history", name])
     let script =
       "if \(check) >/dev/null 2>&1; then "
-      + "echo \"\(remoteProbeMarker) live $(\(read) 2>/dev/null)\"; "
+      + "gc_done=$(\(history) 2>/dev/null | tail -c 4096 | "
+      + "sed -n 's/.*ZMX_TASK_COMPLETED:\\([0-9][0-9]*\\).*/\\1/p' | tail -1); "
+      + "if [ -n \"$gc_done\" ]; then echo \"\(remoteProbeMarker) exited $gc_done\"; "
+      + "else echo \"\(remoteProbeMarker) live $(\(read) 2>/dev/null)\"; fi; "
       + "else echo '\(remoteProbeMarker) absent'; fi"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
   }
@@ -1229,6 +1313,11 @@ public enum ZmxSessionLauncher {
     let status = marked.dropFirst(remoteProbeMarker.count)
       .trimmingCharacters(in: .whitespaces)
     if status == "absent" { return .absent }
+    if status.hasPrefix("exited "),
+      let code = Int(status.dropFirst("exited ".count).trimmingCharacters(in: .whitespaces))
+    {
+      return .exited(code: code)
+    }
     guard status.hasPrefix("live") else { return .unreachable }
     let label = status.dropFirst("live".count).trimmingCharacters(in: .whitespaces)
     return .live(label: label.isEmpty ? nil : label)
@@ -1252,6 +1341,8 @@ public enum ZmxSessionLauncher {
     switch status {
     case .unreachable: return .unknown
     case .absent: return .absent
+    case .exited(let code):
+      return PresenceReading(presence: .idle, confidence: .scanned, exitCode: code)
     case .live(let label):
       guard let label, let reported = parsePresenceLabel(label) else { return liveWithoutLabel }
       return PresenceReading(presence: reported, confidence: .reported)
@@ -1359,11 +1450,14 @@ public enum ZmxSessionLauncher {
       DialLog.record(session: name, dial: "ensure", event: "resume-dead")
       SessionIDStore.remove(forNodeID: node.id)
     }
-    // The local half of the trust seed the remote ensure has always done: without it a
-    // fresh unattended Copilot parks its opening prompt behind the folder-trust dialog
-    // and swallows anything typed at it — the first pass included (`CopilotTrust`).
-    if node.backend == .copilotCLI, let directory = wd {
-      CopilotTrust.ensureTrusted(directory: directory)
+    // Folder trust is separate from backend permission modes. The path is the one the
+    // human explicitly added to the graph, and the write is additive and idempotent.
+    if let directory = wd {
+      if node.backend == .claudeCode {
+        ClaudeTrust.ensureTrusted(directory: directory)
+      } else if node.backend == .copilotCLI {
+        CopilotTrust.ensureTrusted(directory: directory)
+      }
     }
     // Noted *before* the launch: the first pass below waits for a Copilot session
     // directory that was not already there, which is how it tells a session it just

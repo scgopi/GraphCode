@@ -288,4 +288,36 @@ struct MessageAndSpawnTests {
 
     #expect(delivered.value.isEmpty)
   }
+
+  @Test
+  func anAdHocMessageRestartsADeadSessionAndRetriesDelivery() async {
+    let node = LoopNode(
+      title: "Worker", loopType: .goalBased, goal: GoalSpec(summary: "work"),
+      presence: PresenceReading(presence: .idle, confidence: .scanned, exitCode: 1),
+      state: .running)
+    let graph = LoopGraph(
+      project: ProjectRef(path: "/tmp/recover", name: "recover"), nodes: [node])
+    let attempts = LockIsolated(0)
+    let recovered = LockIsolated<[String]>([])
+    let remembered = LockIsolated<[String]>([])
+    let store = GraphStore(
+      graph: graph,
+      onDeliverMessage: { _, _, _ in
+        attempts.withValue { $0 += 1 }
+        return attempts.value > 1
+      },
+      onRecoverSession: { target, path in
+        recovered.withValue { $0.append("\(target.title)@\(path ?? "")") }
+        return true
+      },
+      onAppendMemory: { _, entry in remembered.withValue { $0.append(entry) } })
+
+    await store.handle(.messageNode(node.id, text: "keep going", from: nil, followUp: nil))
+
+    #expect(attempts.value == 2)
+    #expect(recovered.value == ["Worker@/tmp/recover"])
+    #expect(remembered.value.contains { $0.contains("session restarted to deliver") })
+    #expect(!remembered.value.contains { $0.contains("while you were away") })
+    #expect(await store.graph.nodes[0].presence == nil)
+  }
 }
