@@ -78,6 +78,11 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// view showing it.
   func makeNSView(context: Context) -> TerminalSurfaceHostView {
     let host = TerminalSurfaceHostView()
+    if launchesClaudeCode, backend == .claudeCode, remoteLocation == nil {
+      if let workingDirectory {
+        ClaudeCodeTrust.ensureTrusted(directory: workingDirectory)
+      }
+    }
     let view = TerminalSurfaceStore.shared.surface(for: surfaceID) {
       // A remote surface needs the daemon's socket present on its host before the
       // delivered CLI can reach the graph — same forward the daemon's own launches
@@ -320,8 +325,18 @@ struct GhosttyTerminalView: NSViewRepresentable {
     if let resuming = localResumeOrFreshCommand(agentLaunch: agentCommand) {
       return resuming
     }
+    // Unattended Codex sessions are started by graphcoded. Attaching with the agent
+    // command as well creates a race where zmx run types that command into Codex.
+    if defersCodexLaunchToDaemon {
+      return command
+    }
     command += agentCommand
     return command
+  }
+
+  var defersCodexLaunchToDaemon: Bool {
+    backend == .codex && launchesClaudeCode
+      && (loopType == .goalBased || loopType == .timeBased)
   }
 
   /// Opening a loop whose session is gone used to start the agent **fresh**, prompt and

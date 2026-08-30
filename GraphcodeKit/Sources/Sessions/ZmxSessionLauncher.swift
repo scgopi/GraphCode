@@ -313,14 +313,30 @@ public enum ZmxSessionLauncher {
         of: node, at: remote,
         liveWithoutLabel: PresenceReading(presence: .idle, confidence: .heuristic))
     }
-    guard ZmxLocator.isInstalled, await sessionExists(node) else { return .absent }
+    guard ZmxLocator.isInstalled else { return .absent }
+    // The task state, not the session record, is the truth a husk hides: `zmx ls`
+    // prints `ended=`/`exit_code=` only for a completed task (`sessionTaskState`), so
+    // an exit read here is zmx's own bookkeeping — never a marker a transcript could
+    // have quoted. An exited task's code rides the reading; the wrapper shell left
+    // behind has nothing to say.
+    switch await sessionTaskState(node) {
+    case .absent: return .absent
+    case .exited(let code):
+      return PresenceReading(presence: .idle, confidence: .scanned, exitCode: code)
+    case .alive: break
+    }
     guard
       let session = try? PTYProcessSession(
         executable: ZmxLocator.binaryURL.path,
         arguments: presenceLabelArguments(forNode: node))
-    else { return PresenceReading(presence: .idle, confidence: .heuristic) }
+    else {
+      return PresenceReading(presence: .idle, confidence: .heuristic)
+    }
 
     let (succeeded, output) = await session.waitCollectingOutput()
+    if succeeded, let reported = parsePresenceLabel(output), reported == .busy {
+      return PresenceReading(presence: reported, confidence: .reported)
+    }
     guard succeeded, let reported = parsePresenceLabel(output) else {
       return PresenceReading(presence: .idle, confidence: .heuristic)
     }
@@ -353,7 +369,13 @@ public enum ZmxSessionLauncher {
         of: node, at: remote,
         liveWithoutLabel: PresenceReading(presence: .busy, confidence: .scanned))
     }
-    guard ZmxLocator.isInstalled, await sessionExists(node) else { return .absent }
+    guard ZmxLocator.isInstalled else { return .absent }
+    switch await sessionTaskState(node) {
+    case .absent: return .absent
+    case .exited(let code):
+      return PresenceReading(presence: .idle, confidence: .scanned, exitCode: code)
+    case .alive: break
+    }
     guard
       let session = try? PTYProcessSession(
         executable: ZmxLocator.binaryURL.path,
@@ -1275,6 +1297,7 @@ public enum ZmxSessionLauncher {
   enum RemoteSessionStatus: Equatable {
     case unreachable
     case absent
+    case exited(code: Int)
     case live(label: String?)
   }
 
@@ -1296,9 +1319,13 @@ public enum ZmxSessionLauncher {
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     let check = quotedCommand(["zmx", "get", name])
     let read = quotedCommand(["zmx", "get", name, label])
+    let history = quotedCommand(["zmx", "history", name])
     let script =
       "if \(check) >/dev/null 2>&1; then "
-      + "echo \"\(remoteProbeMarker) live $(\(read) 2>/dev/null)\"; "
+      + "gc_done=$(\(history) 2>/dev/null | tail -c 4096 | "
+      + "sed -n 's/.*ZMX_TASK_COMPLETED:\\([0-9][0-9]*\\).*/\\1/p' | tail -1); "
+      + "if [ -n \"$gc_done\" ]; then echo \"\(remoteProbeMarker) exited $gc_done\"; "
+      + "else echo \"\(remoteProbeMarker) live $(\(read) 2>/dev/null)\"; fi; "
       + "else echo '\(remoteProbeMarker) absent'; fi"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
   }
@@ -1329,6 +1356,11 @@ public enum ZmxSessionLauncher {
     let status = marked.dropFirst(remoteProbeMarker.count)
       .trimmingCharacters(in: .whitespaces)
     if status == "absent" { return .absent }
+    if status.hasPrefix("exited "),
+      let code = Int(status.dropFirst("exited ".count).trimmingCharacters(in: .whitespaces))
+    {
+      return .exited(code: code)
+    }
     guard status.hasPrefix("live") else { return .unreachable }
     let label = status.dropFirst("live".count).trimmingCharacters(in: .whitespaces)
     return .live(label: label.isEmpty ? nil : label)
@@ -1352,6 +1384,8 @@ public enum ZmxSessionLauncher {
     switch status {
     case .unreachable: return .unknown
     case .absent: return .absent
+    case .exited(let code):
+      return PresenceReading(presence: .idle, confidence: .scanned, exitCode: code)
     case .live(let label):
       guard let label, let reported = parsePresenceLabel(label) else { return liveWithoutLabel }
       return PresenceReading(presence: reported, confidence: .reported)

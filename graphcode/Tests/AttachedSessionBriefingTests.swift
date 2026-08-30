@@ -17,11 +17,11 @@ struct AttachedSessionBriefingTests {
 
   private func surface(
     _ backend: CLISessionBackendKind, launchesClaudeCode: Bool = true,
-    initialPrompt: String? = "go"
+    initialPrompt: String? = "go", loopType: LoopType = .turnBased
   ) -> GhosttyTerminalView {
     GhosttyTerminalView(
       surfaceID: UUID(), sessionName: "s", launchesClaudeCode: launchesClaudeCode,
-      backend: backend, initialPrompt: initialPrompt, workingDirectory: nil,
+      backend: backend, loopType: loopType, initialPrompt: initialPrompt, workingDirectory: nil,
       projectPath: "/tmp/proj", onProcessExited: { _ in })
   }
 
@@ -60,6 +60,14 @@ struct AttachedSessionBriefingTests {
       surface(.codex).sessionEnvironment(briefingPath: briefing)[
         "GRAPHCODE_TRIGGER_PROMPT"] ?? ""
     #expect(prompt.contains(briefing))
+  }
+
+  @Test
+  func unattendedCodexLeavesFirstLaunchToTheDaemon() {
+    #expect(surface(.codex, loopType: .goalBased).defersCodexLaunchToDaemon)
+    #expect(surface(.codex, loopType: .timeBased).defersCodexLaunchToDaemon)
+    #expect(!surface(.codex).defersCodexLaunchToDaemon)
+    #expect(!surface(.claudeCode, loopType: .goalBased).defersCodexLaunchToDaemon)
   }
 
   @Test

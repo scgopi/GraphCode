@@ -320,6 +320,16 @@ struct PresenceReportingTests {
   }
 
   @Test
+  func aNonzeroBackendExitIsSurfacedAsFailureWithoutResolvingTheLoop() {
+    var exited = node(.running, .idle)
+    exited.presence = PresenceReading(presence: .idle, confidence: .scanned, exitCode: 1)
+
+    #expect(exited.displayState == .failed)
+    #expect(exited.state == .running)
+    #expect(!exited.presenceShowsLiveSession)
+  }
+
+  @Test
   func aGoneSessionOnAnUnattendedLoopPastTheGraceIsFailed() {
     // Issue #215: a goal loop whose agent exited on its first turn showed IDLE — the
     // one word it must not show, since nothing is waiting for work. Past the boot
@@ -404,6 +414,13 @@ struct PresenceReportingTests {
 
     #expect(idleDecoded.presence?.presence == .idle)
     #expect(idleDecoded.displayState == .idle)
+
+    var exited = node(.running, .idle)
+    exited.presence = PresenceReading(presence: .idle, confidence: .scanned, exitCode: 1)
+    let exitDecoded = try JSONDecoder().decode(
+      LoopNode.self, from: JSONEncoder().encode(exited))
+    #expect(exitDecoded.presence?.exitCode == 1)
+    #expect(exitDecoded.displayState == .failed)
   }
 
   // MARK: - Remote Copilot event-log presence

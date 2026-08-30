@@ -18,7 +18,9 @@ public enum ClaudeCodeTrust {
   }
 
   /// Sets `projects[directory].hasTrustDialogAccepted = true` unless it is already set.
-  /// Never throws and never clobbers: a config it cannot parse is left exactly as found.
+  /// Never throws and never clobbers: a config it cannot parse is left exactly as found,
+  /// and so is a config whose `projects` (or the project's own entry) holds something
+  /// other than the expected object — replacing it would trade one known value for a guess.
   public static func ensureTrusted(directory: String, configURL: URL = configURL) {
     guard !directory.isEmpty else { return }
     let fileManager = FileManager.default
@@ -30,7 +32,9 @@ public enum ClaudeCodeTrust {
       else { return }
       config = dictionary
     }
+    if let value = config["projects"], !(value is [String: Any]) { return }
     var projects = config["projects"] as? [String: Any] ?? [:]
+    if let value = projects[directory], !(value is [String: Any]) { return }
     var entry = projects[directory] as? [String: Any] ?? [:]
     guard (entry["hasTrustDialogAccepted"] as? Bool) != true else { return }
     entry["hasTrustDialogAccepted"] = true
