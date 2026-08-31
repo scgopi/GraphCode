@@ -329,6 +329,105 @@ do {
       projectPath: projectPath,
       [.graphCommand(projectPath: projectPath, command: .armComposite(nodeID))])
 
+  case .mailboardPost(let projectPath, let topic, let text):
+    // Attributed like `node send`: run from inside a loop, ZMX_SESSION names the
+    // sender and readers see who posted; from a human's shell there is no variable
+    // and the note reads as from "a human" — which is exactly the human's voice on
+    // the board.
+    let author = SurfaceRef.nodeID(
+      fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
+    try client.send(.openProject(path: projectPath))
+    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try client.send(
+      .graphCommand(
+        projectPath: projectPath,
+        command: .mailboardPost(text: text, topic: topic, from: author)))
+    let postVerdict = try client.waitForEvent { event in
+      switch event {
+      case .graphChanged, .errorOccurred: return true
+      default: return false
+      }
+    }
+    if case .errorOccurred(let message) = postVerdict { fail(message) }
+    if case .graphChanged(let graph) = postVerdict {
+      print(GraphcodeCommand.renderPosted(graph))
+    }
+
+  case .mailboardSync(let projectPath):
+    // Attributed like `node send` — and required, the one place a mailboard verb
+    // refuses a human shell up front: the cursor is the calling loop's, so with no
+    // ZMX_SESSION there is nobody to advance it for, and the daemon's refusal would
+    // arrive only after the round trip. Reading without a cursor is `mailboard list`.
+    let reader = SurfaceRef.nodeID(
+      fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
+    guard let reader else {
+      fail(
+        "mailboard sync needs a loop identity — run it from inside a loop's session "
+          + "($ZMX_SESSION); a human reading the board wants `graphcode mailboard list`")
+    }
+    try client.send(.openProject(path: projectPath))
+    let opened = try client.waitForEvent {
+      if case .graphChanged = $0 { return true } else { return false }
+    }
+    try client.send(
+      .graphCommand(projectPath: projectPath, command: .mailboardSync(from: reader)))
+    let syncVerdict = try client.waitForEvent { event in
+      switch event {
+      case .graphChanged, .errorOccurred: return true
+      default: return false
+      }
+    }
+    if case .errorOccurred(let message) = syncVerdict { fail(message) }
+    // Unread is computed from the snapshot `openProject` already delivered: sync only
+    // moves the cursor, so the posts it covers are exactly those above the cursor
+    // there — a post landing mid-command shows up at the next sync, as it should.
+    if case .graphChanged(let graph) = opened {
+      print(GraphcodeCommand.renderMailboard(graph, unreadFor: reader))
+    }
+
+  case .mailboardList(let projectPath):
+    // Read-only: no command is sent, so — the `status` rule — nothing past the
+    // snapshot is waited for, and no cursor moves. This is the human's window onto
+    // the board; `sync` is the loop's.
+    try client.send(.openProject(path: projectPath))
+    let opened = try client.waitForEvent {
+      if case .graphChanged = $0 { return true } else { return false }
+    }
+    if case .graphChanged(let graph) = opened {
+      print(GraphcodeCommand.renderMailboard(graph))
+    }
+
+  case .mailboardWatch(let projectPath, let on, let topic):
+    // Attributed like `node send` — and required like `sync`: the subscription is
+    // the calling loop's, because the mail is delivered to a session, not a shell.
+    let watcher = SurfaceRef.nodeID(
+      fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
+    guard let watcher else {
+      fail(
+        "mailboard watch needs a loop identity — run it from inside a loop's session "
+          + "($ZMX_SESSION); the mail is delivered to the loop that watches")
+    }
+    try client.send(.openProject(path: projectPath))
+    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try client.send(
+      .graphCommand(
+        projectPath: projectPath,
+        command: .mailboardWatch(on: on, topic: topic, from: watcher)))
+    let watchVerdict = try client.waitForEvent { event in
+      switch event {
+      case .graphChanged, .errorOccurred: return true
+      default: return false
+      }
+    }
+    if case .errorOccurred(let message) = watchVerdict { fail(message) }
+    if on {
+      print(
+        topic.map { "watching '\($0)' — matching posts are typed in when the loop goes idle" }
+          ?? "watching all posts — they are typed in when the loop goes idle")
+    } else {
+      print("stopped watching")
+    }
+
   case .reap:
     break  // handled before the daemon dial above
 

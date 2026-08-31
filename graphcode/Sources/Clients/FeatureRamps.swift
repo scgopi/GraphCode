@@ -23,6 +23,7 @@ enum FeatureRamps {
 
   enum Feature: String {
     case codespaces
+    case mailboard
 
     /// What answers when no ramps.json has ever been fetched (and when the fetch
     /// fails). Kept in step with the *shipped* ramp state: a feature ramped fully on
@@ -31,6 +32,7 @@ enum FeatureRamps {
     var defaultPercents: [String: Int] {
       switch self {
       case .codespaces: return ["beta": 100, "stable": 100]
+      case .mailboard: return ["beta": 100, "stable": 0]
       }
     }
   }

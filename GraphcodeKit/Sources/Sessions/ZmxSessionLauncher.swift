@@ -634,7 +634,10 @@ public enum ZmxSessionLauncher {
     // reach it at its next wake.
     let wakeFile =
       projectPath != nil
-      ? NodeMemory.writeWakeDigest(projectPath: projectPath ?? "", nodeID: node.id) : nil
+      ? NodeMemory.writeWakeDigest(
+        projectPath: projectPath ?? "", nodeID: node.id,
+        mailboardEnabled: settings.mailboardEnabled)
+      : nil
     let wakePath: String?
     if let projectPath, remote != nil {
       wakePath =

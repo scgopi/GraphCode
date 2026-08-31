@@ -375,6 +375,21 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// heartbeat loops immediately without restarting anything.
   public var daemonHeartbeatEnabled: Bool
 
+  /// Whether loops get the **Mailboard** — a shared, unaddressed message board the
+  /// graph's loops post to and read without any wiring: `node send` and edges are
+  /// for talking to a peer you already know, while the Mailboard is the ambient
+  /// counterpart, a note dropped for whoever comes next (a decision, a dead end, a
+  /// claim on a task), discoverable by loops that did not exist when it was written.
+  ///
+  /// **Off by default, and beta-ramped.** The app resolves
+  /// `FeatureRamps.Feature.mailboard` — beta installs first, stable only when the
+  /// ramp says so — and writes the resolved value here, which is the bit the daemon
+  /// (which cannot see ramps or `UserDefaults`) actually enforces: every `mailboard`
+  /// command, the briefing's board section, and the wake digest's pointer all read
+  /// this. A flip the human made in Settings is a recorded choice, preserved the way
+  /// `sharesLoops`' is.
+  public var mailboardEnabled: Bool
+
   /// Whether `graphcoded` keeps the Mac awake while any loop is running
   /// (`AwakeAssertion`). Off by default and deliberately so: a background process that
   /// quietly stops a machine sleeping is a thing to opt into, not to inherit from an
@@ -403,6 +418,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     summaryUsesModel: Bool = false,
     visualisesSummaries: Bool = false,
     daemonHeartbeatEnabled: Bool = false,
+    mailboardEnabled: Bool = false,
     keepsMacAwakeWhileLoopsRun: Bool = false,
     worktreePolicies: [String: WorktreeHygienePolicy] = [:]
   ) {
@@ -419,6 +435,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     self.summaryUsesModel = summaryUsesModel
     self.visualisesSummaries = visualisesSummaries
     self.daemonHeartbeatEnabled = daemonHeartbeatEnabled
+    self.mailboardEnabled = mailboardEnabled
     self.keepsMacAwakeWhileLoopsRun = keepsMacAwakeWhileLoopsRun
     self.worktreePolicies = worktreePolicies
   }
@@ -473,6 +490,11 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       try container.decodeIfPresent(Bool.self, forKey: .visualisesSummaries) ?? false
     daemonHeartbeatEnabled =
       try container.decodeIfPresent(Bool.self, forKey: .daemonHeartbeatEnabled) ?? false
+    // The daemon-side half of the beta ramp: the app writes the ramp-resolved value,
+    // so absent means "no app has spoken yet" and takes the off every non-app flow
+    // (CLI-only machines, hand-edited files) already had.
+    mailboardEnabled =
+      try container.decodeIfPresent(Bool.self, forKey: .mailboardEnabled) ?? false
     // Absent means nobody has asked for it, which is the default. An update must never
     // start holding a power assertion on a machine whose owner did not choose that.
     keepsMacAwakeWhileLoopsRun =

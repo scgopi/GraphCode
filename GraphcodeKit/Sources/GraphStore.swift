@@ -1,4 +1,5 @@
 import Foundation
+import MailboardKit
 
 /// Owns the daemon's one `LoopGraph`, applies commands, automatically fires `.handoff`
 /// edges when a node resolves, keeps time-based nodes' sessions alive, and broadcasts
@@ -79,6 +80,11 @@ public actor GraphStore {
   /// switching it off empties the boards on the next poll without restarting anything, the
   /// same contract `onHeartbeatEnabled` has.
   private let onBoardsEnabled: (@Sendable () -> Bool)?
+  /// Whether the Mailboard is on — read fresh at every gate — so flipping the Settings
+  /// toggle (or the beta ramp resolving) applies to the next post without restarting
+  /// anything. `nil` (tests that don't care, and any client that never wires it) means
+  /// off, which is the ramp's default.
+  private let onMailboardEnabled: (@Sendable () -> Bool)?
   /// The newest pass each node has already been *asked* about, drawn or not.
   ///
   /// Without this, `NONE` — the answer the composer is told to give for a thin pass, and
@@ -197,6 +203,7 @@ public actor GraphStore {
       @Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?
     )? = nil,
     onBoardsEnabled: (@Sendable () -> Bool)? = nil,
+    onMailboardEnabled: (@Sendable () -> Bool)? = nil,
     subGraphDepth: Int = 0
   ) {
     self.graph = graph
@@ -220,6 +227,7 @@ public actor GraphStore {
     self.onHeartbeatEnabled = onHeartbeatEnabled
     self.onComposeBoard = onComposeBoard
     self.onBoardsEnabled = onBoardsEnabled
+    self.onMailboardEnabled = onMailboardEnabled
   }
 
   private func recordMemory(_ nodeID: UUID, _ entry: String) {
@@ -363,6 +371,15 @@ public actor GraphStore {
 
     case .messageNode(let nodeID, let text, let from, let followUp):
       await deliverAdHocMessage(to: nodeID, text: text, from: from, followUp: followUp ?? false)
+
+    case .mailboardPost(let text, let topic, let from):
+      await mailboardPost(text: text, topic: topic, from: from)
+
+    case .mailboardSync(let from):
+      mailboardSync(from: from)
+
+    case .mailboardWatch(let on, let topic, let from):
+      mailboardWatch(on: on, topic: topic, from: from)
 
     case .renameNode(let nodeID, let title):
       renameNode(nodeID, to: title)
@@ -1199,6 +1216,150 @@ public actor GraphStore {
     }
     let sender = senderID.flatMap { $0 == nodeID ? nil : graph.nodes[id: $0]?.title }
     recordMemory(nodeID, "playbook rolled back\(sender.map { " by \($0)" } ?? "")")
+  }
+
+  // MARK: - Mailboard
+
+  /// Whether the Mailboard is on, asked fresh at every gate with the refusal said out
+  /// loud — the export precedent: a beta-ramped feature a loop reaches for while the
+  /// ramp has it off must answer with the way to turn it on, because the sender cannot
+  /// tell a silent no-op from a board nobody read.
+  private func mailboardIsOn() -> Bool { onMailboardEnabled?() == true }
+
+  /// Drops a note onto the shared board. Unaddressed by design: there is no target
+  /// id, no edge, no delivery guarantee to any *specific* loop — the post lands on
+  /// the graph, watchers get their best-effort ding, and every future reader finds
+  /// it with one `mailboard sync`.
+  private func mailboardPost(text: String, topic: String?, from senderID: UUID?) async {
+    guard mailboardIsOn() else {
+      announceError(
+        "the Mailboard is off — enable Mailboard in Settings "
+          + "(mailboardEnabled in ~/.graphcode/settings.json)")
+      return
+    }
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      announceError("mailboard post refused: empty note")
+      return
+    }
+    guard trimmed.utf8.count <= MailboardPost.maxBodyBytes else {
+      announceError(
+        "mailboard post refused: \(trimmed.utf8.count) bytes is over the "
+          + "\(MailboardPost.maxBodyBytes)-byte bound — a post is a note to a peer, not "
+          + "a document; put the document in the repo and post the path")
+      return
+    }
+    let trimmedTopic =
+      topic.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+      ?? Optional<String>.none
+    if let trimmedTopic, trimmedTopic.isEmpty {
+      announceError("mailboard post refused: an empty topic is no topic — omit it")
+      return
+    }
+    guard trimmedTopic?.utf8.count ?? 0 <= MailboardPost.maxTopicBytes else {
+      announceError(
+        "mailboard post refused: topic over \(MailboardPost.maxTopicBytes) bytes")
+      return
+    }
+    let author = senderID.flatMap { graph.nodes[id: $0]?.title } ?? "a human"
+    let post = MailboardPost(
+      id: Mailboard.nextID(after: graph.mailboard), at: Date(), authorID: senderID,
+      author: author, topic: trimmedTopic, body: trimmed)
+    graph.mailboard = Mailboard.pruned(graph.mailboard + [post])
+    // The author's own log keeps a line — their next pass should know what they
+    // already told the board, so it doesn't re-announce it.
+    if let senderID, graph.nodes[id: senderID] != nil {
+      recordMemory(
+        senderID, "mailboard: posted #\(post.id)\(topicSuffix(post)) — \(post.body)")
+    }
+    await wakeMailboardWatchers(about: post)
+  }
+
+  /// The mailbox's ring. Every watcher whose subscription matches hears the post the
+  /// way a `--follow-up` message arrives — typed into a live idle session, queued for
+  /// one mid-turn, staged to memory otherwise — by riding `deliverAdHocMessage`, so
+  /// the delivery rules and their staging guarantees are this store's, learned once.
+  /// The sender id stays `nil` on purpose: the wake names the *post's* author in its
+  /// text, and a watcher reading it later must not mistake the ding for the mail.
+  private func wakeMailboardWatchers(about post: MailboardPost) async {
+    for node in graph.nodes where node.id != post.authorID {
+      guard let watch = node.mailboardWatch, watch.matches(post.topic) else { continue }
+      let preview =
+        post.body.utf8.count > 140
+        ? String(post.body.prefix(140)) + "…" : post.body
+      let nudge =
+        "mailboard — new post #\(post.id)\(topicSuffix(post)) from \(post.author): "
+        + "\(preview) — read it with: graphcode mailboard sync \(graph.project.path)"
+      await deliverAdHocMessage(to: node.id, text: nudge, from: nil, followUp: true)
+    }
+  }
+
+  private func topicSuffix(_ post: MailboardPost) -> String {
+    post.topic.map { " (\($0))" } ?? ""
+  }
+
+  /// Advances the reading loop's cursor to the newest post — the write half of
+  /// `graphcode mailboard sync`. Deliberately no memory record: sync is reading,
+  /// not learning, and a log line per read would turn the log into a metronome.
+  private func mailboardSync(from readerID: UUID?) {
+    guard mailboardIsOn() else {
+      announceError(
+        "the Mailboard is off — enable Mailboard in Settings "
+          + "(mailboardEnabled in ~/.graphcode/settings.json)")
+      return
+    }
+    guard let readerID, graph.nodes[id: readerID] != nil else {
+      announceError(
+        "mailboard sync needs a loop identity — run it from a loop's session "
+          + "($ZMX_SESSION); a human reading the board needs no cursor")
+      return
+    }
+    // Never moves backward: ids only grow (`Mailboard.nextID` is max-plus-one), so
+    // the max below only guards a board emptied by something other than pruning.
+    let latest = graph.mailboard.last?.id ?? 0
+    // Read into a local first: reading and writing the cursor through the same
+    // `IdentifiedArray` subscript in one expression is an overlapping access the
+    // runtime treats as fatal exclusivity.
+    let current = graph.nodes[id: readerID]?.lastMailboardRead ?? 0
+    graph.nodes[id: readerID]?.lastMailboardRead = max(latest, current)
+  }
+
+  /// Subscribes or unsubscribes the calling loop. Recorded to the loop's memory so a
+  /// relaunched session knows it is the project's watcher — the subscription lives on
+  /// the node, but knowing *why* it is set is the session's to inherit.
+  private func mailboardWatch(on: Bool, topic: String?, from watcherID: UUID?) {
+    guard mailboardIsOn() else {
+      announceError(
+        "the Mailboard is off — enable Mailboard in Settings "
+          + "(mailboardEnabled in ~/.graphcode/settings.json)")
+      return
+    }
+    guard let watcherID, graph.nodes[id: watcherID] != nil else {
+      announceError(
+        "mailboard watch needs a loop identity — run it from a loop's session "
+          + "($ZMX_SESSION); the watcher is the loop the mail is delivered to")
+      return
+    }
+    if on {
+      let trimmed =
+        topic.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        ?? Optional<String>.none
+      if let trimmed, trimmed.isEmpty {
+        announceError("mailboard watch refused: an empty topic is no topic — omit it")
+        return
+      }
+      graph.nodes[id: watcherID]?.mailboardWatch = MailboardWatch(topic: trimmed)
+      recordMemory(
+        watcherID, "mailboard: now watching \(trimmed.map { "'\($0)'" } ?? "all posts")")
+    } else {
+      guard graph.nodes[id: watcherID]?.mailboardWatch != nil else {
+        announceError("mailboard: \(graph.nodes[id: watcherID]?.title ?? "this loop") "
+          + "was not watching anything")
+        return
+      }
+      graph.nodes[id: watcherID]?.mailboardWatch = nil
+      recordMemory(watcherID, "mailboard: stopped watching")
+    }
   }
 
   // MARK: - Import

@@ -77,6 +77,33 @@ public enum SessionBriefing {
         Do not reach for this for one-off work: "check the build" is a goal, "check the
         build every hour" is time-based.
       """
+    // The Mailboard's section exists only while the beta ramp has the feature on: a
+    // briefing that taught verbs the daemon would refuse would send every loop
+    // through a refusal once per idea.
+    let mailboardSection =
+      settings.mailboardEnabled
+      ? """
+      ## The Mailboard — notes for whoever comes next
+
+      `node send` reaches one peer you already know. The Mailboard is the shared
+      counterpart: an unaddressed board any loop can post to and any loop can read,
+      with no wiring and no ids — post for *whoever comes next*, including loops that
+      do not exist yet. Check it at the start of a pass; post the moment you learn
+      something a peer or successor should not have to rediscover:
+
+      ```sh
+      graphcode mailboard sync \(projectPath)     # read what you have not seen, mark it read
+      graphcode mailboard post \(projectPath) [--topic <t>] <note…>   # leave something behind
+      graphcode mailboard list \(projectPath)     # read-only peek, cursor untouched
+      graphcode mailboard watch \(projectPath) [--topic <t>]   # ring me when new mail lands
+      ```
+
+      Post decisions made, dead ends hit, claims staked ("I'm taking issue #12") —
+      a note for a peer, not a transcript. Sync before you rely on nobody having
+      got there first, and watch a topic when you want the board to come to you.
+
+      """
+      : ""
     return """
       # You are a loop in a graphcode graph
 
@@ -147,7 +174,7 @@ public enum SessionBriefing {
       an edge is still the right tool: a `message` edge fires automatically when you
       finish, a `handoff` sequences the other loop after you. This command is the
       one-off.
-
+      \(mailboardSection)
       ## Remembering across passes
 
       Loops that run in cycles get relaunched, and a relaunched session starts fresh.

@@ -1,4 +1,5 @@
 import Foundation
+import MailboardKit
 
 /// Argument parsing and output formatting for the `graphcode` CLI
 /// (docs/03-architecture.md#cli-graphcode).
@@ -43,6 +44,18 @@ public enum GraphcodeCommand: Equatable, Sendable {
   case exportNode(projectPath: String, nodeID: UUID, output: String, includeChildren: Bool = false)
   case exportGraph(projectPath: String, output: String)
   case importNodes(projectPath: String, fromZip: String, asChildOf: UUID? = nil)
+  /// The Mailboard verbs (docs/03-architecture.md#cli-graphcode): the shared,
+  /// unaddressed board any loop can write to and read. Attribution is not parsed —
+  /// like `sendMessage`, the sender comes from `ZMX_SESSION` at execution.
+  case mailboardPost(projectPath: String, topic: String?, text: String)
+  /// Read unread, then mark the board read — the cursor belongs to the calling loop,
+  /// so this verb only means anything run from inside a session.
+  case mailboardSync(projectPath: String)
+  /// The whole board, read-only: no command reaches the daemon, no cursor moves.
+  case mailboardList(projectPath: String)
+  /// Subscribe (`on: true`, `--topic` filters) or unsubscribe (`--off`) the calling
+  /// loop; like `sync`, the subscription belongs to a loop, not a shell.
+  case mailboardWatch(projectPath: String, on: Bool, topic: String?)
 
   public enum ParseError: Error, Equatable {
     case unknownCommand(String)
@@ -71,6 +84,15 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode node pilot <project-path> <node-id>     dry-run a composite
       graphcode node arm <project-path> <node-id>       arm it (needs a pilot first)
       graphcode edge create <project-path> <from-id> <to-id> [--kind <k>] [--condition <c>]
+      graphcode mailboard post <project-path> [--topic <t>] <note…>
+                           leave a note on the shared board for whoever comes next
+      graphcode mailboard sync <project-path>
+                           read your unread posts and mark the board read
+      graphcode mailboard list <project-path>
+                           the whole board, read-only — no cursor moves
+      graphcode mailboard watch <project-path> [--topic <t>] [--off]
+                           have matching posts typed into this loop's session as they
+                           land; --off stops watching
       graphcode usage <project-path>
       graphcode reap [--dry-run]   recover suspected orphaned zmx sessions when PTYs
                            cannot be allocated or deleted loops leave sessions behind
@@ -166,6 +188,18 @@ public enum GraphcodeCommand: Equatable, Sendable {
       --into <path>        spawn into a different project (--kind spawn only); this is
                            how the global graph dispatches work into a project
 
+    MAILBOARD
+      The shared, unaddressed board: `node send` reaches one peer you already know;
+      a Mailboard post is a note for whoever comes next, discoverable by loops that
+      did not exist when it was written. Run from inside a loop, posts are attributed
+      to that loop (`ZMX_SESSION`, the same mechanism as `node send`); from a human's
+      shell they read as from "a human". `sync` and `watch` need that loop identity —
+      the read cursor and the subscription belong to a loop — so a human reads the
+      board with `list`. A post is a note to a peer, not a transcript: 1 KB bound,
+      and `--topic <t>` groups a thread (a watcher of a topic only hears matching
+      posts; watched posts are delivered like a --follow-up message).
+
+
     EXIT CODES
       0   done
       1   bad usage, or graphcoded refused the command
@@ -181,6 +215,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode status <project-path>
       graphcode node send <project-path> <node-id> --follow-up <message…>
                            stage work without interrupting an active turn
+      graphcode mailboard sync <project-path>
+                           check what other loops left for you before starting a pass
+      graphcode mailboard post <project-path> --topic claims issue #12 is mine
+                           stake a claim where every loop will find it, addressed to no one
       graphcode node pilot <project-path> <composite-id>
       graphcode node arm <project-path> <composite-id>
                            pilot before arming a proactive routine
@@ -312,6 +350,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
       default:
         throw ParseError.unknownCommand("node \(verb)")
       }
+
+    case "mailboard":
+      return try parseMailboard(&arguments)
 
     case "edge":
       let verb = try take(&arguments, name: "edge subcommand")
@@ -729,6 +770,50 @@ extension GraphcodeCommand {
     return projects.map { "\($0.name)  \($0.path)" }.joined(separator: "\n")
   }
 
+  /// The board for a terminal. `mailboard list` prints the whole thing (`reader`
+  /// nil); `mailboard sync` passes the reading loop's id and prints only what its
+  /// cursor has not covered — the subtraction is `Mailboard.unread`, the arithmetic
+  /// the daemon's cursor contract rests on, so the CLI's "unread" and the store's can
+  /// never disagree.
+  public static func renderMailboard(
+    _ graph: LoopGraph, unreadFor readerID: UUID? = nil
+  ) -> String {
+    let posts: [MailboardPost]
+    if let readerID {
+      posts = Mailboard.unread(
+        in: graph.mailboard, since: graph.nodes[id: readerID]?.lastMailboardRead)
+    } else {
+      posts = graph.mailboard
+    }
+    guard !posts.isEmpty else {
+      return readerID == nil
+        ? "the board is empty — post one: graphcode mailboard post <project-path> <note…>"
+        : "no unread posts"
+    }
+    let label = readerID == nil ? "mailboard" : "mailboard, unread"
+    var lines = [
+      "\(graph.project.name) \(label): \(posts.count) post\(posts.count == 1 ? "" : "s")"
+    ]
+    for post in posts { lines.append("  \(render(post))") }
+    return lines.joined(separator: "\n")
+  }
+
+  /// One post, one line — the same identification the daemon's wake nudge quotes, so
+  /// a loop reads a note the same way everywhere it meets one.
+  public static func render(_ post: MailboardPost) -> String {
+    let topic = post.topic.map { " (\($0))" } ?? ""
+    let stamp = post.at.formatted(date: .abbreviated, time: .shortened)
+    return "#\(post.id)\(topic) from \(post.author) at \(stamp) — \(post.body)"
+  }
+
+  /// `mailboard post`'s answer — the sequence number is what the author's own log and
+  /// any replier's `node send` can refer to the note by.
+  public static func renderPosted(_ graph: LoopGraph) -> String {
+    guard let post = graph.mailboard.last else { return "posted" }
+    let topic = post.topic.map { " (\($0))" } ?? ""
+    return "posted #\(post.id)\(topic)"
+  }
+
   public static func describe(_ error: ParseError) -> String {
     switch error {
     case .unknownCommand(let name): return "unknown command: \(name)"
@@ -781,5 +866,48 @@ extension GraphcodeCommand {
       asChildOf = id
     }
     return .importNodes(projectPath: projectPath, fromZip: zipPath, asChildOf: asChildOf)
+  }
+
+  /// The `mailboard` verbs' parsing, split from `parseVerb` the way export/import
+  /// were. The note is joined argv words — the `node send`/`node memo` bargain, so
+  /// `graphcode mailboard post <path> --topic claims issue #12 is mine` needs no
+  /// quoting gymnastics — with `--topic <t>` riding along in either position.
+  fileprivate static func parseMailboard(
+    _ arguments: inout [String]
+  ) throws -> GraphcodeCommand {
+    let verb = try take(&arguments, name: "mailboard subcommand")
+    let path = try take(&arguments, name: "project-path")
+    if arguments.contains(where: isHelpFlag) { throw HelpRequested() }
+    switch verb {
+    case "post":
+      try validateFlags(arguments, allowed: ["topic"])
+      let flags = parseFlags(arguments)
+      // Strip the flag pair; a trailing `--topic` with no value goes too — it was
+      // meant as the flag, never as the note's text, and dropping it lets the empty
+      // note error say the real thing instead of echoing the flag back.
+      var words = arguments
+      if let index = words.firstIndex(of: "--topic") {
+        words.removeSubrange(index...min(index + 1, words.count - 1))
+      }
+      let text = words.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+      guard !text.isEmpty else { throw ParseError.missingArgument("note") }
+      return .mailboardPost(projectPath: path, topic: flags["topic"], text: text)
+
+    case "sync":
+      try validateFlags(arguments, allowed: [])
+      return .mailboardSync(projectPath: path)
+
+    case "list":
+      try validateFlags(arguments, allowed: [])
+      return .mailboardList(projectPath: path)
+
+    case "watch":
+      try validateFlags(arguments, allowed: ["topic", "off"])
+      let flags = parseFlags(arguments)
+      return .mailboardWatch(projectPath: path, on: flags["off"] == nil, topic: flags["topic"])
+
+    default:
+      throw ParseError.unknownCommand("mailboard \(verb)")
+    }
   }
 }
