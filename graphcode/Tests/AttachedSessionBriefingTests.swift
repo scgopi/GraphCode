@@ -71,6 +71,17 @@ struct AttachedSessionBriefingTests {
   }
 
   @Test
+  func unattendedCodexDoesNotResumeFromTheApp() {
+    guard ZmxLocator.isInstalled else { return }
+    let view = surface(.codex, loopType: .goalBased)
+    let command = view.command(briefingPath: briefing)
+    #expect(command.first == "/bin/zsh")
+    #expect(command.contains { $0.contains("until") && $0.contains("cmd=.*codex") })
+    #expect(command.last?.contains("exec") == true)
+    #expect(command.last?.contains("attach 's'") == true)
+  }
+
+  @Test
   func noBriefingMeansTheCommandAndPromptOfBefore() {
     let command =
       surface(.copilotCLI).agentCommand(
