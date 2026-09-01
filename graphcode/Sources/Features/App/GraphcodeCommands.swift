@@ -81,6 +81,15 @@ struct GraphcodeCommands: Commands {
         .disabled(!hasWorkspace)
       Button("Stop Loop") { store.send(.openLoop(.stopLoopTapped)) }
         .disabled(!hasWorkspace)
+
+      Divider()
+
+      // The recovery for a replaced `zmx` or backend CLI: the session is killed and
+      // picked back up on the same transcript. See `AppFeature+LoopSessions.swift`.
+      Button("Restart Session") { store.send(.sessionRestart(.openLoopTapped)) }
+        .disabled(!hasRestartableLoop)
+      Button("Restart All Sessions…") { store.send(.sessionRestart(.allTapped)) }
+        .disabled(store.projects.isEmpty)
     }
 
     CommandMenu("Terminal") {
@@ -128,6 +137,12 @@ struct GraphcodeCommands: Commands {
       store.projects[id: candidate] != nil
     else { return nil }
     return candidate
+  }
+
+  /// A chat is not a node in any graph, so there is nothing for the daemon to restart.
+  private var hasRestartableLoop: Bool {
+    guard let open = store.openLoop else { return false }
+    return store.quickChats[id: open.node.id] == nil
   }
 
   private var railTitle: String {

@@ -178,6 +178,22 @@ struct AppView: View {
         "Its terminal session is ended and every edge touching it is removed. "
           + "This can't be undone.")
     }
+    .confirmationDialog(
+      "Restart every session?",
+      isPresented: Binding(
+        get: { store.sessionRestart.isConfirmingAll },
+        set: { if !$0 { store.send(.sessionRestart(.allCancelled)) } }
+      ),
+      titleVisibility: .visible
+    ) {
+      Button("Restart All") { store.send(.sessionRestart(.allConfirmed)) }
+      Button("Cancel", role: .cancel) { store.send(.sessionRestart(.allCancelled)) }
+    } message: {
+      Text(
+        "Every running loop's terminal session is ended and picked back up on the same "
+          + "transcript. Goal and timed loops come back on their own; a turn-based loop "
+          + "resumes when you next open it.")
+    }
     // A loop's title is written before the work exists, so it's the one thing about a
     // loop people want to change afterwards. An alert with a field rather than a sheet:
     // there is exactly one thing to type, and it has to be able to open over a terminal

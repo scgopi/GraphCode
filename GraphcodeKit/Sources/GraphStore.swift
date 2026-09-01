@@ -35,6 +35,10 @@ public actor GraphStore {
   private let onGraphChanged: (@Sendable (LoopGraph) -> Void)?
   private let onEnsureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let onTerminateSession: (@Sendable (LoopNode, String?) -> Void)?
+  /// Kills a loop's session and, for an unattended loop, relaunches it on the same
+  /// transcript. Awaited, unlike the two above: the answer is whether the old session
+  /// is confirmed gone, and `restartNode` must not say so until it is.
+  private let onRestartSession: (@Sendable (LoopNode, String?) async -> Bool)?
   private let onEvaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)?
   /// `onEvaluatePredicate` with the evidence kept: pass/fail plus the run's output tail
   /// (`ShellPredicateEvaluator.check`). Goal polling prefers this when wired, so a
@@ -196,6 +200,7 @@ public actor GraphStore {
     onGraphChanged: (@Sendable (LoopGraph) -> Void)? = nil,
     onEnsureSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
     onTerminateSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
+    onRestartSession: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
     onEvaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)? = nil,
     onCheckPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)? = nil,
     onDeliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)? = nil,
@@ -226,6 +231,7 @@ public actor GraphStore {
     self.onGraphChanged = onGraphChanged
     self.onEnsureSession = onEnsureSession
     self.onTerminateSession = onTerminateSession
+    self.onRestartSession = onRestartSession
     self.onEvaluatePredicate = onEvaluatePredicate
     self.onCheckPredicate = onCheckPredicate
     self.onDeliverMessage = onDeliverMessage
@@ -647,6 +653,12 @@ public actor GraphStore {
     case .stopNode(let nodeID):
       await stopNode(nodeID)
 
+    case .restartNode(let nodeID):
+      await restartNode(nodeID)
+
+    case .restartSessions:
+      await restartSessions()
+
     case .subGraphCommand(let nodeID, let inner):
       await runInSubGraph(nodeID, inner)
 
@@ -715,7 +727,7 @@ public actor GraphStore {
     case .nodeCheckApproved(let id), .nodeCheckRejected(let id), .renameNode(let id, _),
       .updateNode(let id, _), .promoteNode(let id, _, _), .memoNode(let id, _, _),
       .refineNode(let id, _, _), .rollbackRefinement(let id, _), .messageNode(let id, _, _, _),
-      .deleteNode(let id), .stopNode(let id):
+      .deleteNode(let id), .stopNode(let id), .restartNode(let id):
       guard let ownerID = subGraphOwner(of: id) else { return nil }
       return .subGraphCommand(nodeID: ownerID, command: command)
     default:
@@ -767,6 +779,7 @@ public actor GraphStore {
       // store. Stopping is still forwarded below: those sessions are real once piloted.
       onEnsureSession: nil,
       onTerminateSession: onTerminateSession,
+      onRestartSession: onRestartSession,
       onEvaluatePredicate: onEvaluatePredicate,
       onCheckPredicate: onCheckPredicate,
       onDeliverMessage: onDeliverMessage,
@@ -1862,6 +1875,59 @@ public actor GraphStore {
     }
   }
 
+  /// Kills a loop's session and brings it back on the same transcript — see
+  /// `GraphCommand.restartNode`. A resolved loop has no session worth bringing back and
+  /// a stopped one was told to stay down, so both are refused rather than revived.
+  private func restartNode(_ nodeID: UUID) async {
+    guard let node = graph.nodes[id: nodeID] else {
+      announceError("no loop \(nodeID) in this graph")
+      return
+    }
+    guard !node.isResolved else {
+      announceError("\(node.title) has finished — there is no session to restart")
+      return
+    }
+    if node.loopType == .composite {
+      await runInSubGraph(nodeID, .restartSessions)
+      return
+    }
+    await restart([node])
+  }
+
+  private func restartSessions() async {
+    let live = graph.nodes.filter { !$0.isResolved }
+    for composite in live where composite.loopType == .composite {
+      await runInSubGraph(composite.id, .restartSessions)
+    }
+    await restart(live.filter { $0.loopType != .composite })
+  }
+
+  /// The kills run concurrently: each one waits on `zmx` to confirm a death, and a dozen
+  /// loops in sequence would hold this actor for as long as their kills add up to. The
+  /// bump is written only for a confirmed kill — it is the app's cue to reattach, and a
+  /// pane reattached to a session that would not die reads the eventual exit as the
+  /// loop resolving.
+  private func restart(_ nodes: [LoopNode]) async {
+    guard let onRestartSession else { return }
+    let path = graph.project.path
+    let confirmed = await withTaskGroup(of: (UUID, Bool).self) { group in
+      for node in nodes {
+        group.addTask { (node.id, await onRestartSession(node, path)) }
+      }
+      var results: [UUID: Bool] = [:]
+      for await (id, died) in group { results[id] = died }
+      return results
+    }
+    for node in nodes {
+      if confirmed[node.id] == true {
+        graph.nodes[id: node.id]?.sessionRestarts += 1
+        recordMemory(node.id, "session restarted in place, resumed from its transcript")
+      } else {
+        announceError("could not restart \(node.title): its session did not die")
+      }
+    }
+  }
+
   /// Stops one loop: the session is *asked* to stop rather than killed.
   ///
   /// Killing the PTY took the whole agent with it — the transcript, the scrollback, and
@@ -2641,6 +2707,7 @@ public actor GraphStore {
     GraphStore(
       graph: subGraph,
       onTerminateSession: onTerminateSession,
+      onRestartSession: onRestartSession,
       onEvaluatePredicate: onEvaluatePredicate,
       onCheckPredicate: onCheckPredicate,
       onDeliverMessage: onDeliverMessage,

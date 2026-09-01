@@ -169,6 +169,7 @@ public enum RemoteGraphAccess {
       graphcode status <project-path>
       graphcode node create <project-path> --title <t> --type <turn|goal|time|composite> [options]
       graphcode node stop <project-path> <node-id>
+      graphcode node restart <project-path> <node-id>  kill its session, resume it in place
       graphcode node delete <project-path> <node-id>   irreversible; stop is reversible
       graphcode node send <project-path> <node-id> <message...>
       graphcode node memo <project-path> <node-id> <note...>
@@ -484,13 +485,15 @@ public enum RemoteGraphAccess {
                 create = {"subGraphCommand": {"nodeID": into, "command": create}}
             run_and_print(project, [graph_command(project, create)])
             return
-        if subverb not in ("stop", "delete", "send", "memo"):
+        if subverb not in ("stop", "restart", "delete", "send", "memo"):
             fail("node %s runs from the Mac's own shell, not from a remote host" % subverb)
         if not arguments:
             fail("missing node-id")
         node_id = parse_uuid(arguments.pop(0), "node-id")
         if subverb == "stop":
             run_and_print(project, [graph_command(project, {"stopNode": {"_0": node_id}})])
+        elif subverb == "restart":
+            run_and_print(project, [graph_command(project, {"restartNode": {"_0": node_id}})])
         elif subverb == "delete":
             run_and_print(project, [graph_command(project, {"deleteNode": {"_0": node_id}})])
         else:

@@ -557,6 +557,38 @@ public enum ZmxSessionLauncher {
     }
   }
 
+  /// `kill` for a session that is coming straight back: the same confirmed `zmx kill`,
+  /// minus everything that makes a kill final. The banked session id stays, so the
+  /// relaunch resumes the transcript; the first-pass record stays, so the loop is not
+  /// briefed as new; and the name is not condemned, because the reaper would otherwise
+  /// take out the very session this brings back. `false` when the old session would not
+  /// die — relaunching on top of it is how two agents end up on one name.
+  ///
+  /// The relaunch is `start`, detached: the ensure a reboot runs, resume-or-fresh with
+  /// the same husk check, and it settles for seconds a caller need not wait on. Only an
+  /// unattended loop is relaunched here; an attended one resumes when a human opens it,
+  /// exactly as after a reboot.
+  static func restart(_ node: LoopNode, projectPath: String? = nil) async -> Bool {
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+      guard await runRemoteRetrying(remoteKillInvocation(forNode: node, at: remote)) else {
+        return false
+      }
+      DialLog.record(session: name, dial: "restart", event: "killed")
+      if node.runsUnattended {
+        Task.detached { await startRemote(node, at: remote) }
+      }
+      return true
+    }
+    guard ZmxLocator.isInstalled else { return false }
+    guard await killConfirmingDeath(sessionNamed: name) else { return false }
+    DialLog.record(session: name, dial: "restart", event: "killed")
+    if node.runsUnattended {
+      Task.detached { await start(node, projectPath: projectPath) }
+    }
+    return true
+  }
+
   /// `zmx kill`, then proof: `zmx kill` exits 0 whether or not anything died, and
   /// `zmx get` exits 1 both for absence and for a timeout against a live busy session.
   /// A successful `zmx ls` that contains no row for the name is the only unambiguous

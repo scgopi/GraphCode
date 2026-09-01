@@ -32,6 +32,9 @@ public struct CLISessionBackend: Sendable {
   /// kill spoken only to the local socket left remote sessions running forever after
   /// their node was stopped or deleted.
   public var terminate: @Sendable (LoopNode, String?) async -> Void
+  /// End the session and, for an unattended loop, bring it back on the same transcript
+  /// (`ZmxSessionLauncher.restart`). Answers whether the old session is confirmed gone.
+  public var restart: @Sendable (LoopNode, String?) async -> Bool
   /// Push text into a live session. The transport behind a `.message` edge — see
   /// `MessageBusClient`. Returns false when the backend can't accept mid-session input
   /// or the session isn't live. `projectPath` routes the send the same way `terminate`'s
@@ -58,6 +61,7 @@ public struct CLISessionBackend: Sendable {
     kind: CLISessionBackendKind,
     launch: @escaping @Sendable (LoopNode, String?) async -> Void,
     terminate: @escaping @Sendable (LoopNode, String?) async -> Void,
+    restart: @escaping @Sendable (LoopNode, String?) async -> Bool = { _, _ in false },
     sendInput: @escaping @Sendable (LoopNode, String, String?) async -> Bool,
     presence: @escaping @Sendable (LoopNode, String?) async -> PresenceReading,
     usage: @escaping @Sendable (LoopNode, String?) async -> UsageSample?,
@@ -67,6 +71,7 @@ public struct CLISessionBackend: Sendable {
     self.kind = kind
     self.launch = launch
     self.terminate = terminate
+    self.restart = restart
     self.sendInput = sendInput
     self.presence = presence
     self.usage = usage
@@ -97,6 +102,9 @@ extension CLISessionBackend {
       },
       terminate: { node, projectPath in
         await ZmxSessionLauncher.kill(node, projectPath: projectPath)
+      },
+      restart: { node, projectPath in
+        await ZmxSessionLauncher.restart(node, projectPath: projectPath)
       },
       sendInput: { node, text, projectPath in
         await ZmxSessionLauncher.send(text, to: node, projectPath: projectPath)
@@ -230,6 +238,12 @@ extension CLISessionBackend {
 
   public static let terminateSession: @Sendable (LoopNode, String?) -> Void = { node, path in
     Task.detached { await backend(for: node).terminate(node, path) }
+  }
+
+  /// Awaited rather than detached: `GraphStore.restartNode` needs the answer.
+  public static let restartSession: @Sendable (LoopNode, String?) async -> Bool = {
+    node, path in
+    await backend(for: node).restart(node, path)
   }
 
   /// The `.message` transport `GraphStore` is wired with — routed through the *target's*

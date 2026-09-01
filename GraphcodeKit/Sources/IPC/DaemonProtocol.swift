@@ -160,6 +160,15 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// agent alive. The session is only killed when it can't be reached to be asked. The
   /// node itself stays in the graph — stopping is not deleting.
   case stopNode(UUID)
+  /// Kill a loop's session and bring it straight back on the same transcript — the verb
+  /// for "`zmx` or the backend CLI was replaced under every running loop". Unlike the
+  /// kill `stopNode` falls back to, the banked session id survives, so the relaunch is a
+  /// resume rather than a fresh pass. An unattended loop is relaunched by the daemon; an
+  /// attended one comes back when a human next opens it, exactly as after a reboot. A
+  /// composite restarts its workers.
+  case restartNode(UUID)
+  /// `restartNode` for every unresolved loop in the graph, workers included.
+  case restartSessions
   /// Route a command into a composite node's sub-graph. Editing a composite's insides is
   /// the same set of operations as editing any graph, so it reuses them wholesale rather
   /// than growing a parallel vocabulary.

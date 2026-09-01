@@ -32,6 +32,7 @@ public actor ProjectRegistry {
   private var sidebarConnections: Set<UUID> = []
   private let ensureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let terminateSession: (@Sendable (LoopNode, String?) -> Void)?
+  private let restartSession: (@Sendable (LoopNode, String?) async -> Bool)?
   private let evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)?
   private let checkPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)?
   private let deliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)?
@@ -57,6 +58,8 @@ public actor ProjectRegistry {
     ensureSession: (@Sendable (LoopNode, String?) -> Void)? = CLISessionBackend.ensureSession,
     terminateSession: (@Sendable (LoopNode, String?) -> Void)? =
       CLISessionBackend.terminateSession,
+    restartSession: (@Sendable (LoopNode, String?) async -> Bool)? =
+      CLISessionBackend.restartSession,
     evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)? = ShellPredicateEvaluator
       .evaluate,
     checkPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)? =
@@ -79,6 +82,7 @@ public actor ProjectRegistry {
     persistence = ProjectPersistence(baseDirectory: persistenceDirectory)
     self.ensureSession = ensureSession
     self.terminateSession = terminateSession
+    self.restartSession = restartSession
     self.evaluatePredicate = evaluatePredicate
     self.checkPredicate = checkPredicate
     self.deliverMessage = deliverMessage
@@ -443,6 +447,7 @@ public actor ProjectRegistry {
       },
       onEnsureSession: ensureSession,
       onTerminateSession: terminateSession,
+      onRestartSession: restartSession,
       onEvaluatePredicate: evaluatePredicate,
       onCheckPredicate: checkPredicate,
       onDeliverMessage: deliverMessage,

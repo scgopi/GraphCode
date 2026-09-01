@@ -65,6 +65,12 @@ final class TerminalSurfaceStore {
     }
   }
 
+  /// Every retained surface, mounted or not — for a restart of every session, where any
+  /// pane left alive would watch its process die and report it.
+  func retireAll() {
+    retire(Array(surfaces.keys))
+  }
+
   /// Whether a surface for `id` is currently alive. For tests and for callers deciding
   /// whether a rebuild is about to happen.
   func isRetained(_ id: UUID) -> Bool { surfaces[id] != nil }
@@ -99,6 +105,7 @@ final class TerminalSurfaceStore {
 /// a plain closure rather than an effect.
 struct TerminalSurfaceClient: Sendable {
   var retire: @Sendable ([UUID]) -> Void
+  var retireAll: @Sendable () -> Void
 }
 
 extension TerminalSurfaceClient: DependencyKey {
@@ -114,12 +121,21 @@ extension TerminalSurfaceClient: DependencyKey {
           MainActor.assumeIsolated { TerminalSurfaceStore.shared.retire(ids) }
         }
       }
+    },
+    retireAll: {
+      if Thread.isMainThread {
+        MainActor.assumeIsolated { TerminalSurfaceStore.shared.retireAll() }
+      } else {
+        DispatchQueue.main.async {
+          MainActor.assumeIsolated { TerminalSurfaceStore.shared.retireAll() }
+        }
+      }
     })
 
   /// Tests exercise the retention rules against `SurfaceRetentionPolicy` directly; a
   /// reducer test asserting on tab bookkeeping has no surfaces to retire and should not
   /// spin up a `ghostty_app_t` to find that out.
-  static let testValue = TerminalSurfaceClient(retire: { _ in })
+  static let testValue = TerminalSurfaceClient(retire: { _ in }, retireAll: {})
 }
 
 extension DependencyValues {
