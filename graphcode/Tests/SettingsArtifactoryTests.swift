@@ -23,28 +23,27 @@ struct SettingsArtifactoryTests {
     #expect(
       resolution(loaded: false, choice: nil, rampedOn: true)
         == SettingsModel.ArtifactoryResolution(
-          enabled: true, fileNeedsWrite: true, showsSwitch: true))
-    // A stable install the ramp hasn't reached boots off, and the file already
-    // agrees, so nothing is written.
+          enabled: true, fileNeedsWrite: true))
+    // Should the ramp ever be pulled, an install that never chose boots off, and a
+    // file that already agrees is left alone.
     #expect(
       resolution(loaded: false, choice: nil, rampedOn: false)
         == SettingsModel.ArtifactoryResolution(
-          enabled: false, fileNeedsWrite: false, showsSwitch: false))
+          enabled: false, fileNeedsWrite: false))
   }
 
   @Test
   func aRecordedChoiceOutranksTheRamp() {
-    // An explicit on survives the ramp never — or no longer — offering it, and the
-    // switch stays offered so the choice can always be undone.
+    // An explicit on survives the ramp being pulled back.
     #expect(
       resolution(loaded: true, choice: true, rampedOn: false)
         == SettingsModel.ArtifactoryResolution(
-          enabled: true, fileNeedsWrite: false, showsSwitch: true))
+          enabled: true, fileNeedsWrite: false))
     // An explicit off survives the ramp turning everyone on.
     #expect(
       resolution(loaded: false, choice: false, rampedOn: true)
         == SettingsModel.ArtifactoryResolution(
-          enabled: false, fileNeedsWrite: false, showsSwitch: true))
+          enabled: false, fileNeedsWrite: false))
   }
 
   @Test
@@ -54,17 +53,17 @@ struct SettingsArtifactoryTests {
     #expect(
       resolution(loaded: true, choice: nil, rampedOn: true)
         == SettingsModel.ArtifactoryResolution(
-          enabled: true, fileNeedsWrite: false, showsSwitch: true))
+          enabled: true, fileNeedsWrite: false))
   }
 
   @Test
   func aRampPulledToZeroReachesTheFile() {
     // The kill-switch posture: the ramp drops to 0 under a choice-less install whose
-    // file still says on — the app is the only writer that can resolve this, and the
-    // switch goes away with it.
+    // file still says on — the app is the only writer that can resolve this. The
+    // switch stays: it is a setting, and a person can turn the board back on.
     #expect(
       resolution(loaded: true, choice: nil, rampedOn: false)
         == SettingsModel.ArtifactoryResolution(
-          enabled: false, fileNeedsWrite: true, showsSwitch: false))
+          enabled: false, fileNeedsWrite: true))
   }
 }

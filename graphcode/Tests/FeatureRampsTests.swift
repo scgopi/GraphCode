@@ -79,15 +79,15 @@ struct FeatureRampsTests {
   }
 
   @Test
-  func artifactoryShipsBetaOnAndStableOff() {
-    // The Artifactory ramps the way codespaces no longer does: beta installs first,
-    // stable waiting for the fetched file to raise it. The baked default is the
-    // shipped posture, not the end state.
+  func artifactoryShipsOnEverywhere() {
+    // The Artifactory is ramped fully on, so — the codespaces rule — its baked default
+    // moved up with it: an offline first launch on either channel gets the board, and
+    // the served file is the kill switch rather than the opener.
     let id = UUID().uuidString
     #expect(
       FeatureRamps.isEnabled(.artifactory, configuration: nil, channel: "beta", installID: id))
     #expect(
-      !FeatureRamps.isEnabled(.artifactory, configuration: nil, channel: "stable", installID: id))
+      FeatureRamps.isEnabled(.artifactory, configuration: nil, channel: "stable", installID: id))
     // The fetched file stays both the opener and the kill switch either way: raised
     // to 100 everywhere it turns stable installs on, dropped to 0 it turns even beta
     // installs off.

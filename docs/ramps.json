@@ -1,5 +1,12 @@
 {
   "features": {
-    "codespaces": { "beta": 100, "stable": 100 }
+    "codespaces": {
+      "beta": 100,
+      "stable": 100
+    },
+    "artifactory": {
+      "beta": 100,
+      "stable": 100
+    }
   }
 }
