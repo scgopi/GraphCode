@@ -123,6 +123,27 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// mid-turn. Optional so frames from clients that predate the flag decode as the
   /// immediate send they always were.
   case messageNode(UUID, text: String, from: UUID?, followUp: Bool?)
+  /// Drop a note onto the project's Artifactory — the shared, unaddressed board (`graphcode
+  /// artifactory post`) any loop can write to for *whoever comes next*, without naming a
+  /// recipient or drawing an edge first. `topic` groups threads for watchers; `from` is
+  /// attributed exactly as `messageNode`'s is (`ZMX_SESSION`), or `nil` from a human's
+  /// shell. Refused outright while the beta ramp has the Artifactory off
+  /// (`artifactoryEnabled` in `~/.graphcode/settings.json`) — a silent no-op would read,
+  /// to the loop that sent it, as a post nobody answered.
+  case artifactoryPost(text: String, topic: String?, from: UUID?)
+  /// Mark every post on the Artifactory as read for the calling loop — `graphcode
+  /// artifactory sync`, the cursor half of reading. The CLI reads the board out of the
+  /// graph snapshot it already gets from `openProject`; this is the write that makes
+  /// "unread" mean something the *next* sync can subtract from. Requires a loop
+  /// identity: a human reading the board needs no cursor, since nothing downstream
+  /// tracks what they have seen.
+  case artifactorySync(from: UUID?)
+  /// Subscribe (`on: true`) or unsubscribe (`on: false`) the calling loop to Artifactory
+  /// posts — `graphcode artifactory watch`. A watched post is delivered the way a
+  /// `--follow-up` message is: typed into a live idle session, staged to a busy one's
+  /// memory, and for a loop that is gone, nowhere — the post itself is the durable
+  /// half, waiting at the next wake. `topic` filters; `nil` hears everything.
+  case artifactoryWatch(on: Bool, topic: String?, from: UUID?)
   /// Removes the node, every edge touching it, and its detached session. Irreversible
   /// — the app confirms before sending this.
   case deleteNode(UUID)

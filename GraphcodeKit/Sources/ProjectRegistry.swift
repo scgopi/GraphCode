@@ -475,7 +475,10 @@ public actor ProjectRegistry {
         // meaningless without the reading that feeds it. Switching the rail off takes the
         // boards with it rather than leaving pictures of a run nothing is narrating.
         return settings.summarisesLoops && settings.visualisesSummaries
-      })
+      },
+      // Read fresh per command, the way the heartbeat toggle is: the app resolving
+      // the beta ramp (or a hand edit) applies to the next post with no restart.
+      onArtifactoryEnabled: { GraphcodeSettingsStore.load().artifactoryEnabled })
     stores[path] = newStore
     // Only on first load of this project — a time-based node's session outlives the app
     // but not a reboot, so something has to restart it, and this is the moment the

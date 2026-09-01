@@ -39,6 +39,7 @@ struct LoopWorkspaceFeature {
     /// summary's fold: they answer different questions, and someone who wants the sentence
     /// and not the diagram — or the diagram and not the sentence — is not being perverse.
     var isBoardFolded = LoopWorkspaceRail.loadBoardFolded()
+    var isArtifactoryFolded = LoopWorkspaceRail.loadArtifactoryFolded()
     /// Whether a rail width has ever been committed by a drag on this machine.
     ///
     /// What lets a board open the rail wider without ever overruling a width somebody
@@ -102,6 +103,11 @@ struct LoopWorkspaceFeature {
     case summaryFoldToggled
     /// The board section's header row.
     case boardFoldToggled
+    case artifactoryFoldToggled
+    /// A human leaving a note on the board from the rail. Handled by `AppFeature`,
+    /// which is the level holding the daemon connection — the same division as
+    /// `primarySurfaceExited`.
+    case artifactoryPostSubmitted(text: String, topic: String?)
     /// The board section's expand button, and the cover's own close.
     case boardExpandToggled
     /// The amber block's `Answer it` — the question is in the terminal, so this is a
@@ -253,6 +259,16 @@ struct LoopWorkspaceFeature {
       case .boardFoldToggled:
         state.isBoardFolded.toggle()
         LoopWorkspaceRail.saveBoardFolded(state.isBoardFolded)
+        return .none
+
+      case .artifactoryFoldToggled:
+        state.isArtifactoryFolded.toggle()
+        LoopWorkspaceRail.saveArtifactoryFolded(state.isArtifactoryFolded)
+        return .none
+
+      // Nothing local to change: the post is the daemon's to apply, and the board it
+      // lands on arrives back in the next `.graphChanged`.
+      case .artifactoryPostSubmitted:
         return .none
 
       case .boardExpandToggled:
