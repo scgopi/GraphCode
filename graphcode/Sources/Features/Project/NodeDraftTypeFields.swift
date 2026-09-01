@@ -17,7 +17,8 @@ struct SketchDraftFields: View {
     ) {
       DraftProseField(
         placeholder: "e.g. where does the usage cap get read from?",
-        text: $store.draftSketchNote, takesFocusRequest: $store.templates.requestsPrimaryFocus)
+        text: $store.draftSketchNote, takesFocusRequest: store.templateFocus(.brief),
+        onTokenJump: store.tokenJump)
     }
   }
 }
@@ -40,7 +41,7 @@ struct GoalDraftFields: View {
       ) {
         DraftProseField(
           placeholder: "the crash rate is back under 1%", text: $store.draftGoal,
-          takesFocusRequest: $store.templates.requestsPrimaryFocus)
+          takesFocusRequest: store.templateFocus(.brief), onTokenJump: store.tokenJump)
       }
 
       DraftField(
@@ -50,7 +51,8 @@ struct GoalDraftFields: View {
       ) {
         HStack(spacing: 8) {
           DraftTextField(
-            placeholder: "swift test 2>/dev/null", text: $store.draftPredicate, isMono: true)
+            placeholder: "swift test 2>/dev/null", text: $store.draftPredicate, isMono: true,
+            takesFocusRequest: store.templateFocus(.doneCheck), onTokenJump: store.tokenJump)
           testButton
         }
       }
@@ -104,7 +106,8 @@ struct GoalDraftFields: View {
         fromTemplate: store.templateSetFields.contains(.metric)
       ) {
         DraftTextField(
-          placeholder: "./scripts/score.sh", text: $store.draftMetric, isMono: true)
+          placeholder: "./scripts/score.sh", text: $store.draftMetric, isMono: true,
+          takesFocusRequest: store.templateFocus(.metric), onTokenJump: store.tokenJump)
       }
       Picker("", selection: $store.draftMetricDirection) {
         Text("Higher is better").tag(MetricDirection.maximize)
@@ -201,7 +204,8 @@ struct TimedDraftFields: View {
       ) {
         DraftProseField(
           placeholder: "Check for new crash reports and triage anything new",
-          text: $store.draftTimedTask, takesFocusRequest: $store.templates.requestsPrimaryFocus)
+          text: $store.draftTimedTask, takesFocusRequest: store.templateFocus(.brief),
+          onTokenJump: store.tokenJump)
       }
 
       if store.draftRequiresDaemonHeartbeat {
@@ -277,7 +281,7 @@ struct TurnDraftFields: View {
         DraftProseField(
           placeholder: "Port the settings screen to the new design system",
           text: $store.draftFirstInstruction,
-          takesFocusRequest: $store.templates.requestsPrimaryFocus)
+          takesFocusRequest: store.templateFocus(.brief), onTokenJump: store.tokenJump)
       }
 
       DraftField(
@@ -352,7 +356,7 @@ struct CompositeDraftFields: View {
       DraftField(label: "Name", fromTemplate: store.templateSetFields.contains(.title)) {
         DraftTextField(
           placeholder: "Nightly sweep", text: $store.draftTitle,
-          takesFocusRequest: $store.templates.requestsPrimaryFocus)
+          takesFocusRequest: store.templateFocus(.brief), onTokenJump: store.tokenJump)
       }
 
       if let carried = store.draftSubGraph {

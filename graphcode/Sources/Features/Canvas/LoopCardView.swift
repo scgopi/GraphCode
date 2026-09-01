@@ -35,6 +35,9 @@ struct LoopCardView: View {
   var reclaimOffer: WorktreeAssessment?
   var onReclaim: (() -> Void)?
   var onKeep: (() -> Void)?
+  /// Set where the card can act on a template follow — `Detach` sits beside the
+  /// Follows chip (PROMPT_TEMPLATES.md § Follow vs snapshot).
+  var onDetachTemplate: (() -> Void)?
 
   enum Metrics {
     static let size = CGSize(width: 250, height: 106)
@@ -231,7 +234,9 @@ struct LoopCardView: View {
         .lineLimit(1)
         .truncationMode(.middle)
       if let follow = node.templateFollow {
-        FollowsChip(follow: follow)
+        // The design puts `Detach` right beside the chip, not only in the context
+        // menu: the fact and the way out of it belong together.
+        FollowsChip(follow: follow, detach: onDetachTemplate)
       }
       if isRemote {
         Image(systemName: "network").font(.system(size: 9)).foregroundStyle(.white.opacity(0.4))
@@ -251,6 +256,9 @@ struct LoopCardView: View {
 /// not a sixth kind of it.
 struct FollowsChip: View {
   let follow: TemplateFollow
+  /// `nil` where the card can't act — the overview's read-only rows draw the fact
+  /// without the affordance.
+  var detach: (() -> Void)?
 
   var body: some View {
     HStack(spacing: 4) {
@@ -261,6 +269,13 @@ struct FollowsChip: View {
         .font(.system(size: 10, design: .monospaced))
         .foregroundStyle(missing ? Color(red: 1.0, green: 0.804, blue: 0.478) : .white.opacity(0.6))
         .lineLimit(1)
+      if let detach {
+        Button("Detach", action: detach)
+          .buttonStyle(.plain)
+          .font(.system(size: 9.5, weight: .semibold))
+          .foregroundStyle(Color(red: 0.549, green: 0.773, blue: 1.0).opacity(0.9))
+          .help("Stop reading the template — the brief it has now becomes its own")
+      }
     }
     .padding(.vertical, 1)
     .padding(.horizontal, 6)

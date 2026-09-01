@@ -39,7 +39,9 @@ extension ProjectCanvasView {
       onMarkAsEntry: { store.send(.markAsEntryTapped(node.id)) },
       reclaimOffer: store.worktreeReclaimOffers[node.id],
       onReclaim: { store.send(.reclaimWorktreeTapped(node.id)) },
-      onKeep: { store.send(.keepWorktreeTapped(node.id)) }
+      onKeep: { store.send(.keepWorktreeTapped(node.id)) },
+      onDetachTemplate: node.templateFollow == nil
+        ? nil : { store.send(.detachTemplateTapped(node.id)) }
     )
     .contentShape(Rectangle())
     // A composite has no session of its own to open (`LoopNode.firstInstruction` is nil

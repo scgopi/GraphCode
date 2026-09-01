@@ -132,13 +132,31 @@ extension ProjectFeature {
     _ state: inout State, _ action: Action
   ) -> Effect<Action> {
     switch action {
+    case .templateTokenJumpRequested:
+      // ⇥ walks the fields still holding a hole, cycling from wherever it last
+      // landed — a token in a done check is as much a hole as one in the brief.
+      let fields = state.tokenFields
+      guard let first = fields.first else { return .none }
+      guard let current = state.templates.focusRequest,
+        let index = fields.firstIndex(of: current)
+      else {
+        state.templates.focusRequest = first
+        return .none
+      }
+      state.templates.focusRequest = fields[(index + 1) % fields.count]
+      return .none
+
+    case .templateFocusConsumed:
+      state.templates.focusRequest = nil
+      return .none
+
     case .templateChosen(let id):
       guard let template = state.templates.library.first(where: { $0.id == id }) else {
         return .none
       }
       state.templates.isPickerOpen = false
       applyTemplate(&state, template)
-      state.templates.requestsPrimaryFocus = true
+      state.templates.focusRequest = .brief
       return countUse(of: template, in: state.graph.project.path)
 
     case .templateLaunched(let id):
@@ -152,7 +170,7 @@ extension ProjectFeature {
       // unfilled-token gate the Create button obeys. The fill still happened, so the
       // human lands on the brief with the holes to fill, exactly as ⏎ leaves them.
       guard state.unfilledTokens.isEmpty, state.draft.isValid else {
-        state.templates.requestsPrimaryFocus = true
+        state.templates.focusRequest = .brief
         return counted
       }
       return .merge(counted, confirmCreateNode(&state))

@@ -115,7 +115,7 @@ struct TemplatePickerTests {
     await store.send(.templateLibraryChanged(library))
     await store.send(.templateChosen(template.id))
     #expect(store.state.draftSketchNote == "Trace {symbol} through the codebase.")
-    #expect(store.state.templates.requestsPrimaryFocus)
+    #expect(store.state.templates.focusRequest == .brief)
     #expect(store.state.unfilledTokens == ["symbol"])
     #expect(store.state.draftBlocksOnTokens)
     #expect(store.state.templates.applied?.name == "Trace a symbol")

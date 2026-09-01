@@ -250,6 +250,73 @@ struct TemplateApplyTests {
     #expect(store.state.unfilledTokens.isEmpty)
   }
 
+  /// `⇥` walks the fields that still hold a hole, in form order, and cycles — the
+  /// design's "One token left to fill · ⇥ to jump to it" has to be true.
+  @Test
+  @MainActor
+  func tabWalksTheFieldsHoldingUnfilledTokens() async {
+    let template = PromptTemplate(
+      id: UUID(), name: "Suite check", body: "Get {area} green.", shape: .goalBased,
+      settings: TemplateSettings(doneCheck: "make test-{suite}"), origin: .home)
+    let library = [template]
+    let store = makeStore(library)
+    store.exhaustivity = .off
+
+    await store.send(.templatesButtonTapped)
+    await store.send(.templateLibraryChanged(library))
+    await store.send(.templateChosen(template.id))
+    // ⏎ lands on the brief.
+    #expect(store.state.templates.focusRequest == .brief)
+    #expect(store.state.tokenFields == [.brief, .doneCheck])
+
+    await store.send(.templateTokenJumpRequested)
+    #expect(store.state.templates.focusRequest == .doneCheck)
+    // Cycles rather than dead-ending on the last one.
+    await store.send(.templateTokenJumpRequested)
+    #expect(store.state.templates.focusRequest == .brief)
+
+    // A field the human has filled drops out of the walk.
+    await store.send(.binding(.set(\.draftGoal, "Get the parser green.")))
+    #expect(store.state.tokenFields == [.doneCheck])
+    await store.send(.templateTokenJumpRequested)
+    #expect(store.state.templates.focusRequest == .doneCheck)
+  }
+
+  /// The field that answers a focus request clears it, so one jump moves one field.
+  @Test
+  @MainActor
+  func aFocusRequestIsConsumedByTheFieldThatAnswersIt() async {
+    let store = makeStore()
+    store.exhaustivity = .off
+    await store.send(.templateTokenJumpRequested)
+    await store.send(.templateFocusConsumed)
+    #expect(store.state.templates.focusRequest == nil)
+  }
+
+  /// The line the design writes, verbatim.
+  @Test
+  @MainActor
+  func theUnfilledTokenLineIsTheDesignsOwn() async {
+    let one = PromptTemplate(
+      id: UUID(), name: "One", body: "Review {branch}.", shape: .goalBased, origin: .home)
+    let two = PromptTemplate(
+      id: UUID(), name: "Two", body: "Review {branch} for {ticket}.", shape: .goalBased,
+      origin: .home)
+    let library = [one, two]
+    let store = makeStore(library)
+    store.exhaustivity = .off
+    await store.send(.templatesButtonTapped)
+    await store.send(.templateLibraryChanged(library))
+
+    await store.send(.templateChosen(one.id))
+    #expect(store.state.unfilledTokenPrompt == "One token left to fill · ⇥ to jump to it")
+    await store.send(.templateChosen(two.id))
+    #expect(store.state.unfilledTokenPrompt == "2 tokens left to fill · ⇥ to jump to them")
+
+    await store.send(.binding(.set(\.draftGoal, "Review main for GC-1.")))
+    #expect(store.state.unfilledTokenPrompt == nil)
+  }
+
   /// ✕ answers "put the form back the way I found it", and that means before *any*
   /// template landed — not before the most recent one.
   @Test

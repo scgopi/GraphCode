@@ -118,12 +118,22 @@ extension ProjectFeature.State {
   var unfilledTokens: [String] {
     var seen = Set<String>()
     var ordered: [String] = []
-    for field in [currentBriefText, draftPredicate, draftMetric, draftBranch] {
-      for token in PromptTemplate.tokens(in: field) where seen.insert(token).inserted {
+    for field in ProjectFeature.TemplateTokenField.allCases {
+      for token in PromptTemplate.tokens(in: tokenFieldText(field))
+      where seen.insert(token).inserted {
         ordered.append(token)
       }
     }
     return ordered
+  }
+
+  /// The design's own line: "One token left to fill · ⇥ to jump to it".
+  var unfilledTokenPrompt: String? {
+    let count = unfilledTokens.count
+    guard count > 0 else { return nil }
+    return count == 1
+      ? "One token left to fill · ⇥ to jump to it"
+      : "\(count) tokens left to fill · ⇥ to jump to them"
   }
 
   /// What the applied template set — the "from template" dots read this. A
@@ -162,6 +172,23 @@ extension ProjectFeature.State {
       + home
       .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
       .map { ProjectFeature.TemplatePickerRow(template: $0, scope: .home) }
+  }
+
+  /// The fields still holding a `{token}`, in the order `⇥` walks them — the order
+  /// they appear in the form, so tabbing reads down the dialog.
+  var tokenFields: [ProjectFeature.TemplateTokenField] {
+    ProjectFeature.TemplateTokenField.allCases.filter {
+      !PromptTemplate.tokens(in: tokenFieldText($0)).isEmpty
+    }
+  }
+
+  func tokenFieldText(_ field: ProjectFeature.TemplateTokenField) -> String {
+    switch field {
+    case .brief: return currentBriefText
+    case .doneCheck: return draftPredicate
+    case .metric: return draftMetric
+    case .branch: return draftBranch
+    }
   }
 
   var hasProjectTemplates: Bool {
@@ -329,6 +356,15 @@ extension ProjectFeature {
         return count > 0 ? "Composite · \(count) loops" : "Composite"
       }
     }
+  }
+
+  /// A field a template's `{token}`s can be sitting in, in form order — what `⇥`
+  /// walks while any of them is still unfilled.
+  enum TemplateTokenField: String, CaseIterable, Equatable, Sendable {
+    case brief
+    case doneCheck
+    case metric
+    case branch
   }
 
   /// The two scope groups the picker sorts by — a project's committed templates

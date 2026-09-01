@@ -157,11 +157,14 @@ struct NodeDraftForm: View {
               .buttonStyle(.plain)
               .font(.system(size: 11.5, weight: .semibold))
               .foregroundStyle(Color(red: 0.549, green: 0.773, blue: 1.0).opacity(0.9))
+            Text("to keep just the prompt.")
+              .font(.system(size: 11.5))
+              .foregroundStyle(.white.opacity(0.75))
           }
         }
-        if !store.unfilledTokens.isEmpty {
+        if let prompt = store.unfilledTokenPrompt {
           HStack(spacing: 5) {
-            Text("Fill in:")
+            Text(prompt)
               .font(.system(size: 11))
               .foregroundStyle(.white.opacity(0.55))
             ForEach(store.unfilledTokens, id: \.self) { token in
@@ -185,25 +188,32 @@ struct NodeDraftForm: View {
     }
   }
 
-  /// The shape in words, exactly the strip's promise: what type it made the loop
-  /// and what it set. "Undo the shape to keep just the prompt" rides on it.
+  /// The shape in words, exactly the strip's promise: "This template makes it a
+  /// **Goal** loop and sets a done check and a worktree." One shared verb — the
+  /// design's sentence says "sets a done check and a worktree", not "sets … and
+  /// sets …".
   private func shapeSentence(_ applied: ProjectFeature.AppliedTemplate) -> AttributedString {
     var text = AttributedString("This template")
     if applied.setFields.contains(.shape) || applied.shape != nil {
       text += AttributedString(" makes it a \((applied.shape ?? .sketch).displayName) loop")
     }
-    let settings: [String] = [
-      applied.setFields.contains(.doneCheck) ? "sets a done check" : nil,
-      applied.setFields.contains(.cadence) ? "sets a cadence" : nil,
-      applied.setFields.contains(.pausesBeforeWritesOnly) ? "pauses only before writes" : nil,
-      applied.setFields.contains(.branch) ? "sets a worktree" : nil,
-      applied.setFields.contains(.metric) ? "tracks a metric" : nil,
-      applied.setFields.contains(.backend) ? "names the agent" : nil,
-      applied.setFields.contains(.subGraph) ? "carries its loops" : nil,
+    let sets: [String] = [
+      applied.setFields.contains(.doneCheck) ? "a done check" : nil,
+      applied.setFields.contains(.cadence) ? "a cadence" : nil,
+      applied.setFields.contains(.branch) ? "a worktree" : nil,
+      applied.setFields.contains(.metric) ? "a metric" : nil,
+      applied.setFields.contains(.backend) ? "the agent" : nil,
+      applied.setFields.contains(.subGraph) ? "its loops" : nil,
     ].compactMap { $0 }
-    if !settings.isEmpty {
+    var clauses: [String] = []
+    if !sets.isEmpty { clauses.append("sets " + Self.list(sets)) }
+    // The one that isn't a thing being set — it is a rhythm, so it keeps its own verb.
+    if applied.setFields.contains(.pausesBeforeWritesOnly) {
+      clauses.append("pauses only before writes")
+    }
+    if !clauses.isEmpty {
       if text.characters.count > "This template".count { text += AttributedString(" and") }
-      text += AttributedString(" " + Self.list(settings))
+      text += AttributedString(" " + Self.list(clauses))
     }
     text += AttributedString(".")
     return text

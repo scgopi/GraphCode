@@ -281,6 +281,8 @@ struct ProjectFeature {
     case templatePickerClosed
     case templateQueryChanged(String)
     case templateSelectionMoved(Int)
+    case templateTokenJumpRequested
+    case templateFocusConsumed
     case templateChosen(UUID)
     case templateLaunched(UUID)
     case templateChipRemoved
@@ -392,7 +394,8 @@ struct ProjectFeature {
       // Template actions were handled by the switch above; they land here as
       // no-ops so this switch stays exhaustive, and nothing runs twice.
       case .templatesButtonTapped, .templatePickerClosed, .templateQueryChanged,
-        .templateSelectionMoved, .templateChosen, .templateLaunched, .templateChipRemoved,
+        .templateSelectionMoved, .templateTokenJumpRequested, .templateFocusConsumed,
+        .templateChosen, .templateLaunched, .templateChipRemoved,
         .templateShapeUndone, .saveTemplateTapped, .saveLoopTemplateTapped,
         .saveTemplateConfirmed, .saveTemplateCancelled, .templateSaved,
         .templateSaveNoticeDismissed, .templateRelocationTapped, .templateLibraryChanged,
@@ -622,10 +625,10 @@ struct TemplateFormState: Equatable {
   /// The template currently shaping the form, with everything needed to
   /// un-apply it: what it set, and the fields as they were before it landed.
   var applied: ProjectFeature.AppliedTemplate?
-  /// Set right after ⏎ fills the dialog from a template: the primary field's
-  /// focus follows, so the first thing the human edits is the brief they came
-  /// to edit. The consuming field clears it.
-  var requestsPrimaryFocus = false
+  /// Which field is being asked to take focus: the brief right after ⏎ fills the
+  /// dialog, and then whichever field `⇥` walks to next while tokens are unfilled
+  /// (PROMPT_TEMPLATES.md § What a template carries). The consuming field clears it.
+  var focusRequest: ProjectFeature.TemplateTokenField?
   /// The save-as-template sheet's context — from the dialog
   /// (`saveTemplateTapped`) or a card's context menu (`saveLoopTemplateTapped`).
   /// One sheet, one field of state, two places it can open.
