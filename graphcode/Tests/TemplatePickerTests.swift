@@ -176,27 +176,43 @@ struct TemplatePickerTests {
     #expect(!store.state.showingNewNodeForm)
   }
 
-  /// Starters stand apart while they are the whole library — the scaffolding is what
-  /// a new person needs at the top of the list. Once somebody has saved a brief of
-  /// their own, it stops outranking their work and sorts in with the rest.
+  /// Starters and a person's own templates are two sections for good — scaffolding
+  /// and a library are different things — and the starters keep their shipped order,
+  /// because the group is a ladder: lead a team, then Goal, then Timed, then the rest.
   @Test
   @MainActor
-  func startersArePinnedUntilYouHaveOneOfYourOwn() async {
-    var starter = homeTemplate("Get the build green", body: "Fix the build.", shape: .goalBased)
-    starter.isStarter = true
-    let library = [starter]
+  func startersKeepTheirLadderOrderAndYourOwnSitBelow() async {
+    // Deliberately handed over scrambled and alphabetically hostile.
+    let shipped = StarterTemplates.all
+    let scrambled = Array(shipped.reversed())
+    let mine = homeTemplate("Aardvark brief", body: "Would sort first if names decided.")
+    let library = scrambled + [mine]
     let store = makeStore(library)
     store.exhaustivity = .off
 
     await store.send(.templatesButtonTapped)
     await store.send(.templateLibraryChanged(library))
-    #expect(store.state.templatePickerRows.map(\.scope) == [.starter])
-    #expect(ProjectFeature.TemplatePickerScope.starter.displayName == "Starters")
+    let rows = store.state.templatePickerRows
+    #expect(rows.map(\.scope) == Array(repeating: .starter, count: shipped.count) + [.home])
+    #expect(rows.prefix(shipped.count).map(\.template.name) == shipped.map(\.name))
+    #expect(rows.first?.template.name == "Lead a team toward a goal")
+    #expect(rows.last?.template.name == "Aardvark brief")
+    #expect(ProjectFeature.TemplatePickerScope.home.displayName == "Your templates")
+  }
 
-    // The moment there is a template of their own, the group folds away.
-    let mine = homeTemplate("My brief", body: "Something I wrote.")
-    await store.send(.templateLibraryChanged([starter, mine]))
-    #expect(store.state.templatePickerRows.map(\.scope) == [.home, .home])
+  /// The ladder, spelled out: the team-leading brief first, then every Goal, then
+  /// every Timed, then the rest.
+  @Test
+  func theStarterLadderIsLeadThenGoalThenTimed() {
+    let shapes = StarterTemplates.all.map { $0.shape }
+    #expect(StarterTemplates.all[0].name == "Lead a team toward a goal")
+    #expect(shapes[0] == nil)
+    let goals = shapes.dropFirst().prefix { $0 == .goalBased }
+    #expect(goals.count == 3)
+    let timed = shapes.dropFirst(1 + goals.count).prefix { $0 == .timeBased }
+    #expect(timed.count == 2)
+    #expect(StarterTemplates.priority(of: StarterTemplates.all[0].id) == 0)
+    #expect(StarterTemplates.priority(of: UUID()) == StarterTemplates.all.count)
   }
 
   /// A project's committed templates outrank the shipped ones, always — the rule the

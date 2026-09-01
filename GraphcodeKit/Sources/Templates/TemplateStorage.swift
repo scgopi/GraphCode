@@ -89,43 +89,62 @@ public struct TemplateStorage: Sendable {
 
   // MARK: - Starters
 
-  /// Writes the templates the app ships with into the home folder, **once**.
+  /// Writes the templates the app ships with into the home folder — each of them
+  /// **once**.
   ///
   /// A fresh install has an empty library, and an empty ⌘T picker teaches nothing —
-  /// see `StarterTemplates` for what the ten briefs are chosen to demonstrate. They
-  /// are written as real files so they read, diff and edit like any other template.
+  /// see `StarterTemplates` for what the briefs are chosen to demonstrate. They are
+  /// written as real files so they read, diff and edit like any other template.
   ///
-  /// Two rules keep this from being annoying:
-  /// - **Once.** Guarded by `seededMarker` in the home folder, so a starter you
-  ///   deleted stays deleted rather than reappearing at every launch.
+  /// The marker in the home folder lists the ids this install has already seeded, and
+  /// that is what keeps this from being annoying:
+  /// - **Once per starter.** A starter whose id is in the marker is never written
+  ///   again, so one you deleted stays deleted — and a starter added in a later build
+  ///   still arrives, because its id isn't there yet.
   /// - **Never over anything.** A file already at that name is somebody's, and is
-  ///   left exactly as it is even on the first run.
+  ///   left exactly as it is even on a first run.
   ///
-  /// Returns what it actually wrote, which is empty on every launch after the first.
+  /// Returns what it actually wrote, which is empty on every launch that adds nothing.
   @discardableResult
   public func seedStartersIfNeeded(_ starters: [PromptTemplate] = StarterTemplates.all) throws
     -> [PromptTemplate]
   {
     let marker = homeDirectory.appendingPathComponent(Self.seededMarker)
-    guard !FileManager.default.fileExists(atPath: marker.path) else { return [] }
+    var seeded = seededIDs(at: marker)
+    let pending = starters.filter { !seeded.contains($0.id) }
+    guard !pending.isEmpty else { return [] }
     try FileManager.default.createDirectory(at: homeDirectory, withIntermediateDirectories: true)
     var written: [PromptTemplate] = []
-    for starter in starters {
+    for starter in pending {
       let url = homeDirectory.appendingPathComponent(starter.fileName)
-      guard !FileManager.default.fileExists(atPath: url.path) else { continue }
-      var seeded = starter
-      seeded.origin = .home
-      try TemplateFileCodec.encode(seeded).write(to: url, atomically: true, encoding: .utf8)
-      written.append(seeded)
+      if !FileManager.default.fileExists(atPath: url.path) {
+        var copy = starter
+        copy.origin = .home
+        try TemplateFileCodec.encode(copy).write(to: url, atomically: true, encoding: .utf8)
+        written.append(copy)
+      }
+      seeded.insert(starter.id)
     }
-    // The marker is written last and on its own: a run that threw half way through
-    // should try again, not leave someone with four of the ten.
-    try Data().write(to: marker, options: .atomic)
+    // The marker is written last and whole: a run that threw half way through should
+    // try again, not leave someone with four of the eleven.
+    try seeded.map(\.uuidString).sorted().joined(separator: "\n")
+      .write(to: marker, atomically: true, encoding: .utf8)
     return written
   }
 
+  /// The ids the marker records. An **empty** marker is the one 0.1.58-beta2 and
+  /// beta3 wrote, before ids were recorded: those installs seeded every starter that
+  /// existed at the time, so the empty file is read as exactly that set — the ones
+  /// shipped since are what a later launch still owes them.
+  private func seededIDs(at marker: URL) -> Set<UUID> {
+    guard let text = try? String(contentsOf: marker, encoding: .utf8) else { return [] }
+    let ids = text.split(separator: "\n").compactMap { UUID(uuidString: String($0)) }
+    if ids.isEmpty { return StarterTemplates.seededBeforeIDsWereRecorded }
+    return Set(ids)
+  }
+
   /// A dotfile, so it never shows up as a template — `read` skips hidden files.
-  static let seededMarker = ".starters-seeded"
+  public static let seededMarker = ".starters-seeded"
 
   // MARK: - Writing
 
