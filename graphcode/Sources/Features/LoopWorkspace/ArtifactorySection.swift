@@ -2,6 +2,13 @@ import ArtifactoryKit
 import GraphcodeKit
 import SwiftUI
 
+/// The measured height of the board's posts, reported up so the scroll box can size
+/// itself to them instead of to whatever space the rail happens to have spare.
+private struct ArtifactoryContentHeight: PreferenceKey {
+  static let defaultValue: CGFloat = 0
+  static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 /// What the rail needs to know about the board without building a view to find out.
 enum ArtifactoryPresentation {
   /// Whether this graph's board has anything to show. Absent while empty, for the
@@ -54,6 +61,13 @@ struct ArtifactorySection: View {
   /// Whether the mirrored records are unfolded. Local and unpersisted, unlike the
   /// section's own fold: opening the receipts is a thing you do once to answer a
   /// question, not a way you prefer to read the board.
+  /// How tall the posts actually are, so the scroll box can ask for exactly that.
+  @State private var contentHeight: CGFloat = 0
+  /// Past this the board scrolls rather than pushing the sections under it off the rail.
+  /// Roughly four posts at the rail's default width — enough that scrolling is the
+  /// exception, not the way the section is normally read.
+  static let maxScrollHeight: CGFloat = 300
+
   @State private var showsRecords = false
   @State private var isComposing = false
   @State private var draft = ""
@@ -86,13 +100,34 @@ struct ArtifactorySection: View {
               if post.id == firstUnreadID { sinceYouLooked }
               postRow(post)
             }
-            if isComposing { composer }
           }
           .frame(maxWidth: .infinity, alignment: .leading)
+          .background(
+            GeometryReader { proxy in
+              Color.clear.preference(key: ArtifactoryContentHeight.self, value: proxy.size.height)
+            }
+          )
         }
+        .onPreferenceChange(ArtifactoryContentHeight.self) { contentHeight = $0 }
         .scrollBounceBehavior(.basedOnSize)
         .defaultScrollAnchor(.bottom)
-        .frame(minHeight: 90, maxHeight: .infinity)
+        // Hug the posts, and only then scroll. A `ScrollView` is greedy: given
+        // `maxHeight: .infinity` it took the rail's whole slack, and `defaultScrollAnchor`
+        // pinned the posts to the bottom of that box while the header stayed at its top —
+        // so a board with two notes on it drew a header, a stretch of nothing, and then
+        // the notes. Measuring the content and asking for exactly that height (up to a
+        // cap) leaves no slack for the anchor to spread, which is why the gap cannot come
+        // back rather than merely being smaller.
+        .frame(height: min(contentHeight, Self.maxScrollHeight))
+        // Outside the scroll view on purpose. Inside it the composer was one more row
+        // in a list that can be taller than the rail — it could open scrolled out of
+        // sight, and it moved under the pointer as posts arrived. Pinned here it is
+        // always the thing directly above the section's rule while you are writing.
+        if isComposing {
+          composer
+        } else {
+          leaveANoteButton
+        }
       }
       Rectangle().fill(.white.opacity(0.07)).frame(height: 1)
     }
@@ -120,19 +155,6 @@ struct ArtifactorySection: View {
           .frame(height: 14)
           .background(
             Theme.paneFocusTint.opacity(0.22), in: RoundedRectangle(cornerRadius: 3))
-      }
-      if !isFolded {
-        Button {
-          isComposing = true
-          draftFocused = true
-        } label: {
-          Image(systemName: "plus")
-            .font(.system(size: 9, weight: .semibold))
-            .foregroundStyle(.white.opacity(0.62))
-            .frame(width: 14, height: 14)
-        }
-        .buttonStyle(.plain)
-        .help("Leave a note on the board")
       }
       Image(systemName: isFolded ? "chevron.down" : "chevron.up")
         .font(.system(size: 8, weight: .semibold))
@@ -162,6 +184,35 @@ struct ArtifactorySection: View {
     }
     .contentShape(Rectangle())
     .onTapGesture(perform: onToggleFold)
+  }
+
+  /// The one place a human speaks to the graph, and it says so in words.
+  ///
+  /// This was a `+` on the header, drawn only under the pointer — the manners every
+  /// other header control in the app has, and wrong here. Those are all *second* ways
+  /// to do something reachable elsewhere; this is the only way to put a human's note on
+  /// the board without leaving for a terminal, and an affordance you have to hover to
+  /// discover is one nobody discovers. Named, always drawn, and sitting exactly where
+  /// the composer opens, so the click and its result are in the same place.
+  private var leaveANoteButton: some View {
+    Button {
+      isComposing = true
+    } label: {
+      HStack(spacing: 5) {
+        Image(systemName: "square.and.pencil")
+          .font(.system(size: 10, weight: .medium))
+        Text("Leave a note")
+          .font(.system(size: 11, weight: .semibold))
+      }
+      .foregroundStyle(.white.opacity(0.62))
+      .frame(maxWidth: .infinity, minHeight: 24)
+      .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 5))
+      .overlay {
+        RoundedRectangle(cornerRadius: 5).stroke(.white.opacity(0.08), lineWidth: 1)
+      }
+    }
+    .buttonStyle(.plain)
+    .help("Post a note to this project's board, as a human")
   }
 
   private var sinceYouLooked: some View {
@@ -327,6 +378,15 @@ struct ArtifactorySection: View {
     .overlay {
       RoundedRectangle(cornerRadius: 9)
         .stroke(Theme.paneFocusTint.opacity(0.45), lineWidth: 1)
+    }
+    // A `@FocusState` write only lands on a field that is *already* in the view tree.
+    // Setting it in the same transaction that creates the composer — which is what the
+    // + button used to do — is dropped on the floor, and with the rail unfocused every
+    // keystroke goes to the terminal instead: the draft stays empty, so Post stays
+    // disabled and the section looks like it does nothing. `onAppear` is a transaction
+    // too, hence the hop: the field exists by the time this runs.
+    .onAppear {
+      DispatchQueue.main.async { draftFocused = true }
     }
   }
 
