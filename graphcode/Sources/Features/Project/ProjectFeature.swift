@@ -249,8 +249,11 @@ struct ProjectFeature {
     /// Reclaim/Keep while the human still remembers what the worktree was.
     case worktreeReclaimOffered(nodeID: UUID, assessment: WorktreeAssessment)
     /// Clearing the offer is this scope's job; the removal itself needs `GitClient`
-    /// and happens in `AppWorktreesReducer`, which intercepts the same action.
-    case reclaimWorktreeTapped(UUID)
+    /// and happens in `AppWorktreesReducer`, which intercepts the same action. The
+    /// offer's submodule fact rides along because the offer does not survive it —
+    /// git refuses submodule worktrees even clean, so the removal needs its force
+    /// flag.
+    case reclaimWorktreeTapped(id: UUID, hasSubmodules: Bool)
     case keepWorktreeTapped(UUID)
     /// The canvas background's folder menu. Pure signals like `.nodeTapped`: the sheets
     /// they open are hosted by `AppView`, so `AppWorktreesReducer` intercepts both.
@@ -417,8 +420,8 @@ struct ProjectFeature {
         state.worktreeReclaimOffers[nodeID] = assessment
         return .none
 
-      case .reclaimWorktreeTapped(let nodeID), .keepWorktreeTapped(let nodeID):
-        state.worktreeReclaimOffers[nodeID] = nil
+      case .reclaimWorktreeTapped(let id, _), .keepWorktreeTapped(let id):
+        state.worktreeReclaimOffers[id] = nil
         return .none
 
       case .worktreeSweepTapped, .projectSettingsTapped:

@@ -38,7 +38,12 @@ extension ProjectCanvasView {
       onWireUp: { dragSourceID = node.id },
       onMarkAsEntry: { store.send(.markAsEntryTapped(node.id)) },
       reclaimOffer: store.worktreeReclaimOffers[node.id],
-      onReclaim: { store.send(.reclaimWorktreeTapped(node.id)) },
+      onReclaim: {
+        store.send(
+          .reclaimWorktreeTapped(
+            id: node.id,
+            hasSubmodules: store.worktreeReclaimOffers[node.id]?.facts.hasSubmodules == true))
+      },
       onKeep: { store.send(.keepWorktreeTapped(node.id)) },
       onDetachTemplate: node.templateFollow == nil
         ? nil : { store.send(.detachTemplateTapped(node.id)) }

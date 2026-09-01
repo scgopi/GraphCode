@@ -188,6 +188,23 @@ struct SettingsView: View {
         .font(.caption2)
         .foregroundStyle(.secondary)
         .fixedSize(horizontal: false, vertical: true)
+
+        // The `artifactory` ramp decides whether the switch is offered at all; the
+        // daemon-side bit it drives lives in `artifactoryEnabled` (`GraphcodeSettings`),
+        // which the model writes the ramp's answer to at launch.
+        if model.showsArtifactory {
+          Toggle("Artifactory", isOn: $model.artifactoryEnabled)
+          Text(
+            "Loops share a message board — a note dropped for whoever comes next, "
+              + "discoverable by loops that didn't exist when it was written — "
+              + "alongside the addressed `node send` and edges. The daemon enforces "
+              + "this: off, it refuses every artifactory command. Beta installs start "
+              + "on; a flip here is remembered even if the rollout later changes."
+          )
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+        }
       } footer: {
         Text(
           "A strip along the window's bottom listing passes, hand-offs and state changes "

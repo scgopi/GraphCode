@@ -41,22 +41,33 @@ public struct GoalSpec: Codable, Equatable, Sendable {
   public var metricCommand: String?
   /// Which way `metricCommand`'s number should move. Defaults to `.maximize`.
   public var metricDirection: MetricDirection
-  /// How many tokens (input + output, as the backend reports them) this loop may spend
-  /// before the orchestrator ends it — docs/08-quality-and-token-budgets.md's budget,
-  /// finally enforced rather than reviewed after the fact. `nil` means unbounded, which
-  /// stays the default: a budget is a bound the author chose, never one invented.
+  /// How many tokens this loop may spend before the orchestrator ends it —
+  /// docs/08-quality-and-token-budgets.md's budget, finally enforced rather than
+  /// reviewed after the fact. `nil` means unbounded, which stays the default: a budget
+  /// is a bound the author chose, never one invented.
+  ///
+  /// Counted the way the backend's API meters, not the way a turn feels: input,
+  /// output, cache creation *and cache reads* all count, because each is billed usage
+  /// (`PresenceHooks.usageScript` sums the transcript's four token fields). That makes
+  /// a Claude Code budget a per-turn cost — every turn re-meters the whole context as
+  /// cache reads — so a bound sized from turn counts is spent in minutes. The help
+  /// text says this because "(input + output)" read as hours and was not.
   ///
   /// Enforcement shares `UsageSample`'s honesty rule: usage is *reported* by the
   /// backend's hooks, never estimated, so a loop whose backend reports nothing can
   /// never blow this bound. The budget is only as real as the reporting — the poller
   /// acts on what was reported, and stays silent about what wasn't.
   public var tokenBudget: Int?
-  /// When true, the poller skips re-running the predicate while the working tree is
-  /// unchanged (same `HEAD`, same dirty files) since the last failing run. Off by
-  /// default with reason: plenty of predicates watch things *outside* the tree — a CI
-  /// run, a deployed endpoint — and skipping those would wait on a change that never
-  /// comes. Opt in exactly when the predicate is a function of the tree (a test suite,
-  /// a lint) and expensive enough that docs/08's conservative-polling stance applies.
+  /// When true, the poller skips re-running the predicate while the session is busy
+  /// and the working tree is unchanged (same `HEAD`, same dirty files) since the last
+  /// failing run. An idle session on that unchanged tree gets one more predicate run
+  /// and one more failure relay — a goal loop is the only writer of its own tree and
+  /// only writes once woken, so gating the wake on a tree change would strand it —
+  /// after which polls stay quiet until the tree moves again. Off by default with
+  /// reason: plenty of predicates watch things *outside* the tree — a CI run, a
+  /// deployed endpoint — and the skip buys them least. Opt in when the predicate is a
+  /// function of the tree (a test suite, a lint) and expensive enough that docs/08's
+  /// conservative-polling stance applies.
   public var skipsUnchangedWorkspace: Bool
 
   public init(
@@ -118,8 +129,12 @@ public struct GoalSpec: Codable, Equatable, Sendable {
     }
     if let budget = tokenBudget, budget > 0 {
       // Told to the session for the same reason the metric is: a loop that doesn't know
-      // its budget can't pace itself toward it — it can only be surprised by it.
-      parts.append("Token budget: \(budget) — the orchestrator ends this loop if it spends more.")
+      // its budget can't pace itself toward it — it can only be surprised by it. The
+      // counting is stated because a session metering its own spend from the API would
+      // otherwise pace against a number the orchestrator doesn't use.
+      parts.append(
+        "Token budget: \(budget), counted over every token the API meters (cache reads "
+          + "included) — the orchestrator ends this loop if it spends more.")
     }
     return parts.joined(separator: " ")
   }

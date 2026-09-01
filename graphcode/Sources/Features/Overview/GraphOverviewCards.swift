@@ -181,7 +181,14 @@ extension GraphOverviewView {
       reclaimOffer: store.projects[id: loop.projectPath]?.worktreeReclaimOffers[node.id],
       onReclaim: {
         store.send(
-          .projects(.element(id: loop.projectPath, action: .reclaimWorktreeTapped(node.id))))
+          .projects(
+            .element(
+              id: loop.projectPath,
+              action: .reclaimWorktreeTapped(
+                id: node.id,
+                hasSubmodules:
+                  store.projects[id: loop.projectPath]?.worktreeReclaimOffers[node.id]?
+                  .facts.hasSubmodules == true))))
       },
       onKeep: {
         store.send(

@@ -313,14 +313,30 @@ public enum ZmxSessionLauncher {
         of: node, at: remote,
         liveWithoutLabel: PresenceReading(presence: .idle, confidence: .heuristic))
     }
-    guard ZmxLocator.isInstalled, await sessionExists(node) else { return .absent }
+    guard ZmxLocator.isInstalled else { return .absent }
+    // The task state, not the session record, is the truth a husk hides: `zmx ls`
+    // prints `ended=`/`exit_code=` only for a completed task (`sessionTaskState`), so
+    // an exit read here is zmx's own bookkeeping — never a marker a transcript could
+    // have quoted. An exited task's code rides the reading; the wrapper shell left
+    // behind has nothing to say.
+    switch await sessionTaskState(node) {
+    case .absent: return .absent
+    case .exited(let code):
+      return PresenceReading(presence: .idle, confidence: .scanned, exitCode: code)
+    case .alive: break
+    }
     guard
       let session = try? PTYProcessSession(
         executable: ZmxLocator.binaryURL.path,
         arguments: presenceLabelArguments(forNode: node))
-    else { return PresenceReading(presence: .idle, confidence: .heuristic) }
+    else {
+      return PresenceReading(presence: .idle, confidence: .heuristic)
+    }
 
     let (succeeded, output) = await session.waitCollectingOutput()
+    if succeeded, let reported = parsePresenceLabel(output), reported == .busy {
+      return PresenceReading(presence: reported, confidence: .reported)
+    }
     guard succeeded, let reported = parsePresenceLabel(output) else {
       return PresenceReading(presence: .idle, confidence: .heuristic)
     }
@@ -353,7 +369,13 @@ public enum ZmxSessionLauncher {
         of: node, at: remote,
         liveWithoutLabel: PresenceReading(presence: .busy, confidence: .scanned))
     }
-    guard ZmxLocator.isInstalled, await sessionExists(node) else { return .absent }
+    guard ZmxLocator.isInstalled else { return .absent }
+    switch await sessionTaskState(node) {
+    case .absent: return .absent
+    case .exited(let code):
+      return PresenceReading(presence: .idle, confidence: .scanned, exitCode: code)
+    case .alive: break
+    }
     guard
       let session = try? PTYProcessSession(
         executable: ZmxLocator.binaryURL.path,
@@ -465,9 +487,44 @@ public enum ZmxSessionLauncher {
   /// prefix of another session's name cannot pass.
   static func aliveCheckCommand(zmxPath: String, forNode node: LoopNode) -> String {
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
-    return RemoteProjectLocation.shellQuoted(zmxPath)
-      + " ls 2>/dev/null | grep -v -e $'\\tended=' -e $'\\terr=' | grep -q "
-      + RemoteProjectLocation.shellQuoted("name=\(name)\t")
+    return daemonReadyCheckCommand(
+      zmxPath: zmxPath, sessionName: name,
+      executable: node.backend == .codex ? node.backend.executableName : nil)
+  }
+
+  public static func daemonReadyCheckCommand(
+    zmxPath: String, sessionName: String, executable: String?
+  ) -> String {
+    let name = RemoteProjectLocation.shellQuoted("name=\(sessionName)\t")
+    var command =
+      RemoteProjectLocation.shellQuoted(zmxPath)
+      + " ls 2>/dev/null | grep -v -e $'\\tended=' -e $'\\terr=' | grep -q " + name
+    if let executable {
+      command +=
+        " && " + RemoteProjectLocation.shellQuoted(zmxPath)
+        + " ls 2>/dev/null | grep -v -e $'\\tended=' -e $'\\terr=' | grep -q "
+        + RemoteProjectLocation.shellQuoted("name=\(sessionName)\t.*cmd=.*\(executable)")
+    }
+    return command
+  }
+
+  public static func waitingAttachCommand(
+    zmxPath: String, sessionName: String, executable: String?
+  ) -> [String] {
+    let check = daemonReadyCheckCommand(
+      zmxPath: zmxPath, sessionName: sessionName, executable: executable)
+    let attach =
+      RemoteProjectLocation.shellQuoted(zmxPath)
+      + " attach " + RemoteProjectLocation.shellQuoted(sessionName)
+    // The cap is for a session the daemon never creates — a launch that failed, a loop
+    // deleted mid-wait. Unbounded, the pane polls `zmx ls` twenty times a second
+    // forever; bounded, it says so and gives up after a minute.
+    let script =
+      "tries=0; until \(check); do tries=$((tries+1)); "
+      + "if [ \"$tries\" -ge 600 ]; then "
+      + "echo \"graphcode: '\(sessionName)' never became ready to attach\"; exit 1; fi; "
+      + "sleep 0.1; done; exec \(attach)"
+    return ["/bin/zsh", "-i", "-l", "-c", script]
   }
 
   /// Kills the session behind an id that isn't a graph node — a quick chat. Public
@@ -634,7 +691,10 @@ public enum ZmxSessionLauncher {
     // reach it at its next wake.
     let wakeFile =
       projectPath != nil
-      ? NodeMemory.writeWakeDigest(projectPath: projectPath ?? "", nodeID: node.id) : nil
+      ? NodeMemory.writeWakeDigest(
+        projectPath: projectPath ?? "", nodeID: node.id,
+        artifactoryEnabled: settings.artifactoryEnabled)
+      : nil
     let wakePath: String?
     if let projectPath, remote != nil {
       wakePath =
@@ -1275,6 +1335,7 @@ public enum ZmxSessionLauncher {
   enum RemoteSessionStatus: Equatable {
     case unreachable
     case absent
+    case exited(code: Int)
     case live(label: String?)
   }
 
@@ -1294,12 +1355,19 @@ public enum ZmxSessionLauncher {
     forNode node: LoopNode, label: String, at location: RemoteProjectLocation
   ) -> [String] {
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
-    let check = quotedCommand(["zmx", "get", name])
+    let check = quotedCommand(["zmx", "ls"])
     let read = quotedCommand(["zmx", "get", name, label])
+    // The pattern is a fixed string, so the tab must be a real one: `grep -F` never
+    // interprets a `\t` escape, and the two characters would match nothing — every
+    // probe would read an existing session as absent.
     let script =
-      "if \(check) >/dev/null 2>&1; then "
-      + "echo \"\(remoteProbeMarker) live $(\(read) 2>/dev/null)\"; "
-      + "else echo '\(remoteProbeMarker) absent'; fi"
+      "gc_row=$(\(check) 2>/dev/null | grep -F \(quotedCommand(["name=\(name)\t"])) | head -1); "
+      + "if [ -z \"$gc_row\" ] || printf '%s' \"$gc_row\" | grep -q $'\\terr='; then "
+      + "echo '\(remoteProbeMarker) absent'; "
+      + "elif printf '%s' \"$gc_row\" | grep -q $'\\tended='; then "
+      + "gc_done=$(printf '%s' \"$gc_row\" | sed -n 's/.*\\texit_code=\\([0-9][0-9]*\\).*/\\1/p'); "
+      + "echo \"\(remoteProbeMarker) exited ${gc_done:-1}\"; "
+      + "else echo \"\(remoteProbeMarker) live $(\(read) 2>/dev/null)\"; fi"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
   }
 
@@ -1329,6 +1397,11 @@ public enum ZmxSessionLauncher {
     let status = marked.dropFirst(remoteProbeMarker.count)
       .trimmingCharacters(in: .whitespaces)
     if status == "absent" { return .absent }
+    if status.hasPrefix("exited "),
+      let code = Int(status.dropFirst("exited ".count).trimmingCharacters(in: .whitespaces))
+    {
+      return .exited(code: code)
+    }
     guard status.hasPrefix("live") else { return .unreachable }
     let label = status.dropFirst("live".count).trimmingCharacters(in: .whitespaces)
     return .live(label: label.isEmpty ? nil : label)
@@ -1352,6 +1425,8 @@ public enum ZmxSessionLauncher {
     switch status {
     case .unreachable: return .unknown
     case .absent: return .absent
+    case .exited(let code):
+      return PresenceReading(presence: .idle, confidence: .scanned, exitCode: code)
     case .live(let label):
       guard let label, let reported = parsePresenceLabel(label) else { return liveWithoutLabel }
       return PresenceReading(presence: reported, confidence: .reported)

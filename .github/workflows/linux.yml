@@ -1,0 +1,22 @@
+name: Linux
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Linux build
+    runs-on: ubuntu-latest
+    container: swift:6.2
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift build
+      - run: .build/debug/graphcode

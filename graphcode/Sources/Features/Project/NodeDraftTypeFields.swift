@@ -121,8 +121,11 @@ struct GoalDraftFields: View {
   private var budgetFields: some View {
     DraftField(
       label: "Token budget", qualifier: "optional",
-      help: "Stopped once its backend reports this many tokens spent (input + output). "
-        + "Reported, never estimated — a backend that reports nothing is never stopped."
+      help: "Stopped once its backend reports this many tokens spent — input + output + "
+        + "every cache-read and cache-creation token the API metered. On Claude Code each "
+        + "turn re-meters the whole context as cache reads, so a budget burns per turn, "
+        + "not per hour. Reported, never estimated — a backend that reports nothing is "
+        + "never stopped."
     ) {
       DraftTextField(placeholder: "200000", text: $store.draftBudget, isMono: true)
     }

@@ -12,6 +12,10 @@ struct LoopWorkspaceView: View {
   /// What the loop bar's elapsed label is measured against — the window's one 30s tick,
   /// the same one the canvases' cards use. See `CanvasClock`.
   @State private var now = Date()
+  /// Followed live rather than captured once, like `AppView`'s activity strip: a board
+  /// switched on in Settings should appear without a relaunch, and `SettingsModel` is
+  /// `@Observable`, so reading it here re-renders on the same pass the toggle does.
+  private var artifactoryEnabled: Bool { SettingsModel.shared.settings.artifactoryEnabled }
   var body: some View {
     HStack(spacing: 0) {
       workspace
@@ -23,10 +27,16 @@ struct LoopWorkspaceView: View {
           isSummaryFolded: store.isSummaryFolded,
           seenBeatID: store.seenBeatID,
           isBoardFolded: store.isBoardFolded,
+          artifactoryEnabled: artifactoryEnabled,
+          isArtifactoryFolded: store.isArtifactoryFolded,
           onSummaryFoldToggled: { store.send(.summaryFoldToggled) },
           onSummaryAnswerTapped: { store.send(.summaryAnswerTapped) },
           onBoardFoldToggled: { store.send(.boardFoldToggled) },
-          onBoardExpanded: { store.send(.boardExpandToggled) }
+          onBoardExpanded: { store.send(.boardExpandToggled) },
+          onArtifactoryFoldToggled: { store.send(.artifactoryFoldToggled) },
+          onArtifactoryPost: { text, topic in
+            store.send(.artifactoryPostSubmitted(text: text, topic: topic))
+          }
         ) { targetID in
           store.send(.railTargetTapped(targetID))
         }

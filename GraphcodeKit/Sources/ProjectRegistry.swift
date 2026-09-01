@@ -481,7 +481,10 @@ public actor ProjectRegistry {
       // `TemplateStorage`.
       onResolveTemplate: { templateID, projectPath in
         TemplateStorage.shared.template(withID: templateID, projectPath: projectPath)
-      })
+      },
+      // Read fresh per command, the way the heartbeat toggle is: the app resolving
+      // the beta ramp (or a hand edit) applies to the next post with no restart.
+      onArtifactoryEnabled: { GraphcodeSettingsStore.load().artifactoryEnabled })
     stores[path] = newStore
     // Only on first load of this project — a time-based node's session outlives the app
     // but not a reboot, so something has to restart it, and this is the moment the

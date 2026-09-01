@@ -17,11 +17,11 @@ struct AttachedSessionBriefingTests {
 
   private func surface(
     _ backend: CLISessionBackendKind, launchesClaudeCode: Bool = true,
-    initialPrompt: String? = "go"
+    initialPrompt: String? = "go", loopType: LoopType = .turnBased
   ) -> GhosttyTerminalView {
     GhosttyTerminalView(
       surfaceID: UUID(), sessionName: "s", launchesClaudeCode: launchesClaudeCode,
-      backend: backend, initialPrompt: initialPrompt, workingDirectory: nil,
+      backend: backend, loopType: loopType, initialPrompt: initialPrompt, workingDirectory: nil,
       projectPath: "/tmp/proj", onProcessExited: { _ in })
   }
 
@@ -60,6 +60,25 @@ struct AttachedSessionBriefingTests {
       surface(.codex).sessionEnvironment(briefingPath: briefing)[
         "GRAPHCODE_TRIGGER_PROMPT"] ?? ""
     #expect(prompt.contains(briefing))
+  }
+
+  @Test
+  func unattendedCodexLeavesFirstLaunchToTheDaemon() {
+    #expect(surface(.codex, loopType: .goalBased).defersCodexLaunchToDaemon)
+    #expect(surface(.codex, loopType: .timeBased).defersCodexLaunchToDaemon)
+    #expect(!surface(.codex).defersCodexLaunchToDaemon)
+    #expect(!surface(.claudeCode, loopType: .goalBased).defersCodexLaunchToDaemon)
+  }
+
+  @Test
+  func unattendedCodexDoesNotResumeFromTheApp() {
+    guard ZmxLocator.isInstalled else { return }
+    let view = surface(.codex, loopType: .goalBased)
+    let command = view.command(briefingPath: briefing)
+    #expect(command.first == "/bin/zsh")
+    #expect(command.contains { $0.contains("until") && $0.contains("cmd=.*codex") })
+    #expect(command.last?.contains("exec") == true)
+    #expect(command.last?.contains("attach 's'") == true)
   }
 
   @Test

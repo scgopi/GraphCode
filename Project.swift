@@ -20,6 +20,21 @@ let project = Project(
     name: "graphcode",
     organizationName: "Graphcode",
     targets: [
+        // `ArtifactoryKit` — the Artifactory domain model: one post type, one watch
+        // subscription, and the caps/matching rules both the daemon and the CLI read.
+        // Its own module, with no dependency beyond Foundation, so the shared board is
+        // a thing GraphcodeKit links rather than a folder inside it — and so the
+        // post shape can evolve without touching the session machinery.
+        .target(
+            name: "ArtifactoryKit",
+            destinations: .macOS,
+            product: .staticFramework,
+            bundleId: "\(bundleIdPrefix).artifactory",
+            deploymentTargets: .macOS("15.0"),
+            buildableFolders: [
+                "ArtifactoryKit/Sources"
+            ]
+        ),
         .target(
             name: "GraphcodeKit",
             destinations: .macOS,
@@ -30,6 +45,7 @@ let project = Project(
                 "GraphcodeKit/Sources"
             ],
             dependencies: [
+                .target(name: "ArtifactoryKit"),
                 .external(name: "IdentifiedCollections")
             ]
         ),
@@ -54,8 +70,8 @@ let project = Project(
                 // (#33). Before that the suffix lived on the tag only, so betas 48/49
                 // of the 0.1.15 line read "0.1.15" and are told by the build number
                 // apart.
-                "CFBundleShortVersionString": "0.1.57-beta1",
-                "CFBundleVersion": "216",
+                "CFBundleShortVersionString": "0.1.58-beta1",
+                "CFBundleVersion": "222",
             ]),
             resources: [
                 "graphcode/Resources/**"

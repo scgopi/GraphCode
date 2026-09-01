@@ -79,6 +79,16 @@ struct ClaudeCodeTrustTests {
     #expect(try String(contentsOf: url, encoding: .utf8) == "{not json at all")
   }
 
+  /// A `projects` value the seed does not understand is left exactly as found too:
+  /// replacing it with a dictionary would trade the user's real state for a guess.
+  @Test
+  func anUnexpectedProjectsShapeIsLeftUntouched() throws {
+    let url = temporaryConfig(#"{"projects":"unexpected"}"#)
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    ClaudeCodeTrust.ensureTrusted(directory: "/tmp/project", configURL: url)
+    #expect(try String(contentsOf: url, encoding: .utf8) == #"{"projects":"unexpected"}"#)
+  }
+
   @Test
   func anEmptyDirectoryIsNeverWritten() throws {
     let url = temporaryConfig(#"{"projects":{}}"#)

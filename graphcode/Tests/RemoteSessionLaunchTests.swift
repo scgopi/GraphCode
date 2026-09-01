@@ -107,10 +107,26 @@ struct RemoteSessionLaunchTests {
     #expect(invocation.first == "/usr/bin/ssh")
     let remoteCommand = try #require(invocation.last)
     #expect(remoteCommand.contains("send"))
+    // The send is gated on the husk-aware alive check (#215): a session whose task has
+    // ended must fail it, or the keystrokes land at the husk's shell prompt.
+    #expect(remoteCommand.contains("ls 2>/dev/null"))
+    #expect(remoteCommand.contains("ended="))
     #expect(remoteCommand.contains("task done"))
     #expect(remoteCommand.contains("sleep"))
     #expect(
       remoteCommand.contains(SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName))
+  }
+
+  @Test
+  func aRemoteCompletedTaskCarriesItsExitCode() {
+    let status = ZmxSessionLauncher.parseRemoteStatus(
+      succeeded: true, output: "graphcode-status: exited 1")
+    #expect(status == .exited(code: 1))
+    let reading = ZmxSessionLauncher.presenceReading(
+      from: status,
+      liveWithoutLabel: PresenceReading(presence: .idle, confidence: .heuristic))
+    #expect(reading.exitCode == 1)
+    #expect(reading.confidence == .scanned)
   }
 
   @Test
