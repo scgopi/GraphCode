@@ -1,3 +1,4 @@
+import AppKit
 import ComposableArchitecture
 import SwiftUI
 
@@ -127,11 +128,24 @@ struct DraftProseField: View {
   var body: some View {
     TextField(placeholder, text: $text, axis: .vertical)
       .textFieldStyle(.plain)
-      .lineLimit(2...4)
+      .lineLimit(2...8)
       .font(.system(size: 13))
       .focused($isFocused)
       .draftFieldBox(isFocused: isFocused, minHeight: 54)
       .onKeyPress(.tab) { onTokenJump?() == true ? .handled : .ignored }
+      // ⏎ is the dialog's primary action — the button says so — and a brief is
+      // often more than one paragraph. ⇧⏎ breaks the line, the way every chat
+      // composer does, so writing two paragraphs doesn't mean creating after the
+      // first. The insert goes through the field editor so it lands at the caret
+      // and the binding updates the ordinary way.
+      .onKeyPress(.return, phases: .down) { press in
+        guard press.modifiers.contains(.shift),
+          let editor = NSApp.keyWindow?.firstResponder as? NSTextView
+        else { return .ignored }
+        editor.insertNewlineIgnoringFieldEditor(nil)
+        return .handled
+      }
+      .help("⇧⏎ for a new line — ⏎ creates the loop")
       .claimingFocus(when: takesFocusRequest, focus: $isFocused)
   }
 }

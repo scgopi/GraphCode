@@ -160,30 +160,30 @@ extension ProjectFeature.State {
         || template.name.lowercased().contains(query)
         || template.body.lowercased().contains(query)
     }
-    // Starters stand apart only while they are the whole library. Once somebody has
-    // saved a brief of their own, the scaffolding stops outranking their work and
-    // sorts in with everything else in All projects.
-    let pinStarters = !templates.library.contains { !$0.isStarter && !$0.origin.isProject }
     var project: [PromptTemplate] = []
     var starters: [PromptTemplate] = []
-    var home: [PromptTemplate] = []
+    var mine: [PromptTemplate] = []
     for template in templates.library where matches(template) {
       if template.origin.isProject {
         project.append(template)
-      } else if pinStarters, template.isStarter {
+      } else if template.isStarter {
         starters.append(template)
       } else {
-        home.append(template)
+        mine.append(template)
       }
     }
-    func rows(
-      _ templates: [PromptTemplate], _ scope: ProjectFeature.TemplatePickerScope
-    ) -> [ProjectFeature.TemplatePickerRow] {
-      templates
-        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        .map { ProjectFeature.TemplatePickerRow(template: $0, scope: scope) }
+    func byName(_ templates: [PromptTemplate]) -> [PromptTemplate] {
+      templates.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
-    return rows(project, .project) + rows(starters, .starter) + rows(home, .home)
+    // The shipped ones keep their shipped order: the Starters group is a ladder —
+    // lead a team, then Goal, then Timed, then the rest — and alphabetical would
+    // scramble it. Everything a person wrote sorts by name, as before.
+    let byPriority = starters.sorted {
+      StarterTemplates.priority(of: $0.id) < StarterTemplates.priority(of: $1.id)
+    }
+    return byName(project).map { ProjectFeature.TemplatePickerRow(template: $0, scope: .project) }
+      + byPriority.map { ProjectFeature.TemplatePickerRow(template: $0, scope: .starter) }
+      + byName(mine).map { ProjectFeature.TemplatePickerRow(template: $0, scope: .home) }
   }
 
   /// The fields still holding a `{token}`, in the order `⇥` walks them — the order
@@ -388,9 +388,11 @@ extension ProjectFeature {
     case branch
   }
 
-  /// The groups the picker sorts by — a project's committed templates above the home
-  /// library, always, with the briefs the app ships pinned between them while they are
-  /// still the only thing here.
+  /// The three groups, in the order the picker shows them: a project's committed
+  /// templates first, always — the storage design's rule — then the briefs the app
+  /// ships, then the ones this person saved. The last two are kept apart for good:
+  /// scaffolding and somebody's own library are different things, and a list that
+  /// mixed them once the library grew would make the shipped ones hard to find again.
   enum TemplatePickerScope: Equatable {
     case project
     case starter
@@ -400,7 +402,7 @@ extension ProjectFeature {
       switch self {
       case .project: return "This project"
       case .starter: return "Starters"
-      case .home: return "All projects"
+      case .home: return "Your templates"
       }
     }
   }
