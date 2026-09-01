@@ -432,7 +432,8 @@ do {
   case .artifactoryRead(let projectPath, let postID):
     // Read-only: the post rides the snapshot, no command is sent, no cursor moves —
     // the deep-read half of `sync --headlines` triage, priced at one line of context
-    // per post a loop actually decides to care about.    try client.send(.openProject(path: projectPath))
+    // per post a loop actually decides to care about.
+    try client.send(.openProject(path: projectPath))
     let read = try client.waitForEvent {
       if case .graphChanged = $0 { return true } else { return false }
     }

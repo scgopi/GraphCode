@@ -63,10 +63,12 @@ struct ArtifactorySection: View {
   /// question, not a way you prefer to read the board.
   /// How tall the posts actually are, so the scroll box can ask for exactly that.
   @State private var contentHeight: CGFloat = 0
-  /// Past this the board scrolls rather than pushing the sections under it off the rail.
-  /// Roughly four posts at the rail's default width — enough that scrolling is the
-  /// exception, not the way the section is normally read.
-  static let maxScrollHeight: CGFloat = 300
+  /// Past this the board scrolls rather than pushing the sections above it off the rail.
+  /// Every note is on the board and reachable — this is only how much of it is on screen
+  /// before the wheel takes over. About ten posts at the rail's default width, which is
+  /// the number asked for: enough to read a conversation, not so many that the rail
+  /// is nothing but the board.
+  static let maxScrollHeight: CGFloat = 600
 
   @State private var showsRecords = false
   @State private var isComposing = false
@@ -116,9 +118,16 @@ struct ArtifactorySection: View {
         // pinned the posts to the bottom of that box while the header stayed at its top —
         // so a board with two notes on it drew a header, a stretch of nothing, and then
         // the notes. Measuring the content and asking for exactly that height (up to a
-        // cap) leaves no slack for the anchor to spread, which is why the gap cannot come
-        // back rather than merely being smaller.
-        .frame(height: min(contentHeight, Self.maxScrollHeight))
+        // cap) leaves no slack for the anchor to spread.
+        //
+        // `nil` until measured, never zero. This started as `min(contentHeight, cap)`
+        // with `contentHeight` at 0, and a zero-height scroll view never lays out its
+        // content — so the preference that would have grown it never fired, and the
+        // expanded section drew a header, the button, and nothing between. Unsized for
+        // the first pass, the content is laid out, the measurement lands, and the box
+        // snaps to it. The failure mode is now a brief greedy box, not an empty one.
+        .frame(height: contentHeight > 0 ? min(contentHeight, Self.maxScrollHeight) : nil)
+        .frame(maxHeight: contentHeight > 0 ? nil : Self.maxScrollHeight)
         // Outside the scroll view on purpose. Inside it the composer was one more row
         // in a list that can be taller than the rail — it could open scrolled out of
         // sight, and it moved under the pointer as posts arrived. Pinned here it is
