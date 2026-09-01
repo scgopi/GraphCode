@@ -96,7 +96,11 @@ struct ArtifactorySection: View {
         // in a list that can be taller than the rail — it could open scrolled out of
         // sight, and it moved under the pointer as posts arrived. Pinned here it is
         // always the thing directly above the section's rule while you are writing.
-        if isComposing { composer }
+        if isComposing {
+          composer
+        } else {
+          leaveANoteButton
+        }
       }
       Rectangle().fill(.white.opacity(0.07)).frame(height: 1)
     }
@@ -124,24 +128,6 @@ struct ArtifactorySection: View {
           .frame(height: 14)
           .background(
             Theme.paneFocusTint.opacity(0.22), in: RoundedRectangle(cornerRadius: 3))
-      }
-      if !isFolded {
-        Button {
-          // Already open: the composer will not appear again, so this is the write that
-          // puts the keyboard back in it. Opening it is `onAppear`'s job.
-          if isComposing {
-            draftFocused = true
-          } else {
-            isComposing = true
-          }
-        } label: {
-          Image(systemName: "plus")
-            .font(.system(size: 9, weight: .semibold))
-            .foregroundStyle(.white.opacity(0.62))
-            .frame(width: 14, height: 14)
-        }
-        .buttonStyle(.plain)
-        .help("Leave a note on the board")
       }
       Image(systemName: isFolded ? "chevron.down" : "chevron.up")
         .font(.system(size: 8, weight: .semibold))
@@ -171,6 +157,35 @@ struct ArtifactorySection: View {
     }
     .contentShape(Rectangle())
     .onTapGesture(perform: onToggleFold)
+  }
+
+  /// The one place a human speaks to the graph, and it says so in words.
+  ///
+  /// This was a `+` on the header, drawn only under the pointer — the manners every
+  /// other header control in the app has, and wrong here. Those are all *second* ways
+  /// to do something reachable elsewhere; this is the only way to put a human's note on
+  /// the board without leaving for a terminal, and an affordance you have to hover to
+  /// discover is one nobody discovers. Named, always drawn, and sitting exactly where
+  /// the composer opens, so the click and its result are in the same place.
+  private var leaveANoteButton: some View {
+    Button {
+      isComposing = true
+    } label: {
+      HStack(spacing: 5) {
+        Image(systemName: "square.and.pencil")
+          .font(.system(size: 10, weight: .medium))
+        Text("Leave a note")
+          .font(.system(size: 11, weight: .semibold))
+      }
+      .foregroundStyle(.white.opacity(0.62))
+      .frame(maxWidth: .infinity, minHeight: 24)
+      .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 5))
+      .overlay {
+        RoundedRectangle(cornerRadius: 5).stroke(.white.opacity(0.08), lineWidth: 1)
+      }
+    }
+    .buttonStyle(.plain)
+    .help("Post a note to this project's board, as a human")
   }
 
   private var sinceYouLooked: some View {
