@@ -260,92 +260,101 @@ public struct TemplateStorage: Sendable {
   /// (which is what `git checkout` and an atomic editor save both look like) all put
   /// the watch back on the right descriptor and report the change.
   public func watch(projectPath: String?) -> AsyncStream<Void> {
-    let directories =
-      [homeDirectory]
-      + (projectPath.map { [projectDirectory($0)] } ?? [])
-    return AsyncStream { continuation in
-      let arming = DirectoryWatch(directories: directories) { continuation.yield() }
-      continuation.onTermination = { _ in arming.stop() }
-    }
+    #if canImport(Darwin)
+      let directories =
+        [homeDirectory]
+        + (projectPath.map { [projectDirectory($0)] } ?? [])
+      return AsyncStream { continuation in
+        let arming = DirectoryWatch(directories: directories) { continuation.yield() }
+        continuation.onTermination = { _ in arming.stop() }
+      }
+    #else
+      // Linux builds the non-UI sources for CI, and the only thing that reads
+      // templates there is the daemon's by-id resolve, which re-reads the directory
+      // on every call. There is no library to keep live because there is no picker.
+      return AsyncStream { $0.finish() }
+    #endif
   }
 }
 
-/// Keeps one `DispatchSource` per directory that currently exists, and re-arms as
-/// directories come and go. Separate from `TemplateStorage` because it owns mutable
-/// state with a lifetime — the storage type itself is a value anyone may copy.
-private final class DirectoryWatch: @unchecked Sendable {
-  /// Slow on purpose: this only has to notice a directory *appearing*, which the
-  /// dispatch sources cannot do for themselves. Everything that happens inside an
-  /// already-watched directory is reported immediately by its source.
-  private static let rearmInterval: DispatchTimeInterval = .seconds(2)
+#if canImport(Darwin)
+  /// Keeps one `DispatchSource` per directory that currently exists, and re-arms as
+  /// directories come and go. Separate from `TemplateStorage` because it owns mutable
+  /// state with a lifetime — the storage type itself is a value anyone may copy.
+  private final class DirectoryWatch: @unchecked Sendable {
+    /// Slow on purpose: this only has to notice a directory *appearing*, which the
+    /// dispatch sources cannot do for themselves. Everything that happens inside an
+    /// already-watched directory is reported immediately by its source.
+    private static let rearmInterval: DispatchTimeInterval = .seconds(2)
 
-  private let queue = DispatchQueue(label: "graphcode.template-watch")
-  private let directories: [URL]
-  private let onChange: () -> Void
-  private var sources: [URL: DispatchSourceFileSystemObject] = [:]
-  private var timer: DispatchSourceTimer?
-  private var stopped = false
+    private let queue = DispatchQueue(label: "graphcode.template-watch")
+    private let directories: [URL]
+    private let onChange: () -> Void
+    private var sources: [URL: DispatchSourceFileSystemObject] = [:]
+    private var timer: DispatchSourceTimer?
+    private var stopped = false
 
-  init(directories: [URL], onChange: @escaping () -> Void) {
-    self.directories = directories
-    self.onChange = onChange
-    queue.async { [weak self] in self?.arm(reporting: false) }
-    let timer = DispatchSource.makeTimerSource(queue: queue)
-    timer.schedule(deadline: .now() + Self.rearmInterval, repeating: Self.rearmInterval)
-    timer.setEventHandler { [weak self] in self?.arm(reporting: true) }
-    timer.resume()
-    self.timer = timer
-  }
-
-  func stop() {
-    queue.async { [self] in
-      stopped = true
-      timer?.cancel()
-      timer = nil
-      for source in sources.values { source.cancel() }
-      sources.removeAll()
+    init(directories: [URL], onChange: @escaping () -> Void) {
+      self.directories = directories
+      self.onChange = onChange
+      queue.async { [weak self] in self?.arm(reporting: false) }
+      let timer = DispatchSource.makeTimerSource(queue: queue)
+      timer.schedule(deadline: .now() + Self.rearmInterval, repeating: Self.rearmInterval)
+      timer.setEventHandler { [weak self] in self?.arm(reporting: true) }
+      timer.resume()
+      self.timer = timer
     }
-  }
 
-  /// Brings `sources` back in line with which directories exist. `reporting` is false
-  /// only for the very first pass, where the caller has just read the library itself
-  /// and a yield would be a redundant re-read.
-  private func arm(reporting: Bool) {
-    guard !stopped else { return }
-    var changed = false
-    for url in directories {
-      let exists = FileManager.default.fileExists(atPath: url.path)
-      let watched = sources[url] != nil
-      if exists, !watched, let source = makeSource(for: url) {
-        sources[url] = source
-        changed = true
-      } else if !exists, watched {
-        sources[url]?.cancel()
-        sources[url] = nil
-        changed = true
+    func stop() {
+      queue.async { [self] in
+        stopped = true
+        timer?.cancel()
+        timer = nil
+        for source in sources.values { source.cancel() }
+        sources.removeAll()
       }
     }
-    if changed, reporting { onChange() }
-  }
 
-  private func makeSource(for url: URL) -> DispatchSourceFileSystemObject? {
-    let descriptor = open(url.path, O_EVTONLY)
-    guard descriptor >= 0 else { return nil }
-    let source = DispatchSource.makeFileSystemObjectSource(
-      fileDescriptor: descriptor, eventMask: [.write, .rename, .delete], queue: queue)
-    source.setEventHandler { [weak self] in
-      guard let self else { return }
-      // A directory that was renamed or deleted out from under the descriptor keeps
-      // reporting nothing useful; dropping it here lets the next re-arm re-open the
-      // path, which is how a `git checkout` that swaps the folder is picked up.
-      if source.data.contains(.delete) || source.data.contains(.rename) {
-        source.cancel()
-        sources[url] = nil
+    /// Brings `sources` back in line with which directories exist. `reporting` is false
+    /// only for the very first pass, where the caller has just read the library itself
+    /// and a yield would be a redundant re-read.
+    private func arm(reporting: Bool) {
+      guard !stopped else { return }
+      var changed = false
+      for url in directories {
+        let exists = FileManager.default.fileExists(atPath: url.path)
+        let watched = sources[url] != nil
+        if exists, !watched, let source = makeSource(for: url) {
+          sources[url] = source
+          changed = true
+        } else if !exists, watched {
+          sources[url]?.cancel()
+          sources[url] = nil
+          changed = true
+        }
       }
-      onChange()
+      if changed, reporting { onChange() }
     }
-    source.setCancelHandler { close(descriptor) }
-    source.resume()
-    return source
+
+    private func makeSource(for url: URL) -> DispatchSourceFileSystemObject? {
+      let descriptor = open(url.path, O_EVTONLY)
+      guard descriptor >= 0 else { return nil }
+      let source = DispatchSource.makeFileSystemObjectSource(
+        fileDescriptor: descriptor, eventMask: [.write, .rename, .delete], queue: queue)
+      source.setEventHandler { [weak self] in
+        guard let self else { return }
+        // A directory that was renamed or deleted out from under the descriptor keeps
+        // reporting nothing useful; dropping it here lets the next re-arm re-open the
+        // path, which is how a `git checkout` that swaps the folder is picked up.
+        if source.data.contains(.delete) || source.data.contains(.rename) {
+          source.cancel()
+          sources[url] = nil
+        }
+        onChange()
+      }
+      source.setCancelHandler { close(descriptor) }
+      source.resume()
+      return source
+    }
   }
-}
+#endif
