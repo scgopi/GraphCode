@@ -1,5 +1,5 @@
 import Foundation
-import MailboardKit
+import ArtifactoryKit
 
 /// One node in a graph of loops: a unit of agentic work with a well-defined hand-off
 /// contract, running inside a real CLI session. See docs/02-graph-of-loops.md.
@@ -135,18 +135,18 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// handoff, and custody has to be: stopping or deleting a parent takes its spawned
   /// descendants with it, while a drawn edge to a peer must never be caught in that.
   public let createdBy: UUID?
-  /// The newest Mailboard post this loop has read — `MailboardPost.id` of the last
-  /// post a `graphcode mailboard sync` showed it. `nil` has not synced yet and makes
+  /// The newest Artifactory post this loop has read — `ArtifactoryPost.id` of the last
+  /// post a `graphcode artifactory sync` showed it. `nil` has not synced yet and makes
   /// every post unread; the cursor only moves through sync, so a loop that ignores
   /// the board accrues nothing but a number, and a loop that died with unread mail
   /// finds it still waiting at the next wake.
-  public var lastMailboardRead: Int?
-  /// This loop's standing subscription to its project's Mailboard — set and cleared
-  /// with `graphcode mailboard watch`. Non-nil means every matching post also gets
+  public var lastArtifactoryRead: Int?
+  /// This loop's standing subscription to its project's Artifactory — set and cleared
+  /// with `graphcode artifactory watch`. Non-nil means every matching post also gets
   /// delivered to this loop the way a `--follow-up` message is: typed into a live
   /// idle session, staged to a busy one's memory, waiting in the post itself for a
   /// loop that is gone. The post is the durable half; this is only the ding.
-  public var mailboardWatch: MailboardWatch?
+  public var artifactoryWatch: ArtifactoryWatch?
   public var state: LoopState
   public var createdAt: Date
 
@@ -172,8 +172,8 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     presence: PresenceReading? = nil,
     metricHistory: [MetricSample] = [],
     createdBy: UUID? = nil,
-    lastMailboardRead: Int? = nil,
-    mailboardWatch: MailboardWatch? = nil,
+    lastArtifactoryRead: Int? = nil,
+    artifactoryWatch: ArtifactoryWatch? = nil,
     state: LoopState = .idle,
     createdAt: Date = Date()
   ) {
@@ -198,8 +198,8 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.presence = presence
     self.metricHistory = metricHistory
     self.createdBy = createdBy
-    self.lastMailboardRead = lastMailboardRead
-    self.mailboardWatch = mailboardWatch
+    self.lastArtifactoryRead = lastArtifactoryRead
+    self.artifactoryWatch = artifactoryWatch
     self.state = state
     self.createdAt = createdAt
   }
@@ -433,7 +433,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   private enum CodingKeys: String, CodingKey {
     case id, title, loopType, checkDescription, triggerPrompt, goal, backend, modelTier
     case worktreeBinding, subGraph, pilotState, usage, metricHistory, createdBy
-    case lastMailboardRead, mailboardWatch
+    case lastArtifactoryRead, artifactoryWatch
     case state, createdAt, activity, presence, firstInstruction, pausesBeforeWritesOnly
     case summary, board, heartbeatIntervalSeconds
   }
@@ -475,11 +475,11 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     metricHistory =
       try container.decodeIfPresent([MetricSample].self, forKey: .metricHistory) ?? []
     createdBy = try container.decodeIfPresent(UUID.self, forKey: .createdBy)
-    // Absent from graphs saved before the Mailboard existed — every loop simply has
+    // Absent from graphs saved before the Artifactory existed — every loop simply has
     // not read anything yet, which is what `nil` says.
-    lastMailboardRead = try container.decodeIfPresent(Int.self, forKey: .lastMailboardRead)
-    mailboardWatch = try container.decodeIfPresent(
-      MailboardWatch.self, forKey: .mailboardWatch)
+    lastArtifactoryRead = try container.decodeIfPresent(Int.self, forKey: .lastArtifactoryRead)
+    artifactoryWatch = try container.decodeIfPresent(
+      ArtifactoryWatch.self, forKey: .artifactoryWatch)
     state = try container.decodeIfPresent(LoopState.self, forKey: .state) ?? .idle
     createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
   }

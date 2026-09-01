@@ -16,11 +16,11 @@ import Observation
 final class SettingsModel {
   static let shared = SettingsModel()
 
-  /// The user's explicit Mailboard flip, kept apart from `settings` on purpose: the
+  /// The user's explicit Artifactory flip, kept apart from `settings` on purpose: the
   /// ramp decides what an install that has never chosen boots on, but once a human
   /// has flipped the switch the ramp never overrides them — the way `updateChannel`
   /// does for updates.
-  static let mailboardChoiceDefaultsKey = "mailboardChoice"
+  static let artifactoryChoiceDefaultsKey = "artifactoryChoice"
 
   var settings: GraphcodeSettings {
     didSet {
@@ -39,41 +39,41 @@ final class SettingsModel {
     }
   }
 
-  /// Whether the Settings window offers the Mailboard switch at all — the `mailboard`
+  /// Whether the Settings window offers the Artifactory switch at all — the `artifactory`
   /// ramp (`FeatureRamps`), read once at construction for the same reason as
   /// `AppSidebarView.offersCodespaces`: a ramp change applies from the next launch. A
   /// switch a stable install was never offered can't have recorded a choice, so an
   /// install that has chosen keeps its switch even if the ramp later pulls back.
-  let showsMailboard: Bool
+  let showsArtifactory: Bool
 
-  /// The Mailboard as a switch, following `betaUpdates`' shape — but the daemon
-  /// enforces this one, so a flip writes `mailboardEnabled` into `settings` (which
+  /// The Artifactory as a switch, following `betaUpdates`' shape — but the daemon
+  /// enforces this one, so a flip writes `artifactoryEnabled` into `settings` (which
   /// saves the file the daemon reads) *and* records the explicit choice that then
   /// outranks the ramp for good.
-  var mailboardEnabled: Bool {
+  var artifactoryEnabled: Bool {
     didSet {
-      UserDefaults.standard.set(mailboardEnabled, forKey: Self.mailboardChoiceDefaultsKey)
-      settings.mailboardEnabled = mailboardEnabled
+      UserDefaults.standard.set(artifactoryEnabled, forKey: Self.artifactoryChoiceDefaultsKey)
+      settings.artifactoryEnabled = artifactoryEnabled
     }
   }
 
   private init() {
     let loaded = GraphcodeSettingsStore.load()
-    let mailboard = Self.resolvesMailboard(
-      loaded: loaded.mailboardEnabled,
+    let artifactory = Self.resolvesArtifactory(
+      loaded: loaded.artifactoryEnabled,
       explicitChoice:
-        UserDefaults.standard.object(forKey: Self.mailboardChoiceDefaultsKey) as? Bool,
-      rampedOn: FeatureRamps.isEnabled(.mailboard))
+        UserDefaults.standard.object(forKey: Self.artifactoryChoiceDefaultsKey) as? Bool,
+      rampedOn: FeatureRamps.isEnabled(.artifactory))
     var booted = loaded
-    booted.mailboardEnabled = mailboard.enabled
+    booted.artifactoryEnabled = artifactory.enabled
     settings = booted
     // The assignment above is this property's initial value, so no observer ran: the
     // ramp-resolved bit is saved by hand, and only when it differs from the file.
-    if mailboard.fileNeedsWrite {
+    if artifactory.fileNeedsWrite {
       GraphcodeSettingsStore.save(booted)
     }
-    mailboardEnabled = mailboard.enabled
-    showsMailboard = mailboard.showsSwitch
+    artifactoryEnabled = artifactory.enabled
+    showsArtifactory = artifactory.showsSwitch
     let version =
       Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
     betaUpdates =
@@ -82,25 +82,25 @@ final class SettingsModel {
       == .beta
   }
 
-  /// The Mailboard's boot decision, separated so tests can pin it without touching
+  /// The Artifactory's boot decision, separated so tests can pin it without touching
   /// `UserDefaults`, the settings file, or the bundle.
   ///
   /// An install that has never chosen boots on the ramp's answer — beta first, stable
   /// only when `ramps.json` raises it — and that answer has to reach
   /// `~/.graphcode/settings.json` when it differs, because the daemon enforces
-  /// `mailboardEnabled` out of the file and cannot see ramps or `UserDefaults`. A
+  /// `artifactoryEnabled` out of the file and cannot see ramps or `UserDefaults`. A
   /// recorded choice outranks the ramp from then on, and keeps the switch offered so
   /// the choice can always be undone. Rewriting a file that already agrees is churn.
-  static func resolvesMailboard(
+  static func resolvesArtifactory(
     loaded: Bool, explicitChoice: Bool?, rampedOn: Bool
-  ) -> MailboardResolution {
+  ) -> ArtifactoryResolution {
     let enabled = explicitChoice ?? rampedOn
-    return MailboardResolution(
+    return ArtifactoryResolution(
       enabled: enabled, fileNeedsWrite: enabled != loaded,
       showsSwitch: rampedOn || explicitChoice != nil)
   }
 
-  struct MailboardResolution: Equatable {
+  struct ArtifactoryResolution: Equatable {
     var enabled: Bool
     var fileNeedsWrite: Bool
     var showsSwitch: Bool

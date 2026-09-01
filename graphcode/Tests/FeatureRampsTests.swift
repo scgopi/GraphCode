@@ -79,26 +79,26 @@ struct FeatureRampsTests {
   }
 
   @Test
-  func mailboardShipsBetaOnAndStableOff() {
-    // The Mailboard ramps the way codespaces no longer does: beta installs first,
+  func artifactoryShipsBetaOnAndStableOff() {
+    // The Artifactory ramps the way codespaces no longer does: beta installs first,
     // stable waiting for the fetched file to raise it. The baked default is the
     // shipped posture, not the end state.
     let id = UUID().uuidString
     #expect(
-      FeatureRamps.isEnabled(.mailboard, configuration: nil, channel: "beta", installID: id))
+      FeatureRamps.isEnabled(.artifactory, configuration: nil, channel: "beta", installID: id))
     #expect(
-      !FeatureRamps.isEnabled(.mailboard, configuration: nil, channel: "stable", installID: id))
+      !FeatureRamps.isEnabled(.artifactory, configuration: nil, channel: "stable", installID: id))
     // The fetched file stays both the opener and the kill switch either way: raised
     // to 100 everywhere it turns stable installs on, dropped to 0 it turns even beta
     // installs off.
     let everywhere = FeatureRamps.Configuration(
-      features: ["mailboard": ["beta": 100, "stable": 100]])
+      features: ["artifactory": ["beta": 100, "stable": 100]])
     #expect(
       FeatureRamps.isEnabled(
-        .mailboard, configuration: everywhere, channel: "stable", installID: id))
-    let nowhere = FeatureRamps.Configuration(features: ["mailboard": ["beta": 0, "stable": 0]])
+        .artifactory, configuration: everywhere, channel: "stable", installID: id))
+    let nowhere = FeatureRamps.Configuration(features: ["artifactory": ["beta": 0, "stable": 0]])
     #expect(
       !FeatureRamps.isEnabled(
-        .mailboard, configuration: nowhere, channel: "beta", installID: id))
+        .artifactory, configuration: nowhere, channel: "beta", installID: id))
   }
 }

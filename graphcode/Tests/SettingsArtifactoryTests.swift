@@ -3,16 +3,16 @@ import Testing
 
 @testable import graphcode
 
-/// The Mailboard's boot decision in the app: the ramp answers for an install that has
+/// The Artifactory's boot decision in the app: the ramp answers for an install that has
 /// never chosen, a recorded choice outranks it from then on, and the resolved bit
 /// reaches `settings.json` only when it differs — the daemon enforces the setting out
 /// of the file and cannot see ramps or `UserDefaults`.
 @Suite
-struct SettingsMailboardTests {
+struct SettingsArtifactoryTests {
   private func resolution(
     loaded: Bool, choice: Bool?, rampedOn: Bool
-  ) -> SettingsModel.MailboardResolution {
-    SettingsModel.resolvesMailboard(
+  ) -> SettingsModel.ArtifactoryResolution {
+    SettingsModel.resolvesArtifactory(
       loaded: loaded, explicitChoice: choice, rampedOn: rampedOn)
   }
 
@@ -22,13 +22,13 @@ struct SettingsMailboardTests {
     // daemon — which never sees the ramp — keeps the board off.
     #expect(
       resolution(loaded: false, choice: nil, rampedOn: true)
-        == SettingsModel.MailboardResolution(
+        == SettingsModel.ArtifactoryResolution(
           enabled: true, fileNeedsWrite: true, showsSwitch: true))
     // A stable install the ramp hasn't reached boots off, and the file already
     // agrees, so nothing is written.
     #expect(
       resolution(loaded: false, choice: nil, rampedOn: false)
-        == SettingsModel.MailboardResolution(
+        == SettingsModel.ArtifactoryResolution(
           enabled: false, fileNeedsWrite: false, showsSwitch: false))
   }
 
@@ -38,12 +38,12 @@ struct SettingsMailboardTests {
     // switch stays offered so the choice can always be undone.
     #expect(
       resolution(loaded: true, choice: true, rampedOn: false)
-        == SettingsModel.MailboardResolution(
+        == SettingsModel.ArtifactoryResolution(
           enabled: true, fileNeedsWrite: false, showsSwitch: true))
     // An explicit off survives the ramp turning everyone on.
     #expect(
       resolution(loaded: false, choice: false, rampedOn: true)
-        == SettingsModel.MailboardResolution(
+        == SettingsModel.ArtifactoryResolution(
           enabled: false, fileNeedsWrite: false, showsSwitch: true))
   }
 
@@ -53,7 +53,7 @@ struct SettingsMailboardTests {
     // bytes would be churn.
     #expect(
       resolution(loaded: true, choice: nil, rampedOn: true)
-        == SettingsModel.MailboardResolution(
+        == SettingsModel.ArtifactoryResolution(
           enabled: true, fileNeedsWrite: false, showsSwitch: true))
   }
 
@@ -64,7 +64,7 @@ struct SettingsMailboardTests {
     // switch goes away with it.
     #expect(
       resolution(loaded: true, choice: nil, rampedOn: false)
-        == SettingsModel.MailboardResolution(
+        == SettingsModel.ArtifactoryResolution(
           enabled: false, fileNeedsWrite: true, showsSwitch: false))
   }
 }

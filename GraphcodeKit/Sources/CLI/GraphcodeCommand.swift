@@ -1,5 +1,5 @@
 import Foundation
-import MailboardKit
+import ArtifactoryKit
 
 /// Argument parsing and output formatting for the `graphcode` CLI
 /// (docs/03-architecture.md#cli-graphcode).
@@ -44,18 +44,18 @@ public enum GraphcodeCommand: Equatable, Sendable {
   case exportNode(projectPath: String, nodeID: UUID, output: String, includeChildren: Bool = false)
   case exportGraph(projectPath: String, output: String)
   case importNodes(projectPath: String, fromZip: String, asChildOf: UUID? = nil)
-  /// The Mailboard verbs (docs/03-architecture.md#cli-graphcode): the shared,
+  /// The Artifactory verbs (docs/03-architecture.md#cli-graphcode): the shared,
   /// unaddressed board any loop can write to and read. Attribution is not parsed —
   /// like `sendMessage`, the sender comes from `ZMX_SESSION` at execution.
-  case mailboardPost(projectPath: String, topic: String?, text: String)
+  case artifactoryPost(projectPath: String, topic: String?, text: String)
   /// Read unread, then mark the board read — the cursor belongs to the calling loop,
   /// so this verb only means anything run from inside a session.
-  case mailboardSync(projectPath: String)
+  case artifactorySync(projectPath: String)
   /// The whole board, read-only: no command reaches the daemon, no cursor moves.
-  case mailboardList(projectPath: String)
+  case artifactoryList(projectPath: String)
   /// Subscribe (`on: true`, `--topic` filters) or unsubscribe (`--off`) the calling
   /// loop; like `sync`, the subscription belongs to a loop, not a shell.
-  case mailboardWatch(projectPath: String, on: Bool, topic: String?)
+  case artifactoryWatch(projectPath: String, on: Bool, topic: String?)
 
   public enum ParseError: Error, Equatable {
     case unknownCommand(String)
@@ -84,13 +84,13 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode node pilot <project-path> <node-id>     dry-run a composite
       graphcode node arm <project-path> <node-id>       arm it (needs a pilot first)
       graphcode edge create <project-path> <from-id> <to-id> [--kind <k>] [--condition <c>]
-      graphcode mailboard post <project-path> [--topic <t>] <note…>
+      graphcode artifactory post <project-path> [--topic <t>] <note…>
                            leave a note on the shared board for whoever comes next
-      graphcode mailboard sync <project-path>
+      graphcode artifactory sync <project-path>
                            read your unread posts and mark the board read
-      graphcode mailboard list <project-path>
+      graphcode artifactory list <project-path>
                            the whole board, read-only — no cursor moves
-      graphcode mailboard watch <project-path> [--topic <t>] [--off]
+      graphcode artifactory watch <project-path> [--topic <t>] [--off]
                            have matching posts typed into this loop's session as they
                            land; --off stops watching
       graphcode usage <project-path>
@@ -190,7 +190,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
 
     MAILBOARD
       The shared, unaddressed board: `node send` reaches one peer you already know;
-      a Mailboard post is a note for whoever comes next, discoverable by loops that
+      a Artifactory post is a note for whoever comes next, discoverable by loops that
       did not exist when it was written. Run from inside a loop, posts are attributed
       to that loop (`ZMX_SESSION`, the same mechanism as `node send`); from a human's
       shell they read as from "a human". `sync` and `watch` need that loop identity —
@@ -215,9 +215,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode status <project-path>
       graphcode node send <project-path> <node-id> --follow-up <message…>
                            stage work without interrupting an active turn
-      graphcode mailboard sync <project-path>
+      graphcode artifactory sync <project-path>
                            check what other loops left for you before starting a pass
-      graphcode mailboard post <project-path> --topic claims issue #12 is mine
+      graphcode artifactory post <project-path> --topic claims issue #12 is mine
                            stake a claim where every loop will find it, addressed to no one
       graphcode node pilot <project-path> <composite-id>
       graphcode node arm <project-path> <composite-id>
@@ -351,8 +351,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
         throw ParseError.unknownCommand("node \(verb)")
       }
 
-    case "mailboard":
-      return try parseMailboard(&arguments)
+    case "artifactory":
+      return try parseArtifactory(&arguments)
 
     case "edge":
       let verb = try take(&arguments, name: "edge subcommand")
@@ -770,27 +770,27 @@ extension GraphcodeCommand {
     return projects.map { "\($0.name)  \($0.path)" }.joined(separator: "\n")
   }
 
-  /// The board for a terminal. `mailboard list` prints the whole thing (`reader`
-  /// nil); `mailboard sync` passes the reading loop's id and prints only what its
-  /// cursor has not covered — the subtraction is `Mailboard.unread`, the arithmetic
+  /// The board for a terminal. `artifactory list` prints the whole thing (`reader`
+  /// nil); `artifactory sync` passes the reading loop's id and prints only what its
+  /// cursor has not covered — the subtraction is `Artifactory.unread`, the arithmetic
   /// the daemon's cursor contract rests on, so the CLI's "unread" and the store's can
   /// never disagree.
-  public static func renderMailboard(
+  public static func renderArtifactory(
     _ graph: LoopGraph, unreadFor readerID: UUID? = nil
   ) -> String {
-    let posts: [MailboardPost]
+    let posts: [ArtifactoryPost]
     if let readerID {
-      posts = Mailboard.unread(
-        in: graph.mailboard, since: graph.nodes[id: readerID]?.lastMailboardRead)
+      posts = Artifactory.unread(
+        in: graph.artifactory, since: graph.nodes[id: readerID]?.lastArtifactoryRead)
     } else {
-      posts = graph.mailboard
+      posts = graph.artifactory
     }
     guard !posts.isEmpty else {
       return readerID == nil
-        ? "the board is empty — post one: graphcode mailboard post <project-path> <note…>"
+        ? "the board is empty — post one: graphcode artifactory post <project-path> <note…>"
         : "no unread posts"
     }
-    let label = readerID == nil ? "mailboard" : "mailboard, unread"
+    let label = readerID == nil ? "artifactory" : "artifactory, unread"
     var lines = [
       "\(graph.project.name) \(label): \(posts.count) post\(posts.count == 1 ? "" : "s")"
     ]
@@ -800,16 +800,16 @@ extension GraphcodeCommand {
 
   /// One post, one line — the same identification the daemon's wake nudge quotes, so
   /// a loop reads a note the same way everywhere it meets one.
-  public static func render(_ post: MailboardPost) -> String {
+  public static func render(_ post: ArtifactoryPost) -> String {
     let topic = post.topic.map { " (\($0))" } ?? ""
     let stamp = post.at.formatted(date: .abbreviated, time: .shortened)
     return "#\(post.id)\(topic) from \(post.author) at \(stamp) — \(post.body)"
   }
 
-  /// `mailboard post`'s answer — the sequence number is what the author's own log and
+  /// `artifactory post`'s answer — the sequence number is what the author's own log and
   /// any replier's `node send` can refer to the note by.
   public static func renderPosted(_ graph: LoopGraph) -> String {
-    guard let post = graph.mailboard.last else { return "posted" }
+    guard let post = graph.artifactory.last else { return "posted" }
     let topic = post.topic.map { " (\($0))" } ?? ""
     return "posted #\(post.id)\(topic)"
   }
@@ -868,14 +868,14 @@ extension GraphcodeCommand {
     return .importNodes(projectPath: projectPath, fromZip: zipPath, asChildOf: asChildOf)
   }
 
-  /// The `mailboard` verbs' parsing, split from `parseVerb` the way export/import
+  /// The `artifactory` verbs' parsing, split from `parseVerb` the way export/import
   /// were. The note is joined argv words — the `node send`/`node memo` bargain, so
-  /// `graphcode mailboard post <path> --topic claims issue #12 is mine` needs no
+  /// `graphcode artifactory post <path> --topic claims issue #12 is mine` needs no
   /// quoting gymnastics — with `--topic <t>` riding along in either position.
-  fileprivate static func parseMailboard(
+  fileprivate static func parseArtifactory(
     _ arguments: inout [String]
   ) throws -> GraphcodeCommand {
-    let verb = try take(&arguments, name: "mailboard subcommand")
+    let verb = try take(&arguments, name: "artifactory subcommand")
     let path = try take(&arguments, name: "project-path")
     if arguments.contains(where: isHelpFlag) { throw HelpRequested() }
     switch verb {
@@ -891,23 +891,23 @@ extension GraphcodeCommand {
       }
       let text = words.joined(separator: " ").trimmingCharacters(in: .whitespaces)
       guard !text.isEmpty else { throw ParseError.missingArgument("note") }
-      return .mailboardPost(projectPath: path, topic: flags["topic"], text: text)
+      return .artifactoryPost(projectPath: path, topic: flags["topic"], text: text)
 
     case "sync":
       try validateFlags(arguments, allowed: [])
-      return .mailboardSync(projectPath: path)
+      return .artifactorySync(projectPath: path)
 
     case "list":
       try validateFlags(arguments, allowed: [])
-      return .mailboardList(projectPath: path)
+      return .artifactoryList(projectPath: path)
 
     case "watch":
       try validateFlags(arguments, allowed: ["topic", "off"])
       let flags = parseFlags(arguments)
-      return .mailboardWatch(projectPath: path, on: flags["off"] == nil, topic: flags["topic"])
+      return .artifactoryWatch(projectPath: path, on: flags["off"] == nil, topic: flags["topic"])
 
     default:
-      throw ParseError.unknownCommand("mailboard \(verb)")
+      throw ParseError.unknownCommand("artifactory \(verb)")
     }
   }
 }

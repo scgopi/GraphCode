@@ -329,7 +329,7 @@ do {
       projectPath: projectPath,
       [.graphCommand(projectPath: projectPath, command: .armComposite(nodeID))])
 
-  case .mailboardPost(let projectPath, let topic, let text):
+  case .artifactoryPost(let projectPath, let topic, let text):
     // Attributed like `node send`: run from inside a loop, ZMX_SESSION names the
     // sender and readers see who posted; from a human's shell there is no variable
     // and the note reads as from "a human" — which is exactly the human's voice on
@@ -341,7 +341,7 @@ do {
     try client.send(
       .graphCommand(
         projectPath: projectPath,
-        command: .mailboardPost(text: text, topic: topic, from: author)))
+        command: .artifactoryPost(text: text, topic: topic, from: author)))
     let postVerdict = try client.waitForEvent { event in
       switch event {
       case .graphChanged, .errorOccurred: return true
@@ -353,24 +353,24 @@ do {
       print(GraphcodeCommand.renderPosted(graph))
     }
 
-  case .mailboardSync(let projectPath):
-    // Attributed like `node send` — and required, the one place a mailboard verb
+  case .artifactorySync(let projectPath):
+    // Attributed like `node send` — and required, the one place a artifactory verb
     // refuses a human shell up front: the cursor is the calling loop's, so with no
     // ZMX_SESSION there is nobody to advance it for, and the daemon's refusal would
-    // arrive only after the round trip. Reading without a cursor is `mailboard list`.
+    // arrive only after the round trip. Reading without a cursor is `artifactory list`.
     let reader = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
     guard let reader else {
       fail(
-        "mailboard sync needs a loop identity — run it from inside a loop's session "
-          + "($ZMX_SESSION); a human reading the board wants `graphcode mailboard list`")
+        "artifactory sync needs a loop identity — run it from inside a loop's session "
+          + "($ZMX_SESSION); a human reading the board wants `graphcode artifactory list`")
     }
     try client.send(.openProject(path: projectPath))
     let opened = try client.waitForEvent {
       if case .graphChanged = $0 { return true } else { return false }
     }
     try client.send(
-      .graphCommand(projectPath: projectPath, command: .mailboardSync(from: reader)))
+      .graphCommand(projectPath: projectPath, command: .artifactorySync(from: reader)))
     let syncVerdict = try client.waitForEvent { event in
       switch event {
       case .graphChanged, .errorOccurred: return true
@@ -382,10 +382,10 @@ do {
     // moves the cursor, so the posts it covers are exactly those above the cursor
     // there — a post landing mid-command shows up at the next sync, as it should.
     if case .graphChanged(let graph) = opened {
-      print(GraphcodeCommand.renderMailboard(graph, unreadFor: reader))
+      print(GraphcodeCommand.renderArtifactory(graph, unreadFor: reader))
     }
 
-  case .mailboardList(let projectPath):
+  case .artifactoryList(let projectPath):
     // Read-only: no command is sent, so — the `status` rule — nothing past the
     // snapshot is waited for, and no cursor moves. This is the human's window onto
     // the board; `sync` is the loop's.
@@ -394,17 +394,17 @@ do {
       if case .graphChanged = $0 { return true } else { return false }
     }
     if case .graphChanged(let graph) = opened {
-      print(GraphcodeCommand.renderMailboard(graph))
+      print(GraphcodeCommand.renderArtifactory(graph))
     }
 
-  case .mailboardWatch(let projectPath, let on, let topic):
+  case .artifactoryWatch(let projectPath, let on, let topic):
     // Attributed like `node send` — and required like `sync`: the subscription is
     // the calling loop's, because the mail is delivered to a session, not a shell.
     let watcher = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
     guard let watcher else {
       fail(
-        "mailboard watch needs a loop identity — run it from inside a loop's session "
+        "artifactory watch needs a loop identity — run it from inside a loop's session "
           + "($ZMX_SESSION); the mail is delivered to the loop that watches")
     }
     try client.send(.openProject(path: projectPath))
@@ -412,7 +412,7 @@ do {
     try client.send(
       .graphCommand(
         projectPath: projectPath,
-        command: .mailboardWatch(on: on, topic: topic, from: watcher)))
+        command: .artifactoryWatch(on: on, topic: topic, from: watcher)))
     let watchVerdict = try client.waitForEvent { event in
       switch event {
       case .graphChanged, .errorOccurred: return true

@@ -1,6 +1,6 @@
 import Foundation
 import IdentifiedCollections
-import MailboardKit
+import ArtifactoryKit
 
 /// The unit `graphcoded`'s `GraphStore` owns and the graph canvas renders — see
 /// docs/02-graph-of-loops.md#loopgraph.
@@ -20,15 +20,15 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   public var scope: LoopGraphScope
   public var nodes: IdentifiedArrayOf<LoopNode>
   public var edges: IdentifiedArrayOf<LoopEdge>
-  /// The project's Mailboard — every post any loop has dropped onto the shared board,
-  /// oldest first, capped at `Mailboard.maxPosts`. Kept on the graph rather than in a
+  /// The project's Artifactory — every post any loop has dropped onto the shared board,
+  /// oldest first, capped at `Artifactory.maxPosts`. Kept on the graph rather than in a
   /// side store so it inherits for free everything graph state already has: one
   /// writer (the daemon), atomic persistence beside the graph file, a snapshot in
   /// every `.graphChanged` (which is how the CLI reads it — no second read path), and
   /// the global graph at `graphcode://global` becoming a cross-project board without
   /// a line of extra code. Empty for anyone who never touches the board; graphs saved
   /// before the field existed decode with it empty.
-  public var mailboard: [MailboardPost] = []
+  public var artifactory: [ArtifactoryPost] = []
 
   public var project: ProjectRef {
     get { scope.projectRef }
@@ -244,7 +244,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   // MARK: - Coding
 
   private enum CodingKeys: String, CodingKey {
-    case id, nodes, edges, mailboard
+    case id, nodes, edges, artifactory
     /// Persisted as a `ProjectRef` rather than as the scope enum. Every graph on disk
     /// predates `LoopGraphScope`, and the ref round-trips both cases losslessly (the
     /// global graph's reserved path decodes straight back to `.global`), so there was
@@ -259,7 +259,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     scope = LoopGraphScope(projectPath: ref.path, name: ref.name)
     nodes = try container.decodeIfPresent(IdentifiedArrayOf<LoopNode>.self, forKey: .nodes) ?? []
     edges = try container.decodeIfPresent(IdentifiedArrayOf<LoopEdge>.self, forKey: .edges) ?? []
-    mailboard = try container.decodeIfPresent([MailboardPost].self, forKey: .mailboard) ?? []
+    artifactory = try container.decodeIfPresent([ArtifactoryPost].self, forKey: .artifactory) ?? []
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -270,6 +270,6 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     try container.encode(edges, forKey: .edges)
     // Absent while empty, so a graph file nobody has posted to stays byte-for-byte
     // what it was — the same reason `hasActiveDependents` never reaches disk.
-    if !mailboard.isEmpty { try container.encode(mailboard, forKey: .mailboard) }
+    if !artifactory.isEmpty { try container.encode(artifactory, forKey: .artifactory) }
   }
 }

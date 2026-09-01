@@ -1,9 +1,9 @@
 import Foundation
 
-/// One post on a Mailboard — the shared, unaddressed message board a graph of loops
+/// One post on a Artifactory — the shared, unaddressed message board a graph of loops
 /// writes to and reads without wiring anything: `node send` and edges are addressed
 /// (a sender must already know a target's id, and the daemon routes to that one peer),
-/// while the Mailboard is the ambient counterpart. A loop drops a note for *whoever
+/// while the Artifactory is the ambient counterpart. A loop drops a note for *whoever
 /// comes next* — a decision made, a dead end hit, a claim staked — and any other loop,
 /// present or created after the author is gone, discovers it with one command. Posts
 /// survive their authors: they live on the graph itself, outlasting resolution,
@@ -12,7 +12,7 @@ import Foundation
 /// Small on purpose. A post is a note to a peer, not a transcript — the same bargain
 /// `NodeMemory`'s 512-byte log entries strike — and the caps below are what keep a
 /// wake digest's advice to "check the board" from costing a loop its context budget.
-public struct MailboardPost: Codable, Equatable, Identifiable, Sendable {
+public struct ArtifactoryPost: Codable, Equatable, Identifiable, Sendable {
   /// Position in the board's sequence, 1-based. The unread cursor is this number, so
   /// ids must only ever grow — they are assigned by `GraphStore` from the current
   /// maximum, never from the post count, which pruning would shrink.
@@ -47,10 +47,10 @@ public struct MailboardPost: Codable, Equatable, Identifiable, Sendable {
   public static let maxTopicBytes = 64
 }
 
-/// A loop's standing subscription to its project's Mailboard — what turns the board
+/// A loop's standing subscription to its project's Artifactory — what turns the board
 /// from something a loop must remember to poll into a mailbox that rings. `topic`
 /// `nil` hears every post; a topic hears only posts labelled the same way.
-public struct MailboardWatch: Codable, Equatable, Sendable {
+public struct ArtifactoryWatch: Codable, Equatable, Sendable {
   public var topic: String?
 
   public init(topic: String? = nil) { self.topic = topic }
@@ -60,8 +60,8 @@ public struct MailboardWatch: Codable, Equatable, Sendable {
 
 /// The board's own rules — the arithmetic every surface shares rather than
 /// re-derives, so the CLI's unread count and the daemon's cursor can never disagree.
-public enum Mailboard {
-  /// How many posts a board keeps. The oldest fall off first: a Mailboard is a
+public enum Artifactory {
+  /// How many posts a board keeps. The oldest fall off first: a Artifactory is a
   /// mailbox for the work that is happening, not an archive — a loop's durable
   /// findings belong in its memory log, and the board's job is carrying them to
   /// loops that cannot read that log.
@@ -70,21 +70,21 @@ public enum Mailboard {
   /// The id the next post gets. Maximum-plus-one, never count-plus-one: pruning
   /// removes the oldest posts, and reusing their ids would make unread cursors
   /// mistake old mail for new.
-  public static func nextID(after posts: [MailboardPost]) -> Int {
+  public static func nextID(after posts: [ArtifactoryPost]) -> Int {
     (posts.map(\.id).max() ?? 0) + 1
   }
 
   /// The posts a loop with `lastRead` on its cursor has not seen yet.
   public static func unread(
-    in posts: [MailboardPost], since lastRead: Int?
-  ) -> [MailboardPost] {
+    in posts: [ArtifactoryPost], since lastRead: Int?
+  ) -> [ArtifactoryPost] {
     guard let lastRead else { return posts }
     return posts.filter { $0.id > lastRead }
   }
 
   /// A board that grew past `maxPosts`, oldest first gone. Applied by the store on
   /// every post so no caller can forget.
-  public static func pruned(_ posts: [MailboardPost]) -> [MailboardPost] {
+  public static func pruned(_ posts: [ArtifactoryPost]) -> [ArtifactoryPost] {
     guard posts.count > maxPosts else { return posts }
     return Array(posts.suffix(maxPosts))
   }
