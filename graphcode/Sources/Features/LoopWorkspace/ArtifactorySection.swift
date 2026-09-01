@@ -2,6 +2,13 @@ import ArtifactoryKit
 import GraphcodeKit
 import SwiftUI
 
+/// The measured height of the board's posts, reported up so the scroll box can size
+/// itself to them instead of to whatever space the rail happens to have spare.
+private struct ArtifactoryContentHeight: PreferenceKey {
+  static let defaultValue: CGFloat = 0
+  static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 /// What the rail needs to know about the board without building a view to find out.
 enum ArtifactoryPresentation {
   /// Whether this graph's board has anything to show. Absent while empty, for the
@@ -54,6 +61,13 @@ struct ArtifactorySection: View {
   /// Whether the mirrored records are unfolded. Local and unpersisted, unlike the
   /// section's own fold: opening the receipts is a thing you do once to answer a
   /// question, not a way you prefer to read the board.
+  /// How tall the posts actually are, so the scroll box can ask for exactly that.
+  @State private var contentHeight: CGFloat = 0
+  /// Past this the board scrolls rather than pushing the sections under it off the rail.
+  /// Roughly four posts at the rail's default width — enough that scrolling is the
+  /// exception, not the way the section is normally read.
+  static let maxScrollHeight: CGFloat = 300
+
   @State private var showsRecords = false
   @State private var isComposing = false
   @State private var draft = ""
@@ -88,10 +102,23 @@ struct ArtifactorySection: View {
             }
           }
           .frame(maxWidth: .infinity, alignment: .leading)
+          .background(
+            GeometryReader { proxy in
+              Color.clear.preference(key: ArtifactoryContentHeight.self, value: proxy.size.height)
+            }
+          )
         }
+        .onPreferenceChange(ArtifactoryContentHeight.self) { contentHeight = $0 }
         .scrollBounceBehavior(.basedOnSize)
         .defaultScrollAnchor(.bottom)
-        .frame(minHeight: 90, maxHeight: .infinity)
+        // Hug the posts, and only then scroll. A `ScrollView` is greedy: given
+        // `maxHeight: .infinity` it took the rail's whole slack, and `defaultScrollAnchor`
+        // pinned the posts to the bottom of that box while the header stayed at its top —
+        // so a board with two notes on it drew a header, a stretch of nothing, and then
+        // the notes. Measuring the content and asking for exactly that height (up to a
+        // cap) leaves no slack for the anchor to spread, which is why the gap cannot come
+        // back rather than merely being smaller.
+        .frame(height: min(contentHeight, Self.maxScrollHeight))
         // Outside the scroll view on purpose. Inside it the composer was one more row
         // in a list that can be taller than the rail — it could open scrolled out of
         // sight, and it moved under the pointer as posts arrived. Pinned here it is
