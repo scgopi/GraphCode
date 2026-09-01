@@ -205,9 +205,12 @@ private func boardWithPosts() -> (LoopGraph, LoopNode) {
 @Test
 func syncParsesItsReadModes() throws {
   let plain = try GraphcodeCommand.parse(["artifactory", "sync", "/tmp/x"])
-  #expect(plain == .artifactorySync(projectPath: "/tmp/x", headlines: false, mark: false, json: false))
+  #expect(
+    plain == .artifactorySync(projectPath: "/tmp/x", headlines: false, mark: false, json: false))
 
-  let all = try GraphcodeCommand.parse(["artifactory", "sync", "/tmp/x", "--headlines", "--mark", "--json"])
+  let all = try GraphcodeCommand.parse([
+    "artifactory", "sync", "/tmp/x", "--headlines", "--mark", "--json",
+  ])
   #expect(
     all == .artifactorySync(projectPath: "/tmp/x", headlines: true, mark: true, json: true))
 
@@ -220,8 +223,9 @@ func syncParsesItsReadModes() throws {
 
 @Test
 func readParsesAPostIDAndRejectsNonNumericOnes() throws {
-  #expect(try GraphcodeCommand.parse(["artifactory", "read", "/tmp/x", "7"])
-    == .artifactoryRead(projectPath: "/tmp/x", postID: 7))
+  #expect(
+    try GraphcodeCommand.parse(["artifactory", "read", "/tmp/x", "7"])
+      == .artifactoryRead(projectPath: "/tmp/x", postID: 7))
 
   #expect {
     try GraphcodeCommand.parse(["artifactory", "read", "/tmp/x", "seven"])
@@ -241,10 +245,10 @@ func readParsesAPostIDAndRejectsNonNumericOnes() throws {
 func listParsesSearchAndJSON() throws {
   #expect(
     try GraphcodeCommand.parse(["artifactory", "list", "/tmp/x", "--search", "auth", "--json"])
-    == .artifactoryList(projectPath: "/tmp/x", search: "auth", json: true))
+      == .artifactoryList(projectPath: "/tmp/x", search: "auth", json: true))
   #expect(
     try GraphcodeCommand.parse(["artifactory", "list", "/tmp/x"])
-    == .artifactoryList(projectPath: "/tmp/x", search: nil, json: false))
+      == .artifactoryList(projectPath: "/tmp/x", search: nil, json: false))
 }
 
 @Test
@@ -306,7 +310,9 @@ func statusLineCountsPostsAndUnreadOnlyWhenThereAreAny() {
       == "artifactory: 3 posts, 2 unread for you")
   #expect(
     GraphcodeCommand.renderArtifactoryStatusLine(graph) == "artifactory: 3 posts")
-  #expect(GraphcodeCommand.renderArtifactoryStatusLine(LoopGraph(project: ProjectRef(path: "/tmp/x", name: "x"))) == nil)
+  #expect(
+    GraphcodeCommand.renderArtifactoryStatusLine(
+      LoopGraph(project: ProjectRef(path: "/tmp/x", name: "x"))) == nil)
 
   let rendered = GraphcodeCommand.render(graph, artifactoryReader: reader.id)
   #expect(rendered.contains("artifactory: 3 posts, 2 unread for you"))
