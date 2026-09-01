@@ -14,7 +14,9 @@ struct ArtifactoryTests {
   private func makeStore(
     enabled: Bool = true,
     delivered: LockIsolated<[(UUID, String)]>? = nil,
-    memory: LockIsolated<[(UUID, String)]>? = nil
+    memory: LockIsolated<[(UUID, String)]>? = nil,
+    errors: LockIsolated<[String]>? = nil,
+    presence: Presence? = nil
   ) async -> GraphStore {
     let store = GraphStore(
       onEnsureSession: { _, _ in },
@@ -22,12 +24,18 @@ struct ArtifactoryTests {
         delivered?.withValue { $0.append((node.id, message)) }
         return true
       },
+      onReadPresence: presence.map { reading in
+        { _, _ in PresenceReading(presence: reading, confidence: .reported) }
+      },
       onAppendMemory: { nodeID, entry in
         memory?.withValue { $0.append((nodeID, entry)) }
       },
+      onAnnounceError: { message in errors?.withValue { $0.append(message) } },
       onArtifactoryEnabled: { enabled })
-    await store.handle(.createNode(NodeDraft(title: "Author", loopType: .turnBased, firstInstruction: "Work")))
-    await store.handle(.createNode(NodeDraft(title: "Reader", loopType: .turnBased, firstInstruction: "Work")))
+    await store.handle(
+      .createNode(NodeDraft(title: "Author", loopType: .turnBased, firstInstruction: "Work")))
+    await store.handle(
+      .createNode(NodeDraft(title: "Reader", loopType: .turnBased, firstInstruction: "Work")))
     return store
   }
 
@@ -38,7 +46,8 @@ struct ArtifactoryTests {
     let store = await makeStore()
     let ids = nodeIDs(await store.graph)
 
-    await store.handle(.artifactoryPost(text: "  issue #12 is mine  ", topic: "Claims", from: ids[0]))
+    await store.handle(
+      .artifactoryPost(text: "  issue #12 is mine  ", topic: "Claims", from: ids[0]))
 
     let graph = await store.graph
     #expect(graph.artifactory.count == 1)
@@ -67,8 +76,10 @@ struct ArtifactoryTests {
     let ids = nodeIDs(await store.graph)
 
     await store.handle(.artifactoryPost(text: "   ", topic: nil, from: ids[0]))
-    await store.handle(.artifactoryPost(text: String(repeating: "x", count: 2000), topic: nil, from: ids[0]))
-    await store.handle(.artifactoryPost(text: "ok", topic: String(repeating: "t", count: 100), from: ids[0]))
+    await store.handle(
+      .artifactoryPost(text: String(repeating: "x", count: 2000), topic: nil, from: ids[0]))
+    await store.handle(
+      .artifactoryPost(text: "ok", topic: String(repeating: "t", count: 100), from: ids[0]))
     await store.handle(.artifactoryPost(text: "ok", topic: "  ", from: ids[0]))
 
     let graph = await store.graph
@@ -158,7 +169,9 @@ struct ArtifactoryTests {
     await store.handle(.artifactoryWatch(on: false, topic: nil, from: ids[1]))
     await store.handle(.artifactoryPost(text: "again", topic: "build", from: ids[0]))
 
-    #expect(memory.value.filter { $0.0 == ids[1] && $0.1.contains("artifactory — new post") }.isEmpty)
+    #expect(
+      memory.value.filter { $0.0 == ids[1] && $0.1.contains("artifactory — new post") }
+        .isEmpty)
   }
 
   @Test
@@ -171,7 +184,9 @@ struct ArtifactoryTests {
     await store.handle(.artifactoryPost(text: "a", topic: "auth", from: ids[0]))
     await store.handle(.artifactoryPost(text: "b", topic: nil, from: ids[0]))
 
-    #expect(memory.value.filter { $0.0 == ids[1] && $0.1.contains("artifactory — new post") }.count == 2)
+    #expect(
+      memory.value.filter { $0.0 == ids[1] && $0.1.contains("artifactory — new post") }
+        .count == 2)
   }
 
   @Test
@@ -218,7 +233,8 @@ extension ArtifactoryTests {  // MARK: - Shared-communication mirroring
     let store = await makeStore()
     let ids = nodeIDs(await store.graph)
 
-    await store.handle(.messageNode(ids[1], text: "the API changed under you", from: ids[0], followUp: nil))
+    await store.handle(
+      .messageNode(ids[1], text: "the API changed under you", from: ids[0], followUp: nil))
 
     let graph = await store.graph
     #expect(graph.artifactory.count == 1)
@@ -332,5 +348,156 @@ extension ArtifactoryTests {  // MARK: - Shared-communication mirroring
     let graph = await store.graph
     // Custody: the child went with the parent, and its board record goes too.
     #expect(graph.artifactory.isEmpty)
+  }
+}
+
+/// The review round (PR #229): refusals announce, bounds bind, composites inherit the
+/// gate, imports start clean, and the briefing/digest announce the board exactly when
+/// the daemon will honour it.
+extension ArtifactoryTests {
+  @Test
+  func refusalAnnouncesItselfInsteadOfStayingSilent() async {
+    let errors = LockIsolated<[String]>([])
+    let store = await makeStore(enabled: false, errors: errors)
+    let ids = nodeIDs(await store.graph)
+
+    await store.handle(.artifactoryPost(text: "hello", topic: nil, from: ids[0]))
+
+    let graph = await store.graph
+    #expect(graph.artifactory.isEmpty)
+    #expect(errors.value.count == 1)
+    #expect(errors.value[0].contains("Artifactory is off"))
+  }
+
+  @Test
+  func mirroredRecordTruncationRespectsTheBodyBound() async throws {
+    let store = await makeStore()
+    let ids = nodeIDs(await store.graph)
+
+    await store.handle(
+      .messageNode(ids[1], text: String(repeating: "x", count: 3000), from: ids[0], followUp: nil))
+
+    let graph = await store.graph
+    let record = try #require(graph.artifactory.first)
+    #expect(record.body.utf8.count <= ArtifactoryPost.maxBodyBytes)
+    #expect(record.body.hasSuffix("…"))
+  }
+
+  @Test
+  func liveIdleWatcherHearsThePostThroughTheDeliveryChannel() async {
+    let delivered = LockIsolated<[(UUID, String)]>([])
+    let memory = LockIsolated<[(UUID, String)]>([])
+    let store = await makeStore(
+      delivered: delivered, memory: memory, presence: .idle)
+    let ids = nodeIDs(await store.graph)
+    // The poll's write is what makes stored presence real; the wake machinery reads
+    // the stored reading, so a live idle watcher is this, not just the hook.
+    await store.handle(.refreshUsage)
+    await store.handle(.artifactoryWatch(on: true, topic: nil, from: ids[1]))
+
+    await store.handle(.artifactoryPost(text: "build is red", topic: nil, from: ids[0]))
+
+    // A live idle watcher gets exactly one delivery, typed now — no staging line,
+    // which is the dead-session path's record, not the live one's.
+    #expect(delivered.value.contains { $0.0 == ids[1] && $0.1.contains("artifactory — new post") })
+    #expect(!memory.value.contains { $0.0 == ids[1] && $0.1.contains("follow-up staged") })
+    #expect(!memory.value.contains { $0.0 == ids[1] && $0.1.contains("while you were away") })
+  }
+
+  @Test
+  func compositeWorkerInheritsTheGateInsteadOfAMisleadingRefusal() async throws {
+    let errors = LockIsolated<[String]>([])
+    let store = await makeStore(errors: errors)
+    var sub = LoopGraph(project: ProjectRef(path: "/tmp/sub", name: "sub"))
+    sub.nodes.append(LoopNode(title: "Worker", loopType: .turnBased, firstInstruction: "Work"))
+    await store.handle(
+      .createNode(NodeDraft(title: "Orchestrator", loopType: .composite, subGraph: sub)))
+
+    // The draft re-identifies the sub-graph, so the worker is fetched from the
+    // stored composite, never from the value this test built.
+    let composite = try #require(await store.graph.nodes.first { $0.loopType == .composite })
+    let workerID = try #require(composite.subGraph?.nodes.first?.id)
+    await store.handle(
+      .subGraphCommand(
+        nodeID: composite.id,
+        command: .artifactoryPost(text: "worker note", topic: nil, from: workerID)))
+
+    let graph = await store.graph
+    #expect(errors.value.isEmpty)
+    #expect(graph.nodes[id: composite.id]?.subGraph?.artifactory.map(\.body) == ["worker note"])
+  }
+
+  @Test
+  func importedLoopStartsWithACleanCursor() async throws {
+    let store = await makeStore()
+    var arriving = LoopGraph(project: ProjectRef(path: "/tmp/src", name: "src"))
+    var node = LoopNode(title: "Visitor", loopType: .turnBased, firstInstruction: "Work")
+    node.lastArtifactoryRead = 5
+    arriving.nodes.append(node)
+
+    await store.handle(
+      .importNodes(GraphImportRequest(snapshot: arriving)))
+
+    let graph = await store.graph
+    let imported = try #require(graph.nodes.first { $0.title == "Visitor" })
+    #expect(imported.lastArtifactoryRead == nil)
+  }
+
+  @Test
+  func watchOffWhenNotWatchingIsAHarmlessNoOp() async {
+    let errors = LockIsolated<[String]>([])
+    let store = await makeStore(errors: errors)
+    let ids = nodeIDs(await store.graph)
+
+    await store.handle(.artifactoryWatch(on: false, topic: nil, from: ids[0]))
+
+    let graph = await store.graph
+    #expect(errors.value.isEmpty)
+    #expect(graph.nodes[id: ids[0]]?.artifactoryWatch == nil)
+  }
+
+  @Test
+  func settingsRoundTripPinsTheRampBit() throws {
+    var settings = GraphcodeSettings()
+    settings.artifactoryEnabled = true
+    let data = try JSONEncoder().encode(settings)
+    #expect(try JSONDecoder().decode(GraphcodeSettings.self, from: data).artifactoryEnabled)
+  }
+
+  @Test
+  func briefingAnnouncesTheBoardOnlyWhileItIsOn() {
+    let on = SessionBriefing.text(
+      projectPath: "/tmp/p", settings: GraphcodeSettings(artifactoryEnabled: true))
+    let off = SessionBriefing.text(
+      projectPath: "/tmp/p", settings: GraphcodeSettings(artifactoryEnabled: false))
+    #expect(on?.contains("## The Artifactory — notes for whoever comes next") == true)
+    #expect(on?.contains("graphcode artifactory sync /tmp/p") == true)
+    #expect(off?.contains("## The Artifactory") == false)
+    // Off means byte-for-byte the pre-Artifactory briefing: no stray interpolation
+    // line where the section would have gone.
+    #expect(off?.contains("one-off.\n\n## Remembering across passes") == true)
+  }
+
+  @Test
+  func wakeDigestRemindsAboutTheBoardOnlyWhileItIsOn() throws {
+    let baseURL = URL(fileURLWithPath: NSTemporaryDirectory())
+      .appendingPathComponent("artifactory-tests-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: baseURL) }
+    let projectPath = "/tmp/digest"
+    let nodeID = UUID()
+    NodeMemory.append(
+      "something happened", projectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
+
+    let on = NodeMemory.writeWakeDigest(
+      projectPath: projectPath, nodeID: nodeID, artifactoryEnabled: true, baseURL: baseURL)
+    #expect(on != nil)
+    #expect(try String(contentsOf: try #require(on), encoding: .utf8).contains("Artifactory"))
+
+    let off = NodeMemory.writeWakeDigest(
+      projectPath: projectPath, nodeID: nodeID, artifactoryEnabled: false, baseURL: baseURL)
+    #expect(
+      !(try String(contentsOf: try #require(off), encoding: .utf8).contains("Mailboard")))
+    #expect(
+      !(try String(contentsOf: try #require(off), encoding: .utf8).contains("Artifactory")))
   }
 }

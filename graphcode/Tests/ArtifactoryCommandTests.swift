@@ -1,6 +1,6 @@
+import ArtifactoryKit
 import Foundation
 import GraphcodeKit
-import ArtifactoryKit
 import Testing
 
 /// The `artifactory` verbs' CLI half: what each spelling parses into and what the board

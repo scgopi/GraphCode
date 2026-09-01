@@ -1,5 +1,5 @@
-import Foundation
 import ArtifactoryKit
+import Foundation
 
 /// Argument parsing and output formatting for the `graphcode` CLI
 /// (docs/03-architecture.md#cli-graphcode).
@@ -199,18 +199,19 @@ public enum GraphcodeCommand: Equatable, Sendable {
       --into <path>        spawn into a different project (--kind spawn only); this is
                            how the global graph dispatches work into a project
 
-    MAILBOARD
+    ARTIFACTORY
       The shared, unaddressed board: `node send` reaches one peer you already know;
-      a Artifactory post is a note for whoever comes next, discoverable by loops that
+      an Artifactory post is a note for whoever comes next, discoverable by loops that
       did not exist when it was written. Run from inside a loop, posts are attributed
       to that loop (`ZMX_SESSION`, the same mechanism as `node send`); from a human's
       shell they read as from "a human". `sync` and `watch` need that loop identity —
       the read cursor and the subscription belong to a loop — so a human reads the
       board with `list`. A post is a note to a peer, not a transcript: 1 KB bound,
       and `--topic <t>` groups a thread (a watcher of a topic only hears matching
-      posts; watched posts are delivered like a --follow-up message).
-
-
+      posts; watched posts are delivered like a --follow-up message). Note that the
+      mirrored `direct` and `handoff` records never ring watchers — they are the
+      board's record of traffic that already had its own delivery, so a watch on
+      those topics alone stays silent.
     EXIT CODES
       0   done
       1   bad usage, or graphcoded refused the command
@@ -821,7 +822,10 @@ extension GraphcodeCommand {
   /// a loop reads a note the same way everywhere it meets one.
   public static func render(_ post: ArtifactoryPost) -> String {
     let topic = post.topic.map { " (\($0))" } ?? ""
-    let stamp = post.at.formatted(date: .abbreviated, time: .shortened)
+    // `Date.formatted` has no precedent in GraphcodeKit and corelibs-foundation's
+    // FormatStyle support has been uneven across the toolchains the Linux CI runs;
+    // a fixed DateFormatter is the boring, portable answer.
+    let stamp = ArtifactoryPost.stampFormat.string(from: post.at)
     return "#\(post.id)\(topic) from \(post.author) at \(stamp) — \(post.body)"
   }
 

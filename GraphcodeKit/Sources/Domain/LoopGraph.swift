@@ -1,6 +1,6 @@
+import ArtifactoryKit
 import Foundation
 import IdentifiedCollections
-import ArtifactoryKit
 
 /// The unit `graphcoded`'s `GraphStore` owns and the graph canvas renders — see
 /// docs/02-graph-of-loops.md#loopgraph.

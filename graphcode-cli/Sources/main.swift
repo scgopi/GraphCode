@@ -395,7 +395,11 @@ do {
     if case .errorOccurred(let message) = syncVerdict { fail(message) }
     // Unread is computed from the snapshot `openProject` already delivered: sync only
     // moves the cursor, so the posts it covers are exactly those above the cursor
-    // there — a post landing mid-command shows up at the next sync, as it should.
+    // there. Known race, accepted: a post landing between that snapshot and the
+    // daemon advancing the cursor is marked read without ever having been printed.
+    // The window is one round-trip wide and a watcher would have heard the post live
+    // anyway; fixing it properly means syncing to the highest *printed* id rather
+    // than to latest, which nothing so far has needed.
     if case .graphChanged(let graph) = opened {
       print(GraphcodeCommand.renderArtifactory(graph, unreadFor: reader))
     }

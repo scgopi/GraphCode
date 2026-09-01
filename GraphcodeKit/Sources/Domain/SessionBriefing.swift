@@ -79,10 +79,14 @@ public enum SessionBriefing {
       """
     // The Artifactory's section exists only while the beta ramp has the feature on: a
     // briefing that taught verbs the daemon would refuse would send every loop
-    // through a refusal once per idea.
+    // through a refusal once per idea. It interpolates inline after the "one-off."
+    // sentence (the value leading with blank lines) so that off — an empty value —
+    // leaves the briefing byte-for-byte what it was before this section existed.
     let artifactorySection =
       settings.artifactoryEnabled
       ? """
+
+
       ## The Artifactory — notes for whoever comes next
 
       `node send` reaches one peer you already know. The Artifactory is the shared
@@ -105,9 +109,9 @@ public enum SessionBriefing {
       The board also keeps the record for you: every direct message, message-edge
       delivery, and handoff (topics `direct` and `handoff`) is mirrored onto it
       automatically, so a loop that joins mid-flight can read what was already said.
-      Your posts stay on the board after you resolve; they go only if your loop is
-      deleted.
-
+      Those mirrored records are the record, not the delivery — they never ring a
+      watcher, so watching only those topics stays silent. Your posts stay on the
+      board after you resolve; they go only if your loop is deleted.
       """
       : ""
     return """
@@ -179,8 +183,8 @@ public enum SessionBriefing {
       the exact command for reporting results back to it. For recurring communication,
       an edge is still the right tool: a `message` edge fires automatically when you
       finish, a `handoff` sequences the other loop after you. This command is the
-      one-off.
-      \(artifactorySection)
+      one-off.\(artifactorySection)
+
       ## Remembering across passes
 
       Loops that run in cycles get relaunched, and a relaunched session starts fresh.

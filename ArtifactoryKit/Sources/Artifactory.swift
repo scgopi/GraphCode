@@ -1,6 +1,6 @@
 import Foundation
 
-/// One post on a Artifactory — the shared, unaddressed message board a graph of loops
+/// One post on an Artifactory — the shared, unaddressed message board a graph of loops
 /// writes to and reads without wiring anything: `node send` and edges are addressed
 /// (a sender must already know a target's id, and the daemon routes to that one peer),
 /// while the Artifactory is the ambient counterpart. A loop drops a note for *whoever
@@ -25,10 +25,21 @@ public struct ArtifactoryPost: Codable, Equatable, Identifiable, Sendable {
   /// what it uses to reply in person with `node send`.
   public let author: String
   /// An optional label for threads that keep themselves together — `auth`, `build`,
-  /// `issues`. A watcher subscribed to a topic only hears matching posts; `nil` posts
-  /// reach watchers of every topic except the ones that asked for another.
+  /// `issues`. A watcher subscribed to a topic only hears posts labelled exactly that
+  /// way; a watcher with no topic hears everything.
   public let topic: String?
   public let body: String
+
+  /// Cached formatter for CLI rendering — one `DateFormatter` per process rather than
+  /// per post, and a fixed `dateFormat` with a pinned locale rather than
+  /// `Date.formatted` or named `DateFormatter.Style` cases, neither of which is
+  /// something to find out about from the Linux CI toolchains.
+  public static let stampFormat: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "MMM d, HH:mm"
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    return formatter
+  }()
 
   public init(
     id: Int, at: Date, authorID: UUID?, author: String, topic: String?, body: String
@@ -61,7 +72,7 @@ public struct ArtifactoryWatch: Codable, Equatable, Sendable {
 /// The board's own rules — the arithmetic every surface shares rather than
 /// re-derives, so the CLI's unread count and the daemon's cursor can never disagree.
 public enum Artifactory {
-  /// How many posts a board keeps. The oldest fall off first: a Artifactory is a
+  /// How many posts a board keeps. The oldest fall off first: an Artifactory is a
   /// mailbox for the work that is happening, not an archive — a loop's durable
   /// findings belong in its memory log, and the board's job is carrying them to
   /// loops that cannot read that log.

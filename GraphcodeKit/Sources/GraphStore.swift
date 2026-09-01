@@ -1,5 +1,5 @@
-import Foundation
 import ArtifactoryKit
+import Foundation
 
 /// Owns the daemon's one `LoopGraph`, applies commands, automatically fires `.handoff`
 /// edges when a node resolves, keeps time-based nodes' sessions alive, and broadcasts
@@ -575,6 +575,13 @@ public actor GraphStore {
       onRefinePlaybook: onRefinePlaybook,
       onRollbackPlaybook: onRollbackPlaybook,
       onAnnounceError: effects.errors.append,
+      // The board's gate forwards like any other side effect: a loop inside a piloted
+      // composite is a real loop whose session got the standard briefing — teaching
+      // verbs the child store would refuse is exactly the incoherence the gate exists
+      // to prevent, and worker communication should mirror to the sub-graph's board
+      // the way any other loop's does. nil still means off (the ramp's default),
+      // which is why forwarding, not a nil-means-on reading, is the fix.
+      onArtifactoryEnabled: onArtifactoryEnabled,
       goalCache: goalCache,
       recurrence: effects.recurrence,
       subGraphDepth: subGraphDepth + 1)
@@ -1354,7 +1361,15 @@ public actor GraphStore {
         "artifactory post refused: topic over \(ArtifactoryPost.maxTopicBytes) bytes")
       return
     }
-    let author = senderID.flatMap { graph.nodes[id: $0]?.title } ?? "a human"
+    // A foreign loop's id (a sender from another graph, addressing this board
+    // directly) is kept honestly but never reads as a member: attribution says
+    // "outside" so no reader takes its post for a peer's.
+    let author: String
+    if let senderID, let title = graph.nodes[id: senderID]?.title {
+      author = title
+    } else {
+      author = senderID == nil ? "a human" : "an outside loop"
+    }
     let post = ArtifactoryPost(
       id: Artifactory.nextID(after: graph.artifactory), at: Date(), authorID: senderID,
       author: author, topic: trimmedTopic, body: trimmed)
@@ -1406,7 +1421,9 @@ public actor GraphStore {
     let sender = senderID.flatMap { graph.nodes[id: $0]?.title } ?? "a human"
     var body = "@\(target.title): \(text)"
     if body.utf8.count > ArtifactoryPost.maxBodyBytes {
-      while body.utf8.count > ArtifactoryPost.maxBodyBytes - 1 { body.removeLast() }
+      // Room for the ellipsis itself, or the "1024-byte bound" would be 1026 in the
+      // worst case.
+      while body.utf8.count > ArtifactoryPost.maxBodyBytes - 3 { body.removeLast() }
       body.append("…")
     }
     let post = ArtifactoryPost(
@@ -1469,13 +1486,13 @@ public actor GraphStore {
       recordMemory(
         watcherID, "artifactory: now watching \(trimmed.map { "'\($0)'" } ?? "all posts")")
     } else {
-      guard graph.nodes[id: watcherID]?.artifactoryWatch != nil else {
-        announceError("artifactory: \(graph.nodes[id: watcherID]?.title ?? "this loop") "
-          + "was not watching anything")
-        return
+      // Idempotent, not an error: "stop watching" when nothing is watched is the
+      // state the caller asked for, and an off state arriving twice is harmless in a
+      // way a refusal isn't — the second call would be an agent retrying in a loop.
+      if graph.nodes[id: watcherID]?.artifactoryWatch != nil {
+        recordMemory(watcherID, "artifactory: stopped watching")
       }
       graph.nodes[id: watcherID]?.artifactoryWatch = nil
-      recordMemory(watcherID, "artifactory: stopped watching")
     }
   }
 
@@ -1506,6 +1523,14 @@ public actor GraphStore {
       return
     }
     graph = plan.mergedGraph
+    // An imported loop's cursor describes the board it came from. On this board it is
+    // worse than meaningless: until this graph's ids overtake that number, sync keeps
+    // reporting nothing new — mail that exists and is never shown. A fresh identity
+    // starts with no reading history; the watch subscription is a preference and
+    // travels as one.
+    for newID in plan.idMapping.values {
+      graph.nodes[id: newID]?.lastArtifactoryRead = nil
+    }
     for (oldID, entries) in request.memoryByNodeID {
       guard let newID = plan.idMapping[oldID] else { continue }
       for entry in entries {
@@ -2410,6 +2435,7 @@ public actor GraphStore {
       onRefinePlaybook: onRefinePlaybook,
       onRollbackPlaybook: onRollbackPlaybook,
       onAnnounceError: effects.errors.append,
+      onArtifactoryEnabled: onArtifactoryEnabled,
       goalCache: goalCache,
       recurrence: effects.recurrence,
       subGraphDepth: subGraphDepth + 1)
