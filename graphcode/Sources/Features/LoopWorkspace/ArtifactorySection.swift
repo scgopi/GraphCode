@@ -50,6 +50,10 @@ struct ArtifactorySection: View {
   /// the same thing — a fact about a person at a screen, never about the loop.
   let seenPostID: Int?
   let isFolded: Bool
+  /// How tall the scroll box may grow before it scrolls — the rail's share for the
+  /// board (`LoopWorkspaceRail.artifactoryHeightCap`), never more than
+  /// `maxScrollHeight`.
+  var maxHeight: CGFloat = ArtifactorySection.maxScrollHeight
   let onToggleFold: () -> Void
   /// Posts as "a human" — a click in the app has no `ZMX_SESSION` and no loop identity,
   /// which is exactly what a person talking to the whole graph is.
@@ -58,11 +62,10 @@ struct ArtifactorySection: View {
   /// Whether the mirrored records are unfolded. Local and unpersisted, unlike the
   /// section's own fold: opening the receipts is a thing you do once to answer a
   /// question, not a way you prefer to read the board.
-  /// Past this the board scrolls rather than pushing the sections above it off the rail.
-  /// Every note is on the board and reachable — this is only how much of it is on screen
-  /// before the wheel takes over. About ten posts at the rail's default width, which is
-  /// the number asked for: enough to read a conversation, not so many that the rail
-  /// is nothing but the board.
+  /// The most the board's scroll box will ever be, on any window: about ten posts at
+  /// the rail's default width — enough to read a conversation, not so many that the
+  /// rail is nothing but the board. The rail hands down a smaller cap on a short
+  /// window (`LoopWorkspaceRail.artifactoryHeightCap`); this is the ceiling on that.
   static let maxScrollHeight: CGFloat = 600
 
   @State private var showsRecords = false
@@ -112,7 +115,7 @@ struct ArtifactorySection: View {
         // content's, and `frame(maxHeight:)` under it clamps that. The box is exactly
         // as tall as the posts until the cap, and scrolls after — no state, nothing to
         // go stale, nothing to fire late.
-        .frame(maxHeight: Self.maxScrollHeight)
+        .frame(maxHeight: maxHeight)
         .fixedSize(horizontal: false, vertical: true)
         // Outside the scroll view on purpose. Inside it the composer was one more row
         // in a list that can be taller than the rail — it could open scrolled out of

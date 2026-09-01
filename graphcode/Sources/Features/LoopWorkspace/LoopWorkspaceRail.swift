@@ -199,7 +199,32 @@ struct LoopWorkspaceRail: View {
     graph.edges.filter { $0.to == node.id }.compactMap { graph.nodes[id: $0.from] }
   }
 
+  /// The most of the rail the board may take before it scrolls, as a share of the
+  /// rail's own height. The other flexible sections — the summary, the diagram — are
+  /// greedy and yield; the board hugs its posts with `fixedSize` and does not. On a
+  /// short window a fixed 600pt cap was enough, with THIS LOOP's 118 and the summary's
+  /// 120 floor, to overflow the stack and push the foot of the rail off the bottom.
+  /// A share cannot overflow on its own, and 40% still shows a conversation.
+  static func artifactoryHeightCap(railHeight: CGFloat) -> CGFloat {
+    min(ArtifactorySection.maxScrollHeight, max(160, railHeight * 0.4))
+  }
+
   var body: some View {
+    // Measured at the outside, where a `GeometryReader` is the container and not a
+    // guess from within a scroll view — the rail's height is what the board's share
+    // is a share *of*.
+    GeometryReader { proxy in
+      stack(artifactoryCap: Self.artifactoryHeightCap(railHeight: proxy.size.height))
+    }
+    .frame(width: width)
+    .frame(maxHeight: .infinity)
+    .background(Theme.workspaceRail)
+    .overlay(alignment: .leading) {
+      Rectangle().fill(.white.opacity(0.07)).frame(width: 1)
+    }
+  }
+
+  private func stack(artifactoryCap: CGFloat) -> some View {
     VStack(alignment: .leading, spacing: 10) {
       // Above `THIS LOOP` rather than below it: what the loop is doing this second
       // outranks where it sits in the graph, and a section you have to scroll to is a
@@ -244,6 +269,7 @@ struct LoopWorkspaceRail: View {
       if ArtifactoryPresentation.hasContent(graph: graph, enabled: artifactoryEnabled) {
         ArtifactorySection(
           graph: graph, seenPostID: seenArtifactoryPostID, isFolded: isArtifactoryFolded,
+          maxHeight: artifactoryCap,
           onToggleFold: onArtifactoryFoldToggled, onPost: onArtifactoryPost)
       }
       footer
@@ -251,10 +277,6 @@ struct LoopWorkspaceRail: View {
     .padding(12)
     .frame(width: width, alignment: .leading)
     .frame(maxHeight: .infinity)
-    .background(Theme.workspaceRail)
-    .overlay(alignment: .leading) {
-      Rectangle().fill(.white.opacity(0.07)).frame(width: 1)
-    }
   }
 
   private func section<Content: View>(
