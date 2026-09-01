@@ -32,14 +32,38 @@ public enum StarterTemplates {
     UUID(uuidString: "5747A57E-0000-4000-8000-\(suffix)") ?? UUID()
   }
 
+  /// In **priority order**, which is the order the ⌘T picker shows them — not
+  /// alphabetical, because the list is a ladder and alphabetical scrambles it:
+  ///
+  /// 1. the one that leads a team, since that is what most work becomes;
+  /// 2. Goal, the workhorse;
+  /// 3. Timed;
+  /// 4. everything else — Main's two pokes, the two Turn rhythms, the composite.
   public static var all: [PromptTemplate] {
     [
-      whereDoesThisLive, whyDidThisBreak,
+      leadATeam,
       getTheBuildGreen, reviewTheDiff, raiseTestCoverage,
       nightlyDependencyReview, watchTheBuild,
+      whereDoesThisLive, whyDidThisBreak,
       portWithReview, pairOnThis,
       reviewFixVerify,
     ]
+  }
+
+  /// Where a starter sits in the ladder — what the picker sorts the Starters group
+  /// by. A starter the app no longer ships (a hand-marked file, an old build's) goes
+  /// last rather than nowhere.
+  public static func priority(of id: UUID) -> Int {
+    all.firstIndex { $0.id == id } ?? all.count
+  }
+
+  /// The starters 0.1.58-beta2 and beta3 shipped, whose seed marker predates ids
+  /// being recorded. Every starter in this list is treated as already seeded on such
+  /// an install; anything added since — `leadATeam` first — still arrives. Append
+  /// here only if a starter shipped in one of those two builds, which nothing more
+  /// will.
+  public static var seededBeforeIDsWereRecorded: Set<UUID> {
+    Set(all.filter { $0.id != leadATeam.id }.map(\.id))
   }
 
   /// The three offered on an empty canvas — one from each of the first three rungs of
@@ -47,6 +71,46 @@ public enum StarterTemplates {
   /// a row of every type is a taxonomy lesson, and this is a "get started" row.
   public static var firstLaunchPicks: [PromptTemplate] {
     [whereDoesThisLive, getTheBuildGreen, nightlyDependencyReview]
+  }
+
+  // MARK: - Leading
+
+  /// The starter at the top of the list, because this is what most work turns into:
+  /// one loop that understands the goal, splits it, and stays to put the pieces back
+  /// together. It is a **Main** loop on purpose — `MAIN_LOOP.md` names this as the
+  /// orchestration path ("you explore, find the work splits three ways, and promote")
+  /// — and it cuts no worktree, since a coordinator reads and steers while its
+  /// children write.
+  ///
+  /// The Artifactory is the team's inbox: where the plan is posted for loops that
+  /// don't exist yet, where children post what they finished, and the record of every
+  /// message that passed between them. The brief keeps it in that role — the task is
+  /// the goal; the board is how the team talks about it.
+  static var leadATeam: PromptTemplate {
+    starter(
+      id("000000000001"), "Lead a team toward a goal",
+      """
+      Lead the work toward this goal: {goal}.
+
+      Start by understanding the project well enough to say what done looks like and \
+      where the work splits. Then split it: give each independent piece its own goal \
+      loop — `graphcode node create <project-path> --title <name> --type goal --goal \
+      <what done looks like>` — and give anything that needs checking rather than \
+      finishing, like a build, a flaky test or a service, a timed loop: `--type time \
+      --prompt "/loop 30m <what to check>"`. Keep the integration for yourself: the \
+      goal is met when the pieces fit together, not when each child says it's done.
+
+      The team talks through the Artifactory — treat it as the inbox for this effort, \
+      under the topic {topic}. Post your plan there first — `graphcode artifactory post \
+      <project-path> --topic {topic} <plan>` — so every loop you create reads it before \
+      starting. Tell each child to post its result there the same way when it's done. Run `graphcode artifactory watch <project-path> --topic {topic}` so their \
+      posts reach you, and `graphcode artifactory sync <project-path>` whenever you \
+      come back, to catch up on what arrived while you were away. A stuck child gets a \
+      direct message: `graphcode node send <project-path> <id> --follow-up <steer>`.
+
+      Finish by checking the assembled result against the goal, posting a closing note \
+      to the same topic — done, not done, next — and stopping.
+      """)
   }
 
   // MARK: - Main

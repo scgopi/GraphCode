@@ -88,6 +88,9 @@ struct StarterTemplateTests {
     let picks = StarterTemplates.firstLaunchPicks
     #expect(picks.count == 3)
     #expect(picks.map { $0.shape } == [nil, .goalBased, .timeBased])
+    // The team-leading brief is the top of the picker, not of the canvas: the row
+    // there is for somebody's first loop, and a coordinator is not that.
+    #expect(!picks.contains { $0.id == StarterTemplates.all[0].id })
     // And they are really in the shipped set, not a fourth thing nobody can find again.
     let shipped = StarterTemplates.all.map(\.id)
     for pick in picks {
@@ -107,7 +110,58 @@ struct StarterTemplateTests {
     }
   }
 
+  /// The brief at the top is about the task; the Artifactory appears in it as the
+  /// team's inbox, and every command it names is one the CLI actually has.
+  @Test
+  func theTeamLeadingStarterNamesRealCommands() throws {
+    let lead = try #require(StarterTemplates.all.first)
+    #expect(lead.name == "Lead a team toward a goal")
+    #expect(lead.shape == nil)
+    #expect(lead.settings == nil)
+    #expect(lead.tokens == ["goal", "topic"])
+    for command in [
+      "graphcode node create", "--type goal", "--type time", "/loop 30m",
+      "graphcode artifactory watch", "graphcode artifactory sync", "graphcode artifactory post",
+      "graphcode node send", "--follow-up",
+    ] {
+      #expect(lead.body.contains(command), "missing \(command)")
+    }
+    // Task first: the goal is the first thing the brief says.
+    #expect(lead.body.hasPrefix("Lead the work toward this goal: {goal}."))
+  }
+
   // MARK: - Seeding
+
+  /// An install that already has beta2's ten still gets a starter shipped later —
+  /// the marker records ids, so a new id is owed and an old one never re-arrives.
+  @Test
+  func aStarterShippedLaterStillArrivesOnAnOlderInstall() throws {
+    let original = Array(StarterTemplates.all.dropFirst())  // what beta2 shipped
+    try storage.seedStartersIfNeeded(original)
+    #expect(storage.load(projectPath: nil).count == original.count)
+    // …and one of those was deleted before the update.
+    let deleted = try #require(storage.load(projectPath: nil).last)
+    try storage.delete(deleted)
+
+    let arrived = try storage.seedStartersIfNeeded(StarterTemplates.all)
+    #expect(arrived.map(\.name) == ["Lead a team toward a goal"])
+    let names = storage.load(projectPath: nil).map(\.name)
+    #expect(names.contains("Lead a team toward a goal"))
+    #expect(!names.contains(deleted.name))
+  }
+
+  /// beta2 and beta3 wrote an empty marker. That install seeded everything that
+  /// existed then, so the empty file has to read as exactly that set — the one
+  /// starter added since is what it is still owed, and nothing it deleted returns.
+  @Test
+  func anEmptyLegacyMarkerMeansTheFirstBatchWasSeeded() throws {
+    try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    try Data().write(to: home.appendingPathComponent(TemplateStorage.seededMarker))
+
+    let arrived = try storage.seedStartersIfNeeded()
+    #expect(arrived.map(\.name) == ["Lead a team toward a goal"])
+    #expect(storage.load(projectPath: nil).count == 1)
+  }
 
   @Test
   func seedingWritesEveryStarterOnce() throws {
