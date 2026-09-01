@@ -108,6 +108,11 @@ public enum GraphcodeCommand: Equatable, Sendable {
     the app's pinned "Graph" row — which every other verb accepts wherever
     <project-path> appears.
 
+    A loop created with --into lives inside its composite's sub-graph, but its id is
+    still unique across the whole tree: node stop/delete/send/update/memo/refine and
+    edge create accept it as-is, paired with the project path of the graph the
+    composite belongs to.
+
     RECOVERY AND SAFETY
       Use `graphcode projects` to discover project paths and `status` to inspect state
       before retrying a command. `GRAPHCODE_SUPPORT_DIR` selects the workspace for
@@ -142,19 +147,25 @@ public enum GraphcodeCommand: Equatable, Sendable {
                            once per cycle pass (last stdout line must be a number)
       --direction <d>      minimize | maximize                 (default: maximize)
       --budget <tokens>    for --type goal: end the loop once its backend reports this
-                           many tokens spent (input + output). Reported, never
+                           many tokens spent — input + output + every cache-read and
+                           cache-creation token the API metered. On Claude Code each
+                           turn re-meters the whole context as cache reads, so a
+                           budget burns per turn, not per hour. Reported, never
                            estimated — a loop whose backend reports nothing is never
                            stopped by a budget
-      --skip-unchanged     for --type goal: don't re-run the predicate while HEAD and
-                           the dirty file list are unchanged since its last failure.
-                           Only for predicates that depend on the tree — one that
-                           watches CI or a deploy would never be re-asked
+      --skip-unchanged     for --type goal: while the session is busy, don't re-run
+                           the predicate while HEAD and the dirty file list are
+                           unchanged since its last failure. An idle session gets
+                           one more predicate run and failure notice per unchanged
+                           tree, then polls stay quiet until the tree changes —
+                           the loop is the only writer of its own tree, so waiting
+                           on a change would wait on the loop itself
 
     UPDATE OPTIONS (node update; pass only what changes)
       --goal, --predicate, --prompt, --check, --model, --metric, --direction as above
       --poll <seconds>     how often the predicate is polled
       --stall <seconds>    stall bound; 0 clears it
-      --budget <tokens>    token budget; 0 clears it
+      --budget <tokens>    token budget, counted as at creation; 0 clears it
       --heartbeat <secs>   daemon heartbeat interval; 0 returns cadence to the prompt
       --skip-unchanged <true|false>
       A loop may not change its own --predicate or --budget: the verifier stays outside
@@ -719,8 +730,16 @@ extension GraphcodeCommand {
     }
     for node in graph.nodes {
       var line = "  \(node.id)  \(node.displayState)  \(node.loopType)  \(node.title)"
-      if let reason = AttentionRollup.reason(for: node) {
-        line += "  ← \(reason.displayName)"
+      if let exitCode = node.presence?.exitCode {
+        line += "  ← session exited (\(exitCode))"
+      } else if let reason = AttentionRollup.reason(for: node) {
+        // Stalled is two different endings — a blown budget and a blown deadline — and
+        // only memory told them apart. The graph records which one it was; print it.
+        if let why = node.stallReason, !why.isEmpty {
+          line += "  ← \(reason.displayName): \(why)"
+        } else {
+          line += "  ← \(reason.displayName)"
+        }
       }
       lines.append(line)
     }
@@ -824,6 +843,51 @@ extension GraphcodeCommand {
       return "incomplete loop: a turn-based node needs --check, a goal-based one --goal, "
         + "a time-based one --prompt, and the backend must be able to host that type"
     }
+  }
+
+  /// The one sentence both create and update print: what the flag actually skips, and
+  /// the one-notice-per-frozen-tree bound that keeps an idle loop from being stranded
+  /// or woken into an agent turn every poll.
+  static let skipUnchangedAdvice =
+    "warning: --skip-unchanged spares the predicate only while the session is busy; "
+    + "an idle session on an unchanged tree gets one more predicate run and one more "
+    + "failure notice, then polls stay quiet until the tree changes — the loop is the "
+    + "only writer of its own tree"
+
+  /// Advice printed at `node create` time for the flag combination a first-time user
+  /// reached for and got stranded by (issue #217 item 13): `--skip-unchanged` on a goal
+  /// loop with a predicate. The flag's name invites reading it as "the daemon handles
+  /// idle polls", when what it does is skip re-runs while the session is busy — the
+  /// loop itself is the only writer of the tree the skip was watching. The poller now
+  /// wakes an idle loop on an unchanged tree, so this is advisory rather than a
+  /// refusal, but the contract is worth saying out loud where the flag is typed.
+  public static func createWarnings(for draft: NodeDraft) -> [String] {
+    guard draft.loopType == .goalBased, let goal = draft.goal,
+      goal.skipsUnchangedWorkspace, goal.effectivePredicate != nil
+    else { return [] }
+    return [skipUnchangedAdvice]
+  }
+
+  /// The same advice for `node update --skip-unchanged true`, judged against the node
+  /// as the update will leave it — the flag only matters on a goal loop whose predicate
+  /// survives the update. Best-effort by design: a node the client cannot see at the
+  /// top level (a sub-graph child — issue #217 item 15) warns nobody rather than
+  /// warning wrongly.
+  public static func updateWarnings(
+    for update: NodeUpdate, currentNode: LoopNode?
+  ) -> [String] {
+    guard update.skipsUnchangedWorkspace == true, let node = currentNode,
+      node.loopType == .goalBased
+    else { return [] }
+    let predicateAfter: String?
+    if let raw = update.goalPredicate {
+      let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+      predicateAfter = trimmed.isEmpty ? nil : trimmed
+    } else {
+      predicateAfter = node.goal?.effectivePredicate
+    }
+    guard predicateAfter != nil else { return [] }
+    return [skipUnchangedAdvice]
   }
 }
 

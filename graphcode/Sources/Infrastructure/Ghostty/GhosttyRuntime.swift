@@ -145,6 +145,12 @@ final class GhosttyRuntime: @unchecked Sendable {
     return Unmanaged<GhosttyTerminalNSView>.fromOpaque(userdata).takeUnretainedValue()
   }
 
+  /// Who actually opens an intercepted link. Tests swap in a recorder so a URL no
+  /// application claims (the test-only `x-graphcode-test://` scheme) never reaches
+  /// LaunchServices — with the real opener, every `xcodebuild test` run popped the
+  /// "There is no application set to open the URL" dialog.
+  static var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
+
   /// The one action graphcode handles: a ⌘-clicked link. Everything else returns
   /// false and libghostty's defaults apply — the same posture as before, just no
   /// longer for URLs, because who opens a link is where remote sign-ins are won.
@@ -184,7 +190,7 @@ final class GhosttyRuntime: @unchecked Sendable {
         Task { await RemoteAuthPortForwarder.shared.ensureForwarding(port: port, to: location) }
       }
     }
-    DispatchQueue.main.async { NSWorkspace.shared.open(url) }
+    DispatchQueue.main.async { Self.openURL(url) }
     return true
   }
 

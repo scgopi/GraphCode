@@ -16,7 +16,9 @@ struct WorktreeFolderStats: Equatable, Sendable {
 struct WorktreeRemovalCandidate: Equatable, Sendable {
   var ref: WorktreeRef
   var prunable: Bool
-  /// Only ever true for a row whose discard the human confirmed in the sweeper.
+  /// True when git needs `--force` to go through: a discard the human confirmed,
+  /// or initialized submodules, which git refuses even on a clean tree and whose
+  /// force loses nothing the human wrote.
   var force: Bool
 }
 
@@ -165,9 +167,12 @@ struct AppWorktreesReducer: Reducer {
             // Forcing is decided on what git says *now*; consent is what the human gave
             // to the sheet. A worktree that has grown uncommitted files since the list
             // was built would fail an unforced removal without a word, so it is refused
-            // out loud instead.
-            let needsForce = !current.facts.prunable && !current.facts.clean
-            guard !needsForce || assessment.removalDiscardsFiles else {
+            // out loud instead. Initialized submodules need `--force` too, but that is
+            // bookkeeping, not discard — nothing the human wrote is lost, so it never
+            // demands the confirmation.
+            let discardsFiles = !current.facts.prunable && !current.facts.clean
+            let needsForce = discardsFiles || current.facts.hasSubmodules
+            guard !discardsFiles || assessment.removalDiscardsFiles else {
               blocked.append(
                 "\(current.ref.displayName): uncommitted files appeared since this list "
                   + "was built — reopen Worktrees and confirm the discard")
@@ -278,7 +283,11 @@ struct AppWorktreesReducer: Reducer {
       // The card's Reclaim: the project scope already cleared its offer on this same
       // action; the removal routes through the same verified gate as everything else —
       // an offer can be minutes old, and another loop may have bound the worktree since.
-      case .projects(.element(id: let path, action: .reclaimWorktreeTapped(let nodeID))):
+      // The offer's submodule fact travels with the action because the offer itself
+      // does not survive it: git refuses submodule worktrees even clean, and the
+      // removal needs the force flag the offer's facts carried.
+      case .projects(
+        .element(id: let path, action: .reclaimWorktreeTapped(let nodeID, let hasSubmodules))):
         guard let node = state.projects[id: path]?.graph.nodes[id: nodeID],
           let ref = node.worktreeBinding
         else { return .none }
@@ -286,7 +295,10 @@ struct AppWorktreesReducer: Reducer {
           .worktrees(
             .performRemovals(
               projectPath: path,
-              candidates: [WorktreeRemovalCandidate(ref: ref, prunable: false, force: false)],
+              candidates: [
+                WorktreeRemovalCandidate(
+                  ref: ref, prunable: false, force: hasSubmodules)
+              ],
               blocked: [])))
 
       default:
@@ -449,16 +461,19 @@ extension AppWorktreesReducer {
       guard assessment.tier == .safeToRemove else { return }
       switch policy.onResolveLanded {
       case .remove:
-        // Never forced (the safe tier is clean by definition), and routed through the
-        // verified gate: the inspection above took real time, and a loop can have
-        // claimed the worktree meanwhile.
+        // Never forced for discard (the safe tier is clean by definition), and routed
+        // through the verified gate: the inspection above took real time, and a loop
+        // can have claimed the worktree meanwhile. Initialized submodules still take
+        // `--force` — git refuses their worktrees even clean, and nothing the human
+        // wrote is lost by it.
         await send(
           .worktrees(
             .performRemovals(
               projectPath: path,
               candidates: [
                 WorktreeRemovalCandidate(
-                  ref: inspection.ref, prunable: inspection.facts.prunable, force: false)
+                  ref: inspection.ref, prunable: inspection.facts.prunable,
+                  force: !inspection.facts.prunable && inspection.facts.hasSubmodules)
               ],
               blocked: [])))
       case .ask:

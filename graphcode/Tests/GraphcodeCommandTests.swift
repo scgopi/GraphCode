@@ -106,12 +106,14 @@ struct GraphcodeCommandTests {
   func aDaemonBackedCodexTimeLoopIsAccepted() throws {
     // Codex has no in-session recurrence, but a leading simple directive is converted to
     // the graphcode daemon cadence rather than rejected as an unsupported pairing.
-    #expect(throws: Never.self, performing: {
-      try GraphcodeCommand.parse([
-        "node", "create", "/tmp/x", "--title", "Poll", "--type", "time",
-        "--prompt", "/loop 1h Check", "--backend", "codex",
-      ])
-    })
+    #expect(
+      throws: Never.self,
+      performing: {
+        try GraphcodeCommand.parse([
+          "node", "create", "/tmp/x", "--title", "Poll", "--type", "time",
+          "--prompt", "/loop 1h Check", "--backend", "codex",
+        ])
+      })
     // And the pairing that is fine now, which is the point of the change.
     #expect(
       throws: Never.self,
@@ -312,6 +314,21 @@ struct GraphcodeCommandTests {
     #expect(output.contains(node.id.uuidString))
     #expect(output.contains("Research"))
     #expect(output.contains("Failed"))
+  }
+
+  @Test
+  func renderingAGraphShowsTheBackendExitCode() {
+    let node = LoopNode(
+      title: "Trust dialog", loopType: .goalBased, goal: GoalSpec(summary: "work"),
+      presence: PresenceReading(presence: .idle, confidence: .scanned, exitCode: 1),
+      state: .running)
+    let graph = LoopGraph(
+      project: ProjectRef(path: "/tmp/x", name: "x"), nodes: [node])
+
+    let output = GraphcodeCommand.render(graph)
+
+    #expect(output.contains("failed"))
+    #expect(output.contains("session exited (1)"))
   }
 
   @Test

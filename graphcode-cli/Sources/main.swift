@@ -163,6 +163,10 @@ do {
     attributed.createdBy =
       SurfaceRef.nodeID(
         fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
+    // On stderr so stdout stays the rendered graph a script may be parsing.
+    for warning in GraphcodeCommand.createWarnings(for: attributed) {
+      FileHandle.standardError.write(Data("\(warning)\n".utf8))
+    }
     // Named a composite, and the very same command is addressed at its sub-graph
     // instead — which is what makes the CLI able to build one at all. Without this
     // there was no surface anywhere that could put a loop inside a composite, so the
@@ -227,7 +231,18 @@ do {
     attributed.updatedBy = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
     try client.send(.openProject(path: projectPath))
-    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    let opened = try client.waitForEvent {
+      if case .graphChanged = $0 { return true } else { return false }
+    }
+    // The same advice `node create` prints — turning the flag on from `update` is the
+    // same surprise. Best-effort: the node must be visible at the top level.
+    if case .graphChanged(let graph) = opened {
+      for warning in GraphcodeCommand.updateWarnings(
+        for: attributed, currentNode: graph.nodes.first(where: { $0.id == nodeID }))
+      {
+        FileHandle.standardError.write(Data("\(warning)\n".utf8))
+      }
+    }
     try client.send(
       .graphCommand(
         projectPath: projectPath, command: .updateNode(nodeID, update: attributed)))

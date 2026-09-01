@@ -2,6 +2,7 @@ import Foundation
 import GhosttyKit
 import GraphcodeKit
 import Testing
+import os
 
 @testable import graphcode
 
@@ -91,7 +92,7 @@ struct AuthPortForwardingTests {
   }
 
   @Test
-  func onlySchemeCarryingUnknownURLsAreIntercepted() {
+  func onlySchemeCarryingUnknownURLsAreIntercepted() async {
     // ⌘⇧-click on a local folder's surface must not regress: a clicked *file path*
     // (Ghostty hands over a bare absolute path for resolved links) and the
     // editor-opening scrollback kinds return false, so libghostty's own opener runs
@@ -99,9 +100,19 @@ struct AuthPortForwardingTests {
     #expect(!linkOpenHandled("/Users/dev/notes.txt"))
     #expect(!linkOpenHandled("https://example.com/dump", kind: GHOSTTY_ACTION_OPEN_URL_KIND_TEXT))
     #expect(!linkOpenHandled("https://example.com/dump", kind: GHOSTTY_ACTION_OPEN_URL_KIND_HTML))
-    // A real link is ours — the interception the forwarder rides on. A test-only
-    // scheme, so the open attempt resolves to no application.
+    // A real link is ours — the interception the forwarder rides on. The opener is a
+    // test recorder, so the URL lands in a list instead of LaunchServices: nothing
+    // claims this scheme, and the real opener popped the "no application set to open
+    // the URL" dialog on every test run.
+    let opened = OSAllocatedUnfairLock(initialState: [URL]())
+    let systemOpener = GhosttyRuntime.openURL
+    GhosttyRuntime.openURL = { url in opened.withLock { $0.append(url) } }
+    defer { GhosttyRuntime.openURL = systemOpener }
     #expect(linkOpenHandled("x-graphcode-test://sign-in"))
+    // The open is dispatched to the main queue; a sentinel enqueued after it runs
+    // once the recorded open has happened.
+    await MainActor.run {}
+    #expect(opened.withLock { $0 } == [URL(string: "x-graphcode-test://sign-in")!])
   }
 
   @Test

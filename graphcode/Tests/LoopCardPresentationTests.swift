@@ -128,6 +128,27 @@ struct LoopCardPresentationTests {
   }
 
   @Test
+  func aStalledLoopSaysWhyInsteadOfRestatingItsGoal() {
+    // The pill already said STALLED; a card that went on quoting the goal read as a
+    // loop still pursuing it, and the budget-vs-deadline question sat in memory only.
+    let blown = LoopNode(
+      title: "a", loopType: .goalBased,
+      goal: GoalSpec(summary: "the suite is green"),
+      stallReason: "budget exhausted: 3000000 of 3000000 tokens spent", state: .stalled)
+    #expect(
+      LoopCardPresentation(node: blown).liveLine
+        == "budget exhausted: 3000000 of 3000000 tokens spent")
+  }
+
+  @Test
+  func aStalledLoopWithoutAKnownWhyKeepsItsHandedLine() {
+    let stalled = LoopNode(
+      title: "a", loopType: .goalBased, goal: GoalSpec(summary: "the suite is green"),
+      state: .stalled)
+    #expect(LoopCardPresentation(node: stalled).liveLine == "the suite is green")
+  }
+
+  @Test
   func aLoopWithNothingWrittenDownHasNoLiveLineRatherThanAnEmptyOne() {
     let blank = LoopNode(title: "blank", checkDescription: " ")
     #expect(LoopCardPresentation(node: LoopNode(title: "bare")).liveLine == nil)

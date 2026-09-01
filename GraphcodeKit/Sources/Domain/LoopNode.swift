@@ -147,6 +147,13 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// idle session, staged to a busy one's memory, waiting in the post itself for a
   /// loop that is gone. The post is the durable half; this is only the ding.
   public var artifactoryWatch: ArtifactoryWatch?
+  /// Why the loop is `.stalled`, when the graph knows. A budget exhaustion and a stall
+  /// bound both land in the same terminal state, and both wrote their reason only to
+  /// the loop's memory log — every surface then showed a bare STALLED and a human had
+  /// to open memory to learn whether to raise a number or kill a stuck loop. Set by
+  /// `GraphStore` at the moment of the stall; `nil` for loops stalled before the field
+  /// existed, and for stalls whose cause the graph had nothing to say about.
+  public var stallReason: String?
   public var state: LoopState
   public var createdAt: Date
 
@@ -174,6 +181,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     createdBy: UUID? = nil,
     lastArtifactoryRead: Int? = nil,
     artifactoryWatch: ArtifactoryWatch? = nil,
+    stallReason: String? = nil,
     state: LoopState = .idle,
     createdAt: Date = Date()
   ) {
@@ -200,6 +208,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.createdBy = createdBy
     self.lastArtifactoryRead = lastArtifactoryRead
     self.artifactoryWatch = artifactoryWatch
+    self.stallReason = stallReason
     self.state = state
     self.createdAt = createdAt
   }
@@ -352,6 +361,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// `nil` and `.unknown` count as no: opening is what could *start* a session, and a
   /// gate deciding whether that's safe must not treat "don't know" as "yes".
   public var presenceShowsLiveSession: Bool {
+    if presence?.exitCode != nil { return false }
     switch presence?.presence {
     case .busy, .idle, .awaitingInput: return true
     case .absent, .unknown, nil: return false
@@ -383,6 +393,9 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// untouched, which is exactly the behaviour every surface had before presence existed.
   public var displayState: LoopState {
     guard state == .running, let presence = presence?.presence else { return state }
+    if let exitCode = self.presence?.exitCode {
+      return exitCode == 0 ? .idle : .failed
+    }
     switch presence {
     case .busy: return .running
     case .idle: return hasActiveDependents ? .waiting : .idle
@@ -435,7 +448,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     case worktreeBinding, subGraph, pilotState, usage, metricHistory, createdBy
     case lastArtifactoryRead, artifactoryWatch
     case state, createdAt, activity, presence, firstInstruction, pausesBeforeWritesOnly
-    case summary, board, heartbeatIntervalSeconds
+    case summary, board, heartbeatIntervalSeconds, stallReason
   }
 
   /// Hand-written for the same reason `LoopEdge`'s is: `ProjectPersistence.loadGraph`
@@ -480,6 +493,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     lastArtifactoryRead = try container.decodeIfPresent(Int.self, forKey: .lastArtifactoryRead)
     artifactoryWatch = try container.decodeIfPresent(
       ArtifactoryWatch.self, forKey: .artifactoryWatch)
+    stallReason = try container.decodeIfPresent(String.self, forKey: .stallReason)
     state = try container.decodeIfPresent(LoopState.self, forKey: .state) ?? .idle
     createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
   }

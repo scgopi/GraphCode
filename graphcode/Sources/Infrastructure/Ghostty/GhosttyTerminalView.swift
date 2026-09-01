@@ -78,6 +78,11 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// view showing it.
   func makeNSView(context: Context) -> TerminalSurfaceHostView {
     let host = TerminalSurfaceHostView()
+    if launchesClaudeCode, backend == .claudeCode, remoteLocation == nil {
+      if let workingDirectory {
+        ClaudeCodeTrust.ensureTrusted(directory: workingDirectory)
+      }
+    }
     let view = TerminalSurfaceStore.shared.surface(for: surfaceID) {
       // A remote surface needs the daemon's socket present on its host before the
       // delivered CLI can reach the graph — same forward the daemon's own launches
@@ -295,7 +300,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
     return environment
   }
 
-  private func command(briefingPath: String?) -> [String] {
+  func command(briefingPath: String?) -> [String] {
     // A remote project's surfaces live on the remote host, local zmx or not.
     if let location = remoteLocation {
       return remoteCommand(at: location, settings: GraphcodeSettingsStore.load())
@@ -317,11 +322,23 @@ struct GhosttyTerminalView: NSViewRepresentable {
     // wrapper needed for a plain-shell surface.
     var command = [ZmxLocator.binaryURL.path, "attach", sessionName]
     guard launchesClaudeCode else { return command }
+    // Unattended Codex sessions are started by graphcoded. Attaching with the agent
+    // command as well creates a race where zmx run types that command into Codex.
+    if defersCodexLaunchToDaemon {
+      return ZmxSessionLauncher.waitingAttachCommand(
+        zmxPath: ZmxLocator.binaryURL.path, sessionName: sessionName,
+        executable: backend.executableName)
+    }
     if let resuming = localResumeOrFreshCommand(agentLaunch: agentCommand) {
       return resuming
     }
     command += agentCommand
     return command
+  }
+
+  var defersCodexLaunchToDaemon: Bool {
+    backend == .codex && launchesClaudeCode
+      && (loopType == .goalBased || loopType == .timeBased)
   }
 
   /// Opening a loop whose session is gone used to start the agent **fresh**, prompt and

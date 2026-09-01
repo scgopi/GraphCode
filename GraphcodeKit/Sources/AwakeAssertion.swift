@@ -1,5 +1,7 @@
 import Foundation
-import IOKit.pwr_mgt
+#if canImport(Darwin)
+  import IOKit.pwr_mgt
+#endif
 
 /// Keeps the Mac from falling asleep while loops are actually running — the power
 /// assertion `caffeinate -i` takes, held by the daemon rather than by a person at a
@@ -24,7 +26,13 @@ import IOKit.pwr_mgt
 public actor AwakeAssertion {
   public static let shared = AwakeAssertion()
 
-  private var held: IOPMAssertionID?
+  #if canImport(Darwin)
+    private var held: IOPMAssertionID?
+  #else
+    // No IOKit power assertions on Linux: nothing is ever held, `apply` does nothing,
+    // and the daemon's call site stays platform-independent.
+    private var held: Void?
+  #endif
 
   /// Whether the machine should be kept awake right now. Pure, and separate from the
   /// IOKit call, because the interesting part is the decision: a setting that is off
@@ -37,24 +45,26 @@ public actor AwakeAssertion {
   /// and releasing while released both do nothing, so the caller can simply state the
   /// current answer on every graph change without tracking edges itself.
   public func apply(shouldHold: Bool, runningLoops: Int) {
-    if shouldHold {
-      guard held == nil else { return }
-      var identifier = IOPMAssertionID(0)
-      let reason =
-        runningLoops == 1
-        ? "a GraphCode loop is running" : "\(runningLoops) GraphCode loops are running"
-      let result = IOPMAssertionCreateWithName(
-        kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
-        IOPMAssertionLevel(kIOPMAssertionLevelOn), reason as CFString, &identifier)
-      // A refused assertion is not worth failing anything over: the machine sleeps as it
-      // did before this existed, which is the behaviour every release until now had.
-      guard result == kIOReturnSuccess else { return }
-      held = identifier
-    } else {
-      guard let identifier = held else { return }
-      held = nil
-      IOPMAssertionRelease(identifier)
-    }
+    #if canImport(Darwin)
+      if shouldHold {
+        guard held == nil else { return }
+        var identifier = IOPMAssertionID(0)
+        let reason =
+          runningLoops == 1
+          ? "a GraphCode loop is running" : "\(runningLoops) GraphCode loops are running"
+        let result = IOPMAssertionCreateWithName(
+          kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
+          IOPMAssertionLevel(kIOPMAssertionLevelOn), reason as CFString, &identifier)
+        // A refused assertion is not worth failing anything over: the machine sleeps as it
+        // did before this existed, which is the behaviour every release until now had.
+        guard result == kIOReturnSuccess else { return }
+        held = identifier
+      } else {
+        guard let identifier = held else { return }
+        held = nil
+        IOPMAssertionRelease(identifier)
+      }
+    #endif
   }
 
   /// Whether an assertion is currently held — for the daemon's own logging and for a test

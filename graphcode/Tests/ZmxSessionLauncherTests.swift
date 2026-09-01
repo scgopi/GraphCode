@@ -216,6 +216,29 @@ struct ZmxSessionLauncherTests {
   }
 
   @Test
+  func aCodexDaemonCheckRejectsABareAttachShell() {
+    let node = LoopNode(
+      title: "Codex", loopType: .goalBased, goal: GoalSpec(summary: "work"), backend: .codex)
+    let command = ZmxSessionLauncher.aliveCheckCommand(
+      zmxPath: "/usr/local/bin/zmx", forNode: node)
+    #expect(command.contains("cmd=.*codex"))
+  }
+
+  @Test
+  func appWaitsForTheDaemonBeforeAttachingCodex() {
+    let command = ZmxSessionLauncher.waitingAttachCommand(
+      zmxPath: "/usr/local/bin/zmx", sessionName: "graphcode-a", executable: "codex")
+    #expect(command.first == "/bin/zsh")
+    #expect(command.last?.contains("until") == true)
+    #expect(command.last?.contains("cmd=.*codex") == true)
+    #expect(command.last?.contains("exec '/usr/local/bin/zmx' attach 'graphcode-a'") == true)
+    // A session the daemon never creates must not be polled at 10 Hz forever: the wait
+    // gives up after a minute with a message instead of spinning.
+    #expect(command.last?.contains("-ge 600") == true)
+    #expect(command.last?.contains("exit 1") == true)
+  }
+
+  @Test
   func theRemoteSeedPreTrustsClaudeCodesFolder() {
     // Issue #215's fix on the remote path: a fresh unattended `claude` exits 1 on its
     // trust dialog, so the create branch seeds `hasTrustDialogAccepted` before it runs.
