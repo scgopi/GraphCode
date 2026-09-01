@@ -156,7 +156,7 @@ struct LoopWorkspaceView: View {
       LoopWorkspaceLoopBar(
         node: store.node,
         now: now,
-        onStop: { store.send(.stopLoopTapped) },
+        onRestart: { store.send(.restartLoopTapped) },
         onShowInGraph: { store.send(.showInGraphTapped) })
       // No divider under the strip: its own shadow line is that edge now, and stacking a
       // system `Divider` on top of it draws the seam twice.

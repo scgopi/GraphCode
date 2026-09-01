@@ -53,6 +53,9 @@ public actor GraphStore {
   /// nothing produces beats — no reader wired, or the human has left the producer off.
   private let onReadSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)?
   private let onReadPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)?
+  /// Whether a local loop's session is alive and not a husk — what decides if a pane
+  /// closing may resolve the loop (`sessionPermitsResolution`).
+  private let onSessionAlive: (@Sendable (LoopNode, String?) async -> Bool)?
   /// Cross-graph `.spawn`. `GraphStore` owns exactly one graph and cannot reach another,
   /// so it hands the request up to `ProjectRegistry`, which is the layer that knows every
   /// open project — the same split that keeps this actor unaware multi-project routing
@@ -134,6 +137,12 @@ public actor GraphStore {
   static let maxSubGraphDepth = 6
   static let maxNodesPerGraph = 50
   private var goalPollers: [UUID: Task<Void, Never>] = [:]
+  /// When each loop's session was last restarted in place. A pane that watched that
+  /// kill reports an exit, and for this long afterwards the report is the restart's
+  /// own doing rather than the loop finishing. In-memory: a daemon restart forgetting
+  /// it costs nothing, since the sessions it relaunches are not these.
+  private var recentRestarts: [UUID: Date] = [:]
+  static let restartResolutionGrace: TimeInterval = 60
   /// The experiment's timers — one per heartbeat-driven time loop, alive whether the
   /// Settings toggle is on or off. The *tick* checks the toggle, not the arming: a
   /// timer that skips its beat costs one closure call a minute, and it means flipping
@@ -209,6 +218,7 @@ public actor GraphStore {
     onReadActivity: (@Sendable (LoopNode, String?) async -> String?)? = nil,
     onReadSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)? = nil,
     onReadPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)? = nil,
+    onSessionAlive: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
     onSpawnIntoProject: (@Sendable (String, NodeDraft) -> Void)? = nil,
     onAppendMemory: (@Sendable (UUID, String) -> Void)? = nil,
     onRemoveMemory: (@Sendable (UUID) -> Void)? = nil,
@@ -240,6 +250,7 @@ public actor GraphStore {
     self.onReadActivity = onReadActivity
     self.onReadSummary = onReadSummary
     self.onReadPresence = onReadPresence
+    self.onSessionAlive = onSessionAlive
     self.onSpawnIntoProject = onSpawnIntoProject
     self.onAppendMemory = onAppendMemory
     self.onRemoveMemory = onRemoveMemory
@@ -603,13 +614,14 @@ public actor GraphStore {
       unblockIfStillIdle(to)
 
     case .nodeCheckApproved(let nodeID):
-      if await remoteSessionPermitsResolution(nodeID) {
-        resolveNode(nodeID, succeeded: true)
+      if await sessionPermitsResolution(nodeID, succeeded: true) {
+        resolveNode(nodeID, succeeded: true, reason: "its pane's process finished")
       }
 
     case .nodeCheckRejected(let nodeID):
-      if await remoteSessionPermitsResolution(nodeID) {
-        resolveNode(nodeID, succeeded: false)
+      if await sessionPermitsResolution(nodeID, succeeded: false) {
+        resolveNode(
+          nodeID, succeeded: false, reason: "its pane closed with the process still running")
       }
 
     case .messageNode(let nodeID, let text, let from, let followUp):
@@ -822,9 +834,9 @@ public actor GraphStore {
 
     switch rolled {
     case .succeeded:
-      resolveNode(nodeID, succeeded: true)
+      resolveNode(nodeID, succeeded: true, reason: "its workers rolled up to succeeded")
     case .failed, .stalled:
-      resolveNode(nodeID, succeeded: false)
+      resolveNode(nodeID, succeeded: false, reason: "its workers rolled up to \(rolled)")
     case .idle, .running, .awaitingInput, .blocked, .waiting, .stopped:
       setNodeState(nodeID, rolled)
     }
@@ -1921,6 +1933,7 @@ public actor GraphStore {
     for node in nodes {
       if confirmed[node.id] == true {
         graph.nodes[id: node.id]?.sessionRestarts += 1
+        recentRestarts[node.id] = Date()
         recordMemory(node.id, "session restarted in place, resumed from its transcript")
       } else {
         announceError("could not restart \(node.title): its session did not die")
@@ -1997,18 +2010,42 @@ public actor GraphStore {
   /// it; the presence poll keeps the card honest either way, and reopening the loop
   /// reattaches. The one probe (bounded by ssh's own ConnectTimeout) is deliberately
   /// not retried: this actor serializes a project's commands, and a resolution can
-  /// simply arrive again once the link is back.
-  private func remoteSessionPermitsResolution(_ nodeID: UUID) async -> Bool {
-    guard RemoteProjectLocation.parse(projectPath: graph.project.path) != nil,
-      let onReadPresence, let node = graph.nodes[id: nodeID], !node.isResolved
-    else { return true }
-    let reading = await onReadPresence(node, graph.project.path)
-    if reading.presence == .absent { return true }
-    recordMemory(
-      nodeID,
-      "surface reported an exit, but the remote session was "
-        + "\(reading.presence == .unknown ? "unreachable" : "still live") — not resolved")
-    return false
+  /// simply arrive again once the link is back. Every refusal is written to the node's
+  /// memory, so a state nobody expected can be traced to the report that caused it.
+  private func sessionPermitsResolution(_ nodeID: UUID, succeeded: Bool) async -> Bool {
+    guard let node = graph.nodes[id: nodeID], !node.isResolved else { return true }
+    let report =
+      "surface reported its pane "
+      + (succeeded ? "finished" : "closed with its process still running")
+    // The restart's own kill: the pane that watched it die reports an exit that
+    // means nothing about the work. Every restarted loop showed FAILED or SUCCEEDED
+    // for exactly this reason before the grace existed.
+    if let restarted = recentRestarts[nodeID],
+      Date().timeIntervalSince(restarted) < Self.restartResolutionGrace
+    {
+      let seconds = Int(Date().timeIntervalSince(restarted))
+      recordMemory(
+        nodeID, "\(report) \(seconds)s after a restart — the restart's own kill, not resolved")
+      return false
+    }
+    if RemoteProjectLocation.parse(projectPath: graph.project.path) != nil {
+      guard let onReadPresence else { return true }
+      let reading = await onReadPresence(node, graph.project.path)
+      if reading.presence == .absent { return true }
+      recordMemory(
+        nodeID,
+        "\(report), but the remote session was "
+          + "\(reading.presence == .unknown ? "unreachable" : "still live") — not resolved")
+      return false
+    }
+    // A pane closing is not the loop finishing: ⌘W in a running agent pane (Ghostty's
+    // own close binding, live whenever the app's Close Tab item is disabled) marked the
+    // loop failed while its session carried on headless.
+    if let onSessionAlive, await onSessionAlive(node, graph.project.path) {
+      recordMemory(nodeID, "\(report), but the session is still live — not resolved")
+      return false
+    }
+    return true
   }
 
   /// `sessionMayStillBeLive` is true only for predicate-driven resolutions: the goal
@@ -2017,12 +2054,12 @@ public actor GraphStore {
   /// (`nodeCheckApproved`, composite roll-up) fire *because* the session ended, so
   /// there is nobody left to speak to.
   private func resolveNode(
-    _ nodeID: UUID, succeeded: Bool, sessionMayStillBeLive: Bool = false
+    _ nodeID: UUID, succeeded: Bool, reason: String, sessionMayStillBeLive: Bool = false
   ) {
     guard let node = graph.nodes[id: nodeID] else { return }
     setNodeState(nodeID, succeeded ? .succeeded : .failed)
     cancelGoalPoller(nodeID)
-    recordMemory(nodeID, "resolved: \(succeeded ? "succeeded" : "failed")")
+    recordMemory(nodeID, "resolved: \(succeeded ? "succeeded" : "failed") — \(reason)")
     // Two asks ride resolution, in one interruption. Skill distillation: a goal loop
     // that just succeeded is the one agent holding a proven method in context, and
     // success is load-bearing there — a failed loop's method is not a recipe. The
@@ -2714,6 +2751,7 @@ public actor GraphStore {
       onCaptureScript: onCaptureScript,
       onReadUsage: onReadUsage,
       onReadPresence: onReadPresence,
+      onSessionAlive: onSessionAlive,
       onAppendMemory: onAppendMemory,
       onRemoveMemory: onRemoveMemory,
       onRefinePlaybook: onRefinePlaybook,
@@ -2875,7 +2913,8 @@ public actor GraphStore {
     // or its session exited and resolved it) while the predicate was running.
     guard let current = graph.nodes[id: nodeID], !current.isResolved else { return }
     if outcome.passed {
-      resolveNode(nodeID, succeeded: true, sessionMayStillBeLive: true)
+      resolveNode(
+        nodeID, succeeded: true, reason: "its goal predicate passed", sessionMayStillBeLive: true)
       await drainAndBroadcast()
       return
     }

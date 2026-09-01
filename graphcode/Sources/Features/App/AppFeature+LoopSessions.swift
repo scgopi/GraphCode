@@ -2,8 +2,8 @@ import ComposableArchitecture
 import Foundation
 import GraphcodeKit
 
-/// The Loop menu's verbs on a session: Stop Loop, and Restart Session / Restart All
-/// Sessions… — kill a loop's `zmx` session and bring it back on the same transcript
+/// The Loop menu's verbs on a session — Stop Loop, Restart Session, Restart All
+/// Sessions… — and the pane exit that resolves a loop. Restart kills a loop's `zmx` session and bring it back on the same transcript
 /// (`GraphCommand.restartNode`), for the day `zmx` or a backend CLI was replaced under
 /// every running loop. Stop lives here too because it is the same shape (a menu item, a
 /// daemon command) and `AppFeature.swift` is at its lint budget.
@@ -51,6 +51,33 @@ extension AppFeature {
         guard let id = state.openLoop?.node.id, let path = state.openLoop?.projectPath
         else { return .none }
         return .send(.stopNodeTapped(projectPath: path, nodeID: id))
+
+      case .openLoop(.restartLoopTapped):
+        return .send(.sessionRestart(.openLoopTapped))
+
+      // A loop's own primary session exiting *is* its resolution — no separate human
+      // approve/reject step. `LoopWorkspaceFeature` already updated its local node
+      // state for this same action; telling `graphcoded` is this level's job, since it
+      // holds the connection, and it's what fires the outgoing edges. The daemon has
+      // the last word (`GraphStore.sessionPermitsResolution`), and the report is
+      // logged here so a resolution nobody expected can be traced to the pane that
+      // sent it.
+      case .openLoop(.primarySurfaceExited(let succeeded)):
+        guard let id = state.openLoop?.node.id, let projectPath = state.selectedProjectPath
+        else { return .none }
+        // A chat's session ending resolves nothing — there is no node in any graph for
+        // the daemon to update, so telling it would only earn an unknown-node error.
+        guard !state.isQuickChat(id) else { return .none }
+        DialLog.record(
+          session: SurfaceRef(id: id, launchesClaudeCode: true).zmxSessionName,
+          dial: "pane", event: succeeded ? "exit-finished" : "exit-alive")
+        // The pane that watched a restart's kill has nothing to say about the work.
+        guard state.sessionRestart.pendingReopen?.nodeID != id else { return .none }
+        let command: GraphCommand = succeeded ? .nodeCheckApproved(id) : .nodeCheckRejected(id)
+        return .run { _ in
+          try? await orchestratorClient.send(
+            .graphCommand(projectPath: projectPath, command: command))
+        }
 
       case .sessionRestart(.openLoopTapped):
         // A chat is not a node in any graph — the daemon has nothing to restart.

@@ -125,6 +125,9 @@ struct LoopWorkspaceFeature {
     /// the hairline, which is the whole point of it.
     case workspaceLeft
     case stopLoopTapped
+    /// The loop bar's Restart session — the session is killed and resumed on the same
+    /// transcript; `AppFeature` carries it out, as it does the stop.
+    case restartLoopTapped
     case showInGraphTapped
     case railTargetTapped(UUID)
   }
@@ -308,7 +311,8 @@ struct LoopWorkspaceFeature {
         }
         return .none
 
-      case .stopLoopTapped, .showInGraphTapped, .railTargetTapped, .primaryExitAcknowledged:
+      case .stopLoopTapped, .restartLoopTapped, .showInGraphTapped, .railTargetTapped,
+        .primaryExitAcknowledged:
         // Handled by `AppFeature`'s parent `Reduce` — see the actions' own doc comment.
         return .none
       }
