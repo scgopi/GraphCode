@@ -97,8 +97,7 @@ public enum SessionBriefing {
 
       ```sh
       graphcode artifactory sync \(projectPath)     # read what you have not seen, mark it read
-      graphcode artifactory sync \(projectPath) --headlines   # many unread? triage first
-      graphcode artifactory read \(projectPath) <post-id>     # then read only those in full
+      graphcode artifactory read \(projectPath) <post-id>     # one post in full
       graphcode artifactory post \(projectPath) [--topic <t>] <note…>   # leave something behind
       graphcode artifactory list \(projectPath)     # read-only peek, cursor untouched
       graphcode artifactory watch \(projectPath) [--topic <t>]   # ring me when new mail lands
@@ -107,13 +106,17 @@ public enum SessionBriefing {
       Post decisions made, dead ends hit, claims staked ("I'm taking issue #12") —
       a note for a peer, not a transcript. Sync before you rely on nobody having
       got there first, and watch a topic when you want the board to come to you.
+      A big backlog prints as one line per post and says so; `read <post-id>` then
+      spends context only on the ones that turned out to matter.
 
       The board also keeps the record for you: every direct message, message-edge
       delivery, and handoff (topics `direct` and `handoff`) is mirrored onto it
       automatically, so a loop that joins mid-flight can read what was already said.
       Those mirrored records are the record, not the delivery — they never ring a
-      watcher, so watching only those topics stays silent. Your posts stay on the
-      board after you resolve; they go only if your loop is deleted.
+      watcher, so watching only those topics stays silent, and they prune on their
+      own budget so graph chatter can never crowd out a note. Your posts outlive
+      you: they stay after you resolve, and after your loop is deleted — only the
+      byline goes.
       """
       : ""
     return """

@@ -52,8 +52,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
   /// so this verb only means anything run from inside a session. `--headlines` prints
   /// one triage line per unread post instead of full bodies (pair it with `read`);
   /// `--mark` advances the cursor without printing the backlog ("start me from now");
-  /// `--json` emits the unread posts machine-readably.
-  case artifactorySync(projectPath: String, headlines: Bool, mark: Bool, json: Bool)
+  /// `--json` emits the unread posts machine-readably; `--full` insists on every body
+  /// where the verb would otherwise triage a large backlog down to headlines itself.
+  case artifactorySync(
+    projectPath: String, headlines: Bool, mark: Bool, json: Bool, full: Bool)
   /// One post in full, by id — the deep-read half of `sync --headlines` triage.
   /// Read-only: the post is in the snapshot, no command reaches the daemon.
   case artifactoryRead(projectPath: String, postID: Int)
@@ -94,13 +96,15 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode edge create <project-path> <from-id> <to-id> [--kind <k>] [--condition <c>]
       graphcode artifactory post <project-path> [--topic <t>] <note…>
                            leave a note on the shared board for whoever comes next
-      graphcode artifactory sync <project-path> [--headlines] [--mark] [--json]
-                           read your unread posts and mark the board read; --headlines
-                           prints one triage line each (deep-read with `read`), --mark
+      graphcode artifactory sync <project-path> [--headlines] [--full] [--mark] [--json]
+                           read your unread posts and mark the board read. A large
+                           backlog prints as headlines on its own and says so —
+                           --full insists on every body, --headlines insists on
+                           triage lines (deep-read either with `read`). --mark
                            advances the cursor without printing the backlog, --json is
                            the machine-readable shape. Combined, the output wins in the
-                           order --json > --mark > --headlines; the cursor advances
-                           whichever flags you pass
+                           order --json > --mark > --headlines > --full; the cursor
+                           advances whichever flags you pass
       graphcode artifactory read <project-path> <post-id>
                            one post in full — the deep-read half of --headlines
       graphcode artifactory list <project-path> [--search <text>] [--json]
@@ -830,7 +834,7 @@ extension GraphcodeCommand {
   /// way this verb could lose mail.
   public static func renderArtifactory(
     _ graph: LoopGraph, unreadFor readerID: UUID? = nil, headlines: Bool = false,
-    search: String? = nil
+    search: String? = nil, autoTriage: Bool = false
   ) -> String {
     var posts: [ArtifactoryPost]
     if let readerID {
@@ -856,12 +860,21 @@ extension GraphcodeCommand {
         ? "the board is empty — post one: graphcode artifactory post <project-path> <note…>"
         : "no unread posts"
     }
+    // `sync` asks to be triaged; `--headlines` and `--full` are the two ways to say
+    // so explicitly. Announced on the line above the posts rather than silently, so a
+    // loop reading a truncated board knows it is reading one.
+    let triaged = autoTriage && Artifactory.needsTriage(posts)
     let label = readerID == nil ? "artifactory" : "artifactory, unread"
-    var lines = [
+    var header =
       "\(graph.project.name) \(label): \(posts.count) post\(posts.count == 1 ? "" : "s")"
-    ]
+    if triaged {
+      header +=
+        " — headlines only, that is a lot to read at once. "
+        + "Full text: graphcode artifactory read \(graph.project.path) <post-id>"
+    }
+    var lines = [header]
     for post in posts {
-      lines.append(headlines ? "  \(renderHeadline(post))" : "  \(render(post))")
+      lines.append(headlines || triaged ? "  \(renderHeadline(post))" : "  \(render(post))")
     }
     return lines.joined(separator: "\n")
   }
@@ -1083,11 +1096,11 @@ extension GraphcodeCommand {
       return .artifactoryPost(projectPath: path, topic: flags["topic"], text: text)
 
     case "sync":
-      try validateFlags(arguments, allowed: ["headlines", "mark", "json"])
+      try validateFlags(arguments, allowed: ["headlines", "mark", "json", "full"])
       let flags = parseFlags(arguments)
       return .artifactorySync(
         projectPath: path, headlines: flags["headlines"] != nil, mark: flags["mark"] != nil,
-        json: flags["json"] != nil)
+        json: flags["json"] != nil, full: flags["full"] != nil)
 
     case "read":
       try validateFlags(arguments, allowed: [])

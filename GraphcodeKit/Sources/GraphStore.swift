@@ -1413,7 +1413,8 @@ public actor GraphStore {
   /// memory to), so mirroring must not ring the watchers, or a busy graph would have
   /// every direct message waking every listener on top of its real delivery.
   /// Gated like every board write; body carries the target so a reader can tell a
-  /// note to the room from a note to a peer.
+  /// note to the room from a note to a peer. Written as `.record`, which is what keeps
+  /// a talkative graph inside its own budget instead of evicting the notes.
   private func recordArtifactoryCommunication(
     from senderID: UUID?, to target: LoopNode, text: String, topic: String
   ) {
@@ -1428,7 +1429,7 @@ public actor GraphStore {
     }
     let post = ArtifactoryPost(
       id: Artifactory.nextID(after: graph.artifactory), at: Date(), authorID: senderID,
-      author: sender, topic: topic, body: body)
+      author: sender, topic: topic, body: body, kind: .record)
     graph.artifactory = Artifactory.pruned(graph.artifactory + [post])
   }
 
@@ -1594,12 +1595,18 @@ public actor GraphStore {
     // memory goes the same way — a log for a loop that no longer exists is litter.
     terminateSession(node)
     onRemoveMemory?(node.id)
-    // And its artifactory posts: delete is the one irreversible action in graphcode,
-    // and the confirmation that covers edges, session, and memory covers the loop's
-    // board record too. Posts where this loop was only the *recipient* stay — those
-    // are the other side's record of a communication that happened. A loop that wants
-    // its notes to survive should be stopped, not deleted.
-    graph.artifactory.removeAll { $0.authorID == node.id }
+    // Its artifactory posts stay, with the handle to their author taken off them.
+    // Deleting the loop was never meant to retract what it *told other loops*: a note
+    // on the board is addressed to whoever comes next, peers may already have acted on
+    // it, and a board that un-says things is not a board. What the delete does take is
+    // the id — nothing should be able to address a loop that no longer exists — and
+    // the byline says plainly that the author is gone.
+    for post in graph.artifactory where post.authorID == node.id {
+      guard let index = graph.artifactory.firstIndex(where: { $0.id == post.id }) else {
+        continue
+      }
+      graph.artifactory[index] = post.withAuthorDeleted()
+    }
 
     // A composite's workers live in its sub-graph, on this node rather than in
     // `graph.nodes` — the same blind spot `requestStop` covers when stopping, and the
@@ -1746,14 +1753,20 @@ public actor GraphStore {
     setNodeState(nodeID, succeeded ? .succeeded : .failed)
     cancelGoalPoller(nodeID)
     recordMemory(nodeID, "resolved: \(succeeded ? "succeeded" : "failed")")
-    // Skill distillation rides resolution: a goal loop that just succeeded is the one
-    // agent holding a proven method in context. Its own queue rather than
+    // Two asks ride resolution, in one interruption. Skill distillation: a goal loop
+    // that just succeeded is the one agent holding a proven method in context, and
+    // success is load-bearing there — a failed loop's method is not a recipe. The
+    // board post: whatever this loop learned, including *why it failed*, which is the
+    // finding a successor would otherwise pay for twice. Its own queue rather than
     // `pendingNudges`, because the state written above is exactly what
     // `MessageBus.deliverability` reads — a resolved node is "not live" to the graph
     // while its PTY is still very much there (the `requestStop` ordering lesson).
-    // Success only: a failed loop's method is not a recipe.
-    if succeeded, sessionMayStillBeLive, node.loopType == .goalBased {
-      pendingResolutionNudges.append((nodeID, MessageBus.distillSkillRequest))
+    if sessionMayStillBeLive,
+      let ask = MessageBus.resolutionAsk(
+        distillSkill: succeeded && node.loopType == .goalBased,
+        artifactoryProjectPath: artifactoryIsOn() ? graph.project.path : nil)
+    {
+      pendingResolutionNudges.append((nodeID, ask))
     }
     fireOutgoingEdges(from: nodeID, sourceSucceeded: succeeded)
   }

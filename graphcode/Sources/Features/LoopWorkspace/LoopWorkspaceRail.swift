@@ -25,10 +25,21 @@ struct LoopWorkspaceRail: View {
   /// Whether the board section is collapsed to its header. Per window and persisted,
   /// beside the summary's own fold.
   let isBoardFolded: Bool
+  /// Whether this project's Artifactory is switched on, passed in as a plain value the
+  /// way `AppSidebarView` takes `sharesLoops`: the settings model is `@Observable` and
+  /// the render path should not be reading a file.
+  let artifactoryEnabled: Bool
+  /// Whether the board section is collapsed to its one line, beside the summary's and
+  /// the diagram's own folds.
+  let isArtifactoryFolded: Bool
   let onSummaryFoldToggled: () -> Void
   let onSummaryAnswerTapped: () -> Void
   let onBoardFoldToggled: () -> Void
   let onBoardExpanded: () -> Void
+  let onArtifactoryFoldToggled: () -> Void
+  /// Body and optional topic. Posts as "a human": a click in the app carries no loop
+  /// identity, which is exactly what a person addressing the whole graph is.
+  let onArtifactoryPost: (String, String?) -> Void
   let onTargetTapped: (UUID) -> Void
 
   /// The handoff's number, and now the floor rather than the fixed size. Below this the
@@ -59,6 +70,16 @@ struct LoopWorkspaceRail: View {
   /// overruling a choice somebody actually made.
   static func hasStoredWidth() -> Bool {
     UserDefaults.standard.double(forKey: widthDefaultsKey) > 0
+  }
+
+  static let artifactoryFoldedDefaultsKey = "loopArtifactorySectionFolded"
+
+  static func loadArtifactoryFolded() -> Bool {
+    UserDefaults.standard.bool(forKey: artifactoryFoldedDefaultsKey)
+  }
+
+  static func saveArtifactoryFolded(_ folded: Bool) {
+    UserDefaults.standard.set(folded, forKey: artifactoryFoldedDefaultsKey)
   }
 
   static let boardFoldedDefaultsKey = "loopBoardSectionFolded"
@@ -119,9 +140,14 @@ struct LoopWorkspaceRail: View {
   static func hasContent(
     node: LoopNode, graph: LoopGraph,
     summarising: Bool = LoopSummaryPresentation.isProducing,
-    drawing: Bool = SummaryBoardPresentation.isDrawing
+    drawing: Bool = SummaryBoardPresentation.isDrawing,
+    artifactoryEnabled: Bool = SettingsModel.shared.settings.artifactoryEnabled
   ) -> Bool {
-    graph.edges.contains { $0.from == node.id || $0.to == node.id }
+    // A board with anything on it is reason enough to open the rail: it is the one
+    // section whose content came from *other* loops, so the loop you are looking at
+    // being wired to nothing says nothing about whether there is mail.
+    ArtifactoryPresentation.hasContent(graph: graph, enabled: artifactoryEnabled)
+      || graph.edges.contains { $0.from == node.id || $0.to == node.id }
       || node.metricHistory.count >= 2
       // A loop that is narrating has something to say whether or not it is wired to
       // anything — and that narration is the reason to open the rail at all. With the
@@ -168,6 +194,14 @@ struct LoopWorkspaceRail: View {
         SummaryBoardSection(
           node: node, isFolded: isBoardFolded, onToggleFold: onBoardFoldToggled,
           onExpand: onBoardExpanded)
+      }
+      // Above `THIS LOOP` for the same reason the summary is: what other loops have
+      // said to you outranks where you sit in the graph, and a section you have to
+      // scroll to is a section that answers nothing at a glance.
+      if ArtifactoryPresentation.hasContent(graph: graph, enabled: artifactoryEnabled) {
+        ArtifactorySection(
+          node: node, graph: graph, isFolded: isArtifactoryFolded,
+          onToggleFold: onArtifactoryFoldToggled, onPost: onArtifactoryPost)
       }
       section("THIS LOOP") {
         RailMinimap(node: node, upstream: inbound, downstream: outbound.map(\.target))

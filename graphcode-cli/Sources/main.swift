@@ -374,7 +374,7 @@ do {
       print(GraphcodeCommand.renderPosted(graph))
     }
 
-  case .artifactorySync(let projectPath, let headlines, let mark, let json):
+  case .artifactorySync(let projectPath, let headlines, let mark, let json, let full):
     // Attributed like `node send` — and required, the one place an artifactory verb
     // refuses a human shell up front: the cursor is the calling loop's, so with no
     // ZMX_SESSION there is nobody to advance it for, and the daemon's refusal would
@@ -419,7 +419,13 @@ do {
           print("marked read — the board is empty")
         }
       } else {
-        print(GraphcodeCommand.renderArtifactory(graph, unreadFor: reader, headlines: headlines))
+        // `autoTriage` unless the caller said which way they want it: a loop cannot
+        // know how much mail it has before reading it, and the first sync of a loop
+        // born after a busy week is the whole board.
+        print(
+          GraphcodeCommand.renderArtifactory(
+            graph, unreadFor: reader, headlines: headlines,
+            autoTriage: !headlines && !full))
       }
     }
 

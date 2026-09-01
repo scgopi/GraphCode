@@ -91,14 +91,14 @@ struct ArtifactoryTests {
     let store = await makeStore()
     let ids = nodeIDs(await store.graph)
 
-    for index in 0..<(Artifactory.maxPosts + 5) {
+    for index in 0..<(Artifactory.maxNotes + 5) {
       await store.handle(.artifactoryPost(text: "post \(index)", topic: nil, from: ids[0]))
     }
 
     let graph = await store.graph
-    #expect(graph.artifactory.count == Artifactory.maxPosts)
+    #expect(graph.artifactory.count == Artifactory.maxNotes)
     #expect(graph.artifactory.first?.body == "post 5")
-    #expect(graph.artifactory.last?.id == Artifactory.maxPosts + 5)
+    #expect(graph.artifactory.last?.id == Artifactory.maxNotes + 5)
   }
 
   @Test
@@ -301,8 +301,11 @@ extension ArtifactoryTests {  // MARK: - Shared-communication mirroring
 
   // MARK: - Deletion
 
+  /// Deleting a loop takes the handle to its posts, never the posts. A note is
+  /// addressed to whoever comes next, peers may already have acted on it, and a board
+  /// that un-says things is not a board.
   @Test
-  func deletingALoopRemovesItsArtifactoryPosts() async {
+  func deletingALoopKeepsItsPostsAndTakesTheirHandle() async {
     let store = await makeStore()
     let ids = nodeIDs(await store.graph)
     await store.handle(.artifactoryPost(text: "mine", topic: nil, from: ids[0]))
@@ -312,7 +315,13 @@ extension ArtifactoryTests {  // MARK: - Shared-communication mirroring
 
     let graph = await store.graph
     #expect(graph.nodes.count == 1)
-    #expect(graph.artifactory.map(\.body) == ["theirs"])
+    #expect(graph.artifactory.map(\.body) == ["mine", "theirs"])
+    let orphaned = graph.artifactory[0]
+    #expect(orphaned.authorID == nil)
+    #expect(orphaned.author == "Author (deleted)")
+    // The surviving loop's own post is untouched — attribution and all.
+    #expect(graph.artifactory[1].authorID == ids[1])
+    #expect(graph.artifactory[1].author == "Reader")
   }
 
   @Test
@@ -331,7 +340,7 @@ extension ArtifactoryTests {  // MARK: - Shared-communication mirroring
   }
 
   @Test
-  func deletingALoopRemovesItsSpawnedDescendantsPostsToo() async throws {
+  func deletingALoopOrphansItsSpawnedDescendantsPostsToo() async throws {
     let store = await makeStore()
     let ids = nodeIDs(await store.graph)
     await store.handle(
@@ -346,8 +355,13 @@ extension ArtifactoryTests {  // MARK: - Shared-communication mirroring
     await store.handle(.deleteNode(ids[0]))
 
     let graph = await store.graph
-    // Custody: the child went with the parent, and its board record goes too.
-    #expect(graph.artifactory.isEmpty)
+    // Custody: the child went with the parent, and both their notes stay on the board
+    // with the handles taken off — the descendants' words outlive them the same way.
+    // Author and Child are gone; Reader, who was never in the custody chain, is not.
+    #expect(graph.nodes.map(\.title) == ["Reader"])
+    #expect(graph.artifactory.map(\.body) == ["child note", "parent note"])
+    #expect(graph.artifactory.allSatisfy { $0.authorID == nil })
+    #expect(graph.artifactory.map(\.author) == ["Child (deleted)", "Author (deleted)"])
   }
 }
 

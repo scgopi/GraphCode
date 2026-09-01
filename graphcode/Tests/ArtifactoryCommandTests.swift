@@ -43,7 +43,8 @@ struct ArtifactoryCommandTests {
   func syncAndListTakeOnlyAProjectPath() throws {
     #expect(
       try GraphcodeCommand.parse(["artifactory", "sync", "/tmp/x"])
-        == .artifactorySync(projectPath: "/tmp/x", headlines: false, mark: false, json: false))
+        == .artifactorySync(
+          projectPath: "/tmp/x", headlines: false, mark: false, json: false, full: false))
     #expect(
       try GraphcodeCommand.parse(["artifactory", "list", "/tmp/x"])
         == .artifactoryList(projectPath: "/tmp/x", search: nil, json: false))
@@ -206,13 +207,17 @@ private func boardWithPosts() -> (LoopGraph, LoopNode) {
 func syncParsesItsReadModes() throws {
   let plain = try GraphcodeCommand.parse(["artifactory", "sync", "/tmp/x"])
   #expect(
-    plain == .artifactorySync(projectPath: "/tmp/x", headlines: false, mark: false, json: false))
+    plain
+      == .artifactorySync(
+        projectPath: "/tmp/x", headlines: false, mark: false, json: false, full: false))
 
   let all = try GraphcodeCommand.parse([
     "artifactory", "sync", "/tmp/x", "--headlines", "--mark", "--json",
   ])
   #expect(
-    all == .artifactorySync(projectPath: "/tmp/x", headlines: true, mark: true, json: true))
+    all
+      == .artifactorySync(
+        projectPath: "/tmp/x", headlines: true, mark: true, json: true, full: false))
 
   #expect {
     try GraphcodeCommand.parse(["artifactory", "sync", "/tmp/x", "--search", "x"])
