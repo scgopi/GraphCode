@@ -106,8 +106,7 @@ struct TemplatePickerView: View {
               .foregroundStyle(.white.opacity(0.4))
               .padding(
                 .top,
-                group.scope == .home && !grouped[0].scope.isProjectEquivalent
-                  ? 10 : 2
+                group.scope != grouped[0].scope ? 10 : 2
               )
               .padding(.bottom, 3)
               .padding(.leading, 2)
@@ -286,11 +285,5 @@ struct TemplatePickerView: View {
     case .fill: store.send(.templateChosen(id))
     case .launch: store.send(.templateLaunched(id))
     }
-  }
-}
-
-extension ProjectFeature.TemplatePickerScope {
-  var isProjectEquivalent: Bool {
-    self == .project
   }
 }

@@ -285,6 +285,8 @@ struct ProjectFeature {
     case templateQueryChanged(String)
     case templateSelectionMoved(Int)
     case templateTokenJumpRequested
+    case templateLibraryRequested
+    case startFromTemplateTapped(UUID)
     case templateFocusConsumed
     case templateChosen(UUID)
     case templateLaunched(UUID)
@@ -398,7 +400,8 @@ struct ProjectFeature {
       // no-ops so this switch stays exhaustive, and nothing runs twice.
       case .templatesButtonTapped, .templatePickerClosed, .templateQueryChanged,
         .templateSelectionMoved, .templateTokenJumpRequested, .templateFocusConsumed,
-        .templateChosen, .templateLaunched, .templateChipRemoved,
+        .templateLibraryRequested, .startFromTemplateTapped, .templateChosen, .templateLaunched,
+        .templateChipRemoved,
         .templateShapeUndone, .saveTemplateTapped, .saveLoopTemplateTapped,
         .saveTemplateConfirmed, .saveTemplateCancelled, .templateSaved,
         .templateSaveNoticeDismissed, .templateRelocationTapped, .templateLibraryChanged,
@@ -828,7 +831,7 @@ extension ProjectFeature {
       })
   }
 
-  private func openNodeForm(
+  func openNodeForm(
     _ state: inout State, backend: CLISessionBackendKind?, parentNodeID: UUID?,
     custodial: Bool = false, declaresEntry: Bool = false
   ) -> Effect<Action> {
