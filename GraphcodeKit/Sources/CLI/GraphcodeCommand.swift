@@ -893,7 +893,8 @@ extension GraphcodeCommand {
           || $0.topic?.lowercased().contains(needle) == true
       }
     }
-    let board = Board(posts: posts, lastRead: readerID.flatMap { graph.nodes[id: $0]?.lastArtifactoryRead })
+    let lastRead = readerID.flatMap { graph.nodes[id: $0]?.lastArtifactoryRead }
+    let board = Board(posts: posts, lastRead: lastRead)
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]
     encoder.dateEncodingStrategy = .iso8601
