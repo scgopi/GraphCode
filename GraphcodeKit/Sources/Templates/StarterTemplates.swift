@@ -20,6 +20,13 @@ import Foundation
 /// | Turn | The two pause rhythms, side by side. |
 /// | Composite | Work handed along edges, carried inside one shareable file. |
 ///
+/// **One fill, at the top.** Each starter has at most one `{token}`, and it is the
+/// first line — `Goal: {goal}` — with everything below it fixed text that refers back
+/// ("it", "that branch"). Filling a template is typing over one thing, not hunting
+/// the same word through four paragraphs; and the body is short enough to read in
+/// the picker before choosing it. A starter's settings never carry a token either:
+/// a hole in a done check is a second place to look.
+///
 /// They are seeded as **real markdown files** rather than held as constants, which
 /// teaches the format too: open one and the front matter is right there. Seeding runs
 /// once (see `TemplateStorage.seedStartersIfNeeded`), so a starter you delete stays
@@ -45,7 +52,7 @@ public enum StarterTemplates {
       getTheBuildGreen, reviewTheDiff, raiseTestCoverage,
       nightlyDependencyReview, watchTheBuild,
       whereDoesThisLive, whyDidThisBreak,
-      portWithReview, pairOnThis,
+      changeFileByFile, pairOnThis,
       reviewFixVerify,
     ]
   }
@@ -77,133 +84,122 @@ public enum StarterTemplates {
 
   /// The starter at the top of the list, because this is what most work turns into:
   /// one loop that understands the goal, splits it, and stays to put the pieces back
-  /// together. It is a **Main** loop on purpose — `MAIN_LOOP.md` names this as the
-  /// orchestration path ("you explore, find the work splits three ways, and promote")
-  /// — and it cuts no worktree, since a coordinator reads and steers while its
-  /// children write.
-  ///
-  /// The Artifactory is the team's inbox: where the plan is posted for loops that
-  /// don't exist yet, where children post what they finished, and the record of every
-  /// message that passed between them. The brief keeps it in that role — the task is
-  /// the goal; the board is how the team talks about it.
-  static var leadATeam: PromptTemplate {
+  /// together. A **Main** loop on purpose — `MAIN_LOOP.md` names this as the
+  /// orchestration path — that cuts no worktree, since a coordinator reads and steers
+  /// while its children write. The Artifactory appears as the team's inbox, and the
+  /// topic is the loop's to choose from the goal, so there is one thing to fill.
+  public static var leadATeam: PromptTemplate {
     starter(
       id("000000000001"), "Lead a team toward a goal",
       """
-      Lead the work toward this goal: {goal}.
+      Goal: {goal}
 
-      Start by understanding the project well enough to say what done looks like and \
-      where the work splits. Then split it: give each independent piece its own goal \
-      loop — `graphcode node create <project-path> --title <name> --type goal --goal \
-      <what done looks like>` — and give anything that needs checking rather than \
-      finishing, like a build, a flaky test or a service, a timed loop: `--type time \
-      --prompt "/loop 30m <what to check>"`. Keep the integration for yourself: the \
-      goal is met when the pieces fit together, not when each child says it's done.
+      Lead this rather than doing it all yourself. Work out what done looks like and \
+      where the work splits; give each independent piece its own goal loop, and \
+      anything that needs watching rather than finishing a timed loop. Keep the \
+      integration for yourself.
 
-      The team talks through the Artifactory — treat it as the inbox for this effort, \
-      under the topic {topic}. Post your plan there first — `graphcode artifactory post \
-      <project-path> --topic {topic} <plan>` — so every loop you create reads it before \
-      starting. Tell each child to post its result there the same way when it's done. Run `graphcode artifactory watch <project-path> --topic {topic}` so their \
-      posts reach you, and `graphcode artifactory sync <project-path>` whenever you \
-      come back, to catch up on what arrived while you were away. A stuck child gets a \
-      direct message: `graphcode node send <project-path> <id> --follow-up <steer>`.
-
-      Finish by checking the assembled result against the goal, posting a closing note \
-      to the same topic — done, not done, next — and stopping.
+      The Artifactory is the team's inbox. Post your plan there under one topic named \
+      for this goal, have every child post its result there, watch that topic, and \
+      sync whenever you come back. Finish by checking the assembled result against \
+      the goal and posting a closing note.
       """)
   }
 
   // MARK: - Main
-  // Nothing to fill in, nothing to decide. Both of these end when you close them,
-  // which is the whole type.
+  // Nothing to fill in but the one line, nothing to decide. Both end when you close
+  // them, which is the whole type.
 
-  static var whereDoesThisLive: PromptTemplate {
+  public static var whereDoesThisLive: PromptTemplate {
     starter(
       id("100000000001"), "Where does this live?",
       """
-      Trace {symbol} through this codebase. Show me where it's defined, everything \
-      that reads it, and everything that writes it. Don't change anything — I'm \
-      trying to understand the shape before I touch it.
+      Symbol: {symbol}
+
+      Trace it through this codebase — where it's defined, everything that reads it, \
+      everything that writes it. Don't change anything; I'm trying to understand the \
+      shape before I touch it.
       """)
   }
 
-  static var whyDidThisBreak: PromptTemplate {
+  public static var whyDidThisBreak: PromptTemplate {
     starter(
       id("100000000002"), "Why did this break?",
       """
-      Reproduce {symptom} and explain what causes it. Work from the failure back to \
-      the line responsible. Stop when you can tell me the cause — I'll decide what to \
-      do about it.
+      Symptom: {symptom}
+
+      Reproduce it and work from the failure back to the line responsible. Stop when \
+      you can tell me the cause — I'll decide what to do about it.
       """)
   }
 
   // MARK: - Goal
-  // Three, because Goal is the workhorse, and because its three lessons are separate:
-  // a check that decides, no check at all, and a metric.
+  // Three, because Goal is the workhorse. None carries a done check with a hole in it:
+  // the command a project uses is the one thing a template cannot know, so the brief
+  // asks for it up top and the loop runs it.
 
-  static var getTheBuildGreen: PromptTemplate {
+  public static var getTheBuildGreen: PromptTemplate {
     starter(
       id("200000000001"), "Get the build green",
       """
-      The build is failing. Find out why and fix it — the smallest change that works. \
-      Don't refactor anything you weren't asked to.
-      """,
-      shape: .goalBased,
-      // The token sits in the *done check*, not the brief: filling it is what teaches
-      // that a Goal loop stops itself when a command says so, and that ⇥ walks every
-      // field a template left a hole in.
-      settings: TemplateSettings(doneCheck: "{test_command}"))
-  }
+      Test command: {test_command}
 
-  static var reviewTheDiff: PromptTemplate {
-    starter(
-      id("200000000002"), "Review the diff on this branch",
-      """
-      Review every file changed on {branch} against the conventions already in this \
-      codebase. List what must change before merge, most important first, with \
-      file:line. Don't fix anything — the list is the deliverable.
+      It's failing. Find out why and fix it — the smallest change that works, no \
+      refactoring you weren't asked for — and run that command until it exits 0.
       """,
-      // No done check on purpose: "a good review exists" is not a shell command, and
-      // a Goal loop without one resolves when it has finished the work. The pair of
-      // this and `getTheBuildGreen` is the lesson.
       shape: .goalBased)
   }
 
-  static var raiseTestCoverage: PromptTemplate {
+  public static var reviewTheDiff: PromptTemplate {
+    starter(
+      id("200000000002"), "Review the diff on this branch",
+      """
+      Branch: {branch}
+
+      Review every file it changed against the conventions already in this codebase. \
+      List what must change before merge, most important first, with file:line. \
+      Don't fix anything — the list is the deliverable.
+      """,
+      shape: .goalBased)
+  }
+
+  public static var raiseTestCoverage: PromptTemplate {
     starter(
       id("200000000003"), "Raise test coverage",
       """
-      Add tests for the least-covered code in {area}. Cover the behaviour that would \
-      actually break, not the lines that are cheapest to hit. Keep every existing \
-      test passing.
+      Area: {area}
+
+      Add tests for its least-covered code — the behaviour that would actually break, \
+      not the lines that are cheapest to hit. Keep every existing test passing, and \
+      report the coverage number before and after.
       """,
-      shape: .goalBased,
-      settings: TemplateSettings(metric: "{coverage_command}"))
+      shape: .goalBased)
   }
 
   // MARK: - Timed
-  // Both of these also demonstrate following: edit either file and the next run picks
-  // the change up, which is the half of the design a card has to state.
+  // Both also demonstrate following: edit either file and the next run picks the
+  // change up.
 
-  static var nightlyDependencyReview: PromptTemplate {
+  public static var nightlyDependencyReview: PromptTemplate {
     starter(
       id("300000000001"), "Nightly dependency review",
       """
-      Check for dependency updates worth taking. For each one: what changed, what it \
-      would break here, and whether it's worth doing now. Say "nothing worth taking" \
-      if that's the answer — a quiet night is a valid report.
+      Check for dependency updates worth taking. For each: what changed, what it would \
+      break here, and whether it's worth doing now. "Nothing worth taking" is a valid \
+      report.
       """,
       shape: .timeBased,
       settings: TemplateSettings(cadence: "daily"))
   }
 
-  static var watchTheBuild: PromptTemplate {
+  public static var watchTheBuild: PromptTemplate {
     starter(
       id("300000000002"), "Watch the build",
       """
-      Check whether the build on {branch} is passing. If it broke since last time, \
-      find the commit responsible and say what it changed. If it's still green, say \
-      so in one line and stop.
+      Branch: {branch}
+
+      Check whether its build is passing. If it broke since last time, find the commit \
+      responsible and say what changed. If it's green, say so in one line and stop.
       """,
       shape: .timeBased,
       settings: TemplateSettings(cadence: "1h"))
@@ -212,23 +208,27 @@ public enum StarterTemplates {
   // MARK: - Turn
   // The two pause rhythms, side by side — which is the only way the difference reads.
 
-  static var portWithReview: PromptTemplate {
+  public static var changeFileByFile: PromptTemplate {
     starter(
-      id("400000000001"), "Port {area} to {target}",
+      id("400000000001"), "Make a change, one file at a time",
       """
-      Port {area} to {target}. Work file by file. Before each file you change, tell me \
-      what you're about to do and why.
+      Task: {task}
+
+      Work file by file. Before each file you change, tell me what you're about to do \
+      and why.
       """,
       shape: .turnBased,
       settings: TemplateSettings(pausesBeforeWritesOnly: true))
   }
 
-  static var pairOnThis: PromptTemplate {
+  public static var pairOnThis: PromptTemplate {
     starter(
       id("400000000002"), "Pair on this",
       """
-      Work through {task} with me one step at a time. After each step, stop and tell \
-      me what you did and what you think comes next. I'll steer.
+      Task: {task}
+
+      Work through it with me one step at a time. After each step, stop and tell me \
+      what you did and what you think comes next. I'll steer.
       """,
       shape: .turnBased,
       settings: TemplateSettings(pausesBeforeWritesOnly: false))
@@ -236,35 +236,46 @@ public enum StarterTemplates {
 
   // MARK: - Composite
 
-  /// Three loops and the two hand-offs between them, carried inside one file. This is
-  /// the template that shows what a composite template is *for*: an orchestration
-  /// somebody else can start from without drawing the graph.
-  static var reviewFixVerify: PromptTemplate {
+  /// Three loops and the two hand-offs between them, carried inside one file. The
+  /// children carry no tokens: a hole inside a carried graph is nowhere the dialog can
+  /// show, so it would reach the child as literal text.
+  public static var reviewFixVerify: PromptTemplate {
+    // Every id and date here is fixed. The carried graph is re-identified when it is
+    // applied, so these never reach a real loop — but they do reach the *file*, and
+    // the seeder decides whether a starter is still the one it wrote by hashing the
+    // file. Fresh UUIDs on every access would make the composite look edited by us
+    // at every launch and rewrite it each time.
+    let epoch = Date(timeIntervalSinceReferenceDate: 0)
     let reviewer = LoopNode(
-      title: "Reviewer", loopType: .goalBased,
+      id: id("500000000101"), title: "Reviewer", loopType: .goalBased,
       goal: GoalSpec(
         summary: """
-          Review every file changed on {branch} and list what must change, most \
+          Review every file changed on this branch and list what must change, most \
           important first, with file:line.
-          """))
+          """),
+      createdAt: epoch)
     let fixer = LoopNode(
-      title: "Fixer", loopType: .goalBased,
+      id: id("500000000102"), title: "Fixer", loopType: .goalBased,
       goal: GoalSpec(
         summary: """
           Work through the findings you were handed, most important first. Make the \
           smallest change that resolves each one.
-          """))
+          """),
+      createdAt: epoch)
     let verifier = LoopNode(
-      title: "Verifier", loopType: .goalBased,
+      id: id("500000000103"), title: "Verifier", loopType: .goalBased,
       goal: GoalSpec(
-        summary: "Confirm nothing the fixer changed broke anything else.",
-        predicate: "{test_command}"))
+        summary:
+          "Run the project's tests and confirm nothing the fixer changed broke anything else."),
+      createdAt: epoch)
     var graph = LoopGraph(
-      project: ProjectRef(path: "review-fix-verify", name: "Review, fix, verify"),
+      id: id("500000000100"),
+      project: ProjectRef(
+        path: "review-fix-verify", name: "Review, fix, verify", lastOpenedAt: epoch),
       nodes: [reviewer, fixer, verifier])
     graph.edges = [
-      LoopEdge(from: reviewer.id, to: fixer.id, spec: EdgeSpec()),
-      LoopEdge(from: fixer.id, to: verifier.id, spec: EdgeSpec()),
+      LoopEdge(id: id("500000000111"), from: reviewer.id, to: fixer.id, spec: EdgeSpec()),
+      LoopEdge(id: id("500000000112"), from: fixer.id, to: verifier.id, spec: EdgeSpec()),
     ]
     return starter(
       id("500000000001"), "Review, fix, verify",

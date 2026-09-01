@@ -89,58 +89,103 @@ public struct TemplateStorage: Sendable {
 
   // MARK: - Starters
 
-  /// Writes the templates the app ships with into the home folder — each of them
-  /// **once**.
+  /// Writes the templates the app ships with into the home folder, and keeps the ones
+  /// nobody has touched current.
   ///
   /// A fresh install has an empty library, and an empty ⌘T picker teaches nothing —
   /// see `StarterTemplates` for what the briefs are chosen to demonstrate. They are
   /// written as real files so they read, diff and edit like any other template.
   ///
-  /// The marker in the home folder lists the ids this install has already seeded, and
-  /// that is what keeps this from being annoying:
-  /// - **Once per starter.** A starter whose id is in the marker is never written
-  ///   again, so one you deleted stays deleted — and a starter added in a later build
-  ///   still arrives, because its id isn't there yet.
-  /// - **Never over anything.** A file already at that name is somebody's, and is
-  ///   left exactly as it is even on a first run.
+  /// The marker in the home folder records, per starter id, a hash of the file this
+  /// install last wrote for it. That one fact answers all three questions:
+  /// - **New here?** An id not in the marker is written (never over an existing file
+  ///   — that one is somebody's) and recorded. A starter added in a later build
+  ///   arrives this way.
+  /// - **Deleted?** An id in the marker whose file is gone stays gone.
+  /// - **Changed by us, untouched by you?** A file whose hash still matches what we
+  ///   wrote is ours to refresh when the shipped text changes. One you edited hashes
+  ///   differently and is left exactly as it is.
   ///
-  /// Returns what it actually wrote, which is empty on every launch that adds nothing.
+  /// Returns what it actually wrote, which is empty on every launch that changes nothing.
   @discardableResult
   public func seedStartersIfNeeded(_ starters: [PromptTemplate] = StarterTemplates.all) throws
     -> [PromptTemplate]
   {
     let marker = homeDirectory.appendingPathComponent(Self.seededMarker)
-    var seeded = seededIDs(at: marker)
-    let pending = starters.filter { !seeded.contains($0.id) }
-    guard !pending.isEmpty else { return [] }
-    try FileManager.default.createDirectory(at: homeDirectory, withIntermediateDirectories: true)
+    var record = seedRecord(at: marker)
     var written: [PromptTemplate] = []
-    for starter in pending {
+    var changed = false
+    for starter in starters {
+      var copy = starter
+      copy.origin = .home
+      let shipped = TemplateFileCodec.encode(copy)
+      let shippedHash = Self.contentHash(shipped)
       let url = homeDirectory.appendingPathComponent(starter.fileName)
-      if !FileManager.default.fileExists(atPath: url.path) {
-        var copy = starter
-        copy.origin = .home
-        try TemplateFileCodec.encode(copy).write(to: url, atomically: true, encoding: .utf8)
-        written.append(copy)
+      let exists = FileManager.default.fileExists(atPath: url.path)
+
+      guard let recorded = record[starter.id] else {
+        if !exists {
+          try FileManager.default.createDirectory(
+            at: homeDirectory, withIntermediateDirectories: true)
+          try shipped.write(to: url, atomically: true, encoding: .utf8)
+          written.append(copy)
+        }
+        record[starter.id] = shippedHash
+        changed = true
+        continue
       }
-      seeded.insert(starter.id)
+      guard exists, recorded != shippedHash,
+        let onDisk = try? String(contentsOf: url, encoding: .utf8)
+      else { continue }
+      // A legacy record (beta2/beta3, before hashes) knows only that the file was
+      // seeded. There, the starter mark standing in the file is what "untouched"
+      // means — the one launch where an edited beta starter would be refreshed too.
+      let untouched =
+        recorded.isEmpty
+        ? TemplateFileCodec.decode(onDisk, origin: .home)?.isStarter == true
+        : Self.contentHash(onDisk) == recorded
+      guard untouched else { continue }
+      try shipped.write(to: url, atomically: true, encoding: .utf8)
+      written.append(copy)
+      record[starter.id] = shippedHash
+      changed = true
     }
-    // The marker is written last and whole: a run that threw half way through should
-    // try again, not leave someone with four of the eleven.
-    try seeded.map(\.uuidString).sorted().joined(separator: "\n")
-      .write(to: marker, atomically: true, encoding: .utf8)
+    if changed {
+      // Written last and whole: a run that threw half way through should try again.
+      try FileManager.default.createDirectory(at: homeDirectory, withIntermediateDirectories: true)
+      try record.map { "\($0.key.uuidString) \($0.value)" }.sorted().joined(separator: "\n")
+        .write(to: marker, atomically: true, encoding: .utf8)
+    }
     return written
   }
 
-  /// The ids the marker records. An **empty** marker is the one 0.1.58-beta2 and
-  /// beta3 wrote, before ids were recorded: those installs seeded every starter that
-  /// existed at the time, so the empty file is read as exactly that set — the ones
-  /// shipped since are what a later launch still owes them.
-  private func seededIDs(at marker: URL) -> Set<UUID> {
-    guard let text = try? String(contentsOf: marker, encoding: .utf8) else { return [] }
-    let ids = text.split(separator: "\n").compactMap { UUID(uuidString: String($0)) }
-    if ids.isEmpty { return StarterTemplates.seededBeforeIDsWereRecorded }
-    return Set(ids)
+  /// `id hash` per line. An **empty** marker is the one 0.1.58-beta2 and beta3 wrote,
+  /// before anything was recorded: those installs seeded every starter that existed
+  /// then, so the empty file reads as exactly that set, with no hash to compare.
+  private func seedRecord(at marker: URL) -> [UUID: String] {
+    guard let text = try? String(contentsOf: marker, encoding: .utf8) else { return [:] }
+    var record: [UUID: String] = [:]
+    for line in text.split(separator: "\n") {
+      let parts = line.split(separator: " ", maxSplits: 1)
+      guard let first = parts.first, let id = UUID(uuidString: String(first)) else { continue }
+      record[id] = parts.count > 1 ? String(parts[1]) : ""
+    }
+    if record.isEmpty {
+      for id in StarterTemplates.seededBeforeIDsWereRecorded { record[id] = "" }
+    }
+    return record
+  }
+
+  /// FNV-1a over the file's UTF-8, in hex. Not cryptographic and not meant to be —
+  /// it only has to answer "is this the file we wrote", and it has to do so on the
+  /// Linux CI build, where CryptoKit is not available.
+  static func contentHash(_ text: String) -> String {
+    var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+    for byte in text.utf8 {
+      hash ^= UInt64(byte)
+      hash = hash &* 0x0000_0100_0000_01b3
+    }
+    return String(hash, radix: 16)
   }
 
   /// A dotfile, so it never shows up as a template — `read` skips hidden files.
