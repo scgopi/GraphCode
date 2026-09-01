@@ -86,13 +86,17 @@ struct ArtifactorySection: View {
               if post.id == firstUnreadID { sinceYouLooked }
               postRow(post)
             }
-            if isComposing { composer }
           }
           .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollBounceBehavior(.basedOnSize)
         .defaultScrollAnchor(.bottom)
         .frame(minHeight: 90, maxHeight: .infinity)
+        // Outside the scroll view on purpose. Inside it the composer was one more row
+        // in a list that can be taller than the rail — it could open scrolled out of
+        // sight, and it moved under the pointer as posts arrived. Pinned here it is
+        // always the thing directly above the section's rule while you are writing.
+        if isComposing { composer }
       }
       Rectangle().fill(.white.opacity(0.07)).frame(height: 1)
     }
@@ -123,8 +127,13 @@ struct ArtifactorySection: View {
       }
       if !isFolded {
         Button {
-          isComposing = true
-          draftFocused = true
+          // Already open: the composer will not appear again, so this is the write that
+          // puts the keyboard back in it. Opening it is `onAppear`'s job.
+          if isComposing {
+            draftFocused = true
+          } else {
+            isComposing = true
+          }
         } label: {
           Image(systemName: "plus")
             .font(.system(size: 9, weight: .semibold))
@@ -327,6 +336,15 @@ struct ArtifactorySection: View {
     .overlay {
       RoundedRectangle(cornerRadius: 9)
         .stroke(Theme.paneFocusTint.opacity(0.45), lineWidth: 1)
+    }
+    // A `@FocusState` write only lands on a field that is *already* in the view tree.
+    // Setting it in the same transaction that creates the composer — which is what the
+    // + button used to do — is dropped on the floor, and with the rail unfocused every
+    // keystroke goes to the terminal instead: the draft stays empty, so Post stays
+    // disabled and the section looks like it does nothing. `onAppear` is a transaction
+    // too, hence the hop: the field exists by the time this runs.
+    .onAppear {
+      DispatchQueue.main.async { draftFocused = true }
     }
   }
 
