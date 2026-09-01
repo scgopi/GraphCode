@@ -494,8 +494,23 @@ extension TemplateSettings {
   }
 
   /// The carried sub-graph, encoded — the one JSON line `graph:` stores.
+  ///
+  /// Canonical, not merely valid: a template is a file people diff and the seeder
+  /// hashes, so the same graph has to encode to the same bytes every time. Two
+  /// things in a plain `JSONEncoder` pass break that — key order follows Swift's
+  /// per-process dictionary seeding, and `LoopGraph.project` carries a "last opened"
+  /// date minted at encode time — so keys are sorted and that date is zeroed.
   public static func graphJSON(for graph: LoopGraph) -> String? {
-    guard let data = try? JSONEncoder().encode(graph) else { return nil }
-    return String(data: data, encoding: .utf8)
+    guard let data = try? JSONEncoder().encode(graph),
+      var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else { return nil }
+    if var project = object["project"] as? [String: Any] {
+      project["lastOpenedAt"] = 0
+      object["project"] = project
+    }
+    guard
+      let canonical = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    else { return nil }
+    return String(data: canonical, encoding: .utf8)
   }
 }
