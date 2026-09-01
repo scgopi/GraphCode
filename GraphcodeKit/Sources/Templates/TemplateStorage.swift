@@ -138,6 +138,34 @@ public struct TemplateStorage: Sendable {
     return candidate
   }
 
+  /// Saves an edit to a template that already exists — the Settings editor's Save.
+  ///
+  /// Distinct from `save` in the one way that matters: **the id is kept**, so every
+  /// timed and composite loop following this template goes on following it across
+  /// the edit. That is the whole point of editing rather than saving a new one.
+  /// The file stays in its own location; only a rename moves it, and the old file is
+  /// removed only once the new one is written and only when it is a different file.
+  @discardableResult
+  public func update(
+    _ edited: PromptTemplate, replacing original: PromptTemplate
+  ) throws -> PromptTemplate {
+    let directory = directoryURL(for: original.origin)
+    var saved = edited
+    saved.id = original.id
+    saved.origin = original.origin
+    saved.fileName =
+      edited.name == original.name
+      ? original.fileName
+      : availableFileName(
+        PromptTemplate.fileName(for: edited.name), in: directory, keeping: original.id)
+    let target = directory.appendingPathComponent(saved.fileName)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try TemplateFileCodec.encode(saved).write(to: target, atomically: true, encoding: .utf8)
+    let source = directory.appendingPathComponent(original.fileName)
+    if source != target { try? FileManager.default.removeItem(at: source) }
+    return saved
+  }
+
   /// Removes a template file. Used by Settings' manage list; deleting a project
   /// template deletes the file in the checkout — an explicit act on an explicit
   /// location, same as saving there.
