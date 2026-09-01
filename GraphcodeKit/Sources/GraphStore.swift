@@ -2014,7 +2014,8 @@ public actor GraphStore {
   /// memory, so a state nobody expected can be traced to the report that caused it.
   private func sessionPermitsResolution(_ nodeID: UUID, succeeded: Bool) async -> Bool {
     guard let node = graph.nodes[id: nodeID], !node.isResolved else { return true }
-    let report = "surface reported its pane "
+    let report =
+      "surface reported its pane "
       + (succeeded ? "finished" : "closed with its process still running")
     // The restart's own kill: the pane that watched it die reports an exit that
     // means nothing about the work. Every restarted loop showed FAILED or SUCCEEDED
@@ -2023,7 +2024,8 @@ public actor GraphStore {
       Date().timeIntervalSince(restarted) < Self.restartResolutionGrace
     {
       let seconds = Int(Date().timeIntervalSince(restarted))
-      recordMemory(nodeID, "\(report) \(seconds)s after a restart — the restart's own kill, not resolved")
+      recordMemory(
+        nodeID, "\(report) \(seconds)s after a restart — the restart's own kill, not resolved")
       return false
     }
     if RemoteProjectLocation.parse(projectPath: graph.project.path) != nil {
