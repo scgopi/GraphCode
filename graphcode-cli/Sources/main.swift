@@ -101,6 +101,12 @@ do {
 }
 defer { client.closeConnection() }
 
+/// The calling loop's identity, when this CLI ran inside one — the `status` graph
+/// render uses it for the board's "unread for you" line, the same attribution every
+/// artifactory verb derives from `ZMX_SESSION`.
+let artifactoryReader = SurfaceRef.nodeID(
+  fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
+
 /// Every mutating verb waits for the `.graphChanged` broadcast its own command caused,
 /// then prints the resulting graph. That's the daemon's only acknowledgement — it has no
 /// request/response correlation — and it doubles as useful output.
@@ -119,7 +125,7 @@ func runAndPrintGraph(projectPath: String, _ commands: [DaemonCommand]) throws {
 
   guard !commands.isEmpty else {
     if case .graphChanged(let graph) = opened {
-      print(GraphcodeCommand.render(graph))
+      print(GraphcodeCommand.render(graph, artifactoryReader: artifactoryReader))
     }
     return
   }
@@ -131,7 +137,7 @@ func runAndPrintGraph(projectPath: String, _ commands: [DaemonCommand]) throws {
     if case .graphChanged = $0 { return true } else { return false }
   }
   if case .graphChanged(let graph) = event {
-    print(GraphcodeCommand.render(graph))
+    print(GraphcodeCommand.render(graph, artifactoryReader: artifactoryReader))
   }
 }
 
@@ -256,7 +262,7 @@ do {
     }
     if case .errorOccurred(let message) = updateVerdict { fail(message) }
     if case .graphChanged(let graph) = updateVerdict {
-      print(GraphcodeCommand.render(graph))
+      print(GraphcodeCommand.render(graph, artifactoryReader: artifactoryReader))
     }
 
   case .promoteNode(let projectPath, let nodeID, let promotion):
@@ -280,7 +286,7 @@ do {
     }
     if case .errorOccurred(let message) = promoteVerdict { fail(message) }
     if case .graphChanged(let graph) = promoteVerdict {
-      print(GraphcodeCommand.render(graph))
+      print(GraphcodeCommand.render(graph, artifactoryReader: artifactoryReader))
     }
 
   case .memoNode(let projectPath, let nodeID, let text):
@@ -368,7 +374,7 @@ do {
       print(GraphcodeCommand.renderPosted(graph))
     }
 
-  case .artifactorySync(let projectPath):
+  case .artifactorySync(let projectPath, let headlines, let mark, let json):
     // Attributed like `node send` — and required, the one place a artifactory verb
     // refuses a human shell up front: the cursor is the calling loop's, so with no
     // ZMX_SESSION there is nobody to advance it for, and the daemon's refusal would
@@ -401,19 +407,50 @@ do {
     // anyway; fixing it properly means syncing to the highest *printed* id rather
     // than to latest, which nothing so far has needed.
     if case .graphChanged(let graph) = opened {
-      print(GraphcodeCommand.renderArtifactory(graph, unreadFor: reader))
+      if json {
+        print(GraphcodeCommand.renderArtifactoryJSON(graph, unreadFor: reader))
+      } else if mark {
+        // The quiet sync: the backlog is not the loop's problem any more, and the
+        // one line says the cursor actually moved — a silent success would read,
+        // to the loop that sent it, like a command nobody applied.
+        print("marked read up to #\(graph.artifactory.last?.id ?? 0)")
+      } else {
+        print(GraphcodeCommand.renderArtifactory(graph, unreadFor: reader, headlines: headlines))
+      }
     }
 
-  case .artifactoryList(let projectPath):
+  case .artifactoryRead(let projectPath, let postID):
+    // Read-only: the post rides the snapshot, no command is sent, no cursor moves —
+    // the deep-read half of `sync --headlines` triage, priced at one line of context
+    // per post a loop actually decides to care about.
+    try client.send(.openProject(path: projectPath))
+    let read = try client.waitForEvent {
+      if case .graphChanged = $0 { return true } else { return false }
+    }
+    if case .graphChanged(let graph) = read {
+      guard let post = graph.artifactory.first(where: { $0.id == postID }) else {
+        fail(
+          "no post #\(postID) on this board — `graphcode artifactory list \(projectPath)` "
+            + "shows the ids that exist")
+      }
+      print(GraphcodeCommand.render(post))
+    }
+
+  case .artifactoryList(let projectPath, let search, let json):
     // Read-only: no command is sent, so — the `status` rule — nothing past the
     // snapshot is waited for, and no cursor moves. This is the human's window onto
-    // the board; `sync` is the loop's.
+    // the board; `sync` is the loop's. `--search` filters what is shown, never what
+    // is remembered.
     try client.send(.openProject(path: projectPath))
     let opened = try client.waitForEvent {
       if case .graphChanged = $0 { return true } else { return false }
     }
     if case .graphChanged(let graph) = opened {
-      print(GraphcodeCommand.renderArtifactory(graph))
+      if json {
+        print(GraphcodeCommand.renderArtifactoryJSON(graph))
+      } else {
+        print(GraphcodeCommand.renderArtifactory(graph, search: search))
+      }
     }
 
   case .artifactoryWatch(let projectPath, let on, let topic):
@@ -557,7 +594,7 @@ do {
           + "and \(bundle.graphSnapshot.edges.count) edge(s) with fresh identities"
           + (resumingSessions == 0
             ? "" : "; \(resumingSessions) will resume their exported conversations"))
-      print(GraphcodeCommand.render(graph))
+      print(GraphcodeCommand.render(graph, artifactoryReader: artifactoryReader))
     }
   }
 } catch DaemonSocketClient.ClientError.timedOut {

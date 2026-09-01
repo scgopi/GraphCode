@@ -43,10 +43,10 @@ struct ArtifactoryCommandTests {
   func syncAndListTakeOnlyAProjectPath() throws {
     #expect(
       try GraphcodeCommand.parse(["artifactory", "sync", "/tmp/x"])
-        == .artifactorySync(projectPath: "/tmp/x"))
+        == .artifactorySync(projectPath: "/tmp/x", headlines: false, mark: false, json: false))
     #expect(
       try GraphcodeCommand.parse(["artifactory", "list", "/tmp/x"])
-        == .artifactoryList(projectPath: "/tmp/x"))
+        == .artifactoryList(projectPath: "/tmp/x", search: nil, json: false))
   }
 
   @Test
@@ -179,4 +179,135 @@ struct ArtifactoryCommandTests {
       #expect(GraphcodeCommand.helpText.contains(verb))
     }
   }
+}
+
+// MARK: Read-side verbs (status line, headlines, read, --json, --search, --mark)
+
+private func boardWithPosts() -> (LoopGraph, LoopNode) {
+  var graph = LoopGraph(project: ProjectRef(path: "/tmp/x", name: "x"))
+  var reader = LoopNode(title: "Reader", loopType: .turnBased)
+  reader.lastArtifactoryRead = 1
+  graph.nodes.append(reader)
+  graph.artifactory = [
+    ArtifactoryPost(
+      id: 1, at: Date(timeIntervalSince1970: 0), authorID: nil, author: "a human",
+      topic: nil, body: "already read"),
+    ArtifactoryPost(
+      id: 2, at: Date(timeIntervalSince1970: 1), authorID: UUID(), author: "Author",
+      topic: "build", body: String(repeating: "red ", count: 40)),
+    ArtifactoryPost(
+      id: 3, at: Date(timeIntervalSince1970: 2), authorID: nil, author: "a human",
+      topic: nil, body: "auth deadlock traced to token refresh"),
+  ]
+  return (graph, reader)
+}
+
+@Test
+func syncParsesItsReadModes() throws {
+  let plain = try GraphcodeCommand.parse(["artifactory", "sync", "/tmp/x"])
+  #expect(plain == .artifactorySync(projectPath: "/tmp/x", headlines: false, mark: false, json: false))
+
+  let all = try GraphcodeCommand.parse(["artifactory", "sync", "/tmp/x", "--headlines", "--mark", "--json"])
+  #expect(
+    all == .artifactorySync(projectPath: "/tmp/x", headlines: true, mark: true, json: true))
+
+  #expect {
+    try GraphcodeCommand.parse(["artifactory", "sync", "/tmp/x", "--search", "x"])
+  } throws: { error in
+    error as? GraphcodeCommand.ParseError == .unknownOption("--search")
+  }
+}
+
+@Test
+func readParsesAPostIDAndRejectsNonNumericOnes() throws {
+  #expect(try GraphcodeCommand.parse(["artifactory", "read", "/tmp/x", "7"])
+    == .artifactoryRead(projectPath: "/tmp/x", postID: 7))
+
+  #expect {
+    try GraphcodeCommand.parse(["artifactory", "read", "/tmp/x", "seven"])
+  } throws: { error in
+    error as? GraphcodeCommand.ParseError
+      == .invalidValue(argument: "post-id", value: "seven")
+  }
+
+  #expect {
+    try GraphcodeCommand.parse(["artifactory", "read", "/tmp/x"])
+  } throws: { error in
+    error as? GraphcodeCommand.ParseError == .missingArgument("post-id")
+  }
+}
+
+@Test
+func listParsesSearchAndJSON() throws {
+  #expect(
+    try GraphcodeCommand.parse(["artifactory", "list", "/tmp/x", "--search", "auth", "--json"])
+    == .artifactoryList(projectPath: "/tmp/x", search: "auth", json: true))
+  #expect(
+    try GraphcodeCommand.parse(["artifactory", "list", "/tmp/x"])
+    == .artifactoryList(projectPath: "/tmp/x", search: nil, json: false))
+}
+
+@Test
+func headlinesCutBodiesToATriageLine() {
+  let (graph, reader) = boardWithPosts()
+
+  let headlines = GraphcodeCommand.renderArtifactory(graph, unreadFor: reader.id, headlines: true)
+  #expect(headlines.contains("#2 (build)"))
+  #expect(!headlines.contains("red red red red red red red red red red red red"))
+  let full = GraphcodeCommand.renderArtifactory(graph, unreadFor: reader.id)
+  #expect(full.contains("red red"))
+}
+
+@Test
+func searchFiltersWhatIsShownButNeverWhatIsRemembered() {
+  let (graph, reader) = boardWithPosts()
+
+  // "deadlock" lives only in #3's body — note "auth" would have matched #2's
+  // author ("Author"), which is the filter doing its job, not a bug.
+  let filtered = GraphcodeCommand.renderArtifactory(graph, unreadFor: reader.id, search: "deadlock")
+  #expect(filtered.contains("#3"))
+  #expect(!filtered.contains("#2"))
+
+  #expect(
+    GraphcodeCommand.renderArtifactory(graph, search: "nonesuch")
+      .contains("no posts match 'nonesuch'"))
+  #expect(
+    GraphcodeCommand.renderArtifactory(graph, unreadFor: reader.id, search: "nonesuch")
+      .contains("no unread posts match 'nonesuch'"))
+}
+
+@Test
+func jsonRendersTheSameTruthInOtherSyntax() throws {
+  struct Board: Decodable {
+    let posts: [ArtifactoryPost]
+    let lastRead: Int?
+  }
+  let (graph, reader) = boardWithPosts()
+
+  let forReader = try #require(
+    GraphcodeCommand.renderArtifactoryJSON(graph, unreadFor: reader.id).data(using: .utf8))
+  let decoded = try JSONDecoder().decode(Board.self, from: forReader)
+  #expect(decoded.lastRead == 1)
+  #expect(decoded.posts.map(\.id) == [2, 3])
+
+  let whole = try #require(
+    GraphcodeCommand.renderArtifactoryJSON(graph).data(using: .utf8))
+  let everything = try JSONDecoder().decode(Board.self, from: whole)
+  #expect(everything.posts.count == 3)
+  #expect(everything.lastRead == nil)
+}
+
+@Test
+func statusLineCountsPostsAndUnreadOnlyWhenThereAreAny() {
+  let (graph, reader) = boardWithPosts()
+
+  #expect(
+    GraphcodeCommand.renderArtifactoryStatusLine(graph, readerID: reader.id)
+      == "artifactory: 3 posts, 2 unread for you")
+  #expect(
+    GraphcodeCommand.renderArtifactoryStatusLine(graph) == "artifactory: 3 posts")
+  #expect(GraphcodeCommand.renderArtifactoryStatusLine(LoopGraph(project: ProjectRef(path: "/tmp/x", name: "x"))) == nil)
+
+  let rendered = GraphcodeCommand.render(graph, artifactoryReader: reader.id)
+  #expect(rendered.contains("artifactory: 3 posts, 2 unread for you"))
 }

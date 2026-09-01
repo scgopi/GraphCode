@@ -97,6 +97,8 @@ public enum SessionBriefing {
 
       ```sh
       graphcode artifactory sync \(projectPath)     # read what you have not seen, mark it read
+      graphcode artifactory sync \(projectPath) --headlines   # many unread? triage first
+      graphcode artifactory read \(projectPath) <post-id>     # then read only those in full
       graphcode artifactory post \(projectPath) [--topic <t>] <note…>   # leave something behind
       graphcode artifactory list \(projectPath)     # read-only peek, cursor untouched
       graphcode artifactory watch \(projectPath) [--topic <t>]   # ring me when new mail lands
