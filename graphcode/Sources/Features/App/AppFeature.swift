@@ -729,6 +729,8 @@ extension AppFeature {
       layout: layout,
       projectPath: path,
       projectName: state.projects[id: path]?.graph.project.name ?? path)
+    state.openLoop?.seenArtifactoryPostID =
+      LoopWorkspaceRail.loadSeenArtifactoryPost(forProjectPath: path)
     state.selectedProjectPath = path
     recordVisit(.loop(projectPath: path, nodeID: nodeID), &state)
     return .none

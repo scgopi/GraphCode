@@ -29,6 +29,7 @@ struct LoopWorkspaceView: View {
           isBoardFolded: store.isBoardFolded,
           artifactoryEnabled: artifactoryEnabled,
           isArtifactoryFolded: store.isArtifactoryFolded,
+          seenArtifactoryPostID: store.seenArtifactoryPostID,
           onSummaryFoldToggled: { store.send(.summaryFoldToggled) },
           onSummaryAnswerTapped: { store.send(.summaryAnswerTapped) },
           onBoardFoldToggled: { store.send(.boardFoldToggled) },
