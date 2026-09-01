@@ -77,6 +77,7 @@ struct ProjectCanvasView: View {
         in: store.canvasGraph, declaredEntries: store.declaredEntryIDs))
 
     return VStack(spacing: 0) {
+      TemplateSaveNoticeBar(store: store)
       if let connectionError = store.connectionError {
         Text("Not connected to graphcoded: \(connectionError)")
           .font(.caption)
@@ -122,6 +123,9 @@ struct ProjectCanvasView: View {
     .sheet(isPresented: $store.showingNewNodeForm) {
       NodeDraftForm(store: store)
     }
+    // A save started from a card's context menu has no dialog to live in; this is
+    // where it presents (PROMPT_TEMPLATES.md § Save as template).
+    .modifier(TemplateSaveSheetHost(store: store))
     .sheet(item: $store.pendingEdge) { _ in
       edgeForm
     }

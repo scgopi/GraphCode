@@ -88,6 +88,11 @@ struct ProjectFeature {
     var draftBackend: CLISessionBackendKind = .claudeCode
     var draftWorktree: WorktreeSelection = .none
     var draftBranch = ""
+    /// A composite draft's carried sub-graph — empty for a hand-made composite,
+    /// populated when a template brought its children along (see
+    /// `TemplateSettings.graphJSON`). The same field `.createNode`'s cross-graph
+    /// spawn path fills.
+    var draftSubGraph: LoopGraph?
     /// Set when the form was opened from a node card's + handle: the node the new loop
     /// hangs off. Creation then also draws a hand-off edge from it — see
     /// `createNodeConfirmed`.
@@ -155,6 +160,11 @@ struct ProjectFeature {
     /// inline Reclaim/Keep. Keyed by node id; an offer outlives nothing: it drops the
     /// moment its loop is deleted or answered.
     var worktreeReclaimOffers: [UUID: WorktreeAssessment] = [:]
+
+    /// The template feature's own state — New Designs v4 (PROMPT_TEMPLATES.md):
+    /// the library, the ⌘T picker, the applied template and the save flow, all on
+    /// the store the dialog already runs on. See `TemplateFormState`.
+    var templates = TemplateFormState()
 
     /// This folder's worktree stats, mirrored in by `AppWorktreesReducer` when it loads
     /// them — so the canvas, which only holds a project-scoped store, can put the count
@@ -263,6 +273,27 @@ struct ProjectFeature {
     /// the same reason — the folder was named, not the composite its canvas happens
     /// to be drilled into.
     case projectImportRequested
+
+    // Templates — New Designs v4 (PROMPT_TEMPLATES.md). See `TemplateFormState`
+    // for the state these drive; the verb-by-verb detail lives beside it in
+    // `ProjectFeature+Templates.swift`.
+    case templatesButtonTapped
+    case templatePickerClosed
+    case templateQueryChanged(String)
+    case templateSelectionMoved(Int)
+    case templateChosen(UUID)
+    case templateLaunched(UUID)
+    case templateChipRemoved
+    case templateShapeUndone
+    case saveTemplateTapped
+    case saveLoopTemplateTapped(UUID)
+    case saveTemplateConfirmed
+    case saveTemplateCancelled
+    case templateSaved(PromptTemplate)
+    case templateSaveNoticeDismissed
+    case templateRelocationTapped
+    case templateLibraryChanged([PromptTemplate])
+    case detachTemplateTapped(UUID)
   }
 
   @Dependency(\.gitClient) var gitClient
@@ -273,9 +304,24 @@ struct ProjectFeature {
   @Dependency(\.loopTitleDirectory) var loopTitleDirectory
 
   @Dependency(\.orchestratorClient) var orchestratorClient
+  @Dependency(\.templateLibrary) var templateLibrary
+
+  /// The one long-lived effect the template feature owns: the directory watch that
+  /// keeps `templateLibrary` current while the form is open. Cancelled when the
+  /// form closes.
+  enum CancelID {
+    case templateWatch
+  }
 
   var body: some ReducerOf<Self> {
     BindingReducer()
+    // Templates live in their own switches — the ⌘T picker, the applied state and
+    // Save-as-template — kept beside their state (`TemplateFormState`) and helpers so
+    // the main switch below stays about the graph. Three rather than one because each
+    // is a switch about one thing; see `ProjectFeature+Templates.swift`.
+    Reduce { state, action in templatePickerReducer(&state, action) }
+    Reduce { state, action in templateApplyReducer(&state, action) }
+    Reduce { state, action in templateSaveReducer(&state, action) }
     Reduce { state, action in
       switch action {
       case .binding:
@@ -338,10 +384,20 @@ struct ProjectFeature {
 
       case .cancelNewNodeForm:
         state.showingNewNodeForm = false
-        return .none
+        return .cancel(id: CancelID.templateWatch)
 
       case .createNodeConfirmed:
         return confirmCreateNode(&state)
+
+      // Template actions were handled by the switch above; they land here as
+      // no-ops so this switch stays exhaustive, and nothing runs twice.
+      case .templatesButtonTapped, .templatePickerClosed, .templateQueryChanged,
+        .templateSelectionMoved, .templateChosen, .templateLaunched, .templateChipRemoved,
+        .templateShapeUndone, .saveTemplateTapped, .saveLoopTemplateTapped,
+        .saveTemplateConfirmed, .saveTemplateCancelled, .templateSaved,
+        .templateSaveNoticeDismissed, .templateRelocationTapped, .templateLibraryChanged,
+        .detachTemplateTapped:
+        return .none
 
       case .worktreeCreationFailed(let message):
         state.connectionError = "Couldn't create worktree: \(message)"
@@ -548,6 +604,37 @@ struct ProjectFeature {
   }
 }
 
+/// The template feature's own state — the library this project is offered, the
+/// ⌘T picker, the applied template and the save flow. Nested rather than flat so
+/// the dialog's fields stay where they were and everything ⌘T owns reads as one
+/// block (`store.templates.…`).
+@ObservableState
+struct TemplateFormState: Equatable {
+  /// What this project is offered: the project's own `.graphcode/templates`
+  /// first, then home. Refreshed on every change to either directory, so an
+  /// external edit or a `git pull` shows up without a relaunch.
+  var library: [PromptTemplate] = []
+  var isPickerOpen = false
+  var query = ""
+  /// The highlighted row, as an index into the *flattened* picker list — one
+  /// selection walking two scope groups, which is what ↑↓ means there.
+  var selectionIndex: Int?
+  /// The template currently shaping the form, with everything needed to
+  /// un-apply it: what it set, and the fields as they were before it landed.
+  var applied: ProjectFeature.AppliedTemplate?
+  /// Set right after ⏎ fills the dialog from a template: the primary field's
+  /// focus follows, so the first thing the human edits is the brief they came
+  /// to edit. The consuming field clears it.
+  var requestsPrimaryFocus = false
+  /// The save-as-template sheet's context — from the dialog
+  /// (`saveTemplateTapped`) or a card's context menu (`saveLoopTemplateTapped`).
+  /// One sheet, one field of state, two places it can open.
+  var pendingSave: ProjectFeature.TemplateSaveContext?
+  /// The quiet line after a save — path plus the offer of the other location,
+  /// never a modal. Cleared by the next action the form takes.
+  var saveNotice: ProjectFeature.TemplateSaveNotice?
+}
+
 extension ProjectFeature {
   /// The loop type the form opens on: the last one a loop was actually created with.
   ///
@@ -631,7 +718,7 @@ extension ProjectFeature {
 
   /// The Create button's whole handler — in the trailing extension beside
   /// `openNodeForm` and the rest of the form's helpers, and for the same reason.
-  private func confirmCreateNode(_ state: inout State) -> Effect<Action> {
+  func confirmCreateNode(_ state: inout State) -> Effect<Action> {
     let draft = state.draft
     // `isValid` carries the same rules the daemon enforces, so an incomplete form
     // simply doesn't submit — the Create button is disabled on it too, and this is
@@ -657,6 +744,10 @@ extension ProjectFeature {
     state.draftParentNodeID = nil
     state.draftParentIsCustodial = false
     state.showingNewNodeForm = false
+    // The directory watch belongs to the open dialog, not to the store — creating a
+    // loop closes the form just as Cancel does, and leaving it running would keep
+    // re-reading the library for a form nobody is looking at.
+    let closedWatch = Effect<Action>.cancel(id: CancelID.templateWatch)
     // Inside a composite, the same commands are addressed at its sub-graph. This is
     // the app half of "add loops inside" — the step the dialog's own strip promises.
     let insideComposite = state.openCompositeID
@@ -681,52 +772,54 @@ extension ProjectFeature {
     // still created — unbound rather than not at all — since losing the loop over a
     // branch that already exists would be the more annoying outcome.
     let request = state.newWorktreeRequest
-    return .run { send in
-      var resolved = draft
-      // A custody child carries its parent on the draft; the daemon draws the
-      // fired-at-birth link and writes the report-back memo, exactly as it does
-      // for a CLI-created child. No separate edge command, so nothing blocks.
-      if custodial, let parentNodeID { resolved.createdBy = parentNodeID }
-      if let request {
-        do {
-          resolved.worktree = try await gitClient.createWorktree(
-            request.repositoryPath, request.worktreePath, request.branch)
-        } catch {
-          await send(.worktreeCreationFailed(String(describing: error)))
+    return .merge(
+      closedWatch,
+      .run { send in
+        var resolved = draft
+        // A custody child carries its parent on the draft; the daemon draws the
+        // fired-at-birth link and writes the report-back memo, exactly as it does
+        // for a CLI-created child. No separate edge command, so nothing blocks.
+        if custodial, let parentNodeID { resolved.createdBy = parentNodeID }
+        if let request {
+          do {
+            resolved.worktree = try await gitClient.createWorktree(
+              request.repositoryPath, request.worktreePath, request.branch)
+          } catch {
+            await send(.worktreeCreationFailed(String(describing: error)))
+          }
         }
-      }
-      func addressed(_ command: GraphCommand) -> GraphCommand {
-        insideComposite.map { .subGraphCommand(nodeID: $0, command: command) } ?? command
-      }
-      try? await orchestratorClient.send(
-        .graphCommand(projectPath: projectPath, command: addressed(.createNode(resolved))))
-      if let parentNodeID, !custodial {
+        func addressed(_ command: GraphCommand) -> GraphCommand {
+          insideComposite.map { .subGraphCommand(nodeID: $0, command: command) } ?? command
+        }
+        try? await orchestratorClient.send(
+          .graphCommand(projectPath: projectPath, command: addressed(.createNode(resolved))))
+        if let parentNodeID, !custodial {
+          try? await orchestratorClient.send(
+            .graphCommand(
+              projectPath: projectPath,
+              command: addressed(
+                .createEdge(from: parentNodeID, to: draft.id, spec: EdgeSpec()))))
+        }
+
+        // A blank title creates the node as "New Loop" and asks the loop's own
+        // backend for a real one — after creation, so a slow (or absent) CLI never
+        // holds the node itself hostage. The rename can target the node because the
+        // draft's id *is* the node's id (see `NodeDraft.id`); no answer just means
+        // the fallback name stays.
+        guard draft.title.trimmingCharacters(in: .whitespaces).isEmpty,
+          let basis = [
+            draft.checkDescription, draft.triggerPrompt, draft.goal?.summary,
+            draft.firstInstruction,
+          ]
+          .compactMap({ $0 })
+          .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
+          let title = await titleSuggestionClient.suggest(
+            draft.effectiveBackend, basis, loopTitleDirectory.allTitles())
+        else { return }
         try? await orchestratorClient.send(
           .graphCommand(
-            projectPath: projectPath,
-            command: addressed(
-              .createEdge(from: parentNodeID, to: draft.id, spec: EdgeSpec()))))
-      }
-
-      // A blank title creates the node as "New Loop" and asks the loop's own
-      // backend for a real one — after creation, so a slow (or absent) CLI never
-      // holds the node itself hostage. The rename can target the node because the
-      // draft's id *is* the node's id (see `NodeDraft.id`); no answer just means
-      // the fallback name stays.
-      guard draft.title.trimmingCharacters(in: .whitespaces).isEmpty,
-        let basis = [
-          draft.checkDescription, draft.triggerPrompt, draft.goal?.summary,
-          draft.firstInstruction,
-        ]
-        .compactMap({ $0 })
-        .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
-        let title = await titleSuggestionClient.suggest(
-          draft.effectiveBackend, basis, loopTitleDirectory.allTitles())
-      else { return }
-      try? await orchestratorClient.send(
-        .graphCommand(
-          projectPath: projectPath, command: addressed(.renameNode(draft.id, title: title))))
-    }
+            projectPath: projectPath, command: addressed(.renameNode(draft.id, title: title))))
+      })
   }
 
   private func openNodeForm(
@@ -764,6 +857,7 @@ extension ProjectFeature {
     state.draftStopAfter = ""
     state.draftSchedule = .daily
     state.draftScheduleTime = "09:00"
+    state.draftSubGraph = nil
     // The parent's backend when there is one; the human's default otherwise
     // (Settings → Sessions), never a hardcoded one.
     state.draftBackend = backend ?? GraphcodeSettingsStore.load().defaultBackend
@@ -771,14 +865,29 @@ extension ProjectFeature {
     state.draftBranch = ""
     state.draftParentNodeID = parentNodeID
     state.draftParentIsCustodial = custodial
+    state.templates = TemplateFormState()
     state.showingNewNodeForm = true
     let repositoryPath = state.graph.project.path
-    return .run { send in
-      // A non-repo folder just yields nothing — a missing worktree list is not worth
-      // an error banner when the picker degrades to "None" on its own.
-      let worktrees = (try? await gitClient.listWorktrees(repositoryPath)) ?? []
-      await send(.worktreesLoaded(worktrees))
-    }
+    return .merge(
+      .run { send in
+        // A non-repo folder just yields nothing — a missing worktree list is not worth
+        // an error banner when the picker degrades to "None" on its own.
+        let worktrees = (try? await gitClient.listWorktrees(repositoryPath)) ?? []
+        await send(.worktreesLoaded(worktrees))
+      },
+      // The template library rides in with the form: read once, then kept current by
+      // the directory watch, so an external edit or a `git pull` shows up without a
+      // relaunch (PROMPT_TEMPLATES.md § Storage).
+      .run { send in
+        await send(.templateLibraryChanged(await templateLibrary.load(repositoryPath)))
+      },
+      .run { [projectPath = repositoryPath] send in
+        for await _ in templateLibrary.watch(projectPath) {
+          await send(.templateLibraryChanged(await templateLibrary.load(projectPath)))
+        }
+      }
+      .cancellable(id: CancelID.templateWatch, cancelInFlight: true)
+    )
   }
 
   /// One-liner for the several actions that are just "route this straight to the

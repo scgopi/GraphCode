@@ -230,6 +230,9 @@ struct LoopCardView: View {
         .foregroundStyle(.white.opacity(0.52))
         .lineLimit(1)
         .truncationMode(.middle)
+      if let follow = node.templateFollow {
+        FollowsChip(follow: follow)
+      }
       if isRemote {
         Image(systemName: "network").font(.system(size: 9)).foregroundStyle(.white.opacity(0.4))
       }
@@ -240,6 +243,35 @@ struct LoopCardView: View {
       }
     }
   }
+}
+
+/// A following loop's mark: a 5pt blue dot and the name of what it follows, with
+/// "· missing" when the file could not be found at the last resolve. The blue is
+/// the action blue the Templates button uses — the follow is chrome on the loop,
+/// not a sixth kind of it.
+struct FollowsChip: View {
+  let follow: TemplateFollow
+
+  var body: some View {
+    HStack(spacing: 4) {
+      Circle()
+        .fill(missing ? Color(red: 1.0, green: 0.624, blue: 0.039) : Theme.paneFocusTint)
+        .frame(width: 5, height: 5)
+      Text(follow.missing ? "Follows \(follow.name) · missing" : "Follows \(follow.name)")
+        .font(.system(size: 10, design: .monospaced))
+        .foregroundStyle(missing ? Color(red: 1.0, green: 0.804, blue: 0.478) : .white.opacity(0.6))
+        .lineLimit(1)
+    }
+    .padding(.vertical, 1)
+    .padding(.horizontal, 6)
+    .background(
+      missing
+        ? Color(red: 1.0, green: 0.624, blue: 0.039).opacity(0.12)
+        : Theme.paneFocusTint.opacity(0.12),
+      in: RoundedRectangle(cornerRadius: 4))
+  }
+
+  private var missing: Bool { follow.missing }
 }
 
 /// The state, in a word. The pill is the fix for the overloaded dot: colour, shape, and

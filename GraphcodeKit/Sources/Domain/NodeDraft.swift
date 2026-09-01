@@ -68,6 +68,12 @@ public struct NodeDraft: Codable, Equatable, Sendable {
   ///
   /// `nil` for anything a human created, which is the truth: the form is not a loop.
   public var createdBy: UUID?
+  /// Which template the brief came from — attribution, carried to the node.
+  public var createdFromTemplateID: UUID?
+  /// The template a **timed or composite** draft follows — see
+  /// `TemplateFollow`. The text itself travels in the type's own field as
+  /// the creation-time snapshot; this only says what to re-read next run.
+  public var templateFollow: TemplateFollow?
 
   public init(
     id: UUID = UUID(),
@@ -83,7 +89,9 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     modelTier: ModelTier? = nil,
     worktree: WorktreeRef? = nil,
     subGraph: LoopGraph? = nil,
-    createdBy: UUID? = nil
+    createdBy: UUID? = nil,
+    createdFromTemplateID: UUID? = nil,
+    templateFollow: TemplateFollow? = nil
   ) {
     self.id = id
     self.title = title
@@ -99,6 +107,8 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     self.worktree = worktree
     self.subGraph = subGraph
     self.createdBy = createdBy
+    self.createdFromTemplateID = createdFromTemplateID
+    self.templateFollow = templateFollow
   }
 
   /// docs/08-quality-and-token-budgets.md wants the cheap-to-ignore version of each
@@ -183,7 +193,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
   public func makeNode() -> LoopNode {
     LoopNode(
       // The draft's own id, not a fresh one — the client that built the draft may
-      // already be holding this id to address a follow-up at (see `id`).
+      // already be holding this id to address a follow-up at (see `NodeDraft.id`).
       id: id,
       title: resolvedTitle,
       loopType: loopType,
@@ -205,6 +215,8 @@ public struct NodeDraft: Codable, Equatable, Sendable {
             project: ProjectRef(path: "\(resolvedTitle)-subgraph", name: resolvedTitle)))
         : nil,
       createdBy: createdBy,
+      createdFromTemplateID: createdFromTemplateID,
+      templateFollow: loopType == .timeBased || loopType == .composite ? templateFollow : nil,
       state: loopType == .goalBased ? .running : .idle)
   }
 }
@@ -214,6 +226,7 @@ extension NodeDraft {
     case id, title, loopType, checkDescription, triggerPrompt, goal, backend, modelTier
     case worktree, subGraph, createdBy, firstInstruction, pausesBeforeWritesOnly
     case heartbeatIntervalSeconds
+    case createdFromTemplateID, templateFollow
   }
 
   /// `id` is `decodeIfPresent` because drafts also arrive over the wire from a CLI that
@@ -240,5 +253,9 @@ extension NodeDraft {
     worktree = try container.decodeIfPresent(WorktreeRef.self, forKey: .worktree)
     subGraph = try container.decodeIfPresent(LoopGraph.self, forKey: .subGraph)
     createdBy = try container.decodeIfPresent(UUID.self, forKey: .createdBy)
+    createdFromTemplateID =
+      try container.decodeIfPresent(UUID.self, forKey: .createdFromTemplateID)
+    templateFollow =
+      try container.decodeIfPresent(TemplateFollow.self, forKey: .templateFollow)
   }
 }

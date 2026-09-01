@@ -72,6 +72,17 @@ extension ProjectFeature.State {
       worktree: {
         if case .existing(let ref) = draftWorktree { return ref }
         return nil
+      }(),
+      subGraph: draftLoopType == .composite ? draftSubGraph : nil,
+      // Attribution only — the card can say where the brief came from. The follow
+      // travels too, for the two types that follow: timed and composite re-read the
+      // template on their next run; goal, turn and main snapshot at creation.
+      createdFromTemplateID: templates.applied?.id,
+      templateFollow: {
+        guard let applied = templates.applied,
+          draftLoopType == .timeBased || draftLoopType == .composite
+        else { return nil }
+        return TemplateFollow(id: applied.id, name: applied.name)
       }())
   }
 
@@ -82,6 +93,79 @@ extension ProjectFeature.State {
     guard let value = Int(draftBudget.trimmingCharacters(in: .whitespaces)), value > 0
     else { return nil }
     return value
+  }
+
+  // MARK: - Templates (New Designs v4)
+
+  /// The field currently holding the template brief — the one `{token}` patterns
+  /// are looked for in, and the one Save-as-template reads.
+  var currentBriefText: String {
+    switch draftLoopType {
+    case .sketch: return draftSketchNote
+    case .goalBased: return draftGoal
+    case .timeBased: return draftTimedTask
+    case .turnBased: return draftFirstInstruction
+    case .composite: return draftTitle
+    }
+  }
+
+  /// Which of the applied template's `{token}`s is still a hole. A token the human
+  /// has typed over is gone as text and so is the hole.
+  ///
+  /// Every field a template can land in, not only the brief: a done check reading
+  /// `make test-{suite}` is exactly as unfinished as a brief with a hole in it, and
+  /// starting the loop would run the literal text.
+  var unfilledTokens: [String] {
+    var seen = Set<String>()
+    var ordered: [String] = []
+    for field in [currentBriefText, draftPredicate, draftMetric, draftBranch] {
+      for token in PromptTemplate.tokens(in: field) where seen.insert(token).inserted {
+        ordered.append(token)
+      }
+    }
+    return ordered
+  }
+
+  /// What the applied template set — the "from template" dots read this. A
+  /// property, not a method, because a store's members are reachable through
+  /// key-path lookup only.
+  var templateSetFields: Set<ProjectFeature.TemplateFieldKey> {
+    templates.applied?.setFields ?? []
+  }
+
+  /// Whether the dialog's primary action is ready beyond `draft.isValid` — a
+  /// brief with an unfilled token blocks Start, PROMPT_TEMPLATES.md § What a
+  /// template carries.
+  var draftBlocksOnTokens: Bool {
+    !unfilledTokens.isEmpty
+  }
+
+  /// The picker's rows, already grouped: **This project** first, then **All
+  /// projects**, each sorted by name. The query filters on name and body — a
+  /// template is findable by what it says, not only by what it is called.
+  var templatePickerRows: [ProjectFeature.TemplatePickerRow] {
+    let query = templates.query.trimmingCharacters(in: .whitespaces).lowercased()
+    let matches: (PromptTemplate) -> Bool = { template in
+      query.isEmpty
+        || template.name.lowercased().contains(query)
+        || template.body.lowercased().contains(query)
+    }
+    var project: [PromptTemplate] = []
+    var home: [PromptTemplate] = []
+    for template in templates.library where matches(template) {
+      if template.origin.isProject { project.append(template) } else { home.append(template) }
+    }
+    return
+      project
+      .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+      .map { ProjectFeature.TemplatePickerRow(template: $0, scope: .project) }
+      + home
+      .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+      .map { ProjectFeature.TemplatePickerRow(template: $0, scope: .home) }
+  }
+
+  var hasProjectTemplates: Bool {
+    templates.library.contains(where: \.origin.isProject)
   }
 
   /// What a timed loop's session actually opens with, composed rather than typed.
@@ -222,6 +306,45 @@ extension ProjectFeature.State {
 /// draft types. Nested on `ProjectFeature` rather than `State` so views can name them
 /// without going through the state type.
 extension ProjectFeature {
+  /// The picker's one row: the template plus which scope group it sits in.
+  struct TemplatePickerRow: Equatable, Identifiable {
+    let template: PromptTemplate
+    let scope: TemplatePickerScope
+
+    var id: UUID { template.id }
+    /// "Goal" · "Timed · daily" · "Composite · 3 loops" · "Main" — the type in
+    /// words, with the one qualifier that makes it specific.
+    var typeLabel: String {
+      switch template.shape {
+      case .sketch, nil: return "Main"
+      case .goalBased: return "Goal"
+      case .timeBased:
+        let cadence = template.settings?.cadence.map {
+          $0.trimmingCharacters(in: .whitespaces).lowercased()
+        }
+        return cadence.map { "Timed · \($0)" } ?? "Timed"
+      case .turnBased: return "Turn"
+      case .composite:
+        let count = template.settings?.carriedGraph?.nodes.count ?? 0
+        return count > 0 ? "Composite · \(count) loops" : "Composite"
+      }
+    }
+  }
+
+  /// The two scope groups the picker sorts by — a project's committed templates
+  /// above the home library, always.
+  enum TemplatePickerScope: Equatable {
+    case project
+    case home
+
+    var displayName: String {
+      switch self {
+      case .project: return "This project"
+      case .home: return "All projects"
+      }
+    }
+  }
+
   /// What pressing **Test** on a done check found. No exit code: the shell session
   /// reports pass/fail and nothing finer, and a made-up number is the one detail
   /// somebody would act on.

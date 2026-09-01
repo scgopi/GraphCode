@@ -226,10 +226,126 @@ struct SettingsView: View {
         .font(.caption2)
         .foregroundStyle(.secondary)
       }
+
+      TemplatesSettingsSection()
     }
     .formStyle(.grouped)
   }
 
+}
+
+/// The template library, as Settings can see it: the home folder — yours, offered in
+/// every project. Project templates are read from wherever the project lives and are
+/// committed or removed like any other file the folder holds; the one thing worth
+/// saying here is the half of follow-vs-snapshot that load-bearing (PROMPT_TEMPLATES.md
+/// § Follow vs snapshot): a committed edit changes what runs on a teammate's machine.
+struct TemplatesSettingsSection: View {
+  @State private var templates: [PromptTemplate] = []
+  @State private var pendingDeletion: PromptTemplate?
+
+  var body: some View {
+    Section {
+      if templates.isEmpty {
+        Text(
+          "No templates yet. Save one from the New loop dialog (⌘T), or right-click a "
+            + "loop that worked and choose Save as Template…."
+        )
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+      } else {
+        ForEach(templates) { template in
+          HStack(spacing: 8) {
+            RoundedRectangle(cornerRadius: 2)
+              .fill((template.shape ?? .sketch).accent)
+              .frame(width: 9, height: 9)
+            VStack(alignment: .leading, spacing: 1) {
+              Text(template.name).font(.callout)
+              Text(subtitle(template))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            Button("Reveal") { reveal(template) }
+              .buttonStyle(.link)
+              .font(.caption)
+            Button("Delete", role: .destructive) { pendingDeletion = template }
+              .buttonStyle(.link)
+              .font(.caption)
+          }
+          .padding(.vertical, 2)
+        }
+      }
+    } header: {
+      Text("Templates")
+    } footer: {
+      Text(
+        "One template is one markdown file in ~/.graphcode/templates — editable outside "
+          + "the app, shareable by committing it into a project's .graphcode/templates. "
+          + "Timed and composite loops that started from one follow it and pick up edits "
+          + "on their next run; a loop can be detached from its card's menu. Each project "
+          + "reads its own committed templates first, so a committed edit changes what "
+          + "runs on a teammate's machine."
+      )
+      .font(.caption2)
+      .foregroundStyle(.secondary)
+    }
+    .onAppear(perform: reload)
+    // A template is a file, and a project one is a file in somebody's checkout. The
+    // list is the only place they can be deleted, so the click asks first.
+    .confirmationDialog(
+      "Delete “\(pendingDeletion?.name ?? "")”?",
+      isPresented: Binding(
+        get: { pendingDeletion != nil },
+        set: { if !$0 { pendingDeletion = nil } })
+    ) {
+      Button("Delete template", role: .destructive) {
+        if let template = pendingDeletion { try? TemplateStorage.shared.delete(template) }
+        pendingDeletion = nil
+        reload()
+      }
+      Button("Cancel", role: .cancel) { pendingDeletion = nil }
+    } message: {
+      Text(pendingDeletion.map { "This removes \(TemplateSavePath.display(of: $0))." } ?? "")
+    }
+  }
+
+  private func subtitle(_ template: PromptTemplate) -> String {
+    var parts: [String] = []
+    switch template.shape {
+    case .sketch, nil: parts.append("Main")
+    case .goalBased: parts.append("Goal")
+    case .timeBased:
+      let cadence = template.settings?.cadence.map { $0.lowercased() } ?? ""
+      parts.append(cadence.isEmpty ? "Timed" : "Timed · \(cadence)")
+    case .turnBased: parts.append("Turn")
+    case .composite: parts.append("Composite")
+    }
+    if template.useCount > 0 { parts.append("used \(template.useCount)×") }
+    parts.append(template.summaryLine)
+    return parts.joined(separator: " — ")
+  }
+
+  /// The file this row stands for — which is not always in the home folder, so the
+  /// origin decides rather than the assumption that everything listed here is home's.
+  private func reveal(_ template: PromptTemplate) {
+    let storage = TemplateStorage.shared
+    let directory: URL
+    switch template.origin {
+    case .home: directory = storage.homeDirectory
+    case .project(let path): directory = storage.projectDirectory(path)
+    }
+    NSWorkspace.shared.activateFileViewerSelecting([
+      directory.appendingPathComponent(template.fileName)
+    ])
+  }
+
+  private func reload() {
+    // The same use-count overlay the picker reads, so a template that says "used 4×"
+    // in one list doesn't say "used 0×" in the other.
+    templates = TemplateLibraryClient.overlayUseCounts(
+      TemplateStorage.shared.load(projectPath: nil))
+  }
 }
 
 /// Makes the Settings window actually resizable, because the SwiftUI spelling doesn't.

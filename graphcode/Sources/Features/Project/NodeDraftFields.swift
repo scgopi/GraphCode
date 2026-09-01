@@ -12,11 +12,20 @@ struct DraftField<Content: View>: View {
   /// The "optional" / "recommended" note beside the label.
   var qualifier: String?
   var help: String?
+  /// The template set this field — a 5pt blue dot beside the label, never a lock:
+  /// everything a template lands stays editable. See PROMPT_TEMPLATES.md § Applied
+  /// state.
+  var fromTemplate = false
   @ViewBuilder let content: () -> Content
 
   var body: some View {
     VStack(alignment: .leading, spacing: 5) {
       HStack(alignment: .firstTextBaseline, spacing: 6) {
+        if fromTemplate {
+          Circle()
+            .fill(Theme.paneFocusTint)
+            .frame(width: 5, height: 5)
+        }
         Text(label)
           .font(.system(size: 11.5, weight: .semibold))
           .foregroundStyle(.white.opacity(0.85))
@@ -24,6 +33,11 @@ struct DraftField<Content: View>: View {
           Text(qualifier)
             .font(.system(size: 11))
             .foregroundStyle(.white.opacity(0.56))
+        }
+        if fromTemplate {
+          Text("from template")
+            .font(.system(size: 10.5))
+            .foregroundStyle(.white.opacity(0.75))
         }
       }
       content()
@@ -76,6 +90,9 @@ struct DraftTextField: View {
   let placeholder: String
   @Binding var text: String
   var isMono = false
+  /// The picker's ⏎ asks the brief's field to take focus; the field consumes the
+  /// request by clearing it, so exactly one field answers.
+  var takesFocusRequest: Binding<Bool>? = nil
 
   @FocusState private var isFocused: Bool
 
@@ -85,6 +102,12 @@ struct DraftTextField: View {
       .font(.system(size: isMono ? 12 : 13, design: isMono ? .monospaced : .default))
       .focused($isFocused)
       .draftFieldBox(isFocused: isFocused)
+      .onAppear {
+        if let takesFocusRequest, takesFocusRequest.wrappedValue {
+          isFocused = true
+          takesFocusRequest.wrappedValue = false
+        }
+      }
   }
 }
 
@@ -93,6 +116,8 @@ struct DraftTextField: View {
 struct DraftProseField: View {
   let placeholder: String
   @Binding var text: String
+  /// See `DraftTextField.takesFocusRequest` — the brief is where ⏎ lands the human.
+  var takesFocusRequest: Binding<Bool>? = nil
 
   @FocusState private var isFocused: Bool
 
@@ -103,6 +128,12 @@ struct DraftProseField: View {
       .font(.system(size: 13))
       .focused($isFocused)
       .draftFieldBox(isFocused: isFocused, minHeight: 54)
+      .onAppear {
+        if let takesFocusRequest, takesFocusRequest.wrappedValue {
+          isFocused = true
+          takesFocusRequest.wrappedValue = false
+        }
+      }
   }
 }
 

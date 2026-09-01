@@ -95,6 +95,13 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// stop condition. Optional so frames from clients that predate the field decode as
   /// an unattributed promotion rather than failing.
   case promoteNode(UUID, promotion: SketchPromotion, promotedBy: UUID?)
+  /// Stop a following loop from reading its template — see
+  /// `LoopNode.templateFollow`. Detaching converts it to a snapshot *in place*: the
+  /// brief the node already carries keeps running exactly as it is, and the next
+  /// edit to the template's file no longer reaches it. One local tweak should never
+  /// force a fork of the shared file, which is what editing a followed template
+  /// otherwise asks for.
+  case detachTemplate(UUID)
   /// Append a learned note to a node's memory log (`NodeMemory`) — what `graphcode
   /// node memo` rides on. `from` is attributed the same way `messageNode`'s is.
   case memoNode(UUID, text: String, from: UUID?)

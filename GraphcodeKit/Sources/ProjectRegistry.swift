@@ -475,6 +475,12 @@ public actor ProjectRegistry {
         // meaningless without the reading that feeds it. Switching the rail off takes the
         // boards with it rather than leaving pictures of a run nothing is narrating.
         return settings.summarisesLoops && settings.visualisesSummaries
+      },
+      // What a following loop re-reads at its next run: home + this project's
+      // `.graphcode/templates`, project winning on a filename collision. See
+      // `TemplateStorage`.
+      onResolveTemplate: { templateID, projectPath in
+        TemplateStorage.shared.template(withID: templateID, projectPath: projectPath)
       })
     stores[path] = newStore
     // Only on first load of this project — a time-based node's session outlives the app
