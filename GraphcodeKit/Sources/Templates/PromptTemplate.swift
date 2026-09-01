@@ -26,6 +26,11 @@ public struct PromptTemplate: Codable, Equatable, Identifiable, Sendable {
   /// either names itself inside. Fresh templates (not yet written) derive it from
   /// their name.
   public var fileName: String
+  /// Whether this is one of the briefs the app ships with (`StarterTemplates`).
+  /// Written into the file as `starter: true`, so it survives an edit and is visible
+  /// to anyone reading the file — and so the picker can group the scaffolding apart
+  /// from a library somebody has actually built.
+  public var isStarter: Bool
   /// How many times this template has been applied, as this app has counted it.
   /// **Never written back into the file** — applying a template must not dirty a
   /// repository's working tree, and a project folder may not even be writable. It is
@@ -48,6 +53,7 @@ public struct PromptTemplate: Codable, Equatable, Identifiable, Sendable {
     self.settings = settings
     self.origin = origin
     self.fileName = Self.fileName(for: name)
+    self.isStarter = false
     self.useCount = useCount
   }
 
@@ -352,6 +358,7 @@ public enum TemplateFileCodec {
     var shape: LoopType?
     var settings = TemplateSettings()
     var hadSettings = false
+    var isStarter = false
     for rawLine in header.split(separator: "\n", omittingEmptySubsequences: false) {
       let line = rawLine.trimmingCharacters(in: .whitespaces)
       guard !line.isEmpty, !line.hasPrefix("#"),
@@ -390,6 +397,8 @@ public enum TemplateFileCodec {
       case "graph", "subgraph":
         settings.graphJSON = unwrapped.isEmpty ? nil : unwrapped
         hadSettings = true
+      case "starter":
+        isStarter = unwrapped.lowercased() == "true"
       default:
         break
       }
@@ -406,13 +415,15 @@ public enum TemplateFileCodec {
       .first.map { String($0.prefix(64)).trimmingCharacters(in: .whitespaces) } ?? ""
     let resolvedName = (name?.isEmpty == false ? name : fallbackName) ?? ""
     guard !bodyText.isEmpty || shape == .composite else { return nil }
-    return PromptTemplate(
+    var template = PromptTemplate(
       id: id,
       name: resolvedName,
       body: bodyText,
       shape: shape,
       settings: hadSettings ? settings : nil,
       origin: origin)
+    template.isStarter = isStarter
+    return template
   }
 
   /// Writes the whole file. The `id` line is what lets a following loop find its
@@ -423,6 +434,7 @@ public enum TemplateFileCodec {
     lines.append("id: \(template.id.uuidString)")
     lines.append("name: \(quoteIfNeeded(template.name))")
     lines.append("shape: \(TemplateShapeWord.word(for: template.shape))")
+    if template.isStarter { lines.append("starter: true") }
     if let settings = template.settings, !settings.isEmpty {
       if let backend = settings.backend {
         lines.append("backend: \(backend.rawValue)")

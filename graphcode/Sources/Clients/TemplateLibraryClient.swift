@@ -35,6 +35,9 @@ struct TemplateLibraryClient: Sendable {
   /// One more use of this template, as the picker counts them. App-local: applying a
   /// template must never write to the file, which may live in a repository.
   var recordUse: @Sendable (_ template: PromptTemplate) -> Void
+  /// Writes the briefs the app ships with, once, on a library that has never been
+  /// seeded — an empty ⌘T picker teaches nothing. See `StarterTemplates`.
+  var seedStarters: @Sendable () async -> Void
 }
 
 extension TemplateLibraryClient: DependencyKey {
@@ -75,6 +78,11 @@ extension TemplateLibraryClient: DependencyKey {
     },
     recordUse: { template in
       bumpUseCount(for: template)
+    },
+    seedStarters: {
+      await Task.detached(priority: .utility) {
+        _ = try? TemplateStorage.shared.seedStartersIfNeeded()
+      }.value
     }
   )
 
@@ -86,7 +94,8 @@ extension TemplateLibraryClient: DependencyKey {
     watch: { _ in AsyncStream { $0.finish() } },
     template: { _, _ in nil },
     projectIsWritable: { _ in false },
-    recordUse: { _ in }
+    recordUse: { _ in },
+    seedStarters: {}
   )
 
   /// The use count is app-local (UserDefaults, keyed on filename + origin) and is

@@ -176,6 +176,84 @@ struct TemplatePickerTests {
     #expect(!store.state.showingNewNodeForm)
   }
 
+  /// Starters stand apart while they are the whole library — the scaffolding is what
+  /// a new person needs at the top of the list. Once somebody has saved a brief of
+  /// their own, it stops outranking their work and sorts in with the rest.
+  @Test
+  @MainActor
+  func startersArePinnedUntilYouHaveOneOfYourOwn() async {
+    var starter = homeTemplate("Get the build green", body: "Fix the build.", shape: .goalBased)
+    starter.isStarter = true
+    let library = [starter]
+    let store = makeStore(library)
+    store.exhaustivity = .off
+
+    await store.send(.templatesButtonTapped)
+    await store.send(.templateLibraryChanged(library))
+    #expect(store.state.templatePickerRows.map(\.scope) == [.starter])
+    #expect(ProjectFeature.TemplatePickerScope.starter.displayName == "Starters")
+
+    // The moment there is a template of their own, the group folds away.
+    let mine = homeTemplate("My brief", body: "Something I wrote.")
+    await store.send(.templateLibraryChanged([starter, mine]))
+    #expect(store.state.templatePickerRows.map(\.scope) == [.home, .home])
+  }
+
+  /// A project's committed templates outrank the shipped ones, always — the rule the
+  /// storage design hangs on does not bend for scaffolding.
+  @Test
+  @MainActor
+  func projectTemplatesStillOutrankStarters() async {
+    var starter = homeTemplate("Get the build green", body: "Fix the build.", shape: .goalBased)
+    starter.isStarter = true
+    let committed = PromptTemplate(
+      id: UUID(), name: "Team review", body: "Ours.", shape: .goalBased,
+      origin: .project(Self.project.path))
+    let library = [starter, committed]
+    let store = makeStore(library)
+    store.exhaustivity = .off
+
+    await store.send(.templatesButtonTapped)
+    await store.send(.templateLibraryChanged(library))
+    #expect(store.state.templatePickerRows.map(\.scope) == [.project, .starter])
+  }
+
+  /// The empty canvas offers the shipped picks, and offers back only what is still on
+  /// disk — a starter somebody deleted is not pushed at them again.
+  @Test
+  @MainActor
+  func theCanvasOffersTheFirstLaunchPicksThatSurvive() async {
+    let seeded = StarterTemplates.firstLaunchPicks
+    let store = makeStore(seeded)
+    store.exhaustivity = .off
+
+    await store.send(.templateLibraryChanged(seeded))
+    #expect(store.state.firstLaunchStarters.map(\.name) == seeded.map(\.name))
+
+    // One deleted: the row shrinks rather than offering a template that isn't there.
+    await store.send(.templateLibraryChanged(Array(seeded.dropFirst())))
+    #expect(store.state.firstLaunchStarters.map(\.name) == seeded.dropFirst().map(\.name))
+  }
+
+  /// Starting from the canvas opens the dialog with the template already applied —
+  /// one click from an empty canvas to a filled-in brief.
+  @Test
+  @MainActor
+  func startingFromTheCanvasOpensTheDialogFilledIn() async {
+    let starter = StarterTemplates.firstLaunchPicks[1]  // Get the build green (Goal)
+    let store = makeStore([starter])
+    store.exhaustivity = .off
+
+    await store.send(.templateLibraryChanged([starter]))
+    await store.send(.startFromTemplateTapped(starter.id))
+    #expect(store.state.showingNewNodeForm)
+    #expect(store.state.draftLoopType == .goalBased)
+    #expect(store.state.templates.applied?.name == "Get the build green")
+    // Its token lives in the done check, so that is what Start is waiting on.
+    #expect(store.state.unfilledTokens == ["test_command"])
+    #expect(store.state.draftBlocksOnTokens)
+  }
+
   @Test
   @MainActor
   func theTypeLabelNamesTheShapeAndItsQualifier() {

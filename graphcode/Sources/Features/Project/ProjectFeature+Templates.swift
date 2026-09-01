@@ -146,6 +146,28 @@ extension ProjectFeature {
       state.templates.focusRequest = fields[(index + 1) % fields.count]
       return .none
 
+    case .templateLibraryRequested:
+      // The empty canvas offers starters, and it is the one surface that needs the
+      // library before anybody has opened the New loop dialog.
+      let projectPath = state.graph.project.path
+      let library = templateLibrary
+      return .run { send in
+        await send(.templateLibraryChanged(await library.load(projectPath)))
+      }
+
+    case .startFromTemplateTapped(let id):
+      guard let template = state.templates.library.first(where: { $0.id == id }) else {
+        return .none
+      }
+      // Opening the form resets the template state, so the library it just loaded is
+      // put back before the template lands in it.
+      let library = state.templates.library
+      let opened = openNodeForm(&state, backend: nil, parentNodeID: nil)
+      state.templates.library = library
+      applyTemplate(&state, template)
+      state.templates.focusRequest = .brief
+      return .merge(opened, countUse(of: template, in: state.graph.project.path))
+
     case .templateFocusConsumed:
       state.templates.focusRequest = nil
       return .none

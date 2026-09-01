@@ -1,3 +1,4 @@
+import GraphcodeKit
 import SwiftUI
 
 /// What a graph canvas shows when it has nothing on it yet.
@@ -17,6 +18,10 @@ struct CanvasEmptyState: View {
   let message: String
   let actionTitle: String
   let action: () -> Void
+  /// A few of the briefs the app ships with, offered as one-click starts. Empty
+  /// everywhere but a folder's own empty canvas — see `StarterTemplates`.
+  var starters: [PromptTemplate] = []
+  var onStart: ((PromptTemplate) -> Void)?
 
   init(
     symbol: String, title: String, message: String, actionTitle: String,
@@ -30,7 +35,15 @@ struct CanvasEmptyState: View {
   }
 
   /// A folder's canvas with no loops in it.
-  init(projectName: String, onCreateLoop: @escaping () -> Void) {
+  ///
+  /// The starter row is the point of this state, not decoration: somebody who has
+  /// never made a loop is being asked to pick one of five types, and three briefs
+  /// they can actually start answer that better than any sentence about taxonomy.
+  init(
+    projectName: String, starters: [PromptTemplate] = [],
+    onStart: ((PromptTemplate) -> Void)? = nil,
+    onCreateLoop: @escaping () -> Void
+  ) {
     self.init(
       symbol: "point.3.connected.trianglepath.dotted",
       title: "No loops in \(projectName) yet",
@@ -38,6 +51,8 @@ struct CanvasEmptyState: View {
         "Create a loop to run an AI coding session in this folder, then drag between loops to hand work off.",
       actionTitle: "Create Loop",
       action: onCreateLoop)
+    self.starters = starters
+    self.onStart = onStart
   }
 
   var body: some View {
@@ -52,13 +67,82 @@ struct CanvasEmptyState: View {
         .multilineTextAlignment(.center)
         .frame(maxWidth: 340)
       Button(actionTitle, action: action)
+      if !starters.isEmpty, let onStart {
+        starterRow(onStart)
+      }
     }
     .padding(24)
+  }
+
+  /// Three briefs, each labelled with the type it makes — the row is a taxonomy
+  /// lesson that happens to also be a way to start working.
+  private func starterRow(_ onStart: @escaping (PromptTemplate) -> Void) -> some View {
+    VStack(spacing: 8) {
+      Text("OR START FROM A TEMPLATE")
+        .font(.system(size: 10, weight: .bold))
+        .tracking(0.7)
+        .foregroundStyle(.secondary.opacity(0.7))
+        .padding(.top, 10)
+      HStack(alignment: .top, spacing: 8) {
+        ForEach(starters) { starter in
+          Button {
+            onStart(starter)
+          } label: {
+            VStack(alignment: .leading, spacing: 4) {
+              HStack(spacing: 5) {
+                RoundedRectangle(cornerRadius: 1.5)
+                  .fill((starter.shape ?? .sketch).accent)
+                  .frame(width: 3, height: 22)
+                VStack(alignment: .leading, spacing: 1) {
+                  Text(starter.name)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                  Text(typeLabel(starter))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                }
+              }
+              Text(starter.summaryLine)
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(2, reservesSpace: true)
+                .multilineTextAlignment(.leading)
+            }
+            .padding(9)
+            .frame(width: 168, alignment: .leading)
+            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+              RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            }
+            .contentShape(Rectangle())
+          }
+          .buttonStyle(.plain)
+          .help(starter.body)
+        }
+      }
+    }
+  }
+
+  private func typeLabel(_ template: PromptTemplate) -> String {
+    switch template.shape {
+    case .sketch, nil: return "Main — stops when you close it"
+    case .goalBased: return "Goal — stops when it's done"
+    case .timeBased:
+      let cadence = template.settings?.cadence?.lowercased() ?? ""
+      return cadence.isEmpty ? "Timed — runs again" : "Timed · \(cadence)"
+    case .turnBased: return "Turn — pauses for you"
+    case .composite: return "Composite — a group of loops"
+    }
   }
 }
 
 #Preview {
-  CanvasEmptyState(projectName: "preview", onCreateLoop: {})
-    .frame(width: 560, height: 420)
-    .background(Theme.canvasBackground)
+  CanvasEmptyState(
+    projectName: "preview", starters: StarterTemplates.firstLaunchPicks, onStart: { _ in },
+    onCreateLoop: {}
+  )
+  .frame(width: 560, height: 420)
+  .background(Theme.canvasBackground)
 }

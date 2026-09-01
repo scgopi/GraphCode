@@ -308,9 +308,15 @@ struct ProjectCanvasView: View {
   @ViewBuilder
   private var emptyState: some View {
     if store.canvasGraph.nodes.isEmpty {
-      CanvasEmptyState(projectName: store.openComposite?.title ?? store.graph.project.name) {
+      CanvasEmptyState(
+        projectName: store.openComposite?.title ?? store.graph.project.name,
+        starters: store.firstLaunchStarters,
+        onStart: { store.send(.startFromTemplateTapped($0.id)) }
+      ) {
         store.send(.addNodeButtonTapped(parentBackend: nil))
       }
+      // Only an empty canvas reads the library, and only to fill the starter row.
+      .onAppear { store.send(.templateLibraryRequested) }
     }
   }
 

@@ -281,6 +281,7 @@ struct AppFeature {
   private enum CancelID { case daemonSubscription }
 
   @Dependency(\.orchestratorClient) var orchestratorClient
+  @Dependency(\.templateLibrary) var templateLibrary
   @Dependency(\.terminalLayoutStore) var terminalLayoutStore
   @Dependency(\.quickChatStore) var quickChatStore
   @Dependency(\.updateClient) var updateClient
@@ -487,9 +488,7 @@ struct AppFeature {
         return .none
 
       case .onboardingDismissed:
-        state.showingOnboarding = false
-        UserDefaults.standard.set(true, forKey: "hasSeenOnboarding")
-        return .none
+        return finishOnboarding(&state)
 
       // Both handled by `historyReducer`, in `AppFeature+History.swift` — listed here
       // only so this switch stays exhaustive.
@@ -624,6 +623,15 @@ struct AppFeature {
 // the state and actions above keep growing.
 extension AppFeature {
 
+  /// The tour is over — and stays over. Written down rather than held in state so a
+  /// relaunch doesn't start it again; in the extension for the same reason `start` is,
+  /// the type body being at swiftlint's limit.
+  private func finishOnboarding(_ state: inout State) -> Effect<Action> {
+    state.showingOnboarding = false
+    UserDefaults.standard.set(true, forKey: "hasSeenOnboarding")
+    return .none
+  }
+
   /// Everything a launch has to do: restore the app-local lists, decide whether the
   /// primer is due, and open the daemon subscription the whole app hangs off.
   ///
@@ -663,6 +671,10 @@ extension AppFeature {
       // Ramps refresh once per launch, silently — the cached copy answers reads
       // until this lands, and a failure keeps the last good configuration.
       .run { _ in await FeatureRamps.refresh() },
+      // A fresh install has an empty template library, and an empty ⌘T picker teaches
+      // nothing about what the five loop types are for. Writes the shipped briefs
+      // once and never again, so a starter somebody deleted stays deleted.
+      .run { _ in await templateLibrary.seedStarters() },
       .send(.checkForUpdatesInBackground)
     )
   }

@@ -87,6 +87,46 @@ public struct TemplateStorage: Sendable {
       }
   }
 
+  // MARK: - Starters
+
+  /// Writes the templates the app ships with into the home folder, **once**.
+  ///
+  /// A fresh install has an empty library, and an empty ⌘T picker teaches nothing —
+  /// see `StarterTemplates` for what the ten briefs are chosen to demonstrate. They
+  /// are written as real files so they read, diff and edit like any other template.
+  ///
+  /// Two rules keep this from being annoying:
+  /// - **Once.** Guarded by `seededMarker` in the home folder, so a starter you
+  ///   deleted stays deleted rather than reappearing at every launch.
+  /// - **Never over anything.** A file already at that name is somebody's, and is
+  ///   left exactly as it is even on the first run.
+  ///
+  /// Returns what it actually wrote, which is empty on every launch after the first.
+  @discardableResult
+  public func seedStartersIfNeeded(_ starters: [PromptTemplate] = StarterTemplates.all) throws
+    -> [PromptTemplate]
+  {
+    let marker = homeDirectory.appendingPathComponent(Self.seededMarker)
+    guard !FileManager.default.fileExists(atPath: marker.path) else { return [] }
+    try FileManager.default.createDirectory(at: homeDirectory, withIntermediateDirectories: true)
+    var written: [PromptTemplate] = []
+    for starter in starters {
+      let url = homeDirectory.appendingPathComponent(starter.fileName)
+      guard !FileManager.default.fileExists(atPath: url.path) else { continue }
+      var seeded = starter
+      seeded.origin = .home
+      try TemplateFileCodec.encode(seeded).write(to: url, atomically: true, encoding: .utf8)
+      written.append(seeded)
+    }
+    // The marker is written last and on its own: a run that threw half way through
+    // should try again, not leave someone with four of the ten.
+    try Data().write(to: marker, options: .atomic)
+    return written
+  }
+
+  /// A dotfile, so it never shows up as a template — `read` skips hidden files.
+  static let seededMarker = ".starters-seeded"
+
   // MARK: - Writing
 
   /// Saves a template. Returns where it actually landed: **home unless the caller

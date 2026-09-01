@@ -160,18 +160,30 @@ extension ProjectFeature.State {
         || template.name.lowercased().contains(query)
         || template.body.lowercased().contains(query)
     }
+    // Starters stand apart only while they are the whole library. Once somebody has
+    // saved a brief of their own, the scaffolding stops outranking their work and
+    // sorts in with everything else in All projects.
+    let pinStarters = !templates.library.contains { !$0.isStarter && !$0.origin.isProject }
     var project: [PromptTemplate] = []
+    var starters: [PromptTemplate] = []
     var home: [PromptTemplate] = []
     for template in templates.library where matches(template) {
-      if template.origin.isProject { project.append(template) } else { home.append(template) }
+      if template.origin.isProject {
+        project.append(template)
+      } else if pinStarters, template.isStarter {
+        starters.append(template)
+      } else {
+        home.append(template)
+      }
     }
-    return
-      project
-      .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-      .map { ProjectFeature.TemplatePickerRow(template: $0, scope: .project) }
-      + home
-      .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-      .map { ProjectFeature.TemplatePickerRow(template: $0, scope: .home) }
+    func rows(
+      _ templates: [PromptTemplate], _ scope: ProjectFeature.TemplatePickerScope
+    ) -> [ProjectFeature.TemplatePickerRow] {
+      templates
+        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        .map { ProjectFeature.TemplatePickerRow(template: $0, scope: scope) }
+    }
+    return rows(project, .project) + rows(starters, .starter) + rows(home, .home)
   }
 
   /// The fields still holding a `{token}`, in the order `⇥` walks them — the order
@@ -188,6 +200,15 @@ extension ProjectFeature.State {
     case .doneCheck: return draftPredicate
     case .metric: return draftMetric
     case .branch: return draftBranch
+    }
+  }
+
+  /// The starters offered on an empty canvas: the shipped picks, in the order
+  /// `StarterTemplates` names them, and only the ones still on disk — a starter
+  /// somebody deleted is not offered back to them.
+  var firstLaunchStarters: [PromptTemplate] {
+    StarterTemplates.firstLaunchPicks.compactMap { pick in
+      templates.library.first { $0.id == pick.id }
     }
   }
 
@@ -367,15 +388,18 @@ extension ProjectFeature {
     case branch
   }
 
-  /// The two scope groups the picker sorts by — a project's committed templates
-  /// above the home library, always.
+  /// The groups the picker sorts by — a project's committed templates above the home
+  /// library, always, with the briefs the app ships pinned between them while they are
+  /// still the only thing here.
   enum TemplatePickerScope: Equatable {
     case project
+    case starter
     case home
 
     var displayName: String {
       switch self {
       case .project: return "This project"
+      case .starter: return "Starters"
       case .home: return "All projects"
       }
     }
