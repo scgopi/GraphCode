@@ -36,15 +36,11 @@ struct StarterTemplateTests {
     for main in StarterTemplates.all where main.shape == nil {
       #expect(main.settings == nil)
     }
-    // Goal shows all three of its cases: a check that decides, no check at all, and
-    // a metric.
+    // Goal is the workhorse and gets three. None carries a setting with a hole in
+    // it — see `theOneFillRule` — so the three differ by brief, not by settings.
     let goals = StarterTemplates.all.filter { $0.shape == .goalBased }
-    let withCheck = goals.filter { $0.settings?.doneCheck != nil }.count
-    let withoutCheck = goals.filter { $0.settings?.doneCheck == nil }.count
-    let withMetric = goals.filter { $0.settings?.metric != nil }.count
-    #expect(withCheck > 0)
-    #expect(withoutCheck > 0)
-    #expect(withMetric > 0)
+    #expect(goals.count == 3)
+    #expect(Set(goals.map(\.name)).count == 3)
     // Timed always carries a cadence — a timed loop without one is not the type.
     for timed in StarterTemplates.all where timed.shape == .timeBased {
       #expect(timed.settings?.cadence?.isEmpty == false)
@@ -81,6 +77,16 @@ struct StarterTemplateTests {
     #expect(Set(StarterTemplates.all.map(\.fileName)).count == StarterTemplates.all.count)
   }
 
+  /// The seeder decides whether a file is still the one it wrote by hashing what it
+  /// would write; a starter that encoded differently on every access would look
+  /// edited-by-us at every launch and be rewritten each time.
+  @Test
+  func everyStarterEncodesIdentically() {
+    let once = StarterTemplates.all.map { TemplateFileCodec.encode($0) }
+    let twice = StarterTemplates.all.map { TemplateFileCodec.encode($0) }
+    #expect(once == twice)
+  }
+
   /// The three offered on an empty canvas climb the commitment ladder — that is what
   /// makes the row a lesson rather than three arbitrary briefs.
   @Test
@@ -98,13 +104,50 @@ struct StarterTemplateTests {
     }
   }
 
-  /// Every token is a hole somebody can be expected to fill from where they're
-  /// standing — and the brief has to say enough for them to know what to put in it.
+  /// **One fill, at the top.** At most one token per starter, appearing exactly once,
+  /// on the first line — and never in a setting. Filling a template is typing over
+  /// one thing, not hunting the same word through four paragraphs.
   @Test
-  func everyStarterReadsAsAFinishedBrief() {
+  func theOneFillRule() {
     for template in StarterTemplates.all {
-      #expect(!template.name.isEmpty)
-      #expect(template.body.count > 40, "\(template.name) is too terse to teach anything")
+      let tokens = template.tokens
+      #expect(tokens.count <= 1, "\(template.name) asks for \(tokens)")
+      if let token = tokens.first {
+        let occurrences = template.body.components(separatedBy: "{\(token)}").count - 1
+        #expect(occurrences == 1, "\(template.name) repeats {\(token)} \(occurrences)×")
+        let firstLine =
+          template.body.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? ""
+        #expect(firstLine.contains("{\(token)}"), "\(template.name)'s hole isn't on its first line")
+      }
+      for setting in [
+        template.settings?.doneCheck, template.settings?.metric, template.settings?.branch,
+        template.settings?.cadence,
+      ] {
+        #expect(
+          PromptTemplate.tokens(in: setting ?? "").isEmpty,
+          "\(template.name) hides a hole in a setting")
+      }
+      // A carried graph is nowhere the dialog can show a hole, so it must have none.
+      for child in template.settings?.carriedGraph?.nodes ?? [] {
+        let inSummary = PromptTemplate.tokens(in: child.goal?.summary ?? "")
+        let inPredicate = PromptTemplate.tokens(in: child.goal?.predicate ?? "")
+        #expect(inSummary.isEmpty, "\(child.title) carries \(inSummary)")
+        #expect(inPredicate.isEmpty, "\(child.title) carries \(inPredicate)")
+      }
+      // Names are names, not fill-in forms.
+      #expect(
+        PromptTemplate.tokens(in: template.name).isEmpty, "\(template.name) has a hole in its name")
+    }
+  }
+
+  /// Short enough to read in the picker before choosing it. The leader is the longest
+  /// on purpose and still under a hundred words; the rest are a few sentences.
+  @Test
+  func everyStarterIsShort() {
+    for template in StarterTemplates.all {
+      let words = template.body.split(whereSeparator: \.isWhitespace).count
+      #expect(words <= 100, "\(template.name) is \(words) words")
+      #expect(words >= 15, "\(template.name) is too terse to teach anything")
       #expect(template.isStarter)
       #expect(template.origin == .home)
     }
@@ -118,16 +161,15 @@ struct StarterTemplateTests {
     #expect(lead.name == "Lead a team toward a goal")
     #expect(lead.shape == nil)
     #expect(lead.settings == nil)
-    #expect(lead.tokens == ["goal", "topic"])
-    for command in [
-      "graphcode node create", "--type goal", "--type time", "/loop 30m",
-      "graphcode artifactory watch", "graphcode artifactory sync", "graphcode artifactory post",
-      "graphcode node send", "--follow-up",
-    ] {
-      #expect(lead.body.contains(command), "missing \(command)")
+    #expect(lead.tokens == ["goal"])
+    // Task first: the goal is the first line, and the only thing to fill.
+    #expect(lead.body.hasPrefix("Goal: {goal}\n"))
+    // The method in words, not a CLI transcript — the loop's own instructions carry
+    // the flags. What the brief has to say is which loop type for which piece, and
+    // that the Artifactory is the inbox.
+    for phrase in ["goal loop", "timed loop", "Artifactory", "inbox", "topic", "closing note"] {
+      #expect(lead.body.contains(phrase), "missing \(phrase)")
     }
-    // Task first: the goal is the first thing the brief says.
-    #expect(lead.body.hasPrefix("Lead the work toward this goal: {goal}."))
   }
 
   // MARK: - Seeding
@@ -148,6 +190,56 @@ struct StarterTemplateTests {
     let names = storage.load(projectPath: nil).map(\.name)
     #expect(names.contains("Lead a team toward a goal"))
     #expect(!names.contains(deleted.name))
+  }
+
+  /// A starter nobody edited is ours to keep current: when the shipped text changes,
+  /// the file is refreshed. One somebody edited is theirs, and is left alone.
+  @Test
+  func untouchedStartersRefreshAndEditedOnesDoNot() throws {
+    var first = StarterTemplates.whereDoesThisLive
+    first.body = "The old text this install was shipped."
+    var second = StarterTemplates.whyDidThisBreak
+    second.body = "Another old text."
+    try storage.seedStartersIfNeeded([first, second])
+
+    // The person edits the second one.
+    let mine = try #require(storage.load(projectPath: nil).first { $0.id == second.id })
+    var edited = mine
+    edited.body = "My own rewrite."
+    try storage.update(edited, replacing: mine)
+
+    // A new build ships new text for both.
+    let refreshed = try storage.seedStartersIfNeeded([
+      StarterTemplates.whereDoesThisLive, StarterTemplates.whyDidThisBreak,
+    ])
+    #expect(refreshed.map(\.id) == [first.id])
+    let bodies = Dictionary(
+      uniqueKeysWithValues: storage.load(projectPath: nil).map { ($0.id, $0.body) })
+    #expect(bodies[first.id] == StarterTemplates.whereDoesThisLive.body)
+    #expect(bodies[second.id] == "My own rewrite.")
+    // And nothing further to do next launch.
+    let again = try storage.seedStartersIfNeeded([
+      StarterTemplates.whereDoesThisLive, StarterTemplates.whyDidThisBreak,
+    ])
+    #expect(again.isEmpty)
+  }
+
+  /// A beta2/beta3 install has the old bodies and a marker with no hashes. Its
+  /// starters that still carry the mark are refreshed once, so the shorter briefs
+  /// reach the people who asked for them.
+  @Test
+  func aLegacyInstallGetsTheNewBodiesOnce() throws {
+    try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    var old = StarterTemplates.getTheBuildGreen
+    old.body = "The build is failing. A long old brief with {test_command} in the done check."
+    try TemplateFileCodec.encode(old)
+      .write(to: home.appendingPathComponent(old.fileName), atomically: true, encoding: .utf8)
+    try Data().write(to: home.appendingPathComponent(TemplateStorage.seededMarker))
+
+    let refreshed = try storage.seedStartersIfNeeded([StarterTemplates.getTheBuildGreen])
+    #expect(refreshed.map(\.name) == ["Get the build green"])
+    #expect(
+      storage.load(projectPath: nil).first?.body == StarterTemplates.getTheBuildGreen.body)
   }
 
   /// beta2 and beta3 wrote an empty marker. That install seeded everything that

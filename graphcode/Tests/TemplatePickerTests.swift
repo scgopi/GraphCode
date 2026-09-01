@@ -265,9 +265,10 @@ struct TemplatePickerTests {
     #expect(store.state.showingNewNodeForm)
     #expect(store.state.draftLoopType == .goalBased)
     #expect(store.state.templates.applied?.name == "Get the build green")
-    // Its token lives in the done check, so that is what Start is waiting on.
+    // One thing to fill, on the brief's first line.
     #expect(store.state.unfilledTokens == ["test_command"])
     #expect(store.state.draftBlocksOnTokens)
+    #expect(store.state.draftGoal.hasPrefix("Test command: {test_command}"))
   }
 
   @Test
