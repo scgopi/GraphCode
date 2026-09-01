@@ -290,13 +290,15 @@ func jsonRendersTheSameTruthInOtherSyntax() throws {
 
   let forReader = try #require(
     GraphcodeCommand.renderArtifactoryJSON(graph, unreadFor: reader.id).data(using: .utf8))
-  let decoded = try JSONDecoder().decode(Board.self, from: forReader)
+  let decoder = JSONDecoder()
+  decoder.dateDecodingStrategy = .iso8601
+  let decoded = try decoder.decode(Board.self, from: forReader)
   #expect(decoded.lastRead == 1)
   #expect(decoded.posts.map(\.id) == [2, 3])
 
   let whole = try #require(
     GraphcodeCommand.renderArtifactoryJSON(graph).data(using: .utf8))
-  let everything = try JSONDecoder().decode(Board.self, from: whole)
+  let everything = try decoder.decode(Board.self, from: whole)
   #expect(everything.posts.count == 3)
   #expect(everything.lastRead == nil)
 }
@@ -316,4 +318,91 @@ func statusLineCountsPostsAndUnreadOnlyWhenThereAreAny() {
 
   let rendered = GraphcodeCommand.render(graph, artifactoryReader: reader.id)
   #expect(rendered.contains("artifactory: 3 posts, 2 unread for you"))
+}
+
+// MARK: Read-side review round (status-line blast radius, json+search, boundaries)
+
+@Test
+func statusLineSurvivesAnEmptyNodeGraphWithHumanPosts() {
+  var graph = LoopGraph(project: ProjectRef(path: "/tmp/x", name: "x"))
+  graph.artifactory = [
+    ArtifactoryPost(
+      id: 1, at: Date(timeIntervalSince1970: 0), authorID: nil, author: "a human",
+      topic: nil, body: "written after the last loop was deleted")
+  ]
+
+  let rendered = GraphcodeCommand.render(graph)
+  #expect(rendered.contains("no loops yet"))
+  #expect(rendered.contains("artifactory: 1 post"))
+}
+
+@Test
+func neverTouchedBoardRendersExactlyAsBeforeTheArtifactory() {
+  var graph = LoopGraph(project: ProjectRef(path: "/tmp/x", name: "x"))
+  graph.nodes.append(LoopNode(title: "Solo", loopType: .turnBased, firstInstruction: "Work"))
+
+  let rendered = GraphcodeCommand.render(graph, artifactoryReader: UUID())
+  #expect(!rendered.contains("artifactory:"))
+  #expect(!rendered.contains("\n  edges:"))
+}
+
+@Test
+func foreignReaderGetsThePlainCountLikeAHuman() {
+  let (graph, _) = boardWithPosts()
+  // The daemon refuses sync for a reader absent from this graph; the status line
+  // claims no "unread for you" for one either.
+  #expect(
+    GraphcodeCommand.renderArtifactoryStatusLine(graph, readerID: UUID())
+      == "artifactory: 3 posts")
+}
+
+@Test
+func listJSONHonorsTheSearchFilter() throws {
+  struct Board: Decodable {
+    let posts: [ArtifactoryPost]
+  }
+  let (graph, _) = boardWithPosts()
+
+  let filtered = try #require(
+    GraphcodeCommand.renderArtifactoryJSON(graph, search: "deadlock").data(using: .utf8))
+  let decoder = JSONDecoder()
+  decoder.dateDecodingStrategy = .iso8601
+  #expect(try decoder.decode(Board.self, from: filtered).posts.map(\.id) == [3])
+}
+
+@Test
+func jsonDatesAreISOTwo8601NotTheEncoderDefault() throws {
+  struct Board: Decodable {
+    let posts: [ArtifactoryPost]
+  }
+  let (graph, _) = boardWithPosts()
+  let data = try #require(
+    GraphcodeCommand.renderArtifactoryJSON(graph).data(using: .utf8))
+
+  // The pin: decode with the ISO-8601 strategy explicitly. The default (seconds
+  // since 2001-01-01) fails here, so nobody can silently change the wire format.
+  let decoder = JSONDecoder()
+  decoder.dateDecodingStrategy = .iso8601
+  let decoded = try decoder.decode(Board.self, from: data)
+  #expect(decoded.posts.count == 3)
+}
+
+@Test
+func headlineTruncatesOnlyPastTheBoundaryAndStaysOneLine() {
+  // Rendered prefix up to the body: "#1 from a human at <stamp> — " — build the
+  // body so the full line lands exactly at 80, then at 81.
+  let at = Date(timeIntervalSince1970: 0)
+  let prefix = GraphcodeCommand.render(
+    ArtifactoryPost(id: 1, at: at, authorID: nil, author: "a human", topic: nil, body: "")
+  )
+  let exact = ArtifactoryPost(
+    id: 1, at: at, authorID: nil, author: "a human", topic: nil,
+    body: String(repeating: "a", count: 80 - prefix.count))
+  let over = ArtifactoryPost(
+    id: 1, at: at, authorID: nil, author: "a human", topic: nil,
+    body: String(repeating: "a", count: 81 - prefix.count))
+
+  #expect(GraphcodeCommand.renderHeadline(exact) == GraphcodeCommand.render(exact))
+  #expect(GraphcodeCommand.renderHeadline(over).hasSuffix("…"))
+  #expect(!GraphcodeCommand.renderHeadline(over).contains("\n"))
 }

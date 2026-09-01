@@ -98,7 +98,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
                            read your unread posts and mark the board read; --headlines
                            prints one triage line each (deep-read with `read`), --mark
                            advances the cursor without printing the backlog, --json is
-                           the machine-readable shape
+                           the machine-readable shape. Combined, the output wins in the
+                           order --json > --mark > --headlines; the cursor advances
+                           whichever flags you pass
       graphcode artifactory read <project-path> <post-id>
                            one post in full — the deep-read half of --headlines
       graphcode artifactory list <project-path> [--search <text>] [--json]
@@ -743,6 +745,12 @@ extension GraphcodeCommand {
     var lines = ["\(graph.project.name)  (\(graph.aggregateState))"]
     if graph.nodes.isEmpty {
       lines.append("  no loops yet")
+      // The board can outlive every loop on it — human posts carry no authorID, so
+      // "last loop deleted" does not mean "board empty". The line belongs on this
+      // path too, not only on the rendered-below one.
+      if let boardLine = renderArtifactoryStatusLine(graph, readerID: readerID) {
+        lines.append("  \(boardLine)")
+      }
       return lines.joined(separator: "\n")
     }
     for node in graph.nodes {
@@ -859,23 +867,36 @@ extension GraphcodeCommand {
   }
 
   /// The board as one machine-readable object — the same posts `renderArtifactory`
-  /// would print, plus the reader's cursor so a client can compute unread itself.
-  /// `ArtifactoryPost` is already Codable; this is the same truth in the other syntax.
+  /// would print (the same `search` filter included, so `--search --json` shows a
+  /// filtered board, never quietly an unfiltered one), plus the reader's cursor so a
+  /// client can compute unread itself. Dates are ISO-8601, pinned by test — the
+  /// encoder's default (seconds since 2001) is a wire format only this process
+  /// should ever have to know about.
   public static func renderArtifactoryJSON(
-    _ graph: LoopGraph, unreadFor readerID: UUID? = nil
+    _ graph: LoopGraph, unreadFor readerID: UUID? = nil, search: String? = nil
   ) -> String {
     struct Board: Encodable {
       var posts: [ArtifactoryPost]
       var lastRead: Int?
     }
-    let board = Board(
-      posts:
-        readerID.map {
-          Artifactory.unread(in: graph.artifactory, since: graph.nodes[id: $0]?.lastArtifactoryRead)
-        } ?? graph.artifactory,
-      lastRead: readerID.flatMap { graph.nodes[id: $0]?.lastArtifactoryRead })
+    var posts: [ArtifactoryPost]
+    if let readerID {
+      posts = Artifactory.unread(
+        in: graph.artifactory, since: graph.nodes[id: readerID]?.lastArtifactoryRead)
+    } else {
+      posts = graph.artifactory
+    }
+    if let search, !search.isEmpty {
+      let needle = search.lowercased()
+      posts = posts.filter {
+        $0.body.lowercased().contains(needle) || $0.author.lowercased().contains(needle)
+          || $0.topic?.lowercased().contains(needle) == true
+      }
+    }
+    let board = Board(posts: posts, lastRead: readerID.flatMap { graph.nodes[id: $0]?.lastArtifactoryRead })
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]
+    encoder.dateEncodingStrategy = .iso8601
     guard let data = try? encoder.encode(board) else { return "{}" }
     return String(decoding: data, as: UTF8.self)
   }
@@ -892,7 +913,12 @@ extension GraphcodeCommand {
     guard !graph.artifactory.isEmpty else { return nil }
     let total = graph.artifactory.count
     let plural = total == 1 ? "" : "s"
-    guard let readerID else { return "artifactory: \(total) post\(plural)" }
+    // "Unread for you" needs a *you* this board knows: the daemon refuses sync for a
+    // reader absent from the graph, so the status line claims no unread for one
+    // either — a foreign or stale id gets the plain count, same as a human.
+    guard let readerID, graph.nodes[id: readerID] != nil else {
+      return "artifactory: \(total) post\(plural)"
+    }
     let unread = Artifactory.unread(
       in: graph.artifactory, since: graph.nodes[id: readerID]?.lastArtifactoryRead
     ).count
@@ -915,7 +941,9 @@ extension GraphcodeCommand {
   /// how a loop joining after forty messages spends forty lines instead of forty
   /// kilobytes, and deep-reads only the posts that turned out to matter.
   public static func renderHeadline(_ post: ArtifactoryPost) -> String {
-    let full = render(post)
+    // Bodies are single-line at the daemon (memos flatten), but this renders a
+    // *rendered line*, and the one-triage-line promise survives anything.
+    let full = render(post).replacingOccurrences(of: "\n", with: " ")
     let budget = 80
     guard full.count > budget else { return full }
     return String(full.prefix(budget)) + "…"
@@ -1063,7 +1091,9 @@ extension GraphcodeCommand {
     case "read":
       try validateFlags(arguments, allowed: [])
       let raw = try take(&arguments, name: "post-id")
-      guard let postID = Int(raw) else {
+      // One-based by construction — the daemon's ids start at 1 — so "-7" is a typo,
+      // never a post, and says so here rather than at the runtime lookup.
+      guard let postID = Int(raw), postID >= 1 else {
         throw ParseError.invalidValue(argument: "post-id", value: raw)
       }
       return .artifactoryRead(projectPath: path, postID: postID)

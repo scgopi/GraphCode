@@ -375,7 +375,7 @@ do {
     }
 
   case .artifactorySync(let projectPath, let headlines, let mark, let json):
-    // Attributed like `node send` — and required, the one place a artifactory verb
+    // Attributed like `node send` — and required, the one place an artifactory verb
     // refuses a human shell up front: the cursor is the calling loop's, so with no
     // ZMX_SESSION there is nobody to advance it for, and the daemon's refusal would
     // arrive only after the round trip. Reading without a cursor is `artifactory list`.
@@ -413,7 +413,11 @@ do {
         // The quiet sync: the backlog is not the loop's problem any more, and the
         // one line says the cursor actually moved — a silent success would read,
         // to the loop that sent it, like a command nobody applied.
-        print("marked read up to #\(graph.artifactory.last?.id ?? 0)")
+        if let latest = graph.artifactory.last?.id, latest > 0 {
+          print("marked read up to #\(latest)")
+        } else {
+          print("marked read — the board is empty")
+        }
       } else {
         print(GraphcodeCommand.renderArtifactory(graph, unreadFor: reader, headlines: headlines))
       }
@@ -422,8 +426,7 @@ do {
   case .artifactoryRead(let projectPath, let postID):
     // Read-only: the post rides the snapshot, no command is sent, no cursor moves —
     // the deep-read half of `sync --headlines` triage, priced at one line of context
-    // per post a loop actually decides to care about.
-    try client.send(.openProject(path: projectPath))
+    // per post a loop actually decides to care about.    try client.send(.openProject(path: projectPath))
     let read = try client.waitForEvent {
       if case .graphChanged = $0 { return true } else { return false }
     }
@@ -447,7 +450,7 @@ do {
     }
     if case .graphChanged(let graph) = opened {
       if json {
-        print(GraphcodeCommand.renderArtifactoryJSON(graph))
+        print(GraphcodeCommand.renderArtifactoryJSON(graph, search: search))
       } else {
         print(GraphcodeCommand.renderArtifactory(graph, search: search))
       }
