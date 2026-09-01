@@ -123,13 +123,20 @@ struct ArtifactorySection: View {
         // in a list that can be taller than the rail — it could open scrolled out of
         // sight, and it moved under the pointer as posts arrived. Pinned here it is
         // always the thing directly above the section's rule while you are writing.
-        if isComposing {
-          composer
-        } else {
-          leaveANoteButton
-        }
+        leaveANoteButton
       }
       Rectangle().fill(.white.opacity(0.07)).frame(height: 1)
+    }
+    // A sheet, not a field in the rail — the only shape text entry has ever worked in
+    // this app, and now it is clear why. Ghostty's `NSView` holds the window's first
+    // responder while a loop is open, and `@FocusState` cannot take it off an AppKit
+    // view inside the same window: the caret never arrived, so every keystroke went to
+    // the terminal and the draft stayed empty. A sheet gets its own key window, which
+    // is why `JumpPaletteView` focuses with a bare `onAppear` and why the rename and
+    // delete prompts are hosted the same way. See `AppView`'s note on ⌘K opening over
+    // a terminal as readily as over a canvas.
+    .sheet(isPresented: $isComposing) {
+      composerSheet
     }
   }
 
@@ -327,67 +334,65 @@ struct ArtifactorySection: View {
 
   // MARK: - Composing
 
-  /// A human's voice on the board. Anchored at the foot, where the post will land.
-  private var composer: some View {
-    VStack(alignment: .leading, spacing: 7) {
-      TextField("topic (optional)", text: $draftTopic)
-        .textFieldStyle(.plain)
-        .font(.system(size: 10.5))
-        .foregroundStyle(.white.opacity(0.75))
-      TextField("a note for whoever comes next", text: $draft, axis: .vertical)
-        .textFieldStyle(.plain)
-        .font(.system(size: 12.5))
-        .foregroundStyle(.white.opacity(0.92))
-        .lineLimit(2...6)
-        .focused($draftFocused)
+  /// A human's voice on the board.
+  private var composerSheet: some View {
+    VStack(spacing: 12) {
+      Text("Leave a note").font(.headline)
+
+      Text(
+        """
+        Every loop in this project reads this board, including loops that do not exist \
+        yet. Post what a peer or a successor should not have to rediscover — a dead end, \
+        a decision, a claim you are staking.
+        """
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
+      .fixedSize(horizontal: false, vertical: true)
+      .frame(maxWidth: .infinity, alignment: .leading)
+
+      Form {
+        TextField("Topic (optional)", text: $draftTopic, prompt: Text("claims, build, findings"))
+          .autocorrectionDisabled()
+        TextField("Note", text: $draft, axis: .vertical)
+          .lineLimit(3...10)
+          .focused($draftFocused)
+      }
+      .formStyle(.columns)
+      .fixedSize(horizontal: false, vertical: true)
+
       HStack(spacing: 6) {
         Image(systemName: "person")
-          .font(.system(size: 8))
-          .foregroundStyle(.white.opacity(0.42))
-        Text("posting as a human")
           .font(.system(size: 10))
-          .foregroundStyle(.white.opacity(0.42))
+          .foregroundStyle(.secondary)
+        Text("Posts as “a human” — the app carries no loop identity.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
         Spacer(minLength: 0)
-        // Shown only as the bound approaches: a counter on an empty field is chrome,
-        // and the daemon refuses anything over this anyway.
+        // Only as the bound approaches: the daemon refuses anything over it, and a
+        // counter on an empty field is chrome.
         if remainingBytes <= 120 {
           Text("\(remainingBytes)")
-            .font(.system(size: 10, design: .monospaced))
-            .foregroundStyle(remainingBytes < 0 ? .red : .white.opacity(0.5))
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundStyle(remainingBytes < 0 ? .red : .secondary)
         }
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+
+      HStack {
         Button("Cancel") { cancelCompose() }
-          .buttonStyle(.plain)
-          .font(.system(size: 10.5))
-          .foregroundStyle(.white.opacity(0.5))
           .keyboardShortcut(.cancelAction)
+        Spacer()
         Button("Post") { submit() }
-          .buttonStyle(.plain)
-          .font(.system(size: 10.5, weight: .semibold))
-          .foregroundStyle(
-            canPost
-              ? AnyShapeStyle(Color(red: 0.549, green: 0.773, blue: 1.0))
-              : AnyShapeStyle(.white.opacity(0.3))
-          )
+          .keyboardShortcut(.defaultAction)
           .disabled(!canPost)
-          .keyboardShortcut(.return, modifiers: .command)
       }
     }
-    .padding(.horizontal, 10)
-    .padding(.vertical, 9)
-    .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 9))
-    .overlay {
-      RoundedRectangle(cornerRadius: 9)
-        .stroke(Theme.paneFocusTint.opacity(0.45), lineWidth: 1)
-    }
-    // A `@FocusState` write only lands on a field that is *already* in the view tree.
-    // Setting it in the same transaction that creates the composer — which is what the
-    // + button used to do — is dropped on the floor, and with the rail unfocused every
-    // keystroke goes to the terminal instead: the draft stays empty, so Post stays
-    // disabled and the section looks like it does nothing. `onAppear` is a transaction
-    // too, hence the hop: the field exists by the time this runs.
-    .onAppear {
-      DispatchQueue.main.async { draftFocused = true }
-    }
+    .padding(24)
+    .frame(width: 420)
+    // No run-loop hop needed, unlike the rail: the sheet's own window is key by the
+    // time this runs, which is the whole reason the composer moved into one.
+    .onAppear { draftFocused = true }
   }
 
   private var trimmedDraft: String {
