@@ -2,11 +2,13 @@ import ComposableArchitecture
 import Foundation
 import GraphcodeKit
 
-/// Loop ▸ Restart Session and Restart All Sessions… — kill a loop's `zmx` session and
-/// bring it back on the same transcript (`GraphCommand.restartNode`), for the day `zmx`
-/// or a backend CLI was replaced under every running loop.
+/// The Loop menu's verbs on a session: Stop Loop, and Restart Session / Restart All
+/// Sessions… — kill a loop's `zmx` session and bring it back on the same transcript
+/// (`GraphCommand.restartNode`), for the day `zmx` or a backend CLI was replaced under
+/// every running loop. Stop lives here too because it is the same shape (a menu item, a
+/// daemon command) and `AppFeature.swift` is at its lint budget.
 ///
-/// The app's half is about panes, not sessions. A mounted agent pane reads its process
+/// A restart's app half is about panes, not sessions. A mounted agent pane reads its process
 /// exiting as the loop resolving (`primarySurfaceExited`), and a retained one keeps that
 /// callback after the loop was switched away from — so every affected surface is
 /// retired *before* the daemon is asked, and the workspace that was open is remounted
@@ -36,9 +38,20 @@ struct SessionRestart: Equatable {
 }
 
 extension AppFeature {
-  var sessionRestartReducer: some ReducerOf<Self> {
+  var loopSessionsReducer: some ReducerOf<Self> {
     Reduce { state, action in
       switch action {
+      case .stopNodeTapped(let projectPath, let nodeID):
+        return .run { _ in
+          try? await orchestratorClient.send(
+            .graphCommand(projectPath: projectPath, command: .stopNode(nodeID)))
+        }
+
+      case .openLoop(.stopLoopTapped):
+        guard let id = state.openLoop?.node.id, let path = state.openLoop?.projectPath
+        else { return .none }
+        return .send(.stopNodeTapped(projectPath: path, nodeID: id))
+
       case .sessionRestart(.openLoopTapped):
         // A chat is not a node in any graph — the daemon has nothing to restart.
         guard let open = state.openLoop, !state.isQuickChat(open.node.id) else { return .none }

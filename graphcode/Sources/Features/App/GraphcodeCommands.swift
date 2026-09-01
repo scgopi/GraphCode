@@ -85,7 +85,7 @@ struct GraphcodeCommands: Commands {
       Divider()
 
       // The recovery for a replaced `zmx` or backend CLI: the session is killed and
-      // picked back up on the same transcript. See `AppFeature+SessionRestart.swift`.
+      // picked back up on the same transcript. See `AppFeature+LoopSessions.swift`.
       Button("Restart Session") { store.send(.sessionRestart(.openLoopTapped)) }
         .disabled(!hasRestartableLoop)
       Button("Restart All Sessions…") { store.send(.sessionRestart(.allTapped)) }

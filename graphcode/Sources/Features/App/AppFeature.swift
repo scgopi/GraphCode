@@ -125,7 +125,7 @@ struct AppFeature {
     /// A bundle replaced underneath this running app — see `BundleSwap` in
     /// `AppFeature+Updates.swift`.
     var bundleSwap = BundleSwap()
-    /// Restart Session / Restart All Sessions — see `AppFeature+SessionRestart.swift`.
+    /// Restart Session / Restart All Sessions — see `AppFeature+LoopSessions.swift`.
     var sessionRestart = SessionRestart()
 
     /// State changes seen since launch, for the activity strip — see
@@ -309,7 +309,7 @@ struct AppFeature {
     jumpPaletteReducer
     updatesReducer
     historyReducer
-    sessionRestartReducer
+    loopSessionsReducer
     // Before the main Reduce on purpose: its `.graphChanged` diff needs the previous
     // graph, which the main reducer replaces. See `AppFeature+Worktrees.swift`.
     AppWorktreesReducer()
@@ -481,18 +481,17 @@ struct AppFeature {
       case .selectPreviousLoop:
         return stepOpenLoop(state, by: -1)
 
-      case .stopNodeTapped(let projectPath, let nodeID):
-        return .run { _ in
-          try? await orchestratorClient.send(
-            .graphCommand(projectPath: projectPath, command: .stopNode(nodeID)))
-        }
-
       case .onboardingRequested:
         state.showingOnboarding = true
         return .none
 
       case .onboardingDismissed:
         return finishOnboarding(&state)
+
+      // Stop and restart are handled by `loopSessionsReducer`, in
+      // `AppFeature+LoopSessions.swift` — listed here so this switch stays exhaustive.
+      case .stopNodeTapped, .sessionRestart:
+        return .none
 
       // Both handled by `historyReducer`, in `AppFeature+History.swift` — listed here
       // only so this switch stays exhaustive.
@@ -503,7 +502,7 @@ struct AppFeature {
       // `AppFeature+Updates.swift` — listed here only so this switch stays exhaustive.
       case .checkForUpdatesTapped, .checkForUpdatesInBackground, .updateFoundInBackground,
         .updateBannerTapped, .updateCheckCompleted, .updateDownloadTapped,
-        .bundleSwap, .sessionRestart,
+        .bundleSwap,
         .updateReleaseNotesTapped, .updateAlertDismissed, .updateNoticeDismissed,
         .updateInstallTapped, .updateInstallConfirmed, .updateInstallResolved,
         .updateInstallProgressed,
@@ -575,11 +574,6 @@ struct AppFeature {
           try? await orchestratorClient.send(
             .graphCommand(projectPath: projectPath, command: .deleteNode(id)))
         }
-
-      case .openLoop(.stopLoopTapped):
-        guard let id = state.openLoop?.node.id, let path = state.openLoop?.projectPath
-        else { return .none }
-        return .send(.stopNodeTapped(projectPath: path, nodeID: id))
 
       case .openLoop(.showInGraphTapped):
         // Closing the workspace *without* ending its terminals: the loop keeps running,
@@ -719,23 +713,13 @@ extension AppFeature {
   /// doesn't. The refusal raises the notice alert rather than doing nothing: a
   /// silent dead click reads as a broken canvas, not a rule (#194 follow-up).
   private func openNode(_ nodeID: UUID, in path: String, _ state: inout State) -> Effect<Action> {
-    guard let node = state.projects[id: path]?.graph.nodes[id: nodeID]
+    guard let graph = state.projects[id: path]?.graph, let node = graph.nodes[id: nodeID]
     else { return .none }
     guard node.opensOnHumanTap else {
-      state.blockedLoopNotice = BlockedLoopNotice(
-        node: node, graph: state.projects[id: path]?.graph)
+      state.blockedLoopNotice = BlockedLoopNotice(node: node, graph: graph)
       return .none
     }
-    let layout = terminalLayoutStore.load(forNode: nodeID) ?? .defaultLayout(forNode: nodeID)
-    state.openLoop = LoopWorkspaceFeature.State(
-      node: node,
-      graph: state.projects[id: path]?.graph ?? LoopGraph(scope: .global),
-      layout: layout,
-      projectPath: path,
-      projectName: state.projects[id: path]?.graph.project.name ?? path)
-    state.openLoop?.seenArtifactoryPostID =
-      LoopWorkspaceRail.loadSeenArtifactoryPost(forProjectPath: path)
-    state.selectedProjectPath = path
+    mountWorkspace(node: node, graph: graph, projectPath: path, &state)
     recordVisit(.loop(projectPath: path, nodeID: nodeID), &state)
     return .none
   }
