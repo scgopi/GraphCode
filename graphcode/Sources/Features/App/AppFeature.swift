@@ -125,6 +125,8 @@ struct AppFeature {
     /// A bundle replaced underneath this running app — see `BundleSwap` in
     /// `AppFeature+Updates.swift`.
     var bundleSwap = BundleSwap()
+    /// Restart Session / Restart All Sessions — see `AppFeature+SessionRestart.swift`.
+    var sessionRestart = SessionRestart()
 
     /// State changes seen since launch, for the activity strip — see
     /// `AppFeature+Activity.swift`. Bounded, and deliberately not persisted.
@@ -241,6 +243,7 @@ struct AppFeature {
     /// A bundle replaced underneath this running window — asked on activation, answered
     /// with a relaunch prompt. See `BundleSwap.Action`.
     case bundleSwap(BundleSwap.Action)
+    case sessionRestart(SessionRestart.Action)
     case updateDownloadTapped
     case updateReleaseNotesTapped
     case updateAlertDismissed
@@ -306,6 +309,7 @@ struct AppFeature {
     jumpPaletteReducer
     updatesReducer
     historyReducer
+    sessionRestartReducer
     // Before the main Reduce on purpose: its `.graphChanged` diff needs the previous
     // graph, which the main reducer replaces. See `AppFeature+Worktrees.swift`.
     AppWorktreesReducer()
@@ -499,7 +503,7 @@ struct AppFeature {
       // `AppFeature+Updates.swift` — listed here only so this switch stays exhaustive.
       case .checkForUpdatesTapped, .checkForUpdatesInBackground, .updateFoundInBackground,
         .updateBannerTapped, .updateCheckCompleted, .updateDownloadTapped,
-        .bundleSwap,
+        .bundleSwap, .sessionRestart,
         .updateReleaseNotesTapped, .updateAlertDismissed, .updateNoticeDismissed,
         .updateInstallTapped, .updateInstallConfirmed, .updateInstallResolved,
         .updateInstallProgressed,

@@ -200,6 +200,16 @@ do {
       projectPath: projectPath,
       [.graphCommand(projectPath: projectPath, command: .stopNode(nodeID))])
 
+  case .restartNode(let projectPath, let nodeID):
+    try runAndPrintGraph(
+      projectPath: projectPath,
+      [.graphCommand(projectPath: projectPath, command: .restartNode(nodeID))])
+
+  case .restartSessions(let projectPath):
+    try runAndPrintGraph(
+      projectPath: projectPath,
+      [.graphCommand(projectPath: projectPath, command: .restartSessions)])
+
   case .deleteNode(let projectPath, let nodeID):
     try runAndPrintGraph(
       projectPath: projectPath,

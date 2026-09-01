@@ -230,6 +230,20 @@ struct GraphcodeCommandTests {
   }
 
   @Test
+  func restartingANodeAndEverySession() throws {
+    let nodeID = UUID()
+    #expect(
+      try GraphcodeCommand.parse(["node", "restart", "/tmp/x", nodeID.uuidString])
+        == .restartNode(projectPath: "/tmp/x", nodeID: nodeID))
+    #expect(
+      try GraphcodeCommand.parse(["sessions", "restart", "/tmp/x"])
+        == .restartSessions(projectPath: "/tmp/x"))
+    #expect(throws: GraphcodeCommand.ParseError.self) {
+      try GraphcodeCommand.parse(["sessions", "stop", "/tmp/x"])
+    }
+  }
+
+  @Test
   func pilotingAndArmingAComposite() throws {
     let nodeID = UUID()
     #expect(

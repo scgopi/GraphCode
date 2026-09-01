@@ -20,6 +20,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
   case createNode(projectPath: String, draft: NodeDraft, into: UUID? = nil)
   case createEdge(projectPath: String, from: UUID, to: UUID, spec: EdgeSpec)
   case stopNode(projectPath: String, nodeID: UUID)
+  /// Kill the loop's session and resume it on the same transcript — the verb for a
+  /// replaced `zmx` or backend CLI. `restartSessions` does it for every live loop.
+  case restartNode(projectPath: String, nodeID: UUID)
+  case restartSessions(projectPath: String)
   case deleteNode(projectPath: String, nodeID: UUID)
   case sendMessage(projectPath: String, nodeID: UUID, text: String, followUp: Bool = false)
   case updateNode(projectPath: String, nodeID: UUID, update: NodeUpdate)
@@ -83,6 +87,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode status <project-path>
       graphcode node create <project-path> --title <t> --type <main|turn|goal|time|composite> [options]
       graphcode node stop <project-path> <node-id>
+      graphcode node restart <project-path> <node-id>  kill its session and resume it on
+                           the same transcript — for a replaced zmx or backend CLI
+      graphcode sessions restart <project-path>        the same, for every live loop
       graphcode node delete <project-path> <node-id>   removes it, its edges, session
                            and memory — irreversible; stop is the reversible verb
       graphcode node send <project-path> <node-id> [--follow-up] <message…>
@@ -300,6 +307,13 @@ public enum GraphcodeCommand: Equatable, Sendable {
       try validateFlags(arguments, allowed: [])
       return .usage(projectPath: path)
 
+    case "sessions":
+      let verb = try take(&arguments, name: "sessions subcommand")
+      guard verb == "restart" else { throw ParseError.unknownCommand("sessions \(verb)") }
+      let path = try take(&arguments, name: "project-path")
+      try validateFlags(arguments, allowed: [])
+      return .restartSessions(projectPath: path)
+
     case "reap":
       if arguments.contains(where: isHelpFlag) { throw HelpRequested() }
       let flags = try parseReapFlags(arguments)
@@ -334,7 +348,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
           into = id
         }
         return .createNode(projectPath: path, draft: try parseDraft(arguments), into: into)
-      case "stop", "delete", "pilot", "arm", "send", "update", "memo", "promote", "refine":
+      case "stop", "restart", "delete", "pilot", "arm", "send", "update", "memo", "promote",
+        "refine":
         let raw = try take(&arguments, name: "node-id")
         guard let nodeID = UUID(uuidString: raw) else {
           throw ParseError.invalidValue(argument: "node-id", value: raw)
@@ -349,6 +364,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
         case "delete":
           try validateFlags(arguments, allowed: [])
           return .deleteNode(projectPath: path, nodeID: nodeID)
+        case "restart":
+          try validateFlags(arguments, allowed: [])
+          return .restartNode(projectPath: path, nodeID: nodeID)
         case "promote":
           return .promoteNode(
             projectPath: path, nodeID: nodeID, promotion: try parsePromotion(arguments))

@@ -98,6 +98,11 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// What the backend has reported spending on this loop, if anything. Never estimated —
   /// see `UsageSample`.
   public var usage: UsageSample?
+  /// How many times the session has been restarted in place (`GraphCommand.restartNode`).
+  /// The number means nothing; a *change* in it is the daemon's word that the old session
+  /// is confirmed dead, which is what the app waits for before reattaching a pane. A pane
+  /// attached any earlier joins the dying session and reads its exit as the loop resolving.
+  public var sessionRestarts = 0
   /// The last thing the session said it was doing — `"editing UsageReport.swift"`.
   ///
   /// Reported, never inferred, by exactly the mechanism `presence` and `usage` use: a
@@ -486,7 +491,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     case lastArtifactoryRead, artifactoryWatch
     case state, createdAt, activity, presence, firstInstruction, pausesBeforeWritesOnly
     case summary, board, heartbeatIntervalSeconds, stallReason
-    case createdFromTemplateID, templateFollow
+    case createdFromTemplateID, templateFollow, sessionRestarts
   }
 
   /// Hand-written for the same reason `LoopEdge`'s is: `ProjectPersistence.loadGraph`
@@ -514,6 +519,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     subGraph = try container.decodeIfPresent(LoopGraph.self, forKey: .subGraph)
     pilotState = try container.decodeIfPresent(PilotState.self, forKey: .pilotState) ?? .notPiloted
     usage = try container.decodeIfPresent(UsageSample.self, forKey: .usage)
+    sessionRestarts = try container.decodeIfPresent(Int.self, forKey: .sessionRestarts) ?? 0
     activity = try container.decodeIfPresent(String.self, forKey: .activity)
     // Unlike `presence` and `activity`, this survives a reload: pass summaries are the
     // account of a run, and a resolved loop's is the thing worth reading after the fact.
