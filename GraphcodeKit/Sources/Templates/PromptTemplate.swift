@@ -60,9 +60,9 @@ public struct PromptTemplate: Codable, Equatable, Identifiable, Sendable {
   public static func tokens(in text: String) -> [String] {
     var seen = Set<String>()
     var ordered: [String] = []
-    for range in text.ranges(of: Self.tokenPattern) {
-      let token = String(text[range]).dropFirst().dropLast()
-      if seen.insert(String(token)).inserted { ordered.append(String(token)) }
+    for range in tokenRanges(in: text) {
+      let token = String(text[range].dropFirst().dropLast())
+      if seen.insert(token).inserted { ordered.append(token) }
     }
     return ordered
   }
@@ -72,7 +72,7 @@ public struct PromptTemplate: Codable, Equatable, Identifiable, Sendable {
   /// match exactly — someone who rewrote more than the tokens gets `nil` and
   /// their text is saved as they wrote it, never guessed at.
   public static func tokenValues(of filled: String, against brief: String) -> [String: String]? {
-    let tokenRanges = Array(brief.ranges(of: Self.tokenPattern))
+    let tokenRanges = Self.tokenRanges(in: brief)
     guard !tokenRanges.isEmpty else { return [:] }
     var pattern = "^"
     var tokensFound: [String] = []
@@ -105,7 +105,23 @@ public struct PromptTemplate: Codable, Equatable, Identifiable, Sendable {
     return values
   }
 
-  static let tokenPattern = /\{[A-Za-z_][A-Za-z0-9_]*\}/
+  /// `{token}` — a brace-wrapped identifier.
+  ///
+  /// An `NSRegularExpression` rather than a `/…/` literal: SwiftPM builds this module
+  /// for the Linux CI job without bare-slash-regex enabled, and Xcode turning it on by
+  /// default hid that until CI said so. The pattern is a constant, so `try?` never
+  /// actually returns nil — it is here to keep a force-try out of the file.
+  private static let tokenExpression: NSRegularExpression? = try? NSRegularExpression(
+    pattern: #"\{[A-Za-z_][A-Za-z0-9_]*\}"#)
+
+  /// Where each `{token}` sits, in order of appearance.
+  static func tokenRanges(in text: String) -> [Range<String.Index>] {
+    guard let tokenExpression else { return [] }
+    return
+      tokenExpression
+      .matches(in: text, range: NSRange(text.startIndex..., in: text))
+      .compactMap { Range($0.range, in: text) }
+  }
 
   /// A copy under a new name, **with its filename re-derived**. `fileName` is stored
   /// rather than computed so a template loaded from disk keeps the name the file
