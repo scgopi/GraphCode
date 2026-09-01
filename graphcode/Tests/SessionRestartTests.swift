@@ -92,6 +92,46 @@ struct SessionRestartTests {
   }
 
   @Test
+  func aPaneExitRightAfterARestartDoesNotResolveTheLoop() async {
+    let memos = LockIsolated<[String]>([])
+    let store = GraphStore(
+      onRestartSession: { _, _ in true },
+      onAppendMemory: { _, entry in memos.withValue { $0.append(entry) } })
+    await store.handle(.createNode(draft("Bounced")))
+    let id = await store.graph.nodes[0].id
+    await store.handle(.restartNode(id))
+
+    await store.handle(.nodeCheckRejected(id))
+    await store.handle(.nodeCheckApproved(id))
+
+    #expect(await store.graph.nodes[id: id]?.state == .running)
+    #expect(memos.value.filter { $0.contains("after a restart") }.count == 2)
+  }
+
+  @Test
+  func aPaneClosingOnALiveSessionDoesNotResolveTheLoop() async {
+    let alive = LockIsolated(true)
+    let memos = LockIsolated<[String]>([])
+    let store = GraphStore(
+      onSessionAlive: { _, _ in alive.value },
+      onAppendMemory: { _, entry in memos.withValue { $0.append(entry) } })
+    await store.handle(.createNode(draft("Closed on")))
+    let id = await store.graph.nodes[0].id
+
+    await store.handle(.nodeCheckRejected(id))
+    #expect(await store.graph.nodes[id: id]?.state == .running)
+    #expect(memos.value.contains { $0.contains("still live — not resolved") })
+
+    alive.setValue(false)
+    await store.handle(.nodeCheckRejected(id))
+    #expect(await store.graph.nodes[id: id]?.state == .failed)
+    #expect(
+      memos.value.contains {
+        $0.contains("resolved: failed — its pane closed with the process still running")
+      })
+  }
+
+  @Test
   func aNodeSavedBeforeTheCounterExistedDecodesAtZero() throws {
     let json = #"{"id":"\#(UUID().uuidString)","title":"Old"}"#
     let node = try JSONDecoder().decode(LoopNode.self, from: Data(json.utf8))

@@ -275,6 +275,12 @@ extension CLISessionBackend {
   /// chain that was otherwise complete: `presence` was implemented on every adapter and
   /// called by nothing, so every surface had only `LoopState` to go on and a loop that
   /// had finished its turn read RUNNING until a human stopped it.
+  /// The liveness hook `GraphStore` is wired with — session-level like `terminate`,
+  /// so it needs no per-backend adapter.
+  public static let sessionAlive: @Sendable (LoopNode, String?) async -> Bool = { node, path in
+    ZmxSessionLauncher.isSessionAlive(node, projectPath: path)
+  }
+
   public static let readPresence: @Sendable (LoopNode, String?) async -> PresenceReading = {
     node, path in
     await backend(for: node).presence(node, path)

@@ -539,18 +539,6 @@ struct AppFeature {
       // its local node state for this same action; telling `graphcoded` is this
       // level's job, since it's the one holding the connection, and it's what
       // actually triggers automatic outgoing-edge firing.
-      case .openLoop(.primarySurfaceExited(let succeeded)):
-        guard let id = state.openLoop?.node.id, let projectPath = state.selectedProjectPath
-        else { return .none }
-        // A chat's session ending resolves nothing — there is no node in any graph for
-        // the daemon to update, so telling it would only earn an unknown-node error.
-        guard !state.isQuickChat(id) else { return .none }
-        let command: GraphCommand = succeeded ? .nodeCheckApproved(id) : .nodeCheckRejected(id)
-        return .run { _ in
-          try? await orchestratorClient.send(
-            .graphCommand(projectPath: projectPath, command: command))
-        }
-
       // The keypress on the agent pane's "Press any key to close" screen. The session
       // was already resolved when it exited (above) — this is the human dismissing what
       // remains, so the workspace closes *and* the node leaves the graph. Deleting via

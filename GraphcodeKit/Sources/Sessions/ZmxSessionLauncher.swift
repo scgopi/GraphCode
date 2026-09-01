@@ -621,6 +621,23 @@ public enum ZmxSessionLauncher {
     }
   }
 
+  /// Whether the node's local session is alive and not a husk — the ensure's own
+  /// create-or-run check (`aliveCheckCommand`), asked on its own. A remote session
+  /// answers `false`: its liveness is read through presence over ssh (`GraphStore`).
+  static func isSessionAlive(_ node: LoopNode, projectPath: String? = nil) -> Bool {
+    if let projectPath, RemoteProjectLocation.parse(projectPath: projectPath) != nil {
+      return false
+    }
+    guard ZmxLocator.isInstalled, let result = runZmx(["ls"]), result.status == 0 else {
+      return false
+    }
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    return result.output.split(separator: "\n").contains { line in
+      !line.contains("\tended=") && !line.contains("\terr=")
+        && line.split(whereSeparator: \.isWhitespace).contains("name=\(name)")
+    }
+  }
+
   private enum SessionNamedState {
     case present
     case absent
