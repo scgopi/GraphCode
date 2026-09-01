@@ -32,6 +32,8 @@ struct LoopWorkspaceRail: View {
   /// Whether the board section is collapsed to its one line, beside the summary's and
   /// the diagram's own folds.
   let isArtifactoryFolded: Bool
+  /// See `LoopWorkspaceFeature.seenArtifactoryPostID`.
+  let seenArtifactoryPostID: Int?
   let onSummaryFoldToggled: () -> Void
   let onSummaryAnswerTapped: () -> Void
   let onBoardFoldToggled: () -> Void
@@ -70,6 +72,26 @@ struct LoopWorkspaceRail: View {
   /// overruling a choice somebody actually made.
   static func hasStoredWidth() -> Bool {
     UserDefaults.standard.double(forKey: widthDefaultsKey) > 0
+  }
+
+  /// The newest board post that was on screen when a human last left a workspace in
+  /// this project — what the ARTIFACTORY section's `SINCE YOU LOOKED` rule and its
+  /// `N NEW` badge are drawn against. Keyed by project because the board is the
+  /// project's: opening a different loop in the same project is not "not having
+  /// looked". Persisted, unlike the summary's `seenBeatID`, because a board pointer
+  /// that reset on relaunch would mark every post new again each morning.
+  static func seenArtifactoryPostDefaultsKey(forProjectPath path: String) -> String {
+    "artifactorySeenPostID." + path
+  }
+
+  static func loadSeenArtifactoryPost(forProjectPath path: String) -> Int? {
+    let stored = UserDefaults.standard.integer(
+      forKey: seenArtifactoryPostDefaultsKey(forProjectPath: path))
+    return stored > 0 ? stored : nil
+  }
+
+  static func saveSeenArtifactoryPost(_ id: Int, forProjectPath path: String) {
+    UserDefaults.standard.set(id, forKey: seenArtifactoryPostDefaultsKey(forProjectPath: path))
   }
 
   static let artifactoryFoldedDefaultsKey = "loopArtifactorySectionFolded"
@@ -221,7 +243,7 @@ struct LoopWorkspaceRail: View {
       // thing you read messages in is arranged.
       if ArtifactoryPresentation.hasContent(graph: graph, enabled: artifactoryEnabled) {
         ArtifactorySection(
-          node: node, graph: graph, isFolded: isArtifactoryFolded,
+          graph: graph, seenPostID: seenArtifactoryPostID, isFolded: isArtifactoryFolded,
           onToggleFold: onArtifactoryFoldToggled, onPost: onArtifactoryPost)
       }
       footer

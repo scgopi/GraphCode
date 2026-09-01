@@ -27,11 +27,12 @@ enum ArtifactoryPresentation {
     graph.artifactory.filter { $0.kind == .record }
   }
 
-  /// How many notes this loop's cursor has not covered. Records are excluded: they are
-  /// folded away by default, and a badge counting mail nobody is being shown is a badge
-  /// that cannot be cleared.
-  static func unreadNoteCount(graph: LoopGraph, node: LoopNode) -> Int {
-    Artifactory.unread(in: notes(in: graph), since: node.lastArtifactoryRead).count
+  /// How many notes have landed since the human last looked — `seenPostID` is
+  /// `LoopWorkspaceFeature.seenArtifactoryPostID`, not the loop's sync cursor. Records
+  /// are excluded: they are folded away by default, and a badge counting mail nobody is
+  /// being shown is a badge that cannot be cleared.
+  static func unreadNoteCount(graph: LoopGraph, seenPostID: Int?) -> Int {
+    Artifactory.unread(in: notes(in: graph), since: seenPostID).count
   }
 }
 
@@ -43,8 +44,11 @@ enum ArtifactoryPresentation {
 /// the whole reason it is here rather than behind a menu: a coordination channel a
 /// supervisor never sees is the failure mode, not a missing convenience.
 struct ArtifactorySection: View {
-  let node: LoopNode
   let graph: LoopGraph
+  /// What `SINCE YOU LOOKED` means here: the newest post that was on screen when this
+  /// person last left a workspace in the project. The same words two sections up mean
+  /// the same thing — a fact about a person at a screen, never about the loop.
+  let seenPostID: Int?
   let isFolded: Bool
   let onToggleFold: () -> Void
   /// Posts as "a human" — a click in the app has no `ZMX_SESSION` and no loop identity,
@@ -70,11 +74,11 @@ struct ArtifactorySection: View {
   private var notes: [ArtifactoryPost] { ArtifactoryPresentation.notes(in: graph) }
   private var records: [ArtifactoryPost] { ArtifactoryPresentation.records(in: graph) }
   private var unread: Int {
-    ArtifactoryPresentation.unreadNoteCount(graph: graph, node: node)
+    ArtifactoryPresentation.unreadNoteCount(graph: graph, seenPostID: seenPostID)
   }
 
-  /// The id the unread rule is drawn above — the first note this loop's cursor has not
-  /// covered. `nil` when everything is read, which is when nothing should be drawn.
+  /// The id the unread rule is drawn above — the first note that landed after the human
+  /// last looked. `nil` when everything is read, which is when nothing should be drawn.
   private var firstUnreadID: Int? {
     guard unread > 0 else { return nil }
     return notes.suffix(unread).first?.id
