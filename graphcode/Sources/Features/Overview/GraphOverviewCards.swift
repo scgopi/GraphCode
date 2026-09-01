@@ -225,6 +225,12 @@ extension GraphOverviewView {
         .disabled(!node.pilotState.canArm)
     }
     Button("Rename…") { send(.renameNodeRequested(node.id), to: loop.projectPath) }
+    Button("Save as Template…") { send(.saveLoopTemplateTapped(node.id), to: loop.projectPath) }
+    if node.templateFollow != nil {
+      Button("Detach from Template") {
+        send(.detachTemplateTapped(node.id), to: loop.projectPath)
+      }
+    }
     if !node.isResolved {
       Button("Stop Loop") {
         store.send(.stopNodeTapped(projectPath: loop.projectPath, nodeID: node.id))

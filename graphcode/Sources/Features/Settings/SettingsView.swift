@@ -243,6 +243,8 @@ struct SettingsView: View {
         .font(.caption2)
         .foregroundStyle(.secondary)
       }
+
+      TemplatesSettingsSection()
     }
     .formStyle(.grouped)
   }

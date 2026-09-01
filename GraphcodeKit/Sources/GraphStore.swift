@@ -215,6 +215,7 @@ public actor GraphStore {
       @Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?
     )? = nil,
     onBoardsEnabled: (@Sendable () -> Bool)? = nil,
+    onResolveTemplate: (@Sendable (UUID, String?) -> PromptTemplate?)? = nil,
     onArtifactoryEnabled: (@Sendable () -> Bool)? = nil,
     goalCache: GoalEvaluationCache? = nil,
     recurrence: RecurrenceSink? = nil,
@@ -242,6 +243,7 @@ public actor GraphStore {
     self.onHeartbeatEnabled = onHeartbeatEnabled
     self.onComposeBoard = onComposeBoard
     self.onBoardsEnabled = onBoardsEnabled
+    self.onResolveTemplate = onResolveTemplate
     self.onArtifactoryEnabled = onArtifactoryEnabled
     self.goalCache = goalCache ?? GoalEvaluationCache()
     self.recurrence = recurrence
@@ -273,8 +275,204 @@ public actor GraphStore {
   /// The path is where the session opens when the node has no worktree of its own. Without
   /// it a daemon-launched loop inherits `graphcoded`'s own directory, which under launchd
   /// is `/`, so the loop ran nowhere near the project it was created in.
+  ///
+  /// This is also where a **following loop picks up its template's edits** — every start
+  /// is a "next run", whatever caused it. The resolve runs before the launch, so the
+  /// session opens on the current brief and the node's stored snapshot is refreshed with
+  /// it; see `resolvedForLaunch`.
   private func ensureSession(_ node: LoopNode) {
-    onEnsureSession?(node, graph.project.path)
+    onEnsureSession?(resolvedForLaunch(node), graph.project.path)
+  }
+
+  // MARK: - Template follows
+
+  /// Asks the storage layer for the template a loop follows, when it can. Injected
+  /// like every other side effect so tests can stand in a scratch directory; the
+  /// production wiring reads home + the project's own `.graphcode/templates`,
+  /// project winning on a filename collision.
+  private var onResolveTemplate: (@Sendable (UUID, String?) -> PromptTemplate?)?
+
+  /// Re-reads a following loop's template at a run boundary and returns the node to
+  /// launch with — the design's "they re-read it and pick up edits on the next run",
+  /// with the node's own fields as the fallback snapshot.
+  ///
+  /// Three refusals keep a resolve from mangling a loop:
+  /// - The template's file is gone → the node keeps its snapshot and `missing` flips
+  ///   on (once — the card warns, nothing fails).
+  /// - The body still carries `{tokens}` nobody filled → the snapshot stands; a brief
+  ///   with a hole in it is not a brief.
+  /// - The template has since committed to a different shape → the snapshot stands;
+  ///   a loop cannot change what it is underneath a running session.
+  ///
+  /// The refreshed node is written back to wherever it lives (top level or a
+  /// composite's sub-graph) so the change survives a restart. Commands broadcast
+  /// through `handle`; the two session sweeps are not commands and have to say so
+  /// themselves — see `broadcastIfTemplatesRefreshed`.
+  func resolvedForLaunch(_ node: LoopNode) -> LoopNode {
+    guard let follow = node.templateFollow, let resolve = onResolveTemplate else { return node }
+    guard let template = resolve(follow.id, graph.project.path) else {
+      if !follow.missing, var stored = stored(node.id) {
+        stored.templateFollow?.missing = true
+        store(stored)
+        templatesRefreshed = true
+      }
+      return node
+    }
+    guard var refreshed = refreshedCopy(of: node, from: template) else { return node }
+    refreshed.templateFollow?.missing = false
+    // Only a resolve that actually changed something is a write. The sweeps run on a
+    // timer, so storing an identical node would persist the graph every tick for
+    // bytes nobody's edited.
+    if refreshed != node {
+      store(refreshed)
+      templatesRefreshed = true
+    }
+    return refreshed
+  }
+
+  /// Set by a resolve that changed a node, drained by the session sweeps. Without it
+  /// a `missing` template — the one thing the design puts on the card — would sit in
+  /// the daemon's memory and never reach a client, because nothing else in those
+  /// sweeps broadcasts.
+  private var templatesRefreshed = false
+
+  private func broadcastIfTemplatesRefreshed() {
+    guard templatesRefreshed else { return }
+    templatesRefreshed = false
+    broadcast()
+  }
+
+  /// The node a template's current contents would launch — or the unchanged node
+  /// when the resolve declines (refusals above). The recomposition preserves what
+  /// the old prompt already knew: the cadence, unless the template now carries one
+  /// of its own, and any trailing "Stop after …" the old brief promised.
+  private func refreshedCopy(of node: LoopNode, from template: PromptTemplate) -> LoopNode? {
+    let body = template.body.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !body.isEmpty, PromptTemplate.tokens(in: body).isEmpty else { return nil }
+    if let shape = template.shape, shape != node.loopType { return nil }
+    var refreshed = node
+    if node.heartbeatIntervalSeconds != nil {
+      // The daemon holds the timer, so the prompt is the bare task — recomposing a
+      // /loop here would double-drive the loop.
+      refreshed.triggerPrompt = body
+      return refreshed
+    }
+    guard let old = node.triggerPrompt else {
+      refreshed.triggerPrompt = body
+      return refreshed
+    }
+    guard let recurrence = SessionPrompt.recurrence(of: old) else {
+      refreshed.triggerPrompt = body
+      return refreshed
+    }
+    let cadence =
+      template.settings?.cadence.map { $0.trimmingCharacters(in: .whitespaces) }
+      .flatMap { $0.isEmpty ? nil : $0 } ?? recurrence.interval
+    var prompt = "/loop \(cadence) \(body)"
+    if let stop = Self.stopAfterClause(of: old) { prompt += " Stop after \(stop)." }
+    refreshed.triggerPrompt = prompt
+    return refreshed
+  }
+
+  /// The "Stop after …" tail of a composed prompt, without its punctuation — so a
+  /// refresh can carry the same promise forward rather than silently dropping it.
+  /// Searched backwards: the clause the form appends is the last one, and a brief is
+  /// perfectly entitled to use the words "stop after" in its own sentence.
+  static func stopAfterClause(of prompt: String) -> String? {
+    guard let range = prompt.range(of: "Stop after ", options: .backwards) else { return nil }
+    let tail =
+      prompt[range.upperBound...]
+      .trimmingCharacters(in: CharacterSet(charactersIn: ". \n"))
+    return tail.isEmpty ? nil : tail
+  }
+
+  /// A composite that follows its template re-reads the **graph** the template
+  /// carries before a pilot — the pilot is the composite's next run. The template is
+  /// the source of truth a following composite has chosen, and `Detach` is how a
+  /// local re-arrangement opts out.
+  ///
+  /// Replacing the sub-graph is destructive in a way the rest of a follow is not:
+  /// node ids are `zmx` session names, so re-identified children mean the previous
+  /// pass's sessions are still running with nothing in the graph pointing at them,
+  /// and their memory logs are stranded under ids no card can reach. So two rules:
+  /// **nothing happens unless the template's graph actually differs from what is
+  /// here** (compared on what a human authored, not on ids or run state), and when it
+  /// does differ the outgoing children are torn down the way `removeSingleNode` tears
+  /// down a deleted composite's workers.
+  private func resolveCompositeFollow(_ nodeID: UUID) {
+    guard let node = graph.nodes[id: nodeID], node.loopType == .composite,
+      let follow = node.templateFollow, let resolve = onResolveTemplate,
+      let template = resolve(follow.id, graph.project.path)
+    else { return }
+    // The template was found, so the follow is intact whatever it carries. A
+    // composite template with no children is a template someone hasn't finished, not
+    // a missing file — `missing` means the file is gone, and saying it here would put
+    // the wrong warning on the card.
+    graph.nodes[id: nodeID]?.templateFollow?.missing = false
+    guard let carried = template.settings?.carriedGraph, !carried.nodes.isEmpty else { return }
+    let current = node.subGraph
+    guard Self.authoredShape(of: carried) != current.map(Self.authoredShape(of:)) else { return }
+    for worker in current?.nodesAtAnyDepth ?? [] {
+      terminateSession(worker)
+      onRemoveMemory?(worker.id)
+    }
+    graph.nodes[id: nodeID]?.subGraph = carried.reIdentified()
+  }
+
+  /// A sub-graph reduced to what a person wrote — titles, types, briefs, agents and
+  /// the edges between them, positionally. Ids, run state, usage and presence are all
+  /// left out, because two copies of the same template's graph differ in every one of
+  /// them and are still the same orchestration.
+  static func authoredShape(of graph: LoopGraph) -> String {
+    var position: [UUID: Int] = [:]
+    for (index, node) in graph.nodes.enumerated() { position[node.id] = index }
+    let nodes = graph.nodes.map { node in
+      [
+        node.title, String(describing: node.loopType), node.triggerPrompt ?? "",
+        node.firstInstruction ?? "", node.goal?.summary ?? "", node.goal?.predicate ?? "",
+        node.goal?.metricCommand ?? "", String(describing: node.backend),
+        String(node.pausesBeforeWritesOnly),
+      ].joined(separator: "\u{1}")
+    }
+    let edges =
+      graph.edges
+      .map { edge in
+        "\(position[edge.from].map(String.init) ?? "?")>"
+          + "\(position[edge.to].map(String.init) ?? "?"):\(String(describing: edge.kind))"
+      }
+      .sorted()
+    return (nodes + ["--"] + edges).joined(separator: "\u{2}")
+  }
+
+  /// `GraphCommand.detachTemplate`: the follow is dropped and the node's own brief
+  /// — which is already exactly what it has been running — becomes the whole truth.
+  private func detachTemplate(_ nodeID: UUID) {
+    guard var node = graph.nodes[id: nodeID], node.templateFollow != nil else { return }
+    node.templateFollow = nil
+    graph.nodes[id: nodeID] = node
+    recordMemory(nodeID, "detached from its template — the current brief is now its own")
+  }
+
+  /// Where a node with this id actually lives — top level, or inside a composite's
+  /// sub-graph. `nil` when it has been deleted under the resolve.
+  private func stored(_ nodeID: UUID) -> LoopNode? {
+    if graph.nodes[id: nodeID] != nil { return graph.nodes[id: nodeID] }
+    for composite in graph.nodes {
+      if let child = composite.subGraph?.nodes[id: nodeID] { return child }
+    }
+    return nil
+  }
+
+  /// The write-back half of `stored(_:)` — same search, assignment instead.
+  private func store(_ node: LoopNode) {
+    if graph.nodes[id: node.id] != nil {
+      graph.nodes[id: node.id] = node
+    } else {
+      for composite in graph.nodes
+      where composite.subGraph?.nodes[id: node.id] != nil {
+        graph.nodes[id: composite.id]?.subGraph?.nodes[id: node.id] = node
+      }
+    }
   }
 
   // MARK: - Connections
@@ -427,6 +625,9 @@ public actor GraphStore {
 
     case .promoteNode(let nodeID, let promotion, let promotedBy):
       promoteNode(nodeID, promotion: promotion, promotedBy: promotedBy)
+
+    case .detachTemplate(let nodeID):
+      detachTemplate(nodeID)
 
     case .memoNode(let nodeID, let text, let from):
       memoNode(nodeID, text: text, from: from)
@@ -627,6 +828,9 @@ public actor GraphStore {
     guard let node = graph.nodes[id: nodeID], node.loopType == .composite,
       node.subGraph != nil
     else { return }
+    // The template's edits land here, at the run boundary a following composite
+    // has — see `resolveCompositeFollow`.
+    resolveCompositeFollow(nodeID)
     graph.nodes[id: nodeID]?.pilotState = .piloting
     setNodeState(nodeID, .running)
 
@@ -2809,6 +3013,7 @@ public actor GraphStore {
       if !node.isResolved { armHeartbeat(for: node) }
       ensureSession(node)
     }
+    broadcastIfTemplatesRefreshed()
     armPilotedSubGraphRecurrence(graph.nodes)
   }
 
@@ -2847,6 +3052,7 @@ public actor GraphStore {
     for node in graph.nodes where node.runsUnattended && !node.isResolved {
       ensureSession(node)
     }
+    broadcastIfTemplatesRefreshed()
   }
 
   // MARK: - Broadcast

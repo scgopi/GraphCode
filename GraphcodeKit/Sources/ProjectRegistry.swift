@@ -476,6 +476,12 @@ public actor ProjectRegistry {
         // boards with it rather than leaving pictures of a run nothing is narrating.
         return settings.summarisesLoops && settings.visualisesSummaries
       },
+      // What a following loop re-reads at its next run: home + this project's
+      // `.graphcode/templates`, project winning on a filename collision. See
+      // `TemplateStorage`.
+      onResolveTemplate: { templateID, projectPath in
+        TemplateStorage.shared.template(withID: templateID, projectPath: projectPath)
+      },
       // Read fresh per command, the way the heartbeat toggle is: the app resolving
       // the beta ramp (or a hand edit) applies to the next post with no restart.
       onArtifactoryEnabled: { GraphcodeSettingsStore.load().artifactoryEnabled })

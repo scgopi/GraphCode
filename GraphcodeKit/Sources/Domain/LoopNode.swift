@@ -8,6 +8,32 @@ import Foundation
 /// the full taxonomy describes — plain fields for now, one per loop type actually
 /// wired up (turn-based, time-based), rather than a whole payload-type hierarchy for
 /// types (`.goalBased`, `.composite`) nothing constructs yet.
+/// The template a loop still reads its brief from — see PROMPT_TEMPLATES.md
+/// (New Designs v4) § Follow vs snapshot.
+///
+/// Only a **timed or composite** loop carries one: those re-read the template and
+/// pick up its edits on their next run, so a fixed nightly brief doesn't need the
+/// loop recreated. A Main, Goal or Turn loop snapshots its brief at creation and
+/// never carries this — a running session cannot have its text swapped underneath
+/// it. The node's own fields *are* the snapshot: if the template's file later
+/// disappears, the loop keeps running on what it already had and says so.
+public struct TemplateFollow: Codable, Equatable, Sendable {
+  /// The template's id, not its filename — how a follow survives a rename or a
+  /// move between home and a project.
+  public var id: UUID
+  public var name: String
+  /// Set when a resolve could not find the file. The loop keeps its snapshot and
+  /// the card warns rather than failing — the one difference between "the template
+  /// changed" and "the template is gone".
+  public var missing: Bool
+
+  public init(id: UUID, name: String, missing: Bool = false) {
+    self.id = id
+    self.name = name
+    self.missing = missing
+  }
+}
+
 public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   public let id: UUID
   public var title: String
@@ -135,6 +161,13 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// handoff, and custody has to be: stopping or deleting a parent takes its spawned
   /// descendants with it, while a drawn edge to a peer must never be caught in that.
   public let createdBy: UUID?
+  /// Which template this loop's brief came from, for every type — pure attribution
+  /// the card can show, never a live link. A snapshot loop keeps this and nothing
+  /// more; a following one also carries `templateFollow`.
+  public var createdFromTemplateID: UUID?
+  /// The template a **timed or composite** loop still follows — see `TemplateFollow`
+  /// for why only those two types do. `nil` for every snapshot loop.
+  public var templateFollow: TemplateFollow?
   /// The newest Artifactory post this loop has read — `ArtifactoryPost.id` of the last
   /// post a `graphcode artifactory sync` showed it. `nil` has not synced yet and makes
   /// every post unread; the cursor only moves through sync, so a loop that ignores
@@ -179,6 +212,8 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     presence: PresenceReading? = nil,
     metricHistory: [MetricSample] = [],
     createdBy: UUID? = nil,
+    createdFromTemplateID: UUID? = nil,
+    templateFollow: TemplateFollow? = nil,
     lastArtifactoryRead: Int? = nil,
     artifactoryWatch: ArtifactoryWatch? = nil,
     stallReason: String? = nil,
@@ -206,6 +241,8 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.presence = presence
     self.metricHistory = metricHistory
     self.createdBy = createdBy
+    self.createdFromTemplateID = createdFromTemplateID
+    self.templateFollow = templateFollow
     self.lastArtifactoryRead = lastArtifactoryRead
     self.artifactoryWatch = artifactoryWatch
     self.stallReason = stallReason
@@ -449,6 +486,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     case lastArtifactoryRead, artifactoryWatch
     case state, createdAt, activity, presence, firstInstruction, pausesBeforeWritesOnly
     case summary, board, heartbeatIntervalSeconds, stallReason
+    case createdFromTemplateID, templateFollow
   }
 
   /// Hand-written for the same reason `LoopEdge`'s is: `ProjectPersistence.loadGraph`
@@ -488,6 +526,12 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     metricHistory =
       try container.decodeIfPresent([MetricSample].self, forKey: .metricHistory) ?? []
     createdBy = try container.decodeIfPresent(UUID.self, forKey: .createdBy)
+    createdFromTemplateID =
+      try container.decodeIfPresent(UUID.self, forKey: .createdFromTemplateID)
+    // Absent on every graph saved before templates existed — those loops were all
+    // snapshots, which is what nil says.
+    templateFollow = try container.decodeIfPresent(
+      TemplateFollow.self, forKey: .templateFollow)
     // Absent from graphs saved before the Artifactory existed — every loop simply has
     // not read anything yet, which is what `nil` says.
     lastArtifactoryRead = try container.decodeIfPresent(Int.self, forKey: .lastArtifactoryRead)

@@ -44,7 +44,9 @@ extension ProjectCanvasView {
             id: node.id,
             hasSubmodules: store.worktreeReclaimOffers[node.id]?.facts.hasSubmodules == true))
       },
-      onKeep: { store.send(.keepWorktreeTapped(node.id)) }
+      onKeep: { store.send(.keepWorktreeTapped(node.id)) },
+      onDetachTemplate: node.templateFollow == nil
+        ? nil : { store.send(.detachTemplateTapped(node.id)) }
     )
     .contentShape(Rectangle())
     // A composite has no session of its own to open (`LoopNode.firstInstruction` is nil
@@ -113,6 +115,15 @@ extension ProjectCanvasView {
     // Available on a resolved loop too: a finished loop is still something you read the
     // graph by, and its name is what you read.
     Button("Rename…") { store.send(.renameNodeRequested(node.id)) }
+    // The design's first save entry point: a loop that worked is the most common thing
+    // to reuse. Saving a shaped loop captures its type and settings alongside the text;
+    // saving a Main loop captures text only. See PROMPT_TEMPLATES.md § Save as template.
+    Button("Save as Template…") { store.send(.saveLoopTemplateTapped(node.id)) }
+    if node.templateFollow != nil {
+      // Detach converts it to a snapshot in place: the brief it already has keeps
+      // running, and the next edit to the template's file stops reaching it.
+      Button("Detach from Template") { store.send(.detachTemplateTapped(node.id)) }
+    }
     if !node.isResolved {
       Button("Stop Loop") { store.send(.stopNodeTapped(node.id)) }
     }
