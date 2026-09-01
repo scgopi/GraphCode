@@ -195,14 +195,6 @@ struct LoopWorkspaceRail: View {
           node: node, isFolded: isBoardFolded, onToggleFold: onBoardFoldToggled,
           onExpand: onBoardExpanded)
       }
-      // Above `THIS LOOP` for the same reason the summary is: what other loops have
-      // said to you outranks where you sit in the graph, and a section you have to
-      // scroll to is a section that answers nothing at a glance.
-      if ArtifactoryPresentation.hasContent(graph: graph, enabled: artifactoryEnabled) {
-        ArtifactorySection(
-          node: node, graph: graph, isFolded: isArtifactoryFolded,
-          onToggleFold: onArtifactoryFoldToggled, onPost: onArtifactoryPost)
-      }
       section("THIS LOOP") {
         RailMinimap(node: node, upstream: inbound, downstream: outbound.map(\.target))
       }
@@ -219,6 +211,19 @@ struct LoopWorkspaceRail: View {
         section("RECENT PASSES") { RailSparkline(node: node) }
       }
       Spacer(minLength: 0)
+      // The board sits at the foot, under the spacer, so the rail's slack collects
+      // *above* it rather than inside it. It went in above `THIS LOOP` first, on the
+      // reasoning that what other loops said to you outranks where you sit in the
+      // graph — but the sections above it are fixed-height and the board is not, so a
+      // quiet rail left it stranded at the top with everything it says a long way from
+      // the button that answers it. Low and against the footer is also where a message
+      // board belongs: newest at the bottom, composer under it, the way every other
+      // thing you read messages in is arranged.
+      if ArtifactoryPresentation.hasContent(graph: graph, enabled: artifactoryEnabled) {
+        ArtifactorySection(
+          node: node, graph: graph, isFolded: isArtifactoryFolded,
+          onToggleFold: onArtifactoryFoldToggled, onPost: onArtifactoryPost)
+      }
       footer
     }
     .padding(12)
