@@ -1,2 +1,4 @@
 frames/
-node_modules/
+# and as a symlink: a worktree that shares the primary checkout's install has
+# node_modules as a link, which `node_modules/` does not match.
+node_modules

@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GraphCode — a note for whoever comes next</title>
+<style>
+  :root{
+    --page:#000; --panel:#0c0f14;
+    --hair:rgba(255,255,255,0.09);
+    --ink:rgba(255,255,255,0.96); --ink-2:rgba(255,255,255,0.60); --ink-3:rgba(255,255,255,0.30);
+    --blue:#8cc5ff; --amber:#ffcd7a; --green:#7ee49b; --red:#ff8a80;
+    --mono:ui-monospace,"SF Mono",Menlo,monospace;
+    --sans:-apple-system,"SF Pro Text","Helvetica Neue",sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{background:var(--page)}
+  body{display:flex;align-items:center;justify-content:center;min-height:100vh}
+  #stage{position:relative;width:1200px;height:675px;background:var(--panel);
+    font-family:var(--sans);color:var(--ink);-webkit-font-smoothing:antialiased;overflow:hidden}
+
+  #kick{position:absolute;left:56px;top:40px;font-family:var(--mono);font-size:11px;
+    letter-spacing:2.2px;text-transform:uppercase;color:var(--blue)}
+  #head{position:absolute;left:56px;top:62px;font-size:28px;font-weight:640;letter-spacing:-0.6px}
+
+  .loop{position:absolute;left:56px;width:300px;height:66px;border-radius:12px;
+    border:1.5px solid var(--hair);background:rgba(255,255,255,0.025);
+    display:flex;flex-direction:column;justify-content:center;padding:0 16px}
+  .loop .t{font-size:19px;font-weight:640;letter-spacing:-0.3px}
+  .loop .p{margin-top:6px;align-self:flex-start;font-family:var(--mono);font-size:10px;
+    letter-spacing:1.3px;text-transform:uppercase;padding:2.5px 8px;border-radius:5px}
+
+  /* Panel-backed so they mask whatever they sit on, as in bundle-travels. */
+  .chip{position:absolute;font-family:var(--mono);font-size:9.5px;letter-spacing:1.1px;
+    text-transform:uppercase;background:var(--panel);padding:2px 7px;opacity:0}
+
+  #rule{position:absolute;left:56px;top:264px;width:300px;height:1px;
+    background:rgba(255,255,255,0.12);opacity:0}
+
+  #board{position:absolute;left:418px;top:156px;width:726px;height:126px;border-radius:14px;
+    border:1.5px solid var(--hair);background:rgba(255,255,255,0.022);padding:15px 0 0;
+    overflow:hidden}
+  #bhead{display:flex;align-items:baseline;padding:0 22px 13px;
+    border-bottom:1px solid var(--hair)}
+  #bhead .l{font-family:var(--mono);font-size:10px;letter-spacing:2px;
+    text-transform:uppercase;color:var(--blue)}
+  #bhead .r{margin-left:auto;font-family:var(--mono);font-size:10px;letter-spacing:0.6px;
+    color:var(--ink-3)}
+  #bempty{position:absolute;left:0;top:56px;padding:0 22px;font-family:var(--mono);
+    font-size:12.5px;color:var(--ink-3)}
+  .post{padding:15px 22px 0;font-family:var(--mono);font-size:12.5px;line-height:1.5;
+    color:var(--ink-2);opacity:0}
+  .post .id{color:var(--blue)} .post .tp{color:var(--amber)}
+  .post .by{color:var(--ink-3)} .post .bd{color:rgba(255,255,255,0.86)}
+
+  #cmd{position:absolute;left:418px;top:320px;width:726px;font-family:var(--mono);
+    font-size:13px;line-height:1.6;color:rgba(255,255,255,0.86);opacity:0}
+  #cmd .d{color:var(--ink-3)} #cmd .a{color:var(--amber)}
+  #out{position:absolute;left:418px;top:374px;width:726px;font-family:var(--mono);
+    font-size:12px;line-height:1.65;color:var(--ink-2);opacity:0}
+  #out .ok{color:var(--green)} #out .d{color:var(--ink-3)}
+  #out .id{color:var(--blue)} #out .tp{color:var(--amber)}
+
+  #cap{position:absolute;left:70px;top:508px;width:1060px;text-align:center;
+    font-size:27px;font-weight:600;letter-spacing:-0.4px;line-height:1.3}
+  #cap b{color:var(--blue)}
+  #cap i{font-style:normal;color:var(--green)}
+  #cap u{text-decoration:none;color:var(--amber)}
+  svg{position:absolute;inset:0;overflow:visible}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="kick">graphcode · artifactory</div>
+  <div id="head">A note for whoever comes next</div>
+  <svg id="wires"></svg>
+
+  <div class="loop" id="lFix" style="top:168px;"><div class="t">Fixer</div><div class="p"></div></div>
+  <div class="loop" id="lRev" style="top:280px;"><div class="t">Reviewer</div><div class="p"></div></div>
+  <div class="loop" id="lAud" style="top:284px;opacity:0;"><div class="t">Auditor</div><div class="p"></div></div>
+
+  <div class="chip" id="chSend" style="left:220px;top:242px;color:var(--ink-3);">node send</div>
+  <div id="rule"></div>
+  <div class="chip" id="chLater" style="left:56px;top:257px;color:var(--ink-3);">three days later</div>
+
+  <div id="board">
+    <div id="bhead"><div class="l">Artifactory</div><div class="r"></div></div>
+    <div id="bempty"></div>
+    <div class="post" id="p1"></div>
+    <div class="post" id="p2"></div>
+  </div>
+
+  <div id="cmd"></div>
+  <div id="out"></div>
+  <div id="cap"></div>
+</div>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = $('wires');
+  const cl = u => u < 0 ? 0 : u > 1 ? 1 : u;
+  const seg = (t,a,b) => cl((t-a)/(b-a));
+  const eOut = u => 1 - Math.pow(1-u,3);
+  const eIO = u => u < .5 ? 2*u*u : 1 - Math.pow(-2*u+2,2)/2;
+  const O = (t,a,b) => eOut(seg(t,a,b));
+  const lerp = (a,b,u) => a+(b-a)*u;
+  // Fade up over `up`, hold, fade back down over the last `dn` — one call per element
+  // so nothing has to be cleared by hand between acts.
+  const win = (t,a,b,up=0.4,dn=0.35) => Math.min(O(t,a,a+up), 1-O(t,b-dn,b));
+
+  const PILL = {
+    RUNNING:{w:'RUNNING',c:'#8cc5ff',b:'rgba(10,132,255,0.16)'},
+    DONE:{w:'DONE',c:'#7ee49b',b:'rgba(48,209,88,0.16)'},
+  };
+  function pill(el,k){ const p = PILL[k], n = el.querySelector('.p');
+    n.textContent = p.w; n.style.color = p.c; n.style.background = p.b; }
+
+  // The addressed wire: Fixer's bottom port down to Reviewer's top port. It exists to
+  // be contrasted with the board, which is reached without drawing anything at all.
+  const wire = document.createElementNS(NS,'path');
+  wire.setAttribute('d','M 206,234 L 206,276');
+  wire.setAttribute('fill','none'); wire.setAttribute('stroke','rgba(255,255,255,0.22)');
+  wire.setAttribute('stroke-width',1.8); wire.setAttribute('stroke-dasharray','5 4');
+  svg.appendChild(wire);
+  const head = document.createElementNS(NS,'path');
+  head.setAttribute('d','M 200,271 L 206,278 L 212,271');
+  head.setAttribute('fill','none'); head.setAttribute('stroke','rgba(255,255,255,0.32)');
+  head.setAttribute('stroke-width',1.6); head.setAttribute('stroke-linecap','round');
+  svg.appendChild(head);
+
+  const dot = document.createElementNS(NS,'circle');
+  dot.setAttribute('r',5.5); dot.setAttribute('fill','#8cc5ff'); dot.setAttribute('opacity',0);
+  svg.appendChild(dot);
+
+  // Quadratic beziers the pip rides. The last two are never stroked: a post reaches the
+  // board, and the board reaches a loop, with no edge between them.
+  const CURVES = {
+    send:  [[206,236],[206,258],[206,276]],
+    toBd:  [[356,201],[400,182],[436,221]],
+    fromBd:[[436,221],[400,275],[356,317]],
+    up:    [[356,317],[400,278],[436,255]],
+  };
+  const at = (c,u) => {
+    const v = 1-u;
+    return [ v*v*c[0][0] + 2*v*u*c[1][0] + u*u*c[2][0],
+             v*v*c[0][1] + 2*v*u*c[1][1] + u*u*c[2][1] ];
+  };
+  function pip(t,a,b,curve){
+    if (t < a || t > b) return false;
+    const u = eIO(seg(t,a,b)), [x,y] = at(CURVES[curve],u);
+    dot.setAttribute('cx',x); dot.setAttribute('cy',y);
+    dot.setAttribute('opacity', Math.sin(Math.PI*u)*0.9 + 0.10);
+    return true;
+  }
+
+  const PATH = '/Users/ada/acme-api';
+  // Rendered exactly as GraphcodeCommand does: `#<id>(topic) from <author> at <stamp> — <body>`,
+  // and the byline picks up " (deleted)" the way ArtifactoryPost.withAuthorDeleted leaves it.
+  const post1 = gone => `<span class="id">#1</span> <span class="tp">(claims)</span> `
+    + `<span class="by">from Fixer${gone ? ' (deleted)' : ''} at Sep 1, 14:20</span> — `
+    + `<span class="bd">issue #12 is mine; worktree wt/i12</span>`;
+  const post2 = `<span class="id">#2</span> <span class="tp">(claims)</span> `
+    + `<span class="by">from Auditor at Sep 4, 09:02</span> — `
+    + `<span class="bd">took #12 over; reusing wt/i12</span>`;
+
+  const CMDS = [
+    { a:1.10, b:4.30, html:`<span class="d">$</span> graphcode node send ${PATH} `
+        + `<span class="a">7f3a91c2-…</span> "rebased onto main"` },
+    { a:4.80, b:11.00, html:`<span class="d">$</span> graphcode artifactory post ${PATH} --topic claims <span class="d">\\</span>`
+        + `<br>&nbsp;&nbsp;&nbsp;&nbsp;"issue #12 is mine; worktree wt/i12"` },
+    { a:16.90, b:19.10, html:`<span class="d">$</span> graphcode status ${PATH}` },
+    { a:19.30, b:25.60, html:`<span class="d">$</span> graphcode artifactory sync ${PATH}` },
+    { a:26.00, b:29.50, html:`<span class="d">$</span> graphcode artifactory post ${PATH} --topic claims <span class="d">\\</span>`
+        + `<br>&nbsp;&nbsp;&nbsp;&nbsp;"took #12 over; reusing wt/i12"` },
+  ];
+  const OUTS = [
+    { a:6.30, b:11.00, html:`<span class="ok">posted #1 (claims)</span>` },
+    { a:17.80, b:19.10, html:`<span class="d">…</span><br>artifactory: 1 post, <span class="ok">1 unread for you</span>` },
+    { a:20.50, b:25.60, html:`acme-api artifactory, unread: 1 post<br>&nbsp;&nbsp;${post1(true)}` },
+    { a:26.90, b:29.50, html:`<span class="ok">posted #2 (claims)</span>` },
+  ];
+
+  const CAPS = [
+    { a:1.60,  b:4.20,  html:'<b>node send</b> and edges are addressed — you need the peer’s id.' },
+    { a:8.10,  b:10.70, html:'The Artifactory is the ambient half: post it <b>to nobody in particular</b>.' },
+    { a:11.40, b:15.60, html:'The author finishes, and is deleted. <i>The note stays.</i>' },
+    { a:16.40, b:19.20, html:'A loop created days later, wired to nothing…' },
+    { a:19.40, b:26.60, html:'…runs <b>one command</b>, and the note is <i>waiting for it</i>.' },
+    { a:28.00, b:30.00, html:'Notes <i>outlive their authors</i>.', dn:0 },
+  ];
+
+  const END = 30.0;
+
+  function render(t){
+    const intro = O(t,0,0.55);
+    $('kick').style.opacity = intro; $('head').style.opacity = intro;
+
+    // Fixer resolves at 11.0, then is deleted — the card goes, the post does not.
+    pill($('lFix'), t >= 10.60 ? 'DONE' : 'RUNNING');
+    $('lFix').style.opacity = intro * (1 - O(t,12.00,12.70));
+    $('lFix').style.borderColor = t >= 10.60 ? 'rgba(48,209,88,0.45)' : 'var(--hair)';
+
+    // The lane closes over the author the way the canvas reflows when a card goes,
+    // eased rather than jumped: a hard cut here reads as a rendering fault.
+    pill($('lRev'),'RUNNING');
+    $('lRev').style.opacity = intro;
+    $('lRev').style.transform = `translateY(${(-112 * O(t,12.70,13.30)).toFixed(2)}px)`;
+
+    const aud = O(t,15.90,16.50);
+    pill($('lAud'),'RUNNING');
+    $('lAud').style.opacity = aud;
+    $('lAud').style.transform = `scale(${lerp(0.94,1,aud).toFixed(3)})`;
+    $('lAud').style.borderColor = aud > 0.5 ? 'rgba(140,197,255,0.55)' : 'var(--hair)';
+
+    const sendVis = intro * (1 - O(t,4.30,4.70));
+    wire.setAttribute('opacity', sendVis); head.setAttribute('opacity', sendVis);
+    $('chSend').style.opacity = sendVis;
+
+    const later = O(t,15.50,16.00);
+    $('rule').style.opacity = later; $('chLater').style.opacity = later;
+
+    $('board').style.opacity = intro;
+    const posts = t >= 27.80 ? 2 : t >= 7.60 ? 1 : 0;
+    $('bhead').querySelector('.r').textContent =
+      `shared · unaddressed · ${posts} post${posts === 1 ? '' : 's'}`;
+    $('bempty').textContent = 'the board is empty — post one: graphcode artifactory post <project-path> <note…>';
+    $('bempty').style.opacity = 1 - O(t,7.30,7.70);
+
+    $('p1').innerHTML = post1(t >= 13.55);
+    $('p1').style.opacity = O(t,7.60,8.05) * 0.95;
+    $('p2').innerHTML = post2;
+    $('p2').style.opacity = O(t,27.80,28.25) * 0.95;
+
+    const cmd = CMDS.find(c => t >= c.a && t < c.b);
+    if (cmd) {
+      $('cmd').innerHTML = cmd.html;
+      $('cmd').style.opacity = win(t, cmd.a, cmd.b, 0.28, 0.20);
+    } else $('cmd').style.opacity = 0;
+
+    const out = OUTS.find(o => t >= o.a && t < o.b);
+    if (out) {
+      $('out').innerHTML = out.html;
+      $('out').style.opacity = win(t, out.a, out.b, 0.28, 0.20);
+    } else $('out').style.opacity = 0;
+
+    if (!pip(t, 1.70, 2.45, 'send')
+     && !pip(t, 6.60, 7.40, 'toBd')
+     && !pip(t, 21.20, 22.00, 'fromBd')
+     && !pip(t, 27.10, 27.85, 'up')) dot.setAttribute('opacity', 0);
+
+    const cap = CAPS.find(c => t >= c.a && t < c.b);
+    if (cap) {
+      const v = win(t, cap.a, cap.b, 0.3, cap.dn === 0 ? 0 : 0.25);
+      $('cap').innerHTML = cap.html; $('cap').style.opacity = v;
+      $('cap').style.transform = `translateY(${lerp(8,0,cl(v)).toFixed(2)}px)`;
+    } else $('cap').style.opacity = 0;
+  }
+
+  let paused = false, t0 = null;
+  window.__duration = END;
+  window.__seek = t => { paused = true; render(t); };
+  window.__pause = () => { paused = true; };
+  function frame(x){ if(!paused){ if(t0===null) t0=x; render(((x-t0)/1000)%END); } requestAnimationFrame(frame); }
+  render(0); requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
