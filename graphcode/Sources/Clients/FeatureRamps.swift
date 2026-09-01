@@ -32,7 +32,7 @@ enum FeatureRamps {
     var defaultPercents: [String: Int] {
       switch self {
       case .codespaces: return ["beta": 100, "stable": 100]
-      case .artifactory: return ["beta": 100, "stable": 0]
+      case .artifactory: return ["beta": 100, "stable": 100]
       }
     }
   }

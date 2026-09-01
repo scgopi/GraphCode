@@ -418,7 +418,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     summaryUsesModel: Bool = false,
     visualisesSummaries: Bool = false,
     daemonHeartbeatEnabled: Bool = false,
-    artifactoryEnabled: Bool = false,
+    artifactoryEnabled: Bool = true,
     keepsMacAwakeWhileLoopsRun: Bool = false,
     worktreePolicies: [String: WorktreeHygienePolicy] = [:]
   ) {
@@ -490,11 +490,12 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       try container.decodeIfPresent(Bool.self, forKey: .visualisesSummaries) ?? false
     daemonHeartbeatEnabled =
       try container.decodeIfPresent(Bool.self, forKey: .daemonHeartbeatEnabled) ?? false
-    // The daemon-side half of the beta ramp: the app writes the ramp-resolved value,
-    // so absent means "no app has spoken yet" and takes the off every non-app flow
-    // (CLI-only machines, hand-edited files) already had.
+    // On unless somebody turned it off. Absent used to mean off while the board was
+    // beta-only — "no app has spoken yet" — and now means the default: a CLI-only
+    // machine or a hand-edited file gets the board the way every install does, and
+    // the app still writes an explicit value the moment a human flips the switch.
     artifactoryEnabled =
-      try container.decodeIfPresent(Bool.self, forKey: .artifactoryEnabled) ?? false
+      try container.decodeIfPresent(Bool.self, forKey: .artifactoryEnabled) ?? true
     // Absent means nobody has asked for it, which is the default. An update must never
     // start holding a power assertion on a machine whose owner did not choose that.
     keepsMacAwakeWhileLoopsRun =
