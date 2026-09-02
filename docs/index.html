@@ -69,7 +69,7 @@ description: Graph engineering for coding agents on macOS — loops connected on
   .nav-actions { display: flex; align-items: center; gap: 10px; }
   .btn-star { display: flex; align-items: center; gap: 8px; padding: 8px 13px; border: 1px solid var(--line4); border-radius: 8px; font-size: 13px; color: #d6d6d2; font-family: var(--mono); }
   .btn-star:hover { border-color: #4a4a52; color: #fff; }
-  .btn-star .star, .btn-ghost .star { color: var(--amber); }
+  .btn-star .star, .btn-ghost .star, .btn-ghost .social-icon { color: var(--amber); }
   .btn-amber { padding: 9px 16px; background: var(--amber); color: #12100c; border-radius: 8px; font-size: 13px; font-weight: 600; }
   .btn-amber:hover { background: var(--amber-hi); color: #12100c; }
 
@@ -87,6 +87,7 @@ description: Graph engineering for coding agents on macOS — loops connected on
   .btn-primary:hover { background: var(--amber-hi); color: #12100c; }
   .btn-ghost { padding: 14px 22px; border: 1px solid var(--line4); border-radius: 10px; font-size: 15px; color: #e6e6e2; display: flex; align-items: center; gap: 9px; }
   .btn-ghost:hover { border-color: #4a4a52; color: #e6e6e2; }
+  .social-icon { width: 14px; height: 14px; flex: none; }
   .brew { display: inline-flex; align-items: center; gap: 12px; padding: 11px 16px; background: #101013; border: 1px solid var(--line3); border-radius: 10px; font-family: var(--mono); font-size: 13px; color: #b9b9b2; }
   .brew .prompt { color: var(--green); }
   .caret { width: 7px; height: 15px; background: var(--amber); animation: gcCaret 1.1s steps(1) infinite; }
@@ -322,6 +323,10 @@ description: Graph engineering for coding agents on macOS — loops connected on
     <div class="hero-ctas">
       <a class="btn-primary" href="https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg">⬇ Download for macOS</a>
       <a class="btn-ghost" href="https://github.com/scgopi/GraphCode" target="_blank" rel="noopener"><span class="star">★</span> Star on GitHub</a>
+      <a class="btn-ghost" href="https://x.com/scgopi" target="_blank" rel="noopener" aria-label="Follow @scgopi on X">
+        <svg class="social-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231 5.45-6.231Zm-1.161 17.52h1.833L7.084 4.126H5.117L17.083 19.77Z"/></svg>
+        Follow @scgopi
+      </a>
     </div>
     <div class="brew"><span class="prompt">$</span><span>brew install --cask scgopi/graphcode/graphcode</span><span class="caret"></span></div>
   </div>
