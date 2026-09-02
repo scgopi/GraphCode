@@ -150,9 +150,11 @@ extension ProjectFeature.State {
     !unfilledTokens.isEmpty
   }
 
-  /// The picker's rows, already grouped: **This project** first, then **All
-  /// projects**, each sorted by name. The query filters on name and body — a
-  /// template is findable by what it says, not only by what it is called.
+  /// The picker's rows, already grouped: **This project** first, then **Your
+  /// templates**, then **Starters**. What a person wrote outranks what shipped —
+  /// the starters are scaffolding for a first week, and a library that has grown past
+  /// them should not scroll under them every time. The query filters on name and
+  /// body — a template is findable by what it says, not only by what it is called.
   var templatePickerRows: [ProjectFeature.TemplatePickerRow] {
     let query = templates.query.trimmingCharacters(in: .whitespaces).lowercased()
     let matches: (PromptTemplate) -> Bool = { template in
@@ -182,8 +184,8 @@ extension ProjectFeature.State {
       StarterTemplates.priority(of: $0.id) < StarterTemplates.priority(of: $1.id)
     }
     return byName(project).map { ProjectFeature.TemplatePickerRow(template: $0, scope: .project) }
-      + byPriority.map { ProjectFeature.TemplatePickerRow(template: $0, scope: .starter) }
       + byName(mine).map { ProjectFeature.TemplatePickerRow(template: $0, scope: .home) }
+      + byPriority.map { ProjectFeature.TemplatePickerRow(template: $0, scope: .starter) }
   }
 
   /// The fields still holding a `{token}`, in the order `⇥` walks them — the order

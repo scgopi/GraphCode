@@ -177,11 +177,12 @@ struct TemplatePickerTests {
   }
 
   /// Starters and a person's own templates are two sections for good — scaffolding
-  /// and a library are different things — and the starters keep their shipped order,
+  /// and a library are different things. Yours sit above the starters, since what you
+  /// wrote outranks what shipped, and the starters keep their shipped order below,
   /// because the group is a ladder: lead a team, then Goal, then Timed, then the rest.
   @Test
   @MainActor
-  func startersKeepTheirLadderOrderAndYourOwnSitBelow() async {
+  func yourOwnSitAboveTheStartersWhichKeepTheirLadderOrder() async {
     // Deliberately handed over scrambled and alphabetically hostile.
     let shipped = StarterTemplates.all
     let scrambled = Array(shipped.reversed())
@@ -193,10 +194,10 @@ struct TemplatePickerTests {
     await store.send(.templatesButtonTapped)
     await store.send(.templateLibraryChanged(library))
     let rows = store.state.templatePickerRows
-    #expect(rows.map(\.scope) == Array(repeating: .starter, count: shipped.count) + [.home])
-    #expect(rows.prefix(shipped.count).map(\.template.name) == shipped.map(\.name))
-    #expect(rows.first?.template.name == "Lead a team toward a goal")
-    #expect(rows.last?.template.name == "Aardvark brief")
+    #expect(rows.map(\.scope) == [.home] + Array(repeating: .starter, count: shipped.count))
+    #expect(rows.first?.template.name == "Aardvark brief")
+    #expect(rows.dropFirst().map(\.template.name) == shipped.map(\.name))
+    #expect(rows[1].template.name == "Lead a team toward a goal")
     #expect(ProjectFeature.TemplatePickerScope.home.displayName == "Your templates")
   }
 
