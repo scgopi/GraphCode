@@ -508,17 +508,6 @@ public enum ZmxSessionLauncher {
     return command
   }
 
-  /// Positive evidence that a session's task has ended: its listing row is there and
-  /// carries `ended=`. The complement of `daemonReadyCheckCommand` is *not* this — that
-  /// check also fails on a row marked `err=` (a busy daemon missing zmx's one-second
-  /// probe) and on an empty listing, neither of which says the agent is gone. Anything
-  /// destructive keys off this one.
-  public static func sessionEndedCheckCommand(zmxPath: String, sessionName: String) -> String {
-    let name = RemoteProjectLocation.shellQuoted("name=\(sessionName)\t")
-    return RemoteProjectLocation.shellQuoted(zmxPath)
-      + " ls 2>/dev/null | grep " + name + " | grep -q $'\\tended='"
-  }
-
   public static func waitingAttachCommand(
     zmxPath: String, sessionName: String, executable: String?
   ) -> [String] {
@@ -1561,12 +1550,19 @@ public enum ZmxSessionLauncher {
     // no session a keystroke can reach, so the run branch relaunches it — this is
     // what lets an ensure, a send, or the sweep wake a loop that died unattended
     // (issue #215), which a `zmx get` check could never do.
-    let sessionID = resumableSessionID(forNodeID: node.id, backend: node.backend)
+    let sessionID: String? =
+      SessionIDStore.load(forNodeID: node.id)
+      ?? {
+        switch node.backend {
+        case .copilotCLI:
+          let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+          return CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent
+        case .claudeCode, .codex, .openCode:
+          return nil
+        }
+      }()
     guard let runArgs = arguments(forNode: node, projectPath: projectPath) else { return }
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
-    let copilotSessionBefore =
-      node.backend == .copilotCLI
-      ? CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent : nil
     if let sessionID,
       let resumeArgs = resumeArguments(
         forNode: node, sessionID: sessionID, projectPath: projectPath)
@@ -1585,14 +1581,7 @@ public enum ZmxSessionLauncher {
       // only if the session really failed to survive is the ID treated as dead: it is
       // dropped and the fresh launch runs. A resume that took is left alone, and its
       // `SessionStart` hook has already rebanked the same ID.
-      guard await sessionDiedImmediately(node: node) else {
-        // A resume that took is the same conversation as before, so its ID is what a
-        // Copilot node banks — the only backend that cannot bank one itself.
-        if node.backend == .copilotCLI {
-          bankCopilotSessionID(sessionID, forNodeID: node.id, workingDirectory: wd ?? "")
-        }
-        return
-      }
+      guard await sessionDiedImmediately(node: node) else { return }
       DialLog.record(session: name, dial: "ensure", event: "resume-dead")
       SessionIDStore.remove(forNodeID: node.id)
     }
@@ -1609,77 +1598,18 @@ public enum ZmxSessionLauncher {
       case .codex, .openCode: break
       }
     }
-    // `copilotSessionBefore` was noted *before* the launch: the first pass and the ID
-    // bank below both wait for a Copilot session directory that was not already there,
-    // which is how they tell a session this ensure just started from one it found
-    // already running.
+    // Noted *before* the launch: the first pass below waits for a Copilot session
+    // directory that was not already there, which is how it tells a session it just
+    // started from one this ensure found already running.
+    let copilotSessionBefore =
+      firstPassMessage(for: node) != nil
+      ? CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent : nil
     await atomicCheckOrRun(
       checkCommand: aliveCheck, runArguments: runArgs,
       zmxPath: zmxPath, workingDirectory: wd,
       logFragment: DialLog.fragment(session: name, dial: "ensure", event: "fresh"))
     await kickOffFirstPass(
       of: node, sessionNamed: name, projectPath: projectPath, after: copilotSessionBefore)
-    await bankCopilotSessionIDWhenItAppears(
-      forNode: node, sessionNamed: name, workingDirectory: wd, after: copilotSessionBefore)
-  }
-
-  /// The ID a node's session would resume from: the banked pointer, or for Copilot — the
-  /// one backend with no hook to bank its own — the session-state directory carrying
-  /// the `--name` graphcode launched it with. Public because the app's open path
-  /// (`GhosttyTerminalView.localResumeOrFreshCommand`) must make the same choice: for
-  /// as long as it read only the pointer, a local Copilot loop whose session was gone
-  /// was relaunched from its goal under the same name, and nothing logged the duplicate.
-  public static func resumableSessionID(forNodeID nodeID: UUID, backend: CLISessionBackendKind)
-    -> String?
-  {
-    if let banked = SessionIDStore.load(forNodeID: nodeID) { return banked }
-    guard backend == .copilotCLI else { return nil }
-    let name = SurfaceRef(id: nodeID, launchesClaudeCode: true).zmxSessionName
-    return CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent
-  }
-
-  /// Banks a Copilot session's resume ID on this machine — the local twin of
-  /// `CopilotSessionLog.remoteIDBankFragment`, and the same dial-log line. Before this
-  /// the daemon rediscovered the directory on every ensure and the app never looked, so
-  /// the two launchers could disagree on whether there was anything to resume.
-  public static func bankCopilotSessionID(
-    _ sessionID: String, forNodeID nodeID: UUID, workingDirectory: String
-  ) {
-    guard SessionIDStore.load(forNodeID: nodeID) != sessionID else { return }
-    SessionIDStore.bank(sessionID, forNodeID: nodeID, workingDirectory: workingDirectory)
-    let name = SurfaceRef(id: nodeID, launchesClaudeCode: true).zmxSessionName
-    DialLog.record(session: name, dial: "bank", event: "copilot-id")
-  }
-
-  /// After a fresh ensure, waits for the directory a just-launched Copilot creates —
-  /// one that was not there before — and banks it. Nothing is banked when the wait runs
-  /// out: this cannot tell a session the ensure found already running (no new directory,
-  /// ever) from a cold `copilot` still at its trust dialog (a new directory, later), and
-  /// banking the old directory in the second case would point the next resume at the
-  /// dead conversation — the orphaning this whole change exists to end. An unbanked
-  /// Copilot node loses nothing: `resumableSessionID` falls back to the newest directory
-  /// with its name, and the next resume that takes banks it.
-  private static func bankCopilotSessionIDWhenItAppears(
-    forNode node: LoopNode, sessionNamed name: String, workingDirectory: String?,
-    after previous: String?
-  ) async {
-    guard node.backend == .copilotCLI else { return }
-    Task {
-      guard await NodeTickets.copilotBank.claim(node.id) else { return }
-      defer { Task { await NodeTickets.copilotBank.release(node.id) } }
-      let deadline = Date().addingTimeInterval(firstPassWaitSeconds)
-      var observed: String?
-      while Date() < deadline, observed == nil {
-        let current = CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent
-        if let current, current != previous {
-          observed = current
-        } else {
-          try? await Task.sleep(for: .seconds(firstPassPollSeconds))
-        }
-      }
-      guard let sessionID = observed else { return }
-      bankCopilotSessionID(sessionID, forNodeID: node.id, workingDirectory: workingDirectory ?? "")
-    }
   }
 
   /// The message that gives a Copilot time-based loop the pass its schedule will not give
@@ -1725,8 +1655,8 @@ public enum ZmxSessionLauncher {
   ) async {
     guard let message = firstPassMessage(for: node), let projectPath else { return }
     Task {
-      guard await NodeTickets.firstPass.claim(node.id) else { return }
-      defer { Task { await NodeTickets.firstPass.release(node.id) } }
+      guard await FirstPassTickets.shared.claim(node.id) else { return }
+      defer { Task { await FirstPassTickets.shared.release(node.id) } }
       let deadline = Date().addingTimeInterval(firstPassWaitSeconds)
       var observed: String?
       while Date() < deadline, observed == nil {
@@ -1840,9 +1770,8 @@ public enum ZmxSessionLauncher {
 
   /// One first-pass message per node at a time. Two ensure ticks that both see a fresh
   /// session would otherwise type the task in twice.
-  private actor NodeTickets {
-    static let firstPass = NodeTickets()
-    static let copilotBank = NodeTickets()
+  private actor FirstPassTickets {
+    static let shared = FirstPassTickets()
     private var claimed: Set<UUID> = []
     func claim(_ id: UUID) -> Bool { claimed.insert(id).inserted }
     func release(_ id: UUID) { claimed.remove(id) }

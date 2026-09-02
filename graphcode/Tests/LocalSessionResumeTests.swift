@@ -16,7 +16,7 @@ import Testing
 /// days of work, leaving those transcripts on disk with nothing naming them — and every
 /// reboot afterwards resumed the near-empty replacements. Observed 2026-08-11 on three
 /// loops at once.
-@Suite(.serialized)
+@Suite
 struct LocalSessionResumeTests {
   private let projectPath = "/tmp/widget"
 
@@ -55,133 +55,27 @@ struct LocalSessionResumeTests {
     }
     #expect(script.contains(#"--resume "$GRAPHCODE_RESUME_ID""#))
     #expect(script.contains(SessionIDStore.file(forNodeID: nodeID).path))
-    // A live session is still just joined — the same reattach the pane always did, now
-    // behind the daemon's husk-aware listing check rather than a bare `zmx get`.
-    #expect(script.contains("ls 2>/dev/null"))
+    // A live session is still just joined — the same reattach the pane always did.
+    #expect(script.contains("'get'"))
     #expect(script.contains("'attach'"))
   }
 
   @Test
-  func aNodeWithNothingBankedStillLaunchesFreshAndSaysSo() throws {
-    // The fresh launch used to be a bare argv with no log line — the one silent branch,
-    // and the one a user's `dials.log` could never explain. The decision is made by the
-    // script at run time from what is banked *then*, so the shape is the same either way.
+  func aNodeWithNothingBankedStillLaunchesFresh() throws {
     let nodeID = UUID()
     let view = surface(nodeID: nodeID)
-    let script = try withBankedID(nil, forNode: nodeID) {
-      try #require(view.localResumeOrFreshCommand(agentLaunch: ["claude", "the prompt"])?.last)
+    let command = withBankedID(nil, forNode: nodeID) {
+      view.localResumeOrFreshCommand(agentLaunch: ["claude", "the prompt"])
     }
+    // Nothing to resume is the first launch, and the fresh argv is what it gets —
+    // behind its own dial line now. The launch used to be the one silent branch,
+    // which is why the duplicate-session investigation of 2026-09-02 started blind.
+    #expect(command?.first == "/bin/sh")
+    let script = try #require(command?.last)
     #expect(script.contains("open fresh"))
+    #expect(script.contains("'attach'"))
     #expect(script.contains("the prompt"))
-    #expect(script.contains(SessionIDStore.file(forNodeID: nodeID).path))
-  }
-
-  @Test
-  func aDeadShellLeftByTheAgentIsKilledBeforeTheRelaunch() throws {
-    // An agent that died inside its session leaves the shell at a prompt, which answers
-    // `zmx get` for as long as the machine stays up. The old check joined that corpse;
-    // the daemon's husk-aware check (`ended=`) falls through, and the husk is killed so
-    // the resume-or-fresh verdict below it stays measurable.
-    let nodeID = UUID()
-    let view = surface(nodeID: nodeID)
-    let script = try withBankedID("abc-123", forNode: nodeID) {
-      try #require(view.localResumeOrFreshCommand(agentLaunch: ["claude", "the prompt"])?.last)
-    }
-    #expect(script.contains("ended="))
-    #expect(script.contains("open husk-killed"))
-    let kill = try #require(script.range(of: "'kill'"))
-    let resume = try #require(script.range(of: "open resume"))
-    #expect(kill.upperBound < resume.lowerBound)
-    // The kill keys off positive evidence — a listing row carrying `ended=` — not off
-    // the liveness check failing: that also fails on an `err=` row, which is a busy
-    // daemon missing its probe, and killing on it would take a live agent down.
-    let ended = try #require(script.range(of: #"grep -q $'\tended='"#))
-    #expect(ended.upperBound < kill.lowerBound)
-    #expect(!script.contains("'get'"))
-    // zsh, so the alive check's `$'\t'` is read as a tab wherever `/bin/sh` points.
-    #expect(view.localResumeOrFreshCommand(agentLaunch: ["claude"])?.first == "/bin/zsh")
-  }
-
-  // MARK: - Copilot, which cannot bank its own ID
-
-  @Test
-  func aCopilotLoopWithNothingBankedResumesFromItsSessionDirectory() throws {
-    // Copilot has no hook; on a remote host the daemon banks its directory name, locally
-    // nobody did. Opening such a loop with its session gone relaunched `copilot --name
-    // graphcode-<id>` from the goal: a second Copilot session for one loop, every reboot,
-    // unlogged. The pane now discovers and banks the same ID the daemon would.
-    let nodeID = UUID()
-    let name = SurfaceRef(id: nodeID, launchesClaudeCode: true).zmxSessionName
-    let root = try temporaryRoot()
-    defer { try? FileManager.default.removeItem(at: root) }
-    let directory = try copilotSession(named: name, in: root)
-    CopilotSessionLog.stateDirectory = root
-    defer {
-      CopilotSessionLog.stateDirectory = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".copilot/session-state", isDirectory: true)
-    }
-    let view = surface(nodeID: nodeID, backend: .copilotCLI)
-    let script = try withBankedID(nil, forNode: nodeID) {
-      let script = try #require(
-        view.localResumeOrFreshCommand(agentLaunch: ["copilot", "the prompt"])?.last)
-      #expect(SessionIDStore.load(forNodeID: nodeID) == directory.lastPathComponent)
-      #expect(
-        SessionIDStore.history(forNodeID: nodeID).last?.sessionID == directory.lastPathComponent)
-      return script
-    }
-    defer { try? FileManager.default.removeItem(at: SessionIDStore.historyFile(forNodeID: nodeID)) }
-    #expect(script.contains(#"--resume "$GRAPHCODE_RESUME_ID""#))
-  }
-
-  @Test
-  func theNewestDirectoryWithTheNameWinsAndTheBankIsIdempotent() throws {
-    // A loop that already has a duplicate must resume the one being written to now, and
-    // an ensure tick that finds the same ID banked must not grow the history.
-    let nodeID = UUID()
-    let name = SurfaceRef(id: nodeID, launchesClaudeCode: true).zmxSessionName
-    let root = try temporaryRoot()
-    defer { try? FileManager.default.removeItem(at: root) }
-    let older = try copilotSession(named: name, in: root)
-    try FileManager.default.setAttributes(
-      [.modificationDate: Date(timeIntervalSinceNow: -3600)], ofItemAtPath: older.path)
-    let newer = try copilotSession(named: name, in: root)
-    CopilotSessionLog.stateDirectory = root
-    defer {
-      CopilotSessionLog.stateDirectory = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".copilot/session-state", isDirectory: true)
-    }
-    defer {
-      SessionIDStore.remove(forNodeID: nodeID)
-      try? FileManager.default.removeItem(at: SessionIDStore.historyFile(forNodeID: nodeID))
-    }
-    let discovered = ZmxSessionLauncher.resumableSessionID(forNodeID: nodeID, backend: .copilotCLI)
-    #expect(discovered == newer.lastPathComponent)
-    ZmxSessionLauncher.bankCopilotSessionID(
-      newer.lastPathComponent, forNodeID: nodeID, workingDirectory: projectPath)
-    ZmxSessionLauncher.bankCopilotSessionID(
-      newer.lastPathComponent, forNodeID: nodeID, workingDirectory: projectPath)
-    #expect(SessionIDStore.history(forNodeID: nodeID).count == 1)
-    #expect(SessionIDStore.history(forNodeID: nodeID).first?.workingDirectory == projectPath)
-    // Once banked, the pointer is the answer — for a Claude node there is no directory
-    // to fall back to at all.
-    #expect(
-      ZmxSessionLauncher.resumableSessionID(forNodeID: nodeID, backend: .claudeCode)
-        == newer.lastPathComponent)
-  }
-
-  private func temporaryRoot() throws -> URL {
-    let root = FileManager.default.temporaryDirectory
-      .appendingPathComponent("copilot-resume-\(UUID().uuidString)", isDirectory: true)
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    return root
-  }
-
-  private func copilotSession(named name: String, in root: URL) throws -> URL {
-    let directory = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    try "client_name: github/cli\nname: \(name)\n".write(
-      to: directory.appendingPathComponent("workspace.yaml"), atomically: true, encoding: .utf8)
-    return directory
+    #expect(!script.contains("--resume"))
   }
 
   @Test
