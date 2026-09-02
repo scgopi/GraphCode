@@ -67,6 +67,25 @@ public enum SessionIDStore {
     }
   }
 
+  /// The daemon-side twin of the `SessionStart` hook's write, for a backend that has no
+  /// hook to bank its own ID (Copilot): history line first, then the pointer, and nothing
+  /// at all when the pointer already names this ID — an ensure tick must not grow the
+  /// history.
+  public static func bank(_ sessionID: String, forNodeID nodeID: UUID, workingDirectory: String) {
+    guard load(forNodeID: nodeID) != sessionID else { return }
+    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let line = "\(Int(Date().timeIntervalSince1970)) \(sessionID) \(workingDirectory)\n"
+    let history = historyFile(forNodeID: nodeID)
+    if let handle = try? FileHandle(forWritingTo: history) {
+      _ = try? handle.seekToEnd()
+      try? handle.write(contentsOf: Data(line.utf8))
+      try? handle.close()
+    } else {
+      try? line.write(to: history, atomically: true, encoding: .utf8)
+    }
+    save(sessionID, forNodeID: nodeID)
+  }
+
   public static func load(forNodeID nodeID: UUID) -> String? {
     let url = file(forNodeID: nodeID)
     guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
