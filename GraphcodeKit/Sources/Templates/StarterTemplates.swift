@@ -142,10 +142,11 @@ public enum StarterTemplates {
     starter(
       id("200000000001"), "Get the build green",
       """
-      Test command: {test_command}
+      Build command: {build_command}
 
-      It's failing. Find out why and fix it — the smallest change that works, no \
-      refactoring you weren't asked for — and run that command until it exits 0.
+      It's failing. Run it, read the first real error, and fix the cause — the smallest \
+      change that works, no refactoring you weren't asked for. Run it again after every \
+      change, and stop when it exits 0.
       """,
       shape: .goalBased)
   }
