@@ -353,10 +353,24 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// at them. Every reboot afterwards faithfully resumed the near-empty replacements.
   ///
   /// So this path resumes too, and the two launchers now make the same choice from the
-  /// same banked ID. The check-then-launch is one `/bin/sh` script rather than an argv
+  /// same banked ID. The check-then-launch is one shell script rather than an argv
   /// because the decision has to be made *here*, on the machine, at the moment the pane
   /// opens: whether a session exists, and whether the resume survived, are both facts
   /// only the shell holding the terminal can see.
+  ///
+  /// Every local agent launch takes this script — there is no silent branch. The one
+  /// there used to be, a bare `zmx attach <name> <agent> <prompt>` for a node with
+  /// nothing banked, is how a Copilot loop (no hook to bank its own ID; the daemon found
+  /// its session directory by name, this view never looked) was relaunched from its goal
+  /// under the same `--name` after every reboot, a second Copilot session for one loop
+  /// that no dial log ever recorded. Now the ID is discovered and banked first
+  /// (`ZmxSessionLauncher.resumableSessionID`), and a fresh launch says so.
+  ///
+  /// The liveness check is the daemon's husk-aware one (`daemonReadyCheckCommand`), not
+  /// `zmx get`: a session whose agent died leaves its shell at a prompt, which answers
+  /// `zmx get` for as long as the machine stays up. Attaching to that showed the corpse
+  /// and nothing more. Such a husk is killed and the launch proceeds as if the session
+  /// were gone, which keeps the resume-or-fresh verdict below measurable.
   ///
   /// Deliberately *not* consuming the ID up front, which is what the remote path does:
   /// there, one restorer owns the loop, and here the daemon's ensure may be running the
@@ -364,41 +378,54 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// through to a fresh launch — the very failure this exists to end. It is dropped only
   /// once a resume has been *seen* to fail, which is also the check the daemon makes.
   ///
-  /// `nil` for a backend that cannot resume, or a node with nothing banked: both take
-  /// the ordinary fresh launch.
+  /// `nil` only for a surface that is not a node's; the plain agent argv is what that
+  /// gets.
   func localResumeOrFreshCommand(agentLaunch: [String]) -> [String]? {
+    guard let nodeID = SurfaceRef.nodeID(fromZmxSessionName: sessionName) else { return nil }
     let settings = GraphcodeSettingsStore.load()
-    guard let nodeID = SurfaceRef.nodeID(fromZmxSessionName: sessionName),
-      SessionIDStore.load(forNodeID: nodeID) != nil,
-      let resumeLaunch = resumeCommand(
-        settings: settings, hooksFile: presenceHooksFile(), remoteSettingsPath: nil)
-    else { return nil }
+    if SessionIDStore.load(forNodeID: nodeID) == nil,
+      let discovered = ZmxSessionLauncher.resumableSessionID(forNodeID: nodeID, backend: backend)
+    {
+      ZmxSessionLauncher.bankCopilotSessionID(
+        discovered, forNodeID: nodeID, workingDirectory: workingDirectory ?? "")
+    }
+    let resumeLaunch = resumeCommand(
+      settings: settings, hooksFile: presenceHooksFile(), remoteSettingsPath: nil)
     let zmx = ZmxLocator.binaryURL.path
     let quoted = RemoteProjectLocation.shellQuoted
     let idFile = quoted(SessionIDStore.file(forNodeID: nodeID).path)
     let attach = ZmxSessionLauncher.quotedCommand([zmx, "attach", sessionName])
-    let resume = ZmxSessionLauncher.quotedCommand(
-      [zmx, "attach", sessionName] + resumeLaunch)
     let fresh = ZmxSessionLauncher.quotedCommand([zmx, "attach", sessionName] + agentLaunch)
-    let exists = ZmxSessionLauncher.quotedCommand([zmx, "get", sessionName])
-    // A live session is joined as it always was — the resume argv would be ignored by
-    // `zmx attach` anyway, and building it costs a settings read nobody needs.
+    let live = ZmxSessionLauncher.daemonReadyCheckCommand(
+      zmxPath: zmx, sessionName: sessionName, executable: nil)
+    let answers = ZmxSessionLauncher.quotedCommand([zmx, "get", sessionName])
+    let kill = ZmxSessionLauncher.quotedCommand([zmx, "kill", sessionName])
     let idVariable = ZmxSessionLauncher.remoteResumeIDVariable
     let settle = ZmxSessionLauncher.resumeSettleSeconds
     let log = { (event: String) in
       DialLog.fragment(session: self.sessionName, dial: "open", event: event) + "; "
     }
-    let joined = "\(exists) >/dev/null 2>&1 && { \(log("attach-live"))exec \(attach); }; "
-    let read = "\(idVariable)=$(cat \(idFile) 2>/dev/null); "
-    let attempt =
-      "if [ -n \"$\(idVariable)\" ]; then export \(idVariable); \(log("resume"))"
-      + "gc_t0=$(date +%s); "
-      + resume + "; gc_rc=$?; "
-    let verdict =
-      "[ $(($(date +%s) - gc_t0)) -ge \(settle) ] && exit \"$gc_rc\"; rm -f \(idFile); "
-      + log("resume-dead")
-      + #"printf '\033[1;33m── Resume did not take; starting fresh. ──\033[0m\r\n'; fi; "#
-    let script = joined + read + attempt + verdict + log("fresh") + "exec \(fresh)"
-    return ["/bin/sh", "-c", script]
+    // A live session is joined as it always was — the resume argv would be ignored by
+    // `zmx attach` anyway.
+    let joined = "\(live) >/dev/null 2>&1 && { \(log("attach-live"))exec \(attach); }; "
+    let revive = "\(answers) >/dev/null 2>&1 && { \(log("husk-killed"))\(kill) >/dev/null 2>&1; }; "
+    var script = joined + revive
+    if let resumeLaunch {
+      let resume = ZmxSessionLauncher.quotedCommand([zmx, "attach", sessionName] + resumeLaunch)
+      let read = "\(idVariable)=$(cat \(idFile) 2>/dev/null); "
+      let attempt =
+        "if [ -n \"$\(idVariable)\" ]; then export \(idVariable); \(log("resume"))"
+        + "gc_t0=$(date +%s); "
+        + resume + "; gc_rc=$?; "
+      let verdict =
+        "[ $(($(date +%s) - gc_t0)) -ge \(settle) ] && exit \"$gc_rc\"; rm -f \(idFile); "
+        + log("resume-dead")
+        + #"printf '\033[1;33m── Resume did not take; starting fresh. ──\033[0m\r\n'; fi; "#
+      script += read + attempt + verdict
+    }
+    script += log("fresh") + "exec \(fresh)"
+    // zsh, like the daemon's own check-or-run: the alive check's `$'\t'` needs a shell
+    // that reads ANSI-C quoting, which `/bin/sh` is only when it happens to be bash.
+    return ["/bin/zsh", "-c", script]
   }
 }
