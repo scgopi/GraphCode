@@ -16,7 +16,7 @@ import Testing
 /// days of work, leaving those transcripts on disk with nothing naming them — and every
 /// reboot afterwards resumed the near-empty replacements. Observed 2026-08-11 on three
 /// loops at once.
-@Suite
+@Suite(.serialized)
 struct LocalSessionResumeTests {
   private let projectPath = "/tmp/widget"
 
@@ -55,8 +55,9 @@ struct LocalSessionResumeTests {
     }
     #expect(script.contains(#"--resume "$GRAPHCODE_RESUME_ID""#))
     #expect(script.contains(SessionIDStore.file(forNodeID: nodeID).path))
-    // A live session is still just joined — the same reattach the pane always did.
-    #expect(script.contains("'get'"))
+    // A live session is still just joined — the same reattach the pane always did, now
+    // behind the daemon's husk-aware listing check rather than a bare `zmx get`.
+    #expect(script.contains("ls 2>/dev/null"))
     #expect(script.contains("'attach'"))
   }
 
@@ -91,6 +92,12 @@ struct LocalSessionResumeTests {
     let kill = try #require(script.range(of: "'kill'"))
     let resume = try #require(script.range(of: "open resume"))
     #expect(kill.upperBound < resume.lowerBound)
+    // The kill keys off positive evidence — a listing row carrying `ended=` — not off
+    // the liveness check failing: that also fails on an `err=` row, which is a busy
+    // daemon missing its probe, and killing on it would take a live agent down.
+    let ended = try #require(script.range(of: #"grep -q $'\tended='"#))
+    #expect(ended.upperBound < kill.lowerBound)
+    #expect(!script.contains("'get'"))
     // zsh, so the alive check's `$'\t'` is read as a tab wherever `/bin/sh` points.
     #expect(view.localResumeOrFreshCommand(agentLaunch: ["claude"])?.first == "/bin/zsh")
   }

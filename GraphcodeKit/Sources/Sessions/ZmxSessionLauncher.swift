@@ -508,6 +508,17 @@ public enum ZmxSessionLauncher {
     return command
   }
 
+  /// Positive evidence that a session's task has ended: its listing row is there and
+  /// carries `ended=`. The complement of `daemonReadyCheckCommand` is *not* this — that
+  /// check also fails on a row marked `err=` (a busy daemon missing zmx's one-second
+  /// probe) and on an empty listing, neither of which says the agent is gone. Anything
+  /// destructive keys off this one.
+  public static func sessionEndedCheckCommand(zmxPath: String, sessionName: String) -> String {
+    let name = RemoteProjectLocation.shellQuoted("name=\(sessionName)\t")
+    return RemoteProjectLocation.shellQuoted(zmxPath)
+      + " ls 2>/dev/null | grep " + name + " | grep -q $'\\tended='"
+  }
+
   public static func waitingAttachCommand(
     zmxPath: String, sessionName: String, executable: String?
   ) -> [String] {
@@ -1641,9 +1652,13 @@ public enum ZmxSessionLauncher {
   }
 
   /// After a fresh ensure, waits for the directory a just-launched Copilot creates —
-  /// one that was not there before — and banks it. A session the ensure found already
-  /// running makes no new directory; when the wait runs out, the one seen before the
-  /// launch is banked instead, since that is the session still running.
+  /// one that was not there before — and banks it. Nothing is banked when the wait runs
+  /// out: this cannot tell a session the ensure found already running (no new directory,
+  /// ever) from a cold `copilot` still at its trust dialog (a new directory, later), and
+  /// banking the old directory in the second case would point the next resume at the
+  /// dead conversation — the orphaning this whole change exists to end. An unbanked
+  /// Copilot node loses nothing: `resumableSessionID` falls back to the newest directory
+  /// with its name, and the next resume that takes banks it.
   private static func bankCopilotSessionIDWhenItAppears(
     forNode node: LoopNode, sessionNamed name: String, workingDirectory: String?,
     after previous: String?
@@ -1662,7 +1677,7 @@ public enum ZmxSessionLauncher {
           try? await Task.sleep(for: .seconds(firstPassPollSeconds))
         }
       }
-      guard let sessionID = observed ?? previous else { return }
+      guard let sessionID = observed else { return }
       bankCopilotSessionID(sessionID, forNodeID: node.id, workingDirectory: workingDirectory ?? "")
     }
   }
