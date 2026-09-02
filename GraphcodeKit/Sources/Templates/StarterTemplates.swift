@@ -50,7 +50,7 @@ public enum StarterTemplates {
     [
       leadATeam,
       getTheBuildGreen, reviewTheDiff, raiseTestCoverage,
-      nightlyDependencyReview, watchTheBuild,
+      watchMyInbox, watchTheBuild,
       whereDoesThisLive, whyDidThisBreak,
       changeFileByFile, pairOnThis,
       reviewFixVerify,
@@ -74,10 +74,12 @@ public enum StarterTemplates {
   }
 
   /// The three offered on an empty canvas — one from each of the first three rungs of
-  /// the commitment ladder, so the pick itself shows the axis. Deliberately not five:
+  /// the commitment ladder, so the pick itself shows the axis. The timed pick is the
+  /// one about the repository: an inbox watcher is a fine starter and an odd first
+  /// thing to offer on a code project's empty canvas. Deliberately not five:
   /// a row of every type is a taxonomy lesson, and this is a "get started" row.
   public static var firstLaunchPicks: [PromptTemplate] {
-    [whereDoesThisLive, getTheBuildGreen, nightlyDependencyReview]
+    [whereDoesThisLive, getTheBuildGreen, watchTheBuild]
   }
 
   // MARK: - Leading
@@ -183,16 +185,24 @@ public enum StarterTemplates {
   // Both also demonstrate following: edit either file and the next run picks the
   // change up.
 
-  public static var nightlyDependencyReview: PromptTemplate {
+  /// The one timed starter that is not about the repository: mail access is the
+  /// session's own (a connector, an MCP, a local CLI), so the brief names none and
+  /// asks the loop to say so when it has none. It drafts and asks rather than sends —
+  /// the human's answer is the input, and it rides into the next check as memory.
+  public static var watchMyInbox: PromptTemplate {
     starter(
-      id("300000000001"), "Nightly dependency review",
+      id("300000000001"), "Watch my inbox",
       """
-      Check for dependency updates worth taking. For each: what changed, what it would \
-      break here, and whether it's worth doing now. "Nothing worth taking" is a valid \
-      report.
+      Priorities: {priorities}
+
+      Check the inbox with whatever mail access this session has. Pick out only what \
+      needs attention — a question waiting on me, a deadline, anything touching the \
+      priorities above — and say for each why it matters and what a reply would need. \
+      Draft the reply where one is obvious, but send nothing: ask me, and carry what I \
+      tell you into the next check. "Nothing needs you" is a valid report.
       """,
       shape: .timeBased,
-      settings: TemplateSettings(cadence: "daily"))
+      settings: TemplateSettings(cadence: "1h"))
   }
 
   public static var watchTheBuild: PromptTemplate {
