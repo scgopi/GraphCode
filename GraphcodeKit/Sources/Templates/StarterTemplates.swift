@@ -50,7 +50,7 @@ public enum StarterTemplates {
     [
       leadATeam,
       getTheBuildGreen, reviewTheDiff, raiseTestCoverage,
-      nightlyDependencyReview, watchTheBuild,
+      watchMyInbox, watchTheBuild,
       whereDoesThisLive, whyDidThisBreak,
       changeFileByFile, pairOnThis,
       reviewFixVerify,
@@ -74,10 +74,12 @@ public enum StarterTemplates {
   }
 
   /// The three offered on an empty canvas — one from each of the first three rungs of
-  /// the commitment ladder, so the pick itself shows the axis. Deliberately not five:
+  /// the commitment ladder, so the pick itself shows the axis. The timed pick is the
+  /// one about the repository: an inbox watcher is a fine starter and an odd first
+  /// thing to offer on a code project's empty canvas. Deliberately not five:
   /// a row of every type is a taxonomy lesson, and this is a "get started" row.
   public static var firstLaunchPicks: [PromptTemplate] {
-    [whereDoesThisLive, getTheBuildGreen, nightlyDependencyReview]
+    [whereDoesThisLive, getTheBuildGreen, watchTheBuild]
   }
 
   // MARK: - Leading
@@ -107,8 +109,10 @@ public enum StarterTemplates {
   }
 
   // MARK: - Main
-  // Nothing to fill in but the one line, nothing to decide. Both end when you close
-  // them, which is the whole type.
+  // One line to fill, and both end when you close them, which is the whole type. Both
+  // are shaped like the team lead above, at a smaller scale: do the first pass
+  // yourself, split only when the work actually splits, one Artifactory topic per
+  // job, and the main loop is the only voice the human hears.
 
   public static var whereDoesThisLive: PromptTemplate {
     starter(
@@ -116,9 +120,11 @@ public enum StarterTemplates {
       """
       Symbol: {symbol}
 
-      Trace it through this codebase — where it's defined, everything that reads it, \
-      everything that writes it. Don't change anything; I'm trying to understand the \
-      shape before I touch it.
+      Map it before I touch it: where it's defined, everything that reads it, \
+      everything that writes it. Do the first pass yourself. If it reaches into more \
+      than a few areas, give each area its own goal loop to trace in depth and report \
+      to the Artifactory under this symbol's name, and fold their reports into one \
+      map. Change nothing — the map is the deliverable.
       """)
   }
 
@@ -128,8 +134,11 @@ public enum StarterTemplates {
       """
       Symptom: {symptom}
 
-      Reproduce it and work from the failure back to the line responsible. Stop when \
-      you can tell me the cause — I'll decide what to do about it.
+      Reproduce it first. Then list the plausible causes, and if there is more than \
+      one, give each its own goal loop in its own worktree to confirm or rule it out, \
+      reporting to the Artifactory under this symptom. Only you talk to me; the \
+      children report to you. Stop when you can tell me the cause with the evidence — \
+      I'll decide what to do about it.
       """)
   }
 
@@ -142,10 +151,11 @@ public enum StarterTemplates {
     starter(
       id("200000000001"), "Get the build green",
       """
-      Test command: {test_command}
+      Build command: {build_command}
 
-      It's failing. Find out why and fix it — the smallest change that works, no \
-      refactoring you weren't asked for — and run that command until it exits 0.
+      It's failing. Run it, read the first real error, and fix the cause — the smallest \
+      change that works, no refactoring you weren't asked for. Run it again after every \
+      change, and stop when it exits 0.
       """,
       shape: .goalBased)
   }
@@ -169,9 +179,11 @@ public enum StarterTemplates {
       """
       Area: {area}
 
-      Add tests for its least-covered code — the behaviour that would actually break, \
-      not the lines that are cheapest to hit. Keep every existing test passing, and \
-      report the coverage number before and after.
+      Bring its test coverage to 80%. Measure it first and say where it stands. Add \
+      tests for the behaviour that would actually break, not the lines that are \
+      cheapest to hit, and keep every existing test passing. Re-measure after each \
+      batch, and stop when the area reads 80% or above — report the number before and \
+      after.
       """,
       shape: .goalBased)
   }
@@ -180,16 +192,24 @@ public enum StarterTemplates {
   // Both also demonstrate following: edit either file and the next run picks the
   // change up.
 
-  public static var nightlyDependencyReview: PromptTemplate {
+  /// The one timed starter that is not about the repository: mail access is the
+  /// session's own (a connector, an MCP, a local CLI), so the brief names none and
+  /// asks the loop to say so when it has none. It drafts and asks rather than sends —
+  /// the human's answer is the input, and it rides into the next check as memory.
+  public static var watchMyInbox: PromptTemplate {
     starter(
-      id("300000000001"), "Nightly dependency review",
+      id("300000000001"), "Watch my inbox",
       """
-      Check for dependency updates worth taking. For each: what changed, what it would \
-      break here, and whether it's worth doing now. "Nothing worth taking" is a valid \
-      report.
+      Priorities: {priorities}
+
+      Check the inbox with whatever mail access this session has. Pick out only what \
+      needs attention — a question waiting on me, a deadline, anything touching the \
+      priorities above — and say for each why it matters and what a reply would need. \
+      Draft the reply where one is obvious, but send nothing: ask me, and carry what I \
+      tell you into the next check. "Nothing needs you" is a valid report.
       """,
       shape: .timeBased,
-      settings: TemplateSettings(cadence: "daily"))
+      settings: TemplateSettings(cadence: "1h"))
   }
 
   public static var watchTheBuild: PromptTemplate {

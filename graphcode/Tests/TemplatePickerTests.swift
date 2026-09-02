@@ -267,9 +267,9 @@ struct TemplatePickerTests {
     #expect(store.state.draftLoopType == .goalBased)
     #expect(store.state.templates.applied?.name == "Get the build green")
     // One thing to fill, on the brief's first line.
-    #expect(store.state.unfilledTokens == ["test_command"])
+    #expect(store.state.unfilledTokens == ["build_command"])
     #expect(store.state.draftBlocksOnTokens)
-    #expect(store.state.draftGoal.hasPrefix("Test command: {test_command}"))
+    #expect(store.state.draftGoal.hasPrefix("Build command: {build_command}"))
   }
 
   @Test
