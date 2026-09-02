@@ -170,9 +170,11 @@ public enum StarterTemplates {
       """
       Area: {area}
 
-      Add tests for its least-covered code — the behaviour that would actually break, \
-      not the lines that are cheapest to hit. Keep every existing test passing, and \
-      report the coverage number before and after.
+      Bring its test coverage to 80%. Measure it first and say where it stands. Add \
+      tests for the behaviour that would actually break, not the lines that are \
+      cheapest to hit, and keep every existing test passing. Re-measure after each \
+      batch, and stop when the area reads 80% or above — report the number before and \
+      after.
       """,
       shape: .goalBased)
   }
