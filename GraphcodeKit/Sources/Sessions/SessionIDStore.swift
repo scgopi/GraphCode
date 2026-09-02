@@ -75,13 +75,14 @@ public enum SessionIDStore {
     guard load(forNodeID: nodeID) != sessionID else { return }
     try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let line = "\(Int(Date().timeIntervalSince1970)) \(sessionID) \(workingDirectory)\n"
-    let history = historyFile(forNodeID: nodeID)
-    if let handle = try? FileHandle(forWritingTo: history) {
-      _ = try? handle.seekToEnd()
-      try? handle.write(contentsOf: Data(line.utf8))
-      try? handle.close()
-    } else {
-      try? line.write(to: history, atomically: true, encoding: .utf8)
+    // `O_APPEND`, not seek-then-write: the daemon's bank task and the app's bank-on-open
+    // can land on the same file in the same instant, and only an append-mode write
+    // keeps both lines.
+    let descriptor = open(
+      historyFile(forNodeID: nodeID).path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+    if descriptor >= 0 {
+      _ = Array(line.utf8).withUnsafeBytes { write(descriptor, $0.baseAddress, $0.count) }
+      close(descriptor)
     }
     save(sessionID, forNodeID: nodeID)
   }

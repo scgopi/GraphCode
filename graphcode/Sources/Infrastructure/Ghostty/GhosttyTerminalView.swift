@@ -372,6 +372,14 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// and nothing more. Such a husk is killed and the launch proceeds as if the session
   /// were gone, which keeps the resume-or-fresh verdict below measurable.
   ///
+  /// The kill needs *positive* evidence of death — a listing row carrying `ended=`
+  /// (`sessionEndedCheckCommand`) — not the liveness check's failure. That check also
+  /// fails on a row zmx marks `err=`, which is a busy daemon missing its one-second probe
+  /// and nothing more; zmx itself refuses to clean up on that. Killing on it would take a
+  /// live agent down mid-turn at exactly the moment a human opens loops after a reboot,
+  /// and the same evidence rule keeps this from racing the daemon: its relaunch into a
+  /// husk clears the `ended=` mark the instant the command is typed in.
+  ///
   /// Deliberately *not* consuming the ID up front, which is what the remote path does:
   /// there, one restorer owns the loop, and here the daemon's ensure may be running the
   /// same resume concurrently. Two consumers racing on one `rm` is how the loser falls
@@ -398,7 +406,8 @@ struct GhosttyTerminalView: NSViewRepresentable {
     let fresh = ZmxSessionLauncher.quotedCommand([zmx, "attach", sessionName] + agentLaunch)
     let live = ZmxSessionLauncher.daemonReadyCheckCommand(
       zmxPath: zmx, sessionName: sessionName, executable: nil)
-    let answers = ZmxSessionLauncher.quotedCommand([zmx, "get", sessionName])
+    let ended = ZmxSessionLauncher.sessionEndedCheckCommand(
+      zmxPath: zmx, sessionName: sessionName)
     let kill = ZmxSessionLauncher.quotedCommand([zmx, "kill", sessionName])
     let idVariable = ZmxSessionLauncher.remoteResumeIDVariable
     let settle = ZmxSessionLauncher.resumeSettleSeconds
@@ -408,7 +417,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
     // A live session is joined as it always was — the resume argv would be ignored by
     // `zmx attach` anyway.
     let joined = "\(live) >/dev/null 2>&1 && { \(log("attach-live"))exec \(attach); }; "
-    let revive = "\(answers) >/dev/null 2>&1 && { \(log("husk-killed"))\(kill) >/dev/null 2>&1; }; "
+    let revive = "\(ended) >/dev/null 2>&1 && { \(log("husk-killed"))\(kill) >/dev/null 2>&1; }; "
     var script = joined + revive
     if let resumeLaunch {
       let resume = ZmxSessionLauncher.quotedCommand([zmx, "attach", sessionName] + resumeLaunch)
