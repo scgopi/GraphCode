@@ -109,8 +109,10 @@ public enum StarterTemplates {
   }
 
   // MARK: - Main
-  // Nothing to fill in but the one line, nothing to decide. Both end when you close
-  // them, which is the whole type.
+  // One line to fill, and both end when you close them, which is the whole type. Both
+  // are shaped like the team lead above, at a smaller scale: do the first pass
+  // yourself, split only when the work actually splits, one Artifactory topic per
+  // job, and the main loop is the only voice the human hears.
 
   public static var whereDoesThisLive: PromptTemplate {
     starter(
@@ -118,9 +120,11 @@ public enum StarterTemplates {
       """
       Symbol: {symbol}
 
-      Trace it through this codebase — where it's defined, everything that reads it, \
-      everything that writes it. Don't change anything; I'm trying to understand the \
-      shape before I touch it.
+      Map it before I touch it: where it's defined, everything that reads it, \
+      everything that writes it. Do the first pass yourself. If it reaches into more \
+      than a few areas, give each area its own goal loop to trace in depth and report \
+      to the Artifactory under this symbol's name, and fold their reports into one \
+      map. Change nothing — the map is the deliverable.
       """)
   }
 
@@ -130,8 +134,11 @@ public enum StarterTemplates {
       """
       Symptom: {symptom}
 
-      Reproduce it and work from the failure back to the line responsible. Stop when \
-      you can tell me the cause — I'll decide what to do about it.
+      Reproduce it first. Then list the plausible causes, and if there is more than \
+      one, give each its own goal loop in its own worktree to confirm or rule it out, \
+      reporting to the Artifactory under this symptom. Only you talk to me; the \
+      children report to you. Stop when you can tell me the cause with the evidence — \
+      I'll decide what to do about it.
       """)
   }
 
