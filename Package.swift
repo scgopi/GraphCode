@@ -50,6 +50,12 @@ let package = Package(
       swiftSettings: [.swiftLanguageMode(.v5)]
     ),
     .executableTarget(
+      name: "goobers-export-demo",
+      dependencies: ["GraphcodeKit"],
+      path: "Tools/goobers-export-demo",
+      swiftSettings: [.swiftLanguageMode(.v5)]
+    ),
+    .executableTarget(
       name: "graphcoded",
       dependencies: ["GraphcodeKit"],
       path: "graphcoded/Sources",
