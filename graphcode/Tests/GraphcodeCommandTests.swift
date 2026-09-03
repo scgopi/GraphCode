@@ -38,6 +38,21 @@ struct GraphcodeCommandTests {
   }
 
   @Test
+  func aGoobersGraphCanDeclareSchedulesAndWebhookEvents() throws {
+    #expect(
+      try GraphcodeCommand.parse([
+        "graph", "trigger", "/tmp/x", "schedule", "@every 5m",
+      ]) == .addGraphSchedule(projectPath: "/tmp/x", expression: "@every 5m"))
+    #expect(
+      try GraphcodeCommand.parse([
+        "graph", "trigger", "/tmp/x", "webhook", "pull_request", "issues",
+      ]) == .addGraphWebhook(projectPath: "/tmp/x", events: ["pull_request", "issues"]))
+    #expect(
+      try GraphcodeCommand.parse(["graph", "trigger", "/tmp/x", "clear"])
+        == .clearGraphTriggers(projectPath: "/tmp/x"))
+  }
+
+  @Test
   func aMissingProjectPathIsNamedInTheError() throws {
     #expect(throws: GraphcodeCommand.ParseError.missingArgument("project-path")) {
       try GraphcodeCommand.parse(["status"])

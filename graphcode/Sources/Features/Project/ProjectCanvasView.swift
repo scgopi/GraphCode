@@ -100,6 +100,10 @@ struct ProjectCanvasView: View {
             Text("not run yet")
               .foregroundStyle(.secondary)
           }
+          if !store.graph.goobersTriggers.isEmpty {
+            Text("· \(store.graph.goobersTriggers.count) trigger(s)")
+              .foregroundStyle(.secondary)
+          }
           Spacer()
         }
         .font(.caption)

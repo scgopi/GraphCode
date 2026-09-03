@@ -143,6 +143,36 @@ struct GoobersGraphExecutionTests {
     #expect(updated.nodes.allSatisfy { $0.state == .succeeded })
   }
 
+  @Test
+  func triggersRequireTheirOwnSettingAndSynchronizeImmediately() async {
+    let errors = LockIsolated<[String]>([])
+    let synced = LockIsolated<[LoopGraph]>([])
+    var graph = LoopGraph(project: ProjectRef(path: "/tmp/project", name: "project"))
+    graph.executionMode = .goobers
+    let disabled = GraphStore(
+      graph: graph,
+      onAnnounceError: { message in errors.withValue { $0.append(message) } },
+      onGoobersTriggersEnabled: { false },
+      onSyncGoobers: { value in synced.withValue { $0.append(value) } })
+
+    await disabled.handle(.addGoobersTrigger(.schedule("@every 5m")))
+    #expect(await disabled.graph.goobersTriggers.isEmpty)
+    #expect(errors.value.first?.contains("enable Goobers triggers") == true)
+    #expect(synced.value.isEmpty)
+
+    let enabled = GraphStore(
+      graph: graph,
+      onGoobersTriggersEnabled: { true },
+      onSyncGoobers: { value in synced.withValue { $0.append(value) } })
+    await enabled.handle(.addGoobersTrigger(.schedule("@every 5m")))
+    #expect(await enabled.graph.goobersTriggers.count == 1)
+    #expect(synced.value.last?.goobersTriggers.count == 1)
+
+    await enabled.handle(.clearGoobersTriggers)
+    #expect(await enabled.graph.goobersTriggers.isEmpty)
+    #expect(synced.value.last?.goobersTriggers.isEmpty == true)
+  }
+
   private func run(
     id: String,
     phase: String,

@@ -49,6 +49,10 @@ struct GoobersWorkspaceTests {
       project: ProjectRef(path: project.path, name: "Demo Project"),
       nodes: [first, second])
     graph.edges = [LoopEdge(from: first.id, to: second.id, kind: .handoff)]
+    graph.goobersTriggers = [
+      .schedule("@every 5m"),
+      .webhook(events: ["pull_request"]),
+    ]
     let workspace = GoobersWorkspace(graphID: graph.id, baseDirectory: base)
 
     let prepared = try workspace.prepare(graph)
@@ -64,13 +68,27 @@ struct GoobersWorkspaceTests {
       try String(
         contentsOf: workspace.root.appendingPathComponent("instance.yaml"),
         encoding: .utf8
-      ).contains("listen: 127.0.0.1:0"))
+      ).contains("webhook:"))
+    let secret = workspace.root.appendingPathComponent("secrets/webhook-secret")
+    #expect(FileManager.default.fileExists(atPath: secret.path))
+    let attributes = try FileManager.default.attributesOfItem(atPath: secret.path)
+    #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+    #expect(workspace.triggersActive)
     #expect(
       FileManager.default.fileExists(
         atPath:
           workspace.root
           .appendingPathComponent("config/gaggles/graphcode/workflows/demo-project.yaml")
           .path))
+    let workflow = try String(
+      contentsOf:
+        workspace.root
+        .appendingPathComponent("config/gaggles/graphcode/workflows/demo-project.yaml"),
+      encoding: .utf8)
+    #expect(workflow.contains("type: schedule"))
+    #expect(workflow.contains("schedule: \"@every 5m\""))
+    #expect(workflow.contains("type: webhook"))
+    #expect(workflow.contains("- pull_request"))
     #expect(
       FileManager.default.fileExists(
         atPath:
