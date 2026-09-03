@@ -83,7 +83,7 @@ struct CopilotBackendTests {
   }
 
   @Test
-  func copilotHostsEverythingButComposites() {
+  func copilotHostsEveryLoopType() {
     // Goal-based works because a goal is just a prompt plus a predicate the *daemon*
     // polls from outside — nothing about it needs a skill the agent has to own.
     #expect(CLISessionBackendKind.copilotCLI.canHost(.turnBased))
@@ -92,9 +92,12 @@ struct CopilotBackendTests {
     // Copilot had no `/loop` equivalent when this row was first written against 1.0.75;
     // it has one now, which is what allows this pairing (issue #3).
     #expect(CLISessionBackendKind.copilotCLI.canHost(.timeBased))
-    // A composite is a graph of loops running inside one node, and sub-agent fan-out is
-    // still unverified here — the one row that stays refused.
-    #expect(!CLISessionBackendKind.copilotCLI.canHost(.composite))
+    // A composite is a graph of loops running inside one node and leans on sub-agent
+    // fan-out, which was unverified when this row was first written. 1.0.80 lists
+    // `/fleet`, `/tasks` and `/subagents`, so the last refused pairing is allowed too.
+    #expect(CLISessionBackendKind.copilotCLI.canHost(.composite))
+    #expect(CLISessionBackendKind.hosting(.composite).contains(.copilotCLI))
+    #expect(CLISessionBackendKind.copilotCLI.canHost(.sketch))
   }
 
   @Test
