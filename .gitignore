@@ -22,6 +22,12 @@ xcuserdata/
 # mise
 .mise.local.toml
 
+# Developer-local build identity and signing overrides
+.env
+.env.local
+.env.*.local
+!.env.example
+
 # macOS
 .DS_Store
 
