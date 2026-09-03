@@ -219,7 +219,10 @@ struct LoopWorkspaceView: View {
       HStack(spacing: 4) {
         ForEach(Array(store.layout.tabs.enumerated()), id: \.element.id) { index, tab in
           TabPillView(
-            title: agentTabTitle(for: tab),
+            title: Self.agentTabTitle(
+              loopType: store.node.loopType,
+              backend: store.node.backend,
+              launchesAgent: tab.primary.launchesClaudeCode),
             // Only the agent tab has a loop state to report — a plain shell is a shell.
             // This is the fix for "a background tab asked a question and nothing said so".
             state: tab.surfaces.contains(where: \.launchesClaudeCode) ? store.node.state : nil,
@@ -264,15 +267,18 @@ struct LoopWorkspaceView: View {
   }
 
   /// An unattended loop's agent tab is labelled for what it's actually doing rather than
-  /// "Claude Code" — a time-based session is running its own `/loop`, a goal-based one is
-  /// working toward a stop condition, and that distinction is the one thing a glance at
-  /// the tab strip should tell you apart from a turn-based loop's session.
-  private func agentTabTitle(for tab: TabLayout) -> String {
-    guard tab.primary.launchesClaudeCode else { return "Shell" }
-    switch store.node.loopType {
+  /// for the CLI doing it — a time-based session is running its own `/loop`, a goal-based
+  /// one is working toward a stop condition, and that distinction is the one thing a
+  /// glance at the tab strip should tell you apart from an attended loop's session. Every
+  /// other type names its backend, which is only Claude Code when the loop chose it (#255).
+  static func agentTabTitle(loopType: LoopType, backend: CLISessionBackendKind, launchesAgent: Bool)
+    -> String
+  {
+    guard launchesAgent else { return "Shell" }
+    switch loopType {
     case .timeBased: return "Loop"
     case .goalBased: return "Goal"
-    case .sketch, .turnBased, .composite: return "Claude Code"
+    case .sketch, .turnBased, .composite: return backend.displayName
     }
   }
 
