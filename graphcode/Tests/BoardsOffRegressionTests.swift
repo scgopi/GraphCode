@@ -181,7 +181,6 @@ struct BoardsOffRegressionTests {
     #expect(loaded.summarisesLoops)
     #expect(loaded.summaryUsesModel)
     #expect(loaded.daemonHeartbeatEnabled == before.daemonHeartbeatEnabled)
-    #expect(loaded.sharesLoops == before.sharesLoops)
   }
 
   @Test

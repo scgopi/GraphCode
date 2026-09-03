@@ -52,7 +52,7 @@ struct SettingsBackendWriteTests {
     defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
     var settings = GraphcodeSettings()
-    settings.sharesLoops = true
+    settings.summarisesLoops = true
     settings.showsActivityStrip = false
     GraphcodeSettingsStore.save(settings, to: url)
 
@@ -60,7 +60,7 @@ struct SettingsBackendWriteTests {
 
     let reloaded = GraphcodeSettingsStore.load(from: url)
     #expect(reloaded.defaultBackend == .copilotCLI)
-    #expect(reloaded.sharesLoops)
+    #expect(reloaded.summarisesLoops)
     #expect(!reloaded.showsActivityStrip)
   }
 

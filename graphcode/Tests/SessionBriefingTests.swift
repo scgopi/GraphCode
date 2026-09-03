@@ -117,7 +117,7 @@ struct SessionBriefingTests {
     #expect(briefing.contains("irreversible"))
     #expect(briefing.contains("edge create \(Self.project)"))
     #expect(briefing.contains("node export \(Self.project)"))
-    #expect(briefing.contains("Export and import loops"))
+    #expect(briefing.contains("node import \(Self.project)"))
     #expect(briefing.contains("graphcode://global"))
   }
 

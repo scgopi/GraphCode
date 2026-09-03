@@ -245,17 +245,11 @@ extension GraphOverviewView {
 
     Divider()
 
-    // Behind the experiments switch, exactly as on a folder's canvas and in the sidebar:
-    // a right-click verb that writes files and splices loops into graphs is one a person
-    // should choose, not find. Read inline like the folder canvas's menu does — the
-    // sidebar's outline is the one place that cannot (see `AppSidebarView.sharesLoops`).
-    if SettingsModel.shared.settings.sharesLoops {
-      Button("Export Loop…") { send(.exportNodeRequested(node.id), to: loop.projectPath) }
-      Button("Import Loops Here…") {
-        send(.importLoopsRequested(asChildOf: node.id), to: loop.projectPath)
-      }
-      Divider()
+    Button("Export Loop…") { send(.exportNodeRequested(node.id), to: loop.projectPath) }
+    Button("Import Loops Here…") {
+      send(.importLoopsRequested(asChildOf: node.id), to: loop.projectPath)
     }
+    Divider()
 
     Button("Delete Loop…", role: .destructive) {
       send(.deleteNodeRequested(node.id), to: loop.projectPath)

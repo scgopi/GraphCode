@@ -15,20 +15,13 @@ import UniformTypeIdentifiers
 struct AppSidebarView: View {
   @Bindable var store: StoreOf<AppFeature>
 
-  /// Whether the loop rows' menus offer Export/Import (`GraphcodeSettings.sharesLoops`).
-  ///
-  /// Captured as a plain value at construction — the default expression runs in
-  /// `AppView.body`, the same safe spot its activity-strip read lives — because
-  /// reading the `@Observable` settings model *inside* `nodeMenu`'s builder
-  /// segfaulted the List's outline diffing at launch (`ForEachState.item(at:offset:)`
-  /// null deref while the coordinator walked row view IDs). The canvas menus get away
-  /// with the in-builder read; the sidebar's outline does not, so the flag arrives
-  /// here as data and the toggle still propagates through `AppView`'s re-render.
-  var sharesLoops: Bool = SettingsModel.shared.settings.sharesLoops
-
   /// Whether the add menu offers Add Codespace… — the `codespaces` ramp
-  /// (`FeatureRamps`), read once at construction for the same reason as
-  /// `sharesLoops`. A ramp change applies from the next re-render.
+  /// (`FeatureRamps`), captured as a plain value at construction: the default
+  /// expression runs in `AppView.body`, the same safe spot its activity-strip read
+  /// lives, because reading an `@Observable` model *inside* a row menu's builder
+  /// segfaulted the List's outline diffing at launch (`ForEachState.item(at:offset:)`
+  /// null deref while the coordinator walked row view IDs). A ramp change applies from
+  /// the next re-render.
   var offersCodespaces: Bool = FeatureRamps.isEnabled(.codespaces)
 
   // Several of the stored properties and the selection type below are not `private`

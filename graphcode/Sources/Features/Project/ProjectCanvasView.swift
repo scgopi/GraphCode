@@ -286,15 +286,12 @@ struct ProjectCanvasView: View {
     }
     // The whole-canvas counterparts to a card's Export Loop…/Import Loops Here…:
     // everything on this canvas as one bundle, and an import that lands beside the
-    // existing loops rather than under one of them. Behind the same experiments
-    // switch as the card's items.
-    if SettingsModel.shared.settings.sharesLoops {
-      Divider()
-      if !store.canvasGraph.nodes.isEmpty {
-        Button("Export All Loops…") { store.send(.exportGraphRequested) }
-      }
-      Button("Import Loops…") { store.send(.importLoopsRequested(asChildOf: nil)) }
+    // existing loops rather than under one of them.
+    Divider()
+    if !store.canvasGraph.nodes.isEmpty {
+      Button("Export All Loops…") { store.send(.exportGraphRequested) }
     }
+    Button("Import Loops…") { store.send(.importLoopsRequested(asChildOf: nil)) }
   }
 
   private var worktreesMenuTitle: String {

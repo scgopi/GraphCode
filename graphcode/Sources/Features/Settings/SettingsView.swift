@@ -177,18 +177,6 @@ struct SettingsView: View {
         .foregroundStyle(.secondary)
         .fixedSize(horizontal: false, vertical: true)
 
-        Toggle(
-          "Export and import loops",
-          isOn: $model.settings.sharesLoops)
-        Text(
-          "Right-click a loop — on the canvas or in the sidebar — to package it, its "
-            + "child loops and their session memory into a zip, and to import such a "
-            + "bundle back in. Also enables the CLI's export/import verbs."
-        )
-        .font(.caption2)
-        .foregroundStyle(.secondary)
-        .fixedSize(horizontal: false, vertical: true)
-
         // Always offered. The daemon-side bit lives in `artifactoryEnabled`
         // (`GraphcodeSettings`), on by default; a flip here is what turns the board
         // off for a person who finds it too much, and is remembered over any rollout.

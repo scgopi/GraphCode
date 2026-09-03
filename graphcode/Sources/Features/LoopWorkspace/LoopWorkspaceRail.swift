@@ -26,8 +26,8 @@ struct LoopWorkspaceRail: View {
   /// beside the summary's own fold.
   let isBoardFolded: Bool
   /// Whether this project's Artifactory is switched on, passed in as a plain value the
-  /// way `AppSidebarView` takes `sharesLoops`: the settings model is `@Observable` and
-  /// the render path should not be reading a file.
+  /// way `AppSidebarView` takes `offersCodespaces`: the settings model is `@Observable`
+  /// and the render path should not be reading a file.
   let artifactoryEnabled: Bool
   /// Whether the board section is collapsed to its one line, beside the summary's and
   /// the diagram's own folds.

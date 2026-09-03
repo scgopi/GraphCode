@@ -246,8 +246,6 @@ public enum SessionBriefing {
       - `graphcode node export \(projectPath) <node-id> --output <file.zip>` packages a
         loop and its descendants for sharing, and `graphcode node import \(projectPath)
         <file.zip> [--as-child-of <node-id>]` splices a bundle in with fresh identities.
-        Both stay off until "Export and import loops" is enabled in the app's Settings —
-        the command says so when it is not.
       - `graphcode projects` lists every project, `graphcode usage \(projectPath)` totals
         a graph's token spend, and the reserved path `graphcode://global` addresses the
         app-wide global graph wherever a project path is accepted.
