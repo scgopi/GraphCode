@@ -76,6 +76,39 @@ struct RemoteCLIShimTests {
           command: .messageNode(nodeID, text: "the API changed", from: nil, followUp: nil)))
   }
 
+  /// The path a loop *on that host* naturally types — its working directory, or the
+  /// worktree it was told to work in. The daemon keys graphs by the `ssh://` URI and
+  /// opening one is create-if-missing, so this used to add a second project named after
+  /// the worktree and put the child loop inside it. The shim is the one place that knows
+  /// this is a remote host's spelling, so it is where the two are matched up.
+  @Test
+  func aLocalPathOnTheRemoteHostResolvesToItsProject() throws {
+    let run = try runShim([
+      "node", "create", "/home/dev/widget/worktrees/fix-215",
+      "--title", "Fix 215", "--type", "goal", "--goal", "tests pass",
+    ])
+
+    #expect(run.status == 0)
+    #expect(run.commands.first == .listRecentProjects)
+    #expect(run.commands.dropFirst().first == .openProject(path: Self.project))
+    guard case .graphCommand(let path, .createNode) = run.commands.last else {
+      Issue.record("expected a createNode against the resolved project, got \(run.commands)")
+      return
+    }
+    #expect(path == Self.project)
+    #expect(run.stderr.contains(Self.project))
+  }
+
+  /// A path on that host belonging to no known project stays as it was typed: the daemon
+  /// answers with the error naming it, rather than the shim inventing a project.
+  @Test
+  func anUnrelatedLocalPathIsLeftForTheDaemonToRefuse() throws {
+    let run = try runShim(["status", "/home/dev/somewhere-else"])
+
+    #expect(run.commands.first == .listRecentProjects)
+    #expect(run.commands.dropFirst().first == .openProject(path: "/home/dev/somewhere-else"))
+  }
+
   // MARK: - Harness
 
   private struct ShimRun {
@@ -145,7 +178,11 @@ struct RemoteCLIShimTests {
         guard let command = try? JSONDecoder().decode(DaemonCommand.self, from: data)
         else { return }
         received.append(command)
-        guard let reply = try? JSONEncoder().encode(DaemonEvent.graphChanged(graph)),
+        let event: DaemonEvent =
+          command == .listRecentProjects
+          ? .recentProjectsListed([ProjectRef(path: Self.project, name: "widget")])
+          : .graphChanged(graph)
+        guard let reply = try? JSONEncoder().encode(event),
           (try? FramedMessageIO.writeFrame(reply, to: client)) != nil
         else { return }
       }

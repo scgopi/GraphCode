@@ -171,16 +171,15 @@ struct NodeDraftTests {
         title: "Ship", loopType: .goalBased, goal: GoalSpec(summary: "Tests pass"),
         backend: .copilotCLI
       ).isValid)
-    // Time-based on Copilot is allowed now that it can re-trigger its own session, and
-    // a composite since 1.0.80 grew `/fleet`; a composite on Codex is the pairing that
-    // stays refused, since sub-agent fan-out is unverified there.
+    // Time-based on Copilot is allowed now that it can re-trigger its own session; a
+    // composite is the pairing that stays refused, since sub-agent fan-out is unverified.
     #expect(
       NodeDraft(
         title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 1h Check",
         backend: .copilotCLI
       ).isValid)
-    #expect(NodeDraft(title: "Triage", loopType: .composite, backend: .copilotCLI).isValid)
-    #expect(!NodeDraft(title: "Triage", loopType: .composite, backend: .codex).isValid)
+    #expect(
+      !NodeDraft(title: "Triage", loopType: .composite, backend: .copilotCLI).isValid)
   }
 
   @Test
@@ -228,9 +227,9 @@ struct NodeDraftTests {
     #expect(
       CLISessionBackendKind.hosting(.timeBased)
         == [.claudeCode, .copilotCLI, .codex, .openCode])
-    // A composite still needs sub-agent fan-out, which Claude Code and (since 1.0.80's
-    // `/fleet`) Copilot have been shown to do.
-    #expect(CLISessionBackendKind.hosting(.composite) == [.claudeCode, .copilotCLI])
+    // A composite still needs sub-agent fan-out, which only Claude Code has been shown
+    // to do.
+    #expect(CLISessionBackendKind.hosting(.composite) == [.claudeCode])
   }
 
   @Test
