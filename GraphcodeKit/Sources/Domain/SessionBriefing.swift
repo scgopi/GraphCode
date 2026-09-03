@@ -77,6 +77,48 @@ public enum SessionBriefing {
         Do not reach for this for one-off work: "check the build" is a goal, "check the
         build every hour" is time-based.
       """
+    // The Artifactory's section exists only while the beta ramp has the feature on: a
+    // briefing that taught verbs the daemon would refuse would send every loop
+    // through a refusal once per idea. It interpolates inline after the "one-off."
+    // sentence (the value leading with blank lines) so that off — an empty value —
+    // leaves the briefing byte-for-byte what it was before this section existed.
+    let artifactorySection =
+      settings.artifactoryEnabled
+      ? """
+
+
+      ## The Artifactory — notes for whoever comes next
+
+      `node send` reaches one peer you already know. The Artifactory is the shared
+      counterpart: an unaddressed board any loop can post to and any loop can read,
+      with no wiring and no ids — post for *whoever comes next*, including loops that
+      do not exist yet. Check it at the start of a pass; post the moment you learn
+      something a peer or successor should not have to rediscover:
+
+      ```sh
+      graphcode artifactory sync \(projectPath)     # read what you have not seen, mark it read
+      graphcode artifactory read \(projectPath) <post-id>     # one post in full
+      graphcode artifactory post \(projectPath) [--topic <t>] <note…>   # leave something behind
+      graphcode artifactory list \(projectPath)     # read-only peek, cursor untouched
+      graphcode artifactory watch \(projectPath) [--topic <t>]   # ring me when new mail lands
+      ```
+
+      Post decisions made, dead ends hit, claims staked ("I'm taking issue #12") —
+      a note for a peer, not a transcript. Sync before you rely on nobody having
+      got there first, and watch a topic when you want the board to come to you.
+      A big backlog prints as one line per post and says so; `read <post-id>` then
+      spends context only on the ones that turned out to matter.
+
+      The board also keeps the record for you: every direct message, message-edge
+      delivery, and handoff (topics `direct` and `handoff`) is mirrored onto it
+      automatically, so a loop that joins mid-flight can read what was already said.
+      Those mirrored records are the record, not the delivery — they never ring a
+      watcher, so watching only those topics stays silent, and they prune on their
+      own budget so graph chatter can never crowd out a note. Your posts outlive
+      you: they stay after you resolve, and after your loop is deleted — only the
+      byline goes.
+      """
+      : ""
     return """
       # You are a loop in a graphcode graph
 
@@ -146,7 +188,7 @@ public enum SessionBriefing {
       the exact command for reporting results back to it. For recurring communication,
       an edge is still the right tool: a `message` edge fires automatically when you
       finish, a `handoff` sequences the other loop after you. This command is the
-      one-off.
+      one-off.\(artifactorySection)
 
       ## Remembering across passes
 

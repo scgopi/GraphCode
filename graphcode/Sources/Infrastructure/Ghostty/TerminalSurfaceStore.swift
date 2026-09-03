@@ -66,6 +66,12 @@ final class TerminalSurfaceStore {
     }
   }
 
+  /// Every retained surface, mounted or not — for a restart of every session, where any
+  /// pane left alive would watch its process die and report it.
+  func retireAll() {
+    retire(Array(surfaces.keys))
+  }
+
   /// Whether a surface for `id` is currently alive. For tests and for callers deciding
   /// whether a rebuild is about to happen.
   func isRetained(_ id: UUID) -> Bool { surfaces[id] != nil }
@@ -100,6 +106,7 @@ final class TerminalSurfaceStore {
 /// a plain closure rather than an effect.
 struct TerminalSurfaceClient: Sendable {
   var retire: @Sendable ([UUID]) -> Void
+  var retireAll: @Sendable () -> Void
   /// Ends the `zmx` sessions behind the given surface ids — the half of closing a pane
   /// that `retire` deliberately doesn't. Retirement only ends the attach; without this a
   /// shell the human closed kept running detached, invisible, until reboot (#254). Only
@@ -124,6 +131,15 @@ extension TerminalSurfaceClient: DependencyKey {
         }
       }
     },
+    retireAll: {
+      if Thread.isMainThread {
+        MainActor.assumeIsolated { TerminalSurfaceStore.shared.retireAll() }
+      } else {
+        DispatchQueue.main.async {
+          MainActor.assumeIsolated { TerminalSurfaceStore.shared.retireAll() }
+        }
+      }
+    },
     killSessions: { ids, projectPath in
       guard !ids.isEmpty else { return }
       // `killSession` waits on `zmx` round-trips (and retries them); none of that has a
@@ -138,7 +154,8 @@ extension TerminalSurfaceClient: DependencyKey {
   /// Tests exercise the retention rules against `SurfaceRetentionPolicy` directly; a
   /// reducer test asserting on tab bookkeeping has no surfaces to retire and should not
   /// spin up a `ghostty_app_t` to find that out.
-  static let testValue = TerminalSurfaceClient(retire: { _ in }, killSessions: { _, _ in })
+  static let testValue = TerminalSurfaceClient(
+    retire: { _ in }, retireAll: {}, killSessions: { _, _ in })
 }
 
 extension DependencyValues {

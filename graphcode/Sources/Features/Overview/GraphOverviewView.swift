@@ -134,6 +134,9 @@ struct GraphOverviewView: View {
         .sheet(isPresented: $store.showingNewNodeForm) {
           NodeDraftForm(store: store)
         }
+        // Same host as the canvas has: the overview's card menus offer Save as
+        // Template too, and a sheet needs somewhere mounted to present from.
+        .modifier(TemplateSaveSheetHost(store: store))
     }
   }
 

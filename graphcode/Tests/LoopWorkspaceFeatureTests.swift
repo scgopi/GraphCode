@@ -56,6 +56,7 @@ struct LoopWorkspaceFeatureTests {
       $0.terminalLayoutStore = TerminalLayoutStore(baseDirectory: directory)
       $0.terminalSurfaceClient = TerminalSurfaceClient(
         retire: { endings?.retire($0) },
+        retireAll: {},
         killSessions: { ids, _ in endings?.kill(ids) })
     }
     store.exhaustivity = .off

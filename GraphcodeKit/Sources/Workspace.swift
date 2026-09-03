@@ -347,7 +347,9 @@ extension Workspace {
   ) throws -> Workspace {
     let destination = try Workspace.validate(name: name, home: home, fileManager: fileManager)
       .get()
-    DaemonBootstrap.removeLaunchAgent(for: self)
+    #if os(macOS)
+      DaemonBootstrap.removeLaunchAgent(for: self)
+    #endif
     try fileManager.moveItem(at: url, to: destination.url)
     return destination
   }

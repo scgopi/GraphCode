@@ -61,14 +61,21 @@ struct LocalSessionResumeTests {
   }
 
   @Test
-  func aNodeWithNothingBankedStillLaunchesFresh() {
+  func aNodeWithNothingBankedStillLaunchesFresh() throws {
     let nodeID = UUID()
     let view = surface(nodeID: nodeID)
     let command = withBankedID(nil, forNode: nodeID) {
       view.localResumeOrFreshCommand(agentLaunch: ["claude", "the prompt"])
     }
-    // Nothing to resume is the first launch, and the ordinary argv is what it gets.
-    #expect(command == nil)
+    // Nothing to resume is the first launch, and the fresh argv is what it gets —
+    // behind its own dial line now. The launch used to be the one silent branch,
+    // which is why the duplicate-session investigation of 2026-09-02 started blind.
+    #expect(command?.first == "/bin/sh")
+    let script = try #require(command?.last)
+    #expect(script.contains("open fresh"))
+    #expect(script.contains("'attach'"))
+    #expect(script.contains("the prompt"))
+    #expect(!script.contains("--resume"))
   }
 
   @Test

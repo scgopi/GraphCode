@@ -125,6 +125,8 @@ struct AppFeature {
     /// A bundle replaced underneath this running app — see `BundleSwap` in
     /// `AppFeature+Updates.swift`.
     var bundleSwap = BundleSwap()
+    /// Restart Session / Restart All Sessions — see `AppFeature+LoopSessions.swift`.
+    var sessionRestart = SessionRestart()
 
     /// State changes seen since launch, for the activity strip — see
     /// `AppFeature+Activity.swift`. Bounded, and deliberately not persisted.
@@ -241,6 +243,7 @@ struct AppFeature {
     /// A bundle replaced underneath this running window — asked on activation, answered
     /// with a relaunch prompt. See `BundleSwap.Action`.
     case bundleSwap(BundleSwap.Action)
+    case sessionRestart(SessionRestart.Action)
     case updateDownloadTapped
     case updateReleaseNotesTapped
     case updateAlertDismissed
@@ -281,6 +284,7 @@ struct AppFeature {
   private enum CancelID { case daemonSubscription }
 
   @Dependency(\.orchestratorClient) var orchestratorClient
+  @Dependency(\.templateLibrary) var templateLibrary
   @Dependency(\.terminalLayoutStore) var terminalLayoutStore
   @Dependency(\.quickChatStore) var quickChatStore
   @Dependency(\.updateClient) var updateClient
@@ -305,6 +309,7 @@ struct AppFeature {
     jumpPaletteReducer
     updatesReducer
     historyReducer
+    loopSessionsReducer
     // Before the main Reduce on purpose: its `.graphChanged` diff needs the previous
     // graph, which the main reducer replaces. See `AppFeature+Worktrees.swift`.
     AppWorktreesReducer()
@@ -476,19 +481,16 @@ struct AppFeature {
       case .selectPreviousLoop:
         return stepOpenLoop(state, by: -1)
 
-      case .stopNodeTapped(let projectPath, let nodeID):
-        return .run { _ in
-          try? await orchestratorClient.send(
-            .graphCommand(projectPath: projectPath, command: .stopNode(nodeID)))
-        }
-
       case .onboardingRequested:
         state.showingOnboarding = true
         return .none
 
       case .onboardingDismissed:
-        state.showingOnboarding = false
-        UserDefaults.standard.set(true, forKey: "hasSeenOnboarding")
+        return finishOnboarding(&state)
+
+      // Stop and restart are handled by `loopSessionsReducer`, in
+      // `AppFeature+LoopSessions.swift` — listed here so this switch stays exhaustive.
+      case .stopNodeTapped, .sessionRestart:
         return .none
 
       // Both handled by `historyReducer`, in `AppFeature+History.swift` — listed here
@@ -537,19 +539,7 @@ struct AppFeature {
       // its local node state for this same action; telling `graphcoded` is this
       // level's job, since it's the one holding the connection, and it's what
       // actually triggers automatic outgoing-edge firing.
-      case .openLoop(.primarySurfaceExited(let succeeded)):
-        guard let id = state.openLoop?.node.id, let projectPath = state.selectedProjectPath
-        else { return .none }
-        // A chat's session ending resolves nothing — there is no node in any graph for
-        // the daemon to update, so telling it would only earn an unknown-node error.
-        guard !state.isQuickChat(id) else { return .none }
-        let command: GraphCommand = succeeded ? .nodeCheckApproved(id) : .nodeCheckRejected(id)
-        return .run { _ in
-          try? await orchestratorClient.send(
-            .graphCommand(projectPath: projectPath, command: command))
-        }
-
-      // The keypress on the agent pane's "Press any key to close." screen. The session
+      // The keypress on the agent pane's "Press any key to close" screen. The session
       // was already resolved when it exited (above) — this is the human dismissing what
       // remains, so the workspace closes *and* the node leaves the graph. Deleting via
       // the daemon rather than locally, the same way the sidebar's delete does: the
@@ -586,11 +576,6 @@ struct AppFeature {
       case .openLoop(.lastTabClosed):
         return endOpenWorkspace(&state)
 
-      case .openLoop(.stopLoopTapped):
-        guard let id = state.openLoop?.node.id, let path = state.openLoop?.projectPath
-        else { return .none }
-        return .send(.stopNodeTapped(projectPath: path, nodeID: id))
-
       case .openLoop(.showInGraphTapped):
         // Closing the workspace *without* ending its terminals: the loop keeps running,
         // you are just looking at the graph again. `closeOpenWorkspace` is the other
@@ -599,6 +584,18 @@ struct AppFeature {
         state.openLoop = nil
         state.selectedProjectPath = path
         return .none
+
+      // A human's note reaching the daemon. `from: nil` is the whole point: a click in
+      // the app carries no `ZMX_SESSION`, so the board attributes it to "a human" —
+      // the same attribution the CLI gives a person's shell.
+      case .openLoop(.artifactoryPostSubmitted(let text, let topic)):
+        guard let projectPath = state.openLoop?.projectPath else { return .none }
+        return .run { _ in
+          try? await orchestratorClient.send(
+            .graphCommand(
+              projectPath: projectPath,
+              command: .artifactoryPost(text: text, topic: topic, from: nil)))
+        }
 
       case .openLoop(.railTargetTapped(let nodeID)):
         guard let path = state.openLoop?.projectPath else { return .none }
@@ -624,6 +621,15 @@ struct AppFeature {
 // The reducer's helpers — an extension so the type body stays inside the lint budget as
 // the state and actions above keep growing.
 extension AppFeature {
+
+  /// The tour is over — and stays over. Written down rather than held in state so a
+  /// relaunch doesn't start it again; in the extension for the same reason `start` is,
+  /// the type body being at swiftlint's limit.
+  private func finishOnboarding(_ state: inout State) -> Effect<Action> {
+    state.showingOnboarding = false
+    UserDefaults.standard.set(true, forKey: "hasSeenOnboarding")
+    return .none
+  }
 
   /// Everything a launch has to do: restore the app-local lists, decide whether the
   /// primer is due, and open the daemon subscription the whole app hangs off.
@@ -664,6 +670,10 @@ extension AppFeature {
       // Ramps refresh once per launch, silently — the cached copy answers reads
       // until this lands, and a failure keeps the last good configuration.
       .run { _ in await FeatureRamps.refresh() },
+      // A fresh install has an empty template library, and an empty ⌘T picker teaches
+      // nothing about what the five loop types are for. Writes the shipped briefs
+      // once and never again, so a starter somebody deleted stays deleted.
+      .run { _ in await templateLibrary.seedStarters() },
       .send(.checkForUpdatesInBackground)
     )
   }
@@ -704,22 +714,13 @@ extension AppFeature {
   /// doesn't. The refusal raises the notice alert rather than doing nothing: a
   /// silent dead click reads as a broken canvas, not a rule (#194 follow-up).
   private func openNode(_ nodeID: UUID, in path: String, _ state: inout State) -> Effect<Action> {
-    guard let node = state.projects[id: path]?.graph.nodes[id: nodeID]
+    guard let graph = state.projects[id: path]?.graph, let node = graph.nodes[id: nodeID]
     else { return .none }
     guard node.opensOnHumanTap else {
-      state.blockedLoopNotice = BlockedLoopNotice(
-        node: node, graph: state.projects[id: path]?.graph)
+      state.blockedLoopNotice = BlockedLoopNotice(node: node, graph: graph)
       return .none
     }
-    let layout = TerminalLayout.opening(
-      forNode: nodeID, saved: terminalLayoutStore.load(forNode: nodeID))
-    state.openLoop = LoopWorkspaceFeature.State(
-      node: node,
-      graph: state.projects[id: path]?.graph ?? LoopGraph(scope: .global),
-      layout: layout,
-      projectPath: path,
-      projectName: state.projects[id: path]?.graph.project.name ?? path)
-    state.selectedProjectPath = path
+    mountWorkspace(node: node, graph: graph, projectPath: path, &state)
     recordVisit(.loop(projectPath: path, nodeID: nodeID), &state)
     return .none
   }

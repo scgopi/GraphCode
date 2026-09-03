@@ -72,6 +72,17 @@ extension ProjectFeature.State {
       worktree: {
         if case .existing(let ref) = draftWorktree { return ref }
         return nil
+      }(),
+      subGraph: draftLoopType == .composite ? draftSubGraph : nil,
+      // Attribution only — the card can say where the brief came from. The follow
+      // travels too, for the two types that follow: timed and composite re-read the
+      // template on their next run; goal, turn and main snapshot at creation.
+      createdFromTemplateID: templates.applied?.id,
+      templateFollow: {
+        guard let applied = templates.applied,
+          draftLoopType == .timeBased || draftLoopType == .composite
+        else { return nil }
+        return TemplateFollow(id: applied.id, name: applied.name)
       }())
   }
 
@@ -82,6 +93,129 @@ extension ProjectFeature.State {
     guard let value = Int(draftBudget.trimmingCharacters(in: .whitespaces)), value > 0
     else { return nil }
     return value
+  }
+
+  // MARK: - Templates (New Designs v4)
+
+  /// The field currently holding the template brief — the one `{token}` patterns
+  /// are looked for in, and the one Save-as-template reads.
+  var currentBriefText: String {
+    switch draftLoopType {
+    case .sketch: return draftSketchNote
+    case .goalBased: return draftGoal
+    case .timeBased: return draftTimedTask
+    case .turnBased: return draftFirstInstruction
+    case .composite: return draftTitle
+    }
+  }
+
+  /// Which of the applied template's `{token}`s is still a hole. A token the human
+  /// has typed over is gone as text and so is the hole.
+  ///
+  /// Every field a template can land in, not only the brief: a done check reading
+  /// `make test-{suite}` is exactly as unfinished as a brief with a hole in it, and
+  /// starting the loop would run the literal text.
+  var unfilledTokens: [String] {
+    var seen = Set<String>()
+    var ordered: [String] = []
+    for field in ProjectFeature.TemplateTokenField.allCases {
+      for token in PromptTemplate.tokens(in: tokenFieldText(field))
+      where seen.insert(token).inserted {
+        ordered.append(token)
+      }
+    }
+    return ordered
+  }
+
+  /// The design's own line: "One token left to fill · ⇥ to jump to it".
+  var unfilledTokenPrompt: String? {
+    let count = unfilledTokens.count
+    guard count > 0 else { return nil }
+    return count == 1
+      ? "One token left to fill · ⇥ to jump to it"
+      : "\(count) tokens left to fill · ⇥ to jump to them"
+  }
+
+  /// What the applied template set — the "from template" dots read this. A
+  /// property, not a method, because a store's members are reachable through
+  /// key-path lookup only.
+  var templateSetFields: Set<ProjectFeature.TemplateFieldKey> {
+    templates.applied?.setFields ?? []
+  }
+
+  /// Whether the dialog's primary action is ready beyond `draft.isValid` — a
+  /// brief with an unfilled token blocks Start, PROMPT_TEMPLATES.md § What a
+  /// template carries.
+  var draftBlocksOnTokens: Bool {
+    !unfilledTokens.isEmpty
+  }
+
+  /// The picker's rows, already grouped: **This project** first, then **Your
+  /// templates**, then **Starters**. What a person wrote outranks what shipped —
+  /// the starters are scaffolding for a first week, and a library that has grown past
+  /// them should not scroll under them every time. The query filters on name and
+  /// body — a template is findable by what it says, not only by what it is called.
+  var templatePickerRows: [ProjectFeature.TemplatePickerRow] {
+    let query = templates.query.trimmingCharacters(in: .whitespaces).lowercased()
+    let matches: (PromptTemplate) -> Bool = { template in
+      query.isEmpty
+        || template.name.lowercased().contains(query)
+        || template.body.lowercased().contains(query)
+    }
+    var project: [PromptTemplate] = []
+    var starters: [PromptTemplate] = []
+    var mine: [PromptTemplate] = []
+    for template in templates.library where matches(template) {
+      if template.origin.isProject {
+        project.append(template)
+      } else if template.isStarter {
+        starters.append(template)
+      } else {
+        mine.append(template)
+      }
+    }
+    func byName(_ templates: [PromptTemplate]) -> [PromptTemplate] {
+      templates.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+    // The shipped ones keep their shipped order: the Starters group is a ladder —
+    // lead a team, then Goal, then Timed, then the rest — and alphabetical would
+    // scramble it. Everything a person wrote sorts by name, as before.
+    let byPriority = starters.sorted {
+      StarterTemplates.priority(of: $0.id) < StarterTemplates.priority(of: $1.id)
+    }
+    return byName(project).map { ProjectFeature.TemplatePickerRow(template: $0, scope: .project) }
+      + byName(mine).map { ProjectFeature.TemplatePickerRow(template: $0, scope: .home) }
+      + byPriority.map { ProjectFeature.TemplatePickerRow(template: $0, scope: .starter) }
+  }
+
+  /// The fields still holding a `{token}`, in the order `⇥` walks them — the order
+  /// they appear in the form, so tabbing reads down the dialog.
+  var tokenFields: [ProjectFeature.TemplateTokenField] {
+    ProjectFeature.TemplateTokenField.allCases.filter {
+      !PromptTemplate.tokens(in: tokenFieldText($0)).isEmpty
+    }
+  }
+
+  func tokenFieldText(_ field: ProjectFeature.TemplateTokenField) -> String {
+    switch field {
+    case .brief: return currentBriefText
+    case .doneCheck: return draftPredicate
+    case .metric: return draftMetric
+    case .branch: return draftBranch
+    }
+  }
+
+  /// The starters offered on an empty canvas: the shipped picks, in the order
+  /// `StarterTemplates` names them, and only the ones still on disk — a starter
+  /// somebody deleted is not offered back to them.
+  var firstLaunchStarters: [PromptTemplate] {
+    StarterTemplates.firstLaunchPicks.compactMap { pick in
+      templates.library.first { $0.id == pick.id }
+    }
+  }
+
+  var hasProjectTemplates: Bool {
+    templates.library.contains(where: \.origin.isProject)
   }
 
   /// What a timed loop's session actually opens with, composed rather than typed.
@@ -222,6 +356,59 @@ extension ProjectFeature.State {
 /// draft types. Nested on `ProjectFeature` rather than `State` so views can name them
 /// without going through the state type.
 extension ProjectFeature {
+  /// The picker's one row: the template plus which scope group it sits in.
+  struct TemplatePickerRow: Equatable, Identifiable {
+    let template: PromptTemplate
+    let scope: TemplatePickerScope
+
+    var id: UUID { template.id }
+    /// "Goal" · "Timed · daily" · "Composite · 3 loops" · "Main" — the type in
+    /// words, with the one qualifier that makes it specific.
+    var typeLabel: String {
+      switch template.shape {
+      case .sketch, nil: return "Main"
+      case .goalBased: return "Goal"
+      case .timeBased:
+        let cadence = template.settings?.cadence.map {
+          $0.trimmingCharacters(in: .whitespaces).lowercased()
+        }
+        return cadence.map { "Timed · \($0)" } ?? "Timed"
+      case .turnBased: return "Turn"
+      case .composite:
+        let count = template.settings?.carriedGraph?.nodes.count ?? 0
+        return count > 0 ? "Composite · \(count) loops" : "Composite"
+      }
+    }
+  }
+
+  /// A field a template's `{token}`s can be sitting in, in form order — what `⇥`
+  /// walks while any of them is still unfilled.
+  enum TemplateTokenField: String, CaseIterable, Equatable, Sendable {
+    case brief
+    case doneCheck
+    case metric
+    case branch
+  }
+
+  /// The three groups, in the order the picker shows them: a project's committed
+  /// templates first, always — the storage design's rule — then the briefs the app
+  /// ships, then the ones this person saved. The last two are kept apart for good:
+  /// scaffolding and somebody's own library are different things, and a list that
+  /// mixed them once the library grew would make the shipped ones hard to find again.
+  enum TemplatePickerScope: Equatable {
+    case project
+    case starter
+    case home
+
+    var displayName: String {
+      switch self {
+      case .project: return "This project"
+      case .starter: return "Starters"
+      case .home: return "Your templates"
+      }
+    }
+  }
+
   /// What pressing **Test** on a done check found. No exit code: the shell session
   /// reports pass/fail and nothing finer, and a made-up number is the one detail
   /// somebody would act on.

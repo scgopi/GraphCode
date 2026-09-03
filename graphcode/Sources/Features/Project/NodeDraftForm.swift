@@ -35,19 +35,26 @@ struct NodeDraftForm: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
-      header
-      LoopTypeChooser(selection: $store.draftLoopType)
-      ScrollView {
-        VStack(alignment: .leading, spacing: 16) {
-          typeFields
-          Divider().overlay(Color.white.opacity(0.08))
-          runsAs
-          NodeDraftRecap(draft: store.draft, worktree: store.draftWorktree)
+      if store.templates.isPickerOpen {
+        // The picker replaces the body while it is open — the same sheet, not a
+        // second window (PROMPT_TEMPLATES.md § Picker).
+        TemplatePickerView(store: store)
+      } else {
+        header
+        appliedState
+        LoopTypeChooser(selection: $store.draftLoopType)
+        ScrollView {
+          VStack(alignment: .leading, spacing: 16) {
+            typeFields
+            Divider().overlay(Color.white.opacity(0.08))
+            runsAs
+            NodeDraftRecap(draft: store.draft, worktree: store.draftWorktree)
+          }
+          .padding(.bottom, 4)
         }
-        .padding(.bottom, 4)
+        .scrollIndicators(.automatic)
+        footer
       }
-      .scrollIndicators(.automatic)
-      footer
     }
     .padding(.horizontal, 22)
     .padding(.top, 20)
@@ -58,17 +65,54 @@ struct NodeDraftForm: View {
     .frame(minWidth: 520, idealWidth: 520, maxWidth: .infinity)
     .frame(minHeight: 560, idealHeight: 760, maxHeight: .infinity)
     .background(Theme.sheet)
-  }
-
-  private var header: some View {
-    VStack(alignment: .leading, spacing: 2) {
-      Text("New loop").font(.system(size: 16, weight: .semibold))
-      Text("in \(store.graph.project.name)")
-        .font(.system(size: 12))
-        .foregroundStyle(.white.opacity(0.45))
+    // Save-as-template's sheet: the dialog is already a sheet, and one prompt plus a
+    // name and a destination is all the ceremony a save needs.
+    .sheet(item: $store.templates.pendingSave) { _ in
+      TemplateSaveSheet(store: store)
     }
   }
 
+  private var header: some View {
+    HStack(alignment: .firstTextBaseline, spacing: 8) {
+      VStack(alignment: .leading, spacing: 2) {
+        Text("New loop").font(.system(size: 16, weight: .semibold))
+        Text("in \(store.graph.project.name)")
+          .font(.system(size: 12))
+          .foregroundStyle(.white.opacity(0.45))
+      }
+      Spacer(minLength: 8)
+      templatesButton
+    }
+  }
+
+  /// Action blue, never a loop-type hue — templates are chrome, not taxonomy, and
+  /// there is no sixth colour in this feature (PROMPT_TEMPLATES.md § What changes
+  /// in the New loop dialog).
+  private var templatesButton: some View {
+    Button {
+      store.send(.templatesButtonTapped)
+    } label: {
+      HStack(spacing: 6) {
+        Text("Templates")
+          .font(.system(size: 11.5, weight: .semibold))
+          .foregroundStyle(Color(red: 0.706, green: 0.843, blue: 1.0).opacity(0.95))
+        Text("⌘T")
+          .font(.system(size: 10, design: .monospaced))
+          .foregroundStyle(.white.opacity(0.6))
+      }
+      .padding(.horizontal, 10)
+      .frame(height: 26)
+      .background(
+        Theme.paneFocusTint.opacity(0.14), in: RoundedRectangle(cornerRadius: 6)
+      )
+      .overlay {
+        RoundedRectangle(cornerRadius: 6)
+          .stroke(Theme.paneFocusTint.opacity(0.4), lineWidth: 1)
+      }
+    }
+    .buttonStyle(.plain)
+    .keyboardShortcut("t", modifiers: .command)
+  }
   @ViewBuilder
   private var typeFields: some View {
     switch store.draftLoopType {
@@ -88,7 +132,9 @@ struct NodeDraftForm: View {
     VStack(alignment: .leading, spacing: 10) {
       DraftSectionCaption(text: "RUNS AS")
       HStack(alignment: .top, spacing: 10) {
-        DraftField(label: "Agent") {
+        DraftField(
+          label: "Agent", fromTemplate: store.templateSetFields.contains(.backend)
+        ) {
           Picker("", selection: $store.draftBackend) {
             ForEach(CLISessionBackendKind.allCases, id: \.self) { backend in
               Text(backend.displayName).tag(backend)
@@ -97,7 +143,9 @@ struct NodeDraftForm: View {
           .labelsHidden()
         }
         if !isRemoteProject && !store.graph.isGlobal {
-          DraftField(label: "Branch") {
+          DraftField(
+            label: "Branch", fromTemplate: store.templateSetFields.contains(.branch)
+          ) {
             Picker("", selection: $store.draftWorktree) {
               Text("This folder").tag(ProjectFeature.WorktreeSelection.none)
               ForEach(store.availableWorktrees) { worktree in
@@ -138,26 +186,14 @@ struct NodeDraftForm: View {
     }
   }
 
-  private var footer: some View {
-    HStack(spacing: 12) {
-      Button("Cancel") { store.send(.cancelNewNodeForm) }
-        .buttonStyle(.plain)
-        .font(.system(size: 12.5))
-        .foregroundStyle(.white.opacity(0.7))
-      Spacer(minLength: 8)
-      // `draft.isValid` already knows why the button is off. Saying it beats a disabled
-      // control with no explanation, which is the version people file bugs about.
-      if let reason = disabledReason {
-        Text(reason)
-          .font(.system(size: 11.5))
-          .foregroundStyle(.white.opacity(0.62))
-          .lineLimit(1)
-      }
-      createButton
-    }
-  }
-
-  private var createButton: some View {
+  /// Two rows, not one.
+  ///
+  /// The save notice used to sit in this row between the Spacer and the primary
+  /// button, and there is not enough width for it: the path truncated to
+  /// "Saved…op.md", "Put it in the project instead" wrapped onto three lines, and the
+  /// primary button itself wrapped to two. A dialog's primary action must never wrap,
+  /// so the notice gets a line of its own above the buttons and the row below holds
+  var createButton: some View {
     Button {
       store.send(.createNodeConfirmed)
     } label: {
@@ -166,33 +202,46 @@ struct NodeDraftForm: View {
           .font(.system(size: 13, weight: .semibold))
         Text("⏎").font(.system(size: 11, design: .monospaced)).opacity(0.7)
       }
-      .foregroundStyle(store.draft.isValid ? .white : .white.opacity(0.42))
+      .lineLimit(1)
+      .fixedSize(horizontal: true, vertical: false)
+      .foregroundStyle(isCreateEnabled ? .white : .white.opacity(0.42))
       .padding(.horizontal, 14)
       .frame(height: 32)
       .background(
-        Theme.paneFocusTint.opacity(store.draft.isValid ? 1 : 0.28),
+        Theme.paneFocusTint.opacity(isCreateEnabled ? 1 : 0.28),
         in: RoundedRectangle(cornerRadius: 7))
     }
     .buttonStyle(.plain)
     .keyboardShortcut(.defaultAction)
     // docs/08 wants an under-specified node to be structurally awkward, not just
     // discouraged — so the button is off until the draft actually means something.
-    .disabled(!store.draft.isValid)
+    // A template's unfilled `{token}` is the same kind of hole: Start stays off
+    // until the brief is whole (PROMPT_TEMPLATES.md § What a template carries).
+    .disabled(!isCreateEnabled)
   }
 
-  /// A sketch *starts* rather than being created — asking for nothing and opening a
-  /// session is the whole type, and "Create loop" would overstate the ceremony.
+  private var isCreateEnabled: Bool {
+    store.draft.isValid && !store.draftBlocksOnTokens
+  }
+
+  /// The primary button says what Create will actually do — and when a template
+  /// shaped the draft, it says the shape the draft took on.
   private var createLabel: String {
     switch store.draftLoopType {
     case .sketch: "Start"
     case .composite: "Create & open"
-    case .goalBased, .timeBased, .turnBased: "Create loop"
+    case .goalBased: store.templates.applied?.shape != nil ? "Create goal loop" : "Create loop"
+    case .timeBased: store.templates.applied?.shape != nil ? "Create timed loop" : "Create loop"
+    case .turnBased: store.templates.applied?.shape != nil ? "Create turn loop" : "Create loop"
     }
   }
 
   /// Which field is missing, in the words of the thing that is missing.
-  private var disabledReason: String? {
-    guard !store.draft.isValid else { return nil }
+  var disabledReason: String? {
+    guard !store.draft.isValid || store.draftBlocksOnTokens else { return nil }
+    if let first = store.unfilledTokens.first {
+      return "Fill in {\(first)} to continue"
+    }
     guard store.draftBackend.canHost(store.draftLoopType) else {
       return "This agent can't host this kind of loop"
     }

@@ -12,11 +12,13 @@ struct SketchDraftFields: View {
   var body: some View {
     DraftField(
       label: "Starting note", qualifier: "optional — leave it blank and it opens quiet",
-      help: "No done check, no cadence — it works with you until you promote it or close it."
+      help: "No done check, no cadence — it works with you until you promote it or close it.",
+      fromTemplate: store.templateSetFields.contains(.brief)
     ) {
       DraftProseField(
         placeholder: "e.g. where does the usage cap get read from?",
-        text: $store.draftSketchNote)
+        text: $store.draftSketchNote, takesFocusRequest: store.templateFocus(.brief),
+        onTokenJump: store.tokenJump)
     }
   }
 }
@@ -34,19 +36,23 @@ struct GoalDraftFields: View {
     VStack(alignment: .leading, spacing: 14) {
       DraftField(
         label: "What does done look like?",
-        help: "In your own words. The loop is told this, and works toward it."
+        help: "In your own words. The loop is told this, and works toward it.",
+        fromTemplate: store.templateSetFields.contains(.brief)
       ) {
         DraftProseField(
-          placeholder: "the crash rate is back under 1%", text: $store.draftGoal)
+          placeholder: "the crash rate is back under 1%", text: $store.draftGoal,
+          takesFocusRequest: store.templateFocus(.brief), onTokenJump: store.tokenJump)
       }
 
       DraftField(
         label: "Done check", qualifier: "optional",
-        help: "Runs periodically while the loop works. Exit 0 means done."
+        help: "Runs periodically while the loop works. Exit 0 means done.",
+        fromTemplate: store.templateSetFields.contains(.doneCheck)
       ) {
         HStack(spacing: 8) {
           DraftTextField(
-            placeholder: "swift test 2>/dev/null", text: $store.draftPredicate, isMono: true)
+            placeholder: "swift test 2>/dev/null", text: $store.draftPredicate, isMono: true,
+            takesFocusRequest: store.templateFocus(.doneCheck), onTokenJump: store.tokenJump)
           testButton
         }
       }
@@ -96,10 +102,12 @@ struct GoalDraftFields: View {
     VStack(alignment: .leading, spacing: 10) {
       DraftField(
         label: "Measured by",
-        help: "A command printing one number. Sampled once per pass, not per poll."
+        help: "A command printing one number. Sampled once per pass, not per poll.",
+        fromTemplate: store.templateSetFields.contains(.metric)
       ) {
         DraftTextField(
-          placeholder: "./scripts/score.sh", text: $store.draftMetric, isMono: true)
+          placeholder: "./scripts/score.sh", text: $store.draftMetric, isMono: true,
+          takesFocusRequest: store.templateFocus(.metric), onTokenJump: store.tokenJump)
       }
       Picker("", selection: $store.draftMetricDirection) {
         Text("Higher is better").tag(MetricDirection.maximize)
@@ -113,8 +121,11 @@ struct GoalDraftFields: View {
   private var budgetFields: some View {
     DraftField(
       label: "Token budget", qualifier: "optional",
-      help: "Stopped once its backend reports this many tokens spent (input + output). "
-        + "Reported, never estimated — a backend that reports nothing is never stopped."
+      help: "Stopped once its backend reports this many tokens spent — input + output + "
+        + "every cache-read and cache-creation token the API metered. On Claude Code each "
+        + "turn re-meters the whole context as cache reads, so a budget burns per turn, "
+        + "not per hour. Reported, never estimated — a backend that reports nothing is "
+        + "never stopped."
     ) {
       DraftTextField(placeholder: "200000", text: $store.draftBudget, isMono: true)
     }
@@ -172,7 +183,8 @@ struct TimedDraftFields: View {
         help: store.draftRequiresDaemonHeartbeat
           ? "GraphCode's daemon holds the timer for this backend."
           : "GraphCode writes the /loop directive for you — you don't have to know "
-            + "the syntax."
+            + "the syntax.",
+        fromTemplate: store.templateSetFields.contains(.cadence)
       ) {
         VStack(alignment: .leading, spacing: 8) {
           Picker("", selection: $store.draftInterval) {
@@ -189,10 +201,14 @@ struct TimedDraftFields: View {
         }
       }
 
-      DraftField(label: "What to do each time") {
+      DraftField(
+        label: "What to do each time",
+        fromTemplate: store.templateSetFields.contains(.brief)
+      ) {
         DraftProseField(
           placeholder: "Check for new crash reports and triage anything new",
-          text: $store.draftTimedTask)
+          text: $store.draftTimedTask, takesFocusRequest: store.templateFocus(.brief),
+          onTokenJump: store.tokenJump)
       }
 
       if store.draftRequiresDaemonHeartbeat {
@@ -261,13 +277,19 @@ struct TurnDraftFields: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 14) {
-      DraftField(label: "First instruction") {
+      DraftField(
+        label: "First instruction",
+        fromTemplate: store.templateSetFields.contains(.brief)
+      ) {
         DraftProseField(
           placeholder: "Port the settings screen to the new design system",
-          text: $store.draftFirstInstruction)
+          text: $store.draftFirstInstruction,
+          takesFocusRequest: store.templateFocus(.brief), onTokenJump: store.tokenJump)
       }
 
-      DraftField(label: "Pause") {
+      DraftField(
+        label: "Pause", fromTemplate: store.templateSetFields.contains(.pausesBeforeWritesOnly)
+      ) {
         VStack(alignment: .leading, spacing: 6) {
           radio(
             "After every turn", isOn: !store.draftPausesBeforeWritesOnly,
@@ -334,8 +356,36 @@ struct CompositeDraftFields: View {
         .font(.system(size: 11))
         .foregroundStyle(.white.opacity(0.6))
 
-      DraftField(label: "Name") {
-        DraftTextField(placeholder: "Nightly sweep", text: $store.draftTitle)
+      DraftField(label: "Name", fromTemplate: store.templateSetFields.contains(.title)) {
+        DraftTextField(
+          placeholder: "Nightly sweep", text: $store.draftTitle,
+          takesFocusRequest: store.templateFocus(.brief), onTokenJump: store.tokenJump)
+      }
+
+      if let carried = store.draftSubGraph {
+        // A template brought its children: the fifth block, not a detour into the
+        // graph editor — the loops land inside on Create (PROMPT_TEMPLATES.md).
+        DraftField(label: "Carried loops", qualifier: "from the template") {
+          VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(carried.nodes.prefix(4).enumerated()), id: \.element.id) {
+              index, node in
+              HStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: 1.5)
+                  .fill(node.loopType.accent)
+                  .frame(width: 6, height: 6)
+                Text(node.title)
+                  .font(.system(size: 11.5))
+                  .foregroundStyle(.white.opacity(0.75))
+                  .lineLimit(1)
+              }
+            }
+            if carried.nodes.count > 4 {
+              Text("and \(carried.nodes.count - 4) more")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.white.opacity(0.45))
+            }
+          }
+        }
       }
 
       DraftField(

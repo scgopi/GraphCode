@@ -466,6 +466,8 @@ public enum CopilotSessionLog {
     switch status {
     case .unreachable: return .unknown
     case .absent: return .absent
+    case .exited(let code):
+      return PresenceReading(presence: .idle, confidence: .scanned, exitCode: code)
     case .live(let label):
       guard let label, let event = parseCopilotEventLabel(label),
         let p = presence(forEvent: event)

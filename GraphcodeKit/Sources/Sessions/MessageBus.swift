@@ -78,12 +78,46 @@ public enum MessageBus {
   ///
   /// "If" is load-bearing: a one-off fix distilled into a skill is library pollution,
   /// and the judgement of reusability belongs to the agent that did the work.
-  public static let distillSkillRequest =
-    "[graphcode] Goal met. Before you finish: if the method that got you here would be "
+  public static let distillSkillRequest = prefix + distillSkillBody
+
+  private static let prefix = "[graphcode] "
+
+  private static let distillSkillBody =
+    "Goal met. Before you finish: if the method that got you here would be "
     + "reusable by another loop in this project, distill it into a project skill in "
     + "your backend's native format (for Claude Code: .claude/skills/<name>/SKILL.md, "
     + "a short markdown recipe with a one-line description). If it was one-off work, "
     + "skip this."
+
+  /// The Artifactory's half of the same moment, and the board's only *pull*.
+  ///
+  /// Every other artifactory affordance is read-side — the briefing teaches the verbs,
+  /// the digest and the status line remind a loop to look. Nothing asked anyone to
+  /// write, and a board nobody writes to carries nothing to the loops that come after.
+  /// Resolution is when a loop knows what it learned and has no further use for it.
+  ///
+  /// Unlike the skill ask this fires on failure too, and for every loop type: a dead
+  /// end is the single most valuable thing on a board, because it is the one finding
+  /// a successor would otherwise pay for twice.
+  private static func artifactoryPostBody(projectPath: String) -> String {
+    "Before you finish: if you learned something a peer or a successor should not have "
+      + "to rediscover — a dead end, a decision, a claim you staked — leave it on the "
+      + "board with: graphcode artifactory post \(projectPath) [--topic <t>] <note…>. "
+      + "One note, not a transcript. If there is nothing worth a peer's time, skip this."
+  }
+
+  /// The words for a session whose loop has just resolved, or `nil` when it is owed
+  /// none. Assembled rather than queued separately so a goal loop that both succeeded
+  /// and has a board to post to is interrupted once, not twice.
+  public static func resolutionAsk(
+    distillSkill: Bool, artifactoryProjectPath: String?
+  ) -> String? {
+    var parts: [String] = []
+    if distillSkill { parts.append(distillSkillBody) }
+    if let path = artifactoryProjectPath { parts.append(artifactoryPostBody(projectPath: path)) }
+    guard !parts.isEmpty else { return nil }
+    return prefix + parts.joined(separator: " ")
+  }
 
   /// What actually gets typed into the target. The edge's transform decides the content;
   /// a `.script` transform runs to produce it, which is docs/08's "a script is cheaper

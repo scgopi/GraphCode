@@ -39,6 +39,7 @@ struct LoopWorkspaceFeature {
     /// summary's fold: they answer different questions, and someone who wants the sentence
     /// and not the diagram — or the diagram and not the sentence — is not being perverse.
     var isBoardFolded = LoopWorkspaceRail.loadBoardFolded()
+    var isArtifactoryFolded = LoopWorkspaceRail.loadArtifactoryFolded()
     /// Whether a rail width has ever been committed by a drag on this machine.
     ///
     /// What lets a board open the rail wider without ever overruling a width somebody
@@ -57,6 +58,13 @@ struct LoopWorkspaceFeature {
     /// Per window rather than on the node: "since *you* looked" is a fact about a person
     /// at a screen, and the daemon writing it would answer for every window at once.
     var seenBeatID: String?
+    /// The newest board post that was on screen when a workspace in this project was
+    /// last left — the board's counterpart to `seenBeatID`, and a fact about the
+    /// person at the screen for the same reason. It is *not* the loop's own
+    /// `lastArtifactoryRead`: that cursor moves when the loop runs `artifactory sync`,
+    /// which nobody can do from the app, and the rail is what a human reads. Loaded
+    /// from defaults by whoever builds this state (`AppFeature`), per project.
+    var seenArtifactoryPostID: Int?
     var layout: TerminalLayout
     // The project folder every surface without its own worktree binding should open
     // in — a loop's shells shouldn't land in the app's own launch directory (usually
@@ -108,6 +116,11 @@ struct LoopWorkspaceFeature {
     case summaryFoldToggled
     /// The board section's header row.
     case boardFoldToggled
+    case artifactoryFoldToggled
+    /// A human leaving a note on the board from the rail. Handled by `AppFeature`,
+    /// which is the level holding the daemon connection — the same division as
+    /// `primarySurfaceExited`.
+    case artifactoryPostSubmitted(text: String, topic: String?)
     /// The board section's expand button, and the cover's own close.
     case boardExpandToggled
     /// The amber block's `Answer it` — the question is in the terminal, so this is a
@@ -118,6 +131,9 @@ struct LoopWorkspaceFeature {
     /// the hairline, which is the whole point of it.
     case workspaceLeft
     case stopLoopTapped
+    /// The loop bar's Restart session — the session is killed and resumed on the same
+    /// transcript; `AppFeature` carries it out, as it does the stop.
+    case restartLoopTapped
     case showInGraphTapped
     case railTargetTapped(UUID)
   }
@@ -277,6 +293,16 @@ struct LoopWorkspaceFeature {
         LoopWorkspaceRail.saveBoardFolded(state.isBoardFolded)
         return .none
 
+      case .artifactoryFoldToggled:
+        state.isArtifactoryFolded.toggle()
+        LoopWorkspaceRail.saveArtifactoryFolded(state.isArtifactoryFolded)
+        return .none
+
+      // Nothing local to change: the post is the daemon's to apply, and the board it
+      // lands on arrives back in the next `.graphChanged`.
+      case .artifactoryPostSubmitted:
+        return .none
+
       case .boardExpandToggled:
         state.isBoardExpanded.toggle()
         return .none
@@ -296,10 +322,19 @@ struct LoopWorkspaceFeature {
 
       case .workspaceLeft:
         state.seenBeatID = state.node.summary?.current?.id
+        // Only what was actually on screen counts as looked at: a hidden rail or a
+        // folded section showed no posts, and marking them seen would clear a badge
+        // the human never had a chance to read.
+        if state.isRailVisible, !state.isArtifactoryFolded,
+          let newest = ArtifactoryPresentation.notes(in: state.graph).last?.id
+        {
+          state.seenArtifactoryPostID = newest
+          LoopWorkspaceRail.saveSeenArtifactoryPost(newest, forProjectPath: state.projectPath)
+        }
         return .none
 
-      case .stopLoopTapped, .showInGraphTapped, .railTargetTapped, .primaryExitAcknowledged,
-        .lastTabClosed:
+      case .stopLoopTapped, .restartLoopTapped, .showInGraphTapped, .railTargetTapped,
+        .primaryExitAcknowledged, .lastTabClosed:
         // Handled by `AppFeature`'s parent `Reduce` — see the actions' own doc comment.
         return .none
       }

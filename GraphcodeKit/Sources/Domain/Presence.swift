@@ -43,10 +43,12 @@ public enum PresenceConfidence: String, Codable, Equatable, Sendable {
 public struct PresenceReading: Codable, Equatable, Sendable {
   public var presence: Presence
   public var confidence: PresenceConfidence
+  public var exitCode: Int?
 
-  public init(presence: Presence, confidence: PresenceConfidence) {
+  public init(presence: Presence, confidence: PresenceConfidence, exitCode: Int? = nil) {
     self.presence = presence
     self.confidence = confidence
+    self.exitCode = exitCode
   }
 
   public static let absent = PresenceReading(presence: .absent, confidence: .reported)

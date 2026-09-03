@@ -25,10 +25,23 @@ struct LoopWorkspaceRail: View {
   /// Whether the board section is collapsed to its header. Per window and persisted,
   /// beside the summary's own fold.
   let isBoardFolded: Bool
+  /// Whether this project's Artifactory is switched on, passed in as a plain value the
+  /// way `AppSidebarView` takes `sharesLoops`: the settings model is `@Observable` and
+  /// the render path should not be reading a file.
+  let artifactoryEnabled: Bool
+  /// Whether the board section is collapsed to its one line, beside the summary's and
+  /// the diagram's own folds.
+  let isArtifactoryFolded: Bool
+  /// See `LoopWorkspaceFeature.seenArtifactoryPostID`.
+  let seenArtifactoryPostID: Int?
   let onSummaryFoldToggled: () -> Void
   let onSummaryAnswerTapped: () -> Void
   let onBoardFoldToggled: () -> Void
   let onBoardExpanded: () -> Void
+  let onArtifactoryFoldToggled: () -> Void
+  /// Body and optional topic. Posts as "a human": a click in the app carries no loop
+  /// identity, which is exactly what a person addressing the whole graph is.
+  let onArtifactoryPost: (String, String?) -> Void
   let onTargetTapped: (UUID) -> Void
 
   /// The handoff's number, and now the floor rather than the fixed size. Below this the
@@ -59,6 +72,36 @@ struct LoopWorkspaceRail: View {
   /// overruling a choice somebody actually made.
   static func hasStoredWidth() -> Bool {
     UserDefaults.standard.double(forKey: widthDefaultsKey) > 0
+  }
+
+  /// The newest board post that was on screen when a human last left a workspace in
+  /// this project — what the ARTIFACTORY section's `SINCE YOU LOOKED` rule and its
+  /// `N NEW` badge are drawn against. Keyed by project because the board is the
+  /// project's: opening a different loop in the same project is not "not having
+  /// looked". Persisted, unlike the summary's `seenBeatID`, because a board pointer
+  /// that reset on relaunch would mark every post new again each morning.
+  static func seenArtifactoryPostDefaultsKey(forProjectPath path: String) -> String {
+    "artifactorySeenPostID." + path
+  }
+
+  static func loadSeenArtifactoryPost(forProjectPath path: String) -> Int? {
+    let stored = UserDefaults.standard.integer(
+      forKey: seenArtifactoryPostDefaultsKey(forProjectPath: path))
+    return stored > 0 ? stored : nil
+  }
+
+  static func saveSeenArtifactoryPost(_ id: Int, forProjectPath path: String) {
+    UserDefaults.standard.set(id, forKey: seenArtifactoryPostDefaultsKey(forProjectPath: path))
+  }
+
+  static let artifactoryFoldedDefaultsKey = "loopArtifactorySectionFolded"
+
+  static func loadArtifactoryFolded() -> Bool {
+    UserDefaults.standard.bool(forKey: artifactoryFoldedDefaultsKey)
+  }
+
+  static func saveArtifactoryFolded(_ folded: Bool) {
+    UserDefaults.standard.set(folded, forKey: artifactoryFoldedDefaultsKey)
   }
 
   static let boardFoldedDefaultsKey = "loopBoardSectionFolded"
@@ -119,9 +162,14 @@ struct LoopWorkspaceRail: View {
   static func hasContent(
     node: LoopNode, graph: LoopGraph,
     summarising: Bool = LoopSummaryPresentation.isProducing,
-    drawing: Bool = SummaryBoardPresentation.isDrawing
+    drawing: Bool = SummaryBoardPresentation.isDrawing,
+    artifactoryEnabled: Bool = SettingsModel.shared.settings.artifactoryEnabled
   ) -> Bool {
-    graph.edges.contains { $0.from == node.id || $0.to == node.id }
+    // A board with anything on it is reason enough to open the rail: it is the one
+    // section whose content came from *other* loops, so the loop you are looking at
+    // being wired to nothing says nothing about whether there is mail.
+    ArtifactoryPresentation.hasContent(graph: graph, enabled: artifactoryEnabled)
+      || graph.edges.contains { $0.from == node.id || $0.to == node.id }
       || node.metricHistory.count >= 2
       // A loop that is narrating has something to say whether or not it is wired to
       // anything — and that narration is the reason to open the rail at all. With the
@@ -151,7 +199,32 @@ struct LoopWorkspaceRail: View {
     graph.edges.filter { $0.to == node.id }.compactMap { graph.nodes[id: $0.from] }
   }
 
+  /// The most of the rail the board may take before it scrolls, as a share of the
+  /// rail's own height. The other flexible sections — the summary, the diagram — are
+  /// greedy and yield; the board hugs its posts with `fixedSize` and does not. On a
+  /// short window a fixed 600pt cap was enough, with THIS LOOP's 118 and the summary's
+  /// 120 floor, to overflow the stack and push the foot of the rail off the bottom.
+  /// A share cannot overflow on its own, and 40% still shows a conversation.
+  static func artifactoryHeightCap(railHeight: CGFloat) -> CGFloat {
+    min(ArtifactorySection.maxScrollHeight, max(160, railHeight * 0.4))
+  }
+
   var body: some View {
+    // Measured at the outside, where a `GeometryReader` is the container and not a
+    // guess from within a scroll view — the rail's height is what the board's share
+    // is a share *of*.
+    GeometryReader { proxy in
+      stack(artifactoryCap: Self.artifactoryHeightCap(railHeight: proxy.size.height))
+    }
+    .frame(width: width)
+    .frame(maxHeight: .infinity)
+    .background(Theme.workspaceRail)
+    .overlay(alignment: .leading) {
+      Rectangle().fill(.white.opacity(0.07)).frame(width: 1)
+    }
+  }
+
+  private func stack(artifactoryCap: CGFloat) -> some View {
     VStack(alignment: .leading, spacing: 10) {
       // Above `THIS LOOP` rather than below it: what the loop is doing this second
       // outranks where it sits in the graph, and a section you have to scroll to is a
@@ -185,15 +258,25 @@ struct LoopWorkspaceRail: View {
         section("RECENT PASSES") { RailSparkline(node: node) }
       }
       Spacer(minLength: 0)
+      // The board sits at the foot, under the spacer, so the rail's slack collects
+      // *above* it rather than inside it. It went in above `THIS LOOP` first, on the
+      // reasoning that what other loops said to you outranks where you sit in the
+      // graph — but the sections above it are fixed-height and the board is not, so a
+      // quiet rail left it stranded at the top with everything it says a long way from
+      // the button that answers it. Low and against the footer is also where a message
+      // board belongs: newest at the bottom, composer under it, the way every other
+      // thing you read messages in is arranged.
+      if ArtifactoryPresentation.hasContent(graph: graph, enabled: artifactoryEnabled) {
+        ArtifactorySection(
+          graph: graph, seenPostID: seenArtifactoryPostID, isFolded: isArtifactoryFolded,
+          maxHeight: artifactoryCap,
+          onToggleFold: onArtifactoryFoldToggled, onPost: onArtifactoryPost)
+      }
       footer
     }
     .padding(12)
     .frame(width: width, alignment: .leading)
     .frame(maxHeight: .infinity)
-    .background(Theme.workspaceRail)
-    .overlay(alignment: .leading) {
-      Rectangle().fill(.white.opacity(0.07)).frame(width: 1)
-    }
   }
 
   private func section<Content: View>(

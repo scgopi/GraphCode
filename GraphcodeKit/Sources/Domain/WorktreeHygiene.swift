@@ -24,6 +24,11 @@ public struct WorktreeGitFacts: Codable, Equatable, Sendable {
   public var prunable: Bool
   /// `git worktree lock` — git refuses removal even with `--force`.
   public var locked: Bool
+  /// Initialized submodule checkouts inside the worktree. Git refuses to remove
+  /// such a worktree even when the tree is clean, so removal needs `--force` —
+  /// bookkeeping, not discard: a pristine submodule checkout is restorable from
+  /// upstream, which is why this does not by itself demand the confirmation.
+  public var hasSubmodules: Bool
   public var sizeBytes: Int64?
 
   public var landed: Bool { commitsNotLanded == 0 || squashLanded }
@@ -37,6 +42,7 @@ public struct WorktreeGitFacts: Codable, Equatable, Sendable {
     pushed: Bool,
     prunable: Bool = false,
     locked: Bool = false,
+    hasSubmodules: Bool = false,
     sizeBytes: Int64? = nil
   ) {
     self.defaultBranch = defaultBranch
@@ -46,6 +52,7 @@ public struct WorktreeGitFacts: Codable, Equatable, Sendable {
     self.pushed = pushed
     self.prunable = prunable
     self.locked = locked
+    self.hasSubmodules = hasSubmodules
     self.sizeBytes = sizeBytes
   }
 }
@@ -68,7 +75,8 @@ public enum WorktreeLoopBinding: Equatable, Sendable {
 /// The three groups of the sweeper, ordered by what removing the worktree would lose.
 public enum WorktreeTier: Equatable, Sendable {
   /// Landed, clean, pushed and unbound — or a stale admin file with no directory.
-  /// Preselected; the only tier automatic removal may ever touch.
+  /// Never the default branch, whatever its readings say. Preselected; the only tier
+  /// automatic removal may ever touch.
   case safeToRemove
   /// Unmerged commits, uncommitted files, unpushed work, or a stopped loop still bound.
   /// Never preselected: a human looks first.
@@ -103,13 +111,27 @@ public struct WorktreeAssessment: Identifiable, Equatable, Sendable {
     self.resolvedAt = resolvedAt
   }
 
+  /// Whether this worktree holds the repository's default branch. Every landed
+  /// reading is trivially true of it — `git cherry` of `main` against a base of
+  /// `main` is empty — so without this rule the trunk checks every box of the safe
+  /// tier whenever it lives in a linked worktree.
+  public var isDefaultBranch: Bool {
+    !ref.branch.isEmpty && ref.branch == facts.defaultBranch
+  }
+
   public var tier: WorktreeTier {
+    // A running loop occupies the worktree, whatever branch it is on.
+    if binding.isRunning { return .inUse }
+    // The default branch itself is never a cleanup candidate, however clean it
+    // reads: removal deletes the branch too, and the offer would be deleting the
+    // trunk the whole repository hangs from. Before the prunable rule — "stale
+    // admin file · nothing on disk to lose" would still `branch -D` it.
+    if isDefaultBranch { return .lookBeforeRemoving }
     // A prunable entry with unlanded commits is not "nothing to lose" — the directory
     // is gone but removing it deletes the branch, and the branch is all that's left.
     if facts.prunable {
       return facts.landed ? .safeToRemove : .lookBeforeRemoving
     }
-    if binding.isRunning { return .inUse }
     // Locked means a human action stands between here and removal (`git worktree
     // unlock`) — that is "look before removing" by definition, however clean it is.
     if facts.locked { return .lookBeforeRemoving }
@@ -126,9 +148,12 @@ public struct WorktreeAssessment: Identifiable, Equatable, Sendable {
   /// Whether the sweeper can act on this row at all. A running loop locks its
   /// worktree, and so does `git worktree lock` — git refuses a locked removal even
   /// with `--force`, so offering the checkbox would be offering a silent failure.
-  /// Everything else is the human's to remove, including a dirty tree, which asks for
-  /// confirmation first.
-  public var isRemovable: Bool { !binding.isRunning && !facts.locked }
+  /// The default branch is excluded the same way: the removal path deletes the
+  /// branch, and hygiene does not offer the trunk as garbage. Everything else is
+  /// the human's to remove, including a dirty tree, which asks for confirmation first.
+  public var isRemovable: Bool {
+    !binding.isRunning && !facts.locked && !isDefaultBranch
+  }
 
   /// Whether removing this worktree discards files nothing else has a copy of — the
   /// case the sweeper confirms before forcing.
@@ -147,13 +172,18 @@ public struct WorktreeAssessment: Identifiable, Equatable, Sendable {
   /// with "1 file uncommitted" on a merged PR is what makes the sweeper look like it
   /// never noticed the merge.
   public var summary: String {
+    // "merged into main" on main itself is nonsense — the row says why it is here
+    // instead.
+    if binding.isRunning { return "a loop is running in it" }
+    if isDefaultBranch {
+      return "the default branch · never offered for removal"
+    }
     if facts.prunable {
       guard !facts.landed else { return "stale admin file · nothing on disk to lose" }
       let unit = facts.commitsNotLanded == 1 ? "commit" : "commits"
       return "directory gone · \(facts.commitsNotLanded) \(unit) not in "
         + "\(facts.defaultBranch) — only the branch remains"
     }
-    if binding.isRunning { return "a loop is running in it" }
     if tier == .safeToRemove {
       return "\(mergedPhrase) · clean tree · no loop bound"
     }

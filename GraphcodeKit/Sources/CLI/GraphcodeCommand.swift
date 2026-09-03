@@ -1,3 +1,4 @@
+import ArtifactoryKit
 import Foundation
 
 /// Argument parsing and output formatting for the `graphcode` CLI
@@ -19,6 +20,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
   case createNode(projectPath: String, draft: NodeDraft, into: UUID? = nil)
   case createEdge(projectPath: String, from: UUID, to: UUID, spec: EdgeSpec)
   case stopNode(projectPath: String, nodeID: UUID)
+  /// Kill the loop's session and resume it on the same transcript — the verb for a
+  /// replaced `zmx` or backend CLI. `restartSessions` does it for every live loop.
+  case restartNode(projectPath: String, nodeID: UUID)
+  case restartSessions(projectPath: String)
   case deleteNode(projectPath: String, nodeID: UUID)
   case sendMessage(projectPath: String, nodeID: UUID, text: String, followUp: Bool = false)
   case updateNode(projectPath: String, nodeID: UUID, update: NodeUpdate)
@@ -43,6 +48,28 @@ public enum GraphcodeCommand: Equatable, Sendable {
   case exportNode(projectPath: String, nodeID: UUID, output: String, includeChildren: Bool = false)
   case exportGraph(projectPath: String, output: String)
   case importNodes(projectPath: String, fromZip: String, asChildOf: UUID? = nil)
+  /// The Artifactory verbs (docs/03-architecture.md#cli-graphcode): the shared,
+  /// unaddressed board any loop can write to and read. Attribution is not parsed —
+  /// like `sendMessage`, the sender comes from `ZMX_SESSION` at execution.
+  case artifactoryPost(projectPath: String, topic: String?, text: String)
+  /// Read unread, then mark the board read — the cursor belongs to the calling loop,
+  /// so this verb only means anything run from inside a session. `--headlines` prints
+  /// one triage line per unread post instead of full bodies (pair it with `read`);
+  /// `--mark` advances the cursor without printing the backlog ("start me from now");
+  /// `--json` emits the unread posts machine-readably; `--full` insists on every body
+  /// where the verb would otherwise triage a large backlog down to headlines itself.
+  case artifactorySync(
+    projectPath: String, headlines: Bool, mark: Bool, json: Bool, full: Bool)
+  /// One post in full, by id — the deep-read half of `sync --headlines` triage.
+  /// Read-only: the post is in the snapshot, no command reaches the daemon.
+  case artifactoryRead(projectPath: String, postID: Int)
+  /// The whole board, read-only: no command reaches the daemon, no cursor moves.
+  /// `--search` filters by substring across author/topic/body; `--json` emits the
+  /// board machine-readably.
+  case artifactoryList(projectPath: String, search: String?, json: Bool)
+  /// Subscribe (`on: true`, `--topic` filters) or unsubscribe (`--off`) the calling
+  /// loop; like `sync`, the subscription belongs to a loop, not a shell.
+  case artifactoryWatch(projectPath: String, on: Bool, topic: String?)
 
   public enum ParseError: Error, Equatable {
     case unknownCommand(String)
@@ -60,6 +87,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode status <project-path>
       graphcode node create <project-path> --title <t> --type <main|turn|goal|time|composite> [options]
       graphcode node stop <project-path> <node-id>
+      graphcode node restart <project-path> <node-id>  kill its session and resume it on
+                           the same transcript — for a replaced zmx or backend CLI
+      graphcode sessions restart <project-path>        the same, for every live loop
       graphcode node delete <project-path> <node-id>   removes it, its edges, session
                            and memory — irreversible; stop is the reversible verb
       graphcode node send <project-path> <node-id> [--follow-up] <message…>
@@ -71,6 +101,25 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode node pilot <project-path> <node-id>     dry-run a composite
       graphcode node arm <project-path> <node-id>       arm it (needs a pilot first)
       graphcode edge create <project-path> <from-id> <to-id> [--kind <k>] [--condition <c>]
+      graphcode artifactory post <project-path> [--topic <t>] <note…>
+                           leave a note on the shared board for whoever comes next
+      graphcode artifactory sync <project-path> [--headlines] [--full] [--mark] [--json]
+                           read your unread posts and mark the board read. A large
+                           backlog prints as headlines on its own and says so —
+                           --full insists on every body, --headlines insists on
+                           triage lines (deep-read either with `read`). --mark
+                           advances the cursor without printing the backlog, --json is
+                           the machine-readable shape. Combined, the output wins in the
+                           order --json > --mark > --headlines > --full; the cursor
+                           advances whichever flags you pass
+      graphcode artifactory read <project-path> <post-id>
+                           one post in full — the deep-read half of --headlines
+      graphcode artifactory list <project-path> [--search <text>] [--json]
+                           the whole board, read-only — no cursor moves; --search
+                           filters by substring across author, topic and body
+      graphcode artifactory watch <project-path> [--topic <t>] [--off]
+                           have matching posts typed into this loop's session as they
+                           land; --off stops watching
       graphcode usage <project-path>
       graphcode reap [--dry-run]   recover suspected orphaned zmx sessions when PTYs
                            cannot be allocated or deleted loops leave sessions behind
@@ -85,6 +134,11 @@ public enum GraphcodeCommand: Equatable, Sendable {
     The reserved path graphcode://global addresses the always-resident global graph —
     the app's pinned "Graph" row — which every other verb accepts wherever
     <project-path> appears.
+
+    A loop created with --into lives inside its composite's sub-graph, but its id is
+    still unique across the whole tree: node stop/delete/send/update/memo/refine and
+    edge create accept it as-is, paired with the project path of the graph the
+    composite belongs to.
 
     RECOVERY AND SAFETY
       Use `graphcode projects` to discover project paths and `status` to inspect state
@@ -120,19 +174,25 @@ public enum GraphcodeCommand: Equatable, Sendable {
                            once per cycle pass (last stdout line must be a number)
       --direction <d>      minimize | maximize                 (default: maximize)
       --budget <tokens>    for --type goal: end the loop once its backend reports this
-                           many tokens spent (input + output). Reported, never
+                           many tokens spent — input + output + every cache-read and
+                           cache-creation token the API metered. On Claude Code each
+                           turn re-meters the whole context as cache reads, so a
+                           budget burns per turn, not per hour. Reported, never
                            estimated — a loop whose backend reports nothing is never
                            stopped by a budget
-      --skip-unchanged     for --type goal: don't re-run the predicate while HEAD and
-                           the dirty file list are unchanged since its last failure.
-                           Only for predicates that depend on the tree — one that
-                           watches CI or a deploy would never be re-asked
+      --skip-unchanged     for --type goal: while the session is busy, don't re-run
+                           the predicate while HEAD and the dirty file list are
+                           unchanged since its last failure. An idle session gets
+                           one more predicate run and failure notice per unchanged
+                           tree, then polls stay quiet until the tree changes —
+                           the loop is the only writer of its own tree, so waiting
+                           on a change would wait on the loop itself
 
     UPDATE OPTIONS (node update; pass only what changes)
       --goal, --predicate, --prompt, --check, --model, --metric, --direction as above
       --poll <seconds>     how often the predicate is polled
       --stall <seconds>    stall bound; 0 clears it
-      --budget <tokens>    token budget; 0 clears it
+      --budget <tokens>    token budget, counted as at creation; 0 clears it
       --heartbeat <secs>   daemon heartbeat interval; 0 returns cadence to the prompt
       --skip-unchanged <true|false>
       A loop may not change its own --predicate or --budget: the verifier stays outside
@@ -166,6 +226,19 @@ public enum GraphcodeCommand: Equatable, Sendable {
       --into <path>        spawn into a different project (--kind spawn only); this is
                            how the global graph dispatches work into a project
 
+    ARTIFACTORY
+      The shared, unaddressed board: `node send` reaches one peer you already know;
+      an Artifactory post is a note for whoever comes next, discoverable by loops that
+      did not exist when it was written. Run from inside a loop, posts are attributed
+      to that loop (`ZMX_SESSION`, the same mechanism as `node send`); from a human's
+      shell they read as from "a human". `sync` and `watch` need that loop identity —
+      the read cursor and the subscription belong to a loop — so a human reads the
+      board with `list`. A post is a note to a peer, not a transcript: 1 KB bound,
+      and `--topic <t>` groups a thread (a watcher of a topic only hears matching
+      posts; watched posts are delivered like a --follow-up message). Note that the
+      mirrored `direct` and `handoff` records never ring watchers — they are the
+      board's record of traffic that already had its own delivery, so a watch on
+      those topics alone stays silent.
     EXIT CODES
       0   done
       1   bad usage, or graphcoded refused the command
@@ -181,6 +254,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode status <project-path>
       graphcode node send <project-path> <node-id> --follow-up <message…>
                            stage work without interrupting an active turn
+      graphcode artifactory sync <project-path>
+                           check what other loops left for you before starting a pass
+      graphcode artifactory post <project-path> --topic claims issue #12 is mine
+                           stake a claim where every loop will find it, addressed to no one
       graphcode node pilot <project-path> <composite-id>
       graphcode node arm <project-path> <composite-id>
                            pilot before arming a proactive routine
@@ -230,6 +307,13 @@ public enum GraphcodeCommand: Equatable, Sendable {
       try validateFlags(arguments, allowed: [])
       return .usage(projectPath: path)
 
+    case "sessions":
+      let verb = try take(&arguments, name: "sessions subcommand")
+      guard verb == "restart" else { throw ParseError.unknownCommand("sessions \(verb)") }
+      let path = try take(&arguments, name: "project-path")
+      try validateFlags(arguments, allowed: [])
+      return .restartSessions(projectPath: path)
+
     case "reap":
       if arguments.contains(where: isHelpFlag) { throw HelpRequested() }
       let flags = try parseReapFlags(arguments)
@@ -264,7 +348,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
           into = id
         }
         return .createNode(projectPath: path, draft: try parseDraft(arguments), into: into)
-      case "stop", "delete", "pilot", "arm", "send", "update", "memo", "promote", "refine":
+      case "stop", "restart", "delete", "pilot", "arm", "send", "update", "memo", "promote",
+        "refine":
         let raw = try take(&arguments, name: "node-id")
         guard let nodeID = UUID(uuidString: raw) else {
           throw ParseError.invalidValue(argument: "node-id", value: raw)
@@ -279,6 +364,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
         case "delete":
           try validateFlags(arguments, allowed: [])
           return .deleteNode(projectPath: path, nodeID: nodeID)
+        case "restart":
+          try validateFlags(arguments, allowed: [])
+          return .restartNode(projectPath: path, nodeID: nodeID)
         case "promote":
           return .promoteNode(
             projectPath: path, nodeID: nodeID, promotion: try parsePromotion(arguments))
@@ -312,6 +400,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
       default:
         throw ParseError.unknownCommand("node \(verb)")
       }
+
+    case "artifactory":
+      return try parseArtifactory(&arguments)
 
     case "edge":
       let verb = try take(&arguments, name: "edge subcommand")
@@ -670,16 +761,32 @@ extension GraphcodeCommand {
   /// A graph rendered for a terminal. Node ids are shown in full because they're what
   /// every other subcommand takes as input — a truncated id would look tidier and be
   /// useless.
-  public static func render(_ graph: LoopGraph) -> String {
+  public static func render(
+    _ graph: LoopGraph, artifactoryReader readerID: UUID? = nil
+  ) -> String {
     var lines = ["\(graph.project.name)  (\(graph.aggregateState))"]
     if graph.nodes.isEmpty {
       lines.append("  no loops yet")
+      // The board can outlive every loop on it — human posts carry no authorID, so
+      // "last loop deleted" does not mean "board empty". The line belongs on this
+      // path too, not only on the rendered-below one.
+      if let boardLine = renderArtifactoryStatusLine(graph, readerID: readerID) {
+        lines.append("  \(boardLine)")
+      }
       return lines.joined(separator: "\n")
     }
     for node in graph.nodes {
       var line = "  \(node.id)  \(node.displayState)  \(node.loopType)  \(node.title)"
-      if let reason = AttentionRollup.reason(for: node) {
-        line += "  ← \(reason.displayName)"
+      if let exitCode = node.presence?.exitCode {
+        line += "  ← session exited (\(exitCode))"
+      } else if let reason = AttentionRollup.reason(for: node) {
+        // Stalled is two different endings — a blown budget and a blown deadline — and
+        // only memory told them apart. The graph records which one it was; print it.
+        if let why = node.stallReason, !why.isEmpty {
+          line += "  ← \(reason.displayName): \(why)"
+        } else {
+          line += "  ← \(reason.displayName)"
+        }
       }
       lines.append(line)
     }
@@ -693,6 +800,11 @@ extension GraphcodeCommand {
           "    \(fromTitle) \(arrow) \(toTitle)  [\(edge.kind.rawValue)/\(edge.condition.rawValue)]"
         )
       }
+    }
+    // The board rides last: one line, only when there is anything on it, so a
+    // project that never touched the Artifactory renders as it always did.
+    if let boardLine = renderArtifactoryStatusLine(graph, readerID: readerID) {
+      lines.append("  \(boardLine)")
     }
     return lines.joined(separator: "\n")
   }
@@ -729,6 +841,154 @@ extension GraphcodeCommand {
     return projects.map { "\($0.name)  \($0.path)" }.joined(separator: "\n")
   }
 
+  /// The board for a terminal. `artifactory list` prints the whole thing (`reader`
+  /// nil); `artifactory sync` passes the reading loop's id and prints only what its
+  /// cursor has not covered — the subtraction is `Artifactory.unread`, the arithmetic
+  /// the daemon's cursor contract rests on, so the CLI's "unread" and the store's can
+  /// never disagree. `headlines` truncates each body to a triage line's worth (the
+  /// deep read is `artifactory read <id>`); `search` keeps only posts whose author,
+  /// topic or body contains the text, case-insensitively — a list-side filter, never
+  /// a sync-side one, because marking unread mail read without showing it is the one
+  /// way this verb could lose mail.
+  public static func renderArtifactory(
+    _ graph: LoopGraph, unreadFor readerID: UUID? = nil, headlines: Bool = false,
+    search: String? = nil, autoTriage: Bool = false
+  ) -> String {
+    var posts: [ArtifactoryPost]
+    if let readerID {
+      posts = Artifactory.unread(
+        in: graph.artifactory, since: graph.nodes[id: readerID]?.lastArtifactoryRead)
+    } else {
+      posts = graph.artifactory
+    }
+    if let search, !search.isEmpty {
+      let needle = search.lowercased()
+      posts = posts.filter {
+        $0.body.lowercased().contains(needle) || $0.author.lowercased().contains(needle)
+          || $0.topic?.lowercased().contains(needle) == true
+      }
+    }
+    guard !posts.isEmpty else {
+      if let search, !search.isEmpty {
+        return readerID == nil
+          ? "no posts match '\(search)'"
+          : "no unread posts match '\(search)'"
+      }
+      return readerID == nil
+        ? "the board is empty — post one: graphcode artifactory post <project-path> <note…>"
+        : "no unread posts"
+    }
+    // `sync` asks to be triaged; `--headlines` and `--full` are the two ways to say
+    // so explicitly. Announced on the line above the posts rather than silently, so a
+    // loop reading a truncated board knows it is reading one.
+    let triaged = autoTriage && Artifactory.needsTriage(posts)
+    let label = readerID == nil ? "artifactory" : "artifactory, unread"
+    var header =
+      "\(graph.project.name) \(label): \(posts.count) post\(posts.count == 1 ? "" : "s")"
+    if triaged {
+      header +=
+        " — headlines only, that is a lot to read at once. "
+        + "Full text: graphcode artifactory read \(graph.project.path) <post-id>"
+    }
+    var lines = [header]
+    for post in posts {
+      lines.append(headlines || triaged ? "  \(renderHeadline(post))" : "  \(render(post))")
+    }
+    return lines.joined(separator: "\n")
+  }
+
+  /// The board as one machine-readable object — the same posts `renderArtifactory`
+  /// would print (the same `search` filter included, so `--search --json` shows a
+  /// filtered board, never quietly an unfiltered one), plus the reader's cursor so a
+  /// client can compute unread itself. Dates are ISO-8601, pinned by test — the
+  /// encoder's default (seconds since 2001) is a wire format only this process
+  /// should ever have to know about.
+  public static func renderArtifactoryJSON(
+    _ graph: LoopGraph, unreadFor readerID: UUID? = nil, search: String? = nil
+  ) -> String {
+    struct Board: Encodable {
+      var posts: [ArtifactoryPost]
+      var lastRead: Int?
+    }
+    var posts: [ArtifactoryPost]
+    if let readerID {
+      posts = Artifactory.unread(
+        in: graph.artifactory, since: graph.nodes[id: readerID]?.lastArtifactoryRead)
+    } else {
+      posts = graph.artifactory
+    }
+    if let search, !search.isEmpty {
+      let needle = search.lowercased()
+      posts = posts.filter {
+        $0.body.lowercased().contains(needle) || $0.author.lowercased().contains(needle)
+          || $0.topic?.lowercased().contains(needle) == true
+      }
+    }
+    let lastRead = readerID.flatMap { graph.nodes[id: $0]?.lastArtifactoryRead }
+    let board = Board(posts: posts, lastRead: lastRead)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    encoder.dateEncodingStrategy = .iso8601
+    guard let data = try? encoder.encode(board) else { return "{}" }
+    return String(decoding: data, as: UTF8.self)
+  }
+
+  /// `status`'s one-line window onto the board: how many posts exist and — when the
+  /// caller is a loop with a cursor here — how many are unread for it. `nil` when the
+  /// board is empty, so a project that never touched the Artifactory renders exactly
+  /// as it did before this line existed. The point is cost: the briefing already sends
+  /// loops to `status` before claiming or creating work, and this makes the "is there
+  /// mail I should know about" check ride along for free.
+  public static func renderArtifactoryStatusLine(
+    _ graph: LoopGraph, readerID: UUID? = nil
+  ) -> String? {
+    guard !graph.artifactory.isEmpty else { return nil }
+    let total = graph.artifactory.count
+    let plural = total == 1 ? "" : "s"
+    // "Unread for you" needs a *you* this board knows: the daemon refuses sync for a
+    // reader absent from the graph, so the status line claims no unread for one
+    // either — a foreign or stale id gets the plain count, same as a human.
+    guard let readerID, graph.nodes[id: readerID] != nil else {
+      return "artifactory: \(total) post\(plural)"
+    }
+    let unread = Artifactory.unread(
+      in: graph.artifactory, since: graph.nodes[id: readerID]?.lastArtifactoryRead
+    ).count
+    return "artifactory: \(total) post\(plural), \(unread) unread for you"
+  }
+
+  /// One post, one line — the same identification the daemon's wake nudge quotes, so
+  /// a loop reads a note the same way everywhere it meets one.
+  public static func render(_ post: ArtifactoryPost) -> String {
+    let topic = post.topic.map { " (\($0))" } ?? ""
+    // `Date.formatted` has no precedent in GraphcodeKit and corelibs-foundation's
+    // FormatStyle support has been uneven across the toolchains the Linux CI runs;
+    // a fixed DateFormatter is the boring, portable answer.
+    let stamp = ArtifactoryPost.stampFormat.string(from: post.at)
+    return "#\(post.id)\(topic) from \(post.author) at \(stamp) — \(post.body)"
+  }
+
+  /// The triage line — everything `render` says about a post's identity, with the
+  /// body cut to a glance. The pair (`sync --headlines`, `artifactory read <id>`) is
+  /// how a loop joining after forty messages spends forty lines instead of forty
+  /// kilobytes, and deep-reads only the posts that turned out to matter.
+  public static func renderHeadline(_ post: ArtifactoryPost) -> String {
+    // Bodies are single-line at the daemon (memos flatten), but this renders a
+    // *rendered line*, and the one-triage-line promise survives anything.
+    let full = render(post).replacingOccurrences(of: "\n", with: " ")
+    let budget = 80
+    guard full.count > budget else { return full }
+    return String(full.prefix(budget)) + "…"
+  }
+
+  /// `artifactory post`'s answer — the sequence number is what the author's own log and
+  /// any replier's `node send` can refer to the note by.
+  public static func renderPosted(_ graph: LoopGraph) -> String {
+    guard let post = graph.artifactory.last else { return "posted" }
+    let topic = post.topic.map { " (\($0))" } ?? ""
+    return "posted #\(post.id)\(topic)"
+  }
+
   public static func describe(_ error: ParseError) -> String {
     switch error {
     case .unknownCommand(let name): return "unknown command: \(name)"
@@ -739,6 +999,51 @@ extension GraphcodeCommand {
       return "incomplete loop: a turn-based node needs --check, a goal-based one --goal, "
         + "a time-based one --prompt, and the backend must be able to host that type"
     }
+  }
+
+  /// The one sentence both create and update print: what the flag actually skips, and
+  /// the one-notice-per-frozen-tree bound that keeps an idle loop from being stranded
+  /// or woken into an agent turn every poll.
+  static let skipUnchangedAdvice =
+    "warning: --skip-unchanged spares the predicate only while the session is busy; "
+    + "an idle session on an unchanged tree gets one more predicate run and one more "
+    + "failure notice, then polls stay quiet until the tree changes — the loop is the "
+    + "only writer of its own tree"
+
+  /// Advice printed at `node create` time for the flag combination a first-time user
+  /// reached for and got stranded by (issue #217 item 13): `--skip-unchanged` on a goal
+  /// loop with a predicate. The flag's name invites reading it as "the daemon handles
+  /// idle polls", when what it does is skip re-runs while the session is busy — the
+  /// loop itself is the only writer of the tree the skip was watching. The poller now
+  /// wakes an idle loop on an unchanged tree, so this is advisory rather than a
+  /// refusal, but the contract is worth saying out loud where the flag is typed.
+  public static func createWarnings(for draft: NodeDraft) -> [String] {
+    guard draft.loopType == .goalBased, let goal = draft.goal,
+      goal.skipsUnchangedWorkspace, goal.effectivePredicate != nil
+    else { return [] }
+    return [skipUnchangedAdvice]
+  }
+
+  /// The same advice for `node update --skip-unchanged true`, judged against the node
+  /// as the update will leave it — the flag only matters on a goal loop whose predicate
+  /// survives the update. Best-effort by design: a node the client cannot see at the
+  /// top level (a sub-graph child — issue #217 item 15) warns nobody rather than
+  /// warning wrongly.
+  public static func updateWarnings(
+    for update: NodeUpdate, currentNode: LoopNode?
+  ) -> [String] {
+    guard update.skipsUnchangedWorkspace == true, let node = currentNode,
+      node.loopType == .goalBased
+    else { return [] }
+    let predicateAfter: String?
+    if let raw = update.goalPredicate {
+      let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+      predicateAfter = trimmed.isEmpty ? nil : trimmed
+    } else {
+      predicateAfter = node.goal?.effectivePredicate
+    }
+    guard predicateAfter != nil else { return [] }
+    return [skipUnchangedAdvice]
   }
 }
 
@@ -781,5 +1086,63 @@ extension GraphcodeCommand {
       asChildOf = id
     }
     return .importNodes(projectPath: projectPath, fromZip: zipPath, asChildOf: asChildOf)
+  }
+
+  /// The `artifactory` verbs' parsing, split from `parseVerb` the way export/import
+  /// were. The note is joined argv words — the `node send`/`node memo` bargain, so
+  /// `graphcode artifactory post <path> --topic claims issue #12 is mine` needs no
+  /// quoting gymnastics — with `--topic <t>` riding along in either position.
+  fileprivate static func parseArtifactory(
+    _ arguments: inout [String]
+  ) throws -> GraphcodeCommand {
+    let verb = try take(&arguments, name: "artifactory subcommand")
+    let path = try take(&arguments, name: "project-path")
+    if arguments.contains(where: isHelpFlag) { throw HelpRequested() }
+    switch verb {
+    case "post":
+      try validateFlags(arguments, allowed: ["topic"])
+      let flags = parseFlags(arguments)
+      // Strip the flag pair; a trailing `--topic` with no value goes too — it was
+      // meant as the flag, never as the note's text, and dropping it lets the empty
+      // note error say the real thing instead of echoing the flag back.
+      var words = arguments
+      if let index = words.firstIndex(of: "--topic") {
+        words.removeSubrange(index...min(index + 1, words.count - 1))
+      }
+      let text = words.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+      guard !text.isEmpty else { throw ParseError.missingArgument("note") }
+      return .artifactoryPost(projectPath: path, topic: flags["topic"], text: text)
+
+    case "sync":
+      try validateFlags(arguments, allowed: ["headlines", "mark", "json", "full"])
+      let flags = parseFlags(arguments)
+      return .artifactorySync(
+        projectPath: path, headlines: flags["headlines"] != nil, mark: flags["mark"] != nil,
+        json: flags["json"] != nil, full: flags["full"] != nil)
+
+    case "read":
+      try validateFlags(arguments, allowed: [])
+      let raw = try take(&arguments, name: "post-id")
+      // One-based by construction — the daemon's ids start at 1 — so "-7" is a typo,
+      // never a post, and says so here rather than at the runtime lookup.
+      guard let postID = Int(raw), postID >= 1 else {
+        throw ParseError.invalidValue(argument: "post-id", value: raw)
+      }
+      return .artifactoryRead(projectPath: path, postID: postID)
+
+    case "list":
+      try validateFlags(arguments, allowed: ["search", "json"])
+      let flags = parseFlags(arguments)
+      return .artifactoryList(
+        projectPath: path, search: flags["search"], json: flags["json"] != nil)
+
+    case "watch":
+      try validateFlags(arguments, allowed: ["topic", "off"])
+      let flags = parseFlags(arguments)
+      return .artifactoryWatch(projectPath: path, on: flags["off"] == nil, topic: flags["topic"])
+
+    default:
+      throw ParseError.unknownCommand("artifactory \(verb)")
+    }
   }
 }

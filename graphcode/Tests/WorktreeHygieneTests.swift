@@ -16,12 +16,12 @@ struct WorktreeHygieneTests {
 
   private func facts(
     notLanded: Int = 0, squashLanded: Bool = false, dirty: Int = 0, pushed: Bool = true,
-    prunable: Bool = false, locked: Bool = false, size: Int64? = 100
+    prunable: Bool = false, locked: Bool = false, submodules: Bool = false, size: Int64? = 100
   ) -> WorktreeGitFacts {
     WorktreeGitFacts(
       defaultBranch: "main", commitsNotLanded: notLanded, squashLanded: squashLanded,
       dirtyFileCount: dirty, pushed: pushed, prunable: prunable, locked: locked,
-      sizeBytes: size)
+      hasSubmodules: submodules, sizeBytes: size)
   }
 
   private func node(
@@ -118,6 +118,37 @@ struct WorktreeHygieneTests {
   }
 
   @Test
+  func theDefaultBranchIsNeverACleanupCandidate() {
+    // `main` checked out in a linked worktree reads as landed against itself, clean
+    // and pushed — every signal the safe tier asks for. But the removal path deletes
+    // the branch too, so the offer would be deleting the trunk.
+    let main = WorktreeAssessment(ref: ref("main"), facts: facts(), binding: .none)
+
+    #expect(main.tier == .lookBeforeRemoving)
+    #expect(!main.isRemovable)
+    #expect(main.summary == "the default branch · never offered for removal")
+  }
+
+  @Test
+  func theDefaultBranchIsNotSafeEvenWhenPrunable() {
+    // The stale-admin-file rule would read main as "nothing on disk to lose", and
+    // the removal would still `branch -D` the trunk.
+    let pruned = WorktreeAssessment(
+      ref: ref("main"), facts: facts(prunable: true, size: nil), binding: .none)
+
+    #expect(pruned.tier == .lookBeforeRemoving)
+    #expect(!pruned.isRemovable)
+  }
+
+  @Test
+  func aDefaultBranchWithARunningLoopStillReadsInUse() {
+    let main = WorktreeAssessment(
+      ref: ref("main"), facts: facts(), binding: .running(loopTitle: "Release"))
+
+    #expect(main.tier == .inUse)
+  }
+
+  @Test
   func aLockedWorktreeIsNotRemovable() {
     // git refuses a locked removal even with --force; a checkbox would offer a
     // silent failure.
@@ -127,6 +158,21 @@ struct WorktreeHygieneTests {
     // However clean, a lock needs a human first — never the preselected tier.
     #expect(locked.tier == .lookBeforeRemoving)
     #expect(locked.summary.contains("locked"))
+  }
+
+  @Test
+  func submodulesChangeTheRemovalMechanicsNotTheTier() {
+    // Initialized submodules make git refuse a plain removal, so they travel as a
+    // fact for removal to force with. They are not a safety signal: a pristine
+    // checkout is restorable from upstream, the worktree stays safe and selectable,
+    // and — the part that must hold — removing one never reads as discarding files,
+    // so no confirmation stands in the way.
+    let withSubmodules = WorktreeAssessment(
+      ref: ref(), facts: facts(submodules: true), binding: .none)
+
+    #expect(withSubmodules.tier == .safeToRemove)
+    #expect(withSubmodules.isRemovable)
+    #expect(!withSubmodules.removalDiscardsFiles)
   }
 
   @Test

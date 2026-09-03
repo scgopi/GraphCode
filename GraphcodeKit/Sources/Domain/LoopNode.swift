@@ -1,3 +1,4 @@
+import ArtifactoryKit
 import Foundation
 
 /// One node in a graph of loops: a unit of agentic work with a well-defined hand-off
@@ -7,6 +8,32 @@ import Foundation
 /// the full taxonomy describes — plain fields for now, one per loop type actually
 /// wired up (turn-based, time-based), rather than a whole payload-type hierarchy for
 /// types (`.goalBased`, `.composite`) nothing constructs yet.
+/// The template a loop still reads its brief from — see PROMPT_TEMPLATES.md
+/// (New Designs v4) § Follow vs snapshot.
+///
+/// Only a **timed or composite** loop carries one: those re-read the template and
+/// pick up its edits on their next run, so a fixed nightly brief doesn't need the
+/// loop recreated. A Main, Goal or Turn loop snapshots its brief at creation and
+/// never carries this — a running session cannot have its text swapped underneath
+/// it. The node's own fields *are* the snapshot: if the template's file later
+/// disappears, the loop keeps running on what it already had and says so.
+public struct TemplateFollow: Codable, Equatable, Sendable {
+  /// The template's id, not its filename — how a follow survives a rename or a
+  /// move between home and a project.
+  public var id: UUID
+  public var name: String
+  /// Set when a resolve could not find the file. The loop keeps its snapshot and
+  /// the card warns rather than failing — the one difference between "the template
+  /// changed" and "the template is gone".
+  public var missing: Bool
+
+  public init(id: UUID, name: String, missing: Bool = false) {
+    self.id = id
+    self.name = name
+    self.missing = missing
+  }
+}
+
 public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   public let id: UUID
   public var title: String
@@ -71,6 +98,11 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// What the backend has reported spending on this loop, if anything. Never estimated —
   /// see `UsageSample`.
   public var usage: UsageSample?
+  /// How many times the session has been restarted in place (`GraphCommand.restartNode`).
+  /// The number means nothing; a *change* in it is the daemon's word that the old session
+  /// is confirmed dead, which is what the app waits for before reattaching a pane. A pane
+  /// attached any earlier joins the dying session and reads its exit as the loop resolving.
+  public var sessionRestarts = 0
   /// The last thing the session said it was doing — `"editing UsageReport.swift"`.
   ///
   /// Reported, never inferred, by exactly the mechanism `presence` and `usage` use: a
@@ -134,6 +166,32 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// handoff, and custody has to be: stopping or deleting a parent takes its spawned
   /// descendants with it, while a drawn edge to a peer must never be caught in that.
   public let createdBy: UUID?
+  /// Which template this loop's brief came from, for every type — pure attribution
+  /// the card can show, never a live link. A snapshot loop keeps this and nothing
+  /// more; a following one also carries `templateFollow`.
+  public var createdFromTemplateID: UUID?
+  /// The template a **timed or composite** loop still follows — see `TemplateFollow`
+  /// for why only those two types do. `nil` for every snapshot loop.
+  public var templateFollow: TemplateFollow?
+  /// The newest Artifactory post this loop has read — `ArtifactoryPost.id` of the last
+  /// post a `graphcode artifactory sync` showed it. `nil` has not synced yet and makes
+  /// every post unread; the cursor only moves through sync, so a loop that ignores
+  /// the board accrues nothing but a number, and a loop that died with unread mail
+  /// finds it still waiting at the next wake.
+  public var lastArtifactoryRead: Int?
+  /// This loop's standing subscription to its project's Artifactory — set and cleared
+  /// with `graphcode artifactory watch`. Non-nil means every matching post also gets
+  /// delivered to this loop the way a `--follow-up` message is: typed into a live
+  /// idle session, staged to a busy one's memory, waiting in the post itself for a
+  /// loop that is gone. The post is the durable half; this is only the ding.
+  public var artifactoryWatch: ArtifactoryWatch?
+  /// Why the loop is `.stalled`, when the graph knows. A budget exhaustion and a stall
+  /// bound both land in the same terminal state, and both wrote their reason only to
+  /// the loop's memory log — every surface then showed a bare STALLED and a human had
+  /// to open memory to learn whether to raise a number or kill a stuck loop. Set by
+  /// `GraphStore` at the moment of the stall; `nil` for loops stalled before the field
+  /// existed, and for stalls whose cause the graph had nothing to say about.
+  public var stallReason: String?
   public var state: LoopState
   public var createdAt: Date
 
@@ -159,6 +217,11 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     presence: PresenceReading? = nil,
     metricHistory: [MetricSample] = [],
     createdBy: UUID? = nil,
+    createdFromTemplateID: UUID? = nil,
+    templateFollow: TemplateFollow? = nil,
+    lastArtifactoryRead: Int? = nil,
+    artifactoryWatch: ArtifactoryWatch? = nil,
+    stallReason: String? = nil,
     state: LoopState = .idle,
     createdAt: Date = Date()
   ) {
@@ -183,6 +246,11 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.presence = presence
     self.metricHistory = metricHistory
     self.createdBy = createdBy
+    self.createdFromTemplateID = createdFromTemplateID
+    self.templateFollow = templateFollow
+    self.lastArtifactoryRead = lastArtifactoryRead
+    self.artifactoryWatch = artifactoryWatch
+    self.stallReason = stallReason
     self.state = state
     self.createdAt = createdAt
   }
@@ -307,10 +375,10 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   }
 
   /// Loops `graphcoded` is responsible for keeping alive across its own restarts,
-  /// because nothing else would restart them — as opposed to a turn-based node, which a
-  /// human opening is what starts.
+  /// because nothing else would restart them — as opposed to a turn-based node or a
+  /// sketch, which a human opening is what starts. See `LoopType.runsUnattended`.
   public var runsUnattended: Bool {
-    loopType == .timeBased || loopType == .goalBased
+    loopType.runsUnattended
   }
 
   /// The state a surface should show, which is `state` corrected by what the session is
@@ -335,6 +403,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// `nil` and `.unknown` count as no: opening is what could *start* a session, and a
   /// gate deciding whether that's safe must not treat "don't know" as "yes".
   public var presenceShowsLiveSession: Bool {
+    if presence?.exitCode != nil { return false }
     switch presence?.presence {
     case .busy, .idle, .awaitingInput: return true
     case .absent, .unknown, nil: return false
@@ -366,6 +435,9 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// untouched, which is exactly the behaviour every surface had before presence existed.
   public var displayState: LoopState {
     guard state == .running, let presence = presence?.presence else { return state }
+    if let exitCode = self.presence?.exitCode {
+      return exitCode == 0 ? .idle : .failed
+    }
     switch presence {
     case .busy: return .running
     case .idle: return hasActiveDependents ? .waiting : .idle
@@ -416,8 +488,10 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   private enum CodingKeys: String, CodingKey {
     case id, title, loopType, checkDescription, triggerPrompt, goal, backend, modelTier
     case worktreeBinding, subGraph, pilotState, usage, metricHistory, createdBy
+    case lastArtifactoryRead, artifactoryWatch
     case state, createdAt, activity, presence, firstInstruction, pausesBeforeWritesOnly
-    case summary, board, heartbeatIntervalSeconds
+    case summary, board, heartbeatIntervalSeconds, stallReason
+    case createdFromTemplateID, templateFollow, sessionRestarts
   }
 
   /// Hand-written for the same reason `LoopEdge`'s is: `ProjectPersistence.loadGraph`
@@ -445,6 +519,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     subGraph = try container.decodeIfPresent(LoopGraph.self, forKey: .subGraph)
     pilotState = try container.decodeIfPresent(PilotState.self, forKey: .pilotState) ?? .notPiloted
     usage = try container.decodeIfPresent(UsageSample.self, forKey: .usage)
+    sessionRestarts = try container.decodeIfPresent(Int.self, forKey: .sessionRestarts) ?? 0
     activity = try container.decodeIfPresent(String.self, forKey: .activity)
     // Unlike `presence` and `activity`, this survives a reload: pass summaries are the
     // account of a run, and a resolved loop's is the thing worth reading after the fact.
@@ -457,6 +532,18 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     metricHistory =
       try container.decodeIfPresent([MetricSample].self, forKey: .metricHistory) ?? []
     createdBy = try container.decodeIfPresent(UUID.self, forKey: .createdBy)
+    createdFromTemplateID =
+      try container.decodeIfPresent(UUID.self, forKey: .createdFromTemplateID)
+    // Absent on every graph saved before templates existed — those loops were all
+    // snapshots, which is what nil says.
+    templateFollow = try container.decodeIfPresent(
+      TemplateFollow.self, forKey: .templateFollow)
+    // Absent from graphs saved before the Artifactory existed — every loop simply has
+    // not read anything yet, which is what `nil` says.
+    lastArtifactoryRead = try container.decodeIfPresent(Int.self, forKey: .lastArtifactoryRead)
+    artifactoryWatch = try container.decodeIfPresent(
+      ArtifactoryWatch.self, forKey: .artifactoryWatch)
+    stallReason = try container.decodeIfPresent(String.self, forKey: .stallReason)
     state = try container.decodeIfPresent(LoopState.self, forKey: .state) ?? .idle
     createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
   }

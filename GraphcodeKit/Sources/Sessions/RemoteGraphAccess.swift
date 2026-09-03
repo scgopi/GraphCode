@@ -169,6 +169,7 @@ public enum RemoteGraphAccess {
       graphcode status <project-path>
       graphcode node create <project-path> --title <t> --type <turn|goal|time|composite> [options]
       graphcode node stop <project-path> <node-id>
+      graphcode node restart <project-path> <node-id>  kill its session, resume it in place
       graphcode node delete <project-path> <node-id>   irreversible; stop is reversible
       graphcode node send <project-path> <node-id> <message...>
       graphcode node memo <project-path> <node-id> <note...>
@@ -296,8 +297,15 @@ public enum RemoteGraphAccess {
 
         def open_project(self, path):
             self.send({"openProject": {"path": path}})
-            _, value = self.wait_for(["graphChanged"])
+            key, value = self.wait_for(["graphChanged", "errorOccurred"])
+            if key == "errorOccurred":
+                fail(value["_0"])
             return value["_0"]
+
+        def known_projects(self):
+            self.send({"listRecentProjects": {}})
+            _, value = self.wait_for(["recentProjectsListed"])
+            return [p.get("path") for p in (value["_0"] or []) if p.get("path")]
 
 
     def self_node_id():
@@ -354,21 +362,90 @@ public enum RemoteGraphAccess {
         return {"graphCommand": {"projectPath": project, "command": command}}
 
 
-    def run_and_print(project, commands):
+    def normalized(path):
+        parts = []
+        for segment in path.split("/"):
+            if not segment or segment == ".":
+                continue
+            if segment == "..":
+                if parts:
+                    parts.pop()
+                continue
+            parts.append(segment)
+        return "/" + "/".join(parts)
+
+
+    def remote_parts(project):
+        # (host, path) for a project this daemon reaches over ssh, else (None, None).
+        for scheme in ("ssh://", "codespace://"):
+            if project.startswith(scheme):
+                rest = project[len(scheme):]
+                separator = rest.find("/")
+                if separator < 1:
+                    return None, None
+                authority = rest[:separator].split("@")[-1].split(":")[0]
+                return authority, normalized(rest[separator:])
+        return None, None
+
+
+    def this_host_names():
+        names = [os.environ.get("CODESPACE_NAME", "")]
+        try:
+            names.append(os.uname().nodename)
+        except Exception:
+            pass
+        return [name for name in names if name]
+
+
+    def resolve_project(daemon, project):
+        # A path spelled the way *this host* sees it -- the session's working directory,
+        # its worktree -- named as the project it belongs to. The Mac keys graphs by the
+        # ssh:// or codespace:// URI, and opening one is create-if-missing, so a local
+        # spelling used to add a second project with the same name and put the loops in
+        # there rather than in the graph the human is watching.
+        if not project.startswith("/"):
+            return project
+        here = normalized(project)
+        matches = []
+        for known in daemon.known_projects():
+            host, path = remote_parts(known)
+            if path is None:
+                continue
+            if here == path or here.startswith(path.rstrip("/") + "/"):
+                matches.append((known, host))
+        if not matches:
+            return project
+        if len(matches) > 1:
+            local = this_host_names()
+            preferred = [match for match in matches if match[1] in local]
+            if len(preferred) != 1:
+                fail("%s is inside more than one project graphcode knows (%s). Name the "
+                     "one you mean -- your briefing states it exactly."
+                     % (project, ", ".join(sorted(match[0] for match in matches))))
+            matches = preferred
+        resolved = matches[0][0]
+        sys.stderr.write("graphcode: %s is this host's path for %s\n" % (project, resolved))
+        return resolved
+
+
+    def run_and_print(project, inner=None):
         daemon = Daemon()
+        project = resolve_project(daemon, project)
         graph = daemon.open_project(project)
-        for command in commands:
-            daemon.send(command)
-        if commands:
-            _, value = daemon.wait_for(["graphChanged"])
+        if inner is not None:
+            daemon.send(graph_command(project, inner))
+            key, value = daemon.wait_for(["graphChanged", "errorOccurred"])
+            if key == "errorOccurred":
+                fail(value["_0"])
             graph = value["_0"]
         print(render(graph))
 
 
-    def run_with_verdict(project, command, acknowledgement):
+    def run_with_verdict(project, inner, acknowledgement):
         daemon = Daemon()
+        project = resolve_project(daemon, project)
         daemon.open_project(project)
-        daemon.send(command)
+        daemon.send(graph_command(project, inner))
         key, value = daemon.wait_for(["graphChanged", "errorOccurred"])
         if key == "errorOccurred":
             fail(value["_0"])
@@ -461,7 +538,7 @@ public enum RemoteGraphAccess {
         if verb == "status":
             if not arguments:
                 fail("missing project-path")
-            run_and_print(arguments[0], [])
+            run_and_print(arguments[0])
             return
         if verb != "node":
             fail("unknown or Mac-only command: %s (see `graphcode help`)" % verb)
@@ -482,17 +559,19 @@ public enum RemoteGraphAccess {
             if flags.get("into"):
                 into = parse_uuid(flags["into"], "--into")
                 create = {"subGraphCommand": {"nodeID": into, "command": create}}
-            run_and_print(project, [graph_command(project, create)])
+            run_and_print(project, create)
             return
-        if subverb not in ("stop", "delete", "send", "memo"):
+        if subverb not in ("stop", "restart", "delete", "send", "memo"):
             fail("node %s runs from the Mac's own shell, not from a remote host" % subverb)
         if not arguments:
             fail("missing node-id")
         node_id = parse_uuid(arguments.pop(0), "node-id")
         if subverb == "stop":
-            run_and_print(project, [graph_command(project, {"stopNode": {"_0": node_id}})])
+            run_and_print(project, {"stopNode": {"_0": node_id}})
+        elif subverb == "restart":
+            run_and_print(project, {"restartNode": {"_0": node_id}})
         elif subverb == "delete":
-            run_and_print(project, [graph_command(project, {"deleteNode": {"_0": node_id}})])
+            run_and_print(project, {"deleteNode": {"_0": node_id}})
         else:
             follow_up = False
             if subverb == "send" and arguments and arguments[0] == "--follow-up":
@@ -508,12 +587,11 @@ public enum RemoteGraphAccess {
             if subverb == "send":
                 if follow_up:
                     payload["followUp"] = True
-                run_with_verdict(project, graph_command(project, {"messageNode": payload}),
+                run_with_verdict(project, {"messageNode": payload},
                                  "accepted — typed in when the loop next goes idle"
                                  if follow_up else "delivered")
             else:
-                run_with_verdict(project, graph_command(project, {"memoNode": payload}),
-                                 "noted")
+                run_with_verdict(project, {"memoNode": payload}, "noted")
 
 
     main(sys.argv[1:])

@@ -77,6 +77,7 @@ struct ProjectCanvasView: View {
         in: store.canvasGraph, declaredEntries: store.declaredEntryIDs))
 
     return VStack(spacing: 0) {
+      TemplateSaveNoticeBar(store: store)
       if let connectionError = store.connectionError {
         Text("Not connected to graphcoded: \(connectionError)")
           .font(.caption)
@@ -122,6 +123,9 @@ struct ProjectCanvasView: View {
     .sheet(isPresented: $store.showingNewNodeForm) {
       NodeDraftForm(store: store)
     }
+    // A save started from a card's context menu has no dialog to live in; this is
+    // where it presents (PROMPT_TEMPLATES.md § Save as template).
+    .modifier(TemplateSaveSheetHost(store: store))
     .sheet(item: $store.pendingEdge) { _ in
       edgeForm
     }
@@ -304,9 +308,15 @@ struct ProjectCanvasView: View {
   @ViewBuilder
   private var emptyState: some View {
     if store.canvasGraph.nodes.isEmpty {
-      CanvasEmptyState(projectName: store.openComposite?.title ?? store.graph.project.name) {
+      CanvasEmptyState(
+        projectName: store.openComposite?.title ?? store.graph.project.name,
+        starters: store.firstLaunchStarters,
+        onStart: { store.send(.startFromTemplateTapped($0.id)) }
+      ) {
         store.send(.addNodeButtonTapped(parentBackend: nil))
       }
+      // Only an empty canvas reads the library, and only to fill the starter row.
+      .onAppear { store.send(.templateLibraryRequested) }
     }
   }
 

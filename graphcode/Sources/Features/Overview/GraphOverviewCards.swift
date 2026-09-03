@@ -181,7 +181,14 @@ extension GraphOverviewView {
       reclaimOffer: store.projects[id: loop.projectPath]?.worktreeReclaimOffers[node.id],
       onReclaim: {
         store.send(
-          .projects(.element(id: loop.projectPath, action: .reclaimWorktreeTapped(node.id))))
+          .projects(
+            .element(
+              id: loop.projectPath,
+              action: .reclaimWorktreeTapped(
+                id: node.id,
+                hasSubmodules:
+                  store.projects[id: loop.projectPath]?.worktreeReclaimOffers[node.id]?
+                  .facts.hasSubmodules == true))))
       },
       onKeep: {
         store.send(
@@ -218,6 +225,12 @@ extension GraphOverviewView {
         .disabled(!node.pilotState.canArm)
     }
     Button("Rename…") { send(.renameNodeRequested(node.id), to: loop.projectPath) }
+    Button("Save as Template…") { send(.saveLoopTemplateTapped(node.id), to: loop.projectPath) }
+    if node.templateFollow != nil {
+      Button("Detach from Template") {
+        send(.detachTemplateTapped(node.id), to: loop.projectPath)
+      }
+    }
     if !node.isResolved {
       Button("Stop Loop") {
         store.send(.stopNodeTapped(projectPath: loop.projectPath, nodeID: node.id))

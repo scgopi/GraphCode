@@ -86,14 +86,7 @@ extension AppFeature {
     guard let project = state.projects[id: projectPath],
       let node = project.graph.nodes[id: nodeID]
     else { return }
-    let layout = terminalLayoutStore.load(forNode: nodeID) ?? .defaultLayout(forNode: nodeID)
-    state.openLoop = LoopWorkspaceFeature.State(
-      node: node,
-      graph: project.graph,
-      layout: layout,
-      projectPath: projectPath,
-      projectName: project.graph.project.name)
-    state.selectedProjectPath = projectPath
+    mountWorkspace(node: node, graph: project.graph, projectPath: projectPath, &state)
   }
 
   /// Records an arrival the human chose. Called from the two places a workspace opens on

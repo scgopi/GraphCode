@@ -131,6 +131,8 @@ struct GoalBasedLoopTests {
     await store.evaluateGoal(nodeID, now: Date(timeIntervalSince1970: 61))
 
     #expect(await store.graph.nodes[id: nodeID]?.state == .stalled)
+    #expect(
+      await store.graph.nodes[id: nodeID]?.stallReason == "stall bound exceeded without resolving")
     #expect(evaluated.value == 0)
   }
 

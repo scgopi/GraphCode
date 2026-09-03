@@ -95,6 +95,13 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// stop condition. Optional so frames from clients that predate the field decode as
   /// an unattributed promotion rather than failing.
   case promoteNode(UUID, promotion: SketchPromotion, promotedBy: UUID?)
+  /// Stop a following loop from reading its template — see
+  /// `LoopNode.templateFollow`. Detaching converts it to a snapshot *in place*: the
+  /// brief the node already carries keeps running exactly as it is, and the next
+  /// edit to the template's file no longer reaches it. One local tweak should never
+  /// force a fork of the shared file, which is what editing a followed template
+  /// otherwise asks for.
+  case detachTemplate(UUID)
   /// Append a learned note to a node's memory log (`NodeMemory`) — what `graphcode
   /// node memo` rides on. `from` is attributed the same way `messageNode`'s is.
   case memoNode(UUID, text: String, from: UUID?)
@@ -123,6 +130,27 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// mid-turn. Optional so frames from clients that predate the flag decode as the
   /// immediate send they always were.
   case messageNode(UUID, text: String, from: UUID?, followUp: Bool?)
+  /// Drop a note onto the project's Artifactory — the shared, unaddressed board (`graphcode
+  /// artifactory post`) any loop can write to for *whoever comes next*, without naming a
+  /// recipient or drawing an edge first. `topic` groups threads for watchers; `from` is
+  /// attributed exactly as `messageNode`'s is (`ZMX_SESSION`), or `nil` from a human's
+  /// shell. Refused outright while the beta ramp has the Artifactory off
+  /// (`artifactoryEnabled` in `~/.graphcode/settings.json`) — a silent no-op would read,
+  /// to the loop that sent it, as a post nobody answered.
+  case artifactoryPost(text: String, topic: String?, from: UUID?)
+  /// Mark every post on the Artifactory as read for the calling loop — `graphcode
+  /// artifactory sync`, the cursor half of reading. The CLI reads the board out of the
+  /// graph snapshot it already gets from `openProject`; this is the write that makes
+  /// "unread" mean something the *next* sync can subtract from. Requires a loop
+  /// identity: a human reading the board needs no cursor, since nothing downstream
+  /// tracks what they have seen.
+  case artifactorySync(from: UUID?)
+  /// Subscribe (`on: true`) or unsubscribe (`on: false`) the calling loop to Artifactory
+  /// posts — `graphcode artifactory watch`. A watched post is delivered the way a
+  /// `--follow-up` message is: typed into a live idle session, staged to a busy one's
+  /// memory, and for a loop that is gone, nowhere — the post itself is the durable
+  /// half, waiting at the next wake. `topic` filters; `nil` hears everything.
+  case artifactoryWatch(on: Bool, topic: String?, from: UUID?)
   /// Removes the node, every edge touching it, and its detached session. Irreversible
   /// — the app confirms before sending this.
   case deleteNode(UUID)
@@ -132,6 +160,15 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// agent alive. The session is only killed when it can't be reached to be asked. The
   /// node itself stays in the graph — stopping is not deleting.
   case stopNode(UUID)
+  /// Kill a loop's session and bring it straight back on the same transcript — the verb
+  /// for "`zmx` or the backend CLI was replaced under every running loop". Unlike the
+  /// kill `stopNode` falls back to, the banked session id survives, so the relaunch is a
+  /// resume rather than a fresh pass. An unattended loop is relaunched by the daemon; an
+  /// attended one comes back when a human next opens it, exactly as after a reboot. A
+  /// composite restarts its workers.
+  case restartNode(UUID)
+  /// `restartNode` for every unresolved loop in the graph, workers included.
+  case restartSessions
   /// Route a command into a composite node's sub-graph. Editing a composite's insides is
   /// the same set of operations as editing any graph, so it reuses them wholesale rather
   /// than growing a parallel vocabulary.

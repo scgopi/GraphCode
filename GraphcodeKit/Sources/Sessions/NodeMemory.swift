@@ -132,7 +132,8 @@ public enum NodeMemory {
   /// per session start, and the digest can never go stale against a log that grew
   /// underneath it.
   public static func writeWakeDigest(
-    projectPath: String, nodeID: UUID, baseURL: URL = SupportDirectory.url
+    projectPath: String, nodeID: UUID, artifactoryEnabled: Bool = false,
+    baseURL: URL = SupportDirectory.url
   ) -> URL? {
     let all = entries(forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
     let playbook = playbook(forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
@@ -153,6 +154,17 @@ public enum NodeMemory {
       "with: graphcode node memo <project-path> <your-node-id> <note>",
       "",
     ]
+    if artifactoryEnabled {
+      // The reminder half of the Artifactory. The briefing teaches the board's verbs to
+      // every launch; this line is what makes a *relaunching* loop — which should
+      // check the board before redoing work a predecessor may have posted about —
+      // remember to, without any per-node data racing into the shared briefing file.
+      lines.append(
+        "The project's Artifactory is on: other loops may have left findings for you. "
+          + "Check at the start of a pass — graphcode artifactory sync <project-path> — "
+          + "and post anything a peer or successor should not have to rediscover.")
+      lines.append("")
+    }
     if let playbook {
       // The playbook rides ahead of the history: it is the distilled *how*, where the
       // log is the raw *what happened*, and a session should read method before events.

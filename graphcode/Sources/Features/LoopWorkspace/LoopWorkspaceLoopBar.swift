@@ -15,7 +15,7 @@ import SwiftUI
 struct LoopWorkspaceLoopBar: View {
   let node: LoopNode
   let now: Date
-  let onStop: () -> Void
+  let onRestart: () -> Void
   let onShowInGraph: () -> Void
 
   private var card: LoopCardPresentation { LoopCardPresentation(node: node, now: now) }
@@ -106,8 +106,11 @@ struct LoopWorkspaceLoopBar: View {
       // No Pause button. The design has one and the daemon has nothing behind it —
       // `graphcoded` can stop a loop, not suspend one — and a control that looks like it
       // holds a running agent while the agent keeps working is worse than no control.
+      // Restart rather than Stop: stopping is the rarer, graver verb and keeps its
+      // place in the Loop menu; what a human reaches for from inside a running loop is
+      // the session back on its feet after a replaced `zmx` or CLI.
       if !node.isResolved {
-        barButton("Stop loop", action: onStop)
+        barButton("Restart session", action: onRestart)
       }
       Button("Show in graph", action: onShowInGraph)
         .buttonStyle(.plain)

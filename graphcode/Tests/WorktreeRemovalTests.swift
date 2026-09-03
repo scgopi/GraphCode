@@ -11,7 +11,8 @@ import Testing
 @Suite
 struct WorktreeRemovalTests {
   private func inspection(
-    branch: String, dirty: Int = 0, size: Int64? = 100, locked: Bool = false
+    branch: String, dirty: Int = 0, size: Int64? = 100, locked: Bool = false,
+    submodules: Bool = false
   ) -> WorktreeInspection {
     WorktreeInspection(
       ref: WorktreeRef(
@@ -19,7 +20,7 @@ struct WorktreeRemovalTests {
         branch: branch),
       facts: WorktreeGitFacts(
         defaultBranch: "main", commitsNotLanded: 0, dirtyFileCount: dirty, pushed: true,
-        locked: locked, sizeBytes: size))
+        locked: locked, hasSubmodules: submodules, sizeBytes: size))
   }
 
   /// The state a sheet mid-use would hold, for the app-level removal tests.
@@ -215,6 +216,43 @@ struct WorktreeRemovalTests {
     await store.receive(\.worktrees.removalsFinished)
 
     #expect(forced.value == ["wip": true, "landed": false])
+    #expect(store.state.worktreeSweep == nil)
+    await store.finish()
+  }
+
+  @Test
+  @MainActor
+  func aCleanSubmoduleWorktreeIsForcedWithoutAConfirmation() async {
+    // git refuses to remove worktrees with initialized submodules even when the
+    // tree is clean — the refusal that used to surface as "working trees containing
+    // submodules cannot be moved or removed". The force is bookkeeping, not
+    // discard: a pristine submodule checkout is restorable from upstream, so no
+    // confirmation stands between the click and the removal.
+    let sub = inspection(branch: "landed", submodules: true)
+    let forced = LockIsolated<[String: Bool]>([:])
+    var initial = AppFeature.State(projects: [
+      ProjectFeature.State(
+        graph: LoopGraph(scope: .project(ProjectRef(path: "/repo", name: "repo"))))
+    ])
+    initial.worktreeSweep = openSweep([sub], selecting: [sub.ref.worktreePath])
+    let store = TestStore(initialState: initial) {
+      AppFeature()
+    } withDependencies: {
+      $0.gitClient.inspectWorktrees = { _ in [sub] }
+      $0.gitClient.worktreeSizeBytes = { _ in nil }
+      $0.gitClient.removeWorktreeAndBranch = { ref, _, force in
+        forced.withValue { $0[ref.branch] = force }
+      }
+    }
+    store.exhaustivity = .off
+
+    // Straight through — no `isConfirmingRemoval` on the way.
+    await store.send(.worktrees(.sweep(.removeTapped))) {
+      $0.worktreeSweep?.isRemoving = true
+    }
+    await store.receive(\.worktrees.removalsFinished)
+
+    #expect(forced.value == ["landed": true])
     #expect(store.state.worktreeSweep == nil)
     await store.finish()
   }

@@ -78,6 +78,11 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// view showing it.
   func makeNSView(context: Context) -> TerminalSurfaceHostView {
     let host = TerminalSurfaceHostView()
+    if launchesClaudeCode, backend == .claudeCode, remoteLocation == nil {
+      if let workingDirectory {
+        ClaudeCodeTrust.ensureTrusted(directory: workingDirectory)
+      }
+    }
     let view = TerminalSurfaceStore.shared.surface(for: surfaceID) {
       // A remote surface needs the daemon's socket present on its host before the
       // delivered CLI can reach the graph — same forward the daemon's own launches
@@ -295,7 +300,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
     return environment
   }
 
-  private func command(briefingPath: String?) -> [String] {
+  func command(briefingPath: String?) -> [String] {
     // A remote project's surfaces live on the remote host, local zmx or not.
     if let location = remoteLocation {
       return remoteCommand(at: location, settings: GraphcodeSettingsStore.load())
@@ -317,11 +322,23 @@ struct GhosttyTerminalView: NSViewRepresentable {
     // wrapper needed for a plain-shell surface.
     var command = [ZmxLocator.binaryURL.path, "attach", sessionName]
     guard launchesClaudeCode else { return command }
+    // Unattended Codex sessions are started by graphcoded. Attaching with the agent
+    // command as well creates a race where zmx run types that command into Codex.
+    if defersCodexLaunchToDaemon {
+      return ZmxSessionLauncher.waitingAttachCommand(
+        zmxPath: ZmxLocator.binaryURL.path, sessionName: sessionName,
+        executable: backend.executableName)
+    }
     if let resuming = localResumeOrFreshCommand(agentLaunch: agentCommand) {
       return resuming
     }
     command += agentCommand
     return command
+  }
+
+  var defersCodexLaunchToDaemon: Bool {
+    backend == .codex && launchesClaudeCode
+      && (loopType == .goalBased || loopType == .timeBased)
   }
 
   /// Opening a loop whose session is gone used to start the agent **fresh**, prompt and
@@ -347,30 +364,34 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// through to a fresh launch — the very failure this exists to end. It is dropped only
   /// once a resume has been *seen* to fail, which is also the check the daemon makes.
   ///
-  /// `nil` for a backend that cannot resume, or a node with nothing banked: both take
-  /// the ordinary fresh launch.
+  /// `nil` only for a surface that is not a node's. A backend that cannot resume, or a
+  /// node with nothing banked, takes the ordinary fresh launch — logged, where it used
+  /// to be the one silent branch (the duplicate-session investigation of 2026-09-02
+  /// started from exactly that silence; the revert of #248/#249 keeps the dial).
   func localResumeOrFreshCommand(agentLaunch: [String]) -> [String]? {
+    guard let nodeID = SurfaceRef.nodeID(fromZmxSessionName: sessionName) else { return nil }
+    let log = { (event: String) in
+      DialLog.fragment(session: self.sessionName, dial: "open", event: event) + "; "
+    }
+    let zmx = ZmxLocator.binaryURL.path
+    let fresh = ZmxSessionLauncher.quotedCommand([zmx, "attach", sessionName] + agentLaunch)
     let settings = GraphcodeSettingsStore.load()
-    guard let nodeID = SurfaceRef.nodeID(fromZmxSessionName: sessionName),
-      SessionIDStore.load(forNodeID: nodeID) != nil,
+    guard SessionIDStore.load(forNodeID: nodeID) != nil,
       let resumeLaunch = resumeCommand(
         settings: settings, hooksFile: presenceHooksFile(), remoteSettingsPath: nil)
-    else { return nil }
-    let zmx = ZmxLocator.binaryURL.path
+    else {
+      return ["/bin/sh", "-c", log("fresh") + "exec \(fresh)"]
+    }
     let quoted = RemoteProjectLocation.shellQuoted
     let idFile = quoted(SessionIDStore.file(forNodeID: nodeID).path)
     let attach = ZmxSessionLauncher.quotedCommand([zmx, "attach", sessionName])
     let resume = ZmxSessionLauncher.quotedCommand(
       [zmx, "attach", sessionName] + resumeLaunch)
-    let fresh = ZmxSessionLauncher.quotedCommand([zmx, "attach", sessionName] + agentLaunch)
     let exists = ZmxSessionLauncher.quotedCommand([zmx, "get", sessionName])
     // A live session is joined as it always was — the resume argv would be ignored by
     // `zmx attach` anyway, and building it costs a settings read nobody needs.
     let idVariable = ZmxSessionLauncher.remoteResumeIDVariable
     let settle = ZmxSessionLauncher.resumeSettleSeconds
-    let log = { (event: String) in
-      DialLog.fragment(session: self.sessionName, dial: "open", event: event) + "; "
-    }
     let joined = "\(exists) >/dev/null 2>&1 && { \(log("attach-live"))exec \(attach); }; "
     let read = "\(idVariable)=$(cat \(idFile) 2>/dev/null); "
     let attempt =
