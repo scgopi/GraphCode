@@ -45,18 +45,28 @@ extension UpdateInstallClient: DependencyKey {
 
   static let liveValue = UpdateInstallClient(
     install: { dmg, progress in
-      let image = try await download(dmg, progress: progress)
+      UpdateLog.record("install: \(dmg.lastPathComponent) -> \(installedApp.path)")
+      let image = try await UpdateLog.step("download") {
+        try await download(dmg, progress: progress)
+      }
       defer { try? FileManager.default.removeItem(at: image) }
-      let mountPoint = try await attach(image)
+      let mountPoint = try await UpdateLog.step("attach") { try await attach(image) }
       do {
-        let app = try appInside(mountPoint)
-        try await verifySignature(of: app)
-        try await swapIntoApplications(app)
+        let app = try await UpdateLog.step("locate app") { try appInside(mountPoint) }
+        try await UpdateLog.step("verify signature") { try await verifySignature(of: app) }
+        try await UpdateLog.step("swap into /Applications") {
+          try await swapIntoApplications(app)
+        }
       } catch {
-        try? await run("/usr/bin/hdiutil", ["detach", mountPoint.path, "-force"])
+        try? await UpdateLog.step("detach after failure") {
+          try await run("/usr/bin/hdiutil", ["detach", mountPoint.path, "-force"])
+        }
         throw error
       }
-      try? await run("/usr/bin/hdiutil", ["detach", mountPoint.path, "-force"])
+      try? await UpdateLog.step("detach") {
+        try await run("/usr/bin/hdiutil", ["detach", mountPoint.path, "-force"])
+      }
+      UpdateLog.record("install: done")
     },
     relaunch: {
       // Started through LaunchServices rather than as a child of this process, and that
@@ -85,6 +95,7 @@ extension UpdateInstallClient: DependencyKey {
       // never record itself and the workspace would read as free with a window open on
       // it. The `willTerminate` release still runs and is a no-op by then — it only
       // deletes a claim that still names this process.
+      UpdateLog.record("relaunch: asking LaunchServices to open \(installedApp.path)")
       WorkspaceLock.release()
       let launched = await withCheckedContinuation { continuation in
         NSWorkspace.shared.openApplication(at: installedApp, configuration: configuration) {
@@ -94,6 +105,10 @@ extension UpdateInstallClient: DependencyKey {
       }
       // Only once the successor is actually running: terminating first would race the
       // launch request against this process's own death.
+      UpdateLog.record(
+        launched
+          ? "relaunch: LaunchServices started the successor"
+          : "relaunch: LaunchServices REFUSED — falling back to the detached shell")
       if !launched {
         // Nothing to lose by trying the old way if LaunchServices refused outright.
         let reopen = Process()
@@ -251,35 +266,76 @@ extension UpdateInstallClient: DependencyKey {
     }
   }
 
+  /// Runs a tool and returns what it wrote.
+  ///
+  /// **The output goes to temporary files, not pipes, and that is the entire point.** The
+  /// obvious shape — two `Pipe`s read to EOF from inside `terminationHandler` — hangs
+  /// forever in two separate ways, and both are reachable from here:
+  ///
+  /// - A tool that writes more than the pipe buffer holds (64KB) blocks in `write` until
+  ///   somebody reads. Nobody does, because the only reader runs on termination and the
+  ///   tool cannot terminate while it is blocked writing.
+  /// - `readDataToEndOfFile()` waits for every *write end* to close, which is not the
+  ///   same as the tool exiting. `hdiutil attach` hands its descriptors to
+  ///   `diskimages-helper`, which stays alive for as long as the image is attached — so
+  ///   EOF never arrives even though `hdiutil` itself is long gone.
+  ///
+  /// Both present identically to the human: an install parked on "Installing…" with no
+  /// error, no relaunch prompt and no way forward but a manual reinstall. A file has
+  /// neither a capacity to fill nor an EOF to wait for, so neither failure exists.
+  ///
+  /// The timeout is the backstop for a tool that genuinely wedges. An error someone can
+  /// read and report beats a dialog that sits there for the rest of the day.
   @discardableResult
-  private static func run(_ tool: String, _ arguments: [String]) async throws -> String {
-    let process = Process()
+  private static func run(
+    _ tool: String, _ arguments: [String], timeout: TimeInterval = 600
+  ) async throws -> String {
+    let name = String(tool.split(separator: "/").last ?? "tool")
+    let fileManager = FileManager.default
+    let base = fileManager.temporaryDirectory
+      .appendingPathComponent("graphcode-\(name)-\(UUID().uuidString)")
+    let outURL = base.appendingPathExtension("out")
+    let errURL = base.appendingPathExtension("err")
+    fileManager.createFile(atPath: outURL.path, contents: nil)
+    fileManager.createFile(atPath: errURL.path, contents: nil)
+    defer {
+      try? fileManager.removeItem(at: outURL)
+      try? fileManager.removeItem(at: errURL)
+    }
+
+    nonisolated(unsafe) let process = Process()
     process.executableURL = URL(fileURLWithPath: tool)
     process.arguments = arguments
-    let stdout = Pipe()
-    let stderr = Pipe()
-    process.standardOutput = stdout
-    process.standardError = stderr
-    return try await withCheckedThrowingContinuation { continuation in
-      process.terminationHandler = { finished in
-        let output = stdout.fileHandleForReading.readDataToEndOfFile()
-        let errors = stderr.fileHandleForReading.readDataToEndOfFile()
-        if finished.terminationStatus == 0 {
-          continuation.resume(
-            returning: String(bytes: output + errors, encoding: .utf8) ?? "")
-        } else {
-          let reason = String(bytes: errors, encoding: .utf8) ?? ""
-          continuation.resume(
-            throwing: UpdateInstallFailure.swapFailed(
-              "\(tool.split(separator: "/").last ?? "tool") failed: \(reason)"))
-        }
-      }
-      do {
-        try process.run()
-      } catch {
-        continuation.resume(throwing: error)
-      }
+    process.standardOutput = try FileHandle(forWritingTo: outURL)
+    process.standardError = try FileHandle(forWritingTo: errURL)
+
+    let (exited, exitContinuation) = AsyncStream<Int32>.makeStream()
+    // Installed before `run()` so the exit cannot be missed — the same rule `GitClient`
+    // documents, for the same reason.
+    process.terminationHandler = { finished in
+      exitContinuation.yield(finished.terminationStatus)
+      exitContinuation.finish()
     }
+    UpdateLog.record("  run: \(name) \(arguments.joined(separator: " "))")
+    try process.run()
+
+    let watchdog = Task {
+      try await Task.sleep(for: .seconds(timeout))
+      UpdateLog.record("  run: \(name) exceeded \(Int(timeout))s — terminating")
+      process.terminate()
+    }
+    defer { watchdog.cancel() }
+
+    var status: Int32 = -1
+    for await exitStatus in exited { status = exitStatus }
+
+    let output = (try? Data(contentsOf: outURL)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+    let errors = (try? Data(contentsOf: errURL)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+    UpdateLog.record("  run: \(name) exited \(status)")
+    guard status == 0 else {
+      throw UpdateInstallFailure.swapFailed("\(name) failed: \(errors)")
+    }
+    return output + errors
   }
 }
 
