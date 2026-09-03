@@ -2,7 +2,7 @@ import Dependencies
 import Foundation
 import GraphcodeKit
 
-/// Asks a loop's own backend for a one-or-two-word title when the human left the form's
+/// Asks a loop's own backend for a one-word title when the human left the form's
 /// title blank — `claude -p` / `copilot -p` / `codex exec`, the headless print-mode
 /// shape of each CLI, so nothing here opens a session or touches the loop's actual work.
 ///
@@ -44,15 +44,15 @@ extension TitleSuggestionClient: DependencyKey {
   /// every single one.
   private static let takenNamesListed = 100
 
-  /// As precise as possible, preferring two words — a single word is allowed when it
-  /// alone names the task, never more than two — and none of the names any canvas
-  /// already shows. The model is told, and `accept` enforces what telling cannot
+  /// As precise as possible, and always one word: a name that needs two concepts joins
+  /// them in CamelCase rather than spending a space on them. And none of the names any
+  /// canvas already shows — the model is told, and `accept` enforces what telling cannot
   /// guarantee.
   static func instruction(for prompt: String, taken: Set<String>) -> String {
     var instruction = """
-      Reply with the most precise name you can for this task. Prefer two words; use \
-      a single word only when it alone names the task precisely. Never more than two \
-      words, no punctuation, no quotes — and nothing else.
+      Reply with the most precise name you can for this task, as a single word — never \
+      two. When naming it precisely takes two concepts, join them in CamelCase, like \
+      GraphcodeTemplates. No spaces, no punctuation, no quotes — and nothing else.
       """
     let listed = taken.sorted().prefix(takenNamesListed)
     if !listed.isEmpty {
@@ -142,10 +142,11 @@ extension TitleSuggestionClient: DependencyKey {
     return String(data: data, encoding: .utf8)
   }
 
-  /// One clean name — at most two words — out of whatever the model printed. `codex
-  /// exec` wraps its answer in log lines, and any model can get chatty — the *last*
-  /// non-empty line is the answer far more reliably than the first, and two tokens of
-  /// it are all that was asked for.
+  /// One clean single word out of whatever the model printed. `codex exec` wraps its
+  /// answer in log lines, and any model can get chatty — the *last* non-empty line is
+  /// the answer far more reliably than the first, and two tokens of it are all that was
+  /// asked for. A model that answers in separate words anyway is folded into the
+  /// CamelCase it was asked for rather than refused.
   static func sanitize(_ output: String) -> String? {
     let lastLine =
       output
@@ -156,7 +157,7 @@ extension TitleSuggestionClient: DependencyKey {
       .map { $0.trimmingCharacters(in: CharacterSet.alphanumerics.inverted) }
       .filter { !$0.isEmpty }
     guard !words.isEmpty else { return nil }
-    let name = words.joined(separator: " ")
+    let name = words.map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined()
     guard name.count <= 30 else { return nil }
     return name
   }
