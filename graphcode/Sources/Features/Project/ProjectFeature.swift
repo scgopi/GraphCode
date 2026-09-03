@@ -810,7 +810,7 @@ extension ProjectFeature {
                 .createEdge(from: parentNodeID, to: draft.id, spec: EdgeSpec()))))
         }
 
-        // A blank title creates the node as "New Loop" and asks the loop's own
+        // A blank title creates the node as "NewLoop" and asks the loop's own
         // backend for a real one — after creation, so a slow (or absent) CLI never
         // holds the node itself hostage. The rename can target the node because the
         // draft's id *is* the node's id (see `NodeDraft.id`); no answer just means
