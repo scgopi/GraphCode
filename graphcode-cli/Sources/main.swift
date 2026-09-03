@@ -208,6 +208,16 @@ do {
       projectPath: projectPath,
       [.graphCommand(projectPath: projectPath, command: .restartSessions)])
 
+  case .setGraphExecutionMode(let projectPath, let mode):
+    try runAndPrintGraph(
+      projectPath: projectPath,
+      [.graphCommand(projectPath: projectPath, command: .setExecutionMode(mode))])
+
+  case .runGoobersGraph(let projectPath):
+    try runAndPrintGraph(
+      projectPath: projectPath,
+      [.graphCommand(projectPath: projectPath, command: .runGoobers)])
+
   case .deleteNode(let projectPath, let nodeID):
     try runAndPrintGraph(
       projectPath: projectPath,

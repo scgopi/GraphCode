@@ -47,6 +47,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
   case reap(dryRun: Bool)
   case exportNode(projectPath: String, nodeID: UUID, output: String, includeChildren: Bool = false)
   case exportGraph(projectPath: String, output: String)
+  case setGraphExecutionMode(projectPath: String, mode: LoopGraph.ExecutionMode)
+  case runGoobersGraph(projectPath: String)
   case importNodes(projectPath: String, fromZip: String, asChildOf: UUID? = nil)
   /// The Artifactory verbs (docs/03-architecture.md#cli-graphcode): the shared,
   /// unaddressed board any loop can write to and read. Attribution is not parsed —
@@ -127,6 +129,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
                            packages the loop and everything descended from it — child
                            loops, sub-loops, session memory — into a shareable zip
       graphcode graph export <project-path> [--output file.zip]
+      graphcode graph mode <project-path> <graphcode|goobers>
+                           choose one orchestrator for the whole graph
+      graphcode graph run <project-path>
+                           export and trigger one run of a Goobers-managed graph
       graphcode node import <project-path> <file.zip> [--as-child-of <parent-id>]
                            splices a bundle's loops in with fresh identities; name a
                            parent to hang them under an existing loop
@@ -321,13 +327,29 @@ public enum GraphcodeCommand: Equatable, Sendable {
 
     case "graph":
       let verb = try take(&arguments, name: "graph subcommand")
-      guard verb == "export" else { throw ParseError.unknownCommand("graph \(verb)") }
-      let path = try take(&arguments, name: "project-path")
-      try validateFlags(arguments, allowed: ["help", "output"])
-      let flags = parseFlags(arguments)
-      if flags["help"] != nil { throw HelpRequested() }
-      let output = flags["output"] ?? "\(path.split(separator: "/").last ?? "graph").zip"
-      return .exportGraph(projectPath: path, output: output)
+      switch verb {
+      case "export":
+        let path = try take(&arguments, name: "project-path")
+        try validateFlags(arguments, allowed: ["help", "output"])
+        let flags = parseFlags(arguments)
+        if flags["help"] != nil { throw HelpRequested() }
+        let output = flags["output"] ?? "\(path.split(separator: "/").last ?? "graph").zip"
+        return .exportGraph(projectPath: path, output: output)
+      case "mode":
+        let path = try take(&arguments, name: "project-path")
+        let raw = try take(&arguments, name: "execution-mode")
+        guard let mode = LoopGraph.ExecutionMode(rawValue: raw) else {
+          throw ParseError.invalidValue(argument: "execution-mode", value: raw)
+        }
+        try validateFlags(arguments, allowed: [])
+        return .setGraphExecutionMode(projectPath: path, mode: mode)
+      case "run":
+        let path = try take(&arguments, name: "project-path")
+        try validateFlags(arguments, allowed: [])
+        return .runGoobersGraph(projectPath: path)
+      default:
+        throw ParseError.unknownCommand("graph \(verb)")
+      }
 
     case "node":
       let verb = try take(&arguments, name: "node subcommand")
@@ -765,6 +787,10 @@ extension GraphcodeCommand {
     _ graph: LoopGraph, artifactoryReader readerID: UUID? = nil
   ) -> String {
     var lines = ["\(graph.project.name)  (\(graph.aggregateState))"]
+    if graph.executionMode == .goobers {
+      let run = graph.goobersRun.map { " · run \($0.id) · \($0.phase)" } ?? ""
+      lines.append("  execution: goobers\(run)")
+    }
     if graph.nodes.isEmpty {
       lines.append("  no loops yet")
       // The board can outlive every loop on it — human posts carry no authorID, so

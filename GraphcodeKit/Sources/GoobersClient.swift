@@ -63,14 +63,33 @@ public struct GoobersClient: Sendable {
     public var nextCursor: String?
   }
 
-  public typealias Loader = @Sendable (URL) async throws -> (Data, Int)
+  public struct Request: Equatable, Sendable {
+    public var url: URL
+    public var method: String
+    public var body: Data?
+
+    public init(url: URL, method: String = "GET", body: Data? = nil) {
+      self.url = url
+      self.method = method
+      self.body = body
+    }
+  }
+
+  public struct TriggerResponse: Codable, Equatable, Sendable {
+    public var runId: String?
+    public var duplicate: Bool?
+  }
+
+  public typealias Loader = @Sendable (Request) async throws -> (Data, Int)
 
   public let instanceRoot: URL
   private let load: Loader
 
   public init(
     instanceRoot: URL,
-    load: @escaping Loader = GoobersClient.defaultLoad
+    load: @escaping Loader = { request in
+      try await GoobersClient.defaultLoad(request)
+    }
   ) {
     self.instanceRoot = instanceRoot
     self.load = load
@@ -102,19 +121,31 @@ public struct GoobersClient: Sendable {
   }
 
   public func health() async throws -> Health {
-    try await get(path: "/api/v1/health", as: Health.self)
+    try await send(Request(url: try endpoint("/api/v1/health")), as: Health.self)
   }
 
   public func runs(limit: Int = 50) async throws -> RunList {
     let bounded = min(max(limit, 1), 200)
-    return try await get(path: "/api/v1/runs?limit=\(bounded)", as: RunList.self)
+    return try await send(
+      Request(url: try endpoint("/api/v1/runs?limit=\(bounded)")), as: RunList.self)
   }
 
-  private func get<Response: Decodable & Sendable>(
-    path: String, as _: Response.Type
+  public func trigger(
+    gaggle: String,
+    workflow: String,
+    requestID: String = UUID().uuidString
+  ) async throws -> TriggerResponse {
+    let body = try JSONEncoder().encode(
+      TriggerRequest(gaggle: gaggle, workflow: workflow, requestId: requestID))
+    return try await send(
+      Request(url: try endpoint("/api/v1/triggers"), method: "POST", body: body),
+      as: TriggerResponse.self)
+  }
+
+  private func send<Response: Decodable & Sendable>(
+    _ request: Request, as _: Response.Type
   ) async throws -> Response {
-    let url = try endpoint(path)
-    let (data, status) = try await load(url)
+    let (data, status) = try await load(request)
     guard (200..<300).contains(status) else {
       throw ClientError.unexpectedStatus(status)
     }
@@ -145,12 +176,25 @@ public struct GoobersClient: Sendable {
     host == "localhost" || host == "127.0.0.1" || host == "::1"
   }
 
-  public static func defaultLoad(_ url: URL) async throws -> (Data, Int) {
-    let (data, response) = try await URLSession.shared.data(from: url)
+  public static func defaultLoad(_ request: Request) async throws -> (Data, Int) {
+    var urlRequest = URLRequest(url: request.url)
+    urlRequest.httpMethod = request.method
+    urlRequest.httpBody = request.body
+    if request.body != nil {
+      urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    }
+    urlRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+    let (data, response) = try await URLSession.shared.data(for: urlRequest)
     guard let http = response as? HTTPURLResponse else {
       throw ClientError.invalidResponse
     }
     return (data, http.statusCode)
+  }
+
+  private struct TriggerRequest: Encodable {
+    var gaggle: String
+    var workflow: String
+    var requestId: String
   }
 }
 

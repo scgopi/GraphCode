@@ -7,8 +7,9 @@ var implement = LoopNode(title: "Implement", loopType: .goalBased)
 implement.backend = .copilotCLI
 implement.modelTier = .capable
 implement.firstInstruction = "Implement the claimed issue in the worktree."
-implement.goal = GoalSpec(summary: "The change compiles and its tests pass.",
-                          predicate: "swift build")
+implement.goal = GoalSpec(
+  summary: "The change compiles and its tests pass.",
+  predicate: "swift build")
 
 var review = LoopNode(title: "Review", loopType: .turnBased)
 review.backend = .claudeCode
@@ -53,7 +54,6 @@ do {
   exit(1)
 }
 
-
 // --- Negative cases: constructs that must be refused, not silently flattened.
 func expectRefusal(_ label: String, _ build: () -> LoopGraph) {
   do {
@@ -63,7 +63,9 @@ func expectRefusal(_ label: String, _ build: () -> LoopGraph) {
     print("FAIL \(label): expected refusal, got a bundle")
   } catch let error as GoobersExport.ExportError {
     print("OK   \(label): \(error.diagnostics.count) diagnostic(s)")
-    for d in error.diagnostics { print("       - " + d.message.split(separator: "\n").joined(separator: " ")) }
+    for d in error.diagnostics {
+      print("       - " + d.message.split(separator: "\n").joined(separator: " "))
+    }
   } catch { print("FAIL \(label): \(error)") }
 }
 
@@ -83,17 +85,56 @@ expectRefusal("time-based node") {
   return g
 }
 
-expectRefusal("message edge") {  var a = LoopNode(title: "A", loopType: .goalBased); a.backend = .copilotCLI
-  var b = LoopNode(title: "B", loopType: .goalBased); b.backend = .copilotCLI
+expectRefusal("message edge") {
+  var a = LoopNode(title: "A", loopType: .goalBased)
+  a.backend = .copilotCLI
+  var b = LoopNode(title: "B", loopType: .goalBased)
+  b.backend = .copilotCLI
   var g = LoopGraph(scope: .project(ProjectRef(path: "/tmp/d", name: "d")))
   g.nodes = [a, b]
   g.edges = [LoopEdge(from: a.id, to: b.id, kind: .message)]
   return g
 }
 
+expectRefusal("multiple entry points") {
+  var a = LoopNode(title: "A", loopType: .goalBased)
+  a.backend = .copilotCLI
+  var b = LoopNode(title: "B", loopType: .goalBased)
+  b.backend = .copilotCLI
+  var c = LoopNode(title: "C", loopType: .goalBased)
+  c.backend = .copilotCLI
+  var d = LoopNode(title: "D", loopType: .goalBased)
+  d.backend = .copilotCLI
+  var g = LoopGraph(scope: .project(ProjectRef(path: "/tmp/d", name: "d")))
+  g.nodes = [a, b, c, d]
+  g.edges = [
+    LoopEdge(from: a.id, to: b.id),
+    LoopEdge(from: c.id, to: d.id),
+  ]
+  return g
+}
+
+expectRefusal("adaptive cycle guard") {
+  var a = LoopNode(title: "A", loopType: .goalBased)
+  a.backend = .copilotCLI
+  var b = LoopNode(title: "B", loopType: .goalBased)
+  b.backend = .copilotCLI
+  var g = LoopGraph(scope: .project(ProjectRef(path: "/tmp/d", name: "d")))
+  g.nodes = [a, b]
+  g.edges = [
+    LoopEdge(from: a.id, to: b.id),
+    LoopEdge(
+      from: b.id, to: a.id,
+      cycleGuard: CycleGuard(maxIterations: 3, until: "test -f done")),
+  ]
+  return g
+}
+
 expectRefusal("unguarded cycle") {
-  var a = LoopNode(title: "A", loopType: .goalBased); a.backend = .copilotCLI
-  var b = LoopNode(title: "B", loopType: .goalBased); b.backend = .copilotCLI
+  var a = LoopNode(title: "A", loopType: .goalBased)
+  a.backend = .copilotCLI
+  var b = LoopNode(title: "B", loopType: .goalBased)
+  b.backend = .copilotCLI
   var g = LoopGraph(scope: .project(ProjectRef(path: "/tmp/d", name: "d")))
   g.nodes = [a, b]
   g.edges = [
@@ -104,9 +145,12 @@ expectRefusal("unguarded cycle") {
 }
 
 expectRefusal("fan-out without join") {
-  var a = LoopNode(title: "A", loopType: .goalBased); a.backend = .copilotCLI
-  var b = LoopNode(title: "B", loopType: .goalBased); b.backend = .copilotCLI
-  var c = LoopNode(title: "C", loopType: .goalBased); c.backend = .copilotCLI
+  var a = LoopNode(title: "A", loopType: .goalBased)
+  a.backend = .copilotCLI
+  var b = LoopNode(title: "B", loopType: .goalBased)
+  b.backend = .copilotCLI
+  var c = LoopNode(title: "C", loopType: .goalBased)
+  c.backend = .copilotCLI
   var g = LoopGraph(scope: .project(ProjectRef(path: "/tmp/d", name: "d")))
   g.nodes = [a, b, c]
   g.edges = [

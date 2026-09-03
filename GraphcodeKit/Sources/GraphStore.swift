@@ -84,6 +84,15 @@ public actor GraphStore {
   /// that don't care, and any client that never wires it) means off, which is the
   /// experiment's default.
   private let onHeartbeatEnabled: (@Sendable () -> Bool)?
+  /// The master Goobers experiment, read fresh at every command just like the heartbeat
+  /// experiment. A persisted Goobers graph becomes inert rather than silently falling
+  /// back to sessions when this is off.
+  private let onGoobersEnabled: (@Sendable () -> Bool)?
+  /// The only Goobers effect this actor knows: hand the whole immutable graph snapshot
+  /// to the instance owner and get the run/snapshot identities back.
+  private let onRunGoobers: (@Sendable (LoopGraph) async throws -> GoobersWorkspace.Dispatch)?
+  /// Stop the graph's private daemon when its owner switches back to GraphCode sessions.
+  private let onStopGoobers: (@Sendable (UUID) async -> Void)?
   /// Draws one finished pass (`SummaryBoardComposer`). `nil` when nothing composes boards,
   /// which is every test that did not ask for one.
   private let onComposeBoard:
@@ -226,6 +235,9 @@ public actor GraphStore {
     onRollbackPlaybook: (@Sendable (UUID) -> Bool)? = nil,
     onAnnounceError: (@Sendable (String) -> Void)? = nil,
     onHeartbeatEnabled: (@Sendable () -> Bool)? = nil,
+    onGoobersEnabled: (@Sendable () -> Bool)? = nil,
+    onRunGoobers: (@Sendable (LoopGraph) async throws -> GoobersWorkspace.Dispatch)? = nil,
+    onStopGoobers: (@Sendable (UUID) async -> Void)? = nil,
     onComposeBoard: (
       @Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?
     )? = nil,
@@ -258,6 +270,9 @@ public actor GraphStore {
     self.onRollbackPlaybook = onRollbackPlaybook
     self.onAnnounceError = onAnnounceError
     self.onHeartbeatEnabled = onHeartbeatEnabled
+    self.onGoobersEnabled = onGoobersEnabled
+    self.onRunGoobers = onRunGoobers
+    self.onStopGoobers = onStopGoobers
     self.onComposeBoard = onComposeBoard
     self.onBoardsEnabled = onBoardsEnabled
     self.onResolveTemplate = onResolveTemplate
@@ -298,6 +313,7 @@ public actor GraphStore {
   /// session opens on the current brief and the node's stored snapshot is refreshed with
   /// it; see `resolvedForLaunch`.
   private func ensureSession(_ node: LoopNode) {
+    guard graph.executionMode == .graphcode else { return }
     onEnsureSession?(resolvedForLaunch(node), graph.project.path)
   }
 
@@ -552,7 +568,7 @@ public actor GraphStore {
       // the first goal loop added rolled its composite up to RUNNING while `pilotState`
       // still read "Not piloted" and not one process existed — the card claimed the
       // routine was working, which is the exact opposite of what the pilot gate promises.
-      if subGraphDepth > 0 { node.state = .idle }
+      if subGraphDepth > 0 || graph.executionMode == .goobers { node.state = .idle }
       // The draft's id is client-chosen now (see `NodeDraft.id`), so a re-sent command
       // must not become a second node — or a crash: `IdentifiedArray.append` traps on a
       // duplicate id, and this protocol is reachable from any client.
@@ -572,16 +588,16 @@ public actor GraphStore {
           "created by \(parent.title) — report results to it with: "
             + "graphcode node send \(graph.project.path) \(creator.uuidString) <message>")
       }
-      if node.runsUnattended {
+      if graph.executionMode == .graphcode, node.runsUnattended {
         // Start it now rather than waiting for someone to open it — the loop is supposed
         // to run whether or not the app is up, which is the whole reason `graphcoded`
         // exists (docs/03-architecture.md#background-daemons).
         ensureSession(node)
       }
-      if node.loopType == .goalBased {
+      if graph.executionMode == .graphcode, node.loopType == .goalBased {
         armGoalPoller(for: node)
       }
-      armHeartbeat(for: node)
+      if graph.executionMode == .graphcode { armHeartbeat(for: node) }
 
     case .createEdge(let from, let to, let spec):
       guard from != to else { return }
@@ -670,6 +686,12 @@ public actor GraphStore {
 
     case .restartSessions:
       await restartSessions()
+
+    case .setExecutionMode(let mode):
+      await setExecutionMode(mode)
+
+    case .runGoobers:
+      await runGoobers()
 
     case .subGraphCommand(let nodeID, let inner):
       await runInSubGraph(nodeID, inner)
@@ -1923,6 +1945,108 @@ public actor GraphStore {
     await restart(live.filter { $0.loopType != .composite })
   }
 
+  private func setExecutionMode(_ mode: LoopGraph.ExecutionMode) async {
+    guard subGraphDepth == 0 else {
+      announceError("only a project's whole graph can choose its execution mode")
+      return
+    }
+    guard mode != graph.executionMode else { return }
+
+    switch mode {
+    case .goobers:
+      guard onGoobersEnabled?() == true else {
+        announceError("enable Goobers orchestration in Settings before converting this graph")
+        return
+      }
+      // One graph, one orchestrator. End every session before changing the durable bit
+      // so a crash cannot leave a Goobers graph with GraphCode workers still running.
+      for node in graph.nodesAtAnyDepth {
+        onTerminateSession?(node, graph.project.path)
+      }
+      for poller in goalPollers.values { poller.cancel() }
+      goalPollers.removeAll()
+      for timer in heartbeatTimers.values { timer.cancel() }
+      heartbeatTimers.removeAll()
+      graph.executionMode = .goobers
+      graph.goobersRun = nil
+      resetGraphForExternalExecution(running: false)
+
+    case .graphcode:
+      await onStopGoobers?(graph.id)
+      graph.executionMode = .graphcode
+      graph.goobersRun = nil
+      resetGraphForGraphCodeExecution()
+      ensureUnattendedSessions()
+    }
+  }
+
+  private func runGoobers() async {
+    guard subGraphDepth == 0 else {
+      announceError("a composite sub-graph cannot run as a separate Goobers workflow")
+      return
+    }
+    guard graph.executionMode == .goobers else {
+      announceError("mark this graph as Goobers-managed before running it")
+      return
+    }
+    guard onGoobersEnabled?() == true else {
+      announceError("Goobers orchestration is disabled in Settings")
+      return
+    }
+    guard let run = onRunGoobers else {
+      announceError("Goobers execution is unavailable in this graphcoded process")
+      return
+    }
+    do {
+      let dispatch = try await run(graph)
+      graph.goobersRun = LoopGraph.GoobersRun(
+        id: dispatch.runID, snapshotID: dispatch.snapshotID, phase: "running")
+      resetGraphForExternalExecution(running: true)
+    } catch {
+      announceError(error.localizedDescription)
+    }
+  }
+
+  /// The cards remain useful while Goobers owns execution: roots are the work that can
+  /// start, everything downstream is waiting. Stage-level projection replaces this
+  /// coarse initial picture as monitoring lands; no GraphCode edge is fired meanwhile.
+  private func resetGraphForExternalExecution(running: Bool) {
+    for index in graph.edges.indices {
+      graph.edges[index].fireCount = 0
+    }
+    let entries = Set(graph.startAnchors)
+    for index in graph.nodes.indices {
+      guard graph.nodes[index].loopType != .sketch else {
+        graph.nodes[index].state = .idle
+        continue
+      }
+      graph.nodes[index].presence = nil
+      graph.nodes[index].activity = nil
+      if entries.contains(graph.nodes[index].id) {
+        graph.nodes[index].state = running ? .running : .idle
+      } else {
+        graph.nodes[index].state = .blocked
+      }
+    }
+  }
+
+  private func resetGraphForGraphCodeExecution() {
+    for index in graph.edges.indices {
+      graph.edges[index].fireCount = 0
+    }
+    let targeted = Set(graph.sequencingEdges.map(\.to))
+    for index in graph.nodes.indices {
+      let node = graph.nodes[index]
+      graph.nodes[index].presence = nil
+      graph.nodes[index].activity = nil
+      if node.loopType == .sketch || node.loopType == .turnBased || node.loopType == .composite {
+        graph.nodes[index].state = targeted.contains(node.id) ? .blocked : .idle
+      } else {
+        graph.nodes[index].state = targeted.contains(node.id) ? .blocked : .running
+      }
+    }
+  }
+
   /// The kills run concurrently: each one waits on `zmx` to confirm a death, and a dozen
   /// loops in sequence would hold this actor for as long as their kills add up to. The
   /// bump is written only for a confirmed kill — it is the app's cue to reattach, and a
@@ -2095,6 +2219,7 @@ public actor GraphStore {
   /// eligible only while it has never fired (exactly the pre-Phase-5 behaviour), and a
   /// guarded one stays eligible until its bound is reached.
   private func fireOutgoingEdges(from nodeID: UUID, sourceSucceeded: Bool) {
+    guard graph.executionMode == .graphcode else { return }
     let outgoing = graph.edges.filter {
       $0.from == nodeID && $0.kind.isExecutable && $0.mayFireAgain
     }
@@ -2662,6 +2787,7 @@ public actor GraphStore {
   /// headlessly, leaving nothing to attach to. This one only asks an outside question
   /// about work that is running in a perfectly ordinary session the whole time.
   private func armGoalPoller(for node: LoopNode) {
+    guard graph.executionMode == .graphcode else { return }
     // A sub-graph store is built per command; a timer armed here dies with it, so the
     // request is handed up to the store that owns recurrence for this loop. The parent
     // applies the pilot gate — an unpiloted composite's loops are templates, and a
@@ -3045,6 +3171,7 @@ public actor GraphStore {
   /// the session on every beat, so the timer itself holds no authority anything else
   /// would need revoking.
   private func armHeartbeat(for node: LoopNode) {
+    guard graph.executionMode == .graphcode else { return }
     // Forwarded up for the same reason the goal poller is: a per-command store cannot
     // own a timer. The parent applies the same pilot gate on receipt.
     if subGraphDepth > 0 {
@@ -3121,6 +3248,7 @@ public actor GraphStore {
   /// existing session first — `zmx run` itself is *not* idempotent, and re-running it
   /// against a live session types the prompt in a second time.
   public func ensureUnattendedSessions() {
+    guard graph.executionMode == .graphcode else { return }
     for node in graph.nodes where node.runsUnattended {
       if node.loopType == .goalBased {
         guard !node.isResolved else { continue }
@@ -3165,6 +3293,7 @@ public actor GraphStore {
   ///   restarts a `.stopped` time-based node, which is defensible once at boot and wrong
   ///   every minute: a human who stopped a remote loop would watch it come back.
   public func ensureUnattendedSessionsAlive() {
+    guard graph.executionMode == .graphcode else { return }
     for node in graph.nodes where node.runsUnattended && !node.isResolved {
       ensureSession(node)
     }

@@ -242,6 +242,8 @@ struct ProjectFeature {
     case stopNodeTapped(UUID)
     case pilotCompositeTapped(UUID)
     case armCompositeTapped(UUID)
+    case executionModeChanged(LoopGraph.ExecutionMode)
+    case runGoobersTapped
     case refreshUsageTapped
     case worktreesLoaded([WorktreeRef])
     case worktreeCreationFailed(String)
@@ -586,6 +588,12 @@ struct ProjectFeature {
 
       case .armCompositeTapped(let nodeID):
         return send(state, .armComposite(nodeID))
+
+      case .executionModeChanged(let mode):
+        return send(state, .setExecutionMode(mode))
+
+      case .runGoobersTapped:
+        return send(state, .runGoobers)
 
       case .refreshUsageTapped:
         return send(state, .refreshUsage)

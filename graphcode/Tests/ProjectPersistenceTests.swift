@@ -26,6 +26,32 @@ struct ProjectPersistenceTests {
     let loaded = persistence.loadGraph(path: project.path)
     #expect(loaded?.nodes.count == 1)
     #expect(loaded?.project.path == project.path)
+    #expect(loaded?.executionMode == .graphcode)
+  }
+
+  @Test
+  func goobersExecutionStateRoundTripsButTheDefaultStaysImplicit() throws {
+    let persistence = makePersistence()
+    let project = ProjectRef(path: "/tmp/goobers-project", name: "goobers-project")
+    var graph = LoopGraph(project: project)
+    graph.executionMode = .goobers
+    graph.goobersRun = LoopGraph.GoobersRun(
+      id: "run-1", snapshotID: "snapshot-1", phase: "running",
+      startedAt: Date(timeIntervalSince1970: 100))
+
+    persistence.saveGraph(graph)
+    let loaded = persistence.loadGraph(path: project.path)
+    #expect(loaded?.id == graph.id)
+    #expect(loaded?.executionMode == .goobers)
+    #expect(loaded?.goobersRun?.id == "run-1")
+    #expect(loaded?.goobersRun?.snapshotID == "snapshot-1")
+
+    let oldGraph = """
+      {"id":"\(UUID().uuidString)","project":{"path":"/tmp/old","name":"old","lastOpenedAt":0},"nodes":[],"edges":[]}
+      """
+    let decoded = try JSONDecoder().decode(LoopGraph.self, from: Data(oldGraph.utf8))
+    #expect(decoded.executionMode == .graphcode)
+    #expect(decoded.goobersRun == nil)
   }
 
   @Test

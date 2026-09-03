@@ -169,6 +169,13 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   case restartNode(UUID)
   /// `restartNode` for every unresolved loop in the graph, workers included.
   case restartSessions
+  /// Switch the whole graph between its existing session-backed execution and the
+  /// experimental Goobers workflow path. There is deliberately no per-node form yet:
+  /// one graph has one orchestrator, so its edges cannot be driven twice.
+  case setExecutionMode(LoopGraph.ExecutionMode)
+  /// Export the current graph snapshot, ensure its private Goobers daemon, and trigger
+  /// one run. Refused unless the graph is explicitly in Goobers mode.
+  case runGoobers
   /// Route a command into a composite node's sub-graph. Editing a composite's insides is
   /// the same set of operations as editing any graph, so it reuses them wholesale rather
   /// than growing a parallel vocabulary.

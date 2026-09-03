@@ -24,6 +24,7 @@ import Foundation
 /// `.deleteProjectGraph` additionally discards its saved loops.
 public actor ProjectRegistry {
   private let persistence: ProjectPersistence
+  private let persistenceDirectory: URL
   private var stores: [String: GraphStore] = [:]
   private var connectionFileDescriptors: [UUID: Int32] = [:]
   private var connectionProjectPaths: [UUID: Set<String>] = [:]
@@ -81,6 +82,7 @@ public actor ProjectRegistry {
       CLISessionBackend.composeBoard,
     reapCondemnedSessions: Bool = false
   ) {
+    self.persistenceDirectory = persistenceDirectory
     persistence = ProjectPersistence(baseDirectory: persistenceDirectory)
     self.ensureSession = ensureSession
     self.terminateSession = terminateSession
@@ -334,6 +336,11 @@ public actor ProjectRegistry {
       // just deleted from the one still sitting in `stores`.
       stores.removeValue(forKey: canonicalPath)
       persistence.deleteGraph(path: canonicalPath)
+      if let graph {
+        try? await GoobersWorkspace(
+          graphID: graph.id, baseDirectory: persistenceDirectory
+        ).remove()
+      }
 
     case .graphCommand(let path, let inner):
       // Routed the same way the open was, so a client that had its path redirected to the
@@ -558,6 +565,7 @@ public actor ProjectRegistry {
     let scope = LoopGraphScope(projectPath: path, name: Self.displayName(for: path))
     let graph = persistence.loadGraph(path: path) ?? LoopGraph(scope: scope)
     let persistence = self.persistence
+    let goobersDirectory = persistenceDirectory
     // A cross-graph spawn arrives here as a plain request; hopping through an unstructured
     // `Task` is what lets this actor re-enter itself to reach a *different* store without
     // deadlocking on its own isolation.
@@ -601,6 +609,17 @@ public actor ProjectRegistry {
         NodeMemory.rollbackPlaybook(projectPath: path, nodeID: nodeID)
       },
       onHeartbeatEnabled: { GraphcodeSettingsStore.load().daemonHeartbeatEnabled },
+      onGoobersEnabled: { GraphcodeSettingsStore.load().goobersEnabled },
+      onRunGoobers: { graph in
+        try await GoobersWorkspace(
+          graphID: graph.id, baseDirectory: goobersDirectory
+        ).dispatch(graph)
+      },
+      onStopGoobers: { graphID in
+        await GoobersWorkspace(
+          graphID: graphID, baseDirectory: goobersDirectory
+        ).stopDaemon()
+      },
       onComposeBoard: composeBoard,
       onBoardsEnabled: {
         let settings = GraphcodeSettingsStore.load()

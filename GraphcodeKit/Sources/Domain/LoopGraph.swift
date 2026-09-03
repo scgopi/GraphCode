@@ -16,10 +16,39 @@ import IdentifiedCollections
 /// `graphcode://global` ref — so persistence, registry routing, and every existing
 /// `graph.project.path` call site work without knowing the difference.
 public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
+  public enum ExecutionMode: String, Codable, Equatable, Sendable {
+    /// GraphCode owns node sessions, edge firing, and recurrence — every graph written
+    /// before this field existed, and the behavior users already have.
+    case graphcode
+    /// Goobers owns the whole graph as one workflow. Individual nodes have no zmx
+    /// session in this mode; GraphCode is the authoring and monitoring surface.
+    case goobers
+  }
+
+  public struct GoobersRun: Codable, Equatable, Sendable {
+    public var id: String
+    public var snapshotID: String
+    public var phase: String
+    public var startedAt: Date
+
+    public init(id: String, snapshotID: String, phase: String, startedAt: Date = Date()) {
+      self.id = id
+      self.snapshotID = snapshotID
+      self.phase = phase
+      self.startedAt = startedAt
+    }
+  }
+
   public let id: UUID
   public var scope: LoopGraphScope
   public var nodes: IdentifiedArrayOf<LoopNode>
   public var edges: IdentifiedArrayOf<LoopEdge>
+  /// Who executes this graph. Omitted from disk for the default so existing graph files
+  /// stay unchanged until somebody explicitly opts one into the experiment.
+  public var executionMode: ExecutionMode = .graphcode
+  /// The newest Goobers run GraphCode started for this graph. Goobers remains the source
+  /// of truth for its lifecycle; this is the durable join key for monitoring.
+  public var goobersRun: GoobersRun?
   /// The project's Artifactory — every post any loop has dropped onto the shared board,
   /// oldest first, notes and mirrored records each capped on their own budget
   /// (`Artifactory.maxNotes`, `Artifactory.maxRecords`). Kept on the graph rather than in a
@@ -254,7 +283,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   // MARK: - Coding
 
   private enum CodingKeys: String, CodingKey {
-    case id, nodes, edges, artifactory
+    case id, nodes, edges, artifactory, executionMode, goobersRun
     /// Persisted as a `ProjectRef` rather than as the scope enum. Every graph on disk
     /// predates `LoopGraphScope`, and the ref round-trips both cases losslessly (the
     /// global graph's reserved path decodes straight back to `.global`), so there was
@@ -270,6 +299,9 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     nodes = try container.decodeIfPresent(IdentifiedArrayOf<LoopNode>.self, forKey: .nodes) ?? []
     edges = try container.decodeIfPresent(IdentifiedArrayOf<LoopEdge>.self, forKey: .edges) ?? []
     artifactory = try container.decodeIfPresent([ArtifactoryPost].self, forKey: .artifactory) ?? []
+    executionMode =
+      try container.decodeIfPresent(ExecutionMode.self, forKey: .executionMode) ?? .graphcode
+    goobersRun = try container.decodeIfPresent(GoobersRun.self, forKey: .goobersRun)
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -281,5 +313,9 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     // Absent while empty, so a graph file nobody has posted to stays byte-for-byte
     // what it was — the same reason `hasActiveDependents` never reaches disk.
     if !artifactory.isEmpty { try container.encode(artifactory, forKey: .artifactory) }
+    if executionMode != .graphcode {
+      try container.encode(executionMode, forKey: .executionMode)
+    }
+    try container.encodeIfPresent(goobersRun, forKey: .goobersRun)
   }
 }

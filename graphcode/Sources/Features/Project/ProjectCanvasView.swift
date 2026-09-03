@@ -17,6 +17,7 @@ import SwiftUI
 /// instead — no separate enablement logic needed.
 struct ProjectCanvasView: View {
   @Bindable var store: StoreOf<ProjectFeature>
+  @Bindable private var settings = SettingsModel.shared
 
   /// Where this canvas is looking. Shared with the Graph overview — see
   /// `CanvasTransform` for why the scale and offset are one value with arithmetic on it
@@ -86,6 +87,25 @@ struct ProjectCanvasView: View {
           .padding(6)
           .background(Color.red)
       }
+      if store.graph.executionMode == .goobers {
+        HStack(spacing: 8) {
+          Image(systemName: "point.3.connected.trianglepath.dotted")
+          Text("Goobers owns this graph")
+            .fontWeight(.medium)
+          if let run = store.graph.goobersRun {
+            Text("run \(run.id.prefix(8)) · \(run.phase)")
+              .foregroundStyle(.secondary)
+          } else {
+            Text("not run yet")
+              .foregroundStyle(.secondary)
+          }
+          Spacer()
+        }
+        .font(.caption)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.quaternary)
+      }
       if let composite = store.openComposite {
         compositeBreadcrumb(composite)
       }
@@ -100,8 +120,36 @@ struct ProjectCanvasView: View {
         // A quiet + in system materials, not a filled accent pill — HIG-style: the
         // affordance should be findable, not the loudest thing on the canvas.
         .overlay(alignment: .topTrailing) {
-          CanvasAddButton(help: "New Loop") {
-            store.send(.addNodeButtonTapped(parentBackend: nil))
+          HStack(spacing: 8) {
+            if settings.settings.goobersEnabled || store.graph.executionMode == .goobers {
+              Menu {
+                if store.graph.executionMode == .goobers {
+                  Button("Run Workflow", systemImage: "play.fill") {
+                    store.send(.runGoobersTapped)
+                  }
+                  Divider()
+                  Button("Use GraphCode Sessions", systemImage: "terminal") {
+                    store.send(.executionModeChanged(.graphcode))
+                  }
+                } else {
+                  Button(
+                    "Use Goobers for This Graph",
+                    systemImage: "point.3.connected.trianglepath.dotted"
+                  ) {
+                    store.send(.executionModeChanged(.goobers))
+                  }
+                }
+              } label: {
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+                  .frame(width: 30, height: 30)
+                  .background(.regularMaterial, in: Circle())
+              }
+              .menuStyle(.borderlessButton)
+              .help("Graph execution")
+            }
+            CanvasAddButton(help: "New Loop") {
+              store.send(.addNodeButtonTapped(parentBackend: nil))
+            }
           }
           .padding(.trailing, 20)
           .padding(.top, 18)
