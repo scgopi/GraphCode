@@ -14,7 +14,21 @@ import ProjectDescription
 //     edges automatically, and arms time-based triggers that survive the app quitting
 //     — see docs/07-roadmap.md#phase-3--orchestrator-automation.
 
-let bundleIdPrefix = "dev.graphcode"
+// Both are overridable so a development build can run *beside* an installed release
+// instead of replacing it. macOS keys far too much off the bundle id — Login Items,
+// LaunchServices' "which app owns this?", the background-agent attribution — so two
+// builds sharing one id fight over all of it.
+//
+//     TUIST_BUNDLE_ID_PREFIX=ai.kortexa.graphcode-localdev \
+//     TUIST_APP_DISPLAY_NAME="GraphCode (localdev)" \
+//       mise exec -- tuist generate --no-open
+//
+// The bundle id is only half of side-by-side: state is keyed by
+// `GRAPHCODE_SUPPORT_DIR` (see `SupportDirectory`), and a second build sharing
+// `~/.graphcode` would share graphs and zmx session names with the release and fight
+// over the sessions. Set both, or use `make dev-*`, which sets both for you.
+let bundleIdPrefix = Environment.bundleIdPrefix.getString(default: "dev.graphcode")
+let appDisplayName = Environment.appDisplayName.getString(default: "GraphCode")
 
 let project = Project(
     name: "graphcode",
@@ -59,8 +73,8 @@ let project = Project(
                 // The name a human sees — menu bar, Finder, Dock, About. Distinct from
                 // the bundle's filename and from `graphcode` the CLI, which stay lower
                 // case because they are a path and a command someone types.
-                "CFBundleName": "GraphCode",
-                "CFBundleDisplayName": "GraphCode",
+                "CFBundleName": .string(appDisplayName),
+                "CFBundleDisplayName": .string(appDisplayName),
                 "CFBundleIconName": "AppIcon",
                 // The app reported Tuist's default 1.0 while every release was tagged
                 // v0.0.x, so About said one thing and the download page another. Keep

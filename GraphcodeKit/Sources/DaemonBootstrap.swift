@@ -36,7 +36,16 @@ import Foundation
     /// instead of rewriting the first's. The default workspace keeps the bare label it has
     /// always had — an existing install must not see its agent renamed.
     static var label: String { Workspace.current.daemonLabel }
-    private static let appBundleIdentifier = "dev.graphcode.app"
+    /// The app this agent belongs to. Read from the running bundle so a side-by-side
+    /// build (its own bundle id, its own `GRAPHCODE_SUPPORT_DIR`) associates its agent
+    /// with *itself* — a hardcoded id would point the dev build's Login Item at the
+    /// installed release, and macOS would attribute one app's background agent to the
+    /// other. Falls back to the shipping id for the CLI and daemon, which have no app
+    /// bundle of their own.
+    private static var appBundleIdentifier: String {
+      Bundle.main.bundleIdentifier.flatMap { $0.hasSuffix(".app") ? $0 : nil }
+        ?? "dev.graphcode.app"
+    }
     /// `graphcode` here is the CLI, not the app — a different product that happens to share
     /// the name a human types. Shipping it matters: `~/.graphcode/bin` is what the README
     /// tells people to put on their PATH, and without this a drag-to-Applications install

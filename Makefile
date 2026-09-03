@@ -1,5 +1,6 @@
 .PHONY: doctor generate build-app build-daemon run-app run-daemon \
         daemon-install daemon-uninstall daemon-status test check format clean \
+        dev-generate dev-build-app dev-install-zmx dev-run-app dev-status \
         third-party build-zmx install-zmx build-ghostty vendor-sdk \
         build-cli install-cli release-dmg notarize signing-doctor tap-bump
 
@@ -204,6 +205,61 @@ daemon-uninstall:
 
 daemon-status:
 	@launchctl list | grep $(DAEMON_LABEL) || echo "graphcoded is not loaded"
+
+# ---------------------------------------------------------------------------
+# dev build — a second graphcode that runs beside an installed release.
+#
+# Side-by-side needs BOTH halves, which is why these are one target and not a
+# note in the README:
+#   * a distinct bundle id, or macOS confuses the two apps in LaunchServices,
+#     Login Items, and background-agent attribution;
+#   * a distinct support dir, or they share graphs and zmx session names and
+#     fight over the sessions (see SupportDirectory's header).
+# The support dir also gives the dev daemon its own launchd label for free —
+# `Workspace.daemonLabel` suffixes the slug — so nothing here touches the
+# release's agent.
+#
+# The `ai.kortexa` prefix is deliberate: it is a namespace we control, so a dev
+# build can never collide with whatever `app.graphcode`/`dev.graphcode` becomes.
+# ---------------------------------------------------------------------------
+DEV_BUNDLE_ID_PREFIX := ai.kortexa.graphcode-localdev
+DEV_APP_DISPLAY_NAME := GraphCode (localdev)
+DEV_SUPPORT_DIR_NAME := .graphcode.localdev
+DEV_ENV := TUIST_BUNDLE_ID_PREFIX="$(DEV_BUNDLE_ID_PREFIX)" \
+           TUIST_APP_DISPLAY_NAME="$(DEV_APP_DISPLAY_NAME)"
+
+dev-generate: build-ghostty
+	$(DEV_ENV) $(MISE) tuist generate --no-open
+
+dev-build-app: dev-generate
+	set -o pipefail && $(DEV_ENV) $(MISE) xcodebuild -workspace $(WORKSPACE) \
+		-scheme $(SCHEME_APP) -destination '$(DESTINATION)' build | $(MISE) xcbeautify
+
+# Installs zmx into the DEV support dir, not the release's, so the two never
+# share a binary or a session namespace.
+dev-install-zmx: build-zmx
+	@mkdir -p "$(HOME)/$(DEV_SUPPORT_DIR_NAME)/bin"
+	@cp "$(BUILD_DIR)/zmx/bin/zmx" "$(HOME)/$(DEV_SUPPORT_DIR_NAME)/bin/zmx"
+	@codesign --force --sign - "$(HOME)/$(DEV_SUPPORT_DIR_NAME)/bin/zmx" 2>/dev/null || true
+	@echo "installed: $(HOME)/$(DEV_SUPPORT_DIR_NAME)/bin/zmx"
+
+dev-run-app: dev-build-app dev-install-zmx
+	@APP_PATH=$$($(DEV_ENV) $(MISE) xcodebuild -workspace $(WORKSPACE) \
+		-scheme $(SCHEME_APP) -destination '$(DESTINATION)' -showBuildSettings 2>/dev/null \
+		| awk -F'= ' '/ BUILT_PRODUCTS_DIR /{print $$2; exit}')/graphcode.app; \
+	echo "Launching $$APP_PATH with GRAPHCODE_SUPPORT_DIR=$(DEV_SUPPORT_DIR_NAME)"; \
+	open -n --env GRAPHCODE_SUPPORT_DIR="$(DEV_SUPPORT_DIR_NAME)" "$$APP_PATH"
+
+# What the dev build actually is, in one command — useful when the two get confusing.
+dev-status:
+	@echo "bundle id prefix : $(DEV_BUNDLE_ID_PREFIX)"
+	@echo "support dir      : $(HOME)/$(DEV_SUPPORT_DIR_NAME)"
+	@echo "daemon (dev)     : $$(launchctl list | awk '/graphcoded/ && /$(DEV_BUNDLE_ID_PREFIX)/{print $$3}' | paste -sd' ' -)"
+	@echo "daemon (release) : $$(launchctl list | awk '/graphcoded/ && !/$(DEV_BUNDLE_ID_PREFIX)/{print $$3}' | paste -sd' ' -)"
+	@echo "dev app running  : $$(pgrep -f 'Debug/graphcode.app/Contents/MacOS/graphcode' | paste -sd' ' - | sed 's/^$$/no/')"
+	@ls -d /Applications/graphcode.app >/dev/null 2>&1 \
+		&& echo "installed release: /Applications/graphcode.app ($$(defaults read /Applications/graphcode.app/Contents/Info CFBundleIdentifier 2>/dev/null))" \
+		|| echo "installed release: none"
 
 # ---------------------------------------------------------------------------
 # test / check / format
