@@ -102,11 +102,18 @@ extension CLISessionBackendKind {
       // timer of its own. Copilot has since grown one. Worth knowing if a recurring loop
       // runs once and stops: that is the symptom of a Copilot too old to have it, and
       // `copilot help commands` on the machine running the loop is where to check.
+      //
+      // `supportsSubAgents` was false for the same reason and flipped the same way: read
+      // off 1.0.80's `copilot help commands`, which lists `/fleet` ("enable fleet mode for
+      // parallel subagent execution"), `/tasks` ("view and manage tasks (subagents and
+      // shell commands)") and `/subagents`, plus `--agent <agent>` on the launch line.
+      // That is the fan-out a composite leans on. The same age caveat applies: a
+      // composite whose Copilot workers never fan out is a Copilot older than that.
       return BackendCapabilities(
         supportsGoalMode: true,
         supportsHooks: false,
         supportsStructuredOutput: true,
-        supportsSubAgents: false,
+        supportsSubAgents: true,
         supportsMCP: true,
         supportsMidSessionInput: true,
         supportsInSessionRecurrence: true)
