@@ -207,7 +207,15 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     // Walk out from the entry points; whatever the walk never reaches is a cycle-only
     // component, and the first of its nodes becomes that component's anchor.
     var reached = anchored
-    var frontier = entries
+    // A rowed sketch is not an anchor but it is a beginning to walk from: its children
+    // are reached through it, so they are not mistaken for a headless component and
+    // promoted to roots of their own — which listed a Main loop's children as its
+    // siblings, unhidden when it collapsed. Only sketches `sidebarRoots` actually rows
+    // seed the walk; one something points at is reached through its own parent, and
+    // covering it here would strand that subtree with no row at all.
+    let rowedSketches = untargetedSketches
+    reached.formUnion(rowedSketches)
+    var frontier = entries + rowedSketches
     while let current = frontier.popLast() {
       for edge in sequencingEdges where edge.from == current && !reached.contains(edge.to) {
         reached.insert(edge.to)
@@ -235,11 +243,12 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   /// loop that effectively doesn't exist. Untargeted sketches append after the anchored
   /// roots, the sidebar's echo of the canvas's "sketches sit below the lanes"; a sketch
   /// something points at already lists as that node's child.
-  public var sidebarRoots: [UUID] {
+  public var sidebarRoots: [UUID] { startAnchors + untargetedSketches }
+
+  /// The sketches nothing points at — the ones `sidebarRoots` gives a top-level row.
+  private var untargetedSketches: [UUID] {
     let targeted = Set(edges.map(\.to))
-    let sketches = nodes.filter { $0.loopType == .sketch && !targeted.contains($0.id) }
-      .map(\.id)
-    return startAnchors + sketches
+    return nodes.filter { $0.loopType == .sketch && !targeted.contains($0.id) }.map(\.id)
   }
 
   // MARK: - Coding
