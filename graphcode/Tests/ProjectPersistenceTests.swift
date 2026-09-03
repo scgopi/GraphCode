@@ -52,6 +52,20 @@ struct ProjectPersistenceTests {
     let decoded = try JSONDecoder().decode(LoopGraph.self, from: Data(oldGraph.utf8))
     #expect(decoded.executionMode == .graphcode)
     #expect(decoded.goobersRun == nil)
+
+    let earlyGoobersGraph = """
+      {
+        "id":"\(UUID().uuidString)",
+        "project":{"path":"/tmp/early","name":"early","lastOpenedAt":0},
+        "nodes":[],
+        "edges":[],
+        "executionMode":"goobers",
+        "goobersRun":{"id":"old-run","snapshotID":"old-snapshot","phase":"running","startedAt":0}
+      }
+      """
+    let early = try JSONDecoder().decode(LoopGraph.self, from: Data(earlyGoobersGraph.utf8))
+    #expect(early.goobersRun?.trigger == "manual")
+    #expect(early.goobersRun?.currentStage == nil)
   }
 
   @Test

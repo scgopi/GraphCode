@@ -267,6 +267,19 @@ public actor ProjectRegistry {
   private func pollPresence() async {
     for store in stores.values {
       await store.pollPresence()
+      let graph = await store.graph
+      guard graph.executionMode == .goobers else { continue }
+      let workspace = GoobersWorkspace(
+        graphID: graph.id, baseDirectory: persistenceDirectory)
+      let client = GoobersClient(instanceRoot: workspace.root)
+      guard let runs = try? await client.runs(limit: 10),
+        let latest = runs.runs.first(where: {
+          $0.gaggle == "graphcode"
+            && $0.workflow == GoobersExport.slug(graph.project.name)
+        })
+      else { continue }
+      await store.applyGoobersRun(
+        latest, snapshotID: workspace.snapshotID(for: latest.id))
     }
   }
 

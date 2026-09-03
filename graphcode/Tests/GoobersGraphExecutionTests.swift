@@ -104,4 +104,68 @@ struct GoobersGraphExecutionTests {
     #expect(stopped.value == [graphID])
     #expect(started.value == [node.id])
   }
+
+  @Test
+  func monitoringAdoptsScheduledRunsAndProjectsTheirCurrentStage() async {
+    let first = LoopNode(
+      title: "Research", loopType: .turnBased, checkDescription: "Useful?",
+      firstInstruction: "Research", backend: .copilotCLI)
+    let second = LoopNode(
+      title: "Report", loopType: .turnBased, checkDescription: "Clear?",
+      firstInstruction: "Report", backend: .copilotCLI)
+    var graph = LoopGraph(
+      project: ProjectRef(path: "/tmp/project", name: "project"),
+      nodes: [first, second])
+    graph.edges = [LoopEdge(from: first.id, to: second.id)]
+    graph.executionMode = .goobers
+    let store = GraphStore(graph: graph)
+
+    await store.applyGoobersRun(
+      run(
+        id: "scheduled-1", phase: "running", currentStage: "report",
+        trigger: .init(kind: "schedule", ref: "@hourly")),
+      snapshotID: nil)
+
+    var updated = await store.graph
+    #expect(updated.goobersRun?.id == "scheduled-1")
+    #expect(updated.goobersRun?.trigger == "schedule")
+    #expect(updated.goobersRun?.triggerRef == "@hourly")
+    #expect(updated.nodes[id: first.id]?.state == .succeeded)
+    #expect(updated.nodes[id: second.id]?.state == .running)
+
+    await store.applyGoobersRun(
+      run(
+        id: "scheduled-1", phase: "completed", currentStage: nil,
+        trigger: .init(kind: "schedule", ref: "@hourly")),
+      snapshotID: nil)
+    updated = await store.graph
+    #expect(updated.goobersRun?.phase == "completed")
+    #expect(updated.nodes.allSatisfy { $0.state == .succeeded })
+  }
+
+  private func run(
+    id: String,
+    phase: String,
+    currentStage: String?,
+    trigger: GoobersClient.Trigger
+  ) -> GoobersClient.Run {
+    GoobersClient.Run(
+      id: id,
+      workflow: "project",
+      workflowVersion: 1,
+      workflowDigest: nil,
+      gaggle: "graphcode",
+      trigger: trigger,
+      phase: phase,
+      terminal: phase != "running",
+      currentStage: currentStage,
+      startedAt: "2026-09-03T19:00:00Z",
+      finishedAt: phase == "running" ? nil : "2026-09-03T19:01:00Z",
+      durationMillis: 60_000,
+      lastActivityAt: "2026-09-03T19:01:00Z",
+      stale: false,
+      repassCount: 0,
+      retryCount: 0,
+      noWork: false)
+  }
 }

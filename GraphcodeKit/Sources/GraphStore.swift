@@ -1188,7 +1188,8 @@ public actor GraphStore {
   }
 
   public func pollPresence() async {
-    guard !connections.isEmpty, onReadPresence != nil else { return }
+    guard graph.executionMode == .graphcode, !connections.isEmpty, onReadPresence != nil
+    else { return }
     // Both, and in this order, because they are one answer to a human: the pill says a
     // loop is working and the line under it says what at. Reading the second only when
     // someone presses refresh left every card describing the tool call its session made
@@ -2045,6 +2046,75 @@ public actor GraphStore {
         graph.nodes[index].state = targeted.contains(node.id) ? .blocked : .running
       }
     }
+  }
+
+  /// Project one Goobers run onto the graph GraphCode already renders. This is called by
+  /// the registry's app-attached poll and intentionally accepts runs GraphCode did not
+  /// start: a schedule or webhook belongs on the same canvas as an explicit run.
+  public func applyGoobersRun(_ run: GoobersClient.Run, snapshotID: String?) {
+    guard graph.executionMode == .goobers else { return }
+    let isNewRun = graph.goobersRun?.id != run.id
+    let previous = graph.goobersRun
+    let startedAt =
+      Self.goobersDate(run.startedAt) ?? (isNewRun ? Date() : previous?.startedAt ?? Date())
+    graph.goobersRun = LoopGraph.GoobersRun(
+      id: run.id,
+      snapshotID: snapshotID ?? (isNewRun ? nil : previous?.snapshotID),
+      phase: run.phase,
+      currentStage: run.currentStage,
+      trigger: run.trigger.kind,
+      triggerRef: run.trigger.ref,
+      startedAt: startedAt)
+
+    if isNewRun { resetGraphForExternalExecution(running: run.phase == "running") }
+    let names = GoobersExport.uniqueNames(for: Array(graph.nodes))
+    let currentID = run.currentStage.flatMap { stage in
+      names.first(where: { $0.value == stage })?.key
+    }
+
+    switch run.phase {
+    case "running":
+      if let currentID {
+        for index in graph.nodes.indices {
+          let id = graph.nodes[index].id
+          if id == currentID {
+            graph.nodes[index].state = .running
+          } else if graph.nodes[index].state == .running {
+            graph.nodes[index].state = .succeeded
+          }
+        }
+      }
+    case "completed":
+      for index in graph.nodes.indices where graph.nodes[index].loopType != .sketch {
+        graph.nodes[index].state = .succeeded
+      }
+    case "escalated":
+      setActiveGoobersNode(to: .awaitingInput, currentID: currentID)
+    case "failed", "aborted":
+      setActiveGoobersNode(to: .failed, currentID: currentID)
+    default:
+      break
+    }
+    guard graph.goobersRun != previous || isNewRun else { return }
+    broadcast()
+  }
+
+  private func setActiveGoobersNode(to state: LoopState, currentID: UUID?) {
+    if let currentID {
+      graph.nodes[id: currentID]?.state = state
+      return
+    }
+    if let index = graph.nodes.indices.first(where: { graph.nodes[$0].state == .running }) {
+      graph.nodes[index].state = state
+    } else if let first = graph.startAnchors.first {
+      graph.nodes[id: first]?.state = state
+    }
+  }
+
+  private static func goobersDate(_ value: String) -> Date? {
+    let fractional = ISO8601DateFormatter()
+    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
   }
 
   /// The kills run concurrently: each one waits on `zmx` to confirm a death, and a dozen

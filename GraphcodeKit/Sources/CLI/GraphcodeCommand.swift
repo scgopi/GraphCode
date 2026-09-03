@@ -788,7 +788,11 @@ extension GraphcodeCommand {
   ) -> String {
     var lines = ["\(graph.project.name)  (\(graph.aggregateState))"]
     if graph.executionMode == .goobers {
-      let run = graph.goobersRun.map { " · run \($0.id) · \($0.phase)" } ?? ""
+      let run =
+        graph.goobersRun.map {
+          let stage = $0.currentStage.map { " · \($0)" } ?? ""
+          return " · \($0.trigger) · \($0.phase)\(stage) · run \($0.id)"
+        } ?? ""
       lines.append("  execution: goobers\(run)")
     }
     if graph.nodes.isEmpty {
