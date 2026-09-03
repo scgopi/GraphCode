@@ -126,6 +126,17 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// `nil` until the summary producer is switched on in Settings, which is where it stays
   /// for anyone who never turns the experiment on.
   public var summary: LoopSummary?
+  /// What this node's session last said it was called — `/rename` inside Claude Code.
+  ///
+  /// Recorded so the rename fires **once per change** rather than once per poll. Without
+  /// it, the 15s tick would re-apply the session's name forever, and renaming a loop from
+  /// the sidebar would silently undo itself a few seconds later. Persisted for the same
+  /// reason: a daemon restart must not make an already-applied rename look new again.
+  ///
+  /// It is the last *observed* title, not the node's title — the two differ the moment a
+  /// human renames the card afterwards, and that difference is what keeps the card's name
+  /// theirs.
+  public var sessionTitle: String?
   /// The same run, drawn — a Mermaid flowchart or a table, composed once per finished pass
   /// and rendered natively by the rail (`SummaryBoard`).
   ///
@@ -213,6 +224,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     usage: UsageSample? = nil,
     activity: String? = nil,
     summary: LoopSummary? = nil,
+    sessionTitle: String? = nil,
     board: SummaryBoard? = nil,
     presence: PresenceReading? = nil,
     metricHistory: [MetricSample] = [],
@@ -242,6 +254,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.usage = usage
     self.activity = activity
     self.summary = summary
+    self.sessionTitle = sessionTitle
     self.board = board
     self.presence = presence
     self.metricHistory = metricHistory
@@ -490,7 +503,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     case worktreeBinding, subGraph, pilotState, usage, metricHistory, createdBy
     case lastArtifactoryRead, artifactoryWatch
     case state, createdAt, activity, presence, firstInstruction, pausesBeforeWritesOnly
-    case summary, board, heartbeatIntervalSeconds, stallReason
+    case summary, sessionTitle, board, heartbeatIntervalSeconds, stallReason
     case createdFromTemplateID, templateFollow, sessionRestarts
   }
 
@@ -525,6 +538,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     // account of a run, and a resolved loop's is the thing worth reading after the fact.
     // It is bounded by construction, so a graph file cannot grow on it.
     summary = try container.decodeIfPresent(LoopSummary.self, forKey: .summary)
+    sessionTitle = try container.decodeIfPresent(String.self, forKey: .sessionTitle)
     // Survives a reload for the reason above, and one more: it cost a model call, and a
     // picture that has to be paid for again on every relaunch is a picture nobody keeps.
     board = try container.decodeIfPresent(SummaryBoard.self, forKey: .board)

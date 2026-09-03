@@ -23,6 +23,14 @@ import Foundation
 actor TranscriptFreshness {
   static let shared = TranscriptFreshness()
 
+  /// The session-title reader's own instance (`ClaudeSessionLog.sessionTitle`).
+  ///
+  /// A second instance rather than a second caller of `shared`, because `hasChanged` is
+  /// consuming by design: it records the date it just saw, so of two readers asking about
+  /// the same file on the same tick the second is always told "unchanged". Sharing it
+  /// would have left the summary rail and the title reader taking turns to work.
+  static let titles = TranscriptFreshness()
+
   private var seen: [UUID: Date] = [:]
 
   /// True when `url` has been modified since this node last read it — and records the new
