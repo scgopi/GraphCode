@@ -309,19 +309,6 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// switch that quietly does two things.
   public var summarisesLoops: Bool
 
-  /// Whether the export/import surfaces are offered at all — the context-menu items on
-  /// loop cards, sidebar loop and folder rows, the canvas background's counterparts,
-  /// and the CLI's `node export` / `graph export` / `node import` verbs.
-  ///
-  /// **On by default** since 0.1.40, after one release opt-in. It earns the default the
-  /// summary rail couldn't (`summarisesLoops`): every surface is a menu item that does
-  /// nothing until deliberately clicked — no claims made on a loop's behalf, no tokens
-  /// spent, nothing running unattended. Off, none of those surfaces appear and the CLI
-  /// verbs refuse with a pointer here; bundles already exported remain ordinary zips,
-  /// importable again the moment this is back on. A settings file that explicitly says
-  /// `false` — anyone who tried the experiment and turned it off — is preserved.
-  public var sharesLoops: Bool
-
   /// Whether a small model may rewrite the current beat, on top of the free reading.
   ///
   /// **Off by default, and meaningless with `summarisesLoops` off.** The rail works
@@ -387,7 +374,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// (which cannot see ramps or `UserDefaults`) actually enforces: every `artifactory`
   /// command, the briefing's board section, and the wake digest's pointer all read
   /// this. A flip the human made in Settings is a recorded choice, preserved the way
-  /// `sharesLoops`' is.
+  /// `summarisesLoops`' is.
   public var artifactoryEnabled: Bool
 
   /// Whether `graphcoded` keeps the Mac awake while any loop is running
@@ -413,7 +400,6 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     briefsSessionsAboutTheGraph: Bool = true,
     autoSelectsModel: Bool = false,
     showsActivityStrip: Bool = false,
-    sharesLoops: Bool = true,
     summarisesLoops: Bool = false,
     summaryUsesModel: Bool = false,
     visualisesSummaries: Bool = false,
@@ -430,7 +416,6 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     self.briefsSessionsAboutTheGraph = briefsSessionsAboutTheGraph
     self.autoSelectsModel = autoSelectsModel
     self.showsActivityStrip = showsActivityStrip
-    self.sharesLoops = sharesLoops
     self.summarisesLoops = summarisesLoops
     self.summaryUsesModel = summaryUsesModel
     self.visualisesSummaries = visualisesSummaries
@@ -469,11 +454,6 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       try container.decodeIfPresent(Bool.self, forKey: .autoSelectsModel) ?? false
     showsActivityStrip =
       try container.decodeIfPresent(Bool.self, forKey: .showsActivityStrip) ?? false
-    // Absent takes the new default — on. An explicit `false`, written by anyone who
-    // tried the experiment and switched it off, is preserved; flipping a recorded
-    // choice under someone is what the migration comments above never do.
-    sharesLoops =
-      try container.decodeIfPresent(Bool.self, forKey: .sharesLoops) ?? true
     // Absent means nobody has opted in, which is the default again. A person who switched
     // it on has `true` in their file — including anyone whose 0.1.37 install wrote the
     // then-default out — and that is preserved.
