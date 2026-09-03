@@ -339,11 +339,12 @@ struct GraphStoreTests {
     // it properly afterward (see `TitleSuggestionClient`).
     await store.handle(.createNode(NodeDraft(title: "No goal", loopType: .goalBased)))
     await store.handle(.createNode(NodeDraft(title: "Bare", loopType: .timeBased)))
-    // A composite on Copilot: sub-agent fan-out is the one capability still unverified
-    // there, so this is the pairing that stays impossible now that Codex is spiked.
+    // A composite on Codex: sub-agent fan-out is the one capability still unverified
+    // there, so this is the pairing that stays impossible. (Copilot's was, until 1.0.80
+    // grew `/fleet`.)
     await store.handle(
       .createNode(
-        NodeDraft(title: "Wrong backend", loopType: .composite, backend: .copilotCLI)))
+        NodeDraft(title: "Wrong backend", loopType: .composite, backend: .codex)))
 
     #expect(await store.graph.nodes.isEmpty)
   }
