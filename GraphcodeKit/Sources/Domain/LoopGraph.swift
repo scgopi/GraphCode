@@ -27,15 +27,44 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
 
   public struct GoobersRun: Codable, Equatable, Sendable {
     public var id: String
-    public var snapshotID: String
+    public var snapshotID: String?
     public var phase: String
+    public var currentStage: String?
+    public var trigger: String
+    public var triggerRef: String?
     public var startedAt: Date
 
-    public init(id: String, snapshotID: String, phase: String, startedAt: Date = Date()) {
+    public init(
+      id: String,
+      snapshotID: String?,
+      phase: String,
+      currentStage: String? = nil,
+      trigger: String = "manual",
+      triggerRef: String? = nil,
+      startedAt: Date = Date()
+    ) {
       self.id = id
       self.snapshotID = snapshotID
       self.phase = phase
+      self.currentStage = currentStage
+      self.trigger = trigger
+      self.triggerRef = triggerRef
       self.startedAt = startedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+      case id, snapshotID, phase, currentStage, trigger, triggerRef, startedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+      let container = try decoder.container(keyedBy: CodingKeys.self)
+      id = try container.decode(String.self, forKey: .id)
+      snapshotID = try container.decodeIfPresent(String.self, forKey: .snapshotID)
+      phase = try container.decode(String.self, forKey: .phase)
+      currentStage = try container.decodeIfPresent(String.self, forKey: .currentStage)
+      trigger = try container.decodeIfPresent(String.self, forKey: .trigger) ?? "manual"
+      triggerRef = try container.decodeIfPresent(String.self, forKey: .triggerRef)
+      startedAt = try container.decode(Date.self, forKey: .startedAt)
     }
   }
 

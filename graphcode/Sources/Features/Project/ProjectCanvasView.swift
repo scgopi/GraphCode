@@ -93,7 +93,8 @@ struct ProjectCanvasView: View {
           Text("Goobers owns this graph")
             .fontWeight(.medium)
           if let run = store.graph.goobersRun {
-            Text("run \(run.id.prefix(8)) · \(run.phase)")
+            let stage = run.currentStage.map { " · \($0)" } ?? ""
+            Text("\(run.trigger) · \(run.phase)\(stage) · \(run.id.prefix(8))")
               .foregroundStyle(.secondary)
           } else {
             Text("not run yet")

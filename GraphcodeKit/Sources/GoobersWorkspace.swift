@@ -164,6 +164,19 @@ public struct GoobersWorkspace: Sendable {
     }
   }
 
+  public func snapshotID(for runID: String) -> String? {
+    struct Record: Decodable {
+      var snapshotID: String
+    }
+    let url =
+      root.appendingPathComponent("graphcode-runs", isDirectory: true)
+      .appendingPathComponent("\(runID).json")
+    guard let data = try? Data(contentsOf: url),
+      let record = try? JSONDecoder().decode(Record.self, from: data)
+    else { return nil }
+    return record.snapshotID
+  }
+
   static func projectCoordinates(at path: String) throws -> GoobersExport.ProjectCoordinates {
     let origin = try command(
       executable: URL(fileURLWithPath: "/usr/bin/env"),
