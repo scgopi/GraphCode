@@ -811,15 +811,6 @@ public actor GraphStore {
       goalCache: goalCache,
       recurrence: effects.recurrence,
       subGraphDepth: subGraphDepth + 1)
-    // A loop added inside a composite with no backend named runs on the composite's —
-    // a Copilot composite must produce Copilot workers, the same rule `createNode`
-    // applies to a loop fanning out from inside its own session. A creator the tree
-    // can find still wins, exactly as it would at the top level.
-    var command = command
-    if case .createNode(var draft) = command, draft.backend == nil {
-      draft.backend = draft.createdBy.flatMap { stored($0)?.backend } ?? node.backend
-      command = .createNode(draft)
-    }
     await child.handle(command)
     // Settled before the write-back and roll-up below, so a client sees the refusal
     // ahead of the broadcast it would otherwise time out against, and an update's

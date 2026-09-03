@@ -278,8 +278,12 @@ public actor ProjectRegistry {
       send(.recentProjectsListed(persistence.loadRecentProjects()), to: fileDescriptor)
 
     case .openProject(let path):
-      guard Self.isOpenable(path) else { break }
-      await open(Self.canonicalize(path), for: connectionID, fileDescriptor: fileDescriptor)
+      switch routing(for: path, isSidebar: sidebarConnections.contains(connectionID)) {
+      case .project(let canonicalPath):
+        await open(canonicalPath, for: connectionID, fileDescriptor: fileDescriptor)
+      case .refused(let reason):
+        send(.errorOccurred(reason), to: fileDescriptor)
+      }
 
     case .restoreOpenProjects:
       // Each of these broadcasts a `.graphChanged` exactly as `.openProject` would, so
@@ -294,7 +298,7 @@ public actor ProjectRegistry {
       // it is joined to projects *other* clients open, so `graphcode status <new folder>`
       // puts a row in a running app instead of one that only appears next launch.
       sidebarConnections.insert(connectionID)
-      for path in persistence.loadOpenProjects() where Self.isWellFormedProjectPath(path) {
+      for path in prunedOpenProjects() where Self.isWellFormedProjectPath(path) {
         await open(path, for: connectionID, fileDescriptor: fileDescriptor)
       }
 
@@ -308,6 +312,7 @@ public actor ProjectRegistry {
       let canonicalPath = Self.canonicalize(path)
       await close(canonicalPath, for: connectionID)
       persistence.forgetProject(path: canonicalPath)
+      if path != canonicalPath { persistence.forgetProject(path: path) }
 
     case .deleteProjectGraph(let path):
       let canonicalPath = Self.canonicalize(path)
@@ -331,8 +336,20 @@ public actor ProjectRegistry {
       persistence.deleteGraph(path: canonicalPath)
 
     case .graphCommand(let path, let inner):
-      guard let store = stores[Self.canonicalize(path)] else { return }
-      await store.handle(inner)
+      // Routed the same way the open was, so a client that had its path redirected to the
+      // project containing it addresses that project here too. Without the second half,
+      // the open would land on one graph and every command after it on nothing at all —
+      // silently, which is how a `node create` could look like it hung.
+      switch routing(for: path, isSidebar: sidebarConnections.contains(connectionID)) {
+      case .project(let canonicalPath):
+        guard let store = stores[canonicalPath] else {
+          send(.errorOccurred("\(path) isn't open — open it first."), to: fileDescriptor)
+          return
+        }
+        await store.handle(inner)
+      case .refused(let reason):
+        send(.errorOccurred(reason), to: fileDescriptor)
+      }
     }
   }
 
@@ -378,7 +395,38 @@ public actor ProjectRegistry {
       await store.removeConnection(connectionID)
     }
     connectionProjectPaths[connectionID]?.remove(canonicalPath)
-    persistence.saveOpenProjects(persistence.loadOpenProjects().filter { $0 != canonicalPath })
+    // Compared canonically, not literally: a project added before remote paths were
+    // normalized is stored under the spelling it arrived with, and closing it sends that
+    // spelling back through `canonicalize`. Filtering on the raw string left those rows
+    // in the open set and un-closable.
+    persistence.saveOpenProjects(
+      persistence.loadOpenProjects().filter { Self.canonicalize($0) != canonicalPath })
+  }
+
+  /// Clears out the empty twins a pre-normalization daemon left in the sidebar: a stored
+  /// path that is only another stored path spelled differently — a trailing slash, a
+  /// doubled separator — and whose graph never received a loop or a board post.
+  ///
+  /// Deliberately timid. A twin with anything in it is left exactly where it is: it is
+  /// somebody's work, and folding it into the project it duplicates would make those
+  /// loops vanish rather than be found. Its graph file is kept either way; only the
+  /// sidebar entry and the recents row go, and re-opening the path brings both back.
+  private func prunedOpenProjects() -> [String] {
+    let stored = persistence.loadOpenProjects()
+    let kept = stored.filter { path in
+      let canonical = Self.canonicalize(path)
+      // Only ever a *later* twin, so the first spelling of a project always survives even
+      // when every stored spelling of it is a variant.
+      guard path != canonical,
+        stored.prefix(while: { $0 != path }).contains(where: { Self.canonicalize($0) == canonical })
+      else { return true }
+      let graph = persistence.loadGraph(path: path)
+      let isEmpty = (graph?.nodesAtAnyDepth.isEmpty ?? true) && (graph?.artifactory.isEmpty ?? true)
+      if isEmpty { persistence.forgetProject(path: path) }
+      return !isEmpty
+    }
+    if kept != stored { persistence.saveOpenProjects(kept) }
+    return kept
   }
 
   /// Append rather than insert-at-front: the sidebar should come back in the order it
@@ -395,6 +443,82 @@ public actor ProjectRegistry {
     open.append(canonicalPath)
     persistence.saveOpenProjects(open)
     return true
+  }
+
+  // MARK: - Which project a named path belongs to
+
+  enum PathRouting: Equatable {
+    case project(String)
+    case refused(String)
+  }
+
+  /// Where a path a client named should be routed, and whether it may become a *new*
+  /// project rather than an existing one.
+  ///
+  /// Opening is create-if-missing, because that is how a folder becomes a project at all:
+  /// `graphcode status <folder>` from a shell is a supported way to add one. What that
+  /// missed is that most paths a *loop* names are not new projects — they are its own
+  /// worktree, its working directory, or its project's path spelled slightly differently.
+  /// Each of those quietly became a second project: its own graph, its own recents entry,
+  /// its own row in the sidebar under the same name, with the loops the agent then created
+  /// inside it where nobody was looking. A codespace made it trivial to hit, since a
+  /// remote path is never checked against a filesystem: every spelling of one was openable.
+  ///
+  /// So two kinds of path are never a new project when a shell client names them:
+  ///
+  /// - **A folder inside a project that already exists** is that project — a worktree
+  ///   under the repository, a subdirectory, the remote path of a codespace already added.
+  /// - **A remote path this daemon has never seen.** Remote projects are added in the app,
+  ///   which validates the connection over ssh first; nothing typed at a shell can be
+  ///   checked that way, so an unknown one is a typo or a spelling variant of a known one.
+  ///
+  /// The app is exempt from both, and is told apart by having asked for the whole open set
+  /// (`sidebarConnections`): opening a nested folder or adding a remote host is a
+  /// deliberate human act there, and refusing it would break Add Folder.
+  func routing(for path: String, isSidebar: Bool) -> PathRouting {
+    guard Self.isWellFormedProjectPath(path) else {
+      return .refused(
+        "\(path) isn't a project path — name an absolute folder, an ssh:// or codespace:// "
+          + "project, or \(LoopGraphScope.globalPath).")
+    }
+    let canonicalPath = Self.canonicalize(path)
+    guard canonicalPath != LoopGraphScope.globalPath else { return .project(canonicalPath) }
+    let known = knownProjectPaths()
+    if known.contains(canonicalPath) { return .project(canonicalPath) }
+    if !isSidebar, let container = Self.project(containing: canonicalPath, in: known) {
+      return .project(container)
+    }
+    if RemoteProjectLocation.parse(projectPath: canonicalPath) != nil {
+      guard isSidebar else {
+        return .refused(
+          "graphcode doesn't know a project at \(canonicalPath). Run `graphcode projects` "
+            + "for the exact path; a remote repository or codespace is added in the app.")
+      }
+      return .project(canonicalPath)
+    }
+    guard Self.isOpenable(canonicalPath) else {
+      return .refused(
+        "there's no folder at \(canonicalPath). Run `graphcode projects` for the paths "
+          + "graphcode knows.")
+    }
+    return .project(canonicalPath)
+  }
+
+  /// Every project this daemon knows about, canonically spelled: what the sidebar has
+  /// open, what recents remembers, and whatever is resident.
+  private func knownProjectPaths() -> Set<String> {
+    var paths = Set(persistence.loadOpenProjects().map(Self.canonicalize))
+    paths.formUnion(persistence.loadRecentProjects().map { Self.canonicalize($0.path) })
+    paths.formUnion(stores.keys)
+    return paths
+  }
+
+  /// The deepest known project a path lies inside — deepest so that a nested project a
+  /// human deliberately opened wins over the repository around it.
+  static func project(containing path: String, in known: Set<String>) -> String? {
+    known
+      .filter { $0 != LoopGraphScope.globalPath && path.hasPrefix($0 + "/") }
+      .max { $0.count < $1.count }
   }
 
   // MARK: - The global Orchestrator Graph
@@ -551,9 +675,18 @@ public actor ProjectRegistry {
   /// project it asked for by the path a folder picker handed it comes back named by this,
   /// and `/tmp` vs `/private/tmp` is enough to make the two look like different projects.
   public static func canonicalize(_ path: String) -> String {
-    guard path != LoopGraphScope.globalPath,
-      RemoteProjectLocation.parse(projectPath: path) == nil
-    else { return path }
+    guard path != LoopGraphScope.globalPath else { return path }
+    // A remote path gets the textual half of the same treatment. It cannot be resolved
+    // against this filesystem — the directory is on another machine — but the spellings
+    // that fork one project into two are all textual: a trailing slash, a doubled
+    // separator, a `.` segment. Left unnormalized, `codespace://cs/workspaces/repo/` and
+    // `codespace://cs/workspaces/repo` were two projects, two graphs, and two rows in the
+    // sidebar with the same name.
+    if let remote = RemoteProjectLocation.parse(projectPath: path) {
+      var normalized = remote
+      normalized.remotePath = RemoteProjectLocation.normalizedPath(remote.remotePath)
+      return normalized.projectPath
+    }
     return URL(fileURLWithPath: path).resolvingSymlinksInPath().path
   }
 

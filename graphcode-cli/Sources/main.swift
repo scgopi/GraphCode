@@ -107,6 +107,27 @@ defer { client.closeConnection() }
 let artifactoryReader = SurfaceRef.nodeID(
   fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
 
+/// Joins the project every verb addresses, and stops here when the daemon refuses it.
+///
+/// A refusal — a path that names no folder, a remote project graphcode has never been
+/// told about, a spelling of one it has — used to arrive as an event nobody was reading:
+/// the wait for `.graphChanged` ran to the socket timeout and then reported the command
+/// as *possibly applied*, when in fact nothing past the open had been sent. Reading the
+/// error is what turns that into one line saying which path was wrong.
+@discardableResult
+func openProject(_ projectPath: String) throws -> LoopGraph? {
+  try client.send(.openProject(path: projectPath))
+  let opened = try client.waitForEvent {
+    switch $0 {
+    case .graphChanged, .errorOccurred: return true
+    case .recentProjectsListed: return false
+    }
+  }
+  if case .errorOccurred(let message) = opened { fail(message) }
+  if case .graphChanged(let graph) = opened { return graph }
+  return nil
+}
+
 /// Every mutating verb waits for the `.graphChanged` broadcast its own command caused,
 /// then prints the resulting graph. That's the daemon's only acknowledgement — it has no
 /// request/response correlation — and it doubles as useful output.
@@ -118,14 +139,11 @@ let artifactoryReader = SurfaceRef.nodeID(
 /// other loop — would arrive and be mistaken for the acknowledgement, so `status`
 /// appeared to work and hung only on quiet projects.
 func runAndPrintGraph(projectPath: String, _ commands: [DaemonCommand]) throws {
-  try client.send(.openProject(path: projectPath))
-  let opened = try client.waitForEvent {
-    if case .graphChanged = $0 { return true } else { return false }
-  }
+  let opened = try openProject(projectPath)
 
   guard !commands.isEmpty else {
-    if case .graphChanged(let graph) = opened {
-      print(GraphcodeCommand.render(graph, artifactoryReader: artifactoryReader))
+    if let opened {
+      print(GraphcodeCommand.render(opened, artifactoryReader: artifactoryReader))
     }
     return
   }
@@ -220,8 +238,7 @@ do {
     // loop, ZMX_SESSION names the sender, and the target sees who's talking.
     let sender = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
-    try client.send(.openProject(path: projectPath))
-    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try openProject(projectPath)
     try client.send(
       .graphCommand(
         projectPath: projectPath,
@@ -246,13 +263,10 @@ do {
     var attributed = update
     attributed.updatedBy = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
-    try client.send(.openProject(path: projectPath))
-    let opened = try client.waitForEvent {
-      if case .graphChanged = $0 { return true } else { return false }
-    }
+    let opened = try openProject(projectPath)
     // The same advice `node create` prints — turning the flag on from `update` is the
     // same surprise. Best-effort: the node must be visible at the top level.
-    if case .graphChanged(let graph) = opened {
+    if let graph = opened {
       for warning in GraphcodeCommand.updateWarnings(
         for: attributed, currentNode: graph.nodes.first(where: { $0.id == nodeID }))
       {
@@ -280,8 +294,7 @@ do {
     // the daemon refuse a loop handing itself a stop condition through promotion.
     let promoter = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
-    try client.send(.openProject(path: projectPath))
-    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try openProject(projectPath)
     try client.send(
       .graphCommand(
         projectPath: projectPath,
@@ -302,8 +315,7 @@ do {
   case .memoNode(let projectPath, let nodeID, let text):
     let author = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
-    try client.send(.openProject(path: projectPath))
-    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try openProject(projectPath)
     try client.send(
       .graphCommand(
         projectPath: projectPath, command: .memoNode(nodeID, text: text, from: author)))
@@ -319,8 +331,7 @@ do {
   case .refineNode(let projectPath, let nodeID, let text):
     let refiner = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
-    try client.send(.openProject(path: projectPath))
-    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try openProject(projectPath)
     try client.send(
       .graphCommand(
         projectPath: projectPath, command: .refineNode(nodeID, text: text, from: refiner)))
@@ -336,8 +347,7 @@ do {
   case .rollbackRefinement(let projectPath, let nodeID):
     let requester = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
-    try client.send(.openProject(path: projectPath))
-    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try openProject(projectPath)
     try client.send(
       .graphCommand(
         projectPath: projectPath, command: .rollbackRefinement(nodeID, from: requester)))
@@ -367,8 +377,7 @@ do {
     // the board.
     let author = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
-    try client.send(.openProject(path: projectPath))
-    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try openProject(projectPath)
     try client.send(
       .graphCommand(
         projectPath: projectPath,
@@ -396,10 +405,7 @@ do {
         "artifactory sync needs a loop identity — run it from inside a loop's session "
           + "($ZMX_SESSION); a human reading the board wants `graphcode artifactory list`")
     }
-    try client.send(.openProject(path: projectPath))
-    let opened = try client.waitForEvent {
-      if case .graphChanged = $0 { return true } else { return false }
-    }
+    let opened = try openProject(projectPath)
     try client.send(
       .graphCommand(projectPath: projectPath, command: .artifactorySync(from: reader)))
     let syncVerdict = try client.waitForEvent { event in
@@ -416,7 +422,7 @@ do {
     // The window is one round-trip wide and a watcher would have heard the post live
     // anyway; fixing it properly means syncing to the highest *printed* id rather
     // than to latest, which nothing so far has needed.
-    if case .graphChanged(let graph) = opened {
+    if let graph = opened {
       if json {
         print(GraphcodeCommand.renderArtifactoryJSON(graph, unreadFor: reader))
       } else if mark {
@@ -443,11 +449,7 @@ do {
     // Read-only: the post rides the snapshot, no command is sent, no cursor moves —
     // the deep-read half of `sync --headlines` triage, priced at one line of context
     // per post a loop actually decides to care about.
-    try client.send(.openProject(path: projectPath))
-    let read = try client.waitForEvent {
-      if case .graphChanged = $0 { return true } else { return false }
-    }
-    if case .graphChanged(let graph) = read {
+    if let graph = try openProject(projectPath) {
       guard let post = graph.artifactory.first(where: { $0.id == postID }) else {
         fail(
           "no post #\(postID) on this board — `graphcode artifactory list \(projectPath)` "
@@ -461,11 +463,7 @@ do {
     // snapshot is waited for, and no cursor moves. This is the human's window onto
     // the board; `sync` is the loop's. `--search` filters what is shown, never what
     // is remembered.
-    try client.send(.openProject(path: projectPath))
-    let opened = try client.waitForEvent {
-      if case .graphChanged = $0 { return true } else { return false }
-    }
-    if case .graphChanged(let graph) = opened {
+    if let graph = try openProject(projectPath) {
       if json {
         print(GraphcodeCommand.renderArtifactoryJSON(graph, search: search))
       } else {
@@ -483,8 +481,7 @@ do {
         "artifactory watch needs a loop identity — run it from inside a loop's session "
           + "($ZMX_SESSION); the mail is delivered to the loop that watches")
     }
-    try client.send(.openProject(path: projectPath))
-    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try openProject(projectPath)
     try client.send(
       .graphCommand(
         projectPath: projectPath,
@@ -510,8 +507,7 @@ do {
   case .usage(let projectPath):
     // Refresh first: usage is pulled on demand rather than polled, so printing without
     // asking would show whatever was last read, which could be nothing at all.
-    try client.send(.openProject(path: projectPath))
-    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try openProject(projectPath)
     try client.send(.graphCommand(projectPath: projectPath, command: .refreshUsage))
     let event = try client.waitForEvent {
       if case .graphChanged = $0 { return true } else { return false }
@@ -521,11 +517,7 @@ do {
     }
 
   case .exportNode(let projectPath, let nodeID, let output, let includeChildren):
-    try client.send(.openProject(path: projectPath))
-    let opened = try client.waitForEvent {
-      if case .graphChanged = $0 { return true } else { return false }
-    }
-    guard case .graphChanged(let graph) = opened else { fail("Could not load graph") }
+    guard let graph = try openProject(projectPath) else { fail("Could not load graph") }
 
     let persistence = ProjectPersistence(baseDirectory: SupportDirectory.url)
     guard
@@ -547,11 +539,7 @@ do {
     print("Memory logs: \(bundle.memoryByNodeID.count)")
 
   case .exportGraph(let projectPath, let output):
-    try client.send(.openProject(path: projectPath))
-    let opened = try client.waitForEvent {
-      if case .graphChanged = $0 { return true } else { return false }
-    }
-    guard case .graphChanged(let graph) = opened else { fail("Could not load graph") }
+    guard let graph = try openProject(projectPath) else { fail("Could not load graph") }
 
     let persistence = ProjectPersistence(baseDirectory: SupportDirectory.url)
     let bundle = persistence.createFullGraphExportBundle(
@@ -595,8 +583,7 @@ do {
     guard let (request, resumingSessions) = box.value else {
       fail("the bundle contains no loops")
     }
-    try client.send(.openProject(path: projectPath))
-    _ = try client.waitForEvent { if case .graphChanged = $0 { return true } else { return false } }
+    try openProject(projectPath)
     try client.send(
       .graphCommand(projectPath: projectPath, command: .importNodes(request)))
     let verdict = try client.waitForEvent { event in
