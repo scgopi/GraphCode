@@ -183,6 +183,43 @@ struct StartAnchorTests {
     #expect(child.sidebarRoots == [worker.id])
   }
 
+  /// **A Main loop's children are its children, not its siblings.** A sketch is skipped
+  /// when entry points are picked, so the walk out from them never started at one — and
+  /// every loop a Main loop had handed off to came back unreached, was read as a
+  /// headless component, and was promoted to an anchor of its own. In the sidebar that
+  /// listed the children as top-level rows beside their parent, where collapsing the
+  /// parent left them on screen. Only Main-parented loops ever hit it: every other type
+  /// anchors its own subtree.
+  @Test
+  func aSketchesChildrenStayUnderIt() {
+    let sketch = LoopNode(title: "Say Hi", loopType: .sketch)
+    let children = (1...4).map { node("Hello \($0)") }
+    let subject = graph(
+      nodes: [sketch] + children,
+      edges: children.map { LoopEdge(from: sketch.id, to: $0.id, kind: .handoff) })
+
+    #expect(subject.startAnchors.isEmpty)
+    #expect(subject.sidebarRoots == [sketch.id])
+  }
+
+  /// The half of the rule that keeps the fix from hiding loops: a sketch that something
+  /// points at gets no row of its own, so it cannot be the beginning its subtree is
+  /// reached through. Its component still needs an anchor.
+  @Test
+  func aTargetedSketchDoesNotAnchorItsOwnSubtree() {
+    let sketch = LoopNode(title: "Ring member", loopType: .sketch)
+    let worker = node("Worker")
+    let subject = graph(
+      nodes: [sketch, worker],
+      edges: [
+        LoopEdge(from: sketch.id, to: worker.id, kind: .handoff),
+        LoopEdge(from: worker.id, to: sketch.id, kind: .handoff),
+      ])
+
+    #expect(subject.startAnchors == [worker.id])
+    #expect(subject.sidebarRoots == [worker.id])
+  }
+
   // MARK: - Only a handoff is a sequencing edge (#194)
 
   /// **The orchestrator shape, and the bug it exposed.** A parent hands off to each child
