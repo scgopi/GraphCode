@@ -1,6 +1,7 @@
 .PHONY: doctor generate build-app build-daemon run-app run-daemon \
         daemon-install daemon-uninstall daemon-status test check format clean \
-        dev-generate dev-build-app dev-install-zmx dev-run-app dev-status \
+        dev-generate dev-build-app dev-build-daemon dev-install-daemon \
+        dev-install-zmx dev-run-app dev-status \
         third-party build-zmx install-zmx build-ghostty vendor-sdk \
         build-cli install-cli release-dmg notarize signing-doctor tap-bump
 
@@ -231,7 +232,10 @@ daemon-status:
 # ---------------------------------------------------------------------------
 DEV_BUNDLE_ID_PREFIX ?= local.graphcode.dev
 DEV_APP_DISPLAY_NAME ?= GraphCode (localdev)
-DEV_SUPPORT_DIR_NAME ?= .graphcode.localdev
+DEV_SUPPORT_DIR_NAME ?= .graphcode-localdev
+DEV_SUPPORT_DIR := $(HOME)/$(DEV_SUPPORT_DIR_NAME)
+DEV_DAEMON_LABEL := $(DAEMON_LABEL).$(patsubst .graphcode-%,%,$(DEV_SUPPORT_DIR_NAME))
+DEV_DAEMON_PLIST := $(LAUNCH_AGENTS_DIR)/$(DEV_DAEMON_LABEL).plist
 DEV_ENV := TUIST_BUNDLE_ID_PREFIX="$(DEV_BUNDLE_ID_PREFIX)" \
            TUIST_APP_DISPLAY_NAME="$(DEV_APP_DISPLAY_NAME)"
 
@@ -242,15 +246,39 @@ dev-build-app: dev-generate
 	set -o pipefail && $(DEV_ENV) $(MISE) xcodebuild -workspace $(WORKSPACE) \
 		-scheme $(SCHEME_APP) -destination '$(DESTINATION)' build | $(MISE) xcbeautify
 
+dev-build-daemon: dev-generate
+	set -o pipefail && $(DEV_ENV) $(MISE) xcodebuild -workspace $(WORKSPACE) \
+		-scheme $(SCHEME_DAEMON) -destination '$(DESTINATION)' build | $(MISE) xcbeautify
+
+dev-install-daemon: dev-build-daemon
+	@mkdir -p "$(DEV_SUPPORT_DIR)" "$(LAUNCH_AGENTS_DIR)"
+	@BIN_PATH=$$($(DEV_ENV) $(MISE) xcodebuild -workspace $(WORKSPACE) \
+		-scheme $(SCHEME_DAEMON) -destination '$(DESTINATION)' -showBuildSettings 2>/dev/null \
+		| awk -F'= ' '/ BUILT_PRODUCTS_DIR /{print $$2; exit}')/graphcoded; \
+	sed -e "s#dev.graphcode.graphcoded#$(DEV_DAEMON_LABEL)#g" \
+	    -e "s#dev.graphcode.app#$(DEV_BUNDLE_ID_PREFIX).app#g" \
+	    -e "s#__GRAPHCODED_BIN__#$$BIN_PATH#g" \
+	    -e "s#__GRAPHCODED_SUPPORT_DIR__#$(DEV_SUPPORT_DIR)#g" \
+	    graphcoded/Support/dev.graphcode.graphcoded.plist.template > "$(DEV_DAEMON_PLIST)"; \
+	/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables dict" \
+	    -c "Add :EnvironmentVariables:GRAPHCODE_SUPPORT_DIR string $(DEV_SUPPORT_DIR)" \
+	    "$(DEV_DAEMON_PLIST)"; \
+	launchctl unload "$(DEV_DAEMON_PLIST)" >/dev/null 2>&1 || true; \
+	launchctl load "$(DEV_DAEMON_PLIST)"; \
+	echo "graphcoded installed and loaded: $(DEV_DAEMON_PLIST)"
+
 # Installs zmx into the DEV support dir, not the release's, so the two never
 # share a binary or a session namespace.
 dev-install-zmx: build-zmx
-	@mkdir -p "$(HOME)/$(DEV_SUPPORT_DIR_NAME)/bin"
-	@cp "$(BUILD_DIR)/zmx/bin/zmx" "$(HOME)/$(DEV_SUPPORT_DIR_NAME)/bin/zmx"
-	@codesign --force --sign - "$(HOME)/$(DEV_SUPPORT_DIR_NAME)/bin/zmx" 2>/dev/null || true
-	@echo "installed: $(HOME)/$(DEV_SUPPORT_DIR_NAME)/bin/zmx"
+	@mkdir -p "$(DEV_SUPPORT_DIR)/bin"
+	@rm -f "$(DEV_SUPPORT_DIR)/bin/zmx"
+	@cp "$(BUILD_DIR)/zmx/bin/zmx" "$(DEV_SUPPORT_DIR)/bin/zmx"
+	@codesign --force --sign - "$(DEV_SUPPORT_DIR)/bin/zmx" 2>/dev/null
+	@"$(DEV_SUPPORT_DIR)/bin/zmx" version >/dev/null 2>&1 \
+		|| { echo "zmx installed but won't run — check its code signature"; exit 1; }
+	@echo "installed: $(DEV_SUPPORT_DIR)/bin/zmx"
 
-dev-run-app: dev-build-app dev-install-zmx
+dev-run-app: dev-build-app dev-install-zmx dev-install-daemon
 	@APP_PATH=$$($(DEV_ENV) $(MISE) xcodebuild -workspace $(WORKSPACE) \
 		-scheme $(SCHEME_APP) -destination '$(DESTINATION)' -showBuildSettings 2>/dev/null \
 		| awk -F'= ' '/ BUILT_PRODUCTS_DIR /{print $$2; exit}')/graphcode.app; \
@@ -260,9 +288,9 @@ dev-run-app: dev-build-app dev-install-zmx
 # What the dev build actually is, in one command — useful when the two get confusing.
 dev-status:
 	@echo "bundle id prefix : $(DEV_BUNDLE_ID_PREFIX)"
-	@echo "support dir      : $(HOME)/$(DEV_SUPPORT_DIR_NAME)"
-	@echo "daemon (dev)     : $$(launchctl list | awk '/graphcoded/ && /$(DEV_BUNDLE_ID_PREFIX)/{print $$3}' | paste -sd' ' -)"
-	@echo "daemon (release) : $$(launchctl list | awk '/graphcoded/ && !/$(DEV_BUNDLE_ID_PREFIX)/{print $$3}' | paste -sd' ' -)"
+	@echo "support dir      : $(DEV_SUPPORT_DIR)"
+	@echo "daemon (dev)     : $$(launchctl list | awk '$$3 == "$(DEV_DAEMON_LABEL)" {print $$3}')"
+	@echo "daemon (release) : $$(launchctl list | awk '$$3 == "$(DAEMON_LABEL)" {print $$3}')"
 	@echo "dev app running  : $$(pgrep -f 'Debug/graphcode.app/Contents/MacOS/graphcode' | paste -sd' ' - | sed 's/^$$/no/')"
 	@ls -d /Applications/graphcode.app >/dev/null 2>&1 \
 		&& echo "installed release: /Applications/graphcode.app ($$(defaults read /Applications/graphcode.app/Contents/Info CFBundleIdentifier 2>/dev/null))" \
