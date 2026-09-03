@@ -76,8 +76,9 @@ extension GhosttyTerminalView {
   ///   A loop the daemon will never restore — resolved, killed — leaves the pane at
   ///   that banner until the human closes it: visibly waiting, never silently
   ///   relaunching.
-  /// - A **turn-based** loop has no other restorer — the daemon deliberately never
-  ///   starts one — so the pane restores it itself: `restoreScript`, whose fresh
+  /// - An **attended** loop (turn-based, or a sketch — `LoopType.runsUnattended`) has
+  ///   no other restorer — the daemon deliberately never starts one — so the pane
+  ///   restores it itself: `restoreScript`, whose fresh
   ///   fall-through is also the legitimate first launch of a loop nothing has banked
   ///   an ID for. Only the connect writes the boot marker on that create
   ///   (`freshPrefix`); the reconnect's restore runs behind a *proven* reboot and
@@ -137,7 +138,7 @@ extension GhosttyTerminalView {
     }
     let restorePreparation = "if cd \(quoted(location.remotePath)); then " + hooksWrite
     let connectMissing: String
-    if loopType == .turnBased {
+    if !loopType.runsUnattended {
       connectMissing =
         restoreScript(
           preparation: restorePreparation, promptExport: promptExport,
@@ -152,7 +153,7 @@ extension GhosttyTerminalView {
     }
     let connect = delivery + reattachOrRetry("connect") + connectMissing
     let rebootBranch: String
-    if loopType == .turnBased {
+    if !loopType.runsUnattended {
       rebootBranch =
         #"printf '\033[1;33m── Remote machine rebooted; restoring the session. ──\033[0m\r\n'; "#
         + restoreScript(
@@ -175,7 +176,7 @@ extension GhosttyTerminalView {
     return (connect, reconnect)
   }
 
-  /// The turn-based restore a missing session sends both dials into: the preparation
+  /// The attended restore a missing session sends both dials into: the preparation
   /// the caller assembled (cd, hooks — the connect's delivery already ran), then
   /// resume-or-fresh.
   ///
