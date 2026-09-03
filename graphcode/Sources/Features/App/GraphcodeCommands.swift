@@ -1,3 +1,4 @@
+import AppKit
 import ComposableArchitecture
 import GraphcodeKit
 import SwiftUI
@@ -31,6 +32,17 @@ struct GraphcodeCommands: Commands {
     // `File ▸ Worktrees…` — the sweeper for the focused folder, same sheet the lane
     // chip and the context menus open. In File because it is about the folder on disk,
     // not about any loop.
+    // SwiftUI gives every `WindowGroup` a `File ▸ Close` at ⌘W, and AppKit resolves a
+    // key equivalent by walking the menu bar left to right: File would answer ⌘W before
+    // the Terminal menu ever saw it, so Close Pane below would never fire. Replacing the
+    // group is what frees the key. Closing the window keeps a shortcut, ⇧⌘W — Ghostty's
+    // own, and the pairing anyone who has closed a split before already has in their
+    // hands.
+    CommandGroup(replacing: .saveItem) {
+      Button("Close Window") { NSApp.keyWindow?.performClose(nil) }
+        .keyboardShortcut("w", modifiers: [.command, .shift])
+    }
+
     CommandGroup(after: .newItem) {
       Divider()
       // Beside New Window rather than in a menu of its own: a workspace is the other
@@ -87,19 +99,25 @@ struct GraphcodeCommands: Commands {
       Button("New Tab") { store.send(.openLoop(.newTabButtonTapped)) }
         .keyboardShortcut("t", modifiers: .command)
         .disabled(!hasWorkspace)
-      // ⌘W closes what the keyboard is in: the focused pane of a split, the tab when it
-      // isn't one — and, through the reducer, the workspace's last tab ends the loop
-      // itself. That last step is why it is never disabled here: there is always
-      // something ⌘W can close while a workspace is open (#254).
-      Button(closeTitle) {
+      // ⌘W closes what the keyboard is in: the focused pane of a split, and the pane
+      // that *is* the tab when it isn't split — Ghostty's own `close_split` binding,
+      // which is the terminal these panes are. Through the reducer, closing the
+      // workspace's last one asks whether the loop should end (#254), which is why it is
+      // never disabled: there is always something ⌘W can close while a workspace is
+      // open. "Close Pane" rather than a title that follows the split — a label that
+      // renames itself to "Close Tab" collides with the item below it, and a menu with
+      // the same words twice teaches nobody which key does what.
+      Button("Close Pane") {
         guard let layout = store.openLoop?.layout, let focused = layout.focusedSurface
         else { return }
         store.send(.openLoop(.paneClosed(tabID: layout.selectedTabID, surfaceID: focused.id)))
       }
       .keyboardShortcut("w", modifiers: .command)
       .disabled(!hasWorkspace)
+      // Every pane of the tab at once. Unbound on purpose: ⌘W already closes a tab that
+      // isn't split, which is nearly every tab here, and the shortcut this used to carry
+      // is spent on Close Window below — the one ⌘W has to give back.
       Button("Close Tab") { store.send(.openLoop(.tabClosed(selectedTabID))) }
-        .keyboardShortcut("w", modifiers: [.command, .shift])
         .disabled(!hasWorkspace)
 
       Divider()
@@ -144,11 +162,6 @@ struct GraphcodeCommands: Commands {
   private var railTitle: String {
     (store.openLoop?.isRailVisible ?? false) ? "Hide Loop Panel" : "Show Loop Panel"
   }
-
-  /// ⌘W's label follows what it will close — a split's pane, or the tab when it isn't
-  /// split — the way a terminal menu should say what the keystroke does before you
-  /// learn it the hard way.
-  private var closeTitle: String { isSplit ? "Close Pane" : "Close Tab" }
 
   private var isSplit: Bool {
     guard let layout = store.openLoop?.layout else { return false }

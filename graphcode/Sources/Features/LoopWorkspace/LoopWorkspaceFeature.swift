@@ -75,9 +75,10 @@ struct LoopWorkspaceFeature {
     case tabSelected(UUID)
     case tabClosed(UUID)
     /// The workspace's last tab was closed. What that means is `AppFeature`'s to say:
-    /// for a loop it is the end of the loop itself (deleted the way the sidebar's delete
-    /// does, session and all), and for a quick chat it is just the terminal being put
-    /// away — the chat outlives its session.
+    /// for a loop it is the end of the loop itself, put to the same "Delete Loop…"
+    /// confirmation the sidebar's delete goes through — the loop may still be running,
+    /// and ⌘W is not consent. For a quick chat it is just the terminal being put away;
+    /// the chat outlives its session.
     case lastTabClosed
     case selectNextTab
     case selectPreviousTab
@@ -147,6 +148,12 @@ struct LoopWorkspaceFeature {
       case .tabClosed(let id):
         guard let index = state.layout.tabs.index(id: id), let tab = state.layout.tabs[id: id]
         else { return .none }
+        // The last tab going means the workspace has nothing left to show, which is the
+        // end of the loop itself — `AppFeature`'s call, since the deletion is its job,
+        // and it asks the human first. Nothing is torn down on the way out: the answer
+        // may be no, and a tab whose terminals were already retired and whose shells
+        // were already killed is not a tab anyone can be given back.
+        guard state.layout.tabs.count > 1 else { return .send(.lastTabClosed) }
         terminalSurfaceClient.retire(tab.surfaces.map(\.id))
         // The shells in the tab die with it — a pane's zmx session is the pane's reason
         // for existing, and one left running after its pane is gone is invisible until
@@ -155,9 +162,6 @@ struct LoopWorkspaceFeature {
         // tab in front of it.
         terminalSurfaceClient.killSessions(
           tab.surfaces.filter { !$0.launchesClaudeCode }.map(\.id), state.projectPath)
-        // The last tab going means the workspace has nothing left to show, which is the
-        // end of the loop itself — `AppFeature`'s call, since the deletion is its job.
-        guard state.layout.tabs.count > 1 else { return .send(.lastTabClosed) }
         state.layout.tabs.remove(id: id)
         if state.layout.selectedTabID == id {
           let fallbackIndex = min(index, state.layout.tabs.count - 1)

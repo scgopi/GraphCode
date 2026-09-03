@@ -159,22 +159,48 @@ struct SplitNodeTests {
 
   /// Closing a tab (or pane) can take the node's own surface out of a saved layout, and
   /// a layout persisted that way would reopen a running loop as shells-only, its live
-  /// session attached to nothing on screen. The default — the agent tab — is what opens
-  /// instead (#254). Compared by shape rather than `==`: a fresh default's tab and
-  /// surface ids are generated per call.
+  /// session attached to nothing on screen. The agent tab is put back at the front —
+  /// and the shell tabs that were saved alongside it stay, because their zmx sessions
+  /// are still running and a layout that forgot them would only hide them (#254).
   @Test
-  func openingRestoresTheDefaultWhenTheAgentSurfaceWasClosedAway() throws {
+  func openingRestoresTheAgentTabWithoutDiscardingTheSavedOnes() throws {
     let nodeID = UUID()
-    let saved = TerminalLayout(
-      tabs: [
-        TabLayout(primary: SurfaceRef(id: UUID(), launchesClaudeCode: false))
-      ], selectedTabID: UUID())
+    let shell = SurfaceRef(id: UUID(), launchesClaudeCode: false)
+    let shellTab = TabLayout(primary: shell)
+    let saved = TerminalLayout(tabs: [shellTab], selectedTabID: shellTab.id)
 
-    let opened = [
-      TerminalLayout.opening(forNode: nodeID, saved: saved),
-      TerminalLayout.opening(forNode: nodeID, saved: nil),
-    ]
-    for layout in opened {
+    let opened = TerminalLayout.opening(forNode: nodeID, saved: saved)
+
+    #expect(opened.tabs.count == 2)
+    #expect(opened.tabs[0].surfaces == [SurfaceRef(id: nodeID, launchesClaudeCode: true)])
+    #expect(opened.tabs[1] == shellTab)
+    // The saved selection still names a tab that is here, so it is left alone.
+    #expect(opened.selectedTabID == shellTab.id)
+  }
+
+  /// A selection left naming a tab that no longer exists lands on the restored agent
+  /// tab — a workspace whose `selectedTabID` matches nothing shows no terminal at all.
+  @Test
+  func openingRepointsADanglingSelectionAtTheRestoredAgentTab() {
+    let nodeID = UUID()
+    let shellTab = TabLayout(primary: SurfaceRef(id: UUID(), launchesClaudeCode: false))
+    let saved = TerminalLayout(tabs: [shellTab], selectedTabID: UUID())
+
+    let opened = TerminalLayout.opening(forNode: nodeID, saved: saved)
+
+    #expect(opened.selectedTabID == opened.tabs[0].id)
+    #expect(opened.tabs[0].surfaces == [SurfaceRef(id: nodeID, launchesClaudeCode: true)])
+  }
+
+  /// Nothing saved — and nothing salvageable — opens the default. Compared by shape
+  /// rather than `==`: a fresh default's tab and surface ids are generated per call.
+  @Test
+  func openingWithoutASavedLayoutUsesTheDefault() throws {
+    let nodeID = UUID()
+    let empty = TerminalLayout(tabs: [], selectedTabID: UUID())
+
+    for saved in [nil, empty] {
+      let layout = TerminalLayout.opening(forNode: nodeID, saved: saved)
       #expect(layout.tabs.count == 1)
       let tab = try #require(layout.tabs.first)
       #expect(layout.selectedTabID == tab.id)

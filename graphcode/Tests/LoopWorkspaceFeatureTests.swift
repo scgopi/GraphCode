@@ -131,17 +131,42 @@ struct LoopWorkspaceFeatureTests {
   }
 
   /// Closing the last tab is the end of the loop itself — the reducer forwards to
-  /// `AppFeature`, which deletes the node the way the sidebar's delete does (#254).
-  /// The layout is untouched here: the workspace is going away either way.
+  /// `AppFeature`, which asks the human before deleting anything (#254). Nothing is torn
+  /// down on the way out: the layout still stands, its surfaces are still attached and
+  /// its shells still running, because the answer may be no.
   @Test
   @MainActor
   func closingTheLastTabAsksItsParentToEndTheLoop() async {
-    let store = makeStore(makeState())
+    let endings = EndingRecorder()
+    let store = makeStore(makeState(), endings: endings)
     let onlyTabID = store.state.layout.selectedTabID
 
     await store.send(.tabClosed(onlyTabID))
     await store.receive(\.lastTabClosed)
     #expect(store.state.layout.tabs.count == 1)
+    #expect(endings.retired.isEmpty)
+    #expect(endings.killed.isEmpty)
+  }
+
+  /// The same, for the shape that made this reachable without any click at all: a plain
+  /// shell whose process exits sends `.paneClosed`, which collapses to `.tabClosed` when
+  /// the shell is the tab's only pane. Typing `exit` must not be what deletes a loop —
+  /// it asks, exactly like the x does, and kills nothing while the question is open.
+  @Test
+  @MainActor
+  func aLoneShellExitingAsksRatherThanEndingTheLoopOutright() async {
+    var state = makeState()
+    let shell = SurfaceRef(id: UUID(), launchesClaudeCode: false)
+    let shellTab = TabLayout(primary: shell)
+    state.layout = TerminalLayout(tabs: [shellTab], selectedTabID: shellTab.id)
+
+    let endings = EndingRecorder()
+    let store = makeStore(state, endings: endings)
+    await store.send(.paneClosed(tabID: shellTab.id, surfaceID: shell.id))
+
+    await store.receive(\.tabClosed)
+    await store.receive(\.lastTabClosed)
+    #expect(endings.killed.isEmpty)
   }
 
   @Test

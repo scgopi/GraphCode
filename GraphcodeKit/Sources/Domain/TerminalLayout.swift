@@ -297,15 +297,27 @@ public struct TerminalLayout: Codable, Equatable, Sendable {
     return TerminalLayout(tabs: [tab], selectedTabID: tab.id)
   }
 
-  /// The layout a node's workspace should open with: the saved one, unless it lost the
-  /// node's own surface — the agent pane every layout starts with — in which case the
-  /// default is used instead. A tab (or split pane) can be closed like any other now,
-  /// and a layout persisted without the agent surface would otherwise reopen a running
-  /// loop as shells-only, with its live session attached to nothing on screen.
+  /// The layout a node's workspace should open with: the saved one, with the node's own
+  /// surface — the agent pane every layout starts with — put back at the front if the
+  /// saved layout lost it. A tab (or split pane) can be closed like any other now, and a
+  /// layout persisted without the agent surface would otherwise reopen a running loop as
+  /// shells-only, with its live session attached to nothing on screen.
+  ///
+  /// Repaired rather than replaced: the shell tabs a saved layout carries have live zmx
+  /// sessions of their own, and dropping them from the layout would not end those
+  /// sessions — only hide them, which is the leak `killSessions` exists to close. The
+  /// only layout thrown away is the one that was never saved.
   public static func opening(forNode nodeID: UUID, saved: TerminalLayout?) -> TerminalLayout {
-    guard let saved,
-      saved.tabs.contains(where: { tab in tab.surfaces.contains { $0.id == nodeID } })
-    else { return .defaultLayout(forNode: nodeID) }
-    return saved
+    guard var layout = saved, !layout.tabs.isEmpty else { return .defaultLayout(forNode: nodeID) }
+    guard !layout.tabs.contains(where: { tab in tab.surfaces.contains { $0.id == nodeID } })
+    else { return layout }
+    let agentTab = TabLayout(primary: SurfaceRef(id: nodeID, launchesClaudeCode: true))
+    layout.tabs.insert(agentTab, at: 0)
+    // A selection naming a tab that is still here is the human's and stays theirs; one
+    // left dangling by whatever removed the agent tab lands on the tab just restored.
+    if layout.tabs[id: layout.selectedTabID] == nil {
+      layout.selectedTabID = agentTab.id
+    }
+    return layout
   }
 }

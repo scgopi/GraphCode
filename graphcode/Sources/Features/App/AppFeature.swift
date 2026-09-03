@@ -549,19 +549,16 @@ struct AppFeature {
             .graphCommand(projectPath: projectPath, command: command))
         }
 
-      // Two roads to the same end, both the human dismissing what's left of a loop for
-      // good: the keypress on the agent pane's "Press any key to close." screen
-      // (`.primaryExitAcknowledged`), and closing the workspace's last tab
-      // (`.lastTabClosed`) — which for a running loop is the human ending it, exactly
-      // what the sidebar's delete does. The workspace closes *and* the node leaves the
-      // graph, session and all: deleting via the daemon rather than locally, the same
-      // way the sidebar's delete does — the resulting broadcast is what removes the card
-      // everywhere, and `GraphStore` also kills the loop's zmx session. Closed here as
-      // well rather than waiting for that broadcast, so the dead pane goes away even
-      // with the daemon unreachable. A chat, though, is not a node in any graph — there
-      // is nothing to delete, and the chat itself should outlive its session. Just put
-      // the dead terminal away.
-      case .openLoop(.primaryExitAcknowledged), .openLoop(.lastTabClosed):
+      // The keypress on the agent pane's "Press any key to close." screen. The session
+      // was already resolved when it exited (above) — this is the human dismissing what
+      // remains, so the workspace closes *and* the node leaves the graph. Deleting via
+      // the daemon rather than locally, the same way the sidebar's delete does: the
+      // resulting broadcast is what removes the card everywhere, and `GraphStore` also
+      // kills the loop's zmx session. Closed here as well rather than waiting for that
+      // broadcast, so the dead pane goes away even with the daemon unreachable. A chat,
+      // though, is not a node in any graph — there is nothing to delete, and the chat
+      // itself should outlive its session. Just put the dead terminal away.
+      case .openLoop(.primaryExitAcknowledged):
         guard let id = state.openLoop?.node.id, let projectPath = state.openLoop?.projectPath
         else { return .none }
         guard !state.isQuickChat(id) else {
@@ -575,6 +572,19 @@ struct AppFeature {
           try? await orchestratorClient.send(
             .graphCommand(projectPath: projectPath, command: .deleteNode(id)))
         }
+
+      // Closing the workspace's last tab — by its x, by ⌘W, or by a plain shell simply
+      // exiting. There is nothing left to show, which for a loop means ending the loop,
+      // and unlike `.primaryExitAcknowledged` above the session may still be running:
+      // this is a live loop being thrown away by a keystroke every terminal on the
+      // machine binds to closing a tab. So it goes through the same "Delete Loop…"
+      // confirmation every other delete in the app does (`deleteNodeRequested`, whose
+      // dialog `AppView` hosts) rather than deleting behind the human's back. Confirming
+      // deletes through the daemon, and the broadcast that follows is what closes this
+      // workspace — see `.daemonEvent`. Cancelling leaves the tab exactly where it was,
+      // which is why `.tabClosed` retires nothing until the answer is in.
+      case .openLoop(.lastTabClosed):
+        return endOpenWorkspace(&state)
 
       case .openLoop(.stopLoopTapped):
         guard let id = state.openLoop?.node.id, let path = state.openLoop?.projectPath
@@ -775,6 +785,34 @@ extension AppFeature {
   /// workspace belonging to the removed project would otherwise stay on screen with
   /// nothing in the sidebar pointing at it.
   private func isGlobal(_ path: String) -> Bool { path == LoopGraphScope.globalPath }
+
+  /// The workspace's last tab going: nothing is left to show, which for a loop means
+  /// ending the loop. Put to the same "Delete Loop…" confirmation every other delete in
+  /// the app goes through (`deleteNodeRequested`, whose dialog `AppView` hosts) rather
+  /// than deleted outright — unlike `.primaryExitAcknowledged`, the session behind this
+  /// one may still be running, and ⌘W is a keystroke for closing a tab everywhere else
+  /// on the machine, not consent to throw a loop away. Confirming deletes through the
+  /// daemon and the broadcast that follows closes this workspace; cancelling leaves the
+  /// tab where it was, which is why `.tabClosed` retires nothing until the answer is in.
+  func endOpenWorkspace(_ state: inout State) -> Effect<Action> {
+    guard let id = state.openLoop?.node.id, let projectPath = state.openLoop?.projectPath
+    else { return .none }
+    // A chat is not a node in any graph: nothing to confirm and nothing to delete, and
+    // the chat itself outlives its session. Just put the terminal away.
+    guard !state.isQuickChat(id) else {
+      closeOpenWorkspace(&state)
+      state.detailSelection = .quickChats
+      return .none
+    }
+    // No project row means no graph holding this node and no dialog to present it —
+    // closing the workspace is all that is honestly available.
+    guard state.projects[id: projectPath] != nil else {
+      state.openLoop = nil
+      state.selectedProjectPath = projectPath
+      return .none
+    }
+    return .send(.projects(.element(id: projectPath, action: .deleteNodeRequested(id))))
+  }
 
   /// Closes the open workspace *and ends its terminals* — for when the loop itself is
   /// going away, as opposed to merely not being the one on screen any more. Not `private`
