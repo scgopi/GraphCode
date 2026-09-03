@@ -41,6 +41,9 @@ doctor:
 		|| echo "[missing] mise — install with: brew install mise"
 	@$(MISE) tuist version >/dev/null 2>&1 && echo "[ok] tuist: $$($(MISE) tuist version)" \
 		|| echo "[missing] tuist — run: mise install"
+	@test -f Tuist/.build/workspace-state.json \
+		&& echo "[ok] Tuist dependencies installed" \
+		|| echo "[not installed] Tuist dependencies — run: mise exec -- tuist install"
 	@$(MISE) swiftlint version >/dev/null 2>&1 && echo "[ok] swiftlint: $$($(MISE) swiftlint version)" \
 		|| echo "[missing] swiftlint — run: mise install"
 	@$(MISE) xcbeautify --version >/dev/null 2>&1 && echo "[ok] xcbeautify: $$($(MISE) xcbeautify --version)" \
