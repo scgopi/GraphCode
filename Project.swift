@@ -19,7 +19,7 @@ import ProjectDescription
 // LaunchServices' "which app owns this?", the background-agent attribution — so two
 // builds sharing one id fight over all of it.
 //
-//     TUIST_BUNDLE_ID_PREFIX=ai.kortexa.graphcode-localdev \
+//     TUIST_BUNDLE_ID_PREFIX=com.example.graphcode-localdev \
 //     TUIST_APP_DISPLAY_NAME="GraphCode (localdev)" \
 //       mise exec -- tuist generate --no-open
 //

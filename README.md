@@ -108,6 +108,16 @@ make test            # unit tests
 make check           # swiftlint + swift-format, both strict
 ```
 
+To run a local build beside an installed release, optionally copy `.env.example`
+to `.env.local`, choose your own bundle-ID prefix, then run:
+
+```sh
+make dev-run-app
+```
+
+This build is ad-hoc signed for the current Mac and keeps its app identity and
+state separate from the installed release. No production signing profile is needed.
+
 ## Credits & license
 
 Inspired by [Supacode](https://supacode.sh) — same spine of daemon-kept terminal sessions; its unit is the

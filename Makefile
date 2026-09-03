@@ -10,6 +10,11 @@ SCHEME_CLI := graphcode-cli
 WORKSPACE := graphcode.xcworkspace
 DESTINATION := platform=macOS
 
+# Optional developer-local overrides. `.env.local` wins when both exist;
+# command-line assignments still win over either file.
+-include .env
+-include .env.local
+
 BUILD_DIR := $(CURDIR)/.build
 
 # zig 0.15.2 cannot link against macOS SDK 26.x — that SDK dropped the plain
@@ -219,12 +224,11 @@ daemon-status:
 # `Workspace.daemonLabel` suffixes the slug — so nothing here touches the
 # release's agent.
 #
-# The `ai.kortexa` prefix is deliberate: it is a namespace we control, so a dev
-# build can never collide with whatever `app.graphcode`/`dev.graphcode` becomes.
+# Override these in `.env.local` when the defaults collide with another local build.
 # ---------------------------------------------------------------------------
-DEV_BUNDLE_ID_PREFIX := ai.kortexa.graphcode-localdev
-DEV_APP_DISPLAY_NAME := GraphCode (localdev)
-DEV_SUPPORT_DIR_NAME := .graphcode.localdev
+DEV_BUNDLE_ID_PREFIX ?= local.graphcode.dev
+DEV_APP_DISPLAY_NAME ?= GraphCode (localdev)
+DEV_SUPPORT_DIR_NAME ?= .graphcode.localdev
 DEV_ENV := TUIST_BUNDLE_ID_PREFIX="$(DEV_BUNDLE_ID_PREFIX)" \
            TUIST_APP_DISPLAY_NAME="$(DEV_APP_DISPLAY_NAME)"
 
