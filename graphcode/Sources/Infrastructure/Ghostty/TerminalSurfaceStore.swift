@@ -1,6 +1,7 @@
 import AppKit
 import Dependencies
 import Foundation
+import GraphcodeKit
 
 /// Owns every live terminal surface, keyed by the `SurfaceRef.id` it belongs to.
 ///
@@ -99,6 +100,14 @@ final class TerminalSurfaceStore {
 /// a plain closure rather than an effect.
 struct TerminalSurfaceClient: Sendable {
   var retire: @Sendable ([UUID]) -> Void
+  /// Ends the `zmx` sessions behind the given surface ids — the half of closing a pane
+  /// that `retire` deliberately doesn't. Retirement only ends the attach; without this a
+  /// shell the human closed kept running detached, invisible, until reboot (#254). Only
+  /// ever called for plain shells — a loop's agent surface belongs to its loop, whose
+  /// session outlives any one pane and dies with the node, not with the view.
+  /// `projectPath` is the workspace's, so a remote project's shells are killed on their
+  /// own host.
+  var killSessions: @Sendable (_ ids: [UUID], _ projectPath: String?) -> Void
 }
 
 extension TerminalSurfaceClient: DependencyKey {
@@ -114,12 +123,22 @@ extension TerminalSurfaceClient: DependencyKey {
           MainActor.assumeIsolated { TerminalSurfaceStore.shared.retire(ids) }
         }
       }
+    },
+    killSessions: { ids, projectPath in
+      guard !ids.isEmpty else { return }
+      // `killSession` waits on `zmx` round-trips (and retries them); none of that has a
+      // surface attached any more, so it runs off the main thread and nobody waits.
+      Task.detached(priority: .utility) {
+        for id in ids {
+          await ZmxSessionLauncher.killSession(id: id, projectPath: projectPath)
+        }
+      }
     })
 
   /// Tests exercise the retention rules against `SurfaceRetentionPolicy` directly; a
   /// reducer test asserting on tab bookkeeping has no surfaces to retire and should not
   /// spin up a `ghostty_app_t` to find that out.
-  static let testValue = TerminalSurfaceClient(retire: { _ in })
+  static let testValue = TerminalSurfaceClient(retire: { _ in }, killSessions: { _, _ in })
 }
 
 extension DependencyValues {

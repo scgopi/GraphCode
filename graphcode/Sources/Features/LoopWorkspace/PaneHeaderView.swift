@@ -13,6 +13,12 @@ struct PaneHeaderView: View {
   let isFocused: Bool
   /// The shell or agent behind the pane — `claude`, `zsh`. Trailing, quiet.
   var detail: String?
+  /// Whether this pane can be closed here — true for any pane of a split. A lone pane
+  /// is its whole tab, and the tab strip's close button already speaks for it.
+  var canClose: Bool
+  var onClose: (() -> Void)?
+
+  @State private var isHovering = false
 
   var body: some View {
     HStack(spacing: 6) {
@@ -28,14 +34,34 @@ struct PaneHeaderView: View {
           .foregroundStyle(.white.opacity(0.35))
       }
       Spacer(minLength: 6)
-      Text(isFocused ? (detail ?? "") : "⌘] to focus")
-        .font(.system(size: 9.5, design: .monospaced))
-        .foregroundStyle(.white.opacity(0.35))
+      trailing
     }
     .lineLimit(1)
     .padding(.horizontal, 8)
     .frame(height: 22)
     .background(isFocused ? Theme.paneFocusTint.opacity(0.1) : Color.white.opacity(0.03))
+    .contentShape(Rectangle())
+    .onHover { isHovering = $0 }
+  }
+
+  /// The pane's own detail text, traded for an x while the header is hovered — the same
+  /// swap the tab pill makes of its ⌘-number. Without it a split had panes that could
+  /// only ever be closed by focus gymnastics, which is the hole #254 was filed through.
+  @ViewBuilder
+  private var trailing: some View {
+    if canClose, isHovering, let onClose {
+      Button(action: onClose) {
+        Image(systemName: "xmark")
+          .font(.system(size: 8, weight: .bold))
+          .foregroundStyle(.white.opacity(0.6))
+      }
+      .buttonStyle(.plain)
+      .help("Close pane")
+    } else {
+      Text(isFocused ? (detail ?? "") : "⌘] to focus")
+        .font(.system(size: 9.5, design: .monospaced))
+        .foregroundStyle(.white.opacity(0.35))
+    }
   }
 
   /// The blue lifted for text — the saturated tint is a dot colour, not an ink.

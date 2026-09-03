@@ -214,7 +214,6 @@ struct LoopWorkspaceView: View {
             state: tab.surfaces.contains(where: \.launchesClaudeCode) ? store.node.state : nil,
             isSelected: tab.id == store.layout.selectedTabID,
             shortcutHint: index < 9 ? "⌘\(index + 1)" : nil,
-            canClose: store.layout.tabs.count > 1,
             onSelect: { store.send(.tabSelected(tab.id)) },
             onClose: { store.send(.tabClosed(tab.id)) }
           )
@@ -294,7 +293,9 @@ struct LoopWorkspaceView: View {
       PaneHeaderView(
         title: ref.launchesClaudeCode ? "agent" : "shell",
         isFocused: isFocused && tab.id == store.layout.selectedTabID,
-        detail: ref.launchesClaudeCode ? store.node.backend.displayName.lowercased() : "zsh")
+        detail: ref.launchesClaudeCode ? store.node.backend.displayName.lowercased() : "zsh",
+        canClose: tab.isSplit,
+        onClose: { store.send(.paneClosed(tabID: tab.id, surfaceID: ref.id)) })
       terminal(tab: tab, ref: ref)
     }
     // `ref.id` (not just this slot's structural position) is a surface's real

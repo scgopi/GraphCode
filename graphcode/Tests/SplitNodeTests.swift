@@ -145,4 +145,40 @@ struct SplitNodeTests {
             .leaf(SurfaceRef(id: secondaryID, launchesClaudeCode: false)),
           ]))
   }
+
+  /// A saved layout that still carries the node's own surface opens exactly as saved —
+  /// tabs, splits, focus and all.
+  @Test
+  func openingUsesTheSavedLayoutWhileTheAgentSurfaceSurvives() {
+    let nodeID = UUID()
+    var saved = TerminalLayout.defaultLayout(forNode: nodeID)
+    saved.tabs.append(TabLayout(primary: SurfaceRef(id: UUID(), launchesClaudeCode: false)))
+
+    #expect(TerminalLayout.opening(forNode: nodeID, saved: saved) == saved)
+  }
+
+  /// Closing a tab (or pane) can take the node's own surface out of a saved layout, and
+  /// a layout persisted that way would reopen a running loop as shells-only, its live
+  /// session attached to nothing on screen. The default — the agent tab — is what opens
+  /// instead (#254). Compared by shape rather than `==`: a fresh default's tab and
+  /// surface ids are generated per call.
+  @Test
+  func openingRestoresTheDefaultWhenTheAgentSurfaceWasClosedAway() throws {
+    let nodeID = UUID()
+    let saved = TerminalLayout(
+      tabs: [
+        TabLayout(primary: SurfaceRef(id: UUID(), launchesClaudeCode: false))
+      ], selectedTabID: UUID())
+
+    let opened = [
+      TerminalLayout.opening(forNode: nodeID, saved: saved),
+      TerminalLayout.opening(forNode: nodeID, saved: nil),
+    ]
+    for layout in opened {
+      #expect(layout.tabs.count == 1)
+      let tab = try #require(layout.tabs.first)
+      #expect(layout.selectedTabID == tab.id)
+      #expect(tab.surfaces == [SurfaceRef(id: nodeID, launchesClaudeCode: true)])
+    }
+  }
 }

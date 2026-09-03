@@ -74,6 +74,11 @@ struct LoopWorkspaceFeature {
     case newTabButtonTapped
     case tabSelected(UUID)
     case tabClosed(UUID)
+    /// The workspace's last tab was closed. What that means is `AppFeature`'s to say:
+    /// for a loop it is the end of the loop itself (deleted the way the sidebar's delete
+    /// does, session and all), and for a quick chat it is just the terminal being put
+    /// away — the chat outlives its session.
+    case lastTabClosed
     case selectNextTab
     case selectPreviousTab
     case splitButtonTapped(direction: SplitDirection)
@@ -117,9 +122,10 @@ struct LoopWorkspaceFeature {
   }
 
   @Dependency(\.terminalLayoutStore) var terminalLayoutStore
-  /// Closing a tab or a pane is the one thing that should still end a surface. Switching
-  /// loops deliberately doesn't — see `TerminalSurfaceStore` — so without telling it
-  /// here, a closed pane's terminal would linger until it aged out of the cache.
+  /// Closing a tab or a pane is the one thing that should still end a surface — and,
+  /// since #254, the shell session behind it. Switching loops deliberately doesn't — see
+  /// `TerminalSurfaceStore` — so without telling it here, a closed pane's terminal would
+  /// linger until it aged out of the cache.
   @Dependency(\.terminalSurfaceClient) var terminalSurfaceClient
 
   var body: some ReducerOf<Self> {
@@ -139,13 +145,19 @@ struct LoopWorkspaceFeature {
         return .none
 
       case .tabClosed(let id):
-        // A workspace always keeps at least one tab.
-        guard state.layout.tabs.count > 1, let index = state.layout.tabs.index(id: id),
-          let tab = state.layout.tabs[id: id]
-        else {
-          return .none
-        }
+        guard let index = state.layout.tabs.index(id: id), let tab = state.layout.tabs[id: id]
+        else { return .none }
         terminalSurfaceClient.retire(tab.surfaces.map(\.id))
+        // The shells in the tab die with it — a pane's zmx session is the pane's reason
+        // for existing, and one left running after its pane is gone is invisible until
+        // reboot (#254). The agent surface is exempt: its session belongs to the loop,
+        // which outlives any pane and is ended by deleting the node, not by closing a
+        // tab in front of it.
+        terminalSurfaceClient.killSessions(
+          tab.surfaces.filter { !$0.launchesClaudeCode }.map(\.id), state.projectPath)
+        // The last tab going means the workspace has nothing left to show, which is the
+        // end of the loop itself — `AppFeature`'s call, since the deletion is its job.
+        guard state.layout.tabs.count > 1 else { return .send(.lastTabClosed) }
         state.layout.tabs.remove(id: id)
         if state.layout.selectedTabID == id {
           let fallbackIndex = min(index, state.layout.tabs.count - 1)
@@ -213,6 +225,12 @@ struct LoopWorkspaceFeature {
         // Only the pane that went is retired. Every survivor is the same live terminal it
         // was, and is about to be re-mounted in the space the closed one gave up.
         terminalSurfaceClient.retire([surfaceID])
+        // A shell the human closed ends with its pane (#254) — whether it was closed by
+        // the x, ⌘W, or its own process exiting. An agent pane is never killed here: the
+        // loop's session is the loop's, and ends when the node does.
+        if !paneOrder[closedIndex].launchesClaudeCode {
+          terminalSurfaceClient.killSessions([surfaceID], state.projectPath)
+        }
         tab.root = root
         if tab.focusedSurfaceID == surfaceID {
           // Where the keyboard lands, matching Ghostty: the pane before the one that
@@ -276,7 +294,8 @@ struct LoopWorkspaceFeature {
         state.seenBeatID = state.node.summary?.current?.id
         return .none
 
-      case .stopLoopTapped, .showInGraphTapped, .railTargetTapped, .primaryExitAcknowledged:
+      case .stopLoopTapped, .showInGraphTapped, .railTargetTapped, .primaryExitAcknowledged,
+        .lastTabClosed:
         // Handled by `AppFeature`'s parent `Reduce` — see the actions' own doc comment.
         return .none
       }

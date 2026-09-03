@@ -12,13 +12,51 @@ import Testing
 /// never touch the app's real Application Support folder.
 @Suite
 struct LoopWorkspaceFeatureTests {
-  private func makeStore(_ state: LoopWorkspaceFeature.State) -> TestStoreOf<LoopWorkspaceFeature> {
+  /// Records what the reducer asks `TerminalSurfaceClient` to end: the attach going
+  /// away (`retired`) and the zmx sessions being terminated behind it (`killed`).
+  private final class EndingRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var retiredIDs: [UUID] = []
+    private var killedIDs: [UUID] = []
+
+    func retire(_ ids: [UUID]) {
+      lock.lock()
+      retiredIDs += ids
+      lock.unlock()
+    }
+
+    func kill(_ ids: [UUID]) {
+      lock.lock()
+      killedIDs += ids
+      lock.unlock()
+    }
+
+    var retired: [UUID] {
+      lock.lock()
+      defer { lock.unlock() }
+      return retiredIDs
+    }
+
+    var killed: [UUID] {
+      lock.lock()
+      defer { lock.unlock() }
+      return killedIDs
+    }
+  }
+
+  private func makeStore(
+    _ state: LoopWorkspaceFeature.State,
+    endings: EndingRecorder? = nil
+  ) -> TestStoreOf<LoopWorkspaceFeature> {
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
     let store = TestStore(initialState: state) {
       LoopWorkspaceFeature()
     } withDependencies: {
       $0.terminalLayoutStore = TerminalLayoutStore(baseDirectory: directory)
+      $0.terminalSurfaceClient = TerminalSurfaceClient(
+        retire: { endings?.retire($0) },
+        killSessions: { ids, _ in endings?.kill(ids) })
     }
     store.exhaustivity = .off
     return store
@@ -92,13 +130,17 @@ struct LoopWorkspaceFeatureTests {
     #expect(children[1].isSplit)
   }
 
+  /// Closing the last tab is the end of the loop itself — the reducer forwards to
+  /// `AppFeature`, which deletes the node the way the sidebar's delete does (#254).
+  /// The layout is untouched here: the workspace is going away either way.
   @Test
   @MainActor
-  func closingTheLastTabIsANoOp() async {
+  func closingTheLastTabAsksItsParentToEndTheLoop() async {
     let store = makeStore(makeState())
     let onlyTabID = store.state.layout.selectedTabID
 
     await store.send(.tabClosed(onlyTabID))
+    await store.receive(\.lastTabClosed)
     #expect(store.state.layout.tabs.count == 1)
   }
 
@@ -116,6 +158,71 @@ struct LoopWorkspaceFeatureTests {
 
     #expect(store.state.layout.tabs.count == 1)
     #expect(store.state.layout.selectedTabID == firstTabID)
+  }
+
+  /// A shell tab the human closed dies with it — its zmx session is killed, not just
+  /// detached — while the loop's agent session in the surviving tab is untouched (#254).
+  @Test
+  @MainActor
+  func closingAShellTabKillsItsSessionAndSparesTheAgent() async {
+    var state = makeState()
+    let shellTab = TabLayout(primary: SurfaceRef(id: UUID(), launchesClaudeCode: false))
+    state.layout.tabs.append(shellTab)
+
+    let endings = EndingRecorder()
+    let store = makeStore(state, endings: endings)
+    await store.send(.tabClosed(shellTab.id))
+
+    #expect(endings.killed == [shellTab.primary.id])
+    #expect(!endings.retired.isEmpty)
+    #expect(!endings.killed.contains(state.node.id))
+  }
+
+  /// The other side of the same rule: closing the tab that carries the loop's own
+  /// session retires its surface but never kills the session — the loop outlives any
+  /// pane, and its session ends when the node does.
+  @Test
+  @MainActor
+  func closingTheAgentTabNeverKillsTheAgentSession() async {
+    var state = makeState()
+    let shellTab = TabLayout(primary: SurfaceRef(id: UUID(), launchesClaudeCode: false))
+    state.layout.tabs.append(shellTab)
+
+    let endings = EndingRecorder()
+    let store = makeStore(state, endings: endings)
+    await store.send(.tabClosed(state.layout.tabs[0].id))
+
+    #expect(endings.killed.isEmpty)
+  }
+
+  /// A shell pane closed out of a split ends its session (#254).
+  @Test
+  @MainActor
+  func closingAShellPaneKillsItsSession() async throws {
+    let endings = EndingRecorder()
+    let store = makeStore(makeState(), endings: endings)
+    let tabID = store.state.layout.selectedTabID
+    await store.send(.splitButtonTapped(direction: .horizontal))
+    let addition = try #require(store.state.layout.tabs[id: tabID]?.surfaces.last)
+
+    await store.send(.paneClosed(tabID: tabID, surfaceID: addition.id))
+
+    #expect(endings.killed == [addition.id])
+  }
+
+  /// And the agent pane of a split is spared, exactly like the agent tab is.
+  @Test
+  @MainActor
+  func closingAnAgentPaneNeverKillsTheAgentSession() async throws {
+    let endings = EndingRecorder()
+    let store = makeStore(makeState(), endings: endings)
+    let tabID = store.state.layout.selectedTabID
+    await store.send(.splitButtonTapped(direction: .horizontal))
+    let originalPrimary = try #require(store.state.layout.tabs[id: tabID]?.primary)
+
+    await store.send(.paneClosed(tabID: tabID, surfaceID: originalPrimary.id))
+
+    #expect(endings.killed.isEmpty)
   }
 
   @Test

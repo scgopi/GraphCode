@@ -277,6 +277,12 @@ public struct TerminalLayout: Codable, Equatable, Sendable {
   public var tabs: IdentifiedArrayOf<TabLayout>
   public var selectedTabID: UUID
 
+  /// The selected tab's focused pane — the one the keyboard is in, and the one ⌘W
+  /// closes. `nil` only when there are no tabs, which the workspace never allows.
+  public var focusedSurface: SurfaceRef? {
+    tabs[id: selectedTabID]?.focusedSurface
+  }
+
   public init(tabs: IdentifiedArrayOf<TabLayout>, selectedTabID: UUID) {
     self.tabs = tabs
     self.selectedTabID = selectedTabID
@@ -289,5 +295,17 @@ public struct TerminalLayout: Codable, Equatable, Sendable {
   public static func defaultLayout(forNode nodeID: UUID) -> TerminalLayout {
     let tab = TabLayout(primary: SurfaceRef(id: nodeID, launchesClaudeCode: true))
     return TerminalLayout(tabs: [tab], selectedTabID: tab.id)
+  }
+
+  /// The layout a node's workspace should open with: the saved one, unless it lost the
+  /// node's own surface — the agent pane every layout starts with — in which case the
+  /// default is used instead. A tab (or split pane) can be closed like any other now,
+  /// and a layout persisted without the agent surface would otherwise reopen a running
+  /// loop as shells-only, with its live session attached to nothing on screen.
+  public static func opening(forNode nodeID: UUID, saved: TerminalLayout?) -> TerminalLayout {
+    guard let saved,
+      saved.tabs.contains(where: { tab in tab.surfaces.contains { $0.id == nodeID } })
+    else { return .defaultLayout(forNode: nodeID) }
+    return saved
   }
 }

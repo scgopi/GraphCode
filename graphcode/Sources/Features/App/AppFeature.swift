@@ -549,18 +549,21 @@ struct AppFeature {
             .graphCommand(projectPath: projectPath, command: command))
         }
 
-      // The keypress on the agent pane's "Press any key to close" screen. The session
-      // was already resolved when it exited (above) — this is the human dismissing what
-      // remains, so the workspace closes *and* the node leaves the graph. Deleting via
-      // the daemon rather than locally, the same way the sidebar's delete does: the
-      // resulting broadcast is what removes the card everywhere, and `GraphStore` also
-      // kills the loop's zmx session. Closed here as well rather than waiting for that
-      // broadcast, so the dead pane goes away even with the daemon unreachable.
-      case .openLoop(.primaryExitAcknowledged):
+      // Two roads to the same end, both the human dismissing what's left of a loop for
+      // good: the keypress on the agent pane's "Press any key to close." screen
+      // (`.primaryExitAcknowledged`), and closing the workspace's last tab
+      // (`.lastTabClosed`) — which for a running loop is the human ending it, exactly
+      // what the sidebar's delete does. The workspace closes *and* the node leaves the
+      // graph, session and all: deleting via the daemon rather than locally, the same
+      // way the sidebar's delete does — the resulting broadcast is what removes the card
+      // everywhere, and `GraphStore` also kills the loop's zmx session. Closed here as
+      // well rather than waiting for that broadcast, so the dead pane goes away even
+      // with the daemon unreachable. A chat, though, is not a node in any graph — there
+      // is nothing to delete, and the chat itself should outlive its session. Just put
+      // the dead terminal away.
+      case .openLoop(.primaryExitAcknowledged), .openLoop(.lastTabClosed):
         guard let id = state.openLoop?.node.id, let projectPath = state.openLoop?.projectPath
         else { return .none }
-        // A chat is not a node in any graph — there is nothing to delete, and the chat
-        // itself should outlive its session. Just put the dead terminal away.
         guard !state.isQuickChat(id) else {
           closeOpenWorkspace(&state)
           state.detailSelection = .quickChats
@@ -698,7 +701,8 @@ extension AppFeature {
         node: node, graph: state.projects[id: path]?.graph)
       return .none
     }
-    let layout = terminalLayoutStore.load(forNode: nodeID) ?? .defaultLayout(forNode: nodeID)
+    let layout = TerminalLayout.opening(
+      forNode: nodeID, saved: terminalLayoutStore.load(forNode: nodeID))
     state.openLoop = LoopWorkspaceFeature.State(
       node: node,
       graph: state.projects[id: path]?.graph ?? LoopGraph(scope: .global),
@@ -773,11 +777,21 @@ extension AppFeature {
   private func isGlobal(_ path: String) -> Bool { path == LoopGraphScope.globalPath }
 
   /// Closes the open workspace *and ends its terminals* — for when the loop itself is
-  /// gone, as opposed to merely not being the one on screen any more. Not `private`
+  /// going away, as opposed to merely not being the one on screen any more. Not `private`
   /// because a deleted chat needs the same treatment and lives in the other file.
+  ///
+  /// Ending the terminals is two halves: the surfaces are retired (the attach ends), and
+  /// the plain shells behind them are killed (#254) — nothing owns a shell once its
+  /// workspace is gone, and one left running is invisible until reboot. The agent
+  /// surface is deliberately not on the kill list: the loop's session belongs to the
+  /// node, and whichever side deletes the node ends it (`GraphStore` on the daemon's
+  /// path, `QuickChats` for a chat).
   func closeOpenWorkspace(_ state: inout State) {
     guard let openLoop = state.openLoop else { return }
-    terminalSurfaceClient.retire(openLoop.layout.tabs.flatMap { $0.surfaces.map(\.id) })
+    let surfaces = openLoop.layout.tabs.flatMap { $0.surfaces }
+    terminalSurfaceClient.retire(surfaces.map(\.id))
+    terminalSurfaceClient.killSessions(
+      surfaces.filter { !$0.launchesClaudeCode }.map(\.id), openLoop.projectPath)
     state.openLoop = nil
   }
 

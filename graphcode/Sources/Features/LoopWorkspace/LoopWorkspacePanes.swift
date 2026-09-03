@@ -47,7 +47,6 @@ struct TabPillView: View {
   let state: LoopState?
   let isSelected: Bool
   let shortcutHint: String?
-  let canClose: Bool
   let onSelect: () -> Void
   let onClose: () -> Void
 
@@ -89,7 +88,10 @@ struct TabPillView: View {
 
   @ViewBuilder
   private var trailingGlyph: some View {
-    if canClose && isHovering {
+    // Every tab closes, the loop's own included — a lone tab used to hide the button
+    // because closing it "did nothing", but now the last tab's close ends the loop
+    // itself (see `.tabClosed`), which is exactly when an x is most needed (#254).
+    if isHovering {
       Button(action: onClose) {
         Image(systemName: "xmark")
           .font(.system(size: 8, weight: .bold))

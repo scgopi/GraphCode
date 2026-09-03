@@ -109,7 +109,8 @@ extension AppFeature {
       loopType: .composite,
       backend: chat.backend,
       createdAt: chat.createdAt)
-    let layout = terminalLayoutStore.load(forNode: chat.id) ?? .defaultLayout(forNode: chat.id)
+    let layout = TerminalLayout.opening(
+      forNode: chat.id, saved: terminalLayoutStore.load(forNode: chat.id))
     state.openLoop = LoopWorkspaceFeature.State(
       node: node,
       layout: layout,

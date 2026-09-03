@@ -470,11 +470,14 @@ public enum ZmxSessionLauncher {
       + RemoteProjectLocation.shellQuoted("name=\(name)\t")
   }
 
-  /// Kills the session behind an id that isn't a graph node — a quick chat. Public
-  /// because chats are app-owned: no daemon deletes their sessions for them, the way
-  /// `GraphStore` does when a loop is deleted.
-  public static func killSession(id: UUID) async {
-    await kill(LoopNode(id: id, title: ""))
+  /// Kills the session behind an id that isn't a graph node — a quick chat, or a plain
+  /// shell pane the human closed. Public because both are app-owned: no daemon deletes
+  /// their sessions for them, the way `GraphStore` does when a loop is deleted.
+  /// `projectPath` routes a remote project's session to the kill that runs on its host;
+  /// a shell surface has no session id banked for it, so the bookkeeping `kill` does
+  /// alongside is all no-ops for it.
+  public static func killSession(id: UUID, projectPath: String? = nil) async {
+    await kill(LoopNode(id: id, title: ""), projectPath: projectPath)
   }
 
   static func kill(_ node: LoopNode, projectPath: String? = nil) async {

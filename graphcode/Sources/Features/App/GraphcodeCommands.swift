@@ -87,9 +87,20 @@ struct GraphcodeCommands: Commands {
       Button("New Tab") { store.send(.openLoop(.newTabButtonTapped)) }
         .keyboardShortcut("t", modifiers: .command)
         .disabled(!hasWorkspace)
+      // ⌘W closes what the keyboard is in: the focused pane of a split, the tab when it
+      // isn't one — and, through the reducer, the workspace's last tab ends the loop
+      // itself. That last step is why it is never disabled here: there is always
+      // something ⌘W can close while a workspace is open (#254).
+      Button(closeTitle) {
+        guard let layout = store.openLoop?.layout, let focused = layout.focusedSurface
+        else { return }
+        store.send(.openLoop(.paneClosed(tabID: layout.selectedTabID, surfaceID: focused.id)))
+      }
+      .keyboardShortcut("w", modifiers: .command)
+      .disabled(!hasWorkspace)
       Button("Close Tab") { store.send(.openLoop(.tabClosed(selectedTabID))) }
-        .keyboardShortcut("w", modifiers: .command)
-        .disabled(!canCloseTab)
+        .keyboardShortcut("w", modifiers: [.command, .shift])
+        .disabled(!hasWorkspace)
 
       Divider()
 
@@ -134,9 +145,10 @@ struct GraphcodeCommands: Commands {
     (store.openLoop?.isRailVisible ?? false) ? "Hide Loop Panel" : "Show Loop Panel"
   }
 
-  /// A workspace always keeps at least one tab, so closing the last one is refused by
-  /// the reducer — the menu says so rather than offering a no-op.
-  private var canCloseTab: Bool { (store.openLoop?.layout.tabs.count ?? 0) > 1 }
+  /// ⌘W's label follows what it will close — a split's pane, or the tab when it isn't
+  /// split — the way a terminal menu should say what the keystroke does before you
+  /// learn it the hard way.
+  private var closeTitle: String { isSplit ? "Close Pane" : "Close Tab" }
 
   private var isSplit: Bool {
     guard let layout = store.openLoop?.layout else { return false }
