@@ -442,7 +442,7 @@ struct ProjectFeatureTests {
   // the refusal notice — is covered in `BlockedLoopGateTests`.
 }
 
-private actor SentGraphCommandsBox {
+actor SentGraphCommandsBox {
   var commands: [DaemonCommand] = []
   func append(_ command: DaemonCommand) { commands.append(command) }
 }

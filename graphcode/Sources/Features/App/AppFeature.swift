@@ -549,6 +549,9 @@ struct AppFeature {
           .projects(.element(id: path, action: .addNodeButtonTapped(parentBackend: parentBackend))))
 
       case .projects(.element(id: let path, action: .nodeTapped(let nodeID))):
+        guard state.projects[id: path]?.graph.executionMode == .graphcode else {
+          return .none
+        }
         return openNode(nodeID, in: path, &state)
 
       case .blockedLoopNoticeDismissed:

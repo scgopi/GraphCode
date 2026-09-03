@@ -39,6 +39,8 @@ public enum GoobersExport {
     case unboundedCycle(from: String, to: String)
     case danglingEdge
     case timeBasedNode(node: String)
+    case multipleEntryPoints(nodes: [String])
+    case adaptiveCycleGuard(from: String, to: String)
 
     public var message: String {
       switch self {
@@ -50,34 +52,34 @@ public enum GoobersExport {
           A Goobers workflow needs a single `start` state, so at least one node must \
           begin the run.
           """
-      case let .unsupportedBackend(node, backend):
+      case .unsupportedBackend(let node, let backend):
         return """
           Node “\(node)” runs on the \(backend.rawValue) backend, which has no Goobers \
           harness. Goobers supports `copilot` and `claude-code`; switch the node's \
           backend or export it as a deterministic task.
           """
-      case let .messageEdge(from, to):
+      case .messageEdge(let from, let to):
         return """
           The message edge “\(from)” → “\(to)” has no Goobers equivalent. Messages \
           inject into a peer's live session; Goobers tasks communicate through \
           declared outputs (`inputsFrom`), not by interrupting each other.
           """
-      case let .spawnEdge(from, to):
+      case .spawnEdge(let from, let to):
         return """
           The spawn edge “\(from)” → “\(to)” has no Goobers equivalent — DSL 2.0 has \
           no child-workflow construct, so a node cannot instantiate another graph.
           """
-      case let .compositeNode(node):
+      case .compositeNode(let node):
         return """
           Node “\(node)” is a composite holding a sub-graph. DSL 2.0 has no nested \
           workflows; flatten it into the parent graph before exporting.
           """
-      case let .sketchNode(node):
+      case .sketchNode(let node):
         return """
           Node “\(node)” is still a sketch. Promote it to a real loop — a sketch has \
           no backend or goal to translate.
           """
-      case let .fanOut(node, targets):
+      case .fanOut(let node, let targets):
         return """
           Node “\(node)” hands off to \(targets.count) nodes \
           (\(targets.map { "“\($0)”" }.joined(separator: ", "))). Goobers expresses \
@@ -85,7 +87,7 @@ public enum GoobersExport {
           this exporter does not yet synthesize. Serialize the branches, or wait for \
           fan-out support.
           """
-      case let .unboundedCycle(from, to):
+      case .unboundedCycle(let from, let to):
         return """
           The edge “\(from)” → “\(to)” closes a cycle with no guard, so it would fire \
           once and leave the loop inert. Attach a cycle guard — its bound becomes the \
@@ -93,13 +95,27 @@ public enum GoobersExport {
           """
       case .danglingEdge:
         return "An edge refers to a node that is not in the graph."
-      case let .timeBasedNode(node):
+      case .timeBasedNode(let node):
         return """
           Node “\(node)” is a time-based loop, whose cadence re-enters a session that \
           is already running. A Goobers `type: schedule` trigger starts a *new* run \
           instead, so exporting this would silently turn “keep going” into “start \
           again”. Convert it to a goal- or turn-based node, or drive the repetition \
           with a cycle guard, whose bound does become a repass budget.
+          """
+      case .multipleEntryPoints(let nodes):
+        return """
+          The graph has \(nodes.count) entry points \
+          (\(nodes.map { "“\($0)”" }.joined(separator: ", "))). A Goobers workflow has \
+          one start state; preserving several roots requires a parallel block and join, \
+          which this exporter does not synthesize yet.
+          """
+      case .adaptiveCycleGuard(let from, let to):
+        return """
+          The cycle guard on “\(from)” → “\(to)” uses an `until` condition or plateau \
+          detection. Goobers DSL 2.0 only preserves the count as `maxRepasses`; exporting \
+          this guard would silently drop an early-stop rule. Use a count-only guard for \
+          now.
           """
       }
     }
@@ -156,6 +172,35 @@ public enum GoobersExport {
       files["\(dir)/instructions.md"] = renderInstructions(role)
     }
     return Bundle(files: files)
+  }
+
+  /// The live instance file paired with an exported source tree. It is separate from
+  /// `instance.yaml.example` because Goobers' source-tree validator expects the example
+  /// at the export root, while a running instance expects this file beside `config/`.
+  ///
+  /// Port zero asks the OS for a free loopback port. Goobers writes the chosen address
+  /// to `scheduler/api.address`, which is the only address GraphCode trusts.
+  public static func runtimeInstance(
+    project: ProjectCoordinates,
+    apiListen: String = "127.0.0.1:0"
+  ) -> String {
+    """
+    api:
+      listen: \(apiListen)
+    apiVersion: goobers.dev/v1alpha1
+    kind: Instance
+    repos:
+      - provider: github
+        owner: \(project.owner)
+        name: \(project.name)
+        token:
+          env: GOOBERS_GITHUB_TOKEN
+    runConditions:
+      maxParallelRuns: 1
+    telemetry:
+      enabled: true
+
+    """
   }
 
   /// Where the gaggle's work lives. Separate from `ProjectRef` because a GraphCode
@@ -270,6 +315,11 @@ public enum GoobersExport {
         $0.kind.blocksTarget && titles[$0.from] != nil && titles[$0.to] != nil
       })
 
+    let entryIDs = graph.startAnchors.filter { titles[$0] != nil }
+    if entryIDs.count > 1 {
+      diagnostics.append(.multipleEntryPoints(nodes: entryIDs.compactMap { titles[$0] }))
+    }
+
     // A cycle-closing edge must carry a guard, or it fires once and the loop the
     // author drew never actually loops.
     let backEdges = Set(cycleClosingEdgeIDs(nodes: exportable.map(\.id), edges: sequencing))
@@ -278,6 +328,14 @@ public enum GoobersExport {
       if !bounded {
         diagnostics.append(
           .unboundedCycle(from: titles[edge.from] ?? "?", to: titles[edge.to] ?? "?"))
+      }
+      if let guardrail = edge.cycleGuard,
+        guardrail.effectiveUntil != nil
+          || (guardrail.stopAfterPassesWithoutImprovement ?? 0) > 0
+      {
+        diagnostics.append(
+          .adaptiveCycleGuard(
+            from: titles[edge.from] ?? "?", to: titles[edge.to] ?? "?"))
       }
     }
 
@@ -732,7 +790,7 @@ extension LoopGraphScope {
   var displayName: String {
     switch self {
     case .global: return "Global"
-    case let .project(ref): return ref.name
+    case .project(let ref): return ref.name
     }
   }
 }

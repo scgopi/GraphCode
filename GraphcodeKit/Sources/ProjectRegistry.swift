@@ -30,6 +30,7 @@ public actor ProjectRegistry {
   /// For tests that read the file straight after a command: every save is flushed
   /// before the store's turn ends, so the disk is exactly what the store holds.
   private let persistsSynchronously: Bool
+  private let persistenceDirectory: URL
   private var stores: [String: GraphStore] = [:]
   private var connectionFileDescriptors: [UUID: Int32] = [:]
   private var connectionProjectPaths: [UUID: Set<String>] = [:]
@@ -91,6 +92,7 @@ public actor ProjectRegistry {
     reapCondemnedSessions: Bool = false,
     persistsSynchronously: Bool = false
   ) {
+    self.persistenceDirectory = persistenceDirectory
     persistence = ProjectPersistence(baseDirectory: persistenceDirectory)
     writer = GraphWriter(persistence: persistence)
     self.persistsSynchronously = persistsSynchronously
@@ -368,6 +370,11 @@ public actor ProjectRegistry {
       // delete and put the graph back.
       writer.forget(path: canonicalPath)
       persistence.deleteGraph(path: canonicalPath)
+      if let graph {
+        try? await GoobersWorkspace(
+          graphID: graph.id, baseDirectory: persistenceDirectory
+        ).remove()
+      }
 
     case .graphCommand(let path, let inner):
       // Routed the same way the open was, so a client that had its path redirected to the
@@ -628,6 +635,7 @@ public actor ProjectRegistry {
     let scope = LoopGraphScope(projectPath: path, name: Self.displayName(for: path))
     let graph = writer.load(path: path) ?? LoopGraph(scope: scope)
     let persistence = self.persistence
+    let goobersDirectory = persistenceDirectory
     // A cross-graph spawn arrives here as a plain request; hopping through an unstructured
     // `Task` is what lets this actor re-enter itself to reach a *different* store without
     // deadlocking on its own isolation.
@@ -683,6 +691,17 @@ public actor ProjectRegistry {
       onHeartbeatEnabled: { GraphcodeSettingsStore.load().daemonHeartbeatEnabled },
       onResolvedSessionGrace: { GraphcodeSettingsStore.load().resolvedSessionGrace },
       onDefaultBackend: { GraphcodeSettingsStore.load().defaultBackend },
+      onGoobersEnabled: { GraphcodeSettingsStore.load().goobersEnabled },
+      onRunGoobers: { graph in
+        try await GoobersWorkspace(
+          graphID: graph.id, baseDirectory: goobersDirectory
+        ).dispatch(graph)
+      },
+      onStopGoobers: { graphID in
+        await GoobersWorkspace(
+          graphID: graphID, baseDirectory: goobersDirectory
+        ).stopDaemon()
+      },
       onComposeBoard: composeBoard,
       onBoardsEnabled: {
         let settings = GraphcodeSettingsStore.load()

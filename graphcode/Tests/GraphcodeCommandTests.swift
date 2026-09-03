@@ -21,6 +21,23 @@ struct GraphcodeCommandTests {
   }
 
   @Test
+  func aWholeGraphCanOptIntoAndRunWithGoobers() throws {
+    #expect(
+      try GraphcodeCommand.parse(["graph", "mode", "/tmp/x", "goobers"])
+        == .setGraphExecutionMode(projectPath: "/tmp/x", mode: .goobers))
+    #expect(
+      try GraphcodeCommand.parse(["graph", "run", "/tmp/x"])
+        == .runGoobersGraph(projectPath: "/tmp/x"))
+    #expect(
+      throws: GraphcodeCommand.ParseError.invalidValue(
+        argument: "execution-mode", value: "hybrid"
+      )
+    ) {
+      try GraphcodeCommand.parse(["graph", "mode", "/tmp/x", "hybrid"])
+    }
+  }
+
+  @Test
   func aMissingProjectPathIsNamedInTheError() throws {
     #expect(throws: GraphcodeCommand.ParseError.missingArgument("project-path")) {
       try GraphcodeCommand.parse(["status"])

@@ -16,10 +16,39 @@ import MailroomKit
 /// `graphcode://global` ref — so persistence, registry routing, and every existing
 /// `graph.project.path` call site work without knowing the difference.
 public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
+  public enum ExecutionMode: String, Codable, Equatable, Sendable {
+    /// GraphCode owns node sessions, edge firing, and recurrence — every graph written
+    /// before this field existed, and the behavior users already have.
+    case graphcode
+    /// Goobers owns the whole graph as one workflow. Individual nodes have no zmx
+    /// session in this mode; GraphCode is the authoring and monitoring surface.
+    case goobers
+  }
+
+  public struct GoobersRun: Codable, Equatable, Sendable {
+    public var id: String
+    public var snapshotID: String
+    public var phase: String
+    public var startedAt: Date
+
+    public init(id: String, snapshotID: String, phase: String, startedAt: Date = Date()) {
+      self.id = id
+      self.snapshotID = snapshotID
+      self.phase = phase
+      self.startedAt = startedAt
+    }
+  }
+
   public let id: UUID
   public var scope: LoopGraphScope
   public var nodes: IdentifiedArrayOf<LoopNode>
   public var edges: IdentifiedArrayOf<LoopEdge>
+  /// Who executes this graph. Omitted from disk for the default so existing graph files
+  /// stay unchanged until somebody explicitly opts one into the experiment.
+  public var executionMode: ExecutionMode = .graphcode
+  /// The newest Goobers run GraphCode started for this graph. Goobers remains the source
+  /// of truth for its lifecycle; this is the durable join key for monitoring.
+  public var goobersRun: GoobersRun?
   /// The project's Mailroom — every post any loop has dropped onto the shared room,
   /// oldest first, notices and mirrored letters each capped on their own budget
   /// (`Mailroom.maxNotices`, `Mailroom.maxLetters`). Kept on the graph rather than in a
@@ -296,7 +325,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   // MARK: - Coding
 
   private enum CodingKeys: String, CodingKey {
-    case id, nodes, edges, mailroom, mailroomDigest, revision
+    case id, nodes, edges, mailroom, mailroomDigest, revision, executionMode, goobersRun
     /// Persisted as a `ProjectRef` rather than as the scope enum. Every graph on disk
     /// predates `LoopGraphScope`, and the ref round-trips both cases losslessly (the
     /// global graph's reserved path decodes straight back to `.global`), so there was
@@ -316,6 +345,9 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
       ?? decoder.legacyMailroomValue([MailroomPost].self, "artifactory") ?? []
     mailroomDigest = try container.decodeIfPresent(MailroomDigest.self, forKey: .mailroomDigest)
     revision = try container.decodeIfPresent(Int.self, forKey: .revision)
+    executionMode =
+      try container.decodeIfPresent(ExecutionMode.self, forKey: .executionMode) ?? .graphcode
+    goobersRun = try container.decodeIfPresent(GoobersRun.self, forKey: .goobersRun)
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -329,5 +361,9 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     if !mailroom.isEmpty { try container.encode(mailroom, forKey: .mailroom) }
     if let mailroomDigest { try container.encode(mailroomDigest, forKey: .mailroomDigest) }
     if let revision { try container.encode(revision, forKey: .revision) }
+    if executionMode != .graphcode {
+      try container.encode(executionMode, forKey: .executionMode)
+    }
+    try container.encodeIfPresent(goobersRun, forKey: .goobersRun)
   }
 }
