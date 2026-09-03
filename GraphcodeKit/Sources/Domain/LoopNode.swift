@@ -375,10 +375,10 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   }
 
   /// Loops `graphcoded` is responsible for keeping alive across its own restarts,
-  /// because nothing else would restart them — as opposed to a turn-based node, which a
-  /// human opening is what starts.
+  /// because nothing else would restart them — as opposed to a turn-based node or a
+  /// sketch, which a human opening is what starts. See `LoopType.runsUnattended`.
   public var runsUnattended: Bool {
-    loopType == .timeBased || loopType == .goalBased
+    loopType.runsUnattended
   }
 
   /// The state a surface should show, which is `state` corrected by what the session is

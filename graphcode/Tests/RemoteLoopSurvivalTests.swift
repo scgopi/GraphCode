@@ -376,6 +376,41 @@ struct RemoteLoopSurvivalTests {
   }
 
   @Test
+  func aSketchConnectLaunchesItsOwnSessionInsteadOfWaitingForTheDaemon() throws {
+    // A sketch is attended exactly like a turn-based loop — graphcoded never starts
+    // one — but the connect's missing branch keyed on `.turnBased` and sent every
+    // other type to wait for the daemon. A remote sketch therefore waited forever;
+    // in a Codespace, where gh flattens the retry exit to 1, the redial found no
+    // session and no boot marker and closed the pane as "ended while disconnected"
+    // (#253). Both dials now give a sketch the same self-restore a turn-based loop gets.
+    let nodeID = UUID()
+    let view = agentSurface(nodeID: nodeID, loopType: .sketch)
+    let script = try #require(view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
+    #expect(!script.contains("waiting for graphcoded"))
+    #expect(!script.contains("waiting for the loop session"))
+    let connectLine = try #require(script.range(of: "while :; do").map { script[..<$0.lowerBound] })
+    #expect(connectLine.contains("\(nodeID.uuidString).id"))
+    #expect(connectLine.contains(#"--resume "$GRAPHCODE_RESUME_ID""#))
+    #expect(connectLine.contains("connect fresh"))
+    let loopBody = try #require(script.range(of: "while :; do").map { script[$0.upperBound...] })
+    #expect(loopBody.contains("restoring the session"))
+    #expect(loopBody.contains("reboot fresh"))
+  }
+
+  @Test
+  func aCopilotSketchConnectLaunchesFresh() throws {
+    // The backend #253 was filed against. Copilot cannot resume, so the restore has
+    // no banked ID to consume and goes straight to the prompt-bearing first launch —
+    // which is still the pane's to make, not the daemon's.
+    let view = agentSurface(backend: .copilotCLI, loopType: .sketch)
+    let script = try #require(view.remoteCommand(at: location, settings: GraphcodeSettings()).last)
+    #expect(!script.contains("waiting for graphcoded"))
+    let connectLine = try #require(script.range(of: "while :; do").map { script[..<$0.lowerBound] })
+    #expect(connectLine.contains("connect fresh"))
+    #expect(connectLine.contains("copilot"))
+  }
+
+  @Test
   func aCopilotPaneBanksTheResumeIDOnEveryLiveJoin() throws {
     // A turn-based Copilot loop never gets an ensure dial, so the pane's attach-live
     // branch is its one chance to bank — same fragment, same `[ -s ]` guard.

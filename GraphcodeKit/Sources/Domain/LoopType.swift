@@ -30,4 +30,14 @@ public enum LoopType: String, Codable, CaseIterable, Sendable {
   /// far carries that string, and a daemon or CLI in `~/.graphcode/bin` can be a version
   /// behind the app that wrote it — so the on-disk word outlives the vocabulary change.
   case composite = "proactive"
+
+  /// Whether `graphcoded` starts this loop's session and keeps it alive across its own
+  /// restarts, because nothing else would. A turn-based loop or a sketch is *attended*:
+  /// it only ever runs because a human opened it, so whichever pane opens it owns the
+  /// launch — locally and, over ssh, on the remote host. Every gate that decides who
+  /// launches must read this rather than name `turnBased`, which is how remote sketches
+  /// came to wait forever for a daemon that deliberately never starts them (#253).
+  public var runsUnattended: Bool {
+    self == .timeBased || self == .goalBased
+  }
 }
