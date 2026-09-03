@@ -362,6 +362,30 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// heartbeat loops immediately without restarting anything.
   public var daemonHeartbeatEnabled: Bool
 
+  /// Whether GraphCode may export a graph to a GraphCode-owned Goobers instance and
+  /// delegate the graph's orchestration to it instead of starting node sessions.
+  ///
+  /// **Off by default, and experimental.** Merely enabling this setting does not convert
+  /// any graph or start a daemon; a graph must also opt into Goobers execution. Existing
+  /// graphs therefore keep their session-backed behavior byte for byte.
+  public var goobersEnabled: Bool
+
+  /// Whether Goobers may start GraphCode-authored workflows from schedule, backlog,
+  /// signal, or webhook triggers.
+  ///
+  /// **Off by default, experimental, and dependent on `goobersEnabled`.** GraphCode does
+  /// not grow its own webhook listener: Goobers owns trigger ingestion, validation,
+  /// deduplication, and scheduling. Keeping this separate from basic Goobers support lets
+  /// a person try explicit runs without opening any event-driven path.
+  public var goobersTriggersEnabled: Bool
+
+  /// The daemon-side decision. Keeping the stored choice separate means Settings can
+  /// preserve a person's trigger preference while the master experiment is off, without
+  /// any caller accidentally treating that preference as permission to ingest events.
+  public var effectiveGoobersTriggersEnabled: Bool {
+    goobersEnabled && goobersTriggersEnabled
+  }
+
   /// Whether loops get the **Artifactory** — a shared, unaddressed message board the
   /// graph's loops post to and read without any wiring: `node send` and edges are
   /// for talking to a peer you already know, while the Artifactory is the ambient
@@ -404,6 +428,8 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     summaryUsesModel: Bool = false,
     visualisesSummaries: Bool = false,
     daemonHeartbeatEnabled: Bool = false,
+    goobersEnabled: Bool = false,
+    goobersTriggersEnabled: Bool = false,
     artifactoryEnabled: Bool = true,
     keepsMacAwakeWhileLoopsRun: Bool = false,
     worktreePolicies: [String: WorktreeHygienePolicy] = [:]
@@ -420,6 +446,8 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     self.summaryUsesModel = summaryUsesModel
     self.visualisesSummaries = visualisesSummaries
     self.daemonHeartbeatEnabled = daemonHeartbeatEnabled
+    self.goobersEnabled = goobersEnabled
+    self.goobersTriggersEnabled = goobersTriggersEnabled
     self.artifactoryEnabled = artifactoryEnabled
     self.keepsMacAwakeWhileLoopsRun = keepsMacAwakeWhileLoopsRun
     self.worktreePolicies = worktreePolicies
@@ -470,6 +498,10 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       try container.decodeIfPresent(Bool.self, forKey: .visualisesSummaries) ?? false
     daemonHeartbeatEnabled =
       try container.decodeIfPresent(Bool.self, forKey: .daemonHeartbeatEnabled) ?? false
+    goobersEnabled =
+      try container.decodeIfPresent(Bool.self, forKey: .goobersEnabled) ?? false
+    goobersTriggersEnabled =
+      try container.decodeIfPresent(Bool.self, forKey: .goobersTriggersEnabled) ?? false
     // On unless somebody turned it off. Absent used to mean off while the board was
     // beta-only — "no app has spoken yet" — and now means the default: a CLI-only
     // machine or a hand-edited file gets the board the way every install does, and

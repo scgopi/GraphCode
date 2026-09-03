@@ -22,6 +22,21 @@ struct GraphcodeSettingsTests {
     #expect(settings.codexApprovals == .yolo)
     #expect(settings.copilotPermissions == .allowEverything)
     #expect(settings.briefsSessionsAboutTheGraph)
+    #expect(!settings.goobersEnabled)
+    #expect(!settings.goobersTriggersEnabled)
+    #expect(!settings.effectiveGoobersTriggersEnabled)
+  }
+
+  @Test
+  func goobersTriggersRequireTheMasterExperiment() {
+    #expect(
+      !GraphcodeSettings(
+        goobersEnabled: false, goobersTriggersEnabled: true
+      ).effectiveGoobersTriggersEnabled)
+    #expect(
+      GraphcodeSettings(
+        goobersEnabled: true, goobersTriggersEnabled: true
+      ).effectiveGoobersTriggersEnabled)
   }
 
   @Test
@@ -69,6 +84,8 @@ struct GraphcodeSettingsTests {
     #expect(loaded.claudePermissionMode == .dontAsk)
     #expect(loaded.briefsSessionsAboutTheGraph)
     #expect(loaded.defaultBackend == .claudeCode)
+    #expect(!loaded.goobersEnabled)
+    #expect(!loaded.goobersTriggersEnabled)
   }
 
   @Test

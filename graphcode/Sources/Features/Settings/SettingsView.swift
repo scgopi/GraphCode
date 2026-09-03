@@ -165,6 +165,32 @@ struct SettingsView: View {
         .fixedSize(horizontal: false, vertical: true)
 
         Toggle(
+          "Goobers orchestration (experimental)",
+          isOn: $model.settings.goobersEnabled)
+        Text(
+          "Allows an explicitly marked graph to export into its own persistent Goobers "
+            + "workspace and let Goobers run the workflow. Existing graphs still use "
+            + "their ordinary GraphCode sessions; enabling this switch converts nothing."
+        )
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+
+        Toggle(
+          "Goobers triggers and webhooks (experimental)",
+          isOn: $model.settings.goobersTriggersEnabled
+        )
+        .disabled(!model.settings.goobersEnabled)
+        Text(
+          "Lets Goobers start opted-in graphs from schedules and external triggers. "
+            + "Goobers owns the webhook listener and trigger validation; GraphCode does "
+            + "not open a port. Requires Goobers orchestration above."
+        )
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+
+        Toggle(
           "Keep this Mac awake while loops run (experimental)",
           isOn: $model.settings.keepsMacAwakeWhileLoopsRun)
         Text(
