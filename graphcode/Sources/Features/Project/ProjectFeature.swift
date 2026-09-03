@@ -867,9 +867,12 @@ extension ProjectFeature {
     state.draftSchedule = .daily
     state.draftScheduleTime = "09:00"
     state.draftSubGraph = nil
-    // The parent's backend when there is one; the human's default otherwise
-    // (Settings → Sessions), never a hardcoded one.
-    state.draftBackend = backend ?? GraphcodeSettingsStore.load().defaultBackend
+    // The parent's backend when there is one, then the open composite's — its workers
+    // run on what it runs on — and the human's default otherwise (Settings → Sessions),
+    // never a hardcoded one.
+    state.draftBackend =
+      backend ?? state.openCompositeID.flatMap { state.graph.nodes[id: $0]?.backend }
+      ?? GraphcodeSettingsStore.load().defaultBackend
     state.draftWorktree = .none
     state.draftBranch = ""
     state.draftParentNodeID = parentNodeID
