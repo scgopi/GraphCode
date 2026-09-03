@@ -2222,13 +2222,14 @@ public actor GraphStore {
         subGraph: template.subGraph))
   }
 
-  /// "Triage #2", "Triage #3" — a spawned instance needs to be tellable apart from its
+  /// "Triage2", "Triage3" — a spawned instance needs to be tellable apart from its
   /// template at a glance in the sidebar, which is the only place many of them will
-  /// ever be seen.
+  /// ever be seen. The index joins the name without a space, the same one-word shape
+  /// every other loop name has.
   static func instanceTitle(for template: LoopNode, existing: [String]) -> String {
     var index = 2
-    while existing.contains("\(template.title) #\(index)") { index += 1 }
-    return "\(template.title) #\(index)"
+    while existing.contains("\(template.title)\(index)") { index += 1 }
+    return "\(template.title)\(index)"
   }
 
   private func commitFiring(_ edgeID: UUID) {

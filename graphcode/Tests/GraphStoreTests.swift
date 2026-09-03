@@ -276,7 +276,7 @@ struct GraphStoreTests {
     #expect(graph.nodes[id: nodes[1].id]?.state == .idle)
     #expect(graph.nodes[id: nodes[1].id]?.title == "Template")
     // The instance is distinguishable at a glance and carries no edges of its own.
-    #expect(graph.nodes[2].title == "Template #2")
+    #expect(graph.nodes[2].title == "Template2")
     #expect(!graph.edges.contains { $0.from == graph.nodes[2].id || $0.to == graph.nodes[2].id })
   }
 
@@ -335,7 +335,7 @@ struct GraphStoreTests {
 
     // A turn-based draft with no criterion is deliberately *not* in this list — that one
     // is valid now, since the human doing the verifying is there either way. Neither is
-    // an untitled draft: a blank title creates the node as "New Loop" and the app names
+    // an untitled draft: a blank title creates the node as "NewLoop" and the app names
     // it properly afterward (see `TitleSuggestionClient`).
     await store.handle(.createNode(NodeDraft(title: "No goal", loopType: .goalBased)))
     await store.handle(.createNode(NodeDraft(title: "Bare", loopType: .timeBased)))

@@ -37,7 +37,7 @@ struct CompositeSpawnTests {
     await store.handle(.nodeCheckApproved(trigger.id))
 
     let instance = try? #require(await store.graph.nodes.last)
-    #expect(instance?.title == "Triage #2")
+    #expect(instance?.title == "Triage2")
     #expect(instance?.subGraph?.nodes.count == 2)
   }
 

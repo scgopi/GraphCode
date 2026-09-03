@@ -92,7 +92,7 @@ struct NodeDraftTests {
 
   /// The title used to be the one field every draft demanded, and it was the most
   /// tedious one on the form — the prompt is what the human has in their head. A blank
-  /// title now creates the node as "New Loop", and the app follows up with a
+  /// title now creates the node as "NewLoop", and the app follows up with a
   /// backend-suggested name (see `TitleSuggestionClient`).
   @Test
   func anUntitledDraftIsValidAndFallsBackToAPlaceholderName() {
@@ -100,7 +100,7 @@ struct NodeDraftTests {
       title: "  ", loopType: .turnBased, checkDescription: "Sound?",
       firstInstruction: "Read the RFC")
     #expect(draft.isValid)
-    #expect(draft.makeNode().title == "New Loop")
+    #expect(draft.makeNode().title == "NewLoop")
     // A typed title is used as typed.
     #expect(
       NodeDraft(title: "Research", loopType: .turnBased).makeNode().title == "Research")
@@ -135,7 +135,7 @@ struct NodeDraftTests {
     let draft = NodeDraft(title: "Triage inbox", loopType: .composite)
     #expect(draft.isValid)
     // The name, though, is required for this type alone: every other kind gets one from
-    // its own backend once it starts working, and a composite never starts. "New Loop"
+    // its own backend once it starts working, and a composite never starts. "NewLoop"
     // would be its name for good.
     #expect(!NodeDraft(title: "  ", loopType: .composite).isValid)
 

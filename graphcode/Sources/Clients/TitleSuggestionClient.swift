@@ -6,7 +6,7 @@ import GraphcodeKit
 /// title blank — `claude -p` / `copilot -p` / `codex exec`, the headless print-mode
 /// shape of each CLI, so nothing here opens a session or touches the loop's actual work.
 ///
-/// Fire-and-forget by design: the node is already created as "New Loop" by the time this
+/// Fire-and-forget by design: the node is already created as "NewLoop" by the time this
 /// runs, and a `renameNode` follows only if an answer arrives. A backend that is slow,
 /// missing, or confused costs nothing but the fallback name staying.
 struct TitleSuggestionClient: Sendable {
@@ -86,7 +86,7 @@ extension TitleSuggestionClient: DependencyKey {
     case .copilotCLI: command = "exec copilot -p \"$\(promptVariable)\""
     // This is a separate headless process, so it does not inherit the permission flags
     // from the loop session. Without Codex's unattended flag it can stop at an approval
-    // prompt and the new loop remains named "New Loop" forever.
+    // prompt and the new loop remains named "NewLoop" forever.
     case .codex:
       command =
         "exec codex exec --dangerously-bypass-approvals-and-sandbox \"$\(promptVariable)\""

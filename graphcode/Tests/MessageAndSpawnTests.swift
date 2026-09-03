@@ -181,7 +181,7 @@ struct MessageAndSpawnTests {
     await store.handle(.nodeCheckApproved(nodes[0].id))
 
     let titles = await store.graph.nodes.map(\.title)
-    #expect(titles == ["Triage", "Worker", "Worker #2", "Worker #3"])
+    #expect(titles == ["Triage", "Worker", "Worker2", "Worker3"])
   }
 
   @Test
@@ -205,13 +205,13 @@ struct MessageAndSpawnTests {
     await store.handle(.nodeCheckApproved(trigger.id))
 
     let instance = try? #require(await store.graph.nodes.last)
-    #expect(instance?.title == "Worker #2")
+    #expect(instance?.title == "Worker2")
     #expect(instance?.modelTier == .capable)
     #expect(instance?.worktreeBinding == worktree)
     #expect(instance?.triggerPrompt == "/loop 1h Check")
     // An unattended instance starts working immediately — spawning it and not running it
     // would just litter the graph.
-    #expect(started.value.map(\.title) == ["Worker #2"])
+    #expect(started.value.map(\.title) == ["Worker2"])
   }
 
   @Test
