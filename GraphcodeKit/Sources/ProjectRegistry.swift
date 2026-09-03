@@ -271,6 +271,13 @@ public actor ProjectRegistry {
       guard graph.executionMode == .goobers else { continue }
       let workspace = GoobersWorkspace(
         graphID: graph.id, baseDirectory: persistenceDirectory)
+      let triggersEnabled = GraphcodeSettingsStore.load().effectiveGoobersTriggersEnabled
+      let shouldArmTriggers = triggersEnabled && !graph.goobersTriggers.isEmpty
+      if workspace.triggersActive != shouldArmTriggers {
+        var exported = graph
+        if !shouldArmTriggers { exported.goobersTriggers = [] }
+        try? await workspace.synchronize(exported)
+      }
       let client = GoobersClient(instanceRoot: workspace.root)
       guard let runs = try? await client.runs(limit: 10),
         let latest = runs.runs.first(where: {
@@ -632,6 +639,14 @@ public actor ProjectRegistry {
         await GoobersWorkspace(
           graphID: graphID, baseDirectory: goobersDirectory
         ).stopDaemon()
+      },
+      onGoobersTriggersEnabled: {
+        GraphcodeSettingsStore.load().effectiveGoobersTriggersEnabled
+      },
+      onSyncGoobers: { graph in
+        _ = try await GoobersWorkspace(
+          graphID: graph.id, baseDirectory: goobersDirectory
+        ).synchronize(graph)
       },
       onComposeBoard: composeBoard,
       onBoardsEnabled: {

@@ -176,6 +176,11 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// Export the current graph snapshot, ensure its private Goobers daemon, and trigger
   /// one run. Refused unless the graph is explicitly in Goobers mode.
   case runGoobers
+  /// Add one Goobers-native entry point. The daemon synchronizes the graph's private
+  /// instance immediately, so a schedule is armed without requiring a manual run first.
+  case addGoobersTrigger(LoopGraph.GoobersTrigger)
+  /// Return the workflow to manual-only execution while preserving Goobers mode.
+  case clearGoobersTriggers
   /// Route a command into a composite node's sub-graph. Editing a composite's insides is
   /// the same set of operations as editing any graph, so it reuses them wholesale rather
   /// than growing a parallel vocabulary.

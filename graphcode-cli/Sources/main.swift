@@ -73,7 +73,11 @@ if case .reap(let dryRun) = command {
 
 let client: DaemonSocketClient
 do {
-  client = try DaemonSocketClient()
+  // Trigger synchronization deliberately restarts a graph-owned Goobers daemon after
+  // replacing its config; its bounded stop + readiness window can exceed the original
+  // ten-second CLI budget. This only changes how long the CLI waits for graphcoded's
+  // acknowledgement — it does not retry a possibly-applied mutation.
+  client = try DaemonSocketClient(timeout: 30)
 } catch DaemonSocketClient.ClientError.daemonNotRunning {
   fail("graphcoded isn't running. Start it with `make daemon-install`.", code: ExitCode.unavailable)
 } catch {
@@ -217,6 +221,29 @@ do {
     try runAndPrintGraph(
       projectPath: projectPath,
       [.graphCommand(projectPath: projectPath, command: .runGoobers)])
+
+  case .addGraphSchedule(let projectPath, let expression):
+    try runAndPrintGraph(
+      projectPath: projectPath,
+      [
+        .graphCommand(
+          projectPath: projectPath,
+          command: .addGoobersTrigger(.schedule(expression)))
+      ])
+
+  case .addGraphWebhook(let projectPath, let events):
+    try runAndPrintGraph(
+      projectPath: projectPath,
+      [
+        .graphCommand(
+          projectPath: projectPath,
+          command: .addGoobersTrigger(.webhook(events: events)))
+      ])
+
+  case .clearGraphTriggers(let projectPath):
+    try runAndPrintGraph(
+      projectPath: projectPath,
+      [.graphCommand(projectPath: projectPath, command: .clearGoobersTriggers)])
 
   case .deleteNode(let projectPath, let nodeID):
     try runAndPrintGraph(

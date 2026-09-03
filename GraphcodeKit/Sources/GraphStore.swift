@@ -93,6 +93,8 @@ public actor GraphStore {
   private let onRunGoobers: (@Sendable (LoopGraph) async throws -> GoobersWorkspace.Dispatch)?
   /// Stop the graph's private daemon when its owner switches back to GraphCode sessions.
   private let onStopGoobers: (@Sendable (UUID) async -> Void)?
+  private let onGoobersTriggersEnabled: (@Sendable () -> Bool)?
+  private let onSyncGoobers: (@Sendable (LoopGraph) async throws -> Void)?
   /// Draws one finished pass (`SummaryBoardComposer`). `nil` when nothing composes boards,
   /// which is every test that did not ask for one.
   private let onComposeBoard:
@@ -238,6 +240,8 @@ public actor GraphStore {
     onGoobersEnabled: (@Sendable () -> Bool)? = nil,
     onRunGoobers: (@Sendable (LoopGraph) async throws -> GoobersWorkspace.Dispatch)? = nil,
     onStopGoobers: (@Sendable (UUID) async -> Void)? = nil,
+    onGoobersTriggersEnabled: (@Sendable () -> Bool)? = nil,
+    onSyncGoobers: (@Sendable (LoopGraph) async throws -> Void)? = nil,
     onComposeBoard: (
       @Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?
     )? = nil,
@@ -273,6 +277,8 @@ public actor GraphStore {
     self.onGoobersEnabled = onGoobersEnabled
     self.onRunGoobers = onRunGoobers
     self.onStopGoobers = onStopGoobers
+    self.onGoobersTriggersEnabled = onGoobersTriggersEnabled
+    self.onSyncGoobers = onSyncGoobers
     self.onComposeBoard = onComposeBoard
     self.onBoardsEnabled = onBoardsEnabled
     self.onResolveTemplate = onResolveTemplate
@@ -692,6 +698,12 @@ public actor GraphStore {
 
     case .runGoobers:
       await runGoobers()
+
+    case .addGoobersTrigger(let trigger):
+      await addGoobersTrigger(trigger)
+
+    case .clearGoobersTriggers:
+      await clearGoobersTriggers()
 
     case .subGraphCommand(let nodeID, let inner):
       await runInSubGraph(nodeID, inner)
@@ -1999,11 +2011,60 @@ public actor GraphStore {
       return
     }
     do {
-      let dispatch = try await run(graph)
+      var exported = graph
+      if onGoobersTriggersEnabled?() != true { exported.goobersTriggers = [] }
+      let dispatch = try await run(exported)
       graph.goobersRun = LoopGraph.GoobersRun(
         id: dispatch.runID, snapshotID: dispatch.snapshotID, phase: "running")
       resetGraphForExternalExecution(running: true)
     } catch {
+      announceError(error.localizedDescription)
+    }
+  }
+
+  private func addGoobersTrigger(_ trigger: LoopGraph.GoobersTrigger) async {
+    guard graph.executionMode == .goobers else {
+      announceError("mark this graph as Goobers-managed before adding triggers")
+      return
+    }
+    guard onGoobersTriggersEnabled?() == true else {
+      announceError("enable Goobers triggers and webhooks in Settings first")
+      return
+    }
+    guard trigger.isValid else {
+      announceError("the Goobers trigger is incomplete")
+      return
+    }
+    let duplicate = graph.goobersTriggers.contains {
+      $0.kind == trigger.kind && $0.schedule == trigger.schedule && $0.events == trigger.events
+    }
+    guard !duplicate else { return }
+    guard let sync = onSyncGoobers else {
+      announceError("Goobers trigger synchronization is unavailable")
+      return
+    }
+    let previous = graph.goobersTriggers
+    graph.goobersTriggers.append(trigger)
+    do {
+      try await sync(graph)
+    } catch {
+      graph.goobersTriggers = previous
+      announceError(error.localizedDescription)
+    }
+  }
+
+  private func clearGoobersTriggers() async {
+    guard graph.executionMode == .goobers, !graph.goobersTriggers.isEmpty else { return }
+    guard let sync = onSyncGoobers else {
+      announceError("Goobers trigger synchronization is unavailable")
+      return
+    }
+    let previous = graph.goobersTriggers
+    graph.goobersTriggers = []
+    do {
+      try await sync(graph)
+    } catch {
+      graph.goobersTriggers = previous
       announceError(error.localizedDescription)
     }
   }

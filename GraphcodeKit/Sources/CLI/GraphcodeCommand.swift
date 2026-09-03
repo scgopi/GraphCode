@@ -49,6 +49,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
   case exportGraph(projectPath: String, output: String)
   case setGraphExecutionMode(projectPath: String, mode: LoopGraph.ExecutionMode)
   case runGoobersGraph(projectPath: String)
+  case addGraphSchedule(projectPath: String, expression: String)
+  case addGraphWebhook(projectPath: String, events: [String])
+  case clearGraphTriggers(projectPath: String)
   case importNodes(projectPath: String, fromZip: String, asChildOf: UUID? = nil)
   /// The Artifactory verbs (docs/03-architecture.md#cli-graphcode): the shared,
   /// unaddressed board any loop can write to and read. Attribution is not parsed —
@@ -133,6 +136,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
                            choose one orchestrator for the whole graph
       graphcode graph run <project-path>
                            export and trigger one run of a Goobers-managed graph
+      graphcode graph trigger <project-path> schedule <cron-or-@every>
+      graphcode graph trigger <project-path> webhook <event> [event…]
+      graphcode graph trigger <project-path> clear
+                           configure Goobers-owned entry points (experimental)
       graphcode node import <project-path> <file.zip> [--as-child-of <parent-id>]
                            splices a bundle's loops in with fresh identities; name a
                            parent to hang them under an existing loop
@@ -347,6 +354,25 @@ public enum GraphcodeCommand: Equatable, Sendable {
         let path = try take(&arguments, name: "project-path")
         try validateFlags(arguments, allowed: [])
         return .runGoobersGraph(projectPath: path)
+      case "trigger":
+        let path = try take(&arguments, name: "project-path")
+        let kind = try take(&arguments, name: "trigger-kind")
+        switch kind {
+        case "schedule":
+          let expression = try take(&arguments, name: "schedule")
+          try validateFlags(arguments, allowed: [])
+          return .addGraphSchedule(projectPath: path, expression: expression)
+        case "webhook":
+          guard !arguments.isEmpty else { throw ParseError.missingArgument("webhook-event") }
+          let events = arguments
+          try validateFlags(events, allowed: [])
+          return .addGraphWebhook(projectPath: path, events: events)
+        case "clear":
+          try validateFlags(arguments, allowed: [])
+          return .clearGraphTriggers(projectPath: path)
+        default:
+          throw ParseError.invalidValue(argument: "trigger-kind", value: kind)
+        }
       default:
         throw ParseError.unknownCommand("graph \(verb)")
       }
@@ -794,6 +820,14 @@ extension GraphcodeCommand {
           return " · \($0.trigger) · \($0.phase)\(stage) · run \($0.id)"
         } ?? ""
       lines.append("  execution: goobers\(run)")
+      for trigger in graph.goobersTriggers {
+        switch trigger.kind {
+        case .schedule:
+          lines.append("  trigger: schedule · \(trigger.schedule ?? "")")
+        case .webhook:
+          lines.append("  trigger: webhook · \(trigger.events.joined(separator: ", "))")
+        }
+      }
     }
     if graph.nodes.isEmpty {
       lines.append("  no loops yet")

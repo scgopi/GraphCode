@@ -182,25 +182,34 @@ public enum GoobersExport {
   /// to `scheduler/api.address`, which is the only address GraphCode trusts.
   public static func runtimeInstance(
     project: ProjectCoordinates,
-    apiListen: String = "127.0.0.1:0"
+    apiListen: String = "127.0.0.1:0",
+    webhookSecretFile: String? = nil
   ) -> String {
-    """
-    api:
-      listen: \(apiListen)
-    apiVersion: goobers.dev/v1alpha1
-    kind: Instance
-    repos:
-      - provider: github
-        owner: \(project.owner)
-        name: \(project.name)
-        token:
-          env: GOOBERS_GITHUB_TOKEN
-    runConditions:
-      maxParallelRuns: 1
-    telemetry:
-      enabled: true
-
-    """
+    var lines = [
+      "api:",
+      "  listen: \(apiListen)",
+      "apiVersion: goobers.dev/v1alpha1",
+      "kind: Instance",
+      "repos:",
+      "  - provider: github",
+      "    owner: \(project.owner)",
+      "    name: \(project.name)",
+      "    token:",
+      "      env: GOOBERS_GITHUB_TOKEN",
+      "runConditions:",
+      "  maxParallelRuns: 1",
+      "telemetry:",
+      "  enabled: true",
+    ]
+    if let webhookSecretFile {
+      lines.append(contentsOf: [
+        "webhook:",
+        "  listen: 127.0.0.1:0",
+        "  secret:",
+        "    file: \(yamlScalar(webhookSecretFile))",
+      ])
+    }
+    return lines.joined(separator: "\n") + "\n"
   }
 
   /// Where the gaggle's work lives. Separate from `ProjectRef` because a GraphCode
@@ -260,6 +269,7 @@ public enum GoobersExport {
     var tasks: [Task]
     var gates: [Gate]
     var roles: [Role]
+    var triggers: [LoopGraph.GoobersTrigger]
   }
 
   // MARK: - Planning
@@ -441,7 +451,8 @@ public enum GoobersExport {
       start: start,
       tasks: ordered,
       gates: gates,
-      roles: roles.values.sorted { $0.name < $1.name })
+      roles: roles.values.sorted { $0.name < $1.name },
+      triggers: graph.goobersTriggers)
   }
 
   // MARK: - Graph analysis
@@ -720,10 +731,28 @@ public enum GoobersExport {
       "  gaggle: \(plan.gaggleName)",
       "  displayName: \(yamlScalar(plan.displayName))",
       "  triggers:",
-      "    - type: manual",
+    ]
+    if plan.triggers.isEmpty {
+      lines.append("    - type: manual")
+    } else {
+      for trigger in plan.triggers {
+        switch trigger.kind {
+        case .schedule:
+          lines.append("    - type: schedule")
+          lines.append("      schedule: \(yamlScalar(trigger.schedule ?? ""))")
+        case .webhook:
+          lines.append("    - type: webhook")
+          lines.append("      events:")
+          for event in trigger.events {
+            lines.append("        - \(yamlScalar(event))")
+          }
+        }
+      }
+    }
+    lines.append(contentsOf: [
       "  start: \(plan.start)",
       "  tasks:",
-    ]
+    ])
 
     for task in plan.tasks {
       lines.append("    - name: \(task.name)")

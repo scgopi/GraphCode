@@ -68,6 +68,50 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     }
   }
 
+  public struct GoobersTrigger: Identifiable, Codable, Equatable, Sendable {
+    public enum Kind: String, Codable, Equatable, Sendable {
+      case schedule
+      case webhook
+    }
+
+    public let id: UUID
+    public var kind: Kind
+    public var schedule: String?
+    public var events: [String]
+
+    public init(
+      id: UUID = UUID(),
+      kind: Kind,
+      schedule: String? = nil,
+      events: [String] = []
+    ) {
+      self.id = id
+      self.kind = kind
+      self.schedule = schedule
+      self.events = events
+    }
+
+    public static func schedule(_ expression: String) -> Self {
+      Self(kind: .schedule, schedule: expression)
+    }
+
+    public static func webhook(events: [String]) -> Self {
+      Self(kind: .webhook, events: events)
+    }
+
+    public var isValid: Bool {
+      switch kind {
+      case .schedule:
+        return schedule?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+      case .webhook:
+        return !events.isEmpty
+          && events.allSatisfy {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+          }
+      }
+    }
+  }
+
   public let id: UUID
   public var scope: LoopGraphScope
   public var nodes: IdentifiedArrayOf<LoopNode>
@@ -78,6 +122,9 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   /// The newest Goobers run GraphCode started for this graph. Goobers remains the source
   /// of truth for its lifecycle; this is the durable join key for monitoring.
   public var goobersRun: GoobersRun?
+  /// Goobers-native entry points. Empty preserves manual-only execution. These are
+  /// inert unless both experimental settings are on and this graph is Goobers-managed.
+  public var goobersTriggers: [GoobersTrigger] = []
   /// The project's Artifactory — every post any loop has dropped onto the shared board,
   /// oldest first, notes and mirrored records each capped on their own budget
   /// (`Artifactory.maxNotes`, `Artifactory.maxRecords`). Kept on the graph rather than in a
@@ -312,7 +359,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   // MARK: - Coding
 
   private enum CodingKeys: String, CodingKey {
-    case id, nodes, edges, artifactory, executionMode, goobersRun
+    case id, nodes, edges, artifactory, executionMode, goobersRun, goobersTriggers
     /// Persisted as a `ProjectRef` rather than as the scope enum. Every graph on disk
     /// predates `LoopGraphScope`, and the ref round-trips both cases losslessly (the
     /// global graph's reserved path decodes straight back to `.global`), so there was
@@ -331,6 +378,8 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     executionMode =
       try container.decodeIfPresent(ExecutionMode.self, forKey: .executionMode) ?? .graphcode
     goobersRun = try container.decodeIfPresent(GoobersRun.self, forKey: .goobersRun)
+    goobersTriggers =
+      try container.decodeIfPresent([GoobersTrigger].self, forKey: .goobersTriggers) ?? []
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -346,5 +395,8 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
       try container.encode(executionMode, forKey: .executionMode)
     }
     try container.encodeIfPresent(goobersRun, forKey: .goobersRun)
+    if !goobersTriggers.isEmpty {
+      try container.encode(goobersTriggers, forKey: .goobersTriggers)
+    }
   }
 }

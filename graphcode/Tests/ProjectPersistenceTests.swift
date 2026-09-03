@@ -38,6 +38,7 @@ struct ProjectPersistenceTests {
     graph.goobersRun = LoopGraph.GoobersRun(
       id: "run-1", snapshotID: "snapshot-1", phase: "running",
       startedAt: Date(timeIntervalSince1970: 100))
+    graph.goobersTriggers = [.schedule("@every 5m")]
 
     persistence.saveGraph(graph)
     let loaded = persistence.loadGraph(path: project.path)
@@ -45,6 +46,7 @@ struct ProjectPersistenceTests {
     #expect(loaded?.executionMode == .goobers)
     #expect(loaded?.goobersRun?.id == "run-1")
     #expect(loaded?.goobersRun?.snapshotID == "snapshot-1")
+    #expect(loaded?.goobersTriggers.first?.schedule == "@every 5m")
 
     let oldGraph = """
       {"id":"\(UUID().uuidString)","project":{"path":"/tmp/old","name":"old","lastOpenedAt":0},"nodes":[],"edges":[]}

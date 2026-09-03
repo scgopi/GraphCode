@@ -61,9 +61,15 @@ public struct GoobersWorkspace: Sendable {
     let snapshotID = UUID().uuidString.lowercased()
 
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    try GoobersExport.runtimeInstance(project: project)
+    let instance = try runtimeInstance(for: graph, project: project)
+    try instance
       .write(
         to: root.appendingPathComponent("instance.yaml"),
+        atomically: true,
+        encoding: .utf8)
+    try (graph.goobersTriggers.isEmpty ? "false\n" : "true\n")
+      .write(
+        to: root.appendingPathComponent("graphcode-triggers-active"),
         atomically: true,
         encoding: .utf8)
 
@@ -77,7 +83,7 @@ public struct GoobersWorkspace: Sendable {
       .appendingPathComponent(snapshotID, isDirectory: true)
     try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
     try writeConfig(bundle, to: snapshot.appendingPathComponent("config", isDirectory: true))
-    try GoobersExport.runtimeInstance(project: project)
+    try instance
       .write(
         to: snapshot.appendingPathComponent("instance.yaml"),
         atomically: true,
@@ -106,6 +112,17 @@ public struct GoobersWorkspace: Sendable {
     }
     try record(runID: runID, prepared: prepared)
     return Dispatch(runID: runID, snapshotID: prepared.snapshotID)
+  }
+
+  @discardableResult
+  public func synchronize(
+    _ graph: LoopGraph,
+    executable: URL? = nil
+  ) async throws -> Prepared {
+    let prepared = try prepare(graph)
+    await stopDaemon()
+    _ = try await ensureDaemon(executable: executable)
+    return prepared
   }
 
   public func ensureDaemon(executable: URL? = nil) async throws -> GoobersClient {
@@ -175,6 +192,15 @@ public struct GoobersWorkspace: Sendable {
       let record = try? JSONDecoder().decode(Record.self, from: data)
     else { return nil }
     return record.snapshotID
+  }
+
+  public var triggersActive: Bool {
+    guard
+      let value = try? String(
+        contentsOf: root.appendingPathComponent("graphcode-triggers-active"),
+        encoding: .utf8)
+    else { return false }
+    return value.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
   }
 
   static func projectCoordinates(at path: String) throws -> GoobersExport.ProjectCoordinates {
@@ -286,6 +312,25 @@ public struct GoobersWorkspace: Sendable {
         at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
       try contents.write(to: destination, atomically: true, encoding: .utf8)
     }
+  }
+
+  private func runtimeInstance(
+    for graph: LoopGraph,
+    project: GoobersExport.ProjectCoordinates
+  ) throws -> String {
+    guard graph.goobersTriggers.contains(where: { $0.kind == .webhook }) else {
+      return GoobersExport.runtimeInstance(project: project)
+    }
+    let directory = root.appendingPathComponent("secrets", isDirectory: true)
+    let secret = directory.appendingPathComponent("webhook-secret")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    if !FileManager.default.fileExists(atPath: secret.path) {
+      try UUID().uuidString.write(to: secret, atomically: true, encoding: .utf8)
+      try FileManager.default.setAttributes(
+        [.posixPermissions: 0o600], ofItemAtPath: secret.path)
+    }
+    return GoobersExport.runtimeInstance(
+      project: project, webhookSecretFile: secret.path)
   }
 
   private func replaceConfig(with staging: URL) throws {
