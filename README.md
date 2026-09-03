@@ -69,6 +69,10 @@ Releases are Developer ID signed and notarized.
 | `zmx` | Third-party session daemon that keeps each loop's PTY alive ([zmx.sh](https://zmx.sh)) |
 | GhosttyKit | Third-party terminal engine rendering each surface ([ghostty.org](https://ghostty.org)) |
 
+The experimental [GraphCode + Goobers integration roadmap](GOOBERS-INTEGRATION.md)
+documents the execution boundary, current prototype, remaining trigger work, and the path
+from local workflows to hosted/MDB execution.
+
 State lives in `~/.graphcode/` — graphs, recents, layouts, the daemon socket and logs, and the installed
 binaries. **Nothing is ever written inside a project folder you open.**
 
