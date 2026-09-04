@@ -14,25 +14,33 @@ enum ArtifactoryPresentation {
     enabled && !graph.artifactory.isEmpty
   }
 
-  /// The posts somebody wrote on purpose, newest last — the direction the summary and
-  /// the terminal beside it already run.
-  static func notes(in graph: LoopGraph) -> [ArtifactoryPost] {
-    graph.artifactory.filter { $0.kind == .note }
+  /// Everything somebody wrote, newest last — the direction the summary and the
+  /// terminal beside it already run. Notes to the room and the loop-to-loop messages
+  /// mirrored from `node send` and payload-carrying edges, which are the same act:
+  /// a loop chose those words for somebody to read.
+  ///
+  /// The split used to be `kind`, and `kind` is a budget. Mirrored traffic prunes on
+  /// its own quota, so every direct message was a `.record` and every `.record` was
+  /// hidden — which put a root-cause correction between two loops in the one place on
+  /// the board nobody reads (#273).
+  static func posts(in graph: LoopGraph) -> [ArtifactoryPost] {
+    graph.artifactory.filter(\.wasWritten)
   }
 
-  /// The mirrored direct messages and handoffs. Kept apart from the notes because they
-  /// are receipts for deliveries that already happened, not something written to be
-  /// read here.
-  static func records(in graph: LoopGraph) -> [ArtifactoryPost] {
-    graph.artifactory.filter { $0.kind == .record }
+  /// The bookkeeping half of the mirrored traffic: a hand-off that carried no payload,
+  /// an edge whose whole message is that the upstream finished. That two loops spoke is
+  /// all a reader needs from these, so they roll up rather than take a row each.
+  static func receipts(in graph: LoopGraph) -> [ArtifactoryPost] {
+    graph.artifactory.filter { !$0.wasWritten }
   }
 
-  /// How many notes have landed since the human last looked — `seenPostID` is
-  /// `LoopWorkspaceFeature.seenArtifactoryPostID`, not the loop's sync cursor. Records
-  /// are excluded: they are folded away by default, and a badge counting mail nobody is
-  /// being shown is a badge that cannot be cleared.
-  static func unreadNoteCount(graph: LoopGraph, seenPostID: Int?) -> Int {
-    Artifactory.unread(in: notes(in: graph), since: seenPostID).count
+  /// How many written posts have landed since the human last looked — `seenPostID` is
+  /// `LoopWorkspaceFeature.seenArtifactoryPostID`, not the loop's sync cursor. Receipts
+  /// are excluded, and the rule is the one that has always governed this badge: it
+  /// counts what the section shows, because a badge counting mail nobody is being shown
+  /// is a badge that cannot be cleared.
+  static func unreadCount(graph: LoopGraph, seenPostID: Int?) -> Int {
+    Artifactory.unread(in: posts(in: graph), since: seenPostID).count
   }
 }
 
@@ -59,32 +67,38 @@ struct ArtifactorySection: View {
   /// which is exactly what a person talking to the whole graph is.
   let onPost: (String, String?) -> Void
 
-  /// Whether the mirrored records are unfolded. Local and unpersisted, unlike the
-  /// section's own fold: opening the receipts is a thing you do once to answer a
-  /// question, not a way you prefer to read the board.
   /// The most the board's scroll box will ever be, on any window: about ten posts at
   /// the rail's default width — enough to read a conversation, not so many that the
   /// rail is nothing but the board. The rail hands down a smaller cap on a short
   /// window (`LoopWorkspaceRail.artifactoryHeightCap`); this is the ceiling on that.
   static let maxScrollHeight: CGFloat = 600
 
-  @State private var showsRecords = false
+  /// Whether the receipts are unfolded — persisted beside the section's own fold. It
+  /// was local `@State` on the reasoning that opening the receipts is a thing you do
+  /// once to answer a question; in practice the rollup forgot it had been opened every
+  /// time you changed loops, which is not a preference the app gets to keep re-asking.
+  @AppStorage(LoopWorkspaceRail.artifactoryReceiptsShownDefaultsKey)
+  private var showsReceipts = false
+  /// Whether the rollup shows every receipt or stops at the newest few. Deliberately
+  /// not persisted, unlike the line above: this is a drill-down inside something you
+  /// already opened, and the default it returns to is the short one.
+  @State private var showsAllReceipts = false
   @State private var isComposing = false
   @State private var draft = ""
   @State private var draftTopic = ""
   @FocusState private var draftFocused: Bool
 
-  private var notes: [ArtifactoryPost] { ArtifactoryPresentation.notes(in: graph) }
-  private var records: [ArtifactoryPost] { ArtifactoryPresentation.records(in: graph) }
+  private var posts: [ArtifactoryPost] { ArtifactoryPresentation.posts(in: graph) }
+  private var receipts: [ArtifactoryPost] { ArtifactoryPresentation.receipts(in: graph) }
   private var unread: Int {
-    ArtifactoryPresentation.unreadNoteCount(graph: graph, seenPostID: seenPostID)
+    ArtifactoryPresentation.unreadCount(graph: graph, seenPostID: seenPostID)
   }
 
-  /// The id the unread rule is drawn above — the first note that landed after the human
+  /// The id the unread rule is drawn above — the first post that landed after the human
   /// last looked. `nil` when everything is read, which is when nothing should be drawn.
   private var firstUnreadID: Int? {
     guard unread > 0 else { return nil }
-    return notes.suffix(unread).first?.id
+    return posts.suffix(unread).first?.id
   }
 
   var body: some View {
@@ -95,8 +109,8 @@ struct ArtifactorySection: View {
       } else {
         ScrollView(.vertical) {
           VStack(alignment: .leading, spacing: 11) {
-            recordsRollup
-            ForEach(notes) { post in
+            receiptsRollup
+            ForEach(posts) { post in
               if post.id == firstUnreadID { sinceYouLooked }
               postRow(post)
             }
@@ -139,7 +153,7 @@ struct ArtifactorySection: View {
   }
 
   private var unreadIDs: Set<Int> {
-    Set(notes.suffix(unread).map(\.id))
+    Set(posts.suffix(unread).map(\.id))
   }
 
   // MARK: - Header
@@ -173,14 +187,14 @@ struct ArtifactorySection: View {
     .help(isFolded ? "Show the board" : "Collapse to one line")
   }
 
-  /// Folded keeps the newest note, for the reason the summary's fold keeps its beat: a
+  /// Folded keeps the newest post, for the reason the summary's fold keeps its beat: a
   /// folded section that shows nothing is a section you forget exists.
   private var foldedLine: some View {
     HStack(spacing: 6) {
       Circle()
-        .fill(accent(for: notes.last))
+        .fill(accent(for: posts.last))
         .frame(width: 6, height: 6)
-      Text(notes.last?.body ?? "no notes yet")
+      Text(posts.last?.body ?? "no notes yet")
         .font(.system(size: 11.5))
         .foregroundStyle(.white.opacity(0.75))
         .lineLimit(1)
@@ -230,51 +244,69 @@ struct ArtifactorySection: View {
     }
   }
 
-  // MARK: - Records
+  // MARK: - Receipts
 
-  /// The mirrored traffic, one line each and never a body: a record says that two loops
+  /// How many receipts the rollup shows before it offers the rest — enough to see what
+  /// the graph has been doing lately without the bookkeeping outgrowing the board it
+  /// sits above.
+  private static let receiptsShownAtFirst = 8
+
+  private var visibleReceipts: [ArtifactoryPost] {
+    showsAllReceipts ? receipts : Array(receipts.suffix(Self.receiptsShownAtFirst))
+  }
+
+  /// The bookkeeping, one line each and never a body: a receipt says that two loops
   /// spoke, which is all a reader of the board needs from it.
   @ViewBuilder
-  private var recordsRollup: some View {
-    if !records.isEmpty {
+  private var receiptsRollup: some View {
+    if !receipts.isEmpty {
       VStack(alignment: .leading, spacing: 7) {
         HStack(spacing: 6) {
-          Image(systemName: showsRecords ? "chevron.down" : "chevron.right")
+          Image(systemName: showsReceipts ? "chevron.down" : "chevron.right")
             .font(.system(size: 8, weight: .semibold))
             .foregroundStyle(.white.opacity(0.38))
           Text(
-            records.count == 1 ? "1 message record" : "\(records.count) message records"
+            receipts.count == 1
+              ? "1 delivery receipt" : "\(receipts.count) delivery receipts"
           )
           .font(.system(size: 10.5))
           .foregroundStyle(.white.opacity(0.5))
           Spacer(minLength: 0)
         }
         .contentShape(Rectangle())
-        .onTapGesture { showsRecords.toggle() }
-        if showsRecords {
+        .onTapGesture { showsReceipts.toggle() }
+        if showsReceipts {
           VStack(alignment: .leading, spacing: 7) {
-            ForEach(records.suffix(8)) { record in
+            ForEach(visibleReceipts) { receipt in
               HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(ArtifactoryPost.stampFormat.string(from: record.at))
+                Text(ArtifactoryPost.stampFormat.string(from: receipt.at))
                   .font(.system(size: 10.5, design: .monospaced))
                   .foregroundStyle(.white.opacity(0.32))
-                Text(record.body)
+                Text(receipt.body)
                   .font(.system(size: 11))
                   .foregroundStyle(.white.opacity(0.5))
                   .lineLimit(1)
                   .truncationMode(.tail)
               }
             }
-            if records.count > 8 {
-              Text("\(records.count - 8) earlier")
-                .font(.system(size: 10.5))
-                .foregroundStyle(.white.opacity(0.4))
-            }
+            if receipts.count > visibleReceipts.count { showEarlierReceipts }
           }
           .padding(.leading, 14)
         }
       }
     }
+  }
+
+  /// The older receipts were counted and then left with no way to reach them — a line
+  /// that names something and does nothing reads as a bug in the panel. The scroll box
+  /// above already clamps its own height, so opening the rest costs the rail nothing.
+  private var showEarlierReceipts: some View {
+    Text("\(receipts.count - visibleReceipts.count) earlier — show all")
+      .font(.system(size: 10.5))
+      .foregroundStyle(.white.opacity(0.4))
+      .contentShape(Rectangle())
+      .onTapGesture { showsAllReceipts = true }
+      .help("Show every delivery receipt on this board")
   }
 
   // MARK: - Posts
@@ -329,7 +361,11 @@ struct ArtifactorySection: View {
     }
     return author.loopType.accent
   }
+}
 
+/// Kept out of the struct's own body, which sits over swiftlint's length bound: the
+/// composer is a sheet with its own state and nothing above it needs to see any of it.
+extension ArtifactorySection {
   // MARK: - Composing
 
   /// A human's voice on the board.

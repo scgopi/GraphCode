@@ -104,6 +104,12 @@ struct LoopWorkspaceRail: View {
     UserDefaults.standard.set(folded, forKey: artifactoryFoldedDefaultsKey)
   }
 
+  /// Whether the board's delivery-receipt rollup is open. Read through `@AppStorage`
+  /// rather than the reducer, because unlike the section's fold nothing outside the
+  /// section ever needs to know — but persisted all the same: a rollup that forgets it
+  /// was opened every time you change loops is one you stop opening.
+  static let artifactoryReceiptsShownDefaultsKey = "loopArtifactoryReceiptsShown"
+
   static let boardFoldedDefaultsKey = "loopBoardSectionFolded"
 
   static func loadBoardFolded() -> Bool {

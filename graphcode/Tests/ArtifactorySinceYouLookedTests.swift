@@ -47,9 +47,9 @@ struct ArtifactorySinceYouLookedTests {
   @Test
   func unreadIsTheHumansNotTheLoops() {
     let graph = makeGraph(noteIDs: [1, 2, 3], loopCursor: 3)
-    #expect(ArtifactoryPresentation.unreadNoteCount(graph: graph, seenPostID: nil) == 3)
-    #expect(ArtifactoryPresentation.unreadNoteCount(graph: graph, seenPostID: 2) == 1)
-    #expect(ArtifactoryPresentation.unreadNoteCount(graph: graph, seenPostID: 3) == 0)
+    #expect(ArtifactoryPresentation.unreadCount(graph: graph, seenPostID: nil) == 3)
+    #expect(ArtifactoryPresentation.unreadCount(graph: graph, seenPostID: 2) == 1)
+    #expect(ArtifactoryPresentation.unreadCount(graph: graph, seenPostID: 3) == 0)
   }
 
   @Test
@@ -87,20 +87,62 @@ struct ArtifactorySinceYouLookedTests {
     #expect(store.state.seenArtifactoryPostID == nil)
   }
 
-  /// A record (mirrored `node send`) is not a note: it is folded away, so it must not
-  /// be what "looked" advances to, or a badge could count something never drawn.
+  /// A delivery receipt is folded away, so it must not be what "looked" advances to, or
+  /// a badge could count something never drawn.
   @Test
   @MainActor
-  func lookedAdvancesToTheNewestNoteNotTheNewestRecord() async {
+  func lookedAdvancesToTheNewestPostNotTheNewestReceipt() async {
     var graph = makeGraph(noteIDs: [1, 2], loopCursor: nil)
-    graph.artifactory.append(
-      ArtifactoryPost(
-        id: 3, at: Date(), authorID: nil, author: "a human", topic: "direct",
-        body: "@Worker: hi", kind: .record))
+    graph.artifactory.append(receipt(id: 3))
     let store = makeStore(graph: graph, railVisible: true)
 
     await store.send(.workspaceLeft)
 
     #expect(store.state.seenArtifactoryPostID == 2)
+  }
+
+  /// The other half of #273: a mirrored `node send` carries the whole text a loop typed,
+  /// so it is shown, counted, and cleared like any other post. It prunes on the record
+  /// budget all the same — that is a quota, not a verdict on whether anyone should read
+  /// it.
+  @Test
+  func aWrittenMessageIsShownAndCounted() {
+    var graph = makeGraph(noteIDs: [1, 2], loopCursor: nil)
+    graph.artifactory.append(
+      ArtifactoryPost(
+        id: 3, at: Date(), authorID: nil, author: "Peer", topic: "direct",
+        body: "@Worker: truncation is not the mechanism", kind: .record, wasWritten: true))
+    graph.artifactory.append(receipt(id: 4))
+
+    #expect(ArtifactoryPresentation.posts(in: graph).map(\.id) == [1, 2, 3])
+    #expect(ArtifactoryPresentation.receipts(in: graph).map(\.id) == [4])
+    #expect(ArtifactoryPresentation.unreadCount(graph: graph, seenPostID: 2) == 1)
+  }
+
+  /// The badge must stay clearable: everything it counts has to be something leaving the
+  /// workspace marks as looked at.
+  @Test
+  @MainActor
+  func aWrittenMessageClearsTheBadge() async {
+    var graph = makeGraph(noteIDs: [1, 2], loopCursor: nil)
+    graph.artifactory.append(
+      ArtifactoryPost(
+        id: 3, at: Date(), authorID: nil, author: "Peer", topic: "direct",
+        body: "@Worker: correction accepted", kind: .record, wasWritten: true))
+    graph.artifactory.append(receipt(id: 4))
+    let store = makeStore(graph: graph, railVisible: true)
+
+    await store.send(.workspaceLeft)
+
+    #expect(store.state.seenArtifactoryPostID == 3)
+    #expect(
+      ArtifactoryPresentation.unreadCount(
+        graph: graph, seenPostID: store.state.seenArtifactoryPostID) == 0)
+  }
+
+  private func receipt(id: Int) -> ArtifactoryPost {
+    ArtifactoryPost(
+      id: id, at: Date(), authorID: nil, author: "a human", topic: "handoff",
+      body: "@Worker: Peer finished and handed its work off to you.", kind: .record)
   }
 }

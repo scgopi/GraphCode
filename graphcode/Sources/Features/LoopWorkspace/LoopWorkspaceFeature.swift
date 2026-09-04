@@ -326,7 +326,7 @@ struct LoopWorkspaceFeature {
         // folded section showed no posts, and marking them seen would clear a badge
         // the human never had a chance to read.
         if state.isRailVisible, !state.isArtifactoryFolded,
-          let newest = ArtifactoryPresentation.notes(in: state.graph).last?.id
+          let newest = ArtifactoryPresentation.posts(in: state.graph).last?.id
         {
           state.seenArtifactoryPostID = newest
           LoopWorkspaceRail.saveSeenArtifactoryPost(newest, forProjectPath: state.projectPath)
