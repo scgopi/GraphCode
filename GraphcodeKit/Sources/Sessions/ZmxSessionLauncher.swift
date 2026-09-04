@@ -178,6 +178,83 @@ public enum ZmxSessionLauncher {
   /// than ride through `"$@"`: positional arguments pass untouched, so a `$HOME` in one
   /// stays a literal dollar sign forever. The remote hooks flag needs the expansion —
   /// the path is on a machine whose home directory only that shell knows.
+  /// `zmx set <name> agent=<backend>` — the stamp that says graphcode has launched this
+  /// backend into this session, and the signal `daemonReadyCheckCommand` waits on.
+  ///
+  /// It replaces a gate that could never pass. That one grepped `zmx ls` for the agent's
+  /// name in the session's `cmd=` field, and a session created by `zmx run` has no `cmd=`
+  /// field at all: zmx records a command only for `attach` (`main.zig:217`, against
+  /// `.command = null` for `run` at `:259`) and prints the field only when it is non-nil
+  /// (`util.zig:911`). Graphcode launches every loop with `zmx run -d`, so the gate was
+  /// unsatisfiable — every Codex pane spun out its sixty seconds and dropped the human
+  /// into a bare login shell while the agent underneath it ran fine (issue #272).
+  ///
+  /// The decoy, for whoever reads this next: `zmx ls` *also* truncates a long `cmd=` to a
+  /// literal `...` at a 256-byte cap (`ipc.zig:58`, `main.zig:1322`), which looks like the
+  /// bug and is not. Raising that cap or dropping the ellipsis would change nothing here —
+  /// a loop session has no `cmd=` to truncate in the first place. Only sessions created by
+  /// `attach` carry one at all.
+  ///
+  /// Written by the daemon in the same breath as the launch rather than from inside the
+  /// launch script, for one measured reason: what `zmx run` carries is *typed* into the
+  /// session's tty, and a canonical-mode tty drops everything past `MAX_CANON`
+  /// (issue #57). A stamp inside that argument spends a budget the Codex launch has
+  /// already nearly exhausted — it tipped `theLaunchStillFitsInATypedCommandLine` red the
+  /// first time it was tried. Out here it costs the typed line nothing.
+  /// The agent a node's readiness is proved with, or `nil` for a backend whose sessions
+  /// are judged by name alone.
+  ///
+  /// Codex only, because Codex is the only backend whose session the daemon creates while
+  /// the pane waits on it (`defersCodexLaunchToDaemon`) — the race #228 found. Read from
+  /// one place by the gate, the stamp and the repair together, so they cannot drift into
+  /// judging different sets of loops; and kept narrow so a bug in any of the three cannot
+  /// reach a backend that was never part of this.
+  static func readinessAgent(forNode node: LoopNode) -> String? {
+    node.backend == .codex ? node.backend.rawValue : nil
+  }
+
+  static func agentLabelCommand(zmxPath: String, forNode node: LoopNode) -> String? {
+    guard readinessAgent(forNode: node) != nil else { return nil }
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    return RemoteProjectLocation.shellQuoted(zmxPath) + " set "
+      + RemoteProjectLocation.shellQuoted(name) + " "
+      + RemoteProjectLocation.shellQuoted("\(Self.agentLabelKey)=\(node.backend.rawValue)")
+      + " >/dev/null 2>&1"
+  }
+
+  /// Stamps a session that is alive under this node's name and carries **no** agent
+  /// label — the daemon adopting a session it must have launched itself.
+  ///
+  /// Without it, one failed `zmx set` is permanent. A stamp written only in the launch
+  /// branch is only ever retried by another launch, and nothing re-launches a healthy
+  /// local loop: the liveness sweep filters to remote projects, the local ensure runs at
+  /// graph load, node creation and promotion, and a local send checks `sessionExists`
+  /// rather than this gate. The loop would sit unattachable exactly as in #272, but
+  /// intermittently — which is worse than the deterministic bug it came from. The repair
+  /// still only lands when an ensure runs, and nothing runs one periodically for a local
+  /// project; that residual is issue #276.
+  ///
+  /// Only when there is no label at all, never over one that disagrees: a session already
+  /// stamped with a different agent is a session running the wrong thing, and relaunching
+  /// it is the right answer, not relabelling it. And only from the daemon — the pane must
+  /// keep waiting for positive proof, since a bare attach shell is exactly what #228's
+  /// clause exists to reject.
+  static func adoptUnlabelledCommand(zmxPath: String, forNode node: LoopNode) -> String? {
+    guard let stamp = agentLabelCommand(zmxPath: zmxPath, forNode: node) else { return nil }
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    let listed = daemonReadyCheckCommand(zmxPath: zmxPath, sessionName: name, agent: nil)
+    let unlabelled =
+      "! " + RemoteProjectLocation.shellQuoted(zmxPath)
+      + " ls 2>/dev/null | grep -q "
+      + RemoteProjectLocation.shellQuoted("name=\(name)\t.*\t\(Self.agentLabelKey)=")
+    // The stamp cannot decide this branch's answer: having skipped the relaunch is the
+    // outcome that matters, and a stamp that failed is retried by the next ensure.
+    return "\(listed) >/dev/null 2>&1 && \(unlabelled) && { \(stamp) || true; }"
+  }
+
+  /// The label key `agentLabelCommand` writes and `daemonReadyCheckCommand` reads.
+  static let agentLabelKey = "agent"
+
   static func loginShellInvocation(
     of command: String, arguments: [String], environment: [String: String] = [:],
     scriptSuffix: String = ""
@@ -579,30 +656,42 @@ public enum ZmxSessionLauncher {
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     return daemonReadyCheckCommand(
       zmxPath: zmxPath, sessionName: name,
-      executable: node.backend == .codex ? node.backend.executableName : nil)
+      agent: readinessAgent(forNode: node))
   }
 
+  /// `agent` is a `CLISessionBackendKind.rawValue`, the same value the daemon's ensure
+  /// stamps (`agentLabelCommand`) — one source for the write and the read, so a backend
+  /// whose binary is named differently from its case (`claudeCode` → `claude`) cannot
+  /// make the two halves disagree.
   public static func daemonReadyCheckCommand(
-    zmxPath: String, sessionName: String, executable: String?
+    zmxPath: String, sessionName: String, agent: String?
   ) -> String {
     let name = RemoteProjectLocation.shellQuoted("name=\(sessionName)\t")
     var command =
       RemoteProjectLocation.shellQuoted(zmxPath)
       + " ls 2>/dev/null | grep -v -e $'\\tended=' -e $'\\terr=' | grep -q " + name
-    if let executable {
+    if let agent {
+      // The label graphcode writes (`agentLabelCommand`), not the process's own command
+      // line: `zmx ls` never shows a `cmd=` for a `zmx run` session, so the grep this
+      // replaced could not match however long it waited (issue #272).
+      // Anchored on the label's own end — a tab, or the end of the line when it is the
+      // last label zmx printed. Unanchored, `agent=codexFoo` would satisfy a Codex gate;
+      // no backend's rawValue is a prefix of another today, which makes this a trap for
+      // whoever adds the one that is, not a live bug.
       command +=
         " && " + RemoteProjectLocation.shellQuoted(zmxPath)
-        + " ls 2>/dev/null | grep -v -e $'\\tended=' -e $'\\terr=' | grep -q "
-        + RemoteProjectLocation.shellQuoted("name=\(sessionName)\t.*cmd=.*\(executable)")
+        + " ls 2>/dev/null | grep -v -e $'\\tended=' -e $'\\terr=' | grep -qE "
+        + RemoteProjectLocation.shellQuoted(
+          "name=\(sessionName)\t.*\t\(Self.agentLabelKey)=\(agent)(\t|$)")
     }
     return command
   }
 
   public static func waitingAttachCommand(
-    zmxPath: String, sessionName: String, executable: String?
+    zmxPath: String, sessionName: String, agent: String?
   ) -> [String] {
     let check = daemonReadyCheckCommand(
-      zmxPath: zmxPath, sessionName: sessionName, executable: executable)
+      zmxPath: zmxPath, sessionName: sessionName, agent: agent)
     let attach =
       RemoteProjectLocation.shellQuoted(zmxPath)
       + " attach " + RemoteProjectLocation.shellQuoted(sessionName)
@@ -1228,11 +1317,20 @@ public enum ZmxSessionLauncher {
         return ""
       }
     }()
+    // The readiness stamp closes the create branch, after the launch it describes
+    // (`agentLabelCommand`, issue #272). Joined with `;` rather than `&&` because the
+    // create script is an if/else whose exit status belongs to whichever branch ran —
+    // and it is safe to run unconditionally here, since `zmx set` against a session that
+    // was never created fails and leaves no label for the gate to find.
+    let repair = adoptUnlabelledCommand(zmxPath: "zmx", forNode: node).map { "\($0) || " } ?? ""
+    let launch =
+      agentLabelCommand(zmxPath: "zmx", forNode: node)
+      .map { "\(create) && { \($0) || true; }" } ?? create
     let script =
       "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { "
       + deliveryFragment(delivery, ifSessionMissing: check)
-      + "\(check) >/dev/null 2>&1\(bank) || { " + trustSeed + hooksWrite
-      + "\(create); }; }"
+      + "\(check) >/dev/null 2>&1\(bank) || \(repair){ " + trustSeed + hooksWrite
+      + "\(launch); }; }"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
   }
 
@@ -1669,7 +1767,9 @@ public enum ZmxSessionLauncher {
       await atomicCheckOrRun(
         checkCommand: aliveCheck, runArguments: resumeArgs,
         zmxPath: zmxPath, workingDirectory: wd,
-        logFragment: DialLog.fragment(session: name, dial: "ensure", event: "resume"))
+        logFragment: DialLog.fragment(session: name, dial: "ensure", event: "resume"),
+        stampCommand: agentLabelCommand(zmxPath: zmxPath, forNode: node),
+        repairCommand: adoptUnlabelledCommand(zmxPath: zmxPath, forNode: node))
       // `zmx run -d` reports that the *session* exists, not that what it launched
       // survived: `claude --resume` against a transcript its retention expired dies
       // within a second — and the wrapper shell it was typed with stays behind, a
@@ -1706,7 +1806,9 @@ public enum ZmxSessionLauncher {
     await atomicCheckOrRun(
       checkCommand: aliveCheck, runArguments: runArgs,
       zmxPath: zmxPath, workingDirectory: wd,
-      logFragment: DialLog.fragment(session: name, dial: "ensure", event: "fresh"))
+      logFragment: DialLog.fragment(session: name, dial: "ensure", event: "fresh"),
+      stampCommand: agentLabelCommand(zmxPath: zmxPath, forNode: node),
+      repairCommand: adoptUnlabelledCommand(zmxPath: zmxPath, forNode: node))
     await kickOffFirstPass(
       of: node, sessionNamed: name, projectPath: projectPath, after: copilotSessionBefore)
   }
@@ -1901,12 +2003,25 @@ public enum ZmxSessionLauncher {
   /// woken — the husk answered every `zmx get` (#215).
   private static func atomicCheckOrRun(
     checkCommand: String, runArguments: [String],
-    zmxPath: String, workingDirectory: String?, logFragment: String? = nil
+    zmxPath: String, workingDirectory: String?, logFragment: String? = nil,
+    stampCommand: String? = nil, repairCommand: String? = nil
   ) async {
     let run = quotedCommand([zmxPath] + runArguments)
+    // The stamp rides in the run branch, after the launch it describes and only if that
+    // launch was made: it is what the readiness gate reads, so writing it anywhere a
+    // session might not exist would say the session is ready when it is not
+    // (`agentLabelCommand`, issue #272). `|| true` because a failed stamp must not read
+    // as a failed ensure — that is a retry, and a retry runs `zmx run` against a session
+    // that is now live, which types the whole launch command into the agent's input.
+    let launch = stampCommand.map { "\(run) && { \($0) || true; }" } ?? run
+    // Repair before relaunch: an alive, unlabelled session is one whose stamp was lost,
+    // and re-running it would be that same typing disaster (`adoptUnlabelledCommand`).
+    let repair = repairCommand.map { "\($0) || " } ?? ""
     let script =
-      logFragment.map { "\(checkCommand) >/dev/null 2>&1 || { \($0); \(run); }" }
-      ?? "\(checkCommand) >/dev/null 2>&1 || \(run)"
+      logFragment.map {
+        "\(checkCommand) >/dev/null 2>&1 || \(repair){ \($0); \(launch); }"
+      }
+      ?? "\(checkCommand) >/dev/null 2>&1 || \(repair)\(launch)"
     guard
       let session = try? PTYProcessSession(
         executable: "/bin/zsh", arguments: ["-c", script],

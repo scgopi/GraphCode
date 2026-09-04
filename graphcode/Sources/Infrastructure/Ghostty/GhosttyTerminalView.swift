@@ -327,7 +327,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
     if defersCodexLaunchToDaemon {
       return ZmxSessionLauncher.waitingAttachCommand(
         zmxPath: ZmxLocator.binaryURL.path, sessionName: sessionName,
-        executable: backend.executableName)
+        agent: backend.rawValue)
     }
     if let resuming = localResumeOrFreshCommand(agentLaunch: agentCommand) {
       return resuming

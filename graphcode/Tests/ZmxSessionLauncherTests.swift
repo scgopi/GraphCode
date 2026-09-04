@@ -221,16 +221,19 @@ struct ZmxSessionLauncherTests {
       title: "Codex", loopType: .goalBased, goal: GoalSpec(summary: "work"), backend: .codex)
     let command = ZmxSessionLauncher.aliveCheckCommand(
       zmxPath: "/usr/local/bin/zmx", forNode: node)
-    #expect(command.contains("cmd=.*codex"))
+    // The label graphcode writes, never the process command line: `zmx run` records no
+    // command, so `cmd=` is a field a loop session simply does not have (issue #272).
+    #expect(command.contains("agent=codex"))
+    #expect(!command.contains("cmd="))
   }
 
   @Test
   func appWaitsForTheDaemonBeforeAttachingCodex() {
     let command = ZmxSessionLauncher.waitingAttachCommand(
-      zmxPath: "/usr/local/bin/zmx", sessionName: "graphcode-a", executable: "codex")
+      zmxPath: "/usr/local/bin/zmx", sessionName: "graphcode-a", agent: "codex")
     #expect(command.first == "/bin/zsh")
     #expect(command.last?.contains("until") == true)
-    #expect(command.last?.contains("cmd=.*codex") == true)
+    #expect(command.last?.contains("agent=codex") == true)
     #expect(command.last?.contains("exec '/usr/local/bin/zmx' attach 'graphcode-a'") == true)
     // A session the daemon never creates must not be polled at 10 Hz forever: the wait
     // gives up after a minute with a message instead of spinning.
