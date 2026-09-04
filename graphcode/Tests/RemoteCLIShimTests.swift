@@ -1,3 +1,4 @@
+import ArtifactoryKit
 import Foundation
 import Testing
 
@@ -140,7 +141,7 @@ struct RemoteCLIShimTests {
   /// that answers every decoded command with a `graphChanged` — the acknowledgement
   /// shape the real daemon uses.
   private func runShim(
-    _ arguments: [String], environment: [String: String] = [:]
+    _ arguments: [String], environment: [String: String] = [:], graph: LoopGraph? = nil
   ) throws -> ShimRun {
     // Under `/tmp` rather than `NSTemporaryDirectory()`, whose per-user path can push
     // the socket past `sun_path`'s 104 bytes.
@@ -174,7 +175,7 @@ struct RemoteCLIShimTests {
       let client = accept(listener, nil, nil)
       guard client >= 0 else { return }
       defer { close(client) }
-      let graph = LoopGraph(project: ProjectRef(path: Self.project, name: "widget"))
+      let graph = graph ?? LoopGraph(project: ProjectRef(path: Self.project, name: "widget"))
       while let data = try? FramedMessageIO.readFrame(from: client) {
         guard let command = try? JSONDecoder().decode(DaemonCommand.self, from: data)
         else { return }
@@ -216,5 +217,439 @@ struct RemoteCLIShimTests {
       stdout: String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self),
       stderr: String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self),
       commands: received.all)
+  }
+}
+
+/// The board verbs, split into their own extension: `RemoteCLIShimTests` sits at
+/// swiftlint's 350-line `type_body_length` error without them.
+extension RemoteCLIShimTests {
+  /// The board the parity tests drive: a cursor that leaves one post read, a topic and
+  /// a bare byline, a body long enough that a headline has to cut it, and one carrying
+  /// the slashes and the em dash that separate Swift's JSON escaping from Python's.
+  /// Dates are fixed so the reference-date conversion is pinned, not merely exercised.
+  private static func board() -> (LoopGraph, LoopNode) {
+    var graph = LoopGraph(project: ProjectRef(path: project, name: "widget"))
+    var reader = LoopNode(title: "Reader", loopType: .goalBased)
+    reader.lastArtifactoryRead = 1
+    graph.nodes.append(reader)
+    graph.artifactory = [
+      ArtifactoryPost(
+        id: 1, at: Date(timeIntervalSince1970: 1_756_000_000), authorID: nil,
+        author: "a human", topic: nil, body: "already read"),
+      ArtifactoryPost(
+        id: 2, at: Date(timeIntervalSince1970: 1_756_003_600), authorID: UUID(),
+        author: "BuildWatch", topic: "build",
+        body: String(repeating: "the gate is red ", count: 12)),
+      ArtifactoryPost(
+        id: 3, at: Date(timeIntervalSince1970: 1_756_007_200), authorID: nil,
+        author: "a human", topic: nil,
+        // A path and a URL on purpose: Swift's JSONEncoder escapes `/` as `\/` and
+        // Python's json.dumps does not, so a fixture without one lets `--json` drift
+        // apart silently. This is the body that catches it.
+        body: "claiming issue #12 — see docs/281.md and https://example.test/a/b",
+        kind: .record),
+    ]
+    return (graph, reader)
+  }
+
+  /// The renderer is duplicated — Swift on the Mac, Python on the remote host — and a
+  /// defective copy propagates to every remote host on the next ensure, because
+  /// `cliShimStamp` is content-derived. Byte equality against the production Swift
+  /// renderer, through the production shim source, is the only thing that makes the
+  /// duplication safe; nothing here compares against a string written by hand.
+  @Test
+  func theBoardRendersByteEqualToTheSwiftRenderer() throws {
+    let (graph, reader) = Self.board()
+    let session = ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"]
+
+    let cases: [(arguments: [String], environment: [String: String], expected: String)] = [
+      (["artifactory", "list", Self.project], [:], GraphcodeCommand.renderArtifactory(graph)),
+      (
+        ["artifactory", "list", Self.project, "--search", "RED"], [:],
+        GraphcodeCommand.renderArtifactory(graph, search: "RED")
+      ),
+      (
+        ["artifactory", "list", Self.project, "--search", "nothing-matches"], [:],
+        GraphcodeCommand.renderArtifactory(graph, search: "nothing-matches")
+      ),
+      (
+        ["artifactory", "sync", Self.project], session,
+        GraphcodeCommand.renderArtifactory(graph, unreadFor: reader.id, autoTriage: true)
+      ),
+      (
+        ["artifactory", "sync", Self.project, "--headlines"], session,
+        GraphcodeCommand.renderArtifactory(graph, unreadFor: reader.id, headlines: true)
+      ),
+      (
+        ["artifactory", "sync", Self.project, "--full"], session,
+        GraphcodeCommand.renderArtifactory(graph, unreadFor: reader.id)
+      ),
+      (
+        ["artifactory", "read", Self.project, "2"], [:],
+        GraphcodeCommand.render(graph.artifactory[1])
+      ),
+      (
+        ["artifactory", "list", Self.project, "--json"], [:],
+        GraphcodeCommand.renderArtifactoryJSON(graph)
+      ),
+      (
+        ["artifactory", "sync", Self.project, "--json"], session,
+        GraphcodeCommand.renderArtifactoryJSON(graph, unreadFor: reader.id)
+      ),
+    ]
+
+    for testCase in cases {
+      let run = try runShim(testCase.arguments, environment: testCase.environment, graph: graph)
+      #expect(run.status == 0, "\(testCase.arguments) failed: \(run.stderr)")
+      #expect(
+        run.stdout == testCase.expected + "\n",
+        "\(testCase.arguments)\nshim:  \(run.stdout)\nswift: \(testCase.expected)")
+    }
+  }
+
+  /// A board with nothing on it, and a caught-up reader, are the two shapes the parity
+  /// fixture cannot reach — and both are what a loop meets on its very first pass.
+  @Test
+  func anEmptyBoardAndACaughtUpReaderRenderByteEqualToo() throws {
+    var graph = LoopGraph(project: ProjectRef(path: Self.project, name: "widget"))
+    var reader = LoopNode(title: "Reader", loopType: .goalBased)
+    reader.lastArtifactoryRead = 3
+    graph.nodes.append(reader)
+
+    let empty = try runShim(["artifactory", "list", Self.project], graph: graph)
+    #expect(empty.stdout == GraphcodeCommand.renderArtifactory(graph) + "\n")
+
+    graph.artifactory = [
+      ArtifactoryPost(
+        id: 3, at: Date(timeIntervalSince1970: 1_756_000_000), authorID: nil,
+        author: "a human", topic: nil, body: "caught up")
+    ]
+    let synced = try runShim(
+      ["artifactory", "sync", Self.project],
+      environment: ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"], graph: graph)
+    #expect(
+      synced.stdout
+        == GraphcodeCommand.renderArtifactory(graph, unreadFor: reader.id, autoTriage: true) + "\n")
+    #expect(synced.stdout == "no unread posts\n")
+  }
+
+  /// `at` crosses the wire as a Foundation reference-date interval — seconds since
+  /// 2001-01-01, not since the epoch — so a shim that formatted it as epoch would print
+  /// a date 31 years early. Pinned against the formatter the Swift CLI actually uses.
+  @Test
+  func theStampConvertsFromFoundationsReferenceDate() throws {
+    let (graph, _) = Self.board()
+    let stamp = ArtifactoryPost.stampFormat.string(from: graph.artifactory[0].at)
+    let run = try runShim(["artifactory", "read", Self.project, "1"], graph: graph)
+    #expect(run.stdout == "#1 from a human at \(stamp) — already read\n")
+
+    // The stamp cannot carry the whole guard on its own. `MMM d, HH:mm` has no year,
+    // and the offset is 978307200 seconds — exactly 11323 days, which is exactly 31
+    // years across this span's eight leap days — so dropping it entirely renders the
+    // *identical* stamp, "Aug 23, 18:46" either way. The year rides `--json`'s
+    // ISO-8601 instead, where the same mistake cannot hide.
+    let json = try runShim(["artifactory", "list", Self.project, "--json"], graph: graph)
+    #expect(json.stdout.contains("\"at\":\"2025-08-24T01:46:40Z\""))
+    #expect(!json.stdout.contains("\"at\":\"1994-"))
+  }
+
+  /// The triage boundary, both halves of it: `Artifactory.needsTriage` is more than 12
+  /// posts *or* more than 4096 bytes of body, and a sync that trips either one prints
+  /// headlines and says so. Off-by-one here silently truncates a board a loop was told
+  /// it had read in full.
+  @Test
+  func triageTripsAtTwelvePostsAndAtFourKilobytes() throws {
+    func syncOutput(posts: Int, bodyBytes: Int) throws -> (String, String) {
+      var graph = LoopGraph(project: ProjectRef(path: Self.project, name: "widget"))
+      let reader = LoopNode(title: "Reader", loopType: .goalBased)
+      graph.nodes.append(reader)
+      let each = bodyBytes / posts
+      graph.artifactory = (1...posts).map { index in
+        ArtifactoryPost(
+          id: index, at: Date(timeIntervalSince1970: 1_756_000_000 + Double(index)),
+          authorID: nil, author: "a human", topic: nil,
+          body: String(
+            repeating: "x", count: index == posts ? bodyBytes - each * (posts - 1) : each)
+        )
+      }
+      let run = try runShim(
+        ["artifactory", "sync", Self.project],
+        environment: ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"], graph: graph)
+      return (
+        run.stdout,
+        GraphcodeCommand.renderArtifactory(graph, unreadFor: reader.id, autoTriage: true) + "\n"
+      )
+    }
+
+    // Twelve posts well under the byte cap: full bodies, no announcement.
+    let (twelve, twelveSwift) = try syncOutput(posts: 12, bodyBytes: 120)
+    #expect(twelve == twelveSwift)
+    #expect(!twelve.contains("headlines only"))
+
+    let (thirteen, thirteenSwift) = try syncOutput(posts: 13, bodyBytes: 130)
+    #expect(thirteen == thirteenSwift)
+    #expect(thirteen.contains("headlines only"))
+
+    // Bytes, at the boundary: 4096 is not "more than", 4097 is.
+    let (atCap, atCapSwift) = try syncOutput(posts: 8, bodyBytes: 4096)
+    #expect(atCap == atCapSwift)
+    #expect(!atCap.contains("headlines only"))
+
+    let (overCap, overCapSwift) = try syncOutput(posts: 8, bodyBytes: 4097)
+    #expect(overCap == overCapSwift)
+    #expect(overCap.contains("headlines only"))
+  }
+
+  /// `status` is where the briefing sends a loop before it claims work, and the board
+  /// line is what makes "is there mail I should care about" free. It was absent from
+  /// the shim's own render even though the snapshot carrying it was already in hand.
+  @Test
+  func statusCarriesTheBoardLineTheLocalCLIPrints() throws {
+    let (graph, reader) = Self.board()
+
+    let asReader = try runShim(
+      ["status", Self.project],
+      environment: ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"], graph: graph)
+    let readerLine = try #require(
+      GraphcodeCommand.renderArtifactoryStatusLine(graph, readerID: reader.id))
+    #expect(readerLine == "artifactory: 3 posts, 2 unread for you")
+    #expect(asReader.stdout.hasSuffix("  " + readerLine + "\n"))
+
+    // A human shell, and a loop this graph has never heard of, both get the plain
+    // count — the daemon would refuse a cursor for either.
+    let asHuman = try runShim(["status", Self.project], graph: graph)
+    let plain = try #require(GraphcodeCommand.renderArtifactoryStatusLine(graph))
+    #expect(plain == "artifactory: 3 posts")
+    #expect(asHuman.stdout.hasSuffix("  " + plain + "\n"))
+
+    let asStranger = try runShim(
+      ["status", Self.project],
+      environment: ["ZMX_SESSION": "graphcode-\(UUID().uuidString)"], graph: graph)
+    #expect(asStranger.stdout.hasSuffix("  " + plain + "\n"))
+
+    // A project that never touched the board renders exactly as it did before.
+    let untouched = try runShim(
+      ["status", Self.project],
+      graph: LoopGraph(project: ProjectRef(path: Self.project, name: "widget")))
+    #expect(!untouched.stdout.contains("artifactory"))
+  }
+
+  @Test
+  func postSyncAndWatchRideTheWireExactlyAsTheSwiftCLIWould() throws {
+    let (graph, reader) = Self.board()
+    let session = ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"]
+
+    let posted = try runShim(
+      ["artifactory", "post", Self.project, "--topic", "claims", "issue", "#12", "is", "mine"],
+      environment: session, graph: graph)
+    #expect(posted.status == 0)
+    #expect(posted.stdout == GraphcodeCommand.renderPosted(graph) + "\n")
+    #expect(
+      posted.commands.dropFirst().first
+        == .graphCommand(
+          projectPath: Self.project,
+          command: .artifactoryPost(text: "issue #12 is mine", topic: "claims", from: reader.id)))
+
+    // A human's post is unattributed, exactly as `node send` from a shell is.
+    let byHuman = try runShim(
+      ["artifactory", "post", Self.project, "the", "board", "is", "for", "everyone"], graph: graph)
+    #expect(
+      byHuman.commands.dropFirst().first
+        == .graphCommand(
+          projectPath: Self.project,
+          command: .artifactoryPost(
+            text: "the board is for everyone", topic: nil, from: nil)))
+
+    let synced = try runShim(
+      ["artifactory", "sync", Self.project, "--mark"], environment: session, graph: graph)
+    #expect(synced.stdout == "marked read up to #3\n")
+    #expect(
+      synced.commands.dropFirst().first
+        == .graphCommand(projectPath: Self.project, command: .artifactorySync(from: reader.id)))
+
+    let watching = try runShim(
+      ["artifactory", "watch", Self.project, "--topic", "build"], environment: session,
+      graph: graph)
+    #expect(watching.stdout.hasPrefix("watching 'build' —"))
+    #expect(
+      watching.commands.dropFirst().first
+        == .graphCommand(
+          projectPath: Self.project,
+          command: .artifactoryWatch(on: true, topic: "build", from: reader.id)))
+
+    let unwatching = try runShim(
+      ["artifactory", "watch", Self.project, "--off"], environment: session, graph: graph)
+    #expect(unwatching.stdout == "stopped watching\n")
+    #expect(
+      unwatching.commands.dropFirst().first
+        == .graphCommand(
+          projectPath: Self.project,
+          command: .artifactoryWatch(on: false, topic: nil, from: reader.id)))
+  }
+
+  /// Swift measures a headline in extended grapheme clusters and Python in code points,
+  /// so the cut drifts apart on anything built out of combining sequences — and can land
+  /// between a base character and its mark, ending a remote headline on a mangled glyph.
+  /// Every join that actually reaches a note, driven through both renderers.
+  @Test
+  func headlinesCutAtTheSameGraphemeClusterTheMacDoes() throws {
+    let bodies = [
+      // Decomposed accents: 2 code points each, 1 character each.
+      String(repeating: "a\u{0301}", count: 70),
+      // ZWJ family: 7 code points, 1 character.
+      String(repeating: "👨‍👩‍👧‍👦", count: 20),
+      // Skin-tone modifier, regional-indicator flag, and a keycap sequence.
+      String(repeating: "👋🏽🇯🇵1️⃣", count: 20),
+      // Mixed, so the cut lands mid-sequence rather than tidily between them.
+      "release notes: " + String(repeating: "e\u{0301}👨‍👩‍👧‍👦x", count: 20),
+      // Astral without any joining, and text that needs no clustering at all.
+      String(repeating: "𝔊", count: 90),
+      String(repeating: "plain ascii ", count: 12),
+    ]
+
+    for (index, body) in bodies.enumerated() {
+      var graph = LoopGraph(project: ProjectRef(path: Self.project, name: "widget"))
+      graph.artifactory = [
+        ArtifactoryPost(
+          id: 1, at: Date(timeIntervalSince1970: 1_756_000_000), authorID: nil,
+          author: "a human", topic: nil, body: body)
+      ]
+      let reader = LoopNode(title: "Reader", loopType: .goalBased)
+      graph.nodes.append(reader)
+
+      let run = try runShim(
+        ["artifactory", "sync", Self.project, "--headlines"],
+        environment: ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"], graph: graph)
+      let expected = GraphcodeCommand.renderArtifactory(
+        graph, unreadFor: reader.id, headlines: true)
+      #expect(run.stdout == expected + "\n", "body \(index) cut differently")
+    }
+  }
+
+  /// `--search` is how a loop asks whether mail on a subject exists. Swift's
+  /// `String.contains` compares canonically, so a decomposed body matches a precomposed
+  /// needle on the Mac; a code-point test would answer "no posts match" remotely and
+  /// report that the mail does not exist.
+  @Test
+  func searchMatchesCanonicallyEquivalentTextAsSwiftDoes() throws {
+    var graph = LoopGraph(project: ProjectRef(path: Self.project, name: "widget"))
+    graph.artifactory = [
+      ArtifactoryPost(
+        id: 1, at: Date(timeIntervalSince1970: 1_756_000_000), authorID: nil,
+        author: "a human", topic: nil, body: "shipped the e\u{0301}clair build"),
+      ArtifactoryPost(
+        id: 2, at: Date(timeIntervalSince1970: 1_756_003_600), authorID: nil,
+        author: "Ame\u{0301}lie", topic: "cafe\u{0301}", body: "unrelated"),
+    ]
+
+    // Precomposed needles against decomposed body, author and topic — and the reverse.
+    for needle in ["éclair", "e\u{0301}clair", "Amélie", "café", "ÉCLAIR"] {
+      let run = try runShim(
+        ["artifactory", "list", Self.project, "--search", needle], graph: graph)
+      let expected = GraphcodeCommand.renderArtifactory(graph, search: needle)
+      #expect(run.stdout == expected + "\n", "search '\(needle)' diverged")
+      #expect(!expected.hasPrefix("no posts match"), "fixture no longer exercises a match")
+    }
+  }
+
+  /// The parser's remaining shape, matched to `parseArtifactory`: a `--flag` is never a
+  /// project path, and a topic is an Optional rather than a truthiness test — the empty
+  /// topic the daemon refuses today still has to render the way Swift renders it, or
+  /// this is a second rule the renderer would need re-auditing against if that moved.
+  @Test
+  func theParserAndTheEmptyTopicMatchTheSwiftCLIsShape() throws {
+    let missingPath = try runShim(["artifactory", "list", "--json"])
+    #expect(missingPath.status == 1)
+    #expect(missingPath.stderr.contains("missing project-path"))
+    // Refused before the dial, so the daemon is never asked to open a project called
+    // "--json" — nothing reaches the graph to be undone.
+    #expect(missingPath.commands.isEmpty)
+
+    var graph = LoopGraph(project: ProjectRef(path: Self.project, name: "widget"))
+    graph.artifactory = [
+      ArtifactoryPost(
+        id: 5, at: Date(timeIntervalSince1970: 1_756_000_000), authorID: nil,
+        author: "a human", topic: "", body: "a topic that is present but empty")
+    ]
+    let run = try runShim(["artifactory", "read", Self.project, "5"], graph: graph)
+    #expect(run.stdout == GraphcodeCommand.render(graph.artifactory[0]) + "\n")
+    #expect(run.stdout.contains("#5 () from a human"))
+
+    let posted = try runShim(
+      ["artifactory", "post", Self.project, "anything"], graph: graph)
+    #expect(posted.stdout == GraphcodeCommand.renderPosted(graph) + "\n")
+    #expect(posted.stdout == "posted #5 ()\n")
+  }
+
+  /// `read` and `list` send nothing past the open — the snapshot already carries the
+  /// board — so neither can move a cursor by accident.
+  @Test
+  func readAndListSendNoCommandPastTheOpen() throws {
+    let (graph, _) = Self.board()
+    for arguments in [
+      ["artifactory", "read", Self.project, "3"], ["artifactory", "list", Self.project],
+    ] {
+      let run = try runShim(arguments, graph: graph)
+      #expect(run.status == 0)
+      #expect(run.commands == [.openProject(path: Self.project)])
+    }
+  }
+
+  /// The cursor verbs refuse a human shell up front, in the Swift CLI's own wording,
+  /// rather than after a round trip — and `artifactory` no longer falls through to the
+  /// "Mac-only" refusal that made every verb on this list exit 1.
+  @Test
+  func theCursorVerbsNeedALoopIdentityAndArtifactoryIsNoLongerMacOnly() throws {
+    let sync = try runShim(["artifactory", "sync", Self.project])
+    #expect(sync.status == 1)
+    #expect(sync.stderr.contains("artifactory sync needs a loop identity"))
+    #expect(sync.stderr.contains("graphcode artifactory list"))
+
+    let watch = try runShim(["artifactory", "watch", Self.project])
+    #expect(watch.status == 1)
+    #expect(watch.stderr.contains("artifactory watch needs a loop identity"))
+    #expect(watch.stderr.contains("the mail is delivered to the loop that watches"))
+
+    // Neither reached the daemon, so nothing was applied and nothing needs undoing.
+    #expect(sync.commands.isEmpty)
+    #expect(watch.commands.isEmpty)
+
+    for verb in ["post", "sync", "read", "list", "watch"] {
+      let run = try runShim(["artifactory", verb])
+      #expect(!run.stderr.contains("Mac-only"), "artifactory \(verb) still refused as Mac-only")
+    }
+    // A subcommand that genuinely does not exist says so as the Swift CLI does.
+    let bogus = try runShim(["artifactory", "resolve", Self.project])
+    #expect(bogus.status == 1)
+    #expect(bogus.stderr.contains("unknown command: artifactory resolve"))
+    // And a mistyped flag is refused rather than silently ignored.
+    let mistyped = try runShim(["artifactory", "list", Self.project, "--serach", "red"])
+    #expect(mistyped.status == 1)
+    #expect(mistyped.stderr.contains("unknown option: --serach"))
+  }
+
+  @Test
+  func readNamesTheIdsThatExistWhenThePostIsGone() throws {
+    let (graph, _) = Self.board()
+    let missing = try runShim(["artifactory", "read", Self.project, "99"], graph: graph)
+    #expect(missing.status == 1)
+    #expect(missing.stderr.contains("no post #99 on this board"))
+    #expect(missing.stderr.contains("graphcode artifactory list"))
+
+    let negative = try runShim(["artifactory", "read", Self.project, "-7"], graph: graph)
+    #expect(negative.status == 1)
+    #expect(negative.stderr.contains("invalid value for post-id: -7"))
+    #expect(negative.commands.isEmpty)
+  }
+
+  @Test
+  func theHelpTextTeachesEveryVerbTheBriefingDoes() throws {
+    let help = try runShim(["artifactory", "--help"])
+    #expect(help.status == 0)
+    for verb in ["post", "sync", "read", "list", "watch"] {
+      #expect(help.stdout.contains("graphcode artifactory \(verb) "))
+    }
+    // The shim's own honesty rule: nothing it implements may sit on the Mac-only list.
+    #expect(!help.stdout.contains("(update, pilot, arm, edge, usage, artifactory)"))
   }
 }
