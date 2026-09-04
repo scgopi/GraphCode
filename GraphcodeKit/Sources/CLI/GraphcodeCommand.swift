@@ -167,7 +167,8 @@ public enum GraphcodeCommand: Equatable, Sendable {
                            "Daemon heartbeat" enabled in the app's Settings; the prompt
                            is then the bare task, no cadence in it
       --backend <name>     claudeCode | copilotCLI | codex | openCode — default: run from inside a
-                           loop, the creating loop's backend; otherwise claudeCode
+                           loop, the creating loop's backend; otherwise the default
+                           in Settings -> Sessions
       --model <tier>       fast | standard | capable           (default: by loop type)
       --metric <cmd>       how the loop's performance is measured — fed into its prompt
                            so it can score itself as it works, and sampled by graphcoded
