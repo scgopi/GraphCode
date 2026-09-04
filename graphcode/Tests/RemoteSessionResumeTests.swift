@@ -166,8 +166,10 @@ struct RemoteSessionResumeTests {
     // assertion would pass with the write deleted entirely.
     let write = try #require(remoteCommand.range(of: "mkdir -p \"$HOME/.graphcode/hooks\""))
     // And inside the create branch, not merely after the check — textual order alone
-    // would be satisfied by a fragment sitting outside the group.
-    let branch = try #require(remoteCommand.range(of: ">/dev/null 2>&1 || { "))
+    // would be satisfied by a fragment sitting outside the group. The check and the
+    // group are no longer adjacent: the readiness repair sits between them (#272), so
+    // the group opener is what this anchors on.
+    let branch = try #require(remoteCommand.range(of: " || { "))
     let run = try #require(remoteCommand.range(of: "'run'"))
     #expect(branch.lowerBound < write.lowerBound)
     #expect(write.lowerBound < run.lowerBound)

@@ -90,7 +90,7 @@ struct CodexReadinessGateTests {
     #expect(await !run(gate).succeeded)
 
     // The production stamp, run the way the daemon's ensure runs it.
-    await run(ZmxSessionLauncher.agentLabelCommand(zmxPath: Self.zmx, forNode: node))
+    await run(try #require(ZmxSessionLauncher.agentLabelCommand(zmxPath: Self.zmx, forNode: node)))
     #expect(await run(gate).succeeded)
 
     // A session running some *other* agent must still not satisfy a Codex gate — that is
@@ -101,13 +101,105 @@ struct CodexReadinessGateTests {
   }
 
   @Test
+  func aLostStampIsRepairedRatherThanRelaunched() async throws {
+    guard ZmxLocator.isInstalled else { return }
+    let node = codexNode()
+    let name = try #require(await start(node))
+    defer { Task { await kill(name) } }
+
+    // A session that is alive and unlabelled — a stamp that failed, or one written by a
+    // build that predates stamping. The ensure adopts it instead of running `zmx run`
+    // against a live session, which would type the launch command into the agent.
+    let gate = ZmxSessionLauncher.daemonReadyCheckCommand(
+      zmxPath: Self.zmx, sessionName: name, agent: CLISessionBackendKind.codex.rawValue)
+    #expect(await !run(gate).succeeded)
+
+    let repair = try #require(
+      ZmxSessionLauncher.adoptUnlabelledCommand(zmxPath: Self.zmx, forNode: node))
+    #expect(await run(repair).succeeded)
+    #expect(await run(gate).succeeded)
+  }
+
+  @Test
+  func aSessionLabelledForAnotherAgentIsNotAdopted() async throws {
+    guard ZmxLocator.isInstalled else { return }
+    let node = codexNode()
+    let name = try #require(await start(node))
+    defer { Task { await kill(name) } }
+
+    // Alive, but running something else. Relabelling it would make the gate lie; the
+    // ensure has to fall through to its relaunch branch instead, so the adopt must fail.
+    await run("\(Self.quoted(Self.zmx)) set \(Self.quoted(name)) agent=copilotCLI")
+    let repair = try #require(
+      ZmxSessionLauncher.adoptUnlabelledCommand(zmxPath: Self.zmx, forNode: node))
+    #expect(await !run(repair).succeeded)
+
+    let gate = ZmxSessionLauncher.daemonReadyCheckCommand(
+      zmxPath: Self.zmx, sessionName: name, agent: CLISessionBackendKind.codex.rawValue)
+    #expect(await !run(gate).succeeded)
+  }
+
+  @Test
+  func theGateMatchesTheWholeLabelAndNotAPrefixOfIt() async throws {
+    guard ZmxLocator.isInstalled else { return }
+    let node = codexNode()
+    let name = try #require(await start(node))
+    defer { Task { await kill(name) } }
+
+    // No backend's rawValue is a prefix of another today, so this is a trap for whoever
+    // adds the one that is rather than a live bug — which is the moment to pin it.
+    await run("\(Self.quoted(Self.zmx)) set \(Self.quoted(name)) agent=codexFoo")
+    let gate = ZmxSessionLauncher.daemonReadyCheckCommand(
+      zmxPath: Self.zmx, sessionName: name, agent: CLISessionBackendKind.codex.rawValue)
+    #expect(await !run(gate).succeeded)
+
+    // And still matches when the label is the last one on the row, where there is no
+    // trailing tab to anchor against.
+    await run("\(Self.quoted(Self.zmx)) set \(Self.quoted(name)) agent=codex")
+    #expect(await run(gate).succeeded)
+  }
+
+  @Test
+  func aStampAgainstAMissingSessionFailsAndMustNotFailTheEnsure() async {
+    guard ZmxLocator.isInstalled else { return }
+    // The hazard the `|| true` exists for: an ensure that exits non-zero is retried, and
+    // the retry runs `zmx run` against a session that is by then live — which types the
+    // entire launch command into the agent's input, the very thing the ensure's atomic
+    // check-or-run exists to prevent.
+    guard let stamp = ZmxSessionLauncher.agentLabelCommand(
+      zmxPath: Self.zmx, forNode: codexNode())
+    else { return }
+    #expect(await !run(stamp).succeeded)
+    #expect(await run("\(stamp) || true").succeeded)
+  }
+
+  @Test
+  func nothingIsStampedOrRepairedForABackendTheGateNeverJudges() {
+    // Codex only. The gate reads a label for Codex alone (`readinessAgent`), so writing
+    // one anywhere else is a change to three backends that had no part in #272 — and the
+    // stamp is a shell fragment inside the ensure, which is not a place to spend risk.
+    for backend in CLISessionBackendKind.allCases where backend != .codex {
+      let node = LoopNode(
+        title: "Loop", loopType: .goalBased, goal: GoalSpec(summary: "work"), backend: backend)
+      #expect(ZmxSessionLauncher.readinessAgent(forNode: node) == nil)
+      #expect(ZmxSessionLauncher.agentLabelCommand(zmxPath: "/usr/local/bin/zmx", forNode: node) == nil)
+      #expect(
+        ZmxSessionLauncher.adoptUnlabelledCommand(zmxPath: "/usr/local/bin/zmx", forNode: node)
+          == nil)
+      // And the gate for such a node is the name check alone, exactly as before #272.
+      let command = ZmxSessionLauncher.aliveCheckCommand(zmxPath: "/usr/local/bin/zmx", forNode: node)
+      #expect(!command.contains("agent="))
+    }
+  }
+
+  @Test
   func theLabelTheDaemonWritesIsTheOneTheGateReads() {
     // One source for the write and the read. The gate used to take `executableName`
     // while nothing wrote anything, so a backend whose binary is named differently from
     // its case (`claudeCode` → `claude`) could have made the two halves disagree.
     let node = codexNode()
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
-    let stamp = ZmxSessionLauncher.agentLabelCommand(zmxPath: "/usr/local/bin/zmx", forNode: node)
+    let stamp = ZmxSessionLauncher.agentLabelCommand(zmxPath: "/usr/local/bin/zmx", forNode: node) ?? ""
     let gate = ZmxSessionLauncher.daemonReadyCheckCommand(
       zmxPath: "/usr/local/bin/zmx", sessionName: name,
       agent: CLISessionBackendKind.codex.rawValue)
