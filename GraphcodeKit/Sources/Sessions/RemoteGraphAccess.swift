@@ -452,6 +452,20 @@ public enum RemoteGraphAccess {
         print(acknowledgement)
 
 
+    def folded_title(raw):
+        # The one-word CamelCase shape every loop name has -- LoopName.folded on the Mac.
+        words = []
+        for word in raw.split():
+            start, end = 0, len(word)
+            while start < end and not word[start].isalnum():
+                start += 1
+            while end > start and not word[end - 1].isalnum():
+                end -= 1
+            if end > start:
+                words.append(word[start].upper() + word[start + 1:end])
+        return "".join(words) or raw.strip()
+
+
     def make_draft(flags):
         if not flags.get("title"):
             fail("missing --title")
@@ -471,7 +485,7 @@ public enum RemoteGraphAccess {
             fail("a %s loop needs --%s" % (flags["type"], needed))
         draft = {
             "id": str(uuid.uuid4()).upper(),
-            "title": flags["title"],
+            "title": folded_title(flags["title"]),
             "loopType": loop_type,
             "pausesBeforeWritesOnly": False,
         }

@@ -153,12 +153,8 @@ extension TitleSuggestionClient: DependencyKey {
       .components(separatedBy: .newlines)
       .map { $0.trimmingCharacters(in: .whitespaces) }
       .last { !$0.isEmpty }
-    let words = (lastLine ?? "").split(separator: " ").prefix(2)
-      .map { $0.trimmingCharacters(in: CharacterSet.alphanumerics.inverted) }
-      .filter { !$0.isEmpty }
-    guard !words.isEmpty else { return nil }
-    let name = words.map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined()
-    guard name.count <= 30 else { return nil }
+    let answer = (lastLine ?? "").split(separator: " ").prefix(2).joined(separator: " ")
+    guard let name = LoopName.folded(answer), name.count <= 30 else { return nil }
     return name
   }
 }
