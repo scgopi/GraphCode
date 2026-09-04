@@ -234,6 +234,53 @@ public enum ClaudeSessionLog {
     let reading = reading(inTranscriptAt: transcript, metricSamples: node.metricHistory)
     return reading.isEmpty ? nil : reading
   }
+
+  /// The name a human gave this session with `/rename`, or `nil` when nobody has.
+  ///
+  /// Claude Code writes it as a standalone record —
+  /// `{"type":"custom-title","customTitle":"…"}` — and re-emits it at every checkpoint
+  /// rather than once at the rename, so a tail read always carries the current one and the
+  /// last one wins.
+  ///
+  /// **Only `custom-title`.** Every session also carries an `agent-name` record, and it is
+  /// not the same thing: it holds a name the CLI assigned itself (`angleReuse2`) and is
+  /// present in sessions nobody has renamed. Reading it would rename half a graph to
+  /// strings no human ever typed.
+  static func customTitle(inLines lines: [Data]) -> String? {
+    var latest: String?
+    for line in lines {
+      guard let object = try? JSONSerialization.jsonObject(with: line),
+        let record = object as? [String: Any],
+        record["type"] as? String == "custom-title",
+        let title = record["customTitle"] as? String
+      else { continue }
+      let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else { continue }
+      latest = trimmed
+    }
+    return latest
+  }
+
+  /// What this node's session calls itself, or `nil` when nothing does.
+  ///
+  /// **Local only, deliberately.** A remote loop's transcript is on the other machine, and
+  /// every reading of it costs an ssh probe per node per poll. The summary rail pays that
+  /// because a rail changes every few seconds; a title changes when a human types six
+  /// characters, perhaps once in a loop's life. Reported as "nothing said" rather than
+  /// bought at that price — the same answer this gives a backend that writes no transcript.
+  /// Gated on the transcript having moved, like the rail is, and for a sharper reason: the
+  /// summary rail is off by default, so nothing was reading transcripts on a default
+  /// install at all. Ungated this would have added a 512KB tail read per loop every
+  /// fifteen seconds to every install there is, to re-read a name that changes when a
+  /// human types `/rename`. A quiet loop now costs one `stat`.
+  public static func sessionTitle(of node: LoopNode, projectPath: String? = nil) async -> String? {
+    guard projectPath.flatMap(RemoteProjectLocation.parse(projectPath:)) == nil,
+      let sessionID = SessionIDStore.load(forNodeID: node.id),
+      let transcript = transcript(forSessionID: sessionID),
+      await TranscriptFreshness.titles.hasChanged(transcript, forNode: node.id)
+    else { return nil }
+    return customTitle(inLines: SummaryBeatBuilder.tailLines(of: transcript))
+  }
 }
 
 /// How the one number the rail carries is written.

@@ -40,6 +40,7 @@ public actor ProjectRegistry {
   private let readUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)?
   private let readActivity: (@Sendable (LoopNode, String?) async -> String?)?
   private let readSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)?
+  private let readSessionTitle: (@Sendable (LoopNode, String?) async -> String?)?
   private let readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)?
   private let sessionAlive: (@Sendable (LoopNode, String?) async -> Bool)?
   private let composeBoard:
@@ -74,6 +75,8 @@ public actor ProjectRegistry {
       CLISessionBackend.readActivity,
     readSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)? =
       CLISessionBackend.readSummary,
+    readSessionTitle: (@Sendable (LoopNode, String?) async -> String?)? =
+      CLISessionBackend.readSessionTitle,
     readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)? =
       CLISessionBackend.readPresence,
     sessionAlive: (@Sendable (LoopNode, String?) async -> Bool)? = CLISessionBackend.sessionAlive,
@@ -92,6 +95,7 @@ public actor ProjectRegistry {
     self.readUsage = readUsage
     self.readActivity = readActivity
     self.readSummary = readSummary
+    self.readSessionTitle = readSessionTitle
     self.readPresence = readPresence
     self.sessionAlive = sessionAlive
     self.composeBoard = composeBoard
@@ -582,6 +586,7 @@ public actor ProjectRegistry {
       onReadUsage: readUsage,
       onReadActivity: readActivity,
       onReadSummary: readSummary,
+      onReadSessionTitle: readSessionTitle,
       onReadPresence: readPresence,
       onSessionAlive: sessionAlive,
       onSpawnIntoProject: spawnIntoProject,

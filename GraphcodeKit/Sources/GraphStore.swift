@@ -52,6 +52,7 @@ public actor GraphStore {
   /// What a working session has narrated, folded into `LoopNode.summary`. `nil` when
   /// nothing produces beats — no reader wired, or the human has left the producer off.
   private let onReadSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)?
+  private let onReadSessionTitle: (@Sendable (LoopNode, String?) async -> String?)?
   private let onReadPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)?
   /// Whether a local loop's session is alive and not a husk — what decides if a pane
   /// closing may resolve the loop (`sessionPermitsResolution`).
@@ -217,6 +218,7 @@ public actor GraphStore {
     onReadUsage: (@Sendable (LoopNode, String?) async -> UsageSample?)? = nil,
     onReadActivity: (@Sendable (LoopNode, String?) async -> String?)? = nil,
     onReadSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)? = nil,
+    onReadSessionTitle: (@Sendable (LoopNode, String?) async -> String?)? = nil,
     onReadPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)? = nil,
     onSessionAlive: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
     onSpawnIntoProject: (@Sendable (String, NodeDraft) -> Void)? = nil,
@@ -249,6 +251,7 @@ public actor GraphStore {
     self.onReadUsage = onReadUsage
     self.onReadActivity = onReadActivity
     self.onReadSummary = onReadSummary
+    self.onReadSessionTitle = onReadSessionTitle
     self.onReadPresence = onReadPresence
     self.onSessionAlive = onSessionAlive
     self.onSpawnIntoProject = onSpawnIntoProject
@@ -1013,6 +1016,34 @@ public actor GraphStore {
     return changed
   }
 
+  /// Applies a rename a human typed inside a session to the loop it belongs to (#261).
+  ///
+  /// A title is the one thing about a loop that is expected to be wrong: it is written
+  /// before the work exists, and what the loop turns out to be is known only once the
+  /// session is running. `/rename` is a human saying exactly that, and until this existed
+  /// the card went on showing the name they had just replaced.
+  ///
+  /// **Fires on change, not on sight.** `node.sessionTitle` records what the session was
+  /// last *observed* to call itself, which is not the same as what the node is called: the
+  /// two part company the moment someone renames the card afterwards, and that gap is what
+  /// keeps the card's name theirs instead of having it overwritten 15 seconds later. A
+  /// session nobody has renamed reports nothing and nothing here runs.
+  private func refreshSessionTitles() async -> Bool {
+    guard let onReadSessionTitle else { return false }
+    let path = graph.project.path
+    var renamed = false
+    for node in graph.nodes where !node.isResolved {
+      guard let observed = await onReadSessionTitle(node, path), observed != node.sessionTitle
+      else { continue }
+      graph.nodes[id: node.id]?.sessionTitle = observed
+      // Through the same door a human's rename comes through, so a blank title is refused
+      // and everything a rename deliberately leaves alone stays left alone.
+      renameNode(node.id, to: observed)
+      renamed = true
+    }
+    return renamed
+  }
+
   /// Draws the passes that have ended since the last tick — the only reading here that
   /// costs money, and the only one that is allowed to skip work it could do.
   ///
@@ -1174,6 +1205,13 @@ public actor GraphStore {
     var changed = await refreshPresence()
     if await refreshActivity() { changed = true }
     if await refreshSummary() { changed = true }
+    // Kept apart from `changed` because it alone has to reach disk. Every other reading on
+    // this tick is a field restored from the session next time anyone asks; a rename is
+    // the node's own title, and `sessionTitle` is the record that stops the following tick
+    // applying it a second time. Told to clients only, both would be gone at the next
+    // daemon restart — and the rename would then land again as if it were new.
+    let renamed = await refreshSessionTitles()
+    if renamed { changed = true }
     // After the summary and never beside it: a board is drawn *from* the merged summary,
     // so a pass that ended on this tick has to be counted before it can be drawn.
     if await refreshBoards() { changed = true }
@@ -1181,7 +1219,7 @@ public actor GraphStore {
     // what was waiting on exactly that.
     await drainPendingFollowUps()
     guard changed else { return }
-    notifyClients()
+    if renamed { broadcast() } else { notifyClients() }
   }
 
   // MARK: - Renaming

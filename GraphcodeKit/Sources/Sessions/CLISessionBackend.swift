@@ -56,6 +56,11 @@ public struct CLISessionBackend: Sendable {
   /// `LoopNode.summary` by `GraphStore`, never written straight onto the node — see
   /// `LoopSummary.merge` for why the store has the last word.
   public var summary: @Sendable (LoopNode, String?) async -> SummaryReading?
+  /// What the session says it is *called*, or `nil` when the backend has no such notion.
+  /// A human renaming a session from inside it is the one thing that can tell graphcode a
+  /// loop's title is wrong, and only Claude Code writes it down — see
+  /// `ClaudeSessionLog.sessionTitle`.
+  public var sessionTitle: @Sendable (LoopNode, String?) async -> String?
 
   public init(
     kind: CLISessionBackendKind,
@@ -66,7 +71,8 @@ public struct CLISessionBackend: Sendable {
     presence: @escaping @Sendable (LoopNode, String?) async -> PresenceReading,
     usage: @escaping @Sendable (LoopNode, String?) async -> UsageSample?,
     activity: @escaping @Sendable (LoopNode, String?) async -> String? = { _, _ in nil },
-    summary: @escaping @Sendable (LoopNode, String?) async -> SummaryReading? = { _, _ in nil }
+    summary: @escaping @Sendable (LoopNode, String?) async -> SummaryReading? = { _, _ in nil },
+    sessionTitle: @escaping @Sendable (LoopNode, String?) async -> String? = { _, _ in nil }
   ) {
     self.kind = kind
     self.launch = launch
@@ -77,6 +83,7 @@ public struct CLISessionBackend: Sendable {
     self.usage = usage
     self.activity = activity
     self.summary = summary
+    self.sessionTitle = sessionTitle
   }
 }
 
@@ -179,6 +186,19 @@ extension CLISessionBackend {
         guard let reading else { return nil }
         return await SummaryModelWriter.applied(
           to: reading, node: node, projectPath: projectPath, settings: settings)
+      },
+      // Ungated by `summarisesLoops`, unlike the rail above: that setting is about how
+      // closely graphcode watches a session, and this is a human having already said what
+      // the loop is called. Suppressing it would be reading the answer and discarding it.
+      sessionTitle: { node, projectPath in
+        switch kind {
+        case .claudeCode:
+          return await ClaudeSessionLog.sessionTitle(of: node, projectPath: projectPath)
+        case .copilotCLI, .codex, .openCode:
+          // None of the three has a rename that leaves a record behind. `nil` is the
+          // honest answer; a guess here would rename a loop from a string the CLI chose.
+          return nil
+        }
       }
     )
   }
@@ -269,6 +289,12 @@ extension CLISessionBackend {
   public static let readSummary: @Sendable (LoopNode, String?) async -> SummaryReading? = {
     node, path in
     await backend(for: node).summary(node, path)
+  }
+
+  /// The session-title hook `GraphStore` is wired with.
+  public static let readSessionTitle: @Sendable (LoopNode, String?) async -> String? = {
+    node, path in
+    await backend(for: node).sessionTitle(node, path)
   }
 
   /// The presence-reading hook `GraphStore` is wired with. The last missing link in a
