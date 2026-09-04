@@ -73,8 +73,11 @@ struct MessageDeliveryTests {
     return nil
   }
 
+  /// Waits the same twenty seconds `startSink` does. Six was enough on an idle machine
+  /// and not on a loaded one, and a read that gives up early fails as a short message —
+  /// indistinguishable from the head loss this suite exists to catch.
   private func received(from out: URL) async -> String? {
-    for _ in 0..<60 {
+    for _ in 0..<200 {
       if let data = try? Data(contentsOf: out) { return String(bytes: data, encoding: .utf8) }
       try? await Task.sleep(for: .milliseconds(100))
     }
@@ -217,7 +220,13 @@ struct MessageDeliveryTests {
         if b"\\r" in pending:
             del pending[pending.index(b"\\r"):]
             commit()
-            open(target, "wb").write(bytes(composer))
+            # Written aside and renamed: `open(target, "wb")` truncates on open, so a
+            # reader polling for the file catches it empty or half-filled and compares a
+            # short string against the whole message. `os.replace` is atomic, so the
+            # target either is not there or is complete.
+            partial = target + ".partial"
+            open(partial, "wb").write(bytes(composer))
+            os.replace(partial, target)
             break
     """
 }
