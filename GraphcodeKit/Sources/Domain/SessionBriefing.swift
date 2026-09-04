@@ -142,6 +142,12 @@ public enum SessionBriefing {
       Run from inside your session, the CLI already attributes the new loop to you as its
       creator, so making a child needs nothing beyond the create itself.
 
+      A child runs on the same coding agent you do. When the human names a different one —
+      "a Codex loop", "create this in copilot" — say so with `--backend claudeCode |
+      copilotCLI | codex | openCode`, which is the only thing that overrides what you
+      inherit. Naming an agent the target host has no CLI for produces a loop that launches
+      into nothing, so pass what the human asked for and nothing else.
+
       ## Choosing the loop type
 
       Choose by **what decides the loop is finished**. This matters more than it looks:
