@@ -110,7 +110,7 @@ public enum RemoteGraphAccess {
   /// a `graphcode` owned by another uid, a devcontainer feature's own copy, `chattr +i`.
   /// *Not* a full disk, though that was the first guess: on a genuinely full volume both
   /// writes fail and nothing is stranded, so it takes the freak case of enough free
-  /// blocks for a 12-byte stamp but not a 14.6 KB shim.
+  /// blocks for a 12-byte stamp but not a 31 KB shim.
   ///
   /// Ordering alone is sufficient — no `with`/`flush` bookkeeping — because a payload
   /// this size raises at `.write()` rather than at an implicit close, leaving no file
@@ -158,6 +158,7 @@ public enum RemoteGraphAccess {
     import struct
     import sys
     import time
+    import unicodedata
     import uuid
 
     SESSION_PREFIX = "graphcode-"
@@ -401,30 +402,70 @@ public enum RemoteGraphAccess {
 
 
     def render_post(post):
-        topic = (" (%s)" % post["topic"]) if post.get("topic") else ""
+        # Presence, not truthiness: Swift maps over the Optional, so a post whose topic
+        # is the empty string renders " ()". The daemon refuses one today; matching the
+        # Optional exactly is what keeps that a daemon rule rather than a second rule
+        # this renderer would have to be re-audited against if it ever moved.
+        topic = (" (%s)" % post["topic"]) if post.get("topic") is not None else ""
         return "#%s%s from %s at %s %s %s" % (
             post.get("id"), topic, post.get("author"), post_stamp(post.get("at")),
             EM_DASH, post.get("body") or "")
 
 
+    def grapheme_clusters(text):
+        # Swift measures and slices a String in extended grapheme clusters, Python in
+        # code points, so `text[:80]` would cut a headline early -- 15 characters into a
+        # body of decomposed accents, where the Mac cuts at 30 -- and could land between
+        # a base character and its combining mark, ending the line on a mangled glyph.
+        # This is UAX #29 reduced to the joins that actually reach a note: combining
+        # marks, ZWJ sequences, variation selectors, skin-tone modifiers and flags. The
+        # parity test drives each of them through both renderers.
+        clusters = []
+        joining = False
+        flag_open = False
+        for character in text:
+            code = ord(character)
+            regional = 0x1F1E6 <= code <= 0x1F1FF
+            zero_width_joiner = code == 0x200D
+            extends = (unicodedata.category(character) in ("Mn", "Mc", "Me")
+                       or 0xFE00 <= code <= 0xFE0F
+                       or 0xE0100 <= code <= 0xE01EF
+                       or 0x1F3FB <= code <= 0x1F3FF)
+            attaches = extends or zero_width_joiner or joining or (regional and flag_open)
+            if clusters and attaches:
+                clusters[-1] += character
+            else:
+                clusters.append(character)
+            joining = zero_width_joiner
+            flag_open = regional and not flag_open
+        return clusters
+
+
     def render_headline(post):
-        # Python counts code points where Swift counts grapheme clusters, so a body built
-        # out of combining sequences could cut a character earlier or later than the Mac
-        # would. Everything else about the line is identical, and the parity test pins it.
         full = render_post(post).replace("\n", " ")
-        if len(full) <= HEADLINE_BUDGET:
+        clusters = grapheme_clusters(full)
+        if len(clusters) <= HEADLINE_BUDGET:
             return full
-        return full[:HEADLINE_BUDGET] + ELLIPSIS
+        return "".join(clusters[:HEADLINE_BUDGET]) + ELLIPSIS
+
+
+    def folded(text):
+        # Swift's String.contains compares canonically, so "e" + U+0301 and U+00E9 match
+        # there and would not here: Python's `in` is a code-point test. A body carrying
+        # decomposed text -- which anything sourced from a macOS path routinely does --
+        # would otherwise be findable from the Mac and invisible from the remote host,
+        # which is the board reporting that mail does not exist.
+        return unicodedata.normalize("NFC", (text or "").lower())
 
 
     def filtered_posts(posts, search):
         if not search:
             return posts
-        needle = search.lower()
+        needle = folded(search)
         return [post for post in posts
-                if needle in (post.get("body") or "").lower()
-                or needle in (post.get("author") or "").lower()
-                or needle in (post.get("topic") or "").lower()]
+                if needle in folded(post.get("body"))
+                or needle in folded(post.get("author"))
+                or needle in folded(post.get("topic"))]
 
 
     def render_board(graph, reader=None, headlines=False, search=None, auto_triage=False):
@@ -513,7 +554,7 @@ public enum RemoteGraphAccess {
         if not posts:
             return "posted"
         post = posts[-1]
-        topic = (" (%s)" % post["topic"]) if post.get("topic") else ""
+        topic = (" (%s)" % post["topic"]) if post.get("topic") is not None else ""
         return "posted #%s%s" % (post.get("id"), topic)
 
 
@@ -756,7 +797,7 @@ public enum RemoteGraphAccess {
         if wants_help(arguments):
             print(HELP)
             return
-        if not arguments:
+        if not arguments or arguments[0].startswith("--"):
             fail("missing project-path")
         project = arguments.pop(0)
         if any(argument in HELP_FLAGS for argument in arguments):

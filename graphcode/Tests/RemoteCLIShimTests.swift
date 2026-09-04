@@ -487,6 +487,100 @@ extension RemoteCLIShimTests {
           command: .artifactoryWatch(on: false, topic: nil, from: reader.id)))
   }
 
+  /// Swift measures a headline in extended grapheme clusters and Python in code points,
+  /// so the cut drifts apart on anything built out of combining sequences — and can land
+  /// between a base character and its mark, ending a remote headline on a mangled glyph.
+  /// Every join that actually reaches a note, driven through both renderers.
+  @Test
+  func headlinesCutAtTheSameGraphemeClusterTheMacDoes() throws {
+    let bodies = [
+      // Decomposed accents: 2 code points each, 1 character each.
+      String(repeating: "a\u{0301}", count: 70),
+      // ZWJ family: 7 code points, 1 character.
+      String(repeating: "👨‍👩‍👧‍👦", count: 20),
+      // Skin-tone modifier, regional-indicator flag, and a keycap sequence.
+      String(repeating: "👋🏽🇯🇵1️⃣", count: 20),
+      // Mixed, so the cut lands mid-sequence rather than tidily between them.
+      "release notes: " + String(repeating: "e\u{0301}👨‍👩‍👧‍👦x", count: 20),
+      // Astral without any joining, and text that needs no clustering at all.
+      String(repeating: "𝔊", count: 90),
+      String(repeating: "plain ascii ", count: 12),
+    ]
+
+    for (index, body) in bodies.enumerated() {
+      var graph = LoopGraph(project: ProjectRef(path: Self.project, name: "widget"))
+      graph.artifactory = [
+        ArtifactoryPost(
+          id: 1, at: Date(timeIntervalSince1970: 1_756_000_000), authorID: nil,
+          author: "a human", topic: nil, body: body)
+      ]
+      let reader = LoopNode(title: "Reader", loopType: .goalBased)
+      graph.nodes.append(reader)
+
+      let run = try runShim(
+        ["artifactory", "sync", Self.project, "--headlines"],
+        environment: ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"], graph: graph)
+      let expected = GraphcodeCommand.renderArtifactory(
+        graph, unreadFor: reader.id, headlines: true)
+      #expect(run.stdout == expected + "\n", "body \(index) cut differently")
+    }
+  }
+
+  /// `--search` is how a loop asks whether mail on a subject exists. Swift's
+  /// `String.contains` compares canonically, so a decomposed body matches a precomposed
+  /// needle on the Mac; a code-point test would answer "no posts match" remotely and
+  /// report that the mail does not exist.
+  @Test
+  func searchMatchesCanonicallyEquivalentTextAsSwiftDoes() throws {
+    var graph = LoopGraph(project: ProjectRef(path: Self.project, name: "widget"))
+    graph.artifactory = [
+      ArtifactoryPost(
+        id: 1, at: Date(timeIntervalSince1970: 1_756_000_000), authorID: nil,
+        author: "a human", topic: nil, body: "shipped the e\u{0301}clair build"),
+      ArtifactoryPost(
+        id: 2, at: Date(timeIntervalSince1970: 1_756_003_600), authorID: nil,
+        author: "Ame\u{0301}lie", topic: "cafe\u{0301}", body: "unrelated"),
+    ]
+
+    // Precomposed needles against decomposed body, author and topic — and the reverse.
+    for needle in ["éclair", "e\u{0301}clair", "Amélie", "café", "ÉCLAIR"] {
+      let run = try runShim(
+        ["artifactory", "list", Self.project, "--search", needle], graph: graph)
+      let expected = GraphcodeCommand.renderArtifactory(graph, search: needle)
+      #expect(run.stdout == expected + "\n", "search '\(needle)' diverged")
+      #expect(!expected.hasPrefix("no posts match"), "fixture no longer exercises a match")
+    }
+  }
+
+  /// The parser's remaining shape, matched to `parseArtifactory`: a `--flag` is never a
+  /// project path, and a topic is an Optional rather than a truthiness test — the empty
+  /// topic the daemon refuses today still has to render the way Swift renders it, or
+  /// this is a second rule the renderer would need re-auditing against if that moved.
+  @Test
+  func theParserAndTheEmptyTopicMatchTheSwiftCLIsShape() throws {
+    let missingPath = try runShim(["artifactory", "list", "--json"])
+    #expect(missingPath.status == 1)
+    #expect(missingPath.stderr.contains("missing project-path"))
+    // Refused before the dial, so the daemon is never asked to open a project called
+    // "--json" — nothing reaches the graph to be undone.
+    #expect(missingPath.commands.isEmpty)
+
+    var graph = LoopGraph(project: ProjectRef(path: Self.project, name: "widget"))
+    graph.artifactory = [
+      ArtifactoryPost(
+        id: 5, at: Date(timeIntervalSince1970: 1_756_000_000), authorID: nil,
+        author: "a human", topic: "", body: "a topic that is present but empty")
+    ]
+    let run = try runShim(["artifactory", "read", Self.project, "5"], graph: graph)
+    #expect(run.stdout == GraphcodeCommand.render(graph.artifactory[0]) + "\n")
+    #expect(run.stdout.contains("#5 () from a human"))
+
+    let posted = try runShim(
+      ["artifactory", "post", Self.project, "anything"], graph: graph)
+    #expect(posted.stdout == GraphcodeCommand.renderPosted(graph) + "\n")
+    #expect(posted.stdout == "posted #5 ()\n")
+  }
+
   /// `read` and `list` send nothing past the open — the snapshot already carries the
   /// board — so neither can move a cursor by accident.
   @Test
