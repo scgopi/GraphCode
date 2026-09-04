@@ -100,6 +100,12 @@ public enum ZmxSessionLauncher {
   /// unsatisfiable — every Codex pane spun out its sixty seconds and dropped the human
   /// into a bare login shell while the agent underneath it ran fine (issue #272).
   ///
+  /// The decoy, for whoever reads this next: `zmx ls` *also* truncates a long `cmd=` to a
+  /// literal `...` at a 256-byte cap (`ipc.zig:58`, `main.zig:1322`), which looks like the
+  /// bug and is not. Raising that cap or dropping the ellipsis would change nothing here —
+  /// a loop session has no `cmd=` to truncate in the first place. Only sessions created by
+  /// `attach` carry one at all.
+  ///
   /// Written by the daemon in the same breath as the launch rather than from inside the
   /// launch script, for one measured reason: what `zmx run` carries is *typed* into the
   /// session's tty, and a canonical-mode tty drops everything past `MAX_CANON`
