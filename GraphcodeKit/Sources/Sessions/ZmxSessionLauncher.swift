@@ -141,7 +141,9 @@ public enum ZmxSessionLauncher {
   /// local loop: the liveness sweep filters to remote projects, the local ensure runs at
   /// graph load, node creation and promotion, and a local send checks `sessionExists`
   /// rather than this gate. The loop would sit unattachable exactly as in #272, but
-  /// intermittently — which is worse than the deterministic bug it came from.
+  /// intermittently — which is worse than the deterministic bug it came from. The repair
+  /// still only lands when an ensure runs, and nothing runs one periodically for a local
+  /// project; that residual is issue #276.
   ///
   /// Only when there is no label at all, never over one that disagrees: a session already
   /// stamped with a different agent is a session running the wrong thing, and relaunching
@@ -567,8 +569,8 @@ public enum ZmxSessionLauncher {
       agent: readinessAgent(forNode: node))
   }
 
-  /// `agent` is a `CLISessionBackendKind.rawValue`, the same value the launch script
-  /// stamps (`agentLabelStatement`) — one source for the write and the read, so a backend
+  /// `agent` is a `CLISessionBackendKind.rawValue`, the same value the daemon's ensure
+  /// stamps (`agentLabelCommand`) — one source for the write and the read, so a backend
   /// whose binary is named differently from its case (`claudeCode` → `claude`) cannot
   /// make the two halves disagree.
   public static func daemonReadyCheckCommand(
@@ -579,7 +581,7 @@ public enum ZmxSessionLauncher {
       RemoteProjectLocation.shellQuoted(zmxPath)
       + " ls 2>/dev/null | grep -v -e $'\\tended=' -e $'\\terr=' | grep -q " + name
     if let agent {
-      // The label graphcode writes (`agentLabelStatement`), not the process's own command
+      // The label graphcode writes (`agentLabelCommand`), not the process's own command
       // line: `zmx ls` never shows a `cmd=` for a `zmx run` session, so the grep this
       // replaced could not match however long it waited (issue #272).
       // Anchored on the label's own end — a tab, or the end of the line when it is the
