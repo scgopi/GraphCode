@@ -90,7 +90,8 @@ struct CodexReadinessGateTests {
     #expect(await !run(gate).succeeded)
 
     // The production stamp, run the way the daemon's ensure runs it.
-    await run(try #require(ZmxSessionLauncher.agentLabelCommand(zmxPath: Self.zmx, forNode: node)))
+    await run(
+      try #require(ZmxSessionLauncher.agentLabelCommand(zmxPath: Self.zmx, forNode: node)))
     #expect(await run(gate).succeeded)
 
     // A session running some *other* agent must still not satisfy a Codex gate — that is
@@ -166,8 +167,9 @@ struct CodexReadinessGateTests {
     // the retry runs `zmx run` against a session that is by then live — which types the
     // entire launch command into the agent's input, the very thing the ensure's atomic
     // check-or-run exists to prevent.
-    guard let stamp = ZmxSessionLauncher.agentLabelCommand(
-      zmxPath: Self.zmx, forNode: codexNode())
+    guard
+      let stamp = ZmxSessionLauncher.agentLabelCommand(
+        zmxPath: Self.zmx, forNode: codexNode())
     else { return }
     #expect(await !run(stamp).succeeded)
     #expect(await run("\(stamp) || true").succeeded)
@@ -182,12 +184,14 @@ struct CodexReadinessGateTests {
       let node = LoopNode(
         title: "Loop", loopType: .goalBased, goal: GoalSpec(summary: "work"), backend: backend)
       #expect(ZmxSessionLauncher.readinessAgent(forNode: node) == nil)
-      #expect(ZmxSessionLauncher.agentLabelCommand(zmxPath: "/usr/local/bin/zmx", forNode: node) == nil)
+      #expect(
+        ZmxSessionLauncher.agentLabelCommand(zmxPath: "/usr/local/bin/zmx", forNode: node) == nil)
       #expect(
         ZmxSessionLauncher.adoptUnlabelledCommand(zmxPath: "/usr/local/bin/zmx", forNode: node)
           == nil)
       // And the gate for such a node is the name check alone, exactly as before #272.
-      let command = ZmxSessionLauncher.aliveCheckCommand(zmxPath: "/usr/local/bin/zmx", forNode: node)
+      let command = ZmxSessionLauncher.aliveCheckCommand(
+        zmxPath: "/usr/local/bin/zmx", forNode: node)
       #expect(!command.contains("agent="))
     }
   }
@@ -199,7 +203,8 @@ struct CodexReadinessGateTests {
     // its case (`claudeCode` → `claude`) could have made the two halves disagree.
     let node = codexNode()
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
-    let stamp = ZmxSessionLauncher.agentLabelCommand(zmxPath: "/usr/local/bin/zmx", forNode: node) ?? ""
+    let stamp =
+      ZmxSessionLauncher.agentLabelCommand(zmxPath: "/usr/local/bin/zmx", forNode: node) ?? ""
     let gate = ZmxSessionLauncher.daemonReadyCheckCommand(
       zmxPath: "/usr/local/bin/zmx", sessionName: name,
       agent: CLISessionBackendKind.codex.rawValue)
