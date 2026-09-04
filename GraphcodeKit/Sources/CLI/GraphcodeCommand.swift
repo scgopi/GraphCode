@@ -452,7 +452,12 @@ public enum GraphcodeCommand: Equatable, Sendable {
       ])
     let flags = parseFlags(arguments)
     if flags["help"] != nil { throw HelpRequested() }
-    guard let title = flags["title"] else { throw ParseError.missingArgument("--title") }
+    guard let rawTitle = flags["title"] else { throw ParseError.missingArgument("--title") }
+    // A loop fanning work out types the name it would say out loud — "Board Visibility" —
+    // and the instruction to write it as one word is only ever an instruction. Folded
+    // here, at the boundary, so a CLI-created loop is named the way every other one is
+    // (see `LoopName`).
+    let title = LoopName.folded(rawTitle) ?? rawTitle
     guard let rawType = flags["type"] else { throw ParseError.missingArgument("--type") }
 
     let loopType: LoopType

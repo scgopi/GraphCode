@@ -51,7 +51,8 @@ struct RemoteCLIShimTests {
       return
     }
     #expect(path == Self.project)
-    #expect(draft.title == "Fix issue 7")
+    // Folded to one word, exactly as `LoopName.folded` does it on the Mac.
+    #expect(draft.title == "FixIssue7")
     #expect(draft.loopType == .goalBased)
     #expect(draft.goal?.summary == "tests pass")
     #expect(draft.goal?.predicate == "make test")

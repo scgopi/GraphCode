@@ -133,7 +133,7 @@ public enum SessionBriefing {
       in sequence:
 
       ```sh
-      graphcode node create \(projectPath) --title <title> --type goal --goal <what done looks like>
+      graphcode node create \(projectPath) --title <OneWordName> --type goal --goal <what done looks like>
       ```
 
       A **node is a loop** — the cards on graphcode's canvas are loops, and the CLI calls
@@ -256,7 +256,8 @@ public enum SessionBriefing {
       If `graphcode` is not on your `PATH`, it is at `\(installedCLIPath)`.
 
       Give each loop a title that says what it is for and a goal that says what done looks
-      like — they are what a human sees in the sidebar.
+      like — they are what a human sees in the sidebar. A title is one word: two concepts
+      join in CamelCase, `--title BoardVisibility`, never `--title "Board Visibility"`.
 
       ## When not to
 

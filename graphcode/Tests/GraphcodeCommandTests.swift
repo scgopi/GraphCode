@@ -460,6 +460,26 @@ extension GraphcodeCommandTests {
   }
 
   @Test
+  func aTitleWrittenAsSeparateWordsIsFoldedIntoOne() throws {
+    // What a loop fanning work out actually types. Every other loop name on the canvas
+    // is one word, and telling the session so is all the briefing can do.
+    let command = try GraphcodeCommand.parse([
+      "node", "create", "/tmp/x", "--title", "Board Visibility", "--type", "goal",
+      "--goal", "boards ship",
+    ])
+    guard case .createNode(_, let draft, _) = command else {
+      Issue.record("expected createNode, got \(command)")
+      return
+    }
+    #expect(draft.title == "BoardVisibility")
+    #expect(LoopName.folded("fix the flaky login test") == "FixTheFlakyLoginTest")
+    #expect(LoopName.folded("GraphCode  templates") == "GraphCodeTemplates")
+    // Nothing alphanumeric to fold: the caller keeps what it was given rather than
+    // creating a nameless card.
+    #expect(LoopName.folded("---") == nil)
+  }
+
+  @Test
   func compositeIsCreatableFromTheCLIUnderEitherName() throws {
     // `proactive` too: that is what a composite still serialises as, so it is the word a
     // human reading an existing graph off disk has in front of them.
