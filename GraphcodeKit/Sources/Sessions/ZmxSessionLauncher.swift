@@ -33,17 +33,62 @@ public enum ZmxSessionLauncher {
   /// `.message` edge rides on (docs/02-graph-of-loops.md#inter-loop-messaging-in-practice).
   /// Returns false when there's no live session to deliver into, so the caller can
   /// report an undelivered message rather than assume it landed.
+  ///
+  /// One write for the whole message, which is why nothing on the delivery path calls
+  /// this: `sendWrites` is what `send` types, and a message long enough to need framing
+  /// gets none here (issue #277).
   static func sendArguments(_ text: String, toNode node: LoopNode) -> [String] {
     ["send", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, flattened(text)]
   }
 
-  /// The most a single `zmx send` may carry. One send is one uninterrupted write into
-  /// the session's PTY, and a PTY's kernel input queue holds 4 KB: measured on macOS
-  /// 26, a 3.7 KB message typed as one write arrives intact and a 7.3 KB one vanishes
-  /// *entirely* — while `zmx send` still exits 0, so every layer above reported the
-  /// message delivered. Half the queue leaves room for whatever the session's TUI has
-  /// not yet drained when the write lands.
+  /// The most a single `zmx send` may carry — a bound on the *write*, which is all it
+  /// ever was. One send is one uninterrupted write into the session's PTY, and the PTY
+  /// itself honours this size: measured on macOS 26, 2 KB writes reach a raw-mode reader
+  /// byte-for-byte even when that reader stalls 300 ms between reads, because the zmx
+  /// daemon buffers what the kernel will not yet take and drains it on `POLLOUT`.
+  ///
+  /// It is **not** what keeps a message intact. That was the theory this constant was
+  /// introduced with (0.1.29, `d3f7c9a`) and issue #277 disproved it: splitting at this
+  /// size still lost the head of every multi-chunk message. See
+  /// `maxUnbracketedSendBytes` for what the real limit turned out to be.
   static let maxSendChunkBytes = 2048
+
+  /// The most a message may be before it is typed as a **paste** rather than as
+  /// keystrokes — the fix for issue #277, and the one number here that governs whether a
+  /// message survives at all.
+  ///
+  /// What #277 turned out to be: nothing below the agent's own TUI loses anything. The
+  /// controls are unambiguous — 2 KB writes reach a raw-mode sink intact, and reach a
+  /// sink that stalls 300 ms per read intact too, so the kernel, the PTY and the zmx
+  /// daemon are all innocent. The loss is the **composer's** own input handling, which
+  /// swallows a large enough burst of keystrokes whole (2634 bytes sent, 590 received;
+  /// the `[graphcode] <sender>:` prefix went with the head, which is why grepping a
+  /// transcript for `[graphcode]` found only the *undamaged* messages).
+  ///
+  /// And it cannot be fixed by choosing a smaller chunk, which is the trap: the TUI's
+  /// **reads** are not our writes. With a reader stalled 0.5 s, two 512-byte writes
+  /// arrived as one 1022-byte read — and an agent mid-turn stalls for far longer than
+  /// `interChunkDelay`. Any chunk size can coalesce into a burst above the threshold,
+  /// which is why the observed losses (1954, 1096, 2539 bytes) never landed on a chunk
+  /// boundary.
+  ///
+  /// Bracketed paste is the mechanism that does not care: `ESC[200~ … ESC[201~` tells
+  /// the TUI where the payload begins and ends, so coalescing is harmless and no
+  /// keystroke heuristic applies. Verified intact at 2600 bytes as one write, and as
+  /// 512-byte writes inside the brackets. Every backend graphcode launches enables the
+  /// mode (`DECSET 2004`) at startup.
+  ///
+  /// Why a threshold at all, rather than pasting everything: a message this small is
+  /// *measured* to arrive intact as plain keystrokes and is the overwhelming majority of
+  /// what loops send. Leaving it on the path it already survives keeps the fix confined
+  /// to the case that is broken today, where any change can only be an improvement.
+  static let maxUnbracketedSendBytes = 1024
+
+  /// The start and end of a bracketed paste (`DECSET 2004`) — what a terminal emits
+  /// around text a human pastes, and what makes a long message one payload to the TUI
+  /// instead of a burst of keystrokes it is free to drop.
+  static let pasteStart = "\u{1B}[200~"
+  static let pasteEnd = "\u{1B}[201~"
 
   /// The beat between chunks — what gives the session's TUI time to drain one write
   /// out of the PTY queue before the next lands on top of it.
@@ -71,6 +116,50 @@ public enum ZmxSessionLauncher {
     if !current.isEmpty { chunks.append(current) }
     return chunks
   }
+
+  /// The exact sequence of `zmx send` payloads that carries one message, in order.
+  ///
+  /// Short messages are unchanged: one write, plain keystrokes, exactly what shipped
+  /// before issue #277 and exactly what was measured to arrive intact. A message over
+  /// `maxUnbracketedSendBytes` is wrapped in a bracketed paste and carries a trailer —
+  /// see those two for why each is there.
+  ///
+  /// The brackets ride on the first and last chunk rather than travelling as writes of
+  /// their own, so that a start marker can never be separated from the payload it opens
+  /// by a failure between two sends.
+  static func sendWrites(_ text: String, limit: Int = maxSendChunkBytes) -> [String] {
+    let flat = flattened(text)
+    guard flat.utf8.count > maxUnbracketedSendBytes else {
+      return flat.isEmpty ? [] : [flat]
+    }
+    var chunks = messageChunks(flat + deliveryTrailer(for: flat), limit: limit)
+    chunks[0] = pasteStart + chunks[0]
+    chunks[chunks.count - 1] += pasteEnd
+    return chunks
+  }
+
+  /// What a long message says about itself, so that losing its head stays *reportable*.
+  ///
+  /// `delivered` has only ever meant "every `zmx send` exited 0", and issue #277 is the
+  /// second time that has been true of a message whose text never arrived. Nothing this
+  /// side can read back proves otherwise — the composer is not legible through `zmx`,
+  /// and a message to a busy loop sits there unsubmitted for as long as the turn lasts —
+  /// so the receipt is one the *receiver* can check: a clipped message now arrives
+  /// carrying the length and the opening it should have had.
+  ///
+  /// It rides the tail because the tail is the half that survives. That also answers
+  /// #277's third suggestion without moving the `[graphcode] <sender>:` prefix off the
+  /// head where it reads naturally: the marker repeats the `[graphcode]` token, so the
+  /// obvious audit — grepping a transcript for it — stops being blind to exactly the
+  /// messages it should be finding.
+  static func deliveryTrailer(for flattenedText: String) -> String {
+    let opening = String(flattenedText.prefix(deliveryTrailerOpeningCharacters))
+    return " [graphcode] end of a \(flattenedText.count)-character message opening "
+      + "\"\(opening)…\" — if it did not reach you whole, say so and ask for a resend."
+  }
+
+  /// Enough of the opening to recognise, short enough not to bury the message it guards.
+  static let deliveryTrailerOpeningCharacters = 48
 
   /// Wraps a backend command in an **interactive login** shell, so it resolves the same
   /// way it would if a human typed it into a terminal.
@@ -349,12 +438,13 @@ public enum ZmxSessionLauncher {
     }
     guard ZmxLocator.isInstalled, !text.isEmpty else { return false }
     guard await sessionExists(node) else { return false }
-    // Typed in PTY-queue-sized pieces rather than one write — see `maxSendChunkBytes`
-    // for what a single oversized write silently does. The pieces just accumulate in
-    // the composer, exactly as the text and the later `\r` already do; nothing is
-    // submitted until the one Enter below.
+    // Typed as the writes `sendWrites` frames it into — plain keystrokes when it is
+    // short, a bracketed paste when it is not, which is what keeps a long message's head
+    // from being swallowed by the composer (`maxUnbracketedSendBytes`, issue #277). The
+    // pieces just accumulate in the composer, exactly as the text and the later `\r`
+    // already do; nothing is submitted until the one Enter below.
     let sessionName = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
-    for (index, chunk) in messageChunks(text).enumerated() {
+    for (index, chunk) in sendWrites(text).enumerated() {
       if index > 0 { try? await Task.sleep(for: interChunkDelay) }
       guard
         let session = try? PTYProcessSession(
@@ -1116,11 +1206,17 @@ public enum ZmxSessionLauncher {
   /// Messages flatten the same way and for the same reason (`sendArguments`,
   /// `messageChunks`): `zmx` terminates what it types with `\r`, so an embedded
   /// newline would truncate at the first line.
+  ///
+  /// `ESC` goes for a related reason. It is never message *text*: typed as a keystroke
+  /// it is a composer's cancel key, and inside a bracketed paste an `ESC[201~` in the
+  /// payload would close the paste early and type the remainder as keystrokes — the
+  /// exact failure `sendWrites` exists to prevent, reintroduced from the inside.
   static func flattened(_ text: String) -> String {
     text
       .replacingOccurrences(of: "\r\n", with: " ")
       .replacingOccurrences(of: "\r", with: " ")
       .replacingOccurrences(of: "\n", with: " ")
+      .replacingOccurrences(of: "\u{1B}", with: "")
   }
 
   /// Where an unattended session should open, mirroring what the app already does for a
@@ -1448,11 +1544,11 @@ public enum ZmxSessionLauncher {
   static func remoteSendInvocation(
     _ text: String, toNode node: LoopNode, at location: RemoteProjectLocation
   ) -> [String] {
-    // Chunked like the local path — the remote host's PTY queue is no bigger than
-    // ours — but chained into the one ssh round-trip, with the same drain beat
-    // between writes.
+    // Framed exactly like the local path — the composer on the far side is the same
+    // program with the same appetite (issue #277) — but chained into the one ssh
+    // round-trip, with the same drain beat between writes.
     let sessionName = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
-    let sends = messageChunks(text)
+    let sends = sendWrites(text)
       .map { quotedCommand(["zmx", "send", sessionName, $0]) }
       .joined(separator: " && sleep 0.15 && ")
     let submit = quotedCommand(["zmx"] + submitArguments(forNode: node))

@@ -395,10 +395,14 @@ struct ZmxSessionLauncherTests {
 
   // MARK: - Message chunking
 
-  // Why chunks exist at all: one `zmx send` is one uninterrupted PTY write, and a
-  // message bigger than the PTY's 4 KB input queue vanished *entirely* — while every
-  // layer above, `zmx send`'s exit 0 included, reported it delivered. Measured, not
-  // theorized: 3.7 KB in one write arrived byte-exact, 7.3 KB arrived as nothing.
+  // Why chunks exist at all: one `zmx send` is one uninterrupted PTY write, and one
+  // large enough to outrun what the daemon will buffer has nowhere to go — while every
+  // layer above, `zmx send`'s exit 0 included, reports the message delivered.
+  //
+  // Chunking is *not* what keeps a message intact, which is what issue #277 cost two
+  // orchestration runs to learn: the splitter here was correct and every multi-chunk
+  // message still arrived headless. `sendWrites` carries that half — these tests cover
+  // only the cutting, and MessageDeliveryTests covers whether anything arrives.
 
   @Test
   func aShortMessageIsOneChunkUnchanged() {
@@ -446,5 +450,89 @@ struct ZmxSessionLauncherTests {
     // match what a single small send produces.
     let chunks = ZmxSessionLauncher.messageChunks("line one\r\nline two")
     #expect(chunks == ["line one line two"])
+  }
+
+  @Test
+  func anEscapeNeverSurvivesIntoWhatIsTyped() {
+    // Typed bare it is a composer's cancel key; inside a bracketed paste an `ESC[201~`
+    // would end the paste early and type the rest as the keystrokes `sendWrites` exists
+    // to avoid. Neither is ever what the message meant.
+    #expect(ZmxSessionLauncher.flattened("before\u{1B}[201~after") == "before[201~after")
+  }
+
+  // MARK: - How a message is framed into writes (issue #277)
+
+  @Test
+  func aShortMessageIsTypedExactlyAsItAlwaysWas() {
+    // The path that was never broken, kept bit-for-bit: one plain write, no markers.
+    #expect(ZmxSessionLauncher.sendWrites("task done") == ["task done"])
+    #expect(ZmxSessionLauncher.sendWrites("") == [])
+  }
+
+  @Test
+  func aLongMessageIsWrappedInOneBracketedPaste() {
+    let message = String(repeating: "GC-277-ABCDEFGH ", count: 500)  // 8 KB
+    let writes = ZmxSessionLauncher.sendWrites(message)
+
+    #expect(writes.count > 1)
+    // Exactly one paste, opened by the first write and closed by the last: a marker on a
+    // write of its own could be separated from the payload it frames by a failed send.
+    #expect(writes.first?.hasPrefix(ZmxSessionLauncher.pasteStart) == true)
+    #expect(writes.last?.hasSuffix(ZmxSessionLauncher.pasteEnd) == true)
+    #expect(writes.filter { $0.contains(ZmxSessionLauncher.pasteStart) }.count == 1)
+    #expect(writes.filter { $0.contains(ZmxSessionLauncher.pasteEnd) }.count == 1)
+  }
+
+  @Test
+  func theWritesReassembleToTheMessageAndNothingElse() {
+    let message = String(repeating: "GC-277-ABCDEFGH ", count: 500)
+    let flat = ZmxSessionLauncher.flattened(message)
+    let typed = ZmxSessionLauncher.sendWrites(message).joined()
+      .replacingOccurrences(of: ZmxSessionLauncher.pasteStart, with: "")
+      .replacingOccurrences(of: ZmxSessionLauncher.pasteEnd, with: "")
+
+    #expect(typed == flat + ZmxSessionLauncher.deliveryTrailer(for: flat))
+  }
+
+  @Test
+  func aLongMessageSaysWhatItsHeadShouldHaveBeen() {
+    // #277's damage was invisible because the head carried the attribution: a clipped
+    // message read as a whole one, and grepping for `[graphcode]` found only the
+    // undamaged. The trailer rides the surviving half so a receiver can tell.
+    let message = "[graphcode] Reviewer: " + String(repeating: "detail ", count: 400)
+    let flat = ZmxSessionLauncher.flattened(message)
+    let trailer = ZmxSessionLauncher.deliveryTrailer(for: flat)
+
+    #expect(trailer.contains("[graphcode]"))
+    #expect(trailer.contains("\(flat.count)-character"))
+    #expect(trailer.contains("[graphcode] Reviewer: detail"))
+    #expect(ZmxSessionLauncher.sendWrites(message).last?.contains(trailer.suffix(20)) == true)
+  }
+
+  @Test
+  func noWriteExceedsWhatOnePTYWriteCanCarry() {
+    let message = String(repeating: "x", count: 10_000)
+    for write in ZmxSessionLauncher.sendWrites(message) {
+      // The markers ride on top of a full-sized chunk, so allow for them.
+      let framing =
+        ZmxSessionLauncher.pasteStart.utf8.count + ZmxSessionLauncher.pasteEnd.utf8.count
+      #expect(write.utf8.count <= ZmxSessionLauncher.maxSendChunkBytes + framing)
+    }
+  }
+
+  @Test
+  func theRemoteSendCarriesTheSameFramingAsTheLocalOne() throws {
+    // The composer on the far side is the same program with the same appetite, and the
+    // remote path is the one #277 could not test. It chains the same writes into one ssh
+    // round-trip, so it has to be chaining the *framed* ones.
+    let node = LoopNode(title: "Remote", loopType: .goalBased, goal: GoalSpec(summary: "work"))
+    let location = try #require(
+      RemoteProjectLocation.parse(projectPath: "ssh://someone@box/~/project"))
+    let message = String(repeating: "GC-277-ABCDEFGH ", count: 500)
+    let script = ZmxSessionLauncher.remoteSendInvocation(message, toNode: node, at: location)
+      .joined(separator: " ")
+
+    #expect(script.contains("200~"))
+    #expect(script.contains("201~"))
   }
 }
