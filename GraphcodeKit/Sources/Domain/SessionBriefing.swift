@@ -142,6 +142,9 @@ public enum SessionBriefing {
       Run from inside your session, the CLI already attributes the new loop to you as its
       creator, so making a child needs nothing beyond the create itself.
 
+      A child runs on the same coding agent you do. To put one on a different agent, add
+      `--backend claudeCode | copilotCLI | codex | openCode`.
+
       ## Choosing the loop type
 
       Choose by **what decides the loop is finished**. This matters more than it looks:

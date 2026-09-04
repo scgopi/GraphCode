@@ -59,6 +59,19 @@ struct SessionBriefingTests {
   }
 
   @Test
+  func theBriefingTeachesTheFlagThatPicksTheAgent() throws {
+    // Issue #270: a child inherits its creator's backend, so the only way a human's "make
+    // this one a Codex loop" survives the trip is the flag — and the briefing taught every
+    // other flag but that one. A loop that never learns it silently makes the wrong kind.
+    let briefing = try #require(
+      SessionBriefing.text(projectPath: Self.project, settings: GraphcodeSettings()))
+    #expect(briefing.contains("--backend"))
+    for backend in CLISessionBackendKind.allCases {
+      #expect(briefing.contains(backend.rawValue))
+    }
+  }
+
+  @Test
   func theBriefingSaysANodeIsALoop() throws {
     // Issue #91: a Copilot session asked to create a child "node" did nothing, while
     // "child loop" worked — the briefing taught the command only under the word "loop".

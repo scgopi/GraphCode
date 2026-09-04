@@ -601,6 +601,7 @@ public actor ProjectRegistry {
         NodeMemory.rollbackPlaybook(projectPath: path, nodeID: nodeID)
       },
       onHeartbeatEnabled: { GraphcodeSettingsStore.load().daemonHeartbeatEnabled },
+      onDefaultBackend: { GraphcodeSettingsStore.load().defaultBackend },
       onComposeBoard: composeBoard,
       onBoardsEnabled: {
         let settings = GraphcodeSettingsStore.load()

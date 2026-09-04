@@ -213,12 +213,52 @@ struct CreatedByLoopTests {
 
   @Test
   func aParentlessDraftStillDefaultsToClaudeCode() async throws {
-    // A human's shell has no creating loop; the resolution falls through to the same
-    // default the CLI always had.
+    // A human's shell has no creating loop, and nothing is wired to say what their
+    // default is; the resolution falls through to the same default the CLI always had.
     let store = GraphStore()
     await store.handle(.createNode(draft("orphan", createdBy: nil)))
     let node = try #require(await store.graph.nodes.first)
     #expect(node.backend == .claudeCode)
+  }
+
+  @Test
+  func aParentlessDraftTakesTheHumansDefaultBackend() async throws {
+    // Settings → Sessions is what the app's own new-loop form reads, so a loop created
+    // from a shell has to land on it too — issue #270, where every loop a human made in
+    // the app ran on Copilot and every one their loops made came out Claude Code.
+    let store = GraphStore(onDefaultBackend: { .copilotCLI })
+    await store.handle(.createNode(draft("orphan", createdBy: nil)))
+    let node = try #require(await store.graph.nodes.first)
+    #expect(node.backend == .copilotCLI)
+  }
+
+  @Test
+  func aCreatorInAnotherProjectFallsBackToTheDefaultBackend() async throws {
+    // A session fanning work out into a *different* project — a local loop creating
+    // loops on a codespace — names a creator this graph has never heard of. There is
+    // nothing to inherit from, so the human's default decides rather than Claude Code.
+    let store = GraphStore(onDefaultBackend: { .copilotCLI })
+    await store.handle(.createNode(draft("remote worker", createdBy: UUID())))
+    let node = try #require(await store.graph.nodes.first)
+    #expect(node.backend == .copilotCLI)
+  }
+
+  @Test
+  func aResolvableCreatorStillOutranksTheDefaultBackend() async throws {
+    // Inheritance is the stronger signal: a Codex loop's children are Codex loops even
+    // when the human's default says otherwise.
+    let store = GraphStore(onDefaultBackend: { .copilotCLI })
+    await store.handle(
+      .createNode(
+        NodeDraft(
+          title: "Codex parent", loopType: .goalBased,
+          goal: GoalSpec(summary: "triage"), backend: .codex)))
+    let parentID = try #require(await store.graph.nodes.first?.id)
+
+    await store.handle(.createNode(draft("child", createdBy: parentID)))
+
+    let child = try #require(await store.graph.nodes.first { $0.title == "child" })
+    #expect(child.backend == .codex)
   }
 
   @Test

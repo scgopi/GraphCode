@@ -79,6 +79,11 @@ public actor GraphStore {
   /// clients actually listen on. A child owns none of its own, so without this every
   /// refusal inside a composite was said to nobody.
   private let onAnnounceError: (@Sendable (String) -> Void)?
+  /// The backend a new loop starts on when nothing else decided — Settings → Sessions,
+  /// read fresh at every creation so changing the picker applies to the next loop. `nil`
+  /// (tests, and any client that never wires it) leaves `NodeDraft.effectiveBackend` to
+  /// answer, which is Claude Code.
+  private let onDefaultBackend: (@Sendable () -> CLISessionBackendKind)?
   /// Whether the daemon-heartbeat experiment is on, read fresh at every gate — creation,
   /// and every tick — so flipping the Settings toggle applies immediately. `nil` (tests
   /// that don't care, and any client that never wires it) means off, which is the
@@ -226,6 +231,7 @@ public actor GraphStore {
     onRollbackPlaybook: (@Sendable (UUID) -> Bool)? = nil,
     onAnnounceError: (@Sendable (String) -> Void)? = nil,
     onHeartbeatEnabled: (@Sendable () -> Bool)? = nil,
+    onDefaultBackend: (@Sendable () -> CLISessionBackendKind)? = nil,
     onComposeBoard: (
       @Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?
     )? = nil,
@@ -258,6 +264,7 @@ public actor GraphStore {
     self.onRollbackPlaybook = onRollbackPlaybook
     self.onAnnounceError = onAnnounceError
     self.onHeartbeatEnabled = onHeartbeatEnabled
+    self.onDefaultBackend = onDefaultBackend
     self.onComposeBoard = onComposeBoard
     self.onBoardsEnabled = onBoardsEnabled
     self.onResolveTemplate = onResolveTemplate
@@ -524,6 +531,13 @@ public actor GraphStore {
       if draft.backend == nil, let creator = draft.createdBy {
         draft.backend = graph.nodes[id: creator]?.backend
       }
+      // Still nothing means nothing to inherit from: a human's shell has no creating
+      // loop, and a session fanning out into *another* project names a creator this
+      // graph has never heard of (`linkToCreator` drops that same id for the same
+      // reason). Both used to land on Claude Code no matter what Settings → Sessions
+      // said, which is how a human running Copilot got Copilot loops everywhere except
+      // the ones their loops created.
+      if draft.backend == nil { draft.backend = onDefaultBackend?() }
       guard graph.nodes.count < Self.maxNodesPerGraph else {
         announceError(
           "this graph already has \(graph.nodes.count) loops (limit \(Self.maxNodesPerGraph))")
