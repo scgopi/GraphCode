@@ -322,11 +322,12 @@ struct LoopWorkspaceFeature {
 
       case .workspaceLeft:
         state.seenBeatID = state.node.summary?.current?.id
-        // Only what was actually on screen counts as looked at: a hidden rail or a
-        // folded section showed no posts, and marking them seen would clear a badge
-        // the human never had a chance to read.
+        // Only what was actually on screen counts as looked at. A hidden rail drew
+        // nothing; a folded section drew its newest post and no other, so advancing
+        // over the rest would clear the badge rather than let it be read — the badge
+        // stays, and the one gesture it is asking for is the one that clears it.
         if state.isRailVisible, !state.isArtifactoryFolded,
-          let newest = ArtifactoryPresentation.notes(in: state.graph).last?.id
+          let newest = ArtifactoryPresentation.posts(in: state.graph).last?.id
         {
           state.seenArtifactoryPostID = newest
           LoopWorkspaceRail.saveSeenArtifactoryPost(newest, forProjectPath: state.projectPath)

@@ -44,14 +44,14 @@ struct ArtifactoryBudgetTests {
 
     await store.handle(
       .artifactoryPost(text: "DEAD END: approach X fails", topic: "findings", from: ids[0]))
-    for index in 0..<(Artifactory.maxRecords * 4) {
+    for index in 0..<(Artifactory.maxMessages * 4) {
       await store.handle(
         .messageNode(ids[1], text: "ping \(index)", from: ids[0], followUp: true))
     }
 
     let board = await store.graph.artifactory
     #expect(board.contains { $0.body.contains("DEAD END") })
-    #expect(board.filter { $0.kind == .record }.count == Artifactory.maxRecords)
+    #expect(board.filter { $0.kind == .record }.count == Artifactory.maxMessages)
     #expect(board.filter { $0.kind == .note }.count == 1)
   }
 
@@ -78,7 +78,7 @@ struct ArtifactoryBudgetTests {
   func pruningKeepsTheBoardInOneSequence() {
     let base = Date()
     var posts: [ArtifactoryPost] = []
-    for index in 1...(Artifactory.maxRecords + 4) {
+    for index in 1...(Artifactory.maxReceipts + 4) {
       posts.append(
         ArtifactoryPost(
           id: index, at: base, authorID: nil, author: "a human", topic: nil,
@@ -90,7 +90,7 @@ struct ArtifactoryBudgetTests {
     }
     let pruned = Artifactory.pruned(posts.sorted { $0.id < $1.id })
     #expect(pruned == pruned.sorted { $0.id < $1.id })
-    #expect(pruned.filter { $0.kind == .record }.count == Artifactory.maxRecords)
+    #expect(pruned.filter { $0.kind == .record }.count == Artifactory.maxReceipts)
   }
 
   /// A board written before records had a kind decodes as all notes — everything on it

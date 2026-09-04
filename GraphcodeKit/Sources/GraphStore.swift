@@ -1660,15 +1660,21 @@ public actor GraphStore {
   }
 
   /// Writes a shared communication onto the artifactory — the durable record the
-  /// board keeps of everything the graph's loops said to each other. Record-only by
+  /// board keeps of everything the graph's loops said to each other. Silent by
   /// design: the communication already reached its target (or is waiting in staged
   /// memory to), so mirroring must not ring the watchers, or a busy graph would have
   /// every direct message waking every listener on top of its real delivery.
   /// Gated like every board write; body carries the target so a reader can tell a
-  /// note to the room from a note to a peer. Written as `.record`, which is what keeps
+  /// note to the room from a note to a peer. Always a `.record`, which is what keeps
   /// a talkative graph inside its own budget instead of evicting the notes.
+  ///
+  /// `wasWritten` is the other half, and the caller is the only one who knows it: the
+  /// text of a `node send` is a loop talking, while "Author finished." is the board
+  /// noticing that an edge fired. Both belong in the record's budget; only the first
+  /// belongs in front of a reader.
   private func recordArtifactoryCommunication(
-    from senderID: UUID?, to target: LoopNode, text: String, topic: String
+    from senderID: UUID?, to target: LoopNode, text: String, topic: String,
+    wasWritten: Bool
   ) {
     guard onArtifactoryEnabled?() == true else { return }
     let sender = senderID.flatMap { graph.nodes[id: $0]?.title } ?? "a human"
@@ -1681,7 +1687,7 @@ public actor GraphStore {
     }
     let post = ArtifactoryPost(
       id: Artifactory.nextID(after: graph.artifactory), at: Date(), authorID: senderID,
-      author: sender, topic: topic, body: body, kind: .record)
+      author: sender, topic: topic, body: body, kind: .record, wasWritten: wasWritten)
     graph.artifactory = Artifactory.pruned(graph.artifactory + [post])
   }
 
@@ -2359,7 +2365,12 @@ public actor GraphStore {
       if record.hasPrefix("\(source.title): ") {
         record.removeFirst("\(source.title): ".count)
       }
-      recordArtifactoryCommunication(from: source.id, to: target, text: record, topic: "direct")
+      recordArtifactoryCommunication(
+        from: source.id, to: target, text: record, topic: "direct",
+        // An edge with no transform says only that the upstream finished — the board's
+        // own observation, not the loop's. A template or a captured script is content
+        // somebody put there.
+        wasWritten: edge.payloadTransform != .none)
       graph.edges[id: edgeID]?.fireCount += 1
     }
   }
@@ -2454,7 +2465,7 @@ public actor GraphStore {
           "Cycle re-entry \(edge.fireCount)\(bound) — the stop condition is not yet met. "
             + "Continue toward your goal.")
       } else {
-        parts.append("\(source.title) finished and handed its work off to you.")
+        parts.append("\(source.title)\(Artifactory.handedOffWithNothingToSay)")
         // The handoff itself is shared communication and gets its record — with its
         // payload, which is the part a later reader actually needs. Cycle re-entries
         // are the daemon's own metronome, not a loop saying anything, so they stay
@@ -2462,7 +2473,10 @@ public actor GraphStore {
         var record = parts.joined(separator: " ")
         if let payload { record += " " + payload }
         recordArtifactoryCommunication(
-          from: source.id, to: target, text: record, topic: "handoff")
+          from: source.id, to: target, text: record, topic: "handoff",
+          // The payload is the part a later reader needs; without one the line is the
+          // boilerplate above and nothing else, which is a receipt.
+          wasWritten: payload != nil)
       }
       if let payload {
         parts.append(payload)
@@ -2541,7 +2555,7 @@ public actor GraphStore {
     // that already exists, and recording it would have the board record itself.
     if mirror {
       recordArtifactoryCommunication(
-        from: senderID, to: target, text: trimmed, topic: "direct")
+        from: senderID, to: target, text: trimmed, topic: "direct", wasWritten: true)
     }
     // Attributed when the sender is a loop in this graph, the way a message edge names
     // its source — the target should know who's talking without guessing.

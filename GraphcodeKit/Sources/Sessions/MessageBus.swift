@@ -1,3 +1,4 @@
+import ArtifactoryKit
 import Foundation
 
 /// Delivery for `.message`-kind edges — docs/02-graph-of-loops.md#inter-loop-messaging-in-practice
@@ -130,7 +131,9 @@ public enum MessageBus {
     switch edge.payloadTransform {
     case .none:
       // Still worth sending: the fact that the upstream finished is itself the message.
-      return "[graphcode] \(source.title) finished."
+      // The suffix is `ArtifactoryKit`'s so the board can recognise its own bookkeeping
+      // on a post saved before it was flagged as such.
+      return "[graphcode] \(source.title)\(Artifactory.firedWithNothingToSay)"
     case .template(let text):
       return text.isEmpty ? nil : "[graphcode] \(source.title): \(text)"
     case .script(let command):

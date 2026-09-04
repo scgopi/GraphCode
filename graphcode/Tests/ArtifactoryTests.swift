@@ -242,6 +242,7 @@ extension ArtifactoryTests {  // MARK: - Shared-communication mirroring
     #expect(record.topic == "direct")
     #expect(record.author == "Author")
     #expect(record.body == "@Reader: the API changed under you")
+    #expect(record.wasWritten)
   }
 
   @Test
@@ -277,6 +278,7 @@ extension ArtifactoryTests {  // MARK: - Shared-communication mirroring
     #expect(records.count == 1)
     #expect(records[0].author == "Author")
     #expect(records[0].body == "@Reader: specs moved to docs/api.md")
+    #expect(records[0].wasWritten)
   }
 
   @Test
@@ -297,8 +299,171 @@ extension ArtifactoryTests {  // MARK: - Shared-communication mirroring
     #expect(
       records[0].body
         == "@Reader: Author finished and handed its work off to you. branch: fix/auth")
+    #expect(records[0].wasWritten)
+  }
+}
+
+/// #273: which mirrored posts a reader is shown. `kind` is a budget — mirrored traffic
+/// prunes on its own quota so a talkative graph cannot evict a note — and it was doing
+/// double duty as "is there anything in here to read". A `node send` carries every word
+/// its sender typed; an edge that fired with no payload carries none.
+extension ArtifactoryTests {  // MARK: - Written messages and delivery receipts
+  @Test
+  func aPayloadlessEdgeMirrorsAsAReceipt() async {
+    let delivered = LockIsolated<[(UUID, String)]>([])
+    let store = await makeStore(delivered: delivered)
+    let ids = nodeIDs(await store.graph)
+
+    await store.handle(
+      .createEdge(from: ids[0], to: ids[1], spec: EdgeSpec(kind: .message)))
+    await store.handle(.nodeCheckApproved(ids[0]))
+
+    let graph = await store.graph
+    let records = graph.artifactory.filter { $0.topic == "direct" }
+    #expect(records.count == 1)
+    #expect(records[0].body == "@Reader: Author finished.")
+    #expect(!records[0].wasWritten)
   }
 
+  @Test
+  func aPayloadlessHandoffMirrorsAsAReceipt() async {
+    let store = await makeStore()
+    let ids = nodeIDs(await store.graph)
+
+    await store.handle(
+      .createEdge(from: ids[0], to: ids[1], spec: EdgeSpec(kind: .handoff)))
+    await store.handle(.nodeCheckApproved(ids[0]))
+
+    let graph = await store.graph
+    let records = graph.artifactory.filter { $0.topic == "handoff" }
+    #expect(records.count == 1)
+    #expect(!records[0].wasWritten)
+  }
+
+  /// Mirrored traffic still prunes apart from the notes, which is the invariant the
+  /// split was shaped to leave alone: a graph that merely talks must not cost a note.
+  @Test
+  func writtenMessagesStillPruneApartFromTheNotes() async {
+    let store = await makeStore()
+    let ids = nodeIDs(await store.graph)
+
+    await store.handle(.artifactoryPost(text: "DEAD END: approach X", topic: nil, from: ids[0]))
+    for index in 0..<(Artifactory.maxMessages * 2) {
+      await store.handle(
+        .messageNode(ids[1], text: "ping \(index)", from: ids[0], followUp: nil))
+    }
+
+    let board = await store.graph.artifactory
+    #expect(board.filter { $0.kind == .note }.count == 1)
+    #expect(board.filter { $0.kind == .record }.count == Artifactory.maxMessages)
+    #expect(board.filter(\.wasWritten).count == Artifactory.maxMessages + 1)
+  }
+
+  /// The eviction this PR would otherwise have introduced into its own feature. A
+  /// `.none`-transform edge on a cycle mirrors a fresh receipt every pass, and while
+  /// receipts and messages shared one quota those passes would delete the conversation
+  /// the board exists to show — invisible before, because both halves were hidden.
+  @Test
+  func receiptsCannotEvictTheWrittenConversation() {
+    let base = Date()
+    var posts = [
+      ArtifactoryPost(
+        id: 1, at: base, authorID: nil, author: "Author", topic: "direct",
+        body: "@Reader: the truncation is a decoy", kind: .record, wasWritten: true)
+    ]
+    for index in 2...(Artifactory.maxReceipts * 4) {
+      posts.append(
+        ArtifactoryPost(
+          id: index, at: base, authorID: nil, author: "Author", topic: "direct",
+          body: "@Reader: Author\(Artifactory.firedWithNothingToSay)", kind: .record))
+    }
+
+    let pruned = Artifactory.pruned(posts)
+
+    #expect(pruned.contains { $0.body.contains("the truncation is a decoy") })
+    #expect(pruned.filter { !$0.wasWritten }.count == Artifactory.maxReceipts)
+    #expect(pruned == pruned.sorted { $0.id < $1.id })
+  }
+
+  /// Ties the two modules together. `readsAsADeliveryReceipt` recognises a legacy post by
+  /// words `GraphcodeKit` writes, and reading either literal out of the other module
+  /// would let them drift with no compile error — so the shape the mirror actually
+  /// produces is asserted against the reader, not against a copy of the string.
+  @Test
+  func whatTheMirrorGeneratesIsWhatTheReaderRecognises() async {
+    let store = await makeStore()
+    let ids = nodeIDs(await store.graph)
+
+    await store.handle(
+      .createEdge(from: ids[0], to: ids[1], spec: EdgeSpec(kind: .message)))
+    await store.handle(
+      .createEdge(from: ids[0], to: ids[1], spec: EdgeSpec(kind: .handoff)))
+    await store.handle(.nodeCheckApproved(ids[0]))
+
+    let board = await store.graph.artifactory
+    #expect(board.count == 2)
+    for post in board {
+      #expect(Artifactory.readsAsADeliveryReceipt(post.body))
+    }
+  }
+
+  /// A board saved before the split carries no flag, and defaulting it to "receipt"
+  /// would leave every conversation already on one as buried as #273 found it. The two
+  /// generated shapes are read back out; a `node send` is not one of them.
+  @Test
+  func recordsSavedBeforeTheSplitAreReadBackFromTheirBodies() throws {
+    let written = try decodeLegacyRecord(body: "@Reader: truncation is not the mechanism")
+    #expect(written.kind == .record)
+    #expect(written.wasWritten)
+
+    let firedEdge = try decodeLegacyRecord(body: "@Reader: Author finished.")
+    #expect(!firedEdge.wasWritten)
+
+    let handoff = try decodeLegacyRecord(
+      body: "@Reader: Author finished and handed its work off to you.")
+    #expect(!handoff.wasWritten)
+  }
+
+  /// A hand-off that carried a payload ends with the payload, not the boilerplate — the
+  /// part a later reader actually needs, and the reason the suffix test is anchored.
+  @Test
+  func aLegacyHandoffCarryingAPayloadReadsAsWritten() throws {
+    let post = try decodeLegacyRecord(
+      body: "@Reader: Author finished and handed its work off to you. branch: fix/auth")
+    #expect(post.wasWritten)
+  }
+
+  /// An explicit flag always wins: the body is only consulted when there is none.
+  @Test
+  func anExplicitFlagIsNeverSecondGuessedByTheBody() throws {
+    #expect(try decodeRecord(body: "@Reader: Author finished.", wasWritten: true).wasWritten)
+  }
+
+  /// A board with no `wasWritten` key at all, which the current encoder can no longer
+  /// produce — so the JSON is assembled rather than round-tripped.
+  private func decodeLegacyRecord(body: String) throws -> ArtifactoryPost {
+    try decodeRecord(body: body, wasWritten: nil)
+  }
+
+  private func decodeRecord(body: String, wasWritten: Bool?) throws -> ArtifactoryPost {
+    var fields: [String: Any] = [
+      "id": 9, "at": 747_000_000, "author": "Author", "topic": "direct", "body": body,
+      "kind": "record",
+    ]
+    if let wasWritten { fields["wasWritten"] = wasWritten }
+    return try JSONDecoder().decode(
+      ArtifactoryPost.self, from: JSONSerialization.data(withJSONObject: fields))
+  }
+
+  @Test
+  func aNoteIsWrittenWithoutBeingToldSo() {
+    let note = ArtifactoryPost(
+      id: 1, at: Date(), authorID: nil, author: "a human", topic: nil, body: "hello")
+    #expect(note.wasWritten)
+  }
+}
+
+extension ArtifactoryTests {
   // MARK: - Deletion
 
   /// Deleting a loop takes the handle to its posts, never the posts. A note is
