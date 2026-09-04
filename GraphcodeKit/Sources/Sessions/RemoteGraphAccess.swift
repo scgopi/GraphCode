@@ -11,8 +11,8 @@ import Foundation
 /// one file. python3 is already the launch path's scripting dependency (the Copilot
 /// trust seed), it's validated at add-connection time the same way `zmx` is, and the
 /// wire protocol it has to speak is four bytes of length plus JSON. The shim covers the
-/// verbs the briefing teaches — create, send, memo, status — and says so for the rest,
-/// rather than half-implementing all of them.
+/// verbs the briefing teaches — create, send, memo, status, artifactory — and says so
+/// for the rest, rather than half-implementing all of them.
 ///
 /// **Paths are `~/`-relative on purpose.** Nothing local knows the remote home
 /// directory, and every consumer expands them on the remote host itself: the installer
@@ -173,6 +173,11 @@ public enum RemoteGraphAccess {
       graphcode node delete <project-path> <node-id>   irreversible; stop is reversible
       graphcode node send <project-path> <node-id> <message...>
       graphcode node memo <project-path> <node-id> <note...>
+      graphcode artifactory post <project-path> [--topic <t>] <note...>
+      graphcode artifactory sync <project-path> [--headlines] [--full] [--mark] [--json]
+      graphcode artifactory read <project-path> <post-id>
+      graphcode artifactory list <project-path> [--search <text>] [--json]
+      graphcode artifactory watch <project-path> [--topic <t>] [--off]
 
     SAFETY
       Use `graphcode projects` to discover paths and `graphcode status` before retrying.
@@ -180,6 +185,12 @@ public enum RemoteGraphAccess {
       session irreversibly. `--help` and `-h` only print help. The machine-wide
       `graphcode reap` recovery runs on the Mac, not this remote host: use it only there,
       and run `graphcode reap --dry-run` before the destructive form.
+
+    ARTIFACTORY
+      The shared board any loop can post to and any loop can read -- check it at the
+      start of a pass. `sync` and `watch` are the calling loop's, so they need a
+      session ($ZMX_SESSION); `list` and `read` are read-only and move no cursor. A
+      large backlog prints as headlines and says so -- deep-read with `read <post-id>`.
 
     NODE OPTIONS
       --into <composite-id>  create inside that composite's sub-graph
@@ -343,6 +354,169 @@ public enum RemoteGraphAccess {
         return flags
 
 
+    # The board's own arithmetic, ported from ArtifactoryKit rather than asked for over the
+    # wire: `openProject`'s snapshot already carries every post and every reader's cursor, so
+    # `read` and `list` send no command at all and `sync` prints from the snapshot it took
+    # before advancing the cursor. RemoteCLIShimTests asserts this renderer byte-equal against
+    # GraphcodeCommand's, which is the only thing that makes a second copy of it safe to have.
+    TRIAGE_AFTER_POSTS = 12
+    TRIAGE_AFTER_BYTES = 4096
+    # Foundation encodes Date as seconds since 2001-01-01, not since the epoch.
+    REFERENCE_DATE_OFFSET = 978307200
+    # Spelled out rather than left to strftime("%b"), which follows the remote host's
+    # LC_TIME; the Swift side pins en_US_POSIX.
+    MONTH_ABBREVIATIONS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    EM_DASH = "\u2014"
+    ELLIPSIS = "\u2026"
+    HEADLINE_BUDGET = 80
+
+
+    def artifactory_unread(posts, last_read):
+        if last_read is None:
+            return list(posts)
+        return [post for post in posts if post.get("id", 0) > last_read]
+
+
+    def artifactory_needs_triage(posts):
+        if len(posts) > TRIAGE_AFTER_POSTS:
+            return True
+        weight = sum(len((post.get("body") or "").encode("utf-8")) for post in posts)
+        return weight > TRIAGE_AFTER_BYTES
+
+
+    def artifactory_cursor(graph, reader):
+        # (cursor, the graph knows this reader). The distinction is the status line's: a
+        # foreign or stale id gets the plain count, never "0 unread for you".
+        for node in graph.get("nodes") or []:
+            if str(node.get("id") or "").upper() == reader:
+                return node.get("lastArtifactoryRead"), True
+        return None, False
+
+
+    def post_stamp(at):
+        moment = time.localtime((at or 0) + REFERENCE_DATE_OFFSET)
+        return "%s %d, %02d:%02d" % (MONTH_ABBREVIATIONS[moment.tm_mon - 1],
+                                     moment.tm_mday, moment.tm_hour, moment.tm_min)
+
+
+    def render_post(post):
+        topic = (" (%s)" % post["topic"]) if post.get("topic") else ""
+        return "#%s%s from %s at %s %s %s" % (
+            post.get("id"), topic, post.get("author"), post_stamp(post.get("at")),
+            EM_DASH, post.get("body") or "")
+
+
+    def render_headline(post):
+        # Python counts code points where Swift counts grapheme clusters, so a body built
+        # out of combining sequences could cut a character earlier or later than the Mac
+        # would. Everything else about the line is identical, and the parity test pins it.
+        full = render_post(post).replace("\n", " ")
+        if len(full) <= HEADLINE_BUDGET:
+            return full
+        return full[:HEADLINE_BUDGET] + ELLIPSIS
+
+
+    def filtered_posts(posts, search):
+        if not search:
+            return posts
+        needle = search.lower()
+        return [post for post in posts
+                if needle in (post.get("body") or "").lower()
+                or needle in (post.get("author") or "").lower()
+                or needle in (post.get("topic") or "").lower()]
+
+
+    def render_board(graph, reader=None, headlines=False, search=None, auto_triage=False):
+        project = graph.get("project") or {}
+        posts = graph.get("artifactory") or []
+        if reader is not None:
+            cursor, _ = artifactory_cursor(graph, reader)
+            posts = artifactory_unread(posts, cursor)
+        posts = filtered_posts(posts, search)
+        if not posts:
+            if search:
+                if reader is None:
+                    return "no posts match '%s'" % search
+                return "no unread posts match '%s'" % search
+            if reader is not None:
+                return "no unread posts"
+            return ("the board is empty %s post one: graphcode artifactory post "
+                    "<project-path> <note%s>" % (EM_DASH, ELLIPSIS))
+        triaged = auto_triage and artifactory_needs_triage(posts)
+        label = "artifactory" if reader is None else "artifactory, unread"
+        header = "%s %s: %d post%s" % (project.get("name", "?"), label, len(posts),
+                                       "" if len(posts) == 1 else "s")
+        if triaged:
+            header += (" %s headlines only, that is a lot to read at once. Full text: "
+                       "graphcode artifactory read %s <post-id>"
+                       % (EM_DASH, project.get("path", "")))
+        lines = [header]
+        for post in posts:
+            lines.append("  " + (render_headline(post) if headlines or triaged
+                                 else render_post(post)))
+        return "\n".join(lines)
+
+
+    def iso8601(at):
+        moment = time.gmtime((at or 0) + REFERENCE_DATE_OFFSET)
+        return "%04d-%02d-%02dT%02d:%02d:%02dZ" % (
+            moment.tm_year, moment.tm_mon, moment.tm_mday,
+            moment.tm_hour, moment.tm_min, moment.tm_sec)
+
+
+    def encoded_post(post):
+        # What JSONEncoder makes of an ArtifactoryPost: absent rather than null for the
+        # optionals, ISO-8601 for the date, and `kind` defaulted the way the hand-written
+        # decoder defaults it for boards saved before records had their own quota.
+        encoded = {"id": post.get("id"), "at": iso8601(post.get("at")),
+                   "author": post.get("author"), "body": post.get("body"),
+                   "kind": post.get("kind") or "note"}
+        if post.get("authorID") is not None:
+            encoded["authorID"] = post["authorID"]
+        if post.get("topic") is not None:
+            encoded["topic"] = post["topic"]
+        return encoded
+
+
+    def render_board_json(graph, reader=None, search=None):
+        posts = graph.get("artifactory") or []
+        last_read = None
+        if reader is not None:
+            last_read, _ = artifactory_cursor(graph, reader)
+            posts = artifactory_unread(posts, last_read)
+        board = {"posts": [encoded_post(post) for post in filtered_posts(posts, search)]}
+        if last_read is not None:
+            board["lastRead"] = last_read
+        # Swift's JSONEncoder escapes forward slashes and emits non-ASCII raw; json.dumps
+        # does neither by default. `/` cannot occur outside a string in JSON, so escaping
+        # the dumped text wholesale is exact. A body carrying a path or a URL is what makes
+        # this visible, which is why the parity fixture has one.
+        encoded = json.dumps(board, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return encoded.replace("/", "\\/")
+
+
+    def artifactory_status_line(graph, reader):
+        posts = graph.get("artifactory") or []
+        if not posts:
+            return None
+        plural = "" if len(posts) == 1 else "s"
+        cursor, known = artifactory_cursor(graph, reader) if reader else (None, False)
+        if not known:
+            return "artifactory: %d post%s" % (len(posts), plural)
+        return "artifactory: %d post%s, %d unread for you" % (
+            len(posts), plural, len(artifactory_unread(posts, cursor)))
+
+
+    def render_posted(graph):
+        posts = graph.get("artifactory") or []
+        if not posts:
+            return "posted"
+        post = posts[-1]
+        topic = (" (%s)" % post["topic"]) if post.get("topic") else ""
+        return "posted #%s%s" % (post.get("id"), topic)
+
+
     def render(graph):
         project = graph.get("project") or {}
         lines = [str(project.get("name", "?"))]
@@ -355,6 +529,13 @@ public enum RemoteGraphAccess {
                 state = next(iter(state), "?")
             lines.append("  %s  %s  %s  %s" % (
                 node.get("id"), state, node.get("loopType"), node.get("title")))
+        # The board rides last: one line, only when there is anything on it, so a
+        # project that never touched the Artifactory renders as it always did. This is
+        # the cheap "is there mail I should care about" check the briefing sends every
+        # loop to `status` for, and the snapshot already holds everything it needs.
+        board = artifactory_status_line(graph, self_node_id())
+        if board:
+            lines.append("  " + board)
         return "\n".join(lines)
 
 
@@ -452,6 +633,20 @@ public enum RemoteGraphAccess {
         print(acknowledgement)
 
 
+    def run_and_report(project, inner, report):
+        # `run_with_verdict` with the acknowledgement computed from the graph that comes
+        # back rather than fixed in advance -- what `artifactory post` needs to name the
+        # sequence number the note landed at.
+        daemon = Daemon()
+        project = resolve_project(daemon, project)
+        daemon.open_project(project)
+        daemon.send(graph_command(project, inner))
+        key, value = daemon.wait_for(["graphChanged", "errorOccurred"])
+        if key == "errorOccurred":
+            fail(value["_0"])
+        print(report(value["_0"]))
+
+
     def folded_title(raw):
         # The one-word CamelCase shape every loop name has -- LoopName.folded on the Mac.
         words = []
@@ -531,6 +726,137 @@ public enum RemoteGraphAccess {
         return bool(arguments) and arguments[0] in HELP_FLAGS
 
 
+    ARTIFACTORY_FLAGS = {
+        "post": ("topic",),
+        "sync": ("headlines", "mark", "json", "full"),
+        "read": (),
+        "list": ("search", "json"),
+        "watch": ("topic", "off"),
+    }
+
+
+    def artifactory_post_id(raw):
+        # One-based by construction -- the daemon's ids start at 1 -- so "-7" is a typo,
+        # never a post, and says so here rather than at the lookup.
+        digits = raw[1:] if raw[:1] in ("+", "-") else raw
+        if digits and all(character in "0123456789" for character in digits):
+            value = int(raw)
+            if value >= 1:
+                return value
+        fail("invalid value for post-id: %s" % raw)
+
+
+    def artifactory(arguments):
+        # Parsed in GraphcodeCommand.parseArtifactory's order -- subcommand, project path,
+        # help anywhere, then the flags that subcommand allows -- so a mistyped flag is
+        # refused here rather than silently ignored on the way to the daemon.
+        if not arguments:
+            fail("missing artifactory subcommand")
+        subverb = arguments.pop(0)
+        if wants_help(arguments):
+            print(HELP)
+            return
+        if not arguments:
+            fail("missing project-path")
+        project = arguments.pop(0)
+        if any(argument in HELP_FLAGS for argument in arguments):
+            print(HELP)
+            return
+        if subverb not in ARTIFACTORY_FLAGS:
+            fail("unknown command: artifactory %s" % subverb)
+        for argument in arguments:
+            if argument.startswith("--") and argument[2:] not in ARTIFACTORY_FLAGS[subverb]:
+                fail("unknown option: %s" % argument)
+        flags = parse_flags(arguments)
+
+        if subverb == "post":
+            # The note is joined argv words, the node send/memo bargain. A trailing
+            # `--topic` with no value goes with the flag: it was never the note's text.
+            words = list(arguments)
+            if "--topic" in words:
+                index = words.index("--topic")
+                del words[index:index + 2]
+            text = " ".join(words).strip()
+            if not text:
+                fail("missing note")
+            payload = {"text": text, "topic": flags.get("topic"), "from": self_node_id()}
+            run_and_report(project, {"artifactoryPost": payload}, render_posted)
+            return
+
+        if subverb == "sync":
+            reader = self_node_id()
+            if not reader:
+                fail("artifactory sync needs a loop identity %s run it from inside a loop's "
+                     "session ($ZMX_SESSION); a human reading the board wants `graphcode "
+                     "artifactory list`" % EM_DASH)
+            daemon = Daemon()
+            project = resolve_project(daemon, project)
+            # Unread is computed from the snapshot taken *before* the cursor moves; reading
+            # it afterwards would report every post as read. Same one-round-trip race the
+            # Swift CLI documents and accepts.
+            graph = daemon.open_project(project)
+            daemon.send(graph_command(project, {"artifactorySync": {"from": reader}}))
+            key, value = daemon.wait_for(["graphChanged", "errorOccurred"])
+            if key == "errorOccurred":
+                fail(value["_0"])
+            headlines = "headlines" in flags
+            full = "full" in flags
+            if "json" in flags:
+                print(render_board_json(graph, reader=reader))
+            elif "mark" in flags:
+                posts = graph.get("artifactory") or []
+                latest = posts[-1].get("id", 0) if posts else 0
+                if latest > 0:
+                    print("marked read up to #%d" % latest)
+                else:
+                    print("marked read %s the board is empty" % EM_DASH)
+            else:
+                print(render_board(graph, reader=reader, headlines=headlines,
+                                   auto_triage=not headlines and not full))
+            return
+
+        if subverb == "read":
+            if not arguments or arguments[0].startswith("--"):
+                fail("missing post-id")
+            post_id = artifactory_post_id(arguments[0])
+            daemon = Daemon()
+            project = resolve_project(daemon, project)
+            graph = daemon.open_project(project)
+            for post in graph.get("artifactory") or []:
+                if post.get("id") == post_id:
+                    print(render_post(post))
+                    return
+            fail("no post #%d on this board %s `graphcode artifactory list %s` shows the "
+                 "ids that exist" % (post_id, EM_DASH, project))
+
+        if subverb == "list":
+            daemon = Daemon()
+            project = resolve_project(daemon, project)
+            graph = daemon.open_project(project)
+            if "json" in flags:
+                print(render_board_json(graph, search=flags.get("search")))
+            else:
+                print(render_board(graph, search=flags.get("search")))
+            return
+
+        watcher = self_node_id()
+        if not watcher:
+            fail("artifactory watch needs a loop identity %s run it from inside a loop's "
+                 "session ($ZMX_SESSION); the mail is delivered to the loop that watches"
+                 % EM_DASH)
+        on = "off" not in flags
+        topic = flags.get("topic")
+        if not on:
+            acknowledgement = "stopped watching"
+        elif topic is None:
+            acknowledgement = ("watching all posts %s they are typed in when the loop goes "
+                               "idle" % EM_DASH)
+        else:
+            acknowledgement = ("watching '%s' %s matching posts are typed in when the loop "
+                               "goes idle" % (topic, EM_DASH))
+        run_with_verdict(project, {"artifactoryWatch": {"on": on, "topic": topic,
+                                                        "from": watcher}}, acknowledgement)
+
     def main(arguments):
         if not arguments or arguments[0] in ("help", "-h", "--help"):
             print(HELP)
@@ -553,6 +879,9 @@ public enum RemoteGraphAccess {
             if not arguments:
                 fail("missing project-path")
             run_and_print(arguments[0])
+            return
+        if verb == "artifactory":
+            artifactory(arguments)
             return
         if verb != "node":
             fail("unknown or Mac-only command: %s (see `graphcode help`)" % verb)
