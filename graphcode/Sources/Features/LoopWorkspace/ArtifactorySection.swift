@@ -81,8 +81,16 @@ struct ArtifactorySection: View {
   private var showsReceipts = false
   /// Whether the rollup shows every receipt or stops at the newest few. Deliberately
   /// not persisted, unlike the line above: this is a drill-down inside something you
-  /// already opened, and the default it returns to is the short one.
+  /// already opened, and the default it returns to is the short one — which is a claim
+  /// `collapseReceipts` and the "show fewer" line have to keep true, since nothing else
+  /// in a workspace's lifetime would.
   @State private var showsAllReceipts = false
+  /// What the rollup scrolls to when it opens. The board is bottom-anchored and the
+  /// rollup sits at its top, so on any board tall enough to scroll, growing the rollup
+  /// moves content *above* the viewport: without this, tapping "show all" reveals
+  /// nothing and moves nothing, which is the same inert affordance the tap was added to
+  /// remove.
+  private static let receiptsAnchor = "artifactory-receipts"
   @State private var isComposing = false
   @State private var draft = ""
   @State private var draftTopic = ""
@@ -107,30 +115,32 @@ struct ArtifactorySection: View {
       if isFolded {
         foldedLine
       } else {
-        ScrollView(.vertical) {
-          VStack(alignment: .leading, spacing: 11) {
-            receiptsRollup
-            ForEach(posts) { post in
-              if post.id == firstUnreadID { sinceYouLooked }
-              postRow(post)
+        ScrollViewReader { scroll in
+          ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 11) {
+              receiptsRollup(scroll)
+              ForEach(posts) { post in
+                if post.id == firstUnreadID { sinceYouLooked }
+                postRow(post)
+              }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
           }
-          .frame(maxWidth: .infinity, alignment: .leading)
+          .scrollBounceBehavior(.basedOnSize)
+          .defaultScrollAnchor(.bottom)
+          // Hug the posts, and only then scroll. A `ScrollView` is greedy — offered the
+          // rail's slack it takes it, and `defaultScrollAnchor(.bottom)` then pins the
+          // posts to the foot of that box with a gap between them and the header. Two
+          // attempts measured the content through a preference and sized the box to it;
+          // both mis-sized (a zero start that never laid out, then a stale reading that
+          // left the gap). This is the idiom that needs no measuring: `fixedSize`
+          // (vertical) asks the scroll view for its *ideal* height, which is its
+          // content's, and `frame(maxHeight:)` under it clamps that. The box is exactly
+          // as tall as the posts until the cap, and scrolls after — no state, nothing to
+          // go stale, nothing to fire late.
+          .frame(maxHeight: maxHeight)
+          .fixedSize(horizontal: false, vertical: true)
         }
-        .scrollBounceBehavior(.basedOnSize)
-        .defaultScrollAnchor(.bottom)
-        // Hug the posts, and only then scroll. A `ScrollView` is greedy — offered the
-        // rail's slack it takes it, and `defaultScrollAnchor(.bottom)` then pins the
-        // posts to the foot of that box with a gap between them and the header. Two
-        // attempts measured the content through a preference and sized the box to it;
-        // both mis-sized (a zero start that never laid out, then a stale reading that
-        // left the gap). This is the idiom that needs no measuring: `fixedSize`
-        // (vertical) asks the scroll view for its *ideal* height, which is its
-        // content's, and `frame(maxHeight:)` under it clamps that. The box is exactly
-        // as tall as the posts until the cap, and scrolls after — no state, nothing to
-        // go stale, nothing to fire late.
-        .frame(maxHeight: maxHeight)
-        .fixedSize(horizontal: false, vertical: true)
         // Outside the scroll view on purpose. Inside it the composer was one more row
         // in a list that can be taller than the rail — it could open scrolled out of
         // sight, and it moved under the pointer as posts arrived. Pinned here it is
@@ -244,71 +254,6 @@ struct ArtifactorySection: View {
     }
   }
 
-  // MARK: - Receipts
-
-  /// How many receipts the rollup shows before it offers the rest — enough to see what
-  /// the graph has been doing lately without the bookkeeping outgrowing the board it
-  /// sits above.
-  private static let receiptsShownAtFirst = 8
-
-  private var visibleReceipts: [ArtifactoryPost] {
-    showsAllReceipts ? receipts : Array(receipts.suffix(Self.receiptsShownAtFirst))
-  }
-
-  /// The bookkeeping, one line each and never a body: a receipt says that two loops
-  /// spoke, which is all a reader of the board needs from it.
-  @ViewBuilder
-  private var receiptsRollup: some View {
-    if !receipts.isEmpty {
-      VStack(alignment: .leading, spacing: 7) {
-        HStack(spacing: 6) {
-          Image(systemName: showsReceipts ? "chevron.down" : "chevron.right")
-            .font(.system(size: 8, weight: .semibold))
-            .foregroundStyle(.white.opacity(0.38))
-          Text(
-            receipts.count == 1
-              ? "1 delivery receipt" : "\(receipts.count) delivery receipts"
-          )
-          .font(.system(size: 10.5))
-          .foregroundStyle(.white.opacity(0.5))
-          Spacer(minLength: 0)
-        }
-        .contentShape(Rectangle())
-        .onTapGesture { showsReceipts.toggle() }
-        if showsReceipts {
-          VStack(alignment: .leading, spacing: 7) {
-            ForEach(visibleReceipts) { receipt in
-              HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(ArtifactoryPost.stampFormat.string(from: receipt.at))
-                  .font(.system(size: 10.5, design: .monospaced))
-                  .foregroundStyle(.white.opacity(0.32))
-                Text(receipt.body)
-                  .font(.system(size: 11))
-                  .foregroundStyle(.white.opacity(0.5))
-                  .lineLimit(1)
-                  .truncationMode(.tail)
-              }
-            }
-            if receipts.count > visibleReceipts.count { showEarlierReceipts }
-          }
-          .padding(.leading, 14)
-        }
-      }
-    }
-  }
-
-  /// The older receipts were counted and then left with no way to reach them — a line
-  /// that names something and does nothing reads as a bug in the panel. The scroll box
-  /// above already clamps its own height, so opening the rest costs the rail nothing.
-  private var showEarlierReceipts: some View {
-    Text("\(receipts.count - visibleReceipts.count) earlier — show all")
-      .font(.system(size: 10.5))
-      .foregroundStyle(.white.opacity(0.4))
-      .contentShape(Rectangle())
-      .onTapGesture { showsAllReceipts = true }
-      .help("Show every delivery receipt on this board")
-  }
-
   // MARK: - Posts
 
   private func postRow(_ post: ArtifactoryPost) -> some View {
@@ -364,8 +309,110 @@ struct ArtifactorySection: View {
 }
 
 /// Kept out of the struct's own body, which sits over swiftlint's length bound: the
-/// composer is a sheet with its own state and nothing above it needs to see any of it.
+/// receipts rollup and the composer are each a self-contained thing nothing above them
+/// needs to see into.
 extension ArtifactorySection {
+  // MARK: - Receipts
+
+  /// How many receipts the rollup shows before it offers the rest — enough to see what
+  /// the graph has been doing lately without the bookkeeping outgrowing the board it
+  /// sits above.
+  private static let receiptsShownAtFirst = 8
+
+  private var visibleReceipts: [ArtifactoryPost] {
+    showsAllReceipts ? receipts : Array(receipts.suffix(Self.receiptsShownAtFirst))
+  }
+
+  /// The bookkeeping, one line each and never a body: a receipt says that two loops
+  /// spoke, which is all a reader of the board needs from it.
+  ///
+  /// Takes the scroll proxy because every affordance in here grows the rollup upward,
+  /// against a bottom-anchored box — see `receiptsAnchor`.
+  @ViewBuilder
+  private func receiptsRollup(_ scroll: ScrollViewProxy) -> some View {
+    if !receipts.isEmpty {
+      VStack(alignment: .leading, spacing: 7) {
+        HStack(spacing: 6) {
+          Image(systemName: showsReceipts ? "chevron.down" : "chevron.right")
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.38))
+          Text(
+            receipts.count == 1
+              ? "1 delivery receipt" : "\(receipts.count) delivery receipts"
+          )
+          .font(.system(size: 10.5))
+          .foregroundStyle(.white.opacity(0.5))
+          Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { toggleReceipts(scroll) }
+        if showsReceipts {
+          VStack(alignment: .leading, spacing: 7) {
+            ForEach(visibleReceipts) { receipt in
+              HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(ArtifactoryPost.stampFormat.string(from: receipt.at))
+                  .font(.system(size: 10.5, design: .monospaced))
+                  .foregroundStyle(.white.opacity(0.32))
+                Text(receipt.body)
+                  .font(.system(size: 11))
+                  .foregroundStyle(.white.opacity(0.5))
+                  .lineLimit(1)
+                  .truncationMode(.tail)
+              }
+            }
+            receiptsCutoff(scroll)
+          }
+          .padding(.leading, 14)
+        }
+      }
+      .id(Self.receiptsAnchor)
+    }
+  }
+
+  /// The older receipts were counted and then left with no way to reach them — a line
+  /// that names something and does nothing reads as a bug in the panel. Both directions
+  /// are offered, because an expansion nothing can undo is the same complaint again.
+  @ViewBuilder
+  private func receiptsCutoff(_ scroll: ScrollViewProxy) -> some View {
+    if receipts.count > visibleReceipts.count {
+      cutoffLine("\(receipts.count - visibleReceipts.count) earlier — show all") {
+        showsAllReceipts = true
+        revealRollup(scroll)
+      }
+      .help("Show every delivery receipt on this board")
+    } else if showsAllReceipts, receipts.count > Self.receiptsShownAtFirst {
+      cutoffLine("show fewer") {
+        showsAllReceipts = false
+        revealRollup(scroll)
+      }
+      .help("Show only the most recent delivery receipts")
+    }
+  }
+
+  private func cutoffLine(_ title: String, action: @escaping () -> Void) -> some View {
+    Text(title)
+      .font(.system(size: 10.5))
+      .foregroundStyle(.white.opacity(0.4))
+      .contentShape(Rectangle())
+      .onTapGesture(perform: action)
+  }
+
+  private func toggleReceipts(_ scroll: ScrollViewProxy) {
+    showsReceipts.toggle()
+    // Closing it puts the drill-down back where its doc comment says it starts.
+    if !showsReceipts { showsAllReceipts = false }
+    revealRollup(scroll)
+  }
+
+  /// Bring the rollup back under the eye after it changes height. The board anchors to
+  /// its bottom and the rollup sits at the top, so without this every one of these taps
+  /// pushes its own result off the top of the box and looks like it did nothing.
+  private func revealRollup(_ scroll: ScrollViewProxy) {
+    withAnimation(.easeOut(duration: 0.18)) {
+      scroll.scrollTo(Self.receiptsAnchor, anchor: .top)
+    }
+  }
+
   // MARK: - Composing
 
   /// A human's voice on the board.

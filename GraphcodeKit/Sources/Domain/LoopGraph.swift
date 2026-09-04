@@ -22,7 +22,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   public var edges: IdentifiedArrayOf<LoopEdge>
   /// The project's Artifactory — every post any loop has dropped onto the shared board,
   /// oldest first, notes and mirrored records each capped on their own budget
-  /// (`Artifactory.maxNotes`, `Artifactory.maxRecords`). Kept on the graph rather than in a
+  /// (`Artifactory.maxNotes`, `maxMessages`, `maxReceipts`). Kept on the graph rather than in a
   /// side store so it inherits for free everything graph state already has: one
   /// writer (the daemon), atomic persistence beside the graph file, a snapshot in
   /// every `.graphChanged` (which is how the CLI reads it — no second read path), and

@@ -2465,7 +2465,7 @@ public actor GraphStore {
           "Cycle re-entry \(edge.fireCount)\(bound) — the stop condition is not yet met. "
             + "Continue toward your goal.")
       } else {
-        parts.append("\(source.title) finished and handed its work off to you.")
+        parts.append("\(source.title)\(Artifactory.handedOffWithNothingToSay)")
         // The handoff itself is shared communication and gets its record — with its
         // payload, which is the part a later reader actually needs. Cycle re-entries
         // are the daemon's own metronome, not a loop saying anything, so they stay

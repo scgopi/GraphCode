@@ -340,23 +340,71 @@ extension ArtifactoryTests {  // MARK: - Written messages and delivery receipts
     #expect(!records[0].wasWritten)
   }
 
-  /// Both halves still prune on the record budget, which is the invariant the split was
-  /// shaped to leave alone: a graph that merely talks must not cost a note.
+  /// Mirrored traffic still prunes apart from the notes, which is the invariant the
+  /// split was shaped to leave alone: a graph that merely talks must not cost a note.
   @Test
-  func writtenMessagesStillPruneOnTheRecordBudget() async {
+  func writtenMessagesStillPruneApartFromTheNotes() async {
     let store = await makeStore()
     let ids = nodeIDs(await store.graph)
 
     await store.handle(.artifactoryPost(text: "DEAD END: approach X", topic: nil, from: ids[0]))
-    for index in 0..<(Artifactory.maxRecords * 2) {
+    for index in 0..<(Artifactory.maxMessages * 2) {
       await store.handle(
         .messageNode(ids[1], text: "ping \(index)", from: ids[0], followUp: nil))
     }
 
     let board = await store.graph.artifactory
     #expect(board.filter { $0.kind == .note }.count == 1)
-    #expect(board.filter { $0.kind == .record }.count == Artifactory.maxRecords)
-    #expect(board.filter(\.wasWritten).count == Artifactory.maxRecords + 1)
+    #expect(board.filter { $0.kind == .record }.count == Artifactory.maxMessages)
+    #expect(board.filter(\.wasWritten).count == Artifactory.maxMessages + 1)
+  }
+
+  /// The eviction this PR would otherwise have introduced into its own feature. A
+  /// `.none`-transform edge on a cycle mirrors a fresh receipt every pass, and while
+  /// receipts and messages shared one quota those passes would delete the conversation
+  /// the board exists to show — invisible before, because both halves were hidden.
+  @Test
+  func receiptsCannotEvictTheWrittenConversation() {
+    let base = Date()
+    var posts = [
+      ArtifactoryPost(
+        id: 1, at: base, authorID: nil, author: "Author", topic: "direct",
+        body: "@Reader: the truncation is a decoy", kind: .record, wasWritten: true)
+    ]
+    for index in 2...(Artifactory.maxReceipts * 4) {
+      posts.append(
+        ArtifactoryPost(
+          id: index, at: base, authorID: nil, author: "Author", topic: "direct",
+          body: "@Reader: Author\(Artifactory.firedWithNothingToSay)", kind: .record))
+    }
+
+    let pruned = Artifactory.pruned(posts)
+
+    #expect(pruned.contains { $0.body.contains("the truncation is a decoy") })
+    #expect(pruned.filter { !$0.wasWritten }.count == Artifactory.maxReceipts)
+    #expect(pruned == pruned.sorted { $0.id < $1.id })
+  }
+
+  /// Ties the two modules together. `readsAsADeliveryReceipt` recognises a legacy post by
+  /// words `GraphcodeKit` writes, and reading either literal out of the other module
+  /// would let them drift with no compile error — so the shape the mirror actually
+  /// produces is asserted against the reader, not against a copy of the string.
+  @Test
+  func whatTheMirrorGeneratesIsWhatTheReaderRecognises() async {
+    let store = await makeStore()
+    let ids = nodeIDs(await store.graph)
+
+    await store.handle(
+      .createEdge(from: ids[0], to: ids[1], spec: EdgeSpec(kind: .message)))
+    await store.handle(
+      .createEdge(from: ids[0], to: ids[1], spec: EdgeSpec(kind: .handoff)))
+    await store.handle(.nodeCheckApproved(ids[0]))
+
+    let board = await store.graph.artifactory
+    #expect(board.count == 2)
+    for post in board {
+      #expect(Artifactory.readsAsADeliveryReceipt(post.body))
+    }
   }
 
   /// A board saved before the split carries no flag, and defaulting it to "receipt"

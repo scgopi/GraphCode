@@ -162,11 +162,38 @@ public enum Artifactory {
   /// loops that cannot read that log.
   public static let maxNotes = 200
 
-  /// How many mirrored records a board keeps, pruned entirely separately from the
-  /// notes. Smaller because a record is a receipt for something already delivered:
-  /// enough that a loop joining mid-flight can see what was recently said, not so
-  /// many that the graph's chatter becomes the board.
-  public static let maxRecords = 50
+  /// How many mirrored *messages* a board keeps — a `node send`, or an edge that fired
+  /// carrying a payload — pruned entirely separately from the notes. Smaller because a
+  /// message was already delivered elsewhere: enough that a loop joining mid-flight can
+  /// see what was recently said, not so many that the graph's chatter becomes the board.
+  public static let maxMessages = 50
+
+  /// How many delivery receipts a board keeps, on their own budget beneath the messages.
+  ///
+  /// Sharing one quota was survivable while both halves were hidden. Once the written
+  /// half takes rows, it is not: a `.none`-transform edge on a cycle mirrors a fresh
+  /// "@X: Y finished." every pass (`reenterCycle` resets `fireCount`), so fifty passes
+  /// would evict the conversation this section exists to show and leave "50 delivery
+  /// receipts" in its place. Bookkeeping cannot be allowed to price out the thing it is
+  /// bookkeeping for, which is the same argument that split notes from records to begin
+  /// with, one level down.
+  ///
+  /// Small on purpose: a receipt says only that an edge fired, and the rollup shows
+  /// eight before it offers the rest.
+  public static let maxReceipts = 20
+
+  /// What the mirror appends to a source loop's title when an edge fires carrying
+  /// nothing — the whole of such a post's body, and the reason it is a receipt.
+  ///
+  /// Here rather than at the two places in `GraphcodeKit` that write it, because
+  /// `readsAsADeliveryReceipt` has to recognise the same words. Duplicated across the
+  /// module boundary they would drift silently: reword either one and every legacy
+  /// receipt reclassifies as written, with no compile error and no failing test.
+  public static let firedWithNothingToSay = " finished."
+
+  /// The same, for a hand-off that carried no payload. A hand-off *with* one appends it
+  /// after this, which is why the test that uses it is a suffix test.
+  public static let handedOffWithNothingToSay = " finished and handed its work off to you."
 
   /// Whether a record saved before `wasWritten` existed is one of the two lines the
   /// daemon generates itself, rather than something a loop said.
@@ -184,8 +211,7 @@ public enum Artifactory {
   /// would put the daemon's own bookkeeping in front of a reader as though a loop had
   /// said it. Only posts decoded without the flag are ever asked.
   public static func readsAsADeliveryReceipt(_ body: String) -> Bool {
-    body.hasSuffix(" finished.")
-      || body.hasSuffix(" finished and handed its work off to you.")
+    body.hasSuffix(firedWithNothingToSay) || body.hasSuffix(handedOffWithNothingToSay)
   }
 
   /// The id the next post gets. Maximum-plus-one, never count-plus-one: pruning
@@ -221,14 +247,19 @@ public enum Artifactory {
     return posts.filter { $0.id > lastRead }
   }
 
-  /// A board pruned to both budgets, oldest of each kind gone first and the survivors
-  /// back in one sequence. Applied by the store on every write so no caller can forget.
+  /// A board pruned to all three budgets, oldest of each pool gone first and the
+  /// survivors back in one sequence. Applied by the store on every write so no caller
+  /// can forget.
   public static func pruned(_ posts: [ArtifactoryPost]) -> [ArtifactoryPost] {
     let notes = posts.filter { $0.kind == .note }
-    let records = posts.filter { $0.kind == .record }
-    guard notes.count > maxNotes || records.count > maxRecords else { return posts }
+    let messages = posts.filter { $0.kind == .record && $0.wasWritten }
+    let receipts = posts.filter { $0.kind == .record && !$0.wasWritten }
+    guard
+      notes.count > maxNotes || messages.count > maxMessages || receipts.count > maxReceipts
+    else { return posts }
     let kept = Set(
-      (notes.suffix(maxNotes) + records.suffix(maxRecords)).map(\.id))
+      (notes.suffix(maxNotes) + messages.suffix(maxMessages) + receipts.suffix(maxReceipts))
+        .map(\.id))
     return posts.filter { kept.contains($0.id) }
   }
 }
