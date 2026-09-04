@@ -359,16 +359,52 @@ extension ArtifactoryTests {  // MARK: - Written messages and delivery receipts
     #expect(board.filter(\.wasWritten).count == Artifactory.maxRecords + 1)
   }
 
-  /// A board saved before the split has records that could be either. They stay folded,
-  /// which is exactly where they were before this shipped.
+  /// A board saved before the split carries no flag, and defaulting it to "receipt"
+  /// would leave every conversation already on one as buried as #273 found it. The two
+  /// generated shapes are read back out; a `node send` is not one of them.
   @Test
-  func recordsSavedBeforeTheSplitDecodeAsReceipts() throws {
-    let json = """
-      {"id":9,"at":747000000,"author":"Author","body":"@Reader: hi","kind":"record"}
-      """
-    let post = try JSONDecoder().decode(ArtifactoryPost.self, from: Data(json.utf8))
-    #expect(post.kind == .record)
-    #expect(!post.wasWritten)
+  func recordsSavedBeforeTheSplitAreReadBackFromTheirBodies() throws {
+    let written = try decodeLegacyRecord(body: "@Reader: truncation is not the mechanism")
+    #expect(written.kind == .record)
+    #expect(written.wasWritten)
+
+    let firedEdge = try decodeLegacyRecord(body: "@Reader: Author finished.")
+    #expect(!firedEdge.wasWritten)
+
+    let handoff = try decodeLegacyRecord(
+      body: "@Reader: Author finished and handed its work off to you.")
+    #expect(!handoff.wasWritten)
+  }
+
+  /// A hand-off that carried a payload ends with the payload, not the boilerplate — the
+  /// part a later reader actually needs, and the reason the suffix test is anchored.
+  @Test
+  func aLegacyHandoffCarryingAPayloadReadsAsWritten() throws {
+    let post = try decodeLegacyRecord(
+      body: "@Reader: Author finished and handed its work off to you. branch: fix/auth")
+    #expect(post.wasWritten)
+  }
+
+  /// An explicit flag always wins: the body is only consulted when there is none.
+  @Test
+  func anExplicitFlagIsNeverSecondGuessedByTheBody() throws {
+    #expect(try decodeRecord(body: "@Reader: Author finished.", wasWritten: true).wasWritten)
+  }
+
+  /// A board with no `wasWritten` key at all, which the current encoder can no longer
+  /// produce — so the JSON is assembled rather than round-tripped.
+  private func decodeLegacyRecord(body: String) throws -> ArtifactoryPost {
+    try decodeRecord(body: body, wasWritten: nil)
+  }
+
+  private func decodeRecord(body: String, wasWritten: Bool?) throws -> ArtifactoryPost {
+    var fields: [String: Any] = [
+      "id": 9, "at": 747_000_000, "author": "Author", "topic": "direct", "body": body,
+      "kind": "record",
+    ]
+    if let wasWritten { fields["wasWritten"] = wasWritten }
+    return try JSONDecoder().decode(
+      ArtifactoryPost.self, from: JSONSerialization.data(withJSONObject: fields))
   }
 
   @Test

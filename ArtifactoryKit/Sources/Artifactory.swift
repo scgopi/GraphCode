@@ -116,9 +116,12 @@ public struct ArtifactoryPost: Codable, Equatable, Identifiable, Sendable {
     authorID = try container.decodeIfPresent(UUID.self, forKey: .authorID)
     author = try container.decode(String.self, forKey: .author)
     topic = try container.decodeIfPresent(String.self, forKey: .topic)
-    body = try container.decode(String.self, forKey: .body)
     kind = try container.decodeIfPresent(Kind.self, forKey: .kind) ?? .note
-    wasWritten = try container.decodeIfPresent(Bool.self, forKey: .wasWritten) ?? (kind == .note)
+    let body = try container.decode(String.self, forKey: .body)
+    self.body = body
+    wasWritten =
+      try container.decodeIfPresent(Bool.self, forKey: .wasWritten)
+      ?? (kind == .note || !Artifactory.readsAsADeliveryReceipt(body))
   }
 
   /// The same post with its author's handle gone — what deleting a loop leaves behind.
@@ -164,6 +167,26 @@ public enum Artifactory {
   /// enough that a loop joining mid-flight can see what was recently said, not so
   /// many that the graph's chatter becomes the board.
   public static let maxRecords = 50
+
+  /// Whether a record saved before `wasWritten` existed is one of the two lines the
+  /// daemon generates itself, rather than something a loop said.
+  ///
+  /// Boards written before the split carry no flag, and a default of "receipt" would
+  /// leave every conversation already on them exactly as buried as #273 found it — a
+  /// fix that only helps graphs created after it shipped. There is no other signal left
+  /// on those posts, so this reads the two shapes the mirror produces when an edge fires
+  /// with nothing in it (`MessageBus.messageText`'s `.none`, and a hand-off with no
+  /// payload). Everything else on those topics is a `node send` or a payload, which is
+  /// somebody talking.
+  ///
+  /// Deliberately narrow. A written message that happens to end "… finished." is read as
+  /// a receipt and stays folded, which is where it already was; the opposite mistake
+  /// would put the daemon's own bookkeeping in front of a reader as though a loop had
+  /// said it. Only posts decoded without the flag are ever asked.
+  public static func readsAsADeliveryReceipt(_ body: String) -> Bool {
+    body.hasSuffix(" finished.")
+      || body.hasSuffix(" finished and handed its work off to you.")
+  }
 
   /// The id the next post gets. Maximum-plus-one, never count-plus-one: pruning
   /// removes the oldest posts, and reusing their ids would make unread cursors
