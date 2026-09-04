@@ -20,7 +20,10 @@ import Testing
 /// received). It cannot be fixed by chunking smaller, because the reader's reads are not
 /// our writes — two 512-byte writes arrived as one 1022-byte read when the reader
 /// stalled. Bracketed paste is what removes the question.
-@Suite(.serialized)
+/// Disabled rather than returned early when `zmx` is missing: every test here needs a
+/// real session, and a `guard … else { return }` reports a test that never ran as a
+/// passing one — which is the same class of thing this suite exists to catch.
+@Suite(.serialized, .enabled(if: ZmxLocator.isInstalled, "zmx is not installed"))
 struct MessageDeliveryTests {
   private static let zmx = ZmxLocator.binaryURL.path
 
@@ -72,7 +75,7 @@ struct MessageDeliveryTests {
 
   private func received(from out: URL) async -> String? {
     for _ in 0..<60 {
-      if let data = try? Data(contentsOf: out) { return String(decoding: data, as: UTF8.self) }
+      if let data = try? Data(contentsOf: out) { return String(bytes: data, encoding: .utf8) }
       try? await Task.sleep(for: .milliseconds(100))
     }
     return nil
@@ -97,7 +100,6 @@ struct MessageDeliveryTests {
 
   @Test
   func anOversizedMessageArrivesByteForByte() async throws {
-    guard ZmxLocator.isInstalled else { return }
     let node = node()
     let sink = try #require(await startSink(node, composerLimit: nil))
     defer { Task { await kill(sink.name) } }
@@ -116,7 +118,6 @@ struct MessageDeliveryTests {
 
   @Test
   func aLongMessageSurvivesAComposerThatSwallowsKeystrokeBursts() async throws {
-    guard ZmxLocator.isInstalled else { return }
     let node = node()
     // The reader models what was measured of the real composer: a run of plain
     // keystrokes above this size is swallowed whole, and a bracketed paste is not,
@@ -135,7 +136,6 @@ struct MessageDeliveryTests {
 
   @Test
   func aShortMessageStillTravelsAsPlainKeystrokes() async throws {
-    guard ZmxLocator.isInstalled else { return }
     let node = node()
     // Same swallowing reader. A short message is deliberately *not* pasted — it is
     // measured to arrive intact as typing, and leaving it on the path it already
