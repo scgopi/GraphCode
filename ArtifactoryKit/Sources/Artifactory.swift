@@ -55,6 +55,26 @@ public struct ArtifactoryPost: Codable, Equatable, Identifiable, Sendable {
   /// own quota, where everything on the board was a note.
   public let kind: Kind
 
+  /// Whether a loop *wrote* this, or the board is only noting that a delivery happened.
+  ///
+  /// A separate axis from `kind` on purpose, and the two were conflated once. `kind`
+  /// answers "whose budget prunes this" — mirrored traffic must have its own quota or a
+  /// talkative graph evicts every note. It was also read as "is there anything in here
+  /// to read", which it never was: `node send` mirrors as a `.record` because that is
+  /// the budget it belongs to, and the whole text a loop typed rode along inside it.
+  /// Every surface then folded it away, so two loops correcting each other's diagnosis
+  /// held the conversation somewhere no supervisor ever looked (#273).
+  ///
+  /// A hand-off nudge carrying no payload really is a receipt. The text of a `node send`
+  /// is not, and this is the bit that says so.
+  ///
+  /// Absent from boards saved before the split, where a record was only ever a receipt —
+  /// which is also why it rides beside `kind` rather than becoming a third case of it:
+  /// an older build decoding a newer board must not meet a raw value it has never heard
+  /// of, and losing a project's whole graph to a rolled-back beta is a steep price for a
+  /// tidier enum.
+  public let wasWritten: Bool
+
   /// Cached formatter for CLI rendering — one `DateFormatter` per process rather than
   /// per post, and a fixed `dateFormat` with a pinned locale rather than
   /// `Date.formatted` or named `DateFormatter.Style` cases, neither of which is
@@ -66,9 +86,11 @@ public struct ArtifactoryPost: Codable, Equatable, Identifiable, Sendable {
     return formatter
   }()
 
+  /// `wasWritten` defaults to what the kind implies: a note is always somebody speaking,
+  /// and a record is a receipt unless its caller says otherwise.
   public init(
     id: Int, at: Date, authorID: UUID?, author: String, topic: String?, body: String,
-    kind: Kind = .note
+    kind: Kind = .note, wasWritten: Bool? = nil
   ) {
     self.id = id
     self.at = at
@@ -77,10 +99,11 @@ public struct ArtifactoryPost: Codable, Equatable, Identifiable, Sendable {
     self.topic = topic
     self.body = body
     self.kind = kind
+    self.wasWritten = wasWritten ?? (kind == .note)
   }
 
   private enum CodingKeys: String, CodingKey {
-    case id, at, authorID, author, topic, body, kind
+    case id, at, authorID, author, topic, body, kind, wasWritten
   }
 
   /// Hand-written for the reason `LoopNode`'s is: a board saved before `kind` existed
@@ -95,6 +118,7 @@ public struct ArtifactoryPost: Codable, Equatable, Identifiable, Sendable {
     topic = try container.decodeIfPresent(String.self, forKey: .topic)
     body = try container.decode(String.self, forKey: .body)
     kind = try container.decodeIfPresent(Kind.self, forKey: .kind) ?? .note
+    wasWritten = try container.decodeIfPresent(Bool.self, forKey: .wasWritten) ?? (kind == .note)
   }
 
   /// The same post with its author's handle gone — what deleting a loop leaves behind.
@@ -106,7 +130,7 @@ public struct ArtifactoryPost: Codable, Equatable, Identifiable, Sendable {
   public func withAuthorDeleted() -> ArtifactoryPost {
     ArtifactoryPost(
       id: id, at: at, authorID: nil, author: "\(author) (deleted)", topic: topic,
-      body: body, kind: kind)
+      body: body, kind: kind, wasWritten: wasWritten)
   }
 
   /// The bound that keeps "check the board" cheap. A note that cannot fit in a
