@@ -279,9 +279,10 @@ struct GoalBasedLoopTests {
   @Test
   func aGoalOpensWithTheBackendsOwnStopCondition() throws {
     // Prose asks; the directive binds. `/goal <condition>` installs a check the session
-    // cannot finish past, which is the whole contract of the type — so where a backend
-    // has one it leads the prompt, exactly as `/loop` leads a time-based one.
-    for backend in [CLISessionBackendKind.claudeCode, .codex] {
+    // cannot finish past, which is the whole contract of the type — so it leads the
+    // prompt, exactly as `/loop` leads a time-based one. Every backend graphcode drives
+    // has the command, so every backend gets it.
+    for backend in CLISessionBackendKind.allCases {
       let node = LoopNode(
         title: "Green build", loopType: .goalBased,
         goal: GoalSpec(summary: "CI passes", predicate: "make test"), backend: backend)
@@ -290,15 +291,17 @@ struct GoalBasedLoopTests {
       #expect(prompt.contains("make test"))
       #expect(!prompt.contains("Work toward this goal"))
     }
+  }
 
-    // And a backend without the command is not handed a directive it would type as
-    // literal text: it keeps the prose prompt it always had.
-    for backend in [CLISessionBackendKind.copilotCLI, .openCode] {
-      let node = LoopNode(
-        title: "Green build", loopType: .goalBased, goal: GoalSpec(summary: "CI passes"),
-        backend: backend)
-      #expect(node.sessionPrompt == "Work toward this goal until it is met: CI passes")
-    }
+  @Test
+  func aBackendWithoutTheCommandStillGetsAWorkableGoal() {
+    // The prose prompt is not dead code, it is what the next backend opens with until
+    // someone reads `/goal` off its real CLI. A directive typed at an agent that has no
+    // such command is echoed as text and arms nothing, so `nil` has to keep working.
+    let spec = GoalSpec(summary: "CI passes", predicate: "make test")
+    #expect(
+      spec.sessionPrompt().hasPrefix("Work toward this goal until it is met: CI passes"))
+    #expect(spec.sessionPrompt().contains("make test"))
   }
 
   @Test

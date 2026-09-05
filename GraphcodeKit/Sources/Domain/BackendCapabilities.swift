@@ -36,10 +36,11 @@ public struct BackendCapabilities: Codable, Equatable, Sendable {
   /// instruction the agent may consider discharged after one pass, while a goal stated
   /// as the directive is checked by the CLI every time the agent tries to stop.
   ///
-  /// `nil` where the CLI has no such command. Those backends still host goal loops on
-  /// the prose prompt, exactly as every backend did before this existed —
-  /// `supportsGoalMode` is the question of whether the type can run at all, this is only
-  /// whether the session can be handed its own stop condition.
+  /// Every backend graphcode drives has grown the command, so every row now carries it.
+  /// The field stays a per-backend `String?` rather than collapsing into a constant for
+  /// the same reason `isSpiked` did: `nil` is what a backend arriving without the command
+  /// needs, and a session handed a directive its CLI does not have types the arming step
+  /// as literal prose — a goal loop that looks armed and is not.
   public var goalDirective: String?
 
   public init(
@@ -128,10 +129,10 @@ extension CLISessionBackendKind {
       // That is the fan-out a composite leans on. The same age caveat applies: a
       // composite whose Copilot workers never fan out is a Copilot older than that.
       //
-      // `goalDirective` stays nil: `copilot help commands` at 1.0.80 lists no `/goal`.
-      // `/autopilot` takes an objective and is the nearest thing, but it also flips a
-      // session-wide permission mode, which is a bigger change than being handed a stop
-      // condition — so a Copilot goal loop is carried by the prose prompt.
+      // `goalDirective` follows `supportsInSessionRecurrence`'s history exactly: set from
+      // a `copilot help commands` listing that did not mention the command, then flipped
+      // because Copilot has it. That listing is not the authority it looks like — it omits
+      // `/loop` and `/every` too, which this row has claimed and relied on for releases.
       return BackendCapabilities(
         supportsGoalMode: true,
         supportsHooks: false,
@@ -139,7 +140,8 @@ extension CLISessionBackendKind {
         supportsSubAgents: true,
         supportsMCP: true,
         supportsMidSessionInput: true,
-        supportsInSessionRecurrence: true)
+        supportsInSessionRecurrence: true,
+        goalDirective: "/goal")
 
     case .codex:
       // Spiked against Codex CLI 0.145.0 — every entry read off the real `codex --help`,
@@ -189,9 +191,13 @@ extension CLISessionBackendKind {
       // source, not assumed (`PresenceHooks.openCodePlugin`).
       //
       // Sub-agents exist inside the TUI (`@agent` mentions) but not as anything a
-      // composite could lean on from outside. Recurrence is provided by graphcode's daemon,
-      // and `goalDirective` is nil for the same reason `/loop` is absent: 1.18.29 ships no
-      // `/goal`, so a goal loop here is carried by the prose prompt.
+      // composite could lean on from outside. Recurrence is provided by graphcode's daemon.
+      //
+      // `goalDirective` is the one row here not read off the CLI: `/goal` is absent from
+      // 1.18.29's command strings, and it is set anyway on the maintainer's word that the
+      // command exists. The symptom if that is ever wrong is specific — a goal session
+      // that opens with `/goal …` echoed as plain text and starts no work — and this
+      // comment, not a bisect, is where to look.
       return BackendCapabilities(
         supportsGoalMode: true,
         supportsHooks: true,
@@ -200,7 +206,8 @@ extension CLISessionBackendKind {
         supportsMCP: true,
         supportsMidSessionInput: true,
         supportsInSessionRecurrence: false,
-        supportsDaemonRecurrence: true)
+        supportsDaemonRecurrence: true,
+        goalDirective: "/goal")
     }
   }
 
