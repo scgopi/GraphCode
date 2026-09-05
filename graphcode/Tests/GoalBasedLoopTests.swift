@@ -269,11 +269,56 @@ struct GoalBasedLoopTests {
     #expect(prompt.contains("lower is better"))
     #expect(prompt.contains("run it as you work"))
 
-    // No metric, no measurement sentence — the base prompt stays word-for-word what it
-    // always was.
+    // No metric, no measurement sentence — the base prompt is the directive and the
+    // condition, and nothing else.
     let bare = LoopNode(
       title: "Docs", loopType: .goalBased, goal: GoalSpec(summary: "docs read clearly"))
-    #expect(bare.sessionPrompt == "Work toward this goal until it is met: docs read clearly")
+    #expect(bare.sessionPrompt == "/goal docs read clearly")
+  }
+
+  @Test
+  func aGoalOpensWithTheBackendsOwnStopCondition() throws {
+    // Prose asks; the directive binds. `/goal <condition>` installs a check the session
+    // cannot finish past, which is the whole contract of the type — so it leads the
+    // prompt, exactly as `/loop` leads a time-based one. Every backend graphcode drives
+    // has the command, so every backend gets it.
+    for backend in CLISessionBackendKind.allCases {
+      let node = LoopNode(
+        title: "Green build", loopType: .goalBased,
+        goal: GoalSpec(summary: "CI passes", predicate: "make test"), backend: backend)
+      let prompt = try #require(node.sessionPrompt)
+      #expect(prompt.hasPrefix("/goal CI passes"))
+      #expect(prompt.contains("make test"))
+      #expect(!prompt.contains("Work toward this goal"))
+    }
+  }
+
+  @Test
+  func aBackendWithoutTheCommandStillGetsAWorkableGoal() {
+    // The prose prompt is not dead code, it is what the next backend opens with until
+    // someone reads `/goal` off its real CLI. A directive typed at an agent that has no
+    // such command is echoed as text and arms nothing, so `nil` has to keep working.
+    let spec = GoalSpec(summary: "CI passes", predicate: "make test")
+    #expect(
+      spec.sessionPrompt().hasPrefix("Work toward this goal until it is met: CI passes"))
+    #expect(spec.sessionPrompt().contains("make test"))
+  }
+
+  @Test
+  func aGoalThatOpensWithASubcommandIsNotReadAsOne() throws {
+    // `/goal clear` clears the session's goal on both backends that have the command, so
+    // a goal phrased "clear the lint backlog" would arm nothing and look like it had.
+    let node = LoopNode(
+      title: "Lint", loopType: .goalBased,
+      goal: GoalSpec(summary: "clear the lint backlog"))
+    let prompt = try #require(node.sessionPrompt)
+    #expect(prompt == "/goal Done when: clear the lint backlog")
+
+    // Only the leading word is the hazard — one in the middle is ordinary English.
+    let inner = LoopNode(
+      title: "Lint", loopType: .goalBased,
+      goal: GoalSpec(summary: "the lint backlog is clear"))
+    #expect(inner.sessionPrompt == "/goal the lint backlog is clear")
   }
 
   @Test

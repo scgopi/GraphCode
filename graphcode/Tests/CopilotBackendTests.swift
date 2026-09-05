@@ -153,6 +153,8 @@ struct CopilotBackendTests {
     // No `--model`: valid ids aren't discoverable from its help, and a guess fails at
     // launch, so its own default applies.
     #expect(!arguments.contains("--model"))
-    #expect(arguments.last == "Work toward this goal until it is met: Tests pass")
+    // The prompt is the positional last argument, and for a goal it opens with Codex's
+    // own `/goal` — the stop condition the loop type exists to hand over.
+    #expect(arguments.last == "/goal Tests pass")
   }
 }
