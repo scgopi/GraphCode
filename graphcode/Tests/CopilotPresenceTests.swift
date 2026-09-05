@@ -94,6 +94,100 @@ struct CopilotPresenceTests {
   }
 
   @Test
+  func aResumeIsNotOverriddenByTheShutdownBehindIt() throws {
+    // The real ordering, off a live log: shutdown at 17:30:23, `--resume` at 17:30:26
+    // appending to the *same* events.jsonl, nothing mapped since. A reverse scan that
+    // only skips unmapped events walks past the resume and reports the shutdown behind
+    // it, so a session sitting at its prompt reads `.absent` — FAILED on a running
+    // unattended loop, which is what this test exists to keep from coming back.
+    let root = try temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let directory = try session(
+      named: "graphcode-RESUMED",
+      events: [
+        "session.start", "user.message", "assistant.turn_start", "assistant.turn_end",
+        "session.shutdown",
+        "session.resume", "session.permissions_changed",
+      ], in: root)
+
+    let reading = CopilotSessionLog.lastStateChange(
+      inLogAt: directory.appendingPathComponent("events.jsonl"))
+
+    // Nothing since the resume says anything: `presence(of:)` turns this into idle at
+    // `.heuristic`, "a live session with nothing happening", never absent.
+    #expect(reading == nil)
+  }
+
+  @Test
+  func workAfterAResumeIsStillRead() throws {
+    // The boundary stops the scan; it does not blind it. A resumed session that has
+    // started working reads busy off the events written after the resume.
+    let root = try temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let directory = try session(
+      named: "graphcode-RESUMED-BUSY",
+      events: [
+        "assistant.turn_end", "session.shutdown",
+        "session.resume", "user.message", "assistant.turn_start", "tool.execution_start",
+      ], in: root)
+
+    let reading = CopilotSessionLog.lastStateChange(
+      inLogAt: directory.appendingPathComponent("events.jsonl"))
+
+    #expect(reading == .busy)
+  }
+
+  @Test
+  func aShutdownWithNoResumeBehindItStillEndsTheSession() throws {
+    // The other half: a session that really did shut down must keep reporting absent,
+    // or the reading stops being able to say a loop died at all.
+    let root = try temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let directory = try session(
+      named: "graphcode-DEAD",
+      events: ["session.start", "user.message", "assistant.turn_end", "session.shutdown"],
+      in: root)
+
+    let reading = CopilotSessionLog.lastStateChange(
+      inLogAt: directory.appendingPathComponent("events.jsonl"))
+
+    #expect(reading == .absent)
+  }
+
+  @Test
+  func theRemoteProbeCanSeeAResumeAndBlanksIt() {
+    // The remote reader is the same scan expressed as grep + `tail -1`, and it has to
+    // make the same two decisions: the boundaries must be in the keep-list for `tail -1`
+    // to see them at all, and a boundary in hand must blank the answer rather than be
+    // reported as an event.
+    let node = LoopNode(
+      id: UUID(uuidString: "22222222-3333-4444-5555-666666666666")!,
+      title: "Sync", loopType: .goalBased, goal: GoalSpec(summary: "main is current"),
+      backend: .copilotCLI, state: .running)
+    let location = RemoteProjectLocation(host: "box", remotePath: "/home/me/project")
+    let script = CopilotSessionLog.remotePresenceInvocation(forNode: node, at: location)
+      .joined(separator: " ")
+
+    #expect(script.contains("session\\.resume"))
+    #expect(script.contains("session\\.start"))
+    // Only as far as the pattern: the whole script rides inside a single-quoted
+    // login-shell command, so the empty assignment reaches ssh re-quoted, and
+    // matching on that would be a test of the quoter rather than of this.
+    #expect(script.contains("case \"$E\" in session.start|session.resume)"))
+  }
+
+  @Test
+  func anEmptyRemoteEventIsALiveSessionWithNothingToSay() {
+    // What the blanked `$E` above arrives as, and the reading it has to produce: the
+    // remote twin of `lastStateChange` returning nil.
+    let reading = CopilotSessionLog.parseRemotePresence(
+      succeeded: true, output: "\(ZmxSessionLauncher.remoteProbeMarker) live copilot=")
+
+    #expect(reading.presence == .idle)
+    #expect(reading.confidence == .heuristic)
+  }
+
+  @Test
   func theSessionIsFoundByTheNameGraphcodeGaveIt() throws {
     let root = try temporaryRoot()
     defer { try? FileManager.default.removeItem(at: root) }
