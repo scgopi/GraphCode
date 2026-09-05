@@ -536,3 +536,35 @@ struct ZmxSessionLauncherTests {
     #expect(script.contains("201~"))
   }
 }
+
+/// The probe's own failures, kept out of the suite body above only because swiftlint's
+/// `type_body_length` is at its limit there.
+extension ZmxSessionLauncherTests {
+  @Test
+  func aListingThatCouldNotBeTakenIsUnknownNotAbsent() {
+    // `zmx ls` exits 0 whenever it runs at all, so a nil status (the subprocess threw)
+    // and a non-zero one are the probe failing, not a session that is gone. Folding
+    // them into `.absent` made one bad tick read as FAILED on every running unattended
+    // loop at once — `LoopNode.displayState` renders `.unknown` as the graph's own
+    // belief instead, which is what a failed remote probe has always done.
+    #expect(
+      ZmxSessionLauncher.sessionTaskState(
+        lsStatus: nil, lsOutput: "", sessionName: "graphcode-a") == .unknown)
+    #expect(
+      ZmxSessionLauncher.sessionTaskState(
+        lsStatus: 1, lsOutput: "", sessionName: "graphcode-a") == .unknown)
+  }
+
+  @Test
+  func aListingThatRanIsStillReadAsItAlwaysWas() {
+    // The seam must not soften a real answer: a listing that came back is judged on its
+    // contents, absent row and all.
+    #expect(
+      ZmxSessionLauncher.sessionTaskState(
+        lsStatus: 0, lsOutput: "", sessionName: "graphcode-a") == .absent)
+    #expect(
+      ZmxSessionLauncher.sessionTaskState(
+        lsStatus: 0, lsOutput: lsLine(name: "graphcode-a") + "\n",
+        sessionName: "graphcode-a") == .alive)
+  }
+}

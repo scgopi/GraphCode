@@ -607,14 +607,23 @@ public enum ZmxSessionLauncher {
   /// session that check asks about.
   static func sessionTaskState(_ node: LoopNode) async -> SessionTaskState {
     guard ZmxLocator.isInstalled else { return .absent }
-    // A listing that could not be taken is not a listing without the session in it.
-    // `zmx ls` exits 0 whenever it runs at all, so a throw or a non-zero status is the
-    // probe failing, never evidence — and reporting it as `.absent` turned one bad tick
-    // into FAILED on every running unattended loop at once.
-    guard let result = runZmx(["ls"]), result.status == 0 else { return .unknown }
-    return parseSessionTaskState(
-      lsOutput: result.output,
+    let result = runZmx(["ls"])
+    return sessionTaskState(
+      lsStatus: result?.status, lsOutput: result?.output ?? "",
       sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName)
+  }
+
+  /// The judgement above, over a `zmx ls` that may never have run. A listing that could
+  /// not be taken is not a listing without the session in it: `zmx ls` exits 0 whenever
+  /// it runs at all, so a `nil` status (the subprocess threw) and a non-zero one are the
+  /// probe failing, never evidence. Reporting either as `.absent` turned one bad tick
+  /// into FAILED on every running unattended loop at once. Internal so tests can hold
+  /// both failures without a zmx to fail.
+  static func sessionTaskState(lsStatus: Int32?, lsOutput: String, sessionName: String)
+    -> SessionTaskState
+  {
+    guard let lsStatus, lsStatus == 0 else { return .unknown }
+    return parseSessionTaskState(lsOutput: lsOutput, sessionName: sessionName)
   }
 
   enum SessionTaskState: Equatable {
