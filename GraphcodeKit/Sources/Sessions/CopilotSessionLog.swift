@@ -386,8 +386,13 @@ public enum CopilotSessionLog {
       return await remotePresence(of: node, at: remote)
     }
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
-    guard ZmxLocator.isInstalled, await ZmxSessionLauncher.sessionExists(node) else {
-      return .absent
+    guard ZmxLocator.isInstalled else { return .absent }
+    switch await ZmxSessionLauncher.sessionTaskState(node) {
+    // `zmx` could not be asked, so nothing was observed — the same answer the remote
+    // probe gives when ssh fails, and not the `.absent` that reads as FAILED.
+    case .unknown: return .unknown
+    case .absent, .exited: return .absent
+    case .alive: break
     }
     guard let directory = directory(forSessionNamed: name),
       let presence = lastStateChange(

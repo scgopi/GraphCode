@@ -488,6 +488,7 @@ public enum ZmxSessionLauncher {
     // behind has nothing to say.
     switch await sessionTaskState(node) {
     case .absent: return .absent
+    case .unknown: return .unknown
     case .exited(let code):
       return PresenceReading(presence: .idle, confidence: .scanned, exitCode: code)
     case .alive: break
@@ -539,6 +540,7 @@ public enum ZmxSessionLauncher {
     guard ZmxLocator.isInstalled else { return .absent }
     switch await sessionTaskState(node) {
     case .absent: return .absent
+    case .unknown: return .unknown
     case .exited(let code):
       return PresenceReading(presence: .idle, confidence: .scanned, exitCode: code)
     case .alive: break
@@ -604,9 +606,12 @@ public enum ZmxSessionLauncher {
   /// an ensure keyed on `zmx get` could never revive a husk, because the husk *is* the
   /// session that check asks about.
   static func sessionTaskState(_ node: LoopNode) async -> SessionTaskState {
-    guard ZmxLocator.isInstalled, let result = runZmx(["ls"]), result.status == 0 else {
-      return .absent
-    }
+    guard ZmxLocator.isInstalled else { return .absent }
+    // A listing that could not be taken is not a listing without the session in it.
+    // `zmx ls` exits 0 whenever it runs at all, so a throw or a non-zero status is the
+    // probe failing, never evidence — and reporting it as `.absent` turned one bad tick
+    // into FAILED on every running unattended loop at once.
+    guard let result = runZmx(["ls"]), result.status == 0 else { return .unknown }
     return parseSessionTaskState(
       lsOutput: result.output,
       sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName)
@@ -616,6 +621,10 @@ public enum ZmxSessionLauncher {
     case alive
     case exited(exitCode: Int?)
     case absent
+    /// `zmx` could not be asked. Distinct from `.absent` for the same reason the remote
+    /// probe separates an unreachable host from a missing session: only one of them is
+    /// an observation.
+    case unknown
   }
 
   /// Parses the `zmx ls` line for one session into a `SessionTaskState`. Internal so
