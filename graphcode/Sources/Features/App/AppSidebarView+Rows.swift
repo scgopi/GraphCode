@@ -76,7 +76,7 @@ extension AppSidebarView {
             .foregroundStyle(.secondary)
         }
         .buttonStyle(.plain)
-        .help("New Loop in \(project.graph.project.name)")
+        .help("New Node in \(project.graph.project.name)")
         if canExpand(project) {
           Button {
             toggleExpanded(project.id)
@@ -153,7 +153,7 @@ extension AppSidebarView {
     // Selects the project first: the creation sheet presents from that project's
     // canvas, and a form opened on a canvas that isn't showing opens nowhere.
     if !node.isResolved {
-      Button("New Child Loop…") {
+      Button("New Child Node…") {
         store.send(.projectHeaderTapped(projectPath))
         send(.newChildLoopTapped(node.id), to: projectPath)
       }
@@ -191,7 +191,7 @@ extension AppSidebarView {
 
   /// Whether this row has child rows at all — nothing does until it has a loop in it.
   /// The Graph row counts now too: its own loops (watchers and other cross-cutting
-  /// triggers, creatable from its canvas since the overview gained "New Loop") list
+  /// triggers, creatable from its canvas since the overview gained "New Node") list
   /// under it like any folder's.
   func canExpand(_ project: ProjectFeature.State) -> Bool {
     !project.graph.nodes.isEmpty

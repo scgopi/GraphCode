@@ -299,7 +299,7 @@ struct ProjectFeatureTests {
     #expect(state.draft.heartbeatIntervalSeconds == 3600)
   }
 
-  /// "New Child Loop…" makes a *custody* child: `createdBy` rides the draft (the
+  /// "New Child Node…" makes a *custody* child: `createdBy` rides the draft (the
   /// daemon draws the fired-at-birth link) and no separate edge command follows — a
   /// hand-off from a long-running parent left the child blocked indefinitely while
   /// its session already ran.

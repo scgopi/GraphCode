@@ -83,7 +83,7 @@ extension ProjectCanvasView {
     // resolved loop: its hand-off edges have already fired, so a child created now
     // would wait on a parent that can never release it.
     if !node.isResolved {
-      Button("New Child Loop…") { store.send(.newChildLoopTapped(node.id)) }
+      Button("New Child Node…") { store.send(.newChildLoopTapped(node.id)) }
     }
     if node.loopType == .composite {
       // First, because it is the step everything else depends on: a composite with

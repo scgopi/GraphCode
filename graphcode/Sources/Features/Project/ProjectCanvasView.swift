@@ -100,7 +100,7 @@ struct ProjectCanvasView: View {
         // A quiet + in system materials, not a filled accent pill — HIG-style: the
         // affordance should be findable, not the loudest thing on the canvas.
         .overlay(alignment: .topTrailing) {
-          CanvasAddButton(help: "New Loop") {
+          CanvasAddButton(help: "New Node") {
             store.send(.addNodeButtonTapped(parentBackend: nil))
           }
           .padding(.trailing, 20)
@@ -352,11 +352,11 @@ struct ProjectCanvasView: View {
   ///
   /// It sits where the dot does, and only when there is one: `CanvasBandView` draws the
   /// origin exactly when the canvas has entry ports. An empty canvas has no band at all,
-  /// and there the top-right New Loop is the way in.
+  /// and there the top-right New Node is the way in.
   @ViewBuilder
   private func entryHandleLayer(_ derived: Derived) -> some View {
     if let rect = bandRect(derived), !entryPorts(derived).isEmpty {
-      CanvasEntryHandle(help: "New loop in \(store.graph.project.name)") {
+      CanvasEntryHandle(help: "New Node in \(store.graph.project.name)") {
         store.send(.addEntryLoopTapped)
       }
       .position(x: rect.minX + CanvasBand.originLane / 2, y: rect.midY)

@@ -73,7 +73,7 @@ struct QuickChatsCanvasView: View {
         CanvasZoomControls(
           transform: $transform, viewport: viewport, content: contentSize(placements))
       }
-      // Top-right and quiet, the same placement and styling a folder canvas's New Loop
+      // Top-right and quiet, the same placement and styling a folder canvas's New Node
       // has — see `ProjectCanvasView` for why it isn't in the window toolbar.
       .overlay(alignment: .topTrailing) {
         CanvasAddButton(help: "New Chat") { store.send(.newQuickChatTapped) }

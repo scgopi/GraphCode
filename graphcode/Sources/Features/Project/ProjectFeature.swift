@@ -193,7 +193,7 @@ struct ProjectFeature {
     /// The + handle on a node card: opens the same form, and the created loop gets a
     /// hand-off edge from this node.
     case addChildNodeTapped(UUID)
-    /// The context menus' "New Child Loop…": a *custody* child — `createdBy` set, the
+    /// The context menus' "New Child Node…": a *custody* child — `createdBy` set, the
     /// daemon draws the already-fired link, the loop starts now. Distinct from
     /// `.addChildNodeTapped` (the + handle), which wires an unfired hand-off that
     /// sequences the new loop *after* the parent — under a long-running parent that

@@ -148,7 +148,7 @@ extension ProjectFeature {
 
     case .templateLibraryRequested:
       // The empty canvas offers starters, and it is the one surface that needs the
-      // library before anybody has opened the New loop dialog.
+      // library before anybody has opened the New Node dialog.
       let projectPath = state.graph.project.path
       let library = templateLibrary
       return .run { send in
