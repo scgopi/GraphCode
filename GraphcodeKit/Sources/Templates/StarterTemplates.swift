@@ -88,7 +88,7 @@ public enum StarterTemplates {
   /// one loop that understands the goal, splits it, and stays to put the pieces back
   /// together. A **Main** loop on purpose — `MAIN_LOOP.md` names this as the
   /// orchestration path — that cuts no worktree, since a coordinator reads and steers
-  /// while its children write. The Artifactory appears as the team's inbox, and the
+  /// while its children write. The Mailroom appears as the team's inbox, and the
   /// topic is the loop's to choose from the goal, so there is one thing to fill.
   public static var leadATeam: PromptTemplate {
     starter(
@@ -101,7 +101,7 @@ public enum StarterTemplates {
       anything that needs watching rather than finishing a timed loop. Keep the \
       integration for yourself.
 
-      The Artifactory is the team's inbox. Post your plan there under one topic named \
+      The Mailroom is the team's inbox. Post your plan there under one topic named \
       for this goal, have every child post its result there, watch that topic, and \
       sync whenever you come back. Finish by checking the assembled result against \
       the goal and posting a closing note.
@@ -111,7 +111,7 @@ public enum StarterTemplates {
   // MARK: - Main
   // One line to fill, and both end when you close them, which is the whole type. Both
   // are shaped like the team lead above, at a smaller scale: do the first pass
-  // yourself, split only when the work actually splits, one Artifactory topic per
+  // yourself, split only when the work actually splits, one Mailroom topic per
   // job, and the main loop is the only voice the human hears.
 
   public static var whereDoesThisLive: PromptTemplate {
@@ -123,7 +123,7 @@ public enum StarterTemplates {
       Map it before I touch it: where it's defined, everything that reads it, \
       everything that writes it. Do the first pass yourself. If it reaches into more \
       than a few areas, give each area its own goal loop to trace in depth and report \
-      to the Artifactory under this symbol's name, and fold their reports into one \
+      to the Mailroom under this symbol's name, and fold their reports into one \
       map. Change nothing — the map is the deliverable.
       """)
   }
@@ -136,7 +136,7 @@ public enum StarterTemplates {
 
       Reproduce it first. Then list the plausible causes, and if there is more than \
       one, give each its own goal loop in its own worktree to confirm or rule it out, \
-      reporting to the Artifactory under this symptom. Only you talk to me; the \
+      reporting to the Mailroom under this symptom. Only you talk to me; the \
       children report to you. Stop when you can tell me the cause with the evidence — \
       I'll decide what to do about it.
       """)

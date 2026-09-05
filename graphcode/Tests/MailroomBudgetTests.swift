@@ -1,4 +1,4 @@
-import ArtifactoryKit
+import MailroomKit
 import ComposableArchitecture
 import Foundation
 import GraphcodeKit
@@ -8,7 +8,7 @@ import Testing
 /// ask that makes a resolving loop write something down — the review round that
 /// followed the independent read of #229.
 @Suite
-struct ArtifactoryBudgetTests {
+struct MailroomBudgetTests {
   private func makeStore(
     enabled: Bool = true,
     delivered: LockIsolated<[(UUID, String)]>? = nil,
@@ -21,7 +21,7 @@ struct ArtifactoryBudgetTests {
         return true
       },
       onAppendMemory: { nodeID, entry in memory?.withValue { $0.append((nodeID, entry)) } },
-      onArtifactoryEnabled: { enabled })
+      onMailroomEnabled: { enabled })
     await store.handle(
       .createNode(NodeDraft(title: "Author", loopType: .turnBased, firstInstruction: "Work")))
     await store.handle(
@@ -43,15 +43,15 @@ struct ArtifactoryBudgetTests {
     let ids = await ids(store)
 
     await store.handle(
-      .artifactoryPost(text: "DEAD END: approach X fails", topic: "findings", from: ids[0]))
-    for index in 0..<(Artifactory.maxRecords * 4) {
+      .mailroomPost(text: "DEAD END: approach X fails", topic: "findings", from: ids[0]))
+    for index in 0..<(Mailroom.maxRecords * 4) {
       await store.handle(
         .messageNode(ids[1], text: "ping \(index)", from: ids[0], followUp: true))
     }
 
-    let board = await store.graph.artifactory
+    let board = await store.graph.mailroom
     #expect(board.contains { $0.body.contains("DEAD END") })
-    #expect(board.filter { $0.kind == .record }.count == Artifactory.maxRecords)
+    #expect(board.filter { $0.kind == .record }.count == Mailroom.maxRecords)
     #expect(board.filter { $0.kind == .note }.count == 1)
   }
 
@@ -63,34 +63,34 @@ struct ArtifactoryBudgetTests {
     let ids = await ids(store)
 
     await store.handle(.messageNode(ids[1], text: "the API changed", from: ids[0], followUp: true))
-    for index in 0..<(Artifactory.maxNotes + 10) {
-      await store.handle(.artifactoryPost(text: "note \(index)", topic: nil, from: ids[0]))
+    for index in 0..<(Mailroom.maxNotes + 10) {
+      await store.handle(.mailroomPost(text: "note \(index)", topic: nil, from: ids[0]))
     }
 
-    let board = await store.graph.artifactory
+    let board = await store.graph.mailroom
     #expect(board.filter { $0.kind == .record }.count == 1)
-    #expect(board.filter { $0.kind == .note }.count == Artifactory.maxNotes)
+    #expect(board.filter { $0.kind == .note }.count == Mailroom.maxNotes)
     // Ids still only grow, so no cursor mistakes an old post for new mail.
-    #expect(board.last?.id == Artifactory.maxNotes + 11)
+    #expect(board.last?.id == Mailroom.maxNotes + 11)
   }
 
   @Test
   func pruningKeepsTheBoardInOneSequence() {
     let base = Date()
-    var posts: [ArtifactoryPost] = []
-    for index in 1...(Artifactory.maxRecords + 4) {
+    var posts: [MailroomPost] = []
+    for index in 1...(Mailroom.maxRecords + 4) {
       posts.append(
-        ArtifactoryPost(
+        MailroomPost(
           id: index, at: base, authorID: nil, author: "a human", topic: nil,
           body: "r\(index)", kind: .record))
       posts.append(
-        ArtifactoryPost(
+        MailroomPost(
           id: index + 1000, at: base, authorID: nil, author: "a human", topic: nil,
           body: "n\(index)", kind: .note))
     }
-    let pruned = Artifactory.pruned(posts.sorted { $0.id < $1.id })
+    let pruned = Mailroom.pruned(posts.sorted { $0.id < $1.id })
     #expect(pruned == pruned.sorted { $0.id < $1.id })
-    #expect(pruned.filter { $0.kind == .record }.count == Artifactory.maxRecords)
+    #expect(pruned.filter { $0.kind == .record }.count == Mailroom.maxRecords)
   }
 
   /// A board written before records had a kind decodes as all notes — everything on it
@@ -100,7 +100,7 @@ struct ArtifactoryBudgetTests {
     let json = """
       {"id":3,"at":747000000,"author":"Author","body":"hello"}
       """
-    let post = try JSONDecoder().decode(ArtifactoryPost.self, from: Data(json.utf8))
+    let post = try JSONDecoder().decode(MailroomPost.self, from: Data(json.utf8))
     #expect(post.kind == .note)
     #expect(post.authorID == nil)
   }
@@ -114,11 +114,11 @@ struct ArtifactoryBudgetTests {
     let store = await makeStore()
     let ids = await ids(store)
     await store.handle(
-      .artifactoryPost(text: "issue #12 is mine", topic: "claims", from: ids[0]))
+      .mailroomPost(text: "issue #12 is mine", topic: "claims", from: ids[0]))
 
     await store.handle(.deleteNode(ids[0]))
 
-    let board = await store.graph.artifactory
+    let board = await store.graph.mailroom
     #expect(board.count == 1)
     #expect(board[0].body == "issue #12 is mine")
     #expect(board[0].authorID == nil)
@@ -131,15 +131,15 @@ struct ArtifactoryBudgetTests {
   func aLoopBornAfterTheAuthorsDeletionStillReadsTheNote() async {
     let store = await makeStore()
     let ids = await ids(store)
-    await store.handle(.artifactoryPost(text: "approach X fails", topic: nil, from: ids[0]))
+    await store.handle(.mailroomPost(text: "approach X fails", topic: nil, from: ids[0]))
     await store.handle(.deleteNode(ids[0]))
 
     await store.handle(
       .createNode(NodeDraft(title: "Successor", loopType: .turnBased, firstInstruction: "W")))
     let graph = await store.graph
     let successor = graph.nodes.first { $0.title == "Successor" }!
-    let unread = Artifactory.unread(
-      in: graph.artifactory, since: successor.lastArtifactoryRead)
+    let unread = Mailroom.unread(
+      in: graph.mailroom, since: successor.lastMailroomRead)
     #expect(unread.map(\.body) == ["approach X fails"])
   }
 
@@ -151,17 +151,17 @@ struct ArtifactoryBudgetTests {
     let store = GraphStore(
       onEnsureSession: { _, _ in },
       onRemoveMemory: { nodeID in removed.withValue { $0.append(nodeID) } },
-      onArtifactoryEnabled: { true })
+      onMailroomEnabled: { true })
     await store.handle(
       .createNode(NodeDraft(title: "Author", loopType: .turnBased, firstInstruction: "W")))
     let id = try #require(await store.graph.nodes.first?.id)
-    await store.handle(.artifactoryPost(text: "a note", topic: nil, from: id))
+    await store.handle(.mailroomPost(text: "a note", topic: nil, from: id))
 
     await store.handle(.deleteNode(id))
 
     #expect(removed.value == [id])
     #expect(await store.graph.nodes.isEmpty)
-    #expect(await store.graph.artifactory.count == 1)
+    #expect(await store.graph.mailroom.count == 1)
   }
 
   // MARK: - Self-triaging sync
@@ -171,18 +171,18 @@ struct ArtifactoryBudgetTests {
     var graph = LoopGraph(project: ProjectRef(path: "/tmp/p", name: "p"))
     let reader = LoopNode(title: "Reader", loopType: .turnBased)
     graph.nodes.append(reader)
-    for index in 1...(Artifactory.triageAfterPosts + 1) {
-      graph.artifactory.append(
-        ArtifactoryPost(
+    for index in 1...(Mailroom.triageAfterPosts + 1) {
+      graph.mailroom.append(
+        MailroomPost(
           id: index, at: Date(), authorID: nil, author: "a human", topic: nil,
           body: "note \(index) with a body long enough to be worth truncating for triage"))
     }
 
-    let rendered = GraphcodeCommand.renderArtifactory(
+    let rendered = GraphcodeCommand.renderMailroom(
       graph, unreadFor: reader.id, autoTriage: true)
 
     #expect(rendered.contains("headlines only"))
-    #expect(rendered.contains("artifactory read /tmp/p <post-id>"))
+    #expect(rendered.contains("mailroom read /tmp/p <post-id>"))
   }
 
   @Test
@@ -190,12 +190,12 @@ struct ArtifactoryBudgetTests {
     var graph = LoopGraph(project: ProjectRef(path: "/tmp/p", name: "p"))
     let reader = LoopNode(title: "Reader", loopType: .turnBased)
     graph.nodes.append(reader)
-    graph.artifactory.append(
-      ArtifactoryPost(
+    graph.mailroom.append(
+      MailroomPost(
         id: 1, at: Date(), authorID: nil, author: "a human", topic: nil,
         body: "short enough to read in full"))
 
-    let rendered = GraphcodeCommand.renderArtifactory(
+    let rendered = GraphcodeCommand.renderMailroom(
       graph, unreadFor: reader.id, autoTriage: true)
 
     #expect(rendered.contains("short enough to read in full"))
@@ -207,51 +207,51 @@ struct ArtifactoryBudgetTests {
   @Test
   func aFewVeryLongNotesTriageOnBytes() {
     let posts = (1...5).map { index in
-      ArtifactoryPost(
+      MailroomPost(
         id: index, at: Date(), authorID: nil, author: "a human", topic: nil,
         body: String(repeating: "x", count: 1000))
     }
-    #expect(Artifactory.needsTriage(posts))
-    #expect(!Artifactory.needsTriage(Array(posts.prefix(1))))
+    #expect(Mailroom.needsTriage(posts))
+    #expect(!Mailroom.needsTriage(Array(posts.prefix(1))))
   }
 
   @Test
   func syncParsesFullAndDefaultsToAutoTriage() throws {
-    let full = try GraphcodeCommand.parse(["artifactory", "sync", "/tmp/p", "--full"])
+    let full = try GraphcodeCommand.parse(["mailroom", "sync", "/tmp/p", "--full"])
     #expect(
       full
-        == .artifactorySync(
+        == .mailroomSync(
           projectPath: "/tmp/p", headlines: false, mark: false, json: false, full: true))
-    let plain = try GraphcodeCommand.parse(["artifactory", "sync", "/tmp/p"])
+    let plain = try GraphcodeCommand.parse(["mailroom", "sync", "/tmp/p"])
     #expect(
       plain
-        == .artifactorySync(
+        == .mailroomSync(
           projectPath: "/tmp/p", headlines: false, mark: false, json: false, full: false))
   }
 
   // MARK: - The write-side pull
 
-  /// Every other artifactory affordance is read-side. This is the one that asks a loop
+  /// Every other mailroom affordance is read-side. This is the one that asks a loop
   /// to write, at the one moment it knows what it learned.
   @Test
   func aResolvingLoopIsAskedToLeaveANote() {
-    let ask = MessageBus.resolutionAsk(distillSkill: false, artifactoryProjectPath: "/tmp/p")
-    #expect(ask?.contains("graphcode artifactory post /tmp/p") == true)
+    let ask = MessageBus.resolutionAsk(distillSkill: false, mailroomProjectPath: "/tmp/p")
+    #expect(ask?.contains("graphcode mailroom post /tmp/p") == true)
     #expect(ask?.hasPrefix("[graphcode] ") == true)
   }
 
   /// A goal loop that succeeded is owed both asks, and is interrupted once for them.
   @Test
   func bothAsksArriveAsOneInterruption() {
-    let ask = MessageBus.resolutionAsk(distillSkill: true, artifactoryProjectPath: "/tmp/p")
+    let ask = MessageBus.resolutionAsk(distillSkill: true, mailroomProjectPath: "/tmp/p")
     #expect(ask?.contains("distill it into a project skill") == true)
-    #expect(ask?.contains("graphcode artifactory post") == true)
+    #expect(ask?.contains("graphcode mailroom post") == true)
     #expect(ask?.components(separatedBy: "[graphcode] ").count == 2)
   }
 
   @Test
   func noBoardAndNoSkillMeansNoInterruption() {
-    #expect(MessageBus.resolutionAsk(distillSkill: false, artifactoryProjectPath: nil) == nil)
+    #expect(MessageBus.resolutionAsk(distillSkill: false, mailroomProjectPath: nil) == nil)
   }
 
   /// With the board off, a resolving loop is never pointed at a verb the daemon would
@@ -265,7 +265,7 @@ struct ArtifactoryBudgetTests {
         delivered.withValue { $0.append((node.id, message)) }
         return true
       },
-      onArtifactoryEnabled: { false })
+      onMailroomEnabled: { false })
     await store.handle(
       .createNode(
         NodeDraft(
@@ -274,6 +274,6 @@ struct ArtifactoryBudgetTests {
 
     await store.handle(.nodeCheckApproved(id))
 
-    #expect(!delivered.value.contains { $0.1.contains("artifactory post") })
+    #expect(!delivered.value.contains { $0.1.contains("mailroom post") })
   }
 }

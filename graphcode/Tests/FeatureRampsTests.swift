@@ -79,26 +79,26 @@ struct FeatureRampsTests {
   }
 
   @Test
-  func artifactoryShipsOnEverywhere() {
-    // The Artifactory is ramped fully on, so — the codespaces rule — its baked default
+  func mailroomShipsOnEverywhere() {
+    // The Mailroom is ramped fully on, so — the codespaces rule — its baked default
     // moved up with it: an offline first launch on either channel gets the board, and
     // the served file is the kill switch rather than the opener.
     let id = UUID().uuidString
     #expect(
-      FeatureRamps.isEnabled(.artifactory, configuration: nil, channel: "beta", installID: id))
+      FeatureRamps.isEnabled(.mailroom, configuration: nil, channel: "beta", installID: id))
     #expect(
-      FeatureRamps.isEnabled(.artifactory, configuration: nil, channel: "stable", installID: id))
+      FeatureRamps.isEnabled(.mailroom, configuration: nil, channel: "stable", installID: id))
     // The fetched file stays both the opener and the kill switch either way: raised
     // to 100 everywhere it turns stable installs on, dropped to 0 it turns even beta
     // installs off.
     let everywhere = FeatureRamps.Configuration(
-      features: ["artifactory": ["beta": 100, "stable": 100]])
+      features: ["mailroom": ["beta": 100, "stable": 100]])
     #expect(
       FeatureRamps.isEnabled(
-        .artifactory, configuration: everywhere, channel: "stable", installID: id))
-    let nowhere = FeatureRamps.Configuration(features: ["artifactory": ["beta": 0, "stable": 0]])
+        .mailroom, configuration: everywhere, channel: "stable", installID: id))
+    let nowhere = FeatureRamps.Configuration(features: ["mailroom": ["beta": 0, "stable": 0]])
     #expect(
       !FeatureRamps.isEnabled(
-        .artifactory, configuration: nowhere, channel: "beta", installID: id))
+        .mailroom, configuration: nowhere, channel: "beta", installID: id))
   }
 }

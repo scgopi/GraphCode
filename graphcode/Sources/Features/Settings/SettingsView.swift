@@ -177,16 +177,16 @@ struct SettingsView: View {
         .foregroundStyle(.secondary)
         .fixedSize(horizontal: false, vertical: true)
 
-        // Always offered. The daemon-side bit lives in `artifactoryEnabled`
+        // Always offered. The daemon-side bit lives in `mailroomEnabled`
         // (`GraphcodeSettings`), on by default; a flip here is what turns the board
         // off for a person who finds it too much, and is remembered over any rollout.
-        Toggle("Artifactory", isOn: $model.artifactoryEnabled)
+        Toggle("Mailroom", isOn: $model.mailroomEnabled)
         Text(
           "Loops share a message board — a note dropped for whoever comes next, "
             + "discoverable by loops that didn't exist when it was written — "
             + "alongside the addressed `node send` and edges. It also appears in a "
             + "loop's workspace rail, where you can read it and leave notes yourself. "
-            + "Off, the daemon refuses every artifactory command and the rail section "
+            + "Off, the daemon refuses every mailroom command and the rail section "
             + "goes away. On by default; your choice here is kept."
         )
         .font(.caption2)

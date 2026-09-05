@@ -34,19 +34,19 @@ let project = Project(
     name: "graphcode",
     organizationName: "Graphcode",
     targets: [
-        // `ArtifactoryKit` — the Artifactory domain model: one post type, one watch
+        // `MailroomKit` — the Mailroom domain model: one post type, one watch
         // subscription, and the caps/matching rules both the daemon and the CLI read.
         // Its own module, with no dependency beyond Foundation, so the shared board is
         // a thing GraphcodeKit links rather than a folder inside it — and so the
         // post shape can evolve without touching the session machinery.
         .target(
-            name: "ArtifactoryKit",
+            name: "MailroomKit",
             destinations: .macOS,
             product: .staticFramework,
-            bundleId: "\(bundleIdPrefix).artifactory",
+            bundleId: "\(bundleIdPrefix).mailroom",
             deploymentTargets: .macOS("15.0"),
             buildableFolders: [
-                "ArtifactoryKit/Sources"
+                "MailroomKit/Sources"
             ]
         ),
         .target(
@@ -59,7 +59,7 @@ let project = Project(
                 "GraphcodeKit/Sources"
             ],
             dependencies: [
-                .target(name: "ArtifactoryKit"),
+                .target(name: "MailroomKit"),
                 .external(name: "IdentifiedCollections")
             ]
         ),

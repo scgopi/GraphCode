@@ -1,9 +1,9 @@
 import Foundation
 
-/// One post on an Artifactory — the shared, unaddressed message board a graph of loops
+/// One post on an Mailroom — the shared, unaddressed message board a graph of loops
 /// writes to and reads without wiring anything: `node send` and edges are addressed
 /// (a sender must already know a target's id, and the daemon routes to that one peer),
-/// while the Artifactory is the ambient counterpart. A loop drops a note for *whoever
+/// while the Mailroom is the ambient counterpart. A loop drops a note for *whoever
 /// comes next* — a decision made, a dead end hit, a claim staked — and any other loop,
 /// present or created after the author is gone, discovers it with one command. Posts
 /// survive their authors: they live on the graph itself, outlasting resolution, the
@@ -12,7 +12,7 @@ import Foundation
 /// Small on purpose. A post is a note to a peer, not a transcript — the same bargain
 /// `NodeMemory`'s 512-byte log entries strike — and the caps below are what keep a
 /// wake digest's advice to "check the board" from costing a loop its context budget.
-public struct ArtifactoryPost: Codable, Equatable, Identifiable, Sendable {
+public struct MailroomPost: Codable, Equatable, Identifiable, Sendable {
   /// What kind of traffic a post is, which is what decides *whose* budget prunes it.
   ///
   /// The two share a board and nothing else. A note is somebody choosing to tell the
@@ -22,7 +22,7 @@ public struct ArtifactoryPost: Codable, Equatable, Identifiable, Sendable {
   /// trying — evicted every note on it. Separate budgets are the fix: chatter can fill
   /// its own quota to the brim and never touch a note.
   public enum Kind: String, Codable, Sendable {
-    /// Somebody posted this on purpose (`graphcode artifactory post`).
+    /// Somebody posted this on purpose (`graphcode mailroom post`).
     case note
     /// The board's mirror of a delivered direct message or handoff.
     case record
@@ -103,8 +103,8 @@ public struct ArtifactoryPost: Codable, Equatable, Identifiable, Sendable {
   /// peers may already have acted on, which is the one thing an append-only board must
   /// not do. What the delete does take is the handle: `authorID` goes, so nothing can
   /// address a loop that no longer exists, and the byline says plainly that it is gone.
-  public func withAuthorDeleted() -> ArtifactoryPost {
-    ArtifactoryPost(
+  public func withAuthorDeleted() -> MailroomPost {
+    MailroomPost(
       id: id, at: at, authorID: nil, author: "\(author) (deleted)", topic: topic,
       body: body, kind: kind)
   }
@@ -115,10 +115,10 @@ public struct ArtifactoryPost: Codable, Equatable, Identifiable, Sendable {
   public static let maxTopicBytes = 64
 }
 
-/// A loop's standing subscription to its project's Artifactory — what turns the board
+/// A loop's standing subscription to its project's Mailroom — what turns the board
 /// from something a loop must remember to poll into a mailbox that rings. `topic`
 /// `nil` hears every post; a topic hears only posts labelled the same way.
-public struct ArtifactoryWatch: Codable, Equatable, Sendable {
+public struct MailroomWatch: Codable, Equatable, Sendable {
   public var topic: String?
 
   public init(topic: String? = nil) { self.topic = topic }
@@ -128,8 +128,8 @@ public struct ArtifactoryWatch: Codable, Equatable, Sendable {
 
 /// The board's own rules — the arithmetic every surface shares rather than
 /// re-derives, so the CLI's unread count and the daemon's cursor can never disagree.
-public enum Artifactory {
-  /// How many *notes* a board keeps. The oldest fall off first: an Artifactory is a
+public enum Mailroom {
+  /// How many *notes* a board keeps. The oldest fall off first: an Mailroom is a
   /// mailbox for the work that is happening, not an archive — a loop's durable
   /// findings belong in its memory log, and the board's job is carrying them to
   /// loops that cannot read that log.
@@ -144,7 +144,7 @@ public enum Artifactory {
   /// The id the next post gets. Maximum-plus-one, never count-plus-one: pruning
   /// removes the oldest posts, and reusing their ids would make unread cursors
   /// mistake old mail for new.
-  public static func nextID(after posts: [ArtifactoryPost]) -> Int {
+  public static func nextID(after posts: [MailroomPost]) -> Int {
     (posts.map(\.id).max() ?? 0) + 1
   }
 
@@ -161,22 +161,22 @@ public enum Artifactory {
   public static let triageAfterBytes = 4096
 
   /// Whether this many posts is more than a loop should be handed in full.
-  public static func needsTriage(_ posts: [ArtifactoryPost]) -> Bool {
+  public static func needsTriage(_ posts: [MailroomPost]) -> Bool {
     posts.count > triageAfterPosts
       || posts.reduce(0) { $0 + $1.body.utf8.count } > triageAfterBytes
   }
 
   /// The posts a loop with `lastRead` on its cursor has not seen yet.
   public static func unread(
-    in posts: [ArtifactoryPost], since lastRead: Int?
-  ) -> [ArtifactoryPost] {
+    in posts: [MailroomPost], since lastRead: Int?
+  ) -> [MailroomPost] {
     guard let lastRead else { return posts }
     return posts.filter { $0.id > lastRead }
   }
 
   /// A board pruned to both budgets, oldest of each kind gone first and the survivors
   /// back in one sequence. Applied by the store on every write so no caller can forget.
-  public static func pruned(_ posts: [ArtifactoryPost]) -> [ArtifactoryPost] {
+  public static func pruned(_ posts: [MailroomPost]) -> [MailroomPost] {
     let notes = posts.filter { $0.kind == .note }
     let records = posts.filter { $0.kind == .record }
     guard notes.count > maxNotes || records.count > maxRecords else { return posts }

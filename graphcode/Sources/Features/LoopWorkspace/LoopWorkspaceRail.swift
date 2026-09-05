@@ -25,23 +25,23 @@ struct LoopWorkspaceRail: View {
   /// Whether the board section is collapsed to its header. Per window and persisted,
   /// beside the summary's own fold.
   let isBoardFolded: Bool
-  /// Whether this project's Artifactory is switched on, passed in as a plain value the
+  /// Whether this project's Mailroom is switched on, passed in as a plain value the
   /// way `AppSidebarView` takes `offersCodespaces`: the settings model is `@Observable`
   /// and the render path should not be reading a file.
-  let artifactoryEnabled: Bool
+  let mailroomEnabled: Bool
   /// Whether the board section is collapsed to its one line, beside the summary's and
   /// the diagram's own folds.
-  let isArtifactoryFolded: Bool
-  /// See `LoopWorkspaceFeature.seenArtifactoryPostID`.
-  let seenArtifactoryPostID: Int?
+  let isMailroomFolded: Bool
+  /// See `LoopWorkspaceFeature.seenMailroomPostID`.
+  let seenMailroomPostID: Int?
   let onSummaryFoldToggled: () -> Void
   let onSummaryAnswerTapped: () -> Void
   let onBoardFoldToggled: () -> Void
   let onBoardExpanded: () -> Void
-  let onArtifactoryFoldToggled: () -> Void
+  let onMailroomFoldToggled: () -> Void
   /// Body and optional topic. Posts as "a human": a click in the app carries no loop
   /// identity, which is exactly what a person addressing the whole graph is.
-  let onArtifactoryPost: (String, String?) -> Void
+  let onMailroomPost: (String, String?) -> Void
   let onTargetTapped: (UUID) -> Void
 
   /// The handoff's number, and now the floor rather than the fixed size. Below this the
@@ -75,33 +75,33 @@ struct LoopWorkspaceRail: View {
   }
 
   /// The newest board post that was on screen when a human last left a workspace in
-  /// this project — what the ARTIFACTORY section's `SINCE YOU LOOKED` rule and its
+  /// this project — what the MAILROOM section's `SINCE YOU LOOKED` rule and its
   /// `N NEW` badge are drawn against. Keyed by project because the board is the
   /// project's: opening a different loop in the same project is not "not having
   /// looked". Persisted, unlike the summary's `seenBeatID`, because a board pointer
   /// that reset on relaunch would mark every post new again each morning.
-  static func seenArtifactoryPostDefaultsKey(forProjectPath path: String) -> String {
-    "artifactorySeenPostID." + path
+  static func seenMailroomPostDefaultsKey(forProjectPath path: String) -> String {
+    "mailroomSeenPostID." + path
   }
 
-  static func loadSeenArtifactoryPost(forProjectPath path: String) -> Int? {
+  static func loadSeenMailroomPost(forProjectPath path: String) -> Int? {
     let stored = UserDefaults.standard.integer(
-      forKey: seenArtifactoryPostDefaultsKey(forProjectPath: path))
+      forKey: seenMailroomPostDefaultsKey(forProjectPath: path))
     return stored > 0 ? stored : nil
   }
 
-  static func saveSeenArtifactoryPost(_ id: Int, forProjectPath path: String) {
-    UserDefaults.standard.set(id, forKey: seenArtifactoryPostDefaultsKey(forProjectPath: path))
+  static func saveSeenMailroomPost(_ id: Int, forProjectPath path: String) {
+    UserDefaults.standard.set(id, forKey: seenMailroomPostDefaultsKey(forProjectPath: path))
   }
 
-  static let artifactoryFoldedDefaultsKey = "loopArtifactorySectionFolded"
+  static let mailroomFoldedDefaultsKey = "loopMailroomSectionFolded"
 
-  static func loadArtifactoryFolded() -> Bool {
-    UserDefaults.standard.bool(forKey: artifactoryFoldedDefaultsKey)
+  static func loadMailroomFolded() -> Bool {
+    UserDefaults.standard.bool(forKey: mailroomFoldedDefaultsKey)
   }
 
-  static func saveArtifactoryFolded(_ folded: Bool) {
-    UserDefaults.standard.set(folded, forKey: artifactoryFoldedDefaultsKey)
+  static func saveMailroomFolded(_ folded: Bool) {
+    UserDefaults.standard.set(folded, forKey: mailroomFoldedDefaultsKey)
   }
 
   static let boardFoldedDefaultsKey = "loopBoardSectionFolded"
@@ -163,12 +163,12 @@ struct LoopWorkspaceRail: View {
     node: LoopNode, graph: LoopGraph,
     summarising: Bool = LoopSummaryPresentation.isProducing,
     drawing: Bool = SummaryBoardPresentation.isDrawing,
-    artifactoryEnabled: Bool = SettingsModel.shared.settings.artifactoryEnabled
+    mailroomEnabled: Bool = SettingsModel.shared.settings.mailroomEnabled
   ) -> Bool {
     // A board with anything on it is reason enough to open the rail: it is the one
     // section whose content came from *other* loops, so the loop you are looking at
     // being wired to nothing says nothing about whether there is mail.
-    ArtifactoryPresentation.hasContent(graph: graph, enabled: artifactoryEnabled)
+    MailroomPresentation.hasContent(graph: graph, enabled: mailroomEnabled)
       || graph.edges.contains { $0.from == node.id || $0.to == node.id }
       || node.metricHistory.count >= 2
       // A loop that is narrating has something to say whether or not it is wired to
@@ -205,8 +205,8 @@ struct LoopWorkspaceRail: View {
   /// short window a fixed 600pt cap was enough, with THIS LOOP's 118 and the summary's
   /// 120 floor, to overflow the stack and push the foot of the rail off the bottom.
   /// A share cannot overflow on its own, and 40% still shows a conversation.
-  static func artifactoryHeightCap(railHeight: CGFloat) -> CGFloat {
-    min(ArtifactorySection.maxScrollHeight, max(160, railHeight * 0.4))
+  static func mailroomHeightCap(railHeight: CGFloat) -> CGFloat {
+    min(MailroomSection.maxScrollHeight, max(160, railHeight * 0.4))
   }
 
   var body: some View {
@@ -214,7 +214,7 @@ struct LoopWorkspaceRail: View {
     // guess from within a scroll view — the rail's height is what the board's share
     // is a share *of*.
     GeometryReader { proxy in
-      stack(artifactoryCap: Self.artifactoryHeightCap(railHeight: proxy.size.height))
+      stack(mailroomCap: Self.mailroomHeightCap(railHeight: proxy.size.height))
     }
     .frame(width: width)
     .frame(maxHeight: .infinity)
@@ -224,7 +224,7 @@ struct LoopWorkspaceRail: View {
     }
   }
 
-  private func stack(artifactoryCap: CGFloat) -> some View {
+  private func stack(mailroomCap: CGFloat) -> some View {
     VStack(alignment: .leading, spacing: 10) {
       // Above `THIS LOOP` rather than below it: what the loop is doing this second
       // outranks where it sits in the graph, and a section you have to scroll to is a
@@ -266,11 +266,11 @@ struct LoopWorkspaceRail: View {
       // the button that answers it. Low and against the footer is also where a message
       // board belongs: newest at the bottom, composer under it, the way every other
       // thing you read messages in is arranged.
-      if ArtifactoryPresentation.hasContent(graph: graph, enabled: artifactoryEnabled) {
-        ArtifactorySection(
-          graph: graph, seenPostID: seenArtifactoryPostID, isFolded: isArtifactoryFolded,
-          maxHeight: artifactoryCap,
-          onToggleFold: onArtifactoryFoldToggled, onPost: onArtifactoryPost)
+      if MailroomPresentation.hasContent(graph: graph, enabled: mailroomEnabled) {
+        MailroomSection(
+          graph: graph, seenPostID: seenMailroomPostID, isFolded: isMailroomFolded,
+          maxHeight: mailroomCap,
+          onToggleFold: onMailroomFoldToggled, onPost: onMailroomPost)
       }
       footer
     }

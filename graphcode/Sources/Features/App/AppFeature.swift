@@ -588,13 +588,13 @@ struct AppFeature {
       // A human's note reaching the daemon. `from: nil` is the whole point: a click in
       // the app carries no `ZMX_SESSION`, so the board attributes it to "a human" —
       // the same attribution the CLI gives a person's shell.
-      case .openLoop(.artifactoryPostSubmitted(let text, let topic)):
+      case .openLoop(.mailroomPostSubmitted(let text, let topic)):
         guard let projectPath = state.openLoop?.projectPath else { return .none }
         return .run { _ in
           try? await orchestratorClient.send(
             .graphCommand(
               projectPath: projectPath,
-              command: .artifactoryPost(text: text, topic: topic, from: nil)))
+              command: .mailroomPost(text: text, topic: topic, from: nil)))
         }
 
       case .openLoop(.railTargetTapped(let nodeID)):

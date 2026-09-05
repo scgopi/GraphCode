@@ -1,9 +1,9 @@
-import ArtifactoryKit
+import MailroomKit
 import GraphcodeKit
 import SwiftUI
 
 /// What the rail needs to know about the board without building a view to find out.
-enum ArtifactoryPresentation {
+enum MailroomPresentation {
   /// Whether this graph's board has anything to show. Absent while empty, for the
   /// reason the whole rail is absent while empty: a panel that is permanently blank
   /// teaches people to stop looking at the one beside it.
@@ -11,39 +11,39 @@ enum ArtifactoryPresentation {
   /// The gate is the same bit the daemon enforces, read by the caller rather than here
   /// so the render path never touches the settings file.
   static func hasContent(graph: LoopGraph, enabled: Bool) -> Bool {
-    enabled && !graph.artifactory.isEmpty
+    enabled && !graph.mailroom.isEmpty
   }
 
   /// The posts somebody wrote on purpose, newest last — the direction the summary and
   /// the terminal beside it already run.
-  static func notes(in graph: LoopGraph) -> [ArtifactoryPost] {
-    graph.artifactory.filter { $0.kind == .note }
+  static func notes(in graph: LoopGraph) -> [MailroomPost] {
+    graph.mailroom.filter { $0.kind == .note }
   }
 
   /// The mirrored direct messages and handoffs. Kept apart from the notes because they
   /// are receipts for deliveries that already happened, not something written to be
   /// read here.
-  static func records(in graph: LoopGraph) -> [ArtifactoryPost] {
-    graph.artifactory.filter { $0.kind == .record }
+  static func records(in graph: LoopGraph) -> [MailroomPost] {
+    graph.mailroom.filter { $0.kind == .record }
   }
 
   /// How many notes have landed since the human last looked — `seenPostID` is
-  /// `LoopWorkspaceFeature.seenArtifactoryPostID`, not the loop's sync cursor. Records
+  /// `LoopWorkspaceFeature.seenMailroomPostID`, not the loop's sync cursor. Records
   /// are excluded: they are folded away by default, and a badge counting mail nobody is
   /// being shown is a badge that cannot be cleared.
   static func unreadNoteCount(graph: LoopGraph, seenPostID: Int?) -> Int {
-    Artifactory.unread(in: notes(in: graph), since: seenPostID).count
+    Mailroom.unread(in: notes(in: graph), since: seenPostID).count
   }
 }
 
-/// The Artifactory in the workspace rail — a peer of `LoopSummarySection` and
+/// The Mailroom in the workspace rail — a peer of `LoopSummarySection` and
 /// `SummaryBoardSection`, and the one place a human meets the board without a shell.
 ///
 /// The board is how loops leave notes for whoever comes next, and until this section
 /// existed the only way to read one was a CLI verb nobody had been told about. That is
 /// the whole reason it is here rather than behind a menu: a coordination channel a
 /// supervisor never sees is the failure mode, not a missing convenience.
-struct ArtifactorySection: View {
+struct MailroomSection: View {
   let graph: LoopGraph
   /// What `SINCE YOU LOOKED` means here: the newest post that was on screen when this
   /// person last left a workspace in the project. The same words two sections up mean
@@ -51,9 +51,9 @@ struct ArtifactorySection: View {
   let seenPostID: Int?
   let isFolded: Bool
   /// How tall the scroll box may grow before it scrolls — the rail's share for the
-  /// board (`LoopWorkspaceRail.artifactoryHeightCap`), never more than
+  /// board (`LoopWorkspaceRail.mailroomHeightCap`), never more than
   /// `maxScrollHeight`.
-  var maxHeight: CGFloat = ArtifactorySection.maxScrollHeight
+  var maxHeight: CGFloat = MailroomSection.maxScrollHeight
   let onToggleFold: () -> Void
   /// Posts as "a human" — a click in the app has no `ZMX_SESSION` and no loop identity,
   /// which is exactly what a person talking to the whole graph is.
@@ -65,7 +65,7 @@ struct ArtifactorySection: View {
   /// The most the board's scroll box will ever be, on any window: about ten posts at
   /// the rail's default width — enough to read a conversation, not so many that the
   /// rail is nothing but the board. The rail hands down a smaller cap on a short
-  /// window (`LoopWorkspaceRail.artifactoryHeightCap`); this is the ceiling on that.
+  /// window (`LoopWorkspaceRail.mailroomHeightCap`); this is the ceiling on that.
   static let maxScrollHeight: CGFloat = 600
 
   @State private var showsRecords = false
@@ -74,10 +74,10 @@ struct ArtifactorySection: View {
   @State private var draftTopic = ""
   @FocusState private var draftFocused: Bool
 
-  private var notes: [ArtifactoryPost] { ArtifactoryPresentation.notes(in: graph) }
-  private var records: [ArtifactoryPost] { ArtifactoryPresentation.records(in: graph) }
+  private var notes: [MailroomPost] { MailroomPresentation.notes(in: graph) }
+  private var records: [MailroomPost] { MailroomPresentation.records(in: graph) }
   private var unread: Int {
-    ArtifactoryPresentation.unreadNoteCount(graph: graph, seenPostID: seenPostID)
+    MailroomPresentation.unreadNoteCount(graph: graph, seenPostID: seenPostID)
   }
 
   /// The id the unread rule is drawn above — the first note that landed after the human
@@ -146,7 +146,7 @@ struct ArtifactorySection: View {
 
   private var header: some View {
     HStack(spacing: 7) {
-      Text("ARTIFACTORY")
+      Text("MAILROOM")
         .font(.system(size: 10.5, weight: .bold))
         .tracking(0.63)
         .foregroundStyle(.white.opacity(0.5))
@@ -255,7 +255,7 @@ struct ArtifactorySection: View {
           VStack(alignment: .leading, spacing: 7) {
             ForEach(records.suffix(8)) { record in
               HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(ArtifactoryPost.stampFormat.string(from: record.at))
+                Text(MailroomPost.stampFormat.string(from: record.at))
                   .font(.system(size: 10.5, design: .monospaced))
                   .foregroundStyle(.white.opacity(0.32))
                 Text(record.body)
@@ -279,7 +279,7 @@ struct ArtifactorySection: View {
 
   // MARK: - Posts
 
-  private func postRow(_ post: ArtifactoryPost) -> some View {
+  private func postRow(_ post: MailroomPost) -> some View {
     let read = !unreadIDs.contains(post.id)
     return HStack(alignment: .top, spacing: 8) {
       RoundedRectangle(cornerRadius: 1)
@@ -294,7 +294,7 @@ struct ArtifactorySection: View {
               .foregroundStyle(accent(for: post).opacity(read ? 0.85 : 1))
               .lineLimit(1)
           }
-          Text(ArtifactoryPost.stampFormat.string(from: post.at))
+          Text(MailroomPost.stampFormat.string(from: post.at))
             .font(.system(size: 10.5, design: .monospaced))
             .foregroundStyle(.white.opacity(0.4))
           Spacer(minLength: 0)
@@ -322,7 +322,7 @@ struct ArtifactorySection: View {
   /// A post wears its author's loop colour, so a board read at a glance says who is
   /// talking before it says what about. A human's note is the achromatic slot, which is
   /// the one distinction no dichromacy erodes — see `LoopTypeAppearance.accent`.
-  private func accent(for post: ArtifactoryPost?) -> Color {
+  private func accent(for post: MailroomPost?) -> Color {
     guard let post else { return .white.opacity(0.3) }
     guard let authorID = post.authorID, let author = graph.nodes[id: authorID] else {
       return LoopType.sketch.accent
@@ -398,7 +398,7 @@ struct ArtifactorySection: View {
   }
 
   private var remainingBytes: Int {
-    ArtifactoryPost.maxBodyBytes - trimmedDraft.utf8.count
+    MailroomPost.maxBodyBytes - trimmedDraft.utf8.count
   }
 
   private var canPost: Bool { !trimmedDraft.isEmpty && remainingBytes >= 0 }

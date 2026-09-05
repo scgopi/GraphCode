@@ -11,7 +11,7 @@ import Foundation
 /// one file. python3 is already the launch path's scripting dependency (the Copilot
 /// trust seed), it's validated at add-connection time the same way `zmx` is, and the
 /// wire protocol it has to speak is four bytes of length plus JSON. The shim covers the
-/// verbs the briefing teaches — create, send, memo, status, artifactory — and says so
+/// verbs the briefing teaches — create, send, memo, status, mailroom — and says so
 /// for the rest, rather than half-implementing all of them.
 ///
 /// **Paths are `~/`-relative on purpose.** Nothing local knows the remote home
@@ -174,11 +174,11 @@ public enum RemoteGraphAccess {
       graphcode node delete <project-path> <node-id>   irreversible; stop is reversible
       graphcode node send <project-path> <node-id> <message...>
       graphcode node memo <project-path> <node-id> <note...>
-      graphcode artifactory post <project-path> [--topic <t>] <note...>
-      graphcode artifactory sync <project-path> [--headlines] [--full] [--mark] [--json]
-      graphcode artifactory read <project-path> <post-id>
-      graphcode artifactory list <project-path> [--search <text>] [--json]
-      graphcode artifactory watch <project-path> [--topic <t>] [--off]
+      graphcode mailroom post <project-path> [--topic <t>] <note...>
+      graphcode mailroom sync <project-path> [--headlines] [--full] [--mark] [--json]
+      graphcode mailroom read <project-path> <post-id>
+      graphcode mailroom list <project-path> [--search <text>] [--json]
+      graphcode mailroom watch <project-path> [--topic <t>] [--off]
 
     SAFETY
       Use `graphcode projects` to discover paths and `graphcode status` before retrying.
@@ -187,7 +187,7 @@ public enum RemoteGraphAccess {
       `graphcode reap` recovery runs on the Mac, not this remote host: use it only there,
       and run `graphcode reap --dry-run` before the destructive form.
 
-    ARTIFACTORY
+    MAILROOM
       The shared board any loop can post to and any loop can read -- check it at the
       start of a pass. `sync` and `watch` are the calling loop's, so they need a
       session ($ZMX_SESSION); `list` and `read` are read-only and move no cursor. A
@@ -355,7 +355,7 @@ public enum RemoteGraphAccess {
         return flags
 
 
-    # The board's own arithmetic, ported from ArtifactoryKit rather than asked for over the
+    # The board's own arithmetic, ported from MailroomKit rather than asked for over the
     # wire: `openProject`'s snapshot already carries every post and every reader's cursor, so
     # `read` and `list` send no command at all and `sync` prints from the snapshot it took
     # before advancing the cursor. RemoteCLIShimTests asserts this renderer byte-equal against
@@ -373,25 +373,25 @@ public enum RemoteGraphAccess {
     HEADLINE_BUDGET = 80
 
 
-    def artifactory_unread(posts, last_read):
+    def mailroom_unread(posts, last_read):
         if last_read is None:
             return list(posts)
         return [post for post in posts if post.get("id", 0) > last_read]
 
 
-    def artifactory_needs_triage(posts):
+    def mailroom_needs_triage(posts):
         if len(posts) > TRIAGE_AFTER_POSTS:
             return True
         weight = sum(len((post.get("body") or "").encode("utf-8")) for post in posts)
         return weight > TRIAGE_AFTER_BYTES
 
 
-    def artifactory_cursor(graph, reader):
+    def mailroom_cursor(graph, reader):
         # (cursor, the graph knows this reader). The distinction is the status line's: a
         # foreign or stale id gets the plain count, never "0 unread for you".
         for node in graph.get("nodes") or []:
             if str(node.get("id") or "").upper() == reader:
-                return node.get("lastArtifactoryRead"), True
+                return node.get("lastMailroomRead"), True
         return None, False
 
 
@@ -470,10 +470,10 @@ public enum RemoteGraphAccess {
 
     def render_board(graph, reader=None, headlines=False, search=None, auto_triage=False):
         project = graph.get("project") or {}
-        posts = graph.get("artifactory") or []
+        posts = graph.get("mailroom") or []
         if reader is not None:
-            cursor, _ = artifactory_cursor(graph, reader)
-            posts = artifactory_unread(posts, cursor)
+            cursor, _ = mailroom_cursor(graph, reader)
+            posts = mailroom_unread(posts, cursor)
         posts = filtered_posts(posts, search)
         if not posts:
             if search:
@@ -482,15 +482,15 @@ public enum RemoteGraphAccess {
                 return "no unread posts match '%s'" % search
             if reader is not None:
                 return "no unread posts"
-            return ("the board is empty %s post one: graphcode artifactory post "
+            return ("the board is empty %s post one: graphcode mailroom post "
                     "<project-path> <note%s>" % (EM_DASH, ELLIPSIS))
-        triaged = auto_triage and artifactory_needs_triage(posts)
-        label = "artifactory" if reader is None else "artifactory, unread"
+        triaged = auto_triage and mailroom_needs_triage(posts)
+        label = "mailroom" if reader is None else "mailroom, unread"
         header = "%s %s: %d post%s" % (project.get("name", "?"), label, len(posts),
                                        "" if len(posts) == 1 else "s")
         if triaged:
             header += (" %s headlines only, that is a lot to read at once. Full text: "
-                       "graphcode artifactory read %s <post-id>"
+                       "graphcode mailroom read %s <post-id>"
                        % (EM_DASH, project.get("path", "")))
         lines = [header]
         for post in posts:
@@ -507,7 +507,7 @@ public enum RemoteGraphAccess {
 
 
     def encoded_post(post):
-        # What JSONEncoder makes of an ArtifactoryPost: absent rather than null for the
+        # What JSONEncoder makes of an MailroomPost: absent rather than null for the
         # optionals, ISO-8601 for the date, and `kind` defaulted the way the hand-written
         # decoder defaults it for boards saved before records had their own quota.
         encoded = {"id": post.get("id"), "at": iso8601(post.get("at")),
@@ -521,11 +521,11 @@ public enum RemoteGraphAccess {
 
 
     def render_board_json(graph, reader=None, search=None):
-        posts = graph.get("artifactory") or []
+        posts = graph.get("mailroom") or []
         last_read = None
         if reader is not None:
-            last_read, _ = artifactory_cursor(graph, reader)
-            posts = artifactory_unread(posts, last_read)
+            last_read, _ = mailroom_cursor(graph, reader)
+            posts = mailroom_unread(posts, last_read)
         board = {"posts": [encoded_post(post) for post in filtered_posts(posts, search)]}
         if last_read is not None:
             board["lastRead"] = last_read
@@ -537,20 +537,20 @@ public enum RemoteGraphAccess {
         return encoded.replace("/", "\\/")
 
 
-    def artifactory_status_line(graph, reader):
-        posts = graph.get("artifactory") or []
+    def mailroom_status_line(graph, reader):
+        posts = graph.get("mailroom") or []
         if not posts:
             return None
         plural = "" if len(posts) == 1 else "s"
-        cursor, known = artifactory_cursor(graph, reader) if reader else (None, False)
+        cursor, known = mailroom_cursor(graph, reader) if reader else (None, False)
         if not known:
-            return "artifactory: %d post%s" % (len(posts), plural)
-        return "artifactory: %d post%s, %d unread for you" % (
-            len(posts), plural, len(artifactory_unread(posts, cursor)))
+            return "mailroom: %d post%s" % (len(posts), plural)
+        return "mailroom: %d post%s, %d unread for you" % (
+            len(posts), plural, len(mailroom_unread(posts, cursor)))
 
 
     def render_posted(graph):
-        posts = graph.get("artifactory") or []
+        posts = graph.get("mailroom") or []
         if not posts:
             return "posted"
         post = posts[-1]
@@ -571,10 +571,10 @@ public enum RemoteGraphAccess {
             lines.append("  %s  %s  %s  %s" % (
                 node.get("id"), state, node.get("loopType"), node.get("title")))
         # The board rides last: one line, only when there is anything on it, so a
-        # project that never touched the Artifactory renders as it always did. This is
+        # project that never touched the Mailroom renders as it always did. This is
         # the cheap "is there mail I should care about" check the briefing sends every
         # loop to `status` for, and the snapshot already holds everything it needs.
-        board = artifactory_status_line(graph, self_node_id())
+        board = mailroom_status_line(graph, self_node_id())
         if board:
             lines.append("  " + board)
         return "\n".join(lines)
@@ -676,7 +676,7 @@ public enum RemoteGraphAccess {
 
     def run_and_report(project, inner, report):
         # `run_with_verdict` with the acknowledgement computed from the graph that comes
-        # back rather than fixed in advance -- what `artifactory post` needs to name the
+        # back rather than fixed in advance -- what `mailroom post` needs to name the
         # sequence number the note landed at.
         daemon = Daemon()
         project = resolve_project(daemon, project)
@@ -767,7 +767,7 @@ public enum RemoteGraphAccess {
         return bool(arguments) and arguments[0] in HELP_FLAGS
 
 
-    ARTIFACTORY_FLAGS = {
+    MAILROOM_FLAGS = {
         "post": ("topic",),
         "sync": ("headlines", "mark", "json", "full"),
         "read": (),
@@ -776,7 +776,7 @@ public enum RemoteGraphAccess {
     }
 
 
-    def artifactory_post_id(raw):
+    def mailroom_post_id(raw):
         # One-based by construction -- the daemon's ids start at 1 -- so "-7" is a typo,
         # never a post, and says so here rather than at the lookup.
         digits = raw[1:] if raw[:1] in ("+", "-") else raw
@@ -787,12 +787,12 @@ public enum RemoteGraphAccess {
         fail("invalid value for post-id: %s" % raw)
 
 
-    def artifactory(arguments):
-        # Parsed in GraphcodeCommand.parseArtifactory's order -- subcommand, project path,
+    def mailroom(arguments):
+        # Parsed in GraphcodeCommand.parseMailroom's order -- subcommand, project path,
         # help anywhere, then the flags that subcommand allows -- so a mistyped flag is
         # refused here rather than silently ignored on the way to the daemon.
         if not arguments:
-            fail("missing artifactory subcommand")
+            fail("missing mailroom subcommand")
         subverb = arguments.pop(0)
         if wants_help(arguments):
             print(HELP)
@@ -803,10 +803,10 @@ public enum RemoteGraphAccess {
         if any(argument in HELP_FLAGS for argument in arguments):
             print(HELP)
             return
-        if subverb not in ARTIFACTORY_FLAGS:
-            fail("unknown command: artifactory %s" % subverb)
+        if subverb not in MAILROOM_FLAGS:
+            fail("unknown command: mailroom %s" % subverb)
         for argument in arguments:
-            if argument.startswith("--") and argument[2:] not in ARTIFACTORY_FLAGS[subverb]:
+            if argument.startswith("--") and argument[2:] not in MAILROOM_FLAGS[subverb]:
                 fail("unknown option: %s" % argument)
         flags = parse_flags(arguments)
 
@@ -821,22 +821,22 @@ public enum RemoteGraphAccess {
             if not text:
                 fail("missing note")
             payload = {"text": text, "topic": flags.get("topic"), "from": self_node_id()}
-            run_and_report(project, {"artifactoryPost": payload}, render_posted)
+            run_and_report(project, {"mailroomPost": payload}, render_posted)
             return
 
         if subverb == "sync":
             reader = self_node_id()
             if not reader:
-                fail("artifactory sync needs a loop identity %s run it from inside a loop's "
+                fail("mailroom sync needs a loop identity %s run it from inside a loop's "
                      "session ($ZMX_SESSION); a human reading the board wants `graphcode "
-                     "artifactory list`" % EM_DASH)
+                     "mailroom list`" % EM_DASH)
             daemon = Daemon()
             project = resolve_project(daemon, project)
             # Unread is computed from the snapshot taken *before* the cursor moves; reading
             # it afterwards would report every post as read. Same one-round-trip race the
             # Swift CLI documents and accepts.
             graph = daemon.open_project(project)
-            daemon.send(graph_command(project, {"artifactorySync": {"from": reader}}))
+            daemon.send(graph_command(project, {"mailroomSync": {"from": reader}}))
             key, value = daemon.wait_for(["graphChanged", "errorOccurred"])
             if key == "errorOccurred":
                 fail(value["_0"])
@@ -845,7 +845,7 @@ public enum RemoteGraphAccess {
             if "json" in flags:
                 print(render_board_json(graph, reader=reader))
             elif "mark" in flags:
-                posts = graph.get("artifactory") or []
+                posts = graph.get("mailroom") or []
                 latest = posts[-1].get("id", 0) if posts else 0
                 if latest > 0:
                     print("marked read up to #%d" % latest)
@@ -859,15 +859,15 @@ public enum RemoteGraphAccess {
         if subverb == "read":
             if not arguments or arguments[0].startswith("--"):
                 fail("missing post-id")
-            post_id = artifactory_post_id(arguments[0])
+            post_id = mailroom_post_id(arguments[0])
             daemon = Daemon()
             project = resolve_project(daemon, project)
             graph = daemon.open_project(project)
-            for post in graph.get("artifactory") or []:
+            for post in graph.get("mailroom") or []:
                 if post.get("id") == post_id:
                     print(render_post(post))
                     return
-            fail("no post #%d on this board %s `graphcode artifactory list %s` shows the "
+            fail("no post #%d on this board %s `graphcode mailroom list %s` shows the "
                  "ids that exist" % (post_id, EM_DASH, project))
 
         if subverb == "list":
@@ -882,7 +882,7 @@ public enum RemoteGraphAccess {
 
         watcher = self_node_id()
         if not watcher:
-            fail("artifactory watch needs a loop identity %s run it from inside a loop's "
+            fail("mailroom watch needs a loop identity %s run it from inside a loop's "
                  "session ($ZMX_SESSION); the mail is delivered to the loop that watches"
                  % EM_DASH)
         on = "off" not in flags
@@ -895,7 +895,7 @@ public enum RemoteGraphAccess {
         else:
             acknowledgement = ("watching '%s' %s matching posts are typed in when the loop "
                                "goes idle" % (topic, EM_DASH))
-        run_with_verdict(project, {"artifactoryWatch": {"on": on, "topic": topic,
+        run_with_verdict(project, {"mailroomWatch": {"on": on, "topic": topic,
                                                         "from": watcher}}, acknowledgement)
 
     def main(arguments):
@@ -921,8 +921,8 @@ public enum RemoteGraphAccess {
                 fail("missing project-path")
             run_and_print(arguments[0])
             return
-        if verb == "artifactory":
-            artifactory(arguments)
+        if verb == "mailroom":
+            mailroom(arguments)
             return
         if verb != "node":
             fail("unknown or Mac-only command: %s (see `graphcode help`)" % verb)

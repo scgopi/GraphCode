@@ -10,7 +10,7 @@ let package = Package(
   name: "graphcode",
   platforms: [.macOS(.v15)],
   products: [
-    .library(name: "ArtifactoryKit", targets: ["ArtifactoryKit"]),
+    .library(name: "MailroomKit", targets: ["MailroomKit"]),
     .library(name: "GraphcodeKit", targets: ["GraphcodeKit"]),
     .executable(name: "graphcode", targets: ["graphcode-cli"]),
     .executable(name: "graphcoded", targets: ["graphcoded"]),
@@ -25,17 +25,17 @@ let package = Package(
     // Foundation-only, and listed here as well as in `Project.swift` for the reason
     // this file exists at all: Tuist builds the app, SwiftPM builds everything that
     // has to run on Linux, and a module added to one and not the other compiles on a
-    // Mac and fails CI. `GraphcodeKit` exposes `ArtifactoryPost` through `LoopGraph`,
+    // Mac and fails CI. `GraphcodeKit` exposes `MailroomPost` through `LoopGraph`,
     // so it is a product too — anything importing the kit needs this module in scope.
     .target(
-      name: "ArtifactoryKit",
-      path: "ArtifactoryKit/Sources",
+      name: "MailroomKit",
+      path: "MailroomKit/Sources",
       swiftSettings: [.swiftLanguageMode(.v5)]
     ),
     .target(
       name: "GraphcodeKit",
       dependencies: [
-        "ArtifactoryKit",
+        "MailroomKit",
         .product(name: "IdentifiedCollections", package: "swift-identified-collections"),
       ],
       path: "GraphcodeKit/Sources",

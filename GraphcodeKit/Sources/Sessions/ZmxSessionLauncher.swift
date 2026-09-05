@@ -924,7 +924,7 @@ public enum ZmxSessionLauncher {
       projectPath != nil
       ? NodeMemory.writeWakeDigest(
         projectPath: projectPath ?? "", nodeID: node.id,
-        artifactoryEnabled: settings.artifactoryEnabled)
+        mailroomEnabled: settings.mailroomEnabled)
       : nil
     let wakePath: String?
     if let projectPath, remote != nil {

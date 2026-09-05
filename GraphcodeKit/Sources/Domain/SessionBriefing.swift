@@ -77,30 +77,30 @@ public enum SessionBriefing {
         Do not reach for this for one-off work: "check the build" is a goal, "check the
         build every hour" is time-based.
       """
-    // The Artifactory's section exists only while the beta ramp has the feature on: a
+    // The Mailroom's section exists only while the beta ramp has the feature on: a
     // briefing that taught verbs the daemon would refuse would send every loop
     // through a refusal once per idea. It interpolates inline after the "one-off."
     // sentence (the value leading with blank lines) so that off — an empty value —
     // leaves the briefing byte-for-byte what it was before this section existed.
-    let artifactorySection =
-      settings.artifactoryEnabled
+    let mailroomSection =
+      settings.mailroomEnabled
       ? """
 
 
-      ## The Artifactory — notes for whoever comes next
+      ## The Mailroom — notes for whoever comes next
 
-      `node send` reaches one peer you already know. The Artifactory is the shared
+      `node send` reaches one peer you already know. The Mailroom is the shared
       counterpart: an unaddressed board any loop can post to and any loop can read,
       with no wiring and no ids — post for *whoever comes next*, including loops that
       do not exist yet. Check it at the start of a pass; post the moment you learn
       something a peer or successor should not have to rediscover:
 
       ```sh
-      graphcode artifactory sync \(projectPath)     # read what you have not seen, mark it read
-      graphcode artifactory read \(projectPath) <post-id>     # one post in full
-      graphcode artifactory post \(projectPath) [--topic <t>] <note…>   # leave something behind
-      graphcode artifactory list \(projectPath)     # read-only peek, cursor untouched
-      graphcode artifactory watch \(projectPath) [--topic <t>]   # ring me when new mail lands
+      graphcode mailroom sync \(projectPath)     # read what you have not seen, mark it read
+      graphcode mailroom read \(projectPath) <post-id>     # one post in full
+      graphcode mailroom post \(projectPath) [--topic <t>] <note…>   # leave something behind
+      graphcode mailroom list \(projectPath)     # read-only peek, cursor untouched
+      graphcode mailroom watch \(projectPath) [--topic <t>]   # ring me when new mail lands
       ```
 
       Post decisions made, dead ends hit, claims staked ("I'm taking issue #12") —
@@ -191,7 +191,7 @@ public enum SessionBriefing {
       the exact command for reporting results back to it. For recurring communication,
       an edge is still the right tool: a `message` edge fires automatically when you
       finish, a `handoff` sequences the other loop after you. This command is the
-      one-off.\(artifactorySection)
+      one-off.\(mailroomSection)
 
       ## Remembering across passes
 

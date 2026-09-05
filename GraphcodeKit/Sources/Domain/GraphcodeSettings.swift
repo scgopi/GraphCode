@@ -362,20 +362,20 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// heartbeat loops immediately without restarting anything.
   public var daemonHeartbeatEnabled: Bool
 
-  /// Whether loops get the **Artifactory** — a shared, unaddressed message board the
+  /// Whether loops get the **Mailroom** — a shared, unaddressed message board the
   /// graph's loops post to and read without any wiring: `node send` and edges are
-  /// for talking to a peer you already know, while the Artifactory is the ambient
+  /// for talking to a peer you already know, while the Mailroom is the ambient
   /// counterpart, a note dropped for whoever comes next (a decision, a dead end, a
   /// claim on a task), discoverable by loops that did not exist when it was written.
   ///
   /// **Off by default, and beta-ramped.** The app resolves
-  /// `FeatureRamps.Feature.artifactory` — beta installs first, stable only when the
+  /// `FeatureRamps.Feature.mailroom` — beta installs first, stable only when the
   /// ramp says so — and writes the resolved value here, which is the bit the daemon
-  /// (which cannot see ramps or `UserDefaults`) actually enforces: every `artifactory`
+  /// (which cannot see ramps or `UserDefaults`) actually enforces: every `mailroom`
   /// command, the briefing's board section, and the wake digest's pointer all read
   /// this. A flip the human made in Settings is a recorded choice, preserved the way
   /// `summarisesLoops`' is.
-  public var artifactoryEnabled: Bool
+  public var mailroomEnabled: Bool
 
   /// Whether `graphcoded` keeps the Mac awake while any loop is running
   /// (`AwakeAssertion`). Off by default and deliberately so: a background process that
@@ -404,7 +404,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     summaryUsesModel: Bool = false,
     visualisesSummaries: Bool = false,
     daemonHeartbeatEnabled: Bool = false,
-    artifactoryEnabled: Bool = true,
+    mailroomEnabled: Bool = true,
     keepsMacAwakeWhileLoopsRun: Bool = false,
     worktreePolicies: [String: WorktreeHygienePolicy] = [:]
   ) {
@@ -420,7 +420,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     self.summaryUsesModel = summaryUsesModel
     self.visualisesSummaries = visualisesSummaries
     self.daemonHeartbeatEnabled = daemonHeartbeatEnabled
-    self.artifactoryEnabled = artifactoryEnabled
+    self.mailroomEnabled = mailroomEnabled
     self.keepsMacAwakeWhileLoopsRun = keepsMacAwakeWhileLoopsRun
     self.worktreePolicies = worktreePolicies
   }
@@ -474,8 +474,8 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     // beta-only — "no app has spoken yet" — and now means the default: a CLI-only
     // machine or a hand-edited file gets the board the way every install does, and
     // the app still writes an explicit value the moment a human flips the switch.
-    artifactoryEnabled =
-      try container.decodeIfPresent(Bool.self, forKey: .artifactoryEnabled) ?? true
+    mailroomEnabled =
+      try container.decodeIfPresent(Bool.self, forKey: .mailroomEnabled) ?? true
     // Absent means nobody has asked for it, which is the default. An update must never
     // start holding a power assertion on a machine whose owner did not choose that.
     keepsMacAwakeWhileLoopsRun =

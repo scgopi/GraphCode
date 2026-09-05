@@ -89,9 +89,9 @@ public enum MessageBus {
     + "a short markdown recipe with a one-line description). If it was one-off work, "
     + "skip this."
 
-  /// The Artifactory's half of the same moment, and the board's only *pull*.
+  /// The Mailroom's half of the same moment, and the board's only *pull*.
   ///
-  /// Every other artifactory affordance is read-side — the briefing teaches the verbs,
+  /// Every other mailroom affordance is read-side — the briefing teaches the verbs,
   /// the digest and the status line remind a loop to look. Nothing asked anyone to
   /// write, and a board nobody writes to carries nothing to the loops that come after.
   /// Resolution is when a loop knows what it learned and has no further use for it.
@@ -99,10 +99,10 @@ public enum MessageBus {
   /// Unlike the skill ask this fires on failure too, and for every loop type: a dead
   /// end is the single most valuable thing on a board, because it is the one finding
   /// a successor would otherwise pay for twice.
-  private static func artifactoryPostBody(projectPath: String) -> String {
+  private static func mailroomPostBody(projectPath: String) -> String {
     "Before you finish: if you learned something a peer or a successor should not have "
       + "to rediscover — a dead end, a decision, a claim you staked — leave it on the "
-      + "board with: graphcode artifactory post \(projectPath) [--topic <t>] <note…>. "
+      + "board with: graphcode mailroom post \(projectPath) [--topic <t>] <note…>. "
       + "One note, not a transcript. If there is nothing worth a peer's time, skip this."
   }
 
@@ -110,11 +110,11 @@ public enum MessageBus {
   /// none. Assembled rather than queued separately so a goal loop that both succeeded
   /// and has a board to post to is interrupted once, not twice.
   public static func resolutionAsk(
-    distillSkill: Bool, artifactoryProjectPath: String?
+    distillSkill: Bool, mailroomProjectPath: String?
   ) -> String? {
     var parts: [String] = []
     if distillSkill { parts.append(distillSkillBody) }
-    if let path = artifactoryProjectPath { parts.append(artifactoryPostBody(projectPath: path)) }
+    if let path = mailroomProjectPath { parts.append(mailroomPostBody(projectPath: path)) }
     guard !parts.isEmpty else { return nil }
     return prefix + parts.joined(separator: " ")
   }
