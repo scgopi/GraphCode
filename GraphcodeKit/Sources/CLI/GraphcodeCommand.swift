@@ -101,7 +101,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode node pilot <project-path> <node-id>     dry-run a composite
       graphcode node arm <project-path> <node-id>       arm it (needs a pilot first)
       graphcode edge create <project-path> <from-id> <to-id> [--kind <k>] [--condition <c>]
-      graphcode mail post <project-path> [--topic <t>] <note…>
+      graphcode mail post <project-path> [--topic <t>] <notice…>
                            post a notice to the whole graph, for whoever comes next
       graphcode mail inbox <project-path> [--headlines] [--full] [--mark] [--json]
                            read your unread mail and mark the room read. A large
@@ -229,17 +229,17 @@ public enum GraphcodeCommand: Equatable, Sendable {
 
     MAILROOM
       The shared, unaddressed board: `node send` reaches one peer you already know;
-      a Mailroom post is a note for whoever comes next, discoverable by loops that
-      did not exist when it was written. Run from inside a loop, posts are attributed
-      to that loop (`ZMX_SESSION`, the same mechanism as `node send`); from a human's
-      shell they read as from "a human". `sync` and `watch` need that loop identity —
-      the read cursor and the subscription belong to a loop — so a human reads the
-      board with `list`. A post is a note to a peer, not a transcript: 1 KB bound,
-      and `--topic <t>` groups a thread (a watcher of a topic only hears matching
-      posts; watched posts are delivered like a --follow-up message). Note that the
-      mirrored `direct` and `handoff` records never ring watchers — they are the
-      board's record of traffic that already had its own delivery, so a watch on
-      those topics alone stays silent.
+      a notice is addressed to nobody, left for whoever comes next and found by loops
+      that did not exist when it was written. Run from inside a loop, posts are
+      attributed to that loop (`ZMX_SESSION`, the same mechanism as `node send`); from
+      a human's shell they read as from "a human". `inbox` and `watch` need that loop
+      identity — the read cursor and the subscription belong to a loop — so a human
+      reads the room with `list`. A notice is a note to a peer, not a transcript: 1 KB
+      bound, and `--topic <t>` groups a thread (a watcher of a topic only hears
+      matching posts; watched posts are delivered like a --follow-up message). The
+      letters copied from `direct` and `handoff` traffic never ring watchers — they
+      are the room's copy of something that already had its own delivery, so a watch
+      on those topics alone stays silent.
     EXIT CODES
       0   done
       1   bad usage, or graphcoded refused the command
@@ -883,7 +883,7 @@ extension GraphcodeCommand {
           : "no unread posts match '\(search)'"
       }
       return readerID == nil
-        ? "the board is empty — post one: graphcode mail post <project-path> <note…>"
+        ? "the room is empty — post one: graphcode mail post <project-path> <notice…>"
         : "no unread posts"
     }
     // `sync` asks to be triaged; `--headlines` and `--full` are the two ways to say

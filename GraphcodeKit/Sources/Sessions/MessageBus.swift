@@ -101,9 +101,9 @@ public enum MessageBus {
   /// a successor would otherwise pay for twice.
   private static func mailroomPostBody(projectPath: String) -> String {
     "Before you finish: if you learned something a peer or a successor should not have "
-      + "to rediscover — a dead end, a decision, a claim you staked — leave it on the "
-      + "board with: graphcode mail post \(projectPath) [--topic <t>] <note…>. "
-      + "One note, not a transcript. If there is nothing worth a peer's time, skip this."
+      + "to rediscover — a dead end, a decision, a claim you staked — post it as a "
+      + "notice: graphcode mail post \(projectPath) [--topic <t>] <notice…>. "
+      + "One notice, not a transcript. If there is nothing worth a peer's time, skip this."
   }
 
   /// The words for a session whose loop has just resolved, or `nil` when it is owed

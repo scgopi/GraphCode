@@ -147,7 +147,7 @@ struct MailroomCommandTests {
   @Test
   func emptyBoardAndNothingUnreadSaySo() {
     var graph = LoopGraph(project: ProjectRef(path: "/tmp/x", name: "x"))
-    #expect(GraphcodeCommand.renderMailroom(graph).contains("the board is empty"))
+    #expect(GraphcodeCommand.renderMailroom(graph).contains("the room is empty"))
 
     var reader = LoopNode(title: "Reader", loopType: .turnBased)
     reader.lastMailroomRead = 3

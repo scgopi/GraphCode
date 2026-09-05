@@ -98,7 +98,7 @@ public enum SessionBriefing {
       ```sh
       graphcode mail inbox \(projectPath)     # read what you have not seen, mark it read
       graphcode mail read \(projectPath) <post-id>     # one post in full
-      graphcode mail post \(projectPath) [--topic <t>] <note…>   # leave something behind
+      graphcode mail post \(projectPath) [--topic <t>] <notice…>   # leave something behind
       graphcode mail list \(projectPath)     # read-only peek, cursor untouched
       graphcode mail watch \(projectPath) [--topic <t>]   # ring me when new mail lands
       ```

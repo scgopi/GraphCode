@@ -174,7 +174,7 @@ public enum RemoteGraphAccess {
       graphcode node delete <project-path> <node-id>   irreversible; stop is reversible
       graphcode node send <project-path> <node-id> <message...>
       graphcode node memo <project-path> <node-id> <note...>
-      graphcode mail post <project-path> [--topic <t>] <note...>
+      graphcode mail post <project-path> [--topic <t>] <notice...>
       graphcode mail inbox <project-path> [--headlines] [--full] [--mark] [--json]
       graphcode mail read <project-path> <post-id>
       graphcode mail list <project-path> [--search <text>] [--json]
@@ -482,8 +482,8 @@ public enum RemoteGraphAccess {
                 return "no unread posts match '%s'" % search
             if reader is not None:
                 return "no unread posts"
-            return ("the board is empty %s post one: graphcode mail post "
-                    "<project-path> <note%s>" % (EM_DASH, ELLIPSIS))
+            return ("the room is empty %s post one: graphcode mail post "
+                    "<project-path> <notice%s>" % (EM_DASH, ELLIPSIS))
         triaged = auto_triage and mailroom_needs_triage(posts)
         label = "mailroom" if reader is None else "mailroom, unread"
         header = "%s %s: %d post%s" % (project.get("name", "?"), label, len(posts),
@@ -851,7 +851,7 @@ public enum RemoteGraphAccess {
                 if latest > 0:
                     print("marked read up to #%d" % latest)
                 else:
-                    print("marked read %s the board is empty" % EM_DASH)
+                    print("marked read %s the room is empty" % EM_DASH)
             else:
                 print(render_board(graph, reader=reader, headlines=headlines,
                                    auto_triage=not headlines and not full))
