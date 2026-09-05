@@ -643,8 +643,8 @@ public actor GraphStore {
     case .mailroomPost(let text, let topic, let from):
       await mailroomPost(text: text, topic: topic, from: from)
 
-    case .mailroomSync(let from):
-      mailroomSync(from: from)
+    case .mailroomInbox(let from):
+      mailroomInbox(from: from)
 
     case .mailroomWatch(let on, let topic, let from):
       mailroomWatch(on: on, topic: topic, from: from)
@@ -1581,7 +1581,7 @@ public actor GraphStore {
   /// Drops a note onto the shared board. Unaddressed by design: there is no target
   /// id, no edge, no delivery guarantee to any *specific* loop — the post lands on
   /// the graph, watchers get their best-effort ding, and every future reader finds
-  /// it with one `mailroom sync`.
+  /// it with one `mail inbox`.
   private func mailroomPost(text: String, topic: String?, from senderID: UUID?) async {
     guard mailroomIsOn() else {
       announceError(
@@ -1591,12 +1591,12 @@ public actor GraphStore {
     }
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
-      announceError("mailroom post refused: empty note")
+      announceError("mail post refused: empty note")
       return
     }
     guard trimmed.utf8.count <= MailroomPost.maxBodyBytes else {
       announceError(
-        "mailroom post refused: \(trimmed.utf8.count) bytes is over the "
+        "mail post refused: \(trimmed.utf8.count) bytes is over the "
           + "\(MailroomPost.maxBodyBytes)-byte bound — a post is a note to a peer, not "
           + "a document; put the document in the repo and post the path")
       return
@@ -1605,12 +1605,12 @@ public actor GraphStore {
       topic.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
       ?? Optional<String>.none
     if let trimmedTopic, trimmedTopic.isEmpty {
-      announceError("mailroom post refused: an empty topic is no topic — omit it")
+      announceError("mail post refused: an empty topic is no topic — omit it")
       return
     }
     guard trimmedTopic?.utf8.count ?? 0 <= MailroomPost.maxTopicBytes else {
       announceError(
-        "mailroom post refused: topic over \(MailroomPost.maxTopicBytes) bytes")
+        "mail post refused: topic over \(MailroomPost.maxTopicBytes) bytes")
       return
     }
     // A foreign loop's id (a sender from another graph, addressing this board
@@ -1649,7 +1649,7 @@ public actor GraphStore {
         ? String(post.body.prefix(140)) + "…" : post.body
       let nudge =
         "mailroom — new post #\(post.id)\(topicSuffix(post)) from \(post.author): "
-        + "\(preview) — read it with: graphcode mailroom sync \(graph.project.path)"
+        + "\(preview) — read it with: graphcode mail inbox \(graph.project.path)"
       await deliverAdHocMessage(
         to: node.id, text: nudge, from: nil, followUp: true, mirror: false)
     }
@@ -1686,9 +1686,9 @@ public actor GraphStore {
   }
 
   /// Advances the reading loop's cursor to the newest post — the write half of
-  /// `graphcode mailroom sync`. Deliberately no memory record: sync is reading,
+  /// `graphcode mail inbox`. Deliberately no memory record: sync is reading,
   /// not learning, and a log line per read would turn the log into a metronome.
-  private func mailroomSync(from readerID: UUID?) {
+  private func mailroomInbox(from readerID: UUID?) {
     guard mailroomIsOn() else {
       announceError(
         "the Mailroom is off — enable Mailroom in Settings "
@@ -1697,7 +1697,7 @@ public actor GraphStore {
     }
     guard let readerID, graph.nodes[id: readerID] != nil else {
       announceError(
-        "mailroom sync needs a loop identity — run it from a loop's session "
+        "mail inbox needs a loop identity — run it from a loop's session "
           + "($ZMX_SESSION); a human reading the board needs no cursor")
       return
     }
@@ -1723,7 +1723,7 @@ public actor GraphStore {
     }
     guard let watcherID, graph.nodes[id: watcherID] != nil else {
       announceError(
-        "mailroom watch needs a loop identity — run it from a loop's session "
+        "mail watch needs a loop identity — run it from a loop's session "
           + "($ZMX_SESSION); the watcher is the loop the mail is delivered to")
       return
     }
@@ -1732,7 +1732,7 @@ public actor GraphStore {
         topic.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
         ?? Optional<String>.none
       if let trimmed, trimmed.isEmpty {
-        announceError("mailroom watch refused: an empty topic is no topic — omit it")
+        announceError("mail watch refused: an empty topic is no topic — omit it")
         return
       }
       graph.nodes[id: watcherID]?.mailroomWatch = MailroomWatch(topic: trimmed)

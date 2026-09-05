@@ -465,7 +465,7 @@ extension RemoteCLIShimTests {
     #expect(synced.stdout == "marked read up to #3\n")
     #expect(
       synced.commands.dropFirst().first
-        == .graphCommand(projectPath: Self.project, command: .mailroomSync(from: reader.id)))
+        == .graphCommand(projectPath: Self.project, command: .mailroomInbox(from: reader.id)))
 
     let watching = try runShim(
       ["mailroom", "watch", Self.project, "--topic", "build"], environment: session,
@@ -602,12 +602,12 @@ extension RemoteCLIShimTests {
   func theCursorVerbsNeedALoopIdentityAndMailroomIsNoLongerMacOnly() throws {
     let sync = try runShim(["mailroom", "sync", Self.project])
     #expect(sync.status == 1)
-    #expect(sync.stderr.contains("mailroom sync needs a loop identity"))
-    #expect(sync.stderr.contains("graphcode mailroom list"))
+    #expect(sync.stderr.contains("mail inbox needs a loop identity"))
+    #expect(sync.stderr.contains("graphcode mail list"))
 
     let watch = try runShim(["mailroom", "watch", Self.project])
     #expect(watch.status == 1)
-    #expect(watch.stderr.contains("mailroom watch needs a loop identity"))
+    #expect(watch.stderr.contains("mail watch needs a loop identity"))
     #expect(watch.stderr.contains("the mail is delivered to the loop that watches"))
 
     // Neither reached the daemon, so nothing was applied and nothing needs undoing.
@@ -634,7 +634,7 @@ extension RemoteCLIShimTests {
     let missing = try runShim(["mailroom", "read", Self.project, "99"], graph: graph)
     #expect(missing.status == 1)
     #expect(missing.stderr.contains("no post #99 on this board"))
-    #expect(missing.stderr.contains("graphcode mailroom list"))
+    #expect(missing.stderr.contains("graphcode mail list"))
 
     let negative = try runShim(["mailroom", "read", Self.project, "-7"], graph: graph)
     #expect(negative.status == 1)

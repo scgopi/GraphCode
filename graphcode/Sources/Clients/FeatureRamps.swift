@@ -25,6 +25,16 @@ enum FeatureRamps {
     case codespaces
     case mailroom
 
+    /// The key this feature shipped under before it was renamed. ramps.json is fetched
+    /// from graphcode.app, so a build that knew only the new spelling would stop seeing
+    /// the kill switch the moment it shipped ahead of the deployed file.
+    var legacyRawValue: String? {
+      switch self {
+      case .codespaces: return nil
+      case .mailroom: return "artifactory"
+      }
+    }
+
     /// What answers when no ramps.json has ever been fetched (and when the fetch
     /// fails). Kept in step with the *shipped* ramp state: a feature ramped fully on
     /// moves its default up too, so an offline first launch isn't the one place it's
@@ -59,7 +69,10 @@ enum FeatureRamps {
   static func isEnabled(
     _ feature: Feature, configuration: Configuration?, channel: String, installID: String
   ) -> Bool {
-    let percents = configuration?.features[feature.rawValue] ?? feature.defaultPercents
+    let percents =
+      configuration?.features[feature.rawValue]
+      ?? feature.legacyRawValue.flatMap { configuration?.features[$0] }
+      ?? feature.defaultPercents
     let percent = percents[channel] ?? feature.defaultPercents[channel] ?? 0
     return bucket(installID: installID) < percent
   }

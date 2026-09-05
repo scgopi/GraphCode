@@ -174,11 +174,11 @@ public enum RemoteGraphAccess {
       graphcode node delete <project-path> <node-id>   irreversible; stop is reversible
       graphcode node send <project-path> <node-id> <message...>
       graphcode node memo <project-path> <node-id> <note...>
-      graphcode mailroom post <project-path> [--topic <t>] <note...>
-      graphcode mailroom sync <project-path> [--headlines] [--full] [--mark] [--json]
-      graphcode mailroom read <project-path> <post-id>
-      graphcode mailroom list <project-path> [--search <text>] [--json]
-      graphcode mailroom watch <project-path> [--topic <t>] [--off]
+      graphcode mail post <project-path> [--topic <t>] <note...>
+      graphcode mail inbox <project-path> [--headlines] [--full] [--mark] [--json]
+      graphcode mail read <project-path> <post-id>
+      graphcode mail list <project-path> [--search <text>] [--json]
+      graphcode mail watch <project-path> [--topic <t>] [--off]
 
     SAFETY
       Use `graphcode projects` to discover paths and `graphcode status` before retrying.
@@ -482,7 +482,7 @@ public enum RemoteGraphAccess {
                 return "no unread posts match '%s'" % search
             if reader is not None:
                 return "no unread posts"
-            return ("the board is empty %s post one: graphcode mailroom post "
+            return ("the board is empty %s post one: graphcode mail post "
                     "<project-path> <note%s>" % (EM_DASH, ELLIPSIS))
         triaged = auto_triage and mailroom_needs_triage(posts)
         label = "mailroom" if reader is None else "mailroom, unread"
@@ -490,7 +490,7 @@ public enum RemoteGraphAccess {
                                        "" if len(posts) == 1 else "s")
         if triaged:
             header += (" %s headlines only, that is a lot to read at once. Full text: "
-                       "graphcode mailroom read %s <post-id>"
+                       "graphcode mail read %s <post-id>"
                        % (EM_DASH, project.get("path", "")))
         lines = [header]
         for post in posts:
@@ -676,7 +676,7 @@ public enum RemoteGraphAccess {
 
     def run_and_report(project, inner, report):
         # `run_with_verdict` with the acknowledgement computed from the graph that comes
-        # back rather than fixed in advance -- what `mailroom post` needs to name the
+        # back rather than fixed in advance -- what `mail post` needs to name the
         # sequence number the note landed at.
         daemon = Daemon()
         project = resolve_project(daemon, project)
@@ -769,6 +769,7 @@ public enum RemoteGraphAccess {
 
     MAILROOM_FLAGS = {
         "post": ("topic",),
+        "inbox": ("headlines", "mark", "json", "full"),
         "sync": ("headlines", "mark", "json", "full"),
         "read": (),
         "list": ("search", "json"),
@@ -792,7 +793,7 @@ public enum RemoteGraphAccess {
         # help anywhere, then the flags that subcommand allows -- so a mistyped flag is
         # refused here rather than silently ignored on the way to the daemon.
         if not arguments:
-            fail("missing mailroom subcommand")
+            fail("missing mail subcommand")
         subverb = arguments.pop(0)
         if wants_help(arguments):
             print(HELP)
@@ -804,7 +805,7 @@ public enum RemoteGraphAccess {
             print(HELP)
             return
         if subverb not in MAILROOM_FLAGS:
-            fail("unknown command: mailroom %s" % subverb)
+            fail("unknown command: mail %s" % subverb)
         for argument in arguments:
             if argument.startswith("--") and argument[2:] not in MAILROOM_FLAGS[subverb]:
                 fail("unknown option: %s" % argument)
@@ -824,19 +825,19 @@ public enum RemoteGraphAccess {
             run_and_report(project, {"mailroomPost": payload}, render_posted)
             return
 
-        if subverb == "sync":
+        if subverb in ("inbox", "sync"):
             reader = self_node_id()
             if not reader:
-                fail("mailroom sync needs a loop identity %s run it from inside a loop's "
+                fail("mail inbox needs a loop identity %s run it from inside a loop's "
                      "session ($ZMX_SESSION); a human reading the board wants `graphcode "
-                     "mailroom list`" % EM_DASH)
+                     "mail list`" % EM_DASH)
             daemon = Daemon()
             project = resolve_project(daemon, project)
             # Unread is computed from the snapshot taken *before* the cursor moves; reading
             # it afterwards would report every post as read. Same one-round-trip race the
             # Swift CLI documents and accepts.
             graph = daemon.open_project(project)
-            daemon.send(graph_command(project, {"mailroomSync": {"from": reader}}))
+            daemon.send(graph_command(project, {"mailroomInbox": {"from": reader}}))
             key, value = daemon.wait_for(["graphChanged", "errorOccurred"])
             if key == "errorOccurred":
                 fail(value["_0"])
@@ -867,7 +868,7 @@ public enum RemoteGraphAccess {
                 if post.get("id") == post_id:
                     print(render_post(post))
                     return
-            fail("no post #%d on this board %s `graphcode mailroom list %s` shows the "
+            fail("no post #%d on this board %s `graphcode mail list %s` shows the "
                  "ids that exist" % (post_id, EM_DASH, project))
 
         if subverb == "list":
@@ -882,7 +883,7 @@ public enum RemoteGraphAccess {
 
         watcher = self_node_id()
         if not watcher:
-            fail("mailroom watch needs a loop identity %s run it from inside a loop's "
+            fail("mail watch needs a loop identity %s run it from inside a loop's "
                  "session ($ZMX_SESSION); the mail is delivered to the loop that watches"
                  % EM_DASH)
         on = "off" not in flags
@@ -921,7 +922,7 @@ public enum RemoteGraphAccess {
                 fail("missing project-path")
             run_and_print(arguments[0])
             return
-        if verb == "mailroom":
+        if verb in ("mail", "mailroom", "artifactory"):
             mailroom(arguments)
             return
         if verb != "node":

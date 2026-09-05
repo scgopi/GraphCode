@@ -131,7 +131,7 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// immediate send they always were.
   case messageNode(UUID, text: String, from: UUID?, followUp: Bool?)
   /// Drop a note onto the project's Mailroom — the shared, unaddressed board (`graphcode
-  /// mailroom post`) any loop can write to for *whoever comes next*, without naming a
+  /// mail post`) any loop can write to for *whoever comes next*, without naming a
   /// recipient or drawing an edge first. `topic` groups threads for watchers; `from` is
   /// attributed exactly as `messageNode`'s is (`ZMX_SESSION`), or `nil` from a human's
   /// shell. Refused outright while the beta ramp has the Mailroom off
@@ -139,14 +139,14 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// to the loop that sent it, as a post nobody answered.
   case mailroomPost(text: String, topic: String?, from: UUID?)
   /// Mark every post on the Mailroom as read for the calling loop — `graphcode
-  /// mailroom sync`, the cursor half of reading. The CLI reads the board out of the
+  /// mail inbox`, the cursor half of reading. The CLI reads the board out of the
   /// graph snapshot it already gets from `openProject`; this is the write that makes
   /// "unread" mean something the *next* sync can subtract from. Requires a loop
   /// identity: a human reading the board needs no cursor, since nothing downstream
   /// tracks what they have seen.
-  case mailroomSync(from: UUID?)
+  case mailroomInbox(from: UUID?)
   /// Subscribe (`on: true`) or unsubscribe (`on: false`) the calling loop to Mailroom
-  /// posts — `graphcode mailroom watch`. A watched post is delivered the way a
+  /// posts — `graphcode mail watch`. A watched post is delivered the way a
   /// `--follow-up` message is: typed into a live idle session, staged to a busy one's
   /// memory, and for a loop that is gone, nowhere — the post itself is the durable
   /// half, waiting at the next wake. `topic` filters; `nil` hears everything.

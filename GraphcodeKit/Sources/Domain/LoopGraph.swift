@@ -269,7 +269,9 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     scope = LoopGraphScope(projectPath: ref.path, name: ref.name)
     nodes = try container.decodeIfPresent(IdentifiedArrayOf<LoopNode>.self, forKey: .nodes) ?? []
     edges = try container.decodeIfPresent(IdentifiedArrayOf<LoopEdge>.self, forKey: .edges) ?? []
-    mailroom = try container.decodeIfPresent([MailroomPost].self, forKey: .mailroom) ?? []
+    mailroom =
+      try container.decodeIfPresent([MailroomPost].self, forKey: .mailroom)
+      ?? decoder.legacyMailroomValue([MailroomPost].self, "artifactory") ?? []
   }
 
   public func encode(to encoder: Encoder) throws {

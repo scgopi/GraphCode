@@ -475,7 +475,8 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     // machine or a hand-edited file gets the board the way every install does, and
     // the app still writes an explicit value the moment a human flips the switch.
     mailroomEnabled =
-      try container.decodeIfPresent(Bool.self, forKey: .mailroomEnabled) ?? true
+      try container.decodeIfPresent(Bool.self, forKey: .mailroomEnabled)
+      ?? decoder.legacyMailroomValue(Bool.self, "artifactoryEnabled") ?? true
     // Absent means nobody has asked for it, which is the default. An update must never
     // start holding a power assertion on a machine whose owner did not choose that.
     keepsMacAwakeWhileLoopsRun =

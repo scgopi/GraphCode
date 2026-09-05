@@ -61,7 +61,7 @@ struct LoopWorkspaceFeature {
     /// The newest board post that was on screen when a workspace in this project was
     /// last left — the board's counterpart to `seenBeatID`, and a fact about the
     /// person at the screen for the same reason. It is *not* the loop's own
-    /// `lastMailroomRead`: that cursor moves when the loop runs `mailroom sync`,
+    /// `lastMailroomRead`: that cursor moves when the loop runs `mail inbox`,
     /// which nobody can do from the app, and the rail is what a human reads. Loaded
     /// from defaults by whoever builds this state (`AppFeature`), per project.
     var seenMailroomPostID: Int?

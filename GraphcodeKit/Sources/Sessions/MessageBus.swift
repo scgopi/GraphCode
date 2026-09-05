@@ -102,7 +102,7 @@ public enum MessageBus {
   private static func mailroomPostBody(projectPath: String) -> String {
     "Before you finish: if you learned something a peer or a successor should not have "
       + "to rediscover — a dead end, a decision, a claim you staked — leave it on the "
-      + "board with: graphcode mailroom post \(projectPath) [--topic <t>] <note…>. "
+      + "board with: graphcode mail post \(projectPath) [--topic <t>] <note…>. "
       + "One note, not a transcript. If there is nothing worth a peer's time, skip this."
   }
 

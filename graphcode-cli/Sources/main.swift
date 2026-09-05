@@ -373,21 +373,21 @@ do {
       print(GraphcodeCommand.renderPosted(graph))
     }
 
-  case .mailroomSync(let projectPath, let headlines, let mark, let json, let full):
+  case .mailroomInbox(let projectPath, let headlines, let mark, let json, let full):
     // Attributed like `node send` — and required, the one place an mailroom verb
     // refuses a human shell up front: the cursor is the calling loop's, so with no
     // ZMX_SESSION there is nobody to advance it for, and the daemon's refusal would
-    // arrive only after the round trip. Reading without a cursor is `mailroom list`.
+    // arrive only after the round trip. Reading without a cursor is `mail list`.
     let reader = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
     guard let reader else {
       fail(
-        "mailroom sync needs a loop identity — run it from inside a loop's session "
-          + "($ZMX_SESSION); a human reading the board wants `graphcode mailroom list`")
+        "mail inbox needs a loop identity — run it from inside a loop's session "
+          + "($ZMX_SESSION); a human reading the board wants `graphcode mail list`")
     }
     let opened = try openProject(projectPath)
     try client.send(
-      .graphCommand(projectPath: projectPath, command: .mailroomSync(from: reader)))
+      .graphCommand(projectPath: projectPath, command: .mailroomInbox(from: reader)))
     let syncVerdict = try client.waitForEvent { event in
       switch event {
       case .graphChanged, .errorOccurred: return true
@@ -432,7 +432,7 @@ do {
     if let graph = try openProject(projectPath) {
       guard let post = graph.mailroom.first(where: { $0.id == postID }) else {
         fail(
-          "no post #\(postID) on this board — `graphcode mailroom list \(projectPath)` "
+          "no post #\(postID) on this board — `graphcode mail list \(projectPath)` "
             + "shows the ids that exist")
       }
       print(GraphcodeCommand.render(post))
@@ -458,7 +458,7 @@ do {
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
     guard let watcher else {
       fail(
-        "mailroom watch needs a loop identity — run it from inside a loop's session "
+        "mail watch needs a loop identity — run it from inside a loop's session "
           + "($ZMX_SESSION); the mail is delivered to the loop that watches")
     }
     try openProject(projectPath)

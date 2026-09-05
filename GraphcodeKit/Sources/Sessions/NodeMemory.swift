@@ -161,7 +161,7 @@ public enum NodeMemory {
       // remember to, without any per-node data racing into the shared briefing file.
       lines.append(
         "The project's Mailroom is on: other loops may have left findings for you. "
-          + "Check at the start of a pass — graphcode mailroom sync <project-path> — "
+          + "Check at the start of a pass — graphcode mail inbox <project-path> — "
           + "and post anything a peer or successor should not have to rediscover.")
       lines.append("")
     }

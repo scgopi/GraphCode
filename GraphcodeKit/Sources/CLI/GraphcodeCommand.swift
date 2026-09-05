@@ -58,7 +58,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
   /// `--mark` advances the cursor without printing the backlog ("start me from now");
   /// `--json` emits the unread posts machine-readably; `--full` insists on every body
   /// where the verb would otherwise triage a large backlog down to headlines itself.
-  case mailroomSync(
+  case mailroomInbox(
     projectPath: String, headlines: Bool, mark: Bool, json: Bool, full: Bool)
   /// One post in full, by id — the deep-read half of `sync --headlines` triage.
   /// Read-only: the post is in the snapshot, no command reaches the daemon.
@@ -101,10 +101,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode node pilot <project-path> <node-id>     dry-run a composite
       graphcode node arm <project-path> <node-id>       arm it (needs a pilot first)
       graphcode edge create <project-path> <from-id> <to-id> [--kind <k>] [--condition <c>]
-      graphcode mailroom post <project-path> [--topic <t>] <note…>
-                           leave a note on the shared board for whoever comes next
-      graphcode mailroom sync <project-path> [--headlines] [--full] [--mark] [--json]
-                           read your unread posts and mark the board read. A large
+      graphcode mail post <project-path> [--topic <t>] <note…>
+                           post a notice to the whole graph, for whoever comes next
+      graphcode mail inbox <project-path> [--headlines] [--full] [--mark] [--json]
+                           read your unread mail and mark the room read. A large
                            backlog prints as headlines on its own and says so —
                            --full insists on every body, --headlines insists on
                            triage lines (deep-read either with `read`). --mark
@@ -112,12 +112,12 @@ public enum GraphcodeCommand: Equatable, Sendable {
                            the machine-readable shape. Combined, the output wins in the
                            order --json > --mark > --headlines > --full; the cursor
                            advances whichever flags you pass
-      graphcode mailroom read <project-path> <post-id>
+      graphcode mail read <project-path> <post-id>
                            one post in full — the deep-read half of --headlines
-      graphcode mailroom list <project-path> [--search <text>] [--json]
-                           the whole board, read-only — no cursor moves; --search
+      graphcode mail list <project-path> [--search <text>] [--json]
+                           the whole room, read-only — no cursor moves; --search
                            filters by substring across author, topic and body
-      graphcode mailroom watch <project-path> [--topic <t>] [--off]
+      graphcode mail watch <project-path> [--topic <t>] [--off]
                            have matching posts typed into this loop's session as they
                            land; --off stops watching
       graphcode usage <project-path>
@@ -255,9 +255,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode status <project-path>
       graphcode node send <project-path> <node-id> --follow-up <message…>
                            stage work without interrupting an active turn
-      graphcode mailroom sync <project-path>
+      graphcode mail inbox <project-path>
                            check what other loops left for you before starting a pass
-      graphcode mailroom post <project-path> --topic claims issue #12 is mine
+      graphcode mail post <project-path> --topic claims issue #12 is mine
                            stake a claim where every loop will find it, addressed to no one
       graphcode node pilot <project-path> <composite-id>
       graphcode node arm <project-path> <composite-id>
@@ -402,7 +402,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
         throw ParseError.unknownCommand("node \(verb)")
       }
 
-    case "mailroom":
+    // `artifactory` is what this shipped as, and live loops carry the old verb in
+    // briefings and memory logs written before the rename. Accepted, undocumented.
+    case "mail", "mailroom", "artifactory":
       return try parseMailroom(&arguments)
 
     case "edge":
@@ -847,12 +849,12 @@ extension GraphcodeCommand {
     return projects.map { "\($0.name)  \($0.path)" }.joined(separator: "\n")
   }
 
-  /// The board for a terminal. `mailroom list` prints the whole thing (`reader`
-  /// nil); `mailroom sync` passes the reading loop's id and prints only what its
+  /// The board for a terminal. `mail list` prints the whole thing (`reader`
+  /// nil); `mail inbox` passes the reading loop's id and prints only what its
   /// cursor has not covered — the subtraction is `Mailroom.unread`, the arithmetic
   /// the daemon's cursor contract rests on, so the CLI's "unread" and the store's can
   /// never disagree. `headlines` truncates each body to a triage line's worth (the
-  /// deep read is `mailroom read <id>`); `search` keeps only posts whose author,
+  /// deep read is `mail read <id>`); `search` keeps only posts whose author,
   /// topic or body contains the text, case-insensitively — a list-side filter, never
   /// a sync-side one, because marking unread mail read without showing it is the one
   /// way this verb could lose mail.
@@ -881,7 +883,7 @@ extension GraphcodeCommand {
           : "no unread posts match '\(search)'"
       }
       return readerID == nil
-        ? "the board is empty — post one: graphcode mailroom post <project-path> <note…>"
+        ? "the board is empty — post one: graphcode mail post <project-path> <note…>"
         : "no unread posts"
     }
     // `sync` asks to be triaged; `--headlines` and `--full` are the two ways to say
@@ -894,7 +896,7 @@ extension GraphcodeCommand {
     if triaged {
       header +=
         " — headlines only, that is a lot to read at once. "
-        + "Full text: graphcode mailroom read \(graph.project.path) <post-id>"
+        + "Full text: graphcode mail read \(graph.project.path) <post-id>"
     }
     var lines = [header]
     for post in posts {
@@ -975,7 +977,7 @@ extension GraphcodeCommand {
   }
 
   /// The triage line — everything `render` says about a post's identity, with the
-  /// body cut to a glance. The pair (`sync --headlines`, `mailroom read <id>`) is
+  /// body cut to a glance. The pair (`sync --headlines`, `mail read <id>`) is
   /// how a loop joining after forty messages spends forty lines instead of forty
   /// kilobytes, and deep-reads only the posts that turned out to matter.
   public static func renderHeadline(_ post: MailroomPost) -> String {
@@ -987,7 +989,7 @@ extension GraphcodeCommand {
     return String(full.prefix(budget)) + "…"
   }
 
-  /// `mailroom post`'s answer — the sequence number is what the author's own log and
+  /// `mail post`'s answer — the sequence number is what the author's own log and
   /// any replier's `node send` can refer to the note by.
   public static func renderPosted(_ graph: LoopGraph) -> String {
     guard let post = graph.mailroom.last else { return "posted" }
@@ -1096,7 +1098,7 @@ extension GraphcodeCommand {
 
   /// The `mailroom` verbs' parsing, split from `parseVerb` the way export/import
   /// were. The note is joined argv words — the `node send`/`node memo` bargain, so
-  /// `graphcode mailroom post <path> --topic claims issue #12 is mine` needs no
+  /// `graphcode mail post <path> --topic claims issue #12 is mine` needs no
   /// quoting gymnastics — with `--topic <t>` riding along in either position.
   fileprivate static func parseMailroom(
     _ arguments: inout [String]
@@ -1119,10 +1121,11 @@ extension GraphcodeCommand {
       guard !text.isEmpty else { throw ParseError.missingArgument("note") }
       return .mailroomPost(projectPath: path, topic: flags["topic"], text: text)
 
-    case "sync":
+    // `sync` is the pre-rename spelling, kept for the same reason the verb itself is.
+    case "inbox", "sync":
       try validateFlags(arguments, allowed: ["headlines", "mark", "json", "full"])
       let flags = parseFlags(arguments)
-      return .mailroomSync(
+      return .mailroomInbox(
         projectPath: path, headlines: flags["headlines"] != nil, mark: flags["mark"] != nil,
         json: flags["json"] != nil, full: flags["full"] != nil)
 

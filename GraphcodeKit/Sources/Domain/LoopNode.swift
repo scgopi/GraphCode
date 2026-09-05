@@ -174,13 +174,13 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// for why only those two types do. `nil` for every snapshot loop.
   public var templateFollow: TemplateFollow?
   /// The newest Mailroom post this loop has read — `MailroomPost.id` of the last
-  /// post a `graphcode mailroom sync` showed it. `nil` has not synced yet and makes
+  /// post a `graphcode mail inbox` showed it. `nil` has not synced yet and makes
   /// every post unread; the cursor only moves through sync, so a loop that ignores
   /// the board accrues nothing but a number, and a loop that died with unread mail
   /// finds it still waiting at the next wake.
   public var lastMailroomRead: Int?
   /// This loop's standing subscription to its project's Mailroom — set and cleared
-  /// with `graphcode mailroom watch`. Non-nil means every matching post also gets
+  /// with `graphcode mail watch`. Non-nil means every matching post also gets
   /// delivered to this loop the way a `--follow-up` message is: typed into a live
   /// idle session, staged to a busy one's memory, waiting in the post itself for a
   /// loop that is gone. The post is the durable half; this is only the ding.
@@ -541,9 +541,12 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
       TemplateFollow.self, forKey: .templateFollow)
     // Absent from graphs saved before the Mailroom existed — every loop simply has
     // not read anything yet, which is what `nil` says.
-    lastMailroomRead = try container.decodeIfPresent(Int.self, forKey: .lastMailroomRead)
-    mailroomWatch = try container.decodeIfPresent(
-      MailroomWatch.self, forKey: .mailroomWatch)
+    lastMailroomRead =
+      try container.decodeIfPresent(Int.self, forKey: .lastMailroomRead)
+      ?? decoder.legacyMailroomValue(Int.self, "lastArtifactoryRead")
+    mailroomWatch =
+      try container.decodeIfPresent(MailroomWatch.self, forKey: .mailroomWatch)
+      ?? decoder.legacyMailroomValue(MailroomWatch.self, "artifactoryWatch")
     stallReason = try container.decodeIfPresent(String.self, forKey: .stallReason)
     state = try container.decodeIfPresent(LoopState.self, forKey: .state) ?? .idle
     createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()

@@ -43,7 +43,7 @@ struct MailroomCommandTests {
   func syncAndListTakeOnlyAProjectPath() throws {
     #expect(
       try GraphcodeCommand.parse(["mailroom", "sync", "/tmp/x"])
-        == .mailroomSync(
+        == .mailroomInbox(
           projectPath: "/tmp/x", headlines: false, mark: false, json: false, full: false))
     #expect(
       try GraphcodeCommand.parse(["mailroom", "list", "/tmp/x"])
@@ -176,7 +176,7 @@ struct MailroomCommandTests {
 
   @Test
   func helpTextTeachesTheMailroomVerbs() {
-    for verb in ["mailroom post", "mailroom sync", "mailroom list", "mailroom watch"] {
+    for verb in ["mail post", "mail inbox", "mail list", "mail watch"] {
       #expect(GraphcodeCommand.helpText.contains(verb))
     }
   }
@@ -208,7 +208,7 @@ func syncParsesItsReadModes() throws {
   let plain = try GraphcodeCommand.parse(["mailroom", "sync", "/tmp/x"])
   #expect(
     plain
-      == .mailroomSync(
+      == .mailroomInbox(
         projectPath: "/tmp/x", headlines: false, mark: false, json: false, full: false))
 
   let all = try GraphcodeCommand.parse([
@@ -216,7 +216,7 @@ func syncParsesItsReadModes() throws {
   ])
   #expect(
     all
-      == .mailroomSync(
+      == .mailroomInbox(
         projectPath: "/tmp/x", headlines: true, mark: true, json: true, full: false))
 
   #expect {

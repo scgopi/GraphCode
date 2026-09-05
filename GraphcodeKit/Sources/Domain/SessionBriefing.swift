@@ -96,11 +96,11 @@ public enum SessionBriefing {
       something a peer or successor should not have to rediscover:
 
       ```sh
-      graphcode mailroom sync \(projectPath)     # read what you have not seen, mark it read
-      graphcode mailroom read \(projectPath) <post-id>     # one post in full
-      graphcode mailroom post \(projectPath) [--topic <t>] <note…>   # leave something behind
-      graphcode mailroom list \(projectPath)     # read-only peek, cursor untouched
-      graphcode mailroom watch \(projectPath) [--topic <t>]   # ring me when new mail lands
+      graphcode mail inbox \(projectPath)     # read what you have not seen, mark it read
+      graphcode mail read \(projectPath) <post-id>     # one post in full
+      graphcode mail post \(projectPath) [--topic <t>] <note…>   # leave something behind
+      graphcode mail list \(projectPath)     # read-only peek, cursor untouched
+      graphcode mail watch \(projectPath) [--topic <t>]   # ring me when new mail lands
       ```
 
       Post decisions made, dead ends hit, claims staked ("I'm taking issue #12") —

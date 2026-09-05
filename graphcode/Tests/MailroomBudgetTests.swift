@@ -182,7 +182,7 @@ struct MailroomBudgetTests {
       graph, unreadFor: reader.id, autoTriage: true)
 
     #expect(rendered.contains("headlines only"))
-    #expect(rendered.contains("mailroom read /tmp/p <post-id>"))
+    #expect(rendered.contains("mail read /tmp/p <post-id>"))
   }
 
   @Test
@@ -220,12 +220,12 @@ struct MailroomBudgetTests {
     let full = try GraphcodeCommand.parse(["mailroom", "sync", "/tmp/p", "--full"])
     #expect(
       full
-        == .mailroomSync(
+        == .mailroomInbox(
           projectPath: "/tmp/p", headlines: false, mark: false, json: false, full: true))
     let plain = try GraphcodeCommand.parse(["mailroom", "sync", "/tmp/p"])
     #expect(
       plain
-        == .mailroomSync(
+        == .mailroomInbox(
           projectPath: "/tmp/p", headlines: false, mark: false, json: false, full: false))
   }
 
@@ -236,7 +236,7 @@ struct MailroomBudgetTests {
   @Test
   func aResolvingLoopIsAskedToLeaveANote() {
     let ask = MessageBus.resolutionAsk(distillSkill: false, mailroomProjectPath: "/tmp/p")
-    #expect(ask?.contains("graphcode mailroom post /tmp/p") == true)
+    #expect(ask?.contains("graphcode mail post /tmp/p") == true)
     #expect(ask?.hasPrefix("[graphcode] ") == true)
   }
 
@@ -245,7 +245,7 @@ struct MailroomBudgetTests {
   func bothAsksArriveAsOneInterruption() {
     let ask = MessageBus.resolutionAsk(distillSkill: true, mailroomProjectPath: "/tmp/p")
     #expect(ask?.contains("distill it into a project skill") == true)
-    #expect(ask?.contains("graphcode mailroom post") == true)
+    #expect(ask?.contains("graphcode mail post") == true)
     #expect(ask?.components(separatedBy: "[graphcode] ").count == 2)
   }
 
@@ -274,6 +274,6 @@ struct MailroomBudgetTests {
 
     await store.handle(.nodeCheckApproved(id))
 
-    #expect(!delivered.value.contains { $0.1.contains("mailroom post") })
+    #expect(!delivered.value.contains { $0.1.contains("mail post") })
   }
 }

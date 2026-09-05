@@ -107,11 +107,11 @@ struct MailroomTests {
     let ids = nodeIDs(await store.graph)
 
     await store.handle(.mailroomPost(text: "one", topic: nil, from: ids[0]))
-    await store.handle(.mailroomSync(from: ids[1]))
+    await store.handle(.mailroomInbox(from: ids[1]))
     var graph = await store.graph
     #expect(graph.nodes[id: ids[1]]?.lastMailroomRead == 1)
 
-    await store.handle(.mailroomSync(from: ids[1]))
+    await store.handle(.mailroomInbox(from: ids[1]))
     graph = await store.graph
     #expect(graph.nodes[id: ids[1]]?.lastMailroomRead == 1)
   }
@@ -120,7 +120,7 @@ struct MailroomTests {
   func syncNeedsLoopIdentity() async {
     let store = await makeStore()
 
-    await store.handle(.mailroomSync(from: nil))
+    await store.handle(.mailroomInbox(from: nil))
 
     let graph = await store.graph
     #expect(graph.nodes.allSatisfy { $0.lastMailroomRead == nil })
@@ -155,7 +155,7 @@ struct MailroomTests {
       $0.0 == ids[1] && $0.1.contains("mailroom — new post #1 (build) from Author")
     }
     #expect(staged.count == 1)
-    #expect(staged[0].1.contains("graphcode mailroom sync"))
+    #expect(staged[0].1.contains("graphcode mail inbox"))
   }
 
   @Test
@@ -485,7 +485,7 @@ extension MailroomTests {
     let off = SessionBriefing.text(
       projectPath: "/tmp/p", settings: GraphcodeSettings(mailroomEnabled: false))
     #expect(on?.contains("## The Mailroom — notes for whoever comes next") == true)
-    #expect(on?.contains("graphcode mailroom sync /tmp/p") == true)
+    #expect(on?.contains("graphcode mail inbox /tmp/p") == true)
     #expect(off?.contains("## The Mailroom") == false)
     // Off means byte-for-byte the pre-Mailroom briefing: no stray interpolation
     // line where the section would have gone.
