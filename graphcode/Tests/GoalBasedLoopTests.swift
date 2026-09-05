@@ -269,11 +269,53 @@ struct GoalBasedLoopTests {
     #expect(prompt.contains("lower is better"))
     #expect(prompt.contains("run it as you work"))
 
-    // No metric, no measurement sentence — the base prompt stays word-for-word what it
-    // always was.
+    // No metric, no measurement sentence — the base prompt is the directive and the
+    // condition, and nothing else.
     let bare = LoopNode(
       title: "Docs", loopType: .goalBased, goal: GoalSpec(summary: "docs read clearly"))
-    #expect(bare.sessionPrompt == "Work toward this goal until it is met: docs read clearly")
+    #expect(bare.sessionPrompt == "/goal docs read clearly")
+  }
+
+  @Test
+  func aGoalOpensWithTheBackendsOwnStopCondition() throws {
+    // Prose asks; the directive binds. `/goal <condition>` installs a check the session
+    // cannot finish past, which is the whole contract of the type — so where a backend
+    // has one it leads the prompt, exactly as `/loop` leads a time-based one.
+    for backend in [CLISessionBackendKind.claudeCode, .codex] {
+      let node = LoopNode(
+        title: "Green build", loopType: .goalBased,
+        goal: GoalSpec(summary: "CI passes", predicate: "make test"), backend: backend)
+      let prompt = try #require(node.sessionPrompt)
+      #expect(prompt.hasPrefix("/goal CI passes"))
+      #expect(prompt.contains("make test"))
+      #expect(!prompt.contains("Work toward this goal"))
+    }
+
+    // And a backend without the command is not handed a directive it would type as
+    // literal text: it keeps the prose prompt it always had.
+    for backend in [CLISessionBackendKind.copilotCLI, .openCode] {
+      let node = LoopNode(
+        title: "Green build", loopType: .goalBased, goal: GoalSpec(summary: "CI passes"),
+        backend: backend)
+      #expect(node.sessionPrompt == "Work toward this goal until it is met: CI passes")
+    }
+  }
+
+  @Test
+  func aGoalThatOpensWithASubcommandIsNotReadAsOne() throws {
+    // `/goal clear` clears the session's goal on both backends that have the command, so
+    // a goal phrased "clear the lint backlog" would arm nothing and look like it had.
+    let node = LoopNode(
+      title: "Lint", loopType: .goalBased,
+      goal: GoalSpec(summary: "clear the lint backlog"))
+    let prompt = try #require(node.sessionPrompt)
+    #expect(prompt == "/goal Done when: clear the lint backlog")
+
+    // Only the leading word is the hazard — one in the middle is ordinary English.
+    let inner = LoopNode(
+      title: "Lint", loopType: .goalBased,
+      goal: GoalSpec(summary: "the lint backlog is clear"))
+    #expect(inner.sessionPrompt == "/goal the lint backlog is clear")
   }
 
   @Test

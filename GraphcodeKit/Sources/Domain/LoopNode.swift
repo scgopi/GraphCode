@@ -314,7 +314,8 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
         + "Each one is your cue to run one pass of this task, then wait for the next: "
         + "\(task) Do not schedule your own /loop, wakeup, or cron for it — the "
         + "orchestrator holds the timer. Stay in the session between heartbeats."
-    case .goalBased: return goal?.sessionPrompt
+    case .goalBased:
+      return goal?.sessionPrompt(directive: backend.capabilities.goalDirective)
     case .turnBased:
       return Self.turnBasedPrompt(
         instruction: firstInstruction, check: checkDescription,

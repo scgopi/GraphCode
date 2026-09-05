@@ -105,6 +105,18 @@ public struct GoalSpec: Codable, Equatable, Sendable {
     return trimmed.isEmpty ? nil : trimmed
   }
 
+  /// Subcommands a `/goal` directive reads instead of a condition — Codex's full set,
+  /// which contains Claude Code's `clear`. A goal whose summary opens with one of them
+  /// ("clear the lint backlog") would arm nothing and quietly clear the session's goal
+  /// instead, so `condition` keeps the first word ordinary.
+  static let directiveSubcommands: Set<String> = ["clear", "edit", "pause", "resume"]
+
+  static func condition(_ summary: String) -> String {
+    let firstWord = summary.trimmingCharacters(in: .whitespaces).prefix { !$0.isWhitespace }
+    guard directiveSubcommands.contains(firstWord.lowercased()) else { return summary }
+    return "Done when: \(summary)"
+  }
+
   /// The opening prompt for the node's session. States the goal, and — when there's a
   /// predicate or a metric — tells the session the same things the daemon is watching,
   /// so the two aren't working to different definitions of done, or of better.
@@ -114,8 +126,18 @@ public struct GoalSpec: Codable, Equatable, Sendable {
   /// the way an autonomous improvement loop is handed its own fitness function. The
   /// orchestrator still samples the same command once per pass, so the recorded numbers
   /// come from the measurement, never from the loop's self-report.
-  public var sessionPrompt: String {
-    var parts = ["Work toward this goal until it is met: \(summary)"]
+  ///
+  /// `directive` is the backend's own stop-condition command when it has one
+  /// (`BackendCapabilities.goalDirective`), and it replaces the "work toward this" prose
+  /// rather than joining it: the directive already says to keep working, and its argument
+  /// is the condition an evaluator judges. Everything the prompt adds after the summary
+  /// is part of that argument — `/goal` takes the rest of the line — which is why each
+  /// sentence has to read as something a session should hold itself to, not as an aside.
+  public func sessionPrompt(directive: String? = nil) -> String {
+    var parts = [
+      directive.map { "\($0) \(Self.condition(summary))" }
+        ?? "Work toward this goal until it is met: \(summary)"
+    ]
     if let predicate = effectivePredicate {
       parts.append("The goal counts as met when this command exits 0: \(predicate)")
     }

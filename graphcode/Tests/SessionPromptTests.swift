@@ -53,6 +53,21 @@ struct SessionPromptTests {
     #expect(composed.contains("/tmp/m/WAKE.md"))
   }
 
+  /// A goal loop on a backend with `/goal` is the same shape as a `/loop` one, so it
+  /// inherits the same rule for free — the check the type exists to arm is the thing a
+  /// leading preamble would turn into prose.
+  @Test
+  func theGoalDirectiveKeepsTheFrontOfAPromptToo() throws {
+    let node = LoopNode(
+      title: "Green build", loopType: .goalBased, goal: GoalSpec(summary: "CI passes"))
+    let prompt = try #require(node.sessionPrompt)
+    let composed = SessionPrompt.composed(
+      preamble: NodeMemory.wakePointer(toDigestAt: "/tmp/m/WAKE.md"), prompt: prompt)
+
+    #expect(composed.hasPrefix("/goal CI passes"))
+    #expect(composed.contains("/tmp/m/WAKE.md"))
+  }
+
   @Test
   func aTrailingPreambleGetsItsOwnSentence() {
     // Without the boundary the task and the preamble run together into one instruction:

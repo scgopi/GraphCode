@@ -29,6 +29,18 @@ public struct BackendCapabilities: Codable, Equatable, Sendable {
   /// `supportsDaemonRecurrence`. A backend with neither capability cannot host one.
   public var supportsInSessionRecurrence: Bool
   public var supportsDaemonRecurrence: Bool
+  /// The in-session directive that arms the backend's *own* stop-condition check —
+  /// `/goal <condition>`, which sets a session-scoped hook that keeps the agent working
+  /// until a separate evaluator says the condition holds. The goal-based counterpart of
+  /// `/loop`, and it earns its place for the same reason: a goal stated as prose is an
+  /// instruction the agent may consider discharged after one pass, while a goal stated
+  /// as the directive is checked by the CLI every time the agent tries to stop.
+  ///
+  /// `nil` where the CLI has no such command. Those backends still host goal loops on
+  /// the prose prompt, exactly as every backend did before this existed —
+  /// `supportsGoalMode` is the question of whether the type can run at all, this is only
+  /// whether the session can be handed its own stop condition.
+  public var goalDirective: String?
 
   public init(
     supportsGoalMode: Bool = false,
@@ -38,7 +50,8 @@ public struct BackendCapabilities: Codable, Equatable, Sendable {
     supportsMCP: Bool = false,
     supportsMidSessionInput: Bool = false,
     supportsInSessionRecurrence: Bool = false,
-    supportsDaemonRecurrence: Bool = false
+    supportsDaemonRecurrence: Bool = false,
+    goalDirective: String? = nil
   ) {
     self.supportsGoalMode = supportsGoalMode
     self.supportsHooks = supportsHooks
@@ -48,6 +61,7 @@ public struct BackendCapabilities: Codable, Equatable, Sendable {
     self.supportsMidSessionInput = supportsMidSessionInput
     self.supportsInSessionRecurrence = supportsInSessionRecurrence
     self.supportsDaemonRecurrence = supportsDaemonRecurrence
+    self.goalDirective = goalDirective
   }
 }
 
@@ -80,7 +94,11 @@ extension CLISessionBackendKind {
         supportsSubAgents: true,
         supportsMCP: true,
         supportsMidSessionInput: true,
-        supportsInSessionRecurrence: true)
+        supportsInSessionRecurrence: true,
+        // `/goal <condition>` — read off 2.1.261, where it is a first-class slash command
+        // ("Set a goal Claude checks before stopping") that starts a turn immediately and
+        // installs a Stop hook the session cannot finish past until the condition holds.
+        goalDirective: "/goal")
 
     case .copilotCLI:
       // Spiked against GitHub Copilot CLI 0.0.410 — every entry below was read off the
@@ -109,6 +127,11 @@ extension CLISessionBackendKind {
       // shell commands)") and `/subagents`, plus `--agent <agent>` on the launch line.
       // That is the fan-out a composite leans on. The same age caveat applies: a
       // composite whose Copilot workers never fan out is a Copilot older than that.
+      //
+      // `goalDirective` stays nil: `copilot help commands` at 1.0.80 lists no `/goal`.
+      // `/autopilot` takes an objective and is the nearest thing, but it also flips a
+      // session-wide permission mode, which is a bigger change than being handed a stop
+      // condition — so a Copilot goal loop is carried by the prose prompt.
       return BackendCapabilities(
         supportsGoalMode: true,
         supportsHooks: false,
@@ -142,7 +165,11 @@ extension CLISessionBackendKind {
         supportsMCP: true,
         supportsMidSessionInput: true,
         supportsInSessionRecurrence: false,
-        supportsDaemonRecurrence: true)
+        supportsDaemonRecurrence: true,
+        // `/goal [<objective>|clear|edit|pause|resume]` — read off 0.153.2, which pursues
+        // the objective across turns and reports against it. Same directive name as Claude
+        // Code's, so `GoalSpec` composes one prompt shape for both.
+        goalDirective: "/goal")
 
     case .openCode:
       // Spiked against OpenCode 1.18.21 — every entry read off `opencode --help` and its
@@ -162,7 +189,9 @@ extension CLISessionBackendKind {
       // source, not assumed (`PresenceHooks.openCodePlugin`).
       //
       // Sub-agents exist inside the TUI (`@agent` mentions) but not as anything a
-      // composite could lean on from outside. Recurrence is provided by graphcode's daemon.
+      // composite could lean on from outside. Recurrence is provided by graphcode's daemon,
+      // and `goalDirective` is nil for the same reason `/loop` is absent: 1.18.29 ships no
+      // `/goal`, so a goal loop here is carried by the prose prompt.
       return BackendCapabilities(
         supportsGoalMode: true,
         supportsHooks: true,

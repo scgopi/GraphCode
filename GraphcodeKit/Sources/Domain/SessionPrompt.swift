@@ -8,16 +8,21 @@ import Foundation
 /// digest is (`NodeMemory`), both by preamble on the same message. Concatenating those
 /// in front is what a preamble usually means, and for prose it is right.
 ///
-/// It is wrong for exactly one prompt shape, and that shape is a whole loop type. A
-/// time-based node whose session owns recurrence has a slash-command prompt — `/loop 1h
-/// …`. Buried mid-message it is literal text: no schedule is created, the loop runs
-/// exactly one pass and sits `idle` forever. Copilot hosts this form of time-based loop
-/// and receives its briefing as a preamble, so it got both halves of that and never armed
-/// recurrence at all (issue #179).
+/// It is wrong for the two prompt shapes that open with a slash command, and each of
+/// those is a whole loop type. A time-based node whose session owns recurrence has a
+/// slash-command prompt — `/loop 1h …`. Buried mid-message it is literal text: no
+/// schedule is created, the loop runs exactly one pass and sits `idle` forever. Copilot
+/// hosts this form of time-based loop and receives its briefing as a preamble, so it got
+/// both halves of that and never armed recurrence at all (issue #179). A goal-based node
+/// on a backend with `/goal` is the same shape and fails the same way — the directive
+/// that arms the stop check would be typed as prose and nothing would be armed.
 ///
 /// So the preamble trails a prompt that opens with a directive and leads one that doesn't.
 /// Trailing costs nothing: `/loop <interval> <task>` takes the rest of the line as the
 /// task, so the pointer travels into every scheduled pass rather than only the first.
+/// `/goal <condition>` takes the rest of the line too, so a trailing pointer becomes part
+/// of the condition — worth knowing, and still the right side: a condition carrying one
+/// extra instruction the session discharges immediately beats a directive that never ran.
 public enum SessionPrompt {
   /// Whether `prompt` opens with something its backend will read as a command rather than
   /// prose. A leading `/` is the whole test — a prompt that opens with an absolute path
