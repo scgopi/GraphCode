@@ -421,7 +421,7 @@ public actor ProjectRegistry {
         stored.prefix(while: { $0 != path }).contains(where: { Self.canonicalize($0) == canonical })
       else { return true }
       let graph = persistence.loadGraph(path: path)
-      let isEmpty = (graph?.nodesAtAnyDepth.isEmpty ?? true) && (graph?.artifactory.isEmpty ?? true)
+      let isEmpty = (graph?.nodesAtAnyDepth.isEmpty ?? true) && (graph?.mailroom.isEmpty ?? true)
       if isEmpty { persistence.forgetProject(path: path) }
       return !isEmpty
     }
@@ -618,7 +618,7 @@ public actor ProjectRegistry {
       },
       // Read fresh per command, the way the heartbeat toggle is: the app resolving
       // the beta ramp (or a hand edit) applies to the next post with no restart.
-      onArtifactoryEnabled: { GraphcodeSettingsStore.load().artifactoryEnabled })
+      onMailroomEnabled: { GraphcodeSettingsStore.load().mailroomEnabled })
     stores[path] = newStore
     // Only on first load of this project — a time-based node's session outlives the app
     // but not a reboot, so something has to restart it, and this is the moment the

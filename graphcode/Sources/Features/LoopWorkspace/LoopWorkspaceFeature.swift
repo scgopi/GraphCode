@@ -39,7 +39,7 @@ struct LoopWorkspaceFeature {
     /// summary's fold: they answer different questions, and someone who wants the sentence
     /// and not the diagram — or the diagram and not the sentence — is not being perverse.
     var isBoardFolded = LoopWorkspaceRail.loadBoardFolded()
-    var isArtifactoryFolded = LoopWorkspaceRail.loadArtifactoryFolded()
+    var isMailroomFolded = LoopWorkspaceRail.loadMailroomFolded()
     /// Whether a rail width has ever been committed by a drag on this machine.
     ///
     /// What lets a board open the rail wider without ever overruling a width somebody
@@ -61,10 +61,10 @@ struct LoopWorkspaceFeature {
     /// The newest board post that was on screen when a workspace in this project was
     /// last left — the board's counterpart to `seenBeatID`, and a fact about the
     /// person at the screen for the same reason. It is *not* the loop's own
-    /// `lastArtifactoryRead`: that cursor moves when the loop runs `artifactory sync`,
+    /// `lastMailroomRead`: that cursor moves when the loop runs `mail inbox`,
     /// which nobody can do from the app, and the rail is what a human reads. Loaded
     /// from defaults by whoever builds this state (`AppFeature`), per project.
-    var seenArtifactoryPostID: Int?
+    var seenMailroomPostID: Int?
     var layout: TerminalLayout
     // The project folder every surface without its own worktree binding should open
     // in — a loop's shells shouldn't land in the app's own launch directory (usually
@@ -116,11 +116,11 @@ struct LoopWorkspaceFeature {
     case summaryFoldToggled
     /// The board section's header row.
     case boardFoldToggled
-    case artifactoryFoldToggled
+    case mailroomFoldToggled
     /// A human leaving a note on the board from the rail. Handled by `AppFeature`,
     /// which is the level holding the daemon connection — the same division as
     /// `primarySurfaceExited`.
-    case artifactoryPostSubmitted(text: String, topic: String?)
+    case mailroomPostSubmitted(text: String, topic: String?)
     /// The board section's expand button, and the cover's own close.
     case boardExpandToggled
     /// The amber block's `Answer it` — the question is in the terminal, so this is a
@@ -293,14 +293,14 @@ struct LoopWorkspaceFeature {
         LoopWorkspaceRail.saveBoardFolded(state.isBoardFolded)
         return .none
 
-      case .artifactoryFoldToggled:
-        state.isArtifactoryFolded.toggle()
-        LoopWorkspaceRail.saveArtifactoryFolded(state.isArtifactoryFolded)
+      case .mailroomFoldToggled:
+        state.isMailroomFolded.toggle()
+        LoopWorkspaceRail.saveMailroomFolded(state.isMailroomFolded)
         return .none
 
       // Nothing local to change: the post is the daemon's to apply, and the board it
       // lands on arrives back in the next `.graphChanged`.
-      case .artifactoryPostSubmitted:
+      case .mailroomPostSubmitted:
         return .none
 
       case .boardExpandToggled:
@@ -325,11 +325,11 @@ struct LoopWorkspaceFeature {
         // Only what was actually on screen counts as looked at: a hidden rail or a
         // folded section showed no posts, and marking them seen would clear a badge
         // the human never had a chance to read.
-        if state.isRailVisible, !state.isArtifactoryFolded,
-          let newest = ArtifactoryPresentation.notes(in: state.graph).last?.id
+        if state.isRailVisible, !state.isMailroomFolded,
+          let newest = MailroomPresentation.notices(in: state.graph).last?.id
         {
-          state.seenArtifactoryPostID = newest
-          LoopWorkspaceRail.saveSeenArtifactoryPost(newest, forProjectPath: state.projectPath)
+          state.seenMailroomPostID = newest
+          LoopWorkspaceRail.saveSeenMailroomPost(newest, forProjectPath: state.projectPath)
         }
         return .none
 

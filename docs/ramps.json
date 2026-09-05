@@ -4,6 +4,10 @@
       "beta": 100,
       "stable": 100
     },
+    "mailroom": {
+      "beta": 100,
+      "stable": 100
+    },
     "artifactory": {
       "beta": 100,
       "stable": 100

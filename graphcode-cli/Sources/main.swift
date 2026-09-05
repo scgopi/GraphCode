@@ -83,8 +83,8 @@ defer { client.closeConnection() }
 
 /// The calling loop's identity, when this CLI ran inside one — the `status` graph
 /// render uses it for the board's "unread for you" line, the same attribution every
-/// artifactory verb derives from `ZMX_SESSION`.
-let artifactoryReader = SurfaceRef.nodeID(
+/// mailroom verb derives from `ZMX_SESSION`.
+let mailroomReader = SurfaceRef.nodeID(
   fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
 
 /// Joins the project every verb addresses, and stops here when the daemon refuses it.
@@ -123,7 +123,7 @@ func runAndPrintGraph(projectPath: String, _ commands: [DaemonCommand]) throws {
 
   guard !commands.isEmpty else {
     if let opened {
-      print(GraphcodeCommand.render(opened, artifactoryReader: artifactoryReader))
+      print(GraphcodeCommand.render(opened, mailroomReader: mailroomReader))
     }
     return
   }
@@ -135,7 +135,7 @@ func runAndPrintGraph(projectPath: String, _ commands: [DaemonCommand]) throws {
     if case .graphChanged = $0 { return true } else { return false }
   }
   if case .graphChanged(let graph) = event {
-    print(GraphcodeCommand.render(graph, artifactoryReader: artifactoryReader))
+    print(GraphcodeCommand.render(graph, mailroomReader: mailroomReader))
   }
 }
 
@@ -266,7 +266,7 @@ do {
     }
     if case .errorOccurred(let message) = updateVerdict { fail(message) }
     if case .graphChanged(let graph) = updateVerdict {
-      print(GraphcodeCommand.render(graph, artifactoryReader: artifactoryReader))
+      print(GraphcodeCommand.render(graph, mailroomReader: mailroomReader))
     }
 
   case .promoteNode(let projectPath, let nodeID, let promotion):
@@ -289,7 +289,7 @@ do {
     }
     if case .errorOccurred(let message) = promoteVerdict { fail(message) }
     if case .graphChanged(let graph) = promoteVerdict {
-      print(GraphcodeCommand.render(graph, artifactoryReader: artifactoryReader))
+      print(GraphcodeCommand.render(graph, mailroomReader: mailroomReader))
     }
 
   case .memoNode(let projectPath, let nodeID, let text):
@@ -350,7 +350,7 @@ do {
       projectPath: projectPath,
       [.graphCommand(projectPath: projectPath, command: .armComposite(nodeID))])
 
-  case .artifactoryPost(let projectPath, let topic, let text):
+  case .mailroomPost(let projectPath, let topic, let text):
     // Attributed like `node send`: run from inside a loop, ZMX_SESSION names the
     // sender and readers see who posted; from a human's shell there is no variable
     // and the note reads as from "a human" — which is exactly the human's voice on
@@ -361,7 +361,7 @@ do {
     try client.send(
       .graphCommand(
         projectPath: projectPath,
-        command: .artifactoryPost(text: text, topic: topic, from: author)))
+        command: .mailroomPost(text: text, topic: topic, from: author)))
     let postVerdict = try client.waitForEvent { event in
       switch event {
       case .graphChanged, .errorOccurred: return true
@@ -373,21 +373,21 @@ do {
       print(GraphcodeCommand.renderPosted(graph))
     }
 
-  case .artifactorySync(let projectPath, let headlines, let mark, let json, let full):
-    // Attributed like `node send` — and required, the one place an artifactory verb
+  case .mailroomInbox(let projectPath, let headlines, let mark, let json, let full):
+    // Attributed like `node send` — and required, the one place an mailroom verb
     // refuses a human shell up front: the cursor is the calling loop's, so with no
     // ZMX_SESSION there is nobody to advance it for, and the daemon's refusal would
-    // arrive only after the round trip. Reading without a cursor is `artifactory list`.
+    // arrive only after the round trip. Reading without a cursor is `mail list`.
     let reader = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
     guard let reader else {
       fail(
-        "artifactory sync needs a loop identity — run it from inside a loop's session "
-          + "($ZMX_SESSION); a human reading the board wants `graphcode artifactory list`")
+        "mail inbox needs a loop identity — run it from inside a loop's session "
+          + "($ZMX_SESSION); a human reading the board wants `graphcode mail list`")
     }
     let opened = try openProject(projectPath)
     try client.send(
-      .graphCommand(projectPath: projectPath, command: .artifactorySync(from: reader)))
+      .graphCommand(projectPath: projectPath, command: .mailroomInbox(from: reader)))
     let syncVerdict = try client.waitForEvent { event in
       switch event {
       case .graphChanged, .errorOccurred: return true
@@ -404,12 +404,12 @@ do {
     // than to latest, which nothing so far has needed.
     if let graph = opened {
       if json {
-        print(GraphcodeCommand.renderArtifactoryJSON(graph, unreadFor: reader))
+        print(GraphcodeCommand.renderMailroomJSON(graph, unreadFor: reader))
       } else if mark {
         // The quiet sync: the backlog is not the loop's problem any more, and the
         // one line says the cursor actually moved — a silent success would read,
         // to the loop that sent it, like a command nobody applied.
-        if let latest = graph.artifactory.last?.id, latest > 0 {
+        if let latest = graph.mailroom.last?.id, latest > 0 {
           print("marked read up to #\(latest)")
         } else {
           print("marked read — the board is empty")
@@ -419,53 +419,53 @@ do {
         // know how much mail it has before reading it, and the first sync of a loop
         // born after a busy week is the whole board.
         print(
-          GraphcodeCommand.renderArtifactory(
+          GraphcodeCommand.renderMailroom(
             graph, unreadFor: reader, headlines: headlines,
             autoTriage: !headlines && !full))
       }
     }
 
-  case .artifactoryRead(let projectPath, let postID):
+  case .mailroomRead(let projectPath, let postID):
     // Read-only: the post rides the snapshot, no command is sent, no cursor moves —
     // the deep-read half of `sync --headlines` triage, priced at one line of context
     // per post a loop actually decides to care about.
     if let graph = try openProject(projectPath) {
-      guard let post = graph.artifactory.first(where: { $0.id == postID }) else {
+      guard let post = graph.mailroom.first(where: { $0.id == postID }) else {
         fail(
-          "no post #\(postID) on this board — `graphcode artifactory list \(projectPath)` "
+          "no post #\(postID) on this board — `graphcode mail list \(projectPath)` "
             + "shows the ids that exist")
       }
       print(GraphcodeCommand.render(post))
     }
 
-  case .artifactoryList(let projectPath, let search, let json):
+  case .mailroomList(let projectPath, let search, let json):
     // Read-only: no command is sent, so — the `status` rule — nothing past the
     // snapshot is waited for, and no cursor moves. This is the human's window onto
     // the board; `sync` is the loop's. `--search` filters what is shown, never what
     // is remembered.
     if let graph = try openProject(projectPath) {
       if json {
-        print(GraphcodeCommand.renderArtifactoryJSON(graph, search: search))
+        print(GraphcodeCommand.renderMailroomJSON(graph, search: search))
       } else {
-        print(GraphcodeCommand.renderArtifactory(graph, search: search))
+        print(GraphcodeCommand.renderMailroom(graph, search: search))
       }
     }
 
-  case .artifactoryWatch(let projectPath, let on, let topic):
+  case .mailroomWatch(let projectPath, let on, let topic):
     // Attributed like `node send` — and required like `sync`: the subscription is
     // the calling loop's, because the mail is delivered to a session, not a shell.
     let watcher = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
     guard let watcher else {
       fail(
-        "artifactory watch needs a loop identity — run it from inside a loop's session "
+        "mail watch needs a loop identity — run it from inside a loop's session "
           + "($ZMX_SESSION); the mail is delivered to the loop that watches")
     }
     try openProject(projectPath)
     try client.send(
       .graphCommand(
         projectPath: projectPath,
-        command: .artifactoryWatch(on: on, topic: topic, from: watcher)))
+        command: .mailroomWatch(on: on, topic: topic, from: watcher)))
     let watchVerdict = try client.waitForEvent { event in
       switch event {
       case .graphChanged, .errorOccurred: return true
@@ -581,7 +581,7 @@ do {
           + "and \(bundle.graphSnapshot.edges.count) edge(s) with fresh identities"
           + (resumingSessions == 0
             ? "" : "; \(resumingSessions) will resume their exported conversations"))
-      print(GraphcodeCommand.render(graph, artifactoryReader: artifactoryReader))
+      print(GraphcodeCommand.render(graph, mailroomReader: mailroomReader))
     }
   }
 } catch DaemonSocketClient.ClientError.timedOut {

@@ -153,7 +153,7 @@ struct StarterTemplateTests {
     }
   }
 
-  /// The brief at the top is about the task; the Artifactory appears in it as the
+  /// The brief at the top is about the task; the Mailroom appears in it as the
   /// team's inbox, and every command it names is one the CLI actually has.
   @Test
   func theTeamLeadingStarterNamesRealCommands() throws {
@@ -166,8 +166,8 @@ struct StarterTemplateTests {
     #expect(lead.body.hasPrefix("Goal: {goal}\n"))
     // The method in words, not a CLI transcript — the loop's own instructions carry
     // the flags. What the brief has to say is which loop type for which piece, and
-    // that the Artifactory is the inbox.
-    for phrase in ["goal loop", "timed loop", "Artifactory", "inbox", "topic", "closing note"] {
+    // that the Mailroom is the inbox.
+    for phrase in ["goal loop", "timed loop", "Mailroom", "inbox", "topic", "closing note"] {
       #expect(lead.body.contains(phrase), "missing \(phrase)")
     }
   }

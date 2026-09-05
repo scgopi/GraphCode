@@ -167,8 +167,8 @@ extension AppFeature {
       layout: layout,
       projectPath: projectPath,
       projectName: graph.project.name)
-    state.openLoop?.seenArtifactoryPostID =
-      LoopWorkspaceRail.loadSeenArtifactoryPost(forProjectPath: projectPath)
+    state.openLoop?.seenMailroomPostID =
+      LoopWorkspaceRail.loadSeenMailroomPost(forProjectPath: projectPath)
     state.selectedProjectPath = projectPath
   }
 }

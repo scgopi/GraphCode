@@ -1,5 +1,5 @@
-import ArtifactoryKit
 import Foundation
+import MailroomKit
 import Testing
 
 @testable import GraphcodeKit
@@ -230,24 +230,24 @@ extension RemoteCLIShimTests {
   private static func board() -> (LoopGraph, LoopNode) {
     var graph = LoopGraph(project: ProjectRef(path: project, name: "widget"))
     var reader = LoopNode(title: "Reader", loopType: .goalBased)
-    reader.lastArtifactoryRead = 1
+    reader.lastMailroomRead = 1
     graph.nodes.append(reader)
-    graph.artifactory = [
-      ArtifactoryPost(
+    graph.mailroom = [
+      MailroomPost(
         id: 1, at: Date(timeIntervalSince1970: 1_756_000_000), authorID: nil,
         author: "a human", topic: nil, body: "already read"),
-      ArtifactoryPost(
+      MailroomPost(
         id: 2, at: Date(timeIntervalSince1970: 1_756_003_600), authorID: UUID(),
         author: "BuildWatch", topic: "build",
         body: String(repeating: "the gate is red ", count: 12)),
-      ArtifactoryPost(
+      MailroomPost(
         id: 3, at: Date(timeIntervalSince1970: 1_756_007_200), authorID: nil,
         author: "a human", topic: nil,
         // A path and a URL on purpose: Swift's JSONEncoder escapes `/` as `\/` and
         // Python's json.dumps does not, so a fixture without one lets `--json` drift
         // apart silently. This is the body that catches it.
         body: "claiming issue #12 — see docs/281.md and https://example.test/a/b",
-        kind: .record),
+        kind: .letter),
     ]
     return (graph, reader)
   }
@@ -263,38 +263,38 @@ extension RemoteCLIShimTests {
     let session = ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"]
 
     let cases: [(arguments: [String], environment: [String: String], expected: String)] = [
-      (["artifactory", "list", Self.project], [:], GraphcodeCommand.renderArtifactory(graph)),
+      (["mailroom", "list", Self.project], [:], GraphcodeCommand.renderMailroom(graph)),
       (
-        ["artifactory", "list", Self.project, "--search", "RED"], [:],
-        GraphcodeCommand.renderArtifactory(graph, search: "RED")
+        ["mailroom", "list", Self.project, "--search", "RED"], [:],
+        GraphcodeCommand.renderMailroom(graph, search: "RED")
       ),
       (
-        ["artifactory", "list", Self.project, "--search", "nothing-matches"], [:],
-        GraphcodeCommand.renderArtifactory(graph, search: "nothing-matches")
+        ["mailroom", "list", Self.project, "--search", "nothing-matches"], [:],
+        GraphcodeCommand.renderMailroom(graph, search: "nothing-matches")
       ),
       (
-        ["artifactory", "sync", Self.project], session,
-        GraphcodeCommand.renderArtifactory(graph, unreadFor: reader.id, autoTriage: true)
+        ["mailroom", "sync", Self.project], session,
+        GraphcodeCommand.renderMailroom(graph, unreadFor: reader.id, autoTriage: true)
       ),
       (
-        ["artifactory", "sync", Self.project, "--headlines"], session,
-        GraphcodeCommand.renderArtifactory(graph, unreadFor: reader.id, headlines: true)
+        ["mailroom", "sync", Self.project, "--headlines"], session,
+        GraphcodeCommand.renderMailroom(graph, unreadFor: reader.id, headlines: true)
       ),
       (
-        ["artifactory", "sync", Self.project, "--full"], session,
-        GraphcodeCommand.renderArtifactory(graph, unreadFor: reader.id)
+        ["mailroom", "sync", Self.project, "--full"], session,
+        GraphcodeCommand.renderMailroom(graph, unreadFor: reader.id)
       ),
       (
-        ["artifactory", "read", Self.project, "2"], [:],
-        GraphcodeCommand.render(graph.artifactory[1])
+        ["mailroom", "read", Self.project, "2"], [:],
+        GraphcodeCommand.render(graph.mailroom[1])
       ),
       (
-        ["artifactory", "list", Self.project, "--json"], [:],
-        GraphcodeCommand.renderArtifactoryJSON(graph)
+        ["mailroom", "list", Self.project, "--json"], [:],
+        GraphcodeCommand.renderMailroomJSON(graph)
       ),
       (
-        ["artifactory", "sync", Self.project, "--json"], session,
-        GraphcodeCommand.renderArtifactoryJSON(graph, unreadFor: reader.id)
+        ["mailroom", "sync", Self.project, "--json"], session,
+        GraphcodeCommand.renderMailroomJSON(graph, unreadFor: reader.id)
       ),
     ]
 
@@ -313,23 +313,23 @@ extension RemoteCLIShimTests {
   func anEmptyBoardAndACaughtUpReaderRenderByteEqualToo() throws {
     var graph = LoopGraph(project: ProjectRef(path: Self.project, name: "widget"))
     var reader = LoopNode(title: "Reader", loopType: .goalBased)
-    reader.lastArtifactoryRead = 3
+    reader.lastMailroomRead = 3
     graph.nodes.append(reader)
 
-    let empty = try runShim(["artifactory", "list", Self.project], graph: graph)
-    #expect(empty.stdout == GraphcodeCommand.renderArtifactory(graph) + "\n")
+    let empty = try runShim(["mailroom", "list", Self.project], graph: graph)
+    #expect(empty.stdout == GraphcodeCommand.renderMailroom(graph) + "\n")
 
-    graph.artifactory = [
-      ArtifactoryPost(
+    graph.mailroom = [
+      MailroomPost(
         id: 3, at: Date(timeIntervalSince1970: 1_756_000_000), authorID: nil,
         author: "a human", topic: nil, body: "caught up")
     ]
     let synced = try runShim(
-      ["artifactory", "sync", Self.project],
+      ["mailroom", "sync", Self.project],
       environment: ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"], graph: graph)
     #expect(
       synced.stdout
-        == GraphcodeCommand.renderArtifactory(graph, unreadFor: reader.id, autoTriage: true) + "\n")
+        == GraphcodeCommand.renderMailroom(graph, unreadFor: reader.id, autoTriage: true) + "\n")
     #expect(synced.stdout == "no unread posts\n")
   }
 
@@ -339,8 +339,8 @@ extension RemoteCLIShimTests {
   @Test
   func theStampConvertsFromFoundationsReferenceDate() throws {
     let (graph, _) = Self.board()
-    let stamp = ArtifactoryPost.stampFormat.string(from: graph.artifactory[0].at)
-    let run = try runShim(["artifactory", "read", Self.project, "1"], graph: graph)
+    let stamp = MailroomPost.stampFormat.string(from: graph.mailroom[0].at)
+    let run = try runShim(["mailroom", "read", Self.project, "1"], graph: graph)
     #expect(run.stdout == "#1 from a human at \(stamp) — already read\n")
 
     // The stamp cannot carry the whole guard on its own. `MMM d, HH:mm` has no year,
@@ -348,12 +348,12 @@ extension RemoteCLIShimTests {
     // years across this span's eight leap days — so dropping it entirely renders the
     // *identical* stamp, "Aug 23, 18:46" either way. The year rides `--json`'s
     // ISO-8601 instead, where the same mistake cannot hide.
-    let json = try runShim(["artifactory", "list", Self.project, "--json"], graph: graph)
+    let json = try runShim(["mailroom", "list", Self.project, "--json"], graph: graph)
     #expect(json.stdout.contains("\"at\":\"2025-08-24T01:46:40Z\""))
     #expect(!json.stdout.contains("\"at\":\"1994-"))
   }
 
-  /// The triage boundary, both halves of it: `Artifactory.needsTriage` is more than 12
+  /// The triage boundary, both halves of it: `Mailroom.needsTriage` is more than 12
   /// posts *or* more than 4096 bytes of body, and a sync that trips either one prints
   /// headlines and says so. Off-by-one here silently truncates a board a loop was told
   /// it had read in full.
@@ -364,8 +364,8 @@ extension RemoteCLIShimTests {
       let reader = LoopNode(title: "Reader", loopType: .goalBased)
       graph.nodes.append(reader)
       let each = bodyBytes / posts
-      graph.artifactory = (1...posts).map { index in
-        ArtifactoryPost(
+      graph.mailroom = (1...posts).map { index in
+        MailroomPost(
           id: index, at: Date(timeIntervalSince1970: 1_756_000_000 + Double(index)),
           authorID: nil, author: "a human", topic: nil,
           body: String(
@@ -373,11 +373,11 @@ extension RemoteCLIShimTests {
         )
       }
       let run = try runShim(
-        ["artifactory", "sync", Self.project],
+        ["mailroom", "sync", Self.project],
         environment: ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"], graph: graph)
       return (
         run.stdout,
-        GraphcodeCommand.renderArtifactory(graph, unreadFor: reader.id, autoTriage: true) + "\n"
+        GraphcodeCommand.renderMailroom(graph, unreadFor: reader.id, autoTriage: true) + "\n"
       )
     }
 
@@ -411,15 +411,15 @@ extension RemoteCLIShimTests {
       ["status", Self.project],
       environment: ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"], graph: graph)
     let readerLine = try #require(
-      GraphcodeCommand.renderArtifactoryStatusLine(graph, readerID: reader.id))
-    #expect(readerLine == "artifactory: 3 posts, 2 unread for you")
+      GraphcodeCommand.renderMailroomStatusLine(graph, readerID: reader.id))
+    #expect(readerLine == "mailroom: 3 posts, 2 unread for you")
     #expect(asReader.stdout.hasSuffix("  " + readerLine + "\n"))
 
     // A human shell, and a loop this graph has never heard of, both get the plain
     // count — the daemon would refuse a cursor for either.
     let asHuman = try runShim(["status", Self.project], graph: graph)
-    let plain = try #require(GraphcodeCommand.renderArtifactoryStatusLine(graph))
-    #expect(plain == "artifactory: 3 posts")
+    let plain = try #require(GraphcodeCommand.renderMailroomStatusLine(graph))
+    #expect(plain == "mailroom: 3 posts")
     #expect(asHuman.stdout.hasSuffix("  " + plain + "\n"))
 
     let asStranger = try runShim(
@@ -431,7 +431,7 @@ extension RemoteCLIShimTests {
     let untouched = try runShim(
       ["status", Self.project],
       graph: LoopGraph(project: ProjectRef(path: Self.project, name: "widget")))
-    #expect(!untouched.stdout.contains("artifactory"))
+    #expect(!untouched.stdout.contains("mailroom"))
   }
 
   @Test
@@ -440,7 +440,7 @@ extension RemoteCLIShimTests {
     let session = ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"]
 
     let posted = try runShim(
-      ["artifactory", "post", Self.project, "--topic", "claims", "issue", "#12", "is", "mine"],
+      ["mailroom", "post", Self.project, "--topic", "claims", "issue", "#12", "is", "mine"],
       environment: session, graph: graph)
     #expect(posted.status == 0)
     #expect(posted.stdout == GraphcodeCommand.renderPosted(graph) + "\n")
@@ -448,43 +448,43 @@ extension RemoteCLIShimTests {
       posted.commands.dropFirst().first
         == .graphCommand(
           projectPath: Self.project,
-          command: .artifactoryPost(text: "issue #12 is mine", topic: "claims", from: reader.id)))
+          command: .mailroomPost(text: "issue #12 is mine", topic: "claims", from: reader.id)))
 
     // A human's post is unattributed, exactly as `node send` from a shell is.
     let byHuman = try runShim(
-      ["artifactory", "post", Self.project, "the", "board", "is", "for", "everyone"], graph: graph)
+      ["mailroom", "post", Self.project, "the", "board", "is", "for", "everyone"], graph: graph)
     #expect(
       byHuman.commands.dropFirst().first
         == .graphCommand(
           projectPath: Self.project,
-          command: .artifactoryPost(
+          command: .mailroomPost(
             text: "the board is for everyone", topic: nil, from: nil)))
 
     let synced = try runShim(
-      ["artifactory", "sync", Self.project, "--mark"], environment: session, graph: graph)
+      ["mailroom", "sync", Self.project, "--mark"], environment: session, graph: graph)
     #expect(synced.stdout == "marked read up to #3\n")
     #expect(
       synced.commands.dropFirst().first
-        == .graphCommand(projectPath: Self.project, command: .artifactorySync(from: reader.id)))
+        == .graphCommand(projectPath: Self.project, command: .mailroomInbox(from: reader.id)))
 
     let watching = try runShim(
-      ["artifactory", "watch", Self.project, "--topic", "build"], environment: session,
+      ["mailroom", "watch", Self.project, "--topic", "build"], environment: session,
       graph: graph)
     #expect(watching.stdout.hasPrefix("watching 'build' —"))
     #expect(
       watching.commands.dropFirst().first
         == .graphCommand(
           projectPath: Self.project,
-          command: .artifactoryWatch(on: true, topic: "build", from: reader.id)))
+          command: .mailroomWatch(on: true, topic: "build", from: reader.id)))
 
     let unwatching = try runShim(
-      ["artifactory", "watch", Self.project, "--off"], environment: session, graph: graph)
+      ["mailroom", "watch", Self.project, "--off"], environment: session, graph: graph)
     #expect(unwatching.stdout == "stopped watching\n")
     #expect(
       unwatching.commands.dropFirst().first
         == .graphCommand(
           projectPath: Self.project,
-          command: .artifactoryWatch(on: false, topic: nil, from: reader.id)))
+          command: .mailroomWatch(on: false, topic: nil, from: reader.id)))
   }
 
   /// Swift measures a headline in extended grapheme clusters and Python in code points,
@@ -509,8 +509,8 @@ extension RemoteCLIShimTests {
 
     for (index, body) in bodies.enumerated() {
       var graph = LoopGraph(project: ProjectRef(path: Self.project, name: "widget"))
-      graph.artifactory = [
-        ArtifactoryPost(
+      graph.mailroom = [
+        MailroomPost(
           id: 1, at: Date(timeIntervalSince1970: 1_756_000_000), authorID: nil,
           author: "a human", topic: nil, body: body)
       ]
@@ -518,9 +518,9 @@ extension RemoteCLIShimTests {
       graph.nodes.append(reader)
 
       let run = try runShim(
-        ["artifactory", "sync", Self.project, "--headlines"],
+        ["mailroom", "sync", Self.project, "--headlines"],
         environment: ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"], graph: graph)
-      let expected = GraphcodeCommand.renderArtifactory(
+      let expected = GraphcodeCommand.renderMailroom(
         graph, unreadFor: reader.id, headlines: true)
       #expect(run.stdout == expected + "\n", "body \(index) cut differently")
     }
@@ -533,11 +533,11 @@ extension RemoteCLIShimTests {
   @Test
   func searchMatchesCanonicallyEquivalentTextAsSwiftDoes() throws {
     var graph = LoopGraph(project: ProjectRef(path: Self.project, name: "widget"))
-    graph.artifactory = [
-      ArtifactoryPost(
+    graph.mailroom = [
+      MailroomPost(
         id: 1, at: Date(timeIntervalSince1970: 1_756_000_000), authorID: nil,
         author: "a human", topic: nil, body: "shipped the e\u{0301}clair build"),
-      ArtifactoryPost(
+      MailroomPost(
         id: 2, at: Date(timeIntervalSince1970: 1_756_003_600), authorID: nil,
         author: "Ame\u{0301}lie", topic: "cafe\u{0301}", body: "unrelated"),
     ]
@@ -545,20 +545,20 @@ extension RemoteCLIShimTests {
     // Precomposed needles against decomposed body, author and topic — and the reverse.
     for needle in ["éclair", "e\u{0301}clair", "Amélie", "café", "ÉCLAIR"] {
       let run = try runShim(
-        ["artifactory", "list", Self.project, "--search", needle], graph: graph)
-      let expected = GraphcodeCommand.renderArtifactory(graph, search: needle)
+        ["mailroom", "list", Self.project, "--search", needle], graph: graph)
+      let expected = GraphcodeCommand.renderMailroom(graph, search: needle)
       #expect(run.stdout == expected + "\n", "search '\(needle)' diverged")
       #expect(!expected.hasPrefix("no posts match"), "fixture no longer exercises a match")
     }
   }
 
-  /// The parser's remaining shape, matched to `parseArtifactory`: a `--flag` is never a
+  /// The parser's remaining shape, matched to `parseMailroom`: a `--flag` is never a
   /// project path, and a topic is an Optional rather than a truthiness test — the empty
   /// topic the daemon refuses today still has to render the way Swift renders it, or
   /// this is a second rule the renderer would need re-auditing against if that moved.
   @Test
   func theParserAndTheEmptyTopicMatchTheSwiftCLIsShape() throws {
-    let missingPath = try runShim(["artifactory", "list", "--json"])
+    let missingPath = try runShim(["mailroom", "list", "--json"])
     #expect(missingPath.status == 1)
     #expect(missingPath.stderr.contains("missing project-path"))
     // Refused before the dial, so the daemon is never asked to open a project called
@@ -566,17 +566,17 @@ extension RemoteCLIShimTests {
     #expect(missingPath.commands.isEmpty)
 
     var graph = LoopGraph(project: ProjectRef(path: Self.project, name: "widget"))
-    graph.artifactory = [
-      ArtifactoryPost(
+    graph.mailroom = [
+      MailroomPost(
         id: 5, at: Date(timeIntervalSince1970: 1_756_000_000), authorID: nil,
         author: "a human", topic: "", body: "a topic that is present but empty")
     ]
-    let run = try runShim(["artifactory", "read", Self.project, "5"], graph: graph)
-    #expect(run.stdout == GraphcodeCommand.render(graph.artifactory[0]) + "\n")
+    let run = try runShim(["mailroom", "read", Self.project, "5"], graph: graph)
+    #expect(run.stdout == GraphcodeCommand.render(graph.mailroom[0]) + "\n")
     #expect(run.stdout.contains("#5 () from a human"))
 
     let posted = try runShim(
-      ["artifactory", "post", Self.project, "anything"], graph: graph)
+      ["mailroom", "post", Self.project, "anything"], graph: graph)
     #expect(posted.stdout == GraphcodeCommand.renderPosted(graph) + "\n")
     #expect(posted.stdout == "posted #5 ()\n")
   }
@@ -587,7 +587,7 @@ extension RemoteCLIShimTests {
   func readAndListSendNoCommandPastTheOpen() throws {
     let (graph, _) = Self.board()
     for arguments in [
-      ["artifactory", "read", Self.project, "3"], ["artifactory", "list", Self.project],
+      ["mailroom", "read", Self.project, "3"], ["mailroom", "list", Self.project],
     ] {
       let run = try runShim(arguments, graph: graph)
       #expect(run.status == 0)
@@ -596,34 +596,42 @@ extension RemoteCLIShimTests {
   }
 
   /// The cursor verbs refuse a human shell up front, in the Swift CLI's own wording,
-  /// rather than after a round trip — and `artifactory` no longer falls through to the
+  /// rather than after a round trip — and `mailroom` no longer falls through to the
   /// "Mac-only" refusal that made every verb on this list exit 1.
   @Test
-  func theCursorVerbsNeedALoopIdentityAndArtifactoryIsNoLongerMacOnly() throws {
-    let sync = try runShim(["artifactory", "sync", Self.project])
+  func theCursorVerbsNeedALoopIdentityAndMailroomIsNoLongerMacOnly() throws {
+    let sync = try runShim(["mailroom", "sync", Self.project])
     #expect(sync.status == 1)
-    #expect(sync.stderr.contains("artifactory sync needs a loop identity"))
-    #expect(sync.stderr.contains("graphcode artifactory list"))
+    #expect(sync.stderr.contains("mail inbox needs a loop identity"))
+    #expect(sync.stderr.contains("graphcode mail list"))
 
-    let watch = try runShim(["artifactory", "watch", Self.project])
+    let watch = try runShim(["mailroom", "watch", Self.project])
     #expect(watch.status == 1)
-    #expect(watch.stderr.contains("artifactory watch needs a loop identity"))
+    #expect(watch.stderr.contains("mail watch needs a loop identity"))
     #expect(watch.stderr.contains("the mail is delivered to the loop that watches"))
 
     // Neither reached the daemon, so nothing was applied and nothing needs undoing.
     #expect(sync.commands.isEmpty)
     #expect(watch.commands.isEmpty)
 
-    for verb in ["post", "sync", "read", "list", "watch"] {
-      let run = try runShim(["artifactory", verb])
-      #expect(!run.stderr.contains("Mac-only"), "artifactory \(verb) still refused as Mac-only")
+    for verb in ["post", "inbox", "sync", "read", "list", "watch"] {
+      let run = try runShim(["mail", verb])
+      #expect(!run.stderr.contains("Mac-only"), "mail \(verb) still refused as Mac-only")
+    }
+    // The pre-rename spellings still reach the same parser: loops relaunched with a
+    // briefing written before the rename type `artifactory sync`, and must not be told
+    // the verb is Mac-only.
+    for verb in ["mailroom", "artifactory"] {
+      let run = try runShim([verb, "sync"])
+      #expect(!run.stderr.contains("Mac-only"), "\(verb) sync still refused as Mac-only")
+      #expect(!run.stderr.contains("unknown"), "\(verb) sync no longer parses")
     }
     // A subcommand that genuinely does not exist says so as the Swift CLI does.
-    let bogus = try runShim(["artifactory", "resolve", Self.project])
+    let bogus = try runShim(["mailroom", "resolve", Self.project])
     #expect(bogus.status == 1)
-    #expect(bogus.stderr.contains("unknown command: artifactory resolve"))
+    #expect(bogus.stderr.contains("unknown command: mail resolve"))
     // And a mistyped flag is refused rather than silently ignored.
-    let mistyped = try runShim(["artifactory", "list", Self.project, "--serach", "red"])
+    let mistyped = try runShim(["mailroom", "list", Self.project, "--serach", "red"])
     #expect(mistyped.status == 1)
     #expect(mistyped.stderr.contains("unknown option: --serach"))
   }
@@ -631,12 +639,12 @@ extension RemoteCLIShimTests {
   @Test
   func readNamesTheIdsThatExistWhenThePostIsGone() throws {
     let (graph, _) = Self.board()
-    let missing = try runShim(["artifactory", "read", Self.project, "99"], graph: graph)
+    let missing = try runShim(["mailroom", "read", Self.project, "99"], graph: graph)
     #expect(missing.status == 1)
     #expect(missing.stderr.contains("no post #99 on this board"))
-    #expect(missing.stderr.contains("graphcode artifactory list"))
+    #expect(missing.stderr.contains("graphcode mail list"))
 
-    let negative = try runShim(["artifactory", "read", Self.project, "-7"], graph: graph)
+    let negative = try runShim(["mailroom", "read", Self.project, "-7"], graph: graph)
     #expect(negative.status == 1)
     #expect(negative.stderr.contains("invalid value for post-id: -7"))
     #expect(negative.commands.isEmpty)
@@ -644,12 +652,12 @@ extension RemoteCLIShimTests {
 
   @Test
   func theHelpTextTeachesEveryVerbTheBriefingDoes() throws {
-    let help = try runShim(["artifactory", "--help"])
+    let help = try runShim(["mailroom", "--help"])
     #expect(help.status == 0)
-    for verb in ["post", "sync", "read", "list", "watch"] {
-      #expect(help.stdout.contains("graphcode artifactory \(verb) "))
+    for verb in ["post", "inbox", "read", "list", "watch"] {
+      #expect(help.stdout.contains("graphcode mail \(verb) "))
     }
     // The shim's own honesty rule: nothing it implements may sit on the Mac-only list.
-    #expect(!help.stdout.contains("(update, pilot, arm, edge, usage, artifactory)"))
+    #expect(!help.stdout.contains("(update, pilot, arm, edge, usage, mailroom)"))
   }
 }

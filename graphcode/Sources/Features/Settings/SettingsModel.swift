@@ -16,11 +16,11 @@ import Observation
 final class SettingsModel {
   static let shared = SettingsModel()
 
-  /// The user's explicit Artifactory flip, kept apart from `settings` on purpose: the
+  /// The user's explicit Mailroom flip, kept apart from `settings` on purpose: the
   /// ramp decides what an install that has never chosen boots on, but once a human
   /// has flipped the switch the ramp never overrides them — the way `updateChannel`
   /// does for updates.
-  static let artifactoryChoiceDefaultsKey = "artifactoryChoice"
+  static let mailroomChoiceDefaultsKey = "mailroomChoice"
 
   var settings: GraphcodeSettings {
     didSet {
@@ -39,33 +39,33 @@ final class SettingsModel {
     }
   }
 
-  /// The Artifactory as a switch, following `betaUpdates`' shape — but the daemon
-  /// enforces this one, so a flip writes `artifactoryEnabled` into `settings` (which
+  /// The Mailroom as a switch, following `betaUpdates`' shape — but the daemon
+  /// enforces this one, so a flip writes `mailroomEnabled` into `settings` (which
   /// saves the file the daemon reads) *and* records the explicit choice that then
   /// outranks the ramp for good.
-  var artifactoryEnabled: Bool {
+  var mailroomEnabled: Bool {
     didSet {
-      UserDefaults.standard.set(artifactoryEnabled, forKey: Self.artifactoryChoiceDefaultsKey)
-      settings.artifactoryEnabled = artifactoryEnabled
+      UserDefaults.standard.set(mailroomEnabled, forKey: Self.mailroomChoiceDefaultsKey)
+      settings.mailroomEnabled = mailroomEnabled
     }
   }
 
   private init() {
     let loaded = GraphcodeSettingsStore.load()
-    let artifactory = Self.resolvesArtifactory(
-      loaded: loaded.artifactoryEnabled,
+    let mailroom = Self.resolvesMailroom(
+      loaded: loaded.mailroomEnabled,
       explicitChoice:
-        UserDefaults.standard.object(forKey: Self.artifactoryChoiceDefaultsKey) as? Bool,
-      rampedOn: FeatureRamps.isEnabled(.artifactory))
+        UserDefaults.standard.object(forKey: Self.mailroomChoiceDefaultsKey) as? Bool,
+      rampedOn: FeatureRamps.isEnabled(.mailroom))
     var booted = loaded
-    booted.artifactoryEnabled = artifactory.enabled
+    booted.mailroomEnabled = mailroom.enabled
     settings = booted
     // The assignment above is this property's initial value, so no observer ran: the
     // ramp-resolved bit is saved by hand, and only when it differs from the file.
-    if artifactory.fileNeedsWrite {
+    if mailroom.fileNeedsWrite {
       GraphcodeSettingsStore.save(booted)
     }
-    artifactoryEnabled = artifactory.enabled
+    mailroomEnabled = mailroom.enabled
     let version =
       Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
     betaUpdates =
@@ -74,24 +74,24 @@ final class SettingsModel {
       == .beta
   }
 
-  /// The Artifactory's boot decision, separated so tests can pin it without touching
+  /// The Mailroom's boot decision, separated so tests can pin it without touching
   /// `UserDefaults`, the settings file, or the bundle.
   ///
   /// An install that has never chosen boots on the ramp's answer — on everywhere since
   /// the board shipped, with `ramps.json` kept as the kill switch — and that answer has
   /// to reach `~/.graphcode/settings.json` when it differs, because the daemon enforces
-  /// `artifactoryEnabled` out of the file and cannot see ramps or `UserDefaults`. A
+  /// `mailroomEnabled` out of the file and cannot see ramps or `UserDefaults`. A
   /// recorded choice outranks the ramp from then on. The switch itself is always
   /// offered: it is a setting now, not a beta gate, and a person who finds the board
   /// too much turns it off here. Rewriting a file that already agrees is churn.
-  static func resolvesArtifactory(
+  static func resolvesMailroom(
     loaded: Bool, explicitChoice: Bool?, rampedOn: Bool
-  ) -> ArtifactoryResolution {
+  ) -> MailroomResolution {
     let enabled = explicitChoice ?? rampedOn
-    return ArtifactoryResolution(enabled: enabled, fileNeedsWrite: enabled != loaded)
+    return MailroomResolution(enabled: enabled, fileNeedsWrite: enabled != loaded)
   }
 
-  struct ArtifactoryResolution: Equatable {
+  struct MailroomResolution: Equatable {
     var enabled: Bool
     var fileNeedsWrite: Bool
   }

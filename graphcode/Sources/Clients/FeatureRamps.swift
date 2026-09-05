@@ -23,7 +23,17 @@ enum FeatureRamps {
 
   enum Feature: String {
     case codespaces
-    case artifactory
+    case mailroom
+
+    /// The key this feature shipped under before it was renamed. ramps.json is fetched
+    /// from graphcode.app, so a build that knew only the new spelling would stop seeing
+    /// the kill switch the moment it shipped ahead of the deployed file.
+    var legacyRawValue: String? {
+      switch self {
+      case .codespaces: return nil
+      case .mailroom: return "artifactory"
+      }
+    }
 
     /// What answers when no ramps.json has ever been fetched (and when the fetch
     /// fails). Kept in step with the *shipped* ramp state: a feature ramped fully on
@@ -32,7 +42,7 @@ enum FeatureRamps {
     var defaultPercents: [String: Int] {
       switch self {
       case .codespaces: return ["beta": 100, "stable": 100]
-      case .artifactory: return ["beta": 100, "stable": 100]
+      case .mailroom: return ["beta": 100, "stable": 100]
       }
     }
   }
@@ -59,7 +69,10 @@ enum FeatureRamps {
   static func isEnabled(
     _ feature: Feature, configuration: Configuration?, channel: String, installID: String
   ) -> Bool {
-    let percents = configuration?.features[feature.rawValue] ?? feature.defaultPercents
+    let percents =
+      configuration?.features[feature.rawValue]
+      ?? feature.legacyRawValue.flatMap { configuration?.features[$0] }
+      ?? feature.defaultPercents
     let percent = percents[channel] ?? feature.defaultPercents[channel] ?? 0
     return bucket(installID: installID) < percent
   }

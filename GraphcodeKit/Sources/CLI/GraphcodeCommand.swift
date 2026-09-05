@@ -1,5 +1,5 @@
-import ArtifactoryKit
 import Foundation
+import MailroomKit
 
 /// Argument parsing and output formatting for the `graphcode` CLI
 /// (docs/03-architecture.md#cli-graphcode).
@@ -48,28 +48,28 @@ public enum GraphcodeCommand: Equatable, Sendable {
   case exportNode(projectPath: String, nodeID: UUID, output: String, includeChildren: Bool = false)
   case exportGraph(projectPath: String, output: String)
   case importNodes(projectPath: String, fromZip: String, asChildOf: UUID? = nil)
-  /// The Artifactory verbs (docs/03-architecture.md#cli-graphcode): the shared,
+  /// The Mailroom verbs (docs/03-architecture.md#cli-graphcode): the shared,
   /// unaddressed board any loop can write to and read. Attribution is not parsed —
   /// like `sendMessage`, the sender comes from `ZMX_SESSION` at execution.
-  case artifactoryPost(projectPath: String, topic: String?, text: String)
+  case mailroomPost(projectPath: String, topic: String?, text: String)
   /// Read unread, then mark the board read — the cursor belongs to the calling loop,
   /// so this verb only means anything run from inside a session. `--headlines` prints
   /// one triage line per unread post instead of full bodies (pair it with `read`);
   /// `--mark` advances the cursor without printing the backlog ("start me from now");
   /// `--json` emits the unread posts machine-readably; `--full` insists on every body
   /// where the verb would otherwise triage a large backlog down to headlines itself.
-  case artifactorySync(
+  case mailroomInbox(
     projectPath: String, headlines: Bool, mark: Bool, json: Bool, full: Bool)
   /// One post in full, by id — the deep-read half of `sync --headlines` triage.
   /// Read-only: the post is in the snapshot, no command reaches the daemon.
-  case artifactoryRead(projectPath: String, postID: Int)
+  case mailroomRead(projectPath: String, postID: Int)
   /// The whole board, read-only: no command reaches the daemon, no cursor moves.
   /// `--search` filters by substring across author/topic/body; `--json` emits the
   /// board machine-readably.
-  case artifactoryList(projectPath: String, search: String?, json: Bool)
+  case mailroomList(projectPath: String, search: String?, json: Bool)
   /// Subscribe (`on: true`, `--topic` filters) or unsubscribe (`--off`) the calling
   /// loop; like `sync`, the subscription belongs to a loop, not a shell.
-  case artifactoryWatch(projectPath: String, on: Bool, topic: String?)
+  case mailroomWatch(projectPath: String, on: Bool, topic: String?)
 
   public enum ParseError: Error, Equatable {
     case unknownCommand(String)
@@ -101,10 +101,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode node pilot <project-path> <node-id>     dry-run a composite
       graphcode node arm <project-path> <node-id>       arm it (needs a pilot first)
       graphcode edge create <project-path> <from-id> <to-id> [--kind <k>] [--condition <c>]
-      graphcode artifactory post <project-path> [--topic <t>] <note…>
-                           leave a note on the shared board for whoever comes next
-      graphcode artifactory sync <project-path> [--headlines] [--full] [--mark] [--json]
-                           read your unread posts and mark the board read. A large
+      graphcode mail post <project-path> [--topic <t>] <notice…>
+                           post a notice to the whole graph, for whoever comes next
+      graphcode mail inbox <project-path> [--headlines] [--full] [--mark] [--json]
+                           read your unread mail and mark the room read. A large
                            backlog prints as headlines on its own and says so —
                            --full insists on every body, --headlines insists on
                            triage lines (deep-read either with `read`). --mark
@@ -112,12 +112,12 @@ public enum GraphcodeCommand: Equatable, Sendable {
                            the machine-readable shape. Combined, the output wins in the
                            order --json > --mark > --headlines > --full; the cursor
                            advances whichever flags you pass
-      graphcode artifactory read <project-path> <post-id>
+      graphcode mail read <project-path> <post-id>
                            one post in full — the deep-read half of --headlines
-      graphcode artifactory list <project-path> [--search <text>] [--json]
-                           the whole board, read-only — no cursor moves; --search
+      graphcode mail list <project-path> [--search <text>] [--json]
+                           the whole room, read-only — no cursor moves; --search
                            filters by substring across author, topic and body
-      graphcode artifactory watch <project-path> [--topic <t>] [--off]
+      graphcode mail watch <project-path> [--topic <t>] [--off]
                            have matching posts typed into this loop's session as they
                            land; --off stops watching
       graphcode usage <project-path>
@@ -227,19 +227,19 @@ public enum GraphcodeCommand: Equatable, Sendable {
       --into <path>        spawn into a different project (--kind spawn only); this is
                            how the global graph dispatches work into a project
 
-    ARTIFACTORY
+    MAILROOM
       The shared, unaddressed board: `node send` reaches one peer you already know;
-      an Artifactory post is a note for whoever comes next, discoverable by loops that
-      did not exist when it was written. Run from inside a loop, posts are attributed
-      to that loop (`ZMX_SESSION`, the same mechanism as `node send`); from a human's
-      shell they read as from "a human". `sync` and `watch` need that loop identity —
-      the read cursor and the subscription belong to a loop — so a human reads the
-      board with `list`. A post is a note to a peer, not a transcript: 1 KB bound,
-      and `--topic <t>` groups a thread (a watcher of a topic only hears matching
-      posts; watched posts are delivered like a --follow-up message). Note that the
-      mirrored `direct` and `handoff` records never ring watchers — they are the
-      board's record of traffic that already had its own delivery, so a watch on
-      those topics alone stays silent.
+      a notice is addressed to nobody, left for whoever comes next and found by loops
+      that did not exist when it was written. Run from inside a loop, posts are
+      attributed to that loop (`ZMX_SESSION`, the same mechanism as `node send`); from
+      a human's shell they read as from "a human". `inbox` and `watch` need that loop
+      identity — the read cursor and the subscription belong to a loop — so a human
+      reads the room with `list`. A notice is a note to a peer, not a transcript: 1 KB
+      bound, and `--topic <t>` groups a thread (a watcher of a topic only hears
+      matching posts; watched posts are delivered like a --follow-up message). The
+      letters copied from `direct` and `handoff` traffic never ring watchers — they
+      are the room's copy of something that already had its own delivery, so a watch
+      on those topics alone stays silent.
     EXIT CODES
       0   done
       1   bad usage, or graphcoded refused the command
@@ -255,9 +255,9 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode status <project-path>
       graphcode node send <project-path> <node-id> --follow-up <message…>
                            stage work without interrupting an active turn
-      graphcode artifactory sync <project-path>
+      graphcode mail inbox <project-path>
                            check what other loops left for you before starting a pass
-      graphcode artifactory post <project-path> --topic claims issue #12 is mine
+      graphcode mail post <project-path> --topic claims issue #12 is mine
                            stake a claim where every loop will find it, addressed to no one
       graphcode node pilot <project-path> <composite-id>
       graphcode node arm <project-path> <composite-id>
@@ -402,8 +402,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
         throw ParseError.unknownCommand("node \(verb)")
       }
 
-    case "artifactory":
-      return try parseArtifactory(&arguments)
+    // `artifactory` is what this shipped as, and live loops carry the old verb in
+    // briefings and memory logs written before the rename. Accepted, undocumented.
+    case "mail", "mailroom", "artifactory":
+      return try parseMailroom(&arguments)
 
     case "edge":
       let verb = try take(&arguments, name: "edge subcommand")
@@ -768,7 +770,7 @@ extension GraphcodeCommand {
   /// every other subcommand takes as input — a truncated id would look tidier and be
   /// useless.
   public static func render(
-    _ graph: LoopGraph, artifactoryReader readerID: UUID? = nil
+    _ graph: LoopGraph, mailroomReader readerID: UUID? = nil
   ) -> String {
     var lines = ["\(graph.project.name)  (\(graph.aggregateState))"]
     if graph.nodes.isEmpty {
@@ -776,7 +778,7 @@ extension GraphcodeCommand {
       // The board can outlive every loop on it — human posts carry no authorID, so
       // "last loop deleted" does not mean "board empty". The line belongs on this
       // path too, not only on the rendered-below one.
-      if let boardLine = renderArtifactoryStatusLine(graph, readerID: readerID) {
+      if let boardLine = renderMailroomStatusLine(graph, readerID: readerID) {
         lines.append("  \(boardLine)")
       }
       return lines.joined(separator: "\n")
@@ -808,8 +810,8 @@ extension GraphcodeCommand {
       }
     }
     // The board rides last: one line, only when there is anything on it, so a
-    // project that never touched the Artifactory renders as it always did.
-    if let boardLine = renderArtifactoryStatusLine(graph, readerID: readerID) {
+    // project that never touched the Mailroom renders as it always did.
+    if let boardLine = renderMailroomStatusLine(graph, readerID: readerID) {
       lines.append("  \(boardLine)")
     }
     return lines.joined(separator: "\n")
@@ -847,25 +849,25 @@ extension GraphcodeCommand {
     return projects.map { "\($0.name)  \($0.path)" }.joined(separator: "\n")
   }
 
-  /// The board for a terminal. `artifactory list` prints the whole thing (`reader`
-  /// nil); `artifactory sync` passes the reading loop's id and prints only what its
-  /// cursor has not covered — the subtraction is `Artifactory.unread`, the arithmetic
+  /// The board for a terminal. `mail list` prints the whole thing (`reader`
+  /// nil); `mail inbox` passes the reading loop's id and prints only what its
+  /// cursor has not covered — the subtraction is `Mailroom.unread`, the arithmetic
   /// the daemon's cursor contract rests on, so the CLI's "unread" and the store's can
   /// never disagree. `headlines` truncates each body to a triage line's worth (the
-  /// deep read is `artifactory read <id>`); `search` keeps only posts whose author,
+  /// deep read is `mail read <id>`); `search` keeps only posts whose author,
   /// topic or body contains the text, case-insensitively — a list-side filter, never
   /// a sync-side one, because marking unread mail read without showing it is the one
   /// way this verb could lose mail.
-  public static func renderArtifactory(
+  public static func renderMailroom(
     _ graph: LoopGraph, unreadFor readerID: UUID? = nil, headlines: Bool = false,
     search: String? = nil, autoTriage: Bool = false
   ) -> String {
-    var posts: [ArtifactoryPost]
+    var posts: [MailroomPost]
     if let readerID {
-      posts = Artifactory.unread(
-        in: graph.artifactory, since: graph.nodes[id: readerID]?.lastArtifactoryRead)
+      posts = Mailroom.unread(
+        in: graph.mailroom, since: graph.nodes[id: readerID]?.lastMailroomRead)
     } else {
-      posts = graph.artifactory
+      posts = graph.mailroom
     }
     if let search, !search.isEmpty {
       let needle = search.lowercased()
@@ -881,20 +883,20 @@ extension GraphcodeCommand {
           : "no unread posts match '\(search)'"
       }
       return readerID == nil
-        ? "the board is empty — post one: graphcode artifactory post <project-path> <note…>"
+        ? "the room is empty — post one: graphcode mail post <project-path> <notice…>"
         : "no unread posts"
     }
     // `sync` asks to be triaged; `--headlines` and `--full` are the two ways to say
     // so explicitly. Announced on the line above the posts rather than silently, so a
     // loop reading a truncated board knows it is reading one.
-    let triaged = autoTriage && Artifactory.needsTriage(posts)
-    let label = readerID == nil ? "artifactory" : "artifactory, unread"
+    let triaged = autoTriage && Mailroom.needsTriage(posts)
+    let label = readerID == nil ? "mailroom" : "mailroom, unread"
     var header =
       "\(graph.project.name) \(label): \(posts.count) post\(posts.count == 1 ? "" : "s")"
     if triaged {
       header +=
         " — headlines only, that is a lot to read at once. "
-        + "Full text: graphcode artifactory read \(graph.project.path) <post-id>"
+        + "Full text: graphcode mail read \(graph.project.path) <post-id>"
     }
     var lines = [header]
     for post in posts {
@@ -903,25 +905,25 @@ extension GraphcodeCommand {
     return lines.joined(separator: "\n")
   }
 
-  /// The board as one machine-readable object — the same posts `renderArtifactory`
+  /// The board as one machine-readable object — the same posts `renderMailroom`
   /// would print (the same `search` filter included, so `--search --json` shows a
   /// filtered board, never quietly an unfiltered one), plus the reader's cursor so a
   /// client can compute unread itself. Dates are ISO-8601, pinned by test — the
   /// encoder's default (seconds since 2001) is a wire format only this process
   /// should ever have to know about.
-  public static func renderArtifactoryJSON(
+  public static func renderMailroomJSON(
     _ graph: LoopGraph, unreadFor readerID: UUID? = nil, search: String? = nil
   ) -> String {
     struct Board: Encodable {
-      var posts: [ArtifactoryPost]
+      var posts: [MailroomPost]
       var lastRead: Int?
     }
-    var posts: [ArtifactoryPost]
+    var posts: [MailroomPost]
     if let readerID {
-      posts = Artifactory.unread(
-        in: graph.artifactory, since: graph.nodes[id: readerID]?.lastArtifactoryRead)
+      posts = Mailroom.unread(
+        in: graph.mailroom, since: graph.nodes[id: readerID]?.lastMailroomRead)
     } else {
-      posts = graph.artifactory
+      posts = graph.mailroom
     }
     if let search, !search.isEmpty {
       let needle = search.lowercased()
@@ -930,7 +932,7 @@ extension GraphcodeCommand {
           || $0.topic?.lowercased().contains(needle) == true
       }
     }
-    let lastRead = readerID.flatMap { graph.nodes[id: $0]?.lastArtifactoryRead }
+    let lastRead = readerID.flatMap { graph.nodes[id: $0]?.lastMailroomRead }
     let board = Board(posts: posts, lastRead: lastRead)
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]
@@ -941,44 +943,44 @@ extension GraphcodeCommand {
 
   /// `status`'s one-line window onto the board: how many posts exist and — when the
   /// caller is a loop with a cursor here — how many are unread for it. `nil` when the
-  /// board is empty, so a project that never touched the Artifactory renders exactly
+  /// board is empty, so a project that never touched the Mailroom renders exactly
   /// as it did before this line existed. The point is cost: the briefing already sends
   /// loops to `status` before claiming or creating work, and this makes the "is there
   /// mail I should know about" check ride along for free.
-  public static func renderArtifactoryStatusLine(
+  public static func renderMailroomStatusLine(
     _ graph: LoopGraph, readerID: UUID? = nil
   ) -> String? {
-    guard !graph.artifactory.isEmpty else { return nil }
-    let total = graph.artifactory.count
+    guard !graph.mailroom.isEmpty else { return nil }
+    let total = graph.mailroom.count
     let plural = total == 1 ? "" : "s"
     // "Unread for you" needs a *you* this board knows: the daemon refuses sync for a
     // reader absent from the graph, so the status line claims no unread for one
     // either — a foreign or stale id gets the plain count, same as a human.
     guard let readerID, graph.nodes[id: readerID] != nil else {
-      return "artifactory: \(total) post\(plural)"
+      return "mailroom: \(total) post\(plural)"
     }
-    let unread = Artifactory.unread(
-      in: graph.artifactory, since: graph.nodes[id: readerID]?.lastArtifactoryRead
+    let unread = Mailroom.unread(
+      in: graph.mailroom, since: graph.nodes[id: readerID]?.lastMailroomRead
     ).count
-    return "artifactory: \(total) post\(plural), \(unread) unread for you"
+    return "mailroom: \(total) post\(plural), \(unread) unread for you"
   }
 
   /// One post, one line — the same identification the daemon's wake nudge quotes, so
   /// a loop reads a note the same way everywhere it meets one.
-  public static func render(_ post: ArtifactoryPost) -> String {
+  public static func render(_ post: MailroomPost) -> String {
     let topic = post.topic.map { " (\($0))" } ?? ""
     // `Date.formatted` has no precedent in GraphcodeKit and corelibs-foundation's
     // FormatStyle support has been uneven across the toolchains the Linux CI runs;
     // a fixed DateFormatter is the boring, portable answer.
-    let stamp = ArtifactoryPost.stampFormat.string(from: post.at)
+    let stamp = MailroomPost.stampFormat.string(from: post.at)
     return "#\(post.id)\(topic) from \(post.author) at \(stamp) — \(post.body)"
   }
 
   /// The triage line — everything `render` says about a post's identity, with the
-  /// body cut to a glance. The pair (`sync --headlines`, `artifactory read <id>`) is
+  /// body cut to a glance. The pair (`sync --headlines`, `mail read <id>`) is
   /// how a loop joining after forty messages spends forty lines instead of forty
   /// kilobytes, and deep-reads only the posts that turned out to matter.
-  public static func renderHeadline(_ post: ArtifactoryPost) -> String {
+  public static func renderHeadline(_ post: MailroomPost) -> String {
     // Bodies are single-line at the daemon (memos flatten), but this renders a
     // *rendered line*, and the one-triage-line promise survives anything.
     let full = render(post).replacingOccurrences(of: "\n", with: " ")
@@ -987,10 +989,10 @@ extension GraphcodeCommand {
     return String(full.prefix(budget)) + "…"
   }
 
-  /// `artifactory post`'s answer — the sequence number is what the author's own log and
+  /// `mail post`'s answer — the sequence number is what the author's own log and
   /// any replier's `node send` can refer to the note by.
   public static func renderPosted(_ graph: LoopGraph) -> String {
-    guard let post = graph.artifactory.last else { return "posted" }
+    guard let post = graph.mailroom.last else { return "posted" }
     let topic = post.topic.map { " (\($0))" } ?? ""
     return "posted #\(post.id)\(topic)"
   }
@@ -1094,14 +1096,14 @@ extension GraphcodeCommand {
     return .importNodes(projectPath: projectPath, fromZip: zipPath, asChildOf: asChildOf)
   }
 
-  /// The `artifactory` verbs' parsing, split from `parseVerb` the way export/import
+  /// The `mailroom` verbs' parsing, split from `parseVerb` the way export/import
   /// were. The note is joined argv words — the `node send`/`node memo` bargain, so
-  /// `graphcode artifactory post <path> --topic claims issue #12 is mine` needs no
+  /// `graphcode mail post <path> --topic claims issue #12 is mine` needs no
   /// quoting gymnastics — with `--topic <t>` riding along in either position.
-  fileprivate static func parseArtifactory(
+  fileprivate static func parseMailroom(
     _ arguments: inout [String]
   ) throws -> GraphcodeCommand {
-    let verb = try take(&arguments, name: "artifactory subcommand")
+    let verb = try take(&arguments, name: "mailroom subcommand")
     let path = try take(&arguments, name: "project-path")
     if arguments.contains(where: isHelpFlag) { throw HelpRequested() }
     switch verb {
@@ -1117,12 +1119,13 @@ extension GraphcodeCommand {
       }
       let text = words.joined(separator: " ").trimmingCharacters(in: .whitespaces)
       guard !text.isEmpty else { throw ParseError.missingArgument("note") }
-      return .artifactoryPost(projectPath: path, topic: flags["topic"], text: text)
+      return .mailroomPost(projectPath: path, topic: flags["topic"], text: text)
 
-    case "sync":
+    // `sync` is the pre-rename spelling, kept for the same reason the verb itself is.
+    case "inbox", "sync":
       try validateFlags(arguments, allowed: ["headlines", "mark", "json", "full"])
       let flags = parseFlags(arguments)
-      return .artifactorySync(
+      return .mailroomInbox(
         projectPath: path, headlines: flags["headlines"] != nil, mark: flags["mark"] != nil,
         json: flags["json"] != nil, full: flags["full"] != nil)
 
@@ -1134,21 +1137,21 @@ extension GraphcodeCommand {
       guard let postID = Int(raw), postID >= 1 else {
         throw ParseError.invalidValue(argument: "post-id", value: raw)
       }
-      return .artifactoryRead(projectPath: path, postID: postID)
+      return .mailroomRead(projectPath: path, postID: postID)
 
     case "list":
       try validateFlags(arguments, allowed: ["search", "json"])
       let flags = parseFlags(arguments)
-      return .artifactoryList(
+      return .mailroomList(
         projectPath: path, search: flags["search"], json: flags["json"] != nil)
 
     case "watch":
       try validateFlags(arguments, allowed: ["topic", "off"])
       let flags = parseFlags(arguments)
-      return .artifactoryWatch(projectPath: path, on: flags["off"] == nil, topic: flags["topic"])
+      return .mailroomWatch(projectPath: path, on: flags["off"] == nil, topic: flags["topic"])
 
     default:
-      throw ParseError.unknownCommand("artifactory \(verb)")
+      throw ParseError.unknownCommand("mailroom \(verb)")
     }
   }
 }

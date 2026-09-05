@@ -1,15 +1,15 @@
-import ArtifactoryKit
 import ComposableArchitecture
 import Foundation
 import GraphcodeKit
+import MailroomKit
 import Testing
 
 @testable import graphcode
 
-/// `SINCE YOU LOOKED` in the rail's ARTIFACTORY section is about the person at the
+/// `SINCE YOU LOOKED` in the rail's MAILROOM section is about the person at the
 /// screen, exactly as it is two sections up — never the loop's own sync cursor.
 @Suite
-struct ArtifactorySinceYouLookedTests {
+struct MailroomSinceYouLookedTests {
   private let projectPath = "/tmp/since-you-looked-\(UUID().uuidString)"
 
   private func makeStore(
@@ -20,7 +20,7 @@ struct ArtifactorySinceYouLookedTests {
       node: node, graph: graph, layout: .defaultLayout(forNode: node.id),
       projectPath: projectPath, projectName: "p")
     state.isRailVisible = railVisible
-    state.isArtifactoryFolded = folded
+    state.isMailroomFolded = folded
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
     let store = TestStore(initialState: state) {
@@ -34,10 +34,10 @@ struct ArtifactorySinceYouLookedTests {
 
   private func makeGraph(noteIDs: [Int], loopCursor: Int?) -> LoopGraph {
     var graph = LoopGraph(project: ProjectRef(path: projectPath, name: "p"))
-    graph.nodes.append(LoopNode(title: "Worker", lastArtifactoryRead: loopCursor))
+    graph.nodes.append(LoopNode(title: "Worker", lastMailroomRead: loopCursor))
     for id in noteIDs {
-      graph.artifactory.append(
-        ArtifactoryPost(
+      graph.mailroom.append(
+        MailroomPost(
           id: id, at: Date(), authorID: nil, author: "a human", topic: nil, body: "n\(id)"))
     }
     return graph
@@ -47,9 +47,9 @@ struct ArtifactorySinceYouLookedTests {
   @Test
   func unreadIsTheHumansNotTheLoops() {
     let graph = makeGraph(noteIDs: [1, 2, 3], loopCursor: 3)
-    #expect(ArtifactoryPresentation.unreadNoteCount(graph: graph, seenPostID: nil) == 3)
-    #expect(ArtifactoryPresentation.unreadNoteCount(graph: graph, seenPostID: 2) == 1)
-    #expect(ArtifactoryPresentation.unreadNoteCount(graph: graph, seenPostID: 3) == 0)
+    #expect(MailroomPresentation.unreadNoticeCount(graph: graph, seenPostID: nil) == 3)
+    #expect(MailroomPresentation.unreadNoticeCount(graph: graph, seenPostID: 2) == 1)
+    #expect(MailroomPresentation.unreadNoticeCount(graph: graph, seenPostID: 3) == 0)
   }
 
   @Test
@@ -59,8 +59,8 @@ struct ArtifactorySinceYouLookedTests {
 
     await store.send(.workspaceLeft)
 
-    #expect(store.state.seenArtifactoryPostID == 3)
-    #expect(LoopWorkspaceRail.loadSeenArtifactoryPost(forProjectPath: projectPath) == 3)
+    #expect(store.state.seenMailroomPostID == 3)
+    #expect(LoopWorkspaceRail.loadSeenMailroomPost(forProjectPath: projectPath) == 3)
   }
 
   /// A hidden rail showed no posts; leaving must not clear a badge nobody could read.
@@ -72,8 +72,8 @@ struct ArtifactorySinceYouLookedTests {
 
     await store.send(.workspaceLeft)
 
-    #expect(store.state.seenArtifactoryPostID == nil)
-    #expect(LoopWorkspaceRail.loadSeenArtifactoryPost(forProjectPath: projectPath) == nil)
+    #expect(store.state.seenMailroomPostID == nil)
+    #expect(LoopWorkspaceRail.loadSeenMailroomPost(forProjectPath: projectPath) == nil)
   }
 
   @Test
@@ -84,7 +84,7 @@ struct ArtifactorySinceYouLookedTests {
 
     await store.send(.workspaceLeft)
 
-    #expect(store.state.seenArtifactoryPostID == nil)
+    #expect(store.state.seenMailroomPostID == nil)
   }
 
   /// A record (mirrored `node send`) is not a note: it is folded away, so it must not
@@ -93,14 +93,14 @@ struct ArtifactorySinceYouLookedTests {
   @MainActor
   func lookedAdvancesToTheNewestNoteNotTheNewestRecord() async {
     var graph = makeGraph(noteIDs: [1, 2], loopCursor: nil)
-    graph.artifactory.append(
-      ArtifactoryPost(
+    graph.mailroom.append(
+      MailroomPost(
         id: 3, at: Date(), authorID: nil, author: "a human", topic: "direct",
-        body: "@Worker: hi", kind: .record))
+        body: "@Worker: hi", kind: .letter))
     let store = makeStore(graph: graph, railVisible: true)
 
     await store.send(.workspaceLeft)
 
-    #expect(store.state.seenArtifactoryPostID == 2)
+    #expect(store.state.seenMailroomPostID == 2)
   }
 }

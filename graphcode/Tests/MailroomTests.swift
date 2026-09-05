@@ -1,14 +1,14 @@
-import ArtifactoryKit
 import ComposableArchitecture
 import Foundation
 import GraphcodeKit
+import MailroomKit
 import Testing
 
-/// The Artifactory's daemon half: posting, cursors, subscriptions and watcher wakes.
+/// The Mailroom's daemon half: posting, cursors, subscriptions and watcher wakes.
 /// Runs against a bare `GraphStore` with injected closures — no daemon, no socket,
 /// no zmx — the same harness `GraphStoreTests` uses.
 @Suite
-struct ArtifactoryTests {
+struct MailroomTests {
   /// Two loops to talk about: an author and a reader. Turn-based so nothing
   /// auto-starts a session.
   private func makeStore(
@@ -31,7 +31,7 @@ struct ArtifactoryTests {
         memory?.withValue { $0.append((nodeID, entry)) }
       },
       onAnnounceError: { message in errors?.withValue { $0.append(message) } },
-      onArtifactoryEnabled: { enabled })
+      onMailroomEnabled: { enabled })
     await store.handle(
       .createNode(NodeDraft(title: "Author", loopType: .turnBased, firstInstruction: "Work")))
     await store.handle(
@@ -47,11 +47,11 @@ struct ArtifactoryTests {
     let ids = nodeIDs(await store.graph)
 
     await store.handle(
-      .artifactoryPost(text: "  issue #12 is mine  ", topic: "Claims", from: ids[0]))
+      .mailroomPost(text: "  issue #12 is mine  ", topic: "Claims", from: ids[0]))
 
     let graph = await store.graph
-    #expect(graph.artifactory.count == 1)
-    let post = graph.artifactory[0]
+    #expect(graph.mailroom.count == 1)
+    let post = graph.mailroom[0]
     #expect(post.id == 1)
     #expect(post.author == "Author")
     #expect(post.authorID == ids[0])
@@ -64,10 +64,10 @@ struct ArtifactoryTests {
     let store = await makeStore(enabled: false)
     let ids = nodeIDs(await store.graph)
 
-    await store.handle(.artifactoryPost(text: "hello", topic: nil, from: ids[0]))
+    await store.handle(.mailroomPost(text: "hello", topic: nil, from: ids[0]))
 
     let graph = await store.graph
-    #expect(graph.artifactory.isEmpty)
+    #expect(graph.mailroom.isEmpty)
   }
 
   @Test
@@ -75,15 +75,15 @@ struct ArtifactoryTests {
     let store = await makeStore()
     let ids = nodeIDs(await store.graph)
 
-    await store.handle(.artifactoryPost(text: "   ", topic: nil, from: ids[0]))
+    await store.handle(.mailroomPost(text: "   ", topic: nil, from: ids[0]))
     await store.handle(
-      .artifactoryPost(text: String(repeating: "x", count: 2000), topic: nil, from: ids[0]))
+      .mailroomPost(text: String(repeating: "x", count: 2000), topic: nil, from: ids[0]))
     await store.handle(
-      .artifactoryPost(text: "ok", topic: String(repeating: "t", count: 100), from: ids[0]))
-    await store.handle(.artifactoryPost(text: "ok", topic: "  ", from: ids[0]))
+      .mailroomPost(text: "ok", topic: String(repeating: "t", count: 100), from: ids[0]))
+    await store.handle(.mailroomPost(text: "ok", topic: "  ", from: ids[0]))
 
     let graph = await store.graph
-    #expect(graph.artifactory.isEmpty)
+    #expect(graph.mailroom.isEmpty)
   }
 
   @Test
@@ -91,14 +91,14 @@ struct ArtifactoryTests {
     let store = await makeStore()
     let ids = nodeIDs(await store.graph)
 
-    for index in 0..<(Artifactory.maxNotes + 5) {
-      await store.handle(.artifactoryPost(text: "post \(index)", topic: nil, from: ids[0]))
+    for index in 0..<(Mailroom.maxNotices + 5) {
+      await store.handle(.mailroomPost(text: "post \(index)", topic: nil, from: ids[0]))
     }
 
     let graph = await store.graph
-    #expect(graph.artifactory.count == Artifactory.maxNotes)
-    #expect(graph.artifactory.first?.body == "post 5")
-    #expect(graph.artifactory.last?.id == Artifactory.maxNotes + 5)
+    #expect(graph.mailroom.count == Mailroom.maxNotices)
+    #expect(graph.mailroom.first?.body == "post 5")
+    #expect(graph.mailroom.last?.id == Mailroom.maxNotices + 5)
   }
 
   @Test
@@ -106,24 +106,24 @@ struct ArtifactoryTests {
     let store = await makeStore()
     let ids = nodeIDs(await store.graph)
 
-    await store.handle(.artifactoryPost(text: "one", topic: nil, from: ids[0]))
-    await store.handle(.artifactorySync(from: ids[1]))
+    await store.handle(.mailroomPost(text: "one", topic: nil, from: ids[0]))
+    await store.handle(.mailroomInbox(from: ids[1]))
     var graph = await store.graph
-    #expect(graph.nodes[id: ids[1]]?.lastArtifactoryRead == 1)
+    #expect(graph.nodes[id: ids[1]]?.lastMailroomRead == 1)
 
-    await store.handle(.artifactorySync(from: ids[1]))
+    await store.handle(.mailroomInbox(from: ids[1]))
     graph = await store.graph
-    #expect(graph.nodes[id: ids[1]]?.lastArtifactoryRead == 1)
+    #expect(graph.nodes[id: ids[1]]?.lastMailroomRead == 1)
   }
 
   @Test
   func syncNeedsLoopIdentity() async {
     let store = await makeStore()
 
-    await store.handle(.artifactorySync(from: nil))
+    await store.handle(.mailroomInbox(from: nil))
 
     let graph = await store.graph
-    #expect(graph.nodes.allSatisfy { $0.lastArtifactoryRead == nil })
+    #expect(graph.nodes.allSatisfy { $0.lastMailroomRead == nil })
   }
 
   @Test
@@ -131,13 +131,13 @@ struct ArtifactoryTests {
     let store = await makeStore()
     let ids = nodeIDs(await store.graph)
 
-    await store.handle(.artifactoryWatch(on: true, topic: "Build", from: ids[1]))
+    await store.handle(.mailroomWatch(on: true, topic: "Build", from: ids[1]))
     var graph = await store.graph
-    #expect(graph.nodes[id: ids[1]]?.artifactoryWatch == ArtifactoryWatch(topic: "build"))
+    #expect(graph.nodes[id: ids[1]]?.mailroomWatch == MailroomWatch(topic: "build"))
 
-    await store.handle(.artifactoryWatch(on: false, topic: nil, from: ids[1]))
+    await store.handle(.mailroomWatch(on: false, topic: nil, from: ids[1]))
     graph = await store.graph
-    #expect(graph.nodes[id: ids[1]]?.artifactoryWatch == nil)
+    #expect(graph.nodes[id: ids[1]]?.mailroomWatch == nil)
   }
 
   @Test
@@ -147,15 +147,15 @@ struct ArtifactoryTests {
     let memory = LockIsolated<[(UUID, String)]>([])
     let store = await makeStore(memory: memory)
     let ids = nodeIDs(await store.graph)
-    await store.handle(.artifactoryWatch(on: true, topic: "build", from: ids[1]))
+    await store.handle(.mailroomWatch(on: true, topic: "build", from: ids[1]))
 
-    await store.handle(.artifactoryPost(text: "build is red", topic: "build", from: ids[0]))
+    await store.handle(.mailroomPost(text: "build is red", topic: "build", from: ids[0]))
 
     let staged = memory.value.filter {
-      $0.0 == ids[1] && $0.1.contains("artifactory — new post #1 (build) from Author")
+      $0.0 == ids[1] && $0.1.contains("mailroom — new post #1 (build) from Author")
     }
     #expect(staged.count == 1)
-    #expect(staged[0].1.contains("graphcode artifactory sync"))
+    #expect(staged[0].1.contains("graphcode mail inbox"))
   }
 
   @Test
@@ -163,14 +163,14 @@ struct ArtifactoryTests {
     let memory = LockIsolated<[(UUID, String)]>([])
     let store = await makeStore(memory: memory)
     let ids = nodeIDs(await store.graph)
-    await store.handle(.artifactoryWatch(on: true, topic: "build", from: ids[1]))
+    await store.handle(.mailroomWatch(on: true, topic: "build", from: ids[1]))
 
-    await store.handle(.artifactoryPost(text: "unrelated", topic: "auth", from: ids[0]))
-    await store.handle(.artifactoryWatch(on: false, topic: nil, from: ids[1]))
-    await store.handle(.artifactoryPost(text: "again", topic: "build", from: ids[0]))
+    await store.handle(.mailroomPost(text: "unrelated", topic: "auth", from: ids[0]))
+    await store.handle(.mailroomWatch(on: false, topic: nil, from: ids[1]))
+    await store.handle(.mailroomPost(text: "again", topic: "build", from: ids[0]))
 
     #expect(
-      memory.value.filter { $0.0 == ids[1] && $0.1.contains("artifactory — new post") }
+      memory.value.filter { $0.0 == ids[1] && $0.1.contains("mailroom — new post") }
         .isEmpty)
   }
 
@@ -179,57 +179,57 @@ struct ArtifactoryTests {
     let memory = LockIsolated<[(UUID, String)]>([])
     let store = await makeStore(memory: memory)
     let ids = nodeIDs(await store.graph)
-    await store.handle(.artifactoryWatch(on: true, topic: nil, from: ids[1]))
+    await store.handle(.mailroomWatch(on: true, topic: nil, from: ids[1]))
 
-    await store.handle(.artifactoryPost(text: "a", topic: "auth", from: ids[0]))
-    await store.handle(.artifactoryPost(text: "b", topic: nil, from: ids[0]))
+    await store.handle(.mailroomPost(text: "a", topic: "auth", from: ids[0]))
+    await store.handle(.mailroomPost(text: "b", topic: nil, from: ids[0]))
 
     #expect(
-      memory.value.filter { $0.0 == ids[1] && $0.1.contains("artifactory — new post") }
+      memory.value.filter { $0.0 == ids[1] && $0.1.contains("mailroom — new post") }
         .count == 2)
   }
 
   @Test
-  func graphRoundTripsArtifactoryThroughCodable() throws {
+  func graphRoundTripsMailroomThroughCodable() throws {
     var graph = LoopGraph(project: ProjectRef(path: "/tmp/x", name: "x"))
-    graph.artifactory = [
-      ArtifactoryPost(
+    graph.mailroom = [
+      MailroomPost(
         id: 3, at: Date(timeIntervalSince1970: 100), authorID: nil,
         author: "a human", topic: "t", body: "b")
     ]
     var node = LoopNode(title: "n", loopType: .turnBased)
-    node.lastArtifactoryRead = 3
-    node.artifactoryWatch = ArtifactoryWatch(topic: "t")
+    node.lastMailroomRead = 3
+    node.mailroomWatch = MailroomWatch(topic: "t")
     graph.nodes.append(node)
 
     let data = try JSONEncoder().encode(graph)
     let decoded = try JSONDecoder().decode(LoopGraph.self, from: data)
 
-    #expect(decoded.artifactory == graph.artifactory)
-    #expect(decoded.nodes[0].lastArtifactoryRead == 3)
-    #expect(decoded.nodes[0].artifactoryWatch == ArtifactoryWatch(topic: "t"))
+    #expect(decoded.mailroom == graph.mailroom)
+    #expect(decoded.nodes[0].lastMailroomRead == 3)
+    #expect(decoded.nodes[0].mailroomWatch == MailroomWatch(topic: "t"))
 
-    // Graphs saved before the Artifactory decode with an empty board and no cursors:
+    // Graphs saved before the Mailroom decode with an empty board and no cursors:
     // take a fresh encoding and strip the new keys, reproducing an old file.
     let raw = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
     var stripped = raw
-    stripped.removeValue(forKey: "artifactory")
+    stripped.removeValue(forKey: "mailroom")
     var nodes = try #require(raw["nodes"] as? [[String: Any]])
-    nodes[0].removeValue(forKey: "lastArtifactoryRead")
-    nodes[0].removeValue(forKey: "artifactoryWatch")
+    nodes[0].removeValue(forKey: "lastMailroomRead")
+    nodes[0].removeValue(forKey: "mailroomWatch")
     stripped["nodes"] = nodes
     let legacyData = try JSONSerialization.data(withJSONObject: stripped)
     let old = try JSONDecoder().decode(LoopGraph.self, from: legacyData)
-    #expect(old.artifactory.isEmpty)
-    #expect(old.nodes[0].lastArtifactoryRead == nil)
-    #expect(old.nodes[0].artifactoryWatch == nil)
+    #expect(old.mailroom.isEmpty)
+    #expect(old.nodes[0].lastMailroomRead == nil)
+    #expect(old.nodes[0].mailroomWatch == nil)
   }
 }
 
 /// The mirroring and deletion halves live in an extension to keep the suite under swiftlint's body-length bound.
-extension ArtifactoryTests {  // MARK: - Shared-communication mirroring
+extension MailroomTests {  // MARK: - Shared-communication mirroring
   @Test
-  func directMessageMirrorsOntoArtifactory() async {
+  func directMessageMirrorsOntoMailroom() async {
     let store = await makeStore()
     let ids = nodeIDs(await store.graph)
 
@@ -237,8 +237,8 @@ extension ArtifactoryTests {  // MARK: - Shared-communication mirroring
       .messageNode(ids[1], text: "the API changed under you", from: ids[0], followUp: nil))
 
     let graph = await store.graph
-    #expect(graph.artifactory.count == 1)
-    let record = graph.artifactory[0]
+    #expect(graph.mailroom.count == 1)
+    let record = graph.mailroom[0]
     #expect(record.topic == "direct")
     #expect(record.author == "Author")
     #expect(record.body == "@Reader: the API changed under you")
@@ -249,18 +249,18 @@ extension ArtifactoryTests {  // MARK: - Shared-communication mirroring
     let memory = LockIsolated<[(UUID, String)]>([])
     let store = await makeStore(memory: memory)
     let ids = nodeIDs(await store.graph)
-    await store.handle(.artifactoryWatch(on: true, topic: "build", from: ids[1]))
+    await store.handle(.mailroomWatch(on: true, topic: "build", from: ids[1]))
 
-    await store.handle(.artifactoryPost(text: "build is red", topic: "build", from: ids[0]))
+    await store.handle(.mailroomPost(text: "build is red", topic: "build", from: ids[0]))
 
     // One post — the wake staged to the watcher must not become a post of its own.
     let graph = await store.graph
-    #expect(graph.artifactory.count == 1)
-    #expect(memory.value.contains { $0.0 == ids[1] && $0.1.contains("artifactory — new post #1") })
+    #expect(graph.mailroom.count == 1)
+    #expect(memory.value.contains { $0.0 == ids[1] && $0.1.contains("mailroom — new post #1") })
   }
 
   @Test
-  func deliveredMessageEdgeMirrorsOntoArtifactory() async {
+  func deliveredMessageEdgeMirrorsOntoMailroom() async {
     let delivered = LockIsolated<[(UUID, String)]>([])
     let store = await makeStore(delivered: delivered)
     let ids = nodeIDs(await store.graph)
@@ -273,14 +273,14 @@ extension ArtifactoryTests {  // MARK: - Shared-communication mirroring
 
     let graph = await store.graph
     #expect(graph.edges[0].fired)
-    let records = graph.artifactory.filter { $0.topic == "direct" }
+    let records = graph.mailroom.filter { $0.topic == "direct" }
     #expect(records.count == 1)
     #expect(records[0].author == "Author")
     #expect(records[0].body == "@Reader: specs moved to docs/api.md")
   }
 
   @Test
-  func handoffMirrorsOntoArtifactoryWithPayload() async {
+  func handoffMirrorsOntoMailroomWithPayload() async {
     let store = await makeStore()
     let ids = nodeIDs(await store.graph)
 
@@ -291,7 +291,7 @@ extension ArtifactoryTests {  // MARK: - Shared-communication mirroring
     await store.handle(.nodeCheckApproved(ids[0]))
 
     let graph = await store.graph
-    let records = graph.artifactory.filter { $0.topic == "handoff" }
+    let records = graph.mailroom.filter { $0.topic == "handoff" }
     #expect(records.count == 1)
     #expect(records[0].author == "Author")
     #expect(
@@ -308,20 +308,20 @@ extension ArtifactoryTests {  // MARK: - Shared-communication mirroring
   func deletingALoopKeepsItsPostsAndTakesTheirHandle() async {
     let store = await makeStore()
     let ids = nodeIDs(await store.graph)
-    await store.handle(.artifactoryPost(text: "mine", topic: nil, from: ids[0]))
-    await store.handle(.artifactoryPost(text: "theirs", topic: nil, from: ids[1]))
+    await store.handle(.mailroomPost(text: "mine", topic: nil, from: ids[0]))
+    await store.handle(.mailroomPost(text: "theirs", topic: nil, from: ids[1]))
 
     await store.handle(.deleteNode(ids[0]))
 
     let graph = await store.graph
     #expect(graph.nodes.count == 1)
-    #expect(graph.artifactory.map(\.body) == ["mine", "theirs"])
-    let orphaned = graph.artifactory[0]
+    #expect(graph.mailroom.map(\.body) == ["mine", "theirs"])
+    let orphaned = graph.mailroom[0]
     #expect(orphaned.authorID == nil)
     #expect(orphaned.author == "Author (deleted)")
     // The surviving loop's own post is untouched — attribution and all.
-    #expect(graph.artifactory[1].authorID == ids[1])
-    #expect(graph.artifactory[1].author == "Reader")
+    #expect(graph.mailroom[1].authorID == ids[1])
+    #expect(graph.mailroom[1].author == "Reader")
   }
 
   @Test
@@ -329,14 +329,14 @@ extension ArtifactoryTests {  // MARK: - Shared-communication mirroring
     let store = await makeStore()
     let ids = nodeIDs(await store.graph)
     await store.handle(.messageNode(ids[1], text: "for you", from: ids[0], followUp: nil))
-    #expect(await store.graph.artifactory.count == 1)
+    #expect(await store.graph.mailroom.count == 1)
 
     await store.handle(.deleteNode(ids[1]))
 
     let graph = await store.graph
     // The record of what was said stays; only the departed loop's own words go.
-    #expect(graph.artifactory.count == 1)
-    #expect(graph.artifactory[0].body == "@Reader: for you")
+    #expect(graph.mailroom.count == 1)
+    #expect(graph.mailroom[0].body == "@Reader: for you")
   }
 
   @Test
@@ -349,8 +349,8 @@ extension ArtifactoryTests {  // MARK: - Shared-communication mirroring
           title: "Child", loopType: .turnBased, firstInstruction: "Work",
           createdBy: ids[0])))
     let childID = try #require((await store.graph.nodes.first { $0.createdBy == ids[0] })?.id)
-    await store.handle(.artifactoryPost(text: "child note", topic: nil, from: childID))
-    await store.handle(.artifactoryPost(text: "parent note", topic: nil, from: ids[0]))
+    await store.handle(.mailroomPost(text: "child note", topic: nil, from: childID))
+    await store.handle(.mailroomPost(text: "parent note", topic: nil, from: ids[0]))
 
     await store.handle(.deleteNode(ids[0]))
 
@@ -359,28 +359,28 @@ extension ArtifactoryTests {  // MARK: - Shared-communication mirroring
     // with the handles taken off — the descendants' words outlive them the same way.
     // Author and Child are gone; Reader, who was never in the custody chain, is not.
     #expect(graph.nodes.map(\.title) == ["Reader"])
-    #expect(graph.artifactory.map(\.body) == ["child note", "parent note"])
-    #expect(graph.artifactory.allSatisfy { $0.authorID == nil })
-    #expect(graph.artifactory.map(\.author) == ["Child (deleted)", "Author (deleted)"])
+    #expect(graph.mailroom.map(\.body) == ["child note", "parent note"])
+    #expect(graph.mailroom.allSatisfy { $0.authorID == nil })
+    #expect(graph.mailroom.map(\.author) == ["Child (deleted)", "Author (deleted)"])
   }
 }
 
 /// The review round (PR #229): refusals announce, bounds bind, composites inherit the
 /// gate, imports start clean, and the briefing/digest announce the board exactly when
 /// the daemon will honour it.
-extension ArtifactoryTests {
+extension MailroomTests {
   @Test
   func refusalAnnouncesItselfInsteadOfStayingSilent() async {
     let errors = LockIsolated<[String]>([])
     let store = await makeStore(enabled: false, errors: errors)
     let ids = nodeIDs(await store.graph)
 
-    await store.handle(.artifactoryPost(text: "hello", topic: nil, from: ids[0]))
+    await store.handle(.mailroomPost(text: "hello", topic: nil, from: ids[0]))
 
     let graph = await store.graph
-    #expect(graph.artifactory.isEmpty)
+    #expect(graph.mailroom.isEmpty)
     #expect(errors.value.count == 1)
-    #expect(errors.value[0].contains("Artifactory is off"))
+    #expect(errors.value[0].contains("Mailroom is off"))
   }
 
   @Test
@@ -392,8 +392,8 @@ extension ArtifactoryTests {
       .messageNode(ids[1], text: String(repeating: "x", count: 3000), from: ids[0], followUp: nil))
 
     let graph = await store.graph
-    let record = try #require(graph.artifactory.first)
-    #expect(record.body.utf8.count <= ArtifactoryPost.maxBodyBytes)
+    let record = try #require(graph.mailroom.first)
+    #expect(record.body.utf8.count <= MailroomPost.maxBodyBytes)
     #expect(record.body.hasSuffix("…"))
   }
 
@@ -407,13 +407,13 @@ extension ArtifactoryTests {
     // The poll's write is what makes stored presence real; the wake machinery reads
     // the stored reading, so a live idle watcher is this, not just the hook.
     await store.handle(.refreshUsage)
-    await store.handle(.artifactoryWatch(on: true, topic: nil, from: ids[1]))
+    await store.handle(.mailroomWatch(on: true, topic: nil, from: ids[1]))
 
-    await store.handle(.artifactoryPost(text: "build is red", topic: nil, from: ids[0]))
+    await store.handle(.mailroomPost(text: "build is red", topic: nil, from: ids[0]))
 
     // A live idle watcher gets exactly one delivery, typed now — no staging line,
     // which is the dead-session path's record, not the live one's.
-    #expect(delivered.value.contains { $0.0 == ids[1] && $0.1.contains("artifactory — new post") })
+    #expect(delivered.value.contains { $0.0 == ids[1] && $0.1.contains("mailroom — new post") })
     #expect(!memory.value.contains { $0.0 == ids[1] && $0.1.contains("follow-up staged") })
     #expect(!memory.value.contains { $0.0 == ids[1] && $0.1.contains("while you were away") })
   }
@@ -434,11 +434,11 @@ extension ArtifactoryTests {
     await store.handle(
       .subGraphCommand(
         nodeID: composite.id,
-        command: .artifactoryPost(text: "worker note", topic: nil, from: workerID)))
+        command: .mailroomPost(text: "worker note", topic: nil, from: workerID)))
 
     let graph = await store.graph
     #expect(errors.value.isEmpty)
-    #expect(graph.nodes[id: composite.id]?.subGraph?.artifactory.map(\.body) == ["worker note"])
+    #expect(graph.nodes[id: composite.id]?.subGraph?.mailroom.map(\.body) == ["worker note"])
   }
 
   @Test
@@ -446,7 +446,7 @@ extension ArtifactoryTests {
     let store = await makeStore()
     var arriving = LoopGraph(project: ProjectRef(path: "/tmp/src", name: "src"))
     var node = LoopNode(title: "Visitor", loopType: .turnBased, firstInstruction: "Work")
-    node.lastArtifactoryRead = 5
+    node.lastMailroomRead = 5
     arriving.nodes.append(node)
 
     await store.handle(
@@ -454,7 +454,7 @@ extension ArtifactoryTests {
 
     let graph = await store.graph
     let imported = try #require(graph.nodes.first { $0.title == "Visitor" })
-    #expect(imported.lastArtifactoryRead == nil)
+    #expect(imported.lastMailroomRead == nil)
   }
 
   @Test
@@ -463,31 +463,33 @@ extension ArtifactoryTests {
     let store = await makeStore(errors: errors)
     let ids = nodeIDs(await store.graph)
 
-    await store.handle(.artifactoryWatch(on: false, topic: nil, from: ids[0]))
+    await store.handle(.mailroomWatch(on: false, topic: nil, from: ids[0]))
 
     let graph = await store.graph
     #expect(errors.value.isEmpty)
-    #expect(graph.nodes[id: ids[0]]?.artifactoryWatch == nil)
+    #expect(graph.nodes[id: ids[0]]?.mailroomWatch == nil)
   }
 
   @Test
   func settingsRoundTripPinsTheRampBit() throws {
     var settings = GraphcodeSettings()
-    settings.artifactoryEnabled = true
+    settings.mailroomEnabled = true
     let data = try JSONEncoder().encode(settings)
-    #expect(try JSONDecoder().decode(GraphcodeSettings.self, from: data).artifactoryEnabled)
+    #expect(try JSONDecoder().decode(GraphcodeSettings.self, from: data).mailroomEnabled)
   }
 
   @Test
   func briefingAnnouncesTheBoardOnlyWhileItIsOn() {
     let on = SessionBriefing.text(
-      projectPath: "/tmp/p", settings: GraphcodeSettings(artifactoryEnabled: true))
+      projectPath: "/tmp/p", settings: GraphcodeSettings(mailroomEnabled: true))
     let off = SessionBriefing.text(
-      projectPath: "/tmp/p", settings: GraphcodeSettings(artifactoryEnabled: false))
-    #expect(on?.contains("## The Artifactory — notes for whoever comes next") == true)
-    #expect(on?.contains("graphcode artifactory sync /tmp/p") == true)
-    #expect(off?.contains("## The Artifactory") == false)
-    // Off means byte-for-byte the pre-Artifactory briefing: no stray interpolation
+      projectPath: "/tmp/p", settings: GraphcodeSettings(mailroomEnabled: false))
+    #expect(
+      on?.contains("## The Mailroom — the graph's mail, and notices for whoever comes next")
+        == true)
+    #expect(on?.contains("graphcode mail inbox /tmp/p") == true)
+    #expect(off?.contains("## The Mailroom") == false)
+    // Off means byte-for-byte the pre-Mailroom briefing: no stray interpolation
     // line where the section would have gone.
     #expect(off?.contains("one-off.\n\n## Remembering across passes") == true)
   }
@@ -495,7 +497,7 @@ extension ArtifactoryTests {
   @Test
   func wakeDigestRemindsAboutTheBoardOnlyWhileItIsOn() throws {
     let baseURL = URL(fileURLWithPath: NSTemporaryDirectory())
-      .appendingPathComponent("artifactory-tests-\(UUID().uuidString)")
+      .appendingPathComponent("mailroom-tests-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: baseURL) }
     let projectPath = "/tmp/digest"
     let nodeID = UUID()
@@ -503,15 +505,15 @@ extension ArtifactoryTests {
       "something happened", projectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
 
     let on = NodeMemory.writeWakeDigest(
-      projectPath: projectPath, nodeID: nodeID, artifactoryEnabled: true, baseURL: baseURL)
+      projectPath: projectPath, nodeID: nodeID, mailroomEnabled: true, baseURL: baseURL)
     #expect(on != nil)
-    #expect(try String(contentsOf: try #require(on), encoding: .utf8).contains("Artifactory"))
+    #expect(try String(contentsOf: try #require(on), encoding: .utf8).contains("Mailroom"))
 
     let off = NodeMemory.writeWakeDigest(
-      projectPath: projectPath, nodeID: nodeID, artifactoryEnabled: false, baseURL: baseURL)
+      projectPath: projectPath, nodeID: nodeID, mailroomEnabled: false, baseURL: baseURL)
     #expect(
       !(try String(contentsOf: try #require(off), encoding: .utf8).contains("Mailboard")))
     #expect(
-      !(try String(contentsOf: try #require(off), encoding: .utf8).contains("Artifactory")))
+      !(try String(contentsOf: try #require(off), encoding: .utf8).contains("Mailroom")))
   }
 }
