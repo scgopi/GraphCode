@@ -1,6 +1,6 @@
-import MailroomKit
 import Foundation
 import GraphcodeKit
+import MailroomKit
 import Testing
 
 /// The `mailroom` verbs' CLI half: what each spelling parses into and what the board

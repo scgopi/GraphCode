@@ -1,5 +1,5 @@
-import MailroomKit
 import Foundation
+import MailroomKit
 
 /// Argument parsing and output formatting for the `graphcode` CLI
 /// (docs/03-architecture.md#cli-graphcode).

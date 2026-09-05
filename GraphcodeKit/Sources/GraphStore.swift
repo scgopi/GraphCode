@@ -1,5 +1,5 @@
-import MailroomKit
 import Foundation
+import MailroomKit
 
 /// Owns the daemon's one `LoopGraph`, applies commands, automatically fires `.handoff`
 /// edges when a node resolves, keeps time-based nodes' sessions alive, and broadcasts

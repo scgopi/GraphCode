@@ -1,5 +1,5 @@
-import MailroomKit
 import Foundation
+import MailroomKit
 import Testing
 
 @testable import GraphcodeKit
@@ -614,14 +614,22 @@ extension RemoteCLIShimTests {
     #expect(sync.commands.isEmpty)
     #expect(watch.commands.isEmpty)
 
-    for verb in ["post", "sync", "read", "list", "watch"] {
-      let run = try runShim(["mailroom", verb])
-      #expect(!run.stderr.contains("Mac-only"), "mailroom \(verb) still refused as Mac-only")
+    for verb in ["post", "inbox", "sync", "read", "list", "watch"] {
+      let run = try runShim(["mail", verb])
+      #expect(!run.stderr.contains("Mac-only"), "mail \(verb) still refused as Mac-only")
+    }
+    // The pre-rename spellings still reach the same parser: loops relaunched with a
+    // briefing written before the rename type `artifactory sync`, and must not be told
+    // the verb is Mac-only.
+    for verb in ["mailroom", "artifactory"] {
+      let run = try runShim([verb, "sync"])
+      #expect(!run.stderr.contains("Mac-only"), "\(verb) sync still refused as Mac-only")
+      #expect(!run.stderr.contains("unknown"), "\(verb) sync no longer parses")
     }
     // A subcommand that genuinely does not exist says so as the Swift CLI does.
     let bogus = try runShim(["mailroom", "resolve", Self.project])
     #expect(bogus.status == 1)
-    #expect(bogus.stderr.contains("unknown command: mailroom resolve"))
+    #expect(bogus.stderr.contains("unknown command: mail resolve"))
     // And a mistyped flag is refused rather than silently ignored.
     let mistyped = try runShim(["mailroom", "list", Self.project, "--serach", "red"])
     #expect(mistyped.status == 1)
@@ -646,8 +654,8 @@ extension RemoteCLIShimTests {
   func theHelpTextTeachesEveryVerbTheBriefingDoes() throws {
     let help = try runShim(["mailroom", "--help"])
     #expect(help.status == 0)
-    for verb in ["post", "sync", "read", "list", "watch"] {
-      #expect(help.stdout.contains("graphcode mailroom \(verb) "))
+    for verb in ["post", "inbox", "read", "list", "watch"] {
+      #expect(help.stdout.contains("graphcode mail \(verb) "))
     }
     // The shim's own honesty rule: nothing it implements may sit on the Mac-only list.
     #expect(!help.stdout.contains("(update, pilot, arm, edge, usage, mailroom)"))

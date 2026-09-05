@@ -1,7 +1,7 @@
-import MailroomKit
 import ComposableArchitecture
 import Foundation
 import GraphcodeKit
+import MailroomKit
 import Testing
 
 /// The two budgets, the delete that keeps the note, the self-triaging sync, and the

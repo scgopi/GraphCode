@@ -1,6 +1,6 @@
-import MailroomKit
 import Foundation
 import IdentifiedCollections
+import MailroomKit
 
 /// The unit `graphcoded`'s `GraphStore` owns and the graph canvas renders — see
 /// docs/02-graph-of-loops.md#loopgraph.

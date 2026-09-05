@@ -1,7 +1,7 @@
-import MailroomKit
 import ComposableArchitecture
 import Foundation
 import GraphcodeKit
+import MailroomKit
 import Testing
 
 /// The Mailroom's daemon half: posting, cursors, subscriptions and watcher wakes.
@@ -484,7 +484,9 @@ extension MailroomTests {
       projectPath: "/tmp/p", settings: GraphcodeSettings(mailroomEnabled: true))
     let off = SessionBriefing.text(
       projectPath: "/tmp/p", settings: GraphcodeSettings(mailroomEnabled: false))
-    #expect(on?.contains("## The Mailroom — notes for whoever comes next") == true)
+    #expect(
+      on?.contains("## The Mailroom — the graph's mail, and notices for whoever comes next")
+        == true)
     #expect(on?.contains("graphcode mail inbox /tmp/p") == true)
     #expect(off?.contains("## The Mailroom") == false)
     // Off means byte-for-byte the pre-Mailroom briefing: no stray interpolation

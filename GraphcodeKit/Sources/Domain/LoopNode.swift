@@ -1,5 +1,5 @@
-import MailroomKit
 import Foundation
+import MailroomKit
 
 /// One node in a graph of loops: a unit of agentic work with a well-defined hand-off
 /// contract, running inside a real CLI session. See docs/02-graph-of-loops.md.

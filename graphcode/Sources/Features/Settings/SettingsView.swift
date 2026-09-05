@@ -182,12 +182,14 @@ struct SettingsView: View {
         // off for a person who finds it too much, and is remembered over any rollout.
         Toggle("Mailroom", isOn: $model.mailroomEnabled)
         Text(
-          "Loops share a message board — a note dropped for whoever comes next, "
-            + "discoverable by loops that didn't exist when it was written — "
-            + "alongside the addressed `node send` and edges. It also appears in a "
-            + "loop's workspace rail, where you can read it and leave notes yourself. "
-            + "Off, the daemon refuses every mailroom command and the rail section "
-            + "goes away. On by default; your choice here is kept."
+          "One place for a graph's mail. Letters are what the loops said to each "
+            + "other — `node send` messages, edge deliveries and handoffs, each "
+            + "addressed to somebody. Notices are addressed to nobody: a note left "
+            + "for whoever comes next, found by loops that didn't exist when it was "
+            + "written. Both appear in a loop's workspace rail, where you can read "
+            + "them and post notices yourself. Off, the daemon refuses every mail "
+            + "command and the rail section goes away. On by default; your choice "
+            + "here is kept."
         )
         .font(.caption2)
         .foregroundStyle(.secondary)

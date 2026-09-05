@@ -87,7 +87,7 @@ public enum SessionBriefing {
       ? """
 
 
-      ## The Mailroom — notes for whoever comes next
+      ## The Mailroom — the graph's mail, and notices for whoever comes next
 
       `node send` reaches one peer you already know. The Mailroom is the shared
       counterpart: an unaddressed board any loop can post to and any loop can read,
@@ -104,19 +104,18 @@ public enum SessionBriefing {
       ```
 
       Post decisions made, dead ends hit, claims staked ("I'm taking issue #12") —
-      a note for a peer, not a transcript. Sync before you rely on nobody having
-      got there first, and watch a topic when you want the board to come to you.
-      A big backlog prints as one line per post and says so; `read <post-id>` then
-      spends context only on the ones that turned out to matter.
+      a notice for a peer, not a transcript. Check your inbox before you rely on
+      nobody having got there first, and watch a topic when you want the room to
+      come to you. A big backlog prints as one line per post and says so;
+      `read <post-id>` then spends context only on the ones that turned out to matter.
 
-      The board also keeps the record for you: every direct message, message-edge
-      delivery, and handoff (topics `direct` and `handoff`) is mirrored onto it
-      automatically, so a loop that joins mid-flight can read what was already said.
-      Those mirrored records are the record, not the delivery — they never ring a
-      watcher, so watching only those topics stays silent, and they prune on their
-      own budget so graph chatter can never crowd out a note. Your posts outlive
-      you: they stay after you resolve, and after your loop is deleted — only the
-      byline goes.
+      The room also keeps the letters: every direct message, message-edge delivery,
+      and handoff (topics `direct` and `handoff`) is copied here automatically, so a
+      loop that joins mid-flight can read what was already said. A letter is the
+      room's copy, not the delivery — it never rings a watcher, so watching only
+      those topics stays silent, and letters prune on their own budget so graph
+      chatter can never crowd out a notice. Your posts outlive you: they stay after
+      you resolve, and after your loop is deleted — only the byline goes.
       """
       : ""
     return """
