@@ -33,7 +33,7 @@ struct ProjectFeatureTests {
     #expect(store.state.nodePositions[node.id] != nil)
   }
 
-  /// An untitled draft is created as "NewLoop" immediately, then renamed to whatever
+  /// An untitled draft is created as "NewNode" immediately, then renamed to whatever
   /// the backend suggests — creation never waits on the suggestion, and the rename can
   /// find its node because the draft's id *is* the node's id.
   @Test
@@ -71,7 +71,7 @@ struct ProjectFeatureTests {
       return #expect(Bool(false), "expected a createNode command, got \(commands)")
     }
     #expect(draft.id == draftID)
-    #expect(draft.makeNode().title == "NewLoop")
+    #expect(draft.makeNode().title == "NewNode")
     #expect(
       commands.last
         == .graphCommand(
