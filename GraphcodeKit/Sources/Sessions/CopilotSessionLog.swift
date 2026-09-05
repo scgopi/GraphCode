@@ -40,6 +40,18 @@ public enum CopilotSessionLog {
   /// reports a session sitting at a prompt nobody is watching as a loop hard at work,
   /// which is the original lie with a new source. Unlisted, it falls through to idle at
   /// `.heuristic`: "a live session with nothing happening", which is what it is.
+  /// The events that begin a session's life. Everything above one of these in the log
+  /// belongs to a *previous* run of the same session and says nothing about this one.
+  ///
+  /// `--resume <id>` reopens the session's own state directory and appends to the same
+  /// `events.jsonl`, so a resumed session's log reads `session.shutdown` then
+  /// `session.resume` — and a scan that only knows how to skip unmapped events walks
+  /// straight past the resume and reports the shutdown behind it. A live session then
+  /// reads `.absent`, which `LoopNode.displayState` shows as FAILED for a running
+  /// unattended loop. Measured on a real log: shutdown at 17:30:23, resume at 17:30:26,
+  /// nothing mapped since, reported absent.
+  static let lifecycleBoundaries: Set<String> = ["session.start", "session.resume"]
+
   static func presence(forEvent event: String) -> Presence? {
     switch event {
     case "user.message", "assistant.turn_start",
@@ -339,14 +351,18 @@ public enum CopilotSessionLog {
     return reading.isEmpty ? nil : reading
   }
 
-  /// The last event in a log that says anything about what the session is doing.
+  /// The last event in a log that says anything about what the session is doing, or
+  /// `nil` when nothing since the session last started or resumed does.
+  ///
+  /// The scan stops at a `lifecycleBoundaries` event rather than reading past it: a
+  /// record written before this run began describes a process that no longer exists.
   static func lastStateChange(inLogAt url: URL) -> Presence? {
     for line in tailLines(ofLogAt: url).reversed() {
       guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
-        let event = (object as? [String: Any])?["type"] as? String,
-        let presence = presence(forEvent: event)
+        let event = (object as? [String: Any])?["type"] as? String
       else { continue }
-      return presence
+      if lifecycleBoundaries.contains(event) { return nil }
+      if let presence = presence(forEvent: event) { return presence }
     }
     return nil
   }
@@ -429,11 +445,17 @@ public enum CopilotSessionLog {
       + "if grep -qx 'name: \(name)' \"$HOME/.copilot/session-state/$d/workspace.yaml\" 2>/dev/null; then "
       + "D=\"$HOME/.copilot/session-state/$d\"; break; fi; done"
 
+    // The keep-list carries `lifecycleBoundaries` as well as the mapped events, so
+    // `tail -1` can *see* a resume standing between the shutdown and now; the `case`
+    // then blanks it, which is how the local scan's "stop, report nothing" reaches a
+    // shell. An empty `copilot=` is heuristic idle in `parseRemotePresence`, exactly
+    // what `lastStateChange` returning nil gives locally.
     let readEvent =
       "E=$(tail -c 65536 \"$D/events.jsonl\" 2>/dev/null"
       + " | grep -o '\"type\":\"[^\"]*\"'"
-      + " | grep -E 'user\\.message|assistant\\.turn_start|tool\\.execution_start|tool\\.execution_complete|permission\\.completed|permission\\.requested|assistant\\.turn_end|session\\.shutdown'"
-      + " | tail -1 | sed 's/.*\"type\":\"//;s/\"//')"
+      + " | grep -E 'user\\.message|assistant\\.turn_start|tool\\.execution_start|tool\\.execution_complete|permission\\.completed|permission\\.requested|assistant\\.turn_end|session\\.shutdown|session\\.start|session\\.resume'"
+      + " | tail -1 | sed 's/.*\"type\":\"//;s/\"//'); "
+      + "case \"$E\" in session.start|session.resume) E='';; esac"
 
     let script =
       "if \(check) >/dev/null 2>&1; then "
