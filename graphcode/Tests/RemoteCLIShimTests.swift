@@ -247,7 +247,7 @@ extension RemoteCLIShimTests {
         // Python's json.dumps does not, so a fixture without one lets `--json` drift
         // apart silently. This is the body that catches it.
         body: "claiming issue #12 — see docs/281.md and https://example.test/a/b",
-        kind: .record),
+        kind: .letter),
     ]
     return (graph, reader)
   }

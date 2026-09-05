@@ -507,7 +507,7 @@ public enum RemoteGraphAccess {
 
 
     def encoded_post(post):
-        # What JSONEncoder makes of an MailroomPost: absent rather than null for the
+        # What JSONEncoder makes of a MailroomPost: absent rather than null for the
         # optionals, ISO-8601 for the date, and `kind` defaulted the way the hand-written
         # decoder defaults it for boards saved before records had their own quota.
         encoded = {"id": post.get("id"), "at": iso8601(post.get("at")),

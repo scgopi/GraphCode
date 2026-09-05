@@ -47,9 +47,9 @@ struct MailroomSinceYouLookedTests {
   @Test
   func unreadIsTheHumansNotTheLoops() {
     let graph = makeGraph(noteIDs: [1, 2, 3], loopCursor: 3)
-    #expect(MailroomPresentation.unreadNoteCount(graph: graph, seenPostID: nil) == 3)
-    #expect(MailroomPresentation.unreadNoteCount(graph: graph, seenPostID: 2) == 1)
-    #expect(MailroomPresentation.unreadNoteCount(graph: graph, seenPostID: 3) == 0)
+    #expect(MailroomPresentation.unreadNoticeCount(graph: graph, seenPostID: nil) == 3)
+    #expect(MailroomPresentation.unreadNoticeCount(graph: graph, seenPostID: 2) == 1)
+    #expect(MailroomPresentation.unreadNoticeCount(graph: graph, seenPostID: 3) == 0)
   }
 
   @Test
@@ -96,7 +96,7 @@ struct MailroomSinceYouLookedTests {
     graph.mailroom.append(
       MailroomPost(
         id: 3, at: Date(), authorID: nil, author: "a human", topic: "direct",
-        body: "@Worker: hi", kind: .record))
+        body: "@Worker: hi", kind: .letter))
     let store = makeStore(graph: graph, railVisible: true)
 
     await store.send(.workspaceLeft)

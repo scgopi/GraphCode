@@ -326,7 +326,7 @@ struct LoopWorkspaceFeature {
         // folded section showed no posts, and marking them seen would clear a badge
         // the human never had a chance to read.
         if state.isRailVisible, !state.isMailroomFolded,
-          let newest = MailroomPresentation.notes(in: state.graph).last?.id
+          let newest = MailroomPresentation.notices(in: state.graph).last?.id
         {
           state.seenMailroomPostID = newest
           LoopWorkspaceRail.saveSeenMailroomPost(newest, forProjectPath: state.projectPath)

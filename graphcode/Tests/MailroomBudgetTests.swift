@@ -44,15 +44,15 @@ struct MailroomBudgetTests {
 
     await store.handle(
       .mailroomPost(text: "DEAD END: approach X fails", topic: "findings", from: ids[0]))
-    for index in 0..<(Mailroom.maxRecords * 4) {
+    for index in 0..<(Mailroom.maxLetters * 4) {
       await store.handle(
         .messageNode(ids[1], text: "ping \(index)", from: ids[0], followUp: true))
     }
 
     let board = await store.graph.mailroom
     #expect(board.contains { $0.body.contains("DEAD END") })
-    #expect(board.filter { $0.kind == .record }.count == Mailroom.maxRecords)
-    #expect(board.filter { $0.kind == .note }.count == 1)
+    #expect(board.filter { $0.kind == .letter }.count == Mailroom.maxLetters)
+    #expect(board.filter { $0.kind == .notice }.count == 1)
   }
 
   /// And the converse: notes fill their own budget without evicting the records a loop
@@ -63,34 +63,34 @@ struct MailroomBudgetTests {
     let ids = await ids(store)
 
     await store.handle(.messageNode(ids[1], text: "the API changed", from: ids[0], followUp: true))
-    for index in 0..<(Mailroom.maxNotes + 10) {
+    for index in 0..<(Mailroom.maxNotices + 10) {
       await store.handle(.mailroomPost(text: "note \(index)", topic: nil, from: ids[0]))
     }
 
     let board = await store.graph.mailroom
-    #expect(board.filter { $0.kind == .record }.count == 1)
-    #expect(board.filter { $0.kind == .note }.count == Mailroom.maxNotes)
+    #expect(board.filter { $0.kind == .letter }.count == 1)
+    #expect(board.filter { $0.kind == .notice }.count == Mailroom.maxNotices)
     // Ids still only grow, so no cursor mistakes an old post for new mail.
-    #expect(board.last?.id == Mailroom.maxNotes + 11)
+    #expect(board.last?.id == Mailroom.maxNotices + 11)
   }
 
   @Test
   func pruningKeepsTheBoardInOneSequence() {
     let base = Date()
     var posts: [MailroomPost] = []
-    for index in 1...(Mailroom.maxRecords + 4) {
+    for index in 1...(Mailroom.maxLetters + 4) {
       posts.append(
         MailroomPost(
           id: index, at: base, authorID: nil, author: "a human", topic: nil,
-          body: "r\(index)", kind: .record))
+          body: "r\(index)", kind: .letter))
       posts.append(
         MailroomPost(
           id: index + 1000, at: base, authorID: nil, author: "a human", topic: nil,
-          body: "n\(index)", kind: .note))
+          body: "n\(index)", kind: .notice))
     }
     let pruned = Mailroom.pruned(posts.sorted { $0.id < $1.id })
     #expect(pruned == pruned.sorted { $0.id < $1.id })
-    #expect(pruned.filter { $0.kind == .record }.count == Mailroom.maxRecords)
+    #expect(pruned.filter { $0.kind == .letter }.count == Mailroom.maxLetters)
   }
 
   /// A board written before records had a kind decodes as all notes — everything on it
@@ -101,7 +101,7 @@ struct MailroomBudgetTests {
       {"id":3,"at":747000000,"author":"Author","body":"hello"}
       """
     let post = try JSONDecoder().decode(MailroomPost.self, from: Data(json.utf8))
-    #expect(post.kind == .note)
+    #expect(post.kind == .notice)
     #expect(post.authorID == nil)
   }
 

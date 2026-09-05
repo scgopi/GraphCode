@@ -16,23 +16,23 @@ enum MailroomPresentation {
 
   /// The posts somebody wrote on purpose, newest last — the direction the summary and
   /// the terminal beside it already run.
-  static func notes(in graph: LoopGraph) -> [MailroomPost] {
-    graph.mailroom.filter { $0.kind == .note }
+  static func notices(in graph: LoopGraph) -> [MailroomPost] {
+    graph.mailroom.filter { $0.kind == .notice }
   }
 
-  /// The mirrored direct messages and handoffs. Kept apart from the notes because they
+  /// The mirrored direct messages and handoffs. Kept apart from the notices because they
   /// are receipts for deliveries that already happened, not something written to be
   /// read here.
-  static func records(in graph: LoopGraph) -> [MailroomPost] {
-    graph.mailroom.filter { $0.kind == .record }
+  static func letters(in graph: LoopGraph) -> [MailroomPost] {
+    graph.mailroom.filter { $0.kind == .letter }
   }
 
-  /// How many notes have landed since the human last looked — `seenPostID` is
-  /// `LoopWorkspaceFeature.seenMailroomPostID`, not the loop's sync cursor. Records
-  /// are excluded: they are folded away by default, and a badge counting mail nobody is
+  /// How many notices have landed since the human last looked — `seenPostID` is
+  /// `LoopWorkspaceFeature.seenMailroomPostID`, not the loop's inbox cursor.
+  /// Letters are excluded: they are folded away by default, and a badge counting mail nobody is
   /// being shown is a badge that cannot be cleared.
-  static func unreadNoteCount(graph: LoopGraph, seenPostID: Int?) -> Int {
-    Mailroom.unread(in: notes(in: graph), since: seenPostID).count
+  static func unreadNoticeCount(graph: LoopGraph, seenPostID: Int?) -> Int {
+    Mailroom.unread(in: notices(in: graph), since: seenPostID).count
   }
 }
 
@@ -74,10 +74,10 @@ struct MailroomSection: View {
   @State private var draftTopic = ""
   @FocusState private var draftFocused: Bool
 
-  private var notes: [MailroomPost] { MailroomPresentation.notes(in: graph) }
-  private var records: [MailroomPost] { MailroomPresentation.records(in: graph) }
+  private var notices: [MailroomPost] { MailroomPresentation.notices(in: graph) }
+  private var letters: [MailroomPost] { MailroomPresentation.letters(in: graph) }
   private var unread: Int {
-    MailroomPresentation.unreadNoteCount(graph: graph, seenPostID: seenPostID)
+    MailroomPresentation.unreadNoticeCount(graph: graph, seenPostID: seenPostID)
   }
 
   /// The id the unread rule is drawn above — the first note that landed after the human

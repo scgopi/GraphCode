@@ -91,14 +91,14 @@ struct MailroomTests {
     let store = await makeStore()
     let ids = nodeIDs(await store.graph)
 
-    for index in 0..<(Mailroom.maxNotes + 5) {
+    for index in 0..<(Mailroom.maxNotices + 5) {
       await store.handle(.mailroomPost(text: "post \(index)", topic: nil, from: ids[0]))
     }
 
     let graph = await store.graph
-    #expect(graph.mailroom.count == Mailroom.maxNotes)
+    #expect(graph.mailroom.count == Mailroom.maxNotices)
     #expect(graph.mailroom.first?.body == "post 5")
-    #expect(graph.mailroom.last?.id == Mailroom.maxNotes + 5)
+    #expect(graph.mailroom.last?.id == Mailroom.maxNotices + 5)
   }
 
   @Test

@@ -1665,7 +1665,7 @@ public actor GraphStore {
   /// memory to), so mirroring must not ring the watchers, or a busy graph would have
   /// every direct message waking every listener on top of its real delivery.
   /// Gated like every board write; body carries the target so a reader can tell a
-  /// note to the room from a note to a peer. Written as `.record`, which is what keeps
+  /// note to the room from a note to a peer. Written as `.letter`, which is what keeps
   /// a talkative graph inside its own budget instead of evicting the notes.
   private func recordMailroomCommunication(
     from senderID: UUID?, to target: LoopNode, text: String, topic: String
@@ -1681,7 +1681,7 @@ public actor GraphStore {
     }
     let post = MailroomPost(
       id: Mailroom.nextID(after: graph.mailroom), at: Date(), authorID: senderID,
-      author: sender, topic: topic, body: body, kind: .record)
+      author: sender, topic: topic, body: body, kind: .letter)
     graph.mailroom = Mailroom.pruned(graph.mailroom + [post])
   }
 

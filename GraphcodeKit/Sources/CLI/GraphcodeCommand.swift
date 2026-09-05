@@ -229,7 +229,7 @@ public enum GraphcodeCommand: Equatable, Sendable {
 
     MAILROOM
       The shared, unaddressed board: `node send` reaches one peer you already know;
-      an Mailroom post is a note for whoever comes next, discoverable by loops that
+      a Mailroom post is a note for whoever comes next, discoverable by loops that
       did not exist when it was written. Run from inside a loop, posts are attributed
       to that loop (`ZMX_SESSION`, the same mechanism as `node send`); from a human's
       shell they read as from "a human". `sync` and `watch` need that loop identity —

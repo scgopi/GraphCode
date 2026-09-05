@@ -1,6 +1,6 @@
 import Foundation
 
-/// One post on an Mailroom — the shared, unaddressed message board a graph of loops
+/// One post on a Mailroom — the shared, unaddressed message board a graph of loops
 /// writes to and reads without wiring anything: `node send` and edges are addressed
 /// (a sender must already know a target's id, and the daemon routes to that one peer),
 /// while the Mailroom is the ambient counterpart. A loop drops a note for *whoever
@@ -22,10 +22,22 @@ public struct MailroomPost: Codable, Equatable, Identifiable, Sendable {
   /// trying — evicted every note on it. Separate budgets are the fix: chatter can fill
   /// its own quota to the brim and never touch a note.
   public enum Kind: String, Codable, Sendable {
-    /// Somebody posted this on purpose (`graphcode mailroom post`).
-    case note
-    /// The board's mirror of a delivered direct message or handoff.
-    case record
+    /// Somebody posted this on purpose — addressed to nobody, which is the whole of
+    /// what separates it from a letter.
+    case notice
+    /// The room's copy of a direct message or handoff that was delivered elsewhere.
+    case letter
+
+    /// Boards written before the mail vocabulary spell these `note` and `record`. An
+    /// unrecognised kind reads as a notice rather than throwing: `ProjectPersistence`
+    /// turns any decode failure into "no saved graph", so a strict reading here would
+    /// trade one unknown post for every post on the board.
+    public init(from decoder: Decoder) throws {
+      switch try decoder.singleValueContainer().decode(String.self) {
+      case "letter", "record": self = .letter
+      default: self = .notice
+      }
+    }
   }
 
   /// Position in the board's sequence, 1-based. The unread cursor is this number, so
@@ -68,7 +80,7 @@ public struct MailroomPost: Codable, Equatable, Identifiable, Sendable {
 
   public init(
     id: Int, at: Date, authorID: UUID?, author: String, topic: String?, body: String,
-    kind: Kind = .note
+    kind: Kind = .notice
   ) {
     self.id = id
     self.at = at
@@ -94,7 +106,7 @@ public struct MailroomPost: Codable, Equatable, Identifiable, Sendable {
     author = try container.decode(String.self, forKey: .author)
     topic = try container.decodeIfPresent(String.self, forKey: .topic)
     body = try container.decode(String.self, forKey: .body)
-    kind = try container.decodeIfPresent(Kind.self, forKey: .kind) ?? .note
+    kind = try container.decodeIfPresent(Kind.self, forKey: .kind) ?? .notice
   }
 
   /// The same post with its author's handle gone — what deleting a loop leaves behind.
@@ -129,17 +141,21 @@ public struct MailroomWatch: Codable, Equatable, Sendable {
 /// The board's own rules — the arithmetic every surface shares rather than
 /// re-derives, so the CLI's unread count and the daemon's cursor can never disagree.
 public enum Mailroom {
-  /// How many *notes* a board keeps. The oldest fall off first: an Mailroom is a
-  /// mailbox for the work that is happening, not an archive — a loop's durable
-  /// findings belong in its memory log, and the board's job is carrying them to
-  /// loops that cannot read that log.
-  public static let maxNotes = 200
+  /// How many *notices* a room keeps. The oldest fall off first: a Mailroom carries
+  /// the work that is happening, it is not an archive — a loop's durable findings
+  /// belong in its memory log, and the room's job is carrying them to loops that
+  /// cannot read that log.
+  public static let maxNotices = 200
 
-  /// How many mirrored records a board keeps, pruned entirely separately from the
-  /// notes. Smaller because a record is a receipt for something already delivered:
-  /// enough that a loop joining mid-flight can see what was recently said, not so
-  /// many that the graph's chatter becomes the board.
-  public static let maxRecords = 50
+  /// How many *letters* a room keeps, pruned entirely separately from the notices.
+  ///
+  /// Was 50, on the reading that a letter is a mere receipt for something already
+  /// delivered. That undersold it: correspondence is half of what the room is for,
+  /// and a ten-way fanout spends 50 slots in a single pass — so the loop that joins
+  /// afterwards finds the graph's history already evicted, which is the failure the
+  /// separate budgets existed to prevent. Level with the notices, and pruned apart
+  /// from them, so neither kind of traffic can crowd the other out.
+  public static let maxLetters = 200
 
   /// The id the next post gets. Maximum-plus-one, never count-plus-one: pruning
   /// removes the oldest posts, and reusing their ids would make unread cursors
@@ -154,7 +170,7 @@ public enum Mailroom {
   /// The pair `sync --headlines` / `read <id>` already existed, but choosing between
   /// them is a decision a loop cannot make: it learns how much mail it has by reading
   /// it, and a loop created after a busy week inherits the whole board on its first
-  /// sync — measured at 200 notes, that is ~180 KB, or something like 45,000 tokens
+  /// sync — measured at 200 notices, that is ~180 KB, or something like 45,000 tokens
   /// spent before the loop has done anything. So the verb decides, and says which
   /// way it went; `--full` overrides for a caller that really does want every body.
   public static let triageAfterPosts = 12
@@ -177,11 +193,11 @@ public enum Mailroom {
   /// A board pruned to both budgets, oldest of each kind gone first and the survivors
   /// back in one sequence. Applied by the store on every write so no caller can forget.
   public static func pruned(_ posts: [MailroomPost]) -> [MailroomPost] {
-    let notes = posts.filter { $0.kind == .note }
-    let records = posts.filter { $0.kind == .record }
-    guard notes.count > maxNotes || records.count > maxRecords else { return posts }
+    let notices = posts.filter { $0.kind == .notice }
+    let letters = posts.filter { $0.kind == .letter }
+    guard notices.count > maxNotices || letters.count > maxLetters else { return posts }
     let kept = Set(
-      (notes.suffix(maxNotes) + records.suffix(maxRecords)).map(\.id))
+      (notices.suffix(maxNotices) + letters.suffix(maxLetters)).map(\.id))
     return posts.filter { kept.contains($0.id) }
   }
 }
