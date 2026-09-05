@@ -204,9 +204,19 @@ struct LoopWorkspaceRail: View {
   /// greedy and yield; the board hugs its posts with `fixedSize` and does not. On a
   /// short window a fixed 600pt cap was enough, with THIS LOOP's 118 and the summary's
   /// 120 floor, to overflow the stack and push the foot of the rail off the bottom.
-  /// A share cannot overflow on its own, and 40% still shows a conversation.
+  /// A share cannot overflow on its own.
+  ///
+  /// Half, not the original 40%: the room now carries a graph's correspondence as well
+  /// as its notices, and four visible posts on a laptop rail made a section you had to
+  /// scroll to learn anything from. The invariant is unchanged and still pinned by
+  /// `MailroomRailShareTests` — the share plus everything rigid above it fits the
+  /// shortest rail a 1280×800 window produces.
+  static let railShare: CGFloat = 0.5
+  /// Two posts, so a very short rail shows a conversation and not a sliver.
+  static let minMailroomHeight: CGFloat = 200
+
   static func mailroomHeightCap(railHeight: CGFloat) -> CGFloat {
-    min(MailroomSection.maxScrollHeight, max(160, railHeight * 0.4))
+    min(MailroomSection.maxScrollHeight, max(minMailroomHeight, railHeight * railShare))
   }
 
   var body: some View {

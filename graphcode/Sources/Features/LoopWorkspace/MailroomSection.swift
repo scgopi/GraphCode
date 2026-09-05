@@ -1,5 +1,5 @@
-import MailroomKit
 import GraphcodeKit
+import MailroomKit
 import SwiftUI
 
 /// What the rail needs to know about the board without building a view to find out.
@@ -39,7 +39,7 @@ enum MailroomPresentation {
 /// The Mailroom in the workspace rail — a peer of `LoopSummarySection` and
 /// `SummaryBoardSection`, and the one place a human meets the board without a shell.
 ///
-/// The board is how loops leave notes for whoever comes next, and until this section
+/// The board is how loops leave notices for whoever comes next, and until this section
 /// existed the only way to read one was a CLI verb nobody had been told about. That is
 /// the whole reason it is here rather than behind a menu: a coordination channel a
 /// supervisor never sees is the failure mode, not a missing convenience.
@@ -59,16 +59,17 @@ struct MailroomSection: View {
   /// which is exactly what a person talking to the whole graph is.
   let onPost: (String, String?) -> Void
 
-  /// Whether the mirrored records are unfolded. Local and unpersisted, unlike the
+  /// Whether the mirrored letters are unfolded. Local and unpersisted, unlike the
   /// section's own fold: opening the receipts is a thing you do once to answer a
   /// question, not a way you prefer to read the board.
-  /// The most the board's scroll box will ever be, on any window: about ten posts at
-  /// the rail's default width — enough to read a conversation, not so many that the
-  /// rail is nothing but the board. The rail hands down a smaller cap on a short
-  /// window (`LoopWorkspaceRail.mailroomHeightCap`); this is the ceiling on that.
-  static let maxScrollHeight: CGFloat = 600
+  /// The most the room's scroll box will ever be, on any window: about fourteen posts
+  /// at the rail's default width — enough to read a conversation without scrolling,
+  /// not so many that the rail is nothing but the room. The rail hands down a smaller
+  /// cap on a short window (`LoopWorkspaceRail.mailroomHeightCap`); this is the
+  /// ceiling on that.
+  static let maxScrollHeight: CGFloat = 820
 
-  @State private var showsRecords = false
+  @State private var showsLetters = false
   @State private var isComposing = false
   @State private var draft = ""
   @State private var draftTopic = ""
@@ -84,7 +85,7 @@ struct MailroomSection: View {
   /// last looked. `nil` when everything is read, which is when nothing should be drawn.
   private var firstUnreadID: Int? {
     guard unread > 0 else { return nil }
-    return notes.suffix(unread).first?.id
+    return notices.suffix(unread).first?.id
   }
 
   var body: some View {
@@ -95,8 +96,8 @@ struct MailroomSection: View {
       } else {
         ScrollView(.vertical) {
           VStack(alignment: .leading, spacing: 11) {
-            recordsRollup
-            ForEach(notes) { post in
+            lettersRollup
+            ForEach(notices) { post in
               if post.id == firstUnreadID { sinceYouLooked }
               postRow(post)
             }
@@ -139,7 +140,7 @@ struct MailroomSection: View {
   }
 
   private var unreadIDs: Set<Int> {
-    Set(notes.suffix(unread).map(\.id))
+    Set(notices.suffix(unread).map(\.id))
   }
 
   // MARK: - Header
@@ -178,9 +179,9 @@ struct MailroomSection: View {
   private var foldedLine: some View {
     HStack(spacing: 6) {
       Circle()
-        .fill(accent(for: notes.last))
+        .fill(accent(for: notices.last))
         .frame(width: 6, height: 6)
-      Text(notes.last?.body ?? "no notes yet")
+      Text(notices.last?.body ?? "no notices yet")
         .font(.system(size: 11.5))
         .foregroundStyle(.white.opacity(0.75))
         .lineLimit(1)
@@ -235,38 +236,38 @@ struct MailroomSection: View {
   /// The mirrored traffic, one line each and never a body: a record says that two loops
   /// spoke, which is all a reader of the board needs from it.
   @ViewBuilder
-  private var recordsRollup: some View {
-    if !records.isEmpty {
+  private var lettersRollup: some View {
+    if !letters.isEmpty {
       VStack(alignment: .leading, spacing: 7) {
         HStack(spacing: 6) {
-          Image(systemName: showsRecords ? "chevron.down" : "chevron.right")
+          Image(systemName: showsLetters ? "chevron.down" : "chevron.right")
             .font(.system(size: 8, weight: .semibold))
             .foregroundStyle(.white.opacity(0.38))
           Text(
-            records.count == 1 ? "1 message record" : "\(records.count) message records"
+            letters.count == 1 ? "1 letter" : "\(letters.count) letters"
           )
           .font(.system(size: 10.5))
           .foregroundStyle(.white.opacity(0.5))
           Spacer(minLength: 0)
         }
         .contentShape(Rectangle())
-        .onTapGesture { showsRecords.toggle() }
-        if showsRecords {
+        .onTapGesture { showsLetters.toggle() }
+        if showsLetters {
           VStack(alignment: .leading, spacing: 7) {
-            ForEach(records.suffix(8)) { record in
+            ForEach(letters.suffix(8)) { letter in
               HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(MailroomPost.stampFormat.string(from: record.at))
+                Text(MailroomPost.stampFormat.string(from: letter.at))
                   .font(.system(size: 10.5, design: .monospaced))
                   .foregroundStyle(.white.opacity(0.32))
-                Text(record.body)
+                Text(letter.body)
                   .font(.system(size: 11))
                   .foregroundStyle(.white.opacity(0.5))
                   .lineLimit(1)
                   .truncationMode(.tail)
               }
             }
-            if records.count > 8 {
-              Text("\(records.count - 8) earlier")
+            if letters.count > 8 {
+              Text("\(letters.count - 8) earlier")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.white.opacity(0.4))
             }
