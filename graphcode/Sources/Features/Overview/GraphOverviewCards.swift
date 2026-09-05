@@ -31,14 +31,14 @@ extension GraphOverviewView {
   /// beginning. The same handle the folder's own canvas puts on its origin dot.
   ///
   /// The one create the Graph view was missing. A card's `+` continues a chain and the
-  /// top-right New Loop lands in the global graph, so starting a *new* chain in a
+  /// top-right New Node lands in the global graph, so starting a *new* chain in a
   /// particular folder meant crossing to that folder's canvas first.
   /// Only on lanes that *have* an origin dot: `CanvasBandView` draws one exactly when a
   /// lane has entry ports, and a `+` floating where no dot is reads as a stray control.
-  /// A lane whose loops are all in a cycle keeps the top-right New Loop.
+  /// A lane whose loops are all in a cycle keeps the top-right New Node.
   func entryHandleLayer(_ overview: GraphOverview) -> some View {
     ForEach(overview.tetheredFolders) { folder in
-      CanvasEntryHandle(help: "New loop in \(folder.name)") {
+      CanvasEntryHandle(help: "New Node in \(folder.name)") {
         store.send(.projects(.element(id: folder.path, action: .addEntryLoopTapped)))
       }
       .position(folder.originPosition)
@@ -159,7 +159,7 @@ extension GraphOverviewView {
         store.send(
           .projects(.element(id: loop.projectPath, action: .addChildNodeTapped(loop.node.id))))
       }
-      .help("New loop handed off from \(loop.node.title)")
+      .help("New Node handed off from \(loop.node.title)")
   }
 
   /// The same `LoopCardView` a project's own canvas draws, so a loop reads identically
@@ -217,7 +217,7 @@ extension GraphOverviewView {
     let node = loop.node
     Button("Open Terminal") { open(loop) }
     if !node.isResolved {
-      Button("New Child Loop…") { send(.newChildLoopTapped(node.id), to: loop.projectPath) }
+      Button("New Child Node…") { send(.newChildLoopTapped(node.id), to: loop.projectPath) }
     }
     if node.loopType == .composite {
       Button("Pilot Once…") { send(.pilotCompositeTapped(node.id), to: loop.projectPath) }

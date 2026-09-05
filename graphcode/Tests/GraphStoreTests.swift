@@ -335,7 +335,7 @@ struct GraphStoreTests {
 
     // A turn-based draft with no criterion is deliberately *not* in this list — that one
     // is valid now, since the human doing the verifying is there either way. Neither is
-    // an untitled draft: a blank title creates the node as "NewLoop" and the app names
+    // an untitled draft: a blank title creates the node as "NewNode" and the app names
     // it properly afterward (see `TitleSuggestionClient`).
     await store.handle(.createNode(NodeDraft(title: "No goal", loopType: .goalBased)))
     await store.handle(.createNode(NodeDraft(title: "Bare", loopType: .timeBased)))

@@ -13,7 +13,7 @@ import SwiftUI
 /// second way in with its own behaviour.
 ///
 /// **Creates, but never rewires.** The two `+`s a folder's canvas has are both here —
-/// New Loop at the top right, and a hover-revealed one on every card that starts a loop
+/// New Node at the top right, and a hover-revealed one on every card that starts a loop
 /// handed off from it — because "I can see the loop I want to continue from" is the
 /// moment you want to continue from it, and crossing to that folder's canvas first only
 /// to click the same handle is a detour. What stays out is rewiring: no dragging cards
@@ -69,7 +69,7 @@ struct GraphOverviewView: View {
   /// This view once had no toolbar on purpose — global triggers were CLI-only. That
   /// rule made the global graph's one legitimate use from the app unreachable: loops
   /// that belong to no folder, like an email or Teams-message watcher, had nowhere a
-  /// human could create them. "New Loop" here files the loop into the global graph
+  /// human could create them. "New Node" here files the loop into the global graph
   /// through the same `ProjectFeature` form a folder's canvas uses; its session opens
   /// at home (see `ZmxSessionLauncher.workingDirectory`), since there is no project
   /// directory for it to belong to.
@@ -93,9 +93,9 @@ struct GraphOverviewView: View {
         }
       }
       // On the canvas top-right rather than in the toolbar, same placement and quiet
-      // styling as a project canvas's New Loop — see there for why.
+      // styling as a project canvas's New Node — see there for why.
       .overlay(alignment: .topTrailing) {
-        CanvasAddButton(help: "New Loop") {
+        CanvasAddButton(help: "New Node") {
           store.send(
             .projects(
               .element(
@@ -110,7 +110,7 @@ struct GraphOverviewView: View {
 
   /// One host per open folder, all of them mounted for the life of this view.
   ///
-  /// Two forms can be opened from here now — the global graph's, from the New Loop
+  /// Two forms can be opened from here now — the global graph's, from the New Node
   /// button, and any folder's, from a card's `+` handle — and which folder the second
   /// one belongs to isn't known until the click. Mounting a host per folder rather than
   /// inserting one when a form opens is what makes the sheet actually present: a

@@ -39,7 +39,7 @@ struct CanvasAddButton: View {
 }
 
 #Preview {
-  CanvasAddButton(help: "New Loop", action: {})
+  CanvasAddButton(help: "New Node", action: {})
     .padding(24)
     .background(Theme.canvasBackground)
 }

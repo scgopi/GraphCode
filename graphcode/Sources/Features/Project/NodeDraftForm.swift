@@ -75,7 +75,7 @@ struct NodeDraftForm: View {
   private var header: some View {
     HStack(alignment: .firstTextBaseline, spacing: 8) {
       VStack(alignment: .leading, spacing: 2) {
-        Text("New loop").font(.system(size: 16, weight: .semibold))
+        Text("New Node").font(.system(size: 16, weight: .semibold))
         Text("in \(store.graph.project.name)")
           .font(.system(size: 12))
           .foregroundStyle(.white.opacity(0.45))
@@ -87,7 +87,7 @@ struct NodeDraftForm: View {
 
   /// Action blue, never a loop-type hue — templates are chrome, not taxonomy, and
   /// there is no sixth colour in this feature (PROMPT_TEMPLATES.md § What changes
-  /// in the New loop dialog).
+  /// in the New Node dialog).
   private var templatesButton: some View {
     Button {
       store.send(.templatesButtonTapped)

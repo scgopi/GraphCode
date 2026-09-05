@@ -130,7 +130,7 @@ struct TemplateSaveSheet: View {
   }
 }
 
-/// Presents the save sheet for a save started **outside** the New loop dialog — a
+/// Presents the save sheet for a save started **outside** the New Node dialog — a
 /// loop's context menu, which PROMPT_TEMPLATES.md § Save as template names first.
 /// The dialog hosts its own copy while it is open, so this one stands down then:
 /// two `.sheet`s bound to the same item present nothing at all.

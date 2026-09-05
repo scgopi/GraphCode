@@ -23,7 +23,7 @@ struct TemplatesSettingsSection: View {
     Section {
       if templates.isEmpty {
         Text(
-          "No templates yet. Save one from the New loop dialog (⌘T), or right-click a "
+          "No templates yet. Save one from the New Node dialog (⌘T), or right-click a "
             + "loop that worked and choose Save as Template…."
         )
         .font(.caption2)

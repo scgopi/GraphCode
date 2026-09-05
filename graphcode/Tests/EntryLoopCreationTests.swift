@@ -7,7 +7,7 @@ import Testing
 
 /// The `+` on a lane's origin dot in the Graph view: a top-level loop in that folder.
 ///
-/// The gap it fills — a card's `+` continues a chain, and the top-right New Loop lands in
+/// The gap it fills — a card's `+` continues a chain, and the top-right New Node lands in
 /// the global graph, so starting a *new* chain in a particular folder meant crossing to
 /// that folder's own canvas first.
 @Suite
@@ -60,7 +60,7 @@ struct EntryLoopCreationTests {
     await store.send(.createNodeConfirmed)
 
     #expect(store.state.declaredEntryIDs.contains(draftID))
-    // Cleared, so the *next* form — the top-right New Loop, a card's `+` — doesn't
+    // Cleared, so the *next* form — the top-right New Node, a card's `+` — doesn't
     // inherit the declaration.
     #expect(!store.state.draftDeclaresEntry)
   }
@@ -83,7 +83,7 @@ struct EntryLoopCreationTests {
   func aLaneWithNoBeginningGetsNoHandle() {
     // The handle lives where the origin dot does, and `CanvasBandView` draws that dot
     // exactly when a lane has entry ports. A `+` floating where no dot is reads as a
-    // stray control — a cycle-only lane keeps the top-right New Loop instead.
+    // stray control — a cycle-only lane keeps the top-right New Node instead.
     let first = LoopNode(title: "first")
     let second = LoopNode(title: "second")
     var graph = LoopGraph(project: ProjectRef(path: "/tmp/project", name: "project"))

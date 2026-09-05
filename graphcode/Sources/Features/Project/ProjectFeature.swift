@@ -193,7 +193,7 @@ struct ProjectFeature {
     /// The + handle on a node card: opens the same form, and the created loop gets a
     /// hand-off edge from this node.
     case addChildNodeTapped(UUID)
-    /// The context menus' "New Child Loop…": a *custody* child — `createdBy` set, the
+    /// The context menus' "New Child Node…": a *custody* child — `createdBy` set, the
     /// daemon draws the already-fired link, the loop starts now. Distinct from
     /// `.addChildNodeTapped` (the + handle), which wires an unfired hand-off that
     /// sequences the new loop *after* the parent — under a long-running parent that
@@ -810,7 +810,7 @@ extension ProjectFeature {
                 .createEdge(from: parentNodeID, to: draft.id, spec: EdgeSpec()))))
         }
 
-        // A blank title creates the node as "NewLoop" and asks the loop's own
+        // A blank title creates the node as "NewNode" and asks the loop's own
         // backend for a real one — after creation, so a slow (or absent) CLI never
         // holds the node itself hostage. The rename can target the node because the
         // draft's id *is* the node's id (see `NodeDraft.id`); no answer just means

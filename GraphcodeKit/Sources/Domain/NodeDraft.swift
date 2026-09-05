@@ -22,7 +22,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
   /// time the answer arrives the only handle it has is this id. Without it, the client
   /// would have to diff two `graphChanged` broadcasts to guess which node it just made.
   public var id: UUID
-  /// Optional — a blank title creates the node as "NewLoop" (see `makeNode`), on the
+  /// Optional — a blank title creates the node as "NewNode" (see `makeNode`), on the
   /// theory that naming every loop up front was the most tedious field on the form and
   /// the one a backend can fill in afterward.
   public var title: String
@@ -117,7 +117,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
   /// only in the form — the wire protocol is reachable from the CLI too, and a rule that
   /// only one client applies isn't a rule.
   public var isValid: Bool {
-    // No title requirement: `makeNode` falls back to "NewLoop", and the app follows up
+    // No title requirement: `makeNode` falls back to "NewNode", and the app follows up
     // with a backend-suggested name (see `TitleSuggestionClient`). Requiring one taught
     // people to type a throwaway word to get past the form — the prompt is the field
     // that means something, so it's the one each type below actually demands.
@@ -165,14 +165,14 @@ public struct NodeDraft: Codable, Equatable, Sendable {
       //
       // A name is required, though, and only here: every other type gets one from its
       // own backend after it starts working (`TitleSuggestionClient`), and a composite
-      // never starts. "NewLoop" would be its name for good.
+      // never starts. "NewNode" would be its name for good.
       return !title.trimmingCharacters(in: .whitespaces).isEmpty
     }
   }
 
   /// What an untitled draft's node is called until something better arrives — the app
   /// asks the loop's own backend for a real name and renames the node when it answers.
-  public static let untitledFallback = "NewLoop"
+  public static let untitledFallback = "NewNode"
 
   /// The backend this draft builds with when nobody resolved one. `GraphStore` resolves
   /// inheritance *before* this is consulted — a child created by a running loop takes

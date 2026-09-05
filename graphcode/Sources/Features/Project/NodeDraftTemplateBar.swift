@@ -2,7 +2,7 @@ import ComposableArchitecture
 import GraphcodeKit
 import SwiftUI
 
-/// The template chrome the New loop dialog grew: the applied-template strip at the
+/// The template chrome the New Node dialog grew: the applied-template strip at the
 /// top and the two-row footer at the bottom. In its own file because `NodeDraftForm`
 /// sits at swiftlint's type-body limit, the same reason `ProjectFeature`'s template
 /// verbs live beside it rather than inside it.
