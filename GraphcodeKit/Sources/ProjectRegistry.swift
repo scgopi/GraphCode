@@ -115,6 +115,12 @@ public actor ProjectRegistry {
   // MARK: - Connections
 
   public func addConnection(id: UUID, fileDescriptor: Int32) {
+    // Registering the connection is what opens its outbound half — here rather than in
+    // the daemon's accept loop because this is the one place every caller goes through,
+    // and a descriptor with no channel silently delivers nothing. It also gives a reused
+    // descriptor number a fresh channel, so nothing inherits a previous connection's
+    // writer.
+    OutboundChannels.open(fileDescriptor)
     connectionFileDescriptors[id] = fileDescriptor
     startPresencePolling()
   }
@@ -702,6 +708,10 @@ public actor ProjectRegistry {
 
   private func send(_ event: DaemonEvent, to fileDescriptor: Int32) {
     guard let data = try? JSONEncoder().encode(event) else { return }
-    try? FramedMessageIO.writeFrame(data, to: fileDescriptor)
+    // Queued rather than written inline for the same reason `GraphStore.send` queues:
+    // this is actor-isolated, and a blocking write of a full-graph frame hands the actor
+    // to whichever client is slowest to read it. No superseding key — a unicast reply
+    // answers one command and has to arrive.
+    OutboundChannels.send(data, to: fileDescriptor)
   }
 }

@@ -175,6 +175,7 @@ let registry = ProjectRegistry(
 func handleConnection(_ fileDescriptor: Int32) {
   Task {
     let connectionID = UUID()
+    // `addConnection` opens this connection's outbound channel as it registers it.
     await registry.addConnection(id: connectionID, fileDescriptor: fileDescriptor)
     FileHandle.standardOutput.write(Data("graphcoded: client connected\n".utf8))
     while true {
@@ -195,12 +196,16 @@ func handleConnection(_ fileDescriptor: Int32) {
         let event = DaemonEvent.errorOccurred(
           "unrecognized command — graphcoded may be older than the client that sent it")
         if let encoded = try? JSONEncoder().encode(event) {
-          try? FramedMessageIO.writeFrame(encoded, to: fileDescriptor)
+          OutboundChannels.send(encoded, to: fileDescriptor)
         }
       }
     }
     await registry.removeConnection(connectionID)
-    close(fileDescriptor)
+    // The channel owns the descriptor now: closing it here would free a number the
+    // kernel can hand straight to the next `accept` while a write is still in flight on
+    // it. `close` tears the socket down, which is also what unblocks a writer parked on a
+    // peer that stopped reading.
+    OutboundChannels.close(fileDescriptor)
     FileHandle.standardOutput.write(Data("graphcoded: client disconnected\n".utf8))
   }
 }
