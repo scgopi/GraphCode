@@ -2704,8 +2704,10 @@ public actor GraphStore {
   }
 
   private func announceError(_ message: String) {
-    for id in connections.keys {
-      send(.errorOccurred(message), to: id)
+    if let frame = Self.encode(.errorOccurred(message)) {
+      for id in connections.keys {
+        deliver(frame, to: id)
+      }
     }
     onAnnounceError?(message)
   }
@@ -3254,32 +3256,59 @@ public actor GraphStore {
   /// other caller wants `broadcast` — a graph change that isn't saved is a graph change
   /// lost at the next daemon restart.
   private func notifyClients() {
-    let snapshot = graph.wireSnapshot()
+    // Encoded once, not once per connection: the frame is the same bytes for every
+    // client, and encoding a full graph is the expensive half of a broadcast — with C
+    // clients attached it was C encodes of the same snapshot on every change, presence
+    // tick included (issue #288's CPU amplifier). And not at all with no client: the
+    // daemon runs clientless most of the day, and `send` used to find no descriptor
+    // before it encoded anything — hoisting the encode must not turn zero into one.
+    guard !connections.isEmpty else { return }
+    guard let frame = Self.encode(.graphChanged(graph.wireSnapshot())) else { return }
     for id in connections.keys {
-      send(.graphChanged(snapshot), to: id)
+      deliver(frame, to: id)
     }
   }
 
-  private func send(_ event: DaemonEvent, to connectionID: UUID) {
-    guard let fileDescriptor = connections[connectionID] else { return }
-    guard let data = try? JSONEncoder().encode(event) else { return }
-    // Queued, never written here: this runs on the `GraphStore` actor, and a
-    // `graphChanged` frame is far larger than a socket's send buffer, so writing it
-    // inline blocked the actor for as long as the slowest client took to read
-    // (issue #288). A snapshot still waiting to go out is replaced by a newer one rather
-    // than queued behind it — the event carries the whole graph, so the older one has
-    // nothing left to say.
-    //
-    // Keyed per graph, never on the event name alone: one connection joins as many
-    // projects as it likes, and every project's store writes to that one socket. A shared
-    // key made the newest snapshot supersede a *different* project's undelivered one, so
-    // a client that had just joined two projects silently never received the first — its
-    // loops simply never appeared.
+  /// An event as the bytes and the superseding key it goes out with — everything about
+  /// a frame that does not depend on which connection receives it.
+  private struct EncodedEvent {
+    let data: Data
+    /// A snapshot still waiting to go out is replaced by a newer one rather than queued
+    /// behind it — the event carries the whole graph, so the older one has nothing
+    /// left to say. Keyed per graph, never on the event name alone: one connection joins
+    /// as many projects as it likes, and every project's store writes to that one
+    /// socket. A shared key made the newest snapshot supersede a *different* project's
+    /// undelivered one, so a client that had just joined two projects silently never
+    /// received the first — its loops simply never appeared.
+    let supersedingKey: String?
+  }
+
+  private static func encode(_ event: DaemonEvent) -> EncodedEvent? {
+    guard let data = try? JSONEncoder().encode(event) else { return nil }
     let supersedingKey: String? = {
       if case .graphChanged(let changed) = event { return "graphChanged:\(changed.id)" }
       return nil
     }()
-    guard OutboundChannels.send(data, to: fileDescriptor, supersedingKey: supersedingKey) else {
+    return EncodedEvent(data: data, supersedingKey: supersedingKey)
+  }
+
+  /// One event to one connection — the unicast shape (`addConnection`'s joining
+  /// snapshot, a refusal). A broadcast goes through `notifyClients`, which encodes once.
+  private func send(_ event: DaemonEvent, to connectionID: UUID) {
+    guard let frame = Self.encode(event) else { return }
+    deliver(frame, to: connectionID)
+  }
+
+  private func deliver(_ frame: EncodedEvent, to connectionID: UUID) {
+    guard let fileDescriptor = connections[connectionID] else { return }
+    // Queued, never written here: this runs on the `GraphStore` actor, and a
+    // `graphChanged` frame is far larger than a socket's send buffer, so writing it
+    // inline blocked the actor for as long as the slowest client took to read
+    // (issue #288).
+    guard
+      OutboundChannels.send(
+        frame.data, to: fileDescriptor, supersedingKey: frame.supersedingKey)
+    else {
       // No live channel — the client already disconnected. Drop it here rather than
       // waiting for the read loop to notice, so a dead connection can't accumulate
       // failed broadcast attempts.
