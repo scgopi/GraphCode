@@ -3219,7 +3219,9 @@ public actor GraphStore {
     // than queued behind it — the event carries the whole graph, so the older one has
     // nothing left to say.
     let supersedingKey: String? = {
-      if case .graphChanged = event { return "graphChanged" }
+      if case .graphChanged(let snapshot) = event {
+        return "graphChanged:" + snapshot.project.path
+      }
       return nil
     }()
     guard OutboundChannels.send(data, to: fileDescriptor, supersedingKey: supersedingKey) else {

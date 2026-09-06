@@ -114,7 +114,7 @@ final class OutboundChannel: @unchecked Sendable {
     pending.append(Frame(data: data, supersedingKey: supersedingKey))
     pendingBytes += data.count
 
-    if pendingBytes > Self.maxBacklogBytes {
+    if pendingBytes - data.count > Self.maxBacklogBytes {
       // Not a write failure, so nothing else will report it: say so before dropping the
       // client, or a disconnect this daemon *chose* reads afterwards as one it suffered.
       let notice =
@@ -278,14 +278,9 @@ public enum OutboundChannels {
     _ data: Data, to fileDescriptor: Int32, supersedingKey: String? = nil
   ) -> Bool {
     lock.lock()
-    let channel: OutboundChannel
-    if let existing = channels[fileDescriptor] {
-      channel = existing
-    } else {
-      channel = OutboundChannel(fileDescriptor: fileDescriptor)
-      channels[fileDescriptor] = channel
-    }
+    let channel = channels[fileDescriptor]
     lock.unlock()
+    guard let channel else { return false }
     return channel.send(data, supersedingKey: supersedingKey)
   }
 
