@@ -130,12 +130,11 @@ struct OutboundChannelTests {
     #expect(received.contains(reply))
   }
 
-  /// Closing must not wait on a peer that has stopped reading. This is why the writer
-  /// never parks inside a blocking `write(2)`: a thread already blocked there is not
-  /// reliably woken by another thread's `shutdown`, so a wedged peer could hang the
-  /// disconnecting caller for ever — the original bug moved one layer down, from the
-  /// actor to the connection loop. Writing in non-blocking slices lets the writer notice
-  /// the close by itself.
+  /// Closing must not wait on a peer that has stopped reading. This is why no single send
+  /// may park indefinitely: a thread already blocked inside one is not reliably woken by
+  /// another thread's `shutdown`, so a wedged peer could hang the disconnecting caller for
+  /// ever — the original bug moved one layer down, from the actor to the connection loop.
+  /// Coming back every `SO_SNDTIMEO` slice lets the writer notice the close by itself.
   @Test
   func closingReleasesAWriterParkedOnAWedgedClient() {
     let (daemon, client) = makeSocketPair()
@@ -151,6 +150,31 @@ struct OutboundChannelTests {
     close(client)
 
     #expect(elapsed < 2.0, "closing a wedged channel took \(elapsed)s")
+  }
+
+  /// The correction to #291. `MSG_DONTWAIT` does nothing for `send` on a blocking
+  /// AF_UNIX stream socket on macOS — measured at 60 KB into a 4 KB peer, still inside
+  /// the syscall after two minutes — so the writer parked there and the poll loop that
+  /// `closeAndWait` depends on never ran. `SO_SNDTIMEO` is what actually bounds it, and
+  /// it has to be on the descriptor before anything is written.
+  @Test
+  func theChannelBoundsHowLongOneSendMayPark() {
+    let (daemon, client) = makeSocketPair()
+    OutboundChannels.open(daemon)
+    defer {
+      OutboundChannels.close(daemon)
+      close(client)
+    }
+
+    var timeout = timeval(tv_sec: 0, tv_usec: 0)
+    var size = socklen_t(MemoryLayout<timeval>.size)
+    #expect(getsockopt(daemon, SOL_SOCKET, SO_SNDTIMEO, &timeout, &size) == 0)
+
+    let microseconds = Int(timeout.tv_sec) * 1_000_000 + Int(timeout.tv_usec)
+    #expect(microseconds > 0, "a send on this channel is unbounded")
+    // Bounded, and short enough that a close is noticed promptly rather than a slice
+    // later — anything approaching a second would put the teardown back where it was.
+    #expect(microseconds <= 200_000)
   }
 
   /// The safety valve. With superseding in play a backlog is normally one snapshot, so
