@@ -34,7 +34,8 @@ struct ProjectRegistryTests {
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
     return (
-      ProjectRegistry(persistenceDirectory: directory), ProjectPersistence(baseDirectory: directory)
+      ProjectRegistry(persistenceDirectory: directory, persistsSynchronously: true),
+      ProjectPersistence(baseDirectory: directory)
     )
   }
 

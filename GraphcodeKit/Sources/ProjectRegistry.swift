@@ -24,6 +24,12 @@ import Foundation
 /// `.deleteProjectGraph` additionally discards its saved loops.
 public actor ProjectRegistry {
   private let persistence: ProjectPersistence
+  /// Writes graphs off the store's actor — see `GraphWriter`. `nonisolated` so the
+  /// daemon can flush it from a signal handler without an actor hop.
+  private nonisolated let writer: GraphWriter
+  /// For tests that read the file straight after a command: every save is flushed
+  /// before the store's turn ends, so the disk is exactly what the store holds.
+  private let persistsSynchronously: Bool
   private var stores: [String: GraphStore] = [:]
   private var connectionFileDescriptors: [UUID: Int32] = [:]
   private var connectionProjectPaths: [UUID: Set<String>] = [:]
@@ -79,9 +85,12 @@ public actor ProjectRegistry {
     sessionAlive: (@Sendable (LoopNode, String?) async -> Bool)? = CLISessionBackend.sessionAlive,
     composeBoard: (@Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?)? =
       CLISessionBackend.composeBoard,
-    reapCondemnedSessions: Bool = false
+    reapCondemnedSessions: Bool = false,
+    persistsSynchronously: Bool = false
   ) {
     persistence = ProjectPersistence(baseDirectory: persistenceDirectory)
+    writer = GraphWriter(persistence: persistence)
+    self.persistsSynchronously = persistsSynchronously
     self.ensureSession = ensureSession
     self.terminateSession = terminateSession
     self.restartSession = restartSession
@@ -110,6 +119,12 @@ public actor ProjectRegistry {
         }
       }
     }
+  }
+
+  /// Waits for every queued save — the daemon's last act on its way out, so a change
+  /// applied a moment before `SIGTERM` is on disk when launchd restarts it.
+  public nonisolated func flushPersistence() {
+    writer.flush()
   }
 
   // MARK: - Connections
@@ -614,8 +629,11 @@ public actor ProjectRegistry {
     }
     let newStore = GraphStore(
       graph: graph,
-      onGraphChanged: { [weak self] updatedGraph in
-        persistence.saveGraph(updatedGraph)
+      onGraphChanged: { [weak self, writer, persistsSynchronously] updatedGraph in
+        // Handed to the writer and done: this closure runs on the store's actor, and a
+        // write of the whole graph held it for as long as the disk took (#307).
+        writer.save(updatedGraph)
+        if persistsSynchronously { writer.flush() }
         // Every state change is a chance for the last running loop to have stopped, or
         // the first to have started — see `refreshAwakeAssertion`.
         Task { await self?.refreshAwakeAssertion() }

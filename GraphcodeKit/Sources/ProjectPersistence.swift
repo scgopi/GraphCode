@@ -1,4 +1,5 @@
 import Foundation
+import MailroomKit
 
 /// Reads/writes the on-disk state Phase 4 adds: one JSON file per project's `LoopGraph`
 /// plus small recents and open-projects indexes, all under `~/.graphcode` (see
@@ -31,12 +32,52 @@ public struct ProjectPersistence: Sendable {
       graph.nodes[index].presence = nil
       graph.nodes[index].activity = nil
     }
+    // The room's own file wins over one still inline in the graph file — a graph saved
+    // before the split carries its posts inline, and decodes exactly as it always did.
+    if let room = try? Data(contentsOf: mailroomURL(forProjectPath: path)),
+      let posts = try? JSONDecoder().decode([MailroomPost].self, from: room)
+    {
+      graph.mailroom = posts
+    }
     return graph
   }
 
+  /// Two files: the graph without its room, rewritten on every change, and the room on
+  /// its own, rewritten only when the room changed. The room was 84% of the graph file
+  /// (271 KB of 323 KB on the graph that filed #307) and changes only when a post lands,
+  /// while the graph changes on every memo, state tick and cursor move — the same
+  /// argument #293 made for the wire, applied to the file.
   public func saveGraph(_ graph: LoopGraph) {
-    guard let data = try? JSONEncoder().encode(graph) else { return }
+    var slim = graph
+    slim.mailroom = []
+    guard let data = try? JSONEncoder().encode(slim) else { return }
     try? data.write(to: fileURL(forProjectPath: graph.project.path), options: .atomic)
+    let digest = MailroomDigest(of: graph.mailroom)
+    guard Self.roomDigests.changed(to: digest, for: graph.project.path) else { return }
+    let roomURL = mailroomURL(forProjectPath: graph.project.path)
+    if graph.mailroom.isEmpty {
+      try? FileManager.default.removeItem(at: roomURL)
+    } else if let room = try? JSONEncoder().encode(graph.mailroom) {
+      try? room.write(to: roomURL, options: .atomic)
+    }
+  }
+
+  /// What the room last written for each project looked like, so an unchanged room is
+  /// not rewritten. Process-wide because this type is a value: every copy writes the
+  /// same files. A miss (first save after launch) writes once and is then remembered.
+  private static let roomDigests = RoomDigests()
+
+  private final class RoomDigests: @unchecked Sendable {
+    private let lock = NSLock()
+    private var digests: [String: MailroomDigest] = [:]
+
+    func changed(to digest: MailroomDigest, for path: String) -> Bool {
+      lock.lock()
+      defer { lock.unlock() }
+      guard digests[path] != digest else { return false }
+      digests[path] = digest
+      return true
+    }
   }
 
   /// Throws away a project's loops for good — the "Delete Loops…" half of the sidebar's
@@ -45,6 +86,7 @@ public struct ProjectPersistence: Sendable {
   /// written to, deleted from, or otherwise modified.
   public func deleteGraph(path: String) {
     try? FileManager.default.removeItem(at: fileURL(forProjectPath: path))
+    try? FileManager.default.removeItem(at: mailroomURL(forProjectPath: path))
   }
 
   /// Filenames are the canonical path with `/` replaced by `_` — simple, deterministic,
@@ -53,6 +95,12 @@ public struct ProjectPersistence: Sendable {
   private func fileURL(forProjectPath path: String) -> URL {
     let safeName = path.replacingOccurrences(of: "/", with: "_")
     return projectsDirectory.appendingPathComponent("\(safeName).json")
+  }
+
+  /// The room beside its graph: `<name>.mailroom.json`.
+  private func mailroomURL(forProjectPath path: String) -> URL {
+    let safeName = path.replacingOccurrences(of: "/", with: "_")
+    return projectsDirectory.appendingPathComponent("\(safeName).mailroom.json")
   }
 
   // MARK: - Recent projects
