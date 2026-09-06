@@ -3218,8 +3218,14 @@ public actor GraphStore {
     // (issue #288). A snapshot still waiting to go out is replaced by a newer one rather
     // than queued behind it — the event carries the whole graph, so the older one has
     // nothing left to say.
+    //
+    // Keyed per graph, never on the event name alone: one connection joins as many
+    // projects as it likes, and every project's store writes to that one socket. A shared
+    // key made the newest snapshot supersede a *different* project's undelivered one, so
+    // a client that had just joined two projects silently never received the first — its
+    // loops simply never appeared.
     let supersedingKey: String? = {
-      if case .graphChanged = event { return "graphChanged" }
+      if case .graphChanged(let changed) = event { return "graphChanged:\(changed.id)" }
       return nil
     }()
     guard OutboundChannels.send(data, to: fileDescriptor, supersedingKey: supersedingKey) else {

@@ -114,7 +114,13 @@ final class OutboundChannel: @unchecked Sendable {
     pending.append(Frame(data: data, supersedingKey: supersedingKey))
     pendingBytes += data.count
 
-    if pendingBytes > Self.maxBacklogBytes {
+    // The frame just queued is excluded from the measurement, so a single frame is always
+    // allowed however large it is. Measuring the whole queue meant one oversized snapshot
+    // tripped the valve on its own, which would disconnect a perfectly healthy reader for
+    // the crime of opening a big graph — and the bigger the graph grew, the more certain
+    // it became that nobody could open it at all. What the budget is for is a *backlog*:
+    // frames piling up behind a peer that has stopped reading.
+    if pendingBytes - data.count > Self.maxBacklogBytes {
       // Not a write failure, so nothing else will report it: say so before dropping the
       // client, or a disconnect this daemon *chose* reads afterwards as one it suffered.
       let notice =
@@ -179,7 +185,9 @@ final class OutboundChannel: @unchecked Sendable {
     // A writer parked inside `write(2)` on a wedged peer will not notice a flag, and
     // neither will the connection loop's reader. Tearing the socket down makes both
     // return, which is how a client this daemon gives up on is actually let go.
-    shutdown(fileDescriptor, SHUT_RDWR)
+    // `Int32(…)` because Glibc imports `SHUT_RDWR` as `Int` where Darwin gives `Int32`;
+    // without the conversion this compiles on macOS and fails the Linux build.
+    shutdown(fileDescriptor, Int32(SHUT_RDWR))
   }
 
   /// Never closes the descriptor: `closeAndWait`'s caller owns that, and only once this
@@ -265,27 +273,25 @@ public enum OutboundChannels {
   /// Queues a frame for a client without blocking. `supersedingKey` replaces an
   /// undelivered frame carrying the same key — see `OutboundChannel.send`.
   ///
-  /// Returns `false` once the client's channel has failed, which is what tells a
-  /// broadcaster to forget the connection — the same signal a failed write used to give
-  /// synchronously, now arriving on the send after the failure rather than during it.
+  /// Returns `false` when the descriptor has no live channel — it was never registered,
+  /// or its channel has failed. That is what tells a broadcaster to forget the
+  /// connection: the same signal a failed write used to give synchronously, now arriving
+  /// on the send after the failure rather than during it.
   ///
-  /// A descriptor with no channel gets one rather than losing the frame. Delivery must
-  /// not depend on every caller having registered first: a dropped frame is invisible at
-  /// the sending end and shows up at the other as a client waiting forever for an answer
-  /// that was silently discarded.
+  /// An unregistered descriptor is refused rather than given a channel of its own.
+  /// Creating one here looks like insurance against losing a frame, and is the opposite:
+  /// descriptor numbers are recycled, so a send arriving after its connection closed
+  /// would mint a channel on a number the kernel has already reassigned and hand the
+  /// departed connection's frame to whoever holds it now. Registration is what makes a
+  /// descriptor writable, and both `addConnection` paths open a channel as they register.
   @discardableResult
   public static func send(
     _ data: Data, to fileDescriptor: Int32, supersedingKey: String? = nil
   ) -> Bool {
     lock.lock()
-    let channel: OutboundChannel
-    if let existing = channels[fileDescriptor] {
-      channel = existing
-    } else {
-      channel = OutboundChannel(fileDescriptor: fileDescriptor)
-      channels[fileDescriptor] = channel
-    }
+    let channel = channels[fileDescriptor]
     lock.unlock()
+    guard let channel else { return false }
     return channel.send(data, supersedingKey: supersedingKey)
   }
 

@@ -105,6 +105,69 @@ struct OutboundChannelTests {
     #expect(!received.contains(makeFrame("second")))
   }
 
+  /// One connection joins as many projects as it likes, and every project's store writes
+  /// to that one socket. Keying supersession on the event name alone let the newest
+  /// snapshot displace a *different* project's undelivered one, so a client that had just
+  /// joined two projects silently never received the first.
+  @Test
+  func snapshotsOfDifferentGraphsDoNotSupersedeEachOther() {
+    let (daemon, client) = makeSocketPair()
+    OutboundChannels.open(daemon)
+    defer {
+      OutboundChannels.close(daemon)
+      close(client)
+    }
+
+    let projectA = makeFrame("project-a")
+    let projectB = makeFrame("project-b")
+    OutboundChannels.send(projectA, to: daemon, supersedingKey: "graphChanged:A")
+    OutboundChannels.send(projectB, to: daemon, supersedingKey: "graphChanged:B")
+
+    var received: [Data] = []
+    while let frame = try? FramedMessageIO.readFrame(from: client) {
+      received.append(frame)
+      if received.count == 2 { break }
+    }
+
+    #expect(received.contains(projectA), "project A's snapshot was superseded by project B's")
+    #expect(received.contains(projectB))
+  }
+
+  /// The budget exists for a *backlog*, not for one big frame. Measuring the whole queue
+  /// meant a single oversized snapshot tripped the valve on its own and disconnected a
+  /// healthy reader — and the bigger a graph grew, the more certain it became that nobody
+  /// could open it.
+  @Test
+  func oneOversizedFrameIsDeliveredRatherThanDroppedAsABacklog() {
+    let (daemon, client) = makeSocketPair()
+    OutboundChannels.open(daemon)
+    defer {
+      OutboundChannels.close(daemon)
+      close(client)
+    }
+
+    let huge = makeFrame("huge", bytes: OutboundChannel.maxBacklogBytes + 512 * 1024)
+    #expect(OutboundChannels.send(huge, to: daemon))
+    let delivered = try? FramedMessageIO.readFrame(from: client)
+    #expect(delivered == huge)
+  }
+
+  /// Descriptor numbers are recycled, so a send arriving after its connection closed must
+  /// not mint a channel on a number the kernel has already reassigned — that hands the
+  /// departed connection's frame to whoever holds it now.
+  @Test
+  func aSendToAnUnregisteredDescriptorIsRefusedRatherThanDelivered() {
+    let (daemon, client) = makeSocketPair()
+    defer {
+      close(daemon)
+      close(client)
+    }
+
+    // Never opened, so nothing may be written to it — this is also the signal a
+    // broadcaster uses to forget a connection that has gone.
+    #expect(OutboundChannels.send(makeFrame("stray"), to: daemon) == false)
+  }
+
   /// A frame sent under one key must not displace traffic under another — an
   /// `errorOccurred` answering a command has to arrive even while snapshots collapse.
   @Test
