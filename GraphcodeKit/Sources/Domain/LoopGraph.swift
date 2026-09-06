@@ -39,6 +39,11 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   /// Set only on the copy a daemon sends (`wireSnapshot()`); `nil` on the graph the
   /// daemon owns and persists.
   public var mailroomDigest: MailroomDigest?
+  /// Where this snapshot sits in the daemon's sequence of frames for the graph — see
+  /// `DaemonEvent.nodesChanged`. Wire-only like `mailroomDigest`: stamped on the copy a
+  /// daemon sends, `nil` on the graph it owns and persists, and on a snapshot from a
+  /// daemon that predates deltas.
+  public var revision: Int?
 
   public var project: ProjectRef {
     get { scope.projectRef }
@@ -55,11 +60,24 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
 
   /// This graph as a `.graphChanged` frame carries it: the posts stripped and their
   /// digest stamped in their place. Everything else is the graph exactly as it is.
-  public func wireSnapshot() -> LoopGraph {
+  public func wireSnapshot(revision: Int? = nil) -> LoopGraph {
     var copy = self
     copy.mailroomDigest = MailroomDigest(of: mailroom)
     copy.mailroom = []
+    copy.revision = revision
     return copy
+  }
+
+  /// This graph with `nodes` replaced by id — how a client applies a
+  /// `DaemonEvent.nodesChanged` to the snapshot it holds. A node the graph does not
+  /// have is ignored: a delta says how a loop changed, never that one appeared.
+  public func applying(nodesChanged nodes: [LoopNode], revision: Int) -> LoopGraph {
+    var merged = self
+    for node in nodes where merged.nodes[id: node.id] != nil {
+      merged.nodes[id: node.id] = node
+    }
+    merged.revision = revision
+    return merged
   }
 
   public init(
@@ -278,7 +296,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   // MARK: - Coding
 
   private enum CodingKeys: String, CodingKey {
-    case id, nodes, edges, mailroom, mailroomDigest
+    case id, nodes, edges, mailroom, mailroomDigest, revision
     /// Persisted as a `ProjectRef` rather than as the scope enum. Every graph on disk
     /// predates `LoopGraphScope`, and the ref round-trips both cases losslessly (the
     /// global graph's reserved path decodes straight back to `.global`), so there was
@@ -297,6 +315,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
       try container.decodeIfPresent([MailroomPost].self, forKey: .mailroom)
       ?? decoder.legacyMailroomValue([MailroomPost].self, "artifactory") ?? []
     mailroomDigest = try container.decodeIfPresent(MailroomDigest.self, forKey: .mailroomDigest)
+    revision = try container.decodeIfPresent(Int.self, forKey: .revision)
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -309,5 +328,6 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     // what it was — the same reason `hasActiveDependents` never reaches disk.
     if !mailroom.isEmpty { try container.encode(mailroom, forKey: .mailroom) }
     if let mailroomDigest { try container.encode(mailroomDigest, forKey: .mailroomDigest) }
+    if let revision { try container.encode(revision, forKey: .revision) }
   }
 }

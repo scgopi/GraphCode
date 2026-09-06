@@ -114,6 +114,11 @@ public actor ProjectRegistry {
 
   // MARK: - Connections
 
+  /// What each connection announced it can read — see `DaemonCommand.announce`. Kept
+  /// here, per connection, and handed to every store the connection joins, before or
+  /// after the announcement arrives.
+  private var connectionCapabilities: [UUID: Set<String>] = [:]
+
   public func addConnection(id: UUID, fileDescriptor: Int32) {
     // Registering the connection is what opens its outbound half — here rather than in
     // the daemon's accept loop because this is the one place every caller goes through,
@@ -132,6 +137,7 @@ public actor ProjectRegistry {
     }
     connectionFileDescriptors.removeValue(forKey: id)
     connectionProjectPaths.removeValue(forKey: id)
+    connectionCapabilities.removeValue(forKey: id)
     sidebarConnections.remove(id)
     if connectionFileDescriptors.isEmpty { stopPresencePolling() }
   }
@@ -357,6 +363,16 @@ public actor ProjectRegistry {
         send(.errorOccurred(reason), to: fileDescriptor)
       }
 
+    case .announce(let capabilities):
+      // Reaches every store this connection has already joined too: the app's launch
+      // sends its joins and its announcement together, and which lands first must not
+      // decide what the client is sent.
+      let announced = Set(capabilities)
+      connectionCapabilities[connectionID] = announced
+      for path in connectionProjectPaths[connectionID] ?? [] {
+        await stores[path]?.setCapabilities(announced, for: connectionID)
+      }
+
     case .mailbox(let path, let query):
       // Routed and gated exactly as a `.graphCommand`: the room belongs to the project
       // the open landed on, and a query against a project this connection never
@@ -385,7 +401,9 @@ public actor ProjectRegistry {
   private func open(_ canonicalPath: String, for connectionID: UUID, fileDescriptor: Int32) async {
     let store = await store(forProjectPath: canonicalPath)
     connectionProjectPaths[connectionID, default: []].insert(canonicalPath)
-    await store.addConnection(id: connectionID, fileDescriptor: fileDescriptor)
+    await store.addConnection(
+      id: connectionID, fileDescriptor: fileDescriptor,
+      capabilities: connectionCapabilities[connectionID] ?? [])
     // The global graph is always resident and isn't a folder anyone opened, so it stays
     // out of both the recents list and the restore-on-launch set — the app asks for it
     // by name every launch instead.
@@ -415,7 +433,8 @@ public actor ProjectRegistry {
     for id in sidebarConnections where id != opener {
       guard let fileDescriptor = connectionFileDescriptors[id] else { continue }
       connectionProjectPaths[id, default: []].insert(path)
-      await store.addConnection(id: id, fileDescriptor: fileDescriptor)
+      await store.addConnection(
+        id: id, fileDescriptor: fileDescriptor, capabilities: connectionCapabilities[id] ?? [])
     }
   }
 

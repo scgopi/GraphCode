@@ -27,6 +27,9 @@ struct OrchestratorClientTests {
     async let received = firstEvent(of: events)
     try await client.send(.listRecentProjects)
 
+    // First on the socket, before anything the app asks: what it can read.
+    let announce = try #require(await daemon.nextCommand())
+    #expect(announce == .announce(capabilities: [ClientCapability.nodesChanged.rawValue]))
     let command = try #require(await daemon.nextCommand())
     #expect(command == .listRecentProjects)
 
@@ -70,13 +73,17 @@ struct OrchestratorClientTests {
     let events = client.connect()
     async let received = firstEvent(of: events)
     try await client.send(.listRecentProjects)
+    _ = try #require(await daemon.nextCommand())  // the announcement
     let opening = try #require(await daemon.nextCommand())
     #expect(opening == .listRecentProjects)
 
     // The daemon hangs up, the way a restart does.
     daemon.closeConnection(at: 0)
 
-    // The replacement socket announces itself instead of waiting to be spoken to.
+    // The replacement socket announces itself instead of waiting to be spoken to —
+    // what it can read first, then what it wants back.
+    let reannounce = try #require(await daemon.nextCommand(onConnection: 1))
+    #expect(reannounce == .announce(capabilities: [ClientCapability.nodesChanged.rawValue]))
     let rejoin = try #require(await daemon.nextCommand(onConnection: 1))
     #expect(rejoin == .restoreOpenProjects)
     let joinGlobal = try #require(await daemon.nextCommand(onConnection: 1))
@@ -85,6 +92,38 @@ struct OrchestratorClientTests {
     // And it's a live subscription, not merely an open socket.
     try daemon.reply(.errorOccurred("after reconnect"), onConnection: 1)
     #expect(await received == .errorOccurred("after reconnect"))
+  }
+
+  /// A frame this app cannot decode — a daemon newer than it — is skipped, not taken
+  /// for a dead socket: the stream carries on over the same connection and the next
+  /// readable event arrives. Redialling here is what made an older app rejoin every
+  /// fifteen seconds against a daemon that had learned a new event.
+  @Test
+  func anUnknownEventIsSkippedNotTakenForADeadSocket() async throws {
+    let daemon = try StubDaemon()
+    defer { daemon.stop() }
+    let client = OrchestratorClient.live(socketPath: daemon.socketPath)
+    let events = client.connect()
+    async let received = firstEvent(of: events)
+    try await client.send(.listRecentProjects)
+    _ = try #require(await daemon.nextCommand())
+
+    try daemon.replyRaw(Data(#"{"somethingNewer":{"_0":42}}"#.utf8))
+    try daemon.replyRaw(Data(#"{"somethingNewer":{"_0":43}}"#.utf8))
+    let project = ProjectRef(path: "/tmp/stub-project", name: "stub-project")
+    try daemon.reply(.recentProjectsListed([project]))
+
+    // Said once — loudly, through the path a daemon refusal takes — then the stream
+    // carries on over the same socket, and the second unreadable frame is silent.
+    let first = await received
+    #expect(first == .errorOccurred(OrchestratorClient.unreadableFrameMessage))
+    var next: DaemonEvent?
+    for await event in events {
+      next = event
+      break
+    }
+    #expect(next == .recentProjectsListed([project]))
+    #expect(daemon.acceptedConnectionCount == 1)
   }
 
   private func firstEvent(of events: AsyncStream<DaemonEvent>) async -> DaemonEvent? {
@@ -181,6 +220,12 @@ private final class StubDaemon: @unchecked Sendable {
   }
 
   /// Writes an event back the way `graphcoded` does — on the accepted connection.
+  /// Bytes as given — for a frame this build's `DaemonEvent` cannot decode.
+  func replyRaw(_ data: Data, onConnection index: Int = 0) throws {
+    guard let descriptor = waitForConnection(at: index) else { throw StubError.noConnection }
+    try FramedMessageIO.writeFrame(data, to: descriptor)
+  }
+
   func reply(_ event: DaemonEvent, onConnection index: Int = 0) throws {
     guard let descriptor = waitForConnection(at: index) else { throw StubError.noConnection }
     try FramedMessageIO.writeFrame(try JSONEncoder().encode(event), to: descriptor)
