@@ -344,10 +344,11 @@ struct AppFeature {
             // anyone opened, it's the one row that's always there, and it arrives last
             // (the app asks for it after `.restoreOpenProjects`) so appending would
             // leave it below folders that came back from a previous session.
+            let held = ProjectFeature.holding(graph)
             if graph.isGlobal {
-              state.projects.insert(ProjectFeature.State(graph: graph), at: 0)
+              state.projects.insert(ProjectFeature.State(graph: held), at: 0)
             } else {
-              state.projects.append(ProjectFeature.State(graph: graph))
+              state.projects.append(ProjectFeature.State(graph: held))
             }
             // The snapshot carries the room's digest, not its posts; the first
             // sight of a project with anything on its board asks for them. Later

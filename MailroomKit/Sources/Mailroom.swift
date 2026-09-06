@@ -243,7 +243,9 @@ public struct MailroomDigest: Codable, Equatable, Sendable {
       mix(post.authorID?.uuidString ?? "")
       mix(post.author)
     }
-    self.init(count: posts.count, latestID: posts.last?.id ?? 0, fingerprint: hash)
+    // The maximum, the way `Mailroom.nextID` reads it, rather than the last post's —
+    // one answer to "the newest id" rather than two that happen to agree.
+    self.init(count: posts.count, latestID: posts.map(\.id).max() ?? 0, fingerprint: hash)
   }
 
   public var isEmpty: Bool { count == 0 }

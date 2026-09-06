@@ -43,8 +43,8 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
   /// one post — answered on this connection alone with a `.mailbox`. This is the read
   /// path the room has instead of riding every `.graphChanged`: a snapshot carries only
   /// `LoopGraph.mailroomDigest`, and whoever wants posts asks for exactly the posts it
-  /// wants (issue #288). Requires the project to be open on this connection, the same
-  /// rule as `.graphCommand`.
+  /// wants (issue #288). Requires the project to be resident in the daemon — opened by
+  /// some connection — the same rule as `.graphCommand`.
   case mailbox(projectPath: String, query: MailboxQuery)
 }
 

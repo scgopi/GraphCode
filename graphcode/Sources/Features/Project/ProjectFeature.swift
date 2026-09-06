@@ -373,6 +373,7 @@ struct ProjectFeature {
           return fetch
         case .mailbox(_, let mailbox):
           state.graph.mailroom = mailbox.posts
+          state.graph.mailroomDigest = mailbox.digest
         case .errorOccurred(let message):
           state.connectionError = message
         case .recentProjectsListed:
