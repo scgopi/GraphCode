@@ -32,6 +32,9 @@ import MailroomKit
 public actor GraphStore {
   public private(set) var graph: LoopGraph
   private var connections: [UUID: Int32] = [:]
+  /// One counter for every frame this store sends about its graph — snapshots and
+  /// presence deltas alike — so a client can order them (`DaemonEvent.nodesChanged`).
+  private var revision = 0
   private let onGraphChanged: (@Sendable (LoopGraph) -> Void)?
   private let onEnsureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let onTerminateSession: (@Sendable (LoopNode, String?) -> Void)?
@@ -508,7 +511,7 @@ public actor GraphStore {
     // snapshot it was joining for.
     OutboundChannels.open(fileDescriptor)
     connections[id] = fileDescriptor
-    send(.graphChanged(graph.wireSnapshot()), to: id)
+    send(.graphChanged(graph.wireSnapshot(revision: revision)), to: id)
   }
 
   public func removeConnection(_ id: UUID) {
@@ -1190,6 +1193,7 @@ public actor GraphStore {
     // loop is working and the line under it says what at. Reading the second only when
     // someone presses refresh left every card describing the tool call its session made
     // whenever that happened to be.
+    let before = graph.nodes
     var changed = await refreshPresence()
     if await refreshActivity() { changed = true }
     if await refreshSummary() { changed = true }
@@ -1200,7 +1204,12 @@ public actor GraphStore {
     // what was waiting on exactly that.
     await drainPendingFollowUps()
     guard changed else { return }
-    notifyClients()
+    // Only the loops the tick touched, never the whole graph: everything above edits
+    // fields on top-level nodes, so the diff is exact, and a busy graph's fifteen-second
+    // pulse becomes a kilobyte per loop that moved instead of the whole snapshot.
+    let moved = Array(graph.nodes.filter { before[id: $0.id] != $0 })
+    guard !moved.isEmpty else { return }
+    notifyClients(nodesChanged: moved)
   }
 
   // MARK: - Renaming
@@ -3219,7 +3228,23 @@ public actor GraphStore {
     // client, and encoding a full graph is the expensive half of a broadcast — with C
     // clients attached it was C encodes of the same snapshot on every change, presence
     // tick included (issue #288's CPU amplifier).
-    guard let frame = Self.encode(.graphChanged(graph.wireSnapshot())) else { return }
+    revision += 1
+    guard let frame = Self.encode(.graphChanged(graph.wireSnapshot(revision: revision)))
+    else { return }
+    for id in connections.keys {
+      deliver(frame, to: id)
+    }
+  }
+
+  /// The presence poll's broadcast — see `DaemonEvent.nodesChanged`. Not superseded:
+  /// a newer delta does not carry what an older one said, so both go out; the revision
+  /// is what lets a client drop one a later snapshot has overtaken.
+  private func notifyClients(nodesChanged nodes: [LoopNode]) {
+    revision += 1
+    guard
+      let frame = Self.encode(
+        .nodesChanged(projectPath: graph.project.path, revision: revision, nodes: nodes))
+    else { return }
     for id in connections.keys {
       deliver(frame, to: id)
     }

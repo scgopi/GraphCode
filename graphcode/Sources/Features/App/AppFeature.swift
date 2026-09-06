@@ -403,6 +403,9 @@ struct AppFeature {
             state.openLoop?.graph.mailroom = mailbox.posts
           }
           return .send(.projects(.element(id: path, action: .daemonEvent(event))))
+
+        case .nodesChanged(let path, let revision, let nodes):
+          return foldDelta(state, path: path, revision: revision, nodes: nodes)
         }
 
       case .projectHeaderTapped(let path):
@@ -843,6 +846,21 @@ extension AppFeature {
   /// surface is deliberately not on the kill list: the loop's session belongs to the
   /// node, and whichever side deletes the node ends it (`GraphStore` on the daemon's
   /// path, `QuickChats` for a chat).
+  /// The presence tick, as the loops it moved: merged into the snapshot this app holds
+  /// and then handled as the snapshot it amounts to, so every reader of `.graphChanged`
+  /// — the activity log, the open workspace, the project — sees one shape. Dropped when
+  /// older than what is held: a snapshot that overtook it in the daemon's queue already
+  /// carries these loops as they are now.
+  func foldDelta(
+    _ state: State, path: String, revision: Int, nodes: [LoopNode]
+  ) -> Effect<Action> {
+    guard let held = state.projects[id: path]?.graph, revision > (held.revision ?? -1) else {
+      return .none
+    }
+    return .send(
+      .daemonEvent(.graphChanged(held.applying(nodesChanged: nodes, revision: revision))))
+  }
+
   /// A broadcast graph with the room's posts filled back in from the copy this app
   /// holds for the project — see `LoopGraph.mailroom`. A snapshot from a daemon that
   /// still ships posts keeps its own.

@@ -374,6 +374,8 @@ struct ProjectFeature {
         case .mailbox(_, let mailbox):
           state.graph.mailroom = mailbox.posts
           state.graph.mailroomDigest = mailbox.digest
+        case .nodesChanged:
+          break  // `AppFeature` folds a delta into the snapshot it holds before routing.
         case .errorOccurred(let message):
           state.connectionError = message
         case .recentProjectsListed:

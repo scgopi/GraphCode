@@ -217,4 +217,16 @@ public enum DaemonEvent: Codable, Sendable, Equatable {
   /// `projectPath` is the canonical spelling the daemon routed the query to, which is
   /// the id an app keys its projects by.
   case mailbox(projectPath: String, mailbox: Mailbox)
+  /// The presence poll's broadcast: only the loops whose reading, activity, summary or
+  /// board changed on this tick, as whole `LoopNode` values, instead of the whole graph
+  /// every fifteen seconds (issue #288's background load — on a busy graph something
+  /// changes almost every tick, and the tick shipped 50 KB to say which pill moved).
+  /// A client merges them into the snapshot it holds by id.
+  ///
+  /// `revision` orders it against snapshots: the daemon stamps every frame for a graph
+  /// from one counter (`LoopGraph.revision`), and a client applies a delta only when it
+  /// is newer than the graph it holds. That is what makes it safe for an undelivered
+  /// snapshot to be superseded by a later one while a delta queued behind it still
+  /// arrives — the delta is older than what the client has, and is dropped.
+  case nodesChanged(projectPath: String, revision: Int, nodes: [LoopNode])
 }

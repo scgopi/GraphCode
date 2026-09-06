@@ -204,7 +204,11 @@ struct MailboxTests {
     #expect(mailbox["bodiesTrimmed"] as? Bool == false)
     #expect((mailbox["digest"] as? [String: Any])?["count"] as? Int == 0)
   }
+}
 
+/// The daemon half, in an extension: the suite sits past swiftlint's 350-line
+/// `type_body_length` error with it inside.
+extension MailboxTests {
   // MARK: The daemon
 
   /// Reads one frame off `descriptor` on another thread: the store writes from its

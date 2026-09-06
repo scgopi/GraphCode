@@ -101,7 +101,7 @@ func openProject(_ projectPath: String) throws -> LoopGraph? {
   let opened = try client.waitForEvent {
     switch $0 {
     case .graphChanged, .errorOccurred: return true
-    case .recentProjectsListed, .mailbox: return false
+    case .recentProjectsListed, .mailbox, .nodesChanged: return false
     }
   }
   if case .errorOccurred(let message) = opened { fail(message) }
