@@ -54,13 +54,35 @@ final class OutboundChannel: @unchecked Sendable {
 
   init(fileDescriptor: Int32) {
     self.fileDescriptor = fileDescriptor
+    Self.armAgainstSIGPIPE(fileDescriptor)
     // Captured strongly on purpose: the channel must outlive the registry's reference to
     // it, because the descriptor is closed by `pump` on its way out. A weak capture would
     // let a channel released without `close()` take its thread — and its unclosed
     // descriptor — with it.
     let thread = Thread { [self] in pump() }
     thread.name = "graphcoded.outbound.\(fileDescriptor)"
+    // Matches the callers it serves. A writer left at the default class is a priority
+    // inversion waiting to happen: `closeAndWait` blocks the disconnecting thread on this
+    // one, and answering a client's command is interactive work whoever is waiting on it.
+    thread.qualityOfService = .userInitiated
     thread.start()
+  }
+
+  /// Writing to a socket whose peer has gone — or one this channel has just shut down on
+  /// its way out — otherwise raises `SIGPIPE`, and the default action kills the process.
+  /// The channel arms the descriptor itself rather than trusting whoever handed it over:
+  /// `graphcoded` does set this on the sockets it accepts, but a writer that only survives
+  /// because its caller remembered is a crash waiting for the one caller that does not.
+  private static func armAgainstSIGPIPE(_ fileDescriptor: Int32) {
+    #if canImport(Darwin)
+      var enabled: Int32 = 1
+      setsockopt(
+        fileDescriptor, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
+    #else
+      // Linux has no per-socket SO_NOSIGPIPE; ignoring it process-wide is the equivalent
+      // armour, and makes the write return EPIPE the error path already handles.
+      signal(SIGPIPE, SIG_IGN)
+    #endif
   }
 
   /// Queues a frame and returns immediately.
@@ -104,6 +126,21 @@ final class OutboundChannel: @unchecked Sendable {
 
     condition.signal()
     return true
+  }
+
+  /// Gives up the descriptor without touching it: stops accepting frames, drops the
+  /// backlog, and lets the writer thread retire on its own.
+  ///
+  /// For a channel whose descriptor number has already been taken over by a new
+  /// connection. `closeAndWait` would be wrong there — its `shutdown` would tear down the
+  /// *new* connection now answering to that number.
+  func detach() {
+    condition.lock()
+    isClosing = true
+    pending.removeAll()
+    pendingBytes = 0
+    condition.broadcast()
+    condition.unlock()
   }
 
   /// Stops the writer and returns only once it is no longer touching the descriptor, so
@@ -196,24 +233,35 @@ public enum OutboundChannels {
     channels[fileDescriptor] = OutboundChannel(fileDescriptor: fileDescriptor)
     lock.unlock()
     // A descriptor number the kernel reused before its previous channel was torn down.
-    // Stopped outside the registry lock: `closeAndWait` waits on a writer thread, and
-    // holding the table while it does would stall every other connection's sends.
-    stale?.closeAndWait()
+    // Detached rather than closed: the number now belongs to the connection being opened
+    // here, so shutting it down would tear down that one.
+    stale?.detach()
   }
 
   /// Queues a frame for a client without blocking. `supersedingKey` replaces an
   /// undelivered frame carrying the same key — see `OutboundChannel.send`.
   ///
-  /// Returns `false` when there is no live channel for the descriptor, which is what
-  /// tells a broadcaster to forget the connection.
+  /// Returns `false` once the client's channel has failed, which is what tells a
+  /// broadcaster to forget the connection — the same signal a failed write used to give
+  /// synchronously, now arriving on the send after the failure rather than during it.
+  ///
+  /// A descriptor with no channel gets one rather than losing the frame. Delivery must
+  /// not depend on every caller having registered first: a dropped frame is invisible at
+  /// the sending end and shows up at the other as a client waiting forever for an answer
+  /// that was silently discarded.
   @discardableResult
   public static func send(
     _ data: Data, to fileDescriptor: Int32, supersedingKey: String? = nil
   ) -> Bool {
     lock.lock()
-    let channel = channels[fileDescriptor]
+    let channel: OutboundChannel
+    if let existing = channels[fileDescriptor] {
+      channel = existing
+    } else {
+      channel = OutboundChannel(fileDescriptor: fileDescriptor)
+      channels[fileDescriptor] = channel
+    }
     lock.unlock()
-    guard let channel else { return false }
     return channel.send(data, supersedingKey: supersedingKey)
   }
 

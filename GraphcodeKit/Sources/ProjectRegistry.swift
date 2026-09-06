@@ -115,6 +115,12 @@ public actor ProjectRegistry {
   // MARK: - Connections
 
   public func addConnection(id: UUID, fileDescriptor: Int32) {
+    // Registering the connection is what opens its outbound half — here rather than in
+    // the daemon's accept loop because this is the one place every caller goes through,
+    // and a descriptor with no channel silently delivers nothing. It also gives a reused
+    // descriptor number a fresh channel, so nothing inherits a previous connection's
+    // writer.
+    OutboundChannels.open(fileDescriptor)
     connectionFileDescriptors[id] = fileDescriptor
     startPresencePolling()
   }

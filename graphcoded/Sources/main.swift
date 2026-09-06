@@ -175,9 +175,7 @@ let registry = ProjectRegistry(
 func handleConnection(_ fileDescriptor: Int32) {
   Task {
     let connectionID = UUID()
-    // Before anything can write to this client: `addConnection` answers with an
-    // immediate snapshot, and that write has to find a channel already open.
-    OutboundChannels.open(fileDescriptor)
+    // `addConnection` opens this connection's outbound channel as it registers it.
     await registry.addConnection(id: connectionID, fileDescriptor: fileDescriptor)
     FileHandle.standardOutput.write(Data("graphcoded: client connected\n".utf8))
     while true {
