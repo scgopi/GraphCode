@@ -415,34 +415,39 @@ do {
           + "($ZMX_SESSION); a human reading the board wants `graphcode mail list`")
     }
     let opened = try openProject(projectPath)
-    // The posts come first and the cursor moves second, so a refusal to move it — the
-    // room switched off, a reader the graph does not know — stops before anything is
-    // printed as read. `--mark` prints no posts, so it asks for none.
-    var mailbox: Mailbox?
-    if !mark {
-      // `fullBodies` nil leaves the triage to the room: a loop cannot know how much
-      // mail it has before reading it, and the first inbox of a loop born after a
-      // busy week is the whole room. `--json` and `--full` insist on every body,
-      // `--headlines` on triage lines.
-      let fullBodies: Bool? = json || full ? true : headlines ? false : nil
-      mailbox = try fetchMailbox(
-        projectPath, MailboxQuery(selection: .unread(reader: reader), fullBodies: fullBodies))
-    }
-    try client.send(
-      .graphCommand(projectPath: projectPath, command: .mailroomInbox(from: reader)))
-    let syncVerdict = try client.waitForEvent { event in
-      switch event {
-      case .graphChanged, .errorOccurred: return true
-      default: return false
+    if mark {
+      // The quiet sync: everything marked read, nothing printed — the backlog is not
+      // the loop's problem any more, and the one line says the cursor actually moved.
+      // Still page by page through the mailbox, headlines only: a cursor moves only
+      // through mail that was handed over, so "everything" is walked, not jumped to.
+      var mailbox: Mailbox?
+      repeat {
+        mailbox = try fetchMailbox(
+          projectPath,
+          MailboxQuery(
+            selection: .unread(reader: reader), fullBodies: false, advanceCursor: true))
+      } while (mailbox?.remaining ?? 0) > 0
+      if let highest = mailbox?.highestDeliveredID {
+        print("marked read up to #\(highest)")
+      } else if (mailbox?.digest.latestID ?? 0) == 0 {
+        print("marked read — the room is empty")
+      } else {
+        print("marked read — nothing was unread")
       }
-    }
-    if case .errorOccurred(let message) = syncVerdict { fail(message) }
-    // Known race, accepted: a post landing between the mailbox answer and the daemon
-    // advancing the cursor is marked read without ever having been printed. The
-    // window is one round-trip wide and a watcher would have heard the post live
-    // anyway; fixing it properly means syncing to the highest *printed* id
-    // (`Mailbox.highestDeliveredID`) rather than to latest.
-    if let mailbox {
+    } else {
+      // One request does both halves: the daemon hands over a page of unread posts
+      // and moves the cursor to the highest one *in that page*, in the same actor
+      // turn — so nothing can land between the read and the mark and be marked read
+      // unseen, and a backlog longer than a page stays unread past it. `fullBodies`
+      // nil leaves the triage to the room: a loop cannot know how much mail it has
+      // before reading it, and the first inbox of a loop born after a busy week is
+      // the whole room. `--json` and `--full` insist on every body, `--headlines` on
+      // triage lines.
+      let fullBodies: Bool? = json || full ? true : headlines ? false : nil
+      let mailbox = try fetchMailbox(
+        projectPath,
+        MailboxQuery(
+          selection: .unread(reader: reader), fullBodies: fullBodies, advanceCursor: true))
       if json {
         print(GraphcodeCommand.renderMailroomJSON(mailbox))
       } else {
@@ -450,18 +455,6 @@ do {
           GraphcodeCommand.renderMailroom(
             mailbox, project: projectRef(opened, projectPath), unread: true,
             headlines: headlines))
-      }
-    } else {
-      // The quiet sync: the backlog is not the loop's problem any more, and the one
-      // line says the cursor actually moved — a silent success would read, to the
-      // loop that sent it, like a command nobody applied. Read off the graph the
-      // advance came back on, which is the room as it stood when the cursor moved.
-      var latest = 0
-      if case .graphChanged(let graph) = syncVerdict { latest = graph.boardDigest.latestID }
-      if latest > 0 {
-        print("marked read up to #\(latest)")
-      } else {
-        print("marked read — the room is empty")
       }
     }
 

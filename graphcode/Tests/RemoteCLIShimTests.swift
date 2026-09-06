@@ -509,12 +509,20 @@ extension RemoteCLIShimTests {
           command: .mailroomPost(
             text: "the board is for everyone", topic: nil, from: nil)))
 
+    // `--mark` walks the unread mail through the mailbox, headlines only, page by
+    // page — never the legacy `mailroomInbox`, which a daemon now refuses.
     let synced = try runShim(
       ["mailroom", "sync", Self.project, "--mark"], environment: session, graph: graph)
     #expect(synced.stdout == "marked read up to #3\n")
     #expect(
       synced.commands.dropFirst().first
-        == .graphCommand(projectPath: Self.project, command: .mailroomInbox(from: reader.id)))
+        == .mailbox(
+          projectPath: Self.project,
+          query: MailboxQuery(
+            selection: .unread(reader: reader.id), fullBodies: false, advanceCursor: true)))
+    #expect(
+      !synced.commands.contains { if case .graphCommand = $0 { return true } else { return false } }
+    )
 
     let watching = try runShim(
       ["mailroom", "watch", Self.project, "--topic", "build"], environment: session,
@@ -637,6 +645,65 @@ extension RemoteCLIShimTests {
       ["mailroom", "post", Self.project, "--topic", " Claims ", "anything"], graph: graph)
     #expect(spelled.stdout == GraphcodeCommand.renderPosted(graph, topic: " Claims ") + "\n")
     #expect(spelled.stdout == "posted #5 (claims)\n")
+  }
+
+  /// A plain `inbox` is one request: the page of unread posts and the cursor advance
+  /// ride the same `mailbox`, with no `mailroomInbox` behind it — the way the Swift CLI
+  /// sends it. `--mark` is the one spelling that still marks everything read, unseen.
+  @Test
+  func inboxAsksForOnePageAndMovesTheCursorInTheSameRequest() throws {
+    let (graph, reader) = Self.board()
+    let session = ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"]
+
+    let inbox = try runShim(
+      ["mailroom", "inbox", Self.project], environment: session, graph: graph)
+    #expect(inbox.status == 0)
+    #expect(
+      inbox.commands == [
+        .openProject(path: Self.project),
+        .mailbox(
+          projectPath: Self.project,
+          query: MailboxQuery(selection: .unread(reader: reader.id), advanceCursor: true)),
+      ])
+
+    let full = try runShim(
+      ["mailroom", "inbox", Self.project, "--json"], environment: session, graph: graph)
+    #expect(
+      full.commands.last
+        == .mailbox(
+          projectPath: Self.project,
+          query: MailboxQuery(
+            selection: .unread(reader: reader.id), fullBodies: true, advanceCursor: true)))
+  }
+
+  /// A backlog longer than a page prints the page and says what it left, byte-equal
+  /// to the Swift renderer — in text and in `--json`.
+  @Test
+  func aPagedBacklogRendersByteEqualToo() throws {
+    var graph = LoopGraph(project: ProjectRef(path: Self.project, name: "widget"))
+    let reader = LoopNode(title: "Reader", loopType: .goalBased)
+    graph.nodes.append(reader)
+    graph.mailroom = (1...(Mailroom.inboxPageSize + 3)).map { index in
+      MailroomPost(
+        id: index, at: Date(timeIntervalSince1970: 1_756_000_000 + Double(index)),
+        authorID: nil, author: "a human", topic: nil, body: "note \(index)")
+    }
+    let session = ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"]
+
+    let text = try runShim(
+      ["mailroom", "inbox", Self.project], environment: session, graph: graph)
+    let expected = GraphcodeCommand.renderMailroom(
+      Self.served(graph, .unread(reader: reader.id)), project: graph.project, unread: true)
+    #expect(text.stdout == expected + "\n")
+    #expect(text.stdout.contains("3 more unread past #\(Mailroom.inboxPageSize)"))
+
+    let json = try runShim(
+      ["mailroom", "inbox", Self.project, "--json"], environment: session, graph: graph)
+    #expect(
+      json.stdout
+        == GraphcodeCommand.renderMailroomJSON(
+          Self.served(graph, .unread(reader: reader.id), fullBodies: true)) + "\n")
+    #expect(json.stdout.contains("\"remaining\":3"))
   }
 
   /// `read` and `list` ask the mailbox for exactly what they print and send no command —

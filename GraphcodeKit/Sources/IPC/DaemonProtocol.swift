@@ -146,12 +146,13 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// (`mailroomEnabled` in `~/.graphcode/settings.json`) — a silent no-op would read,
   /// to the loop that sent it, as a post nobody answered.
   case mailroomPost(text: String, topic: String?, from: UUID?)
-  /// Mark every post on the Mailroom as read for the calling loop — `graphcode mail
-  /// inbox`, the cursor half of reading. The posts themselves come back on a
-  /// `DaemonCommand.mailbox` sent first; this is the write that makes "unread" mean
-  /// something the *next* inbox can subtract from. Requires a loop identity: a human
-  /// reading the room needs no cursor, since nothing downstream tracks what they have
-  /// seen.
+  /// **Refused by a daemon from this version on.** This was the acknowledgement half of
+  /// `mail inbox` — "advance my cursor to the newest post" — sent after a CLI had read
+  /// the posts off its snapshot. Snapshots carry no posts now, and the cursor moves only
+  /// through mail actually handed over (`MailboxQuery.advanceCursor`); a client still
+  /// sending this is older than the daemon and would otherwise have its cursor moved
+  /// past mail it never saw. Kept on the wire so that client gets an answer that says
+  /// so instead of a hang-up.
   case mailroomInbox(from: UUID?)
   /// Subscribe (`on: true`) or unsubscribe (`on: false`) the calling loop to Mailroom
   /// posts — `graphcode mail watch`. A watched post is delivered the way a

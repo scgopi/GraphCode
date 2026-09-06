@@ -517,7 +517,10 @@ public actor GraphStore {
 
   // MARK: - Commands
 
-  public func handle(_ command: GraphCommand) async {
+  /// `from` is the connection the command arrived on, when the registry knows it — what
+  /// lets a refusal meant for one client go to that client alone. Tests drive the
+  /// store without one and hear refusals through `onAnnounceError`.
+  public func handle(_ command: GraphCommand, from connectionID: UUID? = nil) async {
     // A loop inside a composite addresses itself by its own id — its briefing tells it
     // to `node memo <project> <its-own-id>`, and ids are unique across the whole tree,
     // so a caller has no reason to know how deep its target sits (the same rule
@@ -648,8 +651,8 @@ public actor GraphStore {
     case .mailroomPost(let text, let topic, let from):
       await mailroomPost(text: text, topic: topic, from: from)
 
-    case .mailroomInbox(let from):
-      mailroomInbox(from: from)
+    case .mailroomInbox:
+      refuseLegacyInbox(to: connectionID)
 
     case .mailroomWatch(let on, let topic, let from):
       mailroomWatch(on: on, topic: topic, from: from)
@@ -1690,39 +1693,77 @@ public actor GraphStore {
     graph.mailroom = Mailroom.pruned(graph.mailroom + [post])
   }
 
-  /// The room as a client asked for it — the read half of every mail verb, and the
-  /// only way posts leave the daemon now that `.graphChanged` carries their digest
-  /// instead (issue #288). Pure: nothing moves, nothing is persisted, nobody else
-  /// hears about it. Not gated on the room being on — reading was never gated, and a
-  /// room switched off still shows what was said while it was on.
-  public func mailbox(_ query: MailboxQuery) -> Mailbox {
-    Mailroom.serve(query, from: graph.mailroom) { graph.nodes[id: $0]?.lastMailroomRead }
+  /// Why a mailbox request was refused — the daemon's wording, for the asking
+  /// connection alone rather than every client (`announceError` broadcasts).
+  public struct MailboxRefusal: Error, Equatable {
+    public let message: String
   }
 
-  /// Advances the reading loop's cursor to the newest post — the write half of
-  /// `graphcode mail inbox`. Deliberately no memory record: sync is reading,
-  /// not learning, and a log line per read would turn the log into a metronome.
-  private func mailroomInbox(from readerID: UUID?) {
+  /// The room as a client asked for it — the read half of every mail verb, and the
+  /// only way posts leave the daemon now that `.graphChanged` carries their digest
+  /// instead (issue #288). Reading is not gated on the room being on — it never was,
+  /// and a room switched off still shows what was said while it was on.
+  ///
+  /// With `advanceCursor`, also the acknowledgement: the reader's cursor moves to the
+  /// highest post in the answer, in the same actor turn the answer was drawn — so no
+  /// post can land between the read and the mark and be marked read unseen, and a
+  /// page that stops short (`Mailroom.inboxPageSize`) leaves the rest unread for the
+  /// next request. Persisted, never broadcast: a cursor is the reader's alone, and the
+  /// next snapshot anything else causes carries it anyway.
+  public func mailbox(_ query: MailboxQuery) throws -> Mailbox {
+    let mailbox = Mailroom.serve(query, from: graph.mailroom) {
+      graph.nodes[id: $0]?.lastMailroomRead
+    }
+    guard query.advanceCursor == true, case .unread(let readerID) = query.selection else {
+      return mailbox
+    }
+    // A searched answer skips unread posts, and a cursor only moves through mail that
+    // was handed over — `highestDeliveredID` already stops at the first miss, but the
+    // pair is refused outright so no caller can lean on remembering that.
+    guard query.search?.isEmpty ?? true else {
+      throw MailboxRefusal(
+        message: "a searched inbox cannot move the cursor — search with `mail list`, or "
+          + "read the inbox unsearched")
+    }
     guard mailroomIsOn() else {
-      announceError(
-        "the Mailroom is off — enable Mailroom in Settings "
+      throw MailboxRefusal(
+        message: "the Mailroom is off — enable Mailroom in Settings "
           + "(mailroomEnabled in ~/.graphcode/settings.json)")
-      return
     }
-    guard let readerID, graph.nodes[id: readerID] != nil else {
-      announceError(
-        "mail inbox needs a loop identity — run it from a loop's session "
+    guard graph.nodes[id: readerID] != nil else {
+      throw MailboxRefusal(
+        message: "mail inbox needs a loop identity — run it from a loop's session "
           + "($ZMX_SESSION); a human reading the board needs no cursor")
-      return
     }
-    // Never moves backward: ids only grow (`Mailroom.nextID` is max-plus-one), so
-    // the max below only guards a board emptied by something other than pruning.
-    let latest = graph.mailroom.last?.id ?? 0
-    // Read into a local first: reading and writing the cursor through the same
-    // `IdentifiedArray` subscript in one expression is an overlapping access the
-    // runtime treats as fatal exclusivity.
+    // Never moves backward, and never past what was handed over.
     let current = graph.nodes[id: readerID]?.lastMailroomRead ?? 0
-    graph.nodes[id: readerID]?.lastMailroomRead = max(latest, current)
+    let delivered = mailbox.highestDeliveredID ?? current
+    guard delivered > current else { return mailbox }
+    graph.nodes[id: readerID]?.lastMailroomRead = delivered
+    onGraphChanged?(graph)
+    return mailbox
+  }
+
+  /// What `GraphCommand.mailroomInbox` does now: nothing to the cursor, and says why.
+  ///
+  /// This was "advance to the newest post" — the acknowledgement half of a `mail inbox`
+  /// that read the posts off its snapshot. Snapshots no longer carry posts, so the one
+  /// client still sending this is a CLI older than the daemon, which has just printed
+  /// "no unread posts" off an empty snapshot and would now have its cursor moved past
+  /// mail it never saw — permanently, upgrade or not. A cursor moves only through mail
+  /// that was handed over, so the old command is refused loudly and the new one
+  /// (`MailboxQuery.advanceCursor`) is the only thing that moves it.
+  private func refuseLegacyInbox(to connectionID: UUID?) {
+    let message =
+      "this graphcode CLI predates the daemon's mailbox — nothing was marked read. "
+      + "Upgrade graphcode (the app installs it beside graphcoded) and run the "
+      + "inbox again"
+    // To the asker alone, never `announceError`: that writes to every connected
+    // client, and one stale CLI's problem is nobody else's error to read.
+    if let connectionID, connections[connectionID] != nil {
+      send(.errorOccurred(message), to: connectionID)
+    }
+    onAnnounceError?(message)
   }
 
   /// Subscribes or unsubscribes the calling loop. Recorded to the loop's memory so a

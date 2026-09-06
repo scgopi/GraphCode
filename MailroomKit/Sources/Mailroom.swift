@@ -271,11 +271,23 @@ public struct MailboxQuery: Codable, Equatable, Sendable {
   /// `Mailroom.needsTriage` — what `mail inbox` does unless told `--full` or
   /// `--headlines`, since a loop cannot know how much mail it has before reading it.
   public var fullBodies: Bool?
+  /// For an `.unread` selection: move the reader's cursor to the highest post this
+  /// answer carries (`Mailbox.highestDeliveredID`) — the read and the acknowledgement
+  /// in one step, so a post landing between the two can never be marked read
+  /// without having been handed over, and a page that stops short leaves the rest
+  /// unread for the next request. Refused for a reader the graph does not know, or
+  /// while the room is off. Optional so a query from an older client decodes as the
+  /// plain read it always was.
+  public var advanceCursor: Bool?
 
-  public init(selection: Selection, search: String? = nil, fullBodies: Bool? = nil) {
+  public init(
+    selection: Selection, search: String? = nil, fullBodies: Bool? = nil,
+    advanceCursor: Bool? = nil
+  ) {
     self.selection = selection
     self.search = search
     self.fullBodies = fullBodies
+    self.advanceCursor = advanceCursor
   }
 }
 
@@ -292,19 +304,51 @@ public struct Mailbox: Codable, Equatable, Sendable {
   public var digest: MailroomDigest
   /// The reader's cursor, for an `.unread` selection whose reader the room knows.
   public var lastRead: Int?
-  /// The id of the last post in `posts` — what a cursor may honestly advance to,
-  /// since it is the highest post the reader was actually handed.
+  /// What a cursor may honestly advance to: the highest id below which *every* unread
+  /// post was handed over in this answer. Not simply the last post's id — a page stops
+  /// short, and a search skips posts that stay unread — so this is `nil` for an empty
+  /// answer, `nil` when the first unread post was filtered out, and the page's last
+  /// post only when nothing below it was skipped. A cursor moves through mail that
+  /// was delivered, never past mail that was not.
   public var highestDeliveredID: Int?
+  /// How many posts the selection matched beyond this page (`Mailroom.inboxPageSize`).
+  /// They stay unread: the cursor stops at `highestDeliveredID`, and the same request
+  /// again brings the next page.
+  public var remaining: Int
+  /// Posts that landed after the reader's cursor and were pruned before the reader
+  /// asked — mail this loop will never see, counted so it is told rather than left to
+  /// believe it is caught up. Ids are contiguous (`Mailroom.nextID`), so it is the ids
+  /// above the cursor that no surviving post carries. Zero for a reader the room does
+  /// not know, and for any selection but `.unread`.
+  public var prunedUnread: Int
 
   public init(
     posts: [MailroomPost], bodiesTrimmed: Bool, digest: MailroomDigest, lastRead: Int? = nil,
-    highestDeliveredID: Int? = nil
+    highestDeliveredID: Int? = nil, remaining: Int = 0, prunedUnread: Int = 0
   ) {
     self.posts = posts
     self.bodiesTrimmed = bodiesTrimmed
     self.digest = digest
     self.lastRead = lastRead
     self.highestDeliveredID = highestDeliveredID
+    self.remaining = remaining
+    self.prunedUnread = prunedUnread
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case posts, bodiesTrimmed, digest, lastRead, highestDeliveredID, remaining, prunedUnread
+  }
+
+  /// `remaining` decodes as zero from an answer that predates it.
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    posts = try container.decode([MailroomPost].self, forKey: .posts)
+    bodiesTrimmed = try container.decode(Bool.self, forKey: .bodiesTrimmed)
+    digest = try container.decode(MailroomDigest.self, forKey: .digest)
+    lastRead = try container.decodeIfPresent(Int.self, forKey: .lastRead)
+    highestDeliveredID = try container.decodeIfPresent(Int.self, forKey: .highestDeliveredID)
+    remaining = try container.decodeIfPresent(Int.self, forKey: .remaining) ?? 0
+    prunedUnread = try container.decodeIfPresent(Int.self, forKey: .prunedUnread) ?? 0
   }
 }
 
@@ -327,6 +371,15 @@ extension Mailroom {
   /// trim on the wire without the reader being able to tell.
   public static let headlineBodyBudget = 80
 
+  /// The most posts one `.unread` answer carries — and never fewer than the room can
+  /// hold. A page smaller than retention opened a window the unbounded answer never
+  /// had: page two of a backlog could be pruned before the reader asked for it, and the
+  /// reader would skip it in silence. So the page is the room's own cap: every live
+  /// unread post fits one answer, the mechanism stays (a page still says what it left,
+  /// and the cursor still stops at what it handed over), and pruning between requests
+  /// can only eat what `prunedUnread` then reports. Pinned by test.
+  public static let inboxPageSize = maxNotices + maxLetters
+
   /// Answers a query against a room. `cursor` is the reader's `lastMailroomRead`, or
   /// `nil` for a reader the graph does not know — who, as before, is shown everything
   /// and refused the cursor advance afterwards.
@@ -339,12 +392,21 @@ extension Mailroom {
     var selected: [MailroomPost]
     var lastRead: Int?
     var deepRead = false
+    var paged = false
+    var pruned = 0
     switch query.selection {
     case .board:
       selected = posts
     case .unread(let reader):
       lastRead = cursor(reader)
       selected = unread(in: posts, since: lastRead)
+      paged = true
+      // Every id above the cursor was a post once; the ones no survivor carries were
+      // pruned before this reader got to them.
+      if let lastRead {
+        let latest = posts.map(\.id).max() ?? lastRead
+        pruned = max(0, latest - lastRead - selected.count)
+      }
     case .post(let id):
       selected = posts.filter { $0.id == id }
       deepRead = true
@@ -356,6 +418,23 @@ extension Mailroom {
           || $0.topic?.lowercased().contains(needle) == true
       }
     }
+    var remaining = 0
+    if paged, selected.count > inboxPageSize {
+      remaining = selected.count - inboxPageSize
+      selected = Array(selected.prefix(inboxPageSize))
+    }
+    // The cursor's honest ceiling: walk the unread posts in order and stop at the first
+    // one this answer does not carry — a page's edge or a search's miss.
+    var deliverable: Int?
+    if paged {
+      let handed = Set(selected.map(\.id))
+      for post in unread(in: posts, since: lastRead) {
+        guard handed.contains(post.id) else { break }
+        deliverable = post.id
+      }
+    } else {
+      deliverable = selected.last?.id
+    }
     let trimmed: Bool
     switch query.fullBodies {
     case .some(let full): trimmed = !full && !deepRead
@@ -364,6 +443,7 @@ extension Mailroom {
     if trimmed { selected = selected.map { $0.headlined() } }
     return Mailbox(
       posts: selected, bodiesTrimmed: trimmed, digest: MailroomDigest(of: posts),
-      lastRead: lastRead, highestDeliveredID: selected.last?.id)
+      lastRead: lastRead, highestDeliveredID: deliverable, remaining: remaining,
+      prunedUnread: pruned)
   }
 }

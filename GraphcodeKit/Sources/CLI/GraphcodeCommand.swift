@@ -104,14 +104,14 @@ public enum GraphcodeCommand: Equatable, Sendable {
       graphcode mail post <project-path> [--topic <t>] <notice…>
                            post a notice to the whole graph, for whoever comes next
       graphcode mail inbox <project-path> [--headlines] [--full] [--mark] [--json]
-                           read your unread mail and mark the room read. A large
-                           backlog prints as headlines on its own and says so —
-                           --full insists on every body, --headlines insists on
-                           triage lines (deep-read either with `read`). --mark
-                           advances the cursor without printing the backlog, --json is
-                           the machine-readable shape. Combined, the output wins in the
-                           order --json > --mark > --headlines > --full; the cursor
-                           advances whichever flags you pass
+                           read your unread mail; what prints is what is marked read.
+                           A large backlog prints as headlines on its own and says
+                           so — --full insists on every body, --headlines insists on
+                           triage lines (deep-read either with `read`) — and comes a
+                           page at a time: run it again for the next page. --mark
+                           marks everything read without printing it, --json is the
+                           machine-readable shape. Combined, the output wins in the
+                           order --json > --mark > --headlines > --full
       graphcode mail read <project-path> <post-id>
                            one post in full — the deep-read half of --headlines
       graphcode mail list <project-path> [--search <text>] [--json]
@@ -866,9 +866,14 @@ extension GraphcodeCommand {
       if let search, !search.isEmpty {
         return unread ? "no unread posts match '\(search)'" : "no posts match '\(search)'"
       }
-      return unread
-        ? "no unread posts"
-        : "the room is empty — post one: graphcode mail post <project-path> <notice…>"
+      guard unread else {
+        return "the room is empty — post one: graphcode mail post <project-path> <notice…>"
+      }
+      return mailbox.prunedUnread > 0
+        ? "no unread posts — but \(mailbox.prunedUnread) landed since your last inbox and "
+          + "were pruned before you read them; the room keeps \(Mailroom.maxNotices) notices "
+          + "and \(Mailroom.maxLetters) letters, read it more often"
+        : "no unread posts"
     }
     let triaged = mailbox.bodiesTrimmed && !headlines
     let label = unread ? "mailroom, unread" : "mailroom"
@@ -883,6 +888,23 @@ extension GraphcodeCommand {
       lines.append(
         headlines || mailbox.bodiesTrimmed ? "  \(renderHeadline(post))" : "  \(render(post))")
     }
+    if unread, mailbox.prunedUnread > 0 {
+      // Said before the posts, in words, or the loop believes it is caught up: mail
+      // that landed after its cursor and was pruned before it asked is gone for good.
+      lines.append(
+        "  \(mailbox.prunedUnread) post\(mailbox.prunedUnread == 1 ? "" : "s") landed since your "
+          + "last inbox and \(mailbox.prunedUnread == 1 ? "was" : "were") pruned before you read "
+          + "\(mailbox.prunedUnread == 1 ? "it" : "them") — the room keeps "
+          + "\(Mailroom.maxNotices) notices and \(Mailroom.maxLetters) letters; read it more often")
+    }
+    if mailbox.remaining > 0 {
+      // A page, not the whole backlog: the cursor stopped at the last post above, so
+      // the same command again is the next page — said in words, or a loop would
+      // take one page for the lot.
+      lines.append(
+        "  \(mailbox.remaining) more unread past #\(mailbox.highestDeliveredID ?? 0) — "
+          + "run the same command again for the next page")
+    }
     return lines.joined(separator: "\n")
   }
 
@@ -894,8 +916,15 @@ extension GraphcodeCommand {
     struct Board: Encodable {
       var posts: [MailroomPost]
       var lastRead: Int?
+      /// Present only when the answer is a page, so the shape scripts already parse
+      /// is untouched until there is something to say.
+      var remaining: Int?
+      var prunedUnread: Int?
     }
-    let board = Board(posts: mailbox.posts, lastRead: mailbox.lastRead)
+    let board = Board(
+      posts: mailbox.posts, lastRead: mailbox.lastRead,
+      remaining: mailbox.remaining > 0 ? mailbox.remaining : nil,
+      prunedUnread: mailbox.prunedUnread > 0 ? mailbox.prunedUnread : nil)
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]
     encoder.dateEncodingStrategy = .iso8601

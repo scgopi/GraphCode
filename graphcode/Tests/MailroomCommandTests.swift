@@ -328,6 +328,107 @@ func aRoomThatTriagedItselfSaysSoAndWhereTheFullTextIs() {
 }
 
 @Test
+func aPageSaysWhatItLeftAndJSONSaysSoOnlyThen() throws {
+  var graph = LoopGraph(project: ProjectRef(path: "/tmp/x", name: "x"))
+  graph.mailroom = (1...(Mailroom.inboxPageSize + 2)).map {
+    MailroomPost(
+      id: $0, at: Date(timeIntervalSince1970: 0), authorID: nil, author: "a human",
+      topic: nil, body: "note \($0)")
+  }
+  let reader = UUID()
+
+  let page = served(graph, .unread(reader: reader), fullBodies: true)
+  let rendered = GraphcodeCommand.renderMailroom(page, project: graph.project, unread: true)
+  #expect(
+    rendered.hasSuffix(
+      "2 more unread past #\(Mailroom.inboxPageSize) — run the same command again for the next page"
+    ))
+  #expect(rendered.split(separator: "\n").count == Mailroom.inboxPageSize + 2)
+
+  struct Board: Decodable {
+    let posts: [MailroomPost]
+    let remaining: Int?
+  }
+  let decoder = JSONDecoder()
+  decoder.dateDecodingStrategy = .iso8601
+  let paged = try decoder.decode(
+    Board.self, from: try #require(GraphcodeCommand.renderMailroomJSON(page).data(using: .utf8)))
+  #expect(paged.remaining == 2)
+  #expect(paged.posts.count == Mailroom.inboxPageSize)
+
+  let (small, smallReader) = boardWithPosts()
+  let whole = try decoder.decode(
+    Board.self,
+    from: try #require(
+      GraphcodeCommand.renderMailroomJSON(
+        served(small, .unread(reader: smallReader.id), fullBodies: true)
+      ).data(using: .utf8)))
+  #expect(whole.remaining == nil)
+  #expect(
+    !GraphcodeCommand.renderMailroom(
+      served(small, .unread(reader: smallReader.id)), project: small.project, unread: true
+    ).contains("more unread"))
+}
+
+@Test
+func prunedMailIsSaidOutLoudWithAndWithoutPosts() throws {
+  var graph = LoopGraph(project: ProjectRef(path: "/tmp/x", name: "x"))
+  var reader = LoopNode(title: "Reader", loopType: .turnBased)
+  reader.lastMailroomRead = 2
+  graph.nodes.append(reader)
+  graph.mailroom = [
+    MailroomPost(
+      id: 2, at: Date(timeIntervalSince1970: 0), authorID: nil, author: "a human",
+      topic: nil, body: "read"),
+    MailroomPost(
+      id: 6, at: Date(timeIntervalSince1970: 1), authorID: nil, author: "a human",
+      topic: nil, body: "survived"),
+  ]
+
+  let withPosts = GraphcodeCommand.renderMailroom(
+    served(graph, .unread(reader: reader.id)), project: graph.project, unread: true)
+  #expect(withPosts.contains("#6"))
+  #expect(withPosts.contains("3 posts landed since your last inbox and were pruned"))
+
+  graph.mailroom.removeLast()
+  graph.mailroom.append(
+    MailroomPost(
+      id: 6, at: Date(timeIntervalSince1970: 1), authorID: nil, author: "a human",
+      topic: nil, body: "survived"))
+  graph.nodes[id: reader.id]?.lastMailroomRead = 6
+  var gone = graph
+  gone.mailroom = [graph.mailroom[0]]
+  gone.nodes[id: reader.id]?.lastMailroomRead = 2
+  // Only #2 survives; the cursor is at 2, nothing above it exists: nothing was pruned
+  // *unread* — the count needs a surviving post above the cursor to be knowable.
+  #expect(
+    GraphcodeCommand.renderMailroom(
+      served(gone, .unread(reader: reader.id)), project: graph.project, unread: true)
+      == "no unread posts")
+
+  // JSON says it only when there is something to say — read off the room as it stood
+  // when three posts had been pruned unread.
+  graph.nodes[id: reader.id]?.lastMailroomRead = 2
+  struct Board: Decodable {
+    let prunedUnread: Int?
+  }
+  let decoder = JSONDecoder()
+  decoder.dateDecodingStrategy = .iso8601
+  let pruned = try decoder.decode(
+    Board.self,
+    from: try #require(
+      GraphcodeCommand.renderMailroomJSON(served(graph, .unread(reader: reader.id)))
+        .data(using: .utf8)))
+  #expect(pruned.prunedUnread == 3)
+  let whole = try decoder.decode(
+    Board.self,
+    from: try #require(
+      GraphcodeCommand.renderMailroomJSON(served(graph, .board, fullBodies: true))
+        .data(using: .utf8)))
+  #expect(whole.prunedUnread == nil)
+}
+
+@Test
 func searchFiltersWhatIsShownButNeverWhatIsRemembered() {
   let (graph, reader) = boardWithPosts()
 
