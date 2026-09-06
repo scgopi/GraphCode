@@ -180,10 +180,21 @@ struct RemoteCLIShimTests {
         guard let command = try? JSONDecoder().decode(DaemonCommand.self, from: data)
         else { return }
         received.append(command)
-        let event: DaemonEvent =
-          command == .listRecentProjects
-          ? .recentProjectsListed([ProjectRef(path: Self.project, name: "widget")])
-          : .graphChanged(graph)
+        // The shapes the real daemon answers with: a snapshot carries the room's
+        // digest and no posts, and a mailbox request is answered off the room itself.
+        let event: DaemonEvent
+        switch command {
+        case .listRecentProjects:
+          event = .recentProjectsListed([ProjectRef(path: Self.project, name: "widget")])
+        case .mailbox(_, let query):
+          event = .mailbox(
+            projectPath: Self.project,
+            mailbox: Mailroom.serve(query, from: graph.mailroom) {
+              graph.nodes[id: $0]?.lastMailroomRead
+            })
+        default:
+          event = .graphChanged(graph.wireSnapshot())
+        }
         guard let reply = try? JSONEncoder().encode(event),
           (try? FramedMessageIO.writeFrame(reply, to: client)) != nil
         else { return }
@@ -223,6 +234,18 @@ struct RemoteCLIShimTests {
 /// The board verbs, split into their own extension: `RemoteCLIShimTests` sits at
 /// swiftlint's 350-line `type_body_length` error without them.
 extension RemoteCLIShimTests {
+  /// Served the way `GraphStore.mailbox` serves it; the shim asks the daemon for exactly
+  /// this, so the renderers on both sides are handed the same posts.
+  fileprivate static func served(
+    _ graph: LoopGraph, _ selection: MailboxQuery.Selection, search: String? = nil,
+    fullBodies: Bool? = nil
+  ) -> Mailbox {
+    Mailroom.serve(
+      MailboxQuery(selection: selection, search: search, fullBodies: fullBodies),
+      from: graph.mailroom
+    ) { graph.nodes[id: $0]?.lastMailroomRead }
+  }
+
   /// The board the parity tests drive: a cursor that leaves one post read, a topic and
   /// a bare byline, a body long enough that a headline has to cut it, and one carrying
   /// the slashes and the em dash that separate Swift's JSON escaping from Python's.
@@ -262,27 +285,45 @@ extension RemoteCLIShimTests {
     let (graph, reader) = Self.board()
     let session = ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"]
 
+    func served(
+      _ selection: MailboxQuery.Selection, search: String? = nil, fullBodies: Bool? = nil
+    ) -> Mailbox {
+      Self.served(graph, selection, search: search, fullBodies: fullBodies)
+    }
+    let project = graph.project
     let cases: [(arguments: [String], environment: [String: String], expected: String)] = [
-      (["mailroom", "list", Self.project], [:], GraphcodeCommand.renderMailroom(graph)),
+      (
+        ["mailroom", "list", Self.project], [:],
+        GraphcodeCommand.renderMailroom(
+          served(.board, fullBodies: true), project: project, unread: false)
+      ),
       (
         ["mailroom", "list", Self.project, "--search", "RED"], [:],
-        GraphcodeCommand.renderMailroom(graph, search: "RED")
+        GraphcodeCommand.renderMailroom(
+          served(.board, search: "RED", fullBodies: true), project: project, unread: false,
+          search: "RED")
       ),
       (
         ["mailroom", "list", Self.project, "--search", "nothing-matches"], [:],
-        GraphcodeCommand.renderMailroom(graph, search: "nothing-matches")
+        GraphcodeCommand.renderMailroom(
+          served(.board, search: "nothing-matches", fullBodies: true), project: project,
+          unread: false, search: "nothing-matches")
       ),
       (
         ["mailroom", "sync", Self.project], session,
-        GraphcodeCommand.renderMailroom(graph, unreadFor: reader.id, autoTriage: true)
+        GraphcodeCommand.renderMailroom(
+          served(.unread(reader: reader.id)), project: project, unread: true)
       ),
       (
         ["mailroom", "sync", Self.project, "--headlines"], session,
-        GraphcodeCommand.renderMailroom(graph, unreadFor: reader.id, headlines: true)
+        GraphcodeCommand.renderMailroom(
+          served(.unread(reader: reader.id), fullBodies: false), project: project, unread: true,
+          headlines: true)
       ),
       (
         ["mailroom", "sync", Self.project, "--full"], session,
-        GraphcodeCommand.renderMailroom(graph, unreadFor: reader.id)
+        GraphcodeCommand.renderMailroom(
+          served(.unread(reader: reader.id), fullBodies: true), project: project, unread: true)
       ),
       (
         ["mailroom", "read", Self.project, "2"], [:],
@@ -290,11 +331,15 @@ extension RemoteCLIShimTests {
       ),
       (
         ["mailroom", "list", Self.project, "--json"], [:],
-        GraphcodeCommand.renderMailroomJSON(graph)
+        GraphcodeCommand.renderMailroomJSON(served(.board, fullBodies: true))
       ),
       (
         ["mailroom", "sync", Self.project, "--json"], session,
-        GraphcodeCommand.renderMailroomJSON(graph, unreadFor: reader.id)
+        GraphcodeCommand.renderMailroomJSON(served(.unread(reader: reader.id), fullBodies: true))
+      ),
+      (
+        ["mailroom", "sync", Self.project, "--mark"], session,
+        "marked read up to #3"
       ),
     ]
 
@@ -317,7 +362,11 @@ extension RemoteCLIShimTests {
     graph.nodes.append(reader)
 
     let empty = try runShim(["mailroom", "list", Self.project], graph: graph)
-    #expect(empty.stdout == GraphcodeCommand.renderMailroom(graph) + "\n")
+    #expect(
+      empty.stdout
+        == GraphcodeCommand.renderMailroom(
+          Mailroom.serve(MailboxQuery(selection: .board, fullBodies: true), from: []) { _ in nil },
+          project: graph.project, unread: false) + "\n")
 
     graph.mailroom = [
       MailroomPost(
@@ -327,9 +376,6 @@ extension RemoteCLIShimTests {
     let synced = try runShim(
       ["mailroom", "sync", Self.project],
       environment: ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"], graph: graph)
-    #expect(
-      synced.stdout
-        == GraphcodeCommand.renderMailroom(graph, unreadFor: reader.id, autoTriage: true) + "\n")
     #expect(synced.stdout == "no unread posts\n")
   }
 
@@ -377,7 +423,9 @@ extension RemoteCLIShimTests {
         environment: ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"], graph: graph)
       return (
         run.stdout,
-        GraphcodeCommand.renderMailroom(graph, unreadFor: reader.id, autoTriage: true) + "\n"
+        GraphcodeCommand.renderMailroom(
+          Self.served(graph, .unread(reader: reader.id)), project: graph.project, unread: true)
+          + "\n"
       )
     }
 
@@ -412,7 +460,7 @@ extension RemoteCLIShimTests {
       environment: ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"], graph: graph)
     let readerLine = try #require(
       GraphcodeCommand.renderMailroomStatusLine(graph, readerID: reader.id))
-    #expect(readerLine == "mailroom: 3 posts, 2 unread for you")
+    #expect(readerLine == "mailroom: 3 posts, unread mail for you")
     #expect(asReader.stdout.hasSuffix("  " + readerLine + "\n"))
 
     // A human shell, and a loop this graph has never heard of, both get the plain
@@ -443,7 +491,8 @@ extension RemoteCLIShimTests {
       ["mailroom", "post", Self.project, "--topic", "claims", "issue", "#12", "is", "mine"],
       environment: session, graph: graph)
     #expect(posted.status == 0)
-    #expect(posted.stdout == GraphcodeCommand.renderPosted(graph) + "\n")
+    #expect(posted.stdout == GraphcodeCommand.renderPosted(graph, topic: "claims") + "\n")
+    #expect(posted.stdout == "posted #3 (claims)\n")
     #expect(
       posted.commands.dropFirst().first
         == .graphCommand(
@@ -521,7 +570,8 @@ extension RemoteCLIShimTests {
         ["mailroom", "sync", Self.project, "--headlines"],
         environment: ["ZMX_SESSION": "graphcode-\(reader.id.uuidString)"], graph: graph)
       let expected = GraphcodeCommand.renderMailroom(
-        graph, unreadFor: reader.id, headlines: true)
+        Self.served(graph, .unread(reader: reader.id), fullBodies: false), project: graph.project,
+        unread: true, headlines: true)
       #expect(run.stdout == expected + "\n", "body \(index) cut differently")
     }
   }
@@ -546,7 +596,9 @@ extension RemoteCLIShimTests {
     for needle in ["éclair", "e\u{0301}clair", "Amélie", "café", "ÉCLAIR"] {
       let run = try runShim(
         ["mailroom", "list", Self.project, "--search", needle], graph: graph)
-      let expected = GraphcodeCommand.renderMailroom(graph, search: needle)
+      let expected = GraphcodeCommand.renderMailroom(
+        Self.served(graph, .board, search: needle, fullBodies: true), project: graph.project,
+        unread: false, search: needle)
       #expect(run.stdout == expected + "\n", "search '\(needle)' diverged")
       #expect(!expected.hasPrefix("no posts match"), "fixture no longer exercises a match")
     }
@@ -575,24 +627,41 @@ extension RemoteCLIShimTests {
     #expect(run.stdout == GraphcodeCommand.render(graph.mailroom[0]) + "\n")
     #expect(run.stdout.contains("#5 () from a human"))
 
+    // The sequence number comes off the digest and the topic is the caller's — spelled
+    // the way the daemon keeps it, and absent when there was none.
     let posted = try runShim(
       ["mailroom", "post", Self.project, "anything"], graph: graph)
     #expect(posted.stdout == GraphcodeCommand.renderPosted(graph) + "\n")
-    #expect(posted.stdout == "posted #5 ()\n")
+    #expect(posted.stdout == "posted #5\n")
+    let spelled = try runShim(
+      ["mailroom", "post", Self.project, "--topic", " Claims ", "anything"], graph: graph)
+    #expect(spelled.stdout == GraphcodeCommand.renderPosted(graph, topic: " Claims ") + "\n")
+    #expect(spelled.stdout == "posted #5 (claims)\n")
   }
 
-  /// `read` and `list` send nothing past the open — the snapshot already carries the
-  /// board — so neither can move a cursor by accident.
+  /// `read` and `list` ask the mailbox for exactly what they print and send no command —
+  /// so neither can move a cursor by accident — and they ask the way the Swift CLI asks:
+  /// one post whole, or the whole room with every body.
   @Test
-  func readAndListSendNoCommandPastTheOpen() throws {
+  func readAndListAskTheMailboxAndMoveNoCursor() throws {
     let (graph, _) = Self.board()
-    for arguments in [
-      ["mailroom", "read", Self.project, "3"], ["mailroom", "list", Self.project],
-    ] {
-      let run = try runShim(arguments, graph: graph)
-      #expect(run.status == 0)
-      #expect(run.commands == [.openProject(path: Self.project)])
-    }
+    let read = try runShim(["mailroom", "read", Self.project, "3"], graph: graph)
+    #expect(read.status == 0)
+    #expect(
+      read.commands == [
+        .openProject(path: Self.project),
+        .mailbox(projectPath: Self.project, query: MailboxQuery(selection: .post(id: 3))),
+      ])
+
+    let list = try runShim(["mailroom", "list", Self.project, "--search", "gate"], graph: graph)
+    #expect(list.status == 0)
+    #expect(
+      list.commands == [
+        .openProject(path: Self.project),
+        .mailbox(
+          projectPath: Self.project,
+          query: MailboxQuery(selection: .board, search: "gate", fullBodies: true)),
+      ])
   }
 
   /// The cursor verbs refuse a human shell up front, in the Swift CLI's own wording,

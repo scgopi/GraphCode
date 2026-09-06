@@ -356,6 +356,23 @@ public actor ProjectRegistry {
       case .refused(let reason):
         send(.errorOccurred(reason), to: fileDescriptor)
       }
+
+    case .mailbox(let path, let query):
+      // Routed and gated exactly as a `.graphCommand`: the room belongs to the project
+      // the open landed on, and a query against a project this connection never
+      // opened is answered the way a command against one is.
+      switch routing(for: path, isSidebar: sidebarConnections.contains(connectionID)) {
+      case .project(let canonicalPath):
+        guard let store = stores[canonicalPath] else {
+          send(.errorOccurred("\(path) isn't open — open it first."), to: fileDescriptor)
+          return
+        }
+        send(
+          .mailbox(projectPath: canonicalPath, mailbox: await store.mailbox(query)),
+          to: fileDescriptor)
+      case .refused(let reason):
+        send(.errorOccurred(reason), to: fileDescriptor)
+      }
     }
   }
 

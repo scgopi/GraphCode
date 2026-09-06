@@ -201,3 +201,169 @@ public enum Mailroom {
     return posts.filter { kept.contains($0.id) }
   }
 }
+
+/// What a graph snapshot says about the room in place of the room itself.
+///
+/// The posts used to ride every `.graphChanged`, and on a busy graph they were three
+/// quarters of every frame — 133 KB of a 176 KB broadcast, re-sent to every client on
+/// every presence tick, to clients that already had them and clients that never read
+/// mail at all (issue #288). A snapshot now carries only this: enough for `status` to
+/// say there is mail, for a poster to learn its sequence number, and for a client
+/// holding a copy of the room to know whether that copy is stale. The posts themselves
+/// are served on request, bounded, by `Mailroom.serve`.
+public struct MailroomDigest: Codable, Equatable, Sendable {
+  public var count: Int
+  /// The highest id on the room, `0` while empty.
+  public var latestID: Int
+  /// Changes whenever a post is added, pruned, or edited in place — the one in-place
+  /// edit being an author's deletion, which `count` and `latestID` cannot see. Stable
+  /// across processes (FNV-1a over the fields that can change), so two daemons
+  /// describing the same room agree and a client can compare digests from before and
+  /// after a restart.
+  public var fingerprint: UInt64
+
+  public init(count: Int, latestID: Int, fingerprint: UInt64) {
+    self.count = count
+    self.latestID = latestID
+    self.fingerprint = fingerprint
+  }
+
+  public init(of posts: [MailroomPost]) {
+    var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+    func mix(_ text: String) {
+      for byte in text.utf8 {
+        hash ^= UInt64(byte)
+        hash = hash &* 0x0000_0100_0000_01b3
+      }
+      hash ^= 0xff
+      hash = hash &* 0x0000_0100_0000_01b3
+    }
+    for post in posts {
+      mix(String(post.id))
+      mix(post.authorID?.uuidString ?? "")
+      mix(post.author)
+    }
+    // The maximum, the way `Mailroom.nextID` reads it, rather than the last post's —
+    // one answer to "the newest id" rather than two that happen to agree.
+    self.init(count: posts.count, latestID: posts.map(\.id).max() ?? 0, fingerprint: hash)
+  }
+
+  public var isEmpty: Bool { count == 0 }
+}
+
+/// What a client asks the room for — the read half of every mail verb.
+public struct MailboxQuery: Codable, Equatable, Sendable {
+  public enum Selection: Codable, Equatable, Sendable {
+    /// The whole room — `mail list`, a human's window.
+    case board
+    /// Only what `reader`'s cursor has not covered — `mail inbox`.
+    case unread(reader: UUID)
+    /// One post in full — `mail read <id>`.
+    case post(id: Int)
+  }
+
+  public var selection: Selection
+  /// Keeps only posts whose author, topic or body contains the text,
+  /// case-insensitively — applied before bodies are cut, so a match deep in a body
+  /// still counts.
+  public var search: String?
+  /// `true` for whole bodies, `false` for headlines, `nil` to let the room decide by
+  /// `Mailroom.needsTriage` — what `mail inbox` does unless told `--full` or
+  /// `--headlines`, since a loop cannot know how much mail it has before reading it.
+  public var fullBodies: Bool?
+
+  public init(selection: Selection, search: String? = nil, fullBodies: Bool? = nil) {
+    self.selection = selection
+    self.search = search
+    self.fullBodies = fullBodies
+  }
+}
+
+/// The room's answer to a `MailboxQuery`: the posts asked for, and the numbers a
+/// reader needs to act on them without holding the whole room.
+public struct Mailbox: Codable, Equatable, Sendable {
+  /// Oldest first, the room's own order.
+  public var posts: [MailroomPost]
+  /// Whether `posts` carry headlines rather than whole bodies
+  /// (`Mailroom.headlineBodyBudget`). Said explicitly so a caller that left the choice
+  /// to the room can tell its reader it is reading a triaged room.
+  public var bodiesTrimmed: Bool
+  /// The room the answer was drawn from, for the same purposes a snapshot's is.
+  public var digest: MailroomDigest
+  /// The reader's cursor, for an `.unread` selection whose reader the room knows.
+  public var lastRead: Int?
+  /// The id of the last post in `posts` — what a cursor may honestly advance to,
+  /// since it is the highest post the reader was actually handed.
+  public var highestDeliveredID: Int?
+
+  public init(
+    posts: [MailroomPost], bodiesTrimmed: Bool, digest: MailroomDigest, lastRead: Int? = nil,
+    highestDeliveredID: Int? = nil
+  ) {
+    self.posts = posts
+    self.bodiesTrimmed = bodiesTrimmed
+    self.digest = digest
+    self.lastRead = lastRead
+    self.highestDeliveredID = highestDeliveredID
+  }
+}
+
+extension MailroomPost {
+  /// The same post with its body cut to the first `Mailroom.headlineBodyBudget`
+  /// characters — what a triaged mailbox carries instead of the whole note. Cut in
+  /// grapheme clusters, never mid-glyph.
+  public func headlined() -> MailroomPost {
+    guard body.count > Mailroom.headlineBodyBudget else { return self }
+    return MailroomPost(
+      id: id, at: at, authorID: authorID, author: author, topic: topic,
+      body: String(body.prefix(Mailroom.headlineBodyBudget)), kind: kind)
+  }
+}
+
+extension Mailroom {
+  /// How much of a body a headline keeps. The CLI's triage line is cut at 80
+  /// characters *including* the post's byline, so 80 characters of body is always
+  /// enough for it to render exactly what the whole body would have — the room can
+  /// trim on the wire without the reader being able to tell.
+  public static let headlineBodyBudget = 80
+
+  /// Answers a query against a room. `cursor` is the reader's `lastMailroomRead`, or
+  /// `nil` for a reader the graph does not know — who, as before, is shown everything
+  /// and refused the cursor advance afterwards.
+  ///
+  /// `search` filters before bodies are cut. A `.post` selection is never trimmed: it
+  /// is the deep read a headline points at.
+  public static func serve(
+    _ query: MailboxQuery, from posts: [MailroomPost], cursor: (UUID) -> Int?
+  ) -> Mailbox {
+    var selected: [MailroomPost]
+    var lastRead: Int?
+    var deepRead = false
+    switch query.selection {
+    case .board:
+      selected = posts
+    case .unread(let reader):
+      lastRead = cursor(reader)
+      selected = unread(in: posts, since: lastRead)
+    case .post(let id):
+      selected = posts.filter { $0.id == id }
+      deepRead = true
+    }
+    if let search = query.search, !search.isEmpty {
+      let needle = search.lowercased()
+      selected = selected.filter {
+        $0.body.lowercased().contains(needle) || $0.author.lowercased().contains(needle)
+          || $0.topic?.lowercased().contains(needle) == true
+      }
+    }
+    let trimmed: Bool
+    switch query.fullBodies {
+    case .some(let full): trimmed = !full && !deepRead
+    case .none: trimmed = !deepRead && needsTriage(selected)
+    }
+    if trimmed { selected = selected.map { $0.headlined() } }
+    return Mailbox(
+      posts: selected, bodiesTrimmed: trimmed, digest: MailroomDigest(of: posts),
+      lastRead: lastRead, highestDeliveredID: selected.last?.id)
+  }
+}

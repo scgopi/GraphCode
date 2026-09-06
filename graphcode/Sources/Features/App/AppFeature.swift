@@ -344,22 +344,29 @@ struct AppFeature {
             // anyone opened, it's the one row that's always there, and it arrives last
             // (the app asks for it after `.restoreOpenProjects`) so appending would
             // leave it below folders that came back from a previous session.
+            let held = ProjectFeature.holding(graph)
             if graph.isGlobal {
-              state.projects.insert(ProjectFeature.State(graph: graph), at: 0)
+              state.projects.insert(ProjectFeature.State(graph: held), at: 0)
             } else {
-              state.projects.append(ProjectFeature.State(graph: graph))
+              state.projects.append(ProjectFeature.State(graph: held))
             }
+            // The snapshot carries the room's digest, not its posts; the first
+            // sight of a project with anything on its board asks for them. Later
+            // changes are `ProjectFeature`'s to notice, off its own `.graphChanged`.
+            let fetchesBoard = !graph.boardDigest.isEmpty
             // Selection follows only a project *this* app asked for. A folder can now
             // also arrive because someone else opened it — `graphcode status <folder>`
             // from a loop or an editor plugin joins every running sidebar to it — and
             // that is a row appearing, not a reason to close the terminal a human is
             // working in.
+            let fetch: Effect<Action> =
+              fetchesBoard ? ProjectFeature.fetchBoard(path, via: orchestratorClient) : .none
             guard state.pendingOpenPaths.remove(path) != nil || graph.isGlobal else {
-              return .none
+              return fetch
             }
             state.selectedProjectPath = path
             state.openLoop = nil
-            return .none
+            return fetch
           }
           // Keep an open workspace's node in sync (title, presence dot, check bar) —
           // the workspace doesn't own a daemon subscription itself.
@@ -368,7 +375,10 @@ struct AppFeature {
               state.openLoop?.node = updated
               // The rail's downstream list comes off this — a handoff drawn while the
               // terminal is up should appear there without reopening the workspace.
-              state.openLoop?.graph = graph
+              // The room's posts are not on the wire; the copy this app already holds
+              // stays until the mailbox reply that a changed digest asks for.
+              let hydrated = hydratedWithBoard(graph, in: state)
+              state.openLoop?.graph = hydrated
             } else {
               // The loop was deleted out from under its own terminal — easy to do now
               // that the sidebar can delete a loop while its workspace is the visible
@@ -385,6 +395,14 @@ struct AppFeature {
         case .errorOccurred(let message):
           state.welcome.errorMessage = message
           return .none
+
+        case .mailbox(let path, let mailbox):
+          // The posts a snapshot's digest stood in for. The project keeps the copy;
+          // an open workspace in that project reads the same room off its own graph.
+          if state.openLoop?.projectPath == path {
+            state.openLoop?.graph.mailroom = mailbox.posts
+          }
+          return .send(.projects(.element(id: path, action: .daemonEvent(event))))
         }
 
       case .projectHeaderTapped(let path):
@@ -825,6 +843,16 @@ extension AppFeature {
   /// surface is deliberately not on the kill list: the loop's session belongs to the
   /// node, and whichever side deletes the node ends it (`GraphStore` on the daemon's
   /// path, `QuickChats` for a chat).
+  /// A broadcast graph with the room's posts filled back in from the copy this app
+  /// holds for the project — see `LoopGraph.mailroom`. A snapshot from a daemon that
+  /// still ships posts keeps its own.
+  func hydratedWithBoard(_ graph: LoopGraph, in state: State) -> LoopGraph {
+    guard graph.mailroom.isEmpty else { return graph }
+    var hydrated = graph
+    hydrated.mailroom = state.projects[id: graph.project.path]?.graph.mailroom ?? []
+    return hydrated
+  }
+
   func closeOpenWorkspace(_ state: inout State) {
     guard let openLoop = state.openLoop else { return }
     let surfaces = openLoop.layout.tabs.flatMap { $0.surfaces }

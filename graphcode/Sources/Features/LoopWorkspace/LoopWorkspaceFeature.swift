@@ -298,8 +298,9 @@ struct LoopWorkspaceFeature {
         LoopWorkspaceRail.saveMailroomFolded(state.isMailroomFolded)
         return .none
 
-      // Nothing local to change: the post is the daemon's to apply, and the board it
-      // lands on arrives back in the next `.graphChanged`.
+      // Nothing local to change: the post is the daemon's to apply, and the room it
+      // lands on is asked for when the next `.graphChanged` says the room changed
+      // (`ProjectFeature`), then reaches this graph through `AppFeature`.
       case .mailroomPostSubmitted:
         return .none
 

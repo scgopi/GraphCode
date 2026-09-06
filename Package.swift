@@ -45,7 +45,7 @@ let package = Package(
     ),
     .executableTarget(
       name: "graphcode-cli",
-      dependencies: ["GraphcodeKit"],
+      dependencies: ["GraphcodeKit", "MailroomKit"],
       path: "graphcode-cli/Sources",
       swiftSettings: [.swiftLanguageMode(.v5)]
     ),

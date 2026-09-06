@@ -508,7 +508,7 @@ public actor GraphStore {
     // snapshot it was joining for.
     OutboundChannels.open(fileDescriptor)
     connections[id] = fileDescriptor
-    send(.graphChanged(graph), to: id)
+    send(.graphChanged(graph.wireSnapshot()), to: id)
   }
 
   public func removeConnection(_ id: UUID) {
@@ -1688,6 +1688,15 @@ public actor GraphStore {
       id: Mailroom.nextID(after: graph.mailroom), at: Date(), authorID: senderID,
       author: sender, topic: topic, body: body, kind: .letter)
     graph.mailroom = Mailroom.pruned(graph.mailroom + [post])
+  }
+
+  /// The room as a client asked for it — the read half of every mail verb, and the
+  /// only way posts leave the daemon now that `.graphChanged` carries their digest
+  /// instead (issue #288). Pure: nothing moves, nothing is persisted, nobody else
+  /// hears about it. Not gated on the room being on — reading was never gated, and a
+  /// room switched off still shows what was said while it was on.
+  public func mailbox(_ query: MailboxQuery) -> Mailbox {
+    Mailroom.serve(query, from: graph.mailroom) { graph.nodes[id: $0]?.lastMailroomRead }
   }
 
   /// Advances the reading loop's cursor to the newest post — the write half of
@@ -3204,8 +3213,9 @@ public actor GraphStore {
   /// other caller wants `broadcast` — a graph change that isn't saved is a graph change
   /// lost at the next daemon restart.
   private func notifyClients() {
+    let snapshot = graph.wireSnapshot()
     for id in connections.keys {
-      send(.graphChanged(graph), to: id)
+      send(.graphChanged(snapshot), to: id)
     }
   }
 

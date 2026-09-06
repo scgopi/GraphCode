@@ -179,7 +179,10 @@ struct MailroomBudgetTests {
     }
 
     let rendered = GraphcodeCommand.renderMailroom(
-      graph, unreadFor: reader.id, autoTriage: true)
+      Mailroom.serve(
+        MailboxQuery(selection: .unread(reader: reader.id)), from: graph.mailroom
+      ) { graph.nodes[id: $0]?.lastMailroomRead },
+      project: graph.project, unread: true)
 
     #expect(rendered.contains("headlines only"))
     #expect(rendered.contains("mail read /tmp/p <post-id>"))
@@ -196,7 +199,10 @@ struct MailroomBudgetTests {
         body: "short enough to read in full"))
 
     let rendered = GraphcodeCommand.renderMailroom(
-      graph, unreadFor: reader.id, autoTriage: true)
+      Mailroom.serve(
+        MailboxQuery(selection: .unread(reader: reader.id)), from: graph.mailroom
+      ) { graph.nodes[id: $0]?.lastMailroomRead },
+      project: graph.project, unread: true)
 
     #expect(rendered.contains("short enough to read in full"))
     #expect(!rendered.contains("headlines only"))
