@@ -74,6 +74,7 @@ final class OutboundChannel: @unchecked Sendable {
     isSocket =
       getsockopt(fileDescriptor, SOL_SOCKET, SO_TYPE, &socketType, &typeSize) == 0
     Self.armAgainstSIGPIPE(fileDescriptor)
+    if isSocket { Self.boundSends(on: fileDescriptor) }
     // Captured strongly on purpose: the channel must outlive the registry's reference to
     // it, because the descriptor is closed by `pump` on its way out. A weak capture would
     // let a channel released without `close()` take its thread — and its unclosed
@@ -92,6 +93,25 @@ final class OutboundChannel: @unchecked Sendable {
   /// The channel arms the descriptor itself rather than trusting whoever handed it over:
   /// `graphcoded` does set this on the sockets it accepts, but a writer that only survives
   /// because its caller remembered is a crash waiting for the one caller that does not.
+  /// `SO_SNDTIMEO`, one poll slice long — what actually makes a send return.
+  ///
+  /// On macOS a `send(2)` with `MSG_DONTWAIT` on a blocking AF_UNIX stream socket
+  /// **blocks anyway**: the flag is ignored (60 KB into a 4 KB peer sits inside the
+  /// syscall until the peer drains; Linux honours the flag). So the writer below parked
+  /// inside `send` on a peer that stopped reading and never reached its poll loop — and
+  /// `closeAndWait`, which relies on the writer noticing `isClosing` between slices, was
+  /// not bounded after all. With a send timeout the call returns what it wrote, or
+  /// `EAGAIN` when nothing went, after the slice: the shape the loop was written for.
+  /// It bounds sends only — the reader sharing this descriptor keeps its blocking reads,
+  /// which `O_NONBLOCK` could not promise since that flag lives on the open file
+  /// description both halves share.
+  private static func boundSends(on fileDescriptor: Int32) {
+    var slice = timeval(
+      tv_sec: 0, tv_usec: suseconds_t(Int(writabilityPollMilliseconds) * 1000))
+    setsockopt(
+      fileDescriptor, SOL_SOCKET, SO_SNDTIMEO, &slice, socklen_t(MemoryLayout<timeval>.size))
+  }
+
   private static func armAgainstSIGPIPE(_ fileDescriptor: Int32) {
     #if canImport(Darwin)
       var enabled: Int32 = 1
@@ -254,18 +274,21 @@ final class OutboundChannel: @unchecked Sendable {
   /// Writes one length-prefixed frame, returning false if the peer failed or the channel
   /// was closed part-way through.
   ///
-  /// Every write is non-blocking *per call* (`MSG_DONTWAIT`), waiting for writability
-  /// with a bounded `poll` rather than parking inside `write(2)` until the peer drains.
-  /// That is not a refinement, it is what lets `closeAndWait` promise to return: a thread
-  /// already blocked inside a write on a unix socket is **not** reliably woken by another
-  /// thread's `shutdown`, so a wedged peer could hang the disconnecting caller for ever —
-  /// the original bug moved one layer down, where it showed up as the full test suite
-  /// hanging on a channel whose client never read. Polling in slices lets the writer
-  /// notice `isClosing` by itself instead of depending on being interrupted.
+  /// Every call returns within one slice — because of the socket's send timeout
+  /// (`boundSends`), not the `MSG_DONTWAIT` it also passes, which macOS ignores on a
+  /// blocking unix socket — and then waits for writability with a bounded `poll` rather
+  /// than parking inside the syscall until the peer drains. That is what lets
+  /// `closeAndWait` promise to return: a thread already blocked inside a write on a unix
+  /// socket is **not** reliably woken by another thread's `shutdown`, so a wedged peer
+  /// could hang the disconnecting caller for ever — the original bug moved one layer
+  /// down, where it showed up as the full test suite hanging on a channel whose client
+  /// never read. Returning between slices lets the writer notice `isClosing` by itself
+  /// instead of depending on being interrupted.
   ///
-  /// `MSG_DONTWAIT` per call rather than `O_NONBLOCK` on the descriptor: that flag lives
-  /// on the open file description, which the daemon's *reader* shares, and a reader that
-  /// started returning `EAGAIN` would tear down every connection.
+  /// The flag stays for Linux, where it is honoured and where `SO_SNDTIMEO` is then
+  /// merely redundant. Neither is `O_NONBLOCK` on the descriptor: that lives on the open
+  /// file description, which the daemon's *reader* shares, and a reader that started
+  /// returning `EAGAIN` would tear down every connection.
   private func writeFrame(_ data: Data) -> Bool {
     let length = UInt32(data.count)
     var buffer = Data(capacity: 4 + data.count)
