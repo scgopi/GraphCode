@@ -3207,10 +3207,20 @@ public actor GraphStore {
   private func send(_ event: DaemonEvent, to connectionID: UUID) {
     guard let fileDescriptor = connections[connectionID] else { return }
     guard let data = try? JSONEncoder().encode(event) else { return }
-    guard (try? FramedMessageIO.writeFrame(data, to: fileDescriptor)) != nil else {
-      // The write failed — most likely the client already disconnected. Drop it here
-      // rather than waiting for the read loop to notice, so a dead connection can't
-      // accumulate failed broadcast attempts.
+    // Queued, never written here: this runs on the `GraphStore` actor, and a
+    // `graphChanged` frame is far larger than a socket's send buffer, so writing it
+    // inline blocked the actor for as long as the slowest client took to read
+    // (issue #288). A snapshot still waiting to go out is replaced by a newer one rather
+    // than queued behind it — the event carries the whole graph, so the older one has
+    // nothing left to say.
+    let supersedingKey: String? = {
+      if case .graphChanged = event { return "graphChanged" }
+      return nil
+    }()
+    guard OutboundChannels.send(data, to: fileDescriptor, supersedingKey: supersedingKey) else {
+      // No live channel — the client already disconnected. Drop it here rather than
+      // waiting for the read loop to notice, so a dead connection can't accumulate
+      // failed broadcast attempts.
       connections.removeValue(forKey: connectionID)
       return
     }

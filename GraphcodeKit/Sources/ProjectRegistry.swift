@@ -702,6 +702,10 @@ public actor ProjectRegistry {
 
   private func send(_ event: DaemonEvent, to fileDescriptor: Int32) {
     guard let data = try? JSONEncoder().encode(event) else { return }
-    try? FramedMessageIO.writeFrame(data, to: fileDescriptor)
+    // Queued rather than written inline for the same reason `GraphStore.send` queues:
+    // this is actor-isolated, and a blocking write of a full-graph frame hands the actor
+    // to whichever client is slowest to read it. No superseding key — a unicast reply
+    // answers one command and has to arrive.
+    OutboundChannels.send(data, to: fileDescriptor)
   }
 }
