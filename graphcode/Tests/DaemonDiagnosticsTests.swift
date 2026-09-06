@@ -88,9 +88,10 @@ struct DaemonDiagnosticsTests {
       close(deaf[1])
     }
 
+    let deafID = UUID()
     let lines = try await recording {
       await store.addConnection(id: UUID(), fileDescriptor: reading[0])
-      await store.addConnection(id: UUID(), fileDescriptor: deaf[0])
+      await store.addConnection(id: deafID, fileDescriptor: deaf[0])
       _ = try await frame(from: reading[1])
       await store.handle(.renameNode(store.graph.nodes[0].id, title: "Renamed"))
       _ = try await frame(from: reading[1])
@@ -110,6 +111,8 @@ struct DaemonDiagnosticsTests {
     let stalled = lines.map(fields).filter { line in
       line["event"] == "write-stall" && line["fd"] == deafFD
     }
+    // Named by connection as well as by descriptor: descriptor numbers are reused.
+    #expect(stalled.first?["conn"] == deafID.tag)
     #expect(stalled.count == 1, "the deaf client's stalled write should be named once")
     let blocked = Double(stalled.first?["blocked_ms"] ?? "") ?? 0
     let remaining = Int(stalled.first?["remaining"] ?? "") ?? 0
@@ -156,17 +159,27 @@ struct DaemonDiagnosticsTests {
       log.record("probe", [("n", String(index)), ("pad", String(repeating: "x", count: 40))])
     }
     log.drain()
+    // Bytes that reach the file some other way — the daemon's mirrored stdout and
+    // stderr in production — count against the bound too: the next record rolls over.
+    let handle = try FileHandle(forWritingTo: directory.appendingPathComponent(DaemonLog.fileName))
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data(repeating: 0x2e, count: 1900))
+    try handle.close()
+    log.record("probe", [("n", "60")])
+    log.drain()
 
     let current = directory.appendingPathComponent(DaemonLog.fileName)
     let previous = directory.appendingPathComponent(DaemonLog.fileName + ".1")
     let currentSize = try FileManager.default.attributesOfItem(atPath: current.path)[.size] as? Int
     let previousSize =
       try FileManager.default.attributesOfItem(atPath: previous.path)[.size] as? Int
+    // A generation is bounded by the limit plus whatever reached the file between two
+    // records (the mirrored streams write directly): the next record rolls it over.
     #expect(try #require(currentSize) <= 2000)
-    #expect(try #require(previousSize) <= 2000)
+    #expect(try #require(previousSize) <= 2000 + 1900)
     #expect(try #require(currentSize) + (previousSize ?? 0) < 60 * 100)
     let text = try String(contentsOf: current, encoding: .utf8)
-    #expect(text.contains(" event=probe n=59 "))
+    #expect(text.contains(" event=probe n=60"))
     #expect(text.split(separator: "\n").allSatisfy { $0.hasSuffix("Z event=probe n=") == false })
     // Every line carries a UTC stamp with milliseconds.
     let stamped = text.split(separator: "\n").allSatisfy {

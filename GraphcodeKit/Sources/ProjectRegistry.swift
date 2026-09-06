@@ -125,7 +125,7 @@ public actor ProjectRegistry {
     // and a descriptor with no channel silently delivers nothing. It also gives a reused
     // descriptor number a fresh channel, so nothing inherits a previous connection's
     // writer.
-    OutboundChannels.open(fileDescriptor)
+    OutboundChannels.open(fileDescriptor, tag: id.tag)
     connectionFileDescriptors[id] = fileDescriptor
     startPresencePolling()
   }

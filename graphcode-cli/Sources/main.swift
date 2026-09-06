@@ -92,7 +92,7 @@ var phase = "connecting to graphcoded"
 var framesSent = 0
 
 func sendCommand(_ command: DaemonCommand) throws {
-  try sendCommand(command)
+  try client.send(command)
   framesSent += 1
 }
 

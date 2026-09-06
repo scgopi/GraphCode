@@ -27,6 +27,10 @@ import Foundation
 /// workspace opened (0.1.46-beta1): its three launch commands wait together on the
 /// just-bootstrapped daemon and are released at the same instant.
 public enum FramedMessageIO {
+  /// The 4-byte big-endian length that precedes every frame — what a byte count on the
+  /// wire includes beyond the message itself.
+  public static let headerLength = 4
+
   public enum IOError: Error, Equatable {
     case connectionClosed
     case readFailed(errno: Int32)

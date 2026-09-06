@@ -82,7 +82,7 @@ guard listen(socketDescriptor, 8) == 0 else {
 // The diagnostics file, opened before the first line worth keeping. Stdout and stderr
 // move onto it (launchd pointed them at the same file, unbounded), so from here every
 // line the daemon writes is timestamped, structured, and rotated.
-DaemonLog.shared.open(directory: supportDirectory)
+DaemonLog.shared.open(directory: supportDirectory, mirroringStandardStreams: true)
 DaemonLog.shared.record(
   "startup",
   [
@@ -214,7 +214,7 @@ func handleConnection(_ fileDescriptor: Int32) {
     DaemonLog.shared.record(
       "connect",
       [
-        ("conn", String(connection)), ("fd", String(fileDescriptor)),
+        ("conn", String(connection)), ("id", connectionID.tag), ("fd", String(fileDescriptor)),
         ("peer", peer.map(String.init) ?? "?"),
       ])
     var sequence = 0
@@ -232,18 +232,25 @@ func handleConnection(_ fileDescriptor: Int32) {
       do {
         let command = try JSONDecoder().decode(DaemonCommand.self, from: data)
         let decoded = Date()
-        await DaemonRequestContext.$current.withValue(request) {
-          await registry.handle(command, connectionID: connectionID)
-        }
-        requests += 1
-        // The request's own line: what kind, how big, and how long each phase took.
-        // Never the payload — a `graphCommand.memoNode` is logged as exactly that.
+        // Logged on receipt, before anything is handled: a request that hangs is
+        // exactly the one worth a line, and a line written on completion would never
+        // come. Never the payload — a `graphCommand.memoNode` is logged as exactly that.
         DaemonLog.shared.record(
           "request",
           [
             ("conn", String(connection)), ("seq", String(sequence)),
             ("kind", command.kindName), ("bytes", String(data.count)),
             ("decode_ms", DaemonLog.milliseconds(decoded.timeIntervalSince(received))),
+          ])
+        await DaemonRequestContext.$current.withValue(request) {
+          await registry.handle(command, connectionID: connectionID)
+        }
+        requests += 1
+        DaemonLog.shared.record(
+          "handled",
+          [
+            ("conn", String(connection)), ("seq", String(sequence)),
+            ("kind", command.kindName),
             ("handle_ms", DaemonLog.milliseconds(Date().timeIntervalSince(decoded))),
           ])
       } catch {

@@ -58,6 +58,11 @@ final class OutboundChannel: @unchecked Sendable {
   /// A non-socket cannot block a writer the way a peer that stopped reading can, so a
   /// plain `write` is both correct and sufficient there.
   private let isSocket: Bool
+  /// Which connection this is, for the log — descriptor numbers are reused within
+  /// minutes, so a line keyed on `fd` alone cannot name a client. The registry passes
+  /// the connection's id (its first eight characters), the same `id=` its `connect`
+  /// line carries.
+  private let tag: String?
   private let condition = NSCondition()
   private var pending: [Frame] = []
   private var pendingBytes = 0
@@ -66,7 +71,11 @@ final class OutboundChannel: @unchecked Sendable {
 
   /// `backlogBudget` is injectable so tests can exercise the valve without moving
   /// megabytes through a socket to reach it.
-  init(fileDescriptor: Int32, backlogBudget: Int = OutboundChannel.maxBacklogBytes) {
+  init(
+    fileDescriptor: Int32, backlogBudget: Int = OutboundChannel.maxBacklogBytes,
+    tag: String? = nil
+  ) {
+    self.tag = tag
     self.fileDescriptor = fileDescriptor
     self.backlogBudget = backlogBudget
     var socketType: Int32 = 0
@@ -167,7 +176,8 @@ final class OutboundChannel: @unchecked Sendable {
       DaemonLog.shared.record(
         "backlog-drop",
         [
-          ("fd", String(fileDescriptor)), ("pending_bytes", String(pendingBytes)),
+          ("conn", tag ?? "?"), ("fd", String(fileDescriptor)),
+          ("pending_bytes", String(pendingBytes)),
           ("budget", String(backlogBudget)),
         ])
       beginClosingLocked()
@@ -264,7 +274,8 @@ final class OutboundChannel: @unchecked Sendable {
       // write — kept apart from the broadcast's own duration, which now never waits.
       if blockedSeconds > 0 || !delivered {
         var fields: [(String, String)] = [
-          ("fd", String(fileDescriptor)), ("bytes", String(frame.data.count)),
+          ("conn", tag ?? "?"), ("fd", String(fileDescriptor)),
+          ("bytes", String(frame.data.count + FramedMessageIO.headerLength)),
           ("ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
           ("blocked_ms", DaemonLog.milliseconds(blockedSeconds)),
         ]
@@ -386,7 +397,8 @@ final class OutboundChannel: @unchecked Sendable {
           DaemonLog.shared.record(
             "write-stall",
             [
-              ("fd", String(fileDescriptor)), ("bytes", String(data.count)),
+              ("conn", tag ?? "?"), ("fd", String(fileDescriptor)),
+              ("bytes", String(data.count + FramedMessageIO.headerLength)),
               ("remaining", String(remaining)),
               ("blocked_ms", DaemonLog.milliseconds(blockedSoFar)),
             ])
@@ -439,7 +451,9 @@ public enum OutboundChannels {
   /// dropped as disconnected the moment it arrived.
   /// `backlogBudget` is `nil` for the standard budget; tests inject a small one so the
   /// valve can be exercised without moving megabytes through a socket.
-  public static func open(_ fileDescriptor: Int32, backlogBudget: Int? = nil) {
+  public static func open(
+    _ fileDescriptor: Int32, backlogBudget: Int? = nil, tag: String? = nil
+  ) {
     lock.lock()
     let existing = channels[fileDescriptor]
     guard existing?.isAlive != true else {
@@ -448,7 +462,7 @@ public enum OutboundChannels {
     }
     channels[fileDescriptor] = OutboundChannel(
       fileDescriptor: fileDescriptor,
-      backlogBudget: backlogBudget ?? OutboundChannel.maxBacklogBytes)
+      backlogBudget: backlogBudget ?? OutboundChannel.maxBacklogBytes, tag: tag)
     lock.unlock()
     // Detached rather than closed: the number belongs to the connection being opened
     // here, so shutting it down would tear that one down.

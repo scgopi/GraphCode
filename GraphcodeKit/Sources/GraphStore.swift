@@ -515,7 +515,7 @@ public actor GraphStore {
     // the same way the registry does. Without this a store could bind to a channel left
     // dead on a recycled descriptor number and drop the client as disconnected on the
     // snapshot it was joining for.
-    OutboundChannels.open(fileDescriptor)
+    OutboundChannels.open(fileDescriptor, tag: id.tag)
     connections[id] = fileDescriptor
     send(.graphChanged(graph.wireSnapshot(revision: revision)), to: id)
   }

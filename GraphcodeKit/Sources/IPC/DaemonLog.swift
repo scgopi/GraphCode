@@ -24,8 +24,10 @@ import Foundation
 ///   it to a serial queue; the file write happens there. Logging never blocks an actor,
 ///   and never blocks the writer thread whose write it is measuring.
 /// - **Bounded.** The file rolls over at `maxBytes` into one `.1` generation, so the
-///   most the log ever occupies is two files of that size. `graphcoded.log` had no bound
-///   before this — it was 317 KB and growing on the machine that filed #289.
+///   most the log ever occupies is two files of that size — plus whatever the mirrored
+///   stdout and stderr wrote between two records, since rotation is decided at each
+///   record from the file's real size. `graphcoded.log` had no bound before this — it
+///   was 317 KB and growing on the machine that filed #289.
 ///
 /// launchd hands the daemon `graphcoded.log` as its stdout. This opens the same file for
 /// itself and, when stdout is not a terminal, moves stdout and stderr onto its own
@@ -65,12 +67,17 @@ public final class DaemonLog: @unchecked Sendable {
   /// Opens `<directory>/graphcoded.log` for appending and, when stdout is not a terminal,
   /// routes stdout and stderr through it. `maxBytes` is exposed for tests; the daemon
   /// uses the default.
-  public func open(directory: URL, maxBytes: Int = DaemonLog.maxBytes) {
+  /// `mirroringStandardStreams` routes this process's stdout and stderr through the file
+  /// (skipped when stdout is a terminal). Only the daemon asks for it: a test that
+  /// opened a log with it would move the test runner's own output onto a temp file.
+  public func open(
+    directory: URL, maxBytes: Int = DaemonLog.maxBytes, mirroringStandardStreams: Bool = false
+  ) {
     fileLock.lock()
     defer { fileLock.unlock() }
     limit = maxBytes
     url = directory.appendingPathComponent(Self.fileName)
-    mirrorsStandardStreams = isatty(STDOUT_FILENO) == 0
+    mirrorsStandardStreams = mirroringStandardStreams && isatty(STDOUT_FILENO) == 0
     openLocked()
   }
 
@@ -124,7 +131,13 @@ public final class DaemonLog: @unchecked Sendable {
     defer { fileLock.unlock() }
     guard descriptor >= 0 else { return }
     let data = Data(text.utf8)
-    if bytesWritten + data.count > limit { rotateLocked() }
+    // The file's real size, not a running count of this log's own lines: stdout and
+    // stderr write to the same file through the mirrored descriptors, and those bytes
+    // count against the bound too — a bound that only saw its own records was
+    // measured 25× over.
+    var info = stat()
+    let size = fstat(descriptor, &info) == 0 ? Int(info.st_size) : bytesWritten
+    if size + data.count > limit { rotateLocked() }
     data.withUnsafeBytes { raw in
       var remaining = raw.count
       var pointer = raw.baseAddress!
@@ -291,4 +304,10 @@ public enum SocketPeer {
       return credentials.pid
     #endif
   }
+}
+
+extension UUID {
+  /// The first eight characters — enough to tell connections apart in a log, short
+  /// enough to read; the daemon's `connect` line carries it as `id=`.
+  public var tag: String { String(uuidString.prefix(8)) }
 }
