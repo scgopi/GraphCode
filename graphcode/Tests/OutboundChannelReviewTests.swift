@@ -136,4 +136,83 @@ struct OutboundChannelReviewTests {
     let elapsed = Date().timeIntervalSince(started)
     #expect(elapsed < 20, "150 rounds of open/send/close took \(elapsed)s")
   }
+
+  /// The writer now hands the kernel whatever it will take per call and resumes from
+  /// where it stopped. Every partial write must resume at the right byte and nothing may
+  /// be sent twice: a peer that drains in small gulps, with a receive buffer far smaller
+  /// than any frame, must reassemble every frame intact and in order.
+  @Test
+  func partialWritesResumeWithoutTruncatingOrDuplicating() throws {
+    let (daemon, client) = makeSocketPair()
+    var tiny: Int32 = 2048
+    setsockopt(client, SOL_SOCKET, SO_RCVBUF, &tiny, socklen_t(MemoryLayout<Int32>.size))
+    setsockopt(daemon, SOL_SOCKET, SO_SNDBUF, &tiny, socklen_t(MemoryLayout<Int32>.size))
+    OutboundChannels.open(daemon)
+    defer {
+      OutboundChannels.close(daemon)
+      close(client)
+    }
+
+    let sizes = [1, 3, 2047, 2048, 2049, 4095, 8191, 8192, 100_000, 7, 65_537, 300_000, 2]
+    let sent = sizes.enumerated().map { index, size in
+      Data((0..<size).map { UInt8(truncatingIfNeeded: $0 &+ index) })
+    }
+    for frame in sent { OutboundChannels.send(frame, to: daemon) }
+
+    var received: [Data] = []
+    for _ in sent {
+      received.append(try FramedMessageIO.readFrame(from: client))
+      usleep(2_000)
+    }
+    #expect(received == sent)
+  }
+
+  /// A close landing mid-frame may truncate that frame, but the peer must then see the
+  /// connection end — never a truncated frame followed by more bytes it could mistake for
+  /// the next frame's header.
+  @Test
+  func aCloseMidFrameEndsTheStreamRatherThanCorruptingIt() {
+    let (daemon, client) = makeSocketPair()
+    OutboundChannels.open(daemon)
+    OutboundChannels.send(frame("in-flight"), to: daemon)
+    OutboundChannels.send(frame("queued-behind"), to: daemon)
+    usleep(20_000)
+    OutboundChannels.close(daemon)
+    defer { close(client) }
+
+    var complete: [Data] = []
+    var ended = false
+    while true {
+      do {
+        complete.append(try FramedMessageIO.readFrame(from: client))
+      } catch {
+        ended = true
+        break
+      }
+    }
+    #expect(ended)
+    #expect(complete.allSatisfy { $0 == frame("in-flight") || $0 == frame("queued-behind") })
+  }
+
+  /// The peer vanishes while the writer is parked waiting for room. The channel must
+  /// notice on its own — `poll` reporting the hang-up or the next `send` failing — and
+  /// report the connection dead to the next broadcaster, without anyone closing it.
+  @Test
+  func aPeerThatVanishesWhileTheWriterIsParkedIsNoticedWithoutAClose() {
+    let (daemon, client) = makeSocketPair()
+    OutboundChannels.open(daemon)
+    defer { OutboundChannels.close(daemon) }
+
+    for index in 0..<4 { OutboundChannels.send(frame("parked-\(index)"), to: daemon) }
+    usleep(20_000)
+    close(client)
+
+    let deadline = Date().addingTimeInterval(2)
+    var refused = false
+    while Date() < deadline && !refused {
+      refused = !OutboundChannels.send(frame("after", bytes: 16), to: daemon)
+      usleep(10_000)
+    }
+    #expect(refused, "the channel never noticed its peer had gone")
+  }
 }
