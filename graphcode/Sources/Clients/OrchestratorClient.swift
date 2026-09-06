@@ -17,6 +17,14 @@ struct OrchestratorClient: Sendable {
   var send: @Sendable (_ command: DaemonCommand) async throws -> Void
 }
 
+extension OrchestratorClient {
+  /// What the app shows when the daemon sent something it cannot read — surfaced
+  /// through the same `.errorOccurred` path a daemon refusal takes, once per connection.
+  static let unreadableFrameMessage =
+    "graphcoded sent an event this app cannot read — the daemon is newer than the app. "
+    + "The app keeps its connection but may fall behind until it is updated."
+}
+
 enum OrchestratorClientError: Error, Equatable {
   case connectFailed(errno: Int32)
 }
@@ -85,9 +93,24 @@ private actor DaemonConnection {
             let fileDescriptor = try await ensureConnected()
             connectedDescriptor = fileDescriptor
             if await isReconnect() { try await rejoinProjects() }
+            var saidUnreadable = false
             while true {
               let data = try await readFrameAsync(from: fileDescriptor)
-              let event = try JSONDecoder().decode(DaemonEvent.self, from: data)
+              // A frame that read fine but did not decode is a daemon newer than this
+              // app, not a dead socket — the mirror of how `graphcoded` treats a command
+              // it does not know. Redialling here made an older app tear its connection
+              // down and rejoin every fifteen seconds for as long as the daemon kept
+              // sending something new.
+              // Skipped, and said once per connection through the same path a daemon
+              // refusal takes: a quietly skipped frame is a board going stale with
+              // nothing on screen to say why.
+              guard let event = try? JSONDecoder().decode(DaemonEvent.self, from: data) else {
+                if !saidUnreadable {
+                  saidUnreadable = true
+                  continuation.yield(.errorOccurred(OrchestratorClient.unreadableFrameMessage))
+                }
+                continue
+              }
               continuation.yield(event)
             }
           } catch {
@@ -173,11 +196,22 @@ private actor DaemonConnection {
     generation += 1
   }
 
+  /// Connects, and announces on the new socket before anyone can use it: the
+  /// announcement is written inside the one connect attempt every caller awaits
+  /// (`ensureConnected`), so it is the first frame on every socket by construction —
+  /// `send` and `events()` both resume only after it has gone out. Sending it from the
+  /// stream task instead let a caller's first command race ahead of it, and a
+  /// connection that announced second was a connection that announced nothing for the
+  /// commands the daemon handled in between.
   private func connectWithBackoff() async throws -> Int32 {
     var lastError: any Error = OrchestratorClientError.connectFailed(errno: 0)
     for attempt in 0..<10 {
       do {
-        return try await connectAsync()
+        let fileDescriptor = try await connectAsync()
+        let announce = try JSONEncoder().encode(
+          DaemonCommand.announce(capabilities: [ClientCapability.nodesChanged.rawValue]))
+        try await writeFrameAsync(announce, to: fileDescriptor)
+        return fileDescriptor
       } catch {
         lastError = error
         try? await Task.sleep(for: .milliseconds(200 * (attempt + 1)))

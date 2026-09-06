@@ -46,6 +46,40 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
   /// wants (issue #288). Requires the project to be resident in the daemon — opened by
   /// some connection — the same rule as `.graphCommand`.
   case mailbox(projectPath: String, query: MailboxQuery)
+  /// What this client can read beyond the events every client has always been sent —
+  /// the first frame the app puts on every socket, dial and redial alike. A daemon
+  /// sends a client only what it announced (`ClientCapability`): a client that never
+  /// announces — an older app — keeps getting the whole snapshot on every presence
+  /// tick, exactly as before, rather than a frame it cannot decode. Which matters
+  /// because the app's reader used to take an undecodable frame for a dead socket and
+  /// redial, every fifteen seconds, for ever. Unknown names are ignored, so a newer
+  /// client against this daemon is simply treated as what it is: a client of the
+  /// capabilities this daemon knows. Never answered.
+  case announce(capabilities: [String])
+}
+
+/// The names a client announces (`DaemonCommand.announce`) — strings on the wire so a
+/// name this build does not know decodes rather than fails.
+public enum ClientCapability: String, Sendable {
+  /// Reads `DaemonEvent.nodesChanged` and folds it into the snapshot it holds.
+  case nodesChanged
+}
+
+extension DaemonEvent {
+  /// What a connection must have announced to be sent this event, or `nil` for the
+  /// events every client has always been sent. **Exhaustive on purpose**: adding a
+  /// case to `DaemonEvent` does not compile until its author has decided here whether
+  /// a client that predates it may receive it — and the one delivery path
+  /// (`GraphStore.deliver`) enforces the answer, so the daemon's default is that a
+  /// connection which never announced anything gets no new event type. That default is
+  /// the safety mechanism for clients already in the field, which are exactly the ones
+  /// that never announce; the handshake is how a newer client opts in.
+  public var requiredCapability: ClientCapability? {
+    switch self {
+    case .recentProjectsListed, .graphChanged, .errorOccurred, .mailbox: return nil
+    case .nodesChanged: return .nodesChanged
+    }
+  }
 }
 
 /// Mutations against exactly one project's graph — this is what `GraphStore.handle`
@@ -218,4 +252,18 @@ public enum DaemonEvent: Codable, Sendable, Equatable {
   /// `projectPath` is the canonical spelling the daemon routed the query to, which is
   /// the id an app keys its projects by.
   case mailbox(projectPath: String, mailbox: Mailbox)
+  /// The presence poll's broadcast: only the loops whose reading, activity, summary or
+  /// board changed on this tick, as whole `LoopNode` values, instead of the whole graph
+  /// every fifteen seconds (issue #288's background load — on a busy graph something
+  /// changes almost every tick, and the tick shipped 50 KB to say which pill moved).
+  /// A client merges them into the snapshot it holds by id. Sent only to a connection
+  /// that announced `ClientCapability.nodesChanged`; every other connection gets the
+  /// whole snapshot for the same tick, as it always did.
+  ///
+  /// `revision` orders it against snapshots: the daemon stamps every frame for a graph
+  /// from one counter (`LoopGraph.revision`), and a client applies a delta only when it
+  /// is newer than the graph it holds. That is what makes it safe for an undelivered
+  /// snapshot to be superseded by a later one while a delta queued behind it still
+  /// arrives — the delta is older than what the client has, and is dropped.
+  case nodesChanged(projectPath: String, revision: Int, nodes: [LoopNode])
 }

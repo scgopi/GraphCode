@@ -376,8 +376,10 @@ struct ProjectFeature {
           state.graph.mailroomDigest = mailbox.digest
         case .errorOccurred(let message):
           state.connectionError = message
-        case .recentProjectsListed:
-          break  // Not this feature's concern — AppFeature routes this to `welcome`.
+        case .recentProjectsListed, .nodesChanged:
+          // Not this feature's concern: AppFeature routes the listing to `welcome`
+          // and folds a delta into the snapshot it holds before routing it here.
+          break
         }
         return .none
 
