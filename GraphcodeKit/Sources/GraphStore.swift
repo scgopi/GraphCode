@@ -3268,7 +3268,14 @@ public actor GraphStore {
   // MARK: - Broadcast
 
   private func broadcast() {
+    let started = Date()
     onGraphChanged?(graph)
+    DaemonLog.shared.record(
+      "persist",
+      DaemonRequestContext.fields + [
+        ("nodes", String(graph.nodes.count)),
+        ("ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
+      ])
     notifyClients()
   }
 
@@ -3284,11 +3291,27 @@ public actor GraphStore {
     // clients attached it was C encodes of the same snapshot on every change, presence
     // tick included (issue #288's CPU amplifier).
     revision += 1
+    let started = Date()
     guard let frame = Self.encode(.graphChanged(graph.wireSnapshot(revision: revision)))
     else { return }
-    for id in connections.keys {
-      deliver(frame, to: id)
+    let encoded = Date()
+    let intended = connections.count
+    var accepted = 0
+    for id in connections.keys where deliver(frame, to: id) {
+      accepted += 1
     }
+    // Sizes and counts only. `ms` is the actor's own time — encode plus handing every
+    // frame to its channel — and never includes a client's read: that is `write`'s
+    // `blocked_ms`, per client, which is the field #288 was missing.
+    DaemonLog.shared.record(
+      "broadcast",
+      DaemonRequestContext.fields + [
+        ("kind", "graphChanged"), ("revision", String(revision)),
+        ("bytes", String(frame.data.count)),
+        ("encode_ms", DaemonLog.milliseconds(encoded.timeIntervalSince(started))),
+        ("recipients", String(intended)), ("accepted", String(accepted)),
+        ("ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
+      ])
   }
 
   /// The presence poll's broadcast — see `DaemonEvent.nodesChanged`. Not superseded:
@@ -3301,19 +3324,38 @@ public actor GraphStore {
   /// never meets a frame it cannot read. Both frames are encoded at most once.
   private func notifyClients(nodesChanged nodes: [LoopNode]) {
     revision += 1
+    let started = Date()
     let delta = Self.encode(
       .nodesChanged(projectPath: graph.project.path, revision: revision, nodes: nodes))
     var snapshot: EncodedEvent?
+    let intended = connections.count
+    var accepted = 0
+    var snapshots = 0
     for (id, capabilities) in connectionCapabilities where connections[id] != nil {
       if capabilities.contains(ClientCapability.nodesChanged.rawValue) {
-        if let delta { deliver(delta, to: id) }
+        if let delta, deliver(delta, to: id) { accepted += 1 }
       } else {
+        // `deliver` would refuse the delta here on its own; the snapshot is what keeps
+        // this connection current.
         if snapshot == nil {
           snapshot = Self.encode(.graphChanged(graph.wireSnapshot(revision: revision)))
         }
-        if let snapshot { deliver(snapshot, to: id) }
+        if let snapshot, deliver(snapshot, to: id) {
+          accepted += 1
+          snapshots += 1
+        }
       }
     }
+    DaemonLog.shared.record(
+      "broadcast",
+      [
+        ("kind", "nodesChanged"), ("revision", String(revision)),
+        ("nodes", String(nodes.count)), ("bytes", String(delta?.data.count ?? 0)),
+        ("snapshot_bytes", String(snapshot?.data.count ?? 0)),
+        ("recipients", String(intended)), ("accepted", String(accepted)),
+        ("as_snapshot", String(snapshots)),
+        ("ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
+      ])
   }
 
   /// An event as the bytes and the superseding key it goes out with — everything about
@@ -3349,8 +3391,12 @@ public actor GraphStore {
     deliver(frame, to: connectionID)
   }
 
-  private func deliver(_ frame: EncodedEvent, to connectionID: UUID) {
-    guard let fileDescriptor = connections[connectionID] else { return }
+  /// Whether the frame was handed to a live channel; `false` also drops the connection
+  /// — or, for an event the connection never announced it could read, sends nothing
+  /// and keeps it.
+  @discardableResult
+  private func deliver(_ frame: EncodedEvent, to connectionID: UUID) -> Bool {
+    guard let fileDescriptor = connections[connectionID] else { return false }
     // The one place the daemon's default is enforced: an event a connection never
     // announced it could read is not sent to it, whatever call site asked. A caller
     // that wants such a connection kept current sends it the legacy shape instead
@@ -3358,7 +3404,7 @@ public actor GraphStore {
     if let required = frame.requiredCapability,
       connectionCapabilities[connectionID]?.contains(required.rawValue) != true
     {
-      return
+      return false
     }
     // Queued, never written here: this runs on the `GraphStore` actor, and a
     // `graphChanged` frame is far larger than a socket's send buffer, so writing it
@@ -3372,8 +3418,9 @@ public actor GraphStore {
       // waiting for the read loop to notice, so a dead connection can't accumulate
       // failed broadcast attempts.
       connections.removeValue(forKey: connectionID)
-      return
+      return false
     }
+    return true
   }
 
   /// Predicate-evaluation state shared between a project store and every sub-graph

@@ -82,6 +82,20 @@ do {
 }
 defer { client.closeConnection() }
 
+/// What this run is waiting for right now, and how many frames it has sent — the two
+/// things a timeout has to say for the daemon's log to be searchable for it (#289):
+/// `graphcoded.log` records every request under the client's pid (`peer=`) and its
+/// sequence on the connection (`seq=`), so "pid 4321, frame 2, waiting for the mailbox
+/// answer" names the daemon's line to look at.
+let startedAt = Date()
+var phase = "connecting to graphcoded"
+var framesSent = 0
+
+func sendCommand(_ command: DaemonCommand) throws {
+  try sendCommand(command)
+  framesSent += 1
+}
+
 /// The calling loop's identity, when this CLI ran inside one — the `status` graph
 /// render uses it for the board's "unread for you" line, the same attribution every
 /// mailroom verb derives from `ZMX_SESSION`.
@@ -97,7 +111,8 @@ let mailroomReader = SurfaceRef.nodeID(
 /// error is what turns that into one line saying which path was wrong.
 @discardableResult
 func openProject(_ projectPath: String) throws -> LoopGraph? {
-  try client.send(.openProject(path: projectPath))
+  try sendCommand(.openProject(path: projectPath))
+  phase = "waiting for the project snapshot"
   let opened = try client.waitForEvent {
     switch $0 {
     case .graphChanged, .errorOccurred: return true
@@ -105,6 +120,7 @@ func openProject(_ projectPath: String) throws -> LoopGraph? {
     }
   }
   if case .errorOccurred(let message) = opened { fail(message) }
+  phase = "waiting for the daemon to acknowledge the command"
   if case .graphChanged(let graph) = opened { return graph }
   return nil
 }
@@ -116,7 +132,8 @@ func openProject(_ projectPath: String) throws -> LoopGraph? {
 /// project not open, a path the daemon does not know) arrives as an error and stops
 /// here, the way `openProject`'s does.
 func fetchMailbox(_ projectPath: String, _ query: MailboxQuery) throws -> Mailbox {
-  try client.send(.mailbox(projectPath: projectPath, query: query))
+  try sendCommand(.mailbox(projectPath: projectPath, query: query))
+  phase = "waiting for the mailbox answer"
   let answer = try client.waitForEvent {
     switch $0 {
     case .mailbox, .errorOccurred: return true
@@ -158,8 +175,9 @@ func runAndPrintGraph(projectPath: String, _ commands: [DaemonCommand]) throws {
   }
 
   for command in commands {
-    try client.send(command)
+    try sendCommand(command)
   }
+  phase = "waiting for the daemon to acknowledge the command"
   let event = try client.waitForEvent {
     if case .graphChanged = $0 { return true } else { return false }
   }
@@ -174,7 +192,7 @@ do {
     break
 
   case .listProjects:
-    try client.send(.listRecentProjects)
+    try sendCommand(.listRecentProjects)
     let event = try client.waitForEvent {
       if case .recentProjectsListed = $0 { return true } else { return false }
     }
@@ -248,7 +266,7 @@ do {
     let sender = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
     try openProject(projectPath)
-    try client.send(
+    try sendCommand(
       .graphCommand(
         projectPath: projectPath,
         command: .messageNode(nodeID, text: text, from: sender, followUp: followUp)))
@@ -282,7 +300,7 @@ do {
         FileHandle.standardError.write(Data("\(warning)\n".utf8))
       }
     }
-    try client.send(
+    try sendCommand(
       .graphCommand(
         projectPath: projectPath, command: .updateNode(nodeID, update: attributed)))
     // A refusal arrives as an error, an applied update as the changed graph — wait for
@@ -304,7 +322,7 @@ do {
     let promoter = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
     try openProject(projectPath)
-    try client.send(
+    try sendCommand(
       .graphCommand(
         projectPath: projectPath,
         command: .promoteNode(nodeID, promotion: promotion, promotedBy: promoter)))
@@ -325,7 +343,7 @@ do {
     let author = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
     try openProject(projectPath)
-    try client.send(
+    try sendCommand(
       .graphCommand(
         projectPath: projectPath, command: .memoNode(nodeID, text: text, from: author)))
     let memoVerdict = try client.waitForEvent { event in
@@ -341,7 +359,7 @@ do {
     let refiner = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
     try openProject(projectPath)
-    try client.send(
+    try sendCommand(
       .graphCommand(
         projectPath: projectPath, command: .refineNode(nodeID, text: text, from: refiner)))
     let refineVerdict = try client.waitForEvent { event in
@@ -357,7 +375,7 @@ do {
     let requester = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
     try openProject(projectPath)
-    try client.send(
+    try sendCommand(
       .graphCommand(
         projectPath: projectPath, command: .rollbackRefinement(nodeID, from: requester)))
     let rollbackVerdict = try client.waitForEvent { event in
@@ -387,7 +405,7 @@ do {
     let author = SurfaceRef.nodeID(
       fromZmxSessionName: ProcessInfo.processInfo.environment["ZMX_SESSION"] ?? "")
     try openProject(projectPath)
-    try client.send(
+    try sendCommand(
       .graphCommand(
         projectPath: projectPath,
         command: .mailroomPost(text: text, topic: topic, from: author)))
@@ -496,7 +514,7 @@ do {
           + "($ZMX_SESSION); the mail is delivered to the loop that watches")
     }
     try openProject(projectPath)
-    try client.send(
+    try sendCommand(
       .graphCommand(
         projectPath: projectPath,
         command: .mailroomWatch(on: on, topic: topic, from: watcher)))
@@ -522,7 +540,7 @@ do {
     // Refresh first: usage is pulled on demand rather than polled, so printing without
     // asking would show whatever was last read, which could be nothing at all.
     try openProject(projectPath)
-    try client.send(.graphCommand(projectPath: projectPath, command: .refreshUsage))
+    try sendCommand(.graphCommand(projectPath: projectPath, command: .refreshUsage))
     let event = try client.waitForEvent {
       if case .graphChanged = $0 { return true } else { return false }
     }
@@ -598,7 +616,7 @@ do {
       fail("the bundle contains no loops")
     }
     try openProject(projectPath)
-    try client.send(
+    try sendCommand(
       .graphCommand(projectPath: projectPath, command: .importNodes(request)))
     let verdict = try client.waitForEvent { event in
       switch event {
@@ -621,12 +639,13 @@ do {
 } catch DaemonSocketClient.ClientError.timedOut {
   // Reached only if the daemon accepted the command and then never broadcast anything —
   // so the useful thing to say is that the command may well have been applied, rather
-  // than implying it failed.
+  // than implying it failed — and *where* it was waiting, with the numbers that find
+  // this run in graphcoded.log.
   fail(
-    """
-    timed out waiting for graphcoded to answer. The command may still have been applied — \
-    check with `graphcode status`.
-    """, code: ExitCode.ambiguous)
+    GraphcodeCommand.renderTimeout(
+      phase: phase, elapsed: Date().timeIntervalSince(startedAt),
+      pid: ProcessInfo.processInfo.processIdentifier, framesSent: framesSent),
+    code: ExitCode.ambiguous)
 } catch FramedMessageIO.IOError.connectionClosed {
   // graphcoded went away mid-exchange — a restart landing between the write and the
   // broadcast. Whether it applied the command first is not knowable from here, and the
