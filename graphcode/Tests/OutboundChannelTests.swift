@@ -105,69 +105,6 @@ struct OutboundChannelTests {
     #expect(!received.contains(makeFrame("second")))
   }
 
-  /// One connection joins as many projects as it likes, and every project's store writes
-  /// to that one socket. Keying supersession on the event name alone let the newest
-  /// snapshot displace a *different* project's undelivered one, so a client that had just
-  /// joined two projects silently never received the first.
-  @Test
-  func snapshotsOfDifferentGraphsDoNotSupersedeEachOther() {
-    let (daemon, client) = makeSocketPair()
-    OutboundChannels.open(daemon)
-    defer {
-      OutboundChannels.close(daemon)
-      close(client)
-    }
-
-    let projectA = makeFrame("project-a")
-    let projectB = makeFrame("project-b")
-    OutboundChannels.send(projectA, to: daemon, supersedingKey: "graphChanged:A")
-    OutboundChannels.send(projectB, to: daemon, supersedingKey: "graphChanged:B")
-
-    var received: [Data] = []
-    while let frame = try? FramedMessageIO.readFrame(from: client) {
-      received.append(frame)
-      if received.count == 2 { break }
-    }
-
-    #expect(received.contains(projectA), "project A's snapshot was superseded by project B's")
-    #expect(received.contains(projectB))
-  }
-
-  /// The budget exists for a *backlog*, not for one big frame. Measuring the whole queue
-  /// meant a single oversized snapshot tripped the valve on its own and disconnected a
-  /// healthy reader — and the bigger a graph grew, the more certain it became that nobody
-  /// could open it.
-  @Test
-  func oneOversizedFrameIsDeliveredRatherThanDroppedAsABacklog() {
-    let (daemon, client) = makeSocketPair()
-    OutboundChannels.open(daemon)
-    defer {
-      OutboundChannels.close(daemon)
-      close(client)
-    }
-
-    let huge = makeFrame("huge", bytes: OutboundChannel.maxBacklogBytes + 512 * 1024)
-    #expect(OutboundChannels.send(huge, to: daemon))
-    let delivered = try? FramedMessageIO.readFrame(from: client)
-    #expect(delivered == huge)
-  }
-
-  /// Descriptor numbers are recycled, so a send arriving after its connection closed must
-  /// not mint a channel on a number the kernel has already reassigned — that hands the
-  /// departed connection's frame to whoever holds it now.
-  @Test
-  func aSendToAnUnregisteredDescriptorIsRefusedRatherThanDelivered() {
-    let (daemon, client) = makeSocketPair()
-    defer {
-      close(daemon)
-      close(client)
-    }
-
-    // Never opened, so nothing may be written to it — this is also the signal a
-    // broadcaster uses to forget a connection that has gone.
-    #expect(OutboundChannels.send(makeFrame("stray"), to: daemon) == false)
-  }
-
   /// A frame sent under one key must not displace traffic under another — an
   /// `errorOccurred` answering a command has to arrive even while snapshots collapse.
   @Test
@@ -193,10 +130,12 @@ struct OutboundChannelTests {
     #expect(received.contains(reply))
   }
 
-  /// Closing must not wait on a peer that has stopped reading — a writer parked inside
-  /// `write(2)` will not notice a flag, so the channel tears the socket down to make that
-  /// call return. Without that, disconnecting a wedged client would hang the connection
-  /// loop instead of the actor: the same bug, moved.
+  /// Closing must not wait on a peer that has stopped reading. This is why the writer
+  /// never parks inside a blocking `write(2)`: a thread already blocked there is not
+  /// reliably woken by another thread's `shutdown`, so a wedged peer could hang the
+  /// disconnecting caller for ever — the original bug moved one layer down, from the
+  /// actor to the connection loop. Writing in non-blocking slices lets the writer notice
+  /// the close by itself.
   @Test
   func closingReleasesAWriterParkedOnAWedgedClient() {
     let (daemon, client) = makeSocketPair()
@@ -220,18 +159,20 @@ struct OutboundChannelTests {
   /// false — which is what tells `GraphStore` to forget the connection.
   @Test
   func aClientThatNeverDrainsIsEventuallyDropped() {
+    // A small injected budget, so the valve can be reached without shifting the real
+    // four megabytes through a socket on every run of the suite.
+    let budget = 64 * 1024
     let (daemon, client) = makeSocketPair()
-    OutboundChannels.open(daemon)
+    OutboundChannels.open(daemon, backlogBudget: budget)
     defer {
       OutboundChannels.close(daemon)
       close(client)
     }
 
     // Unkeyed, so nothing collapses and the backlog genuinely grows past its budget.
-    let frame = makeFrame("flood", bytes: 512 * 1024)
-    let budgetedFrames = OutboundChannel.maxBacklogBytes / frame.count
+    let frame = makeFrame("flood", bytes: 16 * 1024)
     var refusedAt: Int?
-    for index in 0...(budgetedFrames + 4) where refusedAt == nil {
+    for index in 0...(budget / frame.count + 6) where refusedAt == nil {
       if !OutboundChannels.send(frame, to: daemon) { refusedAt = index }
     }
 

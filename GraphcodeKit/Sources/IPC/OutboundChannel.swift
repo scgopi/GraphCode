@@ -32,11 +32,16 @@ import Foundation
 final class OutboundChannel: @unchecked Sendable {
   /// How much undelivered data a channel keeps before it gives the client up for lost.
   ///
-  /// With coalescing (below) a backlog is normally one snapshot, so this is a safety
-  /// valve rather than a working limit: reaching it means a peer stopped reading and
-  /// stayed stopped across many changes. Disconnecting it is the honest outcome — it is
-  /// already arbitrarily far behind, and the graph it would eventually receive is one the
-  /// daemon has long since replaced.
+  /// A safety valve rather than a working limit: reaching it means a peer stopped reading
+  /// and stayed stopped across many changes. Disconnecting it is the honest outcome — it
+  /// is already arbitrarily far behind, and the graph it would eventually receive is one
+  /// the daemon has long since replaced.
+  ///
+  /// Sized for the backlog a *healthy* client can legitimately carry. Supersession keeps
+  /// each graph to one undelivered snapshot, but the keys are per graph, so a client
+  /// joined to many projects can hold one of each at once — the budget has to clear that
+  /// comfortably, or the fix for cross-project supersession would start disconnecting the
+  /// very clients it exists to serve.
   static let maxBacklogBytes = 4 * 1024 * 1024
 
   private struct Frame {
@@ -46,14 +51,28 @@ final class OutboundChannel: @unchecked Sendable {
   }
 
   private let fileDescriptor: Int32
+  private let backlogBudget: Int
+  /// Whether the descriptor takes socket calls. `send(2)` and `poll`-for-writability are
+  /// how a socket is written without blocking, and they are meaningless on anything else —
+  /// tests hand these stores a `/dev/null`, where `send` fails outright with `ENOTSOCK`.
+  /// A non-socket cannot block a writer the way a peer that stopped reading can, so a
+  /// plain `write` is both correct and sufficient there.
+  private let isSocket: Bool
   private let condition = NSCondition()
   private var pending: [Frame] = []
   private var pendingBytes = 0
   private var isClosing = false
   private var isFinished = false
 
-  init(fileDescriptor: Int32) {
+  /// `backlogBudget` is injectable so tests can exercise the valve without moving
+  /// megabytes through a socket to reach it.
+  init(fileDescriptor: Int32, backlogBudget: Int = OutboundChannel.maxBacklogBytes) {
     self.fileDescriptor = fileDescriptor
+    self.backlogBudget = backlogBudget
+    var socketType: Int32 = 0
+    var typeSize = socklen_t(MemoryLayout<Int32>.size)
+    isSocket =
+      getsockopt(fileDescriptor, SOL_SOCKET, SO_TYPE, &socketType, &typeSize) == 0
     Self.armAgainstSIGPIPE(fileDescriptor)
     // Captured strongly on purpose: the channel must outlive the registry's reference to
     // it, because the descriptor is closed by `pump` on its way out. A weak capture would
@@ -120,7 +139,7 @@ final class OutboundChannel: @unchecked Sendable {
     // the crime of opening a big graph — and the bigger the graph grew, the more certain
     // it became that nobody could open it at all. What the budget is for is a *backlog*:
     // frames piling up behind a peer that has stopped reading.
-    if pendingBytes - data.count > Self.maxBacklogBytes {
+    if pendingBytes - data.count > backlogBudget {
       // Not a write failure, so nothing else will report it: say so before dropping the
       // client, or a disconnect this daemon *chose* reads afterwards as one it suffered.
       let notice =
@@ -206,11 +225,10 @@ final class OutboundChannel: @unchecked Sendable {
       pendingBytes -= frame.data.count
       condition.unlock()
 
-      do {
-        try FramedMessageIO.writeFrame(frame.data, to: fileDescriptor)
-      } catch {
-        // The peer is gone. Shut the socket down so the connection loop's reader stops
-        // waiting on it too, rather than holding the connection open on one live half.
+      if !writeFrame(frame.data) {
+        // Either the peer is gone or we were asked to stop. Shut the socket down so the
+        // connection loop's reader stops waiting on it too, rather than holding the
+        // connection open on one live half.
         condition.lock()
         beginClosingLocked()
         condition.unlock()
@@ -221,6 +239,75 @@ final class OutboundChannel: @unchecked Sendable {
     isFinished = true
     condition.broadcast()
     condition.unlock()
+  }
+
+  private var shouldStop: Bool {
+    condition.lock()
+    defer { condition.unlock() }
+    return isClosing
+  }
+
+  /// Short enough that closing a channel whose peer stopped reading is prompt, long
+  /// enough that a healthy slow reader costs no measurable spinning.
+  private static let writabilityPollMilliseconds: Int32 = 50
+
+  /// Writes one length-prefixed frame, returning false if the peer failed or the channel
+  /// was closed part-way through.
+  ///
+  /// Every write is non-blocking *per call* (`MSG_DONTWAIT`), waiting for writability
+  /// with a bounded `poll` rather than parking inside `write(2)` until the peer drains.
+  /// That is not a refinement, it is what lets `closeAndWait` promise to return: a thread
+  /// already blocked inside a write on a unix socket is **not** reliably woken by another
+  /// thread's `shutdown`, so a wedged peer could hang the disconnecting caller for ever —
+  /// the original bug moved one layer down, where it showed up as the full test suite
+  /// hanging on a channel whose client never read. Polling in slices lets the writer
+  /// notice `isClosing` by itself instead of depending on being interrupted.
+  ///
+  /// `MSG_DONTWAIT` per call rather than `O_NONBLOCK` on the descriptor: that flag lives
+  /// on the open file description, which the daemon's *reader* shares, and a reader that
+  /// started returning `EAGAIN` would tear down every connection.
+  private func writeFrame(_ data: Data) -> Bool {
+    let length = UInt32(data.count)
+    var buffer = Data(capacity: 4 + data.count)
+    buffer.append(UInt8((length >> 24) & 0xff))
+    buffer.append(UInt8((length >> 16) & 0xff))
+    buffer.append(UInt8((length >> 8) & 0xff))
+    buffer.append(UInt8(length & 0xff))
+    buffer.append(data)
+
+    return buffer.withUnsafeBytes { raw -> Bool in
+      var remaining = raw.count
+      var pointer = raw.baseAddress!
+      while remaining > 0 {
+        if shouldStop { return false }
+        let written: Int
+        if isSocket {
+          #if canImport(Darwin)
+            written = Darwin.send(fileDescriptor, pointer, remaining, MSG_DONTWAIT)
+          #else
+            written = Glibc.send(fileDescriptor, pointer, remaining, Int32(MSG_DONTWAIT))
+          #endif
+        } else {
+          written = write(fileDescriptor, pointer, remaining)
+        }
+        if written > 0 {
+          remaining -= written
+          pointer = pointer.advanced(by: written)
+          continue
+        }
+        if written < 0 && errno == EINTR { continue }
+        guard written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) else { return false }
+        // The peer's buffer is full. Wait for room in slices, so a close is noticed
+        // promptly even when the peer never reads again.
+        var descriptor = pollfd(fd: fileDescriptor, events: Int16(POLLOUT), revents: 0)
+        let ready = poll(&descriptor, 1, Self.writabilityPollMilliseconds)
+        if ready < 0 && errno != EINTR { return false }
+        if ready > 0 && descriptor.revents & Int16(POLLERR | POLLHUP | POLLNVAL) != 0 {
+          return false
+        }
+      }
+      return true
+    }
   }
 }
 
@@ -256,14 +343,18 @@ public enum OutboundChannels {
   /// channel whose write failed can outlive its connection and be inherited by the next
   /// one to be given that number — which would then find every send refused and be
   /// dropped as disconnected the moment it arrived.
-  public static func open(_ fileDescriptor: Int32) {
+  /// `backlogBudget` is `nil` for the standard budget; tests inject a small one so the
+  /// valve can be exercised without moving megabytes through a socket.
+  public static func open(_ fileDescriptor: Int32, backlogBudget: Int? = nil) {
     lock.lock()
     let existing = channels[fileDescriptor]
     guard existing?.isAlive != true else {
       lock.unlock()
       return
     }
-    channels[fileDescriptor] = OutboundChannel(fileDescriptor: fileDescriptor)
+    channels[fileDescriptor] = OutboundChannel(
+      fileDescriptor: fileDescriptor,
+      backlogBudget: backlogBudget ?? OutboundChannel.maxBacklogBytes)
     lock.unlock()
     // Detached rather than closed: the number belongs to the connection being opened
     // here, so shutting it down would tear that one down.
@@ -302,9 +393,13 @@ public enum OutboundChannels {
     lock.lock()
     let channel = channels.removeValue(forKey: fileDescriptor)
     lock.unlock()
+    // Only the registry's own channel owns a descriptor, so with no channel there is
+    // nothing here to close. Closing anyway would shut a number this registry never had —
+    // and by the second call that number belongs to somebody else.
+    guard let channel else { return }
     // Stop the writer before closing, never after: the wait is what guarantees nothing is
     // inside a `write` on a descriptor number about to be handed to the next `accept`.
-    channel?.closeAndWait()
+    channel.closeAndWait()
     posixClose(fileDescriptor)
   }
 }
