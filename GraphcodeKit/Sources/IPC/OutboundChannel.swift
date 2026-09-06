@@ -128,6 +128,16 @@ final class OutboundChannel: @unchecked Sendable {
     return true
   }
 
+  /// Whether this channel can still carry frames. A channel goes dead when its write
+  /// failed or its backlog budget ran out, and a dead one must never be left standing in
+  /// the registry: the next connection to be handed the same descriptor number would
+  /// inherit it and find every send refused.
+  var isAlive: Bool {
+    condition.lock()
+    defer { condition.unlock() }
+    return !isClosing && !isFinished
+  }
+
   /// Gives up the descriptor without touching it: stops accepting frames, drops the
   /// backlog, and lets the writer thread retire on its own.
   ///
@@ -226,16 +236,30 @@ public enum OutboundChannels {
   private static let lock = NSLock()
   nonisolated(unsafe) private static var channels: [Int32: OutboundChannel] = [:]
 
-  /// Called once per accepted connection, before anything writes to it.
+  /// Ensures the descriptor has a live channel — called wherever a connection is
+  /// registered.
+  ///
+  /// Idempotent, because a connection is registered more than once on its way in: the
+  /// daemon's registry records it, then each project's store records it again as the
+  /// client joins. Replacing a live channel on the second call would throw away whatever
+  /// the first had already queued, so an existing live one is kept.
+  ///
+  /// A *dead* channel is replaced. Descriptor numbers are recycled aggressively, so a
+  /// channel whose write failed can outlive its connection and be inherited by the next
+  /// one to be given that number — which would then find every send refused and be
+  /// dropped as disconnected the moment it arrived.
   public static func open(_ fileDescriptor: Int32) {
     lock.lock()
-    let stale = channels.removeValue(forKey: fileDescriptor)
+    let existing = channels[fileDescriptor]
+    guard existing?.isAlive != true else {
+      lock.unlock()
+      return
+    }
     channels[fileDescriptor] = OutboundChannel(fileDescriptor: fileDescriptor)
     lock.unlock()
-    // A descriptor number the kernel reused before its previous channel was torn down.
-    // Detached rather than closed: the number now belongs to the connection being opened
-    // here, so shutting it down would tear down that one.
-    stale?.detach()
+    // Detached rather than closed: the number belongs to the connection being opened
+    // here, so shutting it down would tear that one down.
+    existing?.detach()
   }
 
   /// Queues a frame for a client without blocking. `supersedingKey` replaces an

@@ -502,6 +502,11 @@ public actor GraphStore {
   // MARK: - Connections
 
   public func addConnection(id: UUID, fileDescriptor: Int32) {
+    // Joining a project registers the connection here too, so ensure its outbound half
+    // the same way the registry does. Without this a store could bind to a channel left
+    // dead on a recycled descriptor number and drop the client as disconnected on the
+    // snapshot it was joining for.
+    OutboundChannels.open(fileDescriptor)
     connections[id] = fileDescriptor
     send(.graphChanged(graph), to: id)
   }
