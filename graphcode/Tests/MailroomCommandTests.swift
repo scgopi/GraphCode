@@ -113,7 +113,11 @@ struct MailroomCommandTests {
         topic: "claims", body: "issue #12 is mine"),
     ]
 
-    let rendered = GraphcodeCommand.renderMailroom(graph)
+    let rendered = GraphcodeCommand.renderMailroom(
+      Mailroom.serve(
+        MailboxQuery(selection: .board, fullBodies: true), from: graph.mailroom
+      ) { _ in nil },
+      project: graph.project, unread: false)
 
     #expect(rendered.contains("#1 from a human"))
     #expect(rendered.contains("#4 (claims) from Author"))
@@ -135,19 +139,25 @@ struct MailroomCommandTests {
         topic: nil, body: "still unread"),
     ]
 
-    let forReader = GraphcodeCommand.renderMailroom(graph, unreadFor: reader.id)
+    let forReader = GraphcodeCommand.renderMailroom(
+      served(graph, .unread(reader: reader.id)), project: graph.project, unread: true)
     #expect(forReader.contains("#2"))
     #expect(!forReader.contains("#1 "))
 
     // A loop that never synced sees everything; so does one whose id is not on this
     // graph (no cursor to subtract from).
-    #expect(GraphcodeCommand.renderMailroom(graph, unreadFor: UUID()).contains("#1"))
+    #expect(
+      GraphcodeCommand.renderMailroom(
+        served(graph, .unread(reader: UUID())), project: graph.project, unread: true
+      ).contains("#1"))
   }
 
   @Test
   func emptyBoardAndNothingUnreadSaySo() {
     var graph = LoopGraph(project: ProjectRef(path: "/tmp/x", name: "x"))
-    #expect(GraphcodeCommand.renderMailroom(graph).contains("the room is empty"))
+    #expect(
+      GraphcodeCommand.renderMailroom(served(graph, .board), project: graph.project, unread: false)
+        .contains("the room is empty"))
 
     var reader = LoopNode(title: "Reader", loopType: .turnBased)
     reader.lastMailroomRead = 3
@@ -158,7 +168,10 @@ struct MailroomCommandTests {
         topic: nil, body: "caught up")
     ]
 
-    #expect(GraphcodeCommand.renderMailroom(graph, unreadFor: reader.id) == "no unread posts")
+    #expect(
+      GraphcodeCommand.renderMailroom(
+        served(graph, .unread(reader: reader.id)), project: graph.project, unread: true)
+        == "no unread posts")
   }
 
   @Test
@@ -171,7 +184,13 @@ struct MailroomCommandTests {
         id: 7, at: Date(timeIntervalSince1970: 0), authorID: nil, author: "a human",
         topic: "build", body: "build is red")
     ]
-    #expect(GraphcodeCommand.renderPosted(graph) == "posted #7 (build)")
+    // The topic is the caller's, spelled the way the daemon keeps it — the post itself
+    // is not on the graph that comes back, only the room's digest is.
+    #expect(GraphcodeCommand.renderPosted(graph, topic: " Build ") == "posted #7 (build)")
+    #expect(
+      GraphcodeCommand.renderPosted(graph.wireSnapshot(), topic: "build") == "posted #7 (build)")
+    #expect(GraphcodeCommand.renderPosted(graph.wireSnapshot(), topic: "  ") == "posted #7")
+    #expect(GraphcodeCommand.renderPosted(graph) == "posted #7")
   }
 
   @Test
@@ -183,6 +202,18 @@ struct MailroomCommandTests {
 }
 
 // MARK: Read-side verbs (status line, headlines, read, --json, --search, --mark)
+
+/// The room's answer, served off a graph the way `GraphStore.mailbox` serves it —
+/// what every renderer below now takes instead of the graph.
+private func served(
+  _ graph: LoopGraph, _ selection: MailboxQuery.Selection, search: String? = nil,
+  fullBodies: Bool? = nil
+) -> Mailbox {
+  Mailroom.serve(
+    MailboxQuery(selection: selection, search: search, fullBodies: fullBodies),
+    from: graph.mailroom
+  ) { graph.nodes[id: $0]?.lastMailroomRead }
+}
 
 private func boardWithPosts() -> (LoopGraph, LoopNode) {
   var graph = LoopGraph(project: ProjectRef(path: "/tmp/x", name: "x"))
@@ -260,11 +291,40 @@ func listParsesSearchAndJSON() throws {
 func headlinesCutBodiesToATriageLine() {
   let (graph, reader) = boardWithPosts()
 
-  let headlines = GraphcodeCommand.renderMailroom(graph, unreadFor: reader.id, headlines: true)
+  let headlines = GraphcodeCommand.renderMailroom(
+    served(graph, .unread(reader: reader.id), fullBodies: false), project: graph.project,
+    unread: true, headlines: true)
   #expect(headlines.contains("#2 (build)"))
   #expect(!headlines.contains("red red red red red red red red red red red red"))
-  let full = GraphcodeCommand.renderMailroom(graph, unreadFor: reader.id)
+  // Asked for, so no "headlines only" apology on the header line.
+  #expect(!headlines.contains("headlines only"))
+  let full = GraphcodeCommand.renderMailroom(
+    served(graph, .unread(reader: reader.id), fullBodies: true), project: graph.project,
+    unread: true)
   #expect(full.contains("red red"))
+}
+
+@Test
+func aRoomThatTriagedItselfSaysSoAndWhereTheFullTextIs() {
+  var graph = LoopGraph(project: ProjectRef(path: "/tmp/x", name: "x"))
+  graph.mailroom = (1...(Mailroom.triageAfterPosts + 1)).map {
+    MailroomPost(
+      id: $0, at: Date(timeIntervalSince1970: 0), authorID: nil, author: "a human",
+      topic: nil, body: String(repeating: "word ", count: 30))
+  }
+  let reader = UUID()
+
+  let triaged = GraphcodeCommand.renderMailroom(
+    served(graph, .unread(reader: reader)), project: graph.project, unread: true)
+  #expect(triaged.contains("headlines only, that is a lot to read at once"))
+  #expect(triaged.contains("graphcode mail read /tmp/x <post-id>"))
+  #expect(triaged.split(separator: "\n").count == graph.mailroom.count + 1)
+  #expect(triaged.split(separator: "\n").dropFirst().allSatisfy { $0.hasSuffix("…") })
+  // A room that cut the bodies renders the very lines the whole bodies would have.
+  let whole = GraphcodeCommand.renderMailroom(
+    served(graph, .unread(reader: reader), fullBodies: true), project: graph.project,
+    unread: true, headlines: true)
+  #expect(triaged.split(separator: "\n").dropFirst() == whole.split(separator: "\n").dropFirst())
 }
 
 @Test
@@ -273,16 +333,22 @@ func searchFiltersWhatIsShownButNeverWhatIsRemembered() {
 
   // "deadlock" lives only in #3's body — note "auth" would have matched #2's
   // author ("Author"), which is the filter doing its job, not a bug.
-  let filtered = GraphcodeCommand.renderMailroom(graph, unreadFor: reader.id, search: "deadlock")
+  let filtered = GraphcodeCommand.renderMailroom(
+    served(graph, .unread(reader: reader.id), search: "deadlock"), project: graph.project,
+    unread: true, search: "deadlock")
   #expect(filtered.contains("#3"))
   #expect(!filtered.contains("#2"))
 
   #expect(
-    GraphcodeCommand.renderMailroom(graph, search: "nonesuch")
-      .contains("no posts match 'nonesuch'"))
+    GraphcodeCommand.renderMailroom(
+      served(graph, .board, search: "nonesuch"), project: graph.project, unread: false,
+      search: "nonesuch"
+    ).contains("no posts match 'nonesuch'"))
   #expect(
-    GraphcodeCommand.renderMailroom(graph, unreadFor: reader.id, search: "nonesuch")
-      .contains("no unread posts match 'nonesuch'"))
+    GraphcodeCommand.renderMailroom(
+      served(graph, .unread(reader: reader.id), search: "nonesuch"), project: graph.project,
+      unread: true, search: "nonesuch"
+    ).contains("no unread posts match 'nonesuch'"))
 }
 
 @Test
@@ -294,7 +360,9 @@ func jsonRendersTheSameTruthInOtherSyntax() throws {
   let (graph, reader) = boardWithPosts()
 
   let forReader = try #require(
-    GraphcodeCommand.renderMailroomJSON(graph, unreadFor: reader.id).data(using: .utf8))
+    GraphcodeCommand.renderMailroomJSON(
+      served(graph, .unread(reader: reader.id), fullBodies: true)
+    ).data(using: .utf8))
   let decoder = JSONDecoder()
   decoder.dateDecodingStrategy = .iso8601
   let decoded = try decoder.decode(Board.self, from: forReader)
@@ -302,7 +370,8 @@ func jsonRendersTheSameTruthInOtherSyntax() throws {
   #expect(decoded.posts.map(\.id) == [2, 3])
 
   let whole = try #require(
-    GraphcodeCommand.renderMailroomJSON(graph).data(using: .utf8))
+    GraphcodeCommand.renderMailroomJSON(served(graph, .board, fullBodies: true))
+      .data(using: .utf8))
   let everything = try decoder.decode(Board.self, from: whole)
   #expect(everything.posts.count == 3)
   #expect(everything.lastRead == nil)
@@ -314,15 +383,26 @@ func statusLineCountsPostsAndUnreadOnlyWhenThereAreAny() {
 
   #expect(
     GraphcodeCommand.renderMailroomStatusLine(graph, readerID: reader.id)
-      == "mailroom: 3 posts, 2 unread for you")
+      == "mailroom: 3 posts, unread mail for you")
   #expect(
     GraphcodeCommand.renderMailroomStatusLine(graph) == "mailroom: 3 posts")
   #expect(
     GraphcodeCommand.renderMailroomStatusLine(
       LoopGraph(project: ProjectRef(path: "/tmp/x", name: "x"))) == nil)
 
-  let rendered = GraphcodeCommand.render(graph, mailroomReader: reader.id)
-  #expect(rendered.contains("mailroom: 3 posts, 2 unread for you"))
+  // Off the digest, so the snapshot a client actually receives says the same.
+  let wire = graph.wireSnapshot()
+  #expect(
+    GraphcodeCommand.renderMailroomStatusLine(wire, readerID: reader.id)
+      == "mailroom: 3 posts, unread mail for you")
+  var caughtUp = wire
+  caughtUp.nodes[id: reader.id]?.lastMailroomRead = 3
+  #expect(
+    GraphcodeCommand.renderMailroomStatusLine(caughtUp, readerID: reader.id)
+      == "mailroom: 3 posts, nothing unread for you")
+
+  let rendered = GraphcodeCommand.render(wire, mailroomReader: reader.id)
+  #expect(rendered.contains("mailroom: 3 posts, unread mail for you"))
 }
 
 // MARK: Read-side review round (status-line blast radius, json+search, boundaries)
@@ -369,7 +449,9 @@ func listJSONHonorsTheSearchFilter() throws {
   let (graph, _) = boardWithPosts()
 
   let filtered = try #require(
-    GraphcodeCommand.renderMailroomJSON(graph, search: "deadlock").data(using: .utf8))
+    GraphcodeCommand.renderMailroomJSON(
+      served(graph, .board, search: "deadlock", fullBodies: true)
+    ).data(using: .utf8))
   let decoder = JSONDecoder()
   decoder.dateDecodingStrategy = .iso8601
   #expect(try decoder.decode(Board.self, from: filtered).posts.map(\.id) == [3])
@@ -382,7 +464,8 @@ func jsonDatesAreISOTwo8601NotTheEncoderDefault() throws {
   }
   let (graph, _) = boardWithPosts()
   let data = try #require(
-    GraphcodeCommand.renderMailroomJSON(graph).data(using: .utf8))
+    GraphcodeCommand.renderMailroomJSON(served(graph, .board, fullBodies: true))
+      .data(using: .utf8))
 
   // The pin: decode with the ISO-8601 strategy explicitly. The default (seconds
   // since 2001-01-01) fails here, so nobody can silently change the wire format.

@@ -20,16 +20,25 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   public var scope: LoopGraphScope
   public var nodes: IdentifiedArrayOf<LoopNode>
   public var edges: IdentifiedArrayOf<LoopEdge>
-  /// The project's Mailroom — every post any loop has dropped onto the shared board,
-  /// oldest first, notes and mirrored records each capped on their own budget
+  /// The project's Mailroom — every post any loop has dropped onto the shared room,
+  /// oldest first, notices and mirrored letters each capped on their own budget
   /// (`Mailroom.maxNotices`, `Mailroom.maxLetters`). Kept on the graph rather than in a
   /// side store so it inherits for free everything graph state already has: one
-  /// writer (the daemon), atomic persistence beside the graph file, a snapshot in
-  /// every `.graphChanged` (which is how the CLI reads it — no second read path), and
-  /// the global graph at `graphcode://global` becoming a cross-project board without
-  /// a line of extra code. Empty for anyone who never touches the board; graphs saved
-  /// before the field existed decode with it empty.
+  /// writer (the daemon), atomic persistence beside the graph file, and the global
+  /// graph at `graphcode://global` becoming a cross-project room without a line of
+  /// extra code. Empty for anyone who never touches the room; graphs saved before the
+  /// field existed decode with it empty.
+  ///
+  /// **Not on the wire.** A `.graphChanged` snapshot carries `mailroomDigest` in this
+  /// field's place (`wireSnapshot()`): the posts were three quarters of every
+  /// broadcast frame on a busy graph (issue #288). A client reads them through
+  /// `DaemonCommand.mailbox`, bounded and on request, and one holding a copy fills this
+  /// field back in itself.
   public var mailroom: [MailroomPost] = []
+  /// What a snapshot says about the room instead of shipping it — see `mailroom`.
+  /// Set only on the copy a daemon sends (`wireSnapshot()`); `nil` on the graph the
+  /// daemon owns and persists.
+  public var mailroomDigest: MailroomDigest?
 
   public var project: ProjectRef {
     get { scope.projectRef }
@@ -37,6 +46,21 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   }
 
   public var isGlobal: Bool { scope.isGlobal }
+
+  /// The room as a snapshot describes it, from whichever side of the socket this
+  /// graph is on: the digest a daemon stamped, or — for a graph that still carries its
+  /// posts, as the daemon's own does and a pre-digest daemon's snapshots did — one
+  /// computed from them.
+  public var boardDigest: MailroomDigest { mailroomDigest ?? MailroomDigest(of: mailroom) }
+
+  /// This graph as a `.graphChanged` frame carries it: the posts stripped and their
+  /// digest stamped in their place. Everything else is the graph exactly as it is.
+  public func wireSnapshot() -> LoopGraph {
+    var copy = self
+    copy.mailroomDigest = MailroomDigest(of: mailroom)
+    copy.mailroom = []
+    return copy
+  }
 
   public init(
     id: UUID = UUID(),
@@ -254,7 +278,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   // MARK: - Coding
 
   private enum CodingKeys: String, CodingKey {
-    case id, nodes, edges, mailroom
+    case id, nodes, edges, mailroom, mailroomDigest
     /// Persisted as a `ProjectRef` rather than as the scope enum. Every graph on disk
     /// predates `LoopGraphScope`, and the ref round-trips both cases losslessly (the
     /// global graph's reserved path decodes straight back to `.global`), so there was
@@ -272,6 +296,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     mailroom =
       try container.decodeIfPresent([MailroomPost].self, forKey: .mailroom)
       ?? decoder.legacyMailroomValue([MailroomPost].self, "artifactory") ?? []
+    mailroomDigest = try container.decodeIfPresent(MailroomDigest.self, forKey: .mailroomDigest)
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -283,5 +308,6 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
     // Absent while empty, so a graph file nobody has posted to stays byte-for-byte
     // what it was — the same reason `hasActiveDependents` never reaches disk.
     if !mailroom.isEmpty { try container.encode(mailroom, forKey: .mailroom) }
+    if let mailroomDigest { try container.encode(mailroomDigest, forKey: .mailroomDigest) }
   }
 }

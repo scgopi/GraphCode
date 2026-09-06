@@ -849,91 +849,53 @@ extension GraphcodeCommand {
     return projects.map { "\($0.name)  \($0.path)" }.joined(separator: "\n")
   }
 
-  /// The board for a terminal. `mail list` prints the whole thing (`reader`
-  /// nil); `mail inbox` passes the reading loop's id and prints only what its
-  /// cursor has not covered — the subtraction is `Mailroom.unread`, the arithmetic
-  /// the daemon's cursor contract rests on, so the CLI's "unread" and the store's can
-  /// never disagree. `headlines` truncates each body to a triage line's worth (the
-  /// deep read is `mail read <id>`); `search` keeps only posts whose author,
-  /// topic or body contains the text, case-insensitively — a list-side filter, never
-  /// a sync-side one, because marking unread mail read without showing it is the one
-  /// way this verb could lose mail.
+  /// The room for a terminal, from the mailbox the daemon answered
+  /// (`DaemonCommand.mailbox`). `mail list` asks for the whole room (`unread` false);
+  /// `mail inbox` asks for what the reading loop's cursor has not covered. The
+  /// subtraction, the search and the triage all happened in the daemon, so what
+  /// arrives is exactly what prints — this only decides the words around it. A
+  /// mailbox whose bodies the room cut says so (`bodiesTrimmed`), and unless the
+  /// caller asked for headlines itself, the header tells the reader it is reading a
+  /// triaged room and where the full text is.
   public static func renderMailroom(
-    _ graph: LoopGraph, unreadFor readerID: UUID? = nil, headlines: Bool = false,
-    search: String? = nil, autoTriage: Bool = false
+    _ mailbox: Mailbox, project: ProjectRef, unread: Bool, headlines: Bool = false,
+    search: String? = nil
   ) -> String {
-    var posts: [MailroomPost]
-    if let readerID {
-      posts = Mailroom.unread(
-        in: graph.mailroom, since: graph.nodes[id: readerID]?.lastMailroomRead)
-    } else {
-      posts = graph.mailroom
-    }
-    if let search, !search.isEmpty {
-      let needle = search.lowercased()
-      posts = posts.filter {
-        $0.body.lowercased().contains(needle) || $0.author.lowercased().contains(needle)
-          || $0.topic?.lowercased().contains(needle) == true
-      }
-    }
+    let posts = mailbox.posts
     guard !posts.isEmpty else {
       if let search, !search.isEmpty {
-        return readerID == nil
-          ? "no posts match '\(search)'"
-          : "no unread posts match '\(search)'"
+        return unread ? "no unread posts match '\(search)'" : "no posts match '\(search)'"
       }
-      return readerID == nil
-        ? "the room is empty — post one: graphcode mail post <project-path> <notice…>"
-        : "no unread posts"
+      return unread
+        ? "no unread posts"
+        : "the room is empty — post one: graphcode mail post <project-path> <notice…>"
     }
-    // `sync` asks to be triaged; `--headlines` and `--full` are the two ways to say
-    // so explicitly. Announced on the line above the posts rather than silently, so a
-    // loop reading a truncated board knows it is reading one.
-    let triaged = autoTriage && Mailroom.needsTriage(posts)
-    let label = readerID == nil ? "mailroom" : "mailroom, unread"
-    var header =
-      "\(graph.project.name) \(label): \(posts.count) post\(posts.count == 1 ? "" : "s")"
+    let triaged = mailbox.bodiesTrimmed && !headlines
+    let label = unread ? "mailroom, unread" : "mailroom"
+    var header = "\(project.name) \(label): \(posts.count) post\(posts.count == 1 ? "" : "s")"
     if triaged {
       header +=
         " — headlines only, that is a lot to read at once. "
-        + "Full text: graphcode mail read \(graph.project.path) <post-id>"
+        + "Full text: graphcode mail read \(project.path) <post-id>"
     }
     var lines = [header]
     for post in posts {
-      lines.append(headlines || triaged ? "  \(renderHeadline(post))" : "  \(render(post))")
+      lines.append(
+        headlines || mailbox.bodiesTrimmed ? "  \(renderHeadline(post))" : "  \(render(post))")
     }
     return lines.joined(separator: "\n")
   }
 
-  /// The board as one machine-readable object — the same posts `renderMailroom`
-  /// would print (the same `search` filter included, so `--search --json` shows a
-  /// filtered board, never quietly an unfiltered one), plus the reader's cursor so a
-  /// client can compute unread itself. Dates are ISO-8601, pinned by test — the
-  /// encoder's default (seconds since 2001) is a wire format only this process
-  /// should ever have to know about.
-  public static func renderMailroomJSON(
-    _ graph: LoopGraph, unreadFor readerID: UUID? = nil, search: String? = nil
-  ) -> String {
+  /// The mailbox as one machine-readable object — the same posts `renderMailroom`
+  /// would print, plus the reader's cursor so a client can compute unread itself.
+  /// Dates are ISO-8601, pinned by test — the encoder's default (seconds since 2001)
+  /// is a wire format only this process should ever have to know about.
+  public static func renderMailroomJSON(_ mailbox: Mailbox) -> String {
     struct Board: Encodable {
       var posts: [MailroomPost]
       var lastRead: Int?
     }
-    var posts: [MailroomPost]
-    if let readerID {
-      posts = Mailroom.unread(
-        in: graph.mailroom, since: graph.nodes[id: readerID]?.lastMailroomRead)
-    } else {
-      posts = graph.mailroom
-    }
-    if let search, !search.isEmpty {
-      let needle = search.lowercased()
-      posts = posts.filter {
-        $0.body.lowercased().contains(needle) || $0.author.lowercased().contains(needle)
-          || $0.topic?.lowercased().contains(needle) == true
-      }
-    }
-    let lastRead = readerID.flatMap { graph.nodes[id: $0]?.lastMailroomRead }
-    let board = Board(posts: posts, lastRead: lastRead)
+    let board = Board(posts: mailbox.posts, lastRead: mailbox.lastRead)
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]
     encoder.dateEncodingStrategy = .iso8601
@@ -941,28 +903,28 @@ extension GraphcodeCommand {
     return String(decoding: data, as: UTF8.self)
   }
 
-  /// `status`'s one-line window onto the board: how many posts exist and — when the
-  /// caller is a loop with a cursor here — how many are unread for it. `nil` when the
-  /// board is empty, so a project that never touched the Mailroom renders exactly
+  /// `status`'s one-line window onto the room: how many posts exist and — when the
+  /// caller is a loop with a cursor here — whether any are unread for it. `nil` when
+  /// the room is empty, so a project that never touched the Mailroom renders exactly
   /// as it did before this line existed. The point is cost: the briefing already sends
   /// loops to `status` before claiming or creating work, and this makes the "is there
-  /// mail I should know about" check ride along for free.
+  /// mail I should know about" check ride along for free — off the snapshot's digest,
+  /// without the posts themselves ever crossing the socket.
   public static func renderMailroomStatusLine(
     _ graph: LoopGraph, readerID: UUID? = nil
   ) -> String? {
-    guard !graph.mailroom.isEmpty else { return nil }
-    let total = graph.mailroom.count
-    let plural = total == 1 ? "" : "s"
-    // "Unread for you" needs a *you* this board knows: the daemon refuses sync for a
-    // reader absent from the graph, so the status line claims no unread for one
+    let digest = graph.boardDigest
+    guard !digest.isEmpty else { return nil }
+    let plural = digest.count == 1 ? "" : "s"
+    // "For you" needs a *you* this room knows: the daemon refuses the cursor advance
+    // for a reader absent from the graph, so the status line claims nothing for one
     // either — a foreign or stale id gets the plain count, same as a human.
-    guard let readerID, graph.nodes[id: readerID] != nil else {
-      return "mailroom: \(total) post\(plural)"
+    guard let readerID, let reader = graph.nodes[id: readerID] else {
+      return "mailroom: \(digest.count) post\(plural)"
     }
-    let unread = Mailroom.unread(
-      in: graph.mailroom, since: graph.nodes[id: readerID]?.lastMailroomRead
-    ).count
-    return "mailroom: \(total) post\(plural), \(unread) unread for you"
+    let unread = digest.latestID > (reader.lastMailroomRead ?? 0)
+    return "mailroom: \(digest.count) post\(plural), "
+      + (unread ? "unread mail for you" : "nothing unread for you")
   }
 
   /// One post, one line — the same identification the daemon's wake nudge quotes, so
@@ -990,11 +952,15 @@ extension GraphcodeCommand {
   }
 
   /// `mail post`'s answer — the sequence number is what the author's own log and
-  /// any replier's `node send` can refer to the note by.
-  public static func renderPosted(_ graph: LoopGraph) -> String {
-    guard let post = graph.mailroom.last else { return "posted" }
-    let topic = post.topic.map { " (\($0))" } ?? ""
-    return "posted #\(post.id)\(topic)"
+  /// any replier's `node send` can refer to the note by. Read off the digest of the
+  /// graph the post came back on; `topic` is the one the caller typed, spelled the way
+  /// the daemon keeps it (trimmed, lower-cased, absent when blank).
+  public static func renderPosted(_ graph: LoopGraph, topic: String? = nil) -> String {
+    let latest = graph.boardDigest.latestID
+    guard latest > 0 else { return "posted" }
+    let spelled = topic?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let suffix = spelled.flatMap { $0.isEmpty ? nil : " (\($0))" } ?? ""
+    return "posted #\(latest)\(suffix)"
   }
 
   public static func describe(_ error: ParseError) -> String {

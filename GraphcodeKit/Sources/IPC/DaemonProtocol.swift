@@ -1,4 +1,5 @@
 import Foundation
+import MailroomKit
 
 /// What the app (or, eventually, the `graphcode` CLI) can ask `graphcoded` to do. See
 /// docs/03-architecture.md#background-daemons and
@@ -38,6 +39,13 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
   /// `forgetProject` precisely because it is.
   case deleteProjectGraph(path: String)
   case graphCommand(projectPath: String, command: GraphCommand)
+  /// Read the project's Mailroom — the whole room, one loop's unread slice of it, or
+  /// one post — answered on this connection alone with a `.mailbox`. This is the read
+  /// path the room has instead of riding every `.graphChanged`: a snapshot carries only
+  /// `LoopGraph.mailroomDigest`, and whoever wants posts asks for exactly the posts it
+  /// wants (issue #288). Requires the project to be open on this connection, the same
+  /// rule as `.graphCommand`.
+  case mailbox(projectPath: String, query: MailboxQuery)
 }
 
 /// Mutations against exactly one project's graph — this is what `GraphStore.handle`
@@ -138,12 +146,12 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// (`mailroomEnabled` in `~/.graphcode/settings.json`) — a silent no-op would read,
   /// to the loop that sent it, as a post nobody answered.
   case mailroomPost(text: String, topic: String?, from: UUID?)
-  /// Mark every post on the Mailroom as read for the calling loop — `graphcode
-  /// mail inbox`, the cursor half of reading. The CLI reads the board out of the
-  /// graph snapshot it already gets from `openProject`; this is the write that makes
-  /// "unread" mean something the *next* sync can subtract from. Requires a loop
-  /// identity: a human reading the board needs no cursor, since nothing downstream
-  /// tracks what they have seen.
+  /// Mark every post on the Mailroom as read for the calling loop — `graphcode mail
+  /// inbox`, the cursor half of reading. The posts themselves come back on a
+  /// `DaemonCommand.mailbox` sent first; this is the write that makes "unread" mean
+  /// something the *next* inbox can subtract from. Requires a loop identity: a human
+  /// reading the room needs no cursor, since nothing downstream tracks what they have
+  /// seen.
   case mailroomInbox(from: UUID?)
   /// Subscribe (`on: true`) or unsubscribe (`on: false`) the calling loop to Mailroom
   /// posts — `graphcode mail watch`. A watched post is delivered the way a
@@ -192,7 +200,11 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
 /// other connected client subscribed to the same project, so two open windows never
 /// disagree about that project's graph state. `graphChanged` always carries the *full*
 /// graph rather than a diff: simplest possible thing that keeps every client in sync,
-/// and small enough at this scale that a diff protocol isn't worth the complexity yet.
+/// and small enough at this scale that a diff protocol isn't worth the complexity yet —
+/// with one exception. The Mailroom's posts are left out (`LoopGraph.wireSnapshot()`)
+/// and their digest sent instead: they were three quarters of every frame on a busy
+/// graph, re-sent to every client on every change, and a client reads them through
+/// `DaemonCommand.mailbox` when it actually wants them.
 /// The graph's own `project` field is what tells a client which project a
 /// `graphChanged` event belongs to — there's no separate "project opened" event,
 /// because joining a project already gets one of these as an immediate snapshot (see
@@ -201,4 +213,8 @@ public enum DaemonEvent: Codable, Sendable, Equatable {
   case recentProjectsListed([ProjectRef])
   case graphChanged(LoopGraph)
   case errorOccurred(String)
+  /// The answer to a `DaemonCommand.mailbox`, sent only to the connection that asked.
+  /// `projectPath` is the canonical spelling the daemon routed the query to, which is
+  /// the id an app keys its projects by.
+  case mailbox(projectPath: String, mailbox: Mailbox)
 }

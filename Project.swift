@@ -139,7 +139,8 @@ let project = Project(
                 "graphcode-cli/Sources"
             ],
             dependencies: [
-                .target(name: "GraphcodeKit")
+                .target(name: "GraphcodeKit"),
+                .target(name: "MailroomKit"),
             ]
         ),
         .target(

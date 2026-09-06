@@ -314,6 +314,15 @@ public enum RemoteGraphAccess {
                 fail(value["_0"])
             return value["_0"]
 
+        def mailbox(self, path, query):
+            # The read half of every mail verb: posts no longer ride `graphChanged`
+            # (only their digest does), so a verb asks for exactly the posts it prints.
+            self.send({"mailbox": {"projectPath": path, "query": query}})
+            key, value = self.wait_for(["mailbox", "errorOccurred"])
+            if key == "errorOccurred":
+                fail(value["_0"])
+            return value["mailbox"]
+
         def known_projects(self):
             self.send({"listRecentProjects": {}})
             _, value = self.wait_for(["recentProjectsListed"])
@@ -355,13 +364,11 @@ public enum RemoteGraphAccess {
         return flags
 
 
-    # The board's own arithmetic, ported from MailroomKit rather than asked for over the
-    # wire: `openProject`'s snapshot already carries every post and every reader's cursor, so
-    # `read` and `list` send no command at all and `sync` prints from the snapshot it took
-    # before advancing the cursor. RemoteCLIShimTests asserts this renderer byte-equal against
-    # GraphcodeCommand's, which is the only thing that makes a second copy of it safe to have.
-    TRIAGE_AFTER_POSTS = 12
-    TRIAGE_AFTER_BYTES = 4096
+    # The renderers, ported from GraphcodeCommand: the daemon does the subtraction, the
+    # search and the triage (`Mailroom.serve`), and what comes back in a mailbox is
+    # exactly what prints -- this only decides the words around it. RemoteCLIShimTests
+    # asserts each renderer byte-equal against GraphcodeCommand's, which is the only thing
+    # that makes a second copy of it safe to have.
     # Foundation encodes Date as seconds since 2001-01-01, not since the epoch.
     REFERENCE_DATE_OFFSET = 978307200
     # Spelled out rather than left to strftime("%b"), which follows the remote host's
@@ -373,17 +380,14 @@ public enum RemoteGraphAccess {
     HEADLINE_BUDGET = 80
 
 
-    def mailroom_unread(posts, last_read):
-        if last_read is None:
-            return list(posts)
-        return [post for post in posts if post.get("id", 0) > last_read]
-
-
-    def mailroom_needs_triage(posts):
-        if len(posts) > TRIAGE_AFTER_POSTS:
-            return True
-        weight = sum(len((post.get("body") or "").encode("utf-8")) for post in posts)
-        return weight > TRIAGE_AFTER_BYTES
+    def board_digest(graph):
+        # What the snapshot says about the room in place of the room -- or, from a daemon
+        # that still ships posts, the same two numbers read off them (LoopGraph.boardDigest).
+        digest = graph.get("mailroomDigest")
+        if digest is not None:
+            return digest
+        posts = graph.get("mailroom") or []
+        return {"count": len(posts), "latestID": posts[-1].get("id", 0) if posts else 0}
 
 
     def mailroom_cursor(graph, reader):
@@ -449,43 +453,20 @@ public enum RemoteGraphAccess {
         return "".join(clusters[:HEADLINE_BUDGET]) + ELLIPSIS
 
 
-    def folded(text):
-        # Swift's String.contains compares canonically, so "e" + U+0301 and U+00E9 match
-        # there and would not here: Python's `in` is a code-point test. A body carrying
-        # decomposed text -- which anything sourced from a macOS path routinely does --
-        # would otherwise be findable from the Mac and invisible from the remote host,
-        # which is the board reporting that mail does not exist.
-        return unicodedata.normalize("NFC", (text or "").lower())
-
-
-    def filtered_posts(posts, search):
-        if not search:
-            return posts
-        needle = folded(search)
-        return [post for post in posts
-                if needle in folded(post.get("body"))
-                or needle in folded(post.get("author"))
-                or needle in folded(post.get("topic"))]
-
-
-    def render_board(graph, reader=None, headlines=False, search=None, auto_triage=False):
-        project = graph.get("project") or {}
-        posts = graph.get("mailroom") or []
-        if reader is not None:
-            cursor, _ = mailroom_cursor(graph, reader)
-            posts = mailroom_unread(posts, cursor)
-        posts = filtered_posts(posts, search)
+    def render_board(mailbox, project, unread, headlines=False, search=None):
+        posts = mailbox.get("posts") or []
         if not posts:
             if search:
-                if reader is None:
-                    return "no posts match '%s'" % search
-                return "no unread posts match '%s'" % search
-            if reader is not None:
+                if unread:
+                    return "no unread posts match '%s'" % search
+                return "no posts match '%s'" % search
+            if unread:
                 return "no unread posts"
             return ("the room is empty %s post one: graphcode mail post "
                     "<project-path> <notice%s>" % (EM_DASH, ELLIPSIS))
-        triaged = auto_triage and mailroom_needs_triage(posts)
-        label = "mailroom" if reader is None else "mailroom, unread"
+        trimmed = bool(mailbox.get("bodiesTrimmed"))
+        triaged = trimmed and not headlines
+        label = "mailroom, unread" if unread else "mailroom"
         header = "%s %s: %d post%s" % (project.get("name", "?"), label, len(posts),
                                        "" if len(posts) == 1 else "s")
         if triaged:
@@ -494,7 +475,7 @@ public enum RemoteGraphAccess {
                        % (EM_DASH, project.get("path", "")))
         lines = [header]
         for post in posts:
-            lines.append("  " + (render_headline(post) if headlines or triaged
+            lines.append("  " + (render_headline(post) if headlines or trimmed
                                  else render_post(post)))
         return "\n".join(lines)
 
@@ -520,15 +501,10 @@ public enum RemoteGraphAccess {
         return encoded
 
 
-    def render_board_json(graph, reader=None, search=None):
-        posts = graph.get("mailroom") or []
-        last_read = None
-        if reader is not None:
-            last_read, _ = mailroom_cursor(graph, reader)
-            posts = mailroom_unread(posts, last_read)
-        board = {"posts": [encoded_post(post) for post in filtered_posts(posts, search)]}
-        if last_read is not None:
-            board["lastRead"] = last_read
+    def render_board_json(mailbox):
+        board = {"posts": [encoded_post(post) for post in (mailbox.get("posts") or [])]}
+        if mailbox.get("lastRead") is not None:
+            board["lastRead"] = mailbox["lastRead"]
         # Swift's JSONEncoder escapes forward slashes and emits non-ASCII raw; json.dumps
         # does neither by default. `/` cannot occur outside a string in JSON, so escaping
         # the dumped text wholesale is exact. A body carrying a path or a URL is what makes
@@ -538,24 +514,25 @@ public enum RemoteGraphAccess {
 
 
     def mailroom_status_line(graph, reader):
-        posts = graph.get("mailroom") or []
-        if not posts:
+        digest = board_digest(graph)
+        count = digest.get("count") or 0
+        if not count:
             return None
-        plural = "" if len(posts) == 1 else "s"
+        plural = "" if count == 1 else "s"
         cursor, known = mailroom_cursor(graph, reader) if reader else (None, False)
         if not known:
-            return "mailroom: %d post%s" % (len(posts), plural)
-        return "mailroom: %d post%s, %d unread for you" % (
-            len(posts), plural, len(mailroom_unread(posts, cursor)))
+            return "mailroom: %d post%s" % (count, plural)
+        unread = (digest.get("latestID") or 0) > (cursor or 0)
+        return "mailroom: %d post%s, %s" % (
+            count, plural, "unread mail for you" if unread else "nothing unread for you")
 
 
-    def render_posted(graph):
-        posts = graph.get("mailroom") or []
-        if not posts:
+    def render_posted(graph, topic):
+        latest = board_digest(graph).get("latestID") or 0
+        if not latest:
             return "posted"
-        post = posts[-1]
-        topic = (" (%s)" % post["topic"]) if post.get("topic") is not None else ""
-        return "posted #%s%s" % (post.get("id"), topic)
+        spelled = (topic or "").strip().lower()
+        return "posted #%s%s" % (latest, (" (%s)" % spelled) if spelled else "")
 
 
     def render(graph):
@@ -822,7 +799,8 @@ public enum RemoteGraphAccess {
             if not text:
                 fail("missing note")
             payload = {"text": text, "topic": flags.get("topic"), "from": self_node_id()}
-            run_and_report(project, {"mailroomPost": payload}, render_posted)
+            run_and_report(project, {"mailroomPost": payload},
+                           lambda graph: render_posted(graph, flags.get("topic")))
             return
 
         if subverb in ("inbox", "sync"):
@@ -833,28 +811,37 @@ public enum RemoteGraphAccess {
                      "mail list`" % EM_DASH)
             daemon = Daemon()
             project = resolve_project(daemon, project)
-            # Unread is computed from the snapshot taken *before* the cursor moves; reading
-            # it afterwards would report every post as read. Same one-round-trip race the
-            # Swift CLI documents and accepts.
             graph = daemon.open_project(project)
+            headlines = "headlines" in flags
+            full = "full" in flags
+            mark = "mark" in flags
+            # Posts first, cursor second, so a refusal to move it stops before anything
+            # is printed as read; `--mark` prints no posts, so it asks for none. Bodies
+            # are the room's call unless a flag insists (MailboxQuery.fullBodies).
+            mailbox = None
+            if not mark:
+                query = {"selection": {"unread": {"reader": reader}}}
+                if "json" in flags or full:
+                    query["fullBodies"] = True
+                elif headlines:
+                    query["fullBodies"] = False
+                mailbox = daemon.mailbox(project, query)
             daemon.send(graph_command(project, {"mailroomInbox": {"from": reader}}))
             key, value = daemon.wait_for(["graphChanged", "errorOccurred"])
             if key == "errorOccurred":
                 fail(value["_0"])
-            headlines = "headlines" in flags
-            full = "full" in flags
-            if "json" in flags:
-                print(render_board_json(graph, reader=reader))
-            elif "mark" in flags:
-                posts = graph.get("mailroom") or []
-                latest = posts[-1].get("id", 0) if posts else 0
+            # Same one-round-trip race the Swift CLI documents and accepts.
+            if mailbox is None:
+                latest = board_digest(value["_0"]).get("latestID") or 0
                 if latest > 0:
                     print("marked read up to #%d" % latest)
                 else:
                     print("marked read %s the room is empty" % EM_DASH)
+            elif "json" in flags:
+                print(render_board_json(mailbox))
             else:
-                print(render_board(graph, reader=reader, headlines=headlines,
-                                   auto_triage=not headlines and not full))
+                print(render_board(mailbox, graph.get("project") or {}, True,
+                                   headlines=headlines))
             return
 
         if subverb == "read":
@@ -863,11 +850,11 @@ public enum RemoteGraphAccess {
             post_id = mailroom_post_id(arguments[0])
             daemon = Daemon()
             project = resolve_project(daemon, project)
-            graph = daemon.open_project(project)
-            for post in graph.get("mailroom") or []:
-                if post.get("id") == post_id:
-                    print(render_post(post))
-                    return
+            daemon.open_project(project)
+            mailbox = daemon.mailbox(project, {"selection": {"post": {"id": post_id}}})
+            for post in mailbox.get("posts") or []:
+                print(render_post(post))
+                return
             fail("no post #%d on this board %s `graphcode mail list %s` shows the "
                  "ids that exist" % (post_id, EM_DASH, project))
 
@@ -875,10 +862,15 @@ public enum RemoteGraphAccess {
             daemon = Daemon()
             project = resolve_project(daemon, project)
             graph = daemon.open_project(project)
+            query = {"selection": {"board": {}}, "fullBodies": True}
+            if flags.get("search"):
+                query["search"] = flags["search"]
+            mailbox = daemon.mailbox(project, query)
             if "json" in flags:
-                print(render_board_json(graph, search=flags.get("search")))
+                print(render_board_json(mailbox))
             else:
-                print(render_board(graph, search=flags.get("search")))
+                print(render_board(mailbox, graph.get("project") or {}, False,
+                                   search=flags.get("search")))
             return
 
         watcher = self_node_id()

@@ -1,5 +1,6 @@
 import Foundation
 import GraphcodeKit
+import MailroomKit
 
 // graphcode — the CLI half of docs/03-architecture.md#cli-graphcode.
 //
@@ -100,12 +101,40 @@ func openProject(_ projectPath: String) throws -> LoopGraph? {
   let opened = try client.waitForEvent {
     switch $0 {
     case .graphChanged, .errorOccurred: return true
-    case .recentProjectsListed: return false
+    case .recentProjectsListed, .mailbox: return false
     }
   }
   if case .errorOccurred(let message) = opened { fail(message) }
   if case .graphChanged(let graph) = opened { return graph }
   return nil
+}
+
+/// Asks the daemon for posts — the read half of every mail verb, answered on this
+/// connection alone. A `.graphChanged` no longer carries the room, only its digest
+/// (`LoopGraph.mailroomDigest`), so a verb that prints posts asks for exactly the posts
+/// it prints: one loop's unread slice, one post, or the whole room. A refusal (the
+/// project not open, a path the daemon does not know) arrives as an error and stops
+/// here, the way `openProject`'s does.
+func fetchMailbox(_ projectPath: String, _ query: MailboxQuery) throws -> Mailbox {
+  try client.send(.mailbox(projectPath: projectPath, query: query))
+  let answer = try client.waitForEvent {
+    switch $0 {
+    case .mailbox, .errorOccurred: return true
+    default: return false
+    }
+  }
+  if case .errorOccurred(let message) = answer { fail(message) }
+  guard case .mailbox(_, let mailbox) = answer else {
+    fail("graphcoded never answered the mailbox request", code: ExitCode.ambiguous)
+  }
+  return mailbox
+}
+
+/// The project as the daemon names it, for the mail renderers' header line — or, on
+/// the one path where the open answered with nothing to name it by, as the caller
+/// spelled it.
+func projectRef(_ opened: LoopGraph?, _ projectPath: String) -> ProjectRef {
+  opened?.project ?? ProjectRef(path: projectPath, name: projectPath)
 }
 
 /// Every mutating verb waits for the `.graphChanged` broadcast its own command caused,
@@ -370,7 +399,7 @@ do {
     }
     if case .errorOccurred(let message) = postVerdict { fail(message) }
     if case .graphChanged(let graph) = postVerdict {
-      print(GraphcodeCommand.renderPosted(graph))
+      print(GraphcodeCommand.renderPosted(graph, topic: topic))
     }
 
   case .mailroomInbox(let projectPath, let headlines, let mark, let json, let full):
@@ -386,6 +415,19 @@ do {
           + "($ZMX_SESSION); a human reading the board wants `graphcode mail list`")
     }
     let opened = try openProject(projectPath)
+    // The posts come first and the cursor moves second, so a refusal to move it — the
+    // room switched off, a reader the graph does not know — stops before anything is
+    // printed as read. `--mark` prints no posts, so it asks for none.
+    var mailbox: Mailbox?
+    if !mark {
+      // `fullBodies` nil leaves the triage to the room: a loop cannot know how much
+      // mail it has before reading it, and the first inbox of a loop born after a
+      // busy week is the whole room. `--json` and `--full` insist on every body,
+      // `--headlines` on triage lines.
+      let fullBodies: Bool? = json || full ? true : headlines ? false : nil
+      mailbox = try fetchMailbox(
+        projectPath, MailboxQuery(selection: .unread(reader: reader), fullBodies: fullBodies))
+    }
     try client.send(
       .graphCommand(projectPath: projectPath, command: .mailroomInbox(from: reader)))
     let syncVerdict = try client.waitForEvent { event in
@@ -395,60 +437,59 @@ do {
       }
     }
     if case .errorOccurred(let message) = syncVerdict { fail(message) }
-    // Unread is computed from the snapshot `openProject` already delivered: sync only
-    // moves the cursor, so the posts it covers are exactly those above the cursor
-    // there. Known race, accepted: a post landing between that snapshot and the
-    // daemon advancing the cursor is marked read without ever having been printed.
-    // The window is one round-trip wide and a watcher would have heard the post live
-    // anyway; fixing it properly means syncing to the highest *printed* id rather
-    // than to latest, which nothing so far has needed.
-    if let graph = opened {
+    // Known race, accepted: a post landing between the mailbox answer and the daemon
+    // advancing the cursor is marked read without ever having been printed. The
+    // window is one round-trip wide and a watcher would have heard the post live
+    // anyway; fixing it properly means syncing to the highest *printed* id
+    // (`Mailbox.highestDeliveredID`) rather than to latest.
+    if let mailbox {
       if json {
-        print(GraphcodeCommand.renderMailroomJSON(graph, unreadFor: reader))
-      } else if mark {
-        // The quiet sync: the backlog is not the loop's problem any more, and the
-        // one line says the cursor actually moved — a silent success would read,
-        // to the loop that sent it, like a command nobody applied.
-        if let latest = graph.mailroom.last?.id, latest > 0 {
-          print("marked read up to #\(latest)")
-        } else {
-          print("marked read — the board is empty")
-        }
+        print(GraphcodeCommand.renderMailroomJSON(mailbox))
       } else {
-        // `autoTriage` unless the caller said which way they want it: a loop cannot
-        // know how much mail it has before reading it, and the first sync of a loop
-        // born after a busy week is the whole board.
         print(
           GraphcodeCommand.renderMailroom(
-            graph, unreadFor: reader, headlines: headlines,
-            autoTriage: !headlines && !full))
+            mailbox, project: projectRef(opened, projectPath), unread: true,
+            headlines: headlines))
+      }
+    } else {
+      // The quiet sync: the backlog is not the loop's problem any more, and the one
+      // line says the cursor actually moved — a silent success would read, to the
+      // loop that sent it, like a command nobody applied. Read off the graph the
+      // advance came back on, which is the room as it stood when the cursor moved.
+      var latest = 0
+      if case .graphChanged(let graph) = syncVerdict { latest = graph.boardDigest.latestID }
+      if latest > 0 {
+        print("marked read up to #\(latest)")
+      } else {
+        print("marked read — the room is empty")
       }
     }
 
   case .mailroomRead(let projectPath, let postID):
-    // Read-only: the post rides the snapshot, no command is sent, no cursor moves —
-    // the deep-read half of `sync --headlines` triage, priced at one line of context
-    // per post a loop actually decides to care about.
-    if let graph = try openProject(projectPath) {
-      guard let post = graph.mailroom.first(where: { $0.id == postID }) else {
-        fail(
-          "no post #\(postID) on this board — `graphcode mail list \(projectPath)` "
-            + "shows the ids that exist")
-      }
-      print(GraphcodeCommand.render(post))
+    // Read-only: no cursor moves — the deep-read half of `inbox --headlines` triage,
+    // priced at one line of context per post a loop actually decides to care about.
+    try openProject(projectPath)
+    let mailbox = try fetchMailbox(projectPath, MailboxQuery(selection: .post(id: postID)))
+    guard let post = mailbox.posts.first else {
+      fail(
+        "no post #\(postID) on this board — `graphcode mail list \(projectPath)` "
+          + "shows the ids that exist")
     }
+    print(GraphcodeCommand.render(post))
 
   case .mailroomList(let projectPath, let search, let json):
-    // Read-only: no command is sent, so — the `status` rule — nothing past the
-    // snapshot is waited for, and no cursor moves. This is the human's window onto
-    // the board; `sync` is the loop's. `--search` filters what is shown, never what
-    // is remembered.
-    if let graph = try openProject(projectPath) {
-      if json {
-        print(GraphcodeCommand.renderMailroomJSON(graph, search: search))
-      } else {
-        print(GraphcodeCommand.renderMailroom(graph, search: search))
-      }
+    // Read-only: no cursor moves. This is the human's window onto the room; `inbox`
+    // is the loop's. `--search` filters what is shown, never what is remembered, and
+    // every body comes whole — a human asked to see the room, not to have it triaged.
+    let opened = try openProject(projectPath)
+    let mailbox = try fetchMailbox(
+      projectPath, MailboxQuery(selection: .board, search: search, fullBodies: true))
+    if json {
+      print(GraphcodeCommand.renderMailroomJSON(mailbox))
+    } else {
+      print(
+        GraphcodeCommand.renderMailroom(
+          mailbox, project: projectRef(opened, projectPath), unread: false, search: search))
     }
 
   case .mailroomWatch(let projectPath, let on, let topic):

@@ -2,6 +2,7 @@ import AppKit
 import ComposableArchitecture
 import Foundation
 import GraphcodeKit
+import MailroomKit
 import UniformTypeIdentifiers
 
 /// One open project's graph canvas — one of possibly several the sidebar shows at once
@@ -336,8 +337,9 @@ struct ProjectFeature {
 
       case .daemonEvent(let event):
         switch event {
-        case .graphChanged(let newGraph):
+        case .graphChanged(let broadcast):
           state.connectionError = nil
+          let (newGraph, boardChanged) = Self.carryingRoom(broadcast, over: state.graph)
           loopTitleDirectory.register(newGraph.project.path, newGraph)
           // Every card placed again from the graph that just arrived, rather than only the
           // ones that are new. Slots handed out at arrival time made the canvas a record of
@@ -361,10 +363,16 @@ struct ProjectFeature {
           // The broadcast that delivers a form-created loop is what makes it openable —
           // switch to it now, the way tapping it would. Matched by id so an unrelated
           // broadcast (another loop finishing, a CLI edit) leaves the pending id waiting.
+          let fetch: Effect<Action> =
+            boardChanged
+            ? Self.fetchBoard(newGraph.project.path, via: orchestratorClient) : .none
           if let pending = state.pendingCreatedNodeID, newGraph.nodes[id: pending] != nil {
             state.pendingCreatedNodeID = nil
-            return .send(.nodeTapped(pending))
+            return .merge(fetch, .send(.nodeTapped(pending)))
           }
+          return fetch
+        case .mailbox(_, let mailbox):
+          state.graph.mailroom = mailbox.posts
         case .errorOccurred(let message):
           state.connectionError = message
         case .recentProjectsListed:
