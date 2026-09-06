@@ -101,14 +101,23 @@ struct MailroomTests {
     #expect(graph.mailroom.last?.id == Mailroom.maxNotices + 5)
   }
 
+  /// The cursor moves through the mailbox request that hands the mail over
+  /// (`MailboxQuery.advanceCursor`), never backward, and never on the legacy
+  /// `mailroomInbox`, which a daemon now refuses.
   @Test
-  func syncAdvancesCursorAndNeverMovesItBackward() async {
+  func syncAdvancesCursorAndNeverMovesItBackward() async throws {
     let store = await makeStore()
     let ids = nodeIDs(await store.graph)
 
     await store.handle(.mailroomPost(text: "one", topic: nil, from: ids[0]))
-    await store.handle(.mailroomInbox(from: ids[1]))
+    _ = try await store.mailbox(
+      MailboxQuery(selection: .unread(reader: ids[1]), advanceCursor: true))
     var graph = await store.graph
+    #expect(graph.nodes[id: ids[1]]?.lastMailroomRead == 1)
+
+    _ = try await store.mailbox(
+      MailboxQuery(selection: .unread(reader: ids[1]), advanceCursor: true))
+    graph = await store.graph
     #expect(graph.nodes[id: ids[1]]?.lastMailroomRead == 1)
 
     await store.handle(.mailroomInbox(from: ids[1]))

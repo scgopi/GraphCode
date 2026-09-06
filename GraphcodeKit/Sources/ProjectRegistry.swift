@@ -352,7 +352,7 @@ public actor ProjectRegistry {
           send(.errorOccurred("\(path) isn't open — open it first."), to: fileDescriptor)
           return
         }
-        await store.handle(inner)
+        await store.handle(inner, from: connectionID)
       case .refused(let reason):
         send(.errorOccurred(reason), to: fileDescriptor)
       }
@@ -367,9 +367,15 @@ public actor ProjectRegistry {
           send(.errorOccurred("\(path) isn't open — open it first."), to: fileDescriptor)
           return
         }
-        send(
-          .mailbox(projectPath: canonicalPath, mailbox: await store.mailbox(query)),
-          to: fileDescriptor)
+        do {
+          send(
+            .mailbox(projectPath: canonicalPath, mailbox: try await store.mailbox(query)),
+            to: fileDescriptor)
+        } catch let refusal as GraphStore.MailboxRefusal {
+          send(.errorOccurred(refusal.message), to: fileDescriptor)
+        } catch {
+          send(.errorOccurred("\(error)"), to: fileDescriptor)
+        }
       case .refused(let reason):
         send(.errorOccurred(reason), to: fileDescriptor)
       }

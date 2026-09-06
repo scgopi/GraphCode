@@ -453,17 +453,27 @@ public enum RemoteGraphAccess {
         return "".join(clusters[:HEADLINE_BUDGET]) + ELLIPSIS
 
 
+    MAX_NOTICES = 200
+    MAX_LETTERS = 200
+
+
     def render_board(mailbox, project, unread, headlines=False, search=None):
         posts = mailbox.get("posts") or []
+        pruned = mailbox.get("prunedUnread") or 0
         if not posts:
             if search:
                 if unread:
                     return "no unread posts match '%s'" % search
                 return "no posts match '%s'" % search
-            if unread:
-                return "no unread posts"
-            return ("the room is empty %s post one: graphcode mail post "
-                    "<project-path> <notice%s>" % (EM_DASH, ELLIPSIS))
+            if not unread:
+                return ("the room is empty %s post one: graphcode mail post "
+                        "<project-path> <notice%s>" % (EM_DASH, ELLIPSIS))
+            if pruned > 0:
+                return ("no unread posts %s but %d landed since your last inbox and were "
+                        "pruned before you read them; the room keeps %d notices and %d "
+                        "letters, read it more often" % (EM_DASH, pruned, MAX_NOTICES,
+                                                         MAX_LETTERS))
+            return "no unread posts"
         trimmed = bool(mailbox.get("bodiesTrimmed"))
         triaged = trimmed and not headlines
         label = "mailroom, unread" if unread else "mailroom"
@@ -477,6 +487,18 @@ public enum RemoteGraphAccess {
         for post in posts:
             lines.append("  " + (render_headline(post) if headlines or trimmed
                                  else render_post(post)))
+        if unread and pruned > 0:
+            lines.append("  %d post%s landed since your last inbox and %s pruned before you "
+                         "read %s %s the room keeps %d notices and %d letters; read it more "
+                         "often" % (pruned, "" if pruned == 1 else "s",
+                                    "was" if pruned == 1 else "were",
+                                    "it" if pruned == 1 else "them", EM_DASH,
+                                    MAX_NOTICES, MAX_LETTERS))
+        remaining = mailbox.get("remaining") or 0
+        if remaining > 0:
+            lines.append("  %d more unread past #%s %s run the same command again for the "
+                         "next page" % (remaining, mailbox.get("highestDeliveredID") or 0,
+                                        EM_DASH))
         return "\n".join(lines)
 
 
@@ -505,6 +527,10 @@ public enum RemoteGraphAccess {
         board = {"posts": [encoded_post(post) for post in (mailbox.get("posts") or [])]}
         if mailbox.get("lastRead") is not None:
             board["lastRead"] = mailbox["lastRead"]
+        if (mailbox.get("remaining") or 0) > 0:
+            board["remaining"] = mailbox["remaining"]
+        if (mailbox.get("prunedUnread") or 0) > 0:
+            board["prunedUnread"] = mailbox["prunedUnread"]
         # Swift's JSONEncoder escapes forward slashes and emits non-ASCII raw; json.dumps
         # does neither by default. `/` cannot occur outside a string in JSON, so escaping
         # the dumped text wholesale is exact. A body carrying a path or a URL is what makes
@@ -814,30 +840,34 @@ public enum RemoteGraphAccess {
             graph = daemon.open_project(project)
             headlines = "headlines" in flags
             full = "full" in flags
-            mark = "mark" in flags
-            # Posts first, cursor second, so a refusal to move it stops before anything
-            # is printed as read; `--mark` prints no posts, so it asks for none. Bodies
-            # are the room's call unless a flag insists (MailboxQuery.fullBodies).
-            mailbox = None
-            if not mark:
-                query = {"selection": {"unread": {"reader": reader}}}
-                if "json" in flags or full:
-                    query["fullBodies"] = True
-                elif headlines:
-                    query["fullBodies"] = False
-                mailbox = daemon.mailbox(project, query)
-            daemon.send(graph_command(project, {"mailroomInbox": {"from": reader}}))
-            key, value = daemon.wait_for(["graphChanged", "errorOccurred"])
-            if key == "errorOccurred":
-                fail(value["_0"])
-            # Same one-round-trip race the Swift CLI documents and accepts.
-            if mailbox is None:
-                latest = board_digest(value["_0"]).get("latestID") or 0
-                if latest > 0:
-                    print("marked read up to #%d" % latest)
-                else:
+            if "mark" in flags:
+                # Everything marked read, nothing printed -- still page by page through
+                # the mailbox, since a cursor only moves through mail handed over.
+                mailbox = None
+                while True:
+                    mailbox = daemon.mailbox(project, {
+                        "selection": {"unread": {"reader": reader}},
+                        "fullBodies": False, "advanceCursor": True})
+                    if not (mailbox.get("remaining") or 0) > 0:
+                        break
+                highest = mailbox.get("highestDeliveredID")
+                if highest is not None:
+                    print("marked read up to #%d" % highest)
+                elif not ((mailbox.get("digest") or {}).get("latestID") or 0):
                     print("marked read %s the room is empty" % EM_DASH)
-            elif "json" in flags:
+                else:
+                    print("marked read %s nothing was unread" % EM_DASH)
+                return
+            # One request does both halves: a page of unread posts, and the cursor moved
+            # to the highest one in that page in the same daemon turn. Bodies are the
+            # room's call unless a flag insists (MailboxQuery.fullBodies).
+            query = {"selection": {"unread": {"reader": reader}}, "advanceCursor": True}
+            if "json" in flags or full:
+                query["fullBodies"] = True
+            elif headlines:
+                query["fullBodies"] = False
+            mailbox = daemon.mailbox(project, query)
+            if "json" in flags:
                 print(render_board_json(mailbox))
             else:
                 print(render_board(mailbox, graph.get("project") or {}, True,
