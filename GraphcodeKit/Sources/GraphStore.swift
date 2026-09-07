@@ -182,6 +182,10 @@ public actor GraphStore {
     /// still queued, and lets a wake for a post the reader has since read go unsent.
     /// `nil` for a message a peer or a human sent.
     let watchedPostID: Int?
+    /// Whether the target's memory log already carries this message. Written the first
+    /// time the item is actually put back rather than when it was queued — see
+    /// `staged(_:)`.
+    var recorded: Bool = false
   }
 
   private var pendingFollowUps: [PendingFollowUp] = []
@@ -2699,7 +2703,6 @@ public actor GraphStore {
     // lost to a daemon restart delays the message to the next wake instead of
     // dropping it.
     if followUp, deliversLater(to: target) {
-      recordMemory(nodeID, "follow-up staged: \(message)")
       pendingFollowUps.append(
         PendingFollowUp(nodeID: nodeID, text: message, watchedPostID: watchedPostID))
       return
@@ -2772,6 +2775,21 @@ public actor GraphStore {
   /// the store settles, and from the presence poll — the reading that says "idle" is
   /// the reading this waits for. A target that resolved or died is simply dropped from
   /// the queue: its memory log has carried the message since it was staged.
+  /// The memory record a deferred follow-up leaves, written the first time it is really
+  /// put back rather than when it was queued. Every live target's follow-up now joins
+  /// the queue and `handle` ends in a drain, so a message to an idle session is queued
+  /// and handed over inside the same call: a log line saying it was staged would
+  /// describe a wait that never happened, and a watcher's log would gain one per post it
+  /// was woken for. Anything that does wait is recorded before the pass that deferred it
+  /// ends, which is what the queue's durability across a daemon restart rests on.
+  private func staged(_ pending: PendingFollowUp) -> PendingFollowUp {
+    guard !pending.recorded else { return pending }
+    recordMemory(pending.nodeID, "follow-up staged: \(pending.text)")
+    var recorded = pending
+    recorded.recorded = true
+    return recorded
+  }
+
   private func drainPendingFollowUps() async {
     guard !pendingFollowUps.isEmpty, !isDrainingFollowUps else { return }
     isDrainingFollowUps = true
@@ -2793,7 +2811,14 @@ public actor GraphStore {
     // costs one probe per target rather than one per message.
     var readings: [UUID: Presence] = [:]
     for pending in batch {
-      guard let node = graph.nodes[id: pending.nodeID], !node.isResolved else { continue }
+      guard let node = graph.nodes[id: pending.nodeID], !node.isResolved else {
+        // Its work is over, but the message must not go with the queue entry: the log is
+        // what the loop's next wake reads, and for a resolved loop that is all there is.
+        if !pending.recorded, graph.nodes[id: pending.nodeID] != nil {
+          recordMemory(pending.nodeID, "while you were away: \(pending.text)")
+        }
+        continue
+      }
       // A watcher's wake is only owed while the watch that asked for it stands and the
       // post is unread: `mail watch --off` after the wake was staged, an inbox that has
       // since read past the post, or a watch re-scoped to another topic — the wakes the
@@ -2807,9 +2832,12 @@ public actor GraphStore {
       }
       switch MessageBus.deliverability(to: node) {
       case .targetBusyWithACheck:
-        remaining.append(pending)
+        remaining.append(staged(pending))
         continue
       case .some:
+        if !pending.recorded {
+          recordMemory(pending.nodeID, "while you were away: \(pending.text)")
+        }
         continue
       case nil:
         break
@@ -2825,7 +2853,7 @@ public actor GraphStore {
       // `.idle` and nothing else, which is what makes a timed-out read safe: `.unknown`
       // is not a state, so the message stays queued for a pass that gets an answer.
       guard presence == .idle else {
-        remaining.append(pending)
+        remaining.append(staged(pending))
         continue
       }
       _ = await deliverToSession(node, pending.text)
