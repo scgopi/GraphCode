@@ -1,4 +1,5 @@
 import Foundation
+import MailroomKit
 import Testing
 
 @testable import GraphcodeKit
@@ -149,6 +150,82 @@ struct OrphanedSessionReaperTests {
     let live = try #require(
       OrphanedSessionReaper.liveSessionIDs(workspaceDirectories: [workspace]))
     #expect(live.isEmpty)
+  }
+
+  /// #307 moved the Mailroom out of the graph file and into `<name>.mailroom.json`
+  /// beside it. This scan took every `.json` under `projects/` for a graph, so the room
+  /// looked like a graph it could not decode and `reap` aborted — on every workspace, for
+  /// good, and with a message ("refusing to guess") that reads as caution rather than
+  /// breakage. `reap` is the recovery tool for a machine out of PTYs, so it was broken
+  /// exactly when it is needed. Saved through `ProjectPersistence` rather than by writing
+  /// a hand-picked filename, so the test tracks the name the app actually mints.
+  @Test
+  func aRoomFileBesideItsGraphDoesNotStopAReap() throws {
+    let workspace = FileManager.default.temporaryDirectory
+      .appendingPathComponent("reap-ws-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: workspace) }
+    var graph = LoopGraph(
+      project: ProjectRef(path: "/tmp/p", name: "p"), nodes: [LoopNode(id: id1, title: "loop")])
+    graph.mailroom = [
+      MailroomPost(
+        id: 1, at: Date(timeIntervalSince1970: 1), authorID: nil, author: "a peer",
+        topic: nil, body: "a notice, so the room gets a file of its own")
+    ]
+    ProjectPersistence(baseDirectory: workspace).saveGraph(graph)
+
+    let projects = workspace.appendingPathComponent("projects", isDirectory: true)
+    let written = try FileManager.default.contentsOfDirectory(atPath: projects.path).sorted()
+    #expect(written.count == 2, "the graph and its room, or this no longer reproduces")
+
+    let live = try #require(
+      OrphanedSessionReaper.liveSessionIDs(workspaceDirectories: [workspace]),
+      "a room file beside a graph must not read as state the reap cannot account for")
+    #expect(live == [id1])
+  }
+
+  /// The other half of the same rule, and the reason this is not simply "skip what will
+  /// not decode": a *graph* that cannot be read still owns sessions nobody can enumerate,
+  /// so the reap must keep refusing rather than sweep them.
+  @Test
+  func aCorruptGraphStillStopsAReap() throws {
+    let workspace = FileManager.default.temporaryDirectory
+      .appendingPathComponent("reap-ws-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: workspace) }
+    let projects = workspace.appendingPathComponent("projects", isDirectory: true)
+    try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+    try Data("{ not a graph".utf8)
+      .write(to: projects.appendingPathComponent("_tmp_p.json"))
+
+    #expect(OrphanedSessionReaper.liveSessionIDs(workspaceDirectories: [workspace]) == nil)
+  }
+
+  /// What keeps the rule from rotting into a stale list of names: whatever
+  /// `ProjectPersistence` writes beside a graph has to be something this scan recognises
+  /// as a sidecar. Add a sidecar without registering its suffix and this fails here,
+  /// rather than silently disabling `reap` again months later.
+  @Test
+  func everyFileWrittenBesideAGraphIsRecognisedAsASidecar() throws {
+    let workspace = FileManager.default.temporaryDirectory
+      .appendingPathComponent("reap-ws-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: workspace) }
+    var graph = LoopGraph(
+      project: ProjectRef(path: "/tmp/p", name: "p"), nodes: [LoopNode(id: id1, title: "loop")])
+    graph.mailroom = [
+      MailroomPost(
+        id: 1, at: Date(timeIntervalSince1970: 1), authorID: nil, author: "a peer",
+        topic: nil, body: "a notice")
+    ]
+    ProjectPersistence(baseDirectory: workspace).saveGraph(graph)
+
+    let projects = workspace.appendingPathComponent("projects", isDirectory: true)
+    let beside = try FileManager.default.contentsOfDirectory(atPath: projects.path)
+      .filter { $0 != "_tmp_p.json" }
+    #expect(!beside.isEmpty)
+    for name in beside {
+      #expect(
+        ProjectPersistence.isSidecarFileName(name),
+        "\(name) is written beside a graph but no sidecar suffix claims it")
+    }
   }
 
   @Test

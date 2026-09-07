@@ -208,6 +208,30 @@ struct MailroomPersistenceTests {
     #expect(writer.load(path: "/tmp/never-saved") == nil)
   }
 
+  /// The other side of `aLoadReturnsTheQueuedSnapshotBeforeTheDiskHasIt`: a queued save
+  /// must not outlive the graph it belongs to. Deleting a project evicts its store and
+  /// removes the file, and a `load` still answering from the queue would hand the
+  /// deleted loops back to the next reader.
+  @Test
+  func aDeletedProjectIsNotHandedBackFromTheQueue() throws {
+    let directory = makeDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let persistence = ProjectPersistence(baseDirectory: directory)
+    let writer = GraphWriter(persistence: persistence)
+    let path = "/tmp/deleted-\(UUID().uuidString.prefix(6))"
+    var graph = LoopGraph(project: ProjectRef(path: path, name: "deleted"))
+    graph.nodes.append(LoopNode(title: "Loop", loopType: .turnBased, firstInstruction: "Work"))
+
+    for _ in 0..<50 {
+      writer.save(graph)
+      writer.forget(path: path)
+      persistence.deleteGraph(path: path)
+      #expect(writer.load(path: path) == nil)
+      writer.flush()
+      #expect(persistence.loadGraph(path: path) == nil, "a queued save rewrote a deleted graph")
+    }
+  }
+
   /// The writer takes a burst and lands the newest snapshot once; `flush` returns with
   /// it on disk.
   @Test

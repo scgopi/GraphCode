@@ -49,6 +49,19 @@ public final class GraphWriter: @unchecked Sendable {
     return persistence.loadGraph(path: path)
   }
 
+  /// Drops any save still queued for a project, for a caller that is about to delete it.
+  ///
+  /// The queue exists to let a write land after the actor has moved on, which is exactly
+  /// wrong once the graph is being thrown away: a drain that ran after `deleteGraph`
+  /// would put the file back, and `load` would keep answering from the queue for a
+  /// project that no longer exists. The delete is the one operation that has to reach
+  /// into the queue rather than trail it.
+  public func forget(path: String) {
+    lock.lock()
+    pending.removeValue(forKey: path)
+    lock.unlock()
+  }
+
   /// Returns once everything queued so far is on disk.
   public func flush() {
     queue.sync { drain() }

@@ -65,11 +65,16 @@ public enum OrphanedSessionReaper {
     for directory in workspaceDirectories {
       var workspaceLive: Set<UUID> = []
       let projects = directory.appendingPathComponent("projects", isDirectory: true)
-      let graphFiles =
+      let projectFiles =
         (try? FileManager.default.contentsOfDirectory(
           at: projects, includingPropertiesForKeys: nil))?
         .filter { $0.pathExtension == "json" } ?? []
-      for file in graphFiles {
+      for file in projectFiles {
+        // A sidecar is skipped before it can look corrupt: it is not a graph, it never
+        // owned a session, and refusing to guess about it aborts a reap that has nothing
+        // to be uncertain about. Only a file that claims to be a graph and cannot be read
+        // as one is the "state this build cannot account for" the bail-out is for.
+        if ProjectPersistence.isSidecarFileName(file.lastPathComponent) { continue }
         guard let data = try? Data(contentsOf: file),
           let graph = try? JSONDecoder().decode(LoopGraph.self, from: data)
         else { return nil }

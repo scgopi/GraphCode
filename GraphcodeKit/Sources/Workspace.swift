@@ -233,7 +233,7 @@ extension Workspace {
 
     let projectsDirectory = url.appendingPathComponent("projects", isDirectory: true)
     for name in (try? fileManager.contentsOfDirectory(atPath: projectsDirectory.path)) ?? []
-    where name.hasSuffix(".json") {
+    where name.hasSuffix(".json") && !ProjectPersistence.isSidecarFileName(name) {
       guard let data = try? Data(contentsOf: projectsDirectory.appendingPathComponent(name)),
         let graph = try? JSONDecoder().decode(LoopGraph.self, from: data)
       else { continue }

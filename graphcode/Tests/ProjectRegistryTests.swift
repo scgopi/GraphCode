@@ -317,14 +317,21 @@ struct ProjectRegistryTests {
     // killing them.
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
+    // A real folder, or `routing` refuses the open, no loop is ever created, and every
+    // expectation below holds for having found nothing.
+    let project = FileManager.default.temporaryDirectory
+      .appendingPathComponent("project-closed-\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: project) }
+    let projectPath = project.resolvingSymlinksInPath().path
     let firstRun = ProjectRegistry(
       persistenceDirectory: directory, ensureSession: { _, _ in }, terminateSession: { _, _ in })
     let connectionID = UUID()
     await firstRun.addConnection(id: connectionID, fileDescriptor: -1)
-    await firstRun.handle(.openProject(path: "/tmp/project-g"), connectionID: connectionID)
+    await firstRun.handle(.openProject(path: projectPath), connectionID: connectionID)
     await firstRun.handle(
       .graphCommand(
-        projectPath: "/tmp/project-g",
+        projectPath: projectPath,
         command: .createNode(
           NodeDraft(title: "Watcher", loopType: .timeBased, triggerPrompt: "/loop 1h Check"))),
       connectionID: connectionID)
@@ -332,7 +339,8 @@ struct ProjectRegistryTests {
     // daemon below only ever exists after that.
     firstRun.flushPersistence()
     let persistence = ProjectPersistence(baseDirectory: directory)
-    let nodeID = persistence.loadGraph(path: "/tmp/project-g")?.nodes.first?.id
+    let nodeID = persistence.loadGraph(path: projectPath)?.nodes.first?.id
+    #expect(nodeID != nil, "nothing was created, so what follows would pass for finding none")
 
     let killed = LockIsolated<Set<UUID>>([])
     let started = LockIsolated<Set<UUID>>([])
@@ -343,13 +351,17 @@ struct ProjectRegistryTests {
     let freshConnection = UUID()
     await secondRun.addConnection(id: freshConnection, fileDescriptor: -1)
     await secondRun.handle(
-      .deleteProjectGraph(path: "/tmp/project-g"), connectionID: freshConnection)
+      .deleteProjectGraph(path: projectPath), connectionID: freshConnection)
 
     #expect(killed.value == Set([nodeID].compactMap { $0 }))
     #expect(started.value.isEmpty)
-    #expect(persistence.loadGraph(path: "/tmp/project-g") == nil)
+    #expect(persistence.loadGraph(path: projectPath) == nil)
   }
 
+  /// The same delete with the writer running as it does in production — asynchronously,
+  /// with a save for this very project still queued. The graph must go and stay gone: a
+  /// drain landing after `deleteGraph` would rewrite the file, and a `load` still
+  /// answering from the queue would hand the deleted loops to the next reader.
   /// The bug this guards: a folder added from outside the app — `graphcode status
   /// <folder>`, which is how an editor plugin adds one — was persisted into the open set
   /// but reached no *running* app, so it appeared to have been ignored and only showed up
@@ -451,5 +463,48 @@ private func readFrameOffThread(_ fileDescriptor: Int32) async throws -> Data {
         continuation.resume(throwing: error)
       }
     }
+  }
+}
+
+/// Kept out of the suite's body only to stay inside swiftlint's `type_body_length`.
+extension ProjectRegistryTests {
+  @Test
+  func deletingAProjectWithASaveStillQueuedDoesNotBringItBack() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
+    // A real folder: `routing` refuses a path with nothing at it, and a test that skips
+    // this creates no loops at all and then passes for having found none.
+    let project = FileManager.default.temporaryDirectory
+      .appendingPathComponent("project-queued-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: project) }
+    let path = project.resolvingSymlinksInPath().path
+
+    let killed = LockIsolated<Set<UUID>>([])
+    let registry = ProjectRegistry(
+      persistenceDirectory: directory,
+      ensureSession: { _, _ in },
+      terminateSession: { node, _ in _ = killed.withValue { $0.insert(node.id) } })
+    let persistence = ProjectPersistence(baseDirectory: directory)
+    let connectionID = UUID()
+    await registry.addConnection(id: connectionID, fileDescriptor: -1)
+    await registry.handle(.openProject(path: path), connectionID: connectionID)
+    for index in 0..<8 {
+      await registry.handle(
+        .graphCommand(
+          projectPath: path,
+          command: .createNode(
+            NodeDraft(
+              title: "Watcher\(index)", loopType: .timeBased, triggerPrompt: "/loop 1h Check"))),
+        connectionID: connectionID)
+    }
+
+    // Deliberately no flush: the delete races the writer, the way it does in a daemon
+    // that is still running.
+    await registry.handle(.deleteProjectGraph(path: path), connectionID: connectionID)
+    #expect(killed.value.count == 8)
+
+    registry.flushPersistence()
+    #expect(persistence.loadGraph(path: path) == nil, "a queued save rewrote a deleted graph")
   }
 }
