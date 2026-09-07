@@ -210,12 +210,14 @@ public actor GraphStore {
   /// rejects the plain flag for this same chain and for this same reason.
   ///
   /// So the guard expires. A drain that outlives its lease is a wedge by definition, and
-  /// the next one says so in the daemon log and takes over. Taking over cannot duplicate
-  /// anything — the batch was taken and cleared in one actor step, so the successor
-  /// finds only what was queued after it — and if the wedged drain ever returns, its
-  /// `defer` folds its own remainder back on. Order can slip in that recovery; a queue
-  /// that moves again beats one frozen for ever.
+  /// the next one says so in the daemon log and takes over. The successor recovers the
+  /// deferred and not-yet-started batch, but leaves an in-flight send alone because its
+  /// side effect may already have happened even though the callback never returned.
   private var drainLease: Date?
+  private var drainOwner: UUID?
+  private var drainBatch: [PendingFollowUp] = []
+  private var drainInFlight: PendingFollowUp?
+  private var drainDeferred: [PendingFollowUp] = []
 
   /// How long a presence read may take before the store stops waiting on it.
   ///
@@ -234,29 +236,14 @@ public actor GraphStore {
   /// one poll, not the process.
   private let presenceReadDeadline: Duration
 
+  private let deliveryDeadline: Duration
+
   /// How long a drain may hold the queue before another is allowed to take over. Far
   /// longer than any healthy pass (milliseconds) and longer than a pass that meets
   /// several wedged presence reads, each of which is bounded by `presenceReadDeadline`;
   /// short enough that a hang costs minutes rather than the life of the process. The
   /// 300s here is `RemoteEnsureGate.leaseDuration`, arrived at for the same chain.
   private let drainLeaseDuration: Duration
-
-  /// How long the drain waits on one `deliverToSession` before it stops waiting.
-  ///
-  /// The lease above is a backstop, not the fix: a drain parked inside a send holds the
-  /// queue for the lease's whole 300s, silently, before any successor even learns of it
-  /// (the stable-release check's wedge test against #316). The send is the *likelier*
-  /// half of the chain to hang — one message is several sequential `zmx send`
-  /// invocations, so one message is several chances to hang on a wedged `ControlMaster`.
-  ///
-  /// Bounded in shape by the same `withDeadline` the presence read is: the loser is
-  /// abandoned, never cancelled-and-waited. What the deadline owes the queue is
-  /// durability — a timed-out item is staged to the target's memory log (the Mailroom
-  /// mirror already carries every message) and dropped, so a pass reads at its next wake
-  /// instead of a send that may only ever hang. The same span as
-  /// `presenceReadDeadline`: a bystander behind one wedged target waits one span, not
-  /// the process's life at either end.
-  private let deliveryDeadline: Duration
 
   /// A poller holds `self` weakly, so a store going away already stops it *doing*
   /// anything — but the task itself keeps sleeping in its loop forever. Harmless for
@@ -2859,17 +2846,32 @@ public actor GraphStore {
           ("held_ms", DaemonLog.milliseconds(heldFor)),
           ("queued", String(pendingFollowUps.count)),
         ])
+      pendingFollowUps = drainDeferred + drainBatch + pendingFollowUps
+      drainBatch = []
+      drainInFlight = nil
+      drainDeferred = []
     }
+    let owner = UUID()
     drainLease = taken
+    drainOwner = owner
     // Released only if it is still ours: a successor that took over after this lease
     // expired must not have its own lease cleared by the drain it replaced finally
     // returning — the mistake `RemoteEnsureGate.end(_:token:)` documents.
-    defer { if drainLease == taken { drainLease = nil } }
+    defer {
+      if drainOwner == owner {
+        drainOwner = nil
+        drainLease = nil
+        drainBatch = []
+        drainInFlight = nil
+        drainDeferred = []
+      }
+    }
     // Taken and cleared in one actor step, delivered from the local batch. Anything
     // queued while a delivery below is suspended lands in `pendingFollowUps` untouched
     // and is folded back in behind the retries at the end — never overwritten.
     let batch = pendingFollowUps
     pendingFollowUps = []
+    drainBatch = batch
     var remaining: [PendingFollowUp] = []
     var index = 0
     // Folded back on the way out of every path, not only the one that runs to the end:
@@ -2878,15 +2880,17 @@ public actor GraphStore {
     // now — the reading below is bounded — but what the pass did not resolve belongs on
     // the queue rather than in a variable about to go out of scope, whatever the exit.
     defer {
-      var retained: [PendingFollowUp] = []
-      for pending in remaining + Array(batch[index...]) {
-        if let confirmed = completedTimedOutDeliveries.removeValue(forKey: pending.id) {
-          if !confirmed { _ = staged(pending) }
-        } else {
-          retained.append(pending)
+      if drainOwner == owner {
+        var retained: [PendingFollowUp] = []
+        for pending in remaining + Array(batch[index...]) {
+          if let confirmed = completedTimedOutDeliveries.removeValue(forKey: pending.id) {
+            if !confirmed { _ = staged(pending) }
+          } else {
+            retained.append(pending)
+          }
         }
+        pendingFollowUps = retained + pendingFollowUps
       }
-      pendingFollowUps = retained + pendingFollowUps
     }
     // One reading per target per pass, taken the first time this pass reaches that
     // target and reused for the rest of its queue. Reading again between items is what
@@ -2899,10 +2903,15 @@ public actor GraphStore {
     // costs one probe per target rather than one per message.
     var readings: [UUID: Presence] = [:]
     while index < batch.count {
+      guard drainOwner == owner else { return }
       let pending = batch[index]
       index += 1
+      drainBatch = Array(batch[index...])
+      drainInFlight = pending
       if pendingDeliveryAttempts.contains(pending.id) {
+        drainInFlight = nil
         remaining.append(pending)
+        drainDeferred = remaining
         continue
       }
       guard let node = graph.nodes[id: pending.nodeID], !node.isResolved else {
@@ -2911,6 +2920,7 @@ public actor GraphStore {
         if !pending.recorded, graph.nodes[id: pending.nodeID] != nil {
           recordMemory(pending.nodeID, "while you were away: \(pending.text)")
         }
+        drainInFlight = nil
         continue
       }
       // A watcher's wake is only owed while the watch that asked for it stands and the
@@ -2922,16 +2932,22 @@ public actor GraphStore {
       if let postID = pending.watchedPostID {
         guard let watch = node.mailroomWatch, (node.lastMailroomRead ?? 0) < postID,
           let post = graph.mailroom.first(where: { $0.id == postID }), watch.matches(post.topic)
-        else { continue }
+        else {
+          drainInFlight = nil
+          continue
+        }
       }
       switch MessageBus.deliverability(to: node) {
       case .targetBusyWithACheck:
         remaining.append(staged(pending))
+        drainDeferred = remaining
+        drainInFlight = nil
         continue
       case .some:
         if !pending.recorded {
           recordMemory(pending.nodeID, "while you were away: \(pending.text)")
         }
+        drainInFlight = nil
         continue
       case nil:
         break
@@ -2948,21 +2964,21 @@ public actor GraphStore {
       // is not a state, so the message stays queued for a pass that gets an answer.
       guard presence == .idle else {
         remaining.append(staged(pending))
+        drainDeferred = remaining
+        drainInFlight = nil
         continue
       }
-      // The one await in the walk that used to have no deadline of its own — the send is
-      // the `PTYProcessSession` chain, and a hang here held the queue for the lease's
-      // whole span with nothing logged. Bounded now: a timed-out attempt stays in the
-      // queue until its abandoned operation reports whether it eventually delivered.
+      pendingDeliveryAttempts.insert(pending.id)
       let attempt = DeliveryAttempt()
-      let confirmed = await withDeadline(deliveryDeadline) {
+      let delivered = await withDeadline(deliveryDeadline) {
         let result = await self.deliverToSession(node, pending.text)
         await attempt.complete(result)
         return result
       }
-      guard let confirmed else {
-        pendingDeliveryAttempts.insert(pending.id)
+      guard drainOwner == owner else { return }
+      guard let delivered else {
         remaining.append(pending)
+        drainDeferred = remaining
         Task { [self] in
           let result = await attempt.wait()
           finishTimedOutDelivery(pending.id, confirmed: result)
@@ -2973,20 +2989,25 @@ public actor GraphStore {
             ("node", node.id.uuidString),
             ("deadline_ms", DaemonLog.milliseconds(deliveryDeadline.timeInterval)),
           ])
+        drainInFlight = nil
         continue
       }
-      guard confirmed else {
+      pendingDeliveryAttempts.remove(pending.id)
+      if !delivered {
         DaemonLog.shared.record(
           "delivery-stall",
           DaemonRequestContext.fields + [
             ("node", node.id.uuidString),
             ("deadline_ms", DaemonLog.milliseconds(deliveryDeadline.timeInterval)),
           ])
-        // A completed failure is staged below by `finishTimedOutDelivery`; this branch
-        // covers a transport that answered false before the deadline.
-        _ = staged(pending)
-        continue
+        remaining.append(staged(pending))
+        drainDeferred = remaining
+        if !pending.recorded {
+          announceError(
+            "delivery to \(node.title)'s session failed — follow-up retained for retry")
+        }
       }
+      drainInFlight = nil
     }
   }
 

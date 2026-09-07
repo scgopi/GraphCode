@@ -158,6 +158,7 @@ struct DrainWedgeTests {
   func aHungDeliveryReleasesTheQueueWhenItsLeaseExpires() async {
     let fixture = fixture()
     let delivered = LockIsolated<[String]>([])
+    let typed = LockIsolated<[String]>([])
     let lines = LockIsolated<[String]>([])
     let entered = LockIsolated(false)
     let release = LockIsolated(false)
@@ -166,6 +167,7 @@ struct DrainWedgeTests {
     let store = GraphStore(
       graph: fixture.graph,
       onDeliverMessage: { node, message, _ in
+        typed.withValue { $0.append(message) }
         guard node.id == fixture.hung else {
           delivered.withValue { $0.append(message) }
           return true
@@ -195,8 +197,10 @@ struct DrainWedgeTests {
     await store.handle(.memoNode(fixture.bystander, text: "settle", from: fixture.bystander))
 
     #expect(delivered.value == ["[graphcode] for the bystander"])
+    #expect(typed.value == ["[graphcode] for the hung one", "[graphcode] for the bystander"])
     #expect(lines.value.contains { $0.contains("event=drain-stall") })
     release.setValue(true)
     _ = await wedging.value
+    #expect(typed.value == ["[graphcode] for the hung one", "[graphcode] for the bystander"])
   }
 }
