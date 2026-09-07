@@ -143,8 +143,9 @@ struct OrderingProbeTests {
   /// *some* watch stands, never whether it still matches the post's topic.
   @Test
   func reScopingAWatchDropsTheAbandonedTopicsWakes() async {
-    // Target reads: poll-1 refresh busy (so the wake stages), then idle throughout.
-    let readings = ScriptedReadings([.busy, .idle, .idle])
+    // Target reads: poll-1 refresh busy (so the wake stages) and the settle drain that
+    // follows the post busy too, so the wake is still queued when the re-scope lands.
+    let readings = ScriptedReadings([.busy, .busy, .idle, .idle])
     let delivered = LockIsolated<[String]>([])
     let attachment = Attachment()
     let (store, target, sender) = await makeStore(
@@ -160,6 +161,65 @@ struct OrderingProbeTests {
 
     let texts = plain(delivered)
     print("PROBE-C delivered: \(texts) reads: \(await readings.trace())")
+    #expect(texts.isEmpty)
+    #expect(texts.isEmpty)
+  }
+
+  /// PROBE D — the queue jump needs no exotic timing at all.
+  ///
+  /// Delivering an item is *itself* what makes the target busy, so a drain that hands
+  /// over item 1 will read busy for item 2 and requeue it. The cache, meanwhile, was
+  /// written `idle` by the refresh that opened the same poll and is not rewritten until
+  /// the next one — up to fifteen seconds later. Every follow-up that arrives in that
+  /// window consults the stale idle cache and is typed straight in, ahead of the item
+  /// still queued. This is the ordinary shape of a partly-drained queue, not a race.
+  @Test
+  func aFollowUpArrivingAfterAPartialDrainDoesNotJumpTheRemainder() async {
+    // Target reads: poll-1 refresh busy (both messages stage) and its two settle-drain
+    // reads busy; poll-2 refresh idle (cache goes idle), poll-2 drain: item 1 idle —
+    // delivered, which starts a turn — item 2 busy, requeued.
+    let readings = ScriptedReadings([.busy, .busy, .busy, .idle, .idle, .busy, .idle, .idle])
+    let delivered = LockIsolated<[String]>([])
+    let attachment = Attachment()
+    let (store, target, sender) = await makeStore(
+      readings: readings, delivered: delivered, attachment: attachment)
+    await store.pollPresence()
+    for index in 1...2 {
+      await store.handle(
+        .messageNode(target, text: "staged \(index)", from: sender, followUp: true))
+    }
+    await store.pollPresence()
+    // A peer speaks while the target is mid-turn on what the drain just handed it.
+    await store.handle(.messageNode(target, text: "third", from: sender, followUp: true))
+    await store.pollPresence()
+
+    let texts = plain(delivered)
+    print("PROBE-D order: \(texts) reads: \(await readings.trace())")
+    #expect(texts == ["staged 1", "staged 2", "third"])
+  }
+
+  /// PROBE E — the workaround for probe C: `--off` then `--on --topic beta` is clean.
+  ///
+  /// `--off` is the only path that reaches the staged wakes, so a re-scope spelled as
+  /// two commands drops the abandoned topic's backlog where the one-command re-scope
+  /// keeps it. Worth knowing, because it is what an operator can do today.
+  @Test
+  func offThenOnIsACleanReScope() async {
+    let readings = ScriptedReadings([.busy, .busy, .idle, .idle])
+    let delivered = LockIsolated<[String]>([])
+    let attachment = Attachment()
+    let (store, target, sender) = await makeStore(
+      readings: readings, delivered: delivered, attachment: attachment)
+    await store.pollPresence()
+    await store.handle(.mailroomWatch(on: true, topic: "alpha", from: target))
+    await store.handle(.mailroomPost(text: "an alpha post", topic: "alpha", from: sender))
+
+    await store.handle(.mailroomWatch(on: false, topic: nil, from: target))
+    await store.handle(.mailroomWatch(on: true, topic: "beta", from: target))
+    await store.pollPresence()
+
+    let texts = plain(delivered)
+    print("PROBE-E delivered: \(texts) reads: \(await readings.trace())")
     #expect(texts.isEmpty)
   }
 }
