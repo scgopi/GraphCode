@@ -208,7 +208,8 @@ public actor GraphStore {
   ///
   /// So the guard expires. A drain that outlives its lease is a wedge by definition, and
   /// the next one says so in the daemon log and takes over. The successor recovers the
-  /// suspended batch and invalidates the old owner before taking the queue on.
+  /// deferred and not-yet-started batch, but leaves an in-flight send alone because its
+  /// side effect may already have happened even though the callback never returned.
   private var drainLease: Date?
   private var drainOwner: UUID?
   private var drainBatch: [PendingFollowUp] = []
@@ -2837,8 +2838,7 @@ public actor GraphStore {
           ("held_ms", DaemonLog.milliseconds(heldFor)),
           ("queued", String(pendingFollowUps.count)),
         ])
-      pendingFollowUps = drainDeferred + (drainInFlight.map { [$0] } ?? []) + drainBatch
-        + pendingFollowUps
+      pendingFollowUps = drainDeferred + drainBatch + pendingFollowUps
       drainBatch = []
       drainInFlight = nil
       drainDeferred = []
