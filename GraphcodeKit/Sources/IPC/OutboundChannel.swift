@@ -58,6 +58,11 @@ final class OutboundChannel: @unchecked Sendable {
   /// A non-socket cannot block a writer the way a peer that stopped reading can, so a
   /// plain `write` is both correct and sufficient there.
   private let isSocket: Bool
+  /// Which connection this is, for the log — descriptor numbers are reused within
+  /// minutes, so a line keyed on `fd` alone cannot name a client. The registry passes
+  /// the connection's id (its first eight characters), the same `id=` its `connect`
+  /// line carries.
+  private let tag: String?
   private let condition = NSCondition()
   private var pending: [Frame] = []
   private var pendingBytes = 0
@@ -66,7 +71,11 @@ final class OutboundChannel: @unchecked Sendable {
 
   /// `backlogBudget` is injectable so tests can exercise the valve without moving
   /// megabytes through a socket to reach it.
-  init(fileDescriptor: Int32, backlogBudget: Int = OutboundChannel.maxBacklogBytes) {
+  init(
+    fileDescriptor: Int32, backlogBudget: Int = OutboundChannel.maxBacklogBytes,
+    tag: String? = nil
+  ) {
+    self.tag = tag
     self.fileDescriptor = fileDescriptor
     self.backlogBudget = backlogBudget
     var socketType: Int32 = 0
@@ -164,10 +173,13 @@ final class OutboundChannel: @unchecked Sendable {
     if pendingBytes - data.count > backlogBudget {
       // Not a write failure, so nothing else will report it: say so before dropping the
       // client, or a disconnect this daemon *chose* reads afterwards as one it suffered.
-      let notice =
-        "graphcoded: outbound backlog \(pendingBytes)B exceeded on fd \(fileDescriptor)"
-        + " — dropping a client that stopped reading\n"
-      FileHandle.standardError.write(Data(notice.utf8))
+      DaemonLog.shared.record(
+        "backlog-drop",
+        [
+          ("conn", tag ?? "?"), ("fd", String(fileDescriptor)),
+          ("pending_bytes", String(pendingBytes)),
+          ("budget", String(backlogBudget)),
+        ])
       beginClosingLocked()
     }
 
@@ -247,7 +259,30 @@ final class OutboundChannel: @unchecked Sendable {
       pendingBytes -= frame.data.count
       condition.unlock()
 
-      if !writeFrame(frame.data) {
+      let started = Date()
+      blockedSeconds = 0
+      blockedSince = nil
+      stallReported = false
+      let delivered = writeFrame(frame.data)
+      if let since = blockedSince {
+        blockedSeconds += Date().timeIntervalSince(since)
+        blockedSince = nil
+      }
+      // Only writes that waited or failed are worth a line: a frame that fits the
+      // peer's buffer says nothing, and a healthy graph would drown the log in them.
+      // What this records is the field that names #288 — how long one client held a
+      // write — kept apart from the broadcast's own duration, which now never waits.
+      if blockedSeconds > 0 || !delivered {
+        var fields: [(String, String)] = [
+          ("conn", tag ?? "?"), ("fd", String(fileDescriptor)),
+          ("bytes", String(frame.data.count + FramedMessageIO.headerLength)),
+          ("ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
+          ("blocked_ms", DaemonLog.milliseconds(blockedSeconds)),
+        ]
+        if !delivered { fields.append(("errno", String(lastErrno))) }
+        DaemonLog.shared.record("write", fields)
+      }
+      if !delivered {
         // Either the peer is gone or we were asked to stop. Shut the socket down so the
         // connection loop's reader stops waiting on it too, rather than holding the
         // connection open on one live half.
@@ -262,6 +297,30 @@ final class OutboundChannel: @unchecked Sendable {
     condition.broadcast()
     condition.unlock()
   }
+
+  /// How long the frame just written spent waiting for the peer to make room, and the
+  /// errno a failed write ended on — read by `pump` for the log line, written only by
+  /// the writer thread.
+  private var blockedSeconds: TimeInterval = 0
+  private var lastErrno: Int32 = 0
+  private var stallReported = false
+  /// When the current stretch of waiting began — the first `EAGAIN` of a run of them.
+  /// Measured by the clock rather than by summing `poll` durations: `poll` on a unix
+  /// socket returns early often enough on macOS that the sum badly undercounts a wait
+  /// the writer is plainly still in.
+  private var blockedSince: Date?
+
+  /// Everything the frame has waited so far, the open stretch included.
+  private var blockedSoFar: TimeInterval {
+    blockedSeconds + (blockedSince.map { Date().timeIntervalSince($0) } ?? 0)
+  }
+
+  /// How long a write may wait on its peer before the log names it. A write parked on
+  /// a client that never reads again *completes* never, so a line written only at
+  /// completion would say nothing about exactly the client worth knowing about — the
+  /// #288 stall left no trace for that reason. Past this the writer records the stall
+  /// once, with what it has waited so far, and the completing line carries the total.
+  static let stallThreshold: TimeInterval = 0.25
 
   private var shouldStop: Bool {
     condition.lock()
@@ -315,18 +374,41 @@ final class OutboundChannel: @unchecked Sendable {
           written = write(fileDescriptor, pointer, remaining)
         }
         if written > 0 {
+          if let since = blockedSince {
+            blockedSeconds += Date().timeIntervalSince(since)
+            blockedSince = nil
+          }
           remaining -= written
           pointer = pointer.advanced(by: written)
           continue
         }
         if written < 0 && errno == EINTR { continue }
-        guard written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) else { return false }
+        guard written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) else {
+          lastErrno = written < 0 ? errno : 0
+          return false
+        }
         // The peer's buffer is full. Wait for room in slices, so a close is noticed
         // promptly even when the peer never reads again.
+        if blockedSince == nil { blockedSince = Date() }
         var descriptor = pollfd(fd: fileDescriptor, events: Int16(POLLOUT), revents: 0)
         let ready = poll(&descriptor, 1, Self.writabilityPollMilliseconds)
-        if ready < 0 && errno != EINTR { return false }
+        if !stallReported && blockedSoFar >= Self.stallThreshold {
+          stallReported = true
+          DaemonLog.shared.record(
+            "write-stall",
+            [
+              ("conn", tag ?? "?"), ("fd", String(fileDescriptor)),
+              ("bytes", String(data.count + FramedMessageIO.headerLength)),
+              ("remaining", String(remaining)),
+              ("blocked_ms", DaemonLog.milliseconds(blockedSoFar)),
+            ])
+        }
+        if ready < 0 && errno != EINTR {
+          lastErrno = errno
+          return false
+        }
         if ready > 0 && descriptor.revents & Int16(POLLERR | POLLHUP | POLLNVAL) != 0 {
+          lastErrno = EPIPE
           return false
         }
       }
@@ -369,7 +451,9 @@ public enum OutboundChannels {
   /// dropped as disconnected the moment it arrived.
   /// `backlogBudget` is `nil` for the standard budget; tests inject a small one so the
   /// valve can be exercised without moving megabytes through a socket.
-  public static func open(_ fileDescriptor: Int32, backlogBudget: Int? = nil) {
+  public static func open(
+    _ fileDescriptor: Int32, backlogBudget: Int? = nil, tag: String? = nil
+  ) {
     lock.lock()
     let existing = channels[fileDescriptor]
     guard existing?.isAlive != true else {
@@ -378,7 +462,7 @@ public enum OutboundChannels {
     }
     channels[fileDescriptor] = OutboundChannel(
       fileDescriptor: fileDescriptor,
-      backlogBudget: backlogBudget ?? OutboundChannel.maxBacklogBytes)
+      backlogBudget: backlogBudget ?? OutboundChannel.maxBacklogBytes, tag: tag)
     lock.unlock()
     // Detached rather than closed: the number belongs to the connection being opened
     // here, so shutting it down would tear that one down.

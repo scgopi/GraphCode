@@ -992,6 +992,21 @@ extension GraphcodeCommand {
     return "posted #\(latest)\(suffix)"
   }
 
+  /// The timeout the CLI prints: which phase it was in, for how long, and the two
+  /// numbers that find this run in `graphcoded.log` — its pid (the daemon logs each
+  /// connection's `peer=`) and how many frames it had sent (the daemon's `seq=`).
+  public static func renderTimeout(
+    phase: String, elapsed: TimeInterval, pid: Int32, framesSent: Int
+  ) -> String {
+    let seconds = String(format: "%.1f", elapsed)
+    return """
+      timed out after \(seconds)s \(phase) (pid \(pid), \(framesSent) frame\(framesSent == 1 ? "" : "s") \
+      sent). The command may still have been applied — check with `graphcode status`. \
+      graphcoded.log lines with peer=\(pid) are this run's; seq=\(framesSent) is the frame it \
+      was waiting on.
+      """
+  }
+
   public static func describe(_ error: ParseError) -> String {
     switch error {
     case .unknownCommand(let name): return "unknown command: \(name)"

@@ -125,7 +125,7 @@ public actor ProjectRegistry {
     // and a descriptor with no channel silently delivers nothing. It also gives a reused
     // descriptor number a fresh channel, so nothing inherits a previous connection's
     // writer.
-    OutboundChannels.open(fileDescriptor)
+    OutboundChannels.open(fileDescriptor, tag: id.tag)
     connectionFileDescriptors[id] = fileDescriptor
     startPresencePolling()
   }
@@ -749,7 +749,15 @@ public actor ProjectRegistry {
   // MARK: - Unicast reply
 
   private func send(_ event: DaemonEvent, to fileDescriptor: Int32) {
+    let started = Date()
     guard let data = try? JSONEncoder().encode(event) else { return }
+    DaemonLog.shared.record(
+      "reply",
+      DaemonRequestContext.fields + [
+        ("kind", event.kindName), ("fd", String(fileDescriptor)),
+        ("bytes", String(data.count)),
+        ("encode_ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
+      ])
     // Queued rather than written inline for the same reason `GraphStore.send` queues:
     // this is actor-isolated, and a blocking write of a full-graph frame hands the actor
     // to whichever client is slowest to read it. No superseding key — a unicast reply
