@@ -352,7 +352,7 @@ public actor ProjectRegistry {
       // `store(forProjectPath:)` would run its load-time `ensureUnattendedSessions`,
       // *starting* sessions on the way to killing them. Memory goes with each loop, the
       // same as single-node deletion.
-      let graph = await stores[canonicalPath]?.graph ?? persistence.loadGraph(path: canonicalPath)
+      let graph = await stores[canonicalPath]?.graph ?? writer.load(path: canonicalPath)
       for node in graph?.nodesAtAnyDepth ?? [] {
         terminateSession?(node, canonicalPath)
         NodeMemory.remove(projectPath: canonicalPath, nodeID: node.id)
@@ -483,7 +483,7 @@ public actor ProjectRegistry {
       guard path != canonical,
         stored.prefix(while: { $0 != path }).contains(where: { Self.canonicalize($0) == canonical })
       else { return true }
-      let graph = persistence.loadGraph(path: path)
+      let graph = writer.load(path: path)
       let isEmpty = (graph?.nodesAtAnyDepth.isEmpty ?? true) && (graph?.mailroom.isEmpty ?? true)
       if isEmpty { persistence.forgetProject(path: path) }
       return !isEmpty
@@ -619,7 +619,7 @@ public actor ProjectRegistry {
   private func store(forProjectPath path: String) async -> GraphStore {
     if let existing = stores[path] { return existing }
     let scope = LoopGraphScope(projectPath: path, name: Self.displayName(for: path))
-    let graph = persistence.loadGraph(path: path) ?? LoopGraph(scope: scope)
+    let graph = writer.load(path: path) ?? LoopGraph(scope: scope)
     let persistence = self.persistence
     // A cross-graph spawn arrives here as a plain request; hopping through an unstructured
     // `Task` is what lets this actor re-enter itself to reach a *different* store without

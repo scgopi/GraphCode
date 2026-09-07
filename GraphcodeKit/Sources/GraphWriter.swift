@@ -35,6 +35,20 @@ public final class GraphWriter: @unchecked Sendable {
     queue.async { [self] in drain() }
   }
 
+  /// The newest snapshot of a project — the one still queued, if there is one, else
+  /// the file. Every reader of the persisted graph goes through here rather than
+  /// through the file: a save that has left the actor and not yet reached the disk is
+  /// otherwise invisible, and a delete of a *closed* project (no live store) that read
+  /// the file to find the loops whose sessions it must end would end fewer than exist
+  /// and leave the rest running.
+  public func load(path: String) -> LoopGraph? {
+    lock.lock()
+    let queued = pending[path]
+    lock.unlock()
+    if let queued { return queued }
+    return persistence.loadGraph(path: path)
+  }
+
   /// Returns once everything queued so far is on disk.
   public func flush() {
     queue.sync { drain() }

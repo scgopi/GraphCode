@@ -184,6 +184,30 @@ struct MailroomPersistenceTests {
     #expect(try #require(persistence.loadGraph(path: path)).mailroom == graph.mailroom)
   }
 
+  /// A reader sees the newest snapshot whether or not it has reached the disk yet —
+  /// what keeps a delete of a closed project from missing loops still queued.
+  @Test
+  func aLoadReturnsTheQueuedSnapshotBeforeTheDiskHasIt() throws {
+    let directory = makeDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let persistence = ProjectPersistence(baseDirectory: directory)
+    let writer = GraphWriter(persistence: persistence)
+    let path = "/tmp/queued-\(UUID().uuidString.prefix(6))"
+    var graph = LoopGraph(project: ProjectRef(path: path, name: "queued"))
+    graph.nodes.append(LoopNode(title: "One", loopType: .turnBased, firstInstruction: "Work"))
+    writer.save(graph)
+    writer.flush()
+    graph.nodes.append(LoopNode(title: "Two", loopType: .turnBased, firstInstruction: "Work"))
+    graph.nodes.append(LoopNode(title: "Three", loopType: .turnBased, firstInstruction: "Work"))
+    // Queued but, as far as this test can force it, not yet written: the writer's own
+    // answer must already be the three-loop graph either way.
+    writer.save(graph)
+    #expect(writer.load(path: path)?.nodes.count == 3)
+    writer.flush()
+    #expect(persistence.loadGraph(path: path)?.nodes.count == 3)
+    #expect(writer.load(path: "/tmp/never-saved") == nil)
+  }
+
   /// The writer takes a burst and lands the newest snapshot once; `flush` returns with
   /// it on disk.
   @Test

@@ -268,10 +268,12 @@ struct ProjectRegistryTests {
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
     let killed = LockIsolated<Set<UUID>>([])
+    // Reads the file straight after each command, so every save is flushed first.
     let registry = ProjectRegistry(
       persistenceDirectory: directory,
       ensureSession: { _, _ in },
-      terminateSession: { node, _ in _ = killed.withValue { $0.insert(node.id) } })
+      terminateSession: { node, _ in _ = killed.withValue { $0.insert(node.id) } },
+      persistsSynchronously: true)
     let persistence = ProjectPersistence(baseDirectory: directory)
     let connectionID = UUID()
     await registry.addConnection(id: connectionID, fileDescriptor: -1)
@@ -326,6 +328,9 @@ struct ProjectRegistryTests {
         command: .createNode(
           NodeDraft(title: "Watcher", loopType: .timeBased, triggerPrompt: "/loop 1h Check"))),
       connectionID: connectionID)
+    // The first daemon's last act on its way out is to flush its writer; the second
+    // daemon below only ever exists after that.
+    firstRun.flushPersistence()
     let persistence = ProjectPersistence(baseDirectory: directory)
     let nodeID = persistence.loadGraph(path: "/tmp/project-g")?.nodes.first?.id
 
