@@ -58,13 +58,14 @@ public struct ProjectPersistence: Sendable {
     }
     let roomURL = mailroomURL(forProjectPath: graph.project.path)
     let digest = MailroomDigest(of: graph.mailroom)
-    guard !Self.roomDigests.matches(digest, for: roomURL.path)
-      || !FileManager.default.fileExists(atPath: roomURL.path)
+    guard
+      !Self.roomDigests.matches(digest, for: roomURL.path)
+        || !FileManager.default.fileExists(atPath: roomURL.path)
     else { return }
     if graph.mailroom.isEmpty {
       do {
         try FileManager.default.removeItem(at: roomURL)
-      } catch where !FileManager.default.fileExists(atPath: roomURL.path) {
+      } catch  where !FileManager.default.fileExists(atPath: roomURL.path) {
         Self.roomDigests.set(digest, for: roomURL.path)
       } catch {
         return

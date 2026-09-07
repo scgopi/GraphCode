@@ -2884,7 +2884,7 @@ public actor GraphStore {
         var retained: [PendingFollowUp] = []
         for pending in remaining + Array(batch[index...]) {
           if let confirmed = completedTimedOutDeliveries.removeValue(forKey: pending.id) {
-            if !confirmed { _ = staged(pending) }
+            if !confirmed { retained.append(staged(pending)) }
           } else {
             retained.append(pending)
           }
@@ -2982,6 +2982,9 @@ public actor GraphStore {
         Task { [self] in
           let result = await attempt.wait()
           finishTimedOutDelivery(pending.id, confirmed: result)
+          // A failure learned this late has no command to ride the drain of; without
+          // its own it waits for the next poll to retry, or for good if none comes.
+          if !result { await drainPendingFollowUps() }
         }
         DaemonLog.shared.record(
           "delivery-stall",
@@ -3011,11 +3014,20 @@ public actor GraphStore {
     }
   }
 
+  /// The abandoned send's verdict, whenever it comes. Confirmed means the session got
+  /// the text, late, so the item leaves the queue and is never sent again. Not confirmed
+  /// means the transport failed, and the item is what a fast failure is: staged to memory
+  /// once and kept on the queue, in its place, for the next pass. `staged(_:)` returns
+  /// the recorded copy rather than enqueueing it — dropping that return was how a
+  /// timed-out failure silently left the queue while a prompt one stayed.
   private func finishTimedOutDelivery(_ id: UUID, confirmed: Bool) {
     guard pendingDeliveryAttempts.remove(id) != nil else { return }
     if let index = pendingFollowUps.firstIndex(where: { $0.id == id }) {
-      let pending = pendingFollowUps.remove(at: index)
-      if !confirmed { _ = staged(pending) }
+      if confirmed {
+        pendingFollowUps.remove(at: index)
+      } else {
+        pendingFollowUps[index] = staged(pendingFollowUps[index])
+      }
     } else {
       completedTimedOutDeliveries[id] = confirmed
     }
