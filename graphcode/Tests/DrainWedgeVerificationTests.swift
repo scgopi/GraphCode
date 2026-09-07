@@ -52,7 +52,8 @@ struct DrainWedgeVerificationTests {
         }
         while !release.value { try? await Task.sleep(for: .milliseconds(20)) }
         return PresenceReading(presence: .busy, confidence: .reported)
-      })
+      },
+      presenceReadDeadline: .milliseconds(50))
 
     await store.handle(
       .messageNode(fixture.hung, text: "for the hung one", from: nil, followUp: true))
@@ -82,7 +83,8 @@ struct DrainWedgeVerificationTests {
         }
         while !release.value { try? await Task.sleep(for: .milliseconds(20)) }
         return PresenceReading(presence: .idle, confidence: .reported)
-      })
+      },
+      presenceReadDeadline: .milliseconds(50))
 
     await store.handle(
       .messageNode(fixture.hung, text: "for the hung one", from: nil, followUp: true))
@@ -110,7 +112,8 @@ struct DrainWedgeVerificationTests {
         }
         while !release.value { try? await Task.sleep(for: .milliseconds(20)) }
         return PresenceReading(presence: .busy, confidence: .reported)
-      })
+      },
+      presenceReadDeadline: .milliseconds(50))
 
     await store.handle(.refreshUsage)
 
@@ -187,7 +190,6 @@ struct DeliveryWedgeTests {
   func aHungDeliveryStillFreezesEveryOtherLoopsFollowUps() async {
     let fixture = fixture()
     let delivered = LockIsolated<[String]>([])
-    let announced = LockIsolated<[String]>([])
     let entered = LockIsolated(false)
     let release = LockIsolated(false)
     let store = GraphStore(
@@ -203,7 +205,7 @@ struct DeliveryWedgeTests {
       },
       // Both loops read idle, so the drain tries to deliver to both.
       onReadPresence: { _, _ in PresenceReading(presence: .idle, confidence: .reported) },
-      onAnnounceError: { message in announced.withValue { $0.append(message) } })
+      deliveryDeadline: .milliseconds(50))
 
     // Queued while both are mid-turn (cached `busy`), then delivered by the drain.
     let wedging = Task {
@@ -213,18 +215,18 @@ struct DeliveryWedgeTests {
     await settle(until: entered)
     #expect(entered.value)
 
-    // The store keeps answering, and the bystander's mail never moves.
+    // The store keeps answering, and the bystander's mail moves after the timeout.
     await store.handle(
       .messageNode(fixture.bystander, text: "for the bystander", from: nil, followUp: true))
-    for _ in 0..<10 {
-      await store.handle(.refreshUsage)
-    }
+    try? await Task.sleep(for: .milliseconds(100))
+    await store.handle(.refreshUsage)
 
-    #expect(delivered.value.isEmpty)
-    #expect(announced.value.isEmpty)
+    #expect(delivered.value == ["[graphcode] for the bystander"])
     #expect(!wedging.isCancelled)
 
     release.setValue(true)
     _ = await wedging.value
+    try? await Task.sleep(for: .milliseconds(50))
+    #expect(delivered.value == ["[graphcode] for the bystander", "[graphcode] for the hung one"])
   }
 }

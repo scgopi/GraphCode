@@ -176,6 +176,7 @@ public actor GraphStore {
   /// A deferred delivery: a `--follow-up` message, or a Mailroom watcher's wake for one
   /// post (`watchedPostID`), waiting for its target to go idle.
   struct PendingFollowUp: Equatable {
+    let id: UUID
     let nodeID: UUID
     let text: String
     /// The post a watcher's wake is about — what lets `mail watch --off` drop the wakes
@@ -189,6 +190,8 @@ public actor GraphStore {
   }
 
   private var pendingFollowUps: [PendingFollowUp] = []
+  private var pendingDeliveryAttempts: Set<UUID> = []
+  private var completedTimedOutDeliveries: [UUID: Bool] = [:]
   /// `drainPendingFollowUps` runs across several awaits, and the presence poll that
   /// calls it runs every fifteen seconds: without this, a second drain started while
   /// the first was suspended delivered the same items again and, on finishing, wrote
@@ -2750,7 +2753,8 @@ public actor GraphStore {
     // dropping it.
     if followUp, deliversLater(to: target) {
       pendingFollowUps.append(
-        PendingFollowUp(nodeID: nodeID, text: message, watchedPostID: watchedPostID))
+        PendingFollowUp(
+          id: UUID(), nodeID: nodeID, text: message, watchedPostID: watchedPostID))
       return
     }
 
@@ -2873,7 +2877,17 @@ public actor GraphStore {
     // of the wedge was that a drain which never returns strands them there. It cannot
     // now — the reading below is bounded — but what the pass did not resolve belongs on
     // the queue rather than in a variable about to go out of scope, whatever the exit.
-    defer { pendingFollowUps = remaining + Array(batch[index...]) + pendingFollowUps }
+    defer {
+      var retained: [PendingFollowUp] = []
+      for pending in remaining + Array(batch[index...]) {
+        if let confirmed = completedTimedOutDeliveries.removeValue(forKey: pending.id) {
+          if !confirmed { _ = staged(pending) }
+        } else {
+          retained.append(pending)
+        }
+      }
+      pendingFollowUps = retained + pendingFollowUps
+    }
     // One reading per target per pass, taken the first time this pass reaches that
     // target and reused for the rest of its queue. Reading again between items is what
     // let a turn ending *mid-drain* reorder the queue: three messages for one loop went
@@ -2887,6 +2901,10 @@ public actor GraphStore {
     while index < batch.count {
       let pending = batch[index]
       index += 1
+      if pendingDeliveryAttempts.contains(pending.id) {
+        remaining.append(pending)
+        continue
+      }
       guard let node = graph.nodes[id: pending.nodeID], !node.isResolved else {
         // Its work is over, but the message must not go with the queue entry: the log is
         // what the loop's next wake reads, and for a resolved loop that is all there is.
@@ -2934,13 +2952,29 @@ public actor GraphStore {
       }
       // The one await in the walk that used to have no deadline of its own — the send is
       // the `PTYProcessSession` chain, and a hang here held the queue for the lease's
-      // whole span with nothing logged. Bounded now: whatever it owes on the deadline
-      // passing is staged to memory and dropped below, and the note is logged so frozen
-      // and working do not look identical (`#289` diagnostics).
-      let confirmed =
-        await withDeadline(deliveryDeadline) {
-          await self.deliverToSession(node, pending.text)
-        } ?? false
+      // whole span with nothing logged. Bounded now: a timed-out attempt stays in the
+      // queue until its abandoned operation reports whether it eventually delivered.
+      let attempt = DeliveryAttempt()
+      let confirmed = await withDeadline(deliveryDeadline) {
+        let result = await self.deliverToSession(node, pending.text)
+        await attempt.complete(result)
+        return result
+      }
+      guard let confirmed else {
+        pendingDeliveryAttempts.insert(pending.id)
+        remaining.append(pending)
+        Task { [self] in
+          let result = await attempt.wait()
+          finishTimedOutDelivery(pending.id, confirmed: result)
+        }
+        DaemonLog.shared.record(
+          "delivery-stall",
+          DaemonRequestContext.fields + [
+            ("node", node.id.uuidString),
+            ("deadline_ms", DaemonLog.milliseconds(deliveryDeadline.timeInterval)),
+          ])
+        continue
+      }
       guard confirmed else {
         DaemonLog.shared.record(
           "delivery-stall",
@@ -2948,14 +2982,21 @@ public actor GraphStore {
             ("node", node.id.uuidString),
             ("deadline_ms", DaemonLog.milliseconds(deliveryDeadline.timeInterval)),
           ])
-        // Not left on the queue, not thrown away unwritten: the Mailroom mirror has the
-        // content, and the memory log's entry is what the target's next wake reads — the
-        // durable half a queue entry was only ever going to point at. A drop that does
-        // not record is the loss, and `staged(_:)` is where the record is canonical
-        // ("follow-up staged:") and happens exactly once.
+        // A completed failure is staged below by `finishTimedOutDelivery`; this branch
+        // covers a transport that answered false before the deadline.
         _ = staged(pending)
         continue
       }
+    }
+  }
+
+  private func finishTimedOutDelivery(_ id: UUID, confirmed: Bool) {
+    guard pendingDeliveryAttempts.remove(id) != nil else { return }
+    if let index = pendingFollowUps.firstIndex(where: { $0.id == id }) {
+      let pending = pendingFollowUps.remove(at: index)
+      if !confirmed { _ = staged(pending) }
+    } else {
+      completedTimedOutDeliveries[id] = confirmed
     }
   }
 
@@ -3779,5 +3820,23 @@ public actor GraphStore {
       requests = []
       return taken
     }
+  }
+}
+
+private actor DeliveryAttempt {
+  private var result: Bool?
+  private var waiter: CheckedContinuation<Bool, Never>?
+
+  func complete(_ result: Bool) {
+    guard self.result == nil else { return }
+    self.result = result
+    guard let waiter else { return }
+    self.waiter = nil
+    waiter.resume(returning: result)
+  }
+
+  func wait() async -> Bool {
+    if let result { return result }
+    return await withCheckedContinuation { waiter = $0 }
   }
 }
