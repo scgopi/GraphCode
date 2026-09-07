@@ -104,7 +104,9 @@ public enum SessionBriefing {
       ```
 
       Post decisions made, dead ends hit, claims staked ("I'm taking issue #12") —
-      a notice for a peer, not a transcript. Check your inbox before you rely on
+      a notice for a peer, not a transcript.
+      Keep Mailroom posts within 1,024 UTF-8 bytes; summarize longer text and link to details.
+      Check your inbox before you rely on
       nobody having got there first, and watch a topic when you want the room to
       come to you. A big backlog prints as one line per post and says so;
       `read <post-id>` then spends context only on the ones that turned out to matter.
