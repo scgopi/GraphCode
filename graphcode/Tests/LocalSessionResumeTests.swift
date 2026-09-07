@@ -21,12 +21,13 @@ struct LocalSessionResumeTests {
   private let projectPath = "/tmp/widget"
 
   private func surface(
-    nodeID: UUID = UUID(), backend: CLISessionBackendKind = .claudeCode
+    nodeID: UUID = UUID(), backend: CLISessionBackendKind = .claudeCode,
+    loopType: LoopType = .goalBased
   ) -> GhosttyTerminalView {
     GhosttyTerminalView(
       surfaceID: nodeID,
       sessionName: SurfaceRef(id: nodeID, launchesClaudeCode: true).zmxSessionName,
-      launchesClaudeCode: true, backend: backend, loopType: .goalBased,
+      launchesClaudeCode: true, backend: backend, loopType: loopType,
       initialPrompt: "Work toward this goal until it is met: ship it",
       workingDirectory: projectPath, projectPath: projectPath, onProcessExited: { _ in })
   }
@@ -61,21 +62,46 @@ struct LocalSessionResumeTests {
   }
 
   @Test
-  func aNodeWithNothingBankedStillLaunchesFresh() throws {
+  func anAttendedNodeWithNothingBankedStillLaunchesFresh() throws {
     let nodeID = UUID()
-    let view = surface(nodeID: nodeID)
+    let view = surface(nodeID: nodeID, loopType: .turnBased)
     let command = withBankedID(nil, forNode: nodeID) {
       view.localResumeOrFreshCommand(agentLaunch: ["claude", "the prompt"])
     }
     // Nothing to resume is the first launch, and the fresh argv is what it gets —
     // behind its own dial line now. The launch used to be the one silent branch,
     // which is why the duplicate-session investigation of 2026-09-02 started blind.
+    // Attended, so this pane really is the only launcher: no daemon starts a turn-based
+    // loop, and a pane that waited for one would wait out its whole minute.
     #expect(command?.first == "/bin/sh")
     let script = try #require(command?.last)
     #expect(script.contains("open fresh"))
     #expect(script.contains("'attach'"))
     #expect(script.contains("the prompt"))
     #expect(!script.contains("--resume"))
+  }
+
+  /// The restart bug: `graphcoded` kills the session and starts it again with `--resume`,
+  /// and the app remounts the pane on the same beat. With nothing banked the pane used to
+  /// launch *fresh* — creating the session the daemon was about to resume, winning often
+  /// enough that the agent came up on its goal instead of its conversation. Local Copilot
+  /// took this branch every time, because nothing banks its session id on this machine.
+  @Test
+  func anUnattendedNodeWithNothingBankedWaitsForTheDaemonInsteadOfRacingIt() throws {
+    for loopType in [LoopType.goalBased, .timeBased] {
+      let nodeID = UUID()
+      let view = surface(nodeID: nodeID, backend: .copilotCLI, loopType: loopType)
+      let command = withBankedID(nil, forNode: nodeID) {
+        view.localResumeOrFreshCommand(agentLaunch: ["copilot", "the prompt"])
+      }
+      let script = try #require(command?.last)
+      // It waits on the session the daemon creates, and attaches bare when it appears.
+      #expect(script.contains("until"))
+      #expect(script.contains("open await-daemon"))
+      #expect(script.contains("attach"))
+      // The whole point: the opening prompt is never typed, so the goal is not re-issued.
+      #expect(!script.contains("the prompt"))
+    }
   }
 
   @Test
