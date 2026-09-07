@@ -106,6 +106,11 @@ DaemonLog.shared.record(
 // process just never lived long enough to run it.
 signal(SIGPIPE, SIG_IGN)
 
+// Before the shutdown handlers below, which flush its writer on the way out.
+let registry = ProjectRegistry(
+  persistenceDirectory: supportDirectory,
+  reapCondemnedSessions: true)
+
 // Termination is handled on the main queue, not in signal context (#167). The handlers
 // this replaces called `exit(0)` from inside the signal handler itself, and `exit` is
 // not async-signal-safe: it runs atexit and runtime teardown after interrupting whatever
@@ -124,6 +129,7 @@ signal(SIGINT, SIG_IGN)
 func makeShutdownSource(for signalNumber: Int32) -> DispatchSourceSignal {
   let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
   source.setEventHandler {
+    registry.flushPersistence()
     unlink(path)
     exit(0)
   }
@@ -156,6 +162,7 @@ func makeStalenessTimer() -> DispatchSourceTimer? {
     guard let current = ExecutableIdentity.of(path: executablePath), current != launchIdentity
     else { return }
     DaemonLog.shared.record("shutdown", [("reason", "binary-replaced")])
+    registry.flushPersistence()
     unlink(path)
     exit(0)
   }
@@ -164,10 +171,6 @@ func makeStalenessTimer() -> DispatchSourceTimer? {
 }
 
 let stalenessTimer = makeStalenessTimer()
-
-let registry = ProjectRegistry(
-  persistenceDirectory: supportDirectory,
-  reapCondemnedSessions: true)
 
 /// Bridges a blocking socket read onto a background queue so the `Task` awaiting it
 /// never blocks Swift concurrency's cooperative thread pool — the whole connection
