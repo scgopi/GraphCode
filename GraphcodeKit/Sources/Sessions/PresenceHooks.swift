@@ -46,6 +46,11 @@ public enum PresenceHooks {
     directory.appendingPathComponent("usage.sh")
   }
 
+  /// The `Notification` reporter — the one hook whose meaning depends on its payload.
+  public static var notificationScriptFile: URL {
+    directory.appendingPathComponent("notification.sh")
+  }
+
   /// Which of a backend's lifecycle events mean what, in the backend's own event names.
   ///
   /// `nil` for a backend with no hook mechanism at all, which is the honest answer for
@@ -107,6 +112,52 @@ public enum PresenceHooks {
   /// nicety went wrong.
   static func reportActivity(scriptPath: String) -> String {
     "if [ -r \(scriptPath) ]; then /bin/sh \(scriptPath); fi; exit 0"
+  }
+
+  /// The `Notification` body: the reporter decides from the payload, and a missing
+  /// reporter falls back to what every notification meant before it existed —
+  /// `awaitingInput`, the state a human is shown when a loop needs them. Falling back
+  /// to *that* rather than to nothing is deliberate: a loop that genuinely asked a
+  /// question must never become invisible because a script was not there.
+  static func reportNotification(scriptPath: String, zmxPath: String) -> String {
+    "if [ -r \(scriptPath) ]; then /bin/sh \(scriptPath); else "
+      + "\(report(.awaitingInput, zmxPath: zmxPath, clearingActivity: true)); fi; exit 0"
+  }
+
+  /// What a `Notification` means, by its kind (issue #306).
+  ///
+  /// Claude Code fires a `Notification` for several unrelated things and names which in
+  /// `notification_type`. Mapping every one to `awaitingInput` was the defect: about a
+  /// minute after a turn ends it sends `idle_prompt` — "still idle" — and that flipped
+  /// every resting loop to *needs a human*. Staged follow-ups and Mailroom wakes deliver
+  /// only on `presence == idle`, so for any Claude Code loop idle over a minute, which
+  /// is most loops most of the time, `mail watch` and `node send --follow-up` silently
+  /// delivered nothing (0 of 18 measured), and the sidebar said NEEDS YOU of a loop that
+  /// needed nobody.
+  ///
+  /// The mapping errs the other way on purpose. Only `idle_prompt` confirms idle.
+  /// `permission_prompt` and `elicitation_dialog` are a real question to the human and
+  /// stay `awaitingInput`; `auth_success` is neither and leaves presence alone; and a
+  /// kind this script does not know — including no kind at all, from a Claude Code that
+  /// predates the field — keeps today's behaviour, because the failure on that side is
+  /// worse: a loop that genuinely needs someone, invisible.
+  static func notificationScript(zmxPath: String) -> String {
+    """
+    # Written by graphcode. Reports what a Claude Code notification means for this
+    # session's presence: idle_prompt confirms idle; a real prompt to the human is
+    # awaitingInput; anything unknown is treated as one, never as idle.
+    [ -n "$ZMX_SESSION" ] || exit 0
+    payload=$(head -c 4096 | tr '\\n' ' ')
+    kind=$(printf '%s' "$payload" |
+      sed -n 's/.*"notification_type"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
+    case "$kind" in
+      idle_prompt) presence=idle ;;
+      auth_success) exit 0 ;;
+      *) presence=awaitingInput ;;
+    esac
+    \(singleQuoted(zmxPath)) set "$ZMX_SESSION" "presence=$presence" activity= >/dev/null 2>&1
+    exit 0
+    """
   }
 
   /// The `Stop`/`SessionEnd` body that runs `usageScript`, guarded the same way and for
@@ -286,6 +337,14 @@ public enum PresenceHooks {
 
   public static let remoteUsageScriptExpression = "\"$HOME/.graphcode/hooks/usage.sh\""
 
+  /// Where `notificationScript` lands, in the same two shapes.
+  static var localNotificationScriptExpression: String {
+    singleQuoted(notificationScriptFile.path)
+  }
+
+  public static let remoteNotificationScriptExpression =
+    "\"$HOME/.graphcode/hooks/notification.sh\""
+
   public static let remoteOpenCodeConfigPath = "$HOME/.graphcode/hooks/openCode.json"
   public static let remoteOpenCodePluginExpression =
     "\"$HOME/.graphcode/hooks/opencode-presence.js\""
@@ -308,7 +367,8 @@ public enum PresenceHooks {
   public static func json(
     forBackend backend: CLISessionBackendKind, zmxPath: String,
     sessionsDirectory: String? = nil, activityScriptPath: String? = nil,
-    usageScriptPath: String? = nil, openCodePluginPath: String? = nil
+    usageScriptPath: String? = nil, openCodePluginPath: String? = nil,
+    notificationScriptPath: String? = nil
   ) -> String? {
     if backend == .openCode {
       return OpenCodePresencePlugin.config(
@@ -318,10 +378,15 @@ public enum PresenceHooks {
     let sessions = sessionsDirectory ?? localSessionsExpression
     let script = activityScriptPath ?? localActivityScriptExpression
     let usage = usageScriptPath ?? localUsageScriptExpression
+    let notification = notificationScriptPath ?? localNotificationScriptExpression
     let hooks = events.reduce(into: [String: [Matcher]]()) { result, event in
       let isToolUse = event.0 == "PreToolUse"
+      let isNotification = event.0 == "Notification" && backend == .claudeCode
       var commands = [
-        Command(command: report(event.1, zmxPath: zmxPath, clearingActivity: !isToolUse))
+        Command(
+          command: isNotification
+            ? reportNotification(scriptPath: notification, zmxPath: zmxPath)
+            : report(event.1, zmxPath: zmxPath, clearingActivity: !isToolUse))
       ]
       if isToolUse && backend == .claudeCode {
         commands.append(Command(command: reportActivity(scriptPath: script)))
@@ -362,6 +427,8 @@ public enum PresenceHooks {
         .write(to: activityScriptFile, atomically: true, encoding: .utf8)
       try? usageScript(zmxPath: ZmxLocator.binaryURL.path)
         .write(to: usageScriptFile, atomically: true, encoding: .utf8)
+      try? notificationScript(zmxPath: ZmxLocator.binaryURL.path)
+        .write(to: notificationScriptFile, atomically: true, encoding: .utf8)
       if backend == .openCode {
         // Not best-effort: the config names this file, and OpenCode reports a plugin it
         // cannot load as an error in the session. No plugin means no config.
@@ -418,7 +485,8 @@ public enum PresenceHooks {
         forBackend: .claudeCode, zmxPath: "zmx",
         sessionsDirectory: remoteSessionsExpression,
         activityScriptPath: remoteActivityScriptExpression,
-        usageScriptPath: remoteUsageScriptExpression)
+        usageScriptPath: remoteUsageScriptExpression,
+        notificationScriptPath: remoteNotificationScriptExpression)
     else { return nil }
     // `|| true` so both call sites can chain it with `&&` — a failed write must never
     // block the launch it precedes. The reporters go first: the settings that name them
@@ -429,6 +497,8 @@ public enum PresenceHooks {
       + " > \(remoteActivityScriptExpression)"
       + " && printf '%s' \(singleQuoted(usageScript(zmxPath: "zmx")))"
       + " > \(remoteUsageScriptExpression)"
+      + " && printf '%s' \(singleQuoted(notificationScript(zmxPath: "zmx")))"
+      + " > \(remoteNotificationScriptExpression)"
       + " && printf '%s' \(singleQuoted(json))"
       + " > \"\(remotePathExpression)\"; } 2>/dev/null || true"
   }
