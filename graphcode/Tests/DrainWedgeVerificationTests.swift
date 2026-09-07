@@ -196,6 +196,10 @@ struct DeliveryWedgeTests {
   /// The same wedge as beta5, reached through the send instead of the read: one loop's
   /// `zmx send` never returns and every other loop's staged mail stops moving, silently,
   /// for as long as the process lives.
+  ///
+  /// The hung send eventually *succeeds*: the text was typed, late, so the store must
+  /// count that delivery and never send the message a second time. The closure records
+  /// the late success itself — a hung transport that returns is still the transport.
   @Test
   func aHungDeliveryStillFreezesEveryOtherLoopsFollowUps() async {
     let fixture = fixture()
@@ -214,6 +218,7 @@ struct DeliveryWedgeTests {
         }
         entered.setValue(true)
         while !release.value { try? await Task.sleep(for: .milliseconds(5)) }
+        delivered.withValue { $0.append(message) }
         return true
       },
       // Both loops read idle, so the drain tries to deliver to both.
@@ -227,18 +232,82 @@ struct DeliveryWedgeTests {
     await settle(until: entered)
     #expect(entered.value)
 
-    // The store keeps answering, and the bystander's mail moves after the timeout.
+    // The store keeps answering: the wedged command returns when its send's deadline
+    // passes, closure still hung, and the pass after it serves the bystander — whose
+    // message was queued during that drain and so waits for the next one.
     await store.handle(
       .messageNode(fixture.bystander, text: "for the bystander", from: nil, followUp: true))
-    await settle(until: delivered, reaches: 1)
+    _ = await wedging.value
     await store.handle(.refreshUsage)
 
     #expect(delivered.value == ["[graphcode] for the bystander"])
-    #expect(!wedging.isCancelled)
 
     release.setValue(true)
-    _ = await wedging.value
     await settle(until: delivered, reaches: 2)
     #expect(delivered.value == ["[graphcode] for the bystander", "[graphcode] for the hung one"])
+
+    // Exactly once: the late success took the item off the queue, so a pass finds nothing.
+    await store.handle(.refreshUsage)
+    await store.handle(.refreshUsage)
+    #expect(delivered.value == ["[graphcode] for the bystander", "[graphcode] for the hung one"])
+  }
+
+  /// The other way a hung send can end: it *fails*. `zmx send` finally exits non-zero
+  /// after the deadline passed. On #320's main that verdict staged the message to memory
+  /// and dropped it from the live queue — the target is idle and answering, and the text
+  /// it was owed never reaches its session. A failure is a failure whenever it is
+  /// learned: staged once, retried at the next pass, delivered once.
+  @Test
+  func aTimedOutSendThatThenFailsIsRetriedExactlyOnce() async {
+    let fixture = fixture()
+    let delivered = LockIsolated<[String]>([])
+    let remembered = LockIsolated<[String]>([])
+    let attempts = LockIsolated(0)
+    let entered = LockIsolated(false)
+    let release = LockIsolated(false)
+    let store = GraphStore(
+      graph: fixture.graph,
+      deliveryDeadline: .milliseconds(50),
+      onDeliverMessage: { node, message, _ in
+        guard node.id == fixture.hung else {
+          delivered.withValue { $0.append(message) }
+          return true
+        }
+        let attempt = attempts.withValue { value -> Int in
+          value += 1
+          return value
+        }
+        guard attempt == 1 else {
+          delivered.withValue { $0.append(message) }
+          return true
+        }
+        entered.setValue(true)
+        while !release.value { try? await Task.sleep(for: .milliseconds(5)) }
+        return false
+      },
+      onReadPresence: { _, _ in PresenceReading(presence: .idle, confidence: .reported) },
+      onAppendMemory: { _, entry in remembered.withValue { $0.append(entry) } })
+
+    let wedging = Task {
+      await store.handle(
+        .messageNode(fixture.hung, text: "for the hung one", from: nil, followUp: true))
+    }
+    await settle(until: entered)
+    await store.handle(
+      .messageNode(fixture.bystander, text: "for the bystander", from: nil, followUp: true))
+    _ = await wedging.value
+    await store.handle(.refreshUsage)
+    #expect(delivered.value == ["[graphcode] for the bystander"])
+
+    release.setValue(true)
+    // No command drives this: the store retries on its own once the verdict lands.
+    await settle(until: delivered, reaches: 2)
+    #expect(delivered.value == ["[graphcode] for the bystander", "[graphcode] for the hung one"])
+    #expect(remembered.value.filter { $0.contains("follow-up staged") }.count == 1)
+
+    await store.handle(.refreshUsage)
+    await store.handle(.refreshUsage)
+    #expect(delivered.value == ["[graphcode] for the bystander", "[graphcode] for the hung one"])
+    #expect(attempts.value == 2)
   }
 }
