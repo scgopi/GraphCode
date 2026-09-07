@@ -367,7 +367,9 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// `nil` only for a surface that is not a node's. A backend that cannot resume, or a
   /// node with nothing banked, takes the ordinary fresh launch — logged, where it used
   /// to be the one silent branch (the duplicate-session investigation of 2026-09-02
-  /// started from exactly that silence; the revert of #248/#249 keeps the dial).
+  /// started from exactly that silence; the revert of #248/#249 keeps the dial) — unless
+  /// the loop is unattended, in which case that launch belongs to the daemon and this
+  /// waits for it instead.
   func localResumeOrFreshCommand(agentLaunch: [String]) -> [String]? {
     guard let nodeID = SurfaceRef.nodeID(fromZmxSessionName: sessionName) else { return nil }
     let log = { (event: String) in
@@ -380,6 +382,29 @@ struct GhosttyTerminalView: NSViewRepresentable {
       let resumeLaunch = resumeCommand(
         settings: settings, hooksFile: presenceHooksFile(), remoteSettingsPath: nil)
     else {
+      // Nothing banked means there is no resume for this pane to make. It does *not* mean
+      // a fresh launch is this pane's to make: `graphcoded` owns an unattended loop's
+      // relaunch and, on a restart, is already making it (`ZmxSessionLauncher.restart`
+      // kills and then starts). Creating the session here races that, and wins often
+      // enough to have been the bug — the agent comes up on `initialPrompt` instead of the
+      // conversation, so the goal is re-issued and the transcript the restart existed to
+      // keep is orphaned, with the daemon's `ensure resume` in the dial log one second
+      // away saying it did the right thing.
+      //
+      // Local Copilot is where it bit, because this is the only branch it can ever take:
+      // nothing banks a Copilot session id on this machine — `CopilotSessionLog`'s banker
+      // is the remote ensure's, and Copilot has no `SessionStart` hook the way Claude Code
+      // does — so `SessionIDStore.load` is permanently nil for it here.
+      //
+      // Waiting is the same ownership split the remote pane already makes for a missing
+      // unattended session, and the same one the Codex pane makes for every launch. An
+      // attended loop keeps the fresh launch: no daemon will ever start one, so a pane
+      // that waited for it would wait out its whole minute.
+      if loopType.runsUnattended {
+        return ZmxSessionLauncher.waitingAttachCommand(
+          zmxPath: zmx, sessionName: sessionName, agent: nil,
+          logFragment: DialLog.fragment(session: sessionName, dial: "open", event: "await-daemon"))
+      }
       return ["/bin/sh", "-c", log("fresh") + "exec \(fresh)"]
     }
     let quoted = RemoteProjectLocation.shellQuoted

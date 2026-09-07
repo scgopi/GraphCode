@@ -705,8 +705,11 @@ public enum ZmxSessionLauncher {
     return command
   }
 
+  /// `logFragment` names the branch in the dial log the way every other launch decision
+  /// does — a pane that waited and one that launched have to be told apart afterwards,
+  /// and waiting used to be the silent one.
   public static func waitingAttachCommand(
-    zmxPath: String, sessionName: String, agent: String?
+    zmxPath: String, sessionName: String, agent: String?, logFragment: String? = nil
   ) -> [String] {
     let check = daemonReadyCheckCommand(
       zmxPath: zmxPath, sessionName: sessionName, agent: agent)
@@ -717,7 +720,8 @@ public enum ZmxSessionLauncher {
     // deleted mid-wait. Unbounded, the pane polls `zmx ls` twenty times a second
     // forever; bounded, it says so and gives up after a minute.
     let script =
-      "tries=0; until \(check); do tries=$((tries+1)); "
+      (logFragment.map { "\($0); " } ?? "")
+      + "tries=0; until \(check); do tries=$((tries+1)); "
       + "if [ \"$tries\" -ge 600 ]; then "
       + "echo \"graphcode: '\(sessionName)' never became ready to attach\"; exit 1; fi; "
       + "sleep 0.1; done; exec \(attach)"
