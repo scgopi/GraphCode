@@ -176,6 +176,7 @@ public actor GraphStore {
   /// A deferred delivery: a `--follow-up` message, or a Mailroom watcher's wake for one
   /// post (`watchedPostID`), waiting for its target to go idle.
   struct PendingFollowUp: Equatable {
+    let id: UUID
     let nodeID: UUID
     let text: String
     /// The post a watcher's wake is about — what lets `mail watch --off` drop the wakes
@@ -189,6 +190,8 @@ public actor GraphStore {
   }
 
   private var pendingFollowUps: [PendingFollowUp] = []
+  private var pendingDeliveryAttempts: Set<UUID> = []
+  private var completedTimedOutDeliveries: [UUID: Bool] = [:]
   /// `drainPendingFollowUps` runs across several awaits, and the presence poll that
   /// calls it runs every fifteen seconds: without this, a second drain started while
   /// the first was suspended delivered the same items again and, on finishing, wrote
@@ -232,6 +235,8 @@ public actor GraphStore {
   /// so a live-but-slow host still answers inside this. Short enough that a wedge costs
   /// one poll, not the process.
   private let presenceReadDeadline: Duration
+
+  private let deliveryDeadline: Duration
 
   /// How long a drain may hold the queue before another is allowed to take over. Far
   /// longer than any healthy pass (milliseconds) and longer than a pass that meets
@@ -282,6 +287,7 @@ public actor GraphStore {
   /// `ZmxSessionLauncher`; tests leave it `nil` or capture the calls.
   public init(
     graph: LoopGraph = LoopGraph(project: ProjectRef(path: "", name: "Untitled")),
+    deliveryDeadline: Duration = .seconds(45),
     onGraphChanged: (@Sendable (LoopGraph) -> Void)? = nil,
     onEnsureSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
     onTerminateSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
@@ -345,6 +351,7 @@ public actor GraphStore {
     self.goalCache = goalCache ?? GoalEvaluationCache()
     self.recurrence = recurrence
     self.presenceReadDeadline = presenceReadDeadline
+    self.deliveryDeadline = deliveryDeadline
     self.drainLeaseDuration = drainLeaseDuration
   }
 
@@ -2733,7 +2740,8 @@ public actor GraphStore {
     // dropping it.
     if followUp, deliversLater(to: target) {
       pendingFollowUps.append(
-        PendingFollowUp(nodeID: nodeID, text: message, watchedPostID: watchedPostID))
+        PendingFollowUp(
+          id: UUID(), nodeID: nodeID, text: message, watchedPostID: watchedPostID))
       return
     }
 
@@ -2873,7 +2881,15 @@ public actor GraphStore {
     // the queue rather than in a variable about to go out of scope, whatever the exit.
     defer {
       if drainOwner == owner {
-        pendingFollowUps = remaining + Array(batch[index...]) + pendingFollowUps
+        var retained: [PendingFollowUp] = []
+        for pending in remaining + Array(batch[index...]) {
+          if let confirmed = completedTimedOutDeliveries.removeValue(forKey: pending.id) {
+            if !confirmed { _ = staged(pending) }
+          } else {
+            retained.append(pending)
+          }
+        }
+        pendingFollowUps = retained + pendingFollowUps
       }
     }
     // One reading per target per pass, taken the first time this pass reaches that
@@ -2892,6 +2908,12 @@ public actor GraphStore {
       index += 1
       drainBatch = Array(batch[index...])
       drainInFlight = pending
+      if pendingDeliveryAttempts.contains(pending.id) {
+        drainInFlight = nil
+        remaining.append(pending)
+        drainDeferred = remaining
+        continue
+      }
       guard let node = graph.nodes[id: pending.nodeID], !node.isResolved else {
         // Its work is over, but the message must not go with the queue entry: the log is
         // what the loop's next wake reads, and for a resolved loop that is all there is.
@@ -2946,9 +2968,38 @@ public actor GraphStore {
         drainInFlight = nil
         continue
       }
-      let delivered = await deliverToSession(node, pending.text)
+      pendingDeliveryAttempts.insert(pending.id)
+      let attempt = DeliveryAttempt()
+      let delivered = await withDeadline(deliveryDeadline) {
+        let result = await self.deliverToSession(node, pending.text)
+        await attempt.complete(result)
+        return result
+      }
       guard drainOwner == owner else { return }
+      guard let delivered else {
+        remaining.append(pending)
+        drainDeferred = remaining
+        Task { [self] in
+          let result = await attempt.wait()
+          finishTimedOutDelivery(pending.id, confirmed: result)
+        }
+        DaemonLog.shared.record(
+          "delivery-stall",
+          DaemonRequestContext.fields + [
+            ("node", node.id.uuidString),
+            ("deadline_ms", DaemonLog.milliseconds(deliveryDeadline.timeInterval)),
+          ])
+        drainInFlight = nil
+        continue
+      }
+      pendingDeliveryAttempts.remove(pending.id)
       if !delivered {
+        DaemonLog.shared.record(
+          "delivery-stall",
+          DaemonRequestContext.fields + [
+            ("node", node.id.uuidString),
+            ("deadline_ms", DaemonLog.milliseconds(deliveryDeadline.timeInterval)),
+          ])
         remaining.append(staged(pending))
         drainDeferred = remaining
         if !pending.recorded {
@@ -2957,6 +3008,16 @@ public actor GraphStore {
         }
       }
       drainInFlight = nil
+    }
+  }
+
+  private func finishTimedOutDelivery(_ id: UUID, confirmed: Bool) {
+    guard pendingDeliveryAttempts.remove(id) != nil else { return }
+    if let index = pendingFollowUps.firstIndex(where: { $0.id == id }) {
+      let pending = pendingFollowUps.remove(at: index)
+      if !confirmed { _ = staged(pending) }
+    } else {
+      completedTimedOutDeliveries[id] = confirmed
     }
   }
 
@@ -3780,5 +3841,23 @@ public actor GraphStore {
       requests = []
       return taken
     }
+  }
+}
+
+private actor DeliveryAttempt {
+  private var result: Bool?
+  private var waiter: CheckedContinuation<Bool, Never>?
+
+  func complete(_ result: Bool) {
+    guard self.result == nil else { return }
+    self.result = result
+    guard let waiter else { return }
+    self.waiter = nil
+    waiter.resume(returning: result)
+  }
+
+  func wait() async -> Bool {
+    if let result { return result }
+    return await withCheckedContinuation { waiter = $0 }
   }
 }
