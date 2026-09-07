@@ -28,6 +28,7 @@ struct LoopWorkspaceFeature {
     /// `@State` because the *toggle* lives in the window toolbar, which `AppView` owns —
     /// and a control and the thing it controls cannot hold the answer separately.
     var isRailVisible = LoopWorkspaceRail.loadVisible()
+    var hasCustomRailVisibility = LoopWorkspaceRail.hasStoredVisibility()
     /// How wide the rail is, after any drag on its edge. Persisted like its visibility:
     /// someone who widened it to read beats did not mean only this session.
     var railWidth = LoopWorkspaceRail.loadWidth()
@@ -109,6 +110,7 @@ struct LoopWorkspaceFeature {
     /// and handled up there, the way `.nodeTapped` already is.
     /// ⌥G, and the toolbar's trailing panel toggle.
     case railToggled
+    case mailroomContentChanged(hasContent: Bool)
     /// The rail's leading edge was dragged. Sent once, on release — a per-frame action
     /// would put a reducer run and a `UserDefaults` write behind every pixel.
     case railWidthChanged(CGFloat)
@@ -273,7 +275,13 @@ struct LoopWorkspaceFeature {
 
       case .railToggled:
         state.isRailVisible.toggle()
+        state.hasCustomRailVisibility = true
         LoopWorkspaceRail.saveVisible(state.isRailVisible)
+        return .none
+
+      case .mailroomContentChanged(let hasContent):
+        guard hasContent, !state.hasCustomRailVisibility else { return .none }
+        state.isRailVisible = true
         return .none
 
       case .railWidthChanged(let width):

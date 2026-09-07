@@ -142,8 +142,11 @@ struct LoopWorkspaceRail: View {
     UserDefaults.standard.set(folded, forKey: summaryFoldedDefaultsKey)
   }
 
-  /// **Off** until someone asks for it. It used to default on, which meant every loop
-  /// that feeds nothing opened with 212 points of empty panel beside its terminal.
+  static func hasStoredVisibility() -> Bool {
+    UserDefaults.standard.object(forKey: visibleDefaultsKey) as? Bool != nil
+  }
+
+  /// Starts hidden; Mailroom content may reveal it until a person chooses otherwise.
   static func loadVisible() -> Bool {
     UserDefaults.standard.object(forKey: visibleDefaultsKey) as? Bool ?? false
   }

@@ -51,6 +51,12 @@ struct LoopWorkspaceView: View {
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .overlay { expandedBoard }
     .onReceive(CanvasClock.tick) { now = $0 }
+    .onChange(of: mailroomHasContent, initial: true) { _, hasContent in
+      store.send(.mailroomContentChanged(hasContent: hasContent))
+    }
+    .onChange(of: store.id) { _, _ in
+      store.send(.mailroomContentChanged(hasContent: mailroomHasContent))
+    }
     .onDisappear { store.send(.workspaceLeft) }
     // The folder header goes in the toolbar, not in the `VStack` above, and the pane
     // does *not* claim the titlebar inset. Both were tried: `.ignoresSafeArea(.top)`
@@ -140,6 +146,10 @@ struct LoopWorkspaceView: View {
   /// Whether this loop gives the rail anything to say — see `LoopWorkspaceRail`.
   var railHasContent: Bool {
     LoopWorkspaceRail.hasContent(node: store.node, graph: store.graph)
+  }
+
+  private var mailroomHasContent: Bool {
+    MailroomPresentation.hasContent(graph: store.graph, enabled: mailroomEnabled)
   }
 
   private var railShortcut: some View {
