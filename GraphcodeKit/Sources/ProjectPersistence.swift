@@ -51,15 +51,34 @@ public struct ProjectPersistence: Sendable {
     var slim = graph
     slim.mailroom = []
     guard let data = try? JSONEncoder().encode(slim) else { return }
-    try? data.write(to: fileURL(forProjectPath: graph.project.path), options: .atomic)
+    do {
+      try data.write(to: fileURL(forProjectPath: graph.project.path), options: .atomic)
+    } catch {
+      return
+    }
     let roomURL = mailroomURL(forProjectPath: graph.project.path)
     let digest = MailroomDigest(of: graph.mailroom)
-    guard Self.roomDigests.changed(to: digest, for: roomURL.path) else { return }
+    guard !Self.roomDigests.matches(digest, for: roomURL.path)
+      || !FileManager.default.fileExists(atPath: roomURL.path)
+    else { return }
     if graph.mailroom.isEmpty {
-      try? FileManager.default.removeItem(at: roomURL)
+      do {
+        try FileManager.default.removeItem(at: roomURL)
+      } catch where !FileManager.default.fileExists(atPath: roomURL.path) {
+        Self.roomDigests.set(digest, for: roomURL.path)
+      } catch {
+        return
+      }
     } else if let room = try? JSONEncoder().encode(graph.mailroom) {
-      try? room.write(to: roomURL, options: .atomic)
+      do {
+        try room.write(to: roomURL, options: .atomic)
+      } catch {
+        return
+      }
+    } else {
+      return
     }
+    Self.roomDigests.set(digest, for: roomURL.path)
   }
 
   /// What the room last written for each project looked like, so an unchanged room is
@@ -76,12 +95,16 @@ public struct ProjectPersistence: Sendable {
     private let lock = NSLock()
     private var digests: [String: MailroomDigest] = [:]
 
-    func changed(to digest: MailroomDigest, for path: String) -> Bool {
+    func matches(_ digest: MailroomDigest, for path: String) -> Bool {
       lock.lock()
       defer { lock.unlock() }
-      guard digests[path] != digest else { return false }
+      return digests[path] == digest
+    }
+
+    func set(_ digest: MailroomDigest, for path: String) {
+      lock.lock()
       digests[path] = digest
-      return true
+      lock.unlock()
     }
 
     func forget(_ path: String) {
