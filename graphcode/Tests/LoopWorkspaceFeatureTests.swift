@@ -10,7 +10,7 @@ import Testing
 /// persists via `TerminalLayoutStore`, so these also incidentally cover that the right
 /// save happens at the right time — a temp-directory-backed store is injected so tests
 /// never touch the app's real Application Support folder.
-@Suite
+@Suite(.serialized)
 struct LoopWorkspaceFeatureTests {
   /// Records what the reducer asks `TerminalSurfaceClient` to end: the attach going
   /// away (`retired`) and the zmx sessions being terminated behind it (`killed`).
@@ -443,7 +443,10 @@ struct LoopWorkspaceFeatureTests {
     ) { LoopWorkspaceFeature() }
     store.exhaustivity = .off
 
-    await store.send(.railToggled) { $0.isRailVisible = true }
+    await store.send(.railToggled) {
+      $0.isRailVisible = true
+      $0.hasCustomRailVisibility = true
+    }
     #expect(LoopWorkspaceRail.loadVisible())
   }
 
@@ -457,5 +460,67 @@ struct LoopWorkspaceFeatureTests {
     defer { if let saved { UserDefaults.standard.set(saved, forKey: key) } }
 
     #expect(LoopWorkspaceRail.loadVisible() == false)
+  }
+}
+
+extension LoopWorkspaceFeatureTests {
+  @Test(arguments: [false, true])
+  @MainActor
+  func mailroomContentRevealsTheRailWithoutSavingAUserPreference(existingContent: Bool) async {
+    var state = makeState()
+    state.isRailVisible = false
+    state.hasCustomRailVisibility = false
+    let store = makeStore(state)
+
+    if !existingContent {
+      await store.send(.mailroomContentChanged(hasContent: false))
+      #expect(!store.state.isRailVisible)
+    }
+    await store.send(.mailroomContentChanged(hasContent: true)) {
+      $0.isRailVisible = true
+    }
+    #expect(!store.state.hasCustomRailVisibility)
+    await store.send(.mailroomContentChanged(hasContent: true))
+    await store.send(.mailroomContentChanged(hasContent: false))
+    #expect(store.state.isRailVisible)
+  }
+
+  @Test
+  @MainActor
+  func hidingTheRailPreventsMailFromReopeningItAcrossWorkspaces() async {
+    let key = LoopWorkspaceRail.visibleDefaultsKey
+    let saved = UserDefaults.standard.object(forKey: key)
+    UserDefaults.standard.removeObject(forKey: key)
+    defer {
+      if let saved {
+        UserDefaults.standard.set(saved, forKey: key)
+      } else {
+        UserDefaults.standard.removeObject(forKey: key)
+      }
+    }
+    #expect(!LoopWorkspaceRail.hasStoredVisibility())
+    let store = makeStore(makeState())
+    await store.send(.mailroomContentChanged(hasContent: true)) {
+      $0.isRailVisible = true
+    }
+    #expect(!LoopWorkspaceRail.hasStoredVisibility())
+    await store.send(.railToggled) {
+      $0.isRailVisible = false
+      $0.hasCustomRailVisibility = true
+    }
+    await store.send(.mailroomContentChanged(hasContent: false))
+    await store.send(.mailroomContentChanged(hasContent: true))
+    #expect(!store.state.isRailVisible)
+    #expect(LoopWorkspaceRail.hasStoredVisibility())
+    #expect(!LoopWorkspaceRail.loadVisible())
+
+    let reopened = makeStore(makeState())
+    #expect(reopened.state.hasCustomRailVisibility)
+    await reopened.send(.mailroomContentChanged(hasContent: true))
+    #expect(!reopened.state.isRailVisible)
+    await reopened.send(.railToggled) {
+      $0.isRailVisible = true
+    }
+    #expect(LoopWorkspaceRail.loadVisible())
   }
 }
