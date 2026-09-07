@@ -208,6 +208,45 @@ struct MailroomPersistenceTests {
     #expect(writer.load(path: "/tmp/never-saved") == nil)
   }
 
+  /// The digest cache is process-wide while one project path is a different room file in
+  /// every workspace. Keyed by the path, two workspaces would share an entry and a save
+  /// be judged unchanged against a digest taken from someone else's file — the room never
+  /// written, the file left stale on disk.
+  @Test
+  func aRoomsDigestIsJudgedAgainstItsOwnFileNotTheProjectPath() throws {
+    let workspaceA = FileManager.default.temporaryDirectory
+      .appendingPathComponent("digest-ws-\(UUID().uuidString)")
+    let workspaceB = FileManager.default.temporaryDirectory
+      .appendingPathComponent("digest-ws-\(UUID().uuidString)")
+    defer {
+      try? FileManager.default.removeItem(at: workspaceA)
+      try? FileManager.default.removeItem(at: workspaceB)
+    }
+    func post(_ body: String) -> MailroomPost {
+      MailroomPost(
+        id: 1, at: Date(timeIntervalSince1970: 1), authorID: nil, author: "a peer",
+        topic: nil, body: body)
+    }
+    func graph(_ posts: [MailroomPost]) -> LoopGraph {
+      var graph = LoopGraph(
+        project: ProjectRef(path: "/tmp/p", name: "p"), nodes: [LoopNode(title: "loop")])
+      graph.mailroom = posts
+      return graph
+    }
+    let a = ProjectPersistence(baseDirectory: workspaceA)
+    let b = ProjectPersistence(baseDirectory: workspaceB)
+    a.saveGraph(graph([post("one")]))
+    b.saveGraph(graph([post("one"), post("two")]))
+
+    a.saveGraph(graph([post("one"), post("two")]))
+
+    let roomA = try String(
+      decoding: Data(
+        contentsOf: workspaceA.appendingPathComponent("projects/_tmp_p.mailroom.json")),
+      as: UTF8.self)
+    #expect(roomA.contains("two"), "workspace A's room was judged unchanged and never written")
+  }
+
   /// The other side of `aLoadReturnsTheQueuedSnapshotBeforeTheDiskHasIt`: a queued save
   /// must not outlive the graph it belongs to. Deleting a project evicts its store and
   /// removes the file, and a `load` still answering from the queue would hand the

@@ -312,6 +312,31 @@ struct WorkspaceTests {
   }
 
   @Test
+  func aGraphNamedLikeASidecarIsCountedAndItsRoomIsNot() throws {
+    // A project path ending in `.mailroom` mints a graph file that carries the sidecar
+    // suffix. A room — valid or corrupt — never decodes as a graph, so a room is skipped
+    // by the decode and a sidecar-named graph is not.
+    let home = makeHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+    let workspace = try Workspace.create(name: "work", home: home)
+
+    let node = LoopNode(title: "a loop")
+    var graph = LoopGraph(project: ProjectRef(path: "/tmp/x.mailroom", name: "project"))
+    graph.nodes.append(node)
+    let projects = workspace.url.appendingPathComponent("projects", isDirectory: true)
+    try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+    try JSONEncoder().encode(graph)
+      .write(to: projects.appendingPathComponent("_tmp_x.mailroom.json"))
+    try Data("[]".utf8)
+      .write(to: projects.appendingPathComponent("_tmp_x.mailroom.mailroom.json"))
+
+    let contents = workspace.contents()
+    #expect(contents.projects == 1)
+    #expect(contents.loops == 1)
+    #expect(contents.sessionNames == ["graphcode-\(node.id.uuidString)"])
+  }
+
+  @Test
   func aLiveClaimIsNotStolenByASecondProcess() {
     // The test host launches the app, which claims the default workspace on the way up.
     // Claiming unconditionally would have it overwrite a running window's pid, and once

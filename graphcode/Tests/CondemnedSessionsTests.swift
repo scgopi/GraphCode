@@ -199,6 +199,60 @@ struct OrphanedSessionReaperTests {
     #expect(OrphanedSessionReaper.liveSessionIDs(workspaceDirectories: [workspace]) == nil)
   }
 
+  /// The suffix is a claim about who wrote the file, and a project can make that claim
+  /// against the reaper: a path ending in `.mailroom` mints a graph file that carries the
+  /// sidecar suffix. One that decodes as a graph is a graph — skipping it by name would
+  /// drop its sessions out of the live set for a reap to kill.
+  @Test
+  func aGraphNamedLikeASidecarStillOwnsItsSessions() throws {
+    let workspace = FileManager.default.temporaryDirectory
+      .appendingPathComponent("reap-ws-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: workspace) }
+    var graph = LoopGraph(
+      project: ProjectRef(path: "/tmp/x.mailroom", name: "p"),
+      nodes: [LoopNode(id: id1, title: "loop")])
+    graph.mailroom = [
+      MailroomPost(
+        id: 1, at: Date(timeIntervalSince1970: 1), authorID: nil, author: "a peer",
+        topic: nil, body: "a notice, so the room gets a file of its own")
+    ]
+    ProjectPersistence(baseDirectory: workspace).saveGraph(graph)
+
+    let projects = workspace.appendingPathComponent("projects", isDirectory: true)
+    let written = try FileManager.default.contentsOfDirectory(atPath: projects.path).sorted()
+    #expect(
+      written == ["_tmp_x.mailroom.json", "_tmp_x.mailroom.mailroom.json"],
+      "the graph file itself must carry the sidecar suffix, or this no longer reproduces")
+
+    let live = try #require(
+      OrphanedSessionReaper.liveSessionIDs(workspaceDirectories: [workspace]))
+    #expect(live == [id1])
+  }
+
+  /// The claim that makes the name worth reading at all — a *corrupt* room is still a
+  /// room, and never owned a session — pinned: a sidecar-named file that decodes as
+  /// nothing must not stop a reap either.
+  @Test
+  func aCorruptRoomFileStillDoesNotStopAReap() throws {
+    let workspace = FileManager.default.temporaryDirectory
+      .appendingPathComponent("reap-ws-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: workspace) }
+    var graph = LoopGraph(
+      project: ProjectRef(path: "/tmp/p", name: "p"), nodes: [LoopNode(id: id1, title: "loop")])
+    graph.mailroom = [
+      MailroomPost(
+        id: 1, at: Date(timeIntervalSince1970: 1), authorID: nil, author: "a peer",
+        topic: nil, body: "a notice")
+    ]
+    ProjectPersistence(baseDirectory: workspace).saveGraph(graph)
+    try Data("{ not a room".utf8)
+      .write(to: workspace.appendingPathComponent("projects/_tmp_p.mailroom.json"))
+
+    let live = try #require(
+      OrphanedSessionReaper.liveSessionIDs(workspaceDirectories: [workspace]))
+    #expect(live == [id1])
+  }
+
   /// What keeps the rule from rotting into a stale list of names: whatever
   /// `ProjectPersistence` writes beside a graph has to be something this scan recognises
   /// as a sidecar. Add a sidecar without registering its suffix and this fails here,

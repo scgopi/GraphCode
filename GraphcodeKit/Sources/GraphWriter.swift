@@ -56,10 +56,18 @@ public final class GraphWriter: @unchecked Sendable {
   /// would put the file back, and `load` would keep answering from the queue for a
   /// project that no longer exists. The delete is the one operation that has to reach
   /// into the queue rather than trail it.
+  ///
+  /// Synced against the drain, not just the pending table: a drain that has already
+  /// popped a save still has the write ahead of it — a write made outside the lock, and
+  /// one that would land after `deleteGraph` removed the file. Only the drain's
+  /// completion makes "nothing queued" true, and the serial queue is where that
+  /// ordering lives.
   public func forget(path: String) {
-    lock.lock()
-    pending.removeValue(forKey: path)
-    lock.unlock()
+    queue.sync {
+      lock.lock()
+      pending.removeValue(forKey: path)
+      lock.unlock()
+    }
   }
 
   /// Returns once everything queued so far is on disk.
