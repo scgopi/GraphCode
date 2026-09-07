@@ -192,6 +192,23 @@ public actor GraphStore {
   /// queued in between (issue #304: duplicates, lost mail, and out-of-order delivery).
   private var isDrainingFollowUps = false
 
+  /// How long a presence read may take before the store stops waiting on it.
+  ///
+  /// Every reading in this file runs through `presenceReading(of:)`, and nothing in the
+  /// chain below it has a deadline of its own: `onReadPresence` reaches
+  /// `PTYProcessSession.waitCollectingOutput`, which ends only when the probe's
+  /// `terminationHandler` closes the stream, and `ssh`'s `ConnectTimeout=10` bounds the
+  /// connect rather than a command left hanging on a host that has gone away. An `await`
+  /// that never returns held `isDrainingFollowUps` for the life of the daemon, which
+  /// froze staged delivery for *every* loop in the project — and a frozen queue and an
+  /// empty one report exactly the same thing from outside (issue #311).
+  ///
+  /// Longer than any healthy read: a remote probe is three attempts at
+  /// `ConnectTimeout=10` with 1s and 2s of backoff between them (`RemoteEnsureGate`),
+  /// so a live-but-slow host still answers inside this. Short enough that a wedge costs
+  /// one poll, not the process.
+  private let presenceReadDeadline: Duration
+
   /// A poller holds `self` weakly, so a store going away already stops it *doing*
   /// anything — but the task itself keeps sleeping in its loop forever. Harmless for
   /// the long-lived project store; sub-graph stores are built per command and hold no
@@ -263,6 +280,7 @@ public actor GraphStore {
     onMailroomEnabled: (@Sendable () -> Bool)? = nil,
     goalCache: GoalEvaluationCache? = nil,
     recurrence: RecurrenceSink? = nil,
+    presenceReadDeadline: Duration = .seconds(45),
     subGraphDepth: Int = 0
   ) {
     self.graph = graph
@@ -294,6 +312,24 @@ public actor GraphStore {
     self.onMailroomEnabled = onMailroomEnabled
     self.goalCache = goalCache ?? GoalEvaluationCache()
     self.recurrence = recurrence
+    self.presenceReadDeadline = presenceReadDeadline
+  }
+
+  /// The store's one way to ask what a session is doing, and the only place the answer
+  /// is bounded. `nil` means there is no reader wired at all — every caller then falls
+  /// back to whatever the graph already believes.
+  ///
+  /// A read that runs out of time is `.unknown`, never a state. That is the distinction
+  /// issue #286 established when a `zmx` probe that could not run was being read as
+  /// `.absent`: a probe that did not complete says nothing about the session, so a
+  /// caller must not turn it into a verdict. Here it means a staged message stays
+  /// staged and is tried again, rather than being delivered blindly into a session that
+  /// may be mid-turn or held back for ever as if the target were busy.
+  private func presenceReading(of node: LoopNode) async -> PresenceReading? {
+    guard let onReadPresence else { return nil }
+    let path = graph.project.path
+    return await withDeadline(presenceReadDeadline) { await onReadPresence(node, path) }
+      ?? .unknown
   }
 
   private func recordMemory(_ nodeID: UUID, _ entry: String) {
@@ -1172,10 +1208,10 @@ public actor GraphStore {
   /// telling every client the graph moved when nothing did.
   @discardableResult
   private func refreshPresence() async -> Bool {
-    guard let onReadPresence else { return false }
+    guard onReadPresence != nil else { return false }
     var changed = false
     for node in graph.nodes where !node.isResolved {
-      let reading = await onReadPresence(node, graph.project.path)
+      guard let reading = await presenceReading(of: node) else { continue }
       guard graph.nodes[id: node.id]?.presence != reading else { continue }
       graph.nodes[id: node.id]?.presence = reading
       changed = true
@@ -1831,7 +1867,18 @@ public actor GraphStore {
         announceError("mail watch refused: an empty topic is no topic — omit it")
         return
       }
-      graph.nodes[id: watcherID]?.mailroomWatch = MailroomWatch(topic: trimmed)
+      let watch = MailroomWatch(topic: trimmed)
+      graph.nodes[id: watcherID]?.mailroomWatch = watch
+      // Re-scoping is `--off` for the topic being left: a watch is one subscription, so
+      // the wakes staged under the old topic are for posts this loop is no longer
+      // asking about and arriving minutes later is the same defect turning the watch
+      // off had (issue #304). A wake that still matches the new scope stays queued, and
+      // a peer's `--follow-up` message is not a wake and is untouched.
+      pendingFollowUps.removeAll { pending in
+        guard pending.nodeID == watcherID, let postID = pending.watchedPostID else { return false }
+        guard let post = graph.mailroom.first(where: { $0.id == postID }) else { return true }
+        return !watch.matches(post.topic)
+      }
       recordMemory(
         watcherID, "mailroom: now watching \(trimmed.map { "'\($0)'" } ?? "all posts")")
     } else {
@@ -2151,8 +2198,7 @@ public actor GraphStore {
       return false
     }
     if RemoteProjectLocation.parse(projectPath: graph.project.path) != nil {
-      guard let onReadPresence else { return true }
-      let reading = await onReadPresence(node, graph.project.path)
+      guard let reading = await presenceReading(of: node) else { return true }
       if reading.presence == .absent { return true }
       recordMemory(
         nodeID,
@@ -2703,14 +2749,21 @@ public actor GraphStore {
   /// staged, exactly as before.
   static let respawnedSessionSettle: Duration = .seconds(3)
 
-  /// Whether a follow-up to this node should wait rather than type now. Mid-turn and
-  /// mid-check both qualify — deferring to a busy agent is the flag's entire meaning —
-  /// while an idle session gets ordinary immediate delivery and a dead one gets the
+  /// Whether a follow-up to this node joins the queue rather than being typed now.
+  /// Every live target does; only one the bus cannot reach at all falls through to the
   /// ordinary staged-to-memory path.
+  ///
+  /// This used to answer from the **cached** `node.presence` the poll last wrote, while
+  /// the drain took a live reading of its own — two readings of one question, and a
+  /// follow-up staged while they disagreed was typed in ahead of three already queued
+  /// (issue #311). Arrival order is the only promise a queue makes, so the drain's
+  /// reading is now the single decision point and this one has no presence in it.
+  /// Nothing waits longer for it: `handle` ends in a drain, so a follow-up to an idle
+  /// target is queued and handed over inside the same call — behind whatever was
+  /// already queued for that target, which is the whole difference.
   private func deliversLater(to target: LoopNode) -> Bool {
     switch MessageBus.deliverability(to: target) {
-    case .targetBusyWithACheck: return true
-    case nil: return target.presence?.presence != .idle
+    case .targetBusyWithACheck, nil: return true
     default: return false
     }
   }
@@ -2729,13 +2782,28 @@ public actor GraphStore {
     let batch = pendingFollowUps
     pendingFollowUps = []
     var remaining: [PendingFollowUp] = []
+    // One reading per target per pass, taken the first time this pass reaches that
+    // target and reused for the rest of its queue. Reading again between items is what
+    // let a turn ending *mid-drain* reorder the queue: three messages for one loop went
+    // out as [2, 3, 1] because the first was read while the session was still busy and
+    // the next two after it went idle. One drain produces that on its own, so #309's
+    // non-reentrancy guard cannot see it — and it is the [#357-before-#347] ordering
+    // issue #304 was filed for. A reading taken once cannot disagree with itself, so
+    // the batch either goes out in order or waits together for the next pass. It also
+    // costs one probe per target rather than one per message.
+    var readings: [UUID: Presence] = [:]
     for pending in batch {
       guard let node = graph.nodes[id: pending.nodeID], !node.isResolved else { continue }
-      // A watcher's wake is only owed while the watch stands and the post is unread:
-      // `mail watch --off` after the wake was staged, or an inbox that has since read
-      // past the post, means the wake has nothing left to say.
+      // A watcher's wake is only owed while the watch that asked for it stands and the
+      // post is unread: `mail watch --off` after the wake was staged, an inbox that has
+      // since read past the post, or a watch re-scoped to another topic — the wakes the
+      // abandoned topic staged are not this watcher's mail any more — all mean the wake
+      // has nothing left to say. A post the room has since evicted has nothing to point
+      // at either.
       if let postID = pending.watchedPostID {
-        guard node.mailroomWatch != nil, (node.lastMailroomRead ?? 0) < postID else { continue }
+        guard let watch = node.mailroomWatch, (node.lastMailroomRead ?? 0) < postID,
+          let post = graph.mailroom.first(where: { $0.id == postID }), watch.matches(post.topic)
+        else { continue }
       }
       switch MessageBus.deliverability(to: node) {
       case .targetBusyWithACheck:
@@ -2746,12 +2814,16 @@ public actor GraphStore {
       case nil:
         break
       }
-      let presence: Presence?
-      if let onReadPresence {
-        presence = await onReadPresence(node, graph.project.path).presence
+      let presence: Presence
+      if let known = readings[pending.nodeID] {
+        presence = known
       } else {
-        presence = node.presence?.presence
+        presence =
+          await presenceReading(of: node)?.presence ?? node.presence?.presence ?? .unknown
+        readings[pending.nodeID] = presence
       }
+      // `.idle` and nothing else, which is what makes a timed-out read safe: `.unknown`
+      // is not a state, so the message stays queued for a pass that gets an answer.
       guard presence == .idle else {
         remaining.append(pending)
         continue
@@ -3023,12 +3095,7 @@ public actor GraphStore {
       // the tree moves: re-delivering every poll would be a full agent turn a minute,
       // the unbounded spend the failure-tail dedup exists to prevent.
       if let fingerprint, goalCache.fingerprint(for: nodeID) == fingerprint {
-        let presence: Presence?
-        if let onReadPresence {
-          presence = await onReadPresence(node, graph.project.path).presence
-        } else {
-          presence = node.presence?.presence
-        }
+        let presence = await presenceReading(of: node)?.presence ?? node.presence?.presence
         // A nil presence stays skipped: the relay only ever tells a session it can see
         // idle, so falling through would pay the predicate's price for a wake that can
         // never land. Such a loop's exits are its stall bound and its human.
@@ -3117,12 +3184,7 @@ public actor GraphStore {
   ) async {
     let tail = outcome.outputTail.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !tail.isEmpty, goalCache.feedback(for: node.id) != tail else { return }
-    let presence: Presence?
-    if let onReadPresence {
-      presence = await onReadPresence(node, graph.project.path).presence
-    } else {
-      presence = node.presence?.presence
-    }
+    let presence = await presenceReading(of: node)?.presence ?? node.presence?.presence
     guard presence == .idle, MessageBus.deliverability(to: node) == nil else { return }
     let message =
       "[graphcode] Goal not met yet: `\(predicate)` still exits non-zero. "
@@ -3220,12 +3282,7 @@ public actor GraphStore {
     guard node.backend.capabilities.supportsDaemonRecurrence || onHeartbeatEnabled?() == true
     else { return }
     guard MessageBus.deliverability(to: node) == nil else { return }
-    let presence: Presence?
-    if let onReadPresence {
-      presence = await onReadPresence(node, graph.project.path).presence
-    } else {
-      presence = node.presence?.presence
-    }
+    let presence = await presenceReading(of: node)?.presence ?? node.presence?.presence
     guard presence != .busy else { return }
     let task = node.heartbeatTask ?? ""
     _ = await deliverToSession(
