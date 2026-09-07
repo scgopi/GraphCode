@@ -20,3 +20,6 @@ jobs:
       - uses: actions/checkout@v4
       - run: swift build
       - run: .build/debug/graphcode
+      # The built CLI against a throwaway daemon — exit 0 on the verbs that dial it.
+      # A runtime fault in the CLI passes every scheme build; this is what catches it.
+      - run: scripts/cli-smoke.sh

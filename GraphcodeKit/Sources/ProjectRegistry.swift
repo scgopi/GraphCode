@@ -24,6 +24,12 @@ import Foundation
 /// `.deleteProjectGraph` additionally discards its saved loops.
 public actor ProjectRegistry {
   private let persistence: ProjectPersistence
+  /// Writes graphs off the store's actor — see `GraphWriter`. `nonisolated` so the
+  /// daemon can flush it from a signal handler without an actor hop.
+  private nonisolated let writer: GraphWriter
+  /// For tests that read the file straight after a command: every save is flushed
+  /// before the store's turn ends, so the disk is exactly what the store holds.
+  private let persistsSynchronously: Bool
   private var stores: [String: GraphStore] = [:]
   private var connectionFileDescriptors: [UUID: Int32] = [:]
   private var connectionProjectPaths: [UUID: Set<String>] = [:]
@@ -79,9 +85,12 @@ public actor ProjectRegistry {
     sessionAlive: (@Sendable (LoopNode, String?) async -> Bool)? = CLISessionBackend.sessionAlive,
     composeBoard: (@Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?)? =
       CLISessionBackend.composeBoard,
-    reapCondemnedSessions: Bool = false
+    reapCondemnedSessions: Bool = false,
+    persistsSynchronously: Bool = false
   ) {
     persistence = ProjectPersistence(baseDirectory: persistenceDirectory)
+    writer = GraphWriter(persistence: persistence)
+    self.persistsSynchronously = persistsSynchronously
     self.ensureSession = ensureSession
     self.terminateSession = terminateSession
     self.restartSession = restartSession
@@ -112,6 +121,12 @@ public actor ProjectRegistry {
     }
   }
 
+  /// Waits for every queued save — the daemon's last act on its way out, so a change
+  /// applied a moment before `SIGTERM` is on disk when launchd restarts it.
+  public nonisolated func flushPersistence() {
+    writer.flush()
+  }
+
   // MARK: - Connections
 
   /// What each connection announced it can read — see `DaemonCommand.announce`. Kept
@@ -125,7 +140,7 @@ public actor ProjectRegistry {
     // and a descriptor with no channel silently delivers nothing. It also gives a reused
     // descriptor number a fresh channel, so nothing inherits a previous connection's
     // writer.
-    OutboundChannels.open(fileDescriptor)
+    OutboundChannels.open(fileDescriptor, tag: id.tag)
     connectionFileDescriptors[id] = fileDescriptor
     startPresencePolling()
   }
@@ -337,7 +352,7 @@ public actor ProjectRegistry {
       // `store(forProjectPath:)` would run its load-time `ensureUnattendedSessions`,
       // *starting* sessions on the way to killing them. Memory goes with each loop, the
       // same as single-node deletion.
-      let graph = await stores[canonicalPath]?.graph ?? persistence.loadGraph(path: canonicalPath)
+      let graph = await stores[canonicalPath]?.graph ?? writer.load(path: canonicalPath)
       for node in graph?.nodesAtAnyDepth ?? [] {
         terminateSession?(node, canonicalPath)
         NodeMemory.remove(projectPath: canonicalPath, nodeID: node.id)
@@ -468,7 +483,7 @@ public actor ProjectRegistry {
       guard path != canonical,
         stored.prefix(while: { $0 != path }).contains(where: { Self.canonicalize($0) == canonical })
       else { return true }
-      let graph = persistence.loadGraph(path: path)
+      let graph = writer.load(path: path)
       let isEmpty = (graph?.nodesAtAnyDepth.isEmpty ?? true) && (graph?.mailroom.isEmpty ?? true)
       if isEmpty { persistence.forgetProject(path: path) }
       return !isEmpty
@@ -604,7 +619,7 @@ public actor ProjectRegistry {
   private func store(forProjectPath path: String) async -> GraphStore {
     if let existing = stores[path] { return existing }
     let scope = LoopGraphScope(projectPath: path, name: Self.displayName(for: path))
-    let graph = persistence.loadGraph(path: path) ?? LoopGraph(scope: scope)
+    let graph = writer.load(path: path) ?? LoopGraph(scope: scope)
     let persistence = self.persistence
     // A cross-graph spawn arrives here as a plain request; hopping through an unstructured
     // `Task` is what lets this actor re-enter itself to reach a *different* store without
@@ -614,8 +629,11 @@ public actor ProjectRegistry {
     }
     let newStore = GraphStore(
       graph: graph,
-      onGraphChanged: { [weak self] updatedGraph in
-        persistence.saveGraph(updatedGraph)
+      onGraphChanged: { [weak self, writer, persistsSynchronously] updatedGraph in
+        // Handed to the writer and done: this closure runs on the store's actor, and a
+        // write of the whole graph held it for as long as the disk took (#307).
+        writer.save(updatedGraph)
+        if persistsSynchronously { writer.flush() }
         // Every state change is a chance for the last running loop to have stopped, or
         // the first to have started — see `refreshAwakeAssertion`.
         Task { await self?.refreshAwakeAssertion() }
@@ -749,7 +767,15 @@ public actor ProjectRegistry {
   // MARK: - Unicast reply
 
   private func send(_ event: DaemonEvent, to fileDescriptor: Int32) {
+    let started = Date()
     guard let data = try? JSONEncoder().encode(event) else { return }
+    DaemonLog.shared.record(
+      "reply",
+      DaemonRequestContext.fields + [
+        ("kind", event.kindName), ("fd", String(fileDescriptor)),
+        ("bytes", String(data.count)),
+        ("encode_ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
+      ])
     // Queued rather than written inline for the same reason `GraphStore.send` queues:
     // this is actor-isolated, and a blocking write of a full-graph frame hands the actor
     // to whichever client is slowest to read it. No superseding key — a unicast reply

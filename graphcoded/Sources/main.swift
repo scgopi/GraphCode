@@ -79,7 +79,20 @@ guard listen(socketDescriptor, 8) == 0 else {
   fail("failed to listen on \(path) (errno \(errno))")
 }
 
-FileHandle.standardOutput.write(Data("graphcoded: listening on \(path)\n".utf8))
+// The diagnostics file, opened before the first line worth keeping. Stdout and stderr
+// move onto it (launchd pointed them at the same file, unbounded), so from here every
+// line the daemon writes is timestamped, structured, and rotated.
+DaemonLog.shared.open(directory: supportDirectory, mirroringStandardStreams: true)
+DaemonLog.shared.record(
+  "startup",
+  [
+    ("pid", String(getpid())),
+    ("version", DaemonIdentity.version),
+    ("build", DaemonIdentity.build),
+    ("executable", CommandLine.arguments[0]),
+    ("support", supportDirectory.path),
+    ("socket", path),
+  ])
 
 // A broadcast writes to every connected client, and a client can vanish without a
 // clean close — the app killed, a CLI exiting early, a pane crashing. The write then
@@ -92,6 +105,11 @@ FileHandle.standardOutput.write(Data("graphcoded: listening on \(path)\n".utf8))
 // `GraphStore.send` drops the dead connection. The error path was always right; the
 // process just never lived long enough to run it.
 signal(SIGPIPE, SIG_IGN)
+
+// Before the shutdown handlers below, which flush its writer on the way out.
+let registry = ProjectRegistry(
+  persistenceDirectory: supportDirectory,
+  reapCondemnedSessions: true)
 
 // Termination is handled on the main queue, not in signal context (#167). The handlers
 // this replaces called `exit(0)` from inside the signal handler itself, and `exit` is
@@ -111,6 +129,7 @@ signal(SIGINT, SIG_IGN)
 func makeShutdownSource(for signalNumber: Int32) -> DispatchSourceSignal {
   let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
   source.setEventHandler {
+    registry.flushPersistence()
     unlink(path)
     exit(0)
   }
@@ -142,8 +161,8 @@ func makeStalenessTimer() -> DispatchSourceTimer? {
   timer.setEventHandler {
     guard let current = ExecutableIdentity.of(path: executablePath), current != launchIdentity
     else { return }
-    FileHandle.standardOutput.write(
-      Data("graphcoded: binary replaced on disk; exiting for launchd to start the new one\n".utf8))
+    DaemonLog.shared.record("shutdown", [("reason", "binary-replaced")])
+    registry.flushPersistence()
     unlink(path)
     exit(0)
   }
@@ -152,10 +171,6 @@ func makeStalenessTimer() -> DispatchSourceTimer? {
 }
 
 let stalenessTimer = makeStalenessTimer()
-
-let registry = ProjectRegistry(
-  persistenceDirectory: supportDirectory,
-  reapCondemnedSessions: true)
 
 /// Bridges a blocking socket read onto a background queue so the `Task` awaiting it
 /// never blocks Swift concurrency's cooperative thread pool — the whole connection
@@ -172,12 +187,41 @@ let registry = ProjectRegistry(
   }
 }
 
+/// A counter safe to bump from the accept loop's thread while connection tasks read it.
+final class ManagedAtomic: @unchecked Sendable {
+  private var value: Int
+  private let lock = NSLock()
+  init(_ value: Int) { self.value = value }
+  func next() -> Int {
+    lock.lock()
+    defer { lock.unlock() }
+    value += 1
+    return value
+  }
+}
+
+/// Numbers connections in the order they arrived — the `conn` every line about one
+/// carries, short enough to read and stable for the daemon's lifetime.
+let connectionCounter = ManagedAtomic(0)
+
 func handleConnection(_ fileDescriptor: Int32) {
   Task {
     let connectionID = UUID()
+    let connection = connectionCounter.next()
+    let peer = SocketPeer.pid(of: fileDescriptor)
+    let connected = Date()
     // `addConnection` opens this connection's outbound channel as it registers it.
     await registry.addConnection(id: connectionID, fileDescriptor: fileDescriptor)
-    FileHandle.standardOutput.write(Data("graphcoded: client connected\n".utf8))
+    // `peer` is the client's pid: what a `graphcode` invocation prints when it times
+    // out, so its complaint and these lines can be matched up with no id on the wire.
+    DaemonLog.shared.record(
+      "connect",
+      [
+        ("conn", String(connection)), ("id", connectionID.tag), ("fd", String(fileDescriptor)),
+        ("peer", peer.map(String.init) ?? "?"),
+      ])
+    var sequence = 0
+    var requests = 0
     while true {
       let data: Data
       do {
@@ -185,10 +229,40 @@ func handleConnection(_ fileDescriptor: Int32) {
       } catch {
         break
       }
+      sequence += 1
+      let received = Date()
+      let request = DaemonRequestContext.Request(connection: connection, sequence: sequence)
       do {
         let command = try JSONDecoder().decode(DaemonCommand.self, from: data)
-        await registry.handle(command, connectionID: connectionID)
+        let decoded = Date()
+        // Logged on receipt, before anything is handled: a request that hangs is
+        // exactly the one worth a line, and a line written on completion would never
+        // come. Never the payload — a `graphCommand.memoNode` is logged as exactly that.
+        DaemonLog.shared.record(
+          "request",
+          [
+            ("conn", String(connection)), ("seq", String(sequence)),
+            ("kind", command.kindName), ("bytes", String(data.count)),
+            ("decode_ms", DaemonLog.milliseconds(decoded.timeIntervalSince(received))),
+          ])
+        await DaemonRequestContext.$current.withValue(request) {
+          await registry.handle(command, connectionID: connectionID)
+        }
+        requests += 1
+        DaemonLog.shared.record(
+          "handled",
+          [
+            ("conn", String(connection)), ("seq", String(sequence)),
+            ("kind", command.kindName),
+            ("handle_ms", DaemonLog.milliseconds(Date().timeIntervalSince(decoded))),
+          ])
       } catch {
+        DaemonLog.shared.record(
+          "request",
+          [
+            ("conn", String(connection)), ("seq", String(sequence)), ("kind", "undecodable"),
+            ("bytes", String(data.count)),
+          ])
         // A frame that read fine but didn't decode is version skew, not a dead socket:
         // a newer CLI sent a command this daemon predates. Dropping the connection here
         // failed *silently* — the client just saw a hang-up — so answer instead and
@@ -206,7 +280,13 @@ func handleConnection(_ fileDescriptor: Int32) {
     // it. `close` tears the socket down, which is also what unblocks a writer parked on a
     // peer that stopped reading.
     OutboundChannels.close(fileDescriptor)
-    FileHandle.standardOutput.write(Data("graphcoded: client disconnected\n".utf8))
+    DaemonLog.shared.record(
+      "disconnect",
+      [
+        ("conn", String(connection)), ("fd", String(fileDescriptor)),
+        ("requests", String(requests)),
+        ("lifetime_ms", DaemonLog.milliseconds(Date().timeIntervalSince(connected))),
+      ])
   }
 }
 

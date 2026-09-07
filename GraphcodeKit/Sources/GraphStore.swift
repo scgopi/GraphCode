@@ -173,7 +173,24 @@ public actor GraphStore {
   /// presence poll. The content is in the target's memory log from the moment it was
   /// queued, so losing this queue to a restart delays the message to the next wake
   /// rather than dropping it.
-  private var pendingFollowUps: [(nodeID: UUID, text: String)] = []
+  /// A deferred delivery: a `--follow-up` message, or a Mailroom watcher's wake for one
+  /// post (`watchedPostID`), waiting for its target to go idle.
+  struct PendingFollowUp: Equatable {
+    let nodeID: UUID
+    let text: String
+    /// The post a watcher's wake is about — what lets `mail watch --off` drop the wakes
+    /// still queued, and lets a wake for a post the reader has since read go unsent.
+    /// `nil` for a message a peer or a human sent.
+    let watchedPostID: Int?
+  }
+
+  private var pendingFollowUps: [PendingFollowUp] = []
+  /// `drainPendingFollowUps` runs across several awaits, and the presence poll that
+  /// calls it runs every fifteen seconds: without this, a second drain started while
+  /// the first was suspended delivered the same items again and, on finishing, wrote
+  /// its own idea of what remained over the first's — dropping whatever had been
+  /// queued in between (issue #304: duplicates, lost mail, and out-of-order delivery).
+  private var isDrainingFollowUps = false
 
   /// A poller holds `self` weakly, so a store going away already stops it *doing*
   /// anything — but the task itself keeps sleeping in its loop forever. Harmless for
@@ -515,7 +532,7 @@ public actor GraphStore {
     // the same way the registry does. Without this a store could bind to a channel left
     // dead on a recycled descriptor number and drop the client as disconnected on the
     // snapshot it was joining for.
-    OutboundChannels.open(fileDescriptor)
+    OutboundChannels.open(fileDescriptor, tag: id.tag)
     connections[id] = fileDescriptor
     send(.graphChanged(graph.wireSnapshot(revision: revision)), to: id)
   }
@@ -1682,7 +1699,8 @@ public actor GraphStore {
         "mailroom — new post #\(post.id)\(topicSuffix(post)) from \(post.author): "
         + "\(preview) — read it with: graphcode mail inbox \(graph.project.path)"
       await deliverAdHocMessage(
-        to: node.id, text: nudge, from: nil, followUp: true, mirror: false)
+        to: node.id, text: nudge, from: nil, followUp: true, mirror: false,
+        watchedPostID: post.id)
     }
   }
 
@@ -1824,6 +1842,9 @@ public actor GraphStore {
         recordMemory(watcherID, "mailroom: stopped watching")
       }
       graph.nodes[id: watcherID]?.mailroomWatch = nil
+      // What `--off` is for: the wakes already staged for this watcher go with the
+      // watch. A peer's `--follow-up` message to the same loop is not a wake and stays.
+      pendingFollowUps.removeAll { $0.nodeID == watcherID && $0.watchedPostID != nil }
     }
   }
 
@@ -2601,7 +2622,7 @@ public actor GraphStore {
   /// it landed is the one wrong answer.
   private func deliverAdHocMessage(
     to nodeID: UUID, text: String, from senderID: UUID?, followUp: Bool = false,
-    mirror: Bool = true
+    mirror: Bool = true, watchedPostID: Int? = nil
   ) async {
     guard let target = graph.nodes[id: nodeID] else {
       announceError("message not delivered: no loop \(nodeID) in this graph")
@@ -2633,7 +2654,8 @@ public actor GraphStore {
     // dropping it.
     if followUp, deliversLater(to: target) {
       recordMemory(nodeID, "follow-up staged: \(message)")
-      pendingFollowUps.append((nodeID: nodeID, text: message))
+      pendingFollowUps.append(
+        PendingFollowUp(nodeID: nodeID, text: message, watchedPostID: watchedPostID))
       return
     }
 
@@ -2698,10 +2720,23 @@ public actor GraphStore {
   /// the reading this waits for. A target that resolved or died is simply dropped from
   /// the queue: its memory log has carried the message since it was staged.
   private func drainPendingFollowUps() async {
-    guard !pendingFollowUps.isEmpty else { return }
-    var remaining: [(nodeID: UUID, text: String)] = []
-    for pending in pendingFollowUps {
+    guard !pendingFollowUps.isEmpty, !isDrainingFollowUps else { return }
+    isDrainingFollowUps = true
+    defer { isDrainingFollowUps = false }
+    // Taken and cleared in one actor step, delivered from the local batch. Anything
+    // queued while a delivery below is suspended lands in `pendingFollowUps` untouched
+    // and is folded back in behind the retries at the end — never overwritten.
+    let batch = pendingFollowUps
+    pendingFollowUps = []
+    var remaining: [PendingFollowUp] = []
+    for pending in batch {
       guard let node = graph.nodes[id: pending.nodeID], !node.isResolved else { continue }
+      // A watcher's wake is only owed while the watch stands and the post is unread:
+      // `mail watch --off` after the wake was staged, or an inbox that has since read
+      // past the post, means the wake has nothing left to say.
+      if let postID = pending.watchedPostID {
+        guard node.mailroomWatch != nil, (node.lastMailroomRead ?? 0) < postID else { continue }
+      }
       switch MessageBus.deliverability(to: node) {
       case .targetBusyWithACheck:
         remaining.append(pending)
@@ -2723,7 +2758,7 @@ public actor GraphStore {
       }
       _ = await deliverToSession(node, pending.text)
     }
-    pendingFollowUps = remaining
+    pendingFollowUps = remaining + pendingFollowUps
   }
 
   private func announceError(_ message: String) {
@@ -3268,7 +3303,14 @@ public actor GraphStore {
   // MARK: - Broadcast
 
   private func broadcast() {
+    let started = Date()
     onGraphChanged?(graph)
+    DaemonLog.shared.record(
+      "persist",
+      DaemonRequestContext.fields + [
+        ("nodes", String(graph.nodes.count)),
+        ("ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
+      ])
     notifyClients()
   }
 
@@ -3284,11 +3326,27 @@ public actor GraphStore {
     // clients attached it was C encodes of the same snapshot on every change, presence
     // tick included (issue #288's CPU amplifier).
     revision += 1
+    let started = Date()
     guard let frame = Self.encode(.graphChanged(graph.wireSnapshot(revision: revision)))
     else { return }
-    for id in connections.keys {
-      deliver(frame, to: id)
+    let encoded = Date()
+    let intended = connections.count
+    var accepted = 0
+    for id in connections.keys where deliver(frame, to: id) {
+      accepted += 1
     }
+    // Sizes and counts only. `ms` is the actor's own time — encode plus handing every
+    // frame to its channel — and never includes a client's read: that is `write`'s
+    // `blocked_ms`, per client, which is the field #288 was missing.
+    DaemonLog.shared.record(
+      "broadcast",
+      DaemonRequestContext.fields + [
+        ("kind", "graphChanged"), ("revision", String(revision)),
+        ("bytes", String(frame.data.count)),
+        ("encode_ms", DaemonLog.milliseconds(encoded.timeIntervalSince(started))),
+        ("recipients", String(intended)), ("accepted", String(accepted)),
+        ("ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
+      ])
   }
 
   /// The presence poll's broadcast — see `DaemonEvent.nodesChanged`. Not superseded:
@@ -3301,19 +3359,38 @@ public actor GraphStore {
   /// never meets a frame it cannot read. Both frames are encoded at most once.
   private func notifyClients(nodesChanged nodes: [LoopNode]) {
     revision += 1
+    let started = Date()
     let delta = Self.encode(
       .nodesChanged(projectPath: graph.project.path, revision: revision, nodes: nodes))
     var snapshot: EncodedEvent?
+    let intended = connections.count
+    var accepted = 0
+    var snapshots = 0
     for (id, capabilities) in connectionCapabilities where connections[id] != nil {
       if capabilities.contains(ClientCapability.nodesChanged.rawValue) {
-        if let delta { deliver(delta, to: id) }
+        if let delta, deliver(delta, to: id) { accepted += 1 }
       } else {
+        // `deliver` would refuse the delta here on its own; the snapshot is what keeps
+        // this connection current.
         if snapshot == nil {
           snapshot = Self.encode(.graphChanged(graph.wireSnapshot(revision: revision)))
         }
-        if let snapshot { deliver(snapshot, to: id) }
+        if let snapshot, deliver(snapshot, to: id) {
+          accepted += 1
+          snapshots += 1
+        }
       }
     }
+    DaemonLog.shared.record(
+      "broadcast",
+      [
+        ("kind", "nodesChanged"), ("revision", String(revision)),
+        ("nodes", String(nodes.count)), ("bytes", String(delta?.data.count ?? 0)),
+        ("snapshot_bytes", String(snapshot?.data.count ?? 0)),
+        ("recipients", String(intended)), ("accepted", String(accepted)),
+        ("as_snapshot", String(snapshots)),
+        ("ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
+      ])
   }
 
   /// An event as the bytes and the superseding key it goes out with — everything about
@@ -3349,8 +3426,12 @@ public actor GraphStore {
     deliver(frame, to: connectionID)
   }
 
-  private func deliver(_ frame: EncodedEvent, to connectionID: UUID) {
-    guard let fileDescriptor = connections[connectionID] else { return }
+  /// Whether the frame was handed to a live channel; `false` also drops the connection
+  /// — or, for an event the connection never announced it could read, sends nothing
+  /// and keeps it.
+  @discardableResult
+  private func deliver(_ frame: EncodedEvent, to connectionID: UUID) -> Bool {
+    guard let fileDescriptor = connections[connectionID] else { return false }
     // The one place the daemon's default is enforced: an event a connection never
     // announced it could read is not sent to it, whatever call site asked. A caller
     // that wants such a connection kept current sends it the legacy shape instead
@@ -3358,7 +3439,7 @@ public actor GraphStore {
     if let required = frame.requiredCapability,
       connectionCapabilities[connectionID]?.contains(required.rawValue) != true
     {
-      return
+      return false
     }
     // Queued, never written here: this runs on the `GraphStore` actor, and a
     // `graphChanged` frame is far larger than a socket's send buffer, so writing it
@@ -3372,8 +3453,9 @@ public actor GraphStore {
       // waiting for the read loop to notice, so a dead connection can't accumulate
       // failed broadcast attempts.
       connections.removeValue(forKey: connectionID)
-      return
+      return false
     }
+    return true
   }
 
   /// Predicate-evaluation state shared between a project store and every sub-graph
