@@ -162,6 +162,16 @@ struct DeliveryWedgeTests {
     for _ in 0..<2000 where !flag.value { try? await Task.sleep(for: .milliseconds(5)) }
   }
 
+  /// Waits for a delivery to arrive rather than sleeping a fixed span and hoping. The
+  /// deadline these tests drive is 50ms, but the drain that acts on it competes with the
+  /// rest of the suite — a flat sleep passes alone and fails under load, which reads as
+  /// the timeout not working when it is only late.
+  private func settle(until values: LockIsolated<[String]>, reaches count: Int) async {
+    for _ in 0..<2000 where values.value.count < count {
+      try? await Task.sleep(for: .milliseconds(5))
+    }
+  }
+
   /// The control: every send returns, so the bystander is served.
   @Test
   func aBystandersFollowUpIsDeliveredWhenEverySendReturns() async {
@@ -194,6 +204,9 @@ struct DeliveryWedgeTests {
     let release = LockIsolated(false)
     let store = GraphStore(
       graph: fixture.graph,
+      // Ahead of the closures because that is where `GraphStore.init` declares it, and
+      // Swift matches an argument list in declaration order.
+      deliveryDeadline: .milliseconds(50),
       onDeliverMessage: { node, message, _ in
         guard node.id == fixture.hung else {
           delivered.withValue { $0.append(message) }
@@ -204,8 +217,7 @@ struct DeliveryWedgeTests {
         return true
       },
       // Both loops read idle, so the drain tries to deliver to both.
-      onReadPresence: { _, _ in PresenceReading(presence: .idle, confidence: .reported) },
-      deliveryDeadline: .milliseconds(50))
+      onReadPresence: { _, _ in PresenceReading(presence: .idle, confidence: .reported) })
 
     // Queued while both are mid-turn (cached `busy`), then delivered by the drain.
     let wedging = Task {
@@ -218,7 +230,7 @@ struct DeliveryWedgeTests {
     // The store keeps answering, and the bystander's mail moves after the timeout.
     await store.handle(
       .messageNode(fixture.bystander, text: "for the bystander", from: nil, followUp: true))
-    try? await Task.sleep(for: .milliseconds(100))
+    await settle(until: delivered, reaches: 1)
     await store.handle(.refreshUsage)
 
     #expect(delivered.value == ["[graphcode] for the bystander"])
@@ -226,7 +238,7 @@ struct DeliveryWedgeTests {
 
     release.setValue(true)
     _ = await wedging.value
-    try? await Task.sleep(for: .milliseconds(50))
+    await settle(until: delivered, reaches: 2)
     #expect(delivered.value == ["[graphcode] for the bystander", "[graphcode] for the hung one"])
   }
 }
