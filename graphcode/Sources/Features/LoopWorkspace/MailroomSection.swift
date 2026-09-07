@@ -147,7 +147,7 @@ struct MailroomSection: View {
 
   private var header: some View {
     HStack(spacing: 7) {
-      Text("MAILROOM")
+      Text("Mailroom for \(graph.project.name)")
         .font(.system(size: 10.5, weight: .bold))
         .tracking(0.63)
         .foregroundStyle(.white.opacity(0.5))
