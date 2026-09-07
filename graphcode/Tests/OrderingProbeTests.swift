@@ -18,14 +18,16 @@ struct OrderingProbeTests {
   private actor ScriptedReadings {
     private var script: [Presence]
     private var index = 0
-    private(set) var reads = 0
+    private(set) var log: [String] = []
     init(_ script: [Presence]) { self.script = script }
-    func read() -> PresenceReading {
-      reads += 1
+    func read(_ scripted: Bool) -> PresenceReading {
+      guard scripted else { return PresenceReading(presence: .idle, confidence: .reported) }
       let presence = index < script.count ? script[index] : (script.last ?? .idle)
       index += 1
+      log.append("\(index): \(presence)")
       return PresenceReading(presence: presence, confidence: .reported)
     }
+    func trace() -> [String] { log }
   }
 
   private final class Attachment: @unchecked Sendable {
@@ -59,7 +61,7 @@ struct OrderingProbeTests {
         delivered.withValue { $0.append(message) }
         return true
       },
-      onReadPresence: { _, _ in await readings.read() },
+      onReadPresence: { node, _ in await readings.read(node.title == "Target") },
       onMailroomEnabled: { true })
     await store.handle(
       .createNode(NodeDraft(title: "Target", loopType: .turnBased, firstInstruction: "Work")))
@@ -81,8 +83,11 @@ struct OrderingProbeTests {
   /// two drains overlap, so #309's in-flight guard is not involved at all.
   @Test
   func aTurnEndingMidDrainReordersWithinOneDrain() async {
-    // Read 1 stages the messages as busy; then the walk reads busy, idle, idle.
-    let readings = ScriptedReadings([.busy, .busy, .idle, .idle, .idle])
+    // Target reads, in order: poll-1 refresh (busy, so every message stages), then the
+    // settle drain that follows each `messageNode`. The third of those drains walks a
+    // batch of two and the turn ends between its two reads: busy for item 1, idle for
+    // item 2. One drain, no overlap — #309's in-flight guard cannot see this.
+    let readings = ScriptedReadings([.busy, .busy, .busy, .idle, .idle])
     let delivered = LockIsolated<[String]>([])
     let attachment = Attachment()
     let (store, target, sender) = await makeStore(
@@ -92,13 +97,10 @@ struct OrderingProbeTests {
       await store.handle(
         .messageNode(target, text: "staged \(index)", from: sender, followUp: true))
     }
-    #expect(delivered.value.isEmpty)
-
-    await store.pollPresence()
     await store.pollPresence()
 
     let texts = plain(delivered)
-    print("PROBE-A order: \(texts)")
+    print("PROBE-A order: \(texts) reads: \(await readings.trace())")
     #expect(texts.count == 3)
     #expect(texts == ["staged 1", "staged 2", "staged 3"])
   }
@@ -113,24 +115,24 @@ struct OrderingProbeTests {
   /// straight in ahead of the still-queued message 1.
   @Test
   func aLaterFollowUpDoesNotJumpAnEarlierOne() async {
-    // Poll 1: busy → cached busy. Message 1 staged.
-    // Poll 2's own read: idle → cached idle, then the drain's per-item read: busy → 1 requeued.
-    // Message 2 now sees cached idle and is delivered live, ahead of message 1.
-    let readings = ScriptedReadings([.busy, .idle, .busy, .idle, .idle, .idle])
+    // Target reads: poll-1 refresh busy (so "first" stages), its settle drain busy (so
+    // "first" is requeued), poll-2 refresh idle — the CACHE is now idle — and poll-2's
+    // drain read busy, so "first" stays queued. "second" then consults the cache, sees
+    // idle, and is typed straight into the session ahead of the still-queued "first".
+    let readings = ScriptedReadings([.busy, .busy, .idle, .busy, .idle])
     let delivered = LockIsolated<[String]>([])
     let attachment = Attachment()
     let (store, target, sender) = await makeStore(
       readings: readings, delivered: delivered, attachment: attachment)
     await store.pollPresence()
     await store.handle(.messageNode(target, text: "first", from: sender, followUp: true))
-    #expect(delivered.value.isEmpty)
 
     await store.pollPresence()
     await store.handle(.messageNode(target, text: "second", from: sender, followUp: true))
     await store.pollPresence()
 
     let texts = plain(delivered)
-    print("PROBE-B order: \(texts)")
+    print("PROBE-B order: \(texts) reads: \(await readings.trace())")
     #expect(texts == ["first", "second"])
   }
 
@@ -141,7 +143,8 @@ struct OrderingProbeTests {
   /// *some* watch stands, never whether it still matches the post's topic.
   @Test
   func reScopingAWatchDropsTheAbandonedTopicsWakes() async {
-    let readings = ScriptedReadings([.busy, .idle, .idle, .idle])
+    // Target reads: poll-1 refresh busy (so the wake stages), then idle throughout.
+    let readings = ScriptedReadings([.busy, .idle, .idle])
     let delivered = LockIsolated<[String]>([])
     let attachment = Attachment()
     let (store, target, sender) = await makeStore(
@@ -156,7 +159,7 @@ struct OrderingProbeTests {
     await store.pollPresence()
 
     let texts = plain(delivered)
-    print("PROBE-C delivered: \(texts)")
+    print("PROBE-C delivered: \(texts) reads: \(await readings.trace())")
     #expect(texts.isEmpty)
   }
 }
