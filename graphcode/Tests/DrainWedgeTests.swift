@@ -147,6 +147,42 @@ struct DrainWedgeTests {
     _ = await wedging.value
   }
 
+  /// Issue #322: the stall that actually happens is the one nothing recorded.
+  ///
+  /// `drain-stall` fires only past `drainLeaseDuration`, and a presence read bounded far
+  /// below that never reaches it — so a read that timed out left no line at all, and the
+  /// presence poll hits this with no client command in flight to carry a `handle_ms`.
+  /// That is how #311 stayed invisible for a day: frozen and working looked identical.
+  @Test
+  func aTimedOutPresenceReadIsRecorded() async {
+    let fixture = fixture()
+    let lines = LockIsolated<[String]>([])
+    let tap = DaemonLog.shared.tap { line in lines.withValue { $0.append(line) } }
+    defer { DaemonLog.shared.untap(tap) }
+    let store = GraphStore(
+      graph: fixture.graph,
+      onDeliverMessage: { _, _, _ in true },
+      onReadPresence: { _, _ in
+        // Longer than the deadline, so the read is abandoned rather than answered.
+        try? await Task.sleep(for: .seconds(5))
+        return PresenceReading(presence: .idle, confidence: .reported)
+      },
+      // Last, because that is where `GraphStore.init` declares it and Swift matches an
+      // argument list in declaration order.
+      presenceReadDeadline: .milliseconds(50))
+
+    await store.handle(
+      .messageNode(fixture.bystander, text: "needs a presence read", from: nil, followUp: true))
+
+    #expect(
+      lines.value.contains { $0.contains("event=presence-stall") },
+      "a presence read that ran out of time left no line: \(lines.value)")
+    // The node it could not read, so a reader can tell which backend stopped answering,
+    // and the bound it broke — never a title or any other user text.
+    #expect(lines.value.contains { $0.contains(fixture.bystander.uuidString) })
+    #expect(lines.value.contains { $0.contains("deadline_ms=") })
+  }
+
   /// What the deadline cannot reach, and the reason the guard is a lease.
   ///
   /// `deliverToSession` is the same `PTYProcessSession` chain as the presence read and

@@ -368,8 +368,26 @@ public actor GraphStore {
   private func presenceReading(of node: LoopNode) async -> PresenceReading? {
     guard let onReadPresence else { return nil }
     let path = graph.project.path
-    return await withDeadline(presenceReadDeadline) { await onReadPresence(node, path) }
-      ?? .unknown
+    // The closure is passed rather than trailing: a trailing closure in a `guard let`
+    // condition is read as the guard's own body.
+    let read = await withDeadline(presenceReadDeadline, { await onReadPresence(node, path) })
+    guard let reading = read else {
+      // The timeout is the event; the lease is only the backstop. `drain-stall` fires
+      // past `drainLeaseDuration`, and a read bounded well below that never reaches it —
+      // so the stall that actually happens was the one nothing recorded, which is how
+      // issue #311 stayed invisible for a day. A read that ran out of time says a
+      // backend is not answering, and that is worth a line whether or not a drain was
+      // waiting on it: the presence poll hits this with no client command in flight,
+      // and used to leave no trace at all.
+      DaemonLog.shared.record(
+        "presence-stall",
+        DaemonRequestContext.fields + [
+          ("node", node.id.uuidString),
+          ("deadline_ms", DaemonLog.milliseconds(presenceReadDeadline.timeInterval)),
+        ])
+      return .unknown
+    }
+    return reading
   }
 
   private func recordMemory(_ nodeID: UUID, _ entry: String) {
