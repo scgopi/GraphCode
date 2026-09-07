@@ -238,6 +238,23 @@ public actor GraphStore {
   /// 300s here is `RemoteEnsureGate.leaseDuration`, arrived at for the same chain.
   private let drainLeaseDuration: Duration
 
+  /// How long the drain waits on one `deliverToSession` before it stops waiting.
+  ///
+  /// The lease above is a backstop, not the fix: a drain parked inside a send holds the
+  /// queue for the lease's whole 300s, silently, before any successor even learns of it
+  /// (the stable-release check's wedge test against #316). The send is the *likelier*
+  /// half of the chain to hang — one message is several sequential `zmx send`
+  /// invocations, so one message is several chances to hang on a wedged `ControlMaster`.
+  ///
+  /// Bounded in shape by the same `withDeadline` the presence read is: the loser is
+  /// abandoned, never cancelled-and-waited. What the deadline owes the queue is
+  /// durability — a timed-out item is staged to the target's memory log (the Mailroom
+  /// mirror already carries every message) and dropped, so a pass reads at its next wake
+  /// instead of a send that may only ever hang. The same span as
+  /// `presenceReadDeadline`: a bystander behind one wedged target waits one span, not
+  /// the process's life at either end.
+  private let deliveryDeadline: Duration
+
   /// A poller holds `self` weakly, so a store going away already stops it *doing*
   /// anything — but the task itself keeps sleeping in its loop forever. Harmless for
   /// the long-lived project store; sub-graph stores are built per command and hold no
@@ -280,6 +297,7 @@ public actor GraphStore {
   /// `ZmxSessionLauncher`; tests leave it `nil` or capture the calls.
   public init(
     graph: LoopGraph = LoopGraph(project: ProjectRef(path: "", name: "Untitled")),
+    deliveryDeadline: Duration = .seconds(45),
     onGraphChanged: (@Sendable (LoopGraph) -> Void)? = nil,
     onEnsureSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
     onTerminateSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
@@ -343,6 +361,7 @@ public actor GraphStore {
     self.goalCache = goalCache ?? GoalEvaluationCache()
     self.recurrence = recurrence
     self.presenceReadDeadline = presenceReadDeadline
+    self.deliveryDeadline = deliveryDeadline
     self.drainLeaseDuration = drainLeaseDuration
   }
 
@@ -2913,7 +2932,30 @@ public actor GraphStore {
         remaining.append(staged(pending))
         continue
       }
-      _ = await deliverToSession(node, pending.text)
+      // The one await in the walk that used to have no deadline of its own — the send is
+      // the `PTYProcessSession` chain, and a hang here held the queue for the lease's
+      // whole span with nothing logged. Bounded now: whatever it owes on the deadline
+      // passing is staged to memory and dropped below, and the note is logged so frozen
+      // and working do not look identical (`#289` diagnostics).
+      let confirmed =
+        await withDeadline(deliveryDeadline) {
+          await self.deliverToSession(node, pending.text)
+        } ?? false
+      guard confirmed else {
+        DaemonLog.shared.record(
+          "delivery-stall",
+          DaemonRequestContext.fields + [
+            ("node", node.id.uuidString),
+            ("deadline_ms", DaemonLog.milliseconds(deliveryDeadline.timeInterval)),
+          ])
+        // Not left on the queue, not thrown away unwritten: the Mailroom mirror has the
+        // content, and the memory log's entry is what the target's next wake reads — the
+        // durable half a queue entry was only ever going to point at. A drop that does
+        // not record is the loss, and `staged(_:)` is where the record is canonical
+        // ("follow-up staged:") and happens exactly once.
+        _ = staged(pending)
+        continue
+      }
     }
   }
 
