@@ -2781,7 +2781,10 @@ public actor GraphStore {
   /// and handed over inside the same call: a log line saying it was staged would
   /// describe a wait that never happened, and a watcher's log would gain one per post it
   /// was woken for. Anything that does wait is recorded before the pass that deferred it
-  /// ends, which is what the queue's durability across a daemon restart rests on.
+  /// ends. The floor under all of it is the board: a peer's message is mirrored onto
+  /// the Mailroom when it is sent and a watcher's wake is *about* a post already there,
+  /// so the content survives a daemon that dies mid-pass either way — this line is what
+  /// puts it in front of the loop's next wake without it having to go looking.
   private func staged(_ pending: PendingFollowUp) -> PendingFollowUp {
     guard !pending.recorded else { return pending }
     recordMemory(pending.nodeID, "follow-up staged: \(pending.text)")
@@ -2800,6 +2803,13 @@ public actor GraphStore {
     let batch = pendingFollowUps
     pendingFollowUps = []
     var remaining: [PendingFollowUp] = []
+    var index = 0
+    // Folded back on the way out of every path, not only the one that runs to the end:
+    // the walk holds the whole queue in locals, and the stable-release check's reading
+    // of the wedge was that a drain which never returns strands them there. It cannot
+    // now — the reading below is bounded — but what the pass did not resolve belongs on
+    // the queue rather than in a variable about to go out of scope, whatever the exit.
+    defer { pendingFollowUps = remaining + Array(batch[index...]) + pendingFollowUps }
     // One reading per target per pass, taken the first time this pass reaches that
     // target and reused for the rest of its queue. Reading again between items is what
     // let a turn ending *mid-drain* reorder the queue: three messages for one loop went
@@ -2810,7 +2820,9 @@ public actor GraphStore {
     // the batch either goes out in order or waits together for the next pass. It also
     // costs one probe per target rather than one per message.
     var readings: [UUID: Presence] = [:]
-    for pending in batch {
+    while index < batch.count {
+      let pending = batch[index]
+      index += 1
       guard let node = graph.nodes[id: pending.nodeID], !node.isResolved else {
         // Its work is over, but the message must not go with the queue entry: the log is
         // what the loop's next wake reads, and for a resolved loop that is all there is.
@@ -2858,7 +2870,6 @@ public actor GraphStore {
       }
       _ = await deliverToSession(node, pending.text)
     }
-    pendingFollowUps = remaining + pendingFollowUps
   }
 
   private func announceError(_ message: String) {
