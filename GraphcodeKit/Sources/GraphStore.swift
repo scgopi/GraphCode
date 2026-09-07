@@ -173,7 +173,24 @@ public actor GraphStore {
   /// presence poll. The content is in the target's memory log from the moment it was
   /// queued, so losing this queue to a restart delays the message to the next wake
   /// rather than dropping it.
-  private var pendingFollowUps: [(nodeID: UUID, text: String)] = []
+  /// A deferred delivery: a `--follow-up` message, or a Mailroom watcher's wake for one
+  /// post (`watchedPostID`), waiting for its target to go idle.
+  struct PendingFollowUp: Equatable {
+    let nodeID: UUID
+    let text: String
+    /// The post a watcher's wake is about — what lets `mail watch --off` drop the wakes
+    /// still queued, and lets a wake for a post the reader has since read go unsent.
+    /// `nil` for a message a peer or a human sent.
+    let watchedPostID: Int?
+  }
+
+  private var pendingFollowUps: [PendingFollowUp] = []
+  /// `drainPendingFollowUps` runs across several awaits, and the presence poll that
+  /// calls it runs every fifteen seconds: without this, a second drain started while
+  /// the first was suspended delivered the same items again and, on finishing, wrote
+  /// its own idea of what remained over the first's — dropping whatever had been
+  /// queued in between (issue #304: duplicates, lost mail, and out-of-order delivery).
+  private var isDrainingFollowUps = false
 
   /// A poller holds `self` weakly, so a store going away already stops it *doing*
   /// anything — but the task itself keeps sleeping in its loop forever. Harmless for
@@ -1682,7 +1699,8 @@ public actor GraphStore {
         "mailroom — new post #\(post.id)\(topicSuffix(post)) from \(post.author): "
         + "\(preview) — read it with: graphcode mail inbox \(graph.project.path)"
       await deliverAdHocMessage(
-        to: node.id, text: nudge, from: nil, followUp: true, mirror: false)
+        to: node.id, text: nudge, from: nil, followUp: true, mirror: false,
+        watchedPostID: post.id)
     }
   }
 
@@ -1824,6 +1842,9 @@ public actor GraphStore {
         recordMemory(watcherID, "mailroom: stopped watching")
       }
       graph.nodes[id: watcherID]?.mailroomWatch = nil
+      // What `--off` is for: the wakes already staged for this watcher go with the
+      // watch. A peer's `--follow-up` message to the same loop is not a wake and stays.
+      pendingFollowUps.removeAll { $0.nodeID == watcherID && $0.watchedPostID != nil }
     }
   }
 
@@ -2601,7 +2622,7 @@ public actor GraphStore {
   /// it landed is the one wrong answer.
   private func deliverAdHocMessage(
     to nodeID: UUID, text: String, from senderID: UUID?, followUp: Bool = false,
-    mirror: Bool = true
+    mirror: Bool = true, watchedPostID: Int? = nil
   ) async {
     guard let target = graph.nodes[id: nodeID] else {
       announceError("message not delivered: no loop \(nodeID) in this graph")
@@ -2633,7 +2654,8 @@ public actor GraphStore {
     // dropping it.
     if followUp, deliversLater(to: target) {
       recordMemory(nodeID, "follow-up staged: \(message)")
-      pendingFollowUps.append((nodeID: nodeID, text: message))
+      pendingFollowUps.append(
+        PendingFollowUp(nodeID: nodeID, text: message, watchedPostID: watchedPostID))
       return
     }
 
@@ -2698,10 +2720,23 @@ public actor GraphStore {
   /// the reading this waits for. A target that resolved or died is simply dropped from
   /// the queue: its memory log has carried the message since it was staged.
   private func drainPendingFollowUps() async {
-    guard !pendingFollowUps.isEmpty else { return }
-    var remaining: [(nodeID: UUID, text: String)] = []
-    for pending in pendingFollowUps {
+    guard !pendingFollowUps.isEmpty, !isDrainingFollowUps else { return }
+    isDrainingFollowUps = true
+    defer { isDrainingFollowUps = false }
+    // Taken and cleared in one actor step, delivered from the local batch. Anything
+    // queued while a delivery below is suspended lands in `pendingFollowUps` untouched
+    // and is folded back in behind the retries at the end — never overwritten.
+    let batch = pendingFollowUps
+    pendingFollowUps = []
+    var remaining: [PendingFollowUp] = []
+    for pending in batch {
       guard let node = graph.nodes[id: pending.nodeID], !node.isResolved else { continue }
+      // A watcher's wake is only owed while the watch stands and the post is unread:
+      // `mail watch --off` after the wake was staged, or an inbox that has since read
+      // past the post, means the wake has nothing left to say.
+      if let postID = pending.watchedPostID {
+        guard node.mailroomWatch != nil, (node.lastMailroomRead ?? 0) < postID else { continue }
+      }
       switch MessageBus.deliverability(to: node) {
       case .targetBusyWithACheck:
         remaining.append(pending)
@@ -2723,7 +2758,7 @@ public actor GraphStore {
       }
       _ = await deliverToSession(node, pending.text)
     }
-    pendingFollowUps = remaining
+    pendingFollowUps = remaining + pendingFollowUps
   }
 
   private func announceError(_ message: String) {
