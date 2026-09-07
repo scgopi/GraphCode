@@ -207,12 +207,13 @@ public actor GraphStore {
   /// rejects the plain flag for this same chain and for this same reason.
   ///
   /// So the guard expires. A drain that outlives its lease is a wedge by definition, and
-  /// the next one says so in the daemon log and takes over. Taking over cannot duplicate
-  /// anything — the batch was taken and cleared in one actor step, so the successor
-  /// finds only what was queued after it — and if the wedged drain ever returns, its
-  /// `defer` folds its own remainder back on. Order can slip in that recovery; a queue
-  /// that moves again beats one frozen for ever.
+  /// the next one says so in the daemon log and takes over. The successor recovers the
+  /// suspended batch and invalidates the old owner before taking the queue on.
   private var drainLease: Date?
+  private var drainOwner: UUID?
+  private var drainBatch: [PendingFollowUp] = []
+  private var drainInFlight: PendingFollowUp?
+  private var drainDeferred: [PendingFollowUp] = []
 
   /// How long a presence read may take before the store stops waiting on it.
   ///
@@ -2836,17 +2837,33 @@ public actor GraphStore {
           ("held_ms", DaemonLog.milliseconds(heldFor)),
           ("queued", String(pendingFollowUps.count)),
         ])
+      pendingFollowUps = drainDeferred + (drainInFlight.map { [$0] } ?? []) + drainBatch
+        + pendingFollowUps
+      drainBatch = []
+      drainInFlight = nil
+      drainDeferred = []
     }
+    let owner = UUID()
     drainLease = taken
+    drainOwner = owner
     // Released only if it is still ours: a successor that took over after this lease
     // expired must not have its own lease cleared by the drain it replaced finally
     // returning — the mistake `RemoteEnsureGate.end(_:token:)` documents.
-    defer { if drainLease == taken { drainLease = nil } }
+    defer {
+      if drainOwner == owner {
+        drainOwner = nil
+        drainLease = nil
+        drainBatch = []
+        drainInFlight = nil
+        drainDeferred = []
+      }
+    }
     // Taken and cleared in one actor step, delivered from the local batch. Anything
     // queued while a delivery below is suspended lands in `pendingFollowUps` untouched
     // and is folded back in behind the retries at the end — never overwritten.
     let batch = pendingFollowUps
     pendingFollowUps = []
+    drainBatch = batch
     var remaining: [PendingFollowUp] = []
     var index = 0
     // Folded back on the way out of every path, not only the one that runs to the end:
@@ -2854,7 +2871,11 @@ public actor GraphStore {
     // of the wedge was that a drain which never returns strands them there. It cannot
     // now — the reading below is bounded — but what the pass did not resolve belongs on
     // the queue rather than in a variable about to go out of scope, whatever the exit.
-    defer { pendingFollowUps = remaining + Array(batch[index...]) + pendingFollowUps }
+    defer {
+      if drainOwner == owner {
+        pendingFollowUps = remaining + Array(batch[index...]) + pendingFollowUps
+      }
+    }
     // One reading per target per pass, taken the first time this pass reaches that
     // target and reused for the rest of its queue. Reading again between items is what
     // let a turn ending *mid-drain* reorder the queue: three messages for one loop went
@@ -2866,14 +2887,18 @@ public actor GraphStore {
     // costs one probe per target rather than one per message.
     var readings: [UUID: Presence] = [:]
     while index < batch.count {
+      guard drainOwner == owner else { return }
       let pending = batch[index]
       index += 1
+      drainBatch = Array(batch[index...])
+      drainInFlight = pending
       guard let node = graph.nodes[id: pending.nodeID], !node.isResolved else {
         // Its work is over, but the message must not go with the queue entry: the log is
         // what the loop's next wake reads, and for a resolved loop that is all there is.
         if !pending.recorded, graph.nodes[id: pending.nodeID] != nil {
           recordMemory(pending.nodeID, "while you were away: \(pending.text)")
         }
+        drainInFlight = nil
         continue
       }
       // A watcher's wake is only owed while the watch that asked for it stands and the
@@ -2885,16 +2910,22 @@ public actor GraphStore {
       if let postID = pending.watchedPostID {
         guard let watch = node.mailroomWatch, (node.lastMailroomRead ?? 0) < postID,
           let post = graph.mailroom.first(where: { $0.id == postID }), watch.matches(post.topic)
-        else { continue }
+        else {
+          drainInFlight = nil
+          continue
+        }
       }
       switch MessageBus.deliverability(to: node) {
       case .targetBusyWithACheck:
         remaining.append(staged(pending))
+        drainDeferred = remaining
+        drainInFlight = nil
         continue
       case .some:
         if !pending.recorded {
           recordMemory(pending.nodeID, "while you were away: \(pending.text)")
         }
+        drainInFlight = nil
         continue
       case nil:
         break
@@ -2911,9 +2942,21 @@ public actor GraphStore {
       // is not a state, so the message stays queued for a pass that gets an answer.
       guard presence == .idle else {
         remaining.append(staged(pending))
+        drainDeferred = remaining
+        drainInFlight = nil
         continue
       }
-      _ = await deliverToSession(node, pending.text)
+      let delivered = await deliverToSession(node, pending.text)
+      guard drainOwner == owner else { return }
+      if !delivered {
+        remaining.append(staged(pending))
+        drainDeferred = remaining
+        if !pending.recorded {
+          announceError(
+            "delivery to \(node.title)'s session failed — follow-up retained for retry")
+        }
+      }
+      drainInFlight = nil
     }
   }
 
