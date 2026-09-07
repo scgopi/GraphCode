@@ -360,6 +360,9 @@ public actor ProjectRegistry {
       // Drop the in-memory store too, or a later reopen would resurrect the graph we
       // just deleted from the one still sitting in `stores`.
       stores.removeValue(forKey: canonicalPath)
+      // Before the file goes, so a save still in the writer's queue cannot land after the
+      // delete and put the graph back.
+      writer.forget(path: canonicalPath)
       persistence.deleteGraph(path: canonicalPath)
 
     case .graphCommand(let path, let inner):

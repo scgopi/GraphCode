@@ -234,6 +234,10 @@ extension Workspace {
     let projectsDirectory = url.appendingPathComponent("projects", isDirectory: true)
     for name in (try? fileManager.contentsOfDirectory(atPath: projectsDirectory.path)) ?? []
     where name.hasSuffix(".json") {
+      // A sidecar is not a project, but the suffix alone must not be trusted here either:
+      // a project path ending in `.mailroom` mints a graph file that carries it, and a
+      // room — valid or corrupt — never decodes as a graph, so the decode below already
+      // skips every sidecar without also skipping a sidecar-named graph.
       guard let data = try? Data(contentsOf: projectsDirectory.appendingPathComponent(name)),
         let graph = try? JSONDecoder().decode(LoopGraph.self, from: data)
       else { continue }

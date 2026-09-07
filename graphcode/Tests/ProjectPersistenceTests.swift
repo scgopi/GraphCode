@@ -208,6 +208,69 @@ struct MailroomPersistenceTests {
     #expect(writer.load(path: "/tmp/never-saved") == nil)
   }
 
+  /// The digest cache is process-wide while one project path is a different room file in
+  /// every workspace. Keyed by the path, two workspaces would share an entry and a save
+  /// be judged unchanged against a digest taken from someone else's file — the room never
+  /// written, the file left stale on disk.
+  @Test
+  func aRoomsDigestIsJudgedAgainstItsOwnFileNotTheProjectPath() throws {
+    let workspaceA = FileManager.default.temporaryDirectory
+      .appendingPathComponent("digest-ws-\(UUID().uuidString)")
+    let workspaceB = FileManager.default.temporaryDirectory
+      .appendingPathComponent("digest-ws-\(UUID().uuidString)")
+    defer {
+      try? FileManager.default.removeItem(at: workspaceA)
+      try? FileManager.default.removeItem(at: workspaceB)
+    }
+    func post(_ body: String) -> MailroomPost {
+      MailroomPost(
+        id: 1, at: Date(timeIntervalSince1970: 1), authorID: nil, author: "a peer",
+        topic: nil, body: body)
+    }
+    func graph(_ posts: [MailroomPost]) -> LoopGraph {
+      var graph = LoopGraph(
+        project: ProjectRef(path: "/tmp/p", name: "p"), nodes: [LoopNode(title: "loop")])
+      graph.mailroom = posts
+      return graph
+    }
+    let a = ProjectPersistence(baseDirectory: workspaceA)
+    let b = ProjectPersistence(baseDirectory: workspaceB)
+    a.saveGraph(graph([post("one")]))
+    b.saveGraph(graph([post("one"), post("two")]))
+
+    a.saveGraph(graph([post("one"), post("two")]))
+
+    let roomA = try String(
+      decoding: Data(
+        contentsOf: workspaceA.appendingPathComponent("projects/_tmp_p.mailroom.json")),
+      as: UTF8.self)
+    #expect(roomA.contains("two"), "workspace A's room was judged unchanged and never written")
+  }
+
+  /// The other side of `aLoadReturnsTheQueuedSnapshotBeforeTheDiskHasIt`: a queued save
+  /// must not outlive the graph it belongs to. Deleting a project evicts its store and
+  /// removes the file, and a `load` still answering from the queue would hand the
+  /// deleted loops back to the next reader.
+  @Test
+  func aDeletedProjectIsNotHandedBackFromTheQueue() throws {
+    let directory = makeDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let persistence = ProjectPersistence(baseDirectory: directory)
+    let writer = GraphWriter(persistence: persistence)
+    let path = "/tmp/deleted-\(UUID().uuidString.prefix(6))"
+    var graph = LoopGraph(project: ProjectRef(path: path, name: "deleted"))
+    graph.nodes.append(LoopNode(title: "Loop", loopType: .turnBased, firstInstruction: "Work"))
+
+    for _ in 0..<50 {
+      writer.save(graph)
+      writer.forget(path: path)
+      persistence.deleteGraph(path: path)
+      #expect(writer.load(path: path) == nil)
+      writer.flush()
+      #expect(persistence.loadGraph(path: path) == nil, "a queued save rewrote a deleted graph")
+    }
+  }
+
   /// The writer takes a burst and lands the newest snapshot once; `flush` returns with
   /// it on disk.
   @Test

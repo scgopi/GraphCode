@@ -65,14 +65,26 @@ public enum OrphanedSessionReaper {
     for directory in workspaceDirectories {
       var workspaceLive: Set<UUID> = []
       let projects = directory.appendingPathComponent("projects", isDirectory: true)
-      let graphFiles =
+      let projectFiles =
         (try? FileManager.default.contentsOfDirectory(
           at: projects, includingPropertiesForKeys: nil))?
         .filter { $0.pathExtension == "json" } ?? []
-      for file in graphFiles {
+      for file in projectFiles {
+        let sidecarNamed = ProjectPersistence.isSidecarFileName(file.lastPathComponent)
         guard let data = try? Data(contentsOf: file),
           let graph = try? JSONDecoder().decode(LoopGraph.self, from: data)
-        else { return nil }
+        else {
+          // A sidecar is skipped before it can look corrupt: it is not a graph, it never
+          // owned a session, and refusing to guess about it aborts a reap that has nothing
+          // to be uncertain about. Only a file that claims to be a graph and cannot be read
+          // as one is the "state this build cannot account for" the bail-out is for. The
+          // name is answered first because a *corrupt* room is still a room.
+          if sidecarNamed { continue }
+          return nil
+        }
+        // Where the name can lie, decode wins: a project path ending in `.mailroom` mints
+        // a graph file that carries the sidecar suffix, and skipping one by name would
+        // drop live sessions out of this set for a reap to kill.
         workspaceLive.formUnion(graph.nodesAtAnyDepth.map(\.id))
       }
       workspaceLive.formUnion(QuickChatStore(baseDirectory: directory).load().map(\.id))
