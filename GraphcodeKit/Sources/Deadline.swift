@@ -49,3 +49,12 @@ private actor DeadlineRelay<T: Sendable> {
     return await withCheckedContinuation { self.waiter = $0 }
   }
 }
+
+extension Duration {
+  /// The same span as `Date` arithmetic wants it. `Duration` is what the concurrency
+  /// APIs take and `TimeInterval` is what a lease compares against; this is the one
+  /// conversion between them.
+  var timeInterval: TimeInterval {
+    Double(components.seconds) + Double(components.attoseconds) / 1e18
+  }
+}

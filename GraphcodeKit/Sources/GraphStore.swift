@@ -194,7 +194,25 @@ public actor GraphStore {
   /// the first was suspended delivered the same items again and, on finishing, wrote
   /// its own idea of what remained over the first's — dropping whatever had been
   /// queued in between (issue #304: duplicates, lost mail, and out-of-order delivery).
-  private var isDrainingFollowUps = false
+  /// A drain in flight, held as a **lease** rather than a flag: the moment it was taken,
+  /// which is also proof of *which* drain holds it.
+  ///
+  /// A bare boolean was enough while the only unbounded await under it was the presence
+  /// read, which now has a deadline. It is not enough for the class: `deliverToSession`
+  /// is the same `PTYProcessSession` chain with no deadline of its own — `zmx ls` to
+  /// check the session exists, a write per chunk, and `sendRemote` over `ssh` for a
+  /// remote loop — so a hang there would hold a bare flag for the life of the daemon
+  /// exactly as the presence read did, and every loop in the project would stop
+  /// receiving mail with nothing logged (measured: 364s, zero errors). `RemoteEnsureGate`
+  /// rejects the plain flag for this same chain and for this same reason.
+  ///
+  /// So the guard expires. A drain that outlives its lease is a wedge by definition, and
+  /// the next one says so in the daemon log and takes over. Taking over cannot duplicate
+  /// anything — the batch was taken and cleared in one actor step, so the successor
+  /// finds only what was queued after it — and if the wedged drain ever returns, its
+  /// `defer` folds its own remainder back on. Order can slip in that recovery; a queue
+  /// that moves again beats one frozen for ever.
+  private var drainLease: Date?
 
   /// How long a presence read may take before the store stops waiting on it.
   ///
@@ -203,7 +221,7 @@ public actor GraphStore {
   /// `PTYProcessSession.waitCollectingOutput`, which ends only when the probe's
   /// `terminationHandler` closes the stream, and `ssh`'s `ConnectTimeout=10` bounds the
   /// connect rather than a command left hanging on a host that has gone away. An `await`
-  /// that never returns held `isDrainingFollowUps` for the life of the daemon, which
+  /// that never returns held the drain's guard for the life of the daemon, which
   /// froze staged delivery for *every* loop in the project — and a frozen queue and an
   /// empty one report exactly the same thing from outside (issue #311).
   ///
@@ -212,6 +230,13 @@ public actor GraphStore {
   /// so a live-but-slow host still answers inside this. Short enough that a wedge costs
   /// one poll, not the process.
   private let presenceReadDeadline: Duration
+
+  /// How long a drain may hold the queue before another is allowed to take over. Far
+  /// longer than any healthy pass (milliseconds) and longer than a pass that meets
+  /// several wedged presence reads, each of which is bounded by `presenceReadDeadline`;
+  /// short enough that a hang costs minutes rather than the life of the process. The
+  /// 300s here is `RemoteEnsureGate.leaseDuration`, arrived at for the same chain.
+  private let drainLeaseDuration: Duration
 
   /// A poller holds `self` weakly, so a store going away already stops it *doing*
   /// anything — but the task itself keeps sleeping in its loop forever. Harmless for
@@ -285,6 +310,7 @@ public actor GraphStore {
     goalCache: GoalEvaluationCache? = nil,
     recurrence: RecurrenceSink? = nil,
     presenceReadDeadline: Duration = .seconds(45),
+    drainLeaseDuration: Duration = .seconds(300),
     subGraphDepth: Int = 0
   ) {
     self.graph = graph
@@ -317,6 +343,7 @@ public actor GraphStore {
     self.goalCache = goalCache ?? GoalEvaluationCache()
     self.recurrence = recurrence
     self.presenceReadDeadline = presenceReadDeadline
+    self.drainLeaseDuration = drainLeaseDuration
   }
 
   /// The store's one way to ask what a session is doing, and the only place the answer
@@ -2794,9 +2821,27 @@ public actor GraphStore {
   }
 
   private func drainPendingFollowUps() async {
-    guard !pendingFollowUps.isEmpty, !isDrainingFollowUps else { return }
-    isDrainingFollowUps = true
-    defer { isDrainingFollowUps = false }
+    guard !pendingFollowUps.isEmpty else { return }
+    let taken = Date()
+    if let held = drainLease {
+      let heldFor = taken.timeIntervalSince(held)
+      guard heldFor >= drainLeaseDuration.timeInterval else { return }
+      // The line that stops frozen and working looking identical. A drain past its lease
+      // has hung somewhere this store could not bound — the delivery chain, most likely
+      // — and #289's diagnostics are where that becomes visible instead of being
+      // inferred from mail that never came.
+      DaemonLog.shared.record(
+        "drain-stall",
+        DaemonRequestContext.fields + [
+          ("held_ms", DaemonLog.milliseconds(heldFor)),
+          ("queued", String(pendingFollowUps.count)),
+        ])
+    }
+    drainLease = taken
+    // Released only if it is still ours: a successor that took over after this lease
+    // expired must not have its own lease cleared by the drain it replaced finally
+    // returning — the mistake `RemoteEnsureGate.end(_:token:)` documents.
+    defer { if drainLease == taken { drainLease = nil } }
     // Taken and cleared in one actor step, delivered from the local batch. Anything
     // queued while a delivery below is suspended lands in `pendingFollowUps` untouched
     // and is folded back in behind the retries at the end — never overwritten.
