@@ -55,3 +55,6 @@ xcuserdata/
 !/docs/_includes/
 !/docs/assets/
 !/docs/ramps.json
+
+# Per-worktree DerivedData (docs: .claude/skills/pr-gate-report)
+.derived/
