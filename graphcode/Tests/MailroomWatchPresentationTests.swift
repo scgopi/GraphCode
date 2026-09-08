@@ -5,8 +5,6 @@ import Testing
 
 @testable import graphcode
 
-/// Whether a loop wears the Mailroom-watch envelope, and what its tooltip says
-/// (`MailroomWatchPresentation`).
 @Suite
 struct MailroomWatchPresentationTests {
   private func node(watch: MailroomWatch?, state: LoopState = .running) -> LoopNode {
@@ -40,7 +38,6 @@ struct MailroomWatchPresentationTests {
 
   @Test(arguments: [LoopState.succeeded, .failed, .stalled, .stopped])
   func aResolvedLoopHidesItsWatch(state: LoopState) {
-    // The watch survives on the node, but nothing can ring a loop that has finished.
     let finished = node(watch: MailroomWatch(topic: "design"), state: state)
 
     #expect(!MailroomWatchPresentation.showsGlyph(for: finished))
