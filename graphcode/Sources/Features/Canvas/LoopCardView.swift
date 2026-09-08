@@ -241,6 +241,12 @@ struct LoopCardView: View {
       if isRemote {
         Image(systemName: "network").font(.system(size: 9)).foregroundStyle(.white.opacity(0.4))
       }
+      if let watching = MailroomWatchPresentation.tooltip(for: node) {
+        Image(systemName: MailroomWatchPresentation.symbolName)
+          .font(.system(size: 9))
+          .foregroundStyle(.white.opacity(0.4))
+          .help(watching)
+      }
       switch entryRole {
       case .entry: EntryChip()
       case .cycleOnly: CycleChip()
