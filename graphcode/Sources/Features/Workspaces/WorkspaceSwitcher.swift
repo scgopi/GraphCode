@@ -286,3 +286,4 @@ struct WorkspaceSwitcherPanel: View {
     return summary.isOpen ? "\(loops) · open" : "\(loops) · not running"
   }
 }
+
