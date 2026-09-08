@@ -282,6 +282,12 @@ struct AppSidebarView: View {
         .frame(width: 3, height: 14)
       Text(node.title).font(.system(size: 12.5)).lineLimit(1)
       Spacer(minLength: 4)
+      if let watching = MailroomWatchPresentation.tooltip(for: node) {
+        Image(systemName: MailroomWatchPresentation.symbolName)
+          .font(.system(size: 10))
+          .foregroundStyle(.white.opacity(0.45))
+          .help(watching)
+      }
       Text(LoopCardPresentation.duration(sidebarNow.timeIntervalSince(node.createdAt)))
         .font(.system(size: 10.5, design: .monospaced))
         .foregroundStyle(.white.opacity(0.5))
