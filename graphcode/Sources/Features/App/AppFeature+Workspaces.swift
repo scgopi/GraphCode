@@ -136,8 +136,9 @@ extension AppFeature {
     case createConfirmed
     /// Raise (or launch) the instance that owns this workspace.
     case switchRequested(Workspace)
-    /// ⌘` and ⌘⇧` — the workspace `offset` places along from this one in creation order,
-    /// wrapping at both ends.
+    /// ⌘` and ⌘⇧` — the *running* workspace `offset` places along from this one in
+    /// creation order, wrapping at both ends. One with no instance is stepped over, never
+    /// launched.
     case cycleRequested(offset: Int)
     case switcherPresented(Bool)
     case manageRequested
@@ -311,12 +312,20 @@ struct AppWorkspacesReducer: Reducer {
         // workspace another instance created since then is one ⌘` would skip over.
         let known = workspaces.list()
         state.workspaces.known = known
-        guard known.count > 1,
-          let index = known.firstIndex(where: { $0.id == state.workspaces.current.id })
+        // Only the workspaces with a window. ⌘` is the system's cycle-*windows* key, and
+        // `switchRequested` launches whatever has no instance — so walking the whole
+        // list brought back the workspace someone had just quit (issue #330). The same
+        // question the update path asks before swapping the bundle, answered by the same
+        // client, filtered through `known` so creation order is kept.
+        let current = state.workspaces.current
+        let open = Set(workspaces.otherOpen().map(\.id)).union([current.id])
+        let running = known.filter { open.contains($0.id) }
+        guard running.count > 1,
+          let index = running.firstIndex(where: { $0.id == current.id })
         else { return .none }
         // `%` keeps a negative dividend negative in Swift, so ⌘⇧` at the head of the
-        // list would index -1 without the extra `+ known.count`.
-        let next = known[((index + offset) % known.count + known.count) % known.count]
+        // list would index -1 without the extra `+ running.count`.
+        let next = running[((index + offset) % running.count + running.count) % running.count]
         return .send(.workspaces(.switchRequested(next)))
 
       case .workspaces(.renameRequested(let workspace)):

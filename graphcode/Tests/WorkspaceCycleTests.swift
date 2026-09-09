@@ -7,10 +7,12 @@ import Testing
 
 /// ⌘` and ⌘⇧` — stepping to the next workspace rather than naming one with ⌥⌘<n>.
 ///
-/// Issue #175. The list these walk is `Workspace.all()`, which is in creation order; what
-/// is pinned here is the walking itself — that it wraps at both ends, that it re-reads the
-/// list rather than trusting whatever the last menu opening left in state, and that a
-/// machine with one workspace gets nothing rather than a switch to itself.
+/// Issue #175. The list these walk is `Workspace.all()`, which is in creation order,
+/// narrowed to the workspaces that have a window (issue #330 — the ones the update path's
+/// `otherOpen` reports, plus this one). What is pinned here is the walking itself — that
+/// it wraps at both ends, that it re-reads the list rather than trusting whatever the last
+/// menu opening left in state, that a machine with one workspace gets nothing rather than
+/// a switch to itself, and that a workspace someone quit stays quit.
 @Suite
 struct WorkspaceCycleTests {
   private func workspace(_ slug: String) -> Workspace {
@@ -23,14 +25,19 @@ struct WorkspaceCycleTests {
     return state
   }
 
+  /// `list` is what is on disk; `running` is which of the *others* have an instance —
+  /// `nil` means all of them, the pre-#330 world where the two were never told apart.
   @MainActor
   private func store(
-    current: Workspace, list: [Workspace], opened: LockIsolated<[Workspace]>
+    current: Workspace, list: [Workspace], running: [Workspace]? = nil,
+    opened: LockIsolated<[Workspace]>
   ) -> TestStoreOf<AppFeature> {
+    let others = running ?? list.filter { $0.id != current.id }
     let store = TestStore(initialState: state(current: current)) {
       AppFeature()
     } withDependencies: {
       $0.workspaceClient.list = { list }
+      $0.workspaceClient.otherOpen = { others }
       $0.workspaceClient.open = { workspace in opened.withValue { $0.append(workspace) } }
     }
     store.exhaustivity = .off
@@ -107,5 +114,63 @@ struct WorkspaceCycleTests {
 
     #expect(opened.value == [work])
     #expect(store.state.workspaces.known == [.default, work])
+  }
+
+  // MARK: - Issue #330: only running workspaces are cycled
+
+  @Test
+  @MainActor
+  func aWorkspaceWithNoWindowIsSteppedOver() async {
+    // `work` is on disk and next in creation order, but nobody has it open. ⌘` must land
+    // on `oss` — going to `work` would mean launching it, which is the bug.
+    let work = workspace("work")
+    let oss = workspace("oss")
+    let opened = LockIsolated<[Workspace]>([])
+    let store = store(
+      current: .default, list: [.default, work, oss], running: [oss], opened: opened)
+
+    await store.send(.workspaces(.cycleRequested(offset: 1)))
+    await store.receive(\.workspaces.switchRequested)
+
+    #expect(opened.value == [oss])
+  }
+
+  @Test
+  @MainActor
+  func nothingElseRunningMeansNowhereToGo() async {
+    // The other workspaces exist, and every one of them was quit. ⌘` does nothing rather
+    // than resurrecting the first of them.
+    let work = workspace("work")
+    let oss = workspace("oss")
+    let opened = LockIsolated<[Workspace]>([])
+    let store = store(
+      current: .default, list: [.default, work, oss], running: [], opened: opened)
+
+    await store.send(.workspaces(.cycleRequested(offset: 1)))
+    await store.send(.workspaces(.cycleRequested(offset: -1)))
+
+    #expect(opened.value.isEmpty)
+  }
+
+  @Test
+  @MainActor
+  func wrappingCountsTheRunningOnesNotTheOnesOnDisk() async {
+    // Four on disk, two of them dead: from the last running one, ⌘` wraps to the first
+    // running one, and ⌘⇧` from there comes straight back. An index taken from the disk
+    // list with a modulus of the running count — or the other way round — lands on a dead
+    // workspace or off the end.
+    let work = workspace("work")
+    let oss = workspace("oss")
+    let home = workspace("home")
+    let opened = LockIsolated<[Workspace]>([])
+    let store = store(
+      current: home, list: [.default, work, oss, home], running: [work], opened: opened)
+
+    await store.send(.workspaces(.cycleRequested(offset: 1)))
+    await store.receive(\.workspaces.switchRequested)
+    await store.send(.workspaces(.cycleRequested(offset: -1)))
+    await store.receive(\.workspaces.switchRequested)
+
+    #expect(opened.value == [work, work])
   }
 }
