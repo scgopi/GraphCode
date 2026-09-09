@@ -118,10 +118,15 @@ public enum SessionTransplant {
       (try? FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true))
         != nil
     else { return nil }
-    defer { try? FileManager.default.removeItem(at: staging) }
+    let status = remoteExportStatusFile(besideStaging: staging)
+    defer {
+      try? FileManager.default.removeItem(at: staging)
+      try? FileManager.default.removeItem(at: status)
+    }
     RemoteProjectLocation.prepareControlSocketDirectory()
     guard
-      await runShell(remoteExportPipeline(remoteScript: script, staging: staging, at: location))
+      await runShell(remoteExportPipeline(remoteScript: script, staging: staging, at: location)),
+      (try? String(contentsOf: status, encoding: .utf8)) == "0"
     else { return nil }
     return artifact(
       fromFetched: filesUnder(staging), backend: node.backend,
@@ -130,17 +135,32 @@ public enum SessionTransplant {
 
   /// The local half of the transfer: the dial's stdout straight into `tar -x`, so the
   /// bytes never pass through a PTY or a `String` — a transcript is arbitrary bytes at
-  /// megabytes, the reason `deliver` is a pipeline too. The pipeline's status is the
-  /// untar's, deliberately not ssh's: `gh codespace ssh` flattens every remote exit to 1,
-  /// so the archive itself is the verdict. A link that dies mid-stream leaves a truncated
-  /// archive `tar` rejects; a host that found nothing sends an empty stream, which `tar`
-  /// accepts and extracts nothing from — and an empty staging directory is "nothing to
-  /// carry", the answer the local export gives for a loop with nothing banked.
+  /// megabytes, the reason `deliver` is a pipeline too. Two verdicts, both required:
+  /// the untar's, which is the pipeline's own status and rejects a stream the link
+  /// truncated; and the dial's, recorded to a file beside the staging directory because
+  /// a `tar -c` that lost a member mid-archive still emits a complete archive of the
+  /// rest and exits non-zero — bytes plus a failure is a *partial* session, not one to
+  /// carry (measured on the loopback rig, GNU and bsd tar alike). `gh codespace ssh`
+  /// flattens every remote exit to 1, which is still non-zero, so the rule holds there.
+  /// Recorded by a POSIX group rather than `set -o pipefail`, which `/bin/sh` is not
+  /// guaranteed to know (dash rejects it and exits). A host that found nothing sends an
+  /// empty stream and exits 0, which `tar` accepts and extracts nothing from — an empty
+  /// staging directory is "nothing to carry", the local export's answer for a loop with
+  /// nothing banked.
   static func remoteExportPipeline(
     remoteScript: String, staging: URL, at location: RemoteProjectLocation
   ) -> String {
-    location.sshCommandLine(remoteCommand: remoteScript)
+    let status = RemoteProjectLocation.shellQuoted(
+      remoteExportStatusFile(besideStaging: staging).path)
+    return "{ " + location.sshCommandLine(remoteCommand: remoteScript)
+      + "; printf %s \"$?\" > \(status); }"
       + " | tar -xf - -C \(RemoteProjectLocation.shellQuoted(staging.path))"
+  }
+
+  /// Where the pipeline leaves the dial's exit status: beside the staging directory,
+  /// never inside it, or `filesUnder` would carry it as part of the session.
+  static func remoteExportStatusFile(besideStaging staging: URL) -> URL {
+    URL(fileURLWithPath: staging.path + ".status")
   }
 
   /// What the host runs to find the loop's session and stream it out — the mirror of

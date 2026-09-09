@@ -116,12 +116,15 @@ struct RemoteSessionExportTests {
     let pipeline = SessionTransplant.remoteExportPipeline(
       remoteScript: "exec tar -cf - x", staging: staging, at: location)
 
-    // ssh's argv, single-quoted for `/bin/sh`, then the untar — the archive never
-    // passes through a PTY or a String.
-    #expect(pipeline.hasPrefix("'/usr/bin/ssh' "))
-    #expect(pipeline.contains("'dev@buildbox' '--' 'exec tar -cf - x'"))
-    #expect(pipeline.hasSuffix(" | tar -xf - -C '/tmp/graphcode-export-x'"))
-    #expect(!pipeline.contains("-t "))
+    // ssh's argv, single-quoted for `/bin/sh`, with its exit status recorded beside the
+    // staging directory — a partial archive arrives with a non-zero status and must not
+    // be carried — then the untar. The archive never passes through a PTY or a String.
+    #expect(pipeline.hasPrefix("{ '/usr/bin/ssh' "))
+    #expect(pipeline.contains("'dev@buildbox' '--' 'exec tar -cf - x'; "))
+    #expect(pipeline.contains("printf %s \"$?\" > '/tmp/graphcode-export-x.status'; }"))
+    #expect(pipeline.hasSuffix("} | tar -xf - -C '/tmp/graphcode-export-x'"))
+    #expect(!pipeline.contains("'-t'"))
+    #expect(!pipeline.contains("zsh"))
   }
 
   @Test
@@ -225,8 +228,12 @@ struct RemoteSessionExportTests {
     let project = ProjectRef(path: directory.path, name: "local")
     let graph = LoopGraph(project: project, nodes: [node(.claudeCode)])
 
-    let sync = persistence.createExportBundle(
-      for: [graph.nodes[0].id], from: graph, projectPath: project.path)
+    // From a synchronous closure: in an async context the async overload wins, which is
+    // the resolution the app and CLI rely on.
+    let sync = {
+      persistence.createExportBundle(
+        for: [graph.nodes[0].id], from: graph, projectPath: project.path)
+    }()
     let async = await persistence.createExportBundle(
       for: [graph.nodes[0].id], from: graph, projectPath: project.path)
     let full = await persistence.createFullGraphExportBundle(

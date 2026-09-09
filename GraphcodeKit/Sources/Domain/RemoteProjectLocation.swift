@@ -143,8 +143,10 @@ public struct RemoteProjectLocation: Equatable, Sendable {
   /// is where the sporadic "ssh failed, retrying" noise on healthy networks came from.
   /// A mux channel over a live master cannot fail in transport the way a fresh dial can.
   /// `ControlPersist` keeps the master up between ticks; a dead master is redialed by
-  /// whichever command comes next. If the socket directory is missing ssh just warns and
-  /// dials directly, so this degrades to the old behaviour, never to a failure.
+  /// whichever command comes next. A missing socket directory is a hard failure, not a
+  /// warning: OpenSSH 10.3 exits 255 with `unix_listener: cannot bind to path` and sends
+  /// nothing (measured on the loopback rig), so every spawn site calls
+  /// `prepareControlSocketDirectory()` before dialing.
   ///
   /// A Codespace dials through `gh codespace ssh -c <name> -- <ssh-flags> <command>`
   /// instead — everything after `--` reaches gh's underlying ssh untouched, so the
