@@ -195,6 +195,22 @@ struct RemoteSessionExportTests {
         fromFetched: ["x.jsonl": Data()], backend: .openCode, workingDirectory: "/") == nil)
   }
 
+  @Test
+  func anUnreachableHostYieldsNoSessionRatherThanAFailure() async {
+    // Port 1 on loopback refuses at once, so the dial dies before a byte arrives — the
+    // runner must hand back nil, and the bundle builder must carry on without it.
+    let unreachable = RemoteProjectLocation(
+      user: "nobody", host: "127.0.0.1", port: 1, remotePath: "/srv/none")
+    let node = node(.claudeCode)
+
+    let artifact = await SessionTransplant.exportRemoteArtifact(forNode: node, at: unreachable)
+    let sessions = await ProjectPersistence.remoteAwareSessionArtifacts(
+      for: [node], projectPath: unreachable.projectPath)
+
+    #expect(artifact == nil)
+    #expect(sessions.isEmpty)
+  }
+
   // MARK: - The bundle builders
 
   @Test
