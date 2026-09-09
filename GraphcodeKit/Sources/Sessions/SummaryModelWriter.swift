@@ -65,7 +65,7 @@ public enum SummaryModelWriter {
   /// **The model argument comes from the backend, not from the tier.** `ModelTier`'s alias
   /// is Claude Code's spelling — `haiku` — and this passed it to all three, which is the
   /// exact mistake `BackendCommand.modelArguments(for:)` was written to prevent: Copilot's
-  /// `--model` takes explicit versioned ids (`claude-haiku-4.5`) and Codex's valid ids
+  /// `--model` takes explicit versioned ids (`gpt-5.6-luna`) and Codex's valid ids
   /// aren't visible from its `--help` at all, so it is given none and its own default
   /// applies. A wrong id fails at launch, which for this path means every rewrite quietly
   /// failing and the agent's own sentence standing — the feature would look switched off.
