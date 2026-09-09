@@ -35,9 +35,10 @@ struct WorkspaceMenuItems: View {
       .modifier(WorkspaceShortcut(index: showsShortcuts ? index : nil))
     }
     Divider()
-    // ⌘` walks the same list the rows above are numbered in, which is the point of it:
-    // ⌥⌘<n> is for the workspace you can name, ⌘` for the next one along when you have
-    // more of them than you have fingers.
+    // ⌘` walks the list the rows above are numbered in, skipping any without a window:
+    // ⌥⌘<n> is for the workspace you can name, ⌘` for the next *open* one along when you
+    // have more of them than you have fingers. It never launches one — that is what the
+    // rows are for.
     Button("Next Workspace") { store.send(.workspaces(.cycleRequested(offset: 1))) }
       .modifier(CycleShortcut(isEnabled: showsShortcuts, isBackwards: false))
       .disabled(store.workspaces.known.count < 2)
@@ -286,4 +287,3 @@ struct WorkspaceSwitcherPanel: View {
     return summary.isOpen ? "\(loops) · open" : "\(loops) · not running"
   }
 }
-
