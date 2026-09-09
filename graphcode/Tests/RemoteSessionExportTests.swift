@@ -155,7 +155,7 @@ struct RemoteSessionExportTests {
       remoteScript: "exec tar -cf - x", staging: URL(fileURLWithPath: "/tmp/s"), at: codespace)
 
     #expect(pipeline.contains("'codespace' 'ssh' '-c' 'fluffy-space' '--'"))
-    #expect(pipeline.hasSuffix(" | tar -xf - -C '/tmp/s'"))
+    #expect(pipeline.contains("} | tar -xf - -C '/tmp/s'; }"))
   }
 
   // MARK: - Fetched files become the local export's artifact
