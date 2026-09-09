@@ -138,6 +138,10 @@ struct RemoteSessionExportTests {
     // ssh and tar would outlive the shell still joined by their pipe.
     #expect(SessionTransplant.remoteExportDeadlineSeconds == 600)
     #expect(pipeline.hasPrefix("set -m; "))
+    // A background group reading the controlling tty is stopped with SIGTTIN, and ssh
+    // reads its inherited stdin: from a Terminal the dial would sit stopped until the
+    // deadline. The job never sends anything to the host, so its stdin is /dev/null.
+    #expect(pipeline.contains("; } </dev/null & gc_p=$!"))
     #expect(pipeline.contains("sleep 600; kill -TERM -- -$gc_p"))
     #expect(pipeline.contains("wait $gc_p; gc_s=$?; kill -TERM -- -$gc_w"))
     #expect(pipeline.hasSuffix("exit $gc_s"))

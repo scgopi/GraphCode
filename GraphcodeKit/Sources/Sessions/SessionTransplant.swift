@@ -174,8 +174,15 @@ public enum SessionTransplant {
   /// process left. `dash` runs this with job control off and a warning, so on a Linux
   /// host the deadline ends the wait but not the children — acceptable for the one
   /// caller, whose runner only ever runs on the Mac.
+  ///
+  /// The job's stdin is `/dev/null`, and that is load-bearing: a background process
+  /// group that reads the controlling terminal is stopped with `SIGTTIN`, and `ssh`
+  /// reads its inherited stdin. From the CLI in a Terminal that stdin *is* the tty, so
+  /// without the redirect the dial stopped silently, the watchdog fired at the deadline,
+  /// and the loop exported with no session (found in review; every measurement here had
+  /// run without a tty). Nothing is ever sent to the host on this path.
   static func bounded(_ pipeline: String, seconds: Int) -> String {
-    "set -m; { \(pipeline); } & gc_p=$!; "
+    "set -m; { \(pipeline); } </dev/null & gc_p=$!; "
       + "{ sleep \(seconds); kill -TERM -- -$gc_p; } 2>/dev/null & gc_w=$!; "
       + "wait $gc_p; gc_s=$?; kill -TERM -- -$gc_w 2>/dev/null; exit $gc_s"
   }
