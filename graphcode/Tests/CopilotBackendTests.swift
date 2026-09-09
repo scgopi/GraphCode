@@ -58,10 +58,10 @@ struct CopilotBackendTests {
     // at runtime, which is why the mapping is per-backend.
     #expect(
       CLISessionBackendKind.copilotCLI.modelArguments(for: .fast)
-        == ["--model", "claude-haiku-4.5"])
-    #expect(
-      CLISessionBackendKind.copilotCLI.modelArguments(for: .capable)
-        == ["--model", "claude-opus-4.6"])
+        == ["--model", "gpt-5.6-luna"])
+    // Capable is deliberately unpinned on Copilot: its id list turns over faster than a
+    // release cycle, and a launch that fails on a stale id is worse than the default.
+    #expect(CLISessionBackendKind.copilotCLI.modelArguments(for: .capable).isEmpty)
     // Claude Code's aliases stay aliases — they keep resolving to the current model.
     #expect(CLISessionBackendKind.claudeCode.modelArguments(for: .fast) == ["--model", "haiku"])
   }
@@ -76,10 +76,10 @@ struct CopilotBackendTests {
 
   @Test
   func aPinnedTierReachesTheCopilotArgv() {
-    let arguments = ZmxSessionLauncher.arguments(forNode: node(tier: .capable)) ?? []
+    let arguments = ZmxSessionLauncher.arguments(forNode: node(tier: .fast)) ?? []
 
     #expect(arguments.contains("--model"))
-    #expect(arguments.contains("claude-opus-4.6"))
+    #expect(arguments.contains("gpt-5.6-luna"))
   }
 
   @Test

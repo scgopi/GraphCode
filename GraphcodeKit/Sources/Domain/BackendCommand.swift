@@ -24,20 +24,23 @@ extension CLISessionBackendKind {
   ///
   /// Deliberately per-backend rather than one shared alias list: Claude Code takes short
   /// aliases that keep resolving to the current model in a class, whereas Copilot's
-  /// `--model` takes explicit versioned ids from a fixed set (read off `copilot --help`
-  /// at 0.0.410). Pointing the same string at both would silently fail on one of them.
+  /// `--model` takes explicit versioned ids from a fixed set (read off `copilot help
+  /// config` at 1.0.84). Pointing the same string at both would silently fail on one of
+  /// them.
   ///
   /// `.standard` returns nil everywhere — passing no flag lets the backend's own default
-  /// apply, which is different from asserting what we think it is.
+  /// apply, which is different from asserting what we think it is. Copilot's `.capable`
+  /// is nil too: its list turns over fast enough that the pinned id (`claude-opus-4.6`)
+  /// had already gone by 1.0.84, and a capable loop that fails to launch is worse than
+  /// one on Copilot's own default.
   public func modelArguments(for tier: ModelTier) -> [String] {
     switch self {
     case .claudeCode:
       return tier.modelAlias.map { ["--model", $0] } ?? []
     case .copilotCLI:
       switch tier {
-      case .fast: return ["--model", "claude-haiku-4.5"]
-      case .standard: return []
-      case .capable: return ["--model", "claude-opus-4.6"]
+      case .fast: return ["--model", "gpt-5.6-luna"]
+      case .standard, .capable: return []
       }
     case .codex:
       // `-m` is real, but the valid model ids are not visible from `codex --help` and a
