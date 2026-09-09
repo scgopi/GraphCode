@@ -104,10 +104,9 @@ public enum SessionTransplant {
   /// need no remote-aware branch of their own.
   ///
   /// Nil for anything short of a whole session: nothing banked, the files gone, the
-  /// link dying mid-stream. A loop whose fetch fails is exported without a session —
-  /// the shape a local loop with nothing banked already has — never as a failed export.
-  /// No deadline of its own: a stopped Codespace can take minutes to deliver its first
-  /// byte while `gh` starts it, and the dial's keepalives already bound a dead link.
+  /// link dying mid-stream, the deadline (`remoteExportDeadlineSeconds`) passing. A loop
+  /// whose fetch fails is exported without a session — the shape a local loop with
+  /// nothing banked already has — never as a failed export.
   public static func exportRemoteArtifact(
     forNode node: LoopNode, at location: RemoteProjectLocation
   ) async -> Artifact? {
@@ -152,9 +151,33 @@ public enum SessionTransplant {
   ) -> String {
     let status = RemoteProjectLocation.shellQuoted(
       remoteExportStatusFile(besideStaging: staging).path)
-    return "{ " + location.sshCommandLine(remoteCommand: remoteScript)
+    let pipeline =
+      "{ " + location.sshCommandLine(remoteCommand: remoteScript)
       + "; printf %s \"$?\" > \(status); }"
       + " | tar -xf - -C \(RemoteProjectLocation.shellQuoted(staging.path))"
+    return bounded(pipeline, seconds: remoteExportDeadlineSeconds)
+  }
+
+  /// How long one loop's fetch may take before it is abandoned: generous enough for a
+  /// stopped Codespace, which `gh` starts on the way in and which can take five minutes
+  /// to deliver its first byte, and finite so that a live-but-silent remote or a wedged
+  /// ssh master can never hang an export. On the deadline the loop is exported without
+  /// a session, never as a failed export.
+  static let remoteExportDeadlineSeconds = 600
+
+  /// `pipeline` under a watchdog. Job control (`set -m`) puts the pipeline in a process
+  /// group of its own, and the deadline kills that *group*: terminating only the shell
+  /// would orphan `ssh` and `tar`, still joined by their pipe, holding the connection
+  /// open for as long as the remote stayed silent. The watchdog's own group is killed
+  /// on the way out so a fetch that finished in a second leaves no ten-minute `sleep`
+  /// behind. Measured on a silent pipeline: dead at the deadline with exit 143 and no
+  /// process left. `dash` runs this with job control off and a warning, so on a Linux
+  /// host the deadline ends the wait but not the children — acceptable for the one
+  /// caller, whose runner only ever runs on the Mac.
+  static func bounded(_ pipeline: String, seconds: Int) -> String {
+    "set -m; { \(pipeline); } & gc_p=$!; "
+      + "{ sleep \(seconds); kill -TERM -- -$gc_p; } 2>/dev/null & gc_w=$!; "
+      + "wait $gc_p; gc_s=$?; kill -TERM -- -$gc_w 2>/dev/null; exit $gc_s"
   }
 
   /// Where the pipeline leaves the dial's exit status: beside the staging directory,

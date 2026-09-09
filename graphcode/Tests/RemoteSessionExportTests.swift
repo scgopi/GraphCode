@@ -119,12 +119,27 @@ struct RemoteSessionExportTests {
     // ssh's argv, single-quoted for `/bin/sh`, with its exit status recorded beside the
     // staging directory — a partial archive arrives with a non-zero status and must not
     // be carried — then the untar. The archive never passes through a PTY or a String.
-    #expect(pipeline.hasPrefix("{ '/usr/bin/ssh' "))
+    #expect(pipeline.contains("{ '/usr/bin/ssh' "))
     #expect(pipeline.contains("'dev@buildbox' '--' 'exec tar -cf - x'; "))
     #expect(pipeline.contains("printf %s \"$?\" > '/tmp/graphcode-export-x.status'; }"))
-    #expect(pipeline.hasSuffix("} | tar -xf - -C '/tmp/graphcode-export-x'"))
+    #expect(pipeline.contains("} | tar -xf - -C '/tmp/graphcode-export-x'; }"))
     #expect(!pipeline.contains("'-t'"))
     #expect(!pipeline.contains("zsh"))
+  }
+
+  @Test
+  func pipelineIsBoundedAndKillsItsOwnProcessGroupOnTheDeadline() {
+    let pipeline = SessionTransplant.remoteExportPipeline(
+      remoteScript: "x", staging: URL(fileURLWithPath: "/tmp/s"), at: location)
+
+    // Ten minutes: a stopped Codespace can take five to its first byte; a silent remote
+    // or a wedged ssh master must not hold an export forever. The whole group dies, or
+    // ssh and tar would outlive the shell still joined by their pipe.
+    #expect(SessionTransplant.remoteExportDeadlineSeconds == 600)
+    #expect(pipeline.hasPrefix("set -m; "))
+    #expect(pipeline.contains("sleep 600; kill -TERM -- -$gc_p"))
+    #expect(pipeline.contains("wait $gc_p; gc_s=$?; kill -TERM -- -$gc_w"))
+    #expect(pipeline.hasSuffix("exit $gc_s"))
   }
 
   @Test
