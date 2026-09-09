@@ -129,7 +129,7 @@ struct RemoteSessionExportTests {
   }
 
   @Test
-  func pipelineIsBoundedAndKillsItsOwnProcessGroupOnTheDeadline() {
+  func pipelineIsBoundedAndKillsItsOwnProcessGroupOnTheDeadline() throws {
     let pipeline = SessionTransplant.remoteExportPipeline(
       remoteScript: "x", staging: URL(fileURLWithPath: "/tmp/s"), at: location)
 
@@ -145,6 +145,20 @@ struct RemoteSessionExportTests {
     #expect(pipeline.contains("sleep 600; kill -TERM -- -$gc_p"))
     #expect(pipeline.contains("wait $gc_p; gc_s=$?; kill -TERM -- -$gc_w"))
     #expect(pipeline.hasSuffix("exit $gc_s"))
+    // A signal to the shell alone — the app cancelling, Ctrl-C reaching only the CLI's
+    // group — must take both groups with it, or ssh, tar and the sleep run to the
+    // deadline as orphans. The trap is armed before the wait it interrupts.
+    let trap = try #require(
+      pipeline.range(of: "trap 'kill -TERM -- -$gc_p -$gc_w 2>/dev/null; exit 143' INT TERM HUP; "))
+    let wait = try #require(pipeline.range(of: "wait $gc_p"))
+    #expect(trap.upperBound <= wait.lowerBound)
+  }
+
+  @Test
+  func remoteFetchesAreCappedAtFourInFlight() {
+    // A thirty-loop Codespace graph must not become thirty gh tunnels racing to start
+    // a stopped codespace, each with its own tar and watchdog.
+    #expect(ProjectPersistence.remoteSessionFetchConcurrency == 4)
   }
 
   @Test

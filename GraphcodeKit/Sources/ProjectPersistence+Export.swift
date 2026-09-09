@@ -96,10 +96,17 @@ extension ProjectPersistence {
     return artifacts
   }
 
+  /// How many remote fetches run at once. Each is its own dial — multiplexed over one
+  /// connection for a plain host, a fresh `gh` tunnel per loop for a Codespace — plus
+  /// a `tar` and a watchdog; a thirty-loop Codespace graph fetched all at once would be
+  /// thirty tunnels racing to start a stopped codespace. Four keeps the export quick on
+  /// a live host without turning it into that.
+  static let remoteSessionFetchConcurrency = 4
+
   /// `sessionArtifacts` for a project on any host. A remote project's loops are fetched
-  /// concurrently — each is its own dial, multiplexed over one connection for a plain
-  /// host and a fresh tunnel per loop for a Codespace — and a loop whose fetch comes
-  /// back empty is simply exported without a session: the export never fails on one.
+  /// `remoteSessionFetchConcurrency` at a time — the next dial starts as one finishes —
+  /// and a loop whose fetch comes back empty is simply exported without a session: the
+  /// export never fails on one.
   static func remoteAwareSessionArtifacts(
     for nodes: some Sequence<LoopNode>, projectPath: String
   ) async -> [String: SessionTransplant.Artifact] {
@@ -107,7 +114,14 @@ extension ProjectPersistence {
       return sessionArtifacts(for: nodes, projectPath: projectPath)
     }
     return await withTaskGroup(of: (String, SessionTransplant.Artifact?).self) { group in
+      var artifacts: [String: SessionTransplant.Artifact] = [:]
+      var inFlight = 0
       for node in nodes {
+        if inFlight == remoteSessionFetchConcurrency, let (nodeID, artifact) = await group.next() {
+          inFlight -= 1
+          if let artifact { artifacts[nodeID] = artifact }
+        }
+        inFlight += 1
         group.addTask {
           (
             node.id.uuidString,
@@ -115,7 +129,6 @@ extension ProjectPersistence {
           )
         }
       }
-      var artifacts: [String: SessionTransplant.Artifact] = [:]
       for await (nodeID, artifact) in group {
         if let artifact { artifacts[nodeID] = artifact }
       }

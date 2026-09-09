@@ -181,9 +181,17 @@ public enum SessionTransplant {
   /// without the redirect the dial stopped silently, the watchdog fired at the deadline,
   /// and the loop exported with no session (found in review; every measurement here had
   /// run without a tty). Nothing is ever sent to the host on this path.
+  ///
+  /// The trap is the other half of owning those groups: a signal to the shell alone —
+  /// the app terminating the export, Ctrl-C in a Terminal, which reaches only the CLI's
+  /// own group — would otherwise leave `ssh`, `tar`, the subshells and the ten-minute
+  /// `sleep` running to the deadline (measured on the rig: all alive after the shell
+  /// was TERMed). Both groups are killed and the shell exits 143, the status a TERM
+  /// would have given it.
   static func bounded(_ pipeline: String, seconds: Int) -> String {
     "set -m; { \(pipeline); } </dev/null & gc_p=$!; "
       + "{ sleep \(seconds); kill -TERM -- -$gc_p; } 2>/dev/null & gc_w=$!; "
+      + "trap 'kill -TERM -- -$gc_p -$gc_w 2>/dev/null; exit 143' INT TERM HUP; "
       + "wait $gc_p; gc_s=$?; kill -TERM -- -$gc_w 2>/dev/null; exit $gc_s"
   }
 
