@@ -40,7 +40,8 @@ struct RemoteSessionExportTests {
 
     // The id decides which transcript; the directory is found, not reconstructed — a
     // worktree-bound loop's transcript lives under the worktree's slug.
-    #expect(script.contains(".graphcode/sessions/\(node.id.uuidString).id"))
+    #expect(
+      script.contains("S=$(cat \(PresenceHooks.remoteSessionIDExpression(forNodeID: node.id))"))
     #expect(script.contains("\"$HOME\"/.claude/projects/*/\"$S\".jsonl"))
     #expect(script.hasSuffix("exec tar -cf - -C \"$(dirname \"$F\")\" \"$S.jsonl\""))
   }
