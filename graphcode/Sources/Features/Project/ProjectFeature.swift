@@ -964,11 +964,9 @@ extension ProjectFeature {
   ///
   /// Export is read-only, so unlike import it never goes near the daemon: the graph in
   /// hand is the daemon's own latest broadcast, and memory logs are read straight off
-  /// disk. Sessions are read off disk too for a local project, and fetched from the
-  /// host over ssh for a remote one — off the main actor, since that is round-trips
-  /// and the panel is long dismissed. The finished zip is revealed in Finder — that
-  /// reveal *is* the success feedback, pointing at the file the user is about to go
-  /// share.
+  /// disk. A remote project's sessions are fetched from its host over ssh — off the
+  /// main actor, since that is round-trips and the panel is long dismissed. The finished
+  /// zip is revealed in Finder — that reveal *is* the success feedback.
   private func exportBundle(
     from graph: LoopGraph, projectPath: String, nodeIDs: [UUID]?, suggestedName: String
   ) -> Effect<Action> {
