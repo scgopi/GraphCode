@@ -150,7 +150,7 @@ extension ProjectPersistence {
       edges: IdentifiedArray(uniqueElements: exportedEdges)
     )
     return Slice(
-      graph: exportGraph, nodes: exportedNodes,
+      graph: exportGraph, nodes: Array(exportedNodes),
       isFullGraph: Set(graph.nodes.map(\.id)) == nodeIDsToExport,
       includesChildren: includeChildren)
   }
