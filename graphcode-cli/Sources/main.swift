@@ -131,6 +131,22 @@ func openProject(_ projectPath: String) throws -> LoopGraph? {
 /// it prints: one loop's unread slice, one post, or the whole room. A refusal (the
 /// project not open, a path the daemon does not know) arrives as an error and stops
 /// here, the way `openProject`'s does.
+/// Runs an export's async bundle build to completion from this synchronous top level —
+/// the `reap`/`importNodes` semaphore pattern — because a remote project's sessions
+/// arrive over ssh.
+func awaitBundle(_ build: @escaping @Sendable () async -> GraphExportBundle?) -> GraphExportBundle?
+{
+  final class Box: @unchecked Sendable { var bundle: GraphExportBundle? }
+  let box = Box()
+  let built = DispatchSemaphore(value: 0)
+  Task {
+    box.bundle = await build()
+    built.signal()
+  }
+  built.wait()
+  return box.bundle
+}
+
 func fetchMailbox(_ projectPath: String, _ query: MailboxQuery) throws -> Mailbox {
   try sendCommand(.mailbox(projectPath: projectPath, query: query))
   phase = "waiting for the mailbox answer"
@@ -551,15 +567,20 @@ do {
   case .exportNode(let projectPath, let nodeID, let output, let includeChildren):
     guard let graph = try openProject(projectPath) else { fail("Could not load graph") }
 
+    // Async behind a semaphore, the `importNodes` pattern in reverse: a remote
+    // project's sessions are fetched from its host over ssh, and a loop whose fetch
+    // fails is exported without one — the count printed last is what actually rode.
     let persistence = ProjectPersistence(baseDirectory: SupportDirectory.url)
     guard
-      let bundle = persistence.createExportBundle(
-        for: [nodeID],
-        from: graph,
-        projectPath: projectPath,
-        includeChildren: includeChildren,
-        createdBy: ProcessInfo.processInfo.environment["USER"]
-      )
+      let bundle = awaitBundle({
+        await persistence.createExportBundle(
+          for: [nodeID],
+          from: graph,
+          projectPath: projectPath,
+          includeChildren: includeChildren,
+          createdBy: ProcessInfo.processInfo.environment["USER"]
+        )
+      })
     else { fail("Could not create export bundle") }
 
     guard let zipPath = bundle.writeToZip(at: output) else {
@@ -569,16 +590,21 @@ do {
     print("Exported to \(zipPath)")
     print("Nodes: \(bundle.manifest.contents.nodeIDs.count)")
     print("Memory logs: \(bundle.memoryByNodeID.count)")
+    print("Sessions: \(bundle.sessionsByNodeID.count)")
 
   case .exportGraph(let projectPath, let output):
     guard let graph = try openProject(projectPath) else { fail("Could not load graph") }
 
     let persistence = ProjectPersistence(baseDirectory: SupportDirectory.url)
-    let bundle = persistence.createFullGraphExportBundle(
-      for: graph,
-      projectPath: projectPath,
-      createdBy: ProcessInfo.processInfo.environment["USER"]
-    )
+    guard
+      let bundle = awaitBundle({
+        await persistence.createFullGraphExportBundle(
+          for: graph,
+          projectPath: projectPath,
+          createdBy: ProcessInfo.processInfo.environment["USER"]
+        )
+      })
+    else { fail("Could not create export bundle") }
 
     guard let zipPath = bundle.writeToZip(at: output) else {
       fail("Could not write ZIP file to \(output)")
@@ -588,6 +614,7 @@ do {
     print("Nodes: \(bundle.manifest.contents.nodeIDs.count)")
     print("Edges: \(graph.edges.count)")
     print("Memory logs: \(bundle.memoryByNodeID.count)")
+    print("Sessions: \(bundle.sessionsByNodeID.count)")
 
   case .importNodes(let projectPath, let fromZip, let asChildOf):
     guard let bundle = GraphExportBundle.readFromZip(at: fromZip) else {

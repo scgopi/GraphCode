@@ -92,6 +92,161 @@ public enum SessionTransplant {
     }
   }
 
+  // MARK: - Remote export
+
+  /// The remote twin of `exportArtifact`. A remote loop's session lives on the host it
+  /// runs on — its id banked at the file `PresenceHooks.remoteSessionIDExpression`
+  /// names, its transcript beside it — so reading this Mac's home directory found
+  /// nothing and every remote export shipped without sessions (issue #333). The host
+  /// locates the session and streams it back as `tar` on the ssh dial's stdout, the
+  /// mirror of `restoreRemote`'s tar-in; the stream is unpacked here and re-keyed to
+  /// exactly the artifact the local export produces, so `restore` and `restoreRemote`
+  /// need no remote-aware branch of their own.
+  ///
+  /// Nil for anything short of a whole session: nothing banked, the files gone, the
+  /// link dying mid-stream. A loop whose fetch fails is exported without a session —
+  /// the shape a local loop with nothing banked already has — never as a failed export.
+  /// No deadline of its own: a stopped Codespace can take minutes to deliver its first
+  /// byte while `gh` starts it, and the dial's keepalives already bound a dead link.
+  public static func exportRemoteArtifact(
+    forNode node: LoopNode, at location: RemoteProjectLocation
+  ) async -> Artifact? {
+    guard let script = remoteExportScript(forNode: node, at: location) else { return nil }
+    let staging = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-export-\(UUID().uuidString)", isDirectory: true)
+    guard
+      (try? FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true))
+        != nil
+    else { return nil }
+    defer { try? FileManager.default.removeItem(at: staging) }
+    RemoteProjectLocation.prepareControlSocketDirectory()
+    guard
+      await runShell(remoteExportPipeline(remoteScript: script, staging: staging, at: location))
+    else { return nil }
+    return artifact(
+      fromFetched: filesUnder(staging), backend: node.backend,
+      workingDirectory: remoteWorkingDirectory(forNode: node, at: location))
+  }
+
+  /// The local half of the transfer: the dial's stdout straight into `tar -x`, so the
+  /// bytes never pass through a PTY or a `String` — a transcript is arbitrary bytes at
+  /// megabytes, the reason `deliver` is a pipeline too. The pipeline's status is the
+  /// untar's, deliberately not ssh's: `gh codespace ssh` flattens every remote exit to 1,
+  /// so the archive itself is the verdict. A link that dies mid-stream leaves a truncated
+  /// archive `tar` rejects; a host that found nothing sends an empty stream, which `tar`
+  /// accepts and extracts nothing from — and an empty staging directory is "nothing to
+  /// carry", the answer the local export gives for a loop with nothing banked.
+  static func remoteExportPipeline(
+    remoteScript: String, staging: URL, at location: RemoteProjectLocation
+  ) -> String {
+    location.sshCommandLine(remoteCommand: remoteScript)
+      + " | tar -xf - -C \(RemoteProjectLocation.shellQuoted(staging.path))"
+  }
+
+  /// What the host runs to find the loop's session and stream it out — the mirror of
+  /// `remoteInstallScript`, and like it a pure function so its shape is testable. Each
+  /// backend's lookup is the one graphcode already trusts elsewhere:
+  ///
+  /// - Claude Code: the banked id — the file the ensure's resume branch consumes — then
+  ///   the transcript by id across every project directory, because a worktree-bound
+  ///   loop's transcript lives under the worktree's slug (`findClaudeTranscript`).
+  /// - Copilot: the banked id, else the directory whose `workspace.yaml` names the zmx
+  ///   session graphcode launched it as — the walk `remoteIDBankFragment` does.
+  /// - Codex: the newest rollout whose header opened in the loop's working directory,
+  ///   the match `CodexSessionLog.remoteSummaryInvocation` makes.
+  /// - OpenCode: nothing, for the reason the local export carries nothing.
+  ///
+  /// The archive's first path component is the session's identity — `<id>.jsonl`,
+  /// `<id>/…`, `rollout-….jsonl` — which is how the id reaches this side without a
+  /// second channel; `artifact(fromFetched:)` reads it back. A session that is not there
+  /// exits 0 having written nothing. Not wrapped in the login shell the probes use: an
+  /// interactive `zsh -i` may print from its rc files, and stdout here *is* the archive.
+  static func remoteExportScript(
+    forNode node: LoopNode, at location: RemoteProjectLocation
+  ) -> String? {
+    let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: node.id)
+    switch node.backend {
+    case .claudeCode:
+      return "S=$(cat \(idFile) 2>/dev/null); [ -n \"$S\" ] || exit 0; "
+        + "F=$(ls -t \"$HOME\"/.claude/projects/*/\"$S\".jsonl 2>/dev/null | head -1); "
+        + "[ -n \"$F\" ] || exit 0; exec tar -cf - -C \"$(dirname \"$F\")\" \"$S.jsonl\""
+    case .copilotCLI:
+      let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+      return "S=$(cat \(idFile) 2>/dev/null); if [ -z \"$S\" ]; then "
+        + "for d in $(ls -t \"$HOME/.copilot/session-state/\" 2>/dev/null); do "
+        + "if grep -qx 'name: \(name)' "
+        + "\"$HOME/.copilot/session-state/$d/workspace.yaml\" 2>/dev/null; "
+        + "then S=\"$d\"; break; fi; done; fi; "
+        + "[ -n \"$S\" ] && [ -d \"$HOME/.copilot/session-state/$S\" ] || exit 0; "
+        + "exec tar -cf - -C \"$HOME/.copilot/session-state\" \"$S\""
+    case .codex:
+      let directory = RemoteProjectLocation.shellQuoted(
+        remoteWorkingDirectory(forNode: node, at: location))
+      return "W=\(directory); F=''; "
+        + "for f in $(ls -t \"$HOME\"/.codex/sessions/*/*/*/rollout-*.jsonl 2>/dev/null"
+        + " | head -40); do "
+        + "if head -c 65536 \"$f\" 2>/dev/null | grep -q \"\\\"cwd\\\":\\\"$W\\\"\"; "
+        + "then F=\"$f\"; break; fi; done; "
+        + "[ -n \"$F\" ] || exit 0; exec tar -cf - -C \"$(dirname \"$F\")\" \"$(basename \"$F\")\""
+    case .openCode:
+      return nil
+    }
+  }
+
+  /// A remote loop's working directory: its worktree if bound, else the project folder
+  /// on that host — `CodexSessionLog.summary`'s answer, because the local one checks the
+  /// path exists on this Mac and a remote one never does.
+  static func remoteWorkingDirectory(
+    forNode node: LoopNode, at location: RemoteProjectLocation
+  ) -> String {
+    node.worktreeBinding?.worktreePath ?? location.remotePath
+  }
+
+  /// The fetched archive as the artifact the *local* export would have produced for the
+  /// same session — same keys, same id, so nothing downstream can tell where a session
+  /// came from. The first path component carries the identity: for Claude and Codex a
+  /// single file named by it, for Copilot the session directory, stripped from every key.
+  /// Anything else — two transcripts, a stray file beside the directory — is not a
+  /// session this side knows how to restore, and is refused rather than guessed at.
+  static func artifact(
+    fromFetched files: [String: Data], backend: CLISessionBackendKind, workingDirectory: String
+  ) -> Artifact? {
+    switch backend {
+    case .claudeCode:
+      guard let only = singleFile(in: files) else { return nil }
+      return Artifact(
+        backend: .claudeCode, sessionID: String(only.name.dropLast(".jsonl".count)),
+        sourceWorkingDirectory: workingDirectory, files: ["transcript.jsonl": only.data])
+    case .copilotCLI:
+      guard let first = files.keys.sorted().first, let slash = first.firstIndex(of: "/")
+      else { return nil }
+      let sessionID = String(first[..<slash])
+      let prefix = sessionID + "/"
+      var relative: [String: Data] = [:]
+      for (path, data) in files where path.hasPrefix(prefix) {
+        relative[String(path.dropFirst(prefix.count))] = data
+      }
+      guard !relative.isEmpty, relative.count == files.count else { return nil }
+      return Artifact(
+        backend: .copilotCLI, sessionID: sessionID,
+        sourceWorkingDirectory: workingDirectory, files: relative)
+    case .codex:
+      guard let only = singleFile(in: files) else { return nil }
+      return Artifact(
+        backend: .codex, sessionID: only.name,
+        sourceWorkingDirectory: workingDirectory, files: ["rollout.jsonl": only.data])
+    case .openCode:
+      return nil
+    }
+  }
+
+  private static func singleFile(in files: [String: Data]) -> (name: String, data: Data)? {
+    guard files.count == 1, let entry = files.first, !entry.key.contains("/"),
+      entry.key.hasSuffix(".jsonl")
+    else { return nil }
+    return (entry.key, entry.value)
+  }
+
   // MARK: - Restore
 
   /// Installs an exported session for a freshly imported node, under a fresh identity,

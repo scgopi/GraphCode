@@ -964,32 +964,38 @@ extension ProjectFeature {
   ///
   /// Export is read-only, so unlike import it never goes near the daemon: the graph in
   /// hand is the daemon's own latest broadcast, and memory logs are read straight off
-  /// disk. The finished zip is revealed in Finder — that reveal *is* the success
-  /// feedback, pointing at the file the user is about to go share.
+  /// disk. Sessions are read off disk too for a local project, and fetched from the
+  /// host over ssh for a remote one — off the main actor, since that is round-trips
+  /// and the panel is long dismissed. The finished zip is revealed in Finder — that
+  /// reveal *is* the success feedback, pointing at the file the user is about to go
+  /// share.
   private func exportBundle(
     from graph: LoopGraph, projectPath: String, nodeIDs: [UUID]?, suggestedName: String
   ) -> Effect<Action> {
     .run { _ in
-      await MainActor.run {
+      let destination = await MainActor.run { () -> URL? in
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.zip]
         panel.nameFieldStringValue =
           suggestedName.replacingOccurrences(of: "/", with: "-") + ".zip"
         panel.message = "Export loops as a shareable bundle"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-
-        let persistence = ProjectPersistence(baseDirectory: SupportDirectory.url)
-        let bundle: GraphExportBundle? =
-          if let nodeIDs {
-            persistence.createExportBundle(
-              for: nodeIDs, from: graph, projectPath: projectPath, createdBy: NSUserName())
-          } else {
-            persistence.createFullGraphExportBundle(
-              for: graph, projectPath: projectPath, createdBy: NSUserName())
-          }
-        guard let bundle, bundle.writeToZip(at: url.path) != nil else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([url])
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
       }
+      guard let url = destination else { return }
+
+      let persistence = ProjectPersistence(baseDirectory: SupportDirectory.url)
+      let createdBy = NSUserName()
+      let bundle: GraphExportBundle? =
+        if let nodeIDs {
+          await persistence.createExportBundle(
+            for: nodeIDs, from: graph, projectPath: projectPath, createdBy: createdBy)
+        } else {
+          await persistence.createFullGraphExportBundle(
+            for: graph, projectPath: projectPath, createdBy: createdBy)
+        }
+      guard let bundle, bundle.writeToZip(at: url.path) != nil else { return }
+      await MainActor.run { NSWorkspace.shared.activateFileViewerSelecting([url]) }
     }
   }
 
