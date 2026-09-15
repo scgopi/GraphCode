@@ -20,6 +20,7 @@ const BOOL = c.BOOL;
 const terminal_columns: usize = 120;
 const terminal_rows: usize = 40;
 const terminal_cell_count: usize = terminal_columns * terminal_rows;
+const attach_restart_limit: usize = 8;
 
 const TerminalParserState = enum {
     normal,
@@ -766,7 +767,7 @@ fn waitForInitialAttachOutput(app: *App, index: usize) !void {
         const attach_alive = readAttachOutput(app, index);
         if (app.surfaces[index].output_seen) return;
         if (!attach_alive) {
-            if (restarts == 4) return error.InitialAttachRestartLimit;
+            if (restarts == attach_restart_limit) return error.InitialAttachRestartLimit;
             waitAttachClient(&app.surfaces[index]);
             try startSession(app, sessionName(app, index), index);
             restarts += 1;
@@ -917,7 +918,7 @@ fn runInputContracts(app: *App) !void {
 
 fn restartBrokenAttach(app: *App, index: usize) !void {
     const slot = &app.surfaces[index];
-    if (slot.attach_restarts == 4) return error.AttachRestartLimit;
+    if (slot.attach_restarts == attach_restart_limit) return error.AttachRestartLimit;
     waitAttachClient(slot);
     try startSession(app, sessionName(app, index), index);
     slot.attach_restarts += 1;

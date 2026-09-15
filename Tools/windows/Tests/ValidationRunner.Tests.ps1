@@ -89,7 +89,8 @@ try {
   }
   if ($windowsShellWorkflow -notmatch "validate\.ps1 -Task windows-shell -SkipTrayLive" -or
       $windowsPortWorkflow -notmatch "validate\.ps1 -Task all -SkipTrayLive -SkipWslRemoteE2E" -or
-      $windowsWorkflow -notmatch "validate\.ps1 -Task all -SkipTrayLive -SkipWslRemoteE2E") {
+      $windowsWorkflow -notmatch "validate\.ps1 -Task all -SkipTrayLive -SkipWslRemoteE2E" -or
+      $windowsWorkflow -notmatch "Hardening\.Tests\.ps1 -Environment -SkipTrayLive") {
     throw "RED: hosted Windows CI does not explicitly declare unsupported interactive or WSL fixtures"
   }
   if ($windowsShellWorkflow -notmatch "Tools/windows/uia-live-gate\.ps1") {

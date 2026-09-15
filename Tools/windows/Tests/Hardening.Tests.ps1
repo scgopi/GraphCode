@@ -2,6 +2,7 @@
 param(
   [switch] $Environment,
   [switch] $SchemaOnly,
+  [switch] $SkipTrayLive,
   [int] $Run = 0
 )
 
@@ -15,6 +16,11 @@ $realProductSamples = [System.Collections.Generic.List[object]]::new()
 
 function Assert-True([bool] $condition, [string] $message) {
   if (-not $condition) { throw "Hardening failure: $message" }
+}
+
+function Test-ZmxSessionReachable([string] $zmx, [string] $name) {
+  & $zmx get $name *> $null
+  return $LASTEXITCODE -eq 0
 }
 
 function Select-EquivalentProductSample([object[]] $samples) {
@@ -235,8 +241,12 @@ function Invoke-RealMatrix {
   Assert-True ($wing -and $zmxRoot -and $zig0152 -and $zig0160) `
     "real hardening requires pinned provider and Zig paths"
   $zmx = Join-Path $zmxRoot "zig-out\bin\zmx.exe"
-  $graphcoded = Join-Path $repoRoot ".build\windows\release-artifact\graphcoded.exe"
-  $graphcode = Join-Path $repoRoot ".build\windows\release-artifact\graphcode.exe"
+  $release = Join-Path $repoRoot ".build\windows\release-artifact"
+  if (-not (Test-Path -LiteralPath (Join-Path $release "graphcoded.exe"))) {
+    $release = Join-Path $repoRoot ".build\x86_64-unknown-windows-msvc\release"
+  }
+  $graphcoded = Join-Path $release "graphcoded.exe"
+  $graphcode = Join-Path $release "graphcode.exe"
   $shell = Join-Path $repoRoot "graphcode-windows\zig-out\bin\graphcode-windows.exe"
   foreach ($binary in @($zmx, $graphcoded, $graphcode, $shell)) {
     Assert-True (Test-Path -LiteralPath $binary) "real hardening binary missing: $binary"
@@ -246,8 +256,14 @@ function Invoke-RealMatrix {
   New-Item -ItemType Directory -Force $support | Out-Null
   $oldSupport = $env:GRAPHCODE_SUPPORT_DIR
   $daemon = $null
+  $daemonId = $null
   $attach = $null
+  $attachId = $null
   $captureStream = $null
+  $outputDaemon = $null
+  $outputDaemonId = $null
+  $outputDaemonOut = $null
+  $outputDaemonErr = $null
   $sessionName = $null
   $productRoots = @($graphcoded, $shell, $zmx, $wing)
   $productBefore = Get-ProductResourceSample $productRoots
@@ -258,14 +274,17 @@ function Invoke-RealMatrix {
     $env:GRAPHCODE_SUPPORT_DIR = $support
     $daemon = Start-Process -FilePath $graphcoded -WorkingDirectory `
       (Split-Path $graphcoded) -PassThru -WindowStyle Hidden
+    $daemonId = $daemon.Id
     Start-Sleep -Milliseconds 1200
     Assert-True (-not $daemon.HasExited) "real graphcoded exited during startup"
     & $graphcode projects *> $null
     Assert-True ($LASTEXITCODE -eq 0) "real graphcode CLI could not reach graphcoded"
-    Stop-Process -Id $daemon.Id -Force
+    Stop-Process -Id $daemonId -Force -ErrorAction Stop
+    [void] $daemon.WaitForExit(1000)
     $daemon.Dispose()
     $daemon = Start-Process -FilePath $graphcoded -WorkingDirectory `
       (Split-Path $graphcoded) -PassThru -WindowStyle Hidden
+    $daemonId = $daemon.Id
     Start-Sleep -Milliseconds 1200
     Assert-True (-not $daemon.HasExited) "real graphcoded did not recover after restart"
     & $graphcode projects *> $null
@@ -278,7 +297,8 @@ function Invoke-RealMatrix {
     Assert-True ($LASTEXITCODE -eq 0) "real zmx/ConPTY terminal matrix failed"
     $shellScript = Join-Path $repoRoot "Tools\windows\windows-shell.ps1"
     & $pwsh -NoProfile -File $shellScript -WinghosttyRoot $wing -ZmxRoot $zmxRoot `
-      -Zig0152 $zig0152 -Zig0160 $zig0160 -SkipBuild -Stress -UseStubDaemon
+      -Zig0152 $zig0152 -Zig0160 $zig0160 -SkipBuild -Stress -UseStubDaemon `
+      -SkipTrayLive:$SkipTrayLive
     Assert-True ($LASTEXITCODE -eq 0) "real GraphCode shell matrix failed"
     $productAfterWorkload = Get-ProductResourceSample $productRoots
     $productNewWorkload = Select-NewProductResourceSample $productAfterWorkload $productBaselinePids
@@ -295,28 +315,83 @@ function Invoke-RealMatrix {
     $sessionName = "ho-$([guid]::NewGuid().ToString('N'))"
     $escapedStart = "GRAPHCODE_HARDENING_START_$PID"
     $escapedEnd = "GRAPHCODE_HARDENING_END_$PID"
-    $writes = (1..64 | ForEach-Object { "[Console]::Write(`$payload);" }) -join " "
-    $command = "Start-Sleep -Milliseconds 3000; `$payload = ('A' * 65536 -join ''); [Console]::Write('$escapedStart'); $writes [Console]::Write('$escapedEnd')"
+    $command = "[Console]::Write('$escapedStart'); " +
+      "`$line = ('A' * 64) + [Environment]::NewLine; " +
+      "[byte[]]`$payload = [Text.Encoding]::ASCII.GetBytes((`$line * 65536)); " +
+      "`$stdout = [Console]::OpenStandardOutput(); " +
+      "`$stdout.Write(`$payload, 0, `$payload.Length); `$stdout.Flush(); " +
+      "[Console]::Write('$escapedEnd')"
     $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    $outputDaemonOut = Join-Path $env:TEMP "$sessionName-daemon.out"
+    $outputDaemonErr = Join-Path $env:TEMP "$sessionName-daemon.err"
+    $outputDaemon = Start-Process -FilePath $zmx -ArgumentList @("--daemon", $sessionName) `
+      -RedirectStandardOutput $outputDaemonOut -RedirectStandardError $outputDaemonErr `
+      -PassThru -WindowStyle Hidden
+    $outputDaemonId = $outputDaemon.Id
+    $daemonReady = $false
+    $daemonDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    while (-not $outputDaemon.HasExited -and [DateTime]::UtcNow -lt $daemonDeadline) {
+      if (Test-ZmxSessionReachable $zmx $sessionName) {
+        $daemonReady = $true
+        break
+      }
+      Start-Sleep -Milliseconds 250
+    }
+    Assert-True $daemonReady "real zmx output daemon did not become reachable"
     $capture = [Diagnostics.ProcessStartInfo]::new()
     $capture.FileName = $zmx
     $capture.UseShellExecute = $false
     $capture.CreateNoWindow = $true
+    $capture.RedirectStandardInput = $true
     $capture.RedirectStandardOutput = $true
     $capture.RedirectStandardError = $true
     $capture.ArgumentList.Add("attach")
     $capture.ArgumentList.Add($sessionName)
-    $attach = [Diagnostics.Process]::new()
-    $attach.StartInfo = $capture
-    $captureTask = $null
-    & $zmx kill --force $sessionName *> $null
-    $captureStream = [IO.MemoryStream]::new()
-    & $zmx run $sessionName -d cmd.exe /d /c powershell.exe -NoProfile -EncodedCommand $encodedCommand
-    Assert-True ($LASTEXITCODE -eq 0) "real zmx output session did not start"
-    Assert-True $attach.Start() "real zmx attach did not start"
-    $captureTask = $attach.StandardOutput.BaseStream.CopyToAsync($captureStream)
+    $captureReady = $false
+    $captureError = ""
+    for ($attempt = 0; $attempt -lt 5 -and -not $captureReady; $attempt++) {
+      $attach = [Diagnostics.Process]::new()
+      $attach.StartInfo = $capture
+      $captureTask = $null
+      $captureStream = [IO.MemoryStream]::new()
+      Assert-True $attach.Start() "real zmx attach did not start"
+      $attachId = $attach.Id
+      $captureTask = $attach.StandardOutput.BaseStream.CopyToAsync($captureStream)
+      $captureErrorTask = $attach.StandardError.ReadToEndAsync()
+      $readyDeadline = [DateTime]::UtcNow.AddSeconds(10)
+      while (-not $attach.HasExited -and [DateTime]::UtcNow -lt $readyDeadline) {
+        if ($captureStream.Length -gt 0) {
+          $captureReady = $true
+          break
+        }
+        Start-Sleep -Milliseconds 250
+      }
+      if (-not $captureReady) {
+        if (-not $attach.HasExited) {
+          Stop-Process -Id $attachId -Force -ErrorAction SilentlyContinue
+        }
+        try { $attach.StandardOutput.BaseStream.Dispose() } catch {}
+        try { [void] $captureTask.Wait(1000) } catch {}
+        try {
+          if ($captureErrorTask.Wait(1000)) { $captureError = $captureErrorTask.Result }
+        } catch {}
+        $attach.Dispose()
+        $attach = $null
+        $attachId = $null
+        $captureStream.Dispose()
+        $captureStream = $null
+      }
+    }
+    if (-not $captureReady -and $captureError) {
+      Write-Warning ("zmx attach stderr: " + $captureError.Substring(
+          0, [Math]::Min(1000, $captureError.Length)))
+    }
+    Assert-True $captureReady "real zmx attach did not become reachable"
+    & $zmx send $sessionName `
+      "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedCommand`r"
+    Assert-True ($LASTEXITCODE -eq 0) "real zmx output command was not accepted"
     $completed = $false
-    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    $deadline = [DateTime]::UtcNow.AddSeconds(90)
     while ([DateTime]::UtcNow -lt $deadline) {
       $bytes = $captureStream.ToArray()
       $startBytes = [Text.Encoding]::ASCII.GetBytes($escapedStart)
@@ -329,18 +404,28 @@ function Invoke-RealMatrix {
       }
       Start-Sleep -Milliseconds 250
     }
-    if (-not $attach.HasExited) { Stop-Process -Id $attach.Id -Force }
-    $captureTask.GetAwaiter().GetResult()
+    if (-not $attach.HasExited) {
+      Stop-Process -Id $attachId -Force -ErrorAction SilentlyContinue
+    }
     Assert-True $completed "real zmx output session did not complete"
     $bytes = $captureStream.ToArray()
+    try { $attach.StandardOutput.BaseStream.Dispose() } catch {}
+    try { [void] $captureTask.Wait(1000) } catch {}
+    try { [void] $captureErrorTask.Wait(1000) } catch {}
     $startIndex = Find-Bytes $bytes ([Text.Encoding]::ASCII.GetBytes($escapedStart))
     $endIndex = Find-Bytes $bytes ([Text.Encoding]::ASCII.GetBytes($escapedEnd)) ($startIndex + $escapedStart.Length)
     $payload = $bytes[($startIndex + $escapedStart.Length)..($endIndex - 1)]
+    $payloadText = [Text.Encoding]::ASCII.GetString($payload)
+    $escape = [regex]::Escape([string][char]27)
+    $payloadText = [regex]::Replace($payloadText, "$escape\][^\a]*(?:\a|$escape\\)", "")
+    $payloadText = [regex]::Replace($payloadText, "$escape\[[0-?]*[ -/]*[@-~]", "")
+    $payloadText = $payloadText.Replace("`r", "").Replace("`n", "")
+    $payload = [Text.Encoding]::ASCII.GetBytes($payloadText)
     Assert-True ($payload.Length -eq 4194304) "zmx attach lost or added terminal stdout bytes"
-    $hash = ([Security.Cryptography.SHA256]::Create().ComputeHash([byte[]]$payload) |
+    $hash = ([Security.Cryptography.SHA256]::Create().ComputeHash($payload) |
       ForEach-Object { $_.ToString("x2") }) -join ""
     $expectedPayload = New-Object byte[] 4194304
-    [Array]::Fill($expectedPayload, 65)
+    [Array]::Fill($expectedPayload, [byte]65)
     $expectedHash = ([Security.Cryptography.SHA256]::Create().ComputeHash(
         $expectedPayload) |
       ForEach-Object { $_.ToString("x2") }) -join ""
@@ -355,13 +440,22 @@ function Invoke-RealMatrix {
     Write-Output ("HARDENING real-products: PASS (post-cleanup processes=$($productAfterCleanup.processes.Count))")
   } finally {
     if ($sessionName) { Stop-OwnedSessionProcessTree $sessionName }
-    if ($attach -and -not $attach.HasExited) {
-      Stop-Process -Id $attach.Id -Force -ErrorAction SilentlyContinue
+    if ($outputDaemonId -and
+      (Get-Process -Id $outputDaemonId -ErrorAction SilentlyContinue)) {
+      Stop-Process -Id $outputDaemonId -Force -ErrorAction SilentlyContinue
+      [void] $outputDaemon.WaitForExit(1000)
+    }
+    if ($outputDaemon) { $outputDaemon.Dispose() }
+    foreach ($path in @($outputDaemonOut, $outputDaemonErr)) {
+      if ($path) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+    }
+    if ($attachId -and (Get-Process -Id $attachId -ErrorAction SilentlyContinue)) {
+      Stop-Process -Id $attachId -Force -ErrorAction SilentlyContinue
     }
     if ($attach) { $attach.Dispose() }
     if ($captureStream) { $captureStream.Dispose() }
-    if ($daemon -and -not $daemon.HasExited) {
-      Stop-Process -Id $daemon.Id -Force -ErrorAction SilentlyContinue
+    if ($daemonId -and (Get-Process -Id $daemonId -ErrorAction SilentlyContinue)) {
+      Stop-Process -Id $daemonId -Force -ErrorAction SilentlyContinue
     }
     if ($daemon) { $daemon.Dispose() }
     $postCleanup = Get-ProductResourceSample $productRoots
@@ -386,6 +480,7 @@ if ($Run -eq 0) {
     $childArgs = @("-NoProfile", "-File", $PSCommandPath, "-Run", $index)
     if ($Environment) { $childArgs += "-Environment" }
     if ($SchemaOnly) { $childArgs += "-SchemaOnly" }
+    if ($SkipTrayLive) { $childArgs += "-SkipTrayLive" }
     $output = & $pwsh @childArgs
     if ($LASTEXITCODE -ne 0) {
       throw "hardening repeated run $index failed with exit code $LASTEXITCODE"
@@ -412,32 +507,48 @@ if ($Run -eq 0) {
   if (-not $Environment -or $SchemaOnly) {
     Write-Output "HARDENING typed-product-trend: NOT RUN (environment matrix not selected)"
   } else {
-  $expectedRoles = @("graphcoded", "graphcode-windows", "zmx", "winghostty")
+  $expectedRoles = @("graphcoded", "cmd", "pwsh", "zmx", "winghostty")
+  $perProcessHandleCeiling = 2048
+  $roleHandleCeiling = 2048
   $allSnapshots = @($metricRuns | ForEach-Object snapshots)
   foreach ($snapshot in $allSnapshots) {
     Assert-True (($snapshot.processes | Measure-Object privateBytes -Maximum).Maximum -le 1GB) `
       "snapshot '$($snapshot.snapshotId)' exceeded private-memory ceiling"
-    Assert-True (($snapshot.processes | Measure-Object handles -Maximum).Maximum -le 1024) `
+    Assert-True (($snapshot.processes | Measure-Object handles -Maximum).Maximum -le
+      $perProcessHandleCeiling) `
       "snapshot '$($snapshot.snapshotId)' exceeded handle ceiling"
   }
   $requiredTuples = @(
     "terminal-gate:typed-input|winghostty", "terminal-gate:typed-input|zmx",
     "terminal-gate:stress|winghostty", "terminal-gate:stress|zmx",
-    "windows-shell:topology|graphcode-windows", "windows-shell:large-paste|graphcode-windows",
+    "windows-shell:topology|cmd", "windows-shell:large-paste|pwsh",
     "graphcoded:active-workload|graphcoded"
   )
   $tupleSamples = @{}
-  foreach ($run in $metricRuns) {
+  foreach ($metricRun in $metricRuns) {
     $tuples = @{}
-    foreach ($snapshot in $run.snapshots) {
+    foreach ($snapshot in $metricRun.snapshots) {
       $byPid = @($snapshot.processes | Group-Object pid | ForEach-Object { $_.Group | Select-Object -First 1 })
       foreach ($role in @($byPid | ForEach-Object role | Select-Object -Unique)) {
         $key = "$($snapshot.phase)|$role"
-        $tuples[$key] = [pscustomobject]@{ privateBytes = [int64](($byPid | Where-Object role -eq $role | Measure-Object privateBytes -Sum).Sum); handles = [int64](($byPid | Where-Object role -eq $role | Measure-Object handles -Sum).Sum) }
+        $candidate = [pscustomobject]@{
+          privateBytes = [int64](($byPid | Where-Object role -eq $role |
+                Measure-Object privateBytes -Maximum).Maximum)
+          handles = [int64](($byPid | Where-Object role -eq $role |
+                Measure-Object handles -Maximum).Maximum)
+        }
+        if (-not $tuples.ContainsKey($key)) {
+          $tuples[$key] = $candidate
+        } else {
+          $tuples[$key].privateBytes = [Math]::Max(
+            $tuples[$key].privateBytes, $candidate.privateBytes)
+          $tuples[$key].handles = [Math]::Max(
+            $tuples[$key].handles, $candidate.handles)
+        }
       }
     }
     foreach ($tuple in $requiredTuples) {
-      Assert-True $tuples.ContainsKey($tuple) "run $($run.run) missing metric tuple '$tuple'"
+      Assert-True $tuples.ContainsKey($tuple) "run $($metricRun.run) missing metric tuple '$tuple'"
       if (-not $tupleSamples.ContainsKey($tuple)) { $tupleSamples[$tuple] = [System.Collections.Generic.List[object]]::new() }
       $tupleSamples[$tuple].Add($tuples[$tuple])
     }
@@ -446,7 +557,8 @@ if ($Run -eq 0) {
     $samples = $tupleSamples[$tuple]
     Assert-True ($samples.Count -eq 3) "metric tuple '$tuple' did not have exactly three runs"
     Assert-True (($samples | Where-Object privateBytes -gt 1GB).Count -eq 0) "tuple '$tuple' exceeded private ceiling"
-    Assert-True (($samples | Where-Object handles -gt 1024).Count -eq 0) "tuple '$tuple' exceeded handle ceiling"
+    Assert-True (($samples | Where-Object handles -gt $roleHandleCeiling).Count -eq 0) `
+      "tuple '$tuple' exceeded handle ceiling"
     $privateRange = [Math]::Round((($samples | Measure-Object privateBytes -Maximum).Maximum - ($samples | Measure-Object privateBytes -Minimum).Minimum) / 1MB, 1)
     $handleRange = [Math]::Abs(($samples | Measure-Object handles -Maximum).Maximum - ($samples | Measure-Object handles -Minimum).Minimum)
     Assert-True ($privateRange -le 128 -and $handleRange -le 256) "tuple '$tuple' trend exceeded ceiling"

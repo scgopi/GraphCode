@@ -66,7 +66,7 @@ jobs:
         shell: pwsh
         env:
           GRAPHCODE_HARDENING_TARGET: ${{ github.workspace }}\Tools\windows\Tests\EnvironmentFixture.ps1
-        run: ./Tools/windows/Tests/Hardening.Tests.ps1 -Environment
+        run: ./Tools/windows/Tests/Hardening.Tests.ps1 -Environment -SkipTrayLive
 
   environment:
     name: "Gated environment hardening"
