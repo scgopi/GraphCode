@@ -76,6 +76,7 @@ foreach ($token in @(
     "zmx attach",
     "PeekNamedPipe",
     "readAttachOutput",
+    "waitForInitialAttachOutput",
     "writeAttachInput",
     "child.stdin",
     "child.cwd",
@@ -107,6 +108,12 @@ Assert-Contract ($source.Contains("TranslateMessage")) `
 Assert-Contract (
   $source -match "child\.cwd\s*=\s*app\.cwd"
 ) "zmx attach child does not inherit the gate working directory"
+Assert-Contract ($source.Contains("attach-output-timeout")) `
+  "zmx attach readiness does not have a bounded timeout"
+Assert-Contract (-not $source.Contains("app.tick == 3")) `
+  "typed input still depends on a fixed startup tick"
+Assert-Contract (-not $source.Contains("app.tick == 6")) `
+  "surface recreation still depends on a fixed startup tick"
 
 $harness = Get-Content -LiteralPath (Join-Path $gateRoot "..\..\..\Tools\windows\terminal-gate.ps1") -Raw
 foreach ($token in @(
@@ -117,8 +124,10 @@ foreach ($token in @(
     "same-session restart",
     "Assert-PinnedCleanWorktree",
     "status --porcelain",
-    "zmx list",
     "Get-CimInstance",
+    "Get-ZmxSessionProcessIds",
+    "RedirectStandardOutput",
+    "RedirectStandardError",
     "NewGuid",
     "GRAPHCODE_TERMINAL_SESSION_PREFIX",
     "ownedSessionNames",
@@ -129,6 +138,8 @@ foreach ($token in @(
   Assert-Contract ($harness.Contains($token)) `
     "smoke harness is missing persistent-session proof: $token"
 }
+Assert-Contract (-not $harness.Contains("& `$zmx list")) `
+  "smoke harness still performs an unbounded zmx list"
 
 $runner = Get-Content -LiteralPath (Join-Path $gateRoot "..\..\..\Tools\windows\validate.ps1") -Raw
 foreach ($token in @(

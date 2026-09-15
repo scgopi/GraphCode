@@ -43,6 +43,7 @@ const SurfaceSlot = struct {
     input_bytes: usize = 0,
     input_seen: bool = false,
     output_seen: bool = false,
+    attach_restarts: usize = 0,
     terminal_buffer: [16 * 1024]u8 = undefined,
     terminal_buffer_len: usize = 0,
     terminal_cells: [terminal_cell_count]c.winghostty_terminal_cell = [_]c.winghostty_terminal_cell{
@@ -72,6 +73,10 @@ const App = struct {
     stress: bool = false,
     same_session: bool = false,
     tick: usize = 0,
+    input_contracts_run: bool = false,
+    input_contracts_tick: usize = 0,
+    recreation_started_tick: usize = 0,
+    attach_stable_ticks: usize = 0,
     recreate_count: usize = 0,
     callbacksAfterDestroy: usize = 0,
     lastRenderError: c.winghostty_result = c.WINGHOSTTY_OK,
@@ -506,25 +511,9 @@ fn sessionName(app: *App, index: usize) []const u8 {
     return app.session_buffers[slot][0..app.session_lengths[slot]];
 }
 
-fn zmxGet(app: *App, name: []const u8) !bool {
-    var args = [_][]const u8{ app.zmx_path, "get", name };
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &args,
-        .max_output_bytes = 16 * 1024,
-    });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    return switch (result.term) {
-        .Exited => |code| code == 0,
-        else => false,
-    };
-}
-
 fn startSession(app: *App, name: []const u8, index: usize) !void {
     // zmx attach starts the persistent daemon when the exact session name is
     // absent, and reconnects to it when it already exists.
-    _ = try zmxGet(app, name);
     var attach_args = [_][]const u8{ app.zmx_path, "attach", name };
     var child = std.process.Child.init(&attach_args, allocator);
     child.cwd = app.cwd;
@@ -725,10 +714,10 @@ fn feedTerminalCells(slot: *SurfaceSlot, bytes: []const u8) void {
     }
 }
 
-fn readAttachOutput(app: *App, index: usize) void {
+fn readAttachOutput(app: *App, index: usize) bool {
     const slot = &app.surfaces[index];
-    const child = slot.attach orelse return;
-    const stdout = child.stdout orelse return;
+    const child = slot.attach orelse return false;
+    const stdout = child.stdout orelse return false;
     var available: c.DWORD = 0;
     if (c.PeekNamedPipe(
         @ptrCast(stdout.handle),
@@ -738,7 +727,7 @@ fn readAttachOutput(app: *App, index: usize) void {
         &available,
         null,
     ) == 0) {
-        return;
+        return false;
     }
     while (available > 0) {
         var buffer: [4096]u8 = undefined;
@@ -767,6 +756,23 @@ fn readAttachOutput(app: *App, index: usize) void {
             break;
         }
     }
+    return true;
+}
+
+fn waitForInitialAttachOutput(app: *App, index: usize) !void {
+    var restarts: usize = 0;
+    for (0..120) |_| {
+        const attach_alive = readAttachOutput(app, index);
+        if (app.surfaces[index].output_seen) return;
+        if (!attach_alive) {
+            if (restarts == 4) return error.InitialAttachRestartLimit;
+            waitAttachClient(&app.surfaces[index]);
+            try startSession(app, sessionName(app, index), index);
+            restarts += 1;
+        }
+        std.Thread.sleep(100 * std.time.ns_per_ms);
+    }
+    return error.InitialAttachOutputTimeout;
 }
 
 fn createSurface(app: *App, index: usize) !void {
@@ -795,6 +801,7 @@ fn createSurface(app: *App, index: usize) !void {
     slot.clipboard_events = 0;
     slot.output_events = 0;
     slot.input_bytes = 0;
+    slot.attach_restarts = 0;
     slot.terminal_buffer_len = 0;
     clearTerminalCells(slot);
     slot.terminal_parser = .normal;
@@ -853,7 +860,7 @@ fn runInputContracts(app: *App) !void {
         const surface = slot.surface orelse return error.SurfaceMissing;
         const surface_hwnd =
             c.winghostty_surface_get_hwnd(surface) orelse return error.SurfaceMissing;
-        _ = c.winghostty_surface_set_focus(surface, if (index == app.active_surface) 1 else 0);
+        _ = c.winghostty_surface_set_focus(surface, 1);
         _ = c.winghostty_surface_notify_dpi_changed(surface, if (index == 0) 96 else 144);
         _ = c.winghostty_surface_notify_accessibility_name(
             surface,
@@ -888,32 +895,121 @@ fn runInputContracts(app: *App) !void {
         );
         const redraw_result = c.winghostty_surface_notify_redraw(surface);
         recordProviderError(app, redraw_result);
+        if (index != app.active_surface) {
+            _ = c.winghostty_surface_set_focus(surface, 0);
+        }
     }
+    if (app.surfaces[app.active_surface].surface) |surface| {
+        _ = c.winghostty_surface_set_focus(surface, 1);
+    }
+}
+
+fn restartBrokenAttach(app: *App, index: usize) !void {
+    const slot = &app.surfaces[index];
+    if (slot.attach_restarts == 4) return error.AttachRestartLimit;
+    waitAttachClient(slot);
+    try startSession(app, sessionName(app, index), index);
+    slot.attach_restarts += 1;
+}
+
+fn attachStreamsReady(app: *const App) bool {
+    return app.surfaces[0].output_seen and app.attach_stable_ticks >= 5;
+}
+
+fn failSmokeReadiness(app: *App, reason: []const u8) void {
+    std.debug.print(
+        "terminal gate readiness failure: {s} tick={d} output=({any},{any}) input=({any},{any})\n",
+        .{
+            reason,
+            app.tick,
+            app.surfaces[0].output_seen,
+            app.surfaces[1].output_seen,
+            app.surfaces[0].input_seen,
+            app.surfaces[1].input_seen,
+        },
+    );
+    app.transportFailures += 1;
+    app.lastTransportFailure = reason;
+    _ = c.DestroyWindow(app.hwnd);
 }
 
 fn tick(app: *App) void {
     app.tick += 1;
-    readAttachOutput(app, 0);
-    readAttachOutput(app, 1);
-    if (app.tick == 3) {
-        _ = runInputContracts(app) catch {};
+    var attach_alive = [2]bool{
+        readAttachOutput(app, 0),
+        readAttachOutput(app, 1),
+    };
+    if (!app.input_contracts_run) {
+        for (&attach_alive, 0..) |*alive, index| {
+            if (!alive.*) {
+                restartBrokenAttach(app, index) catch |err| {
+                    std.debug.print(
+                        "terminal gate attach restart failed: {s} surface={d}\n",
+                        .{ @errorName(err), index },
+                    );
+                    failSmokeReadiness(app, "attach-restart");
+                    return;
+                };
+            }
+        }
+        if (attach_alive[0] and attach_alive[1]) {
+            app.attach_stable_ticks += 1;
+        } else {
+            app.attach_stable_ticks = 0;
+        }
+    }
+    if (!app.input_contracts_run and attachStreamsReady(app)) {
+        runInputContracts(app) catch |err| {
+            std.debug.print("terminal gate input contract failed: {s}\n", .{@errorName(err)});
+            app.transportFailures += 1;
+            app.lastTransportFailure = "input-contract";
+            _ = c.DestroyWindow(app.hwnd);
+            return;
+        };
+        app.input_contracts_run = true;
+        app.input_contracts_tick = app.tick;
         if (app.surfaces[1].surface) |surface| {
             _ = c.winghostty_surface_set_focus(surface, 1);
             recordProviderError(app, c.winghostty_surface_notify_redraw(surface));
         }
     }
-    if (app.smoke and app.tick == 6) {
-        _ = recreateSurface(app, 0) catch {};
-        _ = runInputContracts(app) catch {};
+    if (app.smoke and
+        app.input_contracts_run and
+        app.recreation_started_tick == 0 and
+        app.tick - app.input_contracts_tick >= 50)
+    {
+        recreateSurface(app, 0) catch |err| {
+            std.debug.print("terminal gate recreate failed: {s}\n", .{@errorName(err)});
+            app.transportFailures += 1;
+            app.lastTransportFailure = "recreate";
+            _ = c.DestroyWindow(app.hwnd);
+            return;
+        };
+        app.recreation_started_tick = app.tick;
     }
-    if (app.stress and app.tick >= 6 and app.tick < 6 + 16 * 2 and app.tick % 2 == 0) {
-        _ = recreateSurface(app, 0) catch {};
+    const recreation_elapsed =
+        if (app.recreation_started_tick == 0) 0 else app.tick - app.recreation_started_tick;
+    if (app.stress and
+        recreation_elapsed >= 2 and
+        recreation_elapsed < 2 + 16 * 2 and
+        recreation_elapsed % 2 == 0)
+    {
+        recreateSurface(app, 0) catch |err| {
+            std.debug.print("terminal gate stress recreate failed: {s}\n", .{@errorName(err)});
+            app.transportFailures += 1;
+            app.lastTransportFailure = "stress-recreate";
+            _ = c.DestroyWindow(app.hwnd);
+            return;
+        };
     }
-    if (app.smoke and !app.stress and app.tick == 24) {
+    if (app.smoke and !app.stress and recreation_elapsed == 18) {
         _ = c.DestroyWindow(app.hwnd);
     }
-    if (app.smoke and app.stress and app.tick == 40) {
+    if (app.smoke and app.stress and recreation_elapsed == 36) {
         _ = c.DestroyWindow(app.hwnd);
+    }
+    if (app.smoke and app.tick == 120 and !app.input_contracts_run) {
+        failSmokeReadiness(app, "attach-output-timeout");
     }
 }
 
@@ -1028,9 +1124,22 @@ fn messageLoop(app: *App) !void {
             app.totalInputBytes == 0 or
             !app.surfaces[0].input_seen or
             !app.surfaces[0].output_seen or
-            !app.surfaces[1].input_seen or
-            !app.surfaces[1].output_seen))
+            !app.surfaces[1].input_seen))
     {
+        std.debug.print(
+            "terminal gate I/O contract failure: output_events={d} input_bytes={d} output=({any},{any}) input=({any},{any}) restarts=({d},{d}) stable_ticks={d}\n",
+            .{
+                app.totalOutputEvents,
+                app.totalInputBytes,
+                app.surfaces[0].output_seen,
+                app.surfaces[1].output_seen,
+                app.surfaces[0].input_seen,
+                app.surfaces[1].input_seen,
+                app.surfaces[0].attach_restarts,
+                app.surfaces[1].attach_restarts,
+                app.attach_stable_ticks,
+            },
+        );
         return error.SessionIoContractFailed;
     }
 }
@@ -1081,6 +1190,7 @@ pub fn main() !void {
         return error.WinghosttyHostInitializeFailed;
     }
     try createSurface(app, 0);
+    try waitForInitialAttachOutput(app, 0);
     try createSurface(app, 1);
     app.ready = true;
     if (app.smoke) _ = c.PostMessageW(app.hwnd, wm_gate_tick, 0, 0);

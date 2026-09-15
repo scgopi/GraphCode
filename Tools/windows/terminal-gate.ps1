@@ -19,6 +19,7 @@ $wingLib = Join-Path $WinghosttyRoot "zig-out\lib\winghostty-win32-host.lib"
 $zmx = Join-Path $ZmxRoot "zig-out\bin\zmx.exe"
 $ownedSessionNames = [System.Collections.Generic.HashSet[string]]::new()
 $ownedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
+$gateOutputFiles = [System.Collections.Generic.List[string]]::new()
 $gateProcess = $null
 $resourceRole = "winghostty"
 $metricSequence = 0
@@ -73,35 +74,13 @@ function Assert-PinnedCleanWorktree(
   Assert-Equal (git -C $root rev-parse HEAD) $expectedSha "$label pin"
 }
 
-function Get-ZmxSessionLines([string] $name) {
-  $escaped = [regex]::Escape($name)
-  $output = @(& $zmx list 2>&1)
-  if ($LASTEXITCODE -ne 0) {
-    return @()
-  }
-  return @(
-    $output |
-      ForEach-Object { $_.ToString() } |
-      Where-Object { $_ -match "(?m)(?:^|\s)name=$escaped(?:\s|$)" }
-  )
-}
-
-function Get-ZmxSessionRecords {
-  @(& $zmx list 2>$null | ForEach-Object {
-    if ($_ -match "name=([^\s]+)\s+pid=(\d+)") {
-      [pscustomobject]@{ Name = $Matches[1]; Pid = [int] $Matches[2] }
-    }
-  })
-}
-
 function Record-TestOwnedSessions {
-  foreach ($record in @(Get-ZmxSessionRecords)) {
-    if ($names -contains $record.Name) {
-      [void] $ownedSessionNames.Add($record.Name)
-      [void] $ownedProcessIds.Add($record.Pid)
+  foreach ($name in $names) {
+    [void] $ownedSessionNames.Add($name)
+    foreach ($processId in @(Get-ZmxSessionProcessIds $name)) {
+      [void] $ownedProcessIds.Add($processId)
     }
   }
-
 }
 
 function Write-OwnedResourceMetrics([string] $phase) {
@@ -127,26 +106,35 @@ function Write-OwnedResourceMetrics([string] $phase) {
 }
 
 function Invoke-GateProcess([string[]] $arguments, [string] $phase) {
-  $script:gateProcess = Start-Process -FilePath $app -ArgumentList $arguments -PassThru -WindowStyle Hidden
+  $outputPrefix = Join-Path ([IO.Path]::GetTempPath()) `
+    "graphcode-terminal-gate-$([guid]::NewGuid().ToString('N'))"
+  $stdoutPath = "$outputPrefix.stdout.log"
+  $stderrPath = "$outputPrefix.stderr.log"
+  [void] $gateOutputFiles.Add($stdoutPath)
+  [void] $gateOutputFiles.Add($stderrPath)
+  $script:gateProcess = Start-Process -FilePath $app `
+    -ArgumentList $arguments `
+    -NoNewWindow `
+    -PassThru `
+    -RedirectStandardOutput $stdoutPath `
+    -RedirectStandardError $stderrPath
   [void] $ownedProcessIds.Add($script:gateProcess.Id)
   Start-Sleep -Milliseconds 250
   Record-TestOwnedSessions
   Write-OwnedResourceMetrics $phase
   $script:gateProcess.WaitForExit()
-  if ($script:gateProcess.ExitCode -ne 0) {
-    throw "terminal gate exited with code $($script:gateProcess.ExitCode)"
-  }
+  $exitCode = $script:gateProcess.ExitCode
   $script:gateProcess.Dispose()
   $script:gateProcess = $null
+  if ($exitCode -ne 0) {
+    $stdout = Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue
+    $stderr = Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue
+    throw "terminal gate exited with code ${exitCode}: stdout=$stdout, stderr=$stderr"
+  }
 }
 
 function Get-ZmxSessionProcessIds([string] $name) {
   $ids = [System.Collections.Generic.List[int]]::new()
-  foreach ($line in @(Get-ZmxSessionLines $name)) {
-    if ($line -match "\bpid=(\d+)\b") {
-      $ids.Add([int] $Matches[1])
-    }
-  }
   $escaped = [regex]::Escape($name)
   foreach ($process in @(
       Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
@@ -163,19 +151,15 @@ function Get-ZmxSessionProcessIds([string] $name) {
 
 function Assert-ZmxSessionAbsent([string] $name) {
   for ($attempt = 0; $attempt -lt 20; $attempt++) {
-    $lines = @(Get-ZmxSessionLines $name)
     $processIds = @(Get-ZmxSessionProcessIds $name)
-    $liveLines = @($lines | Where-Object {
-        $_ -notmatch "(?i)status=unreachable|err=ConnectionRefused"
-      })
-    if ($liveLines.Count -eq 0 -and $processIds.Count -eq 0) {
+    if ($processIds.Count -eq 0) {
       return
     }
 
     Start-Sleep -Milliseconds 250
   }
-  $details = @($lines + ($processIds | ForEach-Object { "pid=$_" })) -join "; "
-  throw "cleanup left zmx session '$name' registered or running: $details"
+  $details = @($processIds | ForEach-Object { "pid=$_" }) -join "; "
+  throw "cleanup left zmx session '$name' running: $details"
 }
 
 function Get-ProcessTreeIds([int[]] $roots) {
@@ -233,8 +217,6 @@ try {
     }
     Record-TestOwnedSessions
     Write-OwnedResourceMetrics "terminal-gate:typed-input"
-    Write-Host "terminal gate sessions after attach:"
-    & $zmx list | Select-String $sessionPrefix
     Invoke-Native "first-session health" {
       & $zmx get $names[0]
       & $zmx get $names[1]
@@ -308,8 +290,9 @@ try {
   }
   finally {
     $cleanupFailures = [System.Collections.Generic.List[string]]::new()
-    foreach ($name in @($ownedSessionNames)) {
+    foreach ($name in $names) {
       foreach ($processId in @(Get-ZmxSessionProcessIds $name)) {
+        [void] $ownedSessionNames.Add($name)
         [void] $ownedProcessIds.Add($processId)
       }
     }
@@ -318,9 +301,8 @@ try {
       [void] $ownedProcessIds.Add($processId)
     }
     foreach ($name in @($ownedSessionNames)) {
-      & $zmx kill $name *> $null
-      if ($LASTEXITCODE -ne 0) {
-        $cleanupFailures.Add("$name kill exited with $LASTEXITCODE")
+      if (@(Get-ZmxSessionProcessIds $name).Count -ne 0) {
+        & $zmx kill $name *> $null
       }
     }
     foreach ($processId in @($ownedProcessIds)) {
@@ -344,6 +326,9 @@ try {
   }
 }
 finally {
+  foreach ($path in $gateOutputFiles) {
+    Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+  }
   Remove-Item Env:GRAPHCODE_ZMX -ErrorAction SilentlyContinue
   Remove-Item Env:GRAPHCODE_GATE_CWD -ErrorAction SilentlyContinue
   Remove-Item Env:GRAPHCODE_TERMINAL_SESSION_PREFIX -ErrorAction SilentlyContinue
