@@ -31,26 +31,35 @@ public actor RemoteSocketForwarder {
   /// is unreachable and why, which is more diagnosable than anything a launcher with
   /// no UI could do from here.
   public func ensureForwarding(to location: RemoteProjectLocation) {
-    let key = location.authority
-    if let existing = forwarders[key], existing.isRunning { return }
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/bin/sh")
-    process.arguments = [
-      "-c", Self.forwardScript(for: location, localSocketPath: DaemonSocketPath.url.path),
-    ]
-    process.standardOutput = FileHandle.nullDevice
-    process.standardError = FileHandle.nullDevice
-    do {
-      try process.run()
-      forwarders[key] = process
-    } catch {}
+    #if os(Windows)
+      _ = location
+      return
+    #else
+      let key = location.authority
+      if let existing = forwarders[key], existing.isRunning { return }
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: "/bin/sh")
+      process.arguments = [
+        "-c", Self.forwardScript(for: location, localSocketPath: DaemonSocketPath.url.path),
+      ]
+      process.standardOutput = FileHandle.nullDevice
+      process.standardError = FileHandle.nullDevice
+      do {
+        try process.run()
+        forwarders[key] = process
+      } catch {}
+    #endif
   }
 
   static func forwardScript(for location: RemoteProjectLocation, localSocketPath: String)
     -> String
   {
     let prepare = location.sshCommandLine(
-      remoteCommand: "mkdir -p \"$HOME/.graphcode\" && rm -f \"$HOME/.graphcode/graphcoded.sock\""
+      remoteCommand: "mkdir -p \"$HOME/.graphcode\" && rm -f"
+        + " \"$HOME/.graphcode/graphcoded.sock\""
+        + " \"$HOME/.graphcode/bridge-state.json\""
+        + " \"$HOME/.graphcode/bridge-state-generation\""
+        + " \"$HOME/.graphcode/bridge-state.json.lock\""
         + " && printf %s \"$HOME\"")
     let forward = forwardCommandLine(for: location, localSocketPath: localSocketPath)
     return """
@@ -76,7 +85,7 @@ public actor RemoteSocketForwarder {
       // ssh-flags, past the `--`.
       argv = [GhLocator.executablePath, "codespace", "ssh", "-c", location.host, "--"]
     } else {
-      argv = ["/usr/bin/ssh"]
+      argv = [SSHExecutableResolver.executableURL()?.path ?? "ssh"]
     }
     argv += [
       "-N",

@@ -29,12 +29,12 @@ final class SettingsModel {
     }
   }
 
-  /// The update channel as a switch (#36) — app-only, so `UserDefaults` rather than
-  /// `GraphcodeSettings`: the daemon never checks for updates, and `UpdateClient` reads
-  /// the same `updateChannel` key. Starts on the install's effective channel — a beta
-  /// build reads as on — and the first flip writes an explicit override either way.
+  /// The update channel as a switch (#36). It is persisted in the shared settings file
+  /// and mirrored to the update client's legacy `UserDefaults` override.
   var betaUpdates: Bool {
     didSet {
+      guard betaUpdates != oldValue else { return }
+      settings.betaUpdates = betaUpdates
       UserDefaults.standard.set(betaUpdates ? "beta" : "stable", forKey: "updateChannel")
     }
   }
@@ -69,9 +69,10 @@ final class SettingsModel {
     let version =
       Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
     betaUpdates =
-      UpdateChannel.channel(
+      booted.betaUpdates
+      || UpdateChannel.channel(
         for: version, override: UserDefaults.standard.string(forKey: "updateChannel"))
-      == .beta
+        == .beta
   }
 
   /// The Mailroom's boot decision, separated so tests can pin it without touching

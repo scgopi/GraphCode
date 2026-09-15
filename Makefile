@@ -301,7 +301,12 @@ dev-status:
 # ---------------------------------------------------------------------------
 test: generate
 	set -o pipefail && $(MISE) xcodebuild -workspace $(WORKSPACE) -scheme $(SCHEME_APP) \
-		-destination '$(DESTINATION)' test | $(MISE) xcbeautify
+		-destination '$(DESTINATION)' \
+		-parallel-testing-enabled NO \
+		-test-timeouts-enabled YES \
+		-default-test-execution-time-allowance 60 \
+		-maximum-test-execution-time-allowance 180 \
+		test | $(MISE) xcbeautify
 
 check:
 	$(MISE) swiftlint lint

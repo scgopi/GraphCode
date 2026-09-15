@@ -2,12 +2,80 @@ name: Windows release hardening
 
 on:
   workflow_dispatch:
+    inputs:
+      environment_target:
+        description: "Workspace-relative path to the owned environment harness"
+        required: false
+        type: string
+  schedule:
+    - cron: "17 3 * * 1"
+  pull_request:
+    paths:
+      - ".github/workflows/windows-hardening.yml"
+      - "Package.swift"
+      - "Package.resolved"
+      - "MailroomKit/**"
+      - "GraphcodeKit/**"
+      - "graphcode-cli/**"
+      - "graphcoded/**"
+      - "graphcode-windows/**"
+      - "windows-tests/**"
+      - "Tools/windows/**"
+      - "investigation/windows-implementation-plan.md"
+      - "Tools/windows/validation-matrix.md"
 
 permissions:
   contents: read
 
 jobs:
-  registration:
-    runs-on: ubuntu-latest
+  deterministic:
+    name: "Deterministic hardening (${{ matrix.os }}, ${{ matrix.powershell }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+        powershell: [pwsh]
+    runs-on: ${{ matrix.os }}
     steps:
-      - run: echo "Dispatch this workflow with a ref that contains the Windows hardening implementation."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Run hardening contract
+        shell: pwsh
+        run: ./Tools/windows/validate.ps1 -Task hardening
+      - name: Verify runner contract
+        shell: pwsh
+        run: ./Tools/windows/Tests/ValidationRunner.Tests.ps1
+
+  full-pinned:
+    name: "Full pinned Windows validation"
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: compnerd/gha-setup-swift@397094e75494a93fa8d81db0268dbc8f5d6cf7c6 # v0.4.1
+        with:
+          swift-version: swift-6.3.3-release
+          swift-build: 6.3.3-RELEASE
+          cache: true
+      - name: Bootstrap exact Windows dependencies
+        shell: pwsh
+        run: ./Tools/windows/bootstrap.ps1 -ToolRoot .ci-tools -ProviderRoot .ci-providers
+      - name: Run complete release gate
+        shell: pwsh
+        run: ./Tools/windows/validate.ps1 -Task all -SkipTrayLive -SkipWslRemoteE2E
+      - name: Run real hardening matrix after release products
+        shell: pwsh
+        env:
+          GRAPHCODE_HARDENING_TARGET: ${{ github.workspace }}\Tools\windows\Tests\EnvironmentFixture.ps1
+        run: ./Tools/windows/Tests/Hardening.Tests.ps1 -Environment -SkipTrayLive
+
+  environment:
+    name: "Gated environment hardening"
+    if: github.event_name == 'workflow_dispatch' && inputs.environment_target != ''
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Run explicitly selected environment tier
+        shell: pwsh
+        env:
+          GRAPHCODE_HARDENING_TARGET: ${{ inputs.environment_target }}
+        run: ./Tools/windows/Tests/Hardening.Tests.ps1 -Environment -SchemaOnly

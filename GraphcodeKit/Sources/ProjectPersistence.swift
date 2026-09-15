@@ -14,11 +14,17 @@ public struct ProjectPersistence: Sendable {
   private let projectsDirectory: URL
   private let recentProjectsFile: URL
   private let openProjectsFile: URL
+  private let platformPaths: any PlatformPaths
 
   public init(baseDirectory: URL) {
+    self.init(baseDirectory: baseDirectory, platformPaths: CurrentPlatformPaths.value)
+  }
+
+  public init(baseDirectory: URL, platformPaths: any PlatformPaths) {
     projectsDirectory = baseDirectory.appendingPathComponent("projects", isDirectory: true)
     recentProjectsFile = baseDirectory.appendingPathComponent("recent-projects.json")
     openProjectsFile = baseDirectory.appendingPathComponent("open-projects.json")
+    self.platformPaths = platformPaths
     try? FileManager.default.createDirectory(
       at: projectsDirectory, withIntermediateDirectories: true)
   }
@@ -26,7 +32,32 @@ public struct ProjectPersistence: Sendable {
   // MARK: - Per-project graph
 
   public func loadGraph(path: String) -> LoopGraph? {
-    guard let data = try? Data(contentsOf: fileURL(forProjectPath: path)) else { return nil }
+    let currentURL = fileURL(forProjectPath: path)
+    if let graph = decodeGraph(at: currentURL, projectPath: path) {
+      return graph
+    }
+
+    // Before v1 keys, macOS used the path itself as the filename. Keep this fallback
+    // one-way: a successful read immediately moves the bytes to the safe filename so
+    // future launches no longer depend on the legacy spelling.
+    let legacyURL = legacyFileURL(forProjectPath: path)
+    guard let legacyData = try? Data(contentsOf: legacyURL),
+      let legacyGraph = try? JSONDecoder().decode(LoopGraph.self, from: legacyData),
+      pathsMatch(legacyGraph.project.path, path)
+    else { return nil }
+    if (try? legacyData.write(to: currentURL, options: .atomic)) != nil {
+      try? FileManager.default.removeItem(at: legacyURL)
+      migrateLegacyMailroom(forProjectPath: path)
+    }
+    return decodeGraph(data: legacyData, projectPath: path)
+  }
+
+  private func decodeGraph(at url: URL, projectPath: String) -> LoopGraph? {
+    guard let data = try? Data(contentsOf: url) else { return nil }
+    return decodeGraph(data: data, projectPath: projectPath)
+  }
+
+  private func decodeGraph(data: Data, projectPath: String) -> LoopGraph? {
     guard var graph = try? JSONDecoder().decode(LoopGraph.self, from: data) else { return nil }
     for index in graph.nodes.indices {
       graph.nodes[index].presence = nil
@@ -34,7 +65,9 @@ public struct ProjectPersistence: Sendable {
     }
     // The room's own file wins over one still inline in the graph file — a graph saved
     // before the split carries its posts inline, and decodes exactly as it always did.
-    if let room = try? Data(contentsOf: mailroomURL(forProjectPath: path)),
+    let currentRoom = mailroomURL(forProjectPath: projectPath)
+    let legacyRoom = legacyMailroomURL(forProjectPath: projectPath)
+    if let room = (try? Data(contentsOf: currentRoom)) ?? (try? Data(contentsOf: legacyRoom)),
       let posts = try? JSONDecoder().decode([MailroomPost].self, from: room)
     {
       graph.mailroom = posts
@@ -56,6 +89,7 @@ public struct ProjectPersistence: Sendable {
     } catch {
       return
     }
+    removeLegacyGraphIfMatching(path: graph.project.path)
     let roomURL = mailroomURL(forProjectPath: graph.project.path)
     let digest = MailroomDigest(of: graph.mailroom)
     guard
@@ -80,6 +114,7 @@ public struct ProjectPersistence: Sendable {
       return
     }
     Self.roomDigests.set(digest, for: roomURL.path)
+    try? FileManager.default.removeItem(at: legacyMailroomURL(forProjectPath: graph.project.path))
   }
 
   /// What the room last written for each project looked like, so an unchanged room is
@@ -122,22 +157,35 @@ public struct ProjectPersistence: Sendable {
   public func deleteGraph(path: String) {
     try? FileManager.default.removeItem(at: fileURL(forProjectPath: path))
     try? FileManager.default.removeItem(at: mailroomURL(forProjectPath: path))
+    try? FileManager.default.removeItem(at: legacyFileURL(forProjectPath: path))
+    try? FileManager.default.removeItem(at: legacyMailroomURL(forProjectPath: path))
     // The digest cache is keyed by path and outlives the file. Left behind, a project
     // re-created at the same path whose room happens to match the deleted one would be
     // judged unchanged and never written.
     Self.roomDigests.forget(mailroomURL(forProjectPath: path).path)
   }
 
-  /// Filenames are the canonical path with `/` replaced by `_` — simple, deterministic,
-  /// and legible in a Finder window, which matters more here than collision-resistance
-  /// does for a single-user local tool.
+  /// Filenames are versioned hashes of the canonical project path. A path-derived filename
+  /// must be deterministic across launches, but Windows also rejects `:`, `\`, and several
+  /// other characters that occur in perfectly valid project paths. Hashing keeps names
+  /// short, safe, and collision-resistant without leaking a path into a directory listing.
   private func fileURL(forProjectPath path: String) -> URL {
+    let key = platformPaths.persistenceKey(forProjectPath: path)
+    return projectsDirectory.appendingPathComponent("\(key).json")
+  }
+
+  private func legacyFileURL(forProjectPath path: String) -> URL {
     let safeName = path.replacingOccurrences(of: "/", with: "_")
     return projectsDirectory.appendingPathComponent("\(safeName).json")
   }
 
   /// The room beside its graph: `<name>.mailroom.json`.
   private func mailroomURL(forProjectPath path: String) -> URL {
+    let key = platformPaths.persistenceKey(forProjectPath: path)
+    return projectsDirectory.appendingPathComponent("\(key)\(Self.roomFileSuffix)")
+  }
+
+  private func legacyMailroomURL(forProjectPath path: String) -> URL {
     let safeName = path.replacingOccurrences(of: "/", with: "_")
     return projectsDirectory.appendingPathComponent("\(safeName)\(Self.roomFileSuffix)")
   }
@@ -162,6 +210,34 @@ public struct ProjectPersistence: Sendable {
   /// graph and stop a reap.
   public static func isSidecarFileName(_ name: String) -> Bool {
     sidecarFileSuffixes.contains { name.hasSuffix($0) }
+  }
+
+  private func removeLegacyGraphIfMatching(path: String) {
+    let legacyURL = legacyFileURL(forProjectPath: path)
+    guard let data = try? Data(contentsOf: legacyURL),
+      let graph = try? JSONDecoder().decode(LoopGraph.self, from: data),
+      pathsMatch(graph.project.path, path)
+    else { return }
+    try? FileManager.default.removeItem(at: legacyURL)
+    migrateLegacyMailroom(forProjectPath: path)
+  }
+
+  private func migrateLegacyMailroom(forProjectPath path: String) {
+    let legacyURL = legacyMailroomURL(forProjectPath: path)
+    let currentURL = mailroomURL(forProjectPath: path)
+    guard !FileManager.default.fileExists(atPath: currentURL.path),
+      let data = try? Data(contentsOf: legacyURL),
+      (try? data.write(to: currentURL, options: .atomic)) != nil
+    else { return }
+    try? FileManager.default.removeItem(at: legacyURL)
+  }
+
+  private func pathsMatch(_ storedPath: String, _ requestedPath: String) -> Bool {
+    if storedPath == requestedPath { return true }
+    guard let storedCanonical = try? platformPaths.canonicalProjectPath(storedPath),
+      let requestedCanonical = try? platformPaths.canonicalProjectPath(requestedPath)
+    else { return false }
+    return storedCanonical == requestedCanonical
   }
 
   // MARK: - Recent projects

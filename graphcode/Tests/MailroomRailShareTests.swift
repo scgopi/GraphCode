@@ -1,10 +1,11 @@
 import Foundation
-import Testing
 
-@testable import graphcode
+import Testing
 
 /// The board's scroll box is capped by a share of the rail, so a rigid box can never be
 /// what pushes the foot of the rail off a short window.
+@testable import graphcode
+
 @Suite
 struct MailroomRailShareTests {
   @Test
@@ -31,7 +32,11 @@ struct MailroomRailShareTests {
   func theShareLeavesRoomForTheRigidSections() {
     let rail: CGFloat = 700
     let board = LoopWorkspaceRail.mailroomHeightCap(railHeight: rail)
-    let rigidAbove: CGFloat = 118 + 120 + 24 + 24 + 12 * 2
+    let loopSection: CGFloat = 118
+    let summaryFloor: CGFloat = 120
+    let sectionChrome: CGFloat = 24 + 24
+    let verticalSpacing: CGFloat = 12 * 2
+    let rigidAbove = loopSection + summaryFloor + sectionChrome + verticalSpacing
     #expect(board + rigidAbove < rail)
   }
 }

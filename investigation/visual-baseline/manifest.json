@@ -1,0 +1,402 @@
+{
+  "schemaVersion": 1,
+  "id": "graphcode.windows.visual-baseline",
+  "baseCommit": "ece55b6",
+  "clock": "2026-01-15T15:00:00Z",
+  "screenshotSources": [
+    {
+      "path": "screenshots/graph-hero.png",
+      "sha256": "5b97274a9686b663cd07d5ab01a9e531ed3ee2bc53e6fc0f66fbc2ec7016a4f5"
+    }
+  ],
+  "sourceReferences": [
+    "graphcode/Sources/Features/App/Theme.swift",
+    "graphcode/Sources/Features/Canvas/LoopCardView.swift",
+    "graphcode/Sources/Features/Canvas/LoopCardPresentation.swift",
+    "graphcode/Sources/Features/App/AppSidebarView.swift",
+    "graphcode/Sources/Features/Project/ProjectCanvasView.swift",
+    "graphcode/Sources/Features/Canvas/CanvasAttentionRail.swift",
+    "graphcode/Sources/Features/LoopWorkspace/LoopWorkspaceView.swift",
+    "graphcode/Sources/Features/LoopWorkspace/LoopWorkspacePanes.swift",
+    "graphcode/Sources/Features/LoopWorkspace/LoopWorkspaceRail.swift",
+    "graphcode/Sources/Features/App/ProjectHeader.swift",
+    "investigation/ui-parity-matrix.md"
+  ],
+  "tokenContracts": [
+    { "name": "Theme.windowTone", "value": "#1E1E1E" },
+    { "name": "Theme.windowBackground", "value": "opacity(0.55)" },
+    { "name": "Theme.canvasBackground", "value": "opacity(0.62)" },
+    { "name": "Theme.canvasTone", "value": "#181818" },
+    { "name": "Theme.canvasGridLine", "value": "#272727" },
+    { "name": "Theme.unfocusedPaneVeil", "value": "opacity(0.35)" },
+    { "name": "Theme.terminalBackgroundOpacity", "value": "0.80" },
+    { "name": "Theme.workspaceRail", "value": "#1D1D21" },
+    { "name": "Theme.paneFocusTint", "value": "#0A84FF" },
+    { "name": "LoopCardView.Metrics.size", "value": "250x106" },
+    { "name": "LoopCardView.Metrics.radius", "value": "11" },
+    { "name": "LoopCardView.Metrics.stripe", "value": "4" },
+    { "name": "LoopWorkspaceRail.width", "value": "212" },
+    { "name": "PaneHeaderView.height", "value": "22" },
+    { "name": "CanvasAttentionRail.reviewShortcut", "value": "⌘⇧R" }
+  ],
+  "graph": {
+    "id": "00000000-0000-4000-8000-000000000001",
+    "project": {
+      "id": "project-local",
+      "name": "Windows visual baseline",
+      "path": "graphcode://fixtures/windows-visual-baseline",
+      "remote": false
+    },
+    "nodes": [
+      {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "title": "Metric gate",
+        "type": "goalBased",
+        "state": "running",
+        "displayWord": "RUNNING",
+        "createdAt": "2026-01-15T13:00:00Z",
+        "activity": "editing fixture metrics",
+        "metricDirection": "minimize",
+        "metricHistory": [
+          { "recordedAt": "2026-01-15T14:30:00Z", "value": 1.42 },
+          { "recordedAt": "2026-01-15T14:55:00Z", "value": 1.1 }
+        ],
+        "position": { "x": 180, "y": 180 }
+      },
+      {
+        "id": "22222222-2222-4222-8222-222222222222",
+        "title": "Human review",
+        "type": "turnBased",
+        "state": "awaitingInput",
+        "displayWord": "NEEDS YOU",
+        "createdAt": "2026-01-15T14:20:00Z",
+        "activity": "awaiting a fixture reply",
+        "metricHistory": [],
+        "position": { "x": 520, "y": 180 }
+      },
+      {
+        "id": "33333333-3333-4333-8333-333333333333",
+        "title": "Stranded handoff",
+        "type": "goalBased",
+        "state": "blocked",
+        "displayWord": "BLOCKED",
+        "createdAt": "2026-01-15T14:40:00Z",
+        "activity": "upstream failed",
+        "metricDirection": "maximize",
+        "metricHistory": [
+          { "recordedAt": "2026-01-15T14:40:00Z", "value": 41 },
+          { "recordedAt": "2026-01-15T14:50:00Z", "value": 41 }
+        ],
+        "position": { "x": 860, "y": 180 }
+      },
+      {
+        "id": "44444444-4444-4444-8444-444444444444",
+        "title": "Pipeline complete",
+        "type": "composite",
+        "state": "succeeded",
+        "displayWord": "DONE",
+        "createdAt": "2026-01-15T12:30:00Z",
+        "activity": "sub-graph resolved",
+        "metricHistory": [],
+        "position": { "x": 180, "y": 420 }
+      },
+      {
+        "id": "55555555-5555-4555-8555-555555555555",
+        "title": "Failed check",
+        "type": "timeBased",
+        "state": "failed",
+        "displayWord": "FAILED",
+        "createdAt": "2026-01-15T13:30:00Z",
+        "activity": "fixture command exited 1",
+        "metricDirection": "minimize",
+        "metricHistory": [
+          { "recordedAt": "2026-01-15T14:00:00Z", "value": 3 },
+          { "recordedAt": "2026-01-15T14:30:00Z", "value": 5 }
+        ],
+        "position": { "x": 520, "y": 420 }
+      },
+      {
+        "id": "66666666-6666-4666-8666-666666666666",
+        "title": "Stalled worker",
+        "type": "turnBased",
+        "state": "stalled",
+        "displayWord": "STALLED",
+        "createdAt": "2026-01-15T14:00:00Z",
+        "activity": "no progress in fixture window",
+        "metricHistory": [],
+        "position": { "x": 860, "y": 420 }
+      },
+      {
+        "id": "77777777-7777-4777-8777-777777777777",
+        "title": "Scheduled poll",
+        "type": "timeBased",
+        "state": "idle",
+        "displayWord": "SCHEDULED",
+        "createdAt": "2026-01-15T14:10:00Z",
+        "activity": "next fixture tick",
+        "metricDirection": "maximize",
+        "metricHistory": [
+          { "recordedAt": "2026-01-15T14:40:00Z", "value": 0.5 },
+          { "recordedAt": "2026-01-15T14:55:00Z", "value": 0.75 }
+        ],
+        "position": { "x": 180, "y": 660 }
+      },
+      {
+        "id": "88888888-8888-4888-8888-888888888888",
+        "title": "Stopped loop",
+        "type": "goalBased",
+        "state": "stopped",
+        "displayWord": "STOPPED",
+        "createdAt": "2026-01-15T11:00:00Z",
+        "activity": "stopped by fixture operator",
+        "metricHistory": [],
+        "position": { "x": 520, "y": 660 }
+      },
+      {
+        "id": "99999999-9999-4999-8999-999999999999",
+        "title": "Downstream wait",
+        "type": "composite",
+        "state": "waiting",
+        "displayWord": "WAITING",
+        "createdAt": "2026-01-15T12:00:00Z",
+        "activity": "downstream fixture loops active",
+        "metricHistory": [],
+        "position": { "x": 860, "y": 660 }
+      }
+    ],
+    "edges": [
+      {
+        "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "from": "11111111-1111-4111-8111-111111111111",
+        "to": "22222222-2222-4222-8222-222222222222",
+        "kind": "handoff",
+        "condition": "success",
+        "fired": false
+      },
+      {
+        "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "from": "55555555-5555-4555-8555-555555555555",
+        "to": "33333333-3333-4333-8333-333333333333",
+        "kind": "handoff",
+        "condition": "success",
+        "fired": false
+      },
+      {
+        "id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "from": "44444444-4444-4444-8444-444444444444",
+        "to": "99999999-9999-4999-8999-999999999999",
+        "kind": "spawn",
+        "condition": "success",
+        "fired": true
+      }
+    ]
+  },
+  "sidebar": {
+    "sections": [ "Local Projects", "Remote Repositories" ],
+    "rows": [
+      { "id": "graph", "kind": "graph", "title": "Graph", "expanded": true },
+      {
+        "id": "project-local",
+        "kind": "project",
+        "title": "Windows visual baseline",
+        "remote": false,
+        "expanded": true
+      },
+      {
+        "id": "project-remote",
+        "kind": "project",
+        "title": "Remote fixture",
+        "remote": true,
+        "path": "ssh://fixture.example/graphcode/visual-baseline",
+        "expanded": true
+      },
+      {
+        "id": "remote-loop",
+        "kind": "node",
+        "title": "Remote review",
+        "state": "running",
+        "remote": true
+      }
+    ],
+    "remoteIndicator": {
+      "glyph": "network",
+      "label": "remote",
+      "source": "graphcode/Sources/Features/App/ProjectHeader.swift"
+    }
+  },
+  "canvas": {
+    "grid": { "cellSize": 24, "line": "Theme.canvasGridLine" },
+    "viewport": { "width": 1280, "height": 820 },
+    "zoom": 1.0,
+    "attentionRail": {
+      "count": 4,
+      "oldestNodeID": "55555555-5555-4555-8555-555555555555",
+      "oldestAge": "1h 30m",
+      "reviewShortcut": "⌘⇧R",
+      "items": [
+        { "nodeID": "55555555-5555-4555-8555-555555555555", "reason": "failed" },
+        { "nodeID": "66666666-6666-4666-8666-666666666666", "reason": "stalled" },
+        { "nodeID": "22222222-2222-4222-8222-222222222222", "reason": "awaitingInput" },
+        { "nodeID": "33333333-3333-4333-8333-333333333333", "reason": "blocked" }
+      ]
+    }
+  },
+  "workspace": {
+    "loopID": "22222222-2222-4222-8222-222222222222",
+    "projectPath": "ssh://fixture.example/graphcode/visual-baseline",
+    "remote": true,
+    "focusedPaneID": "pane-agent",
+    "rail": {
+      "visible": true,
+      "width": 212,
+      "downstreamCount": 1
+    },
+    "tabs": [
+      {
+        "id": "tab-goal",
+        "title": "Goal",
+        "selected": true,
+        "root": {
+          "kind": "split",
+          "direction": "horizontal",
+          "children": [
+            {
+              "kind": "leaf",
+              "paneID": "pane-agent",
+              "title": "agent",
+              "detail": "claude",
+              "focused": true,
+              "snapshot": "investigation/visual-baseline/fixtures/terminal-agent.txt"
+            },
+            {
+              "kind": "split",
+              "direction": "vertical",
+              "children": [
+                {
+                  "kind": "leaf",
+                  "paneID": "pane-shell",
+                  "title": "shell",
+                  "detail": "zsh",
+                  "focused": false,
+                  "snapshot": "investigation/visual-baseline/fixtures/terminal-shell.txt"
+                },
+                {
+                  "kind": "leaf",
+                  "paneID": "pane-log",
+                  "title": "shell",
+                  "detail": "zsh",
+                  "focused": false,
+                  "snapshot": "investigation/visual-baseline/fixtures/terminal-log.txt"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "tab-shell",
+        "title": "Shell",
+        "selected": false,
+        "root": {
+          "kind": "leaf",
+          "paneID": "pane-extra",
+          "title": "shell",
+          "detail": "zsh",
+          "focused": false,
+          "snapshot": "investigation/visual-baseline/fixtures/terminal-shell.txt"
+        }
+      }
+    ]
+  },
+  "dpiVariants": [
+    { "id": "100", "scale": 1.0, "viewport": { "width": 1600, "height": 1000 } },
+    { "id": "125", "scale": 1.25, "viewport": { "width": 1280, "height": 800 } },
+    { "id": "150", "scale": 1.5, "viewport": { "width": 1066, "height": 666 } },
+    { "id": "200", "scale": 2.0, "viewport": { "width": 800, "height": 500 } }
+  ],
+  "regions": [
+    {
+      "id": "sidebar",
+      "owner": "GraphCode",
+      "kind": "deterministic",
+      "source": "graphcode/Sources/Features/App/AppSidebarView.swift"
+    },
+    {
+      "id": "graph-canvas",
+      "owner": "GraphCode",
+      "kind": "deterministic",
+      "source": "graphcode/Sources/Features/Project/ProjectCanvasView.swift"
+    },
+    {
+      "id": "attention-rail",
+      "owner": "GraphCode",
+      "kind": "deterministic",
+      "source": "graphcode/Sources/Features/Canvas/CanvasAttentionRail.swift"
+    },
+    {
+      "id": "remote-indicator",
+      "owner": "GraphCode",
+      "kind": "deterministic",
+      "source": "graphcode/Sources/Features/App/ProjectHeader.swift"
+    },
+    {
+      "id": "terminal-workspace-chrome",
+      "owner": "GraphCode",
+      "kind": "deterministic",
+      "source": "graphcode/Sources/Features/LoopWorkspace/LoopWorkspaceView.swift"
+    },
+    {
+      "id": "terminal-split-layout",
+      "owner": "GraphCode",
+      "kind": "deterministic",
+      "source": "graphcode/Sources/Features/LoopWorkspace/LoopWorkspacePanes.swift"
+    },
+    {
+      "id": "winghostty-terminal-surface",
+      "owner": "Winghostty",
+      "kind": "live-functional",
+      "source": "investigation/contracts/winghostty-host.md"
+    },
+    {
+      "id": "winghostty-input-dpi",
+      "owner": "Winghostty",
+      "kind": "live-functional",
+      "source": "investigation/contracts/winghostty-host.md"
+    }
+  ],
+  "renderingBoundary": {
+    "deterministicScreenshotRegions": [
+      "sidebar",
+      "graph-canvas",
+      "attention-rail",
+      "remote-indicator",
+      "terminal-workspace-chrome",
+      "terminal-split-layout"
+    ],
+    "liveWinghosttyFunctionalTests": [
+      "winghostty-terminal-surface",
+      "winghostty-input-dpi"
+    ],
+    "rule": "Compare only GraphCode-owned regions in deterministic screenshots; exercise Winghostty surfaces live."
+  },
+  "terminalSnapshots": [
+    {
+      "id": "agent",
+      "path": "investigation/visual-baseline/fixtures/terminal-agent.txt",
+      "owner": "GraphCode",
+      "kind": "deterministic-layout-fixture"
+    },
+    {
+      "id": "shell",
+      "path": "investigation/visual-baseline/fixtures/terminal-shell.txt",
+      "owner": "GraphCode",
+      "kind": "deterministic-layout-fixture"
+    },
+    {
+      "id": "log",
+      "path": "investigation/visual-baseline/fixtures/terminal-log.txt",
+      "owner": "GraphCode",
+      "kind": "deterministic-layout-fixture"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "winghostty": {
+    "repository": "coneilen/winghostty",
+    "remoteUrl": "https://github.com/coneilen/winghostty.git",
+    "sha": "f5abc059e4ca58b376eb209313aca7784659c679",
+    "artifact": "zig-out/lib/winghostty-win32-host.lib",
+    "minimumZig": "0.15.2"
+  },
+  "zmx": {
+    "repository": "coneilen/zmx",
+    "remoteUrl": "https://github.com/coneilen/zmx.git",
+    "sha": "029e11d2b19162fb3bdf90c8270237d303b8bfb4",
+    "artifact": "zig-out/bin/zmx.exe",
+    "minimumZig": "0.16.0"
+  },
+  "localFallback": {
+    "enabled": false,
+    "remoteWorkflowBlocked": false,
+    "reason": "Exact provider commits are publicly available and bootstrapped by Tools/windows/bootstrap.ps1.",
+    "paths": []
+  }
+}

@@ -77,4 +77,12 @@ public enum SessionIDStore {
   public static func remove(forNodeID nodeID: UUID) {
     try? FileManager.default.removeItem(at: file(forNodeID: nodeID))
   }
+
+  public static func nodeIDs() -> [UUID] {
+    guard
+      let files = try? FileManager.default.contentsOfDirectory(
+        at: directory, includingPropertiesForKeys: nil)
+    else { return [] }
+    return files.compactMap { UUID(uuidString: $0.deletingPathExtension().lastPathComponent) }
+  }
 }

@@ -1,8 +1,8 @@
-import Foundation
-
 // launchd, quarantine xattrs, `~/Library/LaunchAgents` — this whole mechanism is the
 // macOS app's drag-to-Applications install, and only the app calls it. A Linux install
 // story (systemd user unit or equivalent) would be a sibling, not a port of this.
+import Foundation
+
 #if os(macOS)
 
   /// Installs the helpers a shipped `graphcode.app` carries inside itself — `graphcoded` and
@@ -447,6 +447,405 @@ import Foundation
       do { try process.run() } catch { return -1 }
       process.waitUntilExit()
       return process.terminationStatus
+    }
+  }
+
+#elseif os(Windows)
+
+  /// Windows helper installation and per-user startup registration.
+  import WinSDK
+
+  public enum DaemonBootstrap {
+    public enum Outcome: Equatable {
+      case notPackaged
+      case upToDate
+      case installed
+      case failed(String)
+    }
+
+    private static let helpers = ["graphcoded.exe", "graphcode.exe"]
+    private static let versionFile = ".graphcode-package.version"
+    private static let endpointGenerationFile = ".graphcode-endpoint-generation"
+    private static let runtimeFilesFile = ".graphcode-runtime-files"
+
+    public static func installIfNeeded() -> Outcome {
+      guard let bundled = bundledHelperDirectory(in: .main) else {
+        return .notPackaged
+      }
+
+      let destination = SupportDirectory.binDirectory
+      do {
+        guard !bundledRuntimeFiles(in: bundled).isEmpty else {
+          throw StartupManagerError.missingRuntimeFiles
+        }
+        let manager = try WindowsStartupManager(
+          daemonURL: destination.appendingPathComponent("graphcoded.exe"))
+        let packageVersion = try packageVersion(for: bundled)
+        let status = try awaitBlocking { try await manager.status() }
+        let processRunning = manager.isDaemonProcessRunning()
+        let launcherCurrent = manager.launcherIsCurrent()
+        let currentEndpointGeneration = try? WindowsNamedPipeEndpoint.generation()
+        let endpointGenerationCurrent = Self.endpointGenerationIsCurrent(
+          current: currentEndpointGeneration,
+          installed: installedEndpointGeneration(in: destination))
+        let installedCurrent =
+          installedPackageVersion(in: destination) == packageVersion
+          && helpersInstalled(in: destination)
+          && runtimeFilesMatch(
+            in: destination,
+            required: bundledRuntimeFiles(in: bundled))
+        if installedCurrent, !processRunning {
+          if status == .running {
+            // A stale scheduler state must not suppress a restart.
+            try prepareAndStart(manager, destination: destination)
+            return .installed
+          }
+          if status == .stopped || status == .notInstalled {
+            try prepareAndStart(manager, destination: destination)
+            return .installed
+          }
+        }
+        if installedCurrent, status == .running, processRunning, launcherCurrent,
+          endpointGenerationCurrent
+        {
+          return .upToDate
+        }
+
+        let wasRunning = status == .running || processRunning
+        if wasRunning {
+          guard status != .notInstalled else {
+            throw StartupManagerError.commandFailed(
+              command: "graphcoded termination",
+              output: "the daemon process is running without its task")
+          }
+          try awaitBlocking {
+            try await manager.stop()
+            try await manager.waitForDaemonExit()
+            try await waitUntilEndpointUnavailable()
+            try await manager.uninstall()
+          }
+        }
+
+        let endpointGeneration = try WindowsNamedPipeEndpoint.generation()
+        let transaction = try stageAndSwitch(
+          from: bundled,
+          to: destination,
+          version: packageVersion,
+          endpointGeneration: endpointGeneration)
+        do {
+          try awaitBlocking {
+            try await manager.installAndStart()
+          }
+          transaction.commit()
+        } catch {
+          transaction.rollback()
+          if wasRunning {
+            try? awaitBlocking {
+              try await manager.installAndStart()
+            }
+          }
+          throw error
+        }
+        return .installed
+      } catch {
+        return .failed("\(error)")
+      }
+    }
+
+    static func bundledHelperDirectory(in bundle: Bundle) -> URL? {
+      guard let resources = bundle.resourceURL else { return nil }
+      let bundled = resources.appendingPathComponent("bin", isDirectory: true)
+      guard
+        helpers.allSatisfy({
+          FileManager.default.isExecutableFile(atPath: bundled.appendingPathComponent($0).path)
+        })
+      else {
+        return nil
+      }
+      return bundled
+    }
+
+    static func bundledRuntimeFiles(in directory: URL) -> [URL] {
+      (try? FileManager.default.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: [.isRegularFileKey],
+        options: [.skipsHiddenFiles]
+      ))?
+      .filter { $0.pathExtension.caseInsensitiveCompare("dll") == .orderedSame }
+      .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        ?? []
+    }
+
+    static func helpersInstalled(in directory: URL) -> Bool {
+      guard
+        helpers.allSatisfy({
+          FileManager.default.isReadableFile(
+            atPath: directory.appendingPathComponent($0).path)
+        })
+      else {
+        return false
+      }
+      guard
+        let manifest = try? String(
+          contentsOf: directory.appendingPathComponent(runtimeFilesFile),
+          encoding: .utf8)
+      else {
+        return false
+      }
+      let required = Set(
+        manifest.split(whereSeparator: \.isNewline)
+          .map { $0.lowercased() })
+      let installed = Set(
+        bundledRuntimeFiles(in: directory)
+          .map { $0.lastPathComponent.lowercased() })
+      guard !required.isEmpty, required == installed else {
+        return false
+      }
+      return required.allSatisfy {
+        FileManager.default.isReadableFile(
+          atPath: directory.appendingPathComponent($0).path)
+      }
+    }
+
+    static func runtimeFilesMatch(in directory: URL, required: [URL]) -> Bool {
+      Set(bundledRuntimeFiles(in: directory).map { $0.lastPathComponent.lowercased() })
+        == Set(required.map { $0.lastPathComponent.lowercased() })
+    }
+
+    static func packageVersion(for directory: URL) throws -> String {
+      if let marker = try? String(
+        contentsOf: directory.appendingPathComponent(versionFile), encoding: .utf8
+      ) {
+        let value = marker.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !value.isEmpty { return value }
+      }
+      let files =
+        helpers.map { directory.appendingPathComponent($0) }
+        + bundledRuntimeFiles(in: directory)
+      var material = Data()
+      for file in files {
+        material.append(contentsOf: Data(file.lastPathComponent.utf8))
+        material.append(0)
+        material.append(try Data(contentsOf: file))
+        material.append(0)
+      }
+      return GraphcodeSHA256.hex(material)
+    }
+
+    static func installedPackageVersion(in directory: URL) -> String? {
+      try? String(
+        contentsOf: directory.appendingPathComponent(versionFile), encoding: .utf8
+      ).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func installedEndpointGeneration(in directory: URL) -> String? {
+      try? String(
+        contentsOf: directory.appendingPathComponent(endpointGenerationFile),
+        encoding: .utf8
+      ).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func endpointGenerationIsCurrent(current: String?, installed: String?) -> Bool {
+      guard let current, let installed else { return false }
+      return current == installed
+    }
+
+    private static func prepareAndStart(
+      _ manager: WindowsStartupManager,
+      destination: URL
+    ) throws {
+      let generation = try WindowsNamedPipeEndpoint.generation()
+      try Data(generation.utf8).write(
+        to: destination.appendingPathComponent(endpointGenerationFile),
+        options: .atomic)
+      try awaitBlocking {
+        try await manager.installAndStart()
+      }
+    }
+
+    /// Stages and switches a complete versioned package. The returned transaction
+    /// keeps the old package until the new daemon has started successfully.
+    static func installBundledFiles(
+      from bundled: URL,
+      to destination: URL,
+      failAfterCopy: Int? = nil
+    ) throws {
+      let version = try packageVersion(for: bundled)
+      let transaction = try stageAndSwitch(
+        from: bundled,
+        to: destination,
+        version: version,
+        failAfterCopy: failAfterCopy)
+      transaction.commit()
+    }
+
+    private static func stageAndSwitch(
+      from bundled: URL,
+      to destination: URL,
+      version: String,
+      endpointGeneration: String? = nil,
+      failAfterCopy: Int? = nil
+    ) throws -> PackageSwitch {
+      let fileManager = FileManager.default
+      let runtimeFiles = bundledRuntimeFiles(in: bundled)
+      let files = helpers.map { bundled.appendingPathComponent($0) } + runtimeFiles
+      guard !runtimeFiles.isEmpty else {
+        throw StartupManagerError.missingRuntimeFiles
+      }
+      let parent = destination.deletingLastPathComponent()
+      try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+      let packageRoot = parent.appendingPathComponent(".graphcode-packages", isDirectory: true)
+      try fileManager.createDirectory(at: packageRoot, withIntermediateDirectories: true)
+      let staging = packageRoot.appendingPathComponent(
+        "\(version)-\(UUID().uuidString)", isDirectory: true)
+      try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+      defer {
+        if fileManager.fileExists(atPath: staging.path) {
+          try? fileManager.removeItem(at: staging)
+        }
+      }
+
+      for source in files {
+        let target = staging.appendingPathComponent(source.lastPathComponent)
+        try fileManager.copyItem(at: source, to: target)
+        if let failAfterCopy, files.firstIndex(of: source).map({ $0 + 1 }) == failAfterCopy {
+          throw StartupManagerError.commandFailed(
+            command: "copy package", output: "injected mid-package failure")
+        }
+      }
+      try Data(version.utf8).write(
+        to: staging.appendingPathComponent(versionFile), options: .atomic)
+      let runtimeManifest = runtimeFiles.map(\.lastPathComponent).joined(separator: "\n")
+      try Data((runtimeManifest + "\n").utf8).write(
+        to: staging.appendingPathComponent(runtimeFilesFile), options: .atomic)
+      if let endpointGeneration {
+        try Data(endpointGeneration.utf8).write(
+          to: staging.appendingPathComponent(endpointGenerationFile), options: .atomic)
+      }
+
+      let backup = parent.appendingPathComponent(
+        ".graphcode-rollback-\(UUID().uuidString)", isDirectory: true)
+      if fileManager.fileExists(atPath: destination.path) {
+        try moveItem(destination, to: backup, replaceExisting: false)
+      }
+      do {
+        try moveItem(staging, to: destination, replaceExisting: false)
+      } catch {
+        if fileManager.fileExists(atPath: backup.path) {
+          try? moveItem(backup, to: destination, replaceExisting: false)
+        }
+        throw error
+      }
+      return PackageSwitch(destination: destination, backup: backup)
+    }
+
+    private static func moveItem(
+      _ source: URL,
+      to target: URL,
+      replaceExisting: Bool
+    ) throws {
+      var sourcePath = Array(source.path.utf16)
+      sourcePath.append(0)
+      var targetPath = Array(target.path.utf16)
+      targetPath.append(0)
+      let succeeded = sourcePath.withUnsafeBufferPointer { source in
+        targetPath.withUnsafeBufferPointer { target in
+          MoveFileExW(
+            source.baseAddress,
+            target.baseAddress,
+            DWORD(
+              (replaceExisting ? MOVEFILE_REPLACE_EXISTING : 0)
+                | MOVEFILE_WRITE_THROUGH))
+        }
+      }
+
+      guard succeeded else {
+        throw WindowsPipeError.win32(operation: "MoveFileExW", code: GetLastError())
+      }
+    }
+
+    private struct PackageSwitch {
+      let destination: URL
+      let backup: URL
+
+      func commit() {
+        try? FileManager.default.removeItem(at: backup)
+      }
+
+      func rollback() {
+        try? FileManager.default.removeItem(at: destination)
+        if FileManager.default.fileExists(atPath: backup.path) {
+          try? DaemonBootstrap.moveItem(backup, to: destination, replaceExisting: false)
+        }
+      }
+    }
+
+    private static func waitUntilEndpointUnavailable() async throws {
+      let endpoint = try WindowsNamedPipeEndpoint.name()
+      let deadline = Date().addingTimeInterval(10)
+      while Date() < deadline {
+        do {
+          let connection = try WindowsNamedPipeClient.connect(
+            to: endpoint, timeoutMilliseconds: 100)
+          try await connection.close()
+        } catch WindowsPipeError.win32(_, let code)
+          where code == UInt32(truncatingIfNeeded: ERROR_FILE_NOT_FOUND)
+          || code == UInt32(truncatingIfNeeded: ERROR_PIPE_NOT_CONNECTED)
+        {
+          return
+        } catch WindowsPipeError.connectionClosed {
+          try await Task.sleep(for: .milliseconds(50))
+          continue
+        } catch WindowsPipeError.win32(_, let code)
+          where code == UInt32(truncatingIfNeeded: ERROR_PIPE_BUSY)
+          || code == UInt32(truncatingIfNeeded: ERROR_SEM_TIMEOUT)
+        {
+          try await Task.sleep(for: .milliseconds(50))
+          continue
+        } catch WindowsPipeError.rendezvousSecretInUse {
+          try await Task.sleep(for: .milliseconds(50))
+          continue
+        } catch {
+          throw error
+        }
+      }
+      throw StartupManagerError.commandFailed(
+        command: "named pipe termination", output: "the daemon endpoint is still available")
+    }
+
+    private static func awaitBlocking<Result>(
+      _ operation: @escaping () async throws -> Result
+    ) throws -> Result {
+      let semaphore = DispatchSemaphore(value: 0)
+      let box = BlockingResult<Result>()
+      Task {
+        do {
+          box.store(.success(try await operation()))
+        } catch {
+          box.store(.failure(error))
+        }
+        semaphore.signal()
+      }
+      semaphore.wait()
+      return try box.take()
+    }
+
+    private final class BlockingResult<Value>: @unchecked Sendable {
+      private let lock = NSLock()
+      private var value: Result<Value, Error>?
+
+      func store(_ value: Result<Value, Error>) {
+        lock.lock()
+        self.value = value
+        lock.unlock()
+      }
+
+      func take() throws -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let value else { fatalError("blocking result was not set") }
+        return try value.get()
+      }
     }
   }
 

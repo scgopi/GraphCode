@@ -1,0 +1,1 @@
+{"version":2,"kind":"event","sequence":13,"event":{"graphChanged":{"id":"graph-remote","project":{"path":"ssh://build/remote","name":"Remote Graph"},"nodes":[{"id":"remote-loop","title":"Remote loop","loopType":"goalBased","state":"failed","presence":{"presence":"idle"}}],"edges":[]}}}

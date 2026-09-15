@@ -1,5 +1,16 @@
 import Foundation
 
+public enum CLISessionError: Error, Equatable, Sendable {
+  case unavailable(String)
+  case failed(String)
+  case notFound
+}
+
+public enum CLISessionStartOutcome: Equatable, Sendable {
+  case attached
+  case started
+}
+
 /// The abstraction over Claude Code, Copilot CLI, and Codex —
 /// docs/04-cli-backends.md#clisessionbackend-protocol.
 ///
@@ -51,6 +62,11 @@ public struct CLISessionBackend: Sendable {
   /// What the session says it is doing right now, or `nil` when nothing reports it —
   /// see `LoopNode.activity`. `projectPath` routed as `presence`'s is.
   public var activity: @Sendable (LoopNode, String?) async -> String?
+  public var startResult:
+    @Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>
+  public var terminateResult: @Sendable (LoopNode, String?) async -> Result<Void, CLISessionError>
+  public var exists: @Sendable (LoopNode, String?) async -> Bool
+  public var enumerate: @Sendable () async -> [UUID]
   /// The beats this session has narrated, or `nil` when the backend has no transcript to
   /// read, the loop is remote, or the human hasn't switched the producer on. Folded into
   /// `LoopNode.summary` by `GraphStore`, never written straight onto the node — see
@@ -66,7 +82,13 @@ public struct CLISessionBackend: Sendable {
     presence: @escaping @Sendable (LoopNode, String?) async -> PresenceReading,
     usage: @escaping @Sendable (LoopNode, String?) async -> UsageSample?,
     activity: @escaping @Sendable (LoopNode, String?) async -> String? = { _, _ in nil },
-    summary: @escaping @Sendable (LoopNode, String?) async -> SummaryReading? = { _, _ in nil }
+    summary: @escaping @Sendable (LoopNode, String?) async -> SummaryReading? = { _, _ in nil },
+    startResult: (
+      @Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>
+    )? = nil,
+    terminateResult: (@Sendable (LoopNode, String?) async -> Result<Void, CLISessionError>)? = nil,
+    exists: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
+    enumerate: (@Sendable () async -> [UUID])? = nil
   ) {
     self.kind = kind
     self.launch = launch
@@ -76,6 +98,18 @@ public struct CLISessionBackend: Sendable {
     self.presence = presence
     self.usage = usage
     self.activity = activity
+    self.startResult =
+      startResult ?? { node, path in
+        await launch(node, path)
+        return .success(.started)
+      }
+    self.terminateResult =
+      terminateResult ?? { node, path in
+        await terminate(node, path)
+        return .success(())
+      }
+    self.exists = exists ?? { _, _ in false }
+    self.enumerate = enumerate ?? { [] }
     self.summary = summary
   }
 }
@@ -183,7 +217,17 @@ extension CLISessionBackend {
         guard let reading else { return nil }
         return await SummaryModelWriter.applied(
           to: reading, node: node, projectPath: projectPath, settings: settings)
-      }
+      },
+      startResult: { node, projectPath in
+        await ZmxSessionLauncher.startResult(node, projectPath: projectPath)
+      },
+      terminateResult: { node, projectPath in
+        await ZmxSessionLauncher.terminateResult(node, projectPath: projectPath)
+      },
+      exists: { node, projectPath in
+        await ZmxSessionLauncher.sessionExists(node, projectPath: projectPath)
+      },
+      enumerate: { await ZmxSessionLauncher.enumerateSessionIDs() }
     )
   }
 
@@ -213,7 +257,10 @@ extension CLISessionBackend {
       },
       sendInput: { _, _, _ in false },
       presence: { _, _ in PresenceReading(presence: .absent, confidence: .reported) },
-      usage: { _, _ in nil }
+      usage: { _, _ in nil },
+      startResult: { _, _ in .failure(.unavailable("backend is not spiked")) },
+      terminateResult: { _, _ in .success(()) },
+      exists: { _, _ in false }, enumerate: { [] }
     )
   }
 

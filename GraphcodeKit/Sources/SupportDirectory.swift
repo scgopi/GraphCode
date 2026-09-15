@@ -1,5 +1,9 @@
 import Foundation
 
+#if os(Windows)
+  import WinSDK
+#endif
+
 /// The one directory graphcode keeps all of its own state in: `~/.graphcode`.
 ///
 /// Everything lives here — per-project graphs, the recents and open-projects indexes,
@@ -53,17 +57,93 @@ public enum SupportDirectory {
 
   /// `~/.graphcode`, unless `GRAPHCODE_SUPPORT_DIR` says otherwise.
   public static var url: URL {
-    let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-    guard let override = ProcessInfo.processInfo.environment[environmentKey],
-      !override.trimmingCharacters(in: .whitespaces).isEmpty
-    else {
+    url(
+      environment: ProcessInfo.processInfo.environment,
+      homeDirectory: URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true))
+  }
+
+  /// Resolves an injected environment without changing the process environment.
+  ///
+  /// Foundation's `URL(fileURLWithPath:)` only recognizes POSIX absolute paths on
+  /// Darwin. On Windows, drive-letter and UNC paths must be classified before URL
+  /// construction or an override such as `C:\GraphCode` is appended to the user's
+  /// home directory. The override is trimmed once; Windows environment keys are
+  /// case-insensitive, while Darwin preserves exact-key behavior.
+  public static func url(environment: [String: String], homeDirectory: URL) -> URL {
+    let configured = configuredURL(environment: environment, homeDirectory: homeDirectory)
+    #if os(Windows)
+      return resolvedWindowsURL(configured)
+    #else
+      return configured
+    #endif
+  }
+
+  /// Resolves an injected environment without following an existing Windows
+  /// junction or other reparse point. This is used when a child process must
+  /// retain the caller's configured path in its environment.
+  static func configuredURL(environment: [String: String], homeDirectory: URL) -> URL {
+    let home = homeDirectory
+    guard let value = overrideValue(in: environment) else {
       return home.appendingPathComponent(".graphcode", isDirectory: true)
     }
-    let expanded = (override as NSString).expandingTildeInPath
-    return expanded.hasPrefix("/")
-      ? URL(fileURLWithPath: expanded, isDirectory: true)
-      : home.appendingPathComponent(expanded, isDirectory: true)
+
+    let expanded = expandTilde(value, homeDirectory: home)
+    guard isAbsolutePath(expanded) else {
+      return home.appendingPathComponent(expanded, isDirectory: true)
+    }
+    return URL(fileURLWithPath: expanded, isDirectory: true)
   }
+
+  #if os(Windows)
+    private static func resolvedWindowsURL(_ url: URL) -> URL {
+      var widePath = Array(url.path.utf16)
+      widePath.append(0)
+      let handle = widePath.withUnsafeBufferPointer {
+        CreateFileW(
+          $0.baseAddress,
+          DWORD(FILE_READ_ATTRIBUTES),
+          DWORD(FILE_SHARE_READ) | DWORD(FILE_SHARE_WRITE) | DWORD(FILE_SHARE_DELETE),
+          nil,
+          DWORD(OPEN_EXISTING),
+          DWORD(FILE_FLAG_BACKUP_SEMANTICS),
+          nil)
+      }
+      guard let handle, handle != INVALID_HANDLE_VALUE else {
+        return url
+      }
+      defer { _ = CloseHandle(handle) }
+
+      var buffer = [WCHAR](repeating: 0, count: 260)
+      while true {
+        let length = buffer.withUnsafeMutableBufferPointer {
+          GetFinalPathNameByHandleW(
+            handle,
+            $0.baseAddress,
+            DWORD($0.count),
+            DWORD(VOLUME_NAME_DOS))
+        }
+        guard length > 0 else { return url }
+        if Int(length) < buffer.count {
+          let resolved = String(decoding: buffer.prefix(Int(length)), as: UTF16.self)
+            .replacingOccurrences(of: "/", with: "\\")
+          let uncPrefix = "\\\\?\\UNC\\"
+          if resolved.range(of: uncPrefix, options: [.caseInsensitive, .anchored]) != nil {
+            return URL(
+              fileURLWithPath: "\\\\" + String(resolved.dropFirst(uncPrefix.count)),
+              isDirectory: true)
+          }
+          let devicePrefix = "\\\\?\\"
+          if resolved.range(of: devicePrefix, options: [.caseInsensitive, .anchored]) != nil {
+            return URL(
+              fileURLWithPath: String(resolved.dropFirst(devicePrefix.count)),
+              isDirectory: true)
+          }
+          return URL(fileURLWithPath: resolved, isDirectory: true)
+        }
+        buffer = [WCHAR](repeating: 0, count: Int(length) + 1)
+      }
+    }
+  #endif
 
   /// Where graphcode kept its state before this moved. Read only by the migration below.
   static var legacyURL: URL {
@@ -83,14 +163,27 @@ public enum SupportDirectory {
   /// safe to run concurrently and repeatedly — hence "move only when the destination is
   /// entirely absent" rather than any kind of merge.
   public static func prepare() {
+    let environment = ProcessInfo.processInfo.environment
+    let homeDirectory = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+    prepare(
+      environment: environment,
+      homeDirectory: homeDirectory,
+      legacy: legacyURL)
+  }
+
+  /// The injectable startup path used by tests and by the process-wide entry point.
+  static func prepare(
+    environment: [String: String],
+    homeDirectory: URL,
+    legacy: URL
+  ) {
     // No migration when someone has named the directory themselves: moving the legacy
     // Application Support folder into `~/.graphcode.dev` would empty the real location
     // into a scratch one, which is the opposite of what asking for a separate directory
     // means. Such a directory just starts empty.
-    let overridden =
-      ProcessInfo.processInfo.environment[environmentKey]?
-      .trimmingCharacters(in: .whitespaces).isEmpty == false
-    prepare(destination: url, legacy: overridden ? url : legacyURL)
+    let overridden = overrideValue(in: environment) != nil
+    let destination = url(environment: environment, homeDirectory: homeDirectory)
+    prepare(destination: destination, legacy: overridden ? destination : legacy)
   }
 
   /// The real work, with both paths injected.
@@ -128,5 +221,52 @@ public enum SupportDirectory {
       // to run. The old directory is left untouched for a human to move by hand.
       return false
     }
+  }
+
+  private static func overrideValue(in environment: [String: String]) -> String? {
+    let rawValue: String?
+    #if os(Windows)
+      if let exact = environment[environmentKey] {
+        rawValue = exact
+      } else {
+        rawValue = environment
+          .keys
+          .sorted()
+          .first(where: { $0.caseInsensitiveCompare(environmentKey) == .orderedSame })
+          .flatMap { environment[$0] }
+      }
+    #else
+      rawValue = environment[environmentKey]
+    #endif
+
+    guard let rawValue else { return nil }
+    let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    return value.isEmpty ? nil : value
+  }
+
+  private static func isAbsolutePath(_ path: String) -> Bool {
+    if path.hasPrefix("/") {
+      return true
+    }
+    #if os(Windows)
+      if path.hasPrefix("\\") {
+        return true
+      }
+      guard path.count >= 3 else { return false }
+      let characters = Array(path)
+      return characters[1] == ":" && (characters[2] == "\\" || characters[2] == "/")
+    #else
+      return false
+    #endif
+  }
+
+  private static func expandTilde(_ path: String, homeDirectory: URL) -> String {
+    guard path == "~" || path.hasPrefix("~/") || path.hasPrefix("~\\") else {
+      return (path as NSString).expandingTildeInPath
+    }
+    let suffix = String(path.dropFirst()).trimmingCharacters(in: CharacterSet(charactersIn: "/\\"))
+    return suffix.isEmpty
+      ? homeDirectory.path
+      : homeDirectory.appendingPathComponent(suffix, isDirectory: true).path
   }
 }

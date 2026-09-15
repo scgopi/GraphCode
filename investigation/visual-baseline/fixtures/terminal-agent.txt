@@ -1,0 +1,5 @@
+GraphCode visual baseline
+session: fixture-agent
+mode: interactive
+pass 4 · editing fixture metrics
+awaiting deterministic reply

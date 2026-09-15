@@ -1,5 +1,9 @@
 import Foundation
 
+#if os(Windows)
+  import WinSDK
+#endif
+
 /// Which process, if any, currently has a workspace open.
 ///
 /// Two app instances over one support directory is the failure `SupportDirectory`'s own
@@ -67,7 +71,17 @@ public enum WorkspaceLock {
   /// belongs to someone else, which for this question is still "alive".
   static func isRunning(_ pid: Int32) -> Bool {
     guard pid > 0 else { return false }
-    if kill(pid, 0) == 0 { return true }
-    return errno == EPERM
+    #if os(Windows)
+      guard
+        let process = OpenProcess(
+          DWORD(PROCESS_QUERY_LIMITED_INFORMATION), false, DWORD(bitPattern: pid))
+      else { return false }
+      defer { CloseHandle(process) }
+      var exitCode: DWORD = 0
+      return GetExitCodeProcess(process, &exitCode) && exitCode == STILL_ACTIVE
+    #else
+      if kill(pid, 0) == 0 { return true }
+      return errno == EPERM
+    #endif
   }
 }

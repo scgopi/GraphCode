@@ -38,6 +38,11 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
   /// Discard a project's saved loops entirely. Irreversible, and separate from
   /// `forgetProject` precisely because it is.
   case deleteProjectGraph(path: String)
+  case listQuickChats
+  case createQuickChat(title: String, backend: CLISessionBackendKind)
+  case openQuickChat(id: UUID)
+  case renameQuickChat(id: UUID, title: String)
+  case deleteQuickChat(id: UUID)
   case graphCommand(projectPath: String, command: GraphCommand)
   /// Read the project's Mailroom — the whole room, one loop's unread slice of it, or
   /// one post — answered on this connection alone with a `.mailbox`. This is the read
@@ -76,7 +81,9 @@ extension DaemonEvent {
   /// that never announce; the handshake is how a newer client opts in.
   public var requiredCapability: ClientCapability? {
     switch self {
-    case .recentProjectsListed, .graphChanged, .errorOccurred, .mailbox: return nil
+    case .recentProjectsListed, .graphChanged, .errorOccurred, .mailbox,
+      .quickChatsListed, .quickChatChanged, .quickChatDeleted, .quickChatActivity:
+      return nil
     case .nodesChanged: return .nodesChanged
     }
   }
@@ -254,6 +261,10 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
 public enum DaemonEvent: Codable, Sendable, Equatable {
   case recentProjectsListed([ProjectRef])
   case graphChanged(LoopGraph)
+  case quickChatsListed([QuickChat])
+  case quickChatChanged(QuickChat)
+  case quickChatDeleted(UUID)
+  case quickChatActivity(id: UUID, activity: QuickChatActivity)
   case errorOccurred(String)
   /// The answer to a `DaemonCommand.mailbox`, sent only to the connection that asked.
   /// `projectPath` is the canonical spelling the daemon routed the query to, which is

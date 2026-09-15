@@ -1,0 +1,146 @@
+[
+  {
+    "out": null,
+    "exit": 0,
+    "err": null,
+    "name": "p1-graph-start"
+  },
+  {
+    "out": null,
+    "exit": 0,
+    "err": null,
+    "name": "p1-quick-create-open"
+  },
+  {
+    "out": "name=graphcode-graph-1-334b4d0a420f424c907f771d59149060\tpid=53124\tclients=0\tcreated=1786959365\tcwd=D:\\depot\\GraphCode-worktrees\\graphcode-win\tcmd=cmd/pwsh -NoProfile -Command Start-Sleep -Seconds 20\nname=graphcode-quickchat-1-58b8f823bcff4aaf9ea82429b28b8557\tpid=59772\tclients=0\tcreated=1786959368\tcwd=D:\\depot\\GraphCode-worktrees\\graphcode-win\tcmd=cmd/pwsh -NoProfile -Command Start-Sleep -Seconds 20\n",
+    "exit": 0,
+    "err": null,
+    "name": "p1-enumerate"
+  },
+  {
+    "out": null,
+    "exit": 0,
+    "err": null,
+    "name": "p1-live-attach"
+  },
+  {
+    "out": null,
+    "exit": 0,
+    "err": null,
+    "name": "p1-graph-survival"
+  },
+  {
+    "out": null,
+    "exit": 0,
+    "err": null,
+    "name": "p1-delete"
+  },
+  {
+    "out": null,
+    "exit": 1,
+    "err": null,
+    "name": "p1-quick-gone"
+  },
+  {
+    "out": null,
+    "exit": 0,
+    "err": null,
+    "name": "p1-graph-cleanup"
+  },
+  {
+    "out": null,
+    "exit": 0,
+    "err": null,
+    "name": "p2-graph-start"
+  },
+  {
+    "out": null,
+    "exit": 0,
+    "err": null,
+    "name": "p2-quick-create-open"
+  },
+  {
+    "out": "name=graphcode-graph-2-1a0d72c17d4b4c2186fecf54d58c1d5d\tpid=33888\tclients=0\tcreated=1786959382\tcwd=D:\\depot\\GraphCode-worktrees\\graphcode-win\tcmd=cmd/pwsh -NoProfile -Command Start-Sleep -Seconds 20\nname=graphcode-quickchat-2-391e83e3ed874e0eac9d1347a423cda5\tpid=53064\tclients=0\tcreated=1786959384\tcwd=D:\\depot\\GraphCode-worktrees\\graphcode-win\tcmd=cmd/pwsh -NoProfile -Command Start-Sleep -Seconds 20\n",
+    "exit": 0,
+    "err": null,
+    "name": "p2-enumerate"
+  },
+  {
+    "out": null,
+    "exit": 0,
+    "err": null,
+    "name": "p2-live-attach"
+  },
+  {
+    "out": null,
+    "exit": 0,
+    "err": null,
+    "name": "p2-graph-survival"
+  },
+  {
+    "out": null,
+    "exit": 0,
+    "err": null,
+    "name": "p2-delete"
+  },
+  {
+    "out": null,
+    "exit": 1,
+    "err": null,
+    "name": "p2-quick-gone"
+  },
+  {
+    "out": null,
+    "exit": 0,
+    "err": null,
+    "name": "p2-graph-cleanup"
+  },
+  {
+    "out": null,
+    "exit": 0,
+    "err": null,
+    "name": "p3-graph-start"
+  },
+  {
+    "out": null,
+    "exit": 0,
+    "err": null,
+    "name": "p3-quick-create-open"
+  },
+  {
+    "out": "name=graphcode-graph-3-809d0feae2e648eab68429d7568ad280\tpid=4932\tclients=0\tcreated=1786959398\tcwd=D:\\depot\\GraphCode-worktrees\\graphcode-win\tcmd=cmd/pwsh -NoProfile -Command Start-Sleep -Seconds 20\nname=graphcode-quickchat-3-6b30b65a5edb4c61802963a1b84b8560\tpid=31800\tclients=0\tcreated=1786959400\tcwd=D:\\depot\\GraphCode-worktrees\\graphcode-win\tcmd=cmd/pwsh -NoProfile -Command Start-Sleep -Seconds 20\n",
+    "exit": 0,
+    "err": null,
+    "name": "p3-enumerate"
+  },
+  {
+    "out": null,
+    "exit": 0,
+    "err": null,
+    "name": "p3-live-attach"
+  },
+  {
+    "out": null,
+    "exit": 0,
+    "err": null,
+    "name": "p3-graph-survival"
+  },
+  {
+    "out": null,
+    "exit": 0,
+    "err": null,
+    "name": "p3-delete"
+  },
+  {
+    "out": null,
+    "exit": 1,
+    "err": null,
+    "name": "p3-quick-gone"
+  },
+  {
+    "out": null,
+    "exit": 0,
+    "err": null,
+    "name": "p3-graph-cleanup"
+  }
+]

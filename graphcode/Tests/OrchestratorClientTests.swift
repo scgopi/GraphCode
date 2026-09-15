@@ -16,6 +16,51 @@ import Testing
 /// could never open a project. These tests pin the invariant against a stand-in daemon.
 @Suite
 struct OrchestratorClientTests {
+  #if canImport(Darwin)
+    @Test
+    func concurrentUnixSocketFramesRemainWhole() async throws {
+      var descriptors = [Int32](repeating: 0, count: 2)
+      guard socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0 else {
+        throw OrchestratorClientError.connectFailed(errno: errno)
+      }
+      defer { close(descriptors[1]) }
+
+      let sender = UnixSocketConnection(fileDescriptor: descriptors[0])
+      let payloads = [
+        Data(repeating: 0x41, count: 256 * 1024),
+        Data(repeating: 0x42, count: 256 * 1024),
+      ]
+      let receiver = Task<[Data], Error> {
+        try await withCheckedThrowingContinuation { continuation in
+          DispatchQueue.global().async {
+            do {
+              continuation.resume(
+                returning: [
+                  try FramedMessageIO.readFrame(from: descriptors[1]),
+                  try FramedMessageIO.readFrame(from: descriptors[1]),
+                ])
+            } catch {
+              continuation.resume(throwing: error)
+            }
+          }
+        }
+      }
+
+      try await withThrowingTaskGroup(of: Void.self) { group in
+        for payload in payloads {
+          group.addTask {
+            try await sender.sendFrame(payload)
+          }
+        }
+        try await group.waitForAll()
+      }
+      sender.closeSync()
+
+      let received = try await receiver.value
+      #expect(Set(received) == Set(payloads))
+    }
+  #endif
+
   @Test
   func connectAndSendShareOneSocket() async throws {
     let daemon = try StubDaemon()
@@ -27,7 +72,6 @@ struct OrchestratorClientTests {
     async let received = firstEvent(of: events)
     try await client.send(.listRecentProjects)
 
-    // First on the socket, before anything the app asks: what it can read.
     let announce = try #require(await daemon.nextCommand())
     #expect(announce == .announce(capabilities: [ClientCapability.nodesChanged.rawValue]))
     let command = try #require(await daemon.nextCommand())
@@ -60,6 +104,24 @@ struct OrchestratorClientTests {
   }
 
   @Test
+  func cancellingBeforeConnectStopsRetrySleepAndFutureDial() async throws {
+    let socketPath = StubDaemon.temporarySocketPath()
+    let client = OrchestratorClient.live(socketPath: socketPath)
+    let reader = Task {
+      for await _ in client.connect() {}
+    }
+
+    try await Task.sleep(for: .milliseconds(100))
+    reader.cancel()
+    await reader.value
+
+    let daemon = try StubDaemon(socketPath: socketPath)
+    defer { daemon.stop() }
+    try await Task.sleep(for: .milliseconds(500))
+    #expect(daemon.acceptedConnectionCount == 0)
+  }
+
+  @Test
   func reconnectingRejoinsTheProjectsItHadOpen() async throws {
     // Joining is per-connection on the daemon's side, and the app asked to join once, from
     // `AppFeature.task`. So a client that lost its socket dialled again and was attached to
@@ -73,15 +135,14 @@ struct OrchestratorClientTests {
     let events = client.connect()
     async let received = firstEvent(of: events)
     try await client.send(.listRecentProjects)
-    _ = try #require(await daemon.nextCommand())  // the announcement
+    let announce = try #require(await daemon.nextCommand())
+    #expect(announce == .announce(capabilities: [ClientCapability.nodesChanged.rawValue]))
     let opening = try #require(await daemon.nextCommand())
     #expect(opening == .listRecentProjects)
 
     // The daemon hangs up, the way a restart does.
     daemon.closeConnection(at: 0)
 
-    // The replacement socket announces itself instead of waiting to be spoken to —
-    // what it can read first, then what it wants back.
     let reannounce = try #require(await daemon.nextCommand(onConnection: 1))
     #expect(reannounce == .announce(capabilities: [ClientCapability.nodesChanged.rawValue]))
     let rejoin = try #require(await daemon.nextCommand(onConnection: 1))
@@ -94,10 +155,77 @@ struct OrchestratorClientTests {
     #expect(await received == .errorOccurred("after reconnect"))
   }
 
+  @Test
+  func sendOnReplacementSocketWaitsForExactlyOneRejoin() async throws {
+    let daemon = try StubDaemon()
+    defer { daemon.stop() }
+    let client = OrchestratorClient.live(socketPath: daemon.socketPath)
+
+    let reader = Task {
+      for await _ in client.connect() {}
+    }
+    try await client.send(.listRecentProjects)
+    #expect(
+      await daemon.nextCommand()
+        == .announce(capabilities: [ClientCapability.nodesChanged.rawValue]))
+    #expect(await daemon.nextCommand() == .listRecentProjects)
+
+    daemon.closeConnection(at: 0)
+    let sendTask = Task {
+      try await client.send(.openProject(path: "/work/send-before-rejoin"))
+    }
+
+    #expect(
+      await daemon.nextCommand(onConnection: 1)
+        == .announce(capabilities: [ClientCapability.nodesChanged.rawValue]))
+    #expect(await daemon.nextCommand(onConnection: 1) == .restoreOpenProjects)
+    #expect(await daemon.nextCommand(onConnection: 1) == .openGlobalGraph)
+    #expect(
+      await daemon.nextCommand(onConnection: 1)
+        == .openProject(
+          path: "/work/send-before-rejoin"))
+    try await sendTask.value
+
+    reader.cancel()
+    await reader.value
+  }
+
+  @Test
+  func cancellingAnEventStreamClosesItsReaderBeforeReconnect() async throws {
+    let daemon = try StubDaemon()
+    defer { daemon.stop() }
+    let client = OrchestratorClient.live(socketPath: daemon.socketPath)
+
+    let oldReader = Task {
+      for await _ in client.connect() {}
+    }
+    for _ in 0..<100 where daemon.acceptedConnectionCount == 0 {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(daemon.acceptedConnectionCount == 1)
+
+    oldReader.cancel()
+    for _ in 0..<100 where !daemon.peerHasClosed(at: 0) {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(daemon.peerHasClosed(at: 0))
+    await oldReader.value
+
+    let newReader = Task {
+      await firstEvent(of: client.connect())
+    }
+    for _ in 0..<100 where daemon.acceptedConnectionCount < 2 {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(daemon.acceptedConnectionCount == 2)
+    try daemon.reply(.errorOccurred("after cancellation"), onConnection: 1)
+    #expect(await newReader.value == .errorOccurred("after cancellation"))
+    newReader.cancel()
+  }
+
   /// A frame this app cannot decode — a daemon newer than it — is skipped, not taken
   /// for a dead socket: the stream carries on over the same connection and the next
-  /// readable event arrives. Redialling here is what made an older app rejoin every
-  /// fifteen seconds against a daemon that had learned a new event.
+  /// readable event arrives.
   @Test
   func anUnknownEventIsSkippedNotTakenForADeadSocket() async throws {
     let daemon = try StubDaemon()
@@ -106,6 +234,9 @@ struct OrchestratorClientTests {
     let events = client.connect()
     async let received = firstEvent(of: events)
     try await client.send(.listRecentProjects)
+    #expect(
+      await daemon.nextCommand()
+        == .announce(capabilities: [ClientCapability.nodesChanged.rawValue]))
     _ = try #require(await daemon.nextCommand())
 
     try daemon.replyRaw(Data(#"{"somethingNewer":{"_0":42}}"#.utf8))
@@ -113,10 +244,7 @@ struct OrchestratorClientTests {
     let project = ProjectRef(path: "/tmp/stub-project", name: "stub-project")
     try daemon.reply(.recentProjectsListed([project]))
 
-    // Said once — loudly, through the path a daemon refusal takes — then the stream
-    // carries on over the same socket, and the second unreadable frame is silent.
-    let first = await received
-    #expect(first == .errorOccurred(OrchestratorClient.unreadableFrameMessage))
+    #expect(await received == .errorOccurred(OrchestratorClient.unreadableFrameMessage))
     var next: DaemonEvent?
     for await event in events {
       next = event
@@ -202,6 +330,21 @@ private final class StubDaemon: @unchecked Sendable {
     lock.withLock { acceptedDescriptors.count }
   }
 
+  func peerHasClosed(at index: Int) -> Bool {
+    guard
+      let descriptor = lock.withLock({
+        acceptedDescriptors.indices.contains(index) ? acceptedDescriptors[index] : nil
+      }), descriptor >= 0
+    else { return true }
+    var buffer = [UInt8](repeating: 0, count: 4096)
+    while true {
+      let result = recv(descriptor, &buffer, buffer.count, MSG_DONTWAIT)
+      if result == 0 { return true }
+      if result > 0 { continue }
+      return errno != EAGAIN && errno != EWOULDBLOCK
+    }
+  }
+
   /// Reads one framed command off an accepted connection, waiting for the accept to land.
   /// Blocking reads run off the cooperative pool.
   func nextCommand(onConnection index: Int = 0) async -> DaemonCommand? {
@@ -220,15 +363,14 @@ private final class StubDaemon: @unchecked Sendable {
   }
 
   /// Writes an event back the way `graphcoded` does — on the accepted connection.
-  /// Bytes as given — for a frame this build's `DaemonEvent` cannot decode.
-  func replyRaw(_ data: Data, onConnection index: Int = 0) throws {
-    guard let descriptor = waitForConnection(at: index) else { throw StubError.noConnection }
-    try FramedMessageIO.writeFrame(data, to: descriptor)
-  }
-
   func reply(_ event: DaemonEvent, onConnection index: Int = 0) throws {
     guard let descriptor = waitForConnection(at: index) else { throw StubError.noConnection }
     try FramedMessageIO.writeFrame(try JSONEncoder().encode(event), to: descriptor)
+  }
+
+  func replyRaw(_ data: Data, onConnection index: Int = 0) throws {
+    guard let descriptor = waitForConnection(at: index) else { throw StubError.noConnection }
+    try FramedMessageIO.writeFrame(data, to: descriptor)
   }
 
   /// Hangs up on one accepted connection, leaving the listener up — a daemon restart as

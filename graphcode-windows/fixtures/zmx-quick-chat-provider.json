@@ -1,0 +1,12 @@
+{
+  "providerSha": "029e11d2b19162fb3bdf90c8270237d303b8bfb4",
+  "source": "D:\\depot\\zmx-worktrees\\quickchat-hang",
+  "executable": "D:\\depot\\zmx-worktrees\\quickchat-hang\\.zig-cache\\current-validation\\zmx.exe",
+  "windowsQuickChatArgv": [
+    "--daemon",
+    "graphcode-<chat-uuid>",
+    "<backend-executable>"
+  ],
+  "isolation": "ZMX_DIR is unique per pass and provider creates the root",
+  "timeoutSeconds": 8
+}

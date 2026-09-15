@@ -235,27 +235,3 @@ public enum ClaudeSessionLog {
     return reading.isEmpty ? nil : reading
   }
 }
-
-/// How the one number the rail carries is written.
-///
-/// Which pass a movement belongs to is `LoopSummary.delta`'s answer, and it is matched on
-/// *when* the sample was taken. Keying the series by position — sample *n* to pass *n* —
-/// was the first version, and it printed a real movement under a pass it did not happen
-/// in as soon as a human typed twice in one pass.
-///
-/// The values themselves come off `metricHistory` unrecomputed: that series is what the
-/// sparkline and the plateau rule already use, so a pass line saying `1.4k → 1.3k` and a
-/// bar chart disagreeing is impossible by construction.
-public enum LoopSummaryDeltas {
-  /// Short enough for a 188pt line: `1.4k`, `0.62`, `312`.
-  public static func number(_ value: Double) -> String {
-    let magnitude = abs(value)
-    if magnitude >= 1000 {
-      return String(format: "%.1fk", value / 1000)
-    }
-    if magnitude >= 100 || value == value.rounded() {
-      return String(format: "%.0f", value)
-    }
-    return String(format: "%.2f", value)
-  }
-}

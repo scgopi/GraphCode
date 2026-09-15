@@ -1,30 +1,5 @@
 import Foundation
 
-/// Why the daemon stopped a loop whose backend CLI the launch shell could not find —
-/// carried on the node (`LoopNode.launchFailure`) so every client can say so, and so
-/// `GraphStore.restartNode` knows this stop is one the human is allowed to undo.
-public struct LaunchFailure: Codable, Equatable, Sendable {
-  public var executable: String
-  public var backend: CLISessionBackendKind
-  public var occurredAt: Date
-
-  public init(executable: String, backend: CLISessionBackendKind, occurredAt: Date = Date()) {
-    self.executable = executable
-    self.backend = backend
-    self.occurredAt = occurredAt
-  }
-
-  public var title: String { "\(executable) is not on your PATH" }
-
-  public var message: String {
-    "GraphCode couldn't find \(executable), the \(backend.displayName) command-line tool, so "
-      + "the loop was stopped instead of left running without an agent. Loops start their "
-      + "agent from a login shell (/bin/zsh -i -l): install \(backend.displayName), or add "
-      + "the folder containing \(executable) to PATH in ~/.zshrc or ~/.zprofile, then "
-      + "restart the loop."
-  }
-}
-
 /// Whether a backend's CLI resolves the way a session launch resolves it. Without this a
 /// missing CLI produced a session whose shell exited 127 at once while the graph went on
 /// reporting the loop as running — or, reported by its pane, as SUCCEEDED.

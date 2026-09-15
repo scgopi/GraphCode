@@ -18,6 +18,23 @@ public enum DaemonSocketPath {
     url(environment: ProcessInfo.processInfo.environment)
   }
 
+  /// The transport endpoint shared by the daemon and its local clients.
+  public static var endpoint: DaemonEndpoint {
+    #if os(Windows)
+      return .namedPipe((try? WindowsNamedPipeEndpoint.name()) ?? "")
+    #else
+      return .unixSocket(url)
+    #endif
+  }
+
+  /// The concrete Windows pipe name. Exposed for launchers and tests so they
+  /// never duplicate the SID/support-directory naming policy.
+  #if os(Windows)
+    public static var pipeName: String? {
+      try? WindowsNamedPipeEndpoint.name()
+    }
+  #endif
+
   /// Injected environment, so tests can state an override without mutating the
   /// process's — the `SupportDirectory.prepare(destination:legacy:)` lesson.
   static func url(environment: [String: String]) -> URL {

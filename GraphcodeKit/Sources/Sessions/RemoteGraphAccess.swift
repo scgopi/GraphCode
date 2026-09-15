@@ -24,6 +24,13 @@ public enum RemoteGraphAccess {
   /// not on your PATH" line stays true verbatim on both kinds of host.
   public static let cliInstallPath = "~/.graphcode/bin/graphcode"
 
+  /// Windows graphcoded publishes this user-only record for the remote loopback
+  /// bridge. It is deliberately stable per remote home: every project on one
+  /// forwarded host uses the same authenticated daemon endpoint.
+  public static let bridgeStatePath = "~/.graphcode/bridge-state.json"
+  /// Non-secret generation receipt used to decide whether a remote shim needs refresh.
+  public static let bridgeStateGenerationPath = "~/.graphcode/bridge-state-generation"
+
   /// Where the receipt for the last installed shim lives.
   ///
   /// **Named for the shim alone, and it covers the shim alone.** The briefing, wake
@@ -130,12 +137,22 @@ public enum RemoteGraphAccess {
     guard let json = try? JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
     else { return nil }
     let program =
-      "import base64,json,os,sys; "
+      "import base64,json,os,sys,tempfile; "
       + "m=json.loads(base64.b64decode(sys.argv[1])); "
-      + "[(os.makedirs(os.path.dirname(os.path.expanduser(p)),exist_ok=True), "
-      + "open(os.path.expanduser(p),'wb').write(base64.b64decode(c)), "
-      + "os.chmod(os.path.expanduser(p),0o755) if p.endswith('/graphcode') else None) "
-      + "for p,c in sorted(m.items())]; "
+      + "exec('def w(p,c):\\n"
+      + " d=os.path.dirname(os.path.expanduser(p))\\n"
+      + " os.makedirs(d,exist_ok=True)\\n"
+      + " b=base64.b64decode(c)\\n"
+      + " if p.endswith(\"/bridge-state.json\"):\\n"
+      + "  fd,t=tempfile.mkstemp(dir=d)\\n"
+      + "  n=os.write(fd,b)\\n"
+      + "  if n != len(b): os.close(fd); raise OSError(\"short state write\")\\n"
+      + "  os.fsync(fd); os.chmod(t,0o600); os.close(fd); os.replace(t,os.path.expanduser(p))\\n"
+      + " else:\\n"
+      + "  with open(os.path.expanduser(p),\"wb\") as f: f.write(b)\\n"
+      + "  os.chmod(os.path.expanduser(p),0o755 if p.endswith(\"/graphcode\") else 0o644)\\n"
+      + "')'); "
+      + "[w(p,c) for p,c in sorted(m.items())]; "
       + "len(sys.argv)>2 and open(os.path.expanduser(sys.argv[2]),'w').write(sys.argv[3])"
     var argv = ["python3", "-c", program, json.base64EncodedString()]
     if let receipt { argv += [receipt.path, receipt.content] }
@@ -143,12 +160,83 @@ public enum RemoteGraphAccess {
       + " >/dev/null 2>&1 || true"
   }
 
+  /// Installs bridge state through the SSH command's stdin. Only the byte count and
+  /// SHA-256 digest appear in the remote command; the capability-bearing JSON never
+  /// appears in argv, shell history, or a process listing.
+  public static func bridgeStateInstallerScript(length: Int, sha256: String) -> String {
+    let program = """
+      import fcntl
+      import hashlib
+      import json
+      import os
+      import sys
+      import tempfile
+
+      count = int(sys.argv[1])
+      digest = sys.argv[2]
+      data = sys.stdin.buffer.read(count)
+      if len(data) != count or hashlib.sha256(data).hexdigest() != digest:
+          raise ValueError("invalid bridge state transfer")
+      state = json.loads(data.decode("utf-8"))
+      state_path = os.path.expanduser(sys.argv[3])
+      generation_path = os.path.expanduser(sys.argv[4])
+      directory = os.path.dirname(state_path)
+      os.makedirs(directory, exist_ok=True)
+
+      def atomic_write(path, payload):
+          folder = os.path.dirname(path)
+          fd, temporary = tempfile.mkstemp(dir=folder)
+          try:
+              with os.fdopen(fd, "wb") as output:
+                  output.write(payload)
+                  output.flush()
+                  os.fsync(output.fileno())
+              os.chmod(temporary, 0o600)
+              os.replace(temporary, path)
+          finally:
+              try:
+                  os.unlink(temporary)
+              except FileNotFoundError:
+                  pass
+
+      lock_path = state_path + ".lock"
+      with open(lock_path, "a+", encoding="ascii") as lock:
+          os.chmod(lock_path, 0o600)
+          fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+          try:
+              current = None
+              try:
+                  with open(state_path, "r", encoding="utf-8") as existing:
+                      current = json.load(existing)
+              except (OSError, ValueError):
+                  pass
+              current_generation = (
+                  current.get("generation")
+                  if isinstance(current, dict)
+                  and isinstance(current.get("generation"), int)
+                  and not isinstance(current.get("generation"), bool)
+                  else 0
+              )
+              incoming_generation = state["generation"]
+              if current_generation < incoming_generation:
+                  atomic_write(state_path, data)
+                  current_generation = incoming_generation
+              atomic_write(generation_path, str(current_generation).encode("ascii"))
+          finally:
+              fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+      """
+    return [
+      "python3", "-c", program, String(length), sha256,
+      bridgeStatePath, bridgeStateGenerationPath,
+    ].map(RemoteProjectLocation.shellQuoted).joined(separator: " ")
+  }
+
   /// The remote `graphcode` CLI. It speaks `FramedMessageIO`'s framing and
-  /// `DaemonProtocol`'s JSON over the unix socket `RemoteSocketForwarder` puts at the
-  /// canonical `~/.graphcode/graphcoded.sock` — so it needs no configuration at all,
-  /// though `GRAPHCODE_SOCKET` and `GRAPHCODE_SUPPORT_DIR` override the dial the same
-  /// way they do locally. `RemoteCLIShimTests` pins the wire contract by running this
-  /// very source against a Swift-decoded socket.
+  /// `DaemonProtocol`'s JSON over the authenticated loopback bridge whenever valid
+  /// state can be reached. Only an absent, invalid, or unreachable bridge falls back
+  /// to the explicitly available Unix socket `RemoteSocketForwarder` puts at the
+  /// canonical `~/.graphcode/graphcoded.sock`. `RemoteCLIShimTests` pins the wire
+  /// contract by running this very source against a Swift-decoded socket.
   public static let cliShimSource = #"""
     #!/usr/bin/env python3
     # The remote half of the `graphcode` CLI, delivered by the Mac that launched this
@@ -157,6 +245,7 @@ public enum RemoteGraphAccess {
     # deliberate subset: the verbs a loop needs to fan out, report back, and remember.
     import errno
     import json
+    import math
     import os
     import socket
     import struct
@@ -246,6 +335,70 @@ public enum RemoteGraphAccess {
         return os.path.join(support, "graphcoded.sock")
 
 
+    def bridge_state_path():
+        override = os.environ.get("GRAPHCODE_BRIDGE_STATE")
+        if override:
+            return os.path.expanduser(override)
+        support = os.environ.get("GRAPHCODE_SUPPORT_DIR") or "~/.graphcode"
+        support = os.path.expanduser(support)
+        if not os.path.isabs(support):
+            support = os.path.join(os.path.expanduser("~"), support)
+        return os.path.join(support, "bridge-state.json")
+
+
+    def read_bridge_state(path):
+        with open(path, "r", encoding="utf-8") as stream:
+            state = json.load(stream)
+        if not isinstance(state, dict):
+            raise ValueError("bridge state is not an object")
+        if state.get("schema_version") != 1 or state.get("protocol_version") != 1:
+            raise ValueError("unsupported bridge state")
+        if state.get("host") != "127.0.0.1":
+            raise ValueError("bridge state is not loopback-only")
+        try:
+            uuid.UUID(state["daemon_instance_id"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("invalid daemon instance")
+        generation = state.get("generation")
+        port = state.get("port")
+        capability = state.get("capability")
+        issued = state.get("issued_at")
+        expires = state.get("expires_at")
+        if (not isinstance(generation, int) or isinstance(generation, bool)
+                or generation < 1 or not isinstance(port, int)
+                or isinstance(port, bool) or not 1 <= port <= 65535
+                or not isinstance(capability, str)
+                or len(capability) != 64
+                or not all(c in "0123456789abcdef" for c in capability)
+                or not isinstance(issued, (int, float))
+                or isinstance(issued, bool)
+                or not isinstance(expires, (int, float))
+                or isinstance(expires, bool)
+                or not math.isfinite(issued) or not math.isfinite(expires)
+                or expires <= issued):
+            raise ValueError("invalid bridge state")
+        previous = state.get("previous")
+        if previous is not None:
+            if (not isinstance(previous, dict)
+                    or not isinstance(previous.get("generation"), int)
+                    or isinstance(previous.get("generation"), bool)
+                    or previous["generation"] < 1
+                    or previous["generation"] >= generation
+                    or not isinstance(previous.get("capability"), str)
+                    or len(previous["capability"]) != 64
+                    or not all(c in "0123456789abcdef"
+                               for c in previous["capability"])
+                    or not isinstance(previous.get("expires_at"), (int, float))
+                    or isinstance(previous.get("expires_at"), bool)
+                    or not math.isfinite(previous["expires_at"])
+                    or previous["expires_at"] <= issued
+                    or previous["expires_at"] > expires):
+                raise ValueError("invalid previous bridge state")
+        if time.time() >= expires:
+            raise ValueError("bridge state expired")
+        return state
+
+
     # Dialling is retried; nothing past the first send is. Nothing has been written when a
     # dial fails, so a redial cannot duplicate a mutation. It matters more here than it
     # does on the Mac: this socket is an ssh forward, so it disappears and comes back
@@ -258,33 +411,73 @@ public enum RemoteGraphAccess {
 
     class Daemon:
         def __init__(self):
-            path = socket_path()
             problem = None
             for attempt in range(DIAL_ATTEMPTS):
-                if os.path.exists(path):
-                    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    sock.settimeout(10)
+                state_path = bridge_state_path()
+                if os.path.exists(state_path):
+                    sock = None
                     try:
-                        sock.connect(path)
+                        state = read_bridge_state(state_path)
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.settimeout(10)
+                        sock.connect((state["host"], state["port"]))
                         self.sock = sock
+                        self.bridge_state = state
+                        self.bridge = True
                         return
-                    except OSError as error:
-                        sock.close()
+                    except (OSError, ValueError) as error:
+                        if isinstance(error, ValueError):
+                            if os.name == "nt":
+                                fail("bridge state is invalid or expired; retry after the "
+                                     "host reconnects", EXIT_UNAVAILABLE)
+                            try:
+                                os.unlink(state_path)
+                            except OSError:
+                                pass
+                        if sock is not None:
+                            sock.close()
                         problem = error
-                        if error.errno not in RETRYABLE_DIAL_ERRNOS:
+                        if os.name == "nt" and getattr(
+                                error, "errno", None) not in RETRYABLE_DIAL_ERRNOS:
                             break
-                else:
-                    problem = None
+                # A Unix socket is a deliberately explicit fallback. Windows hosts
+                # cannot use the macOS forwarding path, so a missing or broken bridge
+                # state remains unavailable there rather than silently using another
+                # transport.
+                if os.name != "nt":
+                    path = socket_path()
+                    if os.path.exists(path):
+                        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                        sock.settimeout(10)
+                        try:
+                            sock.connect(path)
+                            self.sock = sock
+                            self.bridge_state = None
+                            self.bridge = False
+                            return
+                        except OSError as error:
+                            sock.close()
+                            problem = error
+                            if error.errno not in RETRYABLE_DIAL_ERRNOS:
+                                break
+                    elif not os.path.exists(state_path):
+                        problem = None
                 if attempt < DIAL_ATTEMPTS - 1:
                     time.sleep(DIAL_BACKOFF[min(attempt, len(DIAL_BACKOFF) - 1)])
             if problem is None:
-                fail("graphcoded isn't reachable at %s -- the ssh forward from the Mac "
+                fail("graphcoded isn't reachable -- the ssh forward from the Mac "
                      "may be down; it returns when graphcode there next launches a loop "
-                     "on this host." % path, EXIT_UNAVAILABLE)
+                     "on this host.", EXIT_UNAVAILABLE)
             fail("couldn't reach graphcoded: %s" % problem, EXIT_UNAVAILABLE)
 
         def send(self, command):
             data = json.dumps(command).encode("utf-8")
+            if self.bridge:
+                data = json.dumps({
+                    "capability": self.bridge_state["capability"],
+                    "generation": self.bridge_state["generation"],
+                    "request": command,
+                }).encode("utf-8")
             self.sock.sendall(struct.pack(">I", len(data)) + data)
 
         def read_exactly(self, count):
@@ -307,6 +500,9 @@ public enum RemoteGraphAccess {
                     fail("timed out waiting for graphcoded to answer. The command may "
                          "still have been applied -- check with `graphcode status`.",
                          EXIT_AMBIGUOUS)
+                if isinstance(event, dict) and event.get("ok") is False:
+                    error = event.get("error") or "remote bridge refused the request"
+                    fail("remote bridge: %s" % error, EXIT_UNAVAILABLE)
                 for key in keys:
                     if isinstance(event, dict) and key in event:
                         return key, event[key]

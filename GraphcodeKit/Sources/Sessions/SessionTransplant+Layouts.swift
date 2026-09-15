@@ -45,8 +45,7 @@ extension SessionTransplant {
   /// `/private` prefixes unresolved and produced the wrong directory for exactly
   /// those paths.
   static func claudeProjectSlug(forWorkingDirectory path: String) -> String {
-    var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
-    let resolved = path.withCString { realpath($0, &buffer).map { String(cString: $0) } } ?? path
+    let resolved = resolvedWorkingDirectory(path)
     return String(resolved.map { $0.isLetter || $0.isNumber ? $0 : "-" })
   }
 
@@ -78,10 +77,18 @@ extension SessionTransplant {
   /// dropped and every `/`, `\` and `:` replaced by `-`. pi applies it to `process.cwd()`,
   /// which is already resolved, hence `realpath` as for Claude's slug.
   static func piSessionSlug(forWorkingDirectory path: String) -> String {
-    var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
-    let resolved = path.withCString { realpath($0, &buffer).map { String(cString: $0) } } ?? path
+    let resolved = resolvedWorkingDirectory(path)
     let trimmed = resolved.hasPrefix("/") ? String(resolved.dropFirst()) : resolved
     return "--" + String(trimmed.map { "/\\:".contains($0) ? "-" : $0 }) + "--"
+  }
+
+  private static func resolvedWorkingDirectory(_ path: String) -> String {
+    #if os(Windows)
+      return URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+    #else
+      var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+      return path.withCString { realpath($0, &buffer).map { String(cString: $0) } } ?? path
+    #endif
   }
 
   /// `<timestamp>_<id>.jsonl`, the timestamp in pi's own shape: ISO 8601 with `:` and `.`

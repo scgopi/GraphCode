@@ -1,9 +1,10 @@
 import Foundation
+
 import Testing
 
+/// Review probes for PR #291 — each one is a sequence the channel should survive.
 @testable import GraphcodeKit
 
-/// Review probes for PR #291 — each one is a sequence the channel should survive.
 @Suite
 struct OutboundChannelReviewTests {
   private func makeSocketPair() -> (daemon: Int32, client: Int32) {
@@ -95,13 +96,14 @@ struct OutboundChannelReviewTests {
   @Test
   func oneFrameLargerThanTheBudgetIsNotABacklog() throws {
     let (daemon, client) = makeSocketPair()
-    OutboundChannels.open(daemon)
+    let budget = 1024
+    OutboundChannels.open(daemon, backlogBudget: budget)
     defer {
       OutboundChannels.close(daemon)
       close(client)
     }
 
-    let snapshot = frame("one-big-snapshot", bytes: OutboundChannel.maxBacklogBytes + 1)
+    let snapshot = frame("one-big-snapshot", bytes: budget + 1)
     OutboundChannels.send(snapshot, to: daemon)
 
     let received = try FramedMessageIO.readFrame(from: client)

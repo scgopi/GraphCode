@@ -27,6 +27,19 @@ struct SupportDirectoryTests {
   }
 
   @Test
+  func aBackslashOverrideRemainsRelativeOnDarwin() {
+    let home = URL(fileURLWithPath: "/Users/test-user", isDirectory: true)
+    let root = SupportDirectory.url(
+      environment: [SupportDirectory.environmentKey: #"\relative-state"#],
+      homeDirectory: home)
+    #if os(Windows)
+      #expect(root.path != home.appendingPathComponent(#"\relative-state"#).path)
+    #else
+      #expect(root.path == home.appendingPathComponent(#"\relative-state"#).path)
+    #endif
+  }
+
+  @Test
   func theSocketPathFitsInSunPathWithRoomToSpare() {
     // `sockaddr_un.sun_path` is a hard 104 bytes on Darwin, and a bind that overflows it
     // fails at runtime rather than at compile time — which is exactly the kind of thing

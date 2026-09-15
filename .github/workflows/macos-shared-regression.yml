@@ -1,0 +1,50 @@
+name: macOS shared Swift regression
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "GraphcodeKit/**"
+      - "graphcode/**"
+      - "graphcoded/**"
+      - "graphcode-cli/**"
+      - "investigation/spikes/swift-portable/**"
+      - "Project.swift"
+      - "Tuist.swift"
+      - "Tuist/**"
+      - "mise.toml"
+      - "Makefile"
+      - ".gitmodules"
+      - "ThirdParty/**"
+      - "**/Package.swift"
+      - "**/Package.resolved"
+      - ".swift-format"
+      - ".swiftlint.yml"
+      - ".github/workflows/macos-shared-regression.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Prepare portable Swift sources
+        run: python3 Tools/portable-prepare.py
+      - name: Install pinned mise tools
+        run: |
+          brew install mise
+          mise install
+      - name: Validate shared portable Swift package
+        run: mise exec -- swift test --package-path investigation/spikes/swift-portable
+      - name: Install Tuist dependencies
+        run: mise exec -- tuist install
+      - name: Validate macOS app, daemon, and CLI
+        timeout-minutes: 30
+        run: mise exec -- make test
+      - name: Validate macOS lint and formatting
+        run: mise exec -- make check

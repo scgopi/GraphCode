@@ -110,7 +110,7 @@ struct OrphanedSessionReaperTests {
     try JSONEncoder().encode(graph)
       .write(to: projects.appendingPathComponent("_tmp_p.json"))
     let chats = QuickChatStore(baseDirectory: workspace)
-    chats.save([QuickChat(id: chatID, title: "chat")])
+    try chats.save([QuickChat(id: chatID, title: "chat")])
 
     let live = try #require(
       OrphanedSessionReaper.liveSessionIDs(workspaceDirectories: [workspace]))
@@ -199,10 +199,8 @@ struct OrphanedSessionReaperTests {
     #expect(OrphanedSessionReaper.liveSessionIDs(workspaceDirectories: [workspace]) == nil)
   }
 
-  /// The suffix is a claim about who wrote the file, and a project can make that claim
-  /// against the reaper: a path ending in `.mailroom` mints a graph file that carries the
-  /// sidecar suffix. One that decodes as a graph is a graph — skipping it by name would
-  /// drop its sessions out of the live set for a reap to kill.
+  /// Hashed graph keys keep a project path ending in `.mailroom` from minting a filename
+  /// that can be confused with its sidecar. The graph still owns its sessions.
   @Test
   func aGraphNamedLikeASidecarStillOwnsItsSessions() throws {
     let workspace = FileManager.default.temporaryDirectory
@@ -220,9 +218,8 @@ struct OrphanedSessionReaperTests {
 
     let projects = workspace.appendingPathComponent("projects", isDirectory: true)
     let written = try FileManager.default.contentsOfDirectory(atPath: projects.path).sorted()
-    #expect(
-      written == ["_tmp_x.mailroom.json", "_tmp_x.mailroom.mailroom.json"],
-      "the graph file itself must carry the sidecar suffix, or this no longer reproduces")
+    #expect(written.count == 2)
+    #expect(written.filter(ProjectPersistence.isSidecarFileName).count == 1)
 
     let live = try #require(
       OrphanedSessionReaper.liveSessionIDs(workspaceDirectories: [workspace]))
@@ -272,8 +269,14 @@ struct OrphanedSessionReaperTests {
     ProjectPersistence(baseDirectory: workspace).saveGraph(graph)
 
     let projects = workspace.appendingPathComponent("projects", isDirectory: true)
-    let beside = try FileManager.default.contentsOfDirectory(atPath: projects.path)
-      .filter { $0 != "_tmp_p.json" }
+    let written = try FileManager.default.contentsOfDirectory(atPath: projects.path)
+    let graphFiles = written.filter { name in
+      let url = projects.appendingPathComponent(name)
+      guard let data = try? Data(contentsOf: url) else { return false }
+      return (try? JSONDecoder().decode(LoopGraph.self, from: data)) != nil
+    }
+    #expect(graphFiles.count == 1)
+    let beside = written.filter { !graphFiles.contains($0) }
     #expect(!beside.isEmpty)
     for name in beside {
       #expect(

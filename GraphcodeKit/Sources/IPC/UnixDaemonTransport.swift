@@ -1,0 +1,474 @@
+import Foundation
+
+#if canImport(Darwin)
+  import Darwin
+#elseif canImport(Glibc)
+  import Glibc
+#endif
+
+#if canImport(Darwin) || canImport(Glibc)
+  /// A small async adapter around a Unix descriptor. Blocking syscalls are moved off
+  /// Swift's cooperative executor; socket receive/send timeouts bound stalled peers.
+  public final class UnixSocketByteStream: @unchecked Sendable, DaemonByteStream {
+    fileprivate let fileDescriptor: Int32
+    private let closeOnClose: Bool
+    private let lock = NSLock()
+    private var isClosed = false
+
+    public init(
+      fileDescriptor: Int32,
+      readTimeout: TimeInterval? = nil,
+      writeTimeout: TimeInterval? = nil,
+      closeOnClose: Bool = true
+    ) {
+      self.fileDescriptor = fileDescriptor
+      self.closeOnClose = closeOnClose
+      Self.applyTimeout(readTimeout, to: fileDescriptor, option: SO_RCVTIMEO)
+      Self.applyTimeout(writeTimeout, to: fileDescriptor, option: SO_SNDTIMEO)
+      #if canImport(Darwin)
+        var noSignal = 1
+        _ = setsockopt(
+          fileDescriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSignal,
+          socklen_t(MemoryLayout<Int32>.size))
+      #else
+        signal(SIGPIPE, SIG_IGN)
+      #endif
+    }
+
+    public func readExactly(_ count: Int) async throws -> Data {
+      try await withCheckedThrowingContinuation { continuation in
+        DispatchQueue.global().async {
+          do {
+            continuation.resume(returning: try Self.read(count, from: self.fileDescriptor))
+          } catch {
+            continuation.resume(throwing: error)
+          }
+        }
+      }
+    }
+
+    public func writeAll(_ data: Data) async throws {
+      try await withCheckedThrowingContinuation { continuation in
+        DispatchQueue.global().async {
+          do {
+            try Self.write(data, to: self.fileDescriptor)
+            continuation.resume()
+          } catch {
+            continuation.resume(throwing: error)
+          }
+        }
+      }
+    }
+
+    public func close() async throws {
+      closeSync()
+    }
+
+    public func setReadTimeout(_ timeout: TimeInterval?) {
+      Self.applyTimeout(timeout, to: fileDescriptor, option: SO_RCVTIMEO)
+    }
+
+    public func closeSync() {
+      lock.lock()
+      let shouldClose = !isClosed
+      isClosed = true
+      lock.unlock()
+      if shouldClose, closeOnClose {
+        _ = shutdown(fileDescriptor, Int32(SHUT_RDWR))
+        #if canImport(Darwin)
+          Darwin.close(fileDescriptor)
+        #else
+          Glibc.close(fileDescriptor)
+        #endif
+      }
+    }
+
+    fileprivate func readExactlySync(_ count: Int) throws -> Data {
+      try Self.read(count, from: fileDescriptor)
+    }
+
+    fileprivate func readExactlySync(_ count: Int, by deadline: Date) throws -> Data {
+      try Self.read(count, from: fileDescriptor, by: deadline)
+    }
+
+    fileprivate func writeFrameSync(_ data: Data) throws {
+      try FramedMessageIO.writeFrame(data, to: fileDescriptor)
+    }
+
+    private static func applyTimeout(
+      _ timeout: TimeInterval?, to fileDescriptor: Int32, option: Int32
+    ) {
+      var interval = timeval(tv_sec: 0, tv_usec: 0)
+      if let timeout, timeout.isFinite, timeout >= 0 {
+        interval = timeval(
+          tv_sec: Int(timeout),
+          tv_usec: suseconds_t((timeout - timeout.rounded(.down)) * 1_000_000))
+      }
+      _ = setsockopt(
+        fileDescriptor, SOL_SOCKET, option, &interval,
+        socklen_t(MemoryLayout<timeval>.size))
+    }
+
+    private static func write(_ data: Data, to fileDescriptor: Int32) throws {
+      try data.withUnsafeBytes { (rawBuffer: UnsafeRawBufferPointer) in
+        guard let baseAddress = rawBuffer.baseAddress else { return }
+        var remaining = rawBuffer.count
+        var pointer = baseAddress
+        while remaining > 0 {
+          #if canImport(Darwin)
+            let result = Darwin.write(fileDescriptor, pointer, remaining)
+          #else
+            let result = Glibc.write(fileDescriptor, pointer, remaining)
+          #endif
+          if result < 0, errno == EINTR { continue }
+          if result <= 0 {
+            throw FramedMessageIO.IOError.writeFailed(errno: errno)
+          }
+          remaining -= result
+          pointer = pointer.advanced(by: result)
+        }
+      }
+    }
+
+    private static func read(_ count: Int, from fileDescriptor: Int32) throws -> Data {
+      try read(count, from: fileDescriptor, by: nil)
+    }
+
+    private static func read(
+      _ count: Int,
+      from fileDescriptor: Int32,
+      by deadline: Date?
+    ) throws -> Data {
+      guard count > 0 else { return Data() }
+      var buffer = [UInt8](repeating: 0, count: count)
+      var total = 0
+      while total < count {
+        if let deadline {
+          try waitUntilReadable(fileDescriptor, by: deadline)
+        }
+        let result = buffer.withUnsafeMutableBytes { rawBuffer in
+          #if canImport(Darwin)
+            Darwin.read(
+              fileDescriptor, rawBuffer.baseAddress!.advanced(by: total), count - total)
+          #else
+            Glibc.read(
+              fileDescriptor, rawBuffer.baseAddress!.advanced(by: total), count - total)
+          #endif
+        }
+        if result == 0 { throw FramedMessageIO.IOError.connectionClosed }
+        if result < 0, errno == EINTR { continue }
+        if result < 0 {
+          throw FramedMessageIO.IOError.readFailed(errno: errno)
+        }
+        total += result
+      }
+      return Data(buffer)
+    }
+
+    private static func waitUntilReadable(
+      _ fileDescriptor: Int32,
+      by deadline: Date
+    ) throws {
+      while true {
+        let remaining = deadline.timeIntervalSinceNow
+        guard remaining > 0 else {
+          throw FramedMessageIO.IOError.readFailed(errno: EAGAIN)
+        }
+        let milliseconds = min(
+          Double(Int32.max),
+          max(1, (remaining * 1_000).rounded(.up)))
+        var descriptor = pollfd(
+          fd: fileDescriptor,
+          events: Int16(POLLIN),
+          revents: 0)
+        let result = poll(&descriptor, 1, Int32(milliseconds))
+        if result > 0 { return }
+        if result == 0 {
+          throw FramedMessageIO.IOError.readFailed(errno: EAGAIN)
+        }
+        if errno == EINTR { continue }
+        throw FramedMessageIO.IOError.readFailed(errno: errno)
+      }
+    }
+  }
+
+  /// Unix-domain socket implementation of the portable connection contract.
+  public final class UnixSocketConnection: @unchecked Sendable, DaemonConnection {
+    public let id: UUID
+    public let endpoint: DaemonEndpoint
+    private let stream: UnixSocketByteStream
+    private let acceptsWrites: Bool
+    private let buffersWrites: Bool
+    private let writeQueue = DispatchQueue(
+      label: "com.graphcode.unix-socket-frame-writes")
+    private let stateLock = NSLock()
+    private var isClosed = false
+
+    public init(
+      id: UUID = UUID(),
+      fileDescriptor: Int32,
+      endpoint: DaemonEndpoint = .unixSocket(URL(fileURLWithPath: "")),
+      readTimeout: TimeInterval? = nil,
+      writeTimeout: TimeInterval? = nil,
+      bufferedWrites: Bool = false
+    ) {
+      self.id = id
+      self.endpoint = endpoint
+      // Compatibility callers use -1 as an intentionally inert descriptor in tests.
+      self.acceptsWrites = fileDescriptor >= 0
+      self.buffersWrites = bufferedWrites && fileDescriptor >= 0
+      self.stream = UnixSocketByteStream(
+        fileDescriptor: fileDescriptor,
+        readTimeout: readTimeout,
+        writeTimeout: writeTimeout,
+        closeOnClose: !self.buffersWrites)
+      if self.buffersWrites {
+        OutboundChannels.open(fileDescriptor, tag: id.tag)
+      }
+    }
+
+    public func receiveFrame() async throws -> Data {
+      try await FramedMessageIO.readFrame(from: stream)
+    }
+
+    /// Reads the next frame without timing out an idle connection, then applies one
+    /// cumulative deadline after its first byte arrives. This keeps accepted clients
+    /// parked indefinitely between frames while ensuring a peer that starts a header or
+    /// payload cannot hold a daemon task forever.
+    public func receiveFrameWithPostHandshakeDeadline(
+      _ timeout: TimeInterval = 5
+    ) async throws -> Data {
+      try await withCheckedThrowingContinuation { continuation in
+        DispatchQueue.global().async {
+          do {
+            continuation.resume(
+              returning: try self.receiveFrameWithPostHandshakeDeadlineSync(timeout))
+          } catch {
+            continuation.resume(throwing: error)
+          }
+        }
+      }
+    }
+
+    public func receiveFrameWithPostHandshakeDeadlineSync(
+      _ timeout: TimeInterval = 5
+    ) throws -> Data {
+      let firstByte = try stream.readExactlySync(1)
+      let deadline = Date().addingTimeInterval(max(0, timeout))
+      var header = firstByte
+      header.append(try stream.readExactlySync(DaemonFrameHeader.byteCount - 1, by: deadline))
+      let length: Int
+      do {
+        length = try DaemonFrameHeader.decodeLength(
+          Array(header), maxPayloadBytes: DaemonFrameHeader.legacySafetyCeilingBytes)
+      } catch DaemonFrameHeader.HeaderError.invalidHeader {
+        throw FramedMessageIO.IOError.invalidHeader
+      } catch {
+        throw FramedMessageIO.IOError.payloadTooLarge
+      }
+      return length == 0
+        ? Data()
+        : try stream.readExactlySync(length, by: deadline)
+    }
+
+    public func sendFrame(_ data: Data) async throws {
+      guard acceptsWrites else { return }
+      if buffersWrites {
+        guard OutboundChannels.send(data, to: stream.fileDescriptor) else {
+          throw FramedMessageIO.IOError.connectionClosed
+        }
+        return
+      }
+      try await withCheckedThrowingContinuation {
+        (continuation: CheckedContinuation<Void, any Error>) in
+        writeQueue.async {
+          self.stateLock.lock()
+          let closed = self.isClosed
+          self.stateLock.unlock()
+          guard !closed else {
+            continuation.resume(throwing: FramedMessageIO.IOError.connectionClosed)
+            return
+          }
+          do {
+            try self.stream.writeFrameSync(data)
+            continuation.resume()
+          } catch {
+            continuation.resume(throwing: error)
+          }
+        }
+      }
+    }
+
+    public func receiveFrameSync() throws -> Data {
+      let header = try stream.readExactlySync(DaemonFrameHeader.byteCount)
+      let length: Int
+      do {
+        length = try DaemonFrameHeader.decodeLength(
+          Array(header), maxPayloadBytes: DaemonFrameHeader.legacySafetyCeilingBytes)
+      } catch DaemonFrameHeader.HeaderError.invalidHeader {
+        throw FramedMessageIO.IOError.invalidHeader
+      } catch {
+        throw FramedMessageIO.IOError.payloadTooLarge
+      }
+      return length == 0 ? Data() : try stream.readExactlySync(length)
+    }
+
+    public func sendFrameSync(_ data: Data) throws {
+      guard acceptsWrites else { return }
+      if buffersWrites {
+        guard OutboundChannels.send(data, to: stream.fileDescriptor) else {
+          throw FramedMessageIO.IOError.connectionClosed
+        }
+        return
+      }
+      try writeQueue.sync {
+        stateLock.lock()
+        let closed = isClosed
+        stateLock.unlock()
+        guard !closed else {
+          throw FramedMessageIO.IOError.connectionClosed
+        }
+        try stream.writeFrameSync(data)
+      }
+    }
+
+    public func close() async throws {
+      closeSync()
+    }
+
+    public func closeSync() {
+      writeQueue.sync {
+        stateLock.lock()
+        guard !isClosed else {
+          stateLock.unlock()
+          return
+        }
+        isClosed = true
+        stateLock.unlock()
+        if buffersWrites {
+          OutboundChannels.close(stream.fileDescriptor)
+        } else {
+          stream.closeSync()
+        }
+      }
+    }
+
+    public func setReadTimeout(_ timeout: TimeInterval?) {
+      stream.setReadTimeout(timeout)
+    }
+  }
+
+  /// Listener adapter used by the macOS daemon. The bind/unlink policy remains owned by
+  /// the daemon process; this type owns only the descriptor and accept loop.
+  public final class UnixSocketListener: @unchecked Sendable, DaemonListener {
+    public let endpoint: DaemonEndpoint
+    private let fileDescriptor: Int32
+    private let path: String
+    private let lock = NSLock()
+    private var isClosed = false
+
+    public init(path: URL, backlog: Int32 = 8) throws {
+      #if canImport(Darwin)
+        let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+      #else
+        let descriptor = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+      #endif
+      guard descriptor >= 0 else {
+        throw FramedMessageIO.IOError.readFailed(errno: errno)
+      }
+      self.fileDescriptor = descriptor
+      self.path = path.path
+      self.endpoint = .unixSocket(path)
+
+      var address = sockaddr_un()
+      address.sun_family = sa_family_t(AF_UNIX)
+      #if canImport(Darwin)
+        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+      #endif
+      guard self.path.utf8.count < MemoryLayout<sockaddr_un>.size - 2 else {
+        #if canImport(Darwin)
+          Darwin.close(descriptor)
+        #else
+          Glibc.close(descriptor)
+        #endif
+        throw FramedMessageIO.IOError.writeFailed(errno: ENAMETOOLONG)
+      }
+      withUnsafeMutablePointer(to: &address.sun_path) { field in
+        field.withMemoryRebound(
+          to: CChar.self, capacity: MemoryLayout.size(ofValue: field.pointee)
+        ) { pointer in
+          self.path.withCString {
+            strncpy(pointer, $0, MemoryLayout.size(ofValue: field.pointee) - 1)
+          }
+        }
+      }
+      let bound = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+          #if canImport(Darwin)
+            Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+          #else
+            Glibc.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+          #endif
+        }
+      }
+      guard bound == 0 else {
+        let code = errno
+        #if canImport(Darwin)
+          Darwin.close(descriptor)
+        #else
+          Glibc.close(descriptor)
+        #endif
+        throw FramedMessageIO.IOError.writeFailed(errno: code)
+      }
+      #if canImport(Darwin)
+        let listening = Darwin.listen(descriptor, backlog)
+      #else
+        let listening = Glibc.listen(descriptor, backlog)
+      #endif
+      guard listening == 0 else {
+        let code = errno
+        #if canImport(Darwin)
+          Darwin.close(descriptor)
+        #else
+          Glibc.close(descriptor)
+        #endif
+        unlink(self.path)
+        throw FramedMessageIO.IOError.writeFailed(errno: code)
+      }
+    }
+
+    public func accept() async throws -> any DaemonConnection {
+      try await withCheckedThrowingContinuation { continuation in
+        DispatchQueue.global().async {
+          #if canImport(Darwin)
+            let client = Darwin.accept(self.fileDescriptor, nil, nil)
+          #else
+            let client = Glibc.accept(self.fileDescriptor, nil, nil)
+          #endif
+          guard client >= 0 else {
+            continuation.resume(throwing: FramedMessageIO.IOError.readFailed(errno: errno))
+            return
+          }
+          continuation.resume(
+            returning: UnixSocketConnection(
+              fileDescriptor: client, endpoint: self.endpoint, bufferedWrites: true))
+        }
+      }
+    }
+
+    public func close() async throws {
+      lock.lock()
+      let shouldClose = !isClosed
+      isClosed = true
+      lock.unlock()
+      if shouldClose {
+        #if canImport(Darwin)
+          Darwin.close(fileDescriptor)
+        #else
+          Glibc.close(fileDescriptor)
+        #endif
+        unlink(path)
+      }
+    }
+  }
+#endif

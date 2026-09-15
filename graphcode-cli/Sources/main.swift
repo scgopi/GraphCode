@@ -23,7 +23,7 @@ enum ExitCode {
   /// `EX_TEMPFAIL`. The command went out but its outcome never came back. It may have been
   /// applied — `node create`, `node send` and `node memo` are not idempotent, so this is
   /// the one case a wrapper must not blindly retry.
-  static let ambiguous: Int32 = 75
+  static let ambiguous: Int32 = DaemonSocketClient.ambiguousExitCode
 }
 
 func fail(_ message: String, code: Int32 = ExitCode.usage) -> Never {
@@ -116,7 +116,9 @@ func openProject(_ projectPath: String) throws -> LoopGraph? {
   let opened = try client.waitForEvent {
     switch $0 {
     case .graphChanged, .errorOccurred: return true
-    case .recentProjectsListed, .mailbox, .nodesChanged: return false
+    case .recentProjectsListed, .mailbox, .nodesChanged, .quickChatsListed,
+      .quickChatChanged, .quickChatDeleted, .quickChatActivity:
+      return false
     }
   }
   if case .errorOccurred(let message) = opened { fail(message) }
@@ -714,5 +716,16 @@ do {
     applied — check with `graphcode status` rather than re-running it.
     """, code: ExitCode.ambiguous)
 } catch {
+  #if os(Windows)
+    if DaemonSocketClient.isAmbiguousConnectionClose(error) {
+      // The Windows transport uses its own error type for the same ambiguous mid-exchange
+      // close that Unix reports through FramedMessageIO.
+      fail(
+        """
+        graphcoded closed the connection before answering. The command may still have been \
+        applied — check with `graphcode status` rather than re-running it.
+        """, code: ExitCode.ambiguous)
+    }
+  #endif
   fail("\(error)")
 }

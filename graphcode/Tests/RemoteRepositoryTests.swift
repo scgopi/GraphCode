@@ -25,6 +25,19 @@ struct RemoteRepositoryTests {
   }
 
   @Test
+  func projectPathPercentEncodesSpecialUnicodeAndIPv6Authorities() {
+    let special = RemoteProjectLocation(
+      user: "dev", host: "2001:db8::1", port: 2200, remotePath: "/repo name/#q?x%雪")
+    #expect(
+      special.projectPath
+        == "ssh://dev@[2001:db8::1]:2200/repo%20name/%23q%3Fx%25%E9%9B%AA")
+    #expect(RemoteProjectLocation.parse(projectPath: special.projectPath) == special)
+    let components = URLComponents(string: special.projectPath)
+    #expect(components?.host == "2001:db8::1")
+    #expect(components?.path == "/repo name/#q?x%雪")
+  }
+
+  @Test
   func onlyRealRemotePathsParse() {
     // Local folders, the global graph, and junk all take the local branch.
     #expect(RemoteProjectLocation.parse(projectPath: "/Users/dev/widget") == nil)

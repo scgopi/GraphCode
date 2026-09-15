@@ -1,18 +1,21 @@
 import ComposableArchitecture
+
 import Foundation
+
 import GraphcodeKit
+
 import MailroomKit
+
 import Testing
 
 @testable import graphcode
 
-#if canImport(Darwin)
-  import Darwin
-#endif
-
 /// The presence tick's broadcast is the loops it moved, not the whole graph
 /// (`DaemonEvent.nodesChanged`, issue #288's background load) — and a revision on every
 /// frame is what lets a client hold snapshots and deltas in one sequence.
+#if canImport(Darwin)
+  import Darwin
+#endif
 @Suite
 struct PresenceDeltaTests {
   private static let project = ProjectRef(path: "/tmp/project-a", name: "project-a")
@@ -59,14 +62,17 @@ struct PresenceDeltaTests {
       onReadPresence: { node, _ in await readings.read(node) })
     var pair: [Int32] = [0, 0]
     #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
+    let connection = UnixSocketConnection(fileDescriptor: pair[0])
     defer {
-      OutboundChannels.close(pair[0])
+      connection.closeSync()
       close(pair[1])
     }
     // Announced, the way the app's socket is: a connection that never announces gets
     // the whole snapshot on every tick instead (the test below).
+    let connectionID = UUID()
+    let channel = DaemonConnectionChannel(connection: connection, mode: .v1)
     await store.addConnection(
-      id: UUID(), fileDescriptor: pair[0],
+      id: connectionID, channel: channel,
       capabilities: [ClientCapability.nodesChanged.rawValue])
     guard case .graphChanged(let joined) = try await nextEvent(from: pair[1]) else {
       Issue.record("expected the joining snapshot")

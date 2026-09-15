@@ -1,5 +1,24 @@
 import Foundation
 
+public struct ProjectRegistryCommandResult: Equatable, Sendable {
+  public let response: DaemonEvent?
+  public let error: String?
+  /// A successful command may intentionally have no response payload (for example,
+  /// `.forgetProject`). The daemon uses this bit to distinguish that outcome from an
+  /// internal routing failure.
+  public let succeeded: Bool
+
+  public init(
+    response: DaemonEvent? = nil,
+    error: String? = nil,
+    succeeded: Bool? = nil
+  ) {
+    self.response = response
+    self.error = error
+    self.succeeded = succeeded ?? (error == nil)
+  }
+}
+
 /// Owns every open project's `GraphStore`, keyed by canonicalized folder path — this is
 /// what `graphcoded` instantiates instead of a single bare `GraphStore` from Phase 4 on
 /// (see docs/07-roadmap.md#phase-4--projects). Multi-project routing lives entirely
@@ -30,8 +49,11 @@ public actor ProjectRegistry {
   /// For tests that read the file straight after a command: every save is flushed
   /// before the store's turn ends, so the disk is exactly what the store holds.
   private let persistsSynchronously: Bool
+  private let quickChatStore: QuickChatStore
+  private let platformPaths: any PlatformPaths
+  private let replayStore: DaemonReplayStore
   private var stores: [String: GraphStore] = [:]
-  private var connectionFileDescriptors: [UUID: Int32] = [:]
+  private var connections: [UUID: DaemonConnectionChannel] = [:]
   private var connectionProjectPaths: [UUID: Set<String>] = [:]
   /// Connections that asked for the whole open set (`.restoreOpenProjects`) rather than
   /// one named project — see `sidebarSubscribers`.
@@ -39,6 +61,12 @@ public actor ProjectRegistry {
   private let ensureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let terminateSession: (@Sendable (LoopNode, String?) -> Void)?
   private let restartSession: (@Sendable (LoopNode, String?) async -> Bool)?
+  private let startQuickChat:
+    (@Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>)?
+  private let terminateQuickChat:
+    (@Sendable (LoopNode, String?) async -> Result<Void, CLISessionError>)?
+  private let quickChatExists: (@Sendable (LoopNode, String?) async -> Bool)?
+  private let enumerateQuickChatSessions: (@Sendable () async -> [UUID])?
   private let evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)?
   private let checkPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)?
   private let deliverMessage: (@Sendable (LoopNode, String, String?) async -> Bool)?
@@ -56,6 +84,33 @@ public actor ProjectRegistry {
   /// Runs only while the sleep assertion is held — see `refreshAwakeAssertion`.
   private var awakeRecheck: Task<Void, Never>?
 
+  /// Quick Chats are session-backed records too. Reusing the GraphStore launcher
+  /// closures keeps their zmx identity stable (the chat UUID is the LoopNode UUID)
+  /// without inventing a second session protocol.
+  private func quickChatNode(_ chat: QuickChat) -> LoopNode {
+    LoopNode(
+      id: chat.id,
+      title: chat.title,
+      loopType: .turnBased,
+      backend: chat.backend,
+      state: .idle,
+      createdAt: chat.createdAt)
+  }
+
+  private func ensureQuickChatSession(_ chat: QuickChat) async -> Result<
+    CLISessionStartOutcome, CLISessionError
+  > {
+    guard let startQuickChat else { return .failure(.unavailable("session launcher unavailable")) }
+    return await startQuickChat(quickChatNode(chat), nil)
+  }
+
+  private func terminateQuickChatSession(_ chat: QuickChat) async -> Result<Void, CLISessionError> {
+    guard let terminateQuickChat else {
+      return .failure(.unavailable("session launcher unavailable"))
+    }
+    return await terminateQuickChat(quickChatNode(chat), nil)
+  }
+
   /// These default to the real `ZmxSessionLauncher`/`ShellPredicateEvaluator` closures —
   /// every `GraphStore` this registry creates gets them, so an unattended node's session
   /// is (re)started as soon as its project's graph is loaded, torn down when the node is
@@ -63,6 +118,8 @@ public actor ProjectRegistry {
   /// closures, or `nil` to touch no real sessions or subprocesses at all.
   public init(
     persistenceDirectory: URL,
+    platformPaths: any PlatformPaths = CurrentPlatformPaths.value,
+    replayStore: DaemonReplayStore = DaemonReplayStore(),
     ensureSession: (@Sendable (LoopNode, String?) -> Void)? = CLISessionBackend.ensureSession,
     terminateSession: (@Sendable (LoopNode, String?) -> Void)? =
       CLISessionBackend.terminateSession,
@@ -89,11 +146,22 @@ public actor ProjectRegistry {
     composeBoard: (@Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?)? =
       CLISessionBackend.composeBoard,
     reapCondemnedSessions: Bool = false,
-    persistsSynchronously: Bool = false
+    persistsSynchronously: Bool = false,
+    startQuickChat: (
+      @Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>
+    )? = nil,
+    terminateQuickChat: (@Sendable (LoopNode, String?) async -> Result<Void, CLISessionError>)? =
+      nil,
+    quickChatExists: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
+    enumerateQuickChatSessions: (@Sendable () async -> [UUID])? = nil
   ) {
-    persistence = ProjectPersistence(baseDirectory: persistenceDirectory)
+    self.platformPaths = platformPaths
+    persistence = ProjectPersistence(
+      baseDirectory: persistenceDirectory, platformPaths: platformPaths)
     writer = GraphWriter(persistence: persistence)
     self.persistsSynchronously = persistsSynchronously
+    quickChatStore = QuickChatStore(baseDirectory: persistenceDirectory)
+    self.replayStore = replayStore
     self.ensureSession = ensureSession
     self.terminateSession = terminateSession
     self.restartSession = restartSession
@@ -108,6 +176,26 @@ public actor ProjectRegistry {
     self.readPresence = readPresence
     self.sessionAlive = sessionAlive
     self.composeBoard = composeBoard
+    self.startQuickChat =
+      startQuickChat ?? { node, path in
+        let result = await CLISessionBackend.backend(for: node).startResult(node, path)
+        if case .success = result { QuickChatSessionRegistry.markLive(node.id) }
+        return result
+      }
+    self.terminateQuickChat =
+      terminateQuickChat ?? { node, path in
+        let result = await CLISessionBackend.backend(for: node).terminateResult(node, path)
+        if case .success = result { QuickChatSessionRegistry.remove(node.id) }
+        return result
+      }
+    self.quickChatExists =
+      quickChatExists ?? { node, path in
+        await CLISessionBackend.backend(for: node).exists(node, path)
+      }
+    self.enumerateQuickChatSessions =
+      enumerateQuickChatSessions ?? {
+        await CLISessionBackend.backend(for: .init(title: "", backend: .claudeCode)).enumerate()
+      }
     // The reap half of the two-phase kill (`CondemnedSessions`): once at startup, for a
     // delete whose daemon died between condemning a session and confirming it dead, and
     // then on a timer for kills `zmx` failed transiently. This is explicit rather than
@@ -138,27 +226,59 @@ public actor ProjectRegistry {
   /// after the announcement arrives.
   private var connectionCapabilities: [UUID: Set<String>] = [:]
 
-  public func addConnection(id: UUID, fileDescriptor: Int32) {
-    // Registering the connection is what opens its outbound half — here rather than in
-    // the daemon's accept loop because this is the one place every caller goes through,
-    // and a descriptor with no channel silently delivers nothing. It also gives a reused
-    // descriptor number a fresh channel, so nothing inherits a previous connection's
-    // writer.
-    OutboundChannels.open(fileDescriptor, tag: id.tag)
-    connectionFileDescriptors[id] = fileDescriptor
+  public func addConnection(
+    id: UUID,
+    connection: any DaemonConnection,
+    mode: DaemonProtocolMode = .v1,
+    clientID: UUID? = nil,
+    subscription: DaemonWireSubscription? = nil,
+    replayStore: DaemonReplayStore? = nil
+  ) async {
+    let channel = DaemonConnectionChannel(
+      connection: connection, mode: mode, clientID: clientID,
+      subscription: subscription, replayStore: replayStore ?? self.replayStore)
+    await addConnection(id: id, channel: channel)
+  }
+
+  public func addConnection(id: UUID, channel: DaemonConnectionChannel) async {
+    connections[id] = channel
+    // Reattach every persisted chat on reconnect. zmx's stable node ID makes this
+    // idempotent when the previous daemon instance is still winding down.
+    if let chats = try? quickChatStore.loadResult(), case .loaded(let loaded) = chats {
+      for chat in loaded {
+        _ = await ensureQuickChatSession(chat)
+      }
+      let known = Set(loaded.map(\.id))
+      for orphan in await (enumerateQuickChatSessions?() ?? []) where !known.contains(orphan) {
+        _ = await terminateQuickChatSession(
+          QuickChat(id: orphan, title: "orphan", backend: .claudeCode))
+      }
+    }
     startPresencePolling()
   }
+
+  #if canImport(Darwin) || canImport(Glibc)
+    /// Compatibility seam for existing macOS callers; the registry stores only the
+    /// channel abstraction after this boundary.
+    public func addConnection(id: UUID, fileDescriptor: Int32) async {
+      await addConnection(
+        id: id,
+        connection: UnixSocketConnection(
+          id: id, fileDescriptor: fileDescriptor, bufferedWrites: true))
+    }
+  #endif
 
   public func removeConnection(_ id: UUID) async {
     for path in connectionProjectPaths[id] ?? [] {
       guard let store = stores[path] else { continue }
       await store.removeConnection(id)
     }
-    connectionFileDescriptors.removeValue(forKey: id)
+    let channel = connections.removeValue(forKey: id)
     connectionProjectPaths.removeValue(forKey: id)
     connectionCapabilities.removeValue(forKey: id)
     sidebarConnections.remove(id)
-    if connectionFileDescriptors.isEmpty { stopPresencePolling() }
+    if connections.isEmpty { stopPresencePolling() }
+    try? await channel?.close()
   }
 
   // MARK: - Presence polling
@@ -302,18 +422,72 @@ public actor ProjectRegistry {
   // MARK: - Commands
 
   public func handle(_ command: DaemonCommand, connectionID: UUID) async {
-    guard let fileDescriptor = connectionFileDescriptors[connectionID] else { return }
+    guard let result = await apply(command, connectionID: connectionID),
+      let message = result.error,
+      let channel = connections[connectionID],
+      case .v1 = channel.mode
+    else { return }
+    if case .graphCommand(let path, _) = command,
+      stores[Self.canonicalize(path, platformPaths: platformPaths)] != nil
+    {
+      // GraphStore has already emitted this rejection to its v1 subscribers.
+      return
+    }
+    await send(.errorOccurred(message), to: connectionID)
+  }
+
+  /// Called by the daemon's session/activity poller. Sequence numbers are persisted with
+  /// the chat so reconnecting clients can order updates deterministically.
+  public func updateQuickChatActivity(
+    id: UUID,
+    text: String?,
+    presence: PresenceReading?
+  ) async -> Bool {
+    guard let chat = quickChatStore.chat(id: id) else { return false }
+    let sequence = (chat.activity?.sequence ?? 0) + 1
+    let activity = QuickChatActivity(sequence: sequence, text: text, presence: presence)
+    guard (try? quickChatStore.updateActivity(id: id, activity: activity)) != nil else {
+      return false
+    }
+    await broadcast(.quickChatActivity(id: id, activity: activity))
+    return true
+  }
+
+  /// Applies a command and snapshots its correlated result before returning to the
+  /// daemon read loop. Keeping mutation and response selection together prevents a
+  /// concurrent disconnect or command from turning a rejected mutation into a stale
+  /// successful graph response.
+  public func apply(
+    _ command: DaemonCommand,
+    connectionID: UUID
+  ) async -> ProjectRegistryCommandResult? {
+    guard let channel = connections[connectionID] else { return nil }
+    let broadcastErrors: Bool
+    if case .v2 = channel.mode {
+      broadcastErrors = false
+    } else {
+      broadcastErrors = true
+    }
+    var response: DaemonEvent? = nil
+    var error: String? = nil
 
     switch command {
     case .listRecentProjects:
-      send(.recentProjectsListed(persistence.loadRecentProjects()), to: fileDescriptor)
+      let recentProjects = persistence.loadRecentProjects()
+      if case .v1 = channel.mode {
+        await send(.recentProjectsListed(recentProjects), to: connectionID)
+      }
+      response = .recentProjectsListed(recentProjects)
+      error = nil
 
     case .openProject(let path):
       switch routing(for: path, isSidebar: sidebarConnections.contains(connectionID)) {
       case .project(let canonicalPath):
-        await open(canonicalPath, for: connectionID, fileDescriptor: fileDescriptor)
+        let snapshot = await open(canonicalPath, for: connectionID, channel: channel)
+        response = .graphChanged(snapshot)
+        error = nil
       case .refused(let reason):
-        send(.errorOccurred(reason), to: fileDescriptor)
+        error = reason
       }
 
     case .restoreOpenProjects:
@@ -329,25 +503,38 @@ public actor ProjectRegistry {
       // it is joined to projects *other* clients open, so `graphcode status <new folder>`
       // puts a row in a running app instead of one that only appears next launch.
       sidebarConnections.insert(connectionID)
-      for path in prunedOpenProjects() where Self.isWellFormedProjectPath(path) {
-        await open(path, for: connectionID, fileDescriptor: fileDescriptor)
+      for path in prunedOpenProjects()
+      where Self.isWellFormedProjectPath(path, platformPaths: platformPaths) {
+        await open(
+          Self.canonicalize(path, platformPaths: platformPaths),
+          for: connectionID,
+          channel: channel)
       }
+      response = .recentProjectsListed(persistence.loadRecentProjects())
+      error = nil
 
     case .openGlobalGraph:
-      await open(LoopGraphScope.globalPath, for: connectionID, fileDescriptor: fileDescriptor)
+      let snapshot = await open(LoopGraphScope.globalPath, for: connectionID, channel: channel)
+      response = .graphChanged(snapshot)
+      error = nil
 
     case .closeProject(let path):
-      await close(Self.canonicalize(path), for: connectionID)
+      let snapshot = await close(
+        Self.canonicalize(path, platformPaths: platformPaths),
+        for: connectionID)
+      response = snapshot.map(DaemonEvent.graphChanged)
+      error = nil
 
     case .forgetProject(let path):
-      let canonicalPath = Self.canonicalize(path)
-      await close(canonicalPath, for: connectionID)
+      let canonicalPath = Self.canonicalize(path, platformPaths: platformPaths)
+      _ = await close(canonicalPath, for: connectionID)
       persistence.forgetProject(path: canonicalPath)
       if path != canonicalPath { persistence.forgetProject(path: path) }
+      error = nil
 
     case .deleteProjectGraph(let path):
-      let canonicalPath = Self.canonicalize(path)
-      await close(canonicalPath, for: connectionID)
+      let canonicalPath = Self.canonicalize(path, platformPaths: platformPaths)
+      _ = await close(canonicalPath, for: connectionID)
       persistence.forgetProject(path: canonicalPath)
       // The graph is the only handle on every loop's detached session, so its deletion
       // has to end them first — dropping it with the sessions alive left every agent in
@@ -368,6 +555,84 @@ public actor ProjectRegistry {
       // delete and put the graph back.
       writer.forget(path: canonicalPath)
       persistence.deleteGraph(path: canonicalPath)
+      response = .recentProjectsListed(persistence.loadRecentProjects())
+      error = nil
+
+    case .listQuickChats:
+      guard let chats = try? quickChatStore.loadResult() else {
+        error = "quick chat store is corrupt or unreadable"
+        break
+      }
+      switch chats {
+      case .missing: response = .quickChatsListed([])
+      case .loaded(let values): response = .quickChatsListed(values)
+      }
+      await broadcast(response!)
+
+    case .createQuickChat(let title, let backend):
+      let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else {
+        error = "quick chat title must not be empty"
+        break
+      }
+      let chat = QuickChat(title: trimmed, backend: backend)
+      do {
+        try quickChatStore.create(chat)
+      } catch _ {
+        error = "quick chat persistence failed"
+        break
+      }
+      response = .quickChatChanged(chat)
+      await broadcast(response!)
+
+    case .openQuickChat(let id):
+      guard let chat = quickChatStore.chat(id: id) else {
+        error = "quick chat not found"
+        break
+      }
+      switch await ensureQuickChatSession(chat) {
+      case .failure(let failure):
+        error = "quick chat session unavailable: \(failure)"
+        break
+      case .success:
+        response = .quickChatChanged(chat)
+        await broadcast(response!)
+      }
+      if error != nil { break }
+
+    case .renameQuickChat(let id, let title):
+      let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else {
+        error = "quick chat title must not be empty"
+        break
+      }
+      guard let chat = (try? quickChatStore.rename(id: id, title: trimmed)) ?? nil else {
+        error = "quick chat not found"
+        break
+      }
+      response = .quickChatChanged(chat)
+      await broadcast(response!)
+
+    case .deleteQuickChat(let id):
+      guard let chat = quickChatStore.chat(id: id) else {
+        error = "quick chat not found"
+        break
+      }
+      // Stop and confirm first. The record remains durable on failure so reconnect
+      // can retry rather than leaving an untracked live session.
+      guard case .success = await terminateQuickChatSession(chat) else {
+        error = "quick chat session termination failed"
+        break
+      }
+      do {
+        _ = try quickChatStore.delete(id: id)
+      } catch _ {
+        _ = await ensureQuickChatSession(chat)
+        error = "quick chat persistence failed"
+        break
+      }
+      response = .quickChatDeleted(id)
+      await broadcast(response!)
 
     case .graphCommand(let path, let inner):
       // Routed the same way the open was, so a client that had its path redirected to the
@@ -377,12 +642,25 @@ public actor ProjectRegistry {
       switch routing(for: path, isSidebar: sidebarConnections.contains(connectionID)) {
       case .project(let canonicalPath):
         guard let store = stores[canonicalPath] else {
-          send(.errorOccurred("\(path) isn't open — open it first."), to: fileDescriptor)
-          return
+          return ProjectRegistryCommandResult(error: "\(path) isn't open — open it first.")
         }
-        await store.handle(inner, from: connectionID)
+        let v2PayloadLimit: Int? =
+          if case .v2 = channel.mode { FramedMessageIO.v2MaxPayloadBytes } else { nil }
+        let requester: UUID? = if case .v1 = channel.mode { connectionID } else { nil }
+        let result = await store.handle(
+          inner, from: requester,
+          serializeCommands: true,
+          broadcastErrors: broadcastErrors,
+          v2PayloadLimit: v2PayloadLimit)
+        switch result {
+        case .applied(let graph):
+          response = .graphChanged(graph)
+          error = nil
+        case .rejected(let message, _):
+          error = message
+        }
       case .refused(let reason):
-        send(.errorOccurred(reason), to: fileDescriptor)
+        error = reason
       }
 
     case .announce(let capabilities):
@@ -394,6 +672,8 @@ public actor ProjectRegistry {
       for path in connectionProjectPaths[connectionID] ?? [] {
         await stores[path]?.setCapabilities(announced, for: connectionID)
       }
+      response = nil
+      error = nil
 
     case .mailbox(let path, let query):
       // Routed and gated exactly as a `.graphCommand`: the room belongs to the project
@@ -402,39 +682,83 @@ public actor ProjectRegistry {
       switch routing(for: path, isSidebar: sidebarConnections.contains(connectionID)) {
       case .project(let canonicalPath):
         guard let store = stores[canonicalPath] else {
-          send(.errorOccurred("\(path) isn't open — open it first."), to: fileDescriptor)
-          return
+          return ProjectRegistryCommandResult(error: "\(path) isn't open — open it first.")
         }
         do {
-          send(
-            .mailbox(projectPath: canonicalPath, mailbox: try await store.mailbox(query)),
-            to: fileDescriptor)
+          let event = DaemonEvent.mailbox(
+            projectPath: canonicalPath, mailbox: try await store.mailbox(query))
+          if case .v1 = channel.mode {
+            await send(event, to: connectionID)
+          }
+          response = event
+          error = nil
         } catch let refusal as GraphStore.MailboxRefusal {
-          send(.errorOccurred(refusal.message), to: fileDescriptor)
-        } catch {
-          send(.errorOccurred("\(error)"), to: fileDescriptor)
+          error = refusal.message
+        } catch let caught {
+          error = "\(caught)"
         }
       case .refused(let reason):
-        send(.errorOccurred(reason), to: fileDescriptor)
+        error = reason
       }
+    }
+
+    return ProjectRegistryCommandResult(response: error == nil ? response : nil, error: error)
+  }
+
+  /// Produces a correlated v2 response after the command has been applied. The v1
+  /// protocol continues to use its existing broadcast-only acknowledgement path.
+  public func responseEvent(for command: DaemonCommand) async -> DaemonEvent? {
+    switch command {
+    case .listRecentProjects:
+      return .recentProjectsListed(persistence.loadRecentProjects())
+    case .restoreOpenProjects:
+      return .recentProjectsListed(persistence.loadRecentProjects())
+    case .openProject(let path), .closeProject(let path), .forgetProject(let path):
+      let canonical = Self.canonicalize(path, platformPaths: platformPaths)
+      guard let store = stores[canonical] else { return nil }
+      return .graphChanged(await store.graph)
+    case .deleteProjectGraph:
+      return .recentProjectsListed(persistence.loadRecentProjects())
+    case .listQuickChats:
+      guard let chats = try? quickChatStore.loadResult() else { return nil }
+      switch chats {
+      case .missing: return .quickChatsListed([])
+      case .loaded(let values): return .quickChatsListed(values)
+      }
+    case .createQuickChat, .openQuickChat, .renameQuickChat:
+      return nil
+    case .deleteQuickChat(let id):
+      return .quickChatDeleted(id)
+    case .openGlobalGraph:
+      guard let store = stores[LoopGraphScope.globalPath] else { return nil }
+      return .graphChanged(await store.graph)
+    case .graphCommand(let path, _):
+      guard let store = stores[Self.canonicalize(path, platformPaths: platformPaths)] else {
+        return nil
+      }
+      return .graphChanged(await store.graph)
+    case .announce, .mailbox:
+      return nil
     }
   }
 
-  private func open(_ canonicalPath: String, for connectionID: UUID, fileDescriptor: Int32) async {
+  private func open(
+    _ canonicalPath: String, for connectionID: UUID, channel: DaemonConnectionChannel
+  ) async -> LoopGraph {
     let store = await store(forProjectPath: canonicalPath)
     connectionProjectPaths[connectionID, default: []].insert(canonicalPath)
-    await store.addConnection(
-      id: connectionID, fileDescriptor: fileDescriptor,
-      capabilities: connectionCapabilities[connectionID] ?? [])
+    let snapshot = await store.addConnection(id: connectionID, channel: channel)
+    await store.setCapabilities(connectionCapabilities[connectionID] ?? [], for: connectionID)
     // The global graph is always resident and isn't a folder anyone opened, so it stays
     // out of both the recents list and the restore-on-launch set — the app asks for it
     // by name every launch instead.
-    guard canonicalPath != LoopGraphScope.globalPath else { return }
-    let project = await store.graph.project
+    guard canonicalPath != LoopGraphScope.globalPath else { return snapshot }
+    let project = snapshot.project
     persistence.recordOpened(
       ProjectRef(path: project.path, name: project.name, lastOpenedAt: Date()))
-    guard rememberOpen(canonicalPath) else { return }
+    guard rememberOpen(canonicalPath) else { return snapshot }
     await joinSidebars(to: store, at: canonicalPath, excluding: connectionID)
+    return snapshot
   }
 
   /// Joins every attached sidebar client to a project one of *them* — or the CLI, or a
@@ -453,16 +777,17 @@ public actor ProjectRegistry {
   /// would hand it another project's graph to print.
   private func joinSidebars(to store: GraphStore, at path: String, excluding opener: UUID) async {
     for id in sidebarConnections where id != opener {
-      guard let fileDescriptor = connectionFileDescriptors[id] else { continue }
+      guard let channel = connections[id] else { continue }
       connectionProjectPaths[id, default: []].insert(path)
-      await store.addConnection(
-        id: id, fileDescriptor: fileDescriptor, capabilities: connectionCapabilities[id] ?? [])
+      _ = await store.addConnection(id: id, channel: channel)
+      await store.setCapabilities(connectionCapabilities[id] ?? [], for: id)
     }
   }
 
-  private func close(_ canonicalPath: String, for connectionID: UUID) async {
+  private func close(_ canonicalPath: String, for connectionID: UUID) async -> LoopGraph? {
+    var snapshot: LoopGraph?
     if let store = stores[canonicalPath] {
-      await store.removeConnection(connectionID)
+      snapshot = await store.removeConnection(connectionID, leaveReplay: true)
     }
     connectionProjectPaths[connectionID]?.remove(canonicalPath)
     // Compared canonically, not literally: a project added before remote paths were
@@ -470,7 +795,10 @@ public actor ProjectRegistry {
     // spelling back through `canonicalize`. Filtering on the raw string left those rows
     // in the open set and un-closable.
     persistence.saveOpenProjects(
-      persistence.loadOpenProjects().filter { Self.canonicalize($0) != canonicalPath })
+      persistence.loadOpenProjects().filter {
+        Self.canonicalize($0, platformPaths: platformPaths) != canonicalPath
+      })
+    return snapshot
   }
 
   /// Clears out the empty twins a pre-normalization daemon left in the sidebar: a stored
@@ -484,11 +812,13 @@ public actor ProjectRegistry {
   private func prunedOpenProjects() -> [String] {
     let stored = persistence.loadOpenProjects()
     let kept = stored.filter { path in
-      let canonical = Self.canonicalize(path)
+      let canonical = Self.canonicalize(path, platformPaths: platformPaths)
       // Only ever a *later* twin, so the first spelling of a project always survives even
       // when every stored spelling of it is a variant.
       guard path != canonical,
-        stored.prefix(while: { $0 != path }).contains(where: { Self.canonicalize($0) == canonical })
+        stored.prefix(while: { $0 != path }).contains(where: {
+          Self.canonicalize($0, platformPaths: platformPaths) == canonical
+        })
       else { return true }
       let graph = writer.load(path: path)
       let isEmpty = (graph?.nodesAtAnyDepth.isEmpty ?? true) && (graph?.mailroom.isEmpty ?? true)
@@ -546,12 +876,12 @@ public actor ProjectRegistry {
   /// (`sidebarConnections`): opening a nested folder or adding a remote host is a
   /// deliberate human act there, and refusing it would break Add Folder.
   func routing(for path: String, isSidebar: Bool) -> PathRouting {
-    guard Self.isWellFormedProjectPath(path) else {
+    guard Self.isWellFormedProjectPath(path, platformPaths: platformPaths) else {
       return .refused(
         "\(path) isn't a project path — name an absolute folder, an ssh:// or codespace:// "
           + "project, or \(LoopGraphScope.globalPath).")
     }
-    let canonicalPath = Self.canonicalize(path)
+    let canonicalPath = Self.canonicalize(path, platformPaths: platformPaths)
     guard canonicalPath != LoopGraphScope.globalPath else { return .project(canonicalPath) }
     let known = knownProjectPaths()
     if known.contains(canonicalPath) { return .project(canonicalPath) }
@@ -559,14 +889,18 @@ public actor ProjectRegistry {
       return .project(container)
     }
     if RemoteProjectLocation.parse(projectPath: canonicalPath) != nil {
-      guard isSidebar else {
-        return .refused(
-          "graphcode doesn't know a project at \(canonicalPath). Run `graphcode projects` "
-            + "for the exact path; a remote repository or codespace is added in the app.")
-      }
-      return .project(canonicalPath)
+      #if os(Windows)
+        return .project(canonicalPath)
+      #else
+        guard isSidebar else {
+          return .refused(
+            "graphcode doesn't know a project at \(canonicalPath). Run `graphcode projects` "
+              + "for the exact path; a remote repository or codespace is added in the app.")
+        }
+        return .project(canonicalPath)
+      #endif
     }
-    guard Self.isOpenable(canonicalPath) else {
+    guard Self.isOpenable(canonicalPath, platformPaths: platformPaths) else {
       return .refused(
         "there's no folder at \(canonicalPath). Run `graphcode projects` for the paths "
           + "graphcode knows.")
@@ -577,8 +911,14 @@ public actor ProjectRegistry {
   /// Every project this daemon knows about, canonically spelled: what the sidebar has
   /// open, what recents remembers, and whatever is resident.
   private func knownProjectPaths() -> Set<String> {
-    var paths = Set(persistence.loadOpenProjects().map(Self.canonicalize))
-    paths.formUnion(persistence.loadRecentProjects().map { Self.canonicalize($0.path) })
+    var paths = Set(
+      persistence.loadOpenProjects().map {
+        Self.canonicalize($0, platformPaths: platformPaths)
+      })
+    paths.formUnion(
+      persistence.loadRecentProjects().map {
+        Self.canonicalize($0.path, platformPaths: platformPaths)
+      })
     paths.formUnion(stores.keys)
     return paths
   }
@@ -587,7 +927,10 @@ public actor ProjectRegistry {
   /// human deliberately opened wins over the repository around it.
   static func project(containing path: String, in known: Set<String>) -> String? {
     known
-      .filter { $0 != LoopGraphScope.globalPath && path.hasPrefix($0 + "/") }
+      .filter {
+        $0 != LoopGraphScope.globalPath
+          && (path.hasPrefix($0 + "/") || path.hasPrefix($0 + "\\"))
+      }
       .max { $0.count < $1.count }
   }
 
@@ -600,8 +943,8 @@ public actor ProjectRegistry {
   /// broadcasting, and command routing identical to a project's. What makes it global is
   /// where its `.spawn` edges are allowed to point, not a separate code path.
   public func openGlobalGraph(for connectionID: UUID) async {
-    guard let fileDescriptor = connectionFileDescriptors[connectionID] else { return }
-    await open(LoopGraphScope.globalPath, for: connectionID, fileDescriptor: fileDescriptor)
+    guard let channel = connections[connectionID] else { return }
+    await open(LoopGraphScope.globalPath, for: connectionID, channel: channel)
   }
 
   /// Delivers a cross-graph spawn into its target project.
@@ -615,7 +958,7 @@ public actor ProjectRegistry {
   /// nothing spawns back. Enforced here rather than trusted: a project graph naming the
   /// global path as its spawn target is refused.
   private func spawnIntoProject(_ targetPath: String, draft: NodeDraft) async {
-    let canonicalPath = Self.canonicalize(targetPath)
+    let canonicalPath = Self.canonicalize(targetPath, platformPaths: platformPaths)
     guard canonicalPath != LoopGraphScope.globalPath else { return }
     guard let store = stores[canonicalPath] else { return }
     await store.handle(.createNode(draft))
@@ -628,11 +971,15 @@ public actor ProjectRegistry {
     let scope = LoopGraphScope(projectPath: path, name: Self.displayName(for: path))
     let graph = writer.load(path: path) ?? LoopGraph(scope: scope)
     let persistence = self.persistence
+    let replayStore = self.replayStore
     // A cross-graph spawn arrives here as a plain request; hopping through an unstructured
     // `Task` is what lets this actor re-enter itself to reach a *different* store without
     // deadlocking on its own isolation.
     let spawnIntoProject: @Sendable (String, NodeDraft) -> Void = { [weak self] target, draft in
       Task { await self?.spawnIntoProject(target, draft: draft) }
+    }
+    let onConnectionFailure: @Sendable (UUID) -> Void = { [weak self] connectionID in
+      Task { await self?.removeConnection(connectionID) }
     }
     let newStore = GraphStore(
       graph: graph,
@@ -645,6 +992,12 @@ public actor ProjectRegistry {
         // the first to have started — see `refreshAwakeAssertion`.
         Task { await self?.refreshAwakeAssertion() }
       },
+      onGraphEvent: { event in
+        guard case .graphChanged(let updatedGraph) = event else { return [:] }
+        return replayStore.append(
+          event: event, projectPath: updatedGraph.project.path)
+      },
+      onConnectionFailure: onConnectionFailure,
       onEnsureSession: ensureSession,
       onFindMissingProvider: { node, path in
         await ProviderPath.missingProvider(for: node, projectPath: path)
@@ -727,13 +1080,13 @@ public actor ProjectRegistry {
   ///
   /// The root is refused even when spelled out. A project is scanned by the worktree
   /// sweeper and by git; pointed at `/` that is the whole disk.
-  static func isWellFormedProjectPath(_ path: String) -> Bool {
+  static func isWellFormedProjectPath(
+    _ path: String,
+    platformPaths: any PlatformPaths = CurrentPlatformPaths.value
+  ) -> Bool {
     if path == LoopGraphScope.globalPath { return true }
     if RemoteProjectLocation.parse(projectPath: path) != nil { return true }
-    // Absolute, and not the root however it is spelled: `/`, `//`, `/..` and `/a/..` all
-    // reduce to the same directory.
-    guard path.hasPrefix("/") else { return false }
-    return RemoteProjectLocation.normalizedPath(path) != "/"
+    return (try? platformPaths.canonicalProjectPath(path)) != nil
   }
 
   /// Whether a path can be opened as a project right now: well-formed, and a directory
@@ -743,12 +1096,19 @@ public actor ProjectRegistry {
   /// because this is the door every client knocks on, and without it a mistyped or
   /// already-deleted path became a project with a store, a recents entry and a place in
   /// the restore set — `~/.graphcode/projects` accumulates one JSON per such ghost.
-  static func isOpenable(_ path: String) -> Bool {
-    guard isWellFormedProjectPath(path) else { return false }
+  static func isOpenable(
+    _ path: String,
+    platformPaths: any PlatformPaths = CurrentPlatformPaths.value
+  ) -> Bool {
+    guard isWellFormedProjectPath(path, platformPaths: platformPaths) else { return false }
     if path == LoopGraphScope.globalPath { return true }
     if RemoteProjectLocation.parse(projectPath: path) != nil { return true }
+    guard let canonicalPath = try? platformPaths.canonicalProjectPath(path) else {
+      return false
+    }
     var isDirectory: ObjCBool = false
-    let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+    let exists = FileManager.default.fileExists(
+      atPath: canonicalPath, isDirectory: &isDirectory)
     return exists && isDirectory.boolValue
   }
 
@@ -756,7 +1116,10 @@ public actor ProjectRegistry {
   /// `.graphChanged` is keyed on it. Public because the app has to key on it too: a
   /// project it asked for by the path a folder picker handed it comes back named by this,
   /// and `/tmp` vs `/private/tmp` is enough to make the two look like different projects.
-  public static func canonicalize(_ path: String) -> String {
+  public static func canonicalize(
+    _ path: String,
+    platformPaths: any PlatformPaths = CurrentPlatformPaths.value
+  ) -> String {
     guard path != LoopGraphScope.globalPath else { return path }
     // A remote path gets the textual half of the same treatment. It cannot be resolved
     // against this filesystem — the directory is on another machine — but the spellings
@@ -769,7 +1132,7 @@ public actor ProjectRegistry {
       normalized.remotePath = RemoteProjectLocation.normalizedPath(remote.remotePath)
       return normalized.projectPath
     }
-    return URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+    return (try? platformPaths.canonicalProjectPath(path)) ?? path
   }
 
   private static func displayName(for path: String) -> String {
@@ -781,20 +1144,27 @@ public actor ProjectRegistry {
 
   // MARK: - Unicast reply
 
-  private func send(_ event: DaemonEvent, to fileDescriptor: Int32) {
+  private func send(_ event: DaemonEvent, to connectionID: UUID) async {
     let started = Date()
     guard let data = try? JSONEncoder().encode(event) else { return }
     DaemonLog.shared.record(
       "reply",
       DaemonRequestContext.fields + [
-        ("kind", event.kindName), ("fd", String(fileDescriptor)),
+        ("kind", event.kindName), ("connection", connectionID.tag),
         ("bytes", String(data.count)),
         ("encode_ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
       ])
-    // Queued rather than written inline for the same reason `GraphStore.send` queues:
-    // this is actor-isolated, and a blocking write of a full-graph frame hands the actor
-    // to whichever client is slowest to read it. No superseding key — a unicast reply
-    // answers one command and has to arrive.
-    OutboundChannels.send(data, to: fileDescriptor)
+    guard let channel = connections[connectionID] else { return }
+    do {
+      try await channel.sendEvent(event)
+    } catch {
+      await removeConnection(connectionID)
+    }
+  }
+
+  private func broadcast(_ event: DaemonEvent) async {
+    for id in connections.keys {
+      await send(event, to: id)
+    }
   }
 }

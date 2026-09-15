@@ -1,0 +1,2 @@
+name=graphcode-graph-2-1a0d72c17d4b4c2186fecf54d58c1d5d	pid=33888	clients=0	created=1786959382	cwd=D:\depot\GraphCode-worktrees\graphcode-win	cmd=cmd/pwsh -NoProfile -Command Start-Sleep -Seconds 20
+name=graphcode-quickchat-2-391e83e3ed874e0eac9d1347a423cda5	pid=53064	clients=0	created=1786959384	cwd=D:\depot\GraphCode-worktrees\graphcode-win	cmd=cmd/pwsh -NoProfile -Command Start-Sleep -Seconds 20

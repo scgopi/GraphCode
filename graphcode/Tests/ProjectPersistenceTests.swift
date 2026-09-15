@@ -107,6 +107,48 @@ struct ProjectPersistenceTests {
 
     let recents = persistence.loadRecentProjects()
     #expect(recents.map(\.path) == [newer.path, older.path])
+    #expect(recents.map(\.path) == [newer.path, older.path])
+  }
+  @Test
+  func loadingALegacyPathDerivedGraphMigratesItToTheSafeKey() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
+    let persistence = ProjectPersistence(baseDirectory: directory)
+    let project = ProjectRef(path: "/tmp/legacy-project", name: "legacy-project")
+    let graph = LoopGraph(project: project, nodes: [LoopNode(title: "Legacy")])
+    let legacyURL =
+      directory
+      .appendingPathComponent("projects", isDirectory: true)
+      .appendingPathComponent("_tmp_legacy-project.json")
+    try JSONEncoder().encode(graph).write(to: legacyURL)
+
+    #expect(persistence.loadGraph(path: project.path)?.nodes.first?.title == "Legacy")
+    #expect(!FileManager.default.fileExists(atPath: legacyURL.path))
+
+    let files = try FileManager.default.contentsOfDirectory(
+      at: directory.appendingPathComponent("projects", isDirectory: true),
+      includingPropertiesForKeys: nil)
+    #expect(files.count == 1)
+    #expect(files.first?.lastPathComponent.hasPrefix("v1-") == true)
+  }
+
+  @Test
+  func deletingAGraphAlsoRemovesItsLegacyPathDerivedFile() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
+    let persistence = ProjectPersistence(baseDirectory: directory)
+    let path = "/tmp/legacy-delete"
+    let legacyURL =
+      directory
+      .appendingPathComponent("projects", isDirectory: true)
+      .appendingPathComponent("_tmp_legacy-delete.json")
+    let graph = LoopGraph(project: ProjectRef(path: path, name: "legacy-delete"))
+    try JSONEncoder().encode(graph).write(to: legacyURL)
+
+    persistence.deleteGraph(path: path)
+
+    #expect(!FileManager.default.fileExists(atPath: legacyURL.path))
+    #expect(persistence.loadGraph(path: path) == nil)
   }
 }
 
@@ -127,6 +169,20 @@ struct MailroomPersistenceTests {
       author: "a human", topic: nil, body: body)
   }
 
+  private func persistedFiles(in directory: URL) throws -> (graph: URL, room: URL) {
+    let projects = directory.appendingPathComponent("projects", isDirectory: true)
+    let files = try FileManager.default.contentsOfDirectory(
+      at: projects, includingPropertiesForKeys: nil)
+    let graph = try #require(
+      files.first { url in
+        guard let data = try? Data(contentsOf: url) else { return false }
+        return (try? JSONDecoder().decode(LoopGraph.self, from: data)) != nil
+      })
+    let room = try #require(
+      files.first { ProjectPersistence.isSidecarFileName($0.lastPathComponent) })
+    return (graph, room)
+  }
+
   @Test
   func theRoomIsSavedBesideTheGraphAndNeverInsideIt() throws {
     let directory = makeDirectory()
@@ -138,9 +194,7 @@ struct MailroomPersistenceTests {
     graph.mailroom = [post(1, "SECRET-NONCE-A"), post(2, "SECRET-NONCE-B")]
 
     persistence.saveGraph(graph)
-    let name = path.replacingOccurrences(of: "/", with: "_")
-    let graphFile = directory.appendingPathComponent("projects/\(name).json")
-    let roomFile = directory.appendingPathComponent("projects/\(name).mailroom.json")
+    let (graphFile, roomFile) = try persistedFiles(in: directory)
     let graphText = try String(contentsOf: graphFile, encoding: .utf8)
     #expect(!graphText.contains("SECRET-NONCE"))
     #expect(!graphText.contains("\"mailroom\""))
@@ -240,10 +294,8 @@ struct MailroomPersistenceTests {
 
     a.saveGraph(graph([post("one"), post("two")]))
 
-    let roomA = try String(
-      decoding: Data(
-        contentsOf: workspaceA.appendingPathComponent("projects/_tmp_p.mailroom.json")),
-      as: UTF8.self)
+    let (_, roomFileA) = try persistedFiles(in: workspaceA)
+    let roomA = try String(decoding: Data(contentsOf: roomFileA), as: UTF8.self)
     #expect(roomA.contains("two"), "workspace A's room was judged unchanged and never written")
   }
 

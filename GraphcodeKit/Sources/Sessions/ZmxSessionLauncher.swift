@@ -22,7 +22,121 @@ import Foundation
 /// staged the prompt in a file for `"$(cat …)"` to expand, which silently fails: `zmx`
 /// shell-quotes each argument, so `claude` received the literal `$(cat …)` text as its
 /// prompt instead of the prompt itself.
+#if os(Windows)
+  actor WindowsRemoteBridgePublicationGate {
+    static let defaultTimeout: Duration = .seconds(30)
+
+    private struct Pending {
+      let token: UUID
+      let task: Task<Bool, Never>
+    }
+
+    private var pending: [String: Pending] = [:]
+    private var latestGeneration: [String: UInt64] = [:]
+
+    func publish(
+      authority: String,
+      generation: UInt64,
+      timeout: Duration = .seconds(30),
+      operation: @escaping @Sendable () async -> Bool
+    ) async -> Bool {
+      latestGeneration[authority] = max(latestGeneration[authority] ?? 0, generation)
+      let predecessor = pending[authority]?.task
+      let token = UUID()
+      let task = Task { [weak self] () -> Bool in
+        if let predecessor,
+          await Self.waitFor(predecessor, timeout: timeout) == nil
+        {
+          predecessor.cancel()
+        }
+        guard let self else { return false }
+        guard await isLatest(authority: authority, generation: generation) else {
+          await finish(authority: authority, token: token)
+          return true
+        }
+        let result = await operation()
+        await finish(authority: authority, token: token)
+        return result
+      }
+      pending[authority] = Pending(token: token, task: task)
+      return await task.value
+    }
+
+    private static func waitFor(
+      _ task: Task<Bool, Never>, timeout: Duration
+    ) async -> Bool? {
+      await withTaskGroup(of: Bool?.self) { group in
+        group.addTask { await task.value }
+        group.addTask {
+          try? await Task.sleep(for: timeout)
+          return nil
+        }
+        let result = await group.next() ?? nil
+        if result == nil {
+          task.cancel()
+        }
+        group.cancelAll()
+        return result
+      }
+    }
+
+    private func isLatest(authority: String, generation: UInt64) -> Bool {
+      latestGeneration[authority] == generation
+    }
+
+    private func finish(authority: String, token: UUID) {
+      guard pending[authority]?.token == token else { return }
+      pending.removeValue(forKey: authority)
+    }
+  }
+#endif
 public enum ZmxSessionLauncher {
+  #if os(Windows)
+    /// One bridge owner serves every remote project in this UI process. The bridge state is
+    /// per authority, so multiple hosts and projects remain isolated without duplicating
+    /// transport setup in the session launcher.
+    private final class WindowsRemoteBridgeProvider: @unchecked Sendable {
+      private let lock = NSLock()
+      private var bridge: (any WindowsRemoteBridgeService)?
+
+      init(bridge: (any WindowsRemoteBridgeService)?) {
+        self.bridge = bridge
+      }
+
+      func get() -> (any WindowsRemoteBridgeService)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return bridge
+      }
+
+      func set(_ bridge: (any WindowsRemoteBridgeService)?) {
+        lock.lock()
+        self.bridge = bridge
+        lock.unlock()
+      }
+    }
+
+    private static let windowsRemoteBridgeProvider = WindowsRemoteBridgeProvider(
+      bridge: try? WindowsRemoteBridge())
+
+    private static let windowsRemoteBridgePublicationGate =
+      WindowsRemoteBridgePublicationGate()
+
+    static func setWindowsRemoteBridgeForTesting(
+      _ bridge: (any WindowsRemoteBridgeService)?
+    ) {
+      windowsRemoteBridgeProvider.set(bridge)
+    }
+
+    public static func shutdownWindowsRemoteBridge() async {
+      guard let bridge = windowsRemoteBridgeProvider.get() else { return }
+      if let bridge = bridge as? WindowsRemoteBridge {
+        await bridge.shutdown()
+      }
+      windowsRemoteBridgeProvider.set(nil)
+    }
+  #endif
+
   /// `zmx kill <name>` is a no-op (with a stderr note) when nothing matches, so this is
   /// safe for a node whose session was never started or has already exited.
   static func killArguments(forNode node: LoopNode) -> [String] {
@@ -595,8 +709,12 @@ public enum ZmxSessionLauncher {
   /// swallows anything typed at it (issue #215's `node send` that reported "delivered"
   /// into a session whose `claude` had exited). Only a running task is a session a
   /// keystroke can reach.
-  static func sessionExists(_ node: LoopNode) async -> Bool {
-    await sessionTaskState(node) == .alive
+  static func sessionExists(_ node: LoopNode, projectPath: String? = nil) async -> Bool {
+    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+      return await runRemoteRetrying(
+        remoteStatusInvocation(forNode: node, label: "presence", at: remote))
+    }
+    return await sessionTaskState(node) == .alive
   }
 
   /// What is actually inside the node's zmx session: a running task (`alive`), a
@@ -726,6 +844,95 @@ public enum ZmxSessionLauncher {
       + "echo \"graphcode: '\(sessionName)' never became ready to attach\"; exit 1; fi; "
       + "sleep 0.1; done; exec \(attach)"
     return ["/bin/zsh", "-i", "-l", "-c", script]
+  }
+
+  public static func startResult(
+    _ node: LoopNode, projectPath: String? = nil
+  ) async -> Result<CLISessionStartOutcome, CLISessionError> {
+    guard ZmxLocator.isInstalled else {
+      return .failure(.unavailable("zmx is not installed"))
+    }
+    if await sessionExists(node, projectPath: projectPath) {
+      return .success(.attached)
+    }
+    var spawnedProcess: Process?
+    if node.sessionPrompt == nil || node.sessionPrompt?.isEmpty == true {
+      guard let executable = node.backend.executableName else {
+        return .failure(.unavailable("backend has no executable"))
+      }
+      let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+      #if os(Windows)
+        do {
+          let process = Process()
+          process.executableURL = URL(fileURLWithPath: ZmxLocator.binaryURL.path)
+          process.arguments = ["--daemon", name, executable]
+          if let directory = workingDirectory(forNode: node, projectPath: projectPath) {
+            process.currentDirectoryURL = URL(fileURLWithPath: directory)
+          }
+          try process.run()
+          spawnedProcess = process
+        } catch {
+          return .failure(.failed("zmx daemon launch failed: \(error)"))
+        }
+      #else
+        await atomicCheckOrRun(
+          checkCommand: aliveCheckCommand(zmxPath: ZmxLocator.binaryURL.path, forNode: node),
+          runArguments: ["run", name, "-d", executable],
+          zmxPath: ZmxLocator.binaryURL.path,
+          workingDirectory: workingDirectory(forNode: node, projectPath: projectPath))
+      #endif
+    } else {
+      await start(node, projectPath: projectPath)
+    }
+    for delay in [100, 200, 400, 800, 1200] {
+      try? await Task.sleep(for: .milliseconds(delay))
+      if await sessionExists(node, projectPath: projectPath) {
+        spawnedProcess = nil
+        return .success(.started)
+      }
+    }
+    if let spawnedProcess {
+      if spawnedProcess.isRunning { spawnedProcess.terminate() }
+      spawnedProcess.waitUntilExit()
+    }
+    await kill(node, projectPath: projectPath)
+    for delay in [100, 200, 400] {
+      if await sessionExists(node, projectPath: projectPath) {
+        await kill(node, projectPath: projectPath)
+      }
+      try? await Task.sleep(for: .milliseconds(delay))
+    }
+    if await sessionExists(node, projectPath: projectPath) {
+      return .failure(.failed("zmx session appeared after startup timeout"))
+    }
+    return .failure(
+      .failed(
+        "zmx session did not become live "
+          + "(\(SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName))"))
+  }
+
+  public static func terminateResult(
+    _ node: LoopNode, projectPath: String? = nil
+  ) async -> Result<Void, CLISessionError> {
+    guard await sessionExists(node, projectPath: projectPath) else {
+      SessionIDStore.remove(forNodeID: node.id)
+      return .success(())
+    }
+    await kill(node, projectPath: projectPath)
+    guard !(await sessionExists(node, projectPath: projectPath)) else {
+      return .failure(.failed("zmx session remained after terminate"))
+    }
+    return .success(())
+  }
+
+  public static func enumerateSessionIDs() async -> [UUID] {
+    var live: [UUID] = []
+    for id in QuickChatSessionRegistry.ids() {
+      if await sessionExists(LoopNode(id: id, title: "")) {
+        live.append(id)
+      }
+    }
+    return live
   }
 
   /// Kills the session behind an id that isn't a graph node — a quick chat, or a plain
@@ -1374,7 +1581,8 @@ public enum ZmxSessionLauncher {
   /// single shell costs.
   static func remoteEnsureInvocation(
     forNode node: LoopNode, at location: RemoteProjectLocation,
-    settings: GraphcodeSettings = GraphcodeSettingsStore.load()
+    settings: GraphcodeSettings = GraphcodeSettingsStore.load(),
+    bridgeState: RemoteBridgeWireState? = nil
   ) -> [String]? {
     guard
       let zmxArguments = arguments(
@@ -1409,7 +1617,9 @@ public enum ZmxSessionLauncher {
       PresenceHooks.remoteWriteFragment(forBackend: node.backend)
       .map { $0 + "; " } ?? ""
     let delivery =
-      remoteDeliveryScript(forNode: node, at: location, settings: settings)
+      remoteDeliveryScript(
+        forNode: node, at: location, settings: settings, bridgeState: bridgeState
+      )
       .map { $0 + "; " } ?? ""
     let create = remoteCreateScript(
       forNode: node, freshRun: run, at: location, settings: settings)
@@ -1442,7 +1652,9 @@ public enum ZmxSessionLauncher {
       .map { "\(create) && { \($0) || true; }" } ?? create
     let script =
       "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { "
-      + deliveryFragment(delivery, ifSessionMissing: check)
+      + deliveryFragment(
+        delivery, ifSessionMissing: check,
+        bridgeStateGeneration: bridgeState.map(\.generation))
       + "\(check) >/dev/null 2>&1\(bank) || \(repair){ " + trustSeed + hooksWrite
       + "\(launch); }; }"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
@@ -1463,7 +1675,10 @@ public enum ZmxSessionLauncher {
   /// base64 per loop per minute once the sweep existed. The stamp splits the difference:
   /// a healthy tick costs one extra `zmx get` and a `cat` on the same host, and the
   /// delivery itself runs only when it has something new to say.
-  static func deliveryFragment(_ delivery: String, ifSessionMissing check: String) -> String {
+  static func deliveryFragment(
+    _ delivery: String, ifSessionMissing check: String,
+    bridgeStateGeneration: UInt64? = nil
+  ) -> String {
     guard !delivery.isEmpty else { return "" }
     let stamp = RemoteProjectLocation.shellQuoted(RemoteGraphAccess.cliShimStamp)
     // Tilde, unquoted, so the remote shell expands it — the same one constant the
@@ -1475,8 +1690,14 @@ public enum ZmxSessionLauncher {
     // missing session has to re-deliver whatever the stamp says: the create branch below
     // launches an argv naming the briefing, wake digest and prompt files, and every one
     // of them rides in this same fragment.
+    let bridgeChanged =
+      bridgeStateGeneration.map {
+        " || [ \"$(cat \(RemoteGraphAccess.bridgeStateGenerationPath) 2>/dev/null)\" != "
+          + RemoteProjectLocation.shellQuoted(String($0)) + " ]"
+      } ?? ""
     return "if ! \(check) >/dev/null 2>&1 "
-      + "|| [ \"$(cat \(stampFile) 2>/dev/null)\" != \(stamp) ]; then "
+      + "|| [ \"$(cat \(stampFile) 2>/dev/null)\" != \(stamp) ]"
+      + bridgeChanged + "; then "
       + delivery + "fi; "
   }
 
@@ -1548,12 +1769,14 @@ public enum ZmxSessionLauncher {
   /// Public for exactly that caller (`GhosttyTerminalView.remoteCommand`).
   public static func remoteDeliveryScript(
     forNode node: LoopNode?, backend: CLISessionBackendKind? = nil,
-    at location: RemoteProjectLocation, settings: GraphcodeSettings
+    at location: RemoteProjectLocation, settings: GraphcodeSettings,
+    bridgeState: RemoteBridgeWireState? = nil
   ) -> String? {
+    _ = bridgeState
     // The shim's receipt, written only once every file has landed — see
     // `installerScript`. It is what lets a later ensure skip a delivery it doesn't need
     // without ever claiming a shim the host never received.
-    RemoteGraphAccess.installerScript(
+    return RemoteGraphAccess.installerScript(
       files: remoteDeliveryFiles(forNode: node, backend: backend, at: location, settings: settings),
       receipt: (path: RemoteGraphAccess.shimStampPath, content: RemoteGraphAccess.cliShimStamp))
   }
@@ -1595,6 +1818,18 @@ public enum ZmxSessionLauncher {
       }
     }
     return files
+  }
+
+  public static func remoteBridgeStateTransfer(
+    _ state: RemoteBridgeWireState, at location: RemoteProjectLocation
+  ) -> (invocation: [String], input: Data)? {
+    guard let data = try? JSONEncoder().encode(state) else { return nil }
+    let script = RemoteGraphAccess.bridgeStateInstallerScript(
+      length: data.count, sha256: GraphcodeSHA256.hex(data))
+    return (
+      location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script)),
+      data
+    )
   }
 
   /// `quotedCommand`, except that arguments naming graphcode's own remote files —
@@ -1813,18 +2048,63 @@ public enum ZmxSessionLauncher {
   /// idempotent commands: ensure is create-only and kill is a no-op on a dead session,
   /// where a retried *send* could type the same message twice (its caller already has a
   /// staging fallback for the honest failure).
-  static func runRemoteRetrying(_ invocation: [String], attempts: Int = 3) async -> Bool {
+  static func runRemoteRetrying(
+    _ invocation: [String],
+    attempts: Int = 3,
+    standardInput: Data? = nil,
+    timeout: Duration? = nil
+  ) async -> Bool {
     RemoteProjectLocation.prepareControlSocketDirectory()
+    guard attempts > 0 else { return false }
     for attempt in 1...attempts {
-      if let session = try? PTYProcessSession(
-        executable: invocation[0], arguments: Array(invocation.dropFirst())),
-        await session.waitUntilFinished()
-      {
+      guard !Task.isCancelled else { return false }
+      guard
+        let session = try? PTYProcessSession(
+          executable: invocation[0], arguments: Array(invocation.dropFirst()))
+      else { return false }
+      if let standardInput {
+        session.sendInput(String(decoding: standardInput, as: UTF8.self) + "\n")
+      }
+      if await waitForRemoteProcess(session, timeout: timeout) {
         return true
       }
-      if attempt < attempts { try? await Task.sleep(for: .seconds(1 << (attempt - 1))) }
+      if attempt < attempts, !Task.isCancelled {
+        try? await Task.sleep(for: .seconds(1 << (attempt - 1)))
+      }
     }
     return false
+  }
+
+  private static func waitForRemoteProcess(
+    _ session: PTYProcessSession, timeout: Duration?
+  ) async -> Bool {
+    let waiter = Task { await session.waitUntilFinished() }
+    return await withTaskCancellationHandler(
+      operation: {
+        guard let timeout else { return await waiter.value }
+        let result = await withTaskGroup(of: Bool?.self) { group in
+          group.addTask { await waiter.value }
+          group.addTask {
+            try? await Task.sleep(for: timeout)
+            return nil
+          }
+          let first = await group.next() ?? nil
+          if first == nil {
+            waiter.cancel()
+            session.terminate()
+          }
+          group.cancelAll()
+          return first
+        }
+        guard let result else {
+          _ = await waiter.value
+          return false
+        }
+        return result
+      },
+      onCancel: {
+        session.terminate()
+      })
   }
 
   static func remoteKillInvocation(
@@ -1842,15 +2122,60 @@ public enum ZmxSessionLauncher {
     // A dial already in flight for this node is doing this job; a second one racing it
     // is how two `zmx run`s land on one session (`RemoteEnsureGate`).
     guard let lease = await RemoteEnsureGate.shared.begin(node.id) else { return }
-    // The forwarded socket is what makes the delivered CLI's dial land on this Mac's
-    // daemon — without it the shim's commands have nowhere to go. Kept alive per host,
-    // not per launch; see `RemoteSocketForwarder`.
-    await RemoteSocketForwarder.shared.ensureForwarding(to: location)
+    #if os(Windows)
+      guard
+        location.port == nil
+          || (location.port ?? 0) > 0 && (location.port ?? 0) <= Int(UInt16.max)
+      else {
+        await RemoteEnsureGate.shared.end(node.id, token: lease)
+        return
+      }
+      let authorityPort = location.port.map { UInt16($0) }
+      let authority = WindowsSSHAuthority(
+        user: location.user, host: location.host, port: authorityPort)
+      guard
+        let bridge = windowsRemoteBridgeProvider.get(),
+        let state = try? await bridge.ensureForwarding(authority: authority)
+      else {
+        await RemoteEnsureGate.shared.end(node.id, token: lease)
+        return
+      }
+      let bridgeState = RemoteBridgeWireState(remoteBridgeState: state)
+      guard let transfer = remoteBridgeStateTransfer(bridgeState, at: location) else {
+        await RemoteEnsureGate.shared.end(node.id, token: lease)
+        return
+      }
+      let transferred = await windowsRemoteBridgePublicationGate.publish(
+        authority: authority.key,
+        generation: bridgeState.generation,
+        timeout: WindowsRemoteBridgePublicationGate.defaultTimeout
+      ) {
+        await runRemoteRetrying(
+          transfer.invocation,
+          standardInput: transfer.input,
+          timeout: WindowsRemoteBridgePublicationGate.defaultTimeout)
+      }
+      guard transferred else {
+        await RemoteEnsureGate.shared.end(node.id, token: lease)
+        return
+      }
+    #else
+      let bridgeState: RemoteBridgeWireState? = nil
+    #endif
+    // macOS keeps the historical Unix-socket forward alive per host. Windows instead
+    // established its authenticated loopback TCP bridge above; both paths leave the
+    // delivered shim with a local endpoint and keep transport details out of launch
+    // command construction.
+    #if !os(Windows)
+      await RemoteSocketForwarder.shared.ensureForwarding(to: location)
+    #endif
     // Create only, in one round-trip — see `remoteEnsureInvocation` for why the check
     // and the run must share a shell. A failure after the retries is the same posture
     // as the local path: no UI here, the node's state stays honest, opening the loop
     // retries.
-    if let ensure = remoteEnsureInvocation(forNode: node, at: location) {
+    if let ensure = remoteEnsureInvocation(
+      forNode: node, at: location, bridgeState: bridgeState
+    ) {
       _ = await runRemoteRetrying(ensure)
     }
     await RemoteEnsureGate.shared.end(node.id, token: lease)
@@ -2141,24 +2466,31 @@ public enum ZmxSessionLauncher {
     stampCommand: String? = nil, repairCommand: String? = nil
   ) async {
     let run = quotedCommand([zmxPath] + runArguments)
-    // The stamp rides in the run branch, after the launch it describes and only if that
-    // launch was made: it is what the readiness gate reads, so writing it anywhere a
-    // session might not exist would say the session is ready when it is not
-    // (`agentLabelCommand`, issue #272). `|| true` because a failed stamp must not read
-    // as a failed ensure — that is a retry, and a retry runs `zmx run` against a session
-    // that is now live, which types the whole launch command into the agent's input.
-    let launch = stampCommand.map { "\(run) && { \($0) || true; }" } ?? run
-    // Repair before relaunch: an alive, unlabelled session is one whose stamp was lost,
-    // and re-running it would be that same typing disaster (`adoptUnlabelledCommand`).
-    let repair = repairCommand.map { "\($0) || " } ?? ""
-    let script =
-      logFragment.map {
-        "\(checkCommand) >/dev/null 2>&1 || \(repair){ \($0); \(launch); }"
-      }
-      ?? "\(checkCommand) >/dev/null 2>&1 || \(repair)\(launch)"
+    #if os(Windows)
+      // `logFragment` is POSIX shell — `mkdir -p`, `wc`, `printf`, `$HOME` — so it cannot
+      // ride inside a `cmd.exe` script. Windows ensures therefore run unlogged rather
+      // than with a fragment quoted into something that would not execute; the Swift-side
+      // `DialLog.record` is the path to route this through when it is wired up.
+      let script = "\(checkCommand) >NUL 2>&1 || \(run)"
+      let executable = "cmd.exe"
+      let arguments = ["/d", "/s", "/c", script]
+    #else
+      // The stamp rides in the run branch, after the launch it describes and only if
+      // that launch was made. Repair precedes relaunch so an alive unlabelled session
+      // is adopted rather than receiving the launch command as terminal input.
+      let launch = stampCommand.map { "\(run) && { \($0) || true; }" } ?? run
+      let repair = repairCommand.map { "\($0) || " } ?? ""
+      let script =
+        logFragment.map {
+          "\(checkCommand) >/dev/null 2>&1 || \(repair){ \($0); \(launch); }"
+        }
+        ?? "\(checkCommand) >/dev/null 2>&1 || \(repair)\(launch)"
+      let executable = "/bin/sh"
+      let arguments = ["-c", script]
+    #endif
     guard
       let session = try? PTYProcessSession(
-        executable: "/bin/zsh", arguments: ["-c", script],
+        executable: executable, arguments: arguments,
         workingDirectory: workingDirectory)
     else { return }
     _ = await session.waitUntilFinished()

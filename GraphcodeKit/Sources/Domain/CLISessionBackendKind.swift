@@ -13,4 +13,12 @@ public enum CLISessionBackendKind: String, Codable, CaseIterable, Sendable {
   case codex
   case openCode
   case pi
+
+  /// Whether the daemon can read this backend's own goal verdict.
+  public var recordsGoalVerdict: Bool {
+    switch self {
+    case .claudeCode, .codex, .copilotCLI: return true
+    case .openCode, .pi: return false
+    }
+  }
 }

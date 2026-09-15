@@ -264,6 +264,110 @@ struct RemoteSessionLaunchTests {
     #expect(deliveredPaths(in: unbriefed) == ["~/.graphcode/bin/graphcode"])
   }
 
+  @Test
+  func windowsClientToMacOSRemoteDeliversBridgeStateToTheShim() throws {
+    let state = RemoteBridgeWireState(
+      daemonInstanceID: UUID(),
+      generation: 4,
+      port: 45_678,
+      capability: String(repeating: "a", count: 64),
+      issuedAt: 1_700_000_000,
+      expiresAt: 1_700_001_000)
+    let delivery = try #require(
+      ZmxSessionLauncher.remoteDeliveryScript(
+        forNode: nil, at: location, settings: GraphcodeSettings(), bridgeState: state))
+    #expect(!deliveredPaths(in: delivery).contains("~/.graphcode/bridge-state.json"))
+    let transfer = try #require(
+      ZmxSessionLauncher.remoteBridgeStateTransfer(state, at: location))
+    let transferCommand = transfer.invocation.joined(separator: " ")
+    #expect(transferCommand.contains("bridge-state.json"))
+    #expect(transferCommand.contains("bridge-state-generation"))
+    #expect(!transferCommand.contains(state.capability))
+    #expect(String(data: transfer.input, encoding: .utf8)?.contains(state.capability) == true)
+    let ensure = try #require(
+      ZmxSessionLauncher.remoteEnsureInvocation(
+        forNode: LoopNode(
+          title: "Bridge", loopType: .goalBased, goal: GoalSpec(summary: "bridge")),
+        at: location, settings: GraphcodeSettings(), bridgeState: state))
+    let ensureCommand = ensure.joined(separator: " ")
+    #expect(ensureCommand.contains("bridge-state-generation"))
+    #expect(ensureCommand.contains("4"))
+    #expect(!ensureCommand.contains(state.capability))
+  }
+
+  @Test
+  func outOfOrderSameAuthorityStateTransferKeepsTheNewerGeneration() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-bridge-order-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let newer = RemoteBridgeWireState(
+      daemonInstanceID: UUID(),
+      generation: 9,
+      port: 45_678,
+      capability: String(repeating: "9", count: 64),
+      issuedAt: 1_700_000_000,
+      expiresAt: 1_700_001_000)
+    let older = RemoteBridgeWireState(
+      daemonInstanceID: newer.daemonInstanceID,
+      generation: 8,
+      port: 45_678,
+      capability: String(repeating: "8", count: 64),
+      issuedAt: 1_699_999_900,
+      expiresAt: 1_700_000_900)
+
+    func transfer(_ state: RemoteBridgeWireState) throws {
+      let data = try JSONEncoder().encode(state)
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: "/bin/sh")
+      process.arguments = [
+        "-c",
+        RemoteGraphAccess.bridgeStateInstallerScript(
+          length: data.count, sha256: GraphcodeSHA256.hex(data)),
+      ]
+      var environment = ProcessInfo.processInfo.environment
+      environment["HOME"] = root.path
+      process.environment = environment
+      let input = Pipe()
+      process.standardInput = input
+      process.standardOutput = FileHandle.nullDevice
+      process.standardError = FileHandle.nullDevice
+      try process.run()
+      input.fileHandleForWriting.write(data)
+      input.fileHandleForWriting.closeFile()
+      process.waitUntilExit()
+      #expect(process.terminationStatus == 0)
+    }
+
+    try transfer(newer)
+    try transfer(older)
+    let stateURL = root.appendingPathComponent(".graphcode/bridge-state.json")
+    let generationURL = root.appendingPathComponent(
+      ".graphcode/bridge-state-generation")
+    let installed = try JSONDecoder().decode(
+      RemoteBridgeWireState.self, from: Data(contentsOf: stateURL))
+    #expect(installed == newer)
+    #expect(try String(contentsOf: generationURL, encoding: .ascii) == "9")
+  }
+
+  @Test
+  func windowsClientToMacOSRemoteTriesBridgeBeforeUnixFallback() {
+    let shim = RemoteGraphAccess.cliShimSource
+    #expect(shim.contains("if os.path.exists(state_path):"))
+    #expect(shim.contains("state = read_bridge_state(state_path)"))
+    #expect(shim.contains("if os.name != \"nt\":"))
+    #expect(!shim.contains("sys.platform == \"darwin\" and os.path.exists(state_path)"))
+    #expect(shim.contains("socket.AF_UNIX"))
+  }
+
+  @Test
+  func macOSClientToMacOSRemoteSupersedesBridgeBeforeUnixForwarding() {
+    let script = RemoteSocketForwarder.forwardScript(
+      for: location, localSocketPath: "/Users/dev/.graphcode/graphcoded.sock")
+    #expect(script.contains("bridge-state.json"))
+    #expect(script.contains("bridge-state-generation"))
+    #expect(script.contains("graphcoded.sock"))
+  }
+
   /// Decodes the installer fragment's base64 JSON manifest back into the delivered
   /// paths — asserting on what actually lands rather than on encoding details.
   private func deliveredPaths(in script: String) -> [String] {

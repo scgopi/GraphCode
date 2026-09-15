@@ -18,6 +18,7 @@ struct GraphcodeSettingsTests {
   func theDefaultsAreWhatWasHardcodedBefore() {
     let settings = GraphcodeSettings()
     #expect(settings.defaultBackend == .claudeCode)
+    #expect(settings.defaultModelTier == .standard)
     #expect(settings.claudePermissionMode == .auto)
     #expect(settings.codexApprovals == .yolo)
     #expect(settings.copilotPermissions == .allowEverything)
@@ -30,12 +31,26 @@ struct GraphcodeSettingsTests {
     let url = temporaryURL()
     defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
     let settings = GraphcodeSettings(
-      defaultBackend: .copilotCLI, claudePermissionMode: .bypassPermissions,
+      defaultBackend: .copilotCLI, defaultModelTier: .capable,
+      codexApprovals: .unsandboxed, claudePermissionMode: .bypassPermissions,
       copilotPermissions: .ask, copilotPreferredVersion: "1.0.84-5",
-      briefsSessionsAboutTheGraph: false)
+      briefsSessionsAboutTheGraph: false,
+      autoSelectsModel: true, showsActivityStrip: true, betaUpdates: true)
 
     #expect(GraphcodeSettingsStore.save(settings, to: url))
     #expect(GraphcodeSettingsStore.load(from: url) == settings)
+  }
+
+  @Test
+  func defaultsAreCopiedIntoANewNodeDraft() {
+    let settings = GraphcodeSettings(defaultBackend: .copilotCLI, defaultModelTier: .capable)
+    #expect(settings.defaultBackend == .copilotCLI)
+    #expect(settings.defaultModelTier == .capable)
+    let draft = NodeDraft(
+      title: "Ship", loopType: .goalBased, goal: GoalSpec(summary: "Tests pass"),
+      backend: settings.defaultBackend, modelTier: settings.defaultModelTier)
+    #expect(draft.backend == .copilotCLI)
+    #expect(draft.modelTier == .capable)
   }
 
   @Test

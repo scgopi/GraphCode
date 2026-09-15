@@ -87,6 +87,7 @@ struct ProjectFeature {
     var draftSchedule: CompositeSchedule = .daily
     var draftScheduleTime = "09:00"
     var draftBackend: CLISessionBackendKind = .claudeCode
+    var draftModelTier: ModelTier?
     var draftWorktree: WorktreeSelection = .none
     var draftBranch = ""
     /// A composite draft's carried sub-graph — empty for a hand-made composite,
@@ -380,6 +381,8 @@ struct ProjectFeature {
           // Not this feature's concern: AppFeature routes the listing to `welcome`
           // and folds a delta into the snapshot it holds before routing it here.
           break
+        case .quickChatsListed, .quickChatChanged, .quickChatDeleted, .quickChatActivity:
+          break  // Quick chats belong to no project — AppFeature owns them.
         }
         return .none
 
@@ -884,6 +887,8 @@ extension ProjectFeature {
     state.draftBackend =
       backend ?? state.openCompositeID.flatMap { state.graph.nodes[id: $0]?.backend }
       ?? GraphcodeSettingsStore.load().defaultBackend
+    let settings = GraphcodeSettingsStore.load()
+    state.draftModelTier = settings.autoSelectsModel ? nil : settings.defaultModelTier
     state.draftWorktree = .none
     state.draftBranch = ""
     state.draftParentNodeID = parentNodeID

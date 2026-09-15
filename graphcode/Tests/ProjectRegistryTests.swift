@@ -121,6 +121,123 @@ struct ProjectRegistryTests {
       connectionID: UUID())
   }
 
+  @Test
+  func applyReturnsRejectedCommandWithoutASuccessSnapshot() async {
+    let (registry, persistence) = makeRegistryAndPersistence()
+    let connectionID = UUID()
+    await registry.addConnection(id: connectionID, fileDescriptor: -1)
+    await registry.handle(.openProject(path: "/tmp/project-a"), connectionID: connectionID)
+
+    let result = await registry.apply(
+      .graphCommand(
+        projectPath: "/tmp/project-a",
+        command: .createNode(NodeDraft(title: "No goal", loopType: .goalBased))),
+      connectionID: connectionID)
+
+    #expect(result?.error == "node creation refused: draft is invalid")
+    #expect(result?.response == nil)
+    #expect(persistence.loadGraph(path: "/tmp/project-a")?.nodes.isEmpty != false)
+  }
+
+  @Test
+  func v2RejectsAnOversizedResultBeforePersistingTheMutation() async {
+    let (registry, persistence) = makeRegistryAndPersistence()
+    let transport = RecordingConnection()
+    let channel = DaemonConnectionChannel(
+      connection: transport,
+      mode: .v2(version: 2),
+      clientID: UUID())
+    await registry.addConnection(id: transport.id, channel: channel)
+    await registry.handle(.openProject(path: "/tmp/project-a"), connectionID: transport.id)
+
+    let instruction = String(repeating: "x", count: 30_000)
+    var applied = 0
+    var rejected = false
+    for index in 0..<50 {
+      let result = await registry.apply(
+        .graphCommand(
+          projectPath: "/tmp/project-a",
+          command: .createNode(
+            NodeDraft(
+              title: "Large \(index)",
+              loopType: .turnBased,
+              firstInstruction: instruction))),
+        connectionID: transport.id)
+      if result?.error != nil {
+        rejected = true
+        #expect(result?.response == nil)
+        break
+      }
+      applied += 1
+    }
+
+    #expect(rejected)
+    #expect(applied > 0)
+    #expect(persistence.loadGraph(path: "/tmp/project-a")?.nodes.count == applied)
+  }
+
+  @Test
+  func v1StillAcceptsACommandWhoseEventExceedsTheV2Limit() async {
+    let (registry, persistence) = makeRegistryAndPersistence()
+    let connectionID = UUID()
+    await registry.addConnection(id: connectionID, fileDescriptor: -1)
+    await registry.handle(.openProject(path: "/tmp/project-a"), connectionID: connectionID)
+
+    let result = await registry.apply(
+      .graphCommand(
+        projectPath: "/tmp/project-a",
+        command: .createNode(
+          NodeDraft(
+            title: "Legacy large",
+            loopType: .turnBased,
+            firstInstruction: String(repeating: "x", count: 1_100_000)))),
+      connectionID: connectionID)
+
+    #expect(result?.error == nil)
+    #expect(persistence.loadGraph(path: "/tmp/project-a")?.nodes.count == 1)
+  }
+
+  @Test
+  func concurrentApplyResponsesContainTheSnapshotFromTheirOwnCommand() async {
+    let (registry, _) = makeRegistryAndPersistence()
+    let connectionID = UUID()
+    await registry.addConnection(id: connectionID, fileDescriptor: -1)
+    await registry.handle(.openProject(path: "/tmp/project-a"), connectionID: connectionID)
+
+    async let firstResult = registry.apply(
+      .graphCommand(
+        projectPath: "/tmp/project-a",
+        command: .createNode(
+          NodeDraft(
+            title: "First", loopType: .turnBased, checkDescription: "Sound?",
+            firstInstruction: "Work"))),
+      connectionID: connectionID)
+    async let secondResult = registry.apply(
+      .graphCommand(
+        projectPath: "/tmp/project-a",
+        command: .createNode(
+          NodeDraft(
+            title: "Second", loopType: .turnBased, checkDescription: "Clear?",
+            firstInstruction: "Work"))),
+      connectionID: connectionID)
+
+    let results = [await firstResult, await secondResult].compactMap { result -> LoopGraph? in
+      guard let response = result?.response, case .graphChanged(let graph) = response else {
+        Issue.record("expected a correlated graph snapshot for each applied command")
+        return nil
+      }
+      return graph
+    }
+
+    #expect(results.count == 2)
+    #expect(results.contains { $0.nodes.count == 1 && $0.nodes.contains { $0.title == "First" } })
+    #expect(
+      results.contains {
+        $0.nodes.count == 2
+          && Set($0.nodes.map(\.title)) == Set(["First", "Second"])
+      })
+  }
+
   /// The bug this guards: `.openProject` used to detach a connection from whatever
   /// project it had previously joined before joining the new one, so opening a second
   /// folder silently stopped the first folder's `graphChanged` broadcasts from ever
@@ -236,6 +353,22 @@ struct ProjectRegistryTests {
   }
 
   @Test
+  func forgetProjectReturnsCorrelatedNoPayloadSuccess() async {
+    let (registry, _) = makeRegistryAndPersistence()
+    let connectionID = UUID()
+    await registry.addConnection(id: connectionID, fileDescriptor: -1)
+    await registry.handle(.openProject(path: "/tmp/project-d"), connectionID: connectionID)
+
+    let result = await registry.apply(
+      .forgetProject(path: "/tmp/project-d"),
+      connectionID: connectionID)
+
+    #expect(result?.succeeded == true)
+    #expect(result?.response == nil)
+    #expect(result?.error == nil)
+  }
+
+  @Test
   func deletingAProjectsLoopsDiscardsThemForGood() async {
     let (registry, persistence) = makeRegistryAndPersistence()
     let connectionID = UUID()
@@ -258,6 +391,121 @@ struct ProjectRegistryTests {
     await registry.handle(.openProject(path: "/tmp/project-e"), connectionID: connectionID)
     #expect(persistence.loadGraph(path: "/tmp/project-e")?.nodes.isEmpty != false)
   }
+
+  @Test
+  func broadcastWriteFailureEvictsTheConnectionAndClosesItsTransport() async throws {
+    let (registry, _) = makeRegistryAndPersistence()
+    let connection = FailingConnection()
+    await registry.addConnection(id: connection.id, connection: connection)
+    await registry.handle(.openProject(path: "/tmp/project-a"), connectionID: connection.id)
+
+    for _ in 0..<100 where !connection.isClosed {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(connection.isClosed)
+    #expect(connection.sendAttempts == 1)
+
+    await registry.handle(.openProject(path: "/tmp/project-a"), connectionID: connection.id)
+    #expect(connection.sendAttempts == 1)
+  }
+
+  @Test
+  func v2ListRecentProjectsUsesOnlyCorrelatedResponseWithoutReplayEvent() async throws {
+    let (registry, _) = makeRegistryAndPersistence()
+    let transport = RecordingConnection()
+    let replayStore = DaemonReplayStore(capacity: 8)
+    let channel = DaemonConnectionChannel(
+      connection: transport,
+      mode: .v2(version: 2),
+      clientID: UUID(),
+      replayStore: replayStore)
+    await registry.addConnection(id: transport.id, channel: channel)
+
+    let result = await registry.apply(.listRecentProjects, connectionID: transport.id)
+    #expect(result?.error == nil)
+    #expect(result?.response != nil)
+    #expect(transport.frames.isEmpty)
+
+    let requestID = UUID()
+    try await channel.sendResponse(
+      requestID: requestID,
+      event: try #require(result?.response))
+    #expect(transport.frames.count == 1)
+    let response = try JSONDecoder().decode(
+      DaemonWireEnvelope.self,
+      from: try #require(transport.frames.first))
+    #expect(response.kind == .response)
+    #expect(response.requestID == requestID)
+    #expect(response.sequence == nil)
+
+    await registry.removeConnection(transport.id)
+    let reconnectTransport = RecordingConnection()
+    let reconnectChannel = DaemonConnectionChannel(
+      connection: reconnectTransport,
+      mode: .v2(version: 2),
+      clientID: await channel.clientID,
+      replayStore: replayStore)
+    try await reconnectChannel.replay(after: 0)
+    #expect(reconnectTransport.frames.isEmpty)
+  }
+
+  #if canImport(Darwin)
+    @Test
+    func unixCloseSyncWaitsForActiveFrameBeforeClosingDescriptor() async throws {
+      try await assertUnixCloseWaitsForActiveFrame { connection in
+        connection.closeSync()
+      }
+    }
+
+    @Test
+    func unixAsyncCloseWaitsForActiveFrameBeforeClosingDescriptor() async throws {
+      try await assertUnixCloseWaitsForActiveFrame { connection in
+        try await connection.close()
+      }
+    }
+
+    private func assertUnixCloseWaitsForActiveFrame(
+      _ close: @escaping @Sendable (UnixSocketConnection) async throws -> Void
+    ) async throws {
+      var pair = [Int32](repeating: -1, count: 2)
+      #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
+      let peerDescriptor = pair[1]
+      defer { Darwin.close(peerDescriptor) }
+
+      var sendBuffer: Int32 = 1_024
+      _ = setsockopt(
+        pair[0],
+        SOL_SOCKET,
+        SO_SNDBUF,
+        &sendBuffer,
+        socklen_t(MemoryLayout<Int32>.size))
+      let connection = UnixSocketConnection(
+        fileDescriptor: pair[0], writeTimeout: 5)
+      let payload = Data(repeating: 0x41, count: 2 * 1024 * 1024)
+      let sendTask = Task {
+        try await connection.sendFrame(payload)
+      }
+      try await Task.sleep(for: .milliseconds(50))
+
+      let closeCompletion = CloseCompletionProbe()
+      let closeTask = Task {
+        try await close(connection)
+        await closeCompletion.mark()
+      }
+      try await Task.sleep(for: .milliseconds(50))
+      let closedBeforeDrain = await closeCompletion.completed
+      #expect(!closedBeforeDrain)
+
+      let received = try await Task.detached {
+        try FramedMessageIO.readFrame(from: peerDescriptor)
+      }.value
+      try await sendTask.value
+      try await closeTask.value
+      let closedAfterDrain = await closeCompletion.completed
+      #expect(closedAfterDrain)
+      #expect(received == payload)
+    }
+  #endif
 
   @Test
   func deletingAProjectsLoopsEndsEverySessionFirst() async {
@@ -442,6 +690,59 @@ struct ProjectRegistryTests {
   /// than assuming `/tmp` survives as written.
   private static func names(_ paths: [String]) -> [String] {
     paths.map { URL(fileURLWithPath: $0).lastPathComponent }
+  }
+}
+
+private final class FailingConnection: @unchecked Sendable, DaemonConnection {
+  let id = UUID()
+  let endpoint: DaemonEndpoint = .namedPipe("failing")
+  private let lock = NSLock()
+  private var closed = false
+  private var attempts = 0
+
+  var isClosed: Bool {
+    lock.withLock { closed }
+  }
+
+  var sendAttempts: Int {
+    lock.withLock { attempts }
+  }
+
+  func receiveFrame() async throws -> Data {
+    throw FramedMessageIO.IOError.connectionClosed
+  }
+
+  func sendFrame(_ data: Data) async throws {
+    lock.withLock { attempts += 1 }
+    throw FramedMessageIO.IOError.writeFailed(errno: 1)
+  }
+
+  func close() async throws {
+    lock.withLock { closed = true }
+  }
+}
+
+private final class RecordingConnection: @unchecked Sendable, DaemonConnection {
+  let id = UUID()
+  let endpoint: DaemonEndpoint = .namedPipe("recording")
+  private(set) var frames = [Data]()
+
+  func receiveFrame() async throws -> Data {
+    throw FramedMessageIO.IOError.connectionClosed
+  }
+
+  func sendFrame(_ data: Data) async throws {
+    frames.append(data)
+  }
+
+  func close() async throws {}
+}
+
+private actor CloseCompletionProbe {
+  private(set) var completed = false
+
+  func mark() {
+    completed = true
   }
 }
 

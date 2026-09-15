@@ -1,11 +1,5 @@
 import Foundation
 
-#if canImport(Darwin)
-  import Darwin
-#else
-  import Glibc
-#endif
-
 /// `graphcoded`'s diagnostics — one line per IPC event, timestamped, `key=value`, and
 /// never a payload (issue #289).
 ///
@@ -33,6 +27,28 @@ import Foundation
 /// itself and, when stdout is not a terminal, moves stdout and stderr onto its own
 /// descriptor — so anything still printed the old way, and the Swift runtime's own crash
 /// output, lands in the file this rotates rather than in one that only ever grows.
+#if canImport(Darwin)
+  import Darwin
+#elseif canImport(Glibc)
+  import Glibc
+#endif
+
+/// The request being handled, for lines recorded deeper in the daemon — the store's
+/// persist and broadcast, the registry's reply — to carry the same `conn`/`seq` as the
+/// connection loop's own line, so one command's phases read as one story.
+
+/// Who is on the other end of a unix socket — the peer's pid, and nothing else.
+///
+/// Why a diagnostics path reads peer credentials at all, since it is the one field
+/// here that crosses a process boundary: #289 asks that a CLI timeout name an id usable
+/// across the CLI's and the daemon's records, and there is no wire change in this
+/// series. The pid is the one identifier both sides already know — the CLI prints its
+/// own on timeout, the daemon logs the peer's on connect — so the two records can be
+/// joined from outside. An id the daemon minted would tell two connections apart in the
+/// log but could never be printed by a client that never learns it, which leaves that
+/// criterion unsatisfiable without a protocol change. A pid identifies a process, not a
+/// person, is visible to anyone on the machine with `ps`, and is used as a credential
+/// nowhere. The uid and gid that `SO_PEERCRED` also returns are discarded unread.
 public final class DaemonLog: @unchecked Sendable {
   public static let shared = DaemonLog()
 
@@ -54,6 +70,9 @@ public final class DaemonLog: @unchecked Sendable {
   /// Guards the taps alone, so `record`'s only wait is for another `record`.
   private let tapLock = NSLock()
   private var descriptor: Int32 = -1
+  #if os(Windows)
+    private var windowsHandle: FileHandle?
+  #endif
   private var url: URL?
   private var bytesWritten = 0
   private var limit = DaemonLog.maxBytes
@@ -77,7 +96,11 @@ public final class DaemonLog: @unchecked Sendable {
     defer { fileLock.unlock() }
     limit = maxBytes
     url = directory.appendingPathComponent(Self.fileName)
-    mirrorsStandardStreams = mirroringStandardStreams && isatty(STDOUT_FILENO) == 0
+    #if os(Windows)
+      mirrorsStandardStreams = false
+    #else
+      mirrorsStandardStreams = mirroringStandardStreams && isatty(STDOUT_FILENO) == 0
+    #endif
     openLocked()
   }
 
@@ -110,7 +133,8 @@ public final class DaemonLog: @unchecked Sendable {
     let observers = Array(taps.values)
     tapLock.unlock()
     for observer in observers { observer(line) }
-    queue.async { [self] in write(line + "\n") }
+    let record = line + "\n"
+    queue.async { [self] in write(record) }
   }
 
   /// A duration as the log spells it: milliseconds with one decimal, so a stall of
@@ -129,49 +153,74 @@ public final class DaemonLog: @unchecked Sendable {
   private func write(_ text: String) {
     fileLock.lock()
     defer { fileLock.unlock() }
-    guard descriptor >= 0 else { return }
     let data = Data(text.utf8)
-    // The file's real size, not a running count of this log's own lines: stdout and
-    // stderr write to the same file through the mirrored descriptors, and those bytes
-    // count against the bound too — a bound that only saw its own records was
-    // measured 25× over.
-    var info = stat()
-    let size = fstat(descriptor, &info) == 0 ? Int(info.st_size) : bytesWritten
-    if size + data.count > limit { rotateLocked() }
-    data.withUnsafeBytes { raw in
-      var remaining = raw.count
-      var pointer = raw.baseAddress!
-      while remaining > 0 {
-        #if canImport(Darwin)
-          let written = Darwin.write(descriptor, pointer, remaining)
-        #else
-          let written = Glibc.write(descriptor, pointer, remaining)
-        #endif
-        guard written > 0 else { return }
-        remaining -= written
-        pointer = pointer.advanced(by: written)
+    #if os(Windows)
+      guard windowsHandle != nil, let url else { return }
+      let size =
+        ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?
+        .intValue ?? bytesWritten
+      if size + data.count > limit { rotateLocked() }
+      do {
+        try self.windowsHandle?.seekToEnd()
+        try self.windowsHandle?.write(contentsOf: data)
+        bytesWritten += data.count
+      } catch {}
+      return
+    #else
+      guard descriptor >= 0 else { return }
+      // The file's real size, not a running count of this log's own lines: stdout and
+      // stderr write to the same file through the mirrored descriptors, and those bytes
+      // count against the bound too — a bound that only saw its own records was
+      // measured 25× over.
+      var info = stat()
+      let size = fstat(descriptor, &info) == 0 ? Int(info.st_size) : bytesWritten
+      if size + data.count > limit { rotateLocked() }
+      data.withUnsafeBytes { raw in
+        var remaining = raw.count
+        var pointer = raw.baseAddress!
+        while remaining > 0 {
+          #if canImport(Darwin)
+            let written = Darwin.write(descriptor, pointer, remaining)
+          #else
+            let written = Glibc.write(descriptor, pointer, remaining)
+          #endif
+          guard written > 0 else { return }
+          remaining -= written
+          pointer = pointer.advanced(by: written)
+        }
       }
-    }
-    bytesWritten += data.count
+      bytesWritten += data.count
+    #endif
   }
 
   private func openLocked() {
     guard let url else { return }
-    let opened = url.path.withCString { path in
-      #if canImport(Darwin)
-        Darwin.open(path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
-      #else
-        Glibc.open(path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
-      #endif
-    }
-    guard opened >= 0 else { return }
-    descriptor = opened
-    var info = stat()
-    bytesWritten = fstat(opened, &info) == 0 ? Int(info.st_size) : 0
-    if mirrorsStandardStreams {
-      dup2(opened, STDOUT_FILENO)
-      dup2(opened, STDERR_FILENO)
-    }
+    #if os(Windows)
+      if !FileManager.default.fileExists(atPath: url.path) {
+        _ = FileManager.default.createFile(atPath: url.path, contents: nil)
+      }
+      windowsHandle = try? FileHandle(forWritingTo: url)
+      bytesWritten =
+        ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?
+        .intValue ?? 0
+      return
+    #else
+      let opened = url.path.withCString { path in
+        #if canImport(Darwin)
+          Darwin.open(path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+        #else
+          Glibc.open(path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+        #endif
+      }
+      guard opened >= 0 else { return }
+      descriptor = opened
+      var info = stat()
+      bytesWritten = fstat(opened, &info) == 0 ? Int(info.st_size) : 0
+      if mirrorsStandardStreams {
+        dup2(opened, STDOUT_FILENO)
+        dup2(opened, STDERR_FILENO)
+      }
+    #endif
   }
 
   /// `graphcoded.log` becomes `graphcoded.log.1`, replacing the previous generation, and
@@ -179,15 +228,24 @@ public final class DaemonLog: @unchecked Sendable {
   /// into the rotated file.
   private func rotateLocked() {
     guard let url else { return }
-    #if canImport(Darwin)
-      _ = Darwin.close(descriptor)
+    #if os(Windows)
+      try? windowsHandle?.close()
+      windowsHandle = nil
+      let previous = URL(fileURLWithPath: url.path + ".1")
+      try? FileManager.default.removeItem(at: previous)
+      try? FileManager.default.moveItem(at: url, to: previous)
+      openLocked()
     #else
-      _ = Glibc.close(descriptor)
+      #if canImport(Darwin)
+        _ = Darwin.close(descriptor)
+      #else
+        _ = Glibc.close(descriptor)
+      #endif
+      descriptor = -1
+      let previous = url.path + ".1"
+      _ = url.path.withCString { current in previous.withCString { rename(current, $0) } }
+      openLocked()
     #endif
-    descriptor = -1
-    let previous = url.path + ".1"
-    _ = url.path.withCString { current in previous.withCString { rename(current, $0) } }
-    openLocked()
   }
 
   // MARK: - Formatting
@@ -213,7 +271,6 @@ public final class DaemonLog: @unchecked Sendable {
     return "\"" + value.replacingOccurrences(of: "\"", with: "'") + "\""
   }
 }
-
 extension DaemonCommand {
   /// The command's shape for a log line — the case name, and for a `graphCommand` the
   /// inner case too — never its payload.
@@ -230,21 +287,15 @@ extension DaemonCommand {
     return String(describing: value)
   }
 }
-
 extension GraphCommand {
   public var kindName: String {
     if case .subGraphCommand(_, let inner) = self { return "subGraphCommand." + inner.kindName }
     return DaemonCommand.caseName(of: self)
   }
 }
-
 extension DaemonEvent {
   public var kindName: String { DaemonCommand.caseName(of: self) }
 }
-
-/// The request being handled, for lines recorded deeper in the daemon — the store's
-/// persist and broadcast, the registry's reply — to carry the same `conn`/`seq` as the
-/// connection loop's own line, so one command's phases read as one story.
 public enum DaemonRequestContext {
   public struct Request: Sendable {
     public let connection: Int
@@ -265,47 +316,36 @@ public enum DaemonRequestContext {
   }
 }
 
-/// Who is on the other end of a unix socket — the peer's pid, and nothing else.
-///
-/// Why a diagnostics path reads peer credentials at all, since it is the one field
-/// here that crosses a process boundary: #289 asks that a CLI timeout name an id usable
-/// across the CLI's and the daemon's records, and there is no wire change in this
-/// series. The pid is the one identifier both sides already know — the CLI prints its
-/// own on timeout, the daemon logs the peer's on connect — so the two records can be
-/// joined from outside. An id the daemon minted would tell two connections apart in the
-/// log but could never be printed by a client that never learns it, which leaves that
-/// criterion unsatisfiable without a protocol change. A pid identifies a process, not a
-/// person, is visible to anyone on the machine with `ps`, and is used as a credential
-/// nowhere. The uid and gid that `SO_PEERCRED` also returns are discarded unread.
-public enum SocketPeer {
-  #if !canImport(Darwin)
-    /// Linux's `struct ucred`, spelled out: Glibc's Swift module does not export the
-    /// type, only the `SO_PEERCRED` option that fills it.
-    private struct PeerCredentials {
-      var pid: pid_t = 0
-      var uid: uid_t = 0
-      var gid: gid_t = 0
-    }
-  #endif
-
-  public static func pid(of fileDescriptor: Int32) -> Int32? {
-    #if canImport(Darwin)
-      var pid: pid_t = 0
-      var size = socklen_t(MemoryLayout<pid_t>.size)
-      guard getsockopt(fileDescriptor, SOL_LOCAL, LOCAL_PEERPID, &pid, &size) == 0 else {
-        return nil
+#if canImport(Darwin) || canImport(Glibc)
+  public enum SocketPeer {
+    #if !canImport(Darwin)
+      /// Linux's `struct ucred`, spelled out: Glibc's Swift module does not export the
+      /// type, only the `SO_PEERCRED` option that fills it.
+      private struct PeerCredentials {
+        var pid: pid_t = 0
+        var uid: uid_t = 0
+        var gid: gid_t = 0
       }
-      return pid
-    #else
-      var credentials = PeerCredentials()
-      var size = socklen_t(MemoryLayout<PeerCredentials>.size)
-      guard getsockopt(fileDescriptor, SOL_SOCKET, SO_PEERCRED, &credentials, &size) == 0
-      else { return nil }
-      return credentials.pid
     #endif
-  }
-}
 
+    public static func pid(of fileDescriptor: Int32) -> Int32? {
+      #if canImport(Darwin)
+        var pid: pid_t = 0
+        var size = socklen_t(MemoryLayout<pid_t>.size)
+        guard getsockopt(fileDescriptor, SOL_LOCAL, LOCAL_PEERPID, &pid, &size) == 0 else {
+          return nil
+        }
+        return pid
+      #else
+        var credentials = PeerCredentials()
+        var size = socklen_t(MemoryLayout<PeerCredentials>.size)
+        guard getsockopt(fileDescriptor, SOL_SOCKET, SO_PEERCRED, &credentials, &size) == 0
+        else { return nil }
+        return credentials.pid
+      #endif
+    }
+  }
+#endif
 extension UUID {
   /// The first eight characters — enough to tell connections apart in a log, short
   /// enough to read; the daemon's `connect` line carries it as `id=`.

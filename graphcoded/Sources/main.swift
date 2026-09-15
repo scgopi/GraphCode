@@ -1,308 +1,690 @@
 import Foundation
+
 import GraphcodeKit
 
-#if canImport(Darwin)
-  import Darwin
-#else
-  import Glibc
+#if os(Windows)
+  import WinSDK
 #endif
 
-// graphcoded — the graphcode orchestrator daemon.
-//
-// From Phase 3 on this is no longer an empty skeleton (see docs/07-roadmap.md): it
-// speaks `DaemonProtocol` over the Unix socket, fires `.handoff` edges automatically,
-// and arms time-based triggers that keep firing whether or not `graphcode.app` is
-// running — see docs/03-architecture.md#why-a-daemon-at-all for why this has to be a
-// separate, long-lived process rather than in-app state. From Phase 4 on it hosts one
-// `LoopGraph` per opened project (`ProjectRegistry`, wrapping one `GraphStore` per
-// project) rather than a single hardcoded graph, each persisted under this directory.
+// Both platform daemons live in this one file because only `main.swift` may carry
+// top-level code: a second file holding the Darwin entry point compiles on Windows,
+// where it is excluded, and fails everywhere else.
 
-let fileManager = FileManager.default
+#if os(Windows)
+  private enum DaemonStartupHandoffError: Error {
+    case missingReadyEvent
+    case openStartupEvent(UInt32)
+    case waitStartupEvent(DWORD)
+    case openReadyEvent(UInt32)
+  }
 
-// Launched by an agent rather than launchd — `make daemon-install` from a loop's own
-// shell — the daemon inherits that session's identity and would hand it to every backend
-// it starts. See `AgentEnvironment`.
-AgentEnvironment.scrubInheritedAgentIdentity()
+  private final class DaemonStartupHandoff: @unchecked Sendable {
+    let startupEvent: HANDLE?
+    let readyEvent: HANDLE?
 
-// Migrates a pre-existing `~/Library/Application Support/graphcode` and creates the
-// directory. Has to happen before anything reads or writes — including the socket bind
-// immediately below.
-SupportDirectory.prepare()
-let supportDirectory = SupportDirectory.url
+    init(environment: [String: String] = ProcessInfo.processInfo.environment) throws {
+      guard let startupEventName = environment["GRAPHCODE_DAEMON_STARTUP_EVENT"] else {
+        startupEvent = nil
+        readyEvent = nil
+        return
+      }
+      var startupName = Array(startupEventName.utf16)
+      startupName.append(0)
+      guard
+        let startupEvent = startupName.withUnsafeBufferPointer({
+          OpenEventW(DWORD(SYNCHRONIZE), false, $0.baseAddress)
+        })
+      else {
+        throw DaemonStartupHandoffError.openStartupEvent(GetLastError())
+      }
+      let startupResult = WaitForSingleObject(startupEvent, 5_000)
+      guard startupResult == WAIT_OBJECT_0 else {
+        CloseHandle(startupEvent)
+        throw DaemonStartupHandoffError.waitStartupEvent(startupResult)
+      }
 
-let socketURL = DaemonSocketPath.url
-// Clear a stale socket file left behind by a previous run that didn't shut down cleanly.
-try? fileManager.removeItem(at: socketURL)
+      guard let readyEventName = environment["GRAPHCODE_DAEMON_HANDOFF_READY_EVENT"] else {
+        CloseHandle(startupEvent)
+        throw DaemonStartupHandoffError.missingReadyEvent
+      }
+      var readyName = Array(readyEventName.utf16)
+      readyName.append(0)
+      guard
+        let readyEvent = readyName.withUnsafeBufferPointer({
+          OpenEventW(DWORD(EVENT_MODIFY_STATE), false, $0.baseAddress)
+        })
+      else {
+        let code = GetLastError()
+        CloseHandle(startupEvent)
+        throw DaemonStartupHandoffError.openReadyEvent(code)
+      }
+      self.startupEvent = startupEvent
+      self.readyEvent = readyEvent
+    }
 
-func fail(_ message: String) -> Never {
-  FileHandle.standardError.write(Data("graphcoded: \(message)\n".utf8))
-  exit(1)
-}
+    var isParentHandoff: Bool { startupEvent != nil }
 
-#if canImport(Darwin)
-  let socketDescriptor = socket(AF_UNIX, SOCK_STREAM, 0)
-#else
-  // Glibc imports SOCK_STREAM as the `__socket_type` enum, not an Int32.
-  let socketDescriptor = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
-#endif
-guard socketDescriptor >= 0 else {
-  fail("failed to create socket (errno \(errno))")
-}
+    func publish() -> Bool {
+      guard let readyEvent else { return true }
+      return SetEvent(readyEvent)
+    }
 
-var address = sockaddr_un()
-address.sun_family = sa_family_t(AF_UNIX)
-#if canImport(Darwin)
-  address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
-#endif
-
-let path = socketURL.path
-withUnsafeMutablePointer(to: &address.sun_path) { pathField in
-  pathField.withMemoryRebound(
-    to: CChar.self, capacity: MemoryLayout.size(ofValue: pathField.pointee)
-  ) { pathPointer in
-    _ = path.withCString { cPath in
-      strncpy(pathPointer, cPath, MemoryLayout.size(ofValue: pathField.pointee) - 1)
+    deinit {
+      if let startupEvent {
+        CloseHandle(startupEvent)
+      }
+      if let readyEvent {
+        CloseHandle(readyEvent)
+      }
     }
   }
-}
 
-let bindResult = withUnsafePointer(to: &address) { addressPointer -> Int32 in
-  addressPointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { rawPointer in
-    bind(socketDescriptor, rawPointer, socklen_t(MemoryLayout<sockaddr_un>.size))
-  }
-}
-guard bindResult == 0 else {
-  fail("failed to bind \(path) (errno \(errno))")
-}
-
-guard listen(socketDescriptor, 8) == 0 else {
-  fail("failed to listen on \(path) (errno \(errno))")
-}
-
-// The diagnostics file, opened before the first line worth keeping. Stdout and stderr
-// move onto it (launchd pointed them at the same file, unbounded), so from here every
-// line the daemon writes is timestamped, structured, and rotated.
-DaemonLog.shared.open(directory: supportDirectory, mirroringStandardStreams: true)
-DaemonLog.shared.record(
-  "startup",
-  [
-    ("pid", String(getpid())),
-    ("version", DaemonIdentity.version),
-    ("build", DaemonIdentity.build),
-    ("executable", CommandLine.arguments[0]),
-    ("support", supportDirectory.path),
-    ("socket", path),
-  ])
-
-// A broadcast writes to every connected client, and a client can vanish without a
-// clean close — the app killed, a CLI exiting early, a pane crashing. The write then
-// raises SIGPIPE, whose default action *terminates the daemon*: observed as exit
-// status -13 in `launchctl list`, with every loop's in-flight send failing until
-// launchd restarted the process seconds later.
-//
-// Ignoring it turns that into what the code already handles correctly:
-// `FramedMessageIO.writeAll` sees write() return -1/EPIPE, throws, and
-// `GraphStore.send` drops the dead connection. The error path was always right; the
-// process just never lived long enough to run it.
-signal(SIGPIPE, SIG_IGN)
-
-// Before the shutdown handlers below, which flush its writer on the way out.
-let registry = ProjectRegistry(
-  persistenceDirectory: supportDirectory,
-  reapCondemnedSessions: true)
-
-// Termination is handled on the main queue, not in signal context (#167). The handlers
-// this replaces called `exit(0)` from inside the signal handler itself, and `exit` is
-// not async-signal-safe: it runs atexit and runtime teardown after interrupting whatever
-// thread happened to be running — which can be a thread mid-`malloc` or mid-`write`,
-// holding exactly the locks teardown needs. An idle daemon died cleanly in milliseconds
-// every time; a busy one could deadlock until launchd's ExitTimeOut escalated to
-// SIGKILL, observed as `launchctl bootout` taking ~29 seconds while a workspace was
-// being deleted. A dispatch signal source delivers the signal as an ordinary work item,
-// where `exit` is just a function call.
-//
-// `SIG_IGN` first, so the default terminate-without-cleanup disposition can't win the
-// race before the sources are resumed.
-signal(SIGTERM, SIG_IGN)
-signal(SIGINT, SIG_IGN)
-
-func makeShutdownSource(for signalNumber: Int32) -> DispatchSourceSignal {
-  let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
-  source.setEventHandler {
-    registry.flushPersistence()
-    unlink(path)
-    exit(0)
-  }
-  source.resume()
-  return source
-}
-
-// Top-level lets, so the sources outlive this file's execution — a released source
-// stops delivering, and the signal falls back to the ignored disposition above, which
-// would make the daemon *unkillable* by SIGTERM instead of slow.
-let terminateSource = makeShutdownSource(for: SIGTERM)
-let interruptSource = makeShutdownSource(for: SIGINT)
-
-// Notice the binary being swapped underneath this process and get out of its way
-// (#199). `DaemonBootstrap` boots a stale daemon out only from the app, at launch, for
-// the current workspace — every path that misses that call (an update whose relaunch
-// never happened, a workspace whose window stays closed) left an old daemon running old
-// code under `KeepAlive` indefinitely; the pre-0.1.44 PTY leak survived weeks of
-// upgrades exactly this way. The install lands a fresh inode, so one `stat` a minute
-// answers the question, and exiting cleanly is enough: `KeepAlive` respawns the path,
-// which is now the new binary. A launch identity that cannot be read (a relative
-// argv[0] from a hand launch) disables the check rather than arming a wrong one, and a
-// transient unreadable tick — the rename window mid-install — is skipped, not obeyed.
-func makeStalenessTimer() -> DispatchSourceTimer? {
-  let executablePath = CommandLine.arguments[0]
-  guard let launchIdentity = ExecutableIdentity.of(path: executablePath) else { return nil }
-  let timer = DispatchSource.makeTimerSource(queue: .main)
-  timer.schedule(deadline: .now() + 60, repeating: 60)
-  timer.setEventHandler {
-    guard let current = ExecutableIdentity.of(path: executablePath), current != launchIdentity
+  private func writeDaemonHandoffTestState(_ state: String) {
+    guard let path = ProcessInfo.processInfo.environment["GRAPHCODE_DAEMON_HANDOFF_TEST_STATE"]
     else { return }
-    DaemonLog.shared.record("shutdown", [("reason", "binary-replaced")])
-    registry.flushPersistence()
-    unlink(path)
-    exit(0)
+    try? Data(state.utf8).write(to: URL(fileURLWithPath: path), options: .atomic)
   }
-  timer.resume()
-  return timer
-}
 
-let stalenessTimer = makeStalenessTimer()
+  SupportDirectory.prepare()
+  private let startupHandoff: DaemonStartupHandoff = {
+    do {
+      return try DaemonStartupHandoff()
+    } catch {
+      FileHandle.standardError.write(Data("graphcoded: \(error)\n".utf8))
+      exit(1)
+    }
+  }()
+  if startupHandoff.isParentHandoff {
+    writeDaemonHandoffTestState("startup-gate")
+  }
+  let endpointName: String = {
+    do {
+      return try WindowsNamedPipeEndpoint.name()
+    } catch {
+      writeDaemonHandoffTestState("failed: \(error)")
+      FileHandle.standardError.write(Data("graphcoded: \(error)\n".utf8))
+      exit(1)
+    }
+  }()
 
-/// Bridges a blocking socket read onto a background queue so the `Task` awaiting it
-/// never blocks Swift concurrency's cooperative thread pool — the whole connection
-/// handler below is otherwise just async/await hops (this, plus actor calls).
-@Sendable func readFrameAsync(from fileDescriptor: Int32) async throws -> Data {
-  try await withCheckedThrowingContinuation { continuation in
-    DispatchQueue.global().async {
-      do {
-        continuation.resume(returning: try FramedMessageIO.readFrame(from: fileDescriptor))
-      } catch {
-        continuation.resume(throwing: error)
+  let instanceLock: WindowsDaemonInstanceLock = {
+    do {
+      let startupReservation: WindowsDaemonStartupReservation?
+      if startupHandoff.isParentHandoff {
+        startupReservation = nil
+      } else {
+        startupReservation = try WindowsDaemonStartupReservation()
       }
+      defer { _ = startupReservation }
+      try WindowsNamedPipeEndpoint.recordActiveGeneration()
+      return try WindowsDaemonInstanceLock()
+    } catch WindowsPipeError.instanceAlreadyRunning {
+      writeDaemonHandoffTestState("failed: instance already running")
+      FileHandle.standardError.write(Data("graphcoded: daemon is already running\n".utf8))
+      exit(1)
+    } catch {
+      writeDaemonHandoffTestState("failed: \(error)")
+      FileHandle.standardError.write(Data("graphcoded: \(error)\n".utf8))
+      exit(1)
+    }
+  }()
+  if startupHandoff.isParentHandoff {
+    writeDaemonHandoffTestState("lifetime-lock")
+  }
+  let supportDirectory = SupportDirectory.url
+  let replayStore = DaemonReplayStore(capacity: 128)
+  let handshakeLimiter = WindowsPipeHandshakeLimiter(limit: 32)
+  let registry = ProjectRegistry(
+    persistenceDirectory: supportDirectory,
+    replayStore: replayStore)
+  let replayCleanupTask = replayStore.startCleanup()
+  let listener: WindowsNamedPipeListener = {
+    do {
+      return try WindowsNamedPipeListener(
+        pipeName: endpointName,
+        onPublished: {
+          writeDaemonHandoffTestState(
+            startupHandoff.publish() ? "published" : "failed: ready event")
+        })
+    } catch {
+      writeDaemonHandoffTestState("failed: \(error)")
+      FileHandle.standardError.write(Data("graphcoded: \(error)\n".utf8))
+      exit(1)
+    }
+  }()
+
+  final class ShutdownState: @unchecked Sendable {
+    let lock = NSLock()
+    var stopped = false
+
+    func isStopped() -> Bool {
+      lock.lock()
+      defer { lock.unlock() }
+      return stopped
     }
   }
-}
+  let shutdown = ShutdownState()
 
-/// A counter safe to bump from the accept loop's thread while connection tasks read it.
-final class ManagedAtomic: @unchecked Sendable {
-  private var value: Int
-  private let lock = NSLock()
-  init(_ value: Int) { self.value = value }
-  func next() -> Int {
-    lock.lock()
-    defer { lock.unlock() }
-    value += 1
-    return value
-  }
-}
-
-/// Numbers connections in the order they arrived — the `conn` every line about one
-/// carries, short enough to read and stable for the daemon's lifetime.
-let connectionCounter = ManagedAtomic(0)
-
-func handleConnection(_ fileDescriptor: Int32) {
-  Task {
-    let connectionID = UUID()
-    let connection = connectionCounter.next()
-    let peer = SocketPeer.pid(of: fileDescriptor)
-    let connected = Date()
-    // `addConnection` opens this connection's outbound channel as it registers it.
-    await registry.addConnection(id: connectionID, fileDescriptor: fileDescriptor)
-    // `peer` is the client's pid: what a `graphcode` invocation prints when it times
-    // out, so its complaint and these lines can be matched up with no id on the wire.
-    DaemonLog.shared.record(
-      "connect",
-      [
-        ("conn", String(connection)), ("id", connectionID.tag), ("fd", String(fileDescriptor)),
-        ("peer", peer.map(String.init) ?? "?"),
-      ])
-    var sequence = 0
-    var requests = 0
-    while true {
-      let data: Data
-      do {
-        data = try await readFrameAsync(from: fileDescriptor)
-      } catch {
-        break
+  #if os(Windows)
+    if let shutdownEventName = ProcessInfo.processInfo.environment[
+      "GRAPHCODE_DAEMON_SHUTDOWN_EVENT"
+    ] {
+      var wideName = Array(shutdownEventName.utf16)
+      wideName.append(0)
+      if let shutdownEvent = wideName.withUnsafeBufferPointer({
+        OpenEventW(DWORD(SYNCHRONIZE), false, $0.baseAddress)
+      }) {
+        DispatchQueue.global(qos: .utility).async {
+          _ = WaitForSingleObject(shutdownEvent, INFINITE)
+          shutdown.lock.lock()
+          shutdown.stopped = true
+          shutdown.lock.unlock()
+          Task {
+            await ZmxSessionLauncher.shutdownWindowsRemoteBridge()
+            try? await listener.close()
+            CloseHandle(shutdownEvent)
+            exit(0)
+          }
+        }
       }
-      sequence += 1
-      let received = Date()
-      let request = DaemonRequestContext.Request(connection: connection, sequence: sequence)
+    }
+  #endif
+
+  func handleWindowsConnection(_ connection: any DaemonConnection) {
+    guard let handshakePermit = handshakeLimiter.tryAcquire() else {
+      Task { try? await connection.close() }
+      return
+    }
+    Task {
+      let connectionID = connection.id
+      var channel: DaemonConnectionChannel?
+      var initialFrameData: Data?
+      FileHandle.standardOutput.write(Data("graphcoded: client connected\n".utf8))
+      defer {
+        let hadChannel = channel != nil
+        Task {
+          await registry.removeConnection(connectionID)
+          if !hadChannel { try? await connection.close() }
+        }
+      }
+
       do {
-        let command = try JSONDecoder().decode(DaemonCommand.self, from: data)
-        let decoded = Date()
-        // Logged on receipt, before anything is handled: a request that hangs is
-        // exactly the one worth a line, and a line written on completion would never
-        // come. Never the payload — a `graphCommand.memoNode` is logged as exactly that.
-        DaemonLog.shared.record(
-          "request",
-          [
-            ("conn", String(connection)), ("seq", String(sequence)),
-            ("kind", command.kindName), ("bytes", String(data.count)),
-            ("decode_ms", DaemonLog.milliseconds(decoded.timeIntervalSince(received))),
-          ])
-        await DaemonRequestContext.$current.withValue(request) {
+        let firstData: Data
+        if let pipe = connection as? WindowsNamedPipeConnection {
+          firstData = try await pipe.receiveFrameWithFirstByteDeadline()
+        } else {
+          firstData = try await connection.receiveFrame()
+        }
+        initialFrameData = firstData
+        switch try DaemonWireProtocol.decodeClientFrame(firstData) {
+        case .v1(let command):
+          let v1Channel = DaemonConnectionChannel(connection: connection, mode: .v1)
+          channel = v1Channel
+          await registry.addConnection(id: connectionID, channel: v1Channel)
+          handshakePermit.release()
           await registry.handle(command, connectionID: connectionID)
+
+        case .v2(let hello):
+          guard hello.kind == .hello else {
+            try await connection.sendFrame(
+              JSONEncoder().encode(
+                DaemonWireEnvelope.error(
+                  id: nil, code: DaemonWireErrorCode.expectedHello.rawValue,
+                  message: "the first v2 frame must be hello")))
+            return
+          }
+          let selectedVersion: Int
+          do {
+            selectedVersion = try DaemonWireProtocol.negotiatedVersion(for: hello)
+          } catch DaemonWireProtocol.NegotiationError.noSupportedVersion {
+            try await connection.sendFrame(
+              JSONEncoder().encode(
+                DaemonWireEnvelope.error(
+                  id: nil, code: DaemonWireErrorCode.unsupportedVersion.rawValue,
+                  message: "no mutually supported daemon protocol version")))
+            return
+          }
+          let mode: DaemonProtocolMode = selectedVersion == 2 ? .v2(version: 2) : .v1
+          let v2Channel = DaemonConnectionChannel(
+            connection: connection,
+            mode: mode,
+            clientID: hello.clientID ?? connectionID,
+            subscription: hello.subscription,
+            replayStore: replayStore)
+          channel = v2Channel
+          await registry.addConnection(id: connectionID, channel: v2Channel)
+          try await v2Channel.sendHelloResponse(selectedVersion: selectedVersion)
+          handshakePermit.release()
+          if selectedVersion == 2, let resumeFrom = hello.resumeFrom {
+            do {
+              try await v2Channel.replay(after: resumeFrom)
+            } catch DaemonConnectionChannelError.replayUnavailable {
+              try await v2Channel.sendError(
+                code: .replayUnavailable,
+                message: "requested replay history is unavailable")
+            } catch DaemonConnectionChannelError.cursorOutsideWindow {
+              try await v2Channel.sendError(
+                code: .cursorOutsideWindow,
+                message: "requested cursor is beyond the retained event history")
+            }
+          }
         }
-        requests += 1
-        DaemonLog.shared.record(
-          "handled",
-          [
-            ("conn", String(connection)), ("seq", String(sequence)),
-            ("kind", command.kindName),
-            ("handle_ms", DaemonLog.milliseconds(Date().timeIntervalSince(decoded))),
-          ])
+
+        guard let channel else { return }
+        while true {
+          let data: Data
+          if let pipe = connection as? WindowsNamedPipeConnection {
+            data = try await pipe.receiveFrameWithPostHandshakeDeadline()
+          } else {
+            data = try await channel.receiveFrame()
+          }
+          do {
+            switch try DaemonWireProtocol.decodeClientFrame(data) {
+            case .v1(let command):
+              guard channel.mode == .v1 else {
+                try await channel.sendError(
+                  code: .malformedEnvelope,
+                  message: "v2 connections must send request envelopes")
+                continue
+              }
+              await registry.handle(command, connectionID: connectionID)
+
+            case .v2(let request):
+              guard case .v2 = channel.mode, request.kind == .request,
+                let requestID = request.requestID, let command = request.command
+              else {
+                try await channel.sendError(
+                  requestID: DaemonWireProtocol.requestIDIfPresent(in: data),
+                  code: .malformedEnvelope,
+                  message: "expected a v2 request envelope")
+                continue
+              }
+              guard let result = await registry.apply(command, connectionID: connectionID) else {
+                try await channel.sendError(
+                  requestID: requestID,
+                  code: .connectionClosed,
+                  message: "connection is no longer registered")
+                continue
+              }
+              if let error = result.error {
+                try await channel.sendError(
+                  requestID: requestID, code: .requestFailed, message: error)
+              } else if let response = result.response {
+                try await channel.sendResponse(requestID: requestID, event: response)
+              } else if result.succeeded {
+                try await channel.sendSuccess(requestID: requestID)
+              } else {
+                try await channel.sendError(
+                  requestID: requestID,
+                  code: .requestFailed,
+                  message: "request could not be applied")
+              }
+            }
+          } catch {
+            try await channel.sendError(
+              requestID: DaemonWireProtocol.requestIDIfPresent(in: data),
+              code: .malformedEnvelope,
+              message: "\(error)")
+          }
+        }
+      } catch WindowsPipeError.timedOut {
+        try? await connection.close()
       } catch {
-        DaemonLog.shared.record(
-          "request",
-          [
-            ("conn", String(connection)), ("seq", String(sequence)), ("kind", "undecodable"),
-            ("bytes", String(data.count)),
-          ])
-        // A frame that read fine but didn't decode is version skew, not a dead socket:
-        // a newer CLI sent a command this daemon predates. Dropping the connection here
-        // failed *silently* — the client just saw a hang-up — so answer instead and
-        // keep serving the commands this daemon does understand.
-        let event = DaemonEvent.errorOccurred(
-          "unrecognized command — graphcoded may be older than the client that sent it")
-        if let encoded = try? JSONEncoder().encode(event) {
-          OutboundChannels.send(encoded, to: fileDescriptor)
+        if let channel {
+          try? await channel.sendError(code: .transportFailure, message: "\(error)")
+        } else if let initialFrameData,
+          let errorFrame = try? DaemonWireProtocol.initialErrorFrame(
+            for: initialFrameData, message: "\(error)")
+        {
+          try? await connection.sendFrame(errorFrame)
+        }
+      }
+      FileHandle.standardOutput.write(Data("graphcoded: client disconnected\n".utf8))
+    }
+  }
+
+  Task {
+    while !Task.isCancelled {
+      do {
+        handleWindowsConnection(try await listener.accept())
+      } catch {
+        if shutdown.isStopped() { return }
+      }
+    }
+  }
+
+  signal(SIGINT) { _ in
+    shutdown.lock.lock()
+    shutdown.stopped = true
+    shutdown.lock.unlock()
+    Task {
+      await ZmxSessionLauncher.shutdownWindowsRemoteBridge()
+      try? await listener.close()
+      exit(0)
+    }
+  }
+  signal(SIGTERM) { _ in
+    shutdown.lock.lock()
+    shutdown.stopped = true
+    shutdown.lock.unlock()
+    Task {
+      await ZmxSessionLauncher.shutdownWindowsRemoteBridge()
+      try? await listener.close()
+      exit(0)
+    }
+  }
+
+  FileHandle.standardOutput.write(
+    Data("graphcoded: listening on \(String(describing: listener.endpoint))\n".utf8))
+  withExtendedLifetime((replayCleanupTask, instanceLock)) {
+    dispatchMain()
+  }
+#endif
+#if !os(Windows)
+  #if canImport(Darwin)
+    import Darwin
+  #else
+    import Glibc
+  #endif
+
+  // graphcoded — the graphcode orchestrator daemon.
+  //
+  // From Phase 3 on this is no longer an empty skeleton (see docs/07-roadmap.md): it
+  // speaks `DaemonProtocol` over the Unix socket, fires `.handoff` edges automatically,
+  // and arms time-based triggers that keep firing whether or not `graphcode.app` is
+  // running — see docs/03-architecture.md#why-a-daemon-at-all for why this has to be a
+  // separate, long-lived process rather than in-app state. From Phase 4 on it hosts one
+  // `LoopGraph` per opened project (`ProjectRegistry`, wrapping one `GraphStore` per
+  // project) rather than a single hardcoded graph, each persisted under this directory.
+
+  let fileManager = FileManager.default
+
+  // Launched by an agent rather than launchd — `make daemon-install` from a loop's own
+  // shell — the daemon inherits that session's identity and would hand it to every backend
+  // it starts. See `AgentEnvironment`.
+  AgentEnvironment.scrubInheritedAgentIdentity()
+
+  // Migrates a pre-existing `~/Library/Application Support/graphcode` and creates the
+  // directory. Has to happen before anything reads or writes — including the socket bind
+  // immediately below.
+  SupportDirectory.prepare()
+  let supportDirectory = SupportDirectory.url
+
+  let socketURL = DaemonSocketPath.url
+  // Clear a stale socket file left behind by a previous run that didn't shut down cleanly.
+  try? fileManager.removeItem(at: socketURL)
+
+  func fail(_ message: String) -> Never {
+    FileHandle.standardError.write(Data("graphcoded: \(message)\n".utf8))
+    exit(1)
+  }
+
+  #if canImport(Darwin)
+    let socketDescriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+  #else
+    // Glibc imports SOCK_STREAM as the `__socket_type` enum, not an Int32.
+    let socketDescriptor = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+  #endif
+  guard socketDescriptor >= 0 else {
+    fail("failed to create socket (errno \(errno))")
+  }
+
+  var address = sockaddr_un()
+  address.sun_family = sa_family_t(AF_UNIX)
+  #if canImport(Darwin)
+    address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+  #endif
+
+  let path = socketURL.path
+  withUnsafeMutablePointer(to: &address.sun_path) { pathField in
+    pathField.withMemoryRebound(
+      to: CChar.self, capacity: MemoryLayout.size(ofValue: pathField.pointee)
+    ) { pathPointer in
+      _ = path.withCString { cPath in
+        strncpy(pathPointer, cPath, MemoryLayout.size(ofValue: pathField.pointee) - 1)
+      }
+    }
+  }
+
+  let bindResult = withUnsafePointer(to: &address) { addressPointer -> Int32 in
+    addressPointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { rawPointer in
+      bind(socketDescriptor, rawPointer, socklen_t(MemoryLayout<sockaddr_un>.size))
+    }
+  }
+  guard bindResult == 0 else {
+    fail("failed to bind \(path) (errno \(errno))")
+  }
+
+  guard listen(socketDescriptor, 8) == 0 else {
+    fail("failed to listen on \(path) (errno \(errno))")
+  }
+
+  // The diagnostics file, opened before the first line worth keeping. Stdout and stderr
+  // move onto it (launchd pointed them at the same file, unbounded), so from here every
+  // line the daemon writes is timestamped, structured, and rotated.
+  DaemonLog.shared.open(directory: supportDirectory, mirroringStandardStreams: true)
+  DaemonLog.shared.record(
+    "startup",
+    [
+      ("pid", String(getpid())),
+      ("version", DaemonIdentity.version),
+      ("build", DaemonIdentity.build),
+      ("executable", CommandLine.arguments[0]),
+      ("support", supportDirectory.path),
+      ("socket", path),
+    ])
+
+  // A broadcast writes to every connected client, and a client can vanish without a
+  // clean close — the app killed, a CLI exiting early, a pane crashing. The write then
+  // raises SIGPIPE, whose default action *terminates the daemon*: observed as exit
+  // status -13 in `launchctl list`, with every loop's in-flight send failing until
+  // launchd restarted the process seconds later.
+  //
+  // Ignoring it turns that into what the code already handles correctly:
+  // `FramedMessageIO.writeAll` sees write() return -1/EPIPE, throws, and
+  // `GraphStore.send` drops the dead connection. The error path was always right; the
+  // process just never lived long enough to run it.
+  signal(SIGPIPE, SIG_IGN)
+
+  // Before the shutdown handlers below, which flush its writer on the way out.
+  let registry = ProjectRegistry(
+    persistenceDirectory: supportDirectory,
+    reapCondemnedSessions: true)
+
+  // Termination is handled on the main queue, not in signal context (#167). The handlers
+  // this replaces called `exit(0)` from inside the signal handler itself, and `exit` is
+  // not async-signal-safe: it runs atexit and runtime teardown after interrupting whatever
+  // thread happened to be running — which can be a thread mid-`malloc` or mid-`write`,
+  // holding exactly the locks teardown needs. An idle daemon died cleanly in milliseconds
+  // every time; a busy one could deadlock until launchd's ExitTimeOut escalated to
+  // SIGKILL, observed as `launchctl bootout` taking ~29 seconds while a workspace was
+  // being deleted. A dispatch signal source delivers the signal as an ordinary work item,
+  // where `exit` is just a function call.
+  //
+  // `SIG_IGN` first, so the default terminate-without-cleanup disposition can't win the
+  // race before the sources are resumed.
+  signal(SIGTERM, SIG_IGN)
+  signal(SIGINT, SIG_IGN)
+
+  func makeShutdownSource(for signalNumber: Int32) -> DispatchSourceSignal {
+    let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
+    source.setEventHandler {
+      registry.flushPersistence()
+      unlink(path)
+      exit(0)
+    }
+    source.resume()
+    return source
+  }
+
+  // Top-level lets, so the sources outlive this file's execution — a released source
+  // stops delivering, and the signal falls back to the ignored disposition above, which
+  // would make the daemon *unkillable* by SIGTERM instead of slow.
+  let terminateSource = makeShutdownSource(for: SIGTERM)
+  let interruptSource = makeShutdownSource(for: SIGINT)
+
+  // Notice the binary being swapped underneath this process and get out of its way
+  // (#199). `DaemonBootstrap` boots a stale daemon out only from the app, at launch, for
+  // the current workspace — every path that misses that call (an update whose relaunch
+  // never happened, a workspace whose window stays closed) left an old daemon running old
+  // code under `KeepAlive` indefinitely; the pre-0.1.44 PTY leak survived weeks of
+  // upgrades exactly this way. The install lands a fresh inode, so one `stat` a minute
+  // answers the question, and exiting cleanly is enough: `KeepAlive` respawns the path,
+  // which is now the new binary. A launch identity that cannot be read (a relative
+  // argv[0] from a hand launch) disables the check rather than arming a wrong one, and a
+  // transient unreadable tick — the rename window mid-install — is skipped, not obeyed.
+  func makeStalenessTimer() -> DispatchSourceTimer? {
+    let executablePath = CommandLine.arguments[0]
+    guard let launchIdentity = ExecutableIdentity.of(path: executablePath) else { return nil }
+    let timer = DispatchSource.makeTimerSource(queue: .main)
+    timer.schedule(deadline: .now() + 60, repeating: 60)
+    timer.setEventHandler {
+      guard let current = ExecutableIdentity.of(path: executablePath), current != launchIdentity
+      else { return }
+      DaemonLog.shared.record("shutdown", [("reason", "binary-replaced")])
+      registry.flushPersistence()
+      unlink(path)
+      exit(0)
+    }
+    timer.resume()
+    return timer
+  }
+
+  let stalenessTimer = makeStalenessTimer()
+
+  /// Bridges a blocking socket read onto a background queue so the `Task` awaiting it
+  /// never blocks Swift concurrency's cooperative thread pool — the whole connection
+  /// handler below is otherwise just async/await hops (this, plus actor calls).
+  @Sendable func readFrameAsync(from fileDescriptor: Int32) async throws -> Data {
+    try await withCheckedThrowingContinuation { continuation in
+      DispatchQueue.global().async {
+        do {
+          continuation.resume(returning: try FramedMessageIO.readFrame(from: fileDescriptor))
+        } catch {
+          continuation.resume(throwing: error)
         }
       }
     }
-    await registry.removeConnection(connectionID)
-    // The channel owns the descriptor now: closing it here would free a number the
-    // kernel can hand straight to the next `accept` while a write is still in flight on
-    // it. `close` tears the socket down, which is also what unblocks a writer parked on a
-    // peer that stopped reading.
-    OutboundChannels.close(fileDescriptor)
-    DaemonLog.shared.record(
-      "disconnect",
-      [
-        ("conn", String(connection)), ("fd", String(fileDescriptor)),
-        ("requests", String(requests)),
-        ("lifetime_ms", DaemonLog.milliseconds(Date().timeIntervalSince(connected))),
-      ])
   }
-}
 
-DispatchQueue.global().async {
-  while true {
-    let clientDescriptor = accept(socketDescriptor, nil, nil)
-    guard clientDescriptor >= 0 else { continue }
-    // Belt and braces beside the process-wide ignore above: this socket raises no
-    // SIGPIPE whatever any library does to the signal disposition later.
-    #if canImport(Darwin)
-      var noSignal: Int32 = 1
-      setsockopt(
-        clientDescriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
-    #endif
-    handleConnection(clientDescriptor)
+  /// A counter safe to bump from the accept loop's thread while connection tasks read it.
+  final class ManagedAtomic: @unchecked Sendable {
+    private var value: Int
+    private let lock = NSLock()
+    init(_ value: Int) { self.value = value }
+    func next() -> Int {
+      lock.lock()
+      defer { lock.unlock() }
+      value += 1
+      return value
+    }
   }
-}
 
-dispatchMain()
+  /// Numbers connections in the order they arrived — the `conn` every line about one
+  /// carries, short enough to read and stable for the daemon's lifetime.
+  let connectionCounter = ManagedAtomic(0)
+
+  func handleConnection(_ fileDescriptor: Int32) {
+    Task {
+      let connectionID = UUID()
+      let connection = connectionCounter.next()
+      let peer = SocketPeer.pid(of: fileDescriptor)
+      let connected = Date()
+      // `addConnection` opens this connection's outbound channel as it registers it.
+      await registry.addConnection(id: connectionID, fileDescriptor: fileDescriptor)
+      // `peer` is the client's pid: what a `graphcode` invocation prints when it times
+      // out, so its complaint and these lines can be matched up with no id on the wire.
+      DaemonLog.shared.record(
+        "connect",
+        [
+          ("conn", String(connection)), ("id", connectionID.tag), ("fd", String(fileDescriptor)),
+          ("peer", peer.map(String.init) ?? "?"),
+        ])
+      var sequence = 0
+      var requests = 0
+      while true {
+        let data: Data
+        do {
+          data = try await readFrameAsync(from: fileDescriptor)
+        } catch {
+          break
+        }
+        sequence += 1
+        let received = Date()
+        let request = DaemonRequestContext.Request(connection: connection, sequence: sequence)
+        do {
+          let command = try JSONDecoder().decode(DaemonCommand.self, from: data)
+          let decoded = Date()
+          // Logged on receipt, before anything is handled: a request that hangs is
+          // exactly the one worth a line, and a line written on completion would never
+          // come. Never the payload — a `graphCommand.memoNode` is logged as exactly that.
+          DaemonLog.shared.record(
+            "request",
+            [
+              ("conn", String(connection)), ("seq", String(sequence)),
+              ("kind", command.kindName), ("bytes", String(data.count)),
+              ("decode_ms", DaemonLog.milliseconds(decoded.timeIntervalSince(received))),
+            ])
+          await DaemonRequestContext.$current.withValue(request) {
+            await registry.handle(command, connectionID: connectionID)
+          }
+          requests += 1
+          DaemonLog.shared.record(
+            "handled",
+            [
+              ("conn", String(connection)), ("seq", String(sequence)),
+              ("kind", command.kindName),
+              ("handle_ms", DaemonLog.milliseconds(Date().timeIntervalSince(decoded))),
+            ])
+        } catch {
+          DaemonLog.shared.record(
+            "request",
+            [
+              ("conn", String(connection)), ("seq", String(sequence)), ("kind", "undecodable"),
+              ("bytes", String(data.count)),
+            ])
+          // A frame that read fine but didn't decode is version skew, not a dead socket:
+          // a newer CLI sent a command this daemon predates. Dropping the connection here
+          // failed *silently* — the client just saw a hang-up — so answer instead and
+          // keep serving the commands this daemon does understand.
+          let event = DaemonEvent.errorOccurred(
+            "unrecognized command — graphcoded may be older than the client that sent it")
+          if let encoded = try? JSONEncoder().encode(event) {
+            OutboundChannels.send(encoded, to: fileDescriptor)
+          }
+        }
+      }
+      await registry.removeConnection(connectionID)
+      // The channel owns the descriptor now: closing it here would free a number the
+      // kernel can hand straight to the next `accept` while a write is still in flight on
+      // it. `close` tears the socket down, which is also what unblocks a writer parked on a
+      // peer that stopped reading.
+      OutboundChannels.close(fileDescriptor)
+      DaemonLog.shared.record(
+        "disconnect",
+        [
+          ("conn", String(connection)), ("fd", String(fileDescriptor)),
+          ("requests", String(requests)),
+          ("lifetime_ms", DaemonLog.milliseconds(Date().timeIntervalSince(connected))),
+        ])
+    }
+  }
+
+  DispatchQueue.global().async {
+    while true {
+      let clientDescriptor = accept(socketDescriptor, nil, nil)
+      guard clientDescriptor >= 0 else { continue }
+      // Belt and braces beside the process-wide ignore above: this socket raises no
+      // SIGPIPE whatever any library does to the signal disposition later.
+      #if canImport(Darwin)
+        var noSignal: Int32 = 1
+        setsockopt(
+          clientDescriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size)
+        )
+      #endif
+      handleConnection(clientDescriptor)
+    }
+  }
+
+  dispatchMain()
+#endif

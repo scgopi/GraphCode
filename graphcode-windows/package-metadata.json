@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "product": "GraphCode Windows shell",
+  "executable": "graphcode-windows.exe",
+  "launchMode": "tray-shell",
+  "platform": "windows-x86_64",
+  "installer": true,
+  "bundle": {
+    "script": "Tools/windows/package.ps1",
+    "artifactPattern": "GraphCode-<version>-windows-x86_64.zip",
+    "unsignedLabel": "UNSIGNED (development artifact; not code signed)"
+  },
+  "runtime": {
+    "daemon": "graphcoded.exe",
+    "daemonLifecycle": "shell-supervised-when-unavailable",
+    "terminal": "zmx.exe",
+    "host": "winghostty-win32-host.lib"
+  },
+  "providerPins": "provider-pins.json",
+  "validation": "Tools/windows/validate.ps1 -Task windows-shell"
+}

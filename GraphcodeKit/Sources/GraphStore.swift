@@ -16,7 +16,7 @@ import MailroomKit
 ///
 /// Lives in `GraphcodeKit`, not `graphcoded/Sources`, even though only the daemon
 /// instantiates it in production: it has no socket/process-lifecycle coupling of its
-/// own (connections are just `[UUID: Int32]` file descriptors handed to it), so it's
+/// own (connections are `DaemonConnection` channels handed to it), so it's
 /// cleanly unit-testable from `graphcodeTests` without spinning up a real daemon
 /// process or socket.
 ///
@@ -29,16 +29,26 @@ import MailroomKit
 /// caller-supplied rather than generated here — `ProjectRegistry` owns one `UUID` per
 /// live socket end-to-end across every project it might join over that socket's
 /// lifetime, so it needs to be the one minting it.
+
+public enum GraphStoreCommandResult: Equatable, Sendable {
+  case applied(graph: LoopGraph)
+  case rejected(message: String, graph: LoopGraph)
+}
 public actor GraphStore {
   public private(set) var graph: LoopGraph
-  private var connections: [UUID: Int32] = [:]
+  private var connections: [UUID: DaemonConnectionChannel] = [:]
   /// What each connection announced it can read (`DaemonCommand.announce`) — what
   /// decides whether a presence tick reaches it as a delta or as the whole snapshot.
   private var connectionCapabilities: [UUID: Set<String>] = [:]
   /// One counter for every frame this store sends about its graph — snapshots and
   /// presence deltas alike — so a client can order them (`DaemonEvent.nodesChanged`).
   private var revision = 0
+  private var commandTail: Task<GraphStoreCommandResult, Never>?
+  private var commandTailID: UInt64?
+  private var nextCommandID: UInt64 = 0
   private let onGraphChanged: (@Sendable (LoopGraph) -> Void)?
+  private let onGraphEvent: (@Sendable (DaemonEvent) -> [UUID: DaemonWireEnvelope])?
+  private let onConnectionFailure: (@Sendable (UUID) -> Void)?
   private let onEnsureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let onTerminateSession: (@Sendable (LoopNode, String?) -> Void)?
   /// Kills a loop's session and, for an unattended loop, relaunches it on the same
@@ -290,6 +300,7 @@ public actor GraphStore {
   public private(set) var undeliveredMessages:
     [(edgeID: UUID, reason: MessageBus.DeliveryFailure)] =
       []
+  private var pendingErrors: [String] = []
 
   /// `onEnsureSession` is how a time-based node's session gets started without this
   /// actor knowing anything about `zmx` or spawning processes — same injected-closure
@@ -300,6 +311,8 @@ public actor GraphStore {
     graph: LoopGraph = LoopGraph(project: ProjectRef(path: "", name: "Untitled")),
     deliveryDeadline: Duration = .seconds(45),
     onGraphChanged: (@Sendable (LoopGraph) -> Void)? = nil,
+    onGraphEvent: (@Sendable (DaemonEvent) -> [UUID: DaemonWireEnvelope])? = nil,
+    onConnectionFailure: (@Sendable (UUID) -> Void)? = nil,
     onEnsureSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
     onFindMissingProvider: (@Sendable (LoopNode, String?) async -> LaunchFailure?)? = nil,
     onTerminateSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
@@ -341,6 +354,8 @@ public actor GraphStore {
     self.graph = graph
     self.subGraphDepth = subGraphDepth
     self.onGraphChanged = onGraphChanged
+    self.onGraphEvent = onGraphEvent
+    self.onConnectionFailure = onConnectionFailure
     self.onEnsureSession = onEnsureSession
     self.onFindMissingProvider = onFindMissingProvider
     self.onTerminateSession = onTerminateSession
@@ -461,7 +476,7 @@ public actor GraphStore {
       let failure = await onFindMissingProvider(node, graph.project.path),
       stopForMissingProvider(node.id, failure)
     else { return }
-    broadcast()
+    await broadcast()
   }
 
   /// A stop rather than a failure: nothing the loop did went wrong, and the restart that
@@ -548,10 +563,10 @@ public actor GraphStore {
   /// sweeps broadcasts.
   private var templatesRefreshed = false
 
-  private func broadcastIfTemplatesRefreshed() {
+  private func broadcastIfTemplatesRefreshed() async {
     guard templatesRefreshed else { return }
     templatesRefreshed = false
-    broadcast()
+    await broadcast()
   }
 
   /// The node a template's current contents would launch — or the unchanged node
@@ -690,21 +705,59 @@ public actor GraphStore {
   // MARK: - Connections
 
   public func addConnection(
-    id: UUID, fileDescriptor: Int32, capabilities: Set<String> = []
-  ) {
-    connectionCapabilities[id] = capabilities
-    // Joining a project registers the connection here too, so ensure its outbound half
-    // the same way the registry does. Without this a store could bind to a channel left
-    // dead on a recycled descriptor number and drop the client as disconnected on the
-    // snapshot it was joining for.
-    OutboundChannels.open(fileDescriptor, tag: id.tag)
-    connections[id] = fileDescriptor
-    send(.graphChanged(graph.wireSnapshot(revision: revision)), to: id)
+    id: UUID,
+    connection: any DaemonConnection,
+    mode: DaemonProtocolMode = .v1,
+    clientID: UUID? = nil,
+    subscription: DaemonWireSubscription? = nil,
+    replayStore: DaemonReplayStore = DaemonReplayStore()
+  ) async {
+    let channel = DaemonConnectionChannel(
+      connection: connection, mode: mode, clientID: clientID,
+      subscription: subscription, replayStore: replayStore)
+    await addConnection(id: id, channel: channel)
   }
 
-  public func removeConnection(_ id: UUID) {
-    connections.removeValue(forKey: id)
+  @discardableResult
+  public func addConnection(
+    id: UUID,
+    channel: DaemonConnectionChannel,
+    capabilities: Set<String> = []
+  ) async -> LoopGraph {
+    connections[id] = channel
+    connectionCapabilities[id] = capabilities
+    await channel.join(projectPath: graph.project.path)
+    let snapshot = graph.wireSnapshot(revision: revision)
+    let event = DaemonEvent.graphChanged(snapshot)
+    do {
+      try await channel.sendConnectionSnapshot(event)
+    } catch {
+      evictConnection(id)
+    }
+    return snapshot
+  }
+
+  #if canImport(Darwin) || canImport(Glibc)
+    /// Compatibility seam for the existing macOS tests and callers. Ownership inside
+    /// the store is still a `DaemonConnectionChannel`; the descriptor is wrapped at the
+    /// transport boundary and never retained as an integer here.
+    public func addConnection(id: UUID, fileDescriptor: Int32) async {
+      await addConnection(
+        id: id,
+        connection: UnixSocketConnection(
+          id: id, fileDescriptor: fileDescriptor, bufferedWrites: true))
+    }
+  #endif
+
+  @discardableResult
+  public func removeConnection(_ id: UUID, leaveReplay: Bool = false) async -> LoopGraph? {
+    guard let channel = connections.removeValue(forKey: id) else { return graph }
     connectionCapabilities.removeValue(forKey: id)
+    let snapshot = graph
+    if leaveReplay {
+      await channel.leave(projectPath: graph.project.path)
+    }
+    return snapshot
   }
 
   /// An announcement that arrived after the connection joined — see
@@ -716,17 +769,93 @@ public actor GraphStore {
 
   // MARK: - Commands
 
-  /// `from` is the connection the command arrived on, when the registry knows it — what
-  /// lets a refusal meant for one client go to that client alone. Tests drive the
-  /// store without one and hear refusals through `onAnnounceError`.
-  public func handle(_ command: GraphCommand, from connectionID: UUID? = nil) async {
-    // A loop inside a composite addresses itself by its own id — its briefing tells it
-    // to `node memo <project> <its-own-id>`, and ids are unique across the whole tree,
-    // so a caller has no reason to know how deep its target sits (the same rule
-    // `runInSubGraph` already honours for already-wrapped commands). A command whose
-    // target names no top-level loop but lives inside a sub-graph is wrapped for the
-    // composite that holds it rather than refused by a lookup that never looked down.
+  public func handle(
+    _ command: GraphCommand,
+    from connectionID: UUID? = nil,
+    serializeCommands: Bool = true,
+    broadcastErrors: Bool = true,
+    v2PayloadLimit: Int? = nil
+  ) async -> GraphStoreCommandResult {
+    // A loop inside a composite addresses itself by its own id; route it through the
+    // composite that owns it before previewing or applying the command.
     let command = routeIntoSubGraph(command) ?? command
+    let serializes =
+      v2PayloadLimit != nil
+      || (serializeCommands && !Self.allowsDrainRecoveryWhileHandling(command))
+    guard serializes else {
+      return await applyCommand(
+        command, from: connectionID, broadcastErrors: broadcastErrors)
+    }
+    let previous = commandTail
+    let commandID = nextCommandID
+    nextCommandID = nextCommandID == UInt64.max ? 0 : nextCommandID + 1
+    let operation = Task { [weak self] in
+      _ = await previous?.value
+      guard let self else {
+        return GraphStoreCommandResult.rejected(
+          message: "graph store is unavailable",
+          graph: LoopGraph(project: ProjectRef(path: "", name: "Untitled")))
+      }
+      if let v2PayloadLimit {
+        let preview = await self.preview(command, broadcastErrors: broadcastErrors)
+        if case .applied(let projectedGraph) = preview,
+          !Self.v2GraphChangeFits(projectedGraph, limit: v2PayloadLimit)
+        {
+          return .rejected(
+            message: "resulting graph response exceeds the v2 payload limit",
+            graph: await self.graph)
+        }
+      }
+      return await self.applyCommand(
+        command, from: connectionID, broadcastErrors: broadcastErrors)
+    }
+    commandTail = operation
+    commandTailID = commandID
+    let result = await operation.value
+    if commandTailID == commandID {
+      commandTail = nil
+      commandTailID = nil
+    }
+    return result
+  }
+
+  private static func allowsDrainRecoveryWhileHandling(_ command: GraphCommand) -> Bool {
+    switch command {
+    case .messageNode, .memoNode, .mailroomPost, .mailroomInbox, .mailroomWatch:
+      return true
+    default:
+      return false
+    }
+  }
+
+  /// Runs a command against a side-effect-free copy so a v2 request can be rejected
+  /// before the real graph, persistence, or broadcast callbacks are touched.
+  private func preview(
+    _ command: GraphCommand,
+    broadcastErrors: Bool
+  ) async -> GraphStoreCommandResult {
+    let shadow = GraphStore(graph: graph, subGraphDepth: subGraphDepth)
+    return await shadow.handle(command, broadcastErrors: broadcastErrors)
+  }
+
+  private static func v2GraphChangeFits(_ graph: LoopGraph, limit: Int) -> Bool {
+    guard limit >= 0 else { return false }
+    let event = DaemonEvent.graphChanged(graph)
+    let response = DaemonWireEnvelope.response(id: UUID(), event: event)
+    let broadcast = DaemonWireEnvelope.event(sequence: UInt64.max, event: event)
+    guard let responseData = try? JSONEncoder().encode(response),
+      let broadcastData = try? JSONEncoder().encode(broadcast)
+    else {
+      return false
+    }
+    return responseData.count <= limit && broadcastData.count <= limit
+  }
+
+  private func applyCommand(
+    _ command: GraphCommand,
+    from connectionID: UUID? = nil,
+    broadcastErrors: Bool = true
+  ) async -> GraphStoreCommandResult {
     switch command {
     case .createNode(var draft):
       // A child inherits its creator's backend unless one was named: a Copilot loop
@@ -746,14 +875,19 @@ public actor GraphStore {
       // the ones their loops created.
       if draft.backend == nil { draft.backend = onDefaultBackend?() }
       guard graph.nodes.count < Self.maxNodesPerGraph else {
-        announceError(
-          "this graph already has \(graph.nodes.count) loops (limit \(Self.maxNodesPerGraph))")
-        return
+        return await reject(
+          "this graph already has \(graph.nodes.count) loops (limit \(Self.maxNodesPerGraph))",
+          broadcastErrors: broadcastErrors)
       }
       if draft.loopType == .composite && subGraphDepth >= Self.maxSubGraphDepth {
-        announceError(
-          "composites are nested \(subGraphDepth) deep (limit \(Self.maxSubGraphDepth))")
-        return
+        return await reject(
+          "composites are nested \(subGraphDepth) deep (limit \(Self.maxSubGraphDepth))",
+          broadcastErrors: broadcastErrors)
+      }
+      guard draft.isValid else {
+        return await reject(
+          "node creation refused: draft is invalid",
+          broadcastErrors: broadcastErrors)
       }
       // The experiment's gate: a heartbeat loop created while the toggle is off would
       // sit silent looking broken, and refusal-with-a-pointer is the export precedent.
@@ -761,12 +895,12 @@ public actor GraphStore {
         !draft.effectiveBackend.capabilities.supportsDaemonRecurrence,
         onHeartbeatEnabled?() != true
       {
-        announceError(
+        return await reject(
           "heartbeat loops need the Daemon heartbeat experiment enabled in Settings "
-            + "(daemonHeartbeatEnabled in ~/.graphcode/settings.json)")
-        return
+            + "(daemonHeartbeatEnabled in ~/.graphcode/settings.json)",
+          broadcastErrors: broadcastErrors)
       }
-      guard draft.isValid else { return }
+
       var node = draft.makeNode()
       // A goal loop is born `.running`, which is right on a project canvas and a lie in a
       // sub-graph: nothing here has a session until the composite is piloted. Unfixed,
@@ -777,7 +911,11 @@ public actor GraphStore {
       // The draft's id is client-chosen now (see `NodeDraft.id`), so a re-sent command
       // must not become a second node — or a crash: `IdentifiedArray.append` traps on a
       // duplicate id, and this protocol is reachable from any client.
-      guard graph.nodes[id: node.id] == nil else { return }
+      guard graph.nodes[id: node.id] == nil else {
+        return await reject(
+          "node creation refused: a node with that id already exists",
+          broadcastErrors: broadcastErrors)
+      }
       graph.nodes.append(node)
       linkToCreator(of: node, declaredBy: draft)
       // A child is handed the report-back route at birth, verbatim. The briefing
@@ -809,7 +947,11 @@ public actor GraphStore {
       armHeartbeat(for: node)
 
     case .createEdge(let from, let to, let spec):
-      guard from != to else { return }
+      guard from != to else {
+        return await reject(
+          "edge creation refused: a loop cannot connect to itself",
+          broadcastErrors: broadcastErrors)
+      }
       // Refused out loud rather than dropped: routing has already sent pairs that
       // share a sub-graph down into it, so an endpoint missing from this graph's own
       // nodes is either a loop inside a composite — and no edge may span two graphs,
@@ -818,23 +960,31 @@ public actor GraphStore {
       // a refusal. (A duplicate of the same kind still collapses quietly, as before.)
       guard graph.nodes[id: from] != nil, graph.nodes[id: to] != nil else {
         let missing = graph.nodes[id: from] == nil ? from : to
-        announceError(
+        return await reject(
           graph.containsAtAnyDepth(missing)
             ? "edge refused: an edge may not span two graphs — \(missing) lives inside "
               + "a composite, so both of its endpoints must share that sub-graph"
-            : "edge refused: no loop \(missing) in this graph")
-        return
+            : "edge refused: no loop \(missing) in this graph",
+          broadcastErrors: broadcastErrors)
       }
       // Duplicates are scoped per kind, not per pair: a `.handoff` and a `.message`
       // between the same two loops are different relationships (one sequences them,
       // one lets them talk mid-flight), so both are allowed to exist at once. Two
       // edges of the *same* kind between the same pair still collapse to one.
       guard !graph.edges.contains(where: { $0.from == from && $0.to == to && $0.kind == spec.kind })
-      else { return }
+      else {
+        return await reject(
+          "edge creation refused: duplicate \(spec.kind) edge",
+          broadcastErrors: broadcastErrors)
+      }
       // A guard that bounds nothing would turn a cycle into an unattended infinite loop
       // spending tokens forever. Refused outright rather than silently dropped, so the
       // edge doesn't quietly become a one-shot when the human asked for a loop.
-      if let cycleGuard = spec.cycleGuard, !cycleGuard.isBounded { return }
+      if let cycleGuard = spec.cycleGuard, !cycleGuard.isBounded {
+        return await reject(
+          "edge creation refused: cycle guards must be bounded",
+          broadcastErrors: broadcastErrors)
+      }
       graph.edges.append(LoopEdge(from: from, to: to, spec: spec))
       unblockIfStillIdle(to)
 
@@ -857,7 +1007,12 @@ public actor GraphStore {
       await mailroomPost(text: text, topic: topic, from: from)
 
     case .mailroomInbox:
-      refuseLegacyInbox(to: connectionID)
+      let message = legacyInboxRefusal()
+      if let connectionID, connections[connectionID] != nil {
+        _ = await send(.errorOccurred(message), to: connectionID)
+      }
+      onAnnounceError?(message)
+      return .rejected(message: message, graph: graph)
 
     case .mailroomWatch(let on, let topic, let from):
       mailroomWatch(on: on, topic: topic, from: from)
@@ -904,7 +1059,11 @@ public actor GraphStore {
       await resumeResolvedSession(nodeID)
 
     case .subGraphCommand(let nodeID, let inner):
-      await runInSubGraph(nodeID, inner)
+      if let error = await runInSubGraph(
+        nodeID, inner, broadcastErrors: broadcastErrors)
+      {
+        return await reject(error, broadcastErrors: broadcastErrors)
+      }
 
     case .pilotComposite(let nodeID):
       await pilotComposite(nodeID)
@@ -935,7 +1094,11 @@ public actor GraphStore {
     // before anyone is told what the graph looks like. Cycle re-entries run before
     // hand-off deliveries because a re-entry *queues* one; nudges last, since an
     // update's memory record must exist before its session is told to go look.
-    await drainAndBroadcast()
+    let errors = await drainAndBroadcast(broadcastErrors: broadcastErrors)
+    if let error = errors.first {
+      return .rejected(message: error, graph: graph)
+    }
+    return .applied(graph: graph)
   }
 
   // MARK: - Composites
@@ -986,7 +1149,11 @@ public actor GraphStore {
   /// rules — rather than a cut-down interpreter. docs/05 is explicit that a composite is
   /// "the orchestrator running a graph inside a graph"; a second implementation would be
   /// a second set of bugs about edge firing.
-  private func runInSubGraph(_ nodeID: UUID, _ command: GraphCommand) async {
+  private func runInSubGraph(
+    _ nodeID: UUID,
+    _ command: GraphCommand,
+    broadcastErrors: Bool
+  ) async -> String? {
     guard let node = graph.nodes[id: nodeID] else {
       // The id may name a composite further down — a composite inside a composite is the
       // shape docs/01 describes, and its contents are not in *this* graph's nodes. Ids
@@ -995,18 +1162,18 @@ public actor GraphStore {
       // store repeat the search. Without this, `node create --into <nested-composite>`
       // went nowhere at all.
       if let owner = graph.nodes.first(where: { $0.subGraph?.containsAtAnyDepth(nodeID) == true }) {
-        await runInSubGraph(owner.id, .subGraphCommand(nodeID: nodeID, command: command))
-        return
+        return await runInSubGraph(
+          owner.id,
+          .subGraphCommand(nodeID: nodeID, command: command),
+          broadcastErrors: broadcastErrors)
       }
-      announceError("no loop \(nodeID) in this graph")
-      return
+      return "no loop \(nodeID) in this graph"
     }
     // Said out loud rather than returned silently: this is reachable from `node create
     // --into`, and a command that exits 0 having quietly done nothing is the one answer
     // worse than refusing.
     guard node.loopType == .composite, let subGraph = node.subGraph else {
-      announceError("\(node.title) is not a composite, so it has no sub-graph to run in")
-      return
+      return "\(node.title) is not a composite, so it has no sub-graph to run in"
     }
 
     // Built fresh per command rather than cached: the sub-graph lives on the parent
@@ -1053,16 +1220,19 @@ public actor GraphStore {
       draft.backend = draft.createdBy.flatMap { stored($0)?.backend } ?? node.backend
       command = .createNode(draft)
     }
-    await child.handle(command)
+    let result = await child.handle(command, broadcastErrors: broadcastErrors)
     // Settled before the write-back and roll-up below, so a client sees the refusal
     // ahead of the broadcast it would otherwise time out against, and an update's
     // re-armed poller is in place before anyone sees the graph it belongs to.
-    for message in effects.errors.drained {
+    let rejectedMessage: String? =
+      if case .rejected(let message, _) = result { message } else { nil }
+    for message in effects.errors.drained where message != rejectedMessage {
       announceError(message)
     }
     processRecurrence(effects.recurrence)
     graph.nodes[id: nodeID]?.subGraph = await child.graph
     rollUpComposite(nodeID)
+    return rejectedMessage
   }
 
   /// A composite's own state *is* its sub-graph's aggregate — the roll-up docs/05 asks
@@ -1431,7 +1601,7 @@ public actor GraphStore {
     // pulse becomes a kilobyte per loop that moved instead of the whole snapshot.
     let moved = Array(graph.nodes.filter { before[id: $0.id] != $0 })
     guard !moved.isEmpty else { return }
-    notifyClients(nodesChanged: moved)
+    await notifyClients(nodesChanged: moved)
   }
 
   // MARK: - Renaming
@@ -2221,17 +2391,11 @@ public actor GraphStore {
   /// mail it never saw — permanently, upgrade or not. A cursor moves only through mail
   /// that was handed over, so the old command is refused loudly and the new one
   /// (`MailboxQuery.advanceCursor`) is the only thing that moves it.
-  private func refuseLegacyInbox(to connectionID: UUID?) {
-    let message =
+  private func legacyInboxRefusal() -> String {
+    return
       "this graphcode CLI predates the daemon's mailbox — nothing was marked read. "
       + "Upgrade graphcode (the app installs it beside graphcoded) and run the "
       + "inbox again"
-    // To the asker alone, never `announceError`: that writes to every connected
-    // client, and one stale CLI's problem is nobody else's error to read.
-    if let connectionID, connections[connectionID] != nil {
-      send(.errorOccurred(message), to: connectionID)
-    }
-    onAnnounceError?(message)
   }
 
   /// Subscribes or unsubscribes the calling loop. Recorded to the loop's memory so a
@@ -2466,7 +2630,7 @@ public actor GraphStore {
       return
     }
     if node.loopType == .composite {
-      await runInSubGraph(nodeID, .restartSessions)
+      await runInSubGraph(nodeID, .restartSessions, broadcastErrors: false)
       return
     }
     await restart([node])
@@ -2475,7 +2639,7 @@ public actor GraphStore {
   private func restartSessions() async {
     let live = graph.nodes.filter { !$0.isResolved }
     for composite in live where composite.loopType == .composite {
-      await runInSubGraph(composite.id, .restartSessions)
+      await runInSubGraph(composite.id, .restartSessions, broadcastErrors: false)
     }
     await restart(live.filter { $0.loopType != .composite })
   }
@@ -2531,7 +2695,8 @@ public actor GraphStore {
     // set below — a graph whose nodes have all stopped aggregates to `.idle`.
     if node.loopType == .composite, let subGraph = node.subGraph {
       for child in subGraph.nodes where !child.isResolved {
-        await runInSubGraph(node.id, .stopNode(child.id))
+        await runInSubGraph(
+          node.id, .stopNode(child.id), broadcastErrors: false)
       }
     }
 
@@ -3422,12 +3587,16 @@ public actor GraphStore {
   }
 
   private func announceError(_ message: String) {
-    if let frame = Self.encode(.errorOccurred(message)) {
-      for id in connections.keys {
-        deliver(frame, to: id)
-      }
-    }
-    onAnnounceError?(message)
+    pendingErrors.append(message)
+  }
+
+  private func reject(
+    _ message: String,
+    broadcastErrors: Bool
+  ) async -> GraphStoreCommandResult {
+    announceError(message)
+    _ = await drainAndBroadcast(broadcastErrors: broadcastErrors)
+    return .rejected(message: message, graph: graph)
   }
 
   private func unblockIfStillIdle(_ nodeID: UUID) {
@@ -3816,14 +3985,36 @@ public actor GraphStore {
   /// The same settle-then-tell sequence `handle` ends with, for the paths that mutate
   /// outside a command — goal polling resolves nodes and fires edges too, and an edge
   /// fired from a poll must not wait for the next unrelated command to be delivered.
-  private func drainAndBroadcast() async {
+  private func drainAndBroadcast(broadcastErrors: Bool = true) async -> [String] {
     releaseHeldCompletions()
+    let errors = await drainPendingErrors(broadcastErrors: broadcastErrors)
     await drainPendingMessages()
     await drainPendingCycleReentries()
     await drainPendingHandoffDeliveries()
     await drainPendingNudges()
     await drainPendingFollowUps()
-    broadcast()
+    if errors.isEmpty {
+      await broadcast()
+    }
+    return errors
+  }
+
+  private func drainPendingErrors(broadcastErrors: Bool) async -> [String] {
+    guard !pendingErrors.isEmpty else { return [] }
+    let errors = pendingErrors
+    pendingErrors.removeAll()
+    for message in errors { onAnnounceError?(message) }
+    guard broadcastErrors else { return errors }
+    for message in errors {
+      for (connectionID, channel) in connections {
+        do {
+          try await channel.sendError(message: message)
+        } catch {
+          evictConnection(connectionID)
+        }
+      }
+    }
+    return errors
   }
 
   /// Every state write outside the two stall paths goes through here. `stallReason`
@@ -3931,7 +4122,7 @@ public actor GraphStore {
   /// Safe to call repeatedly, but only because `ZmxSessionLauncher` checks for an
   /// existing session first — `zmx run` itself is *not* idempotent, and re-running it
   /// against a live session types the prompt in a second time.
-  public func ensureUnattendedSessions() {
+  public func ensureUnattendedSessions() async {
     // A loop stopped for a missing CLI waits for the human's restart: relaunching it at
     // boot would only reach the same missing CLI and raise the same dialog.
     for node in graph.nodes where node.runsUnattended && node.launchFailure == nil {
@@ -3946,7 +4137,7 @@ public actor GraphStore {
       if !node.isResolved { armHeartbeat(for: node) }
       ensureSession(node)
     }
-    broadcastIfTemplatesRefreshed()
+    await broadcastIfTemplatesRefreshed()
     armPilotedSubGraphRecurrence(graph.nodes)
   }
 
@@ -3981,16 +4172,16 @@ public actor GraphStore {
   /// - **Resolved nodes are skipped whatever their loop type.** The load-time version
   ///   restarts a `.stopped` time-based node, which is defensible once at boot and wrong
   ///   every minute: a human who stopped a remote loop would watch it come back.
-  public func ensureUnattendedSessionsAlive() {
+  public func ensureUnattendedSessionsAlive() async {
     for node in graph.nodes where node.runsUnattended && !node.isResolved {
       ensureSession(node)
     }
-    broadcastIfTemplatesRefreshed()
+    await broadcastIfTemplatesRefreshed()
   }
 
   // MARK: - Broadcast
 
-  private func broadcast() {
+  private func broadcast() async {
     let started = Date()
     onGraphChanged?(graph)
     DaemonLog.shared.record(
@@ -3999,7 +4190,22 @@ public actor GraphStore {
         ("nodes", String(graph.nodes.count)),
         ("ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
       ])
-    notifyClients()
+    revision += 1
+    let event = DaemonEvent.graphChanged(graph.wireSnapshot(revision: revision))
+    let v1Data = try? JSONEncoder().encode(event)
+    let envelopes = onGraphEvent?(event) ?? [:]
+    let encoded = Date()
+    let intended = connections.count
+    let accepted = await notifyClients(event, envelopes: envelopes, encodedV1: v1Data)
+    DaemonLog.shared.record(
+      "broadcast",
+      DaemonRequestContext.fields + [
+        ("kind", "graphChanged"), ("revision", String(revision)),
+        ("bytes", String(v1Data?.count ?? 0)),
+        ("encode_ms", DaemonLog.milliseconds(encoded.timeIntervalSince(started))),
+        ("recipients", String(intended)), ("accepted", String(accepted)),
+        ("ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
+      ])
   }
 
   /// The half of `broadcast` that tells clients, without the half that writes to disk.
@@ -4008,152 +4214,99 @@ public actor GraphStore {
   /// disk: persisting it would be a write every tick for bytes nothing reads back. Every
   /// other caller wants `broadcast` — a graph change that isn't saved is a graph change
   /// lost at the next daemon restart.
-  private func notifyClients() {
-    // Encoded once, not once per connection: the frame is the same bytes for every
-    // client, and encoding a full graph is the expensive half of a broadcast — with C
-    // clients attached it was C encodes of the same snapshot on every change, presence
-    // tick included (issue #288's CPU amplifier).
-    revision += 1
-    let started = Date()
-    guard let frame = Self.encode(.graphChanged(graph.wireSnapshot(revision: revision)))
-    else { return }
-    let encoded = Date()
-    let intended = connections.count
-    var accepted = 0
-    for id in connections.keys where deliver(frame, to: id) {
-      accepted += 1
+  private func notifyClients(
+    _ event: DaemonEvent,
+    envelopes: [UUID: DaemonWireEnvelope],
+    encodedV1: Data? = nil
+  ) async -> Int {
+    var fallbackEnvelopes: [UUID: DaemonWireEnvelope] = [:]
+    for channel in connections.values where envelopes[channel.clientID] == nil {
+      guard fallbackEnvelopes[channel.clientID] == nil else { continue }
+      if let envelope = await channel.envelopeForEvent(event) {
+        fallbackEnvelopes[channel.clientID] = envelope
+      }
     }
-    // Sizes and counts only. `ms` is the actor's own time — encode plus handing every
-    // frame to its channel — and never includes a client's read: that is `write`'s
-    // `blocked_ms`, per client, which is the field #288 was missing.
-    DaemonLog.shared.record(
-      "broadcast",
-      DaemonRequestContext.fields + [
-        ("kind", "graphChanged"), ("revision", String(revision)),
-        ("bytes", String(frame.data.count)),
-        ("encode_ms", DaemonLog.milliseconds(encoded.timeIntervalSince(started))),
-        ("recipients", String(intended)), ("accepted", String(accepted)),
-        ("ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
-      ])
+    var accepted = 0
+    for (id, channel) in connections {
+      if await send(
+        event,
+        to: id,
+        envelope: envelopes[channel.clientID] ?? fallbackEnvelopes[channel.clientID],
+        encodedV1: encodedV1)
+      {
+        accepted += 1
+      }
+    }
+    return accepted
   }
 
-  /// The presence poll's broadcast — see `DaemonEvent.nodesChanged`. Not superseded:
-  /// a newer delta does not carry what an older one said, so both go out; the revision
-  /// is what lets a client drop one a later snapshot has overtaken.
-  ///
-  /// Only a connection that announced `ClientCapability.nodesChanged` gets the delta.
-  /// Every other connection gets the whole snapshot for the same tick, stamped with the
-  /// same revision — what every client got before deltas existed, so an older app
-  /// never meets a frame it cannot read. Both frames are encoded at most once.
-  private func notifyClients(nodesChanged nodes: [LoopNode]) {
+  /// Sends a presence delta to clients that understand it and a same-revision snapshot
+  /// to legacy v1 clients. V2 clients use the replay envelope for the delta.
+  private func notifyClients(nodesChanged nodes: [LoopNode]) async {
     revision += 1
     let started = Date()
-    let delta = Self.encode(
-      .nodesChanged(projectPath: graph.project.path, revision: revision, nodes: nodes))
-    var snapshot: EncodedEvent?
-    let intended = connections.count
+    let delta = DaemonEvent.nodesChanged(
+      projectPath: graph.project.path, revision: revision, nodes: nodes)
+    let snapshot = DaemonEvent.graphChanged(graph.wireSnapshot(revision: revision))
+    let deltaData = try? JSONEncoder().encode(delta)
+    let snapshotData = try? JSONEncoder().encode(snapshot)
+    let envelopes = onGraphEvent?(delta) ?? [:]
+    var fallbackEnvelopes: [UUID: DaemonWireEnvelope] = [:]
     var accepted = 0
     var snapshots = 0
-    for (id, capabilities) in connectionCapabilities where connections[id] != nil {
-      if capabilities.contains(ClientCapability.nodesChanged.rawValue) {
-        if let delta, deliver(delta, to: id) { accepted += 1 }
-      } else {
-        // `deliver` would refuse the delta here on its own; the snapshot is what keeps
-        // this connection current.
-        if snapshot == nil {
-          snapshot = Self.encode(.graphChanged(graph.wireSnapshot(revision: revision)))
+    for (id, channel) in connections {
+      if case .v1 = channel.mode,
+        connectionCapabilities[id]?.contains(ClientCapability.nodesChanged.rawValue) != true
+      {
+        if await send(snapshot, to: id, encodedV1: snapshotData) { accepted += 1 }
+        snapshots += 1
+        continue
+      }
+      var envelope = envelopes[channel.clientID]
+      if envelope == nil {
+        if fallbackEnvelopes[channel.clientID] == nil {
+          fallbackEnvelopes[channel.clientID] = await channel.envelopeForEvent(delta)
         }
-        if let snapshot, deliver(snapshot, to: id) {
-          accepted += 1
-          snapshots += 1
-        }
+        envelope = fallbackEnvelopes[channel.clientID]
+      }
+      if await send(delta, to: id, envelope: envelope, encodedV1: deltaData) {
+        accepted += 1
       }
     }
     DaemonLog.shared.record(
       "broadcast",
       [
         ("kind", "nodesChanged"), ("revision", String(revision)),
-        ("nodes", String(nodes.count)), ("bytes", String(delta?.data.count ?? 0)),
-        ("snapshot_bytes", String(snapshot?.data.count ?? 0)),
-        ("recipients", String(intended)), ("accepted", String(accepted)),
+        ("nodes", String(nodes.count)), ("bytes", String(deltaData?.count ?? 0)),
+        ("snapshot_bytes", String(snapshotData?.count ?? 0)),
+        ("recipients", String(connections.count)), ("accepted", String(accepted)),
         ("as_snapshot", String(snapshots)),
         ("ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
       ])
   }
 
-  /// An event as the bytes and the superseding key it goes out with — everything about
-  /// a frame that does not depend on which connection receives it.
-  private struct EncodedEvent {
-    let data: Data
-    /// `DaemonEvent.requiredCapability` — what `deliver` checks a connection announced.
-    let requiredCapability: ClientCapability?
-    /// A snapshot still waiting to go out is replaced by a newer one rather than queued
-    /// behind it — the event carries the whole graph, so the older one has nothing
-    /// left to say. Keyed per graph, never on the event name alone: one connection joins
-    /// as many projects as it likes, and every project's store writes to that one
-    /// socket. A shared key made the newest snapshot supersede a *different* project's
-    /// undelivered one, so a client that had just joined two projects silently never
-    /// received the first — its loops simply never appeared.
-    let supersedingKey: String?
-  }
-
-  private static func encode(_ event: DaemonEvent) -> EncodedEvent? {
-    guard let data = try? JSONEncoder().encode(event) else { return nil }
-    let supersedingKey: String? = {
-      if case .graphChanged(let changed) = event { return "graphChanged:\(changed.id)" }
-      return nil
-    }()
-    return EncodedEvent(
-      data: data, requiredCapability: event.requiredCapability, supersedingKey: supersedingKey)
-  }
-
-  /// One event to one connection — the unicast shape (`addConnection`'s joining
-  /// snapshot, a refusal). A broadcast goes through `notifyClients`, which encodes once.
-  private func send(_ event: DaemonEvent, to connectionID: UUID) {
-    guard let frame = Self.encode(event) else { return }
-    deliver(frame, to: connectionID)
-  }
-
-  /// Whether the frame was handed to a live channel; `false` also drops the connection
-  /// — or, for an event the connection never announced it could read, sends nothing
-  /// and keeps it.
-  @discardableResult
-  private func deliver(_ frame: EncodedEvent, to connectionID: UUID) -> Bool {
-    guard let fileDescriptor = connections[connectionID] else { return false }
-    // The one place the daemon's default is enforced: an event a connection never
-    // announced it could read is not sent to it, whatever call site asked. A caller
-    // that wants such a connection kept current sends it the legacy shape instead
-    // (`notifyClients(nodesChanged:)` sends the snapshot).
-    if let required = frame.requiredCapability,
-      connectionCapabilities[connectionID]?.contains(required.rawValue) != true
-    {
+  private func send(
+    _ event: DaemonEvent,
+    to connectionID: UUID,
+    envelope: DaemonWireEnvelope? = nil,
+    encodedV1: Data? = nil
+  ) async -> Bool {
+    guard let channel = connections[connectionID] else { return false }
+    do {
+      if case .v1 = channel.mode, let encodedV1 {
+        try await channel.sendEncodedV1Event(encodedV1)
+      } else if let envelope {
+        try await channel.sendEvent(envelope: envelope)
+      } else {
+        try await channel.sendEvent(event)
+      }
+      return true
+    } catch {
+      evictConnection(connectionID)
       return false
     }
-    // Queued, never written here: this runs on the `GraphStore` actor, and a
-    // `graphChanged` frame is far larger than a socket's send buffer, so writing it
-    // inline blocked the actor for as long as the slowest client took to read
-    // (issue #288).
-    guard
-      OutboundChannels.send(
-        frame.data, to: fileDescriptor, supersedingKey: frame.supersedingKey)
-    else {
-      // No live channel — the client already disconnected. Drop it here rather than
-      // waiting for the read loop to notice, so a dead connection can't accumulate
-      // failed broadcast attempts.
-      connections.removeValue(forKey: connectionID)
-      return false
-    }
-    return true
   }
 
-  /// Predicate-evaluation state shared between a project store and every sub-graph
-  /// store it builds: which workspace fingerprint each node's predicate last failed
-  /// against, which failure tail each session was last told, and which frozen tree
-  /// has already spent its one idle re-awake. The project store owns the box for the
-  /// life of the graph; per-command sub-graph stores borrow it so a one-shot
-  /// evaluation inherits what every evaluation before it learned — without that, a
-  /// failing predicate would be relayed to the session afresh on every poll. Public
-  /// only because `GraphStore.init` takes it; there is nothing to call.
   public final class GoalEvaluationCache: @unchecked Sendable {
     private let lock = NSLock()
     private var fingerprints: [UUID: String] = [:]
@@ -4285,8 +4438,13 @@ public actor GraphStore {
       return taken
     }
   }
-}
 
+  private func evictConnection(_ connectionID: UUID) {
+    guard connections.removeValue(forKey: connectionID) != nil else { return }
+    connectionCapabilities.removeValue(forKey: connectionID)
+    onConnectionFailure?(connectionID)
+  }
+}
 private actor DeliveryAttempt {
   private var result: Bool?
   private var waiter: CheckedContinuation<Bool, Never>?

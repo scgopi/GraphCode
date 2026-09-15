@@ -17,7 +17,7 @@ jobs:
     container: swift:6.2
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       # Formatting, before anything slower. Five releases in a row reached main with
       # `swift-format --strict` failing — #320, #350, #351, #352 and one in
       # ProjectPersistence — every one a line the formatter wraps on its own, and every

@@ -53,7 +53,7 @@ public struct RemoteProjectLocation: Equatable, Sendable {
     if projectPath.hasPrefix("\(codespaceScheme)://") {
       guard let components = URLComponents(string: projectPath),
         components.scheme == codespaceScheme,
-        let name = components.host, SafeArgument.isSafeSSHComponent(name),
+        let name = components.host.map(unbracketedHost), SafeArgument.isSafeSSHComponent(name),
         components.user == nil, components.port == nil,
         !components.path.isEmpty, components.path.hasPrefix("/")
       else { return nil }
@@ -62,7 +62,7 @@ public struct RemoteProjectLocation: Equatable, Sendable {
     guard projectPath.hasPrefix("\(scheme)://"),
       let components = URLComponents(string: projectPath),
       components.scheme == scheme,
-      let host = components.host, SafeArgument.isSafeSSHComponent(host),
+      let host = components.host.map(unbracketedHost), SafeArgument.isSafeSSHComponent(host),
       components.user.map(SafeArgument.isSafeSSHComponent) ?? true,
       !components.path.isEmpty, components.path.hasPrefix("/")
     else { return nil }
@@ -72,9 +72,24 @@ public struct RemoteProjectLocation: Equatable, Sendable {
 
   /// The path string this location travels as — `parse`'s inverse.
   public var projectPath: String {
-    isCodespace
-      ? "\(Self.codespaceScheme)://\(host)\(remotePath)"
-      : "\(Self.scheme)://\(authority)\(remotePath)"
+    let encodedPath =
+      remotePath.addingPercentEncoding(withAllowedCharacters: Self.remotePathAllowed)
+      ?? remotePath
+    if isCodespace {
+      return "\(Self.codespaceScheme)://\(host)\(encodedPath)"
+    }
+    return "\(Self.scheme)://\(authority)\(encodedPath)"
+  }
+
+  private static let remotePathAllowed: CharacterSet = {
+    var allowed = CharacterSet.alphanumerics
+    allowed.insert(charactersIn: "-._~/")
+    return allowed
+  }()
+
+  private static func unbracketedHost(_ host: String) -> String {
+    guard host.hasPrefix("["), host.hasSuffix("]") else { return host }
+    return String(host.dropFirst().dropLast())
   }
 
   /// An absolute remote path reduced to the one spelling git will print for it, so two
@@ -99,14 +114,16 @@ public struct RemoteProjectLocation: Equatable, Sendable {
   /// as `-p`, but the authority string carries it for identity and display).
   public var authority: String {
     let userPart = user.map { "\($0)@" } ?? ""
+    let hostPart = host.contains(":") ? "[\(host)]" : host
     let portPart = port.map { ":\($0)" } ?? ""
-    return "\(userPart)\(host)\(portPart)"
+    return "\(userPart)\(hostPart)\(portPart)"
   }
 
   /// What ssh itself is told to connect to — the authority without the port.
   public var sshDestination: String {
     let userPart = user.map { "\($0)@" } ?? ""
-    return "\(userPart)\(host)"
+    let hostPart = host.contains(":") ? "[\(host)]" : host
+    return "\(userPart)\(hostPart)"
   }
 
   /// The sidebar title: the repository folder's name, with the host to tell it apart
@@ -165,7 +182,7 @@ public struct RemoteProjectLocation: Equatable, Sendable {
       invocation.append(remoteCommand)
       return invocation
     }
-    var invocation = ["/usr/bin/ssh"]
+    var invocation = [SSHExecutableResolver.executableURL()?.path ?? "ssh"]
     if interactive { invocation.append("-t") }
     invocation += [
       "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",

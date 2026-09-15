@@ -287,6 +287,11 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       if !defaultBackend.isSpiked { defaultBackend = oldValue.isSpiked ? oldValue : .claudeCode }
     }
   }
+  /// The model tier used by a new loop when it does not pin one itself.
+  ///
+  /// This is deliberately a tier rather than a provider-specific model id so the
+  /// setting remains useful as backend model names change.
+  public var defaultModelTier: ModelTier
   public var claudePermissionMode: ClaudePermissionMode
   public var copilotPermissions: CopilotPermissions
   /// Empty leaves Copilot's version selection unchanged. Applies to future launches,
@@ -301,7 +306,11 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// Installation remains an explicit action on the machine that runs Copilot.
   public var copilotInstallCommand: String? {
     guard let version = normalizedCopilotPreferredVersion else { return nil }
-    return "npm install -g " + PresenceHooks.singleQuoted("@github/copilot@\(version)")
+    return "npm install -g " + Self.shellSingleQuoted("@github/copilot@\(version)")
+  }
+
+  private static func shellSingleQuoted(_ value: String) -> String {
+    "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
   }
 
   /// Whether a session is told it's part of a graph and how to add loops to it
@@ -347,6 +356,8 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// useful during a working session and genuinely thin the moment you relaunch, which
   /// is a trade worth offering and not worth imposing.
   public var showsActivityStrip: Bool
+  /// Whether this installation should receive pre-release updates.
+  public var betaUpdates: Bool
 
   /// Whether graphcode narrates what loops are doing — the summary rail's *producer*.
   ///
@@ -451,6 +462,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
 
   public init(
     defaultBackend: CLISessionBackendKind = .claudeCode,
+    defaultModelTier: ModelTier = .standard,
     codexApprovals: CodexApprovals = .yolo,
     openCodePermissions: OpenCodePermissions = .auto,
     piProjectTrust: PiProjectTrust = .approve,
@@ -460,6 +472,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     briefsSessionsAboutTheGraph: Bool = true,
     autoSelectsModel: Bool = false,
     showsActivityStrip: Bool = false,
+    betaUpdates: Bool = false,
     summarisesLoops: Bool = false,
     summaryUsesModel: Bool = false,
     visualisesSummaries: Bool = false,
@@ -471,6 +484,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   ) {
     self.endsResolvedSessionsAfterMinutes = endsResolvedSessionsAfterMinutes
     self.defaultBackend = defaultBackend.isSpiked ? defaultBackend : .claudeCode
+    self.defaultModelTier = defaultModelTier
     self.codexApprovals = codexApprovals
     self.openCodePermissions = openCodePermissions
     self.piProjectTrust = piProjectTrust
@@ -480,6 +494,7 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     self.briefsSessionsAboutTheGraph = briefsSessionsAboutTheGraph
     self.autoSelectsModel = autoSelectsModel
     self.showsActivityStrip = showsActivityStrip
+    self.betaUpdates = betaUpdates
     self.summarisesLoops = summarisesLoops
     self.summaryUsesModel = summaryUsesModel
     self.visualisesSummaries = visualisesSummaries
@@ -498,6 +513,8 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       try container.decodeIfPresent(CLISessionBackendKind.self, forKey: .defaultBackend)
       ?? .claudeCode
     defaultBackend = storedBackend.isSpiked ? storedBackend : .claudeCode
+    defaultModelTier =
+      try container.decodeIfPresent(ModelTier.self, forKey: .defaultModelTier) ?? .standard
     codexApprovals =
       try container.decodeIfPresent(CodexApprovals.self, forKey: .codexApprovals) ?? .yolo
     openCodePermissions =
@@ -525,6 +542,8 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       try container.decodeIfPresent(Bool.self, forKey: .autoSelectsModel) ?? false
     showsActivityStrip =
       try container.decodeIfPresent(Bool.self, forKey: .showsActivityStrip) ?? false
+    betaUpdates =
+      try container.decodeIfPresent(Bool.self, forKey: .betaUpdates) ?? false
     // Absent means nobody has opted in, which is the default again. A person who switched
     // it on has `true` in their file — including anyone whose 0.1.37 install wrote the
     // then-default out — and that is preserved.

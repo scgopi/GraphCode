@@ -2,10 +2,101 @@
 import PackageDescription
 
 // SwiftPM manifest for the non-UI products — GraphcodeKit, the `graphcode` CLI, and
-// `graphcoded` — so they build on Linux (and anywhere else swift-corelibs Foundation
-// runs), where Tuist and Xcode don't. The macOS app keeps building through
-// `Project.swift`; Tuist resolves its dependencies from `Tuist/Package.swift` and
-// ignores this file. See issue #83.
+// `graphcoded` — so they build anywhere swift-corelibs Foundation runs, where Tuist
+// and Xcode don't. The macOS app keeps building through `Project.swift`; Tuist
+// resolves its dependencies from `Tuist/Package.swift` and ignores this file.
+#if os(Windows)
+  let graphcodeKitTarget: Target = .target(
+    name: "GraphcodeKit",
+    dependencies: [
+      "MailroomKit",
+      .product(name: "IdentifiedCollections", package: "swift-identified-collections"),
+    ],
+    path: "GraphcodeKit/Sources",
+    exclude: [
+      "IPC/OutboundChannel.swift",
+      "Platform/WindowsSessionServices.swift",
+      "Sessions/PTYProcessSession.swift",
+    ],
+    sources: [
+      "Domain",
+      "CLI/GraphcodeCommand.swift",
+      "IPC",
+      "Platform",
+      "Deadline.swift",
+      "DaemonBootstrap.swift",
+      "GraphExportBundle.swift",
+      "GraphExportBundle+ZIP.swift",
+      "GraphStore.swift",
+      "GraphWriter.swift",
+      "TerminalLayoutStore.swift",
+      "Workspace.swift",
+      "WorkspaceLock.swift",
+      "QuickChatStore.swift",
+      "Sessions/QuickChatSessionRegistry.swift",
+      "ProjectPersistence.swift",
+      "ProjectPersistence+Export.swift",
+      "ProjectRegistry.swift",
+      "SupportDirectory.swift",
+      "Sessions/MessageBus.swift",
+      "Sessions/NodeMemory.swift",
+      "GraphcodeSettingsStore.swift",
+      "Sessions/AgentEnvironment.swift",
+      "Sessions/CLISessionBackend.swift",
+      "Sessions/ClaudeSessionLog.swift",
+      "Sessions/ClaudeCodeTrust.swift",
+      "Sessions/CodexSessionLog.swift",
+      "Sessions/CodexThreadResolver.swift",
+      "Sessions/CondemnedSessions.swift",
+      "Sessions/CopilotSessionLog.swift",
+      "Sessions/CopilotTrust.swift",
+      "Sessions/OpenCodePresencePlugin.swift",
+      "Sessions/RemoteEnsureGate.swift",
+      "Sessions/RemoteGraphAccess.swift",
+      "Sessions/RemoteSocketForwarder.swift",
+      "Sessions/RemoteTranscriptProbe.swift",
+      "Sessions/GoalVerdictReader.swift",
+      "Sessions/MermaidBoardParser.swift",
+      "Sessions/OrphanedSessionReaper.swift",
+      "Sessions/PiPresenceExtension.swift",
+      "Sessions/ProviderPath.swift",
+      "Sessions/SessionIDStore.swift",
+      "Sessions/SessionTransplant.swift",
+      "Sessions/SessionTransplant+Layouts.swift",
+      "Sessions/ShellPredicateEvaluator.swift",
+      "Sessions/SummaryBeatBuilder.swift",
+      "Sessions/SummaryBoardComposer.swift",
+      "Sessions/SummaryModelWriter.swift",
+      "Sessions/TranscriptFreshness.swift",
+      "Sessions/WindowsPTYProcessSession.swift",
+      "Sessions/ZmxSessionLauncher.swift",
+      "Sessions/PresenceHooks.swift",
+      "Sessions/ZmxLocator.swift",
+      "Templates",
+    ],
+    swiftSettings: [.swiftLanguageMode(.v5)]
+  )
+  let platformTestTargets: [Target] = [
+    .testTarget(
+      name: "GraphcodeWindowsProductionTests",
+      dependencies: ["GraphcodeKit"],
+      path: "windows-tests",
+      swiftSettings: [.swiftLanguageMode(.v5)]
+    )
+  ]
+#else
+  let graphcodeKitTarget: Target = .target(
+    name: "GraphcodeKit",
+    dependencies: [
+      "MailroomKit",
+      .product(name: "IdentifiedCollections", package: "swift-identified-collections"),
+    ],
+    path: "GraphcodeKit/Sources",
+    swiftSettings: [.swiftLanguageMode(.v5)]
+  )
+  let platformTestTargets: [Target] = []
+#endif
+
 let package = Package(
   name: "graphcode",
   platforms: [.macOS(.v15)],
@@ -18,7 +109,7 @@ let package = Package(
   dependencies: [
     .package(
       url: "https://github.com/pointfreeco/swift-identified-collections",
-      from: "1.1.0"
+      exact: "1.1.1"
     )
   ],
   targets: [
@@ -32,17 +123,7 @@ let package = Package(
       path: "MailroomKit/Sources",
       swiftSettings: [.swiftLanguageMode(.v5)]
     ),
-    .target(
-      name: "GraphcodeKit",
-      dependencies: [
-        "MailroomKit",
-        .product(name: "IdentifiedCollections", package: "swift-identified-collections"),
-      ],
-      path: "GraphcodeKit/Sources",
-      // Language mode 5 to match how Tuist/Xcode builds these same sources today;
-      // moving the tree to strict mode 6 is its own change, not the Linux port's.
-      swiftSettings: [.swiftLanguageMode(.v5)]
-    ),
+    graphcodeKitTarget,
     .executableTarget(
       name: "graphcode-cli",
       dependencies: ["GraphcodeKit", "MailroomKit"],
@@ -55,5 +136,5 @@ let package = Package(
       path: "graphcoded/Sources",
       swiftSettings: [.swiftLanguageMode(.v5)]
     ),
-  ]
+  ] + platformTestTargets
 )

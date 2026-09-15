@@ -25,6 +25,42 @@ extension OrchestratorClient {
     + "The app keeps its connection but may fall behind until it is updated."
 }
 
+private final class ReaderToken: @unchecked Sendable {
+  private let lock = NSLock()
+  private var readerID: UInt64?
+  private var connection: (any DaemonConnection)?
+
+  func set(_ readerID: UInt64) {
+    lock.lock()
+    self.readerID = readerID
+    lock.unlock()
+  }
+
+  func setConnection(_ connection: any DaemonConnection) {
+    lock.lock()
+    self.connection = connection
+    lock.unlock()
+  }
+
+  func closeConnection() {
+    lock.lock()
+    let connection = self.connection
+    lock.unlock()
+    guard let connection else { return }
+    if let unixConnection = connection as? UnixSocketConnection {
+      unixConnection.closeSync()
+    } else {
+      Task { try? await connection.close() }
+    }
+  }
+
+  var value: UInt64? {
+    lock.lock()
+    defer { lock.unlock() }
+    return readerID
+  }
+}
+
 enum OrchestratorClientError: Error, Equatable {
   case connectFailed(errno: Int32)
 }
@@ -36,7 +72,7 @@ extension OrchestratorClient: DependencyKey {
   /// `DaemonConnection.connection`. Parameterized on the socket path so tests can point
   /// a client at a socket they own instead of the real daemon's.
   static func live(socketPath: URL) -> OrchestratorClient {
-    let connection = DaemonConnection(socketPath: socketPath)
+    let connection = AppDaemonConnection(socketPath: socketPath)
     return OrchestratorClient(
       connect: { connection.events() },
       send: { command in try await connection.send(command) }
@@ -53,7 +89,7 @@ extension DependencyValues {
 
 /// Owns the one socket connection to `graphcoded`, connecting lazily and retrying with
 /// backoff — the app can launch before the daemon has finished starting up.
-private actor DaemonConnection {
+private actor AppDaemonConnection {
   private let socketPath: URL
 
   /// The one connect attempt, in flight or finished — **not** a bare file descriptor.
@@ -68,11 +104,18 @@ private actor DaemonConnection {
   /// landed on the descriptor nobody read, and the UI never saw an event. Storing the
   /// `Task` means the second caller awaits the first caller's attempt: one socket, one
   /// reader, replies land where they're expected.
-  private var connection: Task<Int32, any Error>?
+  private var connection: Task<any DaemonConnection, any Error>?
 
   /// Bumped whenever `connection` is dropped, so a late failure handler can tell whether
   /// the attempt it was holding is still the current one.
   private var generation = 0
+  private var nextReaderID: UInt64 = 0
+  private var activeReaderID: UInt64?
+  /// A replacement socket must be joined exactly once, regardless of whether the reader
+  /// or a concurrent send is first to observe it.
+  private var rejoinConnectionID: UUID?
+  private var restoreTask: Task<Void, any Error>?
+  private var globalJoinTask: Task<Void, any Error>?
 
   init(socketPath: URL) {
     self.socketPath = socketPath
@@ -86,24 +129,38 @@ private actor DaemonConnection {
   /// would look connected but never update again.
   nonisolated func events() -> AsyncStream<DaemonEvent> {
     AsyncStream { continuation in
+      let token = ReaderToken()
       let task = Task {
+        let readerID = await beginReader()
+        token.set(readerID)
+        defer {
+          continuation.finish()
+          Task { await endReader(readerID) }
+        }
         while !Task.isCancelled {
-          var connectedDescriptor: Int32?
+          var connectedConnection: (any DaemonConnection)?
           do {
-            let fileDescriptor = try await ensureConnected()
-            connectedDescriptor = fileDescriptor
-            if await isReconnect() { try await rejoinProjects() }
+            guard await isCurrentReader(readerID) else { return }
+            let connection = try await ensureConnected()
+            guard await isCurrentReader(readerID) else {
+              try? await connection.close()
+              return
+            }
+            connectedConnection = connection
+            token.setConnection(connection)
+            if await isReconnect() { try await rejoinProjects(on: connection) }
             var saidUnreadable = false
-            while true {
-              let data = try await readFrameAsync(from: fileDescriptor)
-              // A frame that read fine but did not decode is a daemon newer than this
-              // app, not a dead socket — the mirror of how `graphcoded` treats a command
-              // it does not know. Redialling here made an older app tear its connection
-              // down and rejoin every fifteen seconds for as long as the daemon kept
-              // sending something new.
-              // Skipped, and said once per connection through the same path a daemon
-              // refusal takes: a quietly skipped frame is a board going stale with
-              // nothing on screen to say why.
+            while !Task.isCancelled {
+              guard await isCurrentReader(readerID) else { return }
+              let data = try await withTaskCancellationHandler {
+                try await connection.receiveFrame()
+              } onCancel: {
+                if let unixConnection = connection as? UnixSocketConnection {
+                  unixConnection.closeSync()
+                } else {
+                  Task { try? await connection.close() }
+                }
+              }
               guard let event = try? JSONDecoder().decode(DaemonEvent.self, from: data) else {
                 if !saidUnreadable {
                   saidUnreadable = true
@@ -114,13 +171,28 @@ private actor DaemonConnection {
               continuation.yield(event)
             }
           } catch {
-            if let connectedDescriptor { await invalidate(connectedDescriptor) }
-            try? await Task.sleep(for: .seconds(1))
+            if let connectedConnection {
+              await readerFailed(readerID, connection: connectedConnection)
+            }
+            guard !Task.isCancelled, await isCurrentReader(readerID) else { return }
+            do {
+              try await Task.sleep(for: .seconds(1))
+            } catch {
+              return
+            }
           }
         }
-        continuation.finish()
       }
-      continuation.onTermination = { _ in task.cancel() }
+      continuation.onTermination = { _ in
+        task.cancel()
+        token.closeConnection()
+        Task {
+          while token.value == nil { await Task.yield() }
+          if let readerID = token.value {
+            await self.endReader(readerID)
+          }
+        }
+      }
     }
   }
 
@@ -131,6 +203,53 @@ private actor DaemonConnection {
   private func isReconnect() -> Bool {
     defer { hasConnectedBefore = true }
     return hasConnectedBefore
+  }
+
+  private func beginReader() async -> UInt64 {
+    let readerID = nextReaderID
+    nextReaderID = nextReaderID == UInt64.max ? 0 : nextReaderID + 1
+    let hadReader = activeReaderID != nil
+    activeReaderID = readerID
+    guard hadReader else { return readerID }
+
+    let oldConnection = connection
+    connection = nil
+    generation += 1
+    clearRejoinState()
+    if let oldConnection {
+      oldConnection.cancel()
+      if let resolved = try? await oldConnection.value {
+        try? await resolved.close()
+      }
+    }
+    return readerID
+  }
+
+  private func isCurrentReader(_ readerID: UInt64) -> Bool {
+    activeReaderID == readerID
+  }
+
+  private func endReader(_ readerID: UInt64) async {
+    guard activeReaderID == readerID else { return }
+    activeReaderID = nil
+    let currentConnection = connection
+    connection = nil
+    generation += 1
+    clearRejoinState()
+    if let currentConnection {
+      currentConnection.cancel()
+      if let resolved = try? await currentConnection.value {
+        try? await resolved.close()
+      }
+    }
+  }
+
+  private func readerFailed(_ readerID: UInt64, connection: any DaemonConnection) async {
+    guard activeReaderID == readerID else {
+      try? await connection.close()
+      return
+    }
+    await invalidate(connection)
   }
 
   /// Re-announces which projects this client wants, on a socket that replaced one that
@@ -147,23 +266,43 @@ private actor DaemonConnection {
   /// The same two commands the launch path sends: the daemon's own open-projects set is
   /// the right one to restore from, and the global graph is joined by name because it is
   /// deliberately not in that set.
-  private func rejoinProjects() async throws {
-    try await send(.restoreOpenProjects)
-    try await send(.openGlobalGraph)
+  private func rejoinProjects(on connection: any DaemonConnection) async throws {
+    try await ensureRejoined(connection)
   }
 
   func send(_ command: DaemonCommand) async throws {
-    let fileDescriptor = try await ensureConnected()
-    let data = try JSONEncoder().encode(command)
+    let connection = try await ensureConnected()
     do {
-      try await writeFrameAsync(data, to: fileDescriptor)
+      switch command {
+      case .restoreOpenProjects, .openGlobalGraph:
+        // These are the public join commands used by app startup. Coalesce each with
+        // reconnect rejoin so concurrent startup sends cannot duplicate a join.
+        try await sendJoin(command, on: connection)
+      case .announce, .listRecentProjects, .listQuickChats, .createQuickChat, .openQuickChat,
+        .renameQuickChat, .deleteQuickChat:
+        // Quick chats hang off no project, so they need no rejoin — the raw path is the
+        // same one `listRecentProjects` takes.
+        try await sendRaw(command, on: connection)
+      case .openProject, .closeProject, .forgetProject, .deleteProjectGraph, .graphCommand,
+        .mailbox:
+        do {
+          try await ensureRejoined(connection)
+        } catch {
+          await invalidate(connection)
+          let replacement = try await ensureConnected()
+          try await ensureRejoined(replacement)
+          try await sendRaw(command, on: replacement)
+          return
+        }
+        try await sendRaw(command, on: connection)
+      }
     } catch {
-      await invalidate(fileDescriptor)
+      await invalidate(connection)
       throw error
     }
   }
 
-  private func ensureConnected() async throws -> Int32 {
+  private func ensureConnected() async throws -> any DaemonConnection {
     if let connection { return try await connection.value }
     let attemptGeneration = generation
     let attempt = Task { try await connectWithBackoff() }
@@ -181,47 +320,135 @@ private actor DaemonConnection {
     }
   }
 
+  /// Coalesces the two commands that establish this client's project/global membership.
+  ///
+  /// The task is keyed by the transport identity rather than the actor's generation so a
+  /// send-created replacement socket and the reader's reconnect path share the same work.
+  private func ensureRejoined(_ connection: any DaemonConnection) async throws {
+    try await sendJoin(.restoreOpenProjects, on: connection)
+    try await sendJoin(.openGlobalGraph, on: connection)
+  }
+
+  private func sendJoin(
+    _ command: DaemonCommand,
+    on connection: any DaemonConnection
+  ) async throws {
+    if rejoinConnectionID != connection.id {
+      clearRejoinState()
+      rejoinConnectionID = connection.id
+    }
+    let existingTask: Task<Void, any Error>?
+    switch command {
+    case .restoreOpenProjects:
+      existingTask = restoreTask
+    case .openGlobalGraph:
+      existingTask = globalJoinTask
+    default:
+      preconditionFailure("only join commands can use sendJoin")
+    }
+    if let existingTask {
+      do {
+        try await existingTask.value
+        return
+      } catch {
+        if rejoinConnectionID == connection.id {
+          clearJoinTask(command)
+        }
+        throw error
+      }
+    }
+
+    let task = Task { () throws -> Void in
+      try await sendRaw(command, on: connection)
+    }
+    switch command {
+    case .restoreOpenProjects:
+      restoreTask = task
+    case .openGlobalGraph:
+      globalJoinTask = task
+    default:
+      preconditionFailure("only join commands can use sendJoin")
+    }
+    do {
+      try await task.value
+    } catch {
+      if rejoinConnectionID == connection.id {
+        clearJoinTask(command)
+      }
+      throw error
+    }
+  }
+
+  private func clearJoinTask(_ command: DaemonCommand) {
+    switch command {
+    case .restoreOpenProjects:
+      restoreTask = nil
+    case .openGlobalGraph:
+      globalJoinTask = nil
+    default:
+      break
+    }
+  }
+
+  private func sendRaw(_ command: DaemonCommand, on connection: any DaemonConnection) async throws {
+    try await connection.sendFrame(try JSONEncoder().encode(command))
+  }
+
+  private func clearRejoinState() {
+    restoreTask?.cancel()
+    globalJoinTask?.cancel()
+    restoreTask = nil
+    globalJoinTask = nil
+    rejoinConnectionID = nil
+  }
+
   /// Drops the shared connection after an I/O failure, so the next `send` or `events()`
   /// dials again instead of writing into a socket the daemon has gone from.
   ///
-  /// Deliberately does not `close` the descriptor: `events()` can be parked in a blocking
-  /// `read` on it from another thread, and closing under that read frees the number for
-  /// any other socket the process opens next. Costs one stranded descriptor per daemon
-  /// restart, which the process reclaims on exit.
-  private func invalidate(_ fileDescriptor: Int32) async {
-    guard let connection, let currentDescriptor = try? await connection.value,
-      currentDescriptor == fileDescriptor
+  /// Closes the failed transport as well as dropping it: `events()` can be parked in a
+  /// blocking `read` on another thread, and closing under that read is what wakes the old
+  /// reader so it cannot race a replacement connection.
+  private func invalidate(_ failedConnection: any DaemonConnection) async {
+    guard let connection, let currentConnection = try? await connection.value,
+      currentConnection.id == failedConnection.id
     else { return }
     self.connection = nil
     generation += 1
+    clearRejoinState()
+    connection.cancel()
+    try? await failedConnection.close()
   }
 
-  /// Connects, and announces on the new socket before anyone can use it: the
-  /// announcement is written inside the one connect attempt every caller awaits
-  /// (`ensureConnected`), so it is the first frame on every socket by construction —
-  /// `send` and `events()` both resume only after it has gone out. Sending it from the
-  /// stream task instead let a caller's first command race ahead of it, and a
-  /// connection that announced second was a connection that announced nothing for the
-  /// commands the daemon handled in between.
-  private func connectWithBackoff() async throws -> Int32 {
+  private func connectWithBackoff() async throws -> any DaemonConnection {
     var lastError: any Error = OrchestratorClientError.connectFailed(errno: 0)
     for attempt in 0..<10 {
+      try Task.checkCancellation()
       do {
-        let fileDescriptor = try await connectAsync()
-        let announce = try JSONEncoder().encode(
-          DaemonCommand.announce(capabilities: [ClientCapability.nodesChanged.rawValue]))
-        try await writeFrameAsync(announce, to: fileDescriptor)
-        return fileDescriptor
+        let connection = try await connectAsync()
+        do {
+          let announce = try JSONEncoder().encode(
+            DaemonCommand.announce(capabilities: [ClientCapability.nodesChanged.rawValue]))
+          try await connection.sendFrame(announce)
+          return connection
+        } catch {
+          try? await connection.close()
+          throw error
+        }
       } catch {
         lastError = error
-        try? await Task.sleep(for: .milliseconds(200 * (attempt + 1)))
+        do {
+          try await Task.sleep(for: .milliseconds(200 * (attempt + 1)))
+        } catch {
+          throw CancellationError()
+        }
       }
     }
+
     throw lastError
   }
 
   @Sendable
-  private func connectAsync() async throws -> Int32 {
+  private func connectAsync() async throws -> any DaemonConnection {
     let path = socketPath.path
     return try await withCheckedThrowingContinuation { continuation in
       DispatchQueue.global().async {
@@ -242,6 +469,7 @@ private actor DaemonConnection {
               strncpy(pathPointer, cPath, MemoryLayout.size(ofValue: pathField.pointee) - 1)
             }
           }
+
         }
 
         let connectResult = withUnsafePointer(to: &address) { addressPointer -> Int32 in
@@ -255,34 +483,11 @@ private actor DaemonConnection {
           continuation.resume(throwing: OrchestratorClientError.connectFailed(errno: capturedErrno))
           return
         }
-        continuation.resume(returning: fd)
-      }
-    }
-  }
-}
-
-@Sendable
-private func readFrameAsync(from fileDescriptor: Int32) async throws -> Data {
-  try await withCheckedThrowingContinuation { continuation in
-    DispatchQueue.global().async {
-      do {
-        continuation.resume(returning: try FramedMessageIO.readFrame(from: fileDescriptor))
-      } catch {
-        continuation.resume(throwing: error)
-      }
-    }
-  }
-}
-
-@Sendable
-private func writeFrameAsync(_ data: Data, to fileDescriptor: Int32) async throws {
-  try await withCheckedThrowingContinuation { continuation in
-    DispatchQueue.global().async {
-      do {
-        try FramedMessageIO.writeFrame(data, to: fileDescriptor)
-        continuation.resume()
-      } catch {
-        continuation.resume(throwing: error)
+        continuation.resume(
+          returning: UnixSocketConnection(
+            fileDescriptor: fd,
+            endpoint: .unixSocket(URL(fileURLWithPath: path)),
+            writeTimeout: 5))
       }
     }
   }
