@@ -500,7 +500,7 @@ public enum GoobersExport {
     case .claudeCode: return "claude-code"
     // Goobers has no harness for these; refusing beats silently retargeting a node
     // onto a model its prompt was never written for.
-    case .codex, .openCode: return nil
+    case .codex, .openCode, .pi: return nil
     }
   }
 

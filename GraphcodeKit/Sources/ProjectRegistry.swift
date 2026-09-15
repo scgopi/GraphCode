@@ -654,7 +654,6 @@ public actor ProjectRegistry {
     if let existing = stores[path] { return existing }
     let scope = LoopGraphScope(projectPath: path, name: Self.displayName(for: path))
     let graph = writer.load(path: path) ?? LoopGraph(scope: scope)
-    let persistence = self.persistence
     let goobersDirectory = persistenceDirectory
     // A cross-graph spawn arrives here as a plain request; hopping through an unstructured
     // `Task` is what lets this actor re-enter itself to reach a *different* store without
