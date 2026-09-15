@@ -56,6 +56,17 @@ function Assert-HistoryContains([string] $name, [string] $marker, [string] $labe
   throw "$label did not contain the persistent VT marker '$marker'"
 }
 
+function Assert-ZmxSessionHealthy([string] $name, [string] $label) {
+  for ($attempt = 0; $attempt -lt 40; $attempt++) {
+    & $zmx get $name *> $null
+    if ($LASTEXITCODE -eq 0) {
+      return
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  throw "$label did not become reachable"
+}
+
 function Assert-PinnedCleanWorktree(
   [string] $root,
   [string] $expectedSha,
@@ -218,8 +229,8 @@ try {
     Record-TestOwnedSessions
     Write-OwnedResourceMetrics "terminal-gate:typed-input"
     Invoke-Native "first-session health" {
-      & $zmx get $names[0]
-      & $zmx get $names[1]
+      Assert-ZmxSessionHealthy $names[0] "session A"
+      Assert-ZmxSessionHealthy $names[1] "session B"
     }
     Invoke-Native "session shell pwd/cwd" {
       & $zmx send $names[0] "cd`r"
@@ -247,8 +258,8 @@ try {
     }
     Record-TestOwnedSessions
     Invoke-Native "restart-session health" {
-      & $zmx get $names[0]
-      & $zmx get $names[1]
+      Assert-ZmxSessionHealthy $names[0] "restart session A"
+      Assert-ZmxSessionHealthy $names[1] "restart session B"
     }
     Assert-HistoryContains $names[0] `
       "GraphCode persistent VT output A" "restart A history"
@@ -263,7 +274,7 @@ try {
     }
     Record-TestOwnedSessions
     Invoke-Native "same-session health" {
-      & $zmx get $names[2]
+      Assert-ZmxSessionHealthy $names[2] "shared session"
     }
     Invoke-Native "seed shared persistent shell output" {
       & $zmx send $names[2] "echo GraphCode shared VT output`r"
@@ -282,8 +293,8 @@ try {
       }
       Record-TestOwnedSessions
       Invoke-Native "post-stress session health" {
-        & $zmx get $names[0]
-        & $zmx get $names[1]
+        Assert-ZmxSessionHealthy $names[0] "post-stress session A"
+        Assert-ZmxSessionHealthy $names[1] "post-stress session B"
       }
     }
     Write-Host "Windows terminal gate smoke/stress: PASS"

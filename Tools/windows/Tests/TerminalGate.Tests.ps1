@@ -83,6 +83,7 @@ foreach ($token in @(
     "waitAttachClient",
     "CreateProcessW",
     "recreateSurface",
+    "destroyWinghosttySurface",
     "callbacksAfterDestroy",
     "sameSession",
     "app.active_surface = surfaceIndex"
@@ -120,6 +121,7 @@ foreach ($token in @(
     "zmx send",
     "history",
     "--vt",
+    "Assert-ZmxSessionHealthy",
     "pwd",
     "same-session restart",
     "Assert-PinnedCleanWorktree",

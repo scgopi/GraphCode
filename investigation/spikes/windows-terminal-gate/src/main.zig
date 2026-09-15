@@ -44,6 +44,7 @@ const SurfaceSlot = struct {
     input_seen: bool = false,
     output_seen: bool = false,
     attach_restarts: usize = 0,
+    silent_attach_ticks: usize = 0,
     terminal_buffer: [16 * 1024]u8 = undefined,
     terminal_buffer_len: usize = 0,
     terminal_cells: [terminal_cell_count]c.winghostty_terminal_cell = [_]c.winghostty_terminal_cell{
@@ -775,10 +776,7 @@ fn waitForInitialAttachOutput(app: *App, index: usize) !void {
     return error.InitialAttachOutputTimeout;
 }
 
-fn createSurface(app: *App, index: usize) !void {
-    const name = sessionName(app, index);
-    try startSession(app, name, index);
-
+fn createWinghosttySurface(app: *App, index: usize) !void {
     var options = initializeOptions(app, index);
     const result = c.winghostty_host_create_surface_v2(
         app.host,
@@ -787,12 +785,11 @@ fn createSurface(app: *App, index: usize) !void {
         &app.surfaces[index].surface,
     );
     if (result != c.WINGHOSTTY_OK or app.surfaces[index].surface == null) {
-        waitAttachClient(&app.surfaces[index]);
         return error.WinghosttySurfaceCreateFailed;
     }
     const slot = &app.surfaces[index];
     slot.last_surface = slot.surface;
-    slot.session_name = name;
+    slot.session_name = sessionName(app, index);
     slot.destroyed = false;
     slot.destroying = false;
     slot.redraws = 0;
@@ -802,6 +799,7 @@ fn createSurface(app: *App, index: usize) !void {
     slot.output_events = 0;
     slot.input_bytes = 0;
     slot.attach_restarts = 0;
+    slot.silent_attach_ticks = 0;
     slot.terminal_buffer_len = 0;
     clearTerminalCells(slot);
     slot.terminal_parser = .normal;
@@ -810,11 +808,16 @@ fn createSurface(app: *App, index: usize) !void {
     slot.csi_private = false;
 }
 
-// The gate creates two independent complete surfaces through
-// winghostty_host_create_surface_v2: surface A and surface B.
-fn destroySurface(app: *App, index: usize) void {
+fn createSurface(app: *App, index: usize) !void {
+    try startSession(app, sessionName(app, index), index);
+    createWinghosttySurface(app, index) catch |err| {
+        waitAttachClient(&app.surfaces[index]);
+        return err;
+    };
+}
+
+fn destroyWinghosttySurface(app: *App, index: usize) void {
     const slot = &app.surfaces[index];
-    waitAttachClient(slot);
     if (slot.surface) |surface| {
         slot.destroying = true;
         rememberRetiredSurface(app, surface);
@@ -825,10 +828,18 @@ fn destroySurface(app: *App, index: usize) void {
     }
 }
 
+// The gate creates two independent complete surfaces through
+// winghostty_host_create_surface_v2: surface A and surface B.
+fn destroySurface(app: *App, index: usize) void {
+    const slot = &app.surfaces[index];
+    waitAttachClient(slot);
+    destroyWinghosttySurface(app, index);
+}
+
 fn recreateSurface(app: *App, index: usize) !void {
-    destroySurface(app, index);
+    destroyWinghosttySurface(app, index);
     app.recreate_count += 1;
-    return createSurface(app, index);
+    return createWinghosttySurface(app, index);
 }
 
 fn resizeSurfaces(app: *App, width: i32, height: i32) void {
@@ -910,10 +921,13 @@ fn restartBrokenAttach(app: *App, index: usize) !void {
     waitAttachClient(slot);
     try startSession(app, sessionName(app, index), index);
     slot.attach_restarts += 1;
+    slot.silent_attach_ticks = 0;
 }
 
 fn attachStreamsReady(app: *const App) bool {
-    return app.surfaces[0].output_seen and app.attach_stable_ticks >= 5;
+    const output_ready = app.surfaces[0].output_seen and
+        (app.same_session or app.surfaces[1].output_seen);
+    return output_ready and app.attach_stable_ticks >= 5;
 }
 
 fn failSmokeReadiness(app: *App, reason: []const u8) void {
@@ -950,6 +964,19 @@ fn tick(app: *App) void {
                     failSmokeReadiness(app, "attach-restart");
                     return;
                 };
+            } else if (!app.same_session and !app.surfaces[index].output_seen) {
+                app.surfaces[index].silent_attach_ticks += 1;
+                if (app.surfaces[index].silent_attach_ticks >= 20) {
+                    restartBrokenAttach(app, index) catch |err| {
+                        std.debug.print(
+                            "terminal gate silent attach restart failed: {s} surface={d}\n",
+                            .{ @errorName(err), index },
+                        );
+                        failSmokeReadiness(app, "silent-attach-restart");
+                        return;
+                    };
+                    alive.* = false;
+                }
             }
         }
         if (attach_alive[0] and attach_alive[1]) {
@@ -1124,7 +1151,8 @@ fn messageLoop(app: *App) !void {
             app.totalInputBytes == 0 or
             !app.surfaces[0].input_seen or
             !app.surfaces[0].output_seen or
-            !app.surfaces[1].input_seen))
+            !app.surfaces[1].input_seen or
+            (!app.same_session and !app.surfaces[1].output_seen)))
     {
         std.debug.print(
             "terminal gate I/O contract failure: output_events={d} input_bytes={d} output=({any},{any}) input=({any},{any}) restarts=({d},{d}) stable_ticks={d}\n",
