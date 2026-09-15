@@ -251,6 +251,8 @@ function Invoke-RealMatrix {
   foreach ($binary in @($zmx, $graphcoded, $graphcode, $shell)) {
     Assert-True (Test-Path -LiteralPath $binary) "real hardening binary missing: $binary"
   }
+  $shellVersion = (& $shell --version 2>$null | Select-Object -First 1).Trim()
+  Assert-True ([bool] $shellVersion) "real GraphCode shell did not report a version"
 
   $support = Join-Path $repoRoot ".build\hardening-real-$PID"
   New-Item -ItemType Directory -Force $support | Out-Null
@@ -298,7 +300,7 @@ function Invoke-RealMatrix {
     $shellScript = Join-Path $repoRoot "Tools\windows\windows-shell.ps1"
     & $pwsh -NoProfile -File $shellScript -WinghosttyRoot $wing -ZmxRoot $zmxRoot `
       -Zig0152 $zig0152 -Zig0160 $zig0160 -SkipBuild -Stress -UseStubDaemon `
-      -SkipTrayLive:$SkipTrayLive
+      -SkipTrayLive:$SkipTrayLive -Version $shellVersion
     Assert-True ($LASTEXITCODE -eq 0) "real GraphCode shell matrix failed"
     $productAfterWorkload = Get-ProductResourceSample $productRoots
     $productNewWorkload = Select-NewProductResourceSample $productAfterWorkload $productBaselinePids

@@ -20,7 +20,7 @@ const BOOL = c.BOOL;
 const terminal_columns: usize = 120;
 const terminal_rows: usize = 40;
 const terminal_cell_count: usize = terminal_columns * terminal_rows;
-const attach_restart_limit: usize = 8;
+const attach_restart_limit: usize = 16;
 
 const TerminalParserState = enum {
     normal,

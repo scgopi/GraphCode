@@ -73,6 +73,11 @@ try {
   if ($windowsWorkflow -notmatch "GRAPHCODE_HARDENING_TARGET") {
     throw "RED: full-pinned Windows CI does not provide an owned environment harness"
   }
+  $hardeningSource = Get-Content (Join-Path $PSScriptRoot "Hardening.Tests.ps1") -Raw
+  if ($hardeningSource -notmatch
+      '(?s)\$shellVersion\s*=\s*\(& \$shell --version.*?-Version \$shellVersion') {
+    throw "RED: post-release hardening does not preserve the built shell version"
+  }
   $windowsShellWorkflow = Get-Content (Join-Path $repoRoot ".github\workflows\windows-shell.yml") -Raw
   $windowsPortWorkflow = Get-Content `
     (Join-Path $repoRoot ".github\workflows\windows-port-validation.yml") -Raw
