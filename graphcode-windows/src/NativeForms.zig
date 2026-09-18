@@ -171,7 +171,7 @@ pub fn node(
 
 fn buildNodeDraft(
     allocator: std.mem.Allocator,
-    values: [20][]u8,
+    values: []const []u8,
     initial: Forms.NodeDraft,
 ) !Forms.NodeDraft {
     const goal_based = std.mem.eql(u8, values[1], "goalBased");
@@ -255,7 +255,7 @@ pub fn edgeWithEndpoints(
     return try buildEdgeDraft(allocator, state.values);
 }
 
-fn buildEdgeDraft(allocator: std.mem.Allocator, values: [20][]u8) !Forms.EdgeDraft {
+fn buildEdgeDraft(allocator: std.mem.Allocator, values: []const []u8) !Forms.EdgeDraft {
     const cycle_max = parseOptionalInt(values[7]) catch return error.InvalidNumericInput;
     const cycle_stop = parseOptionalInt(values[8]) catch return error.InvalidNumericInput;
     var result = Forms.EdgeDraft{ .from = &.{}, .to = &.{}, .kind = &.{}, .condition = &.{}, .transform_kind = &.{}, .transform_value = &.{}, .cycle_until = &.{}, .spawn_target_project_path = &.{} };
@@ -1420,7 +1420,7 @@ test "node draft builder preserves every hidden initial field" {
         .briefing_enabled = false,
         .activity_enabled = true,
     };
-    var draft = try buildNodeDraft(std.testing.allocator, values, initial);
+    var draft = try buildNodeDraft(std.testing.allocator, &values, initial);
     defer draft.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings(initial.worktree_repository, draft.worktree_repository);
     try std.testing.expectEqualStrings(initial.worktree_id, draft.worktree_id);
@@ -1434,7 +1434,7 @@ test "node draft builder preserves every hidden initial field" {
     var hidden_values = values;
     hidden_values[8] = @constCast("not-a-number");
     hidden_values[9] = @constCast("also-invalid");
-    var hidden_draft = try buildNodeDraft(std.testing.allocator, hidden_values, initial);
+    var hidden_draft = try buildNodeDraft(std.testing.allocator, &hidden_values, initial);
     defer hidden_draft.deinit(std.testing.allocator);
     try std.testing.expectEqual(initial.poll_interval_seconds, hidden_draft.poll_interval_seconds);
     try std.testing.expectEqual(initial.stall_after_seconds, hidden_draft.stall_after_seconds);
@@ -1474,7 +1474,7 @@ test "conditional graph fields and validation follow selected types" {
     edge_state.values[7] = @constCast("4");
     edge_state.values[8] = @constCast("2");
     edge_state.values[9] = @constCast("D:\\other-project");
-    var edge_draft = try buildEdgeDraft(std.testing.allocator, edge_state.values);
+    var edge_draft = try buildEdgeDraft(std.testing.allocator, &edge_state.values);
     defer edge_draft.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("test -f done.flag", edge_draft.cycle_until);
     try std.testing.expectEqual(@as(?i64, 4), edge_draft.cycle_max_iterations);
