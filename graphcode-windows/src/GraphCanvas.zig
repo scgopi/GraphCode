@@ -33,6 +33,7 @@ pub const CanvasState = struct {
     node_drag_x: i32 = 0,
     node_drag_y: i32 = 0,
     node_drag_origin: NodeOffset = .{},
+    hovered_connector: ?usize = null,
 
     pub fn beginPan(self: *CanvasState, x: i32, y: i32) void {
         self.dragging = true;
@@ -220,7 +221,11 @@ pub const CanvasState = struct {
     }
 
     pub fn zoomAt(self: *CanvasState, x: i32, y: i32, wheel_delta: i16) void {
-        const factor: f32 = if (wheel_delta > 0) 1.1 else 0.9;
+        const steps = @max(1, @abs(@as(i32, wheel_delta)) / 120);
+        const factor: f32 = if (wheel_delta > 0)
+            std.math.pow(f32, 1.1, @floatFromInt(steps))
+        else
+            std.math.pow(f32, 0.9, @floatFromInt(steps));
         self.zoomBy(x, y, factor);
     }
 
@@ -271,10 +276,19 @@ pub const CardTextLayout = struct {
 pub const RenderBounds = struct { left: i32, top: i32, right: i32, bottom: i32 };
 pub const Surface = enum { project, overview, quick_chats, workspace };
 pub const OverviewHit = struct { graph_index: usize, node_index: usize };
+pub const OverviewLaneAction = enum { open_project, inspect_worktrees };
 pub const ZoomControl = enum { out, actual, in, fit };
 pub const HeaderAction = enum { review_attention, inspect_worktrees, jump, toggle_panel };
 pub const ReclaimAction = enum { reclaim, keep };
 pub const ReclaimHit = struct { node_index: usize, action: ReclaimAction };
+
+pub fn attentionRailBounds(width: i32) c.RECT {
+    return rect(Tokens.sidebar_width + 20, Tokens.header_height + 12, width - 20, Tokens.header_height + 43);
+}
+
+pub fn hitTestAttentionRail(x: i32, y: i32, width: i32) bool {
+    return insideGraph(x, y, attentionRailBounds(width));
+}
 
 pub fn renderBounds(client_right: i32, client_bottom: i32, controls: WorkspaceControls.State) RenderBounds {
     const left = if (controls.rail_visible) Tokens.sidebar_width else 0;
@@ -460,11 +474,17 @@ fn drawOverview(
             const lane = overviewLaneBounds(model, graph_index, bounds, state);
             roundedCard(hdc, lane, 0x001D1D21, false);
             drawText(hdc, allocator, graph.project.name, lane.left + scaledValue(18, state.zoom), lane.top + scaledValue(16, state.zoom), scaledValue(14, state.zoom), 0x00E8E8E8);
+            const open = rect(lane.right - scaledValue(132, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(76, state.zoom), lane.top + scaledValue(30, state.zoom));
+            const worktrees = rect(lane.right - scaledValue(72, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(18, state.zoom), lane.top + scaledValue(30, state.zoom));
+            fill(hdc, open, 0x002D2418);
+            fill(hdc, worktrees, 0x00352B1C);
+            drawTextRect(hdc, allocator, "Open", open, scaledValue(9, state.zoom), 0x00E6E6E6, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+            drawTextRect(hdc, allocator, "Worktrees", worktrees, scaledValue(8, state.zoom), 0x00FFCD7A, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
             var index: usize = 0;
             while (index < graph.nodes.items.len) : (index += 1) {
                 const card = overviewCardBounds(model, graph_index, index, bounds, state);
                 roundedCard(hdc, card, 0x00262626, false);
-                fill(hdc, rect(card.left, card.top, card.left + scaledValue(4, state.zoom), card.bottom), stateColor(graph.nodes.items[index].state, false));
+                fill(hdc, rect(card.left, card.top, card.left + scaledValue(4, state.zoom), card.bottom), loopTypeColor(graph.nodes.items[index].loop_type));
                 drawText(hdc, allocator, graph.nodes.items[index].title, card.left + scaledValue(14, state.zoom), card.top + scaledValue(16, state.zoom), scaledValue(13, state.zoom), 0x00FFFFFF);
                 drawText(hdc, allocator, graph.nodes.items[index].state, card.left + scaledValue(14, state.zoom), card.top + scaledValue(46, state.zoom), scaledValue(10, state.zoom), 0x00B8B8B8);
             }
@@ -535,6 +555,16 @@ pub fn overviewCardBounds(
     );
 }
 
+pub fn overviewLaneActionAt(model: *const GraphModel.Model, graph_index: usize, x: i32, y: i32, bounds: c.RECT, state: *const CanvasState) ?OverviewLaneAction {
+    if (graph_index >= model.graphs.items.len) return null;
+    const lane = overviewLaneBounds(model, graph_index, bounds, state);
+    const open = rect(lane.right - scaledValue(132, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(76, state.zoom), lane.top + scaledValue(30, state.zoom));
+    const worktrees = rect(lane.right - scaledValue(72, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(18, state.zoom), lane.top + scaledValue(30, state.zoom));
+    if (insideGraph(x, y, open)) return .open_project;
+    if (insideGraph(x, y, worktrees)) return .inspect_worktrees;
+    return null;
+}
+
 pub fn quickChatCardBounds(index: usize, bounds: c.RECT, state: *const CanvasState) c.RECT {
     const column = @as(i32, @intCast(index % 3));
     const row = @as(i32, @intCast(index / 3));
@@ -562,6 +592,15 @@ fn zoomButtonBounds(bounds: c.RECT, index: i32) c.RECT {
 
 fn drawZoomControls(hdc: c.HDC, allocator: std.mem.Allocator, bounds: c.RECT, state: *const CanvasState) void {
     roundedCard(hdc, zoomControlsBounds(bounds), 0x0026262A, false);
+    drawTextRect(
+        hdc,
+        allocator,
+        "Zoom  Ctrl+-  Ctrl+0  Ctrl+=  Ctrl+9",
+        rect(bounds.right - 292, bounds.bottom - 68, bounds.right - 12, bounds.bottom - 50),
+        9,
+        0x008A8A8A,
+        c.DT_RIGHT | c.DT_SINGLELINE | c.DT_VCENTER,
+    );
     const labels = [_][]const u8{ "-", "", "+", "Fit" };
     for (labels, 0..) |label, index| {
         const button = zoomButtonBounds(bounds, @intCast(index));
@@ -784,9 +823,12 @@ fn attentionRail(
         "1 loop needs you"
     else
         std.fmt.bufPrint(&count, "{d} loops need you", .{model.attentionCount()}) catch "loops need you";
-    fill(hdc, rect(Tokens.sidebar_width + 20, Tokens.header_height + 12, width - 20, Tokens.header_height + 43), 0x002D2418);
+    const rail = attentionRailBounds(width);
+    fill(hdc, rail, 0x002D2418);
     drawText(hdc, allocator, label, Tokens.sidebar_width + 34, Tokens.header_height + 21, 12, 0x00FFCD7A);
-    drawText(hdc, allocator, "Ctrl+Tab review", Tokens.sidebar_width + 210, Tokens.header_height + 21, 11, 0x00B8B8B8);
+    const oldest = if (model.attention_entries.items.len != 0) model.attention_entries.items[0].node.title else "none";
+    drawText(hdc, allocator, "Review", Tokens.sidebar_width + 210, Tokens.header_height + 21, 11, 0x00E6E6E6);
+    drawText(hdc, allocator, oldest, Tokens.sidebar_width + 274, Tokens.header_height + 21, 10, 0x00B8B8B8);
 }
 
 fn activityStrip(
@@ -866,6 +908,8 @@ fn drawEdges(hdc: c.HDC, graph: GraphModel.Graph, state: *const CanvasState) voi
 }
 
 fn drawEdgeLabels(hdc: c.HDC, allocator: std.mem.Allocator, graph: GraphModel.Graph, state: *const CanvasState) void {
+    var placed: [128]c.RECT = undefined;
+    var placed_count: usize = 0;
     for (graph.edges.items, 0..) |edge, index| {
         const from = connectorPosition(graph.nodes.items, edge.from, true, state) orelse continue;
         const to = connectorPosition(graph.nodes.items, edge.to, false, state) orelse continue;
@@ -882,14 +926,32 @@ fn drawEdgeLabels(hdc: c.HDC, allocator: std.mem.Allocator, graph: GraphModel.Gr
         var label_buffer: [128]u8 = undefined;
         const label = edgeLabel(&label_buffer, edge);
         const center_x = @divTrunc(from.x + to.x, 2);
-        const label_y = if (@abs(to.y - from.y) < 40)
+        var label_y = if (@abs(to.y - from.y) < 40)
             @min(from.y, to.y) - 76
         else
             @divTrunc(from.y + to.y, 2) - 10;
-        const bounds = rect(center_x - 74, label_y, center_x + 74, label_y + 20);
+        var bounds = rect(center_x - 74, label_y, center_x + 74, label_y + 20);
+        var attempts: usize = 0;
+        while (attempts < 12 and overlapsPlaced(bounds, placed[0..placed_count])) : (attempts += 1) {
+            label_y += 24;
+            bounds = rect(center_x - 74, label_y, center_x + 74, label_y + 20);
+        }
+        if (placed_count < placed.len) {
+            placed[placed_count] = bounds;
+            placed_count += 1;
+        }
         fill(hdc, bounds, Tokens.canvas_tone);
         drawTextRect(hdc, allocator, label, bounds, 10, color, c.DT_CENTER | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
     }
+}
+
+fn overlapsPlaced(candidate: c.RECT, placed: []const c.RECT) bool {
+    for (placed) |other| {
+        if (candidate.left < other.right and candidate.right > other.left and
+            candidate.top < other.bottom and candidate.bottom > other.top)
+            return true;
+    }
+    return false;
 }
 
 fn edgeKindPenStyle(kind: []const u8) c_int {
@@ -971,7 +1033,7 @@ fn drawNode(
     const attention = needsAttention(node, nodes, edges);
     const selected_card = selected == index;
     roundedCard(hdc, bounds, if (selected_card) 0x00345D8C else 0x00262626, selected_card);
-    const stripe = stateColor(node.state, attention);
+    const stripe = loopTypeColor(node.loop_type);
     fill(hdc, rect(x, y, x + scaled(Tokens.loop_card_stripe, state), y + bounds.bottom - y), stripe);
     const role = nodeRole(edges, node.id, declared_entries);
     const reclaim_offer = hasReclaimOffer(node, inspection, kept_worktrees);
@@ -994,6 +1056,11 @@ fn drawNode(
             drawText(hdc, allocator, "No connections · right-click to recover", x + scaled(14, state), y + layout.state_y + scaled(43, state), scaled(8, state), 0x00FFCD7A);
     }
     if (layout.show_attention) drawText(hdc, allocator, "NEEDS YOU", bounds.right - scaled(88, state), y + scaled(8, state), scaled(9, state), 0x00FFB340);
+    if (state.hovered_connector == index) {
+        const connector = connectorPositionForIndex(nodes, index, true, state);
+        fill(hdc, rect(connector.x - connectorRadius(state), connector.y - connectorRadius(state), connector.x + connectorRadius(state), connector.y + connectorRadius(state)), 0x00FFCD7A);
+        drawTextRect(hdc, allocator, "+", rect(connector.x - scaled(8, state), connector.y - scaled(8, state), connector.x + scaled(8, state), connector.y + scaled(8, state)), scaled(12, state), 0x00262626, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+    }
     if (reclaim_offer) {
         const offer = reclaimOfferBounds(bounds);
         fill(hdc, offer.reclaim, 0x003A3A44);
@@ -1004,14 +1071,14 @@ fn drawNode(
 
 const ReclaimOfferBounds = struct { reclaim: c.RECT, keep: c.RECT };
 
-fn reclaimOfferBounds(bounds: c.RECT) ReclaimOfferBounds {
+pub fn reclaimOfferBounds(bounds: c.RECT) ReclaimOfferBounds {
     return .{
         .reclaim = rect(bounds.left + 12, bounds.bottom - 24, bounds.left + 78, bounds.bottom - 5),
         .keep = rect(bounds.left + 84, bounds.bottom - 24, bounds.left + 126, bounds.bottom - 5),
     };
 }
 
-fn hasReclaimOffer(
+pub fn hasReclaimOffer(
     node: GraphModel.Node,
     inspection: ?*const WorktreeStatus.Inspection,
     kept_worktrees: []const []const u8,
@@ -1081,6 +1148,14 @@ fn stateColor(state: []const u8, attention: bool) u32 {
     if (std.mem.eql(u8, state, "failed")) return 0x00FF453A;
     if (std.mem.eql(u8, state, "blocked")) return 0x00FF9F0A;
     if (std.mem.eql(u8, state, "succeeded")) return 0x0030D158;
+    return 0x00909090;
+}
+
+fn loopTypeColor(loop_type: []const u8) u32 {
+    if (std.mem.eql(u8, loop_type, "composite") or std.mem.eql(u8, loop_type, "proactive")) return 0x00C77DFF;
+    if (std.mem.eql(u8, loop_type, "goalBased")) return 0x000A84FF;
+    if (std.mem.eql(u8, loop_type, "turnBased")) return 0x00D6A649;
+    if (std.mem.eql(u8, loop_type, "message")) return 0x006BD58D;
     return 0x00909090;
 }
 
@@ -1452,6 +1527,23 @@ test "canvas zoom keeps the graph point beneath the cursor stable" {
     try std.testing.expectApproxEqAbs(@as(f32, 1.1), state.zoom, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, -40), state.pan_x, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, -30), state.pan_y, 0.01);
+}
+
+test "canvas wheel zoom scales high-resolution trackpad deltas" {
+    var state = CanvasState{};
+    state.zoomAt(200, 120, 240);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.21), state.zoom, 0.01);
+}
+
+test "loop card stripe follows loop type rather than lifecycle state" {
+    try std.testing.expect(loopTypeColor("goalBased") != stateColor("failed", false));
+    try std.testing.expectEqual(@as(u32, 0x00C77DFF), loopTypeColor("composite"));
+}
+
+test "dense edge labels move away from already placed labels" {
+    const first = rect(100, 100, 248, 120);
+    try std.testing.expect(overlapsPlaced(rect(120, 110, 200, 118), &.{first}));
+    try std.testing.expect(!overlapsPlaced(rect(260, 110, 340, 118), &.{first}));
 }
 
 test "canvas hit testing follows pan and zoom" {

@@ -33,6 +33,7 @@ pub const Target = union(enum) {
 
 pub const Action = enum {
     none,
+    edit_node,
     rename_node,
     stop_node,
     delete_node,
@@ -80,6 +81,7 @@ pub fn canEditEdge(edge_id: []const u8) bool {
 }
 
 const ids = struct {
+    const edit_node = 5100;
     const rename_node = 5101;
     const stop_node = 5102;
     const delete_node = 5103;
@@ -156,8 +158,7 @@ pub fn show(
                 appendEnabled(menu, ids.arm_composite, "Arm Schedule", node.can_arm);
                 separator(menu);
             }
-            append(menu, ids.message_node, "Message");
-            append(menu, ids.memo_node, "Memo");
+            append(menu, ids.edit_node, "Edit Details...");
             append(menu, ids.rename_node, "Rename...");
             append(menu, ids.stop_node, "Stop");
             append(menu, ids.delete_node, "Delete Loop...");
@@ -199,8 +200,7 @@ fn actionForCommand(command: c_int) Action {
         ids.stop_node => .stop_node,
         ids.delete_node => .delete_node,
         ids.open_terminal => .open_terminal,
-        ids.message_node => .message_node,
-        ids.memo_node => .memo_node,
+        ids.edit_node => .edit_node,
         ids.open_composite => .open_composite,
         ids.pilot_composite => .pilot_composite,
         ids.arm_composite => .arm_composite,

@@ -150,6 +150,10 @@ const UiaDynamicTarget = union(enum) {
     },
     active_loop: usize,
     composite_back,
+    reclaim_offer: struct {
+        path: []const u8,
+        action: GraphCanvas.ReclaimAction,
+    },
     quick_chat: []const u8,
 };
 
@@ -1027,6 +1031,35 @@ pub const App = struct {
         self.client.sendRenameNode(project_path, updated_graph.nodes.items[updated_index].id, title_value);
     }
 
+    fn editSelectedNodeDetails(self: *App) void {
+        const graph = self.model.graph orelse return;
+        const index = self.model.selectedIndex() orelse return;
+        if (index >= graph.nodes.items.len) return;
+        const node = graph.nodes.items[index];
+        var update = NativeForms.update(self.window.hwnd, self.allocator, .{
+            .goal_summary = if (node.goal_summary.len == 0) null else node.goal_summary,
+            .goal_predicate = if (node.goal_predicate.len == 0) null else node.goal_predicate,
+            .poll_interval_seconds = node.poll_interval_seconds,
+            .stall_after_seconds = node.stall_after_seconds,
+            .metric_command = if (node.metric_command.len == 0) null else node.metric_command,
+            .metric_direction = if (node.metric_direction.len == 0) null else node.metric_direction,
+            .trigger_prompt = if (node.trigger_prompt.len == 0) null else node.trigger_prompt,
+            .check_description = if (node.check_description.len == 0) null else node.check_description,
+            .model_tier = if (node.model_tier.len == 0) null else node.model_tier,
+        }) catch {
+            self.setStatus("Unable to open node details form");
+            return;
+        } orelse return;
+        defer update.deinit(self.allocator);
+        const current_graph = self.model.graph orelse return;
+        if (!std.mem.eql(u8, current_graph.project.path, graph.project.path)) return;
+        const current_index = GraphModel.findNodeIndexByID(current_graph.nodes.items, node.id) orelse {
+            self.setStatus("Loop changed while editing details");
+            return;
+        };
+        self.client.sendUpdateNodeForm(current_graph.project.path, current_graph.nodes.items[current_index].id, update);
+    }
+
     fn createEdge(self: *App) void {
         const graph = self.model.graph orelse return;
         if (graph.nodes.items.len < 2) return;
@@ -1775,6 +1808,7 @@ pub const App = struct {
                 const index = GraphModel.findNodeIndexByID(graph.nodes.items, stable.id) orelse return;
                 if (!self.selectNodeIndex(index)) return;
                 switch (action) {
+                    .edit_node => self.editSelectedNodeDetails(),
                     .rename_node => self.editSelectedNode(),
                     .stop_node => self.stopSelectedNode(),
                     .delete_node => self.deleteSelectedNode(),
@@ -3184,6 +3218,11 @@ pub const App = struct {
                     const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ graph.project.path, node.id }) catch return;
                     defer self.allocator.free(key);
                     self.appendAccessibilityElement(&elements, &owned_identities, "project-card", key, node.title, 4, bounds, self.model.selected_index == index, false) catch return;
+                    if (GraphCanvas.hasReclaimOffer(node, if (self.worktree_inspection) |*value| value else null, self.kept_worktree_paths.items)) {
+                        const offer = GraphCanvas.reclaimOfferBounds(bounds);
+                        self.appendAccessibilityElement(&elements, &owned_identities, "reclaim", key, "Reclaim", 4, offer.reclaim, false, false) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "keep", key, "Keep", 4, offer.keep, false, false) catch return;
+                    }
                 }
             },
             .overview => for (self.model.graphs.items, 0..) |graph, graph_index| {
@@ -3315,6 +3354,10 @@ pub const App = struct {
                 defer self.allocator.free(overview_identity);
                 const project_card_identity = std.fmt.allocPrint(self.allocator, "project-card:{s}", .{key}) catch return false;
                 defer self.allocator.free(project_card_identity);
+                const reclaim_identity = std.fmt.allocPrint(self.allocator, "reclaim:{s}", .{key}) catch return false;
+                defer self.allocator.free(reclaim_identity);
+                const keep_identity = std.fmt.allocPrint(self.allocator, "keep:{s}", .{key}) catch return false;
+                defer self.allocator.free(keep_identity);
                 const loop_disclosure_identity = std.fmt.allocPrint(self.allocator, "loop-disclosure:{s}", .{key}) catch return false;
                 defer self.allocator.free(loop_disclosure_identity);
                 if (Accessibility.worktreeIdentityPayload(sidebar_identity) == payload or
@@ -3323,6 +3366,14 @@ pub const App = struct {
                 {
                     if (target != null) return false;
                     target = .{ .loop = .{ .project_path = graph.project.path, .index = index } };
+                }
+                if (Accessibility.worktreeIdentityPayload(reclaim_identity) == payload) {
+                    if (target != null) return false;
+                    target = .{ .reclaim_offer = .{ .path = node.worktree_path, .action = .reclaim } };
+                }
+                if (Accessibility.worktreeIdentityPayload(keep_identity) == payload) {
+                    if (target != null) return false;
+                    target = .{ .reclaim_offer = .{ .path = node.worktree_path, .action = .keep } };
                 }
                 if (Accessibility.worktreeIdentityPayload(loop_disclosure_identity) == payload) {
                     if (target != null) return false;
@@ -3440,6 +3491,10 @@ pub const App = struct {
                 self.openSelectedNode();
             },
             .composite_back => self.closeCompositeGroup(),
+            .reclaim_offer => |offer| switch (offer.action) {
+                .reclaim => self.reclaimWorktreeOffer(offer.path),
+                .keep => self.keepWorktreeOffer(offer.path),
+            },
             .quick_chat => |id| {
                 self.client.sendOpenQuickChat(id);
                 self.setStatus("Opening quick chat...");
@@ -3995,6 +4050,12 @@ fn onWindowMessage(
                 result.* = 0;
                 return true;
             }
+            if (app.model.attentionCount() != 0 and GraphCanvas.hitTestAttentionRail(x, y, client.right)) {
+                app.handleAction(.cycle_attention);
+                _ = c.InvalidateRect(hwnd, null, 0);
+                result.* = 0;
+                return true;
+            }
             const routing = inputBounds(client.right, client.bottom, app.workspace_controls);
             const workspace_top = if (app.surface == .workspace and app.workspace_controls.panel_visible)
                 Tokens.header_height
@@ -4066,7 +4127,25 @@ fn onWindowMessage(
                 }
                 switch (app.surface) {
                     .overview => {
-                        if (GraphCanvas.hitTestOverview(&app.model, x, y, &app.canvas, bounds)) |hit| {
+                        var lane_action: ?GraphCanvas.OverviewLaneAction = null;
+                        for (app.model.graphs.items, 0..) |_, graph_index| {
+                            if (GraphCanvas.overviewLaneActionAt(&app.model, graph_index, x, y, bounds, &app.canvas)) |action| {
+                                lane_action = action;
+                                if (action == .inspect_worktrees) {
+                                    if (app.selectProject(app.model.graphs.items[graph_index].project.path)) app.inspectWorktrees();
+                                } else if (app.selectProject(app.model.graphs.items[graph_index].project.path)) {
+                                    app.surface = .project;
+                                    app.workspace_controls.panel_visible = false;
+                                    app.layoutWorkspace();
+                                    app.layoutEmptyStateControls();
+                                    app.rebindWorkspace(app.model.graphs.items[graph_index].project.path);
+                                }
+                                break;
+                            }
+                        }
+                        if (lane_action != null) {
+                            _ = c.InvalidateRect(hwnd, null, 0);
+                        } else if (GraphCanvas.hitTestOverview(&app.model, x, y, &app.canvas, bounds)) |hit| {
                             const graph = app.model.graphs.items[hit.graph_index];
                             if (app.selectProject(graph.project.path)) {
                                 app.surface = .workspace;
@@ -4444,6 +4523,7 @@ fn onWindowMessage(
         },
         c.WM_MOUSEMOVE => {
             const hover_y = mouseY(lparam);
+            const hover_x = mouseX(lparam);
             const next_hover = if (mouseX(lparam) >= 0 and mouseX(lparam) < Tokens.sidebar_width) hover_y else -1;
             if (next_hover != app.sidebar_hover_y) {
                 app.sidebar_hover_y = next_hover;
@@ -4465,6 +4545,16 @@ fn onWindowMessage(
                 _ = c.InvalidateRect(hwnd, null, 0);
                 result.* = 0;
                 return true;
+            }
+            if (app.model.graph) |graph| {
+                var client: c.RECT = undefined;
+                _ = c.GetClientRect(hwnd, &client);
+                const canvas_bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
+                const next_connector = GraphCanvas.hitTestConnector(graph.nodes.items, hover_x, hover_y, &app.canvas, canvas_bounds);
+                if (next_connector != app.canvas.hovered_connector) {
+                    app.canvas.hovered_connector = next_connector;
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                }
             }
         },
         c.WM_MOUSEWHEEL => {
