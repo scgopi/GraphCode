@@ -1206,13 +1206,13 @@ pub const App = struct {
             return;
         };
         defer operation.deinit();
-        const status = RepositoryDialogs.showCloneProgress(self.window.hwnd, self.allocator, operation) catch {
+        const clone_status = RepositoryDialogs.showCloneProgress(self.window.hwnd, self.allocator, operation) catch {
             operation.cancel();
             self.setIngressError("Clone progress sheet could not open");
             self.setStatus("Clone progress sheet could not open");
             return;
         };
-        switch (status) {
+        switch (clone_status) {
             .finished => self.setStatus("Repository cloned"),
             .cancelled => self.setStatus("Clone cancelled"),
             else => {
