@@ -284,43 +284,6 @@ pub const CloneOperation = struct {
             return;
         };
 
-        pub const RemoteValidationStatus = enum { validating, succeeded, failed };
-
-        pub const RemoteValidationOperation = struct {
-            allocator: std.mem.Allocator,
-            fields: RemoteFields,
-            thread: std.Thread,
-            done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-            status: RemoteValidationStatus = .validating,
-
-            pub fn start(allocator: std.mem.Allocator, fields: RemoteFields) !*RemoteValidationOperation {
-                const operation = try allocator.create(RemoteValidationOperation);
-                errdefer allocator.destroy(operation);
-                operation.* = .{ .allocator = allocator, .fields = fields, .thread = undefined };
-                operation.thread = try std.Thread.spawn(.{}, worker, .{operation});
-                return operation;
-            }
-
-            pub fn poll(self: *RemoteValidationOperation) ?RemoteValidationStatus {
-                if (!self.done.load(.acquire)) return null;
-                return self.status;
-            }
-
-            pub fn deinit(self: *RemoteValidationOperation) void {
-                self.thread.join();
-                self.allocator.destroy(self);
-            }
-
-            fn worker(self: *RemoteValidationOperation) void {
-                validateRemoteConnection(self.allocator, self.fields) catch {
-                    self.status = .failed;
-                    self.done.store(true, .release);
-                    return;
-                };
-                self.status = .succeeded;
-                self.done.store(true, .release);
-            }
-        };
         var stderr_thread = std.Thread.spawn(.{}, drainPipe, .{ self.process, &self.process.child.stderr.?, true, &self.stderr_done }) catch {
             self.process.terminate();
             stdout_thread.join();
@@ -336,6 +299,44 @@ pub const CloneOperation = struct {
         stdout_thread.join();
         stderr_thread.join();
         self.status = self.process.finish() catch .failed;
+        self.done.store(true, .release);
+    }
+};
+
+pub const RemoteValidationStatus = enum { validating, succeeded, failed };
+
+pub const RemoteValidationOperation = struct {
+    allocator: std.mem.Allocator,
+    fields: RemoteFields,
+    thread: std.Thread,
+    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    status: RemoteValidationStatus = .validating,
+
+    pub fn start(allocator: std.mem.Allocator, fields: RemoteFields) !*RemoteValidationOperation {
+        const operation = try allocator.create(RemoteValidationOperation);
+        errdefer allocator.destroy(operation);
+        operation.* = .{ .allocator = allocator, .fields = fields, .thread = undefined };
+        operation.thread = try std.Thread.spawn(.{}, worker, .{operation});
+        return operation;
+    }
+
+    pub fn poll(self: *RemoteValidationOperation) ?RemoteValidationStatus {
+        if (!self.done.load(.acquire)) return null;
+        return self.status;
+    }
+
+    pub fn deinit(self: *RemoteValidationOperation) void {
+        self.thread.join();
+        self.allocator.destroy(self);
+    }
+
+    fn worker(self: *RemoteValidationOperation) void {
+        validateRemoteConnection(self.allocator, self.fields) catch {
+            self.status = .failed;
+            self.done.store(true, .release);
+            return;
+        };
+        self.status = .succeeded;
         self.done.store(true, .release);
     }
 };
@@ -1100,7 +1101,9 @@ fn operationDialogProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: 
                 const snapshot = operation.snapshot(&progress, &stderr);
                 if (snapshot.progress_len != 0) setOperationText(operation_dialog_state.label, progress[0..snapshot.progress_len]);
                 if (snapshot.stderr_len != 0) setOperationText(operation_dialog_state.label, stderr[0..snapshot.stderr_len]);
-                if (operation.poll()) |status| if (status != .cloning) operation_dialog_state.closed = true;
+                if (operation.poll()) |status| {
+                    if (status != .cloning) operation_dialog_state.closed = true;
+                }
             } else if (operation_dialog_state.remote) |operation| {
                 if (operation.poll()) |status| {
                     if (status != .validating) operation_dialog_state.closed = true;
