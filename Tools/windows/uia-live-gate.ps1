@@ -630,6 +630,22 @@ try {
            ((@($workspaceCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B") -and
            $workspaceCards[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected) `
     "loop invocation did not transition to the selected workspace loop"
+  $workspaceToolbar = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^workspace-toolbar-' -and $_.Current.Name -eq "UIA project"
+  }) | Select-Object -First 1
+  $workspaceShowGraph = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^workspace-show-graph-' -and $_.Current.Name -eq "Show in Graph"
+  }) | Select-Object -First 1
+  $workspaceTabs = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$'
+  })
+  $workspaceControls = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^workspace-(new-tab|split-right|split-down)-' -and
+      $_.Current.Name -in @("New Tab", "Split Right", "Split Down")
+  })
+  Require (($null -ne $workspaceToolbar) -and ($null -ne $workspaceShowGraph) -and
+           ($workspaceTabs.Count -ge 1) -and ($workspaceControls.Count -eq 3)) `
+    "workspace chrome omitted toolbar identity, Show in Graph, tab, or split controls"
   $surfaceActionPatterns["overview-destination"].Invoke()
   Start-Sleep -Milliseconds 150
   Require ([GraphCodeUiaGateState]::PostTaggedExitCollision($process.MainWindowHandle)) `

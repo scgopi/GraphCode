@@ -147,6 +147,13 @@ const UiaDynamicTarget = union(enum) {
     active_loop: usize,
     composite_back,
     quick_chat: []const u8,
+    workspace_show_graph,
+    workspace_stop,
+    workspace_new_tab,
+    workspace_split_right,
+    workspace_split_down,
+    workspace_tab: usize,
+    workspace_tab_close: usize,
 };
 
 pub const App = struct {
@@ -3107,6 +3114,35 @@ pub const App = struct {
                     defer self.allocator.free(key);
                     self.appendAccessibilityElement(&elements, &owned_identities, "project-card", key, node.title, 4, bounds, self.model.selected_index == index, false) catch return;
                 }
+                if (self.surface == .workspace) {
+                    if (self.workspace) |workspace| {
+                        const workspace_left = if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0;
+                        const workspace_right = client.right - Tokens.loop_detail_width;
+                        const selected_index = self.model.selectedIndex() orelse 0;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toolbar", graph.project.path, graph.project.name, 4, .{ .left = workspace_left, .top = 0, .right = workspace_right, .bottom = Tokens.header_height }, false, false) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-loop-bar", if (selected_index < graph.nodes.items.len) graph.nodes.items[selected_index].id else "none", "Selected loop workspace", 4, .{ .left = workspace_left, .top = Tokens.header_height, .right = workspace_right, .bottom = Tokens.header_height + Tokens.loop_bar_height }, false, false) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .left = workspace_right - 104, .top = Tokens.header_height + 10, .right = workspace_right - 12, .bottom = Tokens.header_height + 36 }, false, false) catch return;
+                        if (selected_index < graph.nodes.items.len and !isResolvedLoopState(graph.nodes.items[selected_index].state)) {
+                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-stop", graph.nodes.items[selected_index].id, "Stop loop", 4, .{ .left = workspace_right - 196, .top = Tokens.header_height + 10, .right = workspace_right - 112, .bottom = Tokens.header_height + 36 }, false, false) catch return;
+                        }
+                        for (workspace.layout.tabs.items, 0..) |tab, tab_index| {
+                            const tab_key = std.fmt.allocPrint(self.allocator, "{d}", .{tab_index}) catch return;
+                            defer self.allocator.free(tab_key);
+                            const tab_left = workspace.layout_origin_x + @as(i32, @intCast(tab_index)) * 120;
+                            const tab_bounds = c.RECT{ .left = tab_left, .top = workspace.layout_origin_y + 4, .right = tab_left + 112, .bottom = workspace.layout_origin_y + Tokens.tab_bar_height - 4 };
+                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-tab", tab_key, if (tab.panes.items.len > 1) "Split tab" else if (tab_index == 0) "Agent tab" else "Shell tab", 4, tab_bounds, tab_index == workspace.layout.selected_tab, true) catch return;
+                            const close_key = std.fmt.allocPrint(self.allocator, "{d}", .{tab_index}) catch return;
+                            defer self.allocator.free(close_key);
+                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-tab-close", close_key, "Close tab", 4, .{ .left = tab_bounds.right - 24, .top = tab_bounds.top, .right = tab_bounds.right, .bottom = tab_bounds.bottom }, false, workspace.canCloseTab()) catch return;
+                        }
+                        const controls_left = @max(workspace.layout_origin_x, workspace.layout_origin_x + workspace.layout_width - 220);
+                        for ([_][]const u8{ "New Tab", "Split Right", "Split Down" }, 0..) |label, control_index| {
+                            const control_left = controls_left + @as(i32, @intCast(control_index)) * 72;
+                            const kind = if (control_index == 0) "workspace-new-tab" else if (control_index == 1) "workspace-split-right" else "workspace-split-down";
+                            self.appendAccessibilityElement(&elements, &owned_identities, kind, "control", label, 4, .{ .left = control_left, .top = workspace.layout_origin_y + 3, .right = control_left + 68, .bottom = workspace.layout_origin_y + Tokens.tab_bar_height - 3 }, false, true) catch return;
+                        }
+                    }
+                }
             },
             .overview => for (self.model.graphs.items, 0..) |graph, graph_index| {
                 for (graph.nodes.items, 0..) |node, node_index| {
@@ -3284,6 +3320,45 @@ pub const App = struct {
                 target = .{ .quick_chat = chat.id };
             }
         }
+        const workspace_static = [_]struct { identity: []const u8, target: UiaDynamicTarget }{
+            .{ .identity = "workspace-show-graph:show-graph", .target = .workspace_show_graph },
+            .{ .identity = "workspace-new-tab:control", .target = .workspace_new_tab },
+            .{ .identity = "workspace-split-right:control", .target = .workspace_split_right },
+            .{ .identity = "workspace-split-down:control", .target = .workspace_split_down },
+        };
+        for (workspace_static) |candidate| {
+            if (Accessibility.worktreeIdentityPayload(candidate.identity) == payload) {
+                if (target != null) return false;
+                target = candidate.target;
+            }
+        }
+        if (self.surface == .workspace) {
+            if (self.model.selectedNodeID()) |node_id| {
+                const identity = std.fmt.allocPrint(self.allocator, "workspace-stop:{s}", .{node_id}) catch return false;
+                defer self.allocator.free(identity);
+                if (Accessibility.worktreeIdentityPayload(identity) == payload) {
+                    if (target != null) return false;
+                    target = .workspace_stop;
+                }
+            }
+            if (self.workspace) |workspace| {
+                for (workspace.layout.tabs.items, 0..) |_, tab_index| {
+                    const key = std.fmt.allocPrint(self.allocator, "{d}", .{tab_index}) catch return false;
+                    defer self.allocator.free(key);
+                    const tab_identity = std.fmt.allocPrint(self.allocator, "workspace-tab:{s}", .{key}) catch return false;
+                    defer self.allocator.free(tab_identity);
+                    const close_identity = std.fmt.allocPrint(self.allocator, "workspace-tab-close:{s}", .{key}) catch return false;
+                    defer self.allocator.free(close_identity);
+                    if (Accessibility.worktreeIdentityPayload(tab_identity) == payload) {
+                        if (target != null) return false;
+                        target = .{ .workspace_tab = tab_index };
+                    } else if (Accessibility.worktreeIdentityPayload(close_identity) == payload) {
+                        if (target != null) return false;
+                        target = .{ .workspace_tab_close = tab_index };
+                    }
+                }
+            }
+        }
         const resolved = target orelse return false;
         switch (resolved) {
             .local_section => self.sidebar_state.local_collapsed = !self.sidebar_state.local_collapsed,
@@ -3327,6 +3402,13 @@ pub const App = struct {
                 self.client.sendOpenQuickChat(id);
                 self.setStatus("Opening quick chat...");
             },
+            .workspace_show_graph => self.handleAction(.show_graph),
+            .workspace_stop => self.stopSelectedNode(),
+            .workspace_new_tab => self.handleAction(.new_tab),
+            .workspace_split_right => self.handleAction(.split_horizontal),
+            .workspace_split_down => self.handleAction(.split_vertical),
+            .workspace_tab => |index| if (self.workspace) |workspace| workspace.selectTab(index) catch return false,
+            .workspace_tab_close => |index| if (self.workspace) |workspace| workspace.closeTab(index) catch return false,
         }
         self.clampSidebarScroll();
         self.syncAccessibility();
@@ -3644,6 +3726,14 @@ fn onWindowMessage(
             if (app.workspace_controls.panel_visible or app.surface == .workspace) {
                 if (app.surface == .workspace) {
                     if (workspaceGraph(&app.model)) |graph| {
+                        TerminalWorkspace.Workspace.paintWorkspaceToolbar(
+                            hdc,
+                            app.allocator,
+                            if (app.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
+                            clientRight(hwnd) - Tokens.loop_detail_width,
+                            graph.project.name,
+                            graph.project.path,
+                        );
                         const index = app.model.selectedIndex() orelse 0;
                         if (index < graph.nodes.items.len) {
                             const node = graph.nodes.items[index];
@@ -3657,6 +3747,10 @@ fn onWindowMessage(
                                 node.loop_type,
                                 node.state,
                                 node.activity,
+                                node.backend,
+                                node.created_at,
+                                node.metric_passes,
+                                node.token_usage,
                                 isResolvedLoopState(node.state),
                             );
                         }
@@ -3920,7 +4014,12 @@ fn onWindowMessage(
                         result.* = 0;
                         return true;
                     }
-                    if (workspace.selectTabAt(x, y)) {
+                    if (workspace.tabActionAt(x, y)) |tab_action| {
+                        switch (tab_action.action) {
+                            .select => workspace.selectTab(tab_action.index) catch {},
+                            .close => workspace.closeTab(tab_action.index) catch {},
+                        }
+                        _ = c.InvalidateRect(hwnd, null, 0);
                         result.* = 0;
                         return true;
                     }

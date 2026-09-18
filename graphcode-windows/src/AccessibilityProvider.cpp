@@ -780,6 +780,15 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("quick-chats-disclosure:", 0) == 0 ? L"quick-chats-disclosure-" :
           row.identity.rfind("quick-chat-row:", 0) == 0 ? L"quick-chat-row-" :
           row.identity.rfind("loop-disclosure:", 0) == 0 ? L"loop-disclosure-" :
+          row.identity.rfind("workspace-toolbar:", 0) == 0 ? L"workspace-toolbar-" :
+          row.identity.rfind("workspace-loop-bar:", 0) == 0 ? L"workspace-loop-bar-" :
+          row.identity.rfind("workspace-show-graph:", 0) == 0 ? L"workspace-show-graph-" :
+          row.identity.rfind("workspace-stop:", 0) == 0 ? L"workspace-stop-" :
+          row.identity.rfind("workspace-tab-close:", 0) == 0 ? L"workspace-tab-close-" :
+          row.identity.rfind("workspace-tab:", 0) == 0 ? L"workspace-tab-" :
+          row.identity.rfind("workspace-new-tab:", 0) == 0 ? L"workspace-new-tab-" :
+          row.identity.rfind("workspace-split-right:", 0) == 0 ? L"workspace-split-right-" :
+          row.identity.rfind("workspace-split-down:", 0) == 0 ? L"workspace-split-down-" :
           parent == 1 ? L"project-row-" :
           parent == 2 ? L"loop-row-" :
           parent == 3 ? L"worktree-row-" : L"canvas-card-";
