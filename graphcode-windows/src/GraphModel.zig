@@ -1129,7 +1129,9 @@ fn jsonArrayObjectCount(object: []const u8, key: []const u8) u32 {
     const start = std.mem.indexOf(u8, object, needle) orelse return 0;
     const close = std.mem.indexOfScalarPos(u8, object, start + needle.len, ']') orelse return 0;
     var count: u32 = 0;
-    for (object[start + needle.len .. close]) |value| if (value == '{') count += 1;
+    for (object[start + needle.len .. close]) |value| {
+        if (value == '{') count += 1;
+    }
     return count;
 }
 
