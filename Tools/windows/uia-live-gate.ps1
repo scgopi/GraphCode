@@ -655,9 +655,14 @@ try {
     }
     Start-Sleep -Milliseconds 100
   }
-  Require (($null -ne $workspaceToolbar) -and ($null -ne $workspaceShowGraph) -and
-           ($workspaceTabs.Count -ge 1) -and ($workspaceControls.Count -eq 3)) `
-    "workspace chrome omitted toolbar identity, Show in Graph, tab, or split controls"
+  Require ($null -ne $workspaceToolbar) `
+    "workspace chrome omitted the toolbar identity child"
+  Require ($null -ne $workspaceShowGraph) `
+    "workspace chrome omitted the Show in Graph child"
+  Require ($workspaceControls.Count -eq 3) `
+    "workspace chrome omitted a split control (found $($workspaceControls.Count) of 3: $(@($workspaceControls | ForEach-Object { $_.Current.Name }) -join '|'))"
+  Require ($workspaceTabs.Count -ge 1) `
+    "workspace chrome exposed no tab children; found $(@($workspaceChildren | ForEach-Object { $_.Current.AutomationId }) -join '|')"
   $surfaceActionPatterns["overview-destination"].Invoke()
   Start-Sleep -Milliseconds 150
   Require ([GraphCodeUiaGateState]::PostTaggedExitCollision($process.MainWindowHandle)) `
