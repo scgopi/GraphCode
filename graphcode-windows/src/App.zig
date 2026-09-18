@@ -413,10 +413,18 @@ pub const App = struct {
         } else |_| {}
         const uia_gate = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_GATE") catch null;
         defer if (uia_gate) |value| self.allocator.free(value);
-        if (uia_gate == null or !std.mem.eql(u8, uia_gate.?, "1")) {
-        self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
-        if (self.workspace) |workspace| workspace.setKeyCallback(self, &onWorkspaceKey);
-        if (self.workspace) |workspace| try workspace.startInputWorker();
+        const uia_gate_zmx = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_ZMX") catch null;
+        defer if (uia_gate_zmx) |value| self.allocator.free(value);
+        // Outside the UIA gate, always build the real workspace. Inside the gate, only do so
+        // when a real zmx executable was supplied (GRAPHCODE_ZMX) so the gate can validate live
+        // workspace chrome (toolbar/tabs/split controls); otherwise keep the historical no-op
+        // to avoid spinning up a workspace with no attach target during other gate scenarios.
+        if (uia_gate == null or !std.mem.eql(u8, uia_gate.?, "1") or
+            (uia_gate_zmx != null and uia_gate_zmx.?.len > 0))
+        {
+            self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
+            if (self.workspace) |workspace| workspace.setKeyCallback(self, &onWorkspaceKey);
+            if (self.workspace) |workspace| try workspace.startInputWorker();
         }
         self.layoutWorkspace();
         if (!envFlag("GRAPHCODE_UIA_UPDATE_AVAILABLE")) self.requestUpdateCheck(false);
