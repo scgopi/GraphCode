@@ -11,21 +11,25 @@ const DialogState = struct {
     closed: bool = false,
     scroll_offset: i32 = 0,
     checks: [3]c.HWND = .{ null, null, null },
-    labels: [20]c.HWND = .{null} ** 20,
-    helps: [20]c.HWND = .{null} ** 20,
-    edits: [20]c.HWND = .{ null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null },
-    input_kinds: [20]InputKind = .{.edit} ** 20,
-    choice_groups: [20]ChoiceGroup = .{.none} ** 20,
-    visible: [20]bool = .{false} ** 20,
+    labels: [256]c.HWND = .{null} ** 256,
+    helps: [256]c.HWND = .{null} ** 256,
+    edits: [256]c.HWND = .{null} ** 256,
+    input_kinds: [256]InputKind = .{.edit} ** 256,
+    choice_groups: [256]ChoiceGroup = .{.none} ** 256,
+    visible: [256]bool = .{false} ** 256,
     field_count: usize = 0,
     intro: c.HWND = null,
     validation: c.HWND = null,
-    values: [20][]u8 = .{ &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{} },
-    initial_values: [20][]u8 = .{ &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{} },
-    display_labels: [20][]u8 = .{ &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{} },
+    values: [256][]u8 = .{&.{}} ** 256,
+    initial_values: [256][]u8 = .{&.{}} ** 256,
+    display_labels: [256][]u8 = .{&.{}} ** 256,
+    sweep_selectable: [256]bool = .{false} ** 256,
+    sweep_paths: [256][]const u8 = .{&.{}} ** 256,
     policy: WorktreeStatus.Policy = .{},
     edge_endpoints: []const EdgeEndpoint = &.{},
     lock_edge_endpoints: bool = true,
+    immediate_policy_path: []const u8 = "",
+    confirmation_armed: bool = false,
 };
 
 const Kind = enum { node, edge, update, settings, jump, worktree_policy, worktree_sweep };
@@ -34,12 +38,14 @@ const ChoiceGroup = enum { none, loop_type, backend, model_tier, metric_directio
 const Choice = struct { label: []const u8, value: []const u8 };
 pub const EdgeEndpoint = struct { id: []const u8, title: []const u8 };
 pub const WorktreeSweepResult = struct {
-    selected: [20]bool = .{false} ** 20,
+    selected: [256]bool = .{false} ** 256,
     count: usize = 0,
+    destructive_confirmed: bool = false,
 };
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeNativeForm");
 const ok_id = 1;
 const cancel_id = 2;
+const reveal_id = 3;
 var active_state: bool = false;
 var active_state_storage: DialogState = undefined;
 
@@ -407,9 +413,15 @@ pub fn jump(parent: c.HWND, allocator: std.mem.Allocator, initial: []const u8) !
     return try allocator.dupe(u8, state.values[0]);
 }
 
-pub fn worktreePolicy(parent: c.HWND, allocator: std.mem.Allocator, initial: WorktreeStatus.Policy) !?WorktreeStatus.Policy {
+pub fn worktreePolicy(parent: c.HWND, allocator: std.mem.Allocator, project_path: []const u8, initial: WorktreeStatus.Policy) !?WorktreeStatus.Policy {
     const state = try allocator.create(DialogState);
-    state.* = .{ .allocator = allocator, .kind = .worktree_policy, .parent = parent, .policy = initial };
+    state.* = .{
+        .allocator = allocator,
+        .kind = .worktree_policy,
+        .parent = parent,
+        .policy = initial,
+        .immediate_policy_path = project_path,
+    };
     defer {
         freeValues(state);
         allocator.destroy(state);
@@ -442,21 +454,45 @@ pub fn worktreeSweep(
         else
             "LOOK BEFORE REMOVING";
         const branch = if (entry.branch.len != 0) entry.branch else entry.path;
+        const size = WorktreeStatus.sizeText(allocator, entry.size_bytes) catch allocator.dupe(u8, "size unavailable") catch &.{};
         state.display_labels[index] = try std.fmt.allocPrint(
             allocator,
-            "{s}: {s} - {s}",
-            .{ tier, branch, WorktreeStatus.failureReasonText(entry) },
+            "{s}: {s} - {s} - {s}",
+            .{ tier, branch, WorktreeStatus.failureReasonText(entry), size },
         );
-        state.values[index] = try allocator.dupe(u8, if (WorktreeStatus.decision(entry) == .reclaimable) "true" else "false");
+        allocator.free(size);
+        state.values[index] = try allocator.dupe(u8, if (WorktreeStatus.sweepSelectable(entry) and WorktreeStatus.decision(entry) == .reclaimable) "true" else "false");
         state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
         state.input_kinds[index] = .checkbox;
         state.visible[index] = true;
+        state.sweep_selectable[index] = WorktreeStatus.sweepSelectable(entry);
+        state.sweep_paths[index] = entry.path;
     }
     state.field_count = count;
-    const title = try std.fmt.allocPrint(allocator, "Worktrees - {s}", .{project_name});
+    var total_bytes: u64 = 0;
+    var safe_count: usize = 0;
+    var look_count: usize = 0;
+    var in_use_count: usize = 0;
+    for (entries[0..count]) |entry| {
+        total_bytes += entry.size_bytes;
+        if (entry.primary or entry.bound_running) {
+            in_use_count += 1;
+        } else if (WorktreeStatus.decision(entry) == .reclaimable) {
+            safe_count += 1;
+        } else {
+            look_count += 1;
+        }
+    }
+    const total_text = try WorktreeStatus.sizeText(allocator, total_bytes);
+    defer allocator.free(total_text);
+    const title = try std.fmt.allocPrint(
+        allocator,
+        "Worktrees - {s} ({d} total, {d} safe, {d} look, {d} in use, {s})",
+        .{ project_name, count, safe_count, look_count, in_use_count, total_text },
+    );
     defer allocator.free(title);
     if (!(try show(state, title, &.{}))) return null;
-    var result = WorktreeSweepResult{ .count = count };
+    var result = WorktreeSweepResult{ .count = count, .destructive_confirmed = state.confirmation_armed };
     for (0..count) |index| result.selected[index] = std.mem.eql(u8, state.values[index], "true");
     return result;
 }
@@ -692,6 +728,7 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             var client: c.RECT = undefined;
             _ = c.GetClientRect(safe_hwnd, &client);
             createButton(safe_hwnd, if (value.kind == .node) "Create" else if (value.kind == .worktree_policy) "Done" else if (value.kind == .worktree_sweep) "Remove Selected" else "OK", ok_id, 478, client.bottom - 38);
+            if (value.kind == .worktree_sweep) createButton(safe_hwnd, "Show in Explorer", reveal_id, 300, client.bottom - 38);
             createButton(safe_hwnd, "Cancel", cancel_id, 393, client.bottom - 38);
             return 0;
         },
@@ -749,13 +786,37 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             }
             if ((notification == c.EN_CHANGE or notification == c.BN_CLICKED) and command >= 9100 and command < 9120)
                 setStaticText(value, value.validation, "");
+            if (value.kind == .worktree_policy and
+                (notification == c.EN_CHANGE or notification == c.BN_CLICKED) and
+                command >= 9100 and command < 9200)
+            {
+                readPolicy(value);
+                persistPolicy(value);
+            }
             if (command == ok_id) {
                 readValues(value);
                 readPolicy(value);
+                if (value.kind == .worktree_sweep and hasDestructiveSelection(value) and !value.confirmation_armed) {
+                    value.confirmation_armed = true;
+                    setStaticText(value, value.validation, "Selected rows contain uncommitted files. Press Remove Selected again to remove anyway.");
+                    return 0;
+                }
                 if (validationReason(value)) |reason| {
                     setStaticText(value, value.validation, reason);
                 } else {
                     applyModalCommand(value, .submit);
+                }
+                return 0;
+            }
+            if (command == reveal_id and value.kind == .worktree_sweep) {
+                for (0..value.field_count) |index| {
+                    if (!std.mem.eql(u8, value.values[index], "true")) continue;
+                    const args = WorktreeStatus.revealCommand(value.allocator, value.sweep_paths[index]) catch break;
+                    defer value.allocator.free(args);
+                    const wide = utf8ToWideZ(value.allocator, args) catch break;
+                    defer value.allocator.free(wide);
+                    _ = c.ShellExecuteW(safe_hwnd, std.unicode.utf8ToUtf16LeStringLiteral("open").ptr, wide.ptr, null, null, c.SW_SHOWNORMAL);
+                    break;
                 }
                 return 0;
             }
@@ -893,7 +954,7 @@ fn createField(hwnd: c.HWND, state: *DialogState, index: usize) void {
         },
         .checkbox => {
             _ = c.SendMessageW(input, c.BM_SETCHECK, if (std.mem.eql(u8, state.values[index], "true")) c.BST_CHECKED else c.BST_UNCHECKED, 0);
-            if (state.kind == .worktree_sweep and !std.mem.eql(u8, state.initial_values[index], "true"))
+            if (state.kind == .worktree_sweep and !state.sweep_selectable[index])
                 _ = c.EnableWindow(input, 0);
         },
         else => {
@@ -1140,6 +1201,28 @@ fn readPolicy(state: *DialogState) void {
     state.policy.applyResolveAction(action);
     state.policy.notice_size_gb = std.fmt.parseInt(u32, std.mem.trim(u8, state.values[0], " \t\r\n"), 10) catch state.policy.notice_size_gb;
     state.policy.notice_count = std.fmt.parseInt(u32, std.mem.trim(u8, state.values[1], " \t\r\n"), 10) catch state.policy.notice_count;
+}
+
+fn persistPolicy(state: *DialogState) void {
+    if (state.immediate_policy_path.len == 0) return;
+    const size = std.fmt.parseInt(u32, std.mem.trim(u8, state.values[0], " \t\r\n"), 10) catch return;
+    const count = std.fmt.parseInt(u32, std.mem.trim(u8, state.values[1], " \t\r\n"), 10) catch return;
+    if (size == 0 or count == 0) return;
+    WorktreeStatus.savePolicy(state.allocator, state.immediate_policy_path, state.policy) catch {
+        setStaticText(state, state.validation, "Unable to save project settings");
+    };
+}
+
+fn hasDestructiveSelection(state: *const DialogState) bool {
+    if (state.kind != .worktree_sweep) return false;
+    for (0..state.field_count) |index| {
+        if (!state.sweep_selectable[index] or !std.mem.eql(u8, state.values[index], "true")) continue;
+        if (std.mem.indexOf(u8, state.display_labels[index], "local changes") != null or
+            std.mem.indexOf(u8, state.display_labels[index], "untracked files") != null or
+            std.mem.indexOf(u8, state.display_labels[index], "merge conflicts") != null)
+            return true;
+    }
+    return false;
 }
 
 fn validationReason(state: *DialogState) ?[]const u8 {

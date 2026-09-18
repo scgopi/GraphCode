@@ -3,6 +3,7 @@ const std = @import("std");
 pub const Entry = struct {
     path: []u8,
     branch: []u8,
+    size_bytes: u64 = 0,
     primary: bool = false,
     locked: bool = false,
     prunable: bool = false,
@@ -190,6 +191,21 @@ pub fn decision(entry: Entry) ReclaimDecision {
     {
         return .keep;
     }
+
+    pub fn sweepSelectable(entry: Entry) bool {
+        return !entry.primary and !entry.locked and !entry.bound_running;
+    }
+
+    pub fn discardsFiles(entry: Entry) bool {
+        return !entry.prunable and (entry.dirty or entry.untracked or entry.conflicted);
+    }
+
+    pub fn sizeText(allocator: std.mem.Allocator, bytes: u64) ![]u8 {
+        if (bytes < 1024) return std.fmt.allocPrint(allocator, "{d} B", .{bytes});
+        if (bytes < 1024 * 1024) return std.fmt.allocPrint(allocator, "{d:.1} KB", .{@as(f64, @floatFromInt(bytes)) / 1024.0});
+        if (bytes < 1024 * 1024 * 1024) return std.fmt.allocPrint(allocator, "{d:.1} MB", .{@as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0)});
+        return std.fmt.allocPrint(allocator, "{d:.1} GB", .{@as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0 * 1024.0)});
+    }
     return .reclaimable;
 }
 
@@ -237,11 +253,24 @@ pub fn inspect(
         errdefer allocator.free(default_branch);
         for (entries.items, 0..) |*entry, index| {
             entry.primary = index == 0;
+            entry.size_bytes = directorySize(entry.path) catch 0;
             for (bindings) |binding| {
                 if (std.mem.eql(u8, entry.path, binding.path)) {
                     entry.bound_running = true;
                     break;
                 }
+
+fn directorySize(path: []const u8) !u64 {
+                var dir = try std.fs.cwd().openDir(path, .{ .iterate = true });
+                defer dir.close();
+                var walker = try dir.walk(std.heap.page_allocator);
+                defer walker.deinit();
+                var total: u64 = 0;
+                while (try walker.next()) |item| {
+                    if (item.kind == .file) total += item.stat.size;
+                }
+                return total;
+}
             }
             if (entry.primary or entry.prunable) continue;
             const status = try runGit(allocator, &.{
@@ -308,6 +337,18 @@ pub fn reclaimSelectedWithPolicy(
     policy: Policy,
     confirmed: bool,
 ) !usize {
+    return reclaimSelectedWithPolicyMode(allocator, project_path, selected, bindings, policy, confirmed, false);
+}
+
+pub fn reclaimSelectedWithPolicyMode(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    selected: []const []const u8,
+    bindings: []const Binding,
+    policy: Policy,
+    confirmed: bool,
+    allow_forced: bool,
+) !usize {
     if (!policy.allow_reclaim) return error.PolicyDisabled;
     if (policy.confirm_each_reclaim and !confirmed) return error.ConfirmationRequired;
     if (selected.len == 0) return error.UnsafeSelection;
@@ -316,10 +357,15 @@ pub fn reclaimSelectedWithPolicy(
         deinit(allocator, &inspection.entries);
         allocator.free(inspection.default_branch);
     }
-    try validateSelected(allocator, inspection.entries.items, selected, bindings);
+    try validateSelectedMode(allocator, inspection.entries.items, selected, bindings, allow_forced);
     var removed: usize = 0;
     for (selected) |path| {
-        _ = try runGit(allocator, &.{ "git", "-C", project_path, "worktree", "remove", path });
+        const entry = selectedEntry(inspection.entries.items, path) orelse return error.UnsafeSelection;
+        if (allow_forced and discardsFiles(entry)) {
+            _ = try runGit(allocator, &.{ "git", "-C", project_path, "worktree", "remove", "--force", path });
+        } else {
+            _ = try runGit(allocator, &.{ "git", "-C", project_path, "worktree", "remove", path });
+        }
         removed += 1;
     }
     return removed;
@@ -331,6 +377,16 @@ pub fn validateSelected(
     selected: []const []const u8,
     bindings: []const Binding,
 ) !void {
+    return validateSelectedMode(allocator, entries, selected, bindings, false);
+}
+
+pub fn validateSelectedMode(
+    allocator: std.mem.Allocator,
+    entries: []const Entry,
+    selected: []const []const u8,
+    bindings: []const Binding,
+    allow_forced: bool,
+) !void {
     if (selected.len == 0) return error.UnsafeSelection;
     var seen = std.StringHashMap(void).init(allocator);
     defer seen.deinit();
@@ -341,7 +397,8 @@ pub fn validateSelected(
             if (std.mem.eql(u8, path, binding.path)) return error.UnsafeSelection;
         }
         const entry = selectedEntry(entries, path) orelse return error.UnsafeSelection;
-        if (decision(entry) != .reclaimable) return error.UnsafeSelection;
+        if (!sweepSelectable(entry)) return error.UnsafeSelection;
+        if (!allow_forced and decision(entry) != .reclaimable) return error.UnsafeSelection;
     }
 }
 
@@ -655,4 +712,27 @@ test "selected batch validation rejects duplicate missing bound and unsafe rows 
     try std.testing.expectError(error.UnsafeSelection, validateSelected(
         std.testing.allocator, &entries, &[_][]const u8{"dirty"}, &.{},
     ));
+}
+
+test "sweep selection allows human-confirmed dirty rows but rejects locked and bound rows" {
+    try std.testing.expect(sweepSelectable(.{
+        .path = @constCast("dirty"),
+        .branch = @constCast("dirty"),
+        .dirty = true,
+    }));
+    try std.testing.expect(!sweepSelectable(.{
+        .path = @constCast("locked"),
+        .branch = @constCast("locked"),
+        .locked = true,
+    }));
+    try std.testing.expect(!sweepSelectable(.{
+        .path = @constCast("running"),
+        .branch = @constCast("running"),
+        .bound_running = true,
+    }));
+    try std.testing.expect(discardsFiles(.{
+        .path = @constCast("dirty"),
+        .branch = @constCast("dirty"),
+        .dirty = true,
+    }));
 }

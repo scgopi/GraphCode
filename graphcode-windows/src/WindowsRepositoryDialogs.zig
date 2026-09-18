@@ -250,6 +250,7 @@ pub const CloneOperation = struct {
             allocator.destroy(process);
             return err;
         };
+
         return operation;
     }
 
@@ -281,6 +282,44 @@ pub const CloneOperation = struct {
             self.status = .failed;
             self.done.store(true, .release);
             return;
+        };
+
+        pub const RemoteValidationStatus = enum { validating, succeeded, failed };
+
+        pub const RemoteValidationOperation = struct {
+            allocator: std.mem.Allocator,
+            fields: RemoteFields,
+            thread: std.Thread,
+            done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+            status: RemoteValidationStatus = .validating,
+
+            pub fn start(allocator: std.mem.Allocator, fields: RemoteFields) !*RemoteValidationOperation {
+                const operation = try allocator.create(RemoteValidationOperation);
+                errdefer allocator.destroy(operation);
+                operation.* = .{ .allocator = allocator, .fields = fields, .thread = undefined };
+                operation.thread = try std.Thread.spawn(.{}, worker, .{operation});
+                return operation;
+            }
+
+            pub fn poll(self: *RemoteValidationOperation) ?RemoteValidationStatus {
+                if (!self.done.load(.acquire)) return null;
+                return self.status;
+            }
+
+            pub fn deinit(self: *RemoteValidationOperation) void {
+                self.thread.join();
+                self.allocator.destroy(self);
+            }
+
+            fn worker(self: *RemoteValidationOperation) void {
+                validateRemoteConnection(self.allocator, self.fields) catch {
+                    self.status = .failed;
+                    self.done.store(true, .release);
+                    return;
+                };
+                self.status = .succeeded;
+                self.done.store(true, .release);
+            }
         };
         var stderr_thread = std.Thread.spawn(.{}, drainPipe, .{ self.process, &self.process.child.stderr.?, true, &self.stderr_done }) catch {
             self.process.terminate();
@@ -940,6 +979,172 @@ pub fn runClone(allocator: std.mem.Allocator, fields: CloneFields) !CloneStatus 
     stdout_thread.join();
     stderr_thread.join();
     return process.finish();
+}
+
+const operation_dialog_class = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeRepositoryOperationDialog");
+const operation_timer_id = 7;
+const operation_cancel_id = 3;
+
+const OperationDialogState = struct {
+    allocator: std.mem.Allocator,
+    parent: c.HWND,
+    clone: ?*CloneOperation = null,
+    remote: ?*RemoteValidationOperation = null,
+    label: c.HWND = null,
+    cancel: c.HWND = null,
+    closed: bool = false,
+    cancelled: bool = false,
+};
+
+var operation_dialog_active = false;
+var operation_dialog_state: OperationDialogState = undefined;
+
+pub fn showCloneProgress(parent: c.HWND, allocator: std.mem.Allocator, operation: *CloneOperation) !CloneStatus {
+    operation_dialog_state = .{ .allocator = allocator, .parent = parent, .clone = operation };
+    const status = try showOperationDialog("Cloning repository", "Starting clone…");
+    if (status == .cancelled) return .cancelled;
+    return status;
+}
+
+pub fn showRemoteValidation(parent: c.HWND, allocator: std.mem.Allocator, fields: RemoteFields) !bool {
+    var operation = try RemoteValidationOperation.start(allocator, fields);
+    defer operation.deinit();
+    operation_dialog_state = .{ .allocator = allocator, .parent = parent, .remote = operation };
+    return try showOperationDialog("Validating SSH connection", "Checking host, repository path, and SSH access…") == .finished;
+}
+
+const OperationResult = enum { finished, cancelled, failed };
+
+fn showOperationDialog(title: []const u8, initial: []const u8) !OperationResult {
+    try registerOperationDialogClass();
+    operation_dialog_active = true;
+    operation_dialog_state.closed = false;
+    operation_dialog_state.cancelled = false;
+    const wide_title = try wideZ(operation_dialog_state.allocator, title);
+    defer operation_dialog_state.allocator.free(wide_title);
+    const hwnd = c.CreateWindowExW(
+        c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT,
+        operation_dialog_class.ptr,
+        wide_title.ptr,
+        c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU,
+        c.CW_USEDEFAULT,
+        c.CW_USEDEFAULT,
+        560,
+        180,
+        operation_dialog_state.parent,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse {
+        operation_dialog_active = false;
+        return error.OperationDialogCreationFailed;
+    };
+    operation_dialog_state.label = createOperationControl(hwnd, "STATIC", initial, 24, 28, 500, 46, 0);
+    operation_dialog_state.cancel = createOperationControl(hwnd, "BUTTON", "Cancel", 430, 96, 88, 30, operation_cancel_id);
+    _ = c.SetTimer(hwnd, operation_timer_id, 100, null);
+    _ = c.EnableWindow(operation_dialog_state.parent, 0);
+    _ = c.ShowWindow(hwnd, c.SW_SHOW);
+    _ = c.SetForegroundWindow(hwnd);
+    var message: c.MSG = undefined;
+    while (!operation_dialog_state.closed) {
+        const code = c.GetMessageW(&message, null, 0, 0);
+        if (code <= 0) {
+            operation_dialog_state.closed = true;
+            break;
+        }
+        _ = c.TranslateMessage(&message);
+        _ = c.DispatchMessageW(&message);
+    }
+    _ = c.KillTimer(hwnd, operation_timer_id);
+    _ = c.DestroyWindow(hwnd);
+    _ = c.EnableWindow(operation_dialog_state.parent, 1);
+    _ = c.SetActiveWindow(operation_dialog_state.parent);
+    operation_dialog_active = false;
+    if (operation_dialog_state.cancelled) return .cancelled;
+    if (operation_dialog_state.clone) |operation| {
+        return switch (operation.poll() orelse .failed) {
+            .finished => .finished,
+            .cancelled => .cancelled,
+            .failed => .failed,
+            .ready, .cloning => .failed,
+        };
+    }
+    if (operation_dialog_state.remote) |operation| {
+        return switch (operation.poll() orelse .failed) {
+            .succeeded => .finished,
+            else => .failed,
+        };
+    }
+    return .failed;
+}
+
+fn registerOperationDialogClass() !void {
+    var klass: c.WNDCLASSW = std.mem.zeroes(c.WNDCLASSW);
+    klass.lpfnWndProc = @ptrCast(&operationDialogProc);
+    klass.hInstance = c.GetModuleHandleW(null);
+    klass.lpszClassName = operation_dialog_class.ptr;
+    klass.hCursor = c.LoadCursorW(null, @ptrFromInt(32512));
+    klass.hbrBackground = c.GetSysColorBrush(c.COLOR_WINDOW);
+    if (c.RegisterClassW(&klass) == 0 and c.GetLastError() != c.ERROR_CLASS_ALREADY_EXISTS)
+        return error.OperationDialogClassRegistrationFailed;
+}
+
+fn operationDialogProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
+    if (!operation_dialog_active) return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    switch (message) {
+        c.WM_TIMER => {
+            if (wparam != operation_timer_id) return 0;
+            if (operation_dialog_state.clone) |operation| {
+                var progress: [256]u8 = undefined;
+                var stderr: [256]u8 = undefined;
+                const snapshot = operation.snapshot(&progress, &stderr);
+                if (snapshot.progress_len != 0) setOperationText(operation_dialog_state.label, progress[0..snapshot.progress_len]);
+                if (snapshot.stderr_len != 0) setOperationText(operation_dialog_state.label, stderr[0..snapshot.stderr_len]);
+                if (operation.poll()) |status| if (status != .cloning) operation_dialog_state.closed = true;
+            } else if (operation_dialog_state.remote) |operation| {
+                if (operation.poll()) |status| {
+                    if (status != .validating) operation_dialog_state.closed = true;
+                }
+            }
+            return 0;
+        },
+        c.WM_COMMAND => {
+            if (@as(u16, @truncate(wparam)) == operation_cancel_id) {
+                operation_dialog_state.cancelled = true;
+                if (operation_dialog_state.clone) |operation| operation.cancel();
+                setOperationText(operation_dialog_state.label, "Cancelling…");
+                if (operation_dialog_state.remote != null) setOperationText(operation_dialog_state.label, "Waiting for SSH validation to finish…");
+                return 0;
+            }
+        },
+        c.WM_CLOSE => {
+            operation_dialog_state.cancelled = true;
+            if (operation_dialog_state.clone) |operation| operation.cancel();
+            setOperationText(operation_dialog_state.label, "Cancelling…");
+            return 0;
+        },
+        else => {},
+    }
+    return c.DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+fn createOperationControl(hwnd: c.HWND, class: []const u8, text: []const u8, x: i32, y: i32, width: i32, height: i32, id: usize) c.HWND {
+    const allocator = operation_dialog_state.allocator;
+    const wide_class = wideZ(allocator, class) catch return null;
+    defer allocator.free(wide_class);
+    const wide_text = wideZ(allocator, text) catch return null;
+    defer allocator.free(wide_text);
+    const style: c.DWORD = c.WS_CHILD | c.WS_VISIBLE | if (std.mem.eql(u8, class, "BUTTON")) c.WS_TABSTOP else 0;
+    const control = c.CreateWindowExW(0, wide_class.ptr, wide_text.ptr, style, x, y, width, height, hwnd, controlId(id), c.GetModuleHandleW(null), null) orelse return null;
+    _ = c.SendMessageW(control, c.WM_SETFONT, @intFromPtr(c.GetStockObject(c.DEFAULT_GUI_FONT)), 1);
+    return control;
+}
+
+fn setOperationText(control: c.HWND, text: []const u8) void {
+    if (control == null) return;
+    const wide = wideZ(operation_dialog_state.allocator, text) catch return;
+    defer operation_dialog_state.allocator.free(wide);
+    _ = c.SetWindowTextW(control, wide.ptr);
 }
 
 fn drainPipe(process: *CloneProcess, file: *std.fs.File, is_stderr: bool, done: *std.atomic.Value(bool)) void {
