@@ -21,8 +21,16 @@ pub fn explorerParameters(allocator: std.mem.Allocator, path: []const u8) ![]u8 
 }
 
 pub const FailureReason = enum {
-    primary, locked, prunable, dirty, untracked, conflicted,
-    unpushed, not_landed, bound_running, safe,
+    primary,
+    locked,
+    prunable,
+    dirty,
+    untracked,
+    conflicted,
+    unpushed,
+    not_landed,
+    bound_running,
+    safe,
 };
 
 pub const ResolveAction = enum { legacy, remove, ask, keep };
@@ -191,22 +199,22 @@ pub fn decision(entry: Entry) ReclaimDecision {
     {
         return .keep;
     }
-
-    pub fn sweepSelectable(entry: Entry) bool {
-        return !entry.primary and !entry.locked and !entry.bound_running;
-    }
-
-    pub fn discardsFiles(entry: Entry) bool {
-        return !entry.prunable and (entry.dirty or entry.untracked or entry.conflicted);
-    }
-
-    pub fn sizeText(allocator: std.mem.Allocator, bytes: u64) ![]u8 {
-        if (bytes < 1024) return std.fmt.allocPrint(allocator, "{d} B", .{bytes});
-        if (bytes < 1024 * 1024) return std.fmt.allocPrint(allocator, "{d:.1} KB", .{@as(f64, @floatFromInt(bytes)) / 1024.0});
-        if (bytes < 1024 * 1024 * 1024) return std.fmt.allocPrint(allocator, "{d:.1} MB", .{@as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0)});
-        return std.fmt.allocPrint(allocator, "{d:.1} GB", .{@as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0 * 1024.0)});
-    }
     return .reclaimable;
+}
+
+pub fn sweepSelectable(entry: Entry) bool {
+    return !entry.primary and !entry.locked and !entry.bound_running;
+}
+
+pub fn discardsFiles(entry: Entry) bool {
+    return !entry.prunable and (entry.dirty or entry.untracked or entry.conflicted);
+}
+
+pub fn sizeText(allocator: std.mem.Allocator, bytes: u64) ![]u8 {
+    if (bytes < 1024) return std.fmt.allocPrint(allocator, "{d} B", .{bytes});
+    if (bytes < 1024 * 1024) return std.fmt.allocPrint(allocator, "{d:.1} KB", .{@as(f64, @floatFromInt(bytes)) / 1024.0});
+    if (bytes < 1024 * 1024 * 1024) return std.fmt.allocPrint(allocator, "{d:.1} MB", .{@as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0)});
+    return std.fmt.allocPrint(allocator, "{d:.1} GB", .{@as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0 * 1024.0)});
 }
 
 pub fn canReclaim(entry: Entry, policy: Policy, confirmed: bool) bool {
@@ -242,65 +250,65 @@ pub fn inspect(
     project_path: []const u8,
     bindings: []const Binding,
 ) !Inspection {
-        if (project_path.len == 0) return error.EmptyProjectPath;
-        const list = try runGit(allocator, &.{
-            "git", "-C", project_path, "worktree", "list", "--porcelain",
+    if (project_path.len == 0) return error.EmptyProjectPath;
+    const list = try runGit(allocator, &.{
+        "git", "-C", project_path, "worktree", "list", "--porcelain",
+    });
+    defer allocator.free(list.output);
+    var entries = try parse(allocator, list.output);
+    errdefer deinit(allocator, &entries);
+    const default_branch = try discoverDefault(allocator, project_path, entries.items);
+    errdefer allocator.free(default_branch);
+    for (entries.items, 0..) |*entry, index| {
+        entry.primary = index == 0;
+        entry.size_bytes = directorySize(entry.path) catch 0;
+        for (bindings) |binding| {
+            if (std.mem.eql(u8, entry.path, binding.path)) {
+                entry.bound_running = true;
+                break;
+            }
+        }
+        if (entry.primary or entry.prunable) continue;
+        const status = try runGit(allocator, &.{
+            "git", "-C", entry.path, "status", "--porcelain=v1", "--untracked-files=all",
         });
-        defer allocator.free(list.output);
-        var entries = try parse(allocator, list.output);
-        errdefer deinit(allocator, &entries);
-        const default_branch = try discoverDefault(allocator, project_path, entries.items);
-        errdefer allocator.free(default_branch);
-        for (entries.items, 0..) |*entry, index| {
-            entry.primary = index == 0;
-            entry.size_bytes = directorySize(entry.path) catch 0;
-            for (bindings) |binding| {
-                if (std.mem.eql(u8, entry.path, binding.path)) {
-                    entry.bound_running = true;
-                    break;
-                }
+        defer allocator.free(status.output);
+        var lines = std.mem.splitScalar(u8, status.output, '\n');
+        while (lines.next()) |raw| {
+            const line = std.mem.trim(u8, raw, "\r");
+            if (line.len < 2) continue;
+            entry.dirty = true;
+            if (std.mem.startsWith(u8, line, "??")) entry.untracked = true;
+            if (line[0] == 'U' or line[1] == 'U' or
+                (line[0] == 'A' and line[1] == 'A') or
+                (line[0] == 'D' and line[1] == 'D')) entry.conflicted = true;
+        }
+        entry.pushed = succeedsGit(allocator, &.{
+            "git", "-C", entry.path, "rev-parse", "--verify", "@{u}",
+        }) and zeroCommitsAhead(allocator, entry.path);
+        entry.landed = succeedsGit(allocator, &.{
+            "git",        "-C",           project_path, "merge-base", "--is-ancestor",
+            entry.branch, default_branch,
+        });
+    }
+    return .{
+        .entries = entries,
+        .default_branch = default_branch,
+        .project_path = try allocator.dupe(u8, project_path),
+    };
+}
 
 fn directorySize(path: []const u8) !u64 {
-                var dir = try std.fs.cwd().openDir(path, .{ .iterate = true });
-                defer dir.close();
-                var walker = try dir.walk(std.heap.page_allocator);
-                defer walker.deinit();
-                var total: u64 = 0;
-                while (try walker.next()) |item| {
-                    if (item.kind == .file) total += item.stat.size;
-                }
-                return total;
-}
-            }
-            if (entry.primary or entry.prunable) continue;
-            const status = try runGit(allocator, &.{
-                "git", "-C", entry.path, "status", "--porcelain=v1", "--untracked-files=all",
-            });
-            defer allocator.free(status.output);
-            var lines = std.mem.splitScalar(u8, status.output, '\n');
-            while (lines.next()) |raw| {
-                const line = std.mem.trim(u8, raw, "\r");
-                if (line.len < 2) continue;
-                entry.dirty = true;
-                if (std.mem.startsWith(u8, line, "??")) entry.untracked = true;
-                if (line[0] == 'U' or line[1] == 'U' or
-                    (line[0] == 'A' and line[1] == 'A') or
-                    (line[0] == 'D' and line[1] == 'D')) entry.conflicted = true;
-            }
-            entry.pushed = succeedsGit(allocator, &.{
-                "git", "-C", entry.path, "rev-parse", "--verify", "@{u}",
-            }) and zeroCommitsAhead(allocator, entry.path);
-            entry.landed = succeedsGit(allocator, &.{
-                "git", "-C", project_path, "merge-base", "--is-ancestor",
-                entry.branch, default_branch,
-            });
-        }
-        return .{
-            .entries = entries,
-            .default_branch = default_branch,
-            .project_path = try allocator.dupe(u8, project_path),
-        };
+    var dir = try std.fs.cwd().openDir(path, .{ .iterate = true });
+    defer dir.close();
+    var walker = try dir.walk(std.heap.page_allocator);
+    defer walker.deinit();
+    var total: u64 = 0;
+    while (try walker.next()) |item| {
+        if (item.kind == .file) total += item.stat.size;
     }
+    return total;
+}
 
 pub fn deinitInspection(allocator: std.mem.Allocator, inspection: *Inspection) void {
     deinit(allocator, &inspection.entries);
@@ -309,16 +317,16 @@ pub fn deinitInspection(allocator: std.mem.Allocator, inspection: *Inspection) v
 }
 
 pub fn reclaim(allocator: std.mem.Allocator, entries: []const Entry) !usize {
-        var removed: usize = 0;
-        for (entries) |entry| {
-            if (decision(entry) != .reclaimable) continue;
-            _ = try runGit(allocator, &.{
-                "git", "-C", entry.path, "worktree", "remove", entry.path,
-            });
-            removed += 1;
-        }
-        return removed;
+    var removed: usize = 0;
+    for (entries) |entry| {
+        if (decision(entry) != .reclaimable) continue;
+        _ = try runGit(allocator, &.{
+            "git", "-C", entry.path, "worktree", "remove", entry.path,
+        });
+        removed += 1;
     }
+    return removed;
+}
 
 pub fn reclaimSelected(
     allocator: std.mem.Allocator,
@@ -405,28 +413,28 @@ pub fn validateSelectedMode(
 const GitResult = struct { output: []u8 };
 
 fn succeedsGit(allocator: std.mem.Allocator, args: []const []const u8) bool {
-        const result = runGit(allocator, args) catch return false;
-        allocator.free(result.output);
-        return true;
+    const result = runGit(allocator, args) catch return false;
+    allocator.free(result.output);
+    return true;
+}
+
+fn zeroCommitsAhead(allocator: std.mem.Allocator, path: []const u8) bool {
+    const result = runGit(allocator, &.{ "git", "-C", path, "rev-list", "--count", "@{upstream}..HEAD" }) catch return false;
+    defer allocator.free(result.output);
+    return std.mem.eql(u8, std.mem.trim(u8, result.output, " \r\n"), "0");
+}
+
+fn landedOnDefault(allocator: std.mem.Allocator, project: []const u8, branch: []const u8, default_branch: []const u8) bool {
+    if (branch.len == 0 or default_branch.len == 0) return false;
+    const result = runGit(allocator, &.{ "git", "-C", project, "cherry", default_branch, branch }) catch return false;
+    defer allocator.free(result.output);
+    var lines = std.mem.splitScalar(u8, result.output, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, std.mem.trim(u8, line, " \r"), "+")) return false;
     }
 
-    fn zeroCommitsAhead(allocator: std.mem.Allocator, path: []const u8) bool {
-        const result = runGit(allocator, &.{ "git", "-C", path, "rev-list", "--count", "@{upstream}..HEAD" }) catch return false;
-        defer allocator.free(result.output);
-        return std.mem.eql(u8, std.mem.trim(u8, result.output, " \r\n"), "0");
-    }
-
-    fn landedOnDefault(allocator: std.mem.Allocator, project: []const u8, branch: []const u8, default_branch: []const u8) bool {
-        if (branch.len == 0 or default_branch.len == 0) return false;
-        const result = runGit(allocator, &.{ "git", "-C", project, "cherry", default_branch, branch }) catch return false;
-        defer allocator.free(result.output);
-        var lines = std.mem.splitScalar(u8, result.output, '\n');
-        while (lines.next()) |line| {
-            if (std.mem.startsWith(u8, std.mem.trim(u8, line, " \r"), "+")) return false;
-        }
-
-        return true;
-    }
+    return true;
+}
 
 fn discoverDefault(allocator: std.mem.Allocator, project: []const u8, entries: []const Entry) ![]u8 {
     const origin = runGit(allocator, &.{ "git", "-C", project, "symbolic-ref", "--short", "refs/remotes/origin/HEAD" }) catch null;
@@ -447,29 +455,29 @@ fn discoverDefault(allocator: std.mem.Allocator, project: []const u8, entries: [
 }
 
 fn runGit(allocator: std.mem.Allocator, args: []const []const u8) !GitResult {
-        var child = std.process.Child.init(args, allocator);
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-        try child.spawn();
-        const output = try child.stdout.?.readToEndAlloc(allocator, 1024 * 1024);
-        const term = try child.wait();
-        switch (term) {
-            .Exited => |code| if (code != 0) {
-                allocator.free(output);
-                return error.GitFailed;
-            },
-            else => {
-                allocator.free(output);
-                return error.GitFailed;
-            },
-        }
-        return .{ .output = output };
+    var child = std.process.Child.init(args, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    try child.spawn();
+    const output = try child.stdout.?.readToEndAlloc(allocator, 1024 * 1024);
+    const term = try child.wait();
+    switch (term) {
+        .Exited => |code| if (code != 0) {
+            allocator.free(output);
+            return error.GitFailed;
+        },
+        else => {
+            allocator.free(output);
+            return error.GitFailed;
+        },
+    }
+    return .{ .output = output };
 }
 
 pub const Action = enum { inspect, reclaim };
 
 pub const CommandError = error{EmptyProjectPath};
-pub const ReclaimError = error{PolicyDisabled, ConfirmationRequired, UnsafeSelection};
+pub const ReclaimError = error{ PolicyDisabled, ConfirmationRequired, UnsafeSelection };
 
 pub fn command(
     allocator: std.mem.Allocator,
@@ -629,7 +637,7 @@ test "reclaim classification fails closed for every unsafe signal" {
     };
     try std.testing.expectEqual(ReclaimDecision.reclaimable, decision(clean));
     inline for ([_][]const u8{
-        "primary", "locked", "dirty", "untracked", "conflicted", "unpushed",
+        "primary",  "locked",          "dirty", "untracked", "conflicted", "unpushed",
         "unlanded", "running binding",
     }) |label| {
         var candidate = clean;
@@ -643,7 +651,6 @@ test "reclaim classification fails closed for every unsafe signal" {
         if (std.mem.eql(u8, label, "running binding")) candidate.bound_running = true;
         try std.testing.expectEqual(ReclaimDecision.keep, decision(candidate));
     }
-
 }
 
 test "explicit row selection is independent of graph binding safety" {
@@ -701,16 +708,28 @@ test "selected batch validation rejects duplicate missing bound and unsafe rows 
     };
     try validateSelected(std.testing.allocator, &entries, &[_][]const u8{"safe"}, &.{});
     try std.testing.expectError(error.UnsafeSelection, validateSelected(
-        std.testing.allocator, &entries, &[_][]const u8{"safe", "safe"}, &.{},
+        std.testing.allocator,
+        &entries,
+        &[_][]const u8{ "safe", "safe" },
+        &.{},
     ));
     try std.testing.expectError(error.UnsafeSelection, validateSelected(
-        std.testing.allocator, &entries, &[_][]const u8{"missing"}, &.{},
+        std.testing.allocator,
+        &entries,
+        &[_][]const u8{"missing"},
+        &.{},
     ));
     try std.testing.expectError(error.UnsafeSelection, validateSelected(
-        std.testing.allocator, &entries, &[_][]const u8{"safe"}, &.{.{ .path = "safe" }},
+        std.testing.allocator,
+        &entries,
+        &[_][]const u8{"safe"},
+        &.{.{ .path = "safe" }},
     ));
     try std.testing.expectError(error.UnsafeSelection, validateSelected(
-        std.testing.allocator, &entries, &[_][]const u8{"dirty"}, &.{},
+        std.testing.allocator,
+        &entries,
+        &[_][]const u8{"dirty"},
+        &.{},
     ));
 }
 
