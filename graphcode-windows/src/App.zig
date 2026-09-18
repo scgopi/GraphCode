@@ -1402,11 +1402,11 @@ pub const App = struct {
             self.setStatus(@errorName(err));
             return;
         };
-        if (!RepositoryDialogs.showRemoteValidation(self.window.hwnd, self.allocator, draft) catch {
+        if (!(RepositoryDialogs.showRemoteValidation(self.window.hwnd, self.allocator, draft) catch {
             self.setIngressError("SSH validation could not start");
             self.setStatus("SSH validation could not start");
             return;
-        }) {
+        })) {
             self.setIngressError("SSH connection validation failed");
             self.setStatus("SSH connection validation failed");
             return;

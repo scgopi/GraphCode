@@ -166,7 +166,7 @@ pub fn node(
     state.values[19] = try allocator.dupe(u8, initial.created_by);
     for (0..20) |index| state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
     if (!(try show(state, "Create or edit node", &.{}))) return null;
-    return try buildNodeDraft(allocator, state.values, initial);
+    return try buildNodeDraft(allocator, &state.values, initial);
 }
 
 fn buildNodeDraft(
@@ -252,7 +252,7 @@ pub fn edgeWithEndpoints(
     state.values[8] = try dupOptionalIntText(allocator, initial.cycle_stop_after_passes);
     state.values[9] = try allocator.dupe(u8, initial.spawn_target_project_path);
     if (!(try show(state, "Create or edit edge", &.{}))) return null;
-    return try buildEdgeDraft(allocator, state.values);
+    return try buildEdgeDraft(allocator, &state.values);
 }
 
 fn buildEdgeDraft(allocator: std.mem.Allocator, values: []const []u8) !Forms.EdgeDraft {
@@ -811,11 +811,11 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             if (command == reveal_id and value.kind == .worktree_sweep) {
                 for (0..value.field_count) |index| {
                     if (!std.mem.eql(u8, value.values[index], "true")) continue;
-                    const args = WorktreeStatus.revealCommand(value.allocator, value.sweep_paths[index]) catch break;
-                    defer value.allocator.free(args);
-                    const wide = utf8ToWideZ(value.allocator, args) catch break;
+                    const parameters = WorktreeStatus.explorerParameters(value.allocator, value.sweep_paths[index]) catch break;
+                    defer value.allocator.free(parameters);
+                    const wide = utf8ToWideZ(value.allocator, parameters) catch break;
                     defer value.allocator.free(wide);
-                    _ = c.ShellExecuteW(safe_hwnd, std.unicode.utf8ToUtf16LeStringLiteral("open").ptr, wide.ptr, null, null, c.SW_SHOWNORMAL);
+                    _ = c.ShellExecuteW(safe_hwnd, std.unicode.utf8ToUtf16LeStringLiteral("open").ptr, std.unicode.utf8ToUtf16LeStringLiteral("explorer.exe").ptr, wide.ptr, null, c.SW_SHOWNORMAL);
                     break;
                 }
                 return 0;
