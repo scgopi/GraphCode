@@ -634,7 +634,7 @@ try {
   $workspaceShowGraph = $null
   $workspaceTabs = @()
   $workspaceControls = @()
-  for ($attempt = 0; $attempt -lt 50; $attempt++) {
+  for ($attempt = 0; $attempt -lt 100; $attempt++) {
     $workspaceChildren = @(Get-DirectChildren $graph $rawWalker)
     $workspaceToolbar = @($workspaceChildren | Where-Object {
       $_.Current.AutomationId -match '^workspace-toolbar-' -and $_.Current.Name -eq "UIA project"
