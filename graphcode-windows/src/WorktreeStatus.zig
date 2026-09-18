@@ -305,7 +305,9 @@ fn directorySize(path: []const u8) !u64 {
     defer walker.deinit();
     var total: u64 = 0;
     while (try walker.next()) |item| {
-        if (item.kind == .file) total += item.stat.size;
+        if (item.kind != .file) continue;
+        const stat = item.dir.statFile(item.basename) catch continue;
+        total += stat.size;
     }
     return total;
 }

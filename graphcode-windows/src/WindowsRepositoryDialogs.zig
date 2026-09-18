@@ -1003,8 +1003,11 @@ var operation_dialog_state: OperationDialogState = undefined;
 pub fn showCloneProgress(parent: c.HWND, allocator: std.mem.Allocator, operation: *CloneOperation) !CloneStatus {
     operation_dialog_state = .{ .allocator = allocator, .parent = parent, .clone = operation };
     const status = try showOperationDialog("Cloning repository", "Starting clone…");
-    if (status == .cancelled) return .cancelled;
-    return status;
+    return switch (status) {
+        .finished => .finished,
+        .cancelled => .cancelled,
+        .failed => .failed,
+    };
 }
 
 pub fn showRemoteValidation(parent: c.HWND, allocator: std.mem.Allocator, fields: RemoteFields) !bool {
@@ -1137,7 +1140,9 @@ fn createOperationControl(hwnd: c.HWND, class: []const u8, text: []const u8, x: 
     defer allocator.free(wide_class);
     const wide_text = wideZ(allocator, text) catch return null;
     defer allocator.free(wide_text);
-    const style: c.DWORD = c.WS_CHILD | c.WS_VISIBLE | if (std.mem.eql(u8, class, "BUTTON")) c.WS_TABSTOP else 0;
+    const style: c.DWORD = @as(c.DWORD, @intCast(c.WS_CHILD)) |
+        @as(c.DWORD, @intCast(c.WS_VISIBLE)) |
+        (if (std.mem.eql(u8, class, "BUTTON")) @as(c.DWORD, @intCast(c.WS_TABSTOP)) else 0);
     const control = c.CreateWindowExW(0, wide_class.ptr, wide_text.ptr, style, x, y, width, height, hwnd, controlId(id), c.GetModuleHandleW(null), null) orelse return null;
     _ = c.SendMessageW(control, c.WM_SETFONT, @intFromPtr(c.GetStockObject(c.DEFAULT_GUI_FONT)), 1);
     return control;
